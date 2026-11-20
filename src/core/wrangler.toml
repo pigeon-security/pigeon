@@ -1,0 +1,16 @@
+name = "pigeon-core"
+main = "build/worker/shim.mjs"
+compatibility_date = "2026-11-01"
+
+[build]
+command = "cargo install -q worker-build@0.9.0 && worker-build --release"
+
+[vars]
+CF_ACCOUNT_ID = "4f94676cb2cbe46fd985b089ca97ea27"
+CF_SECRETS_STORE_ID = "REPLACE_WITH_STORE_ID"
+
+# The parent token: Account API Tokens Write, nothing else.
+[[secrets_store_secrets]]
+binding = "CF_PARENT_TOKEN"
+store_id = "REPLACE_WITH_STORE_ID"
+secret_name = "CF_PARENT_TOKEN"
