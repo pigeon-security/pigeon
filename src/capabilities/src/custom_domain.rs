@@ -8,8 +8,8 @@ use crate::Account;
 use crate::cloudflare::call;
 use crate::tokens::{Policy, Scope, Scoped};
 
-/// Serves `hostname`, in zone `zone_id`, from Worker `worker`; idempotent. Answers the custom
-/// domain's ID.
+/// Serves `hostname`, in zone `zone_id`, from Worker `worker`, moving it from any other Worker;
+/// idempotent. Answers the custom domain's ID.
 pub(crate) async fn attach(
     account: &Account,
     zone_id: &str,
@@ -48,6 +48,8 @@ async fn put(
         "zone_id": zone_id,
         "service": worker,
         "environment": "production",
+        // Setup decides which Worker serves a hostname, so it moves one from another Worker.
+        "override_existing_origin": true,
     });
     let path = format!("/accounts/{account}/workers/domains");
     let v = call(token, Method::Put, &path, Some(&body)).await?;
