@@ -2,6 +2,8 @@ name = "pigeon-core"
 account_id = "4f94676cb2cbe46fd985b089ca97ea27"
 main = "build/worker/shim.mjs"
 compatibility_date = "2026-11-01"
+# Served only on platform.pigeon.dev, behind Access.
+workers_dev = false
 
 [build]
 command = "cargo install -q worker-build@0.9.0 && worker-build --release"
