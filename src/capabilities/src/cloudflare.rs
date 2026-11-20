@@ -24,6 +24,9 @@ pub async fn call(token: &str, method: Method, path: &str, body: Option<&Value>)
     if v["success"].as_bool() == Some(true) {
         Ok(v["result"].clone())
     } else {
-        Err(Error::RustError(format!("{path}: {status}: {}", v["errors"])))
+        Err(Error::RustError(format!(
+            "{path}: {status}: {}",
+            v["errors"]
+        )))
     }
 }

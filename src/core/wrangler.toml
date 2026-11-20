@@ -9,6 +9,8 @@ command = "cargo install -q worker-build@0.9.0 && worker-build --release"
 [vars]
 CF_ACCOUNT_ID = "4f94676cb2cbe46fd985b089ca97ea27"
 CF_SECRETS_STORE_ID = "5185c227b9f34b4291045175695b78ec"
+PLATFORM_ZONE = "pigeon.dev"
+PLATFORM_HOST = "platform.pigeon.dev"
 
 # The parent token: Account API Tokens Write, nothing else.
 [[secrets_store_secrets]]
