@@ -4,6 +4,7 @@ main = "build/worker/shim.mjs"
 compatibility_date = "2026-11-01"
 # Served only on platform.pigeon.dev, behind Access.
 workers_dev = false
+preview_urls = false
 
 [build]
 command = "cargo install -q worker-build@0.9.0 && worker-build --release"
