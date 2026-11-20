@@ -101,3 +101,9 @@ fn iso(ms: f64) -> String {
     let s = String::from(Date::new(&JsValue::from_f64(ms)).to_iso_string());
     format!("{}Z", &s[..19])
 }
+
+/// Whether `token` is active on `account`: its status, as Cloudflare reports it.
+pub async fn verify(token: &str, account: &str) -> Result<String> {
+    let v = call(token, Method::Get, &format!("/accounts/{account}/tokens/verify"), None).await?;
+    Ok(v["status"].as_str().unwrap_or("unknown").to_string())
+}
