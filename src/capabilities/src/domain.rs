@@ -1,16 +1,12 @@
 //! A zone in the account, such as `pigeon.dev`. The zone is added and its nameservers moved by
-//! hand; this capability finds it and reports whether it is active.
+//! hand; this capability finds it and checks it is active.
 
 use serde::Deserialize;
 use worker::{Error, Method, Result};
 
+use crate::Account;
 use crate::cloudflare::call;
-use crate::tokens::{Policy, Scope};
-
-/// What a token for this capability holds.
-pub fn policies() -> Vec<Policy> {
-    vec![Policy::new(Scope::AllZones, &["Zone Read"])]
-}
+use crate::tokens::{Policy, Scope, Scoped};
 
 /// A zone, as the API lists it.
 #[derive(Debug, Deserialize)]
@@ -21,22 +17,28 @@ pub struct Zone {
     pub status: String,
 }
 
-impl Zone {
-    pub fn is_active(&self) -> bool {
-        self.status == "active"
-    }
-}
-
-/// Zone `name` in `account`.
-pub async fn zone(token: &str, account: &str, name: &str) -> Result<Zone> {
-    let v = call(
-        token,
-        Method::Get,
-        &format!("/zones?name={name}&account.id={account}"),
-        None,
+/// Zone `name` in `account`, which must be active.
+pub async fn active(account: &Account, name: &str) -> Result<Zone> {
+    let token = Scoped::open(
+        account,
+        "domain",
+        vec![Policy::new(Scope::AllZones, &["Zone Read"])],
     )
     .await?;
-    let zones: Vec<Zone> = serde_json::from_value(v)?;
+    let zone = find(token.value(), &account.id, name).await;
+    let zone = token.finish(zone).await?;
+    if zone.status != "active" {
+        return Err(Error::RustError(format!(
+            "zone `{name}` is {}, not active",
+            zone.status
+        )));
+    }
+    Ok(zone)
+}
+
+async fn find(token: &str, account: &str, name: &str) -> Result<Zone> {
+    let path = format!("/zones?name={name}&account.id={account}");
+    let zones: Vec<Zone> = serde_json::from_value(call(token, Method::Get, &path, None).await?)?;
     zones
         .into_iter()
         .next()

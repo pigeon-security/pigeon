@@ -5,8 +5,9 @@ use serde::Deserialize;
 use serde_json::json;
 use worker::{Error, Method, Result, SecretStore};
 
+use crate::Account;
 use crate::cloudflare::call;
-use crate::tokens::{self, MintRequest, Minted, Policy, Scope};
+use crate::tokens::{Policy, Scope, Scoped};
 
 /// The permission a writer's token holds, and nothing else.
 pub const WRITE_PERMISSION: &str = "Secrets Store Write";
@@ -25,40 +26,30 @@ pub struct Secret {
     pub comment: Option<String>,
 }
 
-/// Writes to `store` on a minted token. Call [`Writer::finish`] to revoke the token.
-pub struct Writer {
-    parent: String,
-    account: String,
-    store: String,
-    token: Minted,
+/// Writes to the account's store on a minted token. Call [`Writer::finish`] to revoke it.
+pub struct Writer<'a> {
+    account: &'a Account,
+    token: Scoped<'a>,
 }
 
-impl Writer {
-    /// Mints a [`WRITE_PERMISSION`] token, as `parent`, for writing to `store`.
-    pub async fn open(parent: &str, account: &str, store: &str) -> Result<Self> {
-        let request = MintRequest::new(
-            "secrets-store",
-            vec![Policy::new(Scope::Account, &[WRITE_PERMISSION])],
-        );
-        let token = tokens::mint(parent, account, &request).await?;
-        Ok(Self {
-            parent: parent.into(),
-            account: account.into(),
-            store: store.into(),
-            token,
-        })
+impl<'a> Writer<'a> {
+    /// Mints a [`WRITE_PERMISSION`] token for writing to `account`'s store.
+    pub async fn open(account: &'a Account) -> Result<Self> {
+        let policies = vec![Policy::new(Scope::Account, &[WRITE_PERMISSION])];
+        let token = Scoped::open(account, "secrets-store", policies).await?;
+        Ok(Self { account, token })
     }
 
     fn path(&self) -> String {
         format!(
             "/accounts/{}/secrets_store/stores/{}/secrets",
-            self.account, self.store
+            self.account.id, self.account.secrets_store
         )
     }
 
     /// Every secret in the store.
     pub async fn list(&self) -> Result<Vec<Secret>> {
-        let v = call(&self.token.value, Method::Get, &self.path(), None).await?;
+        let v = call(self.token.value(), Method::Get, &self.path(), None).await?;
         Ok(serde_json::from_value(v)?)
     }
 
@@ -66,7 +57,7 @@ impl Writer {
     pub async fn create(&self, name: &str, value: &str, comment: &str) -> Result<String> {
         let body =
             json!([{ "name": name, "value": value, "scopes": ["workers"], "comment": comment }]);
-        let v = call(&self.token.value, Method::Post, &self.path(), Some(&body)).await?;
+        let v = call(self.token.value(), Method::Post, &self.path(), Some(&body)).await?;
         v[0]["id"]
             .as_str()
             .map(String::from)
@@ -76,25 +67,15 @@ impl Writer {
     /// Replaces secret `id`'s value.
     pub async fn update(&self, id: &str, value: &str) -> Result<()> {
         let body = json!({ "value": value, "scopes": ["workers"] });
-        call(
-            &self.token.value,
-            Method::Patch,
-            &format!("{}/{id}", self.path()),
-            Some(&body),
-        )
-        .await?;
+        let path = format!("{}/{id}", self.path());
+        call(self.token.value(), Method::Patch, &path, Some(&body)).await?;
         Ok(())
     }
 
     /// Deletes secret `id`.
     pub async fn delete(&self, id: &str) -> Result<()> {
-        call(
-            &self.token.value,
-            Method::Delete,
-            &format!("{}/{id}", self.path()),
-            None,
-        )
-        .await?;
+        let path = format!("{}/{id}", self.path());
+        call(self.token.value(), Method::Delete, &path, None).await?;
         Ok(())
     }
 
@@ -106,8 +87,8 @@ impl Writer {
         }
     }
 
-    /// Revokes the writer's token.
-    pub async fn finish(self) -> Result<()> {
-        tokens::revoke(&self.parent, &self.account, &self.token.id).await
+    /// Revokes the writer's token, then answers `result`.
+    pub async fn finish<T>(self, result: Result<T>) -> Result<T> {
+        self.token.finish(result).await
     }
 }

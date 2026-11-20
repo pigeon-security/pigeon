@@ -172,3 +172,39 @@ fn iso(ms: f64) -> String {
     let s = String::from(Date::new(&JsValue::from_f64(ms)).to_iso_string());
     format!("{}Z", &s[..19])
 }
+
+/// A token minted for one capability's calls. Call [`Scoped::finish`] to revoke it.
+pub struct Scoped<'a> {
+    account: &'a crate::Account,
+    minted: Minted,
+}
+
+impl<'a> Scoped<'a> {
+    /// Mints a token for `purpose` holding `policies`, on `account`.
+    pub async fn open(
+        account: &'a crate::Account,
+        purpose: &str,
+        policies: Vec<Policy>,
+    ) -> Result<Self> {
+        let minted = mint(
+            &account.parent,
+            &account.id,
+            &MintRequest::new(purpose, policies),
+        )
+        .await?;
+        Ok(Self { account, minted })
+    }
+
+    /// The token's value, for API calls.
+    pub fn value(&self) -> &str {
+        &self.minted.value
+    }
+
+    /// Revokes the token, then answers `result`: the work's own error comes first.
+    pub async fn finish<T>(self, result: Result<T>) -> Result<T> {
+        let revoked = revoke(&self.account.parent, &self.account.id, &self.minted.id).await;
+        let value = result?;
+        revoked?;
+        Ok(value)
+    }
+}
