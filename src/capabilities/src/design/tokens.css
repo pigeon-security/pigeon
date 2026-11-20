@@ -1,0 +1,109 @@
+/* pigeon's design tokens: colours, radii, spacing and type. Dark first; light under
+   prefers-color-scheme or [data-theme]. */
+:root {
+  color-scheme: dark;
+  --background: #14121A;
+  --dot: #2F2B38;
+  --card: #211E26;
+  --ink: #F2ECDF;
+  --ink2: #D3CCBE;
+  --muted: #A79F93;
+  --chip: #2C2833;
+  --line: #4A4553;
+  --shadow: #000000;
+  --accent: #E07AA6;
+  --on-accent: #14121A;
+  --accent-soft: #3D2432;
+  --good: #5FBF8E;
+  --warn: #D06A35;
+  --region: rgba(255, 255, 255, 0.025);
+
+  /* Vendors, for regions and marks. */
+  --cloudflare: #F0913A;
+  --cloudflare-zone: rgba(240, 145, 58, 0.05);
+  --github: #B392F0;
+
+  /* Kinds, for dots and links. */
+  --kind-worker: #E07AA6;
+  --kind-access: #78A9EE;
+  --kind-store: #5FBF8E;
+  --kind-api: #F0913A;
+  --kind-client: #A79F93;
+
+  --radius-card: 14px;
+  --radius-button: 12px;
+  --radius-pill: 999px;
+  --radius-region: 18px;
+  --shadow-offset: 3px;
+  --space-page: 24px;
+  --space-gap: 18px;
+  --grid-step: 16px;
+  --dot-size: 1.1px;
+
+  --font-sans: -apple-system, BlinkMacSystemFont, system-ui, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --type-display: 700 32px/1.15 var(--font-sans);
+  --type-title: 700 22px/1.25 var(--font-sans);
+  --type-heading: 700 17px/1.3 var(--font-sans);
+  --type-body: 400 16px/1.5 var(--font-sans);
+  --type-small: 400 14px/1.45 var(--font-sans);
+  --type-mono: 400 13px/1.45 var(--font-mono);
+  --type-eyebrow: 600 12px/1.3 var(--font-mono);
+  --type-button: 600 16px/1.2 var(--font-sans);
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    color-scheme: light;
+    --background: #F4EEE3;
+    --dot: #CFC4B2;
+    --card: #FFFDF8;
+    --ink: #1B1A17;
+    --ink2: #45403A;
+    --muted: #6A6259;
+    --chip: #EAE1D2;
+    --line: #CBBFAE;
+    --shadow: #1B1A17;
+    --accent: #7A2E4F;
+    --on-accent: #FFFDF8;
+    --accent-soft: #F2D3DE;
+    --good: #2F6B4F;
+    --warn: #B04F1A;
+    --region: rgba(0, 0, 0, 0.02);
+    --cloudflare: #A9520F;
+    --cloudflare-zone: rgba(169, 82, 15, 0.05);
+    --github: #6F42C1;
+    --kind-worker: #7A2E4F;
+    --kind-access: #2C5E9E;
+    --kind-store: #2F6B4F;
+    --kind-api: #A9520F;
+    --kind-client: #6A6259;
+  }
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --background: #F4EEE3;
+  --dot: #CFC4B2;
+  --card: #FFFDF8;
+  --ink: #1B1A17;
+  --ink2: #45403A;
+  --muted: #6A6259;
+  --chip: #EAE1D2;
+  --line: #CBBFAE;
+  --shadow: #1B1A17;
+  --accent: #7A2E4F;
+  --on-accent: #FFFDF8;
+  --accent-soft: #F2D3DE;
+  --good: #2F6B4F;
+  --warn: #B04F1A;
+  --region: rgba(0, 0, 0, 0.02);
+  --cloudflare: #A9520F;
+  --cloudflare-zone: rgba(169, 82, 15, 0.05);
+  --github: #6F42C1;
+  --kind-worker: #7A2E4F;
+  --kind-access: #2C5E9E;
+  --kind-store: #2F6B4F;
+  --kind-api: #A9520F;
+  --kind-client: #6A6259;
+}

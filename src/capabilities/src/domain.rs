@@ -61,3 +61,29 @@ pub async fn protect(account: &Account, zone: &str, protection: &Protection) -> 
     let access = zero_trust::protect(account, &zone.name, protection).await?;
     Ok(Guarded { zone, access })
 }
+
+/// What [`serve`] made.
+#[derive(Serialize)]
+pub struct Served {
+    pub zone: Zone,
+    pub access: Protected,
+    pub custom_domain: String,
+}
+
+/// Serves zone `zone`'s apex from Worker `worker` behind Access; idempotent. Access holds the
+/// apex before the Worker serves it.
+pub async fn serve(
+    account: &Account,
+    zone: &str,
+    worker: &str,
+    protection: &Protection,
+) -> Result<Served> {
+    let guarded = protect(account, zone, protection).await?;
+    let custom_domain =
+        crate::custom_domain::attach(account, &guarded.zone.id, &guarded.zone.name, worker).await?;
+    Ok(Served {
+        zone: guarded.zone,
+        access: guarded.access,
+        custom_domain,
+    })
+}
