@@ -7,6 +7,7 @@ use serde_json::json;
 use worker::{Error, Method, Result};
 
 use crate::cloudflare::call;
+use crate::domain::Zone;
 use crate::tokens::{Policy, Scope, Scoped};
 use crate::zero_trust::{Protected, Protection};
 use crate::{Account, domain, zero_trust};
@@ -26,16 +27,10 @@ pub struct Spec {
 /// What [`serve`] made.
 #[derive(Serialize)]
 pub struct Served {
-    pub zone: ZoneRef,
+    pub zone: Zone,
     pub host: String,
     pub access: Protected,
     pub custom_domain: String,
-}
-
-#[derive(Serialize)]
-pub struct ZoneRef {
-    pub name: String,
-    pub id: String,
 }
 
 /// Serves `spec.host` from `spec.worker` behind Access; idempotent. In order, so the hostname is
@@ -57,10 +52,7 @@ pub async fn serve(account: &Account, spec: &Spec) -> Result<Served> {
     .await;
     let custom_domain = token.finish(attached).await?;
     Ok(Served {
-        zone: ZoneRef {
-            name: zone.name,
-            id: zone.id,
-        },
+        zone,
         host: spec.host.clone(),
         access,
         custom_domain,

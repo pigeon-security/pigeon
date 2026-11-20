@@ -3,6 +3,7 @@
 #[cfg(not(target_arch = "wasm32"))]
 compile_error!("pigeon-core builds for wasm32 only: cargo build --target wasm32-unknown-unknown");
 
+use pigeon_capabilities::domain::{self, Guarded};
 use pigeon_capabilities::subdomain::{self, Served, Spec};
 use pigeon_capabilities::zero_trust::Protection;
 use pigeon_capabilities::{Account, secrets_store};
@@ -20,6 +21,10 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         (Method::Get, "/health") => Response::ok("ok"),
         (Method::Post, "/setup/platform") => match setup_platform(&env).await {
             Ok(served) => Response::from_json(&served),
+            Err(e) => Response::error(format!("setup failed: {e}"), 500),
+        },
+        (Method::Post, "/setup/site") => match setup_site(&env).await {
+            Ok(guarded) => Response::from_json(&guarded),
             Err(e) => Response::error(format!("setup failed: {e}"), 500),
         },
         _ => Response::error("not found", 404),
@@ -43,7 +48,7 @@ async fn account(env: &Env) -> Result<Account> {
 /// Serves the platform hostname from this Worker, behind Access; idempotent.
 async fn setup_platform(env: &Env) -> Result<Served> {
     let spec = Spec {
-        zone: env.var("PLATFORM_ZONE")?.to_string(),
+        zone: env.var("ZONE")?.to_string(),
         host: env.var("PLATFORM_HOST")?.to_string(),
         worker: WORKER.into(),
         protection: Protection {
@@ -54,4 +59,17 @@ async fn setup_platform(env: &Env) -> Result<Served> {
         },
     };
     subdomain::serve(&account(env).await?, &spec).await
+}
+
+/// Puts the zone's apex behind Access, letting in only the site's own service token;
+/// idempotent. Nothing serves the apex yet.
+async fn setup_site(env: &Env) -> Result<Guarded> {
+    let protection = Protection {
+        app: "pigeon-site".into(),
+        service_token: "pigeon-site".into(),
+        client_id_secret: "SITE_ACCESS_CLIENT_ID".into(),
+        client_secret_secret: "SITE_ACCESS_CLIENT_SECRET".into(),
+    };
+    let zone = env.var("ZONE")?.to_string();
+    domain::protect(&account(env).await?, &zone, &protection).await
 }
