@@ -1,8 +1,8 @@
-name = "pigeon-site"
+name = "pigeon"
 account_id = "4f94676cb2cbe46fd985b089ca97ea27"
 main = "build/worker/shim.mjs"
 compatibility_date = "2026-11-01"
-# Served only on pigeon.dev, behind Access; pigeon-core attaches it with POST /setup/site.
+# Served only on pigeon.dev, behind Access; pigeon-platform attaches it with POST /setup/site.
 workers_dev = false
 preview_urls = false
 

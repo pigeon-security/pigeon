@@ -3,7 +3,7 @@
 #[cfg(not(target_arch = "wasm32"))]
 compile_error!("pigeon-core builds for wasm32 only: cargo build --target wasm32-unknown-unknown");
 
-use pigeon_capabilities::domain::{self, Guarded};
+use pigeon_capabilities::domain;
 use pigeon_capabilities::subdomain::{self, Served, Spec};
 use pigeon_capabilities::zero_trust::Protection;
 use pigeon_capabilities::{Account, secrets_store};
@@ -13,7 +13,10 @@ use worker::{Context, Env, Error, Method, Request, Response, Result, event};
 const PARENT_TOKEN: &str = "CF_PARENT_TOKEN";
 
 /// This Worker's name, as deployed.
-const WORKER: &str = "pigeon-core";
+const WORKER: &str = "pigeon-platform";
+
+/// The site Worker, which serves the zone's apex.
+const SITE_WORKER: &str = "pigeon";
 
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
@@ -24,7 +27,7 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
             Err(e) => Response::error(format!("setup failed: {e}"), 500),
         },
         (Method::Post, "/setup/site") => match setup_site(&env).await {
-            Ok(guarded) => Response::from_json(&guarded),
+            Ok(served) => Response::from_json(&served),
             Err(e) => Response::error(format!("setup failed: {e}"), 500),
         },
         _ => Response::error("not found", 404),
@@ -61,15 +64,15 @@ async fn setup_platform(env: &Env) -> Result<Served> {
     subdomain::serve(&account(env).await?, &spec).await
 }
 
-/// Puts the zone's apex behind Access, letting in only the site's own service token;
-/// idempotent. Nothing serves the apex yet.
-async fn setup_site(env: &Env) -> Result<Guarded> {
+/// Serves the zone's apex from the site Worker behind Access, letting in only the site's
+/// own service token; idempotent.
+async fn setup_site(env: &Env) -> Result<domain::Served> {
     let protection = Protection {
-        app: "pigeon-site".into(),
+        app: "pigeon".into(),
         service_token: "pigeon-site".into(),
         client_id_secret: "SITE_ACCESS_CLIENT_ID".into(),
         client_secret_secret: "SITE_ACCESS_CLIENT_SECRET".into(),
     };
     let zone = env.var("ZONE")?.to_string();
-    domain::protect(&account(env).await?, &zone, &protection).await
+    domain::serve(&account(env).await?, &zone, SITE_WORKER, &protection).await
 }

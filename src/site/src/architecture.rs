@@ -21,7 +21,7 @@ fn body() -> String {
 <header>
   <span class="eyebrow">pigeon · architecture</span>
   <h1>What's deployed</h1>
-  <p>Every request passes Cloudflare Access before a Worker sees it. pigeon-core holds one parent token and mints a short-lived, scoped token for each capability it runs.</p>
+  <p>Every request passes Cloudflare Access before a Worker sees it. pigeon-platform holds one parent token and mints a short-lived, scoped token for each capability it runs.</p>
   <div class="pills"><span class="pill">as of {AS_OF}</span><span class="pill">2 Workers</span><span class="pill">6 capabilities</span></div>
 </header>
 
@@ -52,11 +52,11 @@ fn body() -> String {
     <div class="cards">
       <article class="card kind-access">
         <div class="card-h"><span class="dot"></span><h3>platform.pigeon.dev</h3><span class="pill accent">subdomain</span></div>
-        <ul class="kv"><li>admits <code>pigeon-platform</code> service token only</li><li>serves pigeon-core</li></ul>
+        <ul class="kv"><li>admits <code>pigeon-platform</code> service token only</li><li>serves pigeon-platform</li></ul>
       </article>
       <article class="card kind-access">
         <div class="card-h"><span class="dot"></span><h3>pigeon.dev</h3><span class="pill accent">domain</span></div>
-        <ul class="kv"><li>admits <code>pigeon-site</code> service token only</li><li>serves pigeon-site</li></ul>
+        <ul class="kv"><li>admits <code>pigeon-site</code> service token only</li><li>serves pigeon</li></ul>
       </article>
     </div>
   </section>
@@ -67,7 +67,7 @@ fn body() -> String {
     <span class="eyebrow" id="l-workers">Layer 3 · Workers</span>
     <div class="cards">
       <article class="card kind-worker accent">
-        <div class="card-h"><span class="dot"></span><h3>pigeon-core</h3></div>
+        <div class="card-h"><span class="dot"></span><h3>pigeon-platform</h3></div>
         <ul class="kv">
           <li><code>GET /health</code></li>
           <li><code>POST /setup/platform</code> → subdomain</li>
@@ -76,7 +76,7 @@ fn body() -> String {
         <p>workers.dev and preview URLs off.</p>
       </article>
       <article class="card kind-worker">
-        <div class="card-h"><span class="dot"></span><h3>pigeon-site</h3></div>
+        <div class="card-h"><span class="dot"></span><h3>pigeon</h3></div>
         <ul class="kv"><li><code>GET /</code> this page</li></ul>
         <p>Styled by the design capability.</p>
       </article>
@@ -123,7 +123,7 @@ fn body() -> String {
       <article class="card kind-store">
         <div class="card-h"><span class="dot"></span><h3>Secrets Store</h3></div>
         <ul class="kv">
-          <li><code>CF_PARENT_TOKEN</code> bound to pigeon-core</li>
+          <li><code>CF_PARENT_TOKEN</code> bound to pigeon-platform</li>
           <li><code>PLATFORM_ACCESS_CLIENT_ID</code>, <code>_SECRET</code></li>
           <li><code>SITE_ACCESS_CLIENT_ID</code>, <code>_SECRET</code></li>
         </ul>

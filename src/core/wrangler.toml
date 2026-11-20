@@ -1,4 +1,4 @@
-name = "pigeon-core"
+name = "pigeon-platform"
 account_id = "4f94676cb2cbe46fd985b089ca97ea27"
 main = "build/worker/shim.mjs"
 compatibility_date = "2026-11-01"
