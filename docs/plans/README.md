@@ -16,3 +16,5 @@ up to date.
 | [friction.md](friction.md) | `call`, the land flow, read-only diagnostics, the pinned wrangler and its allowlist check, async model jobs, housekeeping | Built on `claude/friction`, awaiting deploy (the last hand-merged one) |
 
 When a plan's status changes, change it in both places: the plan's first lines and this table.
+
+The first change taken into main by `land` (rather than merged by hand) was a one-line docs commit on `claude/land-check-2`.
