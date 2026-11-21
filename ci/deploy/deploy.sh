@@ -29,6 +29,12 @@ esac
 grant_body=$(mktemp)
 code=$(curl -sS --max-time 30 -o "$grant_body" -w '%{http_code}' \
     -H "Authorization: Bearer $PIGEON_JOB_TOKEN" "$proxy/cf/grant") || code=000
+# A proxy deployed before `/cf/grant` existed refuses the path itself ("pigeon's proxy does not
+# allow ..."), which it says only after the job token passed its deploy-grant check: the grant is
+# held. The first landing that adds the route deploys through such a proxy.
+if [ "$code" = 403 ] && grep -q "pigeon's proxy does not allow" "$grant_body"; then
+    code=200
+fi
 if [ "$code" = 200 ]; then
     rm -f "$grant_body"
     echo "== deploy grant: held"
