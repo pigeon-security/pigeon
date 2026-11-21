@@ -1,6 +1,6 @@
 # Linked accounts, instances and sites: noisypigeon.com through pigeon
 
-Status: **designed, waiting for the person's go-ahead** (2026-11-21). Nothing is built. Branch
+Status: **designed, revised with the person's answers; waiting for their go-ahead** (2026-11-21). Nothing is built. Branch
 `claude/linked-accounts`. Phase 0 has tests only the person can run.
 
 ## Goal
@@ -118,27 +118,30 @@ Coordination:
 
 ## Decisions
 
-### 1. "Take ownership" means managing in place, not moving the zone
+### 1. "Take ownership" means the noisypigeon account holds the site, managed in place
 
-The zone stays in the noisypigeon account. Moving it would delete the zone there and add it
-here, which re-issues nameservers and puts the Proton mail records at risk. pigeon is given a
-**declared** set of things in that account and manages only those:
+The person's answer: the noisypigeon account holds the static site's R2 bucket, and its DNS
+records stay in that account. The platform account has no blog for now. pigeon creates and
+manages these resources **in** the noisypigeon account. The zone is not moved, so its
+nameservers and the Proton mail records are never at risk.
+
+What pigeon is given there is **declared**:
 
 | Kind | Declared for noisypigeon | pigeon may |
 | --- | --- | --- |
-| Zone | `noisypigeon.com` | read the zone and list its DNS records, custom domains, routes and rules (inventory for the console) |
-| Worker | `pigeon-site-blog` (made by pigeon) | create, upload versions, roll back, delete |
+| Zone | `noisypigeon.com` | read the zone and its DNS records, custom domains, routes and rules (the console's inventory) |
+| R2 bucket | `pigeon-site-blog` (EU, made by pigeon) | create; put, list and delete objects |
+| Worker | `pigeon-site-blog` (made by pigeon), bound to that bucket | create, upload versions, enable workers.dev |
 | Route | `noisypigeon.com/*` → `pigeon-site-blog` (made by pigeon) | create and delete, only with the person's go-ahead (the cutover) |
-| R2 bucket, custom domains, rules, DNS records | none | read only |
+| DNS records | only records pigeon creates for a declared hostname, tagged `pigeon` and recorded in the ledger. None are needed for the cutover | create and delete its own, with a dry run and the person's passkey |
+| The old bucket `blog-noisypigeon-com`, its R2 custom domains, the rules, every other DNS record (Proton) | none | read only |
 
-Declarations live in `settings.rs`, so changing what pigeon may touch is a landing. The OAuth
-grant may cover more of the account; pigeon ignores the rest. Every resource pigeon makes is
-named `pigeon-…` and recorded, with its id, in the Directory's ledger for the instance. A delete
-or change is refused unless the id is in the ledger, or the name is declared and pigeon made it.
-This is the lesson of the deleted Access apps: never act on "everything matching a domain".
+Declarations live in `settings.rs`, so changing what pigeon may touch takes a landing. The OAuth
+grant may cover more of the account, and pigeon ignores the rest.
 
-**Question for the person:** is "in place" what you meant by ownership? If you want the zone
-moved into pigeon's account instead, that is a different and riskier plan.
+Every resource pigeon makes is named `pigeon-…` and recorded, with its id, in the Directory's
+ledger for the instance. A change or delete is refused unless the id is in the ledger. This is
+the lesson of the deleted Access apps: never act on "everything matching a domain".
 
 ### 2. Linking: Cloudflare OAuth first, a hand-made account token as fallback
 
@@ -147,8 +150,8 @@ moved into pigeon's account instead, that is a different and riskier plan.
 
 1. **Register the client.** Name `pigeon`. Redirect
    `https://platform.pigeon.dev/linked/callback`. Scopes are the IDs that `GET /oauth/scopes`
-   lists for: Account Settings Read, Zone Read, DNS Read, Workers Scripts Write, Workers Routes
-   Write, and Workers R2 Storage Write if the person picks R2 serving (decision 3).
+   lists for: Account Settings Read, Zone Read, DNS Write (pigeon's own records only; decision 1),
+   Workers Scripts Write, Workers Routes Write and Workers R2 Storage Write.
    - By API: `POST /accounts/{pigeon}/oauth_clients`, with a token minted from the parent for
      "OAuth Client Write". The secret is shown once, so pigeon writes it straight to the Secrets
      Store as `CF_OAUTH_CLIENT_SECRET` and keeps `client_id` in settings. If the parent cannot
@@ -214,57 +217,88 @@ the Access tab as slot `CF_LINK_NOISYPIGEON`, bound in `wrangler.toml`.
 2. Access token lifetime, refresh token lifetime and rotation, read from a real authorization.
 3. The exact scope IDs, read from `GET /oauth/scopes`.
 
-### 3. Serving: a site Worker per account, with static assets; R2 for builds
+### 3. Serving: from the R2 bucket in the noisypigeon account, through a Worker there
 
-R2 custom domains can only serve a bucket in the same account. Workers Custom Domains and routes
-can only point at a Worker in the zone's account. So noisypigeon.com is served from the
-noisypigeon account, and `blog.pigeon.dev` from pigeon's.
+The bucket `pigeon-site-blog` is in the noisypigeon account, EU jurisdiction (header
+`cf-r2-jurisdiction: eu`) like the old one. A Worker in the same account, `pigeon-site-blog`,
+serves it through an R2 binding (`{"type":"r2_bucket", "jurisdiction":"eu"}` in the upload's
+metadata). pigeon uploads the Worker: one small JS module embedded in the platform.
 
-**Recommended:**
-- **Builds.** R2 in pigeon's account holds builds: bucket `pigeon-builds`, bound to
-  pigeon-platform as `BUILDS`, keyed `noisypigeon/blog/{commit}.tar.gz`. It keeps the last 20
-  per site (a lifecycle rule), so any target can be redeployed from it without building again.
-- **Serving.** A Worker with **Workers Static Assets** in each target account, `pigeon-site-blog`:
-  - The assets are uploaded with the direct-upload API (`assets-upload-session`). The upload
-    dedupes by hash, so 28 MB of images go up once.
-  - `html_handling: auto-trailing-slash` replaces the old `x` / `x/` copies.
-  - `not_found_handling: 404-page`.
-  - Each deploy is a Worker version, so a rollback deploys the previous version: one call, no
-    rebuild.
-  - Assets are served without invoking the Worker's script, and each version allows 20,000 files
-    of up to 25 MiB.
+**Layout, for atomic deploys and rollback:**
+- `blobs/{sha256}`: each file's content, written once and shared by every deploy. The 28 MB of
+  images go up once.
+- `deploys/{commit}.json`: the manifest, path → `{blob, content_type}`.
+- `live`: the commit being served.
 
-**Alternative (the person's hint):** serve from an R2 bucket in each account, with a Worker that
-reads `{commit}/` objects through a pointer object (R2's REST object API: `PUT/GET/DELETE
-…/r2/buckets/{b}/objects/{key}`). It costs a Worker invocation and an R2 read per request,
-custom serving code, and pointer-based rollback. pigeon would gain R2 core blocks either way:
-bucket ensure, object put/get/list/delete, and the binding.
+The Worker:
+- reads `live`, then the manifest;
+- keeps both for the isolate, rechecking `live` every 30 s;
+- maps `/x` and `/x/` to `x/index.html`;
+- serves the blob with long cache headers on hashed assets;
+- answers the build's `404.html` with status 404.
 
-**Question for the person:** static assets for serving with R2 for builds (recommended), or R2
-for serving too?
+A deploy writes the blobs that are missing, then the manifest, then flips `live`. A rollback
+flips `live` back. Deploys older than the last 20 are pruned, with blobs no remaining manifest
+names.
 
-Targets for the blog:
+**Uploads.** Uploads use R2's REST object API (`PUT/GET/DELETE …/r2/buckets/{b}/objects/{key}`)
+with the linked account's OAuth access token.
+- The S3 API's keys are derived from an API token's id and value, so they don't come from OAuth.
+- A first deploy is about 170 calls: well inside the API's 1,200 requests per 5 minutes. Later
+  deploys are a handful.
 
-| Target | Account | Hostname | How |
+The Worker, not the bucket, holds the hostnames, so the bucket gets no R2 custom domain.
+
+**Why not an R2 custom domain on the new bucket, as the old site does?**
+- A move from the old bucket's custom domains to the new bucket's would delete and re-create the
+  apex's DNS record and certificate.
+- R2 alone serves `/x/` only by writing extra copies.
+- It has no atomic deploy or rollback.
+
+**Targets:**
+
+| Target | Hostname | How | DNS |
 | --- | --- | --- | --- |
-| preview | noisypigeon | `pigeon-site-blog.<sub>.workers.dev` | per-script workers.dev, on until cutover |
-| pigeon.dev | pigeon | `blog.pigeon.dev` (name to confirm) | Workers Custom Domain, made by `site_deploy` in pigeon's own zone |
-| live | noisypigeon | `noisypigeon.com` | a **Worker route** `noisypigeon.com/*` at cutover; no DNS change |
+| preview | `pigeon-site-blog.<sub>.workers.dev` | per-script workers.dev | none |
+| live | `noisypigeon.com` | a **Worker route** `noisypigeon.com/*` at cutover | none: the apex record stays the old R2 custom domain's, and the route runs before it |
+| pigeon.dev subdomain (optional, later) | e.g. `noisypigeon.pigeon.dev` | below | in the platform account |
 
 **Why a route at cutover.**
-- "Routes take precedence over Custom Domains." A route Worker runs before the origin.
-- Adding a route on the hostname the R2 custom domain serves moves traffic to the Worker in one
-  call. Deleting it moves traffic back in one call. The bucket, its custom domains, DNS and the
+- "Routes take precedence over Custom Domains." A route's Worker runs before the origin.
+- Adding a route on the hostname the old R2 custom domain serves moves traffic in one call.
+  Deleting it moves traffic back in one call. The old bucket, its custom domains, DNS and the
   Proton records are untouched.
 - The docs don't state outright that a route intercepts an **R2** custom domain (only forum
   reports do), so phase 0 tests it on a throwaway hostname in pigeon's own zone.
-- The `www` → apex redirect runs in the dynamic redirect phase, first. The `/` → `/index.html`
-  rewrite also runs before the Worker, and static assets serve `/index.html` the same either way.
+- The `www` → apex redirect runs first, in the dynamic redirect phase. The `/` → `/index.html`
+  rewrite also runs before the Worker, and the Worker serves `/index.html` either way.
 
-**Built for one host only.** The build sets Zola's `base_url` to `https://noisypigeon.com`. On
-the preview and on `blog.pigeon.dev`, absolute links therefore point at noisypigeon.com. That is
-fine for checking content before the cutover. A per-target `base_url` (a second build) can come
-later if `blog.pigeon.dev` is meant as a mirror.
+Once the person is happy, the route can later become a Workers Custom Domain on the Worker,
+replacing the old R2 custom domain. That is a DNS change in the noisypigeon account and gets its
+own go-ahead.
+
+**The pigeon.dev subdomain.** The hostname is configured in the platform account, and the
+content stays in the noisypigeon bucket.
+- **Ruled out: the bucket bound to a platform-account Worker.** An R2 binding names a bucket in
+  the Worker's own account.
+- **Ruled out: the platform reading objects with the linked credentials on every request.**
+  - Each page view would be an authenticated api.cloudflare.com call, against the account-wide
+    limit of 1,200 requests per 5 minutes.
+  - The OAuth token would sit on the hot path.
+  - S3 keys don't come from OAuth.
+- **Ruled out: an R2 custom domain on the bucket.** It must be on a zone in the bucket's account,
+  and `pigeon.dev` isn't in the noisypigeon account.
+- **Chosen: pigeon-platform serves the hostname by host, as it serves the apex.**
+  - It sets up a Workers Custom Domain with `custom_domain::attach` in pigeon's own zone, so
+    Cloudflare makes the DNS record in the platform account.
+  - It fetches the same path from the noisypigeon Worker's workers.dev URL and keeps the answer
+    in the platform's edge cache (`caches.default`, keyed by commit) for an hour.
+  - No credential is involved: the noisypigeon Worker is public, like the site.
+  - The cost is one extra hop on a cache miss.
+
+**Built for one host only.** The build sets Zola's `base_url` to `https://noisypigeon.com`. On the
+preview and the subdomain, absolute links therefore point at noisypigeon.com. That is fine for
+checking content before the cutover; a per-target `base_url` can come later.
 
 ### 4. Build: a CI job with Zola, fed by the GitHub App
 
@@ -283,7 +317,9 @@ later if `blog.pigeon.dev` is meant as a mirror.
     the job then doesn't depend on that, and the job never holds the token.
   - It runs the repository's own build: `pigeon sites build workloads/noisypigeon.com/blog`.
   - It uploads `public/` as a tarball to `PUT https://proxy.pigeon.dev/sites/build`, with its
-    job token. The grant names the instance, site and commit. pigeon writes it to `BUILDS`.
+    job token. The grant names the instance, site and commit. pigeon unpacks it in the Worker and
+    writes blobs and the manifest to the noisypigeon bucket. The job never holds a Cloudflare
+    credential.
 - **Deploy.** The platform deploys the build to each target that is on. On GitHub it creates a
   deployment (`environment: noisypigeon.com`) and deployment statuses, with `environment_url`
   and a `log_url` to the console.
@@ -382,12 +418,12 @@ pub struct Instance {
 - `pigeon-security/platform` is today's platform:
   - account `4f94…`, zone `pigeon.dev`;
   - repository Artifacts `pigeon-security/pigeon` (GitHub mirror);
-  - sites: the apex architecture page and `blog.pigeon.dev`;
+  - sites: the apex architecture page (no blog for now);
   - deploys: landings.
 - `noisypigeon`:
   - the linked account, zone `noisypigeon.com`;
   - repository GitHub `noisypigeon/pigeon`;
-  - site `blog` with three targets;
+  - site `blog`, with bucket and Worker `pigeon-site-blog`; targets: preview, `noisypigeon.com`, and later the pigeon.dev subdomain;
   - deploys: site deploys.
 
 The existing capabilities don't change shape. `Site`, `PublicHost`, `Source` and `Land` keep
@@ -418,11 +454,12 @@ Speed, as in console-hardening:
   resources, and `zone` per hostname.
 - `Model` gains `accounts: [{id, name, linked_by, zones}]`.
 - The diagram draws one account box per account: pigeon's as today, noisypigeon's with its zone,
-  `pigeon-site-blog`, its route or preview, and a dashed "not pigeon's" group for the R2 bucket
-  and custom domains it only reads.
-- It also draws `pigeon-builds` (R2), the GitHub App and the `github` portal server as external
-  edges, and the `site-build` job.
-- These come from declarations and `wrangler.toml` (the `BUILDS` binding), never from live calls,
+  the Worker `pigeon-site-blog`, its route or preview, and a dashed "not pigeon's" group for the
+  old bucket and custom domains it only reads.
+- It also draws the noisypigeon R2 bucket `pigeon-site-blog` inside that account, the GitHub App
+  and the `github` portal server as external edges, the `site-build` job, and the pigeon.dev
+  subdomain's edge from pigeon-platform to the noisypigeon Worker.
+- These come from declarations and `wrangler.toml`, never from live calls,
   so the page still builds once per isolate and each deploy's `/architecture.json` check holds.
 
 ### 9. Safety rules for anything outside pigeon's own account
@@ -451,13 +488,14 @@ myself, and land.
 | Phase | What | Live change | Who |
 | --- | --- | --- | --- |
 | 0 | Facts and tests: OAuth consent offers noisypigeon? token lifetimes and scope IDs; route-over-R2-custom-domain test on a throwaway `r2test.pigeon.dev` (pigeon's zone, removed after); run noisypigeon's build here and record its output path, time and size; noisypigeon.com's live headers | test resources in pigeon's account only | person (consent, network host), me |
-| 1 | Core: `Account` credential kind; `cloudflare_oauth` (authorize URL, exchange, refresh, revoke); `r2` (bucket ensure with jurisdiction, objects, binding); `workers` (upload with static assets, versions, deployments, routes, workers.dev, custom domain read); `github_app` (JWT, installation token, webhook verify, tarball, deployments); WebCrypto RS256 sign and AES-GCM. Smoke scenarios: OAuth exchange/refresh with recorded answers, GitHub webhook HMAC, the plan digest refusing drift | none | executors (sonnet: r2, workers, github_app; haiku: crypto wrappers), me |
+| 1 | Core: `Account` credential kind; `cloudflare_oauth` (authorize URL, exchange, refresh, revoke); `r2` (bucket ensure with jurisdiction, REST objects put/get/list/delete, the blob/manifest/live layout as pure functions); `workers` (module upload with an R2 binding, routes, workers.dev, custom domain read); `github_app` (JWT, installation token, webhook verify, tarball, deployments); WebCrypto RS256 sign and AES-GCM. Smoke scenarios: OAuth exchange/refresh with recorded answers, GitHub webhook HMAC, the plan digest refusing drift | none | executors (sonnet: r2, workers, github_app; haiku: crypto wrappers), me |
 | 2 | `instances` capability: declarations, the Instance tab (read-only), the switcher, architecture accounts; `linked` capability: `linked_setup` (LINK_KEY, OAuth client), Link/Unlink, callback, refresh, expiry rows | console shows both instances; noisypigeon "not linked" | executors (sonnet: console JS, architecture render), me |
 | 2b | **Person:** register or confirm the OAuth client; press Link; consent to the noisypigeon account | link stored; inventory of noisypigeon.com shows | person |
 | 3 | GitHub App: `github` capability, `/github/hook`, slots, deployments; the GitHub git proxy route | none until the App exists | executors, me |
 | 3b | **Person:** create the App, set its key and webhook secret on the Access tab, install it on noisypigeon/pigeon | push events recorded | person |
-| 4 | `sites`: `site-build` job and `pigeon-ci-site` image (gate change, delegate), `/sites/build` upload, `pigeon-builds` bucket, deploy to targets, rollback, deploy records | with the person's go-ahead: `pigeon-site-blog` in the noisypigeon account with workers.dev preview; `blog.pigeon.dev` | executors, me |
+| 4 | `sites`: `site-build` job and `pigeon-ci-site` image (gate change, delegate), `/sites/build` upload, the site Worker's JS, deploy (blobs, manifest, `live`), rollback, prune, deploy records | with the person's go-ahead: bucket and Worker `pigeon-site-blog` in the noisypigeon account, workers.dev preview | executors, me |
 | 5 | **Cutover** of noisypigeon.com (below) | route `noisypigeon.com/*` | person's go-ahead, then me |
+| 5b | Optional: the pigeon.dev subdomain (host route in pigeon-platform, custom domain in pigeon.dev, edge cache) | a pigeon.dev hostname | person names it |
 | 6 | Optional: the platform calls GitHub MCP through the portal (decision 6, part 2) | portal server `github-platform`, service token | person decides |
 
 Part 1 of decision 6 (people's sessions reach GitHub through the portal) is a dashboard step for
@@ -466,7 +504,7 @@ the person, possible any time after 3b.
 ## Cutover of noisypigeon.com, and rollback
 
 Before:
-1. The preview (`workers.dev`) and `blog.pigeon.dev` serve the current commit's build.
+1. The preview (`workers.dev`) serves the current commit's build.
 2. A page-by-page comparison of status, content type and body hash passes, for every path in the
    build's file list, between the preview and live `https://noisypigeon.com`. This is a tool,
    `site_compare`, run by me, and its report goes to the person. It needs this session's network
@@ -495,8 +533,8 @@ in noisypigeon/pigeon. That repository's own change, not pigeon's.
 
 1. **Phase 0.**
    - Say whether your Cloudflare login is a member of both accounts.
-   - Answer the questions above: ownership in place, static assets vs R2 serving, the pigeon.dev
-     hostname (`blog.pigeon.dev`?), and phase 6.
+   - Answer the open questions: phase 6, and the pigeon.dev subdomain's name (if wanted).
+     Ownership and serving were answered on 2026-11-21.
    - Approve the network hosts `noisypigeon.com` and `www.noisypigeon.com` for this session when
      asked (read-only checks).
 2. **OAuth client, only if pigeon can't register it by API.** pigeon account → Manage Account →
@@ -541,6 +579,11 @@ not by this session.
 
 ## Log
 
+- 2026-11-21: the person's answers, through the parent. The platform account has no blog for
+  now; the noisypigeon account holds the site's R2 bucket and DNS; a pigeon.dev subdomain may
+  serve that bucket. Decisions 1 and 3 were rewritten: R2 serving through a Worker in the
+  noisypigeon account, and the subdomain proxied by pigeon-platform. Static assets and
+  `pigeon-builds` were dropped.
 - 2026-11-21: design. The noisypigeon repository and its live serving were read; the Cloudflare,
   Cloudflare OAuth and GitHub docs checked; the portal and Buildkite planners consulted. The
   parent session made OAuth the primary link.
