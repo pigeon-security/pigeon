@@ -67,9 +67,23 @@ pub async fn fetch(
     wants: &[String],
     haves: &[String],
 ) -> Result<Fetched> {
+    fetch_filtered(remote, caps, wants, haves, None).await
+}
+
+/// [`fetch`], leaving out what `filter` (such as `tree:0`, commits only) excludes, when the
+/// remote can filter; when it can't, the pack is whole.
+pub async fn fetch_filtered(
+    remote: &Remote,
+    caps: &[String],
+    wants: &[String],
+    haves: &[String],
+    filter: Option<&str>,
+) -> Result<Fetched> {
+    let filter = filter.filter(|_| caps.iter().any(|c| c == "filter"));
     let asked: Vec<&str> = ["ofs-delta", "no-progress"]
         .into_iter()
         .filter(|c| caps.iter().any(|have| have == c))
+        .chain(filter.map(|_| "filter"))
         .collect();
     let mut body = Vec::new();
     for (i, want) in wants.iter().enumerate() {
@@ -79,6 +93,9 @@ pub async fn fetch(
             format!("want {want}\n")
         };
         body.extend(pkt(line.as_bytes()));
+    }
+    if let Some(f) = filter {
+        body.extend(pkt(format!("filter {f}\n").as_bytes()));
     }
     body.extend(b"0000");
     for have in haves {

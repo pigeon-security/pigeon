@@ -5,6 +5,7 @@
 
 pub mod architecture;
 pub mod deploys;
+pub mod git_proxy;
 pub mod mirror;
 pub mod models;
 pub mod oauth;

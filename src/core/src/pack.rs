@@ -11,7 +11,7 @@ use miniz_oxide::inflate::core::{DecompressorOxide, decompress};
 use sha1::{Digest, Sha1};
 
 /// How much a pack may inflate to, in all, deltas included.
-pub const INFLATED_MAX: usize = 64 * 1024 * 1024;
+pub const INFLATED_MAX: usize = 48 * 1024 * 1024;
 
 /// The commits found in a pack.
 pub struct Commits {

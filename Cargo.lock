@@ -504,9 +504,12 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 name = "pigeon-capabilities"
 version = "0.1.0"
 dependencies = [
+ "futures-channel",
+ "futures-util",
  "pigeon-core",
  "serde",
  "serde_json",
+ "wasm-streams",
  "worker",
 ]
 

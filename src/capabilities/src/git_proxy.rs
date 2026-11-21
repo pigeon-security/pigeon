@@ -1,0 +1,922 @@
+//! The git proxy: `/git/{namespace}/{repo}.git/` on the proxy's host, in front of the source
+//! repository in Cloudflare Artifacts, for callers holding a proxy credential. Each request
+//! gets a git token of its own, read for fetches and write for pushes, minted when it arrives
+//! and revoked when its answer has been sent; the caller never sees it. Bodies stream both
+//! ways.
+//!
+//! Pushes follow rules, checked on the ref updates at the start of the push before anything is
+//! sent on: no ref is deleted, the protected branch only moves forward, and every other ref is
+//! a branch under the session prefix. Whether the protected branch moves forward can't be told
+//! from the ref updates alone, so a push that moves it is read whole (up to a cap): its pack's
+//! commits, and the repository's own history when the pack leaves some out, must show the old
+//! commit is an ancestor of the new one. A refused push is answered the way git reports a
+//! refused ref, so `git push` prints why. Every request is logged as one audit line.
+
+use std::collections::HashMap;
+use std::pin::Pin;
+use std::task::{Context as TaskContext, Poll};
+
+use futures_channel::oneshot;
+use futures_util::{Stream, StreamExt, TryStreamExt, stream};
+use pigeon_core::Account;
+use pigeon_core::artifacts::{self, Access};
+use pigeon_core::git::{self, Command, Commands, Remote, ZERO};
+use pigeon_core::mcp::Tool;
+use pigeon_core::pack::{self, Walk};
+use serde_json::Value;
+use worker::js_sys::Uint8Array;
+use worker::wasm_bindgen::JsValue;
+use worker::{
+    ByteStream, Error, Fetch, Headers, Method, Request, RequestInit, Response, Result,
+    console_error,
+};
+
+use crate::proxy::{self, Audit, Outcome, ProxyCaller};
+use crate::{Call as ToolCall, Capability, Context, Footprint, Serve, unknown};
+
+/// How long a git token minted for one request lives: the ceiling if its revoke is lost.
+const TOKEN_TTL: u64 = 900;
+
+/// How much of a push that moves the protected branch is read, at most.
+pub const BUFFERED_MAX: usize = 16 * 1024 * 1024;
+
+/// How long to wait before each retry of an upstream request refused with 401: a token minted
+/// moments before may not have reached Artifacts yet.
+const NOT_YET_ACTIVE_WAITS_MS: [u64; 4] = [1_000, 2_000, 4_000, 8_000];
+
+/// The git proxy for one repository.
+pub struct GitProxy {
+    /// The hostname it answers on; requests to any other are not found.
+    pub host: String,
+    pub namespace: String,
+    pub repo: String,
+    /// The branch that only moves forward, such as `refs/heads/main`.
+    pub protected: String,
+    /// The prefix every other pushed ref must have, such as `refs/heads/claude/`.
+    pub prefix: String,
+}
+
+// ---- what a request may be ----
+
+/// A git smart-HTTP service.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Service {
+    UploadPack,
+    ReceivePack,
+}
+
+impl Service {
+    /// Its name on the wire.
+    pub fn name(self) -> &'static str {
+        match self {
+            Service::UploadPack => "git-upload-pack",
+            Service::ReceivePack => "git-receive-pack",
+        }
+    }
+
+    fn from_name(s: &str) -> Option<Service> {
+        match s {
+            "git-upload-pack" => Some(Service::UploadPack),
+            "git-receive-pack" => Some(Service::ReceivePack),
+            _ => None,
+        }
+    }
+}
+
+/// A request the proxy forwards: a service's refs, or a call to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Call {
+    Refs(Service),
+    Rpc(Service),
+}
+
+/// What request `method path?query` is on repository `namespace/repo`, compared exactly, with
+/// nothing decoded: `GET .../info/refs?service=<service>` or `POST .../<service>`.
+pub fn route(
+    method: &str,
+    path: &str,
+    query: Option<&str>,
+    namespace: &str,
+    repo: &str,
+) -> std::result::Result<Call, &'static str> {
+    let rest = path
+        .strip_prefix("/git/")
+        .and_then(|r| r.strip_prefix(namespace))
+        .and_then(|r| r.strip_prefix('/'))
+        .and_then(|r| r.strip_prefix(repo))
+        .and_then(|r| r.strip_prefix(".git"))
+        .filter(|r| r.is_empty() || r.starts_with('/'))
+        .ok_or("not this repository")?;
+    if rest == "/info/refs" {
+        let service = query
+            .and_then(|q| q.strip_prefix("service="))
+            .and_then(Service::from_name)
+            .ok_or("not a git path")?;
+        if method != "GET" {
+            return Err("wrong method");
+        }
+        return Ok(Call::Refs(service));
+    }
+    let service = rest
+        .strip_prefix('/')
+        .and_then(Service::from_name)
+        .ok_or("not a git path")?;
+    if !matches!(query, None | Some("")) {
+        return Err("not a git path");
+    }
+    if method != "POST" {
+        return Err("wrong method");
+    }
+    Ok(Call::Rpc(service))
+}
+
+/// Whether `name` is a well-formed ref: git's `check-ref-format` rules, made stricter.
+pub fn refname_ok(name: &str) -> bool {
+    if name.len() > 255 || !name.starts_with("refs/") {
+        return false;
+    }
+    if name.contains("..") || name.contains("@{") || name.contains("//") {
+        return false;
+    }
+    if name.ends_with('/') || name.ends_with('.') {
+        return false;
+    }
+    let bad_byte = name.bytes().any(|b| {
+        b < 0x20 || b == 0x7f || matches!(b, b' ' | b'~' | b'^' | b':' | b'?' | b'*' | b'[' | b'\\')
+    });
+    !bad_byte
+        && name
+            .split('/')
+            .all(|c| !c.is_empty() && !c.starts_with('.') && !c.ends_with(".lock"))
+}
+
+/// How an allowed ref update is pushed.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Rule {
+    /// Streamed as it comes.
+    Stream,
+    /// Read whole first, to check it moves forward.
+    FastForward,
+}
+
+/// Whether ref update `c` is allowed, and how.
+pub fn check(c: &Command, protected: &str, prefix: &str) -> std::result::Result<Rule, String> {
+    if !refname_ok(&c.name) {
+        return Err("not a valid ref name".into());
+    }
+    if c.new == ZERO {
+        return Err("deleting refs is not allowed".into());
+    }
+    if c.name == protected {
+        if c.old == ZERO {
+            return Err(format!("{protected} cannot be created through the proxy"));
+        }
+        return Ok(Rule::FastForward);
+    }
+    if c.name.starts_with(prefix) && c.name.len() > prefix.len() {
+        return Ok(Rule::Stream);
+    }
+    Err(format!(
+        "only {protected} and branches under {prefix} can be pushed"
+    ))
+}
+
+/// Every update's rule, or each refused update's ref and reason.
+pub fn check_all(
+    cs: &[Command],
+    protected: &str,
+    prefix: &str,
+) -> std::result::Result<Vec<Rule>, Vec<(String, String)>> {
+    let mut rules = Vec::with_capacity(cs.len());
+    let mut refused = Vec::new();
+    for c in cs {
+        match check(c, protected, prefix) {
+            Ok(r) => rules.push(r),
+            Err(e) => refused.push((c.name.clone(), e)),
+        }
+    }
+    if refused.is_empty() {
+        Ok(rules)
+    } else {
+        Err(refused)
+    }
+}
+
+// ---- streams ----
+
+/// A body stream that tells `ended` when it has been read to its end, or dropped unread.
+struct Ended {
+    inner: Pin<Box<dyn Stream<Item = Result<Vec<u8>>>>>,
+    ended: Option<oneshot::Sender<()>>,
+}
+
+impl Stream for Ended {
+    type Item = Result<Vec<u8>>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
+        let polled = self.inner.as_mut().poll_next(cx);
+        if let Poll::Ready(None) = polled
+            && let Some(tx) = self.ended.take()
+        {
+            let _ = tx.send(());
+        }
+        polled
+    }
+}
+
+/// `s` as a JS `ReadableStream` of `Uint8Array`s, for a request body.
+fn readable(s: impl Stream<Item = Result<Vec<u8>>> + 'static) -> JsValue {
+    let js = s
+        .map_ok(|chunk| JsValue::from(Uint8Array::from(chunk.as_slice())))
+        .map_err(|e| JsValue::from(e.to_string()));
+    wasm_streams::ReadableStream::from_stream(js)
+        .into_raw()
+        .into()
+}
+
+/// A request body as the proxy sends it on.
+enum Body {
+    None,
+    /// Read whole, so the request can be retried.
+    Bytes(Vec<u8>),
+    /// Streamed, so it is sent once.
+    Stream(JsValue),
+}
+
+/// What reading the start of a push found.
+struct Push {
+    commands: Commands,
+    /// What has been read so far.
+    head: Vec<u8>,
+    /// The rest, unread.
+    rest: ByteStream,
+}
+
+/// Reads a push's body until its ref updates are complete.
+async fn read_commands(mut body: ByteStream) -> std::result::Result<Push, String> {
+    let mut head = Vec::new();
+    loop {
+        if let Some(commands) = git::commands(&head)? {
+            return Ok(Push {
+                commands,
+                head,
+                rest: body,
+            });
+        }
+        match body.next().await {
+            Some(Ok(chunk)) => head.extend(chunk),
+            Some(Err(_)) => return Err("the push's body could not be read".into()),
+            None => return Err("the push ended before its ref updates did".into()),
+        }
+    }
+}
+
+/// Reads the rest of a push, up to [`BUFFERED_MAX`] in all.
+async fn read_rest(push: &mut Push) -> std::result::Result<(), String> {
+    while let Some(chunk) = push.rest.next().await {
+        let chunk = chunk.map_err(|_| "the push's body could not be read".to_string())?;
+        if push.head.len() + chunk.len() > BUFFERED_MAX {
+            return Err(format!(
+                "a push that moves the protected branch can be {} MiB at most; push it in \
+                 smaller steps",
+                BUFFERED_MAX / 1024 / 1024
+            ));
+        }
+        push.head.extend(chunk);
+    }
+    Ok(())
+}
+
+// ---- upstream ----
+
+/// Sends one request upstream. Without a streamed body it is retried while Artifacts answers
+/// 401, since the token was minted moments before.
+async fn send(
+    remote: &Remote,
+    method: Method,
+    url: &str,
+    headers: &Headers,
+    body: Body,
+) -> Result<Response> {
+    let mut waits = NOT_YET_ACTIVE_WAITS_MS.iter();
+    let retry = !matches!(body, Body::Stream(_));
+    let mut body = Some(body);
+    loop {
+        let h = Headers::new();
+        for (k, v) in headers.entries() {
+            h.set(&k, &v)?;
+        }
+        h.set("Authorization", &remote.authorization)?;
+        let mut init = RequestInit::new();
+        init.with_method(method.clone()).with_headers(h);
+        match body.as_ref() {
+            Some(Body::Bytes(b)) => {
+                init.with_body(Some(Uint8Array::from(b.as_slice()).into()));
+            }
+            Some(Body::Stream(_)) => {
+                if let Some(Body::Stream(s)) = body.take() {
+                    init.with_body(Some(s));
+                }
+            }
+            Some(Body::None) | None => {}
+        }
+        let response = Fetch::Request(Request::new_with_init(url, &init)?)
+            .send()
+            .await?;
+        if response.status_code() == 401
+            && retry
+            && let Some(ms) = waits.next()
+        {
+            worker::Delay::from(std::time::Duration::from_millis(*ms)).await;
+            continue;
+        }
+        return Ok(response);
+    }
+}
+
+/// The headers sent on: only those git's protocol needs. The caller's `Authorization` and
+/// everything else stay behind.
+fn forwarded_headers(req: &Request, service: Service) -> Result<Headers> {
+    let out = Headers::new();
+    let mut names = vec!["Content-Type", "Accept", "Git-Protocol", "User-Agent"];
+    if service == Service::UploadPack {
+        names.push("Content-Encoding");
+    }
+    for name in names {
+        if let Some(v) = req.headers().get(name)? {
+            out.set(name, &v)?;
+        }
+    }
+    Ok(out)
+}
+
+/// Whether `old` is an ancestor of `new` in the pushed pack, or in the repository's history
+/// when the pack leaves some out.
+async fn fast_forward(
+    remote: &Remote,
+    known: &mut HashMap<String, Vec<String>>,
+    fetched: &mut bool,
+    old: &str,
+    new: &str,
+) -> std::result::Result<bool, String> {
+    match pack::walk(old, new, known, false) {
+        Walk::Forward => return Ok(true),
+        Walk::NotForward => return Ok(false),
+        Walk::Need(_) => {}
+    }
+    if !*fetched {
+        *fetched = true;
+        // Everything the repository's branches reach that `old` doesn't: if `old` is an
+        // ancestor of the commits the push builds on, the walk meets it there.
+        let refs = git::refs(remote, Service::UploadPack.name())
+            .await
+            .map_err(|_| "the repository's refs could not be read".to_string())?;
+        let mut wants: Vec<String> = refs
+            .refs
+            .values()
+            .filter(|id| id.as_str() != old && git::is_id(id))
+            .cloned()
+            .collect();
+        wants.sort();
+        wants.dedup();
+        if !wants.is_empty() {
+            let got = git::fetch_filtered(
+                remote,
+                &refs.caps,
+                &wants,
+                &[old.to_string()],
+                Some("tree:0"),
+            )
+            .await
+            .map_err(|_| "the repository's history could not be read".to_string())?;
+            known.extend(pack::commits(&got.pack)?.parents);
+        }
+    }
+    Ok(pack::walk(old, new, known, true) == Walk::Forward)
+}
+
+impl GitProxy {
+    async fn serve(&self, cx: &Context<'_>, req: Request) -> Result<Response> {
+        let method = req.method();
+        let path = req.path();
+        let mut caller = None;
+        let answer = self.answer(cx, req, &mut caller).await;
+        let (outcome, status, why) = match &answer {
+            Ok((res, why)) => {
+                let status = res.status_code();
+                let outcome = match why {
+                    Some(_) => Outcome::Refused,
+                    None if (200..400).contains(&status) => Outcome::Forwarded,
+                    None => Outcome::Failed,
+                };
+                (outcome, Some(status), why.clone())
+            }
+            Err(e) => (Outcome::Failed, Some(502), Some(e.to_string())),
+        };
+        proxy::audit(
+            caller.as_ref(),
+            &Audit {
+                route: "git",
+                method: method.as_ref(),
+                path: &path,
+                outcome,
+                status,
+                why: why.as_deref(),
+            },
+        );
+        match answer {
+            Ok((res, _)) => Ok(res),
+            Err(e) => {
+                console_error!("git proxy: {e}");
+                Response::error("the git proxy failed; see the platform's logs", 502)
+            }
+        }
+    }
+
+    /// The answer, and why when it is a refusal.
+    async fn answer(
+        &self,
+        cx: &Context<'_>,
+        mut req: Request,
+        caller: &mut Option<ProxyCaller>,
+    ) -> Result<(Response, Option<String>)> {
+        let refuse = |status: u16, why: &str| -> Result<(Response, Option<String>)> {
+            Ok((Response::error(why, status)?, Some(why.to_string())))
+        };
+        let url = req.url()?;
+        if url.host_str() != Some(self.host.as_str()) {
+            return refuse(404, "not found");
+        }
+        *caller = match proxy::caller(cx.env, &req).await {
+            Ok(c) => Some(c),
+            // 403, not 401: a 401 would send git looking for a password to prompt for.
+            Err(e) => return refuse(403, &e.to_string()),
+        };
+        let call = match route(
+            req.method().as_ref(),
+            url.path(),
+            url.query(),
+            &self.namespace,
+            &self.repo,
+        ) {
+            Ok(c) => c,
+            Err(why) => return refuse(404, why),
+        };
+        let Some(worker) = cx.worker else {
+            return Err(Error::RustError(
+                "no request context to revoke tokens in".into(),
+            ));
+        };
+        let service = match call {
+            Call::Refs(s) | Call::Rpc(s) => s,
+        };
+        let headers = forwarded_headers(&req, service)?;
+        // A push's ref updates are read and checked before any token is minted.
+        let mut push = None;
+        let mut rules = Vec::new();
+        if call == Call::Rpc(Service::ReceivePack) {
+            let encoding = req.headers().get("Content-Encoding")?;
+            if encoding.is_some_and(|e| !e.eq_ignore_ascii_case("identity")) {
+                return refuse(415, "the proxy takes pushes without content encoding");
+            }
+            let p = match read_commands(req.stream()?).await {
+                Ok(p) => p,
+                Err(why) => return refuse(400, &why),
+            };
+            match check_all(&p.commands.commands, &self.protected, &self.prefix) {
+                Ok(r) => rules = r,
+                Err(refused) => return refusal(&p.commands, &refused),
+            }
+            push = Some(p);
+        }
+        let access = match service {
+            Service::UploadPack => Access::Read,
+            Service::ReceivePack => Access::Write,
+        };
+        let (repo, token) =
+            artifacts::session(cx.account, &self.namespace, &self.repo, access, TOKEN_TTL).await?;
+        let remote = Remote {
+            url: repo.remote.trim_end_matches('/').to_string(),
+            authorization: format!("Bearer {}", token.value),
+        };
+        // From here the token is revoked whatever happens: when the answer's body ends, or now.
+        let (ended, done) = oneshot::channel::<()>();
+        let account: Account = cx.account.clone();
+        let (namespace, name, id) = (self.namespace.clone(), self.repo.clone(), token.id.clone());
+        worker.wait_until(async move {
+            let _ = done.await;
+            match id {
+                Some(id) => {
+                    if let Err(e) = artifacts::revoke(&account, &namespace, &name, &id).await {
+                        console_error!("git proxy: revoking git token {id}: {e}");
+                    }
+                }
+                None => console_error!("git proxy: a git token came back without an id"),
+            }
+        });
+        let body = match (call, push) {
+            (Call::Refs(_), _) => Body::None,
+            (Call::Rpc(Service::UploadPack), _) => match req.inner().body() {
+                Some(s) => Body::Stream(s.into()),
+                None => Body::None,
+            },
+            (Call::Rpc(Service::ReceivePack), Some(mut p)) => {
+                if rules.contains(&Rule::FastForward) {
+                    if let Err(why) = read_rest(&mut p).await {
+                        return refusal(&p.commands, &[(self.protected.clone(), why)]);
+                    }
+                    if let Some(refused) = self.not_forward(&remote, &p, &rules).await {
+                        return refusal(&p.commands, &refused);
+                    }
+                    Body::Bytes(p.head)
+                } else {
+                    // Warm the token first: a streamed body can be sent only once.
+                    git::refs(&remote, service.name()).await?;
+                    let head = stream::once(async move { Ok::<_, Error>(p.head) });
+                    Body::Stream(readable(head.chain(p.rest)))
+                }
+            }
+            (Call::Rpc(Service::ReceivePack), None) => {
+                return Err(Error::RustError("a push without its ref updates".into()));
+            }
+        };
+        if let Body::Stream(_) = body
+            && call == Call::Rpc(Service::UploadPack)
+        {
+            git::refs(&remote, service.name()).await?;
+        }
+        let (method, upstream_url) = match call {
+            Call::Refs(s) => (
+                Method::Get,
+                format!("{}/info/refs?service={}", remote.url, s.name()),
+            ),
+            Call::Rpc(s) => (Method::Post, format!("{}/{}", remote.url, s.name())),
+        };
+        let mut upstream = send(&remote, method, &upstream_url, &headers, body).await?;
+        let out = Headers::new();
+        for name in ["Content-Type", "Cache-Control"] {
+            if let Some(v) = upstream.headers().get(name)? {
+                out.set(name, &v)?;
+            }
+        }
+        let status = upstream.status_code();
+        if matches!(status, 401 | 403) {
+            // Passed on, a 401 would send git looking for a password; it is the proxy's
+            // token that was refused, not the caller.
+            return Err(Error::RustError(format!(
+                "Artifacts answered {status} to the proxy's git token"
+            )));
+        }
+        let body = Ended {
+            inner: Box::pin(upstream.stream()?),
+            ended: Some(ended),
+        };
+        Ok((
+            Response::from_stream(body)?
+                .with_status(status)
+                .with_headers(out),
+            None,
+        ))
+    }
+
+    /// The protected-branch updates in `p` that don't move forward, with why; `None` when
+    /// every one does.
+    async fn not_forward(
+        &self,
+        remote: &Remote,
+        p: &Push,
+        rules: &[Rule],
+    ) -> Option<Vec<(String, String)>> {
+        let fail = |why: String| Some(vec![(self.protected.clone(), why)]);
+        let start = match git::pack_start(&p.head, &p.commands) {
+            Ok(Some(s)) => s,
+            Ok(None) => return fail("the push ended early".into()),
+            Err(e) => return fail(e),
+        };
+        let pack = &p.head[start..];
+        let (mut known, unresolved) = if pack.is_empty() {
+            (HashMap::new(), 0)
+        } else {
+            match pack::commits(pack) {
+                Ok(c) => (c.parents, c.unresolved),
+                Err(e) => return fail(e),
+            }
+        };
+        let mut fetched = false;
+        for (c, rule) in p.commands.commands.iter().zip(rules) {
+            if *rule != Rule::FastForward {
+                continue;
+            }
+            match fast_forward(remote, &mut known, &mut fetched, &c.old, &c.new).await {
+                Ok(true) => {}
+                Ok(false) if unresolved > 0 => {
+                    return fail(format!(
+                        "{} could not be checked: the push stores objects as changes to \
+                         others it doesn't carry. Push the commit to a branch under {} first, \
+                         then move {} to it",
+                        c.name, self.prefix, c.name
+                    ));
+                }
+                Ok(false) => {
+                    return fail(format!(
+                        "{} only moves forward: push a commit that has the current one in its \
+                         history",
+                        c.name
+                    ));
+                }
+                Err(e) => return fail(e),
+            }
+        }
+        None
+    }
+}
+
+/// A push refused as git reports it: 200 with every ref refused, or 403 when the client asked
+/// for no report.
+fn refusal(c: &Commands, refused: &[(String, String)]) -> Result<(Response, Option<String>)> {
+    let why = refused
+        .iter()
+        .map(|(r, w)| format!("{r}: {w}"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let body = git::refusal(&c.commands, &c.caps, refused);
+    if body.is_empty() {
+        return Ok((Response::error(why.clone(), 403)?, Some(why)));
+    }
+    let headers = Headers::new();
+    headers.set("Content-Type", "application/x-git-receive-pack-result")?;
+    headers.set("Cache-Control", "no-cache")?;
+    Ok((Response::from_bytes(body)?.with_headers(headers), Some(why)))
+}
+
+impl Capability for GitProxy {
+    fn name(&self) -> &'static str {
+        "git_proxy"
+    }
+
+    fn tools(&self) -> Vec<Tool> {
+        Vec::new()
+    }
+
+    fn call<'a>(&'a self, _cx: &'a Context<'a>, tool: &'a str, _args: &'a Value) -> ToolCall<'a> {
+        Box::pin(async move { Err(unknown(tool)) })
+    }
+
+    fn routes(&self) -> Vec<&'static str> {
+        vec!["/git/"]
+    }
+
+    fn fetch<'a>(&'a self, cx: &'a Context<'a>, req: Request) -> Serve<'a> {
+        Box::pin(self.serve(cx, req))
+    }
+
+    fn footprint(&self) -> Footprint {
+        Footprint {
+            repos: vec![format!("{}/{}", self.namespace, self.repo)],
+            ..Footprint::default()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NS: &str = "ns";
+    const REPO: &str = "repo";
+    const P: &str = "refs/heads/main";
+    const X: &str = "refs/heads/claude/";
+
+    fn r(m: &str, p: &str, q: Option<&str>) -> std::result::Result<Call, &'static str> {
+        route(m, p, q, NS, REPO)
+    }
+
+    fn cmd(old: &str, new: &str, name: &str) -> Command {
+        Command {
+            old: old.to_string(),
+            new: new.to_string(),
+            name: name.to_string(),
+        }
+    }
+
+    #[test]
+    fn routes_only_the_four_git_calls() {
+        let b = "/git/ns/repo.git";
+        assert_eq!(
+            r(
+                "GET",
+                &format!("{b}/info/refs"),
+                Some("service=git-upload-pack")
+            ),
+            Ok(Call::Refs(Service::UploadPack))
+        );
+        assert_eq!(
+            r(
+                "GET",
+                &format!("{b}/info/refs"),
+                Some("service=git-receive-pack")
+            ),
+            Ok(Call::Refs(Service::ReceivePack))
+        );
+        assert_eq!(
+            r("POST", &format!("{b}/git-upload-pack"), None),
+            Ok(Call::Rpc(Service::UploadPack))
+        );
+        assert_eq!(
+            r("POST", &format!("{b}/git-receive-pack"), Some("")),
+            Ok(Call::Rpc(Service::ReceivePack))
+        );
+        let q = Some("service=git-upload-pack");
+        assert_eq!(
+            r("GET", "/git/ns/other.git/info/refs", q),
+            Err("not this repository")
+        );
+        for (m, p, q) in [
+            ("GET", "/git/ns/repo/info/refs", q),
+            ("GET", "/git/ns/repo2.git/info/refs", q),
+            ("GET", "/git/nsx/repo.git/info/refs", q),
+            ("GET", "/git/ns/repo.git/x/info/refs", q),
+            ("GET", "/git/ns/repo.git/info/refs/", q),
+            (
+                "GET",
+                "/git/ns/repo.git/info/refs",
+                Some("service=git-upload-pack&x=1"),
+            ),
+            (
+                "GET",
+                "/git/ns/repo.git/info/refs",
+                Some("service=git-upload-archive"),
+            ),
+            ("GET", "/git/ns/repo.git/info/refs", None),
+            ("POST", "/git/ns/repo.git/info/refs", q),
+            ("GET", "/git/ns/repo.git/git-upload-pack", None),
+            ("POST", "/git/ns/repo.git/git-receive-pack", Some("x")),
+            ("GET", "/git/ns/repo.git/objects/info/packs", None),
+            ("GET", "/git/ns/repo.git/HEAD", None),
+        ] {
+            assert!(r(m, p, q).is_err(), "{m} {p} {q:?}");
+        }
+    }
+
+    #[test]
+    fn ref_names_are_strict() {
+        assert!(refname_ok("refs/heads/claude/x"));
+        assert!(refname_ok("refs/heads/main"));
+        for n in [
+            "refs/heads/a..b",
+            "refs/heads/a.lock",
+            "refs/heads/.a",
+            "refs/heads/a/",
+            "refs/heads/a.",
+            "refs/heads/a b",
+            "refs/heads/a@{1}",
+            "refs/heads/a~1",
+            "refs/heads/a\\b",
+            "HEAD",
+            "refs/heads//a",
+            "refs/heads/claude/../main",
+        ] {
+            assert!(!refname_ok(n), "{n}");
+        }
+    }
+
+    #[test]
+    fn push_rules() {
+        let h = "a".repeat(40);
+        let rule = |old: &str, new: &str, name: &str| check(&cmd(old, new, name), P, X);
+        assert!(rule(&h, ZERO, P).is_err(), "delete main");
+        assert!(
+            rule(&h, ZERO, "refs/heads/claude/x").is_err(),
+            "delete a branch"
+        );
+        assert!(rule(ZERO, &h, P).is_err(), "create main");
+        assert_eq!(rule(&h, &h, P), Ok(Rule::FastForward));
+        assert_eq!(rule(ZERO, &h, "refs/heads/claude/x"), Ok(Rule::Stream));
+        assert_eq!(rule(&h, &h, "refs/heads/claude/a/b"), Ok(Rule::Stream));
+        for name in [
+            "refs/heads/claude/",
+            "refs/heads/claudex",
+            "refs/heads/other",
+            "refs/tags/v1",
+            "refs/heads/Main",
+            "refs/heads/main/x",
+            "refs/notes/commits",
+        ] {
+            assert!(rule(ZERO, &h, name).is_err(), "{name}");
+        }
+    }
+
+    /// Runs `git` in `dir`; its output.
+    fn git(dir: &std::path::Path, args: &[&str], input: Option<&str>) -> Vec<u8> {
+        use std::io::Write;
+        use std::process::{Command as Run, Stdio};
+        let mut child = Run::new("git")
+            .args(args)
+            .current_dir(dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        if let Some(i) = input {
+            stdin.write_all(i.as_bytes()).unwrap();
+        }
+        drop(stdin);
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success(), "git {args:?}");
+        out.stdout
+    }
+
+    /// A push body as git sends it: the update with capabilities, a flush, then the thin pack
+    /// of `new` less `old`'s history.
+    fn push_body(dir: &std::path::Path, old: &str, new: &str, name: &str) -> Vec<u8> {
+        let line = format!("{old} {new} {name}\0report-status side-band-64k ofs-delta\n");
+        let mut body = format!("{:04x}{line}0000", line.len() + 4).into_bytes();
+        let revs = format!("{new}\n^{old}\n");
+        body.extend(git(
+            dir,
+            &[
+                "pack-objects",
+                "--stdout",
+                "--revs",
+                "--thin",
+                "-q",
+                "--delta-base-offset",
+            ],
+            Some(&revs),
+        ));
+        body
+    }
+
+    fn commit(dir: &std::path::Path, body: &str) -> String {
+        std::fs::write(dir.join("f"), body).unwrap();
+        git(dir, &["add", "f"], None);
+        git(dir, &["commit", "-q", "-m", "c"], None);
+        String::from_utf8(git(dir, &["rev-parse", "HEAD"], None))
+            .unwrap()
+            .trim()
+            .to_string()
+    }
+
+    /// What the proxy decides about a push to main from `old` to `new`, from the body alone.
+    fn decide(body: &[u8]) -> Walk {
+        let c = git::commands(body).unwrap().unwrap();
+        let rules = check_all(&c.commands, P, X).unwrap();
+        assert_eq!(rules, [Rule::FastForward]);
+        let start = git::pack_start(body, &c).unwrap().unwrap();
+        let known = pack::commits(&body[start..]).unwrap().parents;
+        let u = &c.commands[0];
+        pack::walk(&u.old, &u.new, &known, false)
+    }
+
+    #[test]
+    fn a_real_push_to_main_is_judged_by_its_history() {
+        let dir = std::env::temp_dir().join(format!("pigeon-git-proxy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for args in [
+            &["init", "-q", "-b", "main"][..],
+            &["config", "user.email", "t@example.com"],
+            &["config", "user.name", "t"],
+        ] {
+            git(&dir, args, None);
+        }
+        let base = commit(&dir, &"line\n".repeat(300));
+        let ahead = commit(&dir, &format!("{}more\n", "line\n".repeat(300)));
+        let further = commit(&dir, &format!("{}more\nagain\n", "line\n".repeat(300)));
+        // New commits on top of main: forward, from the pack alone.
+        assert_eq!(decide(&push_body(&dir, &base, &further, P)), Walk::Forward);
+        // A rewrite: a commit beside `ahead`, not after it.
+        git(&dir, &["reset", "-q", "--hard", &base], None);
+        let beside = commit(&dir, "other\n");
+        assert_eq!(
+            decide(&push_body(&dir, &ahead, &beside, P)),
+            Walk::Need(vec![base.clone()]),
+            "the walk asks upstream about the commit the rewrite builds on"
+        );
+        // Moving main to a commit already upstream sends an empty pack: upstream must tell.
+        let mut empty = push_body(&dir, &base, &base, P);
+        let line = format!("{base} {ahead} {P}\0report-status\n");
+        let c = git::commands(&empty).unwrap().unwrap();
+        empty.splice(
+            ..c.end,
+            format!("{:04x}{line}0000", line.len() + 4).into_bytes(),
+        );
+        assert_eq!(decide(&empty), Walk::Need(vec![ahead.clone()]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn every_refused_update_is_named() {
+        let h = "a".repeat(40);
+        let cs = [
+            cmd(&h, &h, P),
+            cmd(ZERO, &h, "refs/tags/v1"),
+            cmd(&h, ZERO, "refs/heads/claude/y"),
+        ];
+        let refused = check_all(&cs, P, X).unwrap_err();
+        let names: Vec<&str> = refused.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["refs/tags/v1", "refs/heads/claude/y"]);
+        assert_eq!(check_all(&cs[..1], P, X), Ok(vec![Rule::FastForward]));
+    }
+}

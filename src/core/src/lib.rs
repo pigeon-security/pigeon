@@ -21,7 +21,9 @@ pub mod webauthn;
 pub mod workers;
 pub mod zones;
 
-/// The Cloudflare account a block acts on.
+/// The Cloudflare account a block acts on. Cloned only to finish work after an answer has
+/// gone; it has no `Debug`, so the parent token can't be printed by accident.
+#[derive(Clone)]
 pub struct Account {
     /// The account's ID.
     pub id: String,

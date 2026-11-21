@@ -1,6 +1,6 @@
 # Routing cloud sessions' traffic through platform.pigeon.dev
 
-Status: phase 1 built, awaiting deploy. Phases are handed back one at a time; each is merged and deployed before the
+Status: phase 1 deployed; phase 2 built, awaiting deploy. Phases are handed back one at a time; each is merged and deployed before the
 next starts.
 
 ## Why
@@ -159,7 +159,7 @@ options, then the pack. The proxy reads the commands before anything is forwarde
 **Plan correction: fast-forward can't be decided from the commands alone.** The commands carry
 only the old and new IDs, not their ancestry; git sends the remote's current ID as `old` even
 on a force push. So a push that updates `main` is handled differently:
-- It is buffered (capped at 32 MiB; larger is refused with a message to push smaller).
+- It is buffered (capped at 16 MiB; larger is refused with a message to push smaller).
 - The pack's commit objects are read (zlib, so the pure-Rust `miniz_oxide` crate is added to
   `pigeon-core`). The walk goes from `new` through parents. Reaching `old` means fast-forward.
 - Parents that are not in the pushed pack already exist upstream (the common case: a
@@ -195,8 +195,27 @@ delete (refused); a force push to `main` (refused); a fast-forward of `main` fro
 logs show one audit line per request and no token; `source_tokens` shows the minted git tokens
 revoked.
 
+As built (differences from the above, decided while building):
+- The proxies' hostname is the setting `PROXY_HOST` in `settings.rs`, `platform.pigeon.dev`
+  for now. If the network secret must not reach `/mcp`, it becomes a hostname of its own;
+  the git proxy answers 404 on any other host.
+- An unknown or missing credential gets 403, not 401: a 401 sends git looking for a password
+  to prompt for. An upstream 401/403 (the proxy's own git token refused) becomes a 502.
+- Upstream history for the fast-forward check is asked for by wanting every upstream ref tip
+  (less `old`), with `have old` and `filter tree:0` when Artifacts offers filtering. This
+  avoids depending on Artifacts allowing a want of any commit ID.
+- A push whose pack stores the needed commit as a delta against an object outside the pack
+  can't be checked. It is refused with a message to push the commit to a `claude/*` branch
+  first, then move `main` to it (an empty pack, checked against upstream).
+- A push with a `Content-Encoding` other than identity is refused (git doesn't compress
+  pushes). Upload-pack's `Content-Encoding` is passed on.
+- Caps: a push that moves `main` is read up to 16 MiB; a pack inflates to 48 MiB at most.
+  Together they stay well inside a Worker's 128 MB of memory.
+- The git token is revoked in `wait_until` once the answer's body has been read to its end or
+  dropped, and also on every early return after minting.
+
 Limits to record: Workers request bodies are capped by plan (100 MB on Free and Pro), which
-caps a streamed push; a push to `main` is capped at 32 MiB by the buffer.
+caps a streamed push; a push to `main` is capped at 16 MiB by the buffer.
 
 ## Phase 3: the Cloudflare API proxy
 

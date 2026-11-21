@@ -4,6 +4,7 @@
 use pigeon_capabilities::Capability;
 use pigeon_capabilities::architecture::Architecture;
 use pigeon_capabilities::deploys::Deploys;
+use pigeon_capabilities::git_proxy::GitProxy;
 use pigeon_capabilities::mirror::{self, Mirror};
 use pigeon_capabilities::models::{Dialect, Models, Provider};
 use pigeon_capabilities::oauth::OAuth;
@@ -25,6 +26,9 @@ const ZONE: &str = "pigeon.dev";
 
 /// The platform's hostname, in public: its paths check their callers themselves.
 pub const HOST: &str = "platform.pigeon.dev";
+/// The hostname the proxies (`/git/`, later `/cf/`) answer on. The platform's own for now;
+/// a hostname of its own if the cloud environment's network secret must not reach `/mcp`.
+pub const PROXY_HOST: &str = HOST;
 const NAMESPACE: &str = "pigeon-security";
 const REPO: &str = "pigeon";
 const BRANCH: &str = "main";
@@ -111,6 +115,15 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
                 host: HOST.into(),
                 site_name: "pigeon".into(),
             },
+        }),
+        // The git proxy: the source repository for cloud sessions holding a proxy credential.
+        // Sessions push to branches under claude/; main only moves forward.
+        Box::new(GitProxy {
+            host: PROXY_HOST.into(),
+            namespace: NAMESPACE.into(),
+            repo: REPO.into(),
+            protected: format!("refs/heads/{BRANCH}"),
+            prefix: "refs/heads/claude/".into(),
         }),
         Box::new(Models {
             gateway: "pigeon".into(),
