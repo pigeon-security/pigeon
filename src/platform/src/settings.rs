@@ -3,6 +3,7 @@
 
 use pigeon_capabilities::Capability;
 use pigeon_capabilities::architecture::Architecture;
+use pigeon_capabilities::cf_proxy::CfProxy;
 use pigeon_capabilities::deploys::Deploys;
 use pigeon_capabilities::git_proxy::GitProxy;
 use pigeon_capabilities::mirror::{self, Mirror};
@@ -133,6 +134,12 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
             repo: REPO.into(),
             protected: format!("refs/heads/{BRANCH}"),
             prefix: "refs/heads/claude/".into(),
+        }),
+        // The Cloudflare API proxy: the calls `wrangler deploy` of this Worker makes, for cloud
+        // sessions holding a proxy credential.
+        Box::new(CfProxy {
+            host: PROXY_HOST.into(),
+            script: WORKER.into(),
         }),
         Box::new(Models {
             gateway: "pigeon".into(),

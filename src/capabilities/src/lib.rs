@@ -4,6 +4,7 @@
 //! and resources it brings), which the architecture page draws.
 
 pub mod architecture;
+pub mod cf_proxy;
 pub mod deploys;
 pub mod git_proxy;
 pub mod mirror;

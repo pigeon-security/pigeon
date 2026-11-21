@@ -1,6 +1,6 @@
 # Routing cloud sessions' traffic through pigeon's platform
 
-Status: phase 1 deployed; phase 2 built, awaiting deploy. Phases are handed back one at a time; each is merged and deployed before the
+Status: phases 1 and 2 deployed; phase 3 built, awaiting deploy. Phases are handed back one at a time; each is merged and deployed before the
 next starts.
 
 ## Why
@@ -248,9 +248,33 @@ Design:
   `/accounts/{account}/workers/scripts/{script}…`, the account's `workers/subdomain`,
   `/accounts/{account}/workers/durable_objects/namespaces` for the migration, and
   `/memberships` or `/user` if wrangler still asks with `CLOUDFLARE_ACCOUNT_ID` set.
+
+  **Recorded** (wrangler 4.166.0, `src/platform`'s config with a stub module, against a
+  stand-in API that logs each call; both ways wrangler deploys, each call then read in
+  `wrangler-dist/cli.js`). `{a}` is the account, `{s}` is `pigeon-platform`:
+
+  | Call | Permissions | What for |
+  | --- | --- | --- |
+  | `GET /accounts/{a}/workers/services/{s}` | Workers Scripts Read | exists? migration tag |
+  | `GET /accounts/{a}/workers/scripts/{s}/secrets` | Workers Scripts Read | secrets |
+  | `GET /accounts/{a}/workers/scripts/{s}/deployments` | Workers Scripts Read | deployments |
+  | `GET /accounts/{a}/workers/scripts/{s}/settings` | Workers Scripts Read | settings |
+  | `POST …/scripts/{s}/versions?bindings_inherit=strict` | Workers Scripts Write, Secrets Store Write | upload, no migration pending |
+  | `POST …/scripts/{s}/deployments` | Workers Scripts Write | deploy that version |
+  | `PATCH …/scripts/{s}/script-settings` | Workers Scripts Write | logpush, observability, tags |
+  | `PUT …/scripts/{s}?excludeScript=true&bindings_inherit=strict` | Workers Scripts Write, Secrets Store Write | upload and deploy, migration pending |
+  | `GET /accounts/{a}/workers/workers/{s}` | Workers Scripts Read | workers.dev settings |
+  | `POST …/scripts/{s}/subdomain` | Workers Scripts Write | keep workers.dev off |
+
+  Wrangler takes the versions route when the Worker exists and no Durable Object migration
+  is pending, and the `PUT` route otherwise (`canUseNewVersionsDeploymentsApi`). No
+  `/memberships` or `/user` call is made with `CLOUDFLARE_ACCOUNT_ID` set. Every call carries
+  only `Content-Type` that matters; the proxy passes on nothing else.
 - Per request: authenticate (`proxy::caller`), match, mint a token holding only that entry's
   permissions (5-minute lifetime), forward (method, path, query, `Content-Type`; nothing
-  else), stream the answer back, revoke after, audit line. Request bodies are buffered (a
+  else), read the answer (small JSON), revoke, answer, audit line. As built, the answer is
+  read whole rather than streamed: the API's answers are small, and revoking before answering
+  is simpler and certain. Request bodies are capped at 16 MiB. Request bodies are buffered (a
   Worker upload is at most 10 MB) so a call refused with 401 by a token not yet active can be
   retried, as `call_fresh` does.
 - Refusals answer in Cloudflare's own shape (`{"success":false,"errors":[{"code":…,

@@ -198,6 +198,21 @@ impl<'a> Scoped<'a> {
         Ok(Self { account, minted })
     }
 
+    /// [`Scoped::open`], with the token living `ttl_secs` instead of the default.
+    pub async fn open_for(
+        account: &'a crate::Account,
+        purpose: &str,
+        policies: Vec<Policy>,
+        ttl_secs: u64,
+    ) -> Result<Self> {
+        let request = MintRequest {
+            ttl_secs,
+            ..MintRequest::new(purpose, policies)
+        };
+        let minted = mint(&account.parent, &account.id, &request).await?;
+        Ok(Self { account, minted })
+    }
+
     /// The token's value, for API calls.
     pub fn value(&self) -> &str {
         &self.minted.value
