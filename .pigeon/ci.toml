@@ -44,3 +44,8 @@ token = true
 cpu = 4
 memory_gb = 12
 disk_gb = 20
+
+# Five minutes of sleep: proves a job's container lives past its runner object going idle.
+[jobs.sleep]
+run = "ci/runner/sleep.sh"
+timeout_min = 10

@@ -117,6 +117,46 @@ pub fn start(state: &State, s: &Start) -> worker::Result<()> {
         .map_err(|e| fail(format!("container start failed: {}", message(&e))))
 }
 
+/// The longest a container may outlive its object's last activity, Cloudflare's ceiling.
+pub const MAX_KEEP_MS: i64 = 6 * 3_600_000;
+
+/// Keeps the container running for `ms` (clamped to 1 ms .. [`MAX_KEEP_MS`]) after its object
+/// last handled anything. Without it, Cloudflare stops the container shortly after the object
+/// goes idle, which kills any job longer than a few seconds. An object that restarts starts
+/// without one, so it is set after each start and again whenever the object wakes.
+pub async fn keep_for(state: &State, ms: i64) -> worker::Result<()> {
+    match ask_keep(state, ms)? {
+        Some(answer) => answer.await,
+        None => Ok(()),
+    }
+}
+
+/// [`keep_for`], asked now: the timeout is requested before this returns, and the returned
+/// future, if any, is its answer. For an object's constructor, which cannot wait.
+pub fn ask_keep(
+    state: &State,
+    ms: i64,
+) -> worker::Result<Option<impl std::future::Future<Output = worker::Result<()>> + 'static>> {
+    let container = container(state).ok_or_else(|| fail("this object has no container"))?;
+    let ms = ms.clamp(1, MAX_KEEP_MS);
+    let result = method(&container, "setInactivityTimeout")?
+        .call1(&container, &JsValue::from_f64(ms as f64))
+        .map_err(|e| {
+            fail(format!(
+                "container inactivity timeout failed: {}",
+                message(&e)
+            ))
+        })?;
+    Ok(result.dyn_into::<Promise>().ok().map(|promise| async move {
+        JsFuture::from(promise).await.map(|_| ()).map_err(|e| {
+            fail(format!(
+                "container inactivity timeout failed: {}",
+                message(&e)
+            ))
+        })
+    }))
+}
+
 /// Whether it is running; false when there is none.
 pub fn running(state: &State) -> bool {
     container(state)

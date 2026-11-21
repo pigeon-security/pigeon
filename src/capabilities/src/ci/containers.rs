@@ -5,6 +5,11 @@
 //! backstop: the runner object's alarm watches it, and an exit without a result is reported to
 //! the scheduler as a lost runner, which the state machine ignores once the job has its result.
 //!
+//! Cloudflare stops a container shortly after its object goes idle unless the object sets an
+//! inactivity timeout, which a restarted object no longer has. So the runner sets one covering
+//! the job's timeout and a margin ([`keep_ms`]) after the start, on every watch, and when a
+//! restarted object finds its container still running.
+//!
 //! Instances are `standard-3` (2 vCPU, 8 GiB, 16 GB) for `small` and `standard-4` (4 vCPU,
 //! 12 GiB, 20 GB) for a reduced `medium`, the largest Cloudflare offers. Under the
 //! `durable_object` scheduling policy Cloudflare caps nothing, so the gateway keeps its own
@@ -29,6 +34,15 @@ pub const NAME: &str = "containers";
 pub const BINDING: &str = "CI_RUNNER";
 /// How often a runner object looks at its container.
 const WATCH_MS: i64 = 60_000;
+/// How long past the job's own timeout its container is kept, for the fetch, the report and
+/// the deadline's allowance.
+const KEEP_MARGIN_MIN: i64 = 15;
+
+/// How long a job's container is kept running while its object is idle: its timeout and a
+/// margin, at most Cloudflare's six hours.
+pub fn keep_ms(timeout_min: u32) -> i64 {
+    ((i64::from(timeout_min) + KEEP_MARGIN_MIN) * 60_000).min(containers::MAX_KEEP_MS)
+}
 
 fn bad(why: &str) -> Error {
     Error::RustError(why.to_string())
@@ -157,6 +171,7 @@ impl Connector for Containers {
                 json!({
                     "job": run.job, "image": image, "instance": instance,
                     "entrypoint": self.entrypoint, "env": env,
+                    "keep_ms": keep_ms(run.timeout_min),
                 }),
             )
             .await?;
@@ -197,8 +212,9 @@ fn lost(status: &Value) -> Option<Report> {
     }
 }
 
-const MIGRATIONS: [&str; 1] = [
+const MIGRATIONS: [&str; 2] = [
     "CREATE TABLE run (id INTEGER PRIMARY KEY CHECK (id = 1), job TEXT NOT NULL, started_at INTEGER NOT NULL, exit INTEGER, ended INTEGER NOT NULL)",
+    "ALTER TABLE run ADD COLUMN keep_ms INTEGER",
 ];
 
 /// One job attempt's container; the hosting Worker's `CiRunner` class wraps it. It keeps the
@@ -214,17 +230,43 @@ struct Kept {
     job: String,
     exit: Option<i64>,
     ended: i64,
+    /// Rows from before it was kept read as the ceiling.
+    keep_ms: Option<i64>,
+}
+
+impl Kept {
+    fn keep(&self) -> i64 {
+        self.keep_ms.unwrap_or(containers::MAX_KEEP_MS)
+    }
 }
 
 impl Runner {
     /// The runner object, its migrations applied.
     pub fn new(state: State, env: Env) -> Result<Self> {
         let db = Db::open(&state, &MIGRATIONS)?;
-        Ok(Self { db, state, env })
+        let runner = Self { db, state, env };
+        // A restarted object has no inactivity timeout: its running container would be stopped
+        // before the next watch, so it is set again at once.
+        if containers::running(&runner.state)
+            && let Ok(Some(kept)) = runner.kept()
+            && kept.ended == 0
+        {
+            match containers::ask_keep(&runner.state, kept.keep()) {
+                Ok(Some(answer)) => worker::wasm_bindgen_futures::spawn_local(async move {
+                    if let Err(e) = answer.await {
+                        console_error!("ci: runner for {}: keeping its container: {e}", kept.job);
+                    }
+                }),
+                Ok(None) => {}
+                Err(e) => console_error!("ci: runner for {}: keeping its container: {e}", kept.job),
+            }
+        }
+        Ok(runner)
     }
 
     fn kept(&self) -> Result<Option<Kept>> {
-        self.db.row("SELECT job, exit, ended FROM run", vec![])
+        self.db
+            .row("SELECT job, exit, ended, keep_ms FROM run", vec![])
     }
 
     /// Answers the connector's operations.
@@ -263,10 +305,12 @@ impl Runner {
                         internet: true,
                     },
                 )?;
+                let keep = a["keep_ms"].as_i64().unwrap_or(containers::MAX_KEEP_MS);
                 self.db.exec(
-                    "INSERT INTO run (id, job, started_at, ended) VALUES (1, ?, ?, 0)",
-                    vec![s("job").into(), now().into()],
+                    "INSERT INTO run (id, job, started_at, ended, keep_ms) VALUES (1, ?, ?, 0, ?)",
+                    vec![s("job").into(), now().into(), keep.into()],
                 )?;
+                containers::keep_for(&self.state, keep).await?;
                 self.state.storage().set_alarm(WATCH_MS).await?;
                 Ok(json!({ "started": true }))
             }
@@ -297,6 +341,9 @@ impl Runner {
             return Response::ok("ended");
         }
         if containers::running(&self.state) {
+            if let Err(e) = containers::keep_for(&self.state, kept.keep()).await {
+                console_error!("ci: runner for {}: keeping its container: {e}", kept.job);
+            }
             self.state.storage().set_alarm(WATCH_MS).await?;
             return Response::ok("running");
         }
@@ -376,6 +423,14 @@ mod tests {
         assert_eq!(instance(&big), None);
         assert!(offers.iter().all(|o| !o.class.docker && !o.network_none));
         assert_eq!(offers[1].memory_gb, 12);
+    }
+
+    #[test]
+    fn a_container_is_kept_past_its_jobs_timeout_and_never_past_six_hours() {
+        assert_eq!(keep_ms(5), 20 * 60_000);
+        assert_eq!(keep_ms(60), 75 * 60_000);
+        assert_eq!(keep_ms(360), containers::MAX_KEEP_MS);
+        assert!(keep_ms(1) > WATCH_MS);
     }
 
     #[test]
