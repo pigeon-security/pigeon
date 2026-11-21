@@ -11,6 +11,7 @@ use pigeon_capabilities::ci::containers::Containers;
 use pigeon_capabilities::ci::{self, Ci, ProxyFiles};
 use pigeon_capabilities::console::Console;
 use pigeon_capabilities::deploys::Deploys;
+use pigeon_capabilities::dispatch::Dispatch;
 use pigeon_capabilities::git_proxy::GitProxy;
 use pigeon_capabilities::mirror::{self, Mirror};
 use pigeon_capabilities::models::{Dialect, Models, Provider};
@@ -192,6 +193,8 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
         }),
         Box::new(Ci { settings: ci() }),
         Box::new(Deploys),
+        // `call {tool, args}`: any tool above by name, for sessions whose tool list predates it.
+        Box::new(Dispatch),
         Box::new(Architecture),
         // The console: one page at the root, signed in to once with a passkey.
         Box::new(Console {

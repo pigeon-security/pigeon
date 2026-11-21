@@ -221,10 +221,6 @@ async fn mcp_post(mut req: Request, env: &Env) -> Result<Response> {
                        proxy credential.",
     };
     let call = async |name: &str, args: &Value| -> Result<Value> {
-        let owner = caps
-            .iter()
-            .find(|c| c.tools().iter().any(|t| t.name == name))
-            .ok_or_else(|| Error::RustError(format!("no tool `{name}`")))?;
         let cx = Context {
             account: &account,
             env,
@@ -233,7 +229,7 @@ async fn mcp_post(mut req: Request, env: &Env) -> Result<Response> {
             caller_note: None,
             worker: None,
         };
-        owner.call(&cx, name, args).await
+        pigeon_capabilities::dispatch(&cx, name, args).await
     };
     match mcp::answer(&server, &tools, &message, call).await {
         Some(answer) => Response::from_json(&answer),

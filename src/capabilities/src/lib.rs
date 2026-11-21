@@ -8,6 +8,7 @@ pub mod cf_proxy;
 pub mod ci;
 pub mod console;
 pub mod deploys;
+pub mod dispatch;
 pub mod git_proxy;
 pub mod mirror;
 pub mod models;
@@ -178,6 +179,25 @@ pub struct HostFootprint {
 pub struct WorkerFootprint {
     pub name: String,
     pub routes: Vec<String>,
+}
+
+/// The hosted capability that offers tool `name`, if one does.
+pub fn owner<'a>(
+    capabilities: &'a [Box<dyn Capability>],
+    name: &str,
+) -> Option<&'a dyn Capability> {
+    capabilities
+        .iter()
+        .find(|c| c.tools().iter().any(|t| t.name == name))
+        .map(|c| c.as_ref())
+}
+
+/// Runs tool `name` with `args` as `cx`'s caller: the one way a tool is run, whether `/mcp`
+/// was asked for it directly or through `call`, so both find it and fail the same way.
+pub async fn dispatch(cx: &Context<'_>, name: &str, args: &Value) -> Result<Value> {
+    let owner = owner(cx.hosted.capabilities, name)
+        .ok_or_else(|| Error::RustError(pigeon_core::mcp::unknown_tool(name)))?;
+    owner.call(cx, name, args).await
 }
 
 /// `v` as JSON.

@@ -38,6 +38,11 @@ impl Tool {
     }
 }
 
+/// What a call of a tool that is not offered is told, wherever it is called from.
+pub fn unknown_tool(name: &str) -> String {
+    format!("unknown tool `{name}`")
+}
+
 /// The answer to one JSON-RPC `message`, or `None` for a notification, which gets none.
 /// `call` runs a tool by name with its arguments; its error becomes a tool error the model can
 /// read, not a protocol error.
@@ -62,7 +67,7 @@ pub async fn answer(
         "tools/call" => {
             let name = params["name"].as_str().unwrap_or_default();
             if !tools.iter().any(|t| t.name == name) {
-                return Some(error(id, -32602, &format!("unknown tool `{name}`")));
+                return Some(error(id, -32602, &unknown_tool(name)));
             }
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
             match call(name, &args).await {
