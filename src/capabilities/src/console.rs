@@ -9,12 +9,16 @@
 pub mod page;
 pub mod sections;
 pub mod session;
+pub mod snapshot;
 pub mod writes;
 
+use futures_util::future::{Either, join_all, select};
 use pigeon_core::mcp::Tool;
 use pigeon_core::oauth::{hash, token};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::future::Future;
+use std::time::Duration;
 use worker::{Env, Error, Headers, Method, Request, Response, Result};
 
 use crate::passkeys::Passkeys;
@@ -61,6 +65,40 @@ fn answer(value: &Value, status: u16) -> Result<Response> {
     Ok(Response::from_json(value)?
         .with_status(status)
         .with_headers(headers))
+}
+
+/// How long a section may take before the console answers that it timed out, in ms. Below the
+/// runtime's own limits, so the page gets an answer it can offer to retry, not a dropped
+/// connection.
+pub const SECTION_MS: u64 = 10_000;
+
+/// What a section that ran out of time answers.
+const TIMED_OUT: &str = "timed out: its source did not answer within 10 seconds";
+
+/// `work`, or the [`TIMED_OUT`] error once `ms` have passed.
+async fn timed<T>(ms: u64, work: impl Future<Output = Result<T>>) -> Result<T> {
+    let wait = worker::Delay::from(Duration::from_millis(ms));
+    futures_util::pin_mut!(work);
+    futures_util::pin_mut!(wait);
+    match select(work, wait).await {
+        Either::Left((done, _)) => done,
+        Either::Right(_) => Err(bad(TIMED_OUT)),
+    }
+}
+
+/// An error as the page gets it: a timeout as 504 that says it can be retried, anything else
+/// as 400.
+fn failed(e: &Error) -> Result<Response> {
+    let why = e.to_string();
+    if why.contains(TIMED_OUT) {
+        answer(&json!({ "error": why, "retry": true }), 504)
+    } else {
+        answer(&json!({ "error": why }), 400)
+    }
+}
+
+fn now_ms() -> i64 {
+    worker::js_sys::Date::now() as i64
 }
 
 /// The number of days a section's data covers: `days` from the query, 1 to 30, 7 by default.
@@ -120,12 +158,12 @@ impl Console {
             [] => Err(bad("no such section")),
             [one] => one.section_data(cx, id, person, query).await,
             many => {
+                // Every owner at once: the section takes as long as its slowest, not their sum.
+                let answers =
+                    join_all(many.iter().map(|c| c.section_data(cx, id, person, query))).await;
                 let mut all = serde_json::Map::new();
-                for c in many {
-                    all.insert(
-                        c.name().into(),
-                        c.section_data(cx, id, person, query).await?,
-                    );
+                for (c, data) in many.iter().zip(answers) {
+                    all.insert(c.name().into(), data?);
                 }
                 Ok(Value::Object(all))
             }
@@ -142,32 +180,39 @@ impl Console {
         let mut missing = Vec::new();
         let mut expiring = Vec::new();
         let mut credentials = Vec::new();
-        for tab in &listing {
-            for l in &tab.sections {
-                let wanted = l.section.cost.is_some() || l.section.id == "keys";
-                if !wanted {
-                    continue;
+        let wanted: Vec<&str> = listing
+            .iter()
+            .flat_map(|t| t.sections.iter())
+            .filter(|l| l.section.cost.is_some() || l.section.id == "keys")
+            .map(|l| l.section.id)
+            .collect();
+        // Every section at once, each within its time; one failing or slow section leaves its
+        // figure out rather than the whole overview.
+        let found = join_all(
+            wanted
+                .iter()
+                .map(|id| timed(SECTION_MS, Self::section(cx, id, person, &week))),
+        )
+        .await;
+        for (id, data) in wanted.iter().zip(found) {
+            let Ok(data) = data else {
+                continue;
+            };
+            if let Some(cost) = data["cost_7d"].as_f64() {
+                answers.push((id.to_string(), cost));
+            }
+            for found in [&data["missing"], &data["secrets"]["missing"]] {
+                if let Some(list) = found.as_array() {
+                    missing.extend(list.iter().cloned());
                 }
-                // One failing section leaves its figure out rather than the whole overview.
-                let Ok(data) = Self::section(cx, l.section.id, person, &week).await else {
-                    continue;
-                };
-                if let Some(cost) = data["cost_7d"].as_f64() {
-                    answers.push((l.section.id.to_string(), cost));
+            }
+            for owner in ["secrets", "proxy"] {
+                let found = &data[owner];
+                if let Some(list) = found["expiring"].as_array() {
+                    expiring.extend(list.iter().cloned());
                 }
-                for found in [&data["missing"], &data["secrets"]["missing"]] {
-                    if let Some(list) = found.as_array() {
-                        missing.extend(list.iter().cloned());
-                    }
-                }
-                for owner in ["secrets", "proxy"] {
-                    let found = &data[owner];
-                    if let Some(list) = found["expiring"].as_array() {
-                        expiring.extend(list.iter().cloned());
-                    }
-                    if let Some(list) = found["expiry"].as_array() {
-                        credentials.extend(list.iter().cloned());
-                    }
+                if let Some(list) = found["expiry"].as_array() {
+                    credentials.extend(list.iter().cloned());
                 }
             }
         }
@@ -193,11 +238,14 @@ impl Console {
     /// their session ends: after idling, and at the latest.
     async fn me(env: &Env, signed: &Signed) -> Result<Value> {
         let user = &signed.user;
-        let avatar = directory(env, "user.avatar", json!({ "id": user.id })).await?;
-        let keys: Vec<Passkey> = serde_json::from_value(
-            directory(env, "passkey.list", json!({ "user_id": user.id })).await?,
-        )?;
-        let listed = directory(env, "users.list", json!({})).await?;
+        let (avatar, keys, listed) = futures_util::future::join3(
+            directory(env, "user.avatar", json!({ "id": user.id })),
+            directory(env, "passkey.list", json!({ "user_id": user.id })),
+            directory(env, "users.list", json!({})),
+        )
+        .await;
+        let (avatar, listed) = (avatar?, listed?);
+        let keys: Vec<Passkey> = serde_json::from_value(keys?)?;
         let apps = listed["links"].as_array().map_or(0, |l| {
             l.iter()
                 .filter(|x| x["standard_user_id"] == user.id.as_str())
@@ -215,6 +263,63 @@ impl Console {
             "expires_at": (signed.last_seen_at + session::IDLE_MS).min(ends_at),
             "ends_at": ends_at,
         }))
+    }
+
+    /// Section `id`'s data over `days` days, within [`SECTION_MS`]. A section that keeps a
+    /// snapshot answers it at once unless `fresh` asks otherwise, and keeps each fresh answer.
+    /// `X-Snapshot-At` says when the answer was made; `X-Snapshot-Stale: 1` that it is past its
+    /// freshness, so the page shows it and asks again with `fresh=1`.
+    async fn snapshot(
+        cx: &Context<'_>,
+        id: &str,
+        person: &User,
+        days: i64,
+        fresh: bool,
+    ) -> Result<Response> {
+        let kept_for = snapshot::fresh_ms(id);
+        let key = snapshot::key(id, days);
+        if let (Some(fresh_ms), false) = (kept_for, fresh) {
+            // A snapshot that cannot be read only means computing the answer.
+            if let Ok(Value::String(kept)) =
+                directory(cx.env, "setting.get", json!({ "key": key })).await
+                && let Ok(snap) = serde_json::from_str::<snapshot::Snapshot>(&kept)
+            {
+                let stale = snapshot::stale(snap.at_ms, fresh_ms, now_ms());
+                return Self::stamped(&snap.data, snap.at_ms, stale);
+            }
+        }
+        let query = json!({ "days": days });
+        let data = match timed(SECTION_MS, Self::section(cx, id, person, &query)).await {
+            Ok(data) => data,
+            Err(e) => return failed(&e),
+        };
+        let at_ms = now_ms();
+        if kept_for.is_some() {
+            let snap = snapshot::Snapshot {
+                at_ms,
+                data: data.clone(),
+            };
+            if let Ok(value) = serde_json::to_string(&snap) {
+                // A snapshot that cannot be written only means computing it next time.
+                let _ = directory(
+                    cx.env,
+                    "setting.put",
+                    json!({ "key": key, "value": value, "ttl_ms": snapshot::KEPT_MS }),
+                )
+                .await;
+            }
+        }
+        Self::stamped(&data, at_ms, false)
+    }
+
+    /// `data` with the time it was made and whether it is stale, in headers.
+    fn stamped(data: &Value, at_ms: i64, stale: bool) -> Result<Response> {
+        let res = answer(data, 200)?;
+        res.headers().set("X-Snapshot-At", &at_ms.to_string())?;
+        if stale {
+            res.headers().set("X-Snapshot-Stale", "1")?;
+        }
+        Ok(res)
     }
 
     async fn serve(&self, cx: &Context<'_>, mut req: Request) -> Result<Response> {
@@ -242,23 +347,26 @@ impl Console {
                         .query_pairs()
                         .find(|(k, _)| k == "days")
                         .map(|(_, v)| v.into_owned());
+                    let fresh = url.query_pairs().any(|(k, v)| k == "fresh" && v == "1");
                     let data = match p {
                         "/console/api/me" => Self::me(cx.env, &signed).await,
                         "/console/api/tabs" => {
                             Ok(serde_json::to_value(sections::tabs(&Self::declared(cx)))?)
                         }
-                        "/console/api/overview" => Self::overview(cx, &signed.user).await,
+                        "/console/api/overview" => {
+                            timed(SECTION_MS * 2, Self::overview(cx, &signed.user)).await
+                        }
                         p => match p.strip_prefix("/console/api/section/") {
                             Some(id) if sections::anchor(id) => {
-                                let q = json!({ "days": days(query.as_deref()) });
-                                Self::section(cx, id, &signed.user, &q).await
+                                let days = days(query.as_deref());
+                                return Self::snapshot(cx, id, &signed.user, days, fresh).await;
                             }
                             _ => return answer(&json!({ "error": "not found" }), 404),
                         },
                     };
                     match data {
                         Ok(v) => answer(&v, 200),
-                        Err(e) => answer(&json!({ "error": e.to_string() }), 400),
+                        Err(e) => failed(&e),
                     }
                 }
                 _ => Response::error("not found", 404),

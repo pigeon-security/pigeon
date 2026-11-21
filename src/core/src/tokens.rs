@@ -67,7 +67,7 @@ pub struct Minted {
     pub expires_on: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 struct Group {
     id: String,
     name: String,
@@ -75,8 +75,29 @@ struct Group {
     scopes: Vec<String>,
 }
 
-/// Mints `request` on `account`, as `parent`.
-pub async fn mint(parent: &str, account: &str, request: &MintRequest) -> Result<Minted> {
+/// How long this isolate keeps the account's permission groups: they change only when
+/// Cloudflare adds a product, and a name not found asks again.
+const GROUPS_KEPT_MS: f64 = 3_600_000.0;
+
+std::thread_local! {
+    /// The account's permission groups and when they were read, for this isolate.
+    static GROUPS: std::cell::RefCell<Option<(String, f64, Vec<Group>)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// `account`'s permission groups, read at most hourly per isolate: every mint needs them, and
+/// asking each time doubled a mint's round trips.
+async fn permission_groups(parent: &str, account: &str) -> Result<Vec<Group>> {
+    let now = Date::now();
+    let kept = GROUPS.with(|g| {
+        g.borrow()
+            .as_ref()
+            .filter(|(a, at, _)| a == account && now - at < GROUPS_KEPT_MS)
+            .map(|(_, _, groups)| groups.clone())
+    });
+    if let Some(groups) = kept {
+        return Ok(groups);
+    }
     let groups: Vec<Group> = serde_json::from_value(
         call(
             parent,
@@ -86,6 +107,13 @@ pub async fn mint(parent: &str, account: &str, request: &MintRequest) -> Result<
         )
         .await?,
     )?;
+    GROUPS.with(|g| *g.borrow_mut() = Some((account.to_string(), now, groups.clone())));
+    Ok(groups)
+}
+
+/// Mints `request` on `account`, as `parent`.
+pub async fn mint(parent: &str, account: &str, request: &MintRequest) -> Result<Minted> {
+    let groups = permission_groups(parent, account).await?;
     let mut policies = Vec::new();
     for policy in &request.policies {
         let (scope, resources) = match &policy.scope {
@@ -109,6 +137,8 @@ pub async fn mint(parent: &str, account: &str, request: &MintRequest) -> Result<
                 .iter()
                 .find(|g| g.name == *name && g.scopes.iter().any(|s| s == scope))
                 .ok_or_else(|| {
+                    // A kept list may predate the group: the next mint reads it afresh.
+                    GROUPS.with(|g| *g.borrow_mut() = None);
                     Error::RustError(format!(
                         "no `{name}` permission group in {scope}; similar: {}",
                         similar(name, &groups)

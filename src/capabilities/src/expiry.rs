@@ -297,29 +297,26 @@ async fn secret_expiry(cx: &Context<'_>, owner: &dyn Capability, name: &str) -> 
 /// declared secret it lacks is `missing`, not checked.
 pub async fn secrets(cx: &Context<'_>, set: &[String]) -> Vec<Row> {
     let now = now_ms();
-    let mut rows = Vec::new();
+    // Each declared secret once, with the first capability that declares it.
+    let mut slots: Vec<(&dyn Capability, String)> = Vec::new();
     for c in cx.hosted.capabilities {
         for slot in c.secrets() {
-            if rows.iter().any(|r: &Row| r.name == slot.name) {
-                continue;
+            if !slots.iter().any(|(_, n)| *n == slot.name) {
+                slots.push((c.as_ref(), slot.name));
             }
-            let row = if set.contains(&slot.name) {
-                let (expiry, checked) = secret_expiry(cx, c.as_ref(), &slot.name).await;
-                Row::new(
-                    &slot.name,
-                    "secret",
-                    c.name(),
-                    Some(expiry),
-                    Some(checked),
-                    now,
-                )
-            } else {
-                Row::new(&slot.name, "secret", c.name(), None, None, now)
-            };
-            rows.push(row);
         }
     }
-    rows
+    // The set ones are read at once, from the cache or their issuers: one slow issuer no
+    // longer holds up the others.
+    let rows = slots.iter().map(|(c, name)| async move {
+        if set.contains(name) {
+            let (expiry, checked) = secret_expiry(cx, *c, name).await;
+            Row::new(name, "secret", c.name(), Some(expiry), Some(checked), now)
+        } else {
+            Row::new(name, "secret", c.name(), None, None, now)
+        }
+    });
+    futures_util::future::join_all(rows).await
 }
 
 /// A proxy credential as the Directory lists it.

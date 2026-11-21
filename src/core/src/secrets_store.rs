@@ -6,7 +6,7 @@ use serde_json::json;
 use worker::{Error, Method, Result, SecretStore};
 
 use crate::Account;
-use crate::cloudflare::call;
+use crate::cloudflare::{call, call_fresh};
 use crate::tokens::{Policy, Scope, Scoped};
 
 /// The scope a secret needs for a Worker to bind it.
@@ -55,7 +55,8 @@ impl<'a> Writer<'a> {
 
     /// Every secret in the store.
     pub async fn list(&self) -> Result<Vec<Secret>> {
-        let v = call(self.token.value(), Method::Get, &self.path(), None).await?;
+        // The token was minted moments ago; the store may not know it yet.
+        let v = call_fresh(self.token.value(), Method::Get, &self.path(), None).await?;
         Ok(serde_json::from_value(v)?)
     }
 

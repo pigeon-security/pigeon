@@ -48,10 +48,11 @@
     try { const t = await r.text(); try { const j = JSON.parse(t); msg = j.error || j.message || t; } catch { msg = t || msg; } } catch {}
     throw new Error(msg);
   };
-  const get = async (path) => {
+  const get = async (path, meta) => {
     const r = await fetch(path, { credentials: "same-origin" });
     if (!r.ok) await fail(r);
     seen();
+    if (meta) meta.stale = r.headers.get("X-Snapshot-Stale") === "1";
     return r.json();
   };
   const post = async (path, body) => {
@@ -183,17 +184,22 @@
       el("div", { class: "c-right" }, time, el("div", { class: "c-me-wrap" }, meBtn, menuEl)));
   }
 
-  async function loadSection(s, body, days, g) {
+  // A section answered from a stale snapshot is shown, then loaded fresh behind it. A reload
+  // after a write always asks for a fresh answer.
+  async function loadSection(s, body, days, g, fresh, behind) {
     try {
-      const data = await get(`/console/api/section/${encodeURIComponent(s.id)}?days=${days}`);
+      const meta = {};
+      const data = await get(`/console/api/section/${encodeURIComponent(s.id)}?days=${days}${fresh ? "&fresh=1" : ""}`, meta);
       if (g !== gen) return;
       body.replaceChildren();
       const fn = sections[s.id];
-      if (fn) await fn(body, data, { days, reload: (d) => loadSection(s, body, d ?? days, gen) });
+      if (meta.stale && !fresh) setTimeout(() => loadSection(s, body, days, g, true, true), 0);
+      if (fn) await fn(body, data, { days, reload: (d) => loadSection(s, body, d ?? days, gen, true) });
       else if (data && typeof data.html === "string") body.innerHTML = data.html; // the server's own architecture drawing
       else body.append(el("p", { class: "muted", text: "Nothing to show yet." }));
     } catch (e) {
-      if (g !== gen || e.auth) return;
+      // A refresh behind a shown snapshot that fails leaves the snapshot in place.
+      if (g !== gen || e.auth || behind) return;
       body.replaceChildren(el("p", { class: "c-error", role: "alert", text: e.message || String(e) }));
     }
   }

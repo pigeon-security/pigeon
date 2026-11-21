@@ -19,7 +19,7 @@ use worker::js_sys::{Date, Uint8Array};
 use worker::{Fetch, Headers, Method, Request, RequestInit, Result};
 
 use crate::Account;
-use crate::cloudflare::call;
+use crate::cloudflare::{call, call_fresh};
 use crate::tokens::{Policy, Scope, Scoped};
 
 /// What managing a gateway and its providers' keys takes.
@@ -518,7 +518,13 @@ async fn logs_with(
         let path = format!(
             "{base}?per_page={PER_PAGE}&page={page}&order_by=created_at&order_by_direction=desc"
         );
-        let got: Vec<Log> = serde_json::from_value(call(token, Method::Get, &path, None).await?)?;
+        // The first page is the minted token's first call, which may come before it is active.
+        let answer = if page == 1 {
+            call_fresh(token, Method::Get, &path, None).await?
+        } else {
+            call(token, Method::Get, &path, None).await?
+        };
+        let got: Vec<Log> = serde_json::from_value(answer)?;
         let last_page = got.len() < PER_PAGE;
         for log in got {
             if Date::parse(&log.created_at) < since_ms {
