@@ -1,28 +1,113 @@
-//! What the harness can do. Core hands each capability an [`Account`]; a capability mints the
-//! token it needs from it, revokes it after, and calls the other capabilities it builds on.
-//! Nothing here reads the Worker's environment.
+//! pigeon's capabilities: the features a Worker hosts, each an end result built from the
+//! building blocks in `pigeon-core`. Every capability answers the same small interface: its MCP
+//! tools and how to call one, the events it acts on, and its footprint (the hostnames, Workers
+//! and resources it brings), which the architecture page draws.
 
 pub mod architecture;
-pub mod artifacts;
-mod cloudflare;
-mod custom_domain;
-pub mod design;
-pub mod domain;
-mod git;
-pub mod mcp;
+pub mod deploys;
 pub mod mirror;
-pub mod queues;
-pub mod secrets_store;
-pub mod subdomain;
-pub mod tokens;
-pub mod zero_trust;
+pub mod protected_host;
+pub mod site;
+pub mod source;
 
-/// The Cloudflare account a capability acts on.
-pub struct Account {
-    /// The account's ID.
-    pub id: String,
-    /// The parent token, which mints every other.
-    pub parent: String,
-    /// The account's Secrets Store ID.
-    pub secrets_store: String,
+use std::future::Future;
+use std::pin::Pin;
+
+use pigeon_core::Account;
+use pigeon_core::mcp::Tool;
+use serde::Serialize;
+use serde_json::Value;
+use worker::{Env, Error, Result};
+
+/// A tool call or event in flight.
+pub type Call<'a> = Pin<Box<dyn Future<Output = Result<Value>> + 'a>>;
+
+/// What a capability acts with: the account, the hosting Worker's environment, and the other
+/// capabilities hosted beside it.
+pub struct Context<'a> {
+    pub account: &'a Account,
+    pub env: &'a Env,
+    pub hosted: &'a Hosted<'a>,
+}
+
+/// A Worker and the capabilities it hosts, with the repository's sources it was built from.
+pub struct Hosted<'a> {
+    pub worker: &'a str,
+    pub capabilities: &'a [Box<dyn Capability>],
+    /// By path from the repository root.
+    pub sources: &'a [(&'a str, &'a str)],
+}
+
+/// A feature a Worker hosts.
+pub trait Capability {
+    /// Its module's name, such as `protected_host`.
+    fn name(&self) -> &'static str;
+
+    /// The MCP tools it offers.
+    fn tools(&self) -> Vec<Tool>;
+
+    /// Runs `tool`, one of its own.
+    fn call<'a>(&'a self, cx: &'a Context<'a>, tool: &'a str, args: &'a Value) -> Call<'a>;
+
+    /// Whether it acts on queue message `event`.
+    fn wants(&self, _event: &Value) -> bool {
+        false
+    }
+
+    /// Acts on the events it wants, once per batch.
+    fn on_events<'a>(&'a self, _cx: &'a Context<'a>) -> Call<'a> {
+        Box::pin(async { Ok(Value::Null) })
+    }
+
+    /// What it brings to the platform, for the architecture page.
+    fn footprint(&self) -> Footprint {
+        Footprint::default()
+    }
+}
+
+/// The hostnames, Workers and resources a capability brings.
+#[derive(Serialize, Default, Clone)]
+pub struct Footprint {
+    pub hostnames: Vec<HostFootprint>,
+    pub workers: Vec<WorkerFootprint>,
+    pub zone: Option<String>,
+    pub secrets: Vec<String>,
+    pub queues: Vec<String>,
+    pub repos: Vec<String>,
+    pub mirrors: Vec<String>,
+}
+
+/// A hostname a capability serves.
+#[derive(Serialize, Clone)]
+pub struct HostFootprint {
+    pub host: String,
+    pub worker: String,
+    /// The capability serving it.
+    pub by: String,
+    /// The service tokens Access admits; empty when public.
+    pub access: Vec<String>,
+}
+
+/// A Worker a capability publishes, other than the one hosting it.
+#[derive(Serialize, Clone)]
+pub struct WorkerFootprint {
+    pub name: String,
+    pub routes: Vec<String>,
+}
+
+/// `v` as JSON.
+pub fn to_value<T: Serialize>(v: T) -> Value {
+    serde_json::to_value(v).unwrap_or(Value::Null)
+}
+
+/// The error for a tool a capability does not have.
+pub fn unknown(tool: &str) -> Error {
+    Error::RustError(format!("no tool `{tool}`"))
+}
+
+/// Argument `name` of a tool call, as a string, required.
+pub fn arg<'a>(args: &'a Value, name: &str) -> Result<&'a str> {
+    args[name]
+        .as_str()
+        .ok_or_else(|| Error::RustError(format!("`{name}` is required")))
 }

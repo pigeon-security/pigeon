@@ -7,12 +7,101 @@
 //! reported as diverged. Refusing non-fast-forward updates on the copy's side (a ruleset that
 //! blocks force pushes) backs the first rule up.
 
+use pigeon_core::Account;
+use pigeon_core::artifacts::{self, Access};
+use pigeon_core::git::{self, Remote, Update, ZERO};
+use pigeon_core::mcp::Tool;
+use pigeon_core::secrets_store;
 use serde::Serialize;
+use serde_json::Value;
 use worker::{Error, Result};
 
-use crate::Account;
-use crate::artifacts::{self, Access};
-use crate::git::{self, Remote, Update, ZERO};
+use crate::{Call, Capability, Context, Footprint, to_value, unknown};
+
+/// The mirror as a capability: on every push to the source's branches or tags, and on demand.
+pub struct Mirror {
+    pub source: Source,
+    /// The copy's URL; its push token is read from Secrets Store binding `token_binding`.
+    pub url: String,
+    pub token_binding: String,
+    /// The tool that runs it on demand, such as `source_mirror`.
+    pub tool: &'static str,
+}
+
+impl Mirror {
+    async fn run(&self, cx: &Context<'_>) -> Result<Report> {
+        let token = secrets_store::read(&cx.env.secret_store(&self.token_binding)?)
+            .await?
+            .ok_or_else(|| {
+                Error::RustError(format!(
+                    "`{}` is not set in the Secrets Store",
+                    self.token_binding
+                ))
+            })?;
+        let copy = Copy {
+            url: self.url.clone(),
+            token,
+        };
+        mirror(cx.account, &self.source, &copy).await
+    }
+}
+
+impl Capability for Mirror {
+    fn name(&self) -> &'static str {
+        "mirror"
+    }
+
+    fn tools(&self) -> Vec<Tool> {
+        vec![Tool::bare(
+            self.tool,
+            "Bring the read-only copy up to the Artifacts repository now; it also runs on every \
+             push.",
+        )]
+    }
+
+    fn call<'a>(&'a self, cx: &'a Context<'a>, tool: &'a str, _args: &'a Value) -> Call<'a> {
+        Box::pin(async move {
+            if tool != self.tool {
+                return Err(unknown(tool));
+            }
+            Ok(to_value(self.run(cx).await?))
+        })
+    }
+
+    /// An Artifacts push to one of the source's branches or a tag of its repository.
+    fn wants(&self, event: &Value) -> bool {
+        let p = event.get("payload").unwrap_or(event);
+        let r#ref = p["ref"].as_str().unwrap_or_default();
+        let repo = &self.source.repo;
+        let ours = ["repoName", "repo_name", "repo", "repository"]
+            .iter()
+            .find_map(|k| {
+                event["source"][*k]
+                    .as_str()
+                    .or_else(|| p[*k].as_str())
+                    .or_else(|| p[*k]["name"].as_str())
+            })
+            .is_none_or(|r| r == repo || r.ends_with(&format!("/{repo}")));
+        let branch = self
+            .source
+            .branches
+            .iter()
+            .any(|b| r#ref == format!("refs/heads/{b}"));
+        ours && (branch || r#ref.starts_with("refs/tags/"))
+    }
+
+    fn on_events<'a>(&'a self, cx: &'a Context<'a>) -> Call<'a> {
+        Box::pin(async move { Ok(to_value(self.run(cx).await?)) })
+    }
+
+    fn footprint(&self) -> Footprint {
+        Footprint {
+            mirrors: vec![self.url.clone()],
+            secrets: vec![self.token_binding.clone()],
+            ..Footprint::default()
+        }
+    }
+}
 
 /// The copy: a git remote over HTTPS and the token that pushes to it, sent as
 /// `x-access-token:<token>` basic credentials, as GitHub takes them.

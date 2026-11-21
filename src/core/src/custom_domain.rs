@@ -1,5 +1,5 @@
 //! Attaches a hostname to a Worker as a Workers Custom Domain, so Cloudflare creates its DNS
-//! record and certificate. Shared by [`crate::domain`] and [`crate::subdomain`].
+//! record and certificate.
 
 use serde_json::json;
 use worker::{Error, Method, Result};
@@ -10,7 +10,7 @@ use crate::tokens::{Policy, Scope, Scoped};
 
 /// Serves `hostname`, in zone `zone_id`, from Worker `worker`, moving it from any other Worker;
 /// idempotent. Answers the custom domain's ID.
-pub(crate) async fn attach(
+pub async fn attach(
     account: &Account,
     zone_id: &str,
     hostname: &str,

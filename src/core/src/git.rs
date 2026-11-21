@@ -7,17 +7,17 @@ use worker::js_sys::Uint8Array;
 use worker::{Error, Fetch, Headers, Method, Request, RequestInit, Result};
 
 /// The all-zero object ID: a ref that does not exist.
-pub(crate) const ZERO: &str = "0000000000000000000000000000000000000000";
+pub const ZERO: &str = "0000000000000000000000000000000000000000";
 
 /// A remote and the `Authorization` header that reaches it.
-pub(crate) struct Remote {
+pub struct Remote {
     /// Its URL, ending in `.git`.
     pub url: String,
     pub authorization: String,
 }
 
 /// A remote's refs, by name, peeled tag entries (`^{}`) left out, and its capabilities.
-pub(crate) struct Refs {
+pub struct Refs {
     pub refs: BTreeMap<String, String>,
     pub caps: Vec<String>,
 }
@@ -27,7 +27,7 @@ pub(crate) struct Refs {
 const NOT_YET_ACTIVE_WAITS_MS: [u64; 4] = [1_000, 2_000, 4_000, 8_000];
 
 /// `remote`'s refs, as `service` (`git-upload-pack` or `git-receive-pack`) advertises them.
-pub(crate) async fn refs(remote: &Remote, service: &str) -> Result<Refs> {
+pub async fn refs(remote: &Remote, service: &str) -> Result<Refs> {
     let url = format!("{}/info/refs?service={service}", remote.url);
     let body = send(remote, Method::Get, &url, None, None).await?;
     let mut refs = BTreeMap::new();
@@ -54,14 +54,14 @@ pub(crate) async fn refs(remote: &Remote, service: &str) -> Result<Refs> {
 }
 
 /// What [`fetch`] got: the object IDs the remote acknowledged having, and the pack.
-pub(crate) struct Fetched {
+pub struct Fetched {
     pub acked: Vec<String>,
     pub pack: Vec<u8>,
 }
 
 /// A pack from `remote` holding `wants` and what they reach, less what `haves` reach. The pack
 /// is complete (not thin), so another remote can take it as it is.
-pub(crate) async fn fetch(
+pub async fn fetch(
     remote: &Remote,
     caps: &[String],
     wants: &[String],
@@ -117,7 +117,7 @@ pub(crate) async fn fetch(
 }
 
 /// One ref update: from `old` (or [`ZERO`] to create) to `new`.
-pub(crate) struct Update {
+pub struct Update {
     pub name: String,
     pub old: String,
     pub new: String,
@@ -125,7 +125,7 @@ pub(crate) struct Update {
 
 /// Pushes `updates` and `pack` to `remote`; answers each ref's status line from the remote,
 /// such as `ok refs/heads/main` or `ng refs/heads/main non-fast-forward`.
-pub(crate) async fn push(
+pub async fn push(
     remote: &Remote,
     caps: &[String],
     updates: &[Update],
@@ -247,7 +247,7 @@ fn lines(data: &[u8]) -> Result<Vec<Vec<u8>>> {
 }
 
 /// `bytes` in standard base64, padded.
-pub(crate) fn base64(bytes: &[u8]) -> String {
+pub fn base64(bytes: &[u8]) -> String {
     const ABC: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {

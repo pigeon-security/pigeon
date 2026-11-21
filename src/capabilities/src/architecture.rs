@@ -1,23 +1,52 @@
-//! The platform's architecture, read from its own source and drawn in the design system. The
-//! same sources always give the same model and page; nothing is written by hand.
-//!
-//! What it reads, by convention:
-//! - capabilities: each module of `src/capabilities/src`, `pub mod` or internal in `lib.rs`;
-//!   its `//!` summary, top-level `pub fn`s and `pub` methods, `crate::` references to other
-//!   modules, and the permission names in `Policy::new(...)` and `*PERMISSION*` consts;
-//! - Workers: each `wrangler.toml` and the Rust beside it; name, `workers_dev`, vars, Secrets
-//!   Store bindings, `(Method::X, "/path")` routes, `mcp::Tool` names, `#[event(...)]`
-//!   handlers and the capabilities it uses;
-//! - hostnames: a Worker using `subdomain` serves its `*_HOST` var behind Access; one calling
-//!   `domain::serve` serves the `ZONE` apex from the Worker named there, in public;
-//! - resources: Secrets Store names, `queue:`, the Artifacts `namespace:`/`name:` and the
-//!   mirror `url:` named in the Worker's code.
+//! pigeon's architecture, drawn in the design system from two sources, so nothing on it is
+//! written by hand and the same inputs always give the same page:
+//! - the repository's code: the building blocks in `src/core/src` and the capabilities in
+//!   `src/capabilities/src` (each module's `//!` summary, interface, the modules it uses and
+//!   the permission names in `Policy::new(...)` and `*PERMISSIONS*` consts), and the hosting
+//!   Worker's `wrangler.toml`, `(Method::X, "/path")` routes and `#[event(...)]` handlers;
+//! - the capabilities the Worker hosts: their MCP tools and their footprints, the hostnames,
+//!   Workers and resources each brings.
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use pigeon_core::design::{Page, escape};
+use pigeon_core::mcp::Tool;
 use serde::Serialize;
+use serde_json::Value;
 
-use crate::design::{Page, escape};
+use crate::{Call, Capability, Context, Footprint, Hosted, to_value, unknown};
+
+/// The architecture as a capability: its model, on demand.
+pub struct Architecture;
+
+impl Capability for Architecture {
+    fn name(&self) -> &'static str {
+        "architecture"
+    }
+
+    fn tools(&self) -> Vec<Tool> {
+        vec![Tool::bare(
+            "architecture_describe",
+            "The platform's architecture as data: building blocks, capabilities, Workers, \
+             hostnames and resources, read from the sources this Worker was built with.",
+        )]
+    }
+
+    fn call<'a>(&'a self, cx: &'a Context<'a>, tool: &'a str, _args: &'a Value) -> Call<'a> {
+        Box::pin(async move {
+            if tool != "architecture_describe" {
+                return Err(unknown(tool));
+            }
+            let sources: Vec<Source> = cx
+                .hosted
+                .sources
+                .iter()
+                .map(|(path, text)| Source { path, text })
+                .collect();
+            Ok(to_value(describe(&sources, cx.hosted)))
+        })
+    }
+}
 
 /// One source file, by its path from the repository root.
 pub struct Source<'a> {
@@ -25,10 +54,11 @@ pub struct Source<'a> {
     pub text: &'a str,
 }
 
-/// The platform, as its source describes it.
+/// The platform, as its code and capabilities describe it.
 #[derive(Serialize)]
 pub struct Model {
-    pub capabilities: Vec<Capability>,
+    /// The capabilities, then the building blocks.
+    pub parts: Vec<Part>,
     pub workers: Vec<Worker>,
     pub hostnames: Vec<Hostname>,
     pub resources: Resources,
@@ -37,13 +67,16 @@ pub struct Model {
     pub digest: String,
 }
 
+/// A capability or a building block.
 #[derive(Serialize)]
-pub struct Capability {
+pub struct Part {
     pub name: String,
-    /// Exported from the crate; internal modules serve capabilities only.
-    pub public: bool,
+    /// A capability, rather than a building block.
+    pub capability: bool,
     pub summary: String,
+    /// A capability's MCP tools; a block's public functions and types.
     pub interface: Vec<String>,
+    /// The blocks and capabilities it is built from.
     pub calls: Vec<String>,
     pub permissions: Vec<String>,
 }
@@ -57,7 +90,10 @@ pub struct Worker {
     /// `fetch`, `queue`, `scheduled`.
     pub handlers: Vec<String>,
     pub secrets: Vec<String>,
+    /// The capabilities it hosts.
     pub uses: Vec<String>,
+    /// The capability that publishes it, for a Worker with no code of its own.
+    pub published_by: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -81,98 +117,96 @@ pub struct Resources {
     pub permissions: Vec<String>,
 }
 
-/// The model of `sources`.
-pub fn describe(sources: &[Source]) -> Model {
+/// The model of `sources` and the capabilities `hosted` hosts.
+pub fn describe(sources: &[Source], hosted: &Hosted) -> Model {
     let mut sorted: Vec<&Source> = sources.iter().collect();
     sorted.sort_by_key(|s| s.path);
-    let capabilities = capabilities(&sorted);
-    let names: BTreeSet<String> = capabilities.iter().map(|c| c.name.clone()).collect();
-    let mut workers = Vec::new();
-    let mut hostnames = Vec::new();
+    let blocks = parts(&sorted, "src/core/src/", false, &[]);
+    let block_names: Vec<String> = blocks.iter().map(|b| b.name.clone()).collect();
+    let mut caps = parts(&sorted, "src/capabilities/src/", true, &block_names);
+    for part in &mut caps {
+        if let Some(c) = hosted.capabilities.iter().find(|c| c.name() == part.name) {
+            part.interface = c.tools().iter().map(|t| t.name.to_string()).collect();
+        }
+    }
+
+    let footprints: Vec<(String, Footprint)> = hosted
+        .capabilities
+        .iter()
+        .map(|c| (c.name().to_string(), c.footprint()))
+        .collect();
     let mut resources = Resources::default();
-    let toml: Vec<&&Source> = sorted
-        .iter()
-        .filter(|s| s.path.ends_with("wrangler.toml"))
-        .collect();
-    let worker_names: Vec<String> = toml
-        .iter()
-        .filter_map(|t| Toml::read(t.text).name)
-        .collect();
-    for t in &toml {
-        let dir = t.path.trim_end_matches("wrangler.toml");
-        let config = Toml::read(t.text);
+    let mut hostnames = Vec::new();
+    let mut workers = Vec::new();
+
+    // The hosting Worker: its wrangler.toml and the Rust beside it.
+    if let Some(toml) = sorted.iter().find(|s| {
+        s.path.ends_with("wrangler.toml")
+            && Toml::read(s.text).name.as_deref() == Some(hosted.worker)
+    }) {
+        let dir = toml.path.trim_end_matches("wrangler.toml");
+        let config = Toml::read(toml.text);
         let rust: String = sorted
             .iter()
             .filter(|s| s.path.starts_with(&format!("{dir}src/")) && s.path.ends_with(".rs"))
-            .map(|s| s.text)
+            .map(|s| code(s.text))
             .collect::<Vec<_>>()
             .join("\n");
-        let consts = str_consts(&rust);
-        let name = config.name.clone().unwrap_or_else(|| dir.to_string());
-        let uses = uses(&rust, &names);
-        let tokens = access_tokens(&rust, &consts);
-        if uses.iter().any(|u| u == "subdomain") {
-            for (var, host) in &config.vars {
-                if var.ends_with("_HOST") {
-                    hostnames.push(Hostname {
-                        host: host.clone(),
-                        worker: name.clone(),
-                        by: "subdomain".into(),
-                        access: tokens.clone(),
-                    });
-                }
-            }
-        }
-        if let (Some(apex), Some(served)) = (config.vars.get("ZONE"), apex_worker(&rust, &consts)) {
-            if worker_names.contains(&served) {
-                hostnames.push(Hostname {
-                    host: apex.clone(),
-                    worker: served,
-                    by: "domain".into(),
-                    access: Vec::new(),
-                });
-            }
-        }
-        if let Some(zone) = config.vars.get("ZONE") {
-            resources.zone = Some(zone.clone());
-        }
         resources.secrets.extend(config.secrets.iter().cloned());
-        resources.secrets.extend(field_values(
-            &rust,
-            "client_id_secret",
-            &consts,
-            "protection: Protection {",
-        ));
-        resources.secrets.extend(field_values(
-            &rust,
-            "client_secret_secret",
-            &consts,
-            "protection: Protection {",
-        ));
-        resources
-            .queues
-            .extend(field_values(&rust, "queue", &consts, "queues::Spec {"));
-        let namespaces = field_values(&rust, "namespace", &consts, "artifacts::Spec {");
-        let repos = field_values(&rust, "name", &consts, "artifacts::Spec {");
-        for (ns, repo) in namespaces.iter().zip(&repos) {
-            resources.repos.push(format!("{ns}/{repo}"));
-        }
-        resources
-            .mirrors
-            .extend(field_values(&rust, "url", &consts, "Copy {"));
-        resources.permissions.extend(permissions(&rust));
         workers.push(Worker {
-            name,
+            name: hosted.worker.to_string(),
             workers_dev: config.workers_dev,
             routes: routes(&rust),
-            tools: tools(&rust),
+            tools: hosted
+                .capabilities
+                .iter()
+                .flat_map(|c| c.tools())
+                .map(|t| t.name.to_string())
+                .collect(),
             handlers: handlers(&rust),
             secrets: config.secrets,
-            uses,
+            uses: hosted
+                .capabilities
+                .iter()
+                .map(|c| c.name().to_string())
+                .collect(),
+            published_by: None,
         });
     }
-    for c in &capabilities {
-        resources.permissions.extend(c.permissions.iter().cloned());
+
+    for (by, f) in &footprints {
+        for h in &f.hostnames {
+            hostnames.push(Hostname {
+                host: h.host.clone(),
+                worker: h.worker.clone(),
+                by: h.by.clone(),
+                access: h.access.clone(),
+            });
+        }
+        for w in &f.workers {
+            workers.push(Worker {
+                name: w.name.clone(),
+                workers_dev: false,
+                routes: w.routes.clone(),
+                tools: Vec::new(),
+                handlers: vec!["fetch".into()],
+                secrets: Vec::new(),
+                uses: Vec::new(),
+                published_by: Some(by.clone()),
+            });
+        }
+        if f.zone.is_some() {
+            resources.zone.clone_from(&f.zone);
+        }
+        resources.secrets.extend(f.secrets.iter().cloned());
+        resources.queues.extend(f.queues.iter().cloned());
+        resources.repos.extend(f.repos.iter().cloned());
+        resources.mirrors.extend(f.mirrors.iter().cloned());
+    }
+    for part in blocks.iter().chain(&caps) {
+        resources
+            .permissions
+            .extend(part.permissions.iter().cloned());
     }
     for list in [
         &mut resources.secrets,
@@ -185,8 +219,11 @@ pub fn describe(sources: &[Source]) -> Model {
         list.dedup();
     }
     hostnames.sort_by(|a, b| a.host.cmp(&b.host));
+
+    let mut parts = caps;
+    parts.extend(blocks);
     Model {
-        capabilities,
+        parts,
         workers,
         hostnames,
         resources,
@@ -195,66 +232,64 @@ pub fn describe(sources: &[Source]) -> Model {
     }
 }
 
-/// The architecture page of `sources`.
-pub fn page(sources: &[Source]) -> String {
-    let model = describe(sources);
+/// The architecture page of `model`.
+pub fn page(model: &Model) -> String {
     Page {
         title: "pigeon architecture",
         description: "pigeon's architecture, read from its own source.",
-        body: &render(&model),
+        body: &render(model),
     }
     .render()
 }
 
-// ---- capabilities ----
+// ---- parts ----
 
-fn capabilities(sorted: &[&Source]) -> Vec<Capability> {
-    const DIR: &str = "src/capabilities/src/";
+/// The modules of the crate whose sources are in `dir`, as declared in its `lib.rs`. A
+/// capability's calls are the building blocks (`pigeon_core::`) and capabilities (`crate::`)
+/// it uses; a block's are the other blocks it uses.
+fn parts(sorted: &[&Source], dir: &str, capability: bool, blocks: &[String]) -> Vec<Part> {
     let lib = sorted
         .iter()
-        .find(|s| s.path == format!("{DIR}lib.rs"))
+        .find(|s| s.path == format!("{dir}lib.rs"))
         .map_or("", |s| s.text);
-    let mut public = BTreeSet::new();
-    let mut modules = BTreeSet::new();
-    for line in lib.lines() {
-        let line = line.trim();
-        if let Some(m) = line
-            .strip_prefix("pub mod ")
-            .and_then(|m| m.strip_suffix(';'))
-        {
-            public.insert(m.to_string());
-            modules.insert(m.to_string());
-        } else if let Some(m) = line.strip_prefix("mod ").and_then(|m| m.strip_suffix(';')) {
-            modules.insert(m.to_string());
-        }
-    }
-    let mut out: Vec<Capability> = sorted
+    let modules: BTreeSet<String> = lib
+        .lines()
+        .filter_map(|l| {
+            let l = l.trim();
+            l.strip_prefix("pub mod ")
+                .or_else(|| l.strip_prefix("mod "))
+                .and_then(|m| m.strip_suffix(';'))
+                .map(String::from)
+        })
+        .collect();
+    let blocks: BTreeSet<String> = blocks.iter().cloned().collect();
+    let mut out: Vec<Part> = sorted
         .iter()
         .filter_map(|s| {
-            let name = s.path.strip_prefix(DIR)?.strip_suffix(".rs")?;
+            let name = s.path.strip_prefix(dir)?.strip_suffix(".rs")?;
             if name.contains('/') || !modules.contains(name) {
                 return None;
             }
             let code = code(s.text);
-            let mut calls: Vec<String> = crate_refs(&code, &modules)
-                .into_iter()
-                .filter(|c| c != name)
-                .collect();
-            calls.sort();
-            Some(Capability {
+            let mut calls: BTreeSet<String> = refs(&code, "crate::", &modules);
+            if capability {
+                calls.extend(refs(&code, "pigeon_core::", &blocks));
+            }
+            calls.remove(name);
+            Some(Part {
                 name: name.to_string(),
-                public: public.contains(name),
+                capability,
                 summary: summary(s.text),
                 interface: interface(s.text),
-                calls,
+                calls: calls.into_iter().collect(),
                 permissions: permissions(&code),
             })
         })
         .collect();
-    // Those that call most come first; then by name.
+    // Those built on most come first; then by name.
     let depth: BTreeMap<String, usize> = out
         .iter()
-        .map(|c| (c.name.clone(), depth_of(&c.name, &out, 0)))
+        .map(|p| (p.name.clone(), depth_of(&p.name, &out, 0)))
         .collect();
     out.sort_by(|a, b| {
         depth[&b.name]
@@ -264,7 +299,7 @@ fn capabilities(sorted: &[&Source]) -> Vec<Capability> {
     out
 }
 
-fn depth_of(name: &str, all: &[Capability], seen: usize) -> usize {
+fn depth_of(name: &str, all: &[Part], seen: usize) -> usize {
     if seen > all.len() {
         return 0;
     }
@@ -355,11 +390,11 @@ fn impl_type(line: &str) -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
-/// The modules `text` reaches through `crate::`.
-fn crate_refs(text: &str, modules: &BTreeSet<String>) -> BTreeSet<String> {
+/// The modules `text` reaches through `prefix`, such as `crate::`.
+fn refs(text: &str, prefix: &str, modules: &BTreeSet<String>) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
-    for at in found(text, "crate::") {
-        let rest = &text[at + "crate::".len()..];
+    for at in found(text, prefix) {
+        let rest = &text[at + prefix.len()..];
         if let Some(group) = rest.strip_prefix('{') {
             let group = &group[..group.find('}').unwrap_or(group.len())];
             for item in group.split(',') {
@@ -473,22 +508,6 @@ fn routes(text: &str) -> Vec<String> {
 }
 
 /// The names of the `mcp::Tool`s defined.
-fn tools(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    for at in found(text, "mcp::Tool") {
-        let rest = &text[at + "mcp::Tool".len()..];
-        let name = if let Some(r) = rest.strip_prefix("::bare(") {
-            strings(r).into_iter().next()
-        } else if rest.trim_start().starts_with('{') {
-            rest.find("name:")
-                .and_then(|i| strings(&rest[i..]).into_iter().next())
-        } else {
-            None
-        };
-        out.extend(name);
-    }
-    out
-}
 
 fn handlers(text: &str) -> Vec<String> {
     ["fetch", "queue", "scheduled"]
@@ -499,93 +518,6 @@ fn handlers(text: &str) -> Vec<String> {
 }
 
 /// The capabilities `text` uses through `pigeon_capabilities::`.
-fn uses(text: &str, names: &BTreeSet<String>) -> Vec<String> {
-    let mut out = BTreeSet::new();
-    for at in found(text, "pigeon_capabilities::") {
-        let rest = &text[at + "pigeon_capabilities::".len()..];
-        if let Some(group) = rest.strip_prefix('{') {
-            let group = &group[..group.find('}').unwrap_or(group.len())];
-            for item in group.split(',') {
-                let first = item.trim().split("::").next().unwrap_or("").trim();
-                if names.contains(first) {
-                    out.insert(first.to_string());
-                }
-            }
-        } else {
-            let first = ident(rest);
-            if names.contains(&first) {
-                out.insert(first);
-            }
-        }
-    }
-    out.into_iter().collect()
-}
-
-/// The service tokens a `protection: Protection { ... }` lets in: its `service_token` and its
-/// `guests`.
-fn access_tokens(text: &str, consts: &BTreeMap<String, String>) -> Vec<String> {
-    let mut out = BTreeSet::new();
-    out.extend(field_values(
-        text,
-        "service_token",
-        consts,
-        "protection: Protection {",
-    ));
-    for at in found(text, "protection: Protection {") {
-        let block = balanced_braces(&text[at..]);
-        if let Some(i) = block.find("guests:") {
-            let list = &block[i..];
-            let list = &list[..list.find(']').unwrap_or(list.len())];
-            out.extend(strings(list));
-            for word in list.split(|c: char| !(c.is_alphanumeric() || c == '_')) {
-                if let Some(v) = consts.get(word) {
-                    out.insert(v.clone());
-                }
-            }
-        }
-    }
-    out.into_iter().collect()
-}
-
-/// The Worker `domain::serve(account, zone, WORKER, ...)` names, resolved through consts.
-fn apex_worker(text: &str, consts: &BTreeMap<String, String>) -> Option<String> {
-    let at = found(text, "domain::serve(").into_iter().next()?;
-    let args = balanced(&text[at + "domain::serve".len()..]);
-    let third = args.trim_matches(['(', ')']).split(',').nth(2)?.trim();
-    strings(third)
-        .into_iter()
-        .next()
-        .or_else(|| consts.get(third).cloned())
-}
-
-/// The values of `field:` inside each block that starts with `opener`, as literals or consts.
-fn field_values(
-    text: &str,
-    field: &str,
-    consts: &BTreeMap<String, String>,
-    opener: &str,
-) -> Vec<String> {
-    let mut out = Vec::new();
-    for at in found(text, opener) {
-        let block = balanced_braces(&text[at..]);
-        let key = format!("{field}:");
-        let Some(i) = block
-            .match_indices(&key)
-            .map(|(i, _)| i)
-            .find(|&i| i == 0 || !block[..i].ends_with(|c: char| c.is_alphanumeric() || c == '_'))
-        else {
-            continue;
-        };
-        let value = block[i + key.len()..].trim_start();
-        let value = &value[..value.find(['\n', ',']).unwrap_or(value.len())];
-        if let Some(s) = strings(value).into_iter().next() {
-            out.push(s);
-        } else if let Some(v) = consts.get(&ident(value)) {
-            out.push(v.clone());
-        }
-    }
-    out
-}
 
 // ---- text helpers ----
 
@@ -632,24 +564,6 @@ fn code(text: &str) -> String {
         .join("\n")
 }
 
-/// `const NAME: &str = "value";`, by name.
-fn str_consts(text: &str) -> BTreeMap<String, String> {
-    let mut out = BTreeMap::new();
-    for line in text.lines() {
-        let line = line.trim().trim_start_matches("pub ");
-        let Some(rest) = line.strip_prefix("const ") else {
-            continue;
-        };
-        if !rest.contains(": &str =") {
-            continue;
-        }
-        if let Some(v) = strings(rest).into_iter().next() {
-            out.insert(ident(rest), v);
-        }
-    }
-    out
-}
-
 /// The string literals in `text`, in order.
 fn strings(text: &str) -> Vec<String> {
     let mut out = Vec::new();
@@ -684,11 +598,6 @@ fn ident(text: &str) -> String {
 /// `text` from its first `(` to the matching `)`.
 fn balanced(text: &str) -> &str {
     matched(text, '(', ')')
-}
-
-/// `text` from its first `{` to the matching `}`.
-fn balanced_braces(text: &str) -> &str {
-    matched(text, '{', '}')
 }
 
 fn matched(text: &str, open: char, close: char) -> &str {
@@ -961,14 +870,11 @@ fn diagram(m: &Model) -> String {
             "start",
         );
         let mut flags: Vec<String> = w.handlers.clone();
-        flags.push(
-            if w.workers_dev {
-                "workers.dev on"
-            } else {
-                "workers.dev off"
-            }
-            .into(),
-        );
+        flags.push(match (&w.published_by, w.workers_dev) {
+            (Some(by), _) => format!("published by {by}"),
+            (None, true) => "workers.dev on".into(),
+            (None, false) => "workers.dev off".into(),
+        });
         s.chips(x + 16.0, y3 + 46.0, x + col_w - 16.0, &flags, false);
         s.stack(x + 16.0, y3 + 84.0, col_w - 32.0, 62.0);
         let routes = format!("{} routes", w.routes.len());
@@ -1207,14 +1113,14 @@ fn render(m: &Model) -> String {
             .filter(|w| w.uses.iter().any(|u| u == name))
             .map(|w| w.name.clone())
             .chain(
-                m.capabilities
+                m.parts
                     .iter()
                     .filter(|c| c.calls.iter().any(|d| d == name))
                     .map(|c| c.name.clone()),
             )
             .collect()
     };
-    let def = |c: &Capability| {
+    let def = |c: &Part| {
         let mut body = pills(&c.interface, " accent");
         for (what, items) in [
             ("calls", c.calls.clone()),
@@ -1234,18 +1140,8 @@ fn render(m: &Model) -> String {
             escape(&c.summary)
         )
     };
-    let public: String = m
-        .capabilities
-        .iter()
-        .filter(|c| c.public)
-        .map(def)
-        .collect();
-    let internal: String = m
-        .capabilities
-        .iter()
-        .filter(|c| !c.public)
-        .map(def)
-        .collect();
+    let public: String = m.parts.iter().filter(|c| c.capability).map(def).collect();
+    let internal: String = m.parts.iter().filter(|c| !c.capability).map(def).collect();
     let workers: String = m
         .workers
         .iter()
@@ -1306,7 +1202,7 @@ fn render(m: &Model) -> String {
   <span class="eyebrow">pigeon · architecture</span>
   <h1>pigeon, layer by layer</h1>
   <p>Read from the repository's own source each time the site is built, and drawn top to bottom in the order a request travels. Nothing here is written by hand.</p>
-  <div class="pills"><span class="pill">{} Workers</span><span class="pill">{} capabilities</span><span class="pill">{tool_count} MCP tools</span><span class="pill">digest {}</span></div>
+  <div class="pills"><span class="pill">{} Workers</span><span class="pill">{} capabilities</span><span class="pill">{} core blocks</span><span class="pill">{tool_count} MCP tools</span><span class="pill">digest {}</span></div>
 </header>
 <section aria-label="Diagram" style="margin-top:24px">{}</section>
 {}
@@ -1316,12 +1212,13 @@ fn render(m: &Model) -> String {
 </main>
 <footer>Generated from {} source files · digest {}</footer>"#,
         m.workers.len(),
-        m.capabilities.iter().filter(|c| c.public).count(),
+        m.parts.iter().filter(|c| c.capability).count(),
+        m.parts.iter().filter(|c| !c.capability).count(),
         m.digest,
         diagram(m),
         section("Definitions", "Workers", &workers),
         section("Definitions", "Capabilities", &public),
-        section("Definitions", "Internal modules", &internal),
+        section("Foundation", "Core building blocks", &internal),
         section("Definitions", "Account resources", &resources),
         m.files,
         m.digest,

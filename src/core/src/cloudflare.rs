@@ -1,20 +1,31 @@
 //! A minimal Cloudflare API client: one call, its `result` or its `errors`.
 
 use serde_json::Value;
-use worker::wasm_bindgen::JsValue;
+use worker::js_sys::Uint8Array;
 use worker::{Error, Fetch, Headers, Method, Request, RequestInit, Result};
 
 const API: &str = "https://api.cloudflare.com/client/v4";
 
 /// Calls `method path` as `token`, sending `body` as JSON; answers the response's `result`.
 pub async fn call(token: &str, method: Method, path: &str, body: Option<&Value>) -> Result<Value> {
+    let body = body.map(|b| ("application/json", b.to_string().into_bytes()));
+    call_raw(token, method, path, body).await
+}
+
+/// [`call`] with a body of any content type, such as a multipart upload.
+pub async fn call_raw(
+    token: &str,
+    method: Method,
+    path: &str,
+    body: Option<(&str, Vec<u8>)>,
+) -> Result<Value> {
     let headers = Headers::new();
     headers.set("Authorization", &format!("Bearer {token}"))?;
     let mut init = RequestInit::new();
     init.with_method(method);
-    if let Some(body) = body {
-        headers.set("Content-Type", "application/json")?;
-        init.with_body(Some(JsValue::from_str(&body.to_string())));
+    if let Some((content_type, bytes)) = body {
+        headers.set("Content-Type", content_type)?;
+        init.with_body(Some(Uint8Array::from(bytes.as_slice()).into()));
     }
     init.with_headers(headers);
     let request = Request::new_with_init(&format!("{API}{path}"), &init)?;
