@@ -134,7 +134,7 @@ Buildkite runner ──OIDC token──▶ platform.pigeon.dev/ci/token  (unchan
 | The person's Claude sessions (the "Pigeon MCP" connector) | Portal → server `buildkite` → `https://mcp.buildkite.com/direct`, `auth_type: "bearer"` | `BUILDKITE_API_TOKEN`: the platform copies it from the Secrets Store into the server's `auth_credentials` through Cloudflare's API (§3, "The portal server"). Cloudflare stores it encrypted and never returns it. |
 | The same sessions, for setup | Portal → server `pigeon` → `ci_buildkite_plan` (read) | pigeon's OAuth, as today |
 | The platform's setup and connector | Worker → `api.buildkite.com` directly | `BUILDKITE_API_TOKEN` in the Secrets Store, set once on the console's secrets page. It is never in chat or in a command. |
-| Buildkite webhooks | → `/ci/hooks/buildkite` | `BUILDKITE_WEBHOOK_TOKEN`. **pigeon generates it** and writes it to the Secrets Store and to the notification service. Nobody copies it. |
+| Buildkite webhooks | → `/ci/hooks/buildkite` | The webhook key. **pigeon generates it**, keeps it in the scheduler's SQLite (`buildkite_hook_key`) and gives it to the notification service. Nobody copies it, and it is not a Secrets Store secret (see §3, "The webhook key"). |
 | Buildkite runners | → `/ci/token` | The step's OIDC token (unchanged) |
 
 **What the single token opens to sessions.** With write tools on, any session using "Pigeon MCP"
@@ -253,11 +253,21 @@ domain alone.
   pipeline → service). It records each created id before going on. It stops at the first
   failure and reports what was done. It is idempotent: a second run right after plans all `ok`.
 
-**The webhook token.** On the service's first `create`, `apply` generates 32 random bytes
-(base64url). It writes them to the Secrets Store as `BUILDKITE_WEBHOOK_TOKEN` through the
-store's API (`secrets_store::Session::put_scoped`, already used by the platform), then creates
-the service with it. If the service exists, is pigeon's, but its token differs from the store's
-(someone edited it), the step is `update {token}`, and the store's value wins.
+**The webhook key.** On the service's first `create`, `apply` generates 32 random bytes
+(base64url), stores them in the scheduler's SQLite (`buildkite_hook_key`, one row), then creates
+the service with them in signature mode. The webhook check reads the key from there.
+
+- **Why not the Secrets Store.** A Worker reads a store secret only through a binding, and the
+  binding's secret must exist; but only the person sets store secrets with a value the Worker
+  then reads. With the key in the store, the platform would need a two-step dance (create the
+  secret by API, then land a binding to it). The key is a shared HMAC key that Buildkite already
+  holds and returns in full on `GET …/services`, so keeping it in the scheduler's storage (only
+  the Worker can read it, encrypted at rest) loses nothing.
+- **Drift.** If the service is pigeon's but its token differs from the stored key (someone
+  edited it), the step is `update {token}`, and the stored key wins.
+- **Lost key.** If the row is lost, the next apply generates a new key and updates the service.
+- The `BUILDKITE_WEBHOOK_TOKEN` slot, its binding on the old branch, and its row in
+  `credentials_expiry` are dropped.
 
 **Who calls it.** There is no policy action kind for "change an outside CI provider", and no
 new rule is added. So the setup writes only from state that has already passed the gate:
@@ -360,7 +370,7 @@ portal credential is set up by hand, and the token is typed once.
 
 | Phase | What | Who | Lands with |
 | --- | --- | --- | --- |
-| 1 | **Rebase `claude/ci-gateway`** onto main: the two secret bindings, the docs and the queue table. Check whether a `secrets_store_secrets` binding to a secret that does not exist yet deploys. If not, the deploy waits for step 3's token, and phase 2 creates the webhook secret through the store API before binding it. No behaviour change: `BUILDKITE_ORG` stays `""`. | Agent | `land` |
+| 1 | **Bind `BUILDKITE_API_TOKEN`**: the one binding left from `claude/ci-gateway` (its docs and queue table are already on main; the webhook binding is dropped). It lands **only after the person has set the token** (§4, step 3), because a binding to a store secret that does not exist may stop the deploy. No behaviour change: `BUILDKITE_ORG` stays `""`. | Agent; person first | `land` |
 | 2 | **The setup.** Core: queue, cluster and notification-service REST calls, and pipeline create, read and update (`pigeon_core::buildkite`). Capability: `Declared`, `observe`, `plan`, `apply`, the `buildkite_owned` migration, the webhook token's generation, `ci_buildkite_plan`, the connector's queue confirmation, and the setup scopes in `ci_buildkite_plan`'s answer. Lander: the post-deploy step, added after `claude/mcp-portal-sync` lands, in coordination with its planner. Smoke: `plan` scenarios in `tests/smoke.rs` only (all-new, all-ok, drift, conflict by name, orphaned, missing scope), well under the 60 s. Settings: the person's slug in `BUILDKITE.org`. | Agent: AI Gateway executors for the core client and `plan`; the planner for `apply`, ownership and the Lander, reviewed line by line. Person: steps 1 to 3 before this lands. | `land`. No passkey: no policy or settings.json change. |
 | 2a | **First apply, live.** Run `ci_buildkite_plan` before the landing and after it. Check: the cluster, queues and pipeline exist with the marker; a `ping` reaches `/ci/hooks/buildkite` and verifies; `ci_submit {job: smoke, connector: buildkite}` succeeds; `smoke-fail` fails; a second landing plans all `ok`. Confirm the open points: RS256 vs ES256, curl on the hosted image, DCR. | Agent | — |
 | 3 | **Buildkite MCP behind the portal**, write tools on, bearer with the one token. The setup makes the Cloudflare server `buildkite` (§3) and adds it to `portal_servers`; the person attaches it to the portal (step 4). Check from a session: `buildkite_get_build` and `buildkite_read_logs` on a smoke build; a rotated token reaches the server at the next deploy. | Agent (code, landed with phase 2 or after); person (dashboard, step 4) | `land`, then dashboard |
@@ -392,7 +402,7 @@ This plan does not touch the generator.
 - Whether the API accepts a pipeline whose `repository` is the GitHub mirror with no GitHub app
   connected, and whether `trigger_mode: "none"` is accepted for a provider that is not GitHub.
   If not, the provider is plain git and `build_*: false`.
-- Whether a `secrets_store_secrets` binding deploys before its secret exists (phase 1).
+- Whether a `secrets_store_secrets` binding deploys before its secret exists. Not tried: phase 1 waits for the token to be set instead.
 - Whether a deploy resets the Lander so its post-deploy step runs the new code. If not, the
   step calls the scheduler, which a deploy also resets.
 - From ci-gateway.md, still open: the OIDC algorithm (RS256 assumed), and curl on the hosted

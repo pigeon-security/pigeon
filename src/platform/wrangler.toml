@@ -30,17 +30,12 @@ binding = "GITHUB_MIRROR_TOKEN"
 store_id = "5185c227b9f34b4291045175695b78ec"
 secret_name = "GITHUB_MIRROR_TOKEN"
 
-# The CI gateway's Buildkite connector: an API token (read_builds, write_builds) and its
-# pipeline webhook's token. Both are set on the secrets page.
+# The CI gateway's Buildkite connector: the one Buildkite API token, set on the secrets page,
+# for the setup, the connector and the portal's Buildkite server (docs/plans/buildkite-mcp.md).
 [[secrets_store_secrets]]
 binding = "BUILDKITE_API_TOKEN"
 store_id = "5185c227b9f34b4291045175695b78ec"
 secret_name = "BUILDKITE_API_TOKEN"
-
-[[secrets_store_secrets]]
-binding = "BUILDKITE_WEBHOOK_TOKEN"
-store_id = "5185c227b9f34b4291045175695b78ec"
-secret_name = "BUILDKITE_WEBHOOK_TOKEN"
 
 # Artifacts push events reach this Worker through the pigeon-source-events queue; the queue
 # and its consumer are set up by POST /setup/source, not here.
