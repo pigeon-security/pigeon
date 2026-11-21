@@ -5,8 +5,7 @@ use pigeon_capabilities::Capability;
 use pigeon_capabilities::architecture::Architecture;
 use pigeon_capabilities::cf_proxy::CfProxy;
 use pigeon_capabilities::ci::buildkite::{self, Buildkite};
-use pigeon_capabilities::ci::class::{Class, Size};
-use pigeon_capabilities::ci::config::{Arch, Os};
+use pigeon_capabilities::ci::class::Size;
 use pigeon_capabilities::ci::containers::Containers;
 use pigeon_capabilities::ci::{self, Ci, ProxyFiles};
 use pigeon_capabilities::console::Console;
@@ -218,39 +217,25 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
 
 /// The Buildkite organization's slug.
 const BUILDKITE_ORG: &str = "";
-/// Whether macOS jobs may go to the cluster's `macos-build` queue. Off until decided.
-const BUILDKITE_MACOS: bool = false;
+/// Buildkite's queues in cluster `pigeon`, one row per class: the queue's key, the class, and
+/// the hosted shape's vCPU, memory (GB) and disk (GB). Hosted Linux agents have docker, so each
+/// queue also runs its class's `-docker` jobs. Linux only for now.
+const BUILDKITE_QUEUES: [(&str, Size, bool, u32, u32, u32); 4] = [
+    // LINUX_AMD64_2X4
+    ("pigeon-linux-small", Size::Small, false, 2, 4, 47),
+    ("pigeon-linux-small", Size::Small, true, 2, 4, 47),
+    // LINUX_AMD64_4X16
+    ("pigeon-linux-medium", Size::Medium, false, 4, 16, 95),
+    ("pigeon-linux-medium", Size::Medium, true, 4, 16, 95),
+];
 
-/// Buildkite's queues in cluster `pigeon`, by class: hosted Linux agents (2 vCPU, 4 GB, 47 GB
-/// disk; 4 vCPU, 16 GB, 95 GB), with docker, so each also runs the class's `-docker` jobs.
 fn buildkite_queues() -> Vec<buildkite::Queue> {
-    let mut q = Vec::new();
-    for (key, size, cpu, mem, disk) in [
-        ("pigeon-linux-small", Size::Small, 2, 4, 47),
-        ("pigeon-linux-medium", Size::Medium, 4, 16, 95),
-    ] {
-        for docker in [false, true] {
-            q.push(buildkite::queue(
-                key,
-                buildkite::linux(size, docker),
-                cpu,
-                mem,
-                disk,
-            ));
-        }
-    }
-    if BUILDKITE_MACOS {
-        // MACOS_ARM64_M4_6X28: 6 vCPU, 28 GB, 182 GB.
-        let mac = Class {
-            os: Os::Macos,
-            arch: Arch::Arm64,
-            size: Size::Large,
-            docker: false,
-            gpu: false,
-        };
-        q.push(buildkite::queue("macos-build", mac, 6, 28, 182));
-    }
-    q
+    BUILDKITE_QUEUES
+        .iter()
+        .map(|&(key, size, docker, cpu, mem, disk)| {
+            buildkite::queue(key, buildkite::linux(size, docker), cpu, mem, disk)
+        })
+        .collect()
 }
 
 /// Where landings go: the source repository's main, gated by CI jobs `test` and `deploy`.

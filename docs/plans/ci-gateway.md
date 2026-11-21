@@ -472,7 +472,8 @@ agents, a hosted queue per class (names in settings), `BUILDKITE_API_TOKEN` and
   runner (retried once elsewhere), `canceled` is cancelled; builds without the gateway's
   `pigeon_job` meta-data, or not matching a live job's handle, are ignored.
 - Queues: `pigeon-linux-small` and `pigeon-linux-medium`, each offering its class with and
-  without docker. macOS (`macos-build`, `macos-arm64-large`) is behind `BUILDKITE_MACOS`, off.
+  without docker, as rows of `BUILDKITE_QUEUES` in settings.rs. Linux only, by the person's
+  decision: macOS comes back with the iOS app as its own piece of work, as further rows.
 - No change to the git proxy or the Cloudflare API proxy: the Worker calls api.buildkite.com
   and agent.buildkite.com directly, and runners fetch through the git proxy with job tokens,
   which it already accepts.
