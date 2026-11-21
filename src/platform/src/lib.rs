@@ -20,10 +20,34 @@ use pigeon_capabilities::{Capability, Context, Hosted};
 
 /// The Directory's class, exported from this Worker for its Durable Object binding.
 pub use pigeon_capabilities::users::Directory;
+
+/// The CI scheduler's class: `ci::Scheduler` with the connectors from this Worker's settings,
+/// which the capabilities crate cannot see.
+#[worker::durable_object]
+pub struct CiScheduler {
+    inner: pigeon_capabilities::ci::scheduler::Scheduler,
+}
+
+impl worker::DurableObject for CiScheduler {
+    fn new(state: worker::State, env: Env) -> Self {
+        let inner = pigeon_capabilities::ci::scheduler::Scheduler::new(state, env, settings::ci())
+            .expect("the CI scheduler's migrations apply");
+        Self { inner }
+    }
+
+    async fn fetch(&self, req: Request) -> Result<Response> {
+        self.inner.fetch(req).await
+    }
+
+    async fn alarm(&self) -> Result<Response> {
+        self.inner.alarm().await
+    }
+}
 use pigeon_core::mcp::{self, Server};
 use pigeon_core::oauth as oauth_core;
 use pigeon_core::{Account, secrets_store};
 use serde_json::Value;
+use worker::wasm_bindgen;
 use worker::{
     Context as WorkerContext, Env, Error, Headers, MessageBatch, Method, Request, Response, Result,
     console_error, console_log, event,

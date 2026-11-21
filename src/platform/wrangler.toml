@@ -30,10 +30,23 @@ secret_name = "GITHUB_MIRROR_TOKEN"
 # Artifacts push events reach this Worker through the pigeon-source-events queue; the queue
 # and its consumer are set up by POST /setup/source, not here.
 
-# The Directory: users, passkeys and links, in one Durable Object with SQLite storage.
+# The Directory: users, passkeys and links, in one Durable Object with SQLite storage. The CI
+# scheduler: every CI job, in one Durable Object with SQLite storage and an alarm.
 [durable_objects]
-bindings = [{ name = "DIRECTORY", class_name = "Directory" }]
+bindings = [
+  { name = "DIRECTORY", class_name = "Directory" },
+  { name = "CI_SCHEDULER", class_name = "CiScheduler" },
+]
 
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["Directory"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["CiScheduler"]
+
+# CI state changes, for other capabilities. The queue must exist before this deploys.
+[[queues.producers]]
+binding = "CI_EVENTS"
+queue = "pigeon-ci-events"

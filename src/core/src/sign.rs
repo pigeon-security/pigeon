@@ -44,11 +44,13 @@ fn nibble(c: u8) -> Option<u8> {
 /// Lowercase or uppercase hex, decoded; `None` when not hex or of odd length.
 pub fn unhex(s: &str) -> Option<Vec<u8>> {
     let bytes = s.as_bytes();
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         return None;
     }
     bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| Some((nibble(pair[0])? << 4) | nibble(pair[1])?))
         .collect()
 }

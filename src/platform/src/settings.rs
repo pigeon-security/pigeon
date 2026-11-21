@@ -4,6 +4,7 @@
 use pigeon_capabilities::Capability;
 use pigeon_capabilities::architecture::Architecture;
 use pigeon_capabilities::cf_proxy::CfProxy;
+use pigeon_capabilities::ci::{self, Ci, ProxyFiles};
 use pigeon_capabilities::deploys::Deploys;
 use pigeon_capabilities::git_proxy::GitProxy;
 use pigeon_capabilities::mirror::{self, Mirror};
@@ -180,7 +181,22 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
             }],
             secrets_page: format!("https://{HOST}/secrets"),
         }),
+        Box::new(Ci { settings: ci() }),
         Box::new(Deploys),
         Box::new(Architecture),
     ]
+}
+
+/// The CI gateway's settings: its connectors in the order jobs prefer them (Containers, then
+/// Buildkite, then GitHub Actions, each added in its own phase), the repositories it runs, and
+/// how long a queued job waits for its first choice.
+pub fn ci() -> ci::Settings {
+    ci::Settings {
+        connectors: Vec::new(),
+        files: Box::new(ProxyFiles),
+        repos: vec![format!("{NAMESPACE}/{REPO}")],
+        host: HOST.into(),
+        parent: PARENT_TOKEN.into(),
+        wait_limit_ms: 5 * 60_000,
+    }
 }

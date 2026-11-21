@@ -93,10 +93,10 @@ pub fn verify(key: &[u8], header: &str, body: &[u8], now_secs: i64, tolerance_se
             if t.replace(value).is_some() {
                 return false;
             }
-        } else if let Some(value) = part.strip_prefix("v1=") {
-            if v1.replace(value).is_some() {
-                return false;
-            }
+        } else if let Some(value) = part.strip_prefix("v1=")
+            && v1.replace(value).is_some()
+        {
+            return false;
         }
     }
     let (Some(t), Some(v1)) = (t, v1) else {

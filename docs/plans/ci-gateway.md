@@ -1,6 +1,6 @@
 # The CI gateway
 
-Status: plan written; phase 1 in progress. Phases are handed back one at a time; each is merged and
+Status: phase 1 built, awaiting deploy. Phases are handed back one at a time; each is merged and
 deployed by the parent session before the next starts.
 
 Design: [CI gateway design](https://claude.ai/artifact/M5zwjixxfKwJn9PYUf9tcj). This plan turns
@@ -203,10 +203,12 @@ pub fn on_deadline(state: State, attempt: u32, now_ms: i64, deadline_ms: i64) ->
   `<job> <state> connector=<c> attempt=<n> duration=<s>s url=<u>`, sorted by job name.
 - The scheduler keeps every note it has written (`notes` table). To write one it mints a
   write git token for the repository, reads `refs/notes/ci`'s tip (`git::refs`), builds a blob
-  for the note, a flat tree of every note it keeps (`<40-hex commit>` → blob, sorted), and a
-  commit whose parent is the tip, packs those three objects (undeltified; zlib as stored
-  blocks, so no compressor is needed) and pushes with `git::push`, `old` = the tip. A rejected
-  push (the tip moved) is retried by the alarm with the new tip. The git token is revoked after.
+  per note it keeps, a flat tree of them (`<40-hex commit>` → blob, sorted), and a commit whose
+  parent is the tip, packs them all (undeltified; zlib as stored blocks, so no compressor is
+  needed) and pushes with `git::push`, `old` = the tip. Sending every blob each time means a
+  push never depends on an earlier one having landed; it grows with the number of commits
+  noted, and a fan-out tree is the fix when that matters. A rejected push (the tip moved) is
+  retried by the alarm with the new tip. The git token lives 5 minutes and is revoked after.
 - The notes ref belongs to the gateway: the tree is rebuilt from what the scheduler kept, so a
   note written by someone else would be dropped. Recorded, not worked around.
 - `ci_commit { repo, commit }` answers from the scheduler's records (the same text), so it
@@ -262,9 +264,10 @@ Operations (`durable::call`): `submit`, `route`, `status`, `jobs`, `cancel`, `co
 The alarm loop, set to the earliest of the next due item, at most 60 seconds away while any job
 is live: dispatch queued jobs (with the queue fallback), poll jobs whose deadline passed or whose
 connector has no webhook, send due outbox items. Each state change writes `jobs` and `events`
-in one go, then fans out: the outbox gets a notify post when the job has `notify`, the
-`CI_EVENTS` queue gets `{source:"ci", job, repo, commit, name, state, …}`, and a final state
-puts the commit's note in the outbox.
+in one go, then fans out through the outbox, which the alarm sends: the `CI_EVENTS` queue gets
+`{source:"ci", job, repo, commit, name, state, …}` (one try), a notify post when the job has
+`notify` (three tries), and a final state rewrites the commit's note and queues its push (ten
+tries).
 
 ### HTTP routes
 
@@ -305,8 +308,19 @@ Every job carries the caller (and whom they act for) and `task`, cut to 100 char
 | 6 | `ci-p1-6` | opus | `ci/notify.rs` + tests |
 | 7 | `ci-p1-7` | opus | core `gitobj.rs` (objects, ids, stored zlib, pack) + tests against `git`'s own ids |
 | 8 | `ci-p1-8` | sonnet | `ci/notes.rs` + tests |
-| 9 | `ci-p1-9` | opus | `ci/scheduler.rs`, in pieces: schema and ops; dispatch and the alarm; fan-out |
+| 9 | me | — | `ci/scheduler.rs`: schema and ops, dispatch and the alarm, fan-out (see below) |
 | 10 | me | — | `ci.rs` (trait, tools, routes), the fake connector, wiring, wrangler, docs, review |
+
+**As built.** Steps 1–8 went to agents. Five answers were cut off at the token limit: config
+and token were re-split into implementation-only and tests-only tasks; for route, class,
+gitobj, sign and notes I kept only the functions and tests that came back whole, reviewed them
+like the rest, and re-split or wrote the missing remainder (route's last tests by an agent;
+class's `pick` and last tests, gitobj's last test and notes' last tests by me). Nothing
+half-written was kept. Step 9 I wrote myself:
+it is glue over the pure modules, and a brief carrying `durable.rs`, the worker APIs and every
+module's interface was larger than what an agent can return. The scheduler's decisions are the
+pure, tested functions (`route`, `state`, `after_dispatch`, `deadline`), and its tests drive a
+fake connector through the real `Connector` trait.
 
 Reading `.pigeon/ci.toml` at a commit goes behind one interface:
 

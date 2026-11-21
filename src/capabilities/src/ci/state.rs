@@ -144,12 +144,11 @@ pub fn on_deadline(state: State, last: Option<&Report>) -> Next {
     if state.terminal() || state == State::Queued {
         return Next::Ignore;
     }
-    if let Some(r) = last {
-        if let Next::Move(to) = on_report(state, MAX_ATTEMPTS, r) {
-            if to.terminal() {
-                return Next::Move(to);
-            }
-        }
+    if let Some(r) = last
+        && let Next::Move(to) = on_report(state, MAX_ATTEMPTS, r)
+        && to.terminal()
+    {
+        return Next::Move(to);
     }
     Next::Move(State::TimedOut)
 }

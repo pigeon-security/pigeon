@@ -59,10 +59,10 @@ pub struct Routed {
 /// Match, availability and rank. `Err` is a refusal: every connector with why it cannot run
 /// the job.
 pub fn route(ask: &Ask, candidates: &[Candidate]) -> Result<Routed, Vec<(String, String)>> {
-    if let Some(pin) = ask.pin {
-        if !candidates.iter().any(|c| c.name == pin) {
-            return Err(vec![(pin.to_string(), "no such connector".to_string())]);
-        }
+    if let Some(pin) = ask.pin
+        && !candidates.iter().any(|c| c.name == pin)
+    {
+        return Err(vec![(pin.to_string(), "no such connector".to_string())]);
     }
     let mut ruled_out: Vec<(String, String)> = Vec::new();
     let mut kept: Vec<(Pick, u32, u32)> = Vec::new();
