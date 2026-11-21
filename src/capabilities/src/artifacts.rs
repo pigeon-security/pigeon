@@ -193,18 +193,30 @@ impl<'a> Api<'a> {
     }
 
     /// `path`'s result, or `None` when it answers 404.
-    async fn find(&self, path: &str) -> Result<Option<Value>> {
-        match call(self.token, Method::Get, path, None).await {
-            Ok(v) => Ok(Some(v)),
-            Err(e) if e.to_string().contains(": 404:") => Ok(None),
-            Err(e) => Err(e),
-        }
+    /// The rows `path` lists. Artifacts is found by listing: asking for a missing namespace or
+    /// repository by name answers 401, not 404.
+    async fn list(&self, path: &str) -> Result<Vec<Value>> {
+        let v = call(
+            self.token,
+            Method::Get,
+            &format!("{path}?per_page=100"),
+            None,
+        )
+        .await?;
+        Ok(v.as_array().cloned().unwrap_or_default())
+    }
+
+    async fn has_namespace(&self, namespace: &str) -> Result<bool> {
+        Ok(self
+            .list(&self.namespaces())
+            .await?
+            .iter()
+            .any(|n| named(n, &["namespace", "name"], namespace)))
     }
 
     /// Ensures `namespace` exists; whether it was created.
     async fn namespace(&self, namespace: &str) -> Result<bool> {
-        let path = format!("{}/{namespace}", self.namespaces());
-        if self.find(&path).await?.is_some() {
+        if self.has_namespace(namespace).await? {
             return Ok(false);
         }
         let body = json!({ "namespace": namespace });
@@ -213,10 +225,31 @@ impl<'a> Api<'a> {
     }
 
     async fn repo(&self, namespace: &str, name: &str) -> Result<Option<Repo>> {
-        self.find(&self.repo_path(namespace, name))
+        if !self.has_namespace(namespace).await? {
+            return Ok(None);
+        }
+        let repos = format!("{}/{namespace}/repos", self.namespaces());
+        let Some(listed) = self
+            .list(&repos)
             .await?
-            .map(|v| repo_of(&v, namespace, name))
-            .transpose()
+            .into_iter()
+            .find(|r| named(r, &["name"], name))
+        else {
+            return Ok(None);
+        };
+        // A listed repository may leave out its remote; the repository itself has it.
+        let v = if listed.get("remote").is_some() || listed.get("url").is_some() {
+            listed
+        } else {
+            call(
+                self.token,
+                Method::Get,
+                &self.repo_path(namespace, name),
+                None,
+            )
+            .await?
+        };
+        repo_of(&v, namespace, name).map(Some)
     }
 
     async fn mint(
@@ -366,4 +399,9 @@ fn listed(v: &Value) -> Vec<Listed> {
             }
         })
         .collect()
+}
+
+/// Whether listed row `v` is `name`: the row itself, or one of its `fields`.
+fn named(v: &Value, fields: &[&str], name: &str) -> bool {
+    v.as_str() == Some(name) || fields.iter().any(|f| v[*f].as_str() == Some(name))
 }
