@@ -1,7 +1,7 @@
 # Architecture: one source, regenerated on every deploy
 
-Status: phases 1 and 2 built on `claude/architecture`, awaiting landing; phases 3 and 4 wait for the merge planner. Landings are on hold while the
-Access incident is open (parent session's instruction, 2026-11-21).
+Status: deployed (phases 1 to 4; landings `csQqlS0Y87gIBlKK` and `j9beqhkc55Y2Z4sp`). Every deploy
+regenerates the model and checks that https://pigeon.dev/architecture.json names the deployed commit.
 
 ## Problem
 
