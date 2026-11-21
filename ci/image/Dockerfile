@@ -9,7 +9,7 @@
 # v2 (built by hand): debian bookworm-slim; git, curl, ca-certificates, coreutils,
 # build-essential, pkg-config; Rust stable with wasm32-unknown-unknown, clippy and rustfmt; the
 # runner as /usr/local/bin/pigeon-ci-runner.
-# v3 adds what the `deploy` and `allowlist` jobs need: Node.js 22 (wrangler 4.166.0 needs 22.12
+# v3 adds what the `deploy` and `allowlist` jobs need: libssl-dev (worker-build links OpenSSL); Node.js 22 (wrangler 4.166.0 needs 22.12
 # or later), checksum-checked; and worker-build 0.9.0, the version wrangler.toml's build command
 # names, installed once rather than in every job. wrangler itself is not in the image: each job
 # installs the commit's pinned one with `npm ci` in src/platform.
@@ -26,7 +26,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        git curl ca-certificates coreutils build-essential pkg-config xz-utils \
+        git curl ca-certificates coreutils build-essential pkg-config xz-utils libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Rust stable, with the WASM target and the checks the `test` job runs.
