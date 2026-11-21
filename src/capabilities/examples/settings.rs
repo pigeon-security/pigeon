@@ -16,18 +16,13 @@ use serde_json::json;
 const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
 
 /// The names sessions see pigeon's MCP tools under, as (server, tool prefix): the claude.ai
-/// connector `Pigeon` and the same connector by its server id, as some sessions list it, with
-/// pigeon's own tool names; and the connector `Pigeon MCP` (server `Pigeon_MCP`) to the
-/// Cloudflare MCP server portal on `mcp.pigeon.dev`, which lists pigeon's tools under its
-/// server id `pigeon`, as `pigeon_<tool>` (docs/plans/mcp-portal.md). Rules name each tool
-/// under each, one by one: a server-wide `mcp__<server>__*` would also allow every tool the
-/// policy does not name (`call`, `deploy_token`, `source_token`) and, through the portal, its
-/// own `portal_*` tools.
-const PIGEON: [(&str, &str); 3] = [
-    ("Pigeon", ""),
-    ("71fdea92-23ad-47d5-a156-53f536f8b55a", ""),
-    ("Pigeon_MCP", "pigeon_"),
-];
+/// connector `Pigeon MCP` (server `Pigeon_MCP`) to the Cloudflare MCP server portal on
+/// `mcp.pigeon.dev`, which lists pigeon's tools under its server id `pigeon`, as
+/// `pigeon_<tool>` (docs/plans/mcp-portal.md). The connector straight to
+/// `platform.pigeon.dev/mcp` was removed at the cutover. Rules name each tool one by one: a
+/// server-wide `mcp__<server>__*` would also allow every tool the policy does not name
+/// (`call`, `deploy_token`, `source_token`) and the portal's own `portal_*` tools.
+const PIGEON: [(&str, &str); 1] = [("Pigeon_MCP", "pigeon_")];
 
 /// A tool of claude-code-remote's, or of pigeon's (under each of [`PIGEON`]).
 enum Tool {

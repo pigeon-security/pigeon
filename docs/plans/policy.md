@@ -130,16 +130,16 @@ The list holds:
 
 | Entry | Source |
 | --- | --- |
-| `mcp__Pigeon__policy_check` | always (it only reads the policy) |
+| `mcp__Pigeon_MCP__pigeon_policy_check` | always (it only reads the policy) |
 | `mcp__claude-code-remote__send_message` | `agents-coordinate` |
 | `mcp__claude-code-remote__create_session` | `agents-coordinate` |
 | `mcp__claude-code-remote__archive_session` | `agents-coordinate` |
-| `mcp__Pigeon__land` | `land-and-deploy` |
-| `mcp__Pigeon__land_status` | `land-and-deploy` |
-| `mcp__Pigeon__land_cancel` | `land-and-deploy` |
+| `mcp__Pigeon_MCP__pigeon_land` | `land-and-deploy` |
+| `mcp__Pigeon_MCP__pigeon_land_status` | `land-and-deploy` |
+| `mcp__Pigeon_MCP__pigeon_land_cancel` | `land-and-deploy` |
 | `Bash(git push https://proxy.pigeon.dev/*)` | `session-branches` |
 
-Each pigeon tool is listed three times: under `Pigeon`, the claude.ai connector's name; under `71fdea92-23ad-47d5-a156-53f536f8b55a`, the same connector's server id, which some sessions see instead; and under `Pigeon_MCP`, the connector to the MCP server portal, which prefixes pigeon's tools with `pigeon_` (`mcp__Pigeon_MCP__pigeon_land`; see `mcp-portal.md`). The format follows the Claude Code permissions docs: a tool is `mcp__<server>__<tool>`, the server segment literal. A server-wide `mcp__<server>__*` exists, but it would also allow every pigeon tool the policy does not name, so each tool is named. A Bash rule uses `*` to match any text.
+Each pigeon tool is listed under `Pigeon_MCP`, the claude.ai connector to the MCP server portal, which prefixes pigeon's tools with `pigeon_` (`mcp__Pigeon_MCP__pigeon_land`; see `mcp-portal.md`). The connector straight to the platform (`Pigeon`, server id `71fdea92-23ad-47d5-a156-53f536f8b55a`) was removed at the cutover, and its names with it.
 
 `call` is never in the list: it reaches every pigeon tool, `deploy_token` and `source_token` included, so pre-approving it would go around the policy. Landing 1 generated it, with the names of the `pigeon-platform` server in `.mcp.json`, a duplicate connector that asks for sign-in; the third landing corrected both, with the person's passkey. The clean-up landing removed `.mcp.json` itself: its only entry was that duplicate.
 
