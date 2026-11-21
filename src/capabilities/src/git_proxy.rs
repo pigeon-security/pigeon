@@ -893,6 +893,45 @@ pub async fn forward_of(
     checked
 }
 
+/// Whether `branch`'s tip in `namespace/repo` already has `commit` in its history (or is it):
+/// a landing whose merge answer was lost finds its commit there even after main moved on.
+pub async fn contains(
+    account: &Account,
+    namespace: &str,
+    repo: &str,
+    branch: &str,
+    commit: &str,
+) -> Result<bool> {
+    let (found, token) =
+        artifacts::session(account, namespace, repo, Access::Read, TOKEN_TTL).await?;
+    let remote = Remote {
+        url: found.remote.trim_end_matches('/').to_string(),
+        authorization: format!("Bearer {}", token.value),
+    };
+    let checked = async {
+        let refs = git::refs(&remote, Service::UploadPack.name()).await?;
+        let Some(tip) = refs.refs.get(branch).cloned() else {
+            return Ok(false);
+        };
+        if tip == commit {
+            return Ok(true);
+        }
+        let wants = [tip.clone()];
+        let got = git::fetch_filtered(
+            &remote,
+            &refs.caps,
+            &wants,
+            &[commit.to_string()],
+            Some("tree:0"),
+        )
+        .await?;
+        moves_forward(commit, &tip, &got.pack).map_err(Error::RustError)
+    }
+    .await;
+    revoke(account, namespace, repo, &token).await?;
+    checked
+}
+
 /// [`forward_of`] on `remote`.
 async fn check_forward(
     remote: &Remote,

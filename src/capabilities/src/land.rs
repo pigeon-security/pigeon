@@ -605,6 +605,18 @@ impl Lander {
         }
     }
 
+    /// Whether the setting asks a person to approve every landing.
+    fn approval_on(&self) -> Result<bool> {
+        #[derive(Deserialize)]
+        struct V {
+            value: String,
+        }
+        let v: Option<V> = self
+            .db
+            .row("SELECT value FROM settings WHERE key = 'approval'", vec![])?;
+        Ok(v.is_some_and(|v| v.value == "on"))
+    }
+
     fn row(&self, id: &str) -> Result<Option<Row>> {
         self.db
             .row("SELECT * FROM landings WHERE id = ?", vec![id.into()])
@@ -756,6 +768,17 @@ impl Lander {
                     return Ok(());
                 };
                 if let Some((passed, detail)) = self.job_ended(job).await? {
+                    // The setting as it is now: turned on while the tests ran, it still holds
+                    // this landing.
+                    if passed && row.approval_reason.is_none() && self.approval_on()? {
+                        self.db.exec(
+                            "UPDATE landings SET approval_reason = ? WHERE id = ? AND approval_reason IS NULL",
+                            vec![
+                                state::approval_reason(true, &[]).unwrap_or_default().into(),
+                                row.id.as_str().into(),
+                            ],
+                        )?;
+                    }
                     self.apply(&row, &Seen::JobEnded { passed }, Some(&detail))?;
                     if passed && let Some(r) = self.row(&row.id)? {
                         // On to the merge at once when no approval is needed.
@@ -794,7 +817,25 @@ impl Lander {
                         self.apply(&row, &Seen::Merged, Some("main was already at the commit"))?;
                     }
                     Moved::Refused(why) => {
-                        self.apply(&row, &Seen::MergeRefused, Some(&why))?;
+                        // A retry after a lost answer: main may already hold the commit, and
+                        // may even have moved on past it.
+                        if git_proxy::contains(
+                            &account,
+                            &s.namespace,
+                            &s.repo,
+                            &s.main,
+                            &row.commit_sha,
+                        )
+                        .await?
+                        {
+                            self.apply(
+                                &row,
+                                &Seen::Merged,
+                                Some("main already contains the commit"),
+                            )?;
+                        } else {
+                            self.apply(&row, &Seen::MergeRefused, Some(&why))?;
+                        }
                     }
                 }
                 if let Some(r) = self.row(&row.id)?

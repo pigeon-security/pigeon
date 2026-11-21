@@ -3,7 +3,7 @@
 //! fewer than [`jobs::MAX_RUNNING`] run, marks a silent one lost, sends notifies and deletes
 //! rows once kept long enough. Each job streams in its own object, `job:{id}`, from that
 //! object's alarm: the request goes through the AI Gateway with the caller's tags and no payload
-//! kept, its answer is read as it arrives, progress goes to `index` every 15 seconds and the
+//! kept, its answer is read as it arrives, progress goes to `index` every 3 seconds and the
 //! result once at the end. The prompt is kept only until the job starts (in `index`) and while it
 //! runs (in its own object); the answer only in `index`, until it expires.
 

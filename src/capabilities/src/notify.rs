@@ -14,8 +14,9 @@ pub const HEADER: &str = "Pigeon-Signature";
 /// The longest notify URL accepted, in bytes.
 pub const MAX_URL: usize = 2000;
 
-/// Checks a caller's notify URL; answers it unchanged when it may be used.
-pub fn check_url(url: &str, own_host: &str) -> Result<String, String> {
+/// Checks a caller's notify URL; answers it unchanged when it may be used. `own_hosts` are the
+/// platform's hostnames (its own and its proxies'), which a notify never reaches.
+pub fn check_url(url: &str, own_hosts: &[&str]) -> Result<String, String> {
     if url.len() > MAX_URL {
         return Err(format!("the notify URL is longer than {MAX_URL} bytes"));
     }
@@ -69,9 +70,10 @@ pub fn check_url(url: &str, own_host: &str) -> Result<String, String> {
     {
         return Err("the notify URL must not point at a local or internal host".into());
     }
-    let own = own_host.to_ascii_lowercase();
-    if !own.is_empty() && (host == own || host.ends_with(&format!(".{own}"))) {
-        return Err("the notify URL must not point at the platform".into());
+    for own in own_hosts.iter().map(|h| h.to_ascii_lowercase()) {
+        if !own.is_empty() && (host == own || host.ends_with(&format!(".{own}"))) {
+            return Err("the notify URL must not point at the platform".into());
+        }
     }
     Ok(url.to_string())
 }
@@ -150,7 +152,7 @@ pub async fn post(url: &str, key: &str, body: &[u8]) -> Result<u16> {
 mod tests {
     use super::*;
 
-    const OWN: &str = "platform.pigeon.dev";
+    const OWN: &[&str] = &["platform.pigeon.dev", "proxy.pigeon.dev"];
 
     fn refused(url: &str) -> bool {
         check_url(url, OWN).is_err()
@@ -195,6 +197,9 @@ mod tests {
         assert!(refused("https://PLATFORM.pigeon.dev/hook"));
         assert!(refused("https://a.platform.pigeon.dev/"));
         assert!(!refused("https://pigeon.dev.example.com/"));
+        assert!(refused("https://proxy.pigeon.dev/git/x"));
+        assert!(refused("https://a.proxy.pigeon.dev/"));
+        assert!(!refused("https://pigeon.dev/"));
     }
 
     #[test]

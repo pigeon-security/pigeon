@@ -43,8 +43,9 @@ pub struct Models {
     pub providers: Vec<Provider>,
     /// Where a person sets a key, such as `https://platform.pigeon.dev/secrets`.
     pub secrets_page: String,
-    /// The platform's hostname, which a job's notify may not point at.
+    /// The platform's hostname and its proxies', which a job's notify may not point at.
     pub host: String,
+    pub proxy_host: String,
 }
 
 /// A provider as the gateway knows it.
@@ -364,7 +365,10 @@ impl Models {
         body["stream"] = json!(true);
         let timeout_ms = jobs::timeout_ms(&args["timeout_min"]).map_err(|e| bad(&e))?;
         let notify_url = match args["notify"].as_str() {
-            Some(u) => Some(crate::notify::check_url(u, &self.host).map_err(|e| bad(&e))?),
+            Some(u) => Some(
+                crate::notify::check_url(u, &[&self.host, &self.proxy_host])
+                    .map_err(|e| bad(&e))?,
+            ),
             None => None,
         };
         let notify_key = match notify_url {

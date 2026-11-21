@@ -470,7 +470,10 @@ impl Ci {
             return Err(bad(&format!("no connector `{p}`")));
         }
         let notify_url = match args["notify"].as_str() {
-            Some(u) => Some(notify::check_url(u, &self.settings.host).map_err(|e| bad(&e))?),
+            Some(u) => Some(
+                notify::check_url(u, &[&self.settings.host, &self.settings.proxy_host])
+                    .map_err(|e| bad(&e))?,
+            ),
             None => None,
         };
         let job = self.job(cx.env, repo, &commit, name).await?;

@@ -78,7 +78,7 @@ pub const KEPT_MS: i64 = 24 * 3_600_000;
 /// How long a result is kept once read, so a retried read still finds it.
 pub const KEPT_AFTER_READ_MS: i64 = 10 * 60_000;
 /// How often a running job reports its progress.
-pub const PROGRESS_EVERY_MS: i64 = 15_000;
+pub const PROGRESS_EVERY_MS: i64 = 3_000;
 /// How many times a notify is tried, and the waits between.
 pub const NOTIFY_WAITS_MS: [i64; 3] = [30_000, 120_000, 600_000];
 

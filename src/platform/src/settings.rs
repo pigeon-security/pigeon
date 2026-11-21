@@ -194,6 +194,7 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
             }],
             secrets_page: format!("https://{HOST}/settings#keys"),
             host: HOST.into(),
+            proxy_host: PROXY_HOST.into(),
         }),
         Box::new(Ci { settings: ci() }),
         // Landing: a session branch tested, moved into main and deployed, through `land`.

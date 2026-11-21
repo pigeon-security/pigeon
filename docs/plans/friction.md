@@ -115,7 +115,7 @@ A live check should never need `deploy_token` and raw API calls.
   `for`, `for_name`, `task`) and `cf-aig-collect-log-payload: false`, reads the server-sent
   events as they come (`message_start`, `content_block_delta`, `message_delta`, `error`), writes
   progress (characters so far: the provider counts output tokens only at the end) to `index`
-  every 15 seconds, and the result at the end.
+  every 3 seconds, and the result at the end.
 - **Cap and timeout.** At most 4 jobs run at once; more wait `queued`, and a job is started as
   a slot frees. At most 50 jobs queued or running per platform; more are refused. Each job has a
   timeout (`timeout_min`, 1 to 14, 10 by default) enforced by the job's object, with `index`'s
@@ -346,12 +346,18 @@ deploy from a Container (time and memory of a release build on standard-4); the 
   row first); the guarded-path check failed open on a missing tree and fetched every blob (now
   an error, and fetched with `blob:none`); the guarded set missed `.cargo/`,
   `rust-toolchain.toml` and the `.npmrc` files. Its medium finding (the deploy job had no token,
-  so main would move and the deploy fail) is what commit 7 closes. Left as they are, and
-  known: approval is decided when `land` is called, so turning the setting on does not catch a
-  landing already in flight; a model or CI notify may point at the proxy host (it answers only
-  `/git/`, `/cf/` and `/health`, all authenticated); and if a merge's answer is lost and main
-  moves on before the retry, the landing reads `merge_refused` though it merged
-  (`land_status` shows main's history either way).
+  so main would move and the deploy fail) is what commit 7 closes. Its three remaining findings
+  were fixed after the first deploy and landed through `land`: the approval setting is read
+  again when a landing's tests pass, so turning it on catches one already in flight; a notify
+  may not point at the proxy host either (`check_url` takes every platform host); and a merge
+  retried after a lost answer reads as merged when main already contains the commit, even if
+  main has moved on since.
+- **After the first deploy.** Containers stopped every job about 20 s in: the runner never set
+  `setInactivityTimeout`, so Cloudflare stopped each container once its object went idle; it is
+  now set to the job's timeout plus 15 minutes (proved by a 5-minute `sleep` job and a full
+  `test` in 65 s). Image v3 needed `libssl-dev`. A `durable_object` application has no image of
+  its own, which `containers_images` now says instead of showing nulls. A model job reports its
+  progress every 3 seconds, not 15.
 - **Image v3** (`ci/image/Dockerfile`) is written but not built here: this session has no
   Docker daemon.
 
