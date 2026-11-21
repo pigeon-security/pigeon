@@ -23,6 +23,7 @@ up to date.
 | [linked-accounts.md](linked-accounts.md) | A second Cloudflare account linked by OAuth, instances in the console, static sites deployed from a GitHub repo through a GitHub App: noisypigeon.com | Phase 1 deployed; phase 2a (instances) built |
 | [tool-approvals.md](tool-approvals.md) | Calls to `deploy_token`, `source_token`, `setup_platform`, `users_remove`, `passkeys_remove` and `oauth_revoke` wait for the person's passkey on that exact call: `call_tool` in the policy, enforced in `dispatch`, approved on the console's Approvals tab | Phase 1 built; phase 2 (the person's rules) waits for their passkey |
 | [buildkite-mcp.md](buildkite-mcp.md) | Buildkite set up by pigeon: declared state in settings, reconciled through Buildkite's REST API after each deploy (only what pigeon made, never deleting); Buildkite's MCP server read-only behind the portal for sessions; one token and one OAuth grant by hand | Designed, awaiting the person's go-ahead |
+| [buildkite-mcp.md](buildkite-mcp.md) | Buildkite set up by pigeon: declared state in settings, reconciled through Buildkite's REST API after each deploy (only what pigeon made, never deleting); Buildkite's MCP server behind the portal with the same token, so sessions can act in Buildkite; one token by hand | Being built (one token, Buildkite MCP with write tools, by the person's choice) |
 
 When a plan's status changes, change it in both places: the plan's first lines and this table.
 
