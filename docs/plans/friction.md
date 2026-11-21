@@ -1,6 +1,6 @@
 # Friction: what got in the way, removed
 
-Status: commits 0 to 6 built on `claude/friction`; commit 7 waits for CI's phase 3 to land.
+Status: built on `claude/friction` (commits 0 to 7), awaiting deploy.
 Branch `claude/friction`, from `origin/claude/gracious-ride-526fue`. One hand-back
 to the parent session (`session_015XFA1jgveJDEE8NJjTaHKg`), which merges and deploys it. It is
 meant to be the last hand-merged deploy: after it, work lands through `land`.
@@ -336,6 +336,9 @@ deploy from a Container (time and memory of a release build on standard-4); the 
   approval setting lives in the Lander. The console's Landing section is on the Settings tab.
   `ci/deploy/node.sh` fetches the pinned Node release (checksum-checked) when the image has
   none, so the first landings deploy even before image v3 is in `wrangler.toml`.
+- **Commit 7.** A job's `token = true` reaches the runner as `PIGEON_PASS_TOKEN=1` from both
+  Containers and Buildkite; the land flow pins `deploy` to Containers anyway. CI's `notify.rs`
+  re-exports the shared module; its tests moved with it.
 - **Image v3** (`ci/image/Dockerfile`) is written but not built here: this session has no
   Docker daemon.
 

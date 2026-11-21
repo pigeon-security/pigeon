@@ -79,6 +79,11 @@ pub struct Job {
     pub run: String,
     pub timeout_min: u32,
     pub needs: Needs,
+    /// Whether the job's script gets its job token, as `PIGEON_JOB_TOKEN`: only a job that has
+    /// to reach the platform with it, such as `deploy`, which the deploy proxy takes only as a
+    /// landing's deploy job. Off by default; the runner withholds the token otherwise.
+    #[serde(default)]
+    pub token: bool,
 }
 
 /// The file, read and checked.
@@ -100,6 +105,7 @@ struct RawJob {
     run: Option<String>,
     timeout_min: Option<u32>,
     needs: RawNeeds,
+    token: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -161,6 +167,7 @@ fn build_job(name: &str, raw: RawJob) -> Result<Job, String> {
         run,
         timeout_min,
         needs,
+        token: raw.token.unwrap_or(false),
     })
 }
 
@@ -327,6 +334,21 @@ needs = { os = "linux", docker = true }
         }
         assert!(one("run = \"a.sh\"\nneeds = { disk_gb = 0 }").is_err());
         assert!(one("run = \"a.sh\"\nneeds = { cpu = -1 }").is_err());
+    }
+
+    #[test]
+    fn only_a_job_that_asks_gets_its_token() {
+        let cfg =
+            parse("[jobs.a]\nrun = \"a.sh\"\n[jobs.d]\nrun = \"d.sh\"\ntoken = true\n").unwrap();
+        assert!(!cfg.jobs["a"].token);
+        assert!(cfg.jobs["d"].token);
+        assert!(parse("[jobs.d]\nrun = \"d.sh\"\ntoken = \"yes\"\n").is_err());
+        // A job stored before the field existed reads as without it.
+        let old: Job = serde_json::from_value(serde_json::json!({
+            "run": "a.sh", "timeout_min": 5, "needs": Needs::default()
+        }))
+        .unwrap();
+        assert!(!old.token);
     }
 
     #[test]

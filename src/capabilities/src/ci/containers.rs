@@ -77,7 +77,7 @@ fn offered(size: Size, cpu: u32, memory_gb: u32, disk_gb: u32) -> Offered {
 
 /// The environment the runner gets.
 fn runner_env(run: &Run, token: &str) -> Vec<(&'static str, String)> {
-    vec![
+    let mut env = vec![
         ("PIGEON_JOB", run.job.clone()),
         ("PIGEON_COMMIT", run.commit.clone()),
         ("PIGEON_SCRIPT", run.script.clone()),
@@ -85,7 +85,11 @@ fn runner_env(run: &Run, token: &str) -> Vec<(&'static str, String)> {
         ("PIGEON_GIT_URL", run.git_url.clone()),
         ("PIGEON_RUNNER_URL", run.runner_url.clone()),
         ("PIGEON_JOB_TOKEN", token.to_string()),
-    ]
+    ];
+    if run.pass_token {
+        env.push(("PIGEON_PASS_TOKEN", "1".to_string()));
+    }
+    env
 }
 
 /// The runner object an attempt runs in, which is also its handle.
@@ -349,6 +353,7 @@ mod tests {
             script: "ci/test.sh".into(),
             class: class_for(&Needs::default()).unwrap(),
             timeout_min: 20,
+            pass_token: false,
             token: Some("pgn_ci_x".into()),
             runner_url: "https://platform.example/ci/runner/j1".into(),
             git_url: "https://proxy.example/git/ns/r.git".into(),
@@ -386,6 +391,16 @@ mod tests {
             Some("https://proxy.example/git/ns/r.git")
         );
         assert_eq!(handle(&r), "j1-2");
+        assert_eq!(get("PIGEON_PASS_TOKEN"), None);
+        let deploy = Run {
+            pass_token: true,
+            ..run()
+        };
+        let env = runner_env(&deploy, "pgn_ci_x");
+        assert!(
+            env.iter()
+                .any(|(n, v)| *n == "PIGEON_PASS_TOKEN" && v == "1")
+        );
     }
 
     #[test]

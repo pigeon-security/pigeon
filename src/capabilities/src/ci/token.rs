@@ -56,8 +56,10 @@ pub fn allows_fetch(grant: &Grant, now_ms: i64, repo: &str, commit: &str) -> boo
 }
 
 /// Whether a job token may be presented on `path` (its query string removed) at all: a
-/// runner's report on `/ci/runner/{job}`, or a fetch from the git proxy. Never a push, never
-/// `/cf/` or `/mcp`.
+/// runner's report on `/ci/runner/{job}`, or a fetch from the git proxy. Never a push or
+/// `/mcp`. The deploy proxy, `/cf/`, does not ask this: it takes a job token only as the deploy
+/// job of the landing that is deploying its commit (`land::deploy_caller`), and refuses every
+/// other.
 pub fn reaches(path: &str) -> bool {
     if path.contains('%') || path.contains('\\') {
         return false;

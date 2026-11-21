@@ -83,6 +83,8 @@ pub struct Run {
     pub script: String,
     pub class: Class,
     pub timeout_min: u32,
+    /// Whether the runner leaves the job token in the script's environment (the job's `token`).
+    pub pass_token: bool,
     /// The job token, for connectors whose runner takes it in its environment.
     #[serde(skip)]
     pub token: Option<String>,
@@ -508,11 +510,7 @@ impl Ci {
         let mut out = scheduler(cx.env, "submit", serde_json::to_value(&new)?).await?;
         if let Some(k) = notify_key {
             out["notify_key"] = json!(k);
-            out["notify_key_note"] = json!(
-                "Shown once. Each POST to `notify` carries `Pigeon-Signature: t=<unix seconds>,\
-                 v1=<hex HMAC-SHA256(key, \"<t>.<body>\")>`, the key being these characters as \
-                 they are."
-            );
+            out["notify_key_note"] = json!(crate::notify::KEY_NOTE);
         }
         Ok(out)
     }

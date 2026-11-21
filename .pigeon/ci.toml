@@ -38,6 +38,7 @@ disk_gb = 20
 [jobs.deploy]
 run = "ci/deploy/deploy.sh"
 timeout_min = 60
+token = true
 
 [jobs.deploy.needs]
 cpu = 4

@@ -327,7 +327,7 @@ impl Connector for Buildkite {
                 .ok_or_else(|| bad(&format!("no Buildkite queue runs {}", run.class)))?;
             let token = self.token(cx).await?;
             let api = self.api(&token);
-            let env = json!({
+            let mut env = json!({
                 "PIGEON_JOB": run.job,
                 "PIGEON_QUEUE": queue.key,
                 "PIGEON_COMMIT": run.commit,
@@ -337,6 +337,9 @@ impl Connector for Buildkite {
                 "PIGEON_RUNNER_URL": run.runner_url,
                 "PIGEON_TOKEN_URL": audience(cx.host),
             });
+            if run.pass_token {
+                env["PIGEON_PASS_TOKEN"] = json!("1");
+            }
             let build = api
                 .create(&json!({
                     "commit": run.commit,
