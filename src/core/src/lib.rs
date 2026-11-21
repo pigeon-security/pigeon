@@ -46,9 +46,10 @@ const GIT_TOKEN_TTL: u64 = 900;
 const GIT_TOKEN_MAX_TTL: u64 = 86_400;
 
 /// The service token Claude sessions reach the platform with, and the one header they send it
-/// in, as `{"cf-access-client-id": ..., "cf-access-client-secret": ...}`.
+/// in, as `{"cf-access-client-id": ..., "cf-access-client-secret": ...}`; Access takes only
+/// `Authorization` for it.
 const CLAUDE_SERVICE_TOKEN: &str = "pigeon-claude";
-const ACCESS_TOKEN_HEADER: &str = "cf-access-token";
+const ACCESS_TOKEN_HEADER: &str = "Authorization";
 
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
