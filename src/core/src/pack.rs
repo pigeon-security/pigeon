@@ -723,7 +723,8 @@ pub fn read_path(objects: &Objects, commit: &str, path: &str) -> Result<Option<V
 
 /// The ID of what `path` names in `commit`'s tree, from `objects`: a file's blob or a
 /// directory's tree, `None` when nothing is there. Two commits with the same ID at a path hold
-/// the same content there.
+/// the same content there. Blobs need not be in `objects`; a tree on the way that is missing is
+/// an error, never read as nothing.
 pub fn path_id(objects: &Objects, commit: &str, path: &str) -> Result<Option<String>, String> {
     let parts: Vec<&str> = path.split('/').collect();
     if path.is_empty()
@@ -737,18 +738,22 @@ pub fn path_id(objects: &Objects, commit: &str, path: &str) -> Result<Option<Str
         return Err("the commit is not in the pack".to_string());
     };
     let mut id = commit_tree(commit_data)?;
-    for part in parts {
+    let last = parts.len() - 1;
+    for (i, part) in parts.iter().enumerate() {
         let Some((2, tree_data)) = objects.by_id.get(&id) else {
-            // A file where a directory was expected: nothing is at the path.
+            return Err("a tree is not in the pack".to_string());
+        };
+        let Some(entry) = tree_entries(tree_data)?
+            .into_iter()
+            .find(|e| e.name == *part)
+        else {
             return Ok(None);
         };
-        match tree_entries(tree_data)?
-            .into_iter()
-            .find(|e| e.name == part)
-        {
-            Some(entry) => id = entry.id,
-            None => return Ok(None),
+        // A file where a directory was expected: nothing is at the path.
+        if i < last && entry.mode != "40000" {
+            return Ok(None);
         }
+        id = entry.id;
     }
     Ok(Some(id))
 }
@@ -822,6 +827,13 @@ mod path_tests {
         assert_eq!(path_id(&o, &c, "nope").unwrap(), None);
         assert_eq!(path_id(&o, &c, "README/x").unwrap(), None);
         assert!(path_id(&o, &c, "../x").is_err());
+        let mut gone = Objects {
+            by_id: o.by_id.clone(),
+            unresolved: 0,
+        };
+        gone.by_id.remove(&dir);
+        assert!(path_id(&gone, &c, ".pigeon/ci.toml").is_err());
+        assert_eq!(path_id(&gone, &c, ".pigeon").unwrap(), Some(dir.clone()));
         assert!(path_id(&o, &"0".repeat(40), "README").is_err());
     }
 

@@ -169,11 +169,16 @@ pub fn branch_ref(given: &str) -> Result<String, String> {
 }
 
 /// The paths whose content decides what the gate itself runs: the CI jobs and their scripts,
-/// and the deploy tool's version. A landing that changes any of them needs a person's approval,
+/// how cargo builds and tests (its config and toolchain), and the deploy tool's version and
+/// where npm gets it. A landing that changes any of them needs a person's approval,
 /// whatever the setting: tests catch mistakes, and a commit defines its own tests.
-pub const GUARDED: [&str; 4] = [
+pub const GUARDED: [&str; 8] = [
     ".pigeon",
     "ci",
+    ".cargo",
+    "rust-toolchain.toml",
+    ".npmrc",
+    "src/platform/.npmrc",
     "src/platform/package.json",
     "src/platform/package-lock.json",
 ];
@@ -366,16 +371,12 @@ mod tests {
 
     #[test]
     fn a_change_to_what_the_gate_runs_needs_a_person() {
-        let main = vec![
-            Some("a".to_string()),
-            Some("b".into()),
-            Some("c".into()),
-            None,
-        ];
+        let mut main: Vec<Option<String>> = GUARDED.iter().map(|p| Some(p.to_string())).collect();
+        main[7] = None;
         assert!(guarded_changes(&main, &main).is_empty());
         let mut commit = main.clone();
         commit[1] = Some("b2".into());
-        commit[3] = Some("new".into());
+        commit[7] = Some("new".into());
         let changed = guarded_changes(&main, &commit);
         assert_eq!(changed, ["ci", "src/platform/package-lock.json"]);
         assert!(

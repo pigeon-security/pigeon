@@ -220,8 +220,10 @@ the stand-in uses the commit's own allowlist, so it passes in both cases.
   exactly that commit (its job token fetches nothing else); the proxy allows only the allowlisted
   calls on `pigeon-platform`; the result is noted on the commit. Tests catch mistakes, not
   malice: a commit defines its own tests. So a commit that changes what the gate itself runs
-  (`.pigeon/`, `ci/`, `src/platform/package.json` or `package-lock.json`, compared by tree and
-  blob id against `main`) always needs a person's approval, whatever the setting.
+  (`.pigeon/`, `ci/`, `.cargo/`, `rust-toolchain.toml`, `.npmrc`, `src/platform/.npmrc`,
+  `src/platform/package.json` or `package-lock.json`, compared by tree and blob id against
+  `main`) always needs a person's approval, whatever the setting. A missing tree is an error,
+  never read as no change.
 - **What uploading the platform means.** The platform Worker binds the parent token, so whoever
   can upload it has account-level power. The person accepted this for proxy credentials; `land`
   is the same power behind more checks.
@@ -339,6 +341,17 @@ deploy from a Container (time and memory of a release build on standard-4); the 
 - **Commit 7.** A job's `token = true` reaches the runner as `PIGEON_PASS_TOKEN=1` from both
   Containers and Buildkite; the land flow pins `deploy` to Containers anyway. CI's `notify.rs`
   re-exports the shared module; its tests moved with it.
+- **Security review** (an independent read of the whole diff): no high findings. Fixed: a stale
+  step could write a wrong event and note after a concurrent cancel (`apply` now re-reads the
+  row first); the guarded-path check failed open on a missing tree and fetched every blob (now
+  an error, and fetched with `blob:none`); the guarded set missed `.cargo/`,
+  `rust-toolchain.toml` and the `.npmrc` files. Its medium finding (the deploy job had no token,
+  so main would move and the deploy fail) is what commit 7 closes. Left as they are, and
+  known: approval is decided when `land` is called, so turning the setting on does not catch a
+  landing already in flight; a model or CI notify may point at the proxy host (it answers only
+  `/git/`, `/cf/` and `/health`, all authenticated); and if a merge's answer is lost and main
+  moves on before the retry, the landing reads `merge_refused` though it merged
+  (`land_status` shows main's history either way).
 - **Image v3** (`ci/image/Dockerfile`) is written but not built here: this session has no
   Docker daemon.
 

@@ -627,6 +627,15 @@ impl Lander {
     /// Moves `row` on `seen`, if that moves it; writes the step and, at the end, the note.
     /// Answers whether it moved.
     fn apply(&self, row: &Row, seen: &Seen, detail: Option<&str>) -> Result<bool> {
+        // Read afresh: the row may be stale after an await (a cancel in between). Nothing awaits
+        // from here to the update, so the object takes no other request meanwhile.
+        let Some(current) = self.row(&row.id)? else {
+            return Ok(false);
+        };
+        if current.state != row.state {
+            return Ok(false);
+        }
+        let row = &current;
         let Some(to) = state::next(row.state(), row.approval_reason.is_some(), seen) else {
             return Ok(false);
         };

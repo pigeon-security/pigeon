@@ -37,7 +37,7 @@
       text: on ? "Stop requiring approval" : "Require approval",
       onclick: () => run(btn, "land-approval", on ? "off" : "on", status, ctx) });
     const said = on
-      ? "Every landing waits for a person's passkey after its tests pass, before main moves."
+      ? "Every landing started from now on waits for a person's passkey after its tests pass, before main moves."
       : "Landings go from tests to main and the deploy without a person, unless they change what the gate runs (.pigeon, ci, the pinned wrangler).";
     const by = approval && approval.by ? ` Set by ${approval.by}, ${when(approval.at)}.` : "";
     return el("article", { class: "card", style: "gap:10px" },

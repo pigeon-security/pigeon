@@ -194,7 +194,8 @@ pub async fn read_file(remote: &Remote, commit: &str, path: &str) -> Result<Opti
 }
 
 /// The IDs of what each of `paths` names in `commit` of `remote` (see `pack::path_id`): the
-/// commit alone is fetched, one commit deep, once for all of them.
+/// commit alone is fetched, one commit deep and without blobs where the remote can filter,
+/// once for all of them.
 pub async fn path_ids(
     remote: &Remote,
     commit: &str,
@@ -210,7 +211,7 @@ pub async fn path_ids(
         &advertised.caps,
         std::slice::from_ref(&commit),
         &[],
-        None,
+        Some("blob:none"),
         Some(1),
     )
     .await?;
