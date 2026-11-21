@@ -6,6 +6,7 @@ pub mod access;
 pub mod ai_gateway;
 pub mod artifacts;
 pub mod cloudflare;
+pub mod containers;
 pub mod custom_domain;
 pub mod design;
 pub mod durable;

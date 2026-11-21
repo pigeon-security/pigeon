@@ -43,6 +43,28 @@ impl worker::DurableObject for CiScheduler {
         self.inner.alarm().await
     }
 }
+
+/// The CI runner's class: one per job attempt, holding that attempt's container.
+#[worker::durable_object]
+pub struct CiRunner {
+    inner: pigeon_capabilities::ci::containers::Runner,
+}
+
+impl worker::DurableObject for CiRunner {
+    fn new(state: worker::State, env: Env) -> Self {
+        let inner = pigeon_capabilities::ci::containers::Runner::new(state, env)
+            .expect("the CI runner's migrations apply");
+        Self { inner }
+    }
+
+    async fn fetch(&self, req: Request) -> Result<Response> {
+        self.inner.fetch(req).await
+    }
+
+    async fn alarm(&self) -> Result<Response> {
+        self.inner.alarm().await
+    }
+}
 use pigeon_core::mcp::{self, Server};
 use pigeon_core::oauth as oauth_core;
 use pigeon_core::{Account, secrets_store};

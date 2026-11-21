@@ -1,6 +1,6 @@
 # The CI gateway
 
-Status: phase 1 built, awaiting deploy. Phases are handed back one at a time; each is merged and
+Status: phase 1 deployed; phase 2 built up to the base image, which the person provides. Phases are handed back one at a time; each is merged and
 deployed by the parent session before the next starts.
 
 Design: [CI gateway design](https://claude.ai/artifact/M5zwjixxfKwJn9PYUf9tcj). This plan turns
@@ -385,6 +385,37 @@ Before deploy, the person (or the parent, with the person's go-ahead) creates th
 Needs from the person: the base image's registry reference.
 Live checks: a job that passes, one that fails, one that times out, one whose container is
 killed (retried elsewhere or `error`), the note on the commit.
+
+**As built so far (waiting for the image).**
+- Confirmed from the docs: under `durable_object` each `start()` names the image (a key of
+  `ctx.container.images`) and the instance; there is no default image; wrangler's
+  `instance_type` and `max_instances` do not apply. Whether a class first deployed without a
+  container can gain one is not documented, so `CiRunner` gets its binding, migration and
+  container in one deploy, once the image is known. `basic` is avoided (the docs disagree).
+- core `containers.rs` (step 1, opus): `start`, `running`, `monitor`, `destroy` over the JS API.
+- `ci/containers.rs` (steps 2 and 3, by me): the connector and the `Runner` logic the platform's
+  `CiRunner` class wraps. A runner object is named `{job}-{attempt}`, keeps the job id and the
+  exit code (never the token), and its alarm watches the container every minute.
+- The scheduler enforces a connector's `limit()` (Containers: 4 live jobs).
+- `ci/runner/entrypoint.sh` (step 4, sonnet): the base image installs it as
+  `/usr/local/bin/pigeon-ci-runner`, beside git, curl, coreutils and sh.
+- Left to do with the image: `image: Some("base")` in `settings::ci()`, and in wrangler.toml:
+
+```toml
+# in [durable_objects].bindings
+  { name = "CI_RUNNER", class_name = "CiRunner" },
+
+[[migrations]]
+tag = "v3"
+new_sqlite_classes = ["CiRunner"]
+
+[[containers]]
+class_name = "CiRunner"
+scheduling_policy = "durable_object"
+
+[containers.images.base]
+image = "registry.cloudflare.com/<account>/<name>@sha256:<digest>"
+```
 
 ### Phase 3: Buildkite
 

@@ -169,6 +169,17 @@ pub fn after_dispatch(
     }
 }
 
+/// `a` with the gateway's own `limit` on live jobs applied: free slots are the fewer of what
+/// the connector says and what the limit leaves.
+pub fn with_limit(a: Availability, limit: Option<u32>, live: u32) -> Availability {
+    let Some(limit) = limit else { return a };
+    let left = limit.saturating_sub(live);
+    Availability {
+        free: Some(a.free.map_or(left, |f| f.min(left))),
+        ..a
+    }
+}
+
 /// A job's deadline, dispatched at `at_ms` with `timeout_min`.
 pub fn deadline(at_ms: i64, timeout_min: u32) -> i64 {
     at_ms + i64::from(timeout_min) * 60_000 + DEADLINE_GRACE_MS
@@ -392,9 +403,27 @@ impl Scheduler {
                     a
                 }
             };
-            out.push((c.name().to_string(), a));
+            out.push((
+                c.name().to_string(),
+                with_limit(a, c.limit(), self.live(c.name())?),
+            ));
         }
         Ok(out)
+    }
+
+    /// How many of `connector`'s jobs are live.
+    fn live(&self, connector: &str) -> Result<u32> {
+        #[derive(Deserialize)]
+        struct Count {
+            n: i64,
+        }
+        Ok(self
+            .db
+            .row::<Count>(
+                &format!("SELECT COUNT(*) AS n FROM jobs WHERE connector = ? AND state IN {LIVE}"),
+                vec![connector.into()],
+            )?
+            .map_or(0, |c| u32::try_from(c.n).unwrap_or(u32::MAX)))
     }
 
     /// Dispatches each queued job that has somewhere to go.
@@ -1295,6 +1324,21 @@ mod tests {
                 Next::Move(JobState::Failed)
             );
         });
+    }
+
+    #[test]
+    fn the_gateways_limit_caps_free_slots() {
+        let a = Availability {
+            configured: true,
+            healthy: true,
+            free: None,
+            queued: 0,
+        };
+        assert_eq!(with_limit(a, None, 9).free, None);
+        assert_eq!(with_limit(a, Some(4), 1).free, Some(3));
+        assert_eq!(with_limit(a, Some(4), 6).free, Some(0));
+        let some = Availability { free: Some(2), ..a };
+        assert_eq!(with_limit(some, Some(4), 1).free, Some(2));
     }
 
     #[test]

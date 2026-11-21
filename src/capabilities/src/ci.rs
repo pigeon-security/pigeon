@@ -17,6 +17,7 @@
 
 pub mod class;
 pub mod config;
+pub mod containers;
 pub mod notes;
 pub mod notify;
 pub mod route;
@@ -139,6 +140,12 @@ pub trait Connector {
     /// exchanges its own OIDC token for one at `/ci/token`.
     fn takes_token(&self) -> bool {
         false
+    }
+
+    /// The most of its jobs that may be live at once, which the scheduler enforces; `None` for
+    /// no limit of the gateway's own.
+    fn limit(&self) -> Option<u32> {
+        None
     }
 
     /// Whether it is configured (its secrets set) and healthy, and how much room it has.
