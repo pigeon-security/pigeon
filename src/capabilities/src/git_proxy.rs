@@ -276,6 +276,17 @@ async fn read_commands(mut body: ByteStream) -> std::result::Result<Push, String
     }
 }
 
+/// Reads and drops what is left of a body, up to `cap` bytes.
+async fn drain(rest: &mut ByteStream, cap: usize) {
+    let mut read = 0usize;
+    while read < cap {
+        match rest.next().await {
+            Some(Ok(chunk)) => read += chunk.len(),
+            _ => return,
+        }
+    }
+}
+
 /// Reads the rest of a push, up to [`BUFFERED_MAX`] in all.
 async fn read_rest(push: &mut Push) -> std::result::Result<(), String> {
     while let Some(chunk) = push.rest.next().await {
@@ -355,49 +366,107 @@ fn forwarded_headers(req: &Request, service: Service) -> Result<Headers> {
     Ok(out)
 }
 
-/// Whether `old` is an ancestor of `new` in the pushed pack, or in the repository's history
-/// when the pack leaves some out.
-async fn fast_forward(
+/// The commits `old`'s history doesn't reach, from the repository's branches: every ref tip
+/// but `old` wanted, `old` had, commits only when the remote can filter. Their parents, by
+/// commit.
+async fn upstream_history(
     remote: &Remote,
-    known: &mut HashMap<String, Vec<String>>,
-    fetched: &mut bool,
-    old: &str,
-    new: &str,
-) -> std::result::Result<bool, String> {
-    match pack::walk(old, new, known, false) {
-        Walk::Forward => return Ok(true),
-        Walk::NotForward => return Ok(false),
-        Walk::Need(_) => {}
+    old: String,
+) -> std::result::Result<HashMap<String, Vec<String>>, String> {
+    let refs = git::refs(remote, Service::UploadPack.name())
+        .await
+        .map_err(|_| "the repository's refs could not be read".to_string())?;
+    let mut wants: Vec<String> = refs
+        .refs
+        .values()
+        .filter(|id| **id != old && git::is_id(id))
+        .cloned()
+        .collect();
+    wants.sort();
+    wants.dedup();
+    if wants.is_empty() {
+        return Ok(HashMap::new());
     }
-    if !*fetched {
-        *fetched = true;
-        // Everything the repository's branches reach that `old` doesn't: if `old` is an
-        // ancestor of the commits the push builds on, the walk meets it there.
-        let refs = git::refs(remote, Service::UploadPack.name())
-            .await
-            .map_err(|_| "the repository's refs could not be read".to_string())?;
-        let mut wants: Vec<String> = refs
-            .refs
-            .values()
-            .filter(|id| id.as_str() != old && git::is_id(id))
-            .cloned()
-            .collect();
-        wants.sort();
-        wants.dedup();
-        if !wants.is_empty() {
-            let got = git::fetch_filtered(
-                remote,
-                &refs.caps,
-                &wants,
-                &[old.to_string()],
-                Some("tree:0"),
-            )
-            .await
-            .map_err(|_| "the repository's history could not be read".to_string())?;
-            known.extend(pack::commits(&got.pack)?.parents);
+    let got = git::fetch_filtered(remote, &refs.caps, &wants, &[old], Some("tree:0"))
+        .await
+        .map_err(|_| "the repository's history could not be read".to_string())?;
+    Ok(pack::commits(&got.pack)?.parents)
+}
+
+/// The protected-branch updates in a push that don't move it forward, each with why; `None`
+/// when every one does. `head` is the whole push body, `commands` its ref updates and `rules`
+/// theirs. When the pushed pack doesn't settle it, `upstream(old)` is asked once for the
+/// repository's history that `old` doesn't reach (see [`upstream_history`]); if `old` is an
+/// ancestor of what the push builds on, the walk meets it there.
+pub async fn not_forward<U, F>(
+    head: &[u8],
+    commands: &Commands,
+    rules: &[Rule],
+    prefix: &str,
+    mut upstream: U,
+) -> Option<Vec<(String, String)>>
+where
+    U: FnMut(String) -> F,
+    F: std::future::Future<Output = std::result::Result<HashMap<String, Vec<String>>, String>>,
+{
+    let protected = commands
+        .commands
+        .iter()
+        .zip(rules)
+        .find(|(_, r)| **r == Rule::FastForward)
+        .map(|(c, _)| c.name.clone())?;
+    let fail = |why: String| Some(vec![(protected.clone(), why)]);
+    let start = match git::pack_start(head, commands) {
+        Ok(Some(s)) => s,
+        Ok(None) => return fail("the push ended early".into()),
+        Err(e) => return fail(e),
+    };
+    let pack = &head[start..];
+    let (mut known, unresolved) = if pack.is_empty() {
+        (HashMap::new(), 0)
+    } else {
+        match pack::commits(pack) {
+            Ok(c) => (c.parents, c.unresolved),
+            Err(e) => return fail(e),
         }
+    };
+    let mut fetched = false;
+    for (c, rule) in commands.commands.iter().zip(rules) {
+        if *rule != Rule::FastForward {
+            continue;
+        }
+        let forward = match pack::walk(&c.old, &c.new, &known, false) {
+            Walk::Forward => true,
+            Walk::NotForward => false,
+            Walk::Need(_) => {
+                if !fetched {
+                    fetched = true;
+                    match upstream(c.old.clone()).await {
+                        Ok(more) => known.extend(more),
+                        Err(e) => return fail(e),
+                    }
+                }
+                pack::walk(&c.old, &c.new, &known, true) == Walk::Forward
+            }
+        };
+        if forward {
+            continue;
+        }
+        return fail(if unresolved > 0 {
+            format!(
+                "{} could not be checked: the push stores objects as changes to others it \
+                 doesn't carry. Push the commit to a branch under {prefix} first, then move \
+                 {} to it",
+                c.name, c.name
+            )
+        } else {
+            format!(
+                "{} only moves forward: push a commit that has the current one in its history",
+                c.name
+            )
+        });
     }
-    Ok(pack::walk(old, new, known, true) == Walk::Forward)
+    None
 }
 
 impl GitProxy {
@@ -496,13 +565,18 @@ impl GitProxy {
             if encoding.is_some_and(|e| !e.eq_ignore_ascii_case("identity")) {
                 return refuse(415, "the proxy takes pushes without content encoding");
             }
-            let p = match read_commands(req.stream()?).await {
+            let mut p = match read_commands(req.stream()?).await {
                 Ok(p) => p,
                 Err(why) => return refuse(400, &why),
             };
             match check_all(&p.commands.commands, &self.protected, &self.prefix) {
                 Ok(r) => rules = r,
-                Err(refused) => return refusal(&p.commands, &refused),
+                Err(refused) => {
+                    // Read what git is still sending, so it reads the refusal rather than
+                    // stopping at a closed connection.
+                    drain(&mut p.rest, BUFFERED_MAX).await;
+                    return refusal(&p.commands, &refused);
+                }
             }
             push = Some(p);
         }
@@ -546,7 +620,10 @@ impl GitProxy {
                     if let Err(why) = read_rest(&mut p).await {
                         return refusal(&p.commands, &[(self.protected.clone(), why)]);
                     }
-                    if let Some(refused) = self.not_forward(&remote, &p, &rules).await {
+                    let upstream = |old: String| upstream_history(&remote, old);
+                    if let Some(refused) =
+                        not_forward(&p.head, &p.commands, &rules, &self.prefix, upstream).await
+                    {
                         return refusal(&p.commands, &refused);
                     }
                     Body::Bytes(p.head)
@@ -676,57 +753,6 @@ impl GitProxy {
             Ok(()) => Ok(Ok(Some(body))),
             Err(why) => no(403, why),
         }
-    }
-
-    /// The protected-branch updates in `p` that don't move forward, with why; `None` when
-    /// every one does.
-    async fn not_forward(
-        &self,
-        remote: &Remote,
-        p: &Push,
-        rules: &[Rule],
-    ) -> Option<Vec<(String, String)>> {
-        let fail = |why: String| Some(vec![(self.protected.clone(), why)]);
-        let start = match git::pack_start(&p.head, &p.commands) {
-            Ok(Some(s)) => s,
-            Ok(None) => return fail("the push ended early".into()),
-            Err(e) => return fail(e),
-        };
-        let pack = &p.head[start..];
-        let (mut known, unresolved) = if pack.is_empty() {
-            (HashMap::new(), 0)
-        } else {
-            match pack::commits(pack) {
-                Ok(c) => (c.parents, c.unresolved),
-                Err(e) => return fail(e),
-            }
-        };
-        let mut fetched = false;
-        for (c, rule) in p.commands.commands.iter().zip(rules) {
-            if *rule != Rule::FastForward {
-                continue;
-            }
-            match fast_forward(remote, &mut known, &mut fetched, &c.old, &c.new).await {
-                Ok(true) => {}
-                Ok(false) if unresolved > 0 => {
-                    return fail(format!(
-                        "{} could not be checked: the push stores objects as changes to \
-                         others it doesn't carry. Push the commit to a branch under {} first, \
-                         then move {} to it",
-                        c.name, self.prefix, c.name
-                    ));
-                }
-                Ok(false) => {
-                    return fail(format!(
-                        "{} only moves forward: push a commit that has the current one in its \
-                         history",
-                        c.name
-                    ));
-                }
-                Err(e) => return fail(e),
-            }
-        }
-        None
     }
 }
 
@@ -1028,6 +1054,82 @@ mod tests {
         let known = pack::commits(&body[start..]).unwrap().parents;
         let u = &c.commands[0];
         pack::walk(&u.old, &u.new, &known, false)
+    }
+
+    /// Runs a future that never waits.
+    fn now<F: std::future::Future>(f: F) -> F::Output {
+        let mut f = std::pin::pin!(f);
+        let mut cx = TaskContext::from_waker(std::task::Waker::noop());
+        match f.as_mut().poll(&mut cx) {
+            Poll::Ready(v) => v,
+            Poll::Pending => panic!("the check waited"),
+        }
+    }
+
+    /// What `not_forward` decides on a push of `new` to main from `old`, sending the commits
+    /// `old` doesn't reach (`pack_from` set to `old`) or none (`pack_from` set to `new`), with
+    /// the upstream history read from `dir`'s refs as an upload-pack fetch would give it.
+    fn verdict(dir: &std::path::Path, old: &str, new: &str, pack_from: &str) -> Option<String> {
+        let mut body = push_body(dir, pack_from, new, P);
+        let line = format!("{old} {new} {P}\0report-status-v2 side-band-64k\n");
+        let c = git::commands(&body).unwrap().unwrap();
+        body.splice(
+            ..c.end,
+            format!("{:04x}{line}0000", line.len() + 4).into_bytes(),
+        );
+        let c = git::commands(&body).unwrap().unwrap();
+        let rules = check_all(&c.commands, P, X).unwrap();
+        let upstream = |old: String| {
+            let tips =
+                String::from_utf8(git(dir, &["for-each-ref", "--format=%(objectname)"], None))
+                    .unwrap();
+            let mut revs: String = tips
+                .lines()
+                .filter(|t| *t != old)
+                .map(|t| format!("{t}\n"))
+                .collect();
+            revs.push_str(&format!("^{old}\n"));
+            let pack = git(
+                dir,
+                &["pack-objects", "--stdout", "--revs", "-q"],
+                Some(&revs),
+            );
+            std::future::ready(pack::commits(&pack).map(|c| c.parents))
+        };
+        now(not_forward(&body, &c, &rules, X, upstream)).map(|r| r[0].1.clone())
+    }
+
+    #[test]
+    fn main_moves_only_forward_against_real_history() {
+        let dir = std::env::temp_dir().join(format!("pigeon-forward-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for args in [
+            &["init", "-q", "-b", "main"][..],
+            &["config", "user.email", "t@example.com"],
+            &["config", "user.name", "t"],
+        ] {
+            git(&dir, args, None);
+        }
+        let one = commit(&dir, "one\n");
+        let two = commit(&dir, "one\ntwo\n");
+        git(&dir, &["checkout", "-q", "-b", "claude/feature"], None);
+        let f1 = commit(&dir, "one\ntwo\nf1\n");
+        // Upstream: main at `two`, claude/feature at `f1`.
+        git(&dir, &["update-ref", "refs/heads/main", &two], None);
+        git(&dir, &["checkout", "-q", "-b", "side", &one], None);
+        let sibling = commit(&dir, "one\nsibling\n");
+        // New commits on top of main, sent in the push.
+        assert_eq!(verdict(&dir, &two, &f1, &two), None);
+        // main moved to a branch tip already upstream: an empty pack, decided upstream.
+        assert_eq!(verdict(&dir, &two, &f1, &f1), None);
+        // A sibling of main's commit, and main moved back to its parent: refused.
+        let refused = Some(format!(
+            "{P} only moves forward: push a commit that has the current one in its history"
+        ));
+        assert_eq!(verdict(&dir, &two, &sibling, &one), refused);
+        assert_eq!(verdict(&dir, &two, &one, &one), refused);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

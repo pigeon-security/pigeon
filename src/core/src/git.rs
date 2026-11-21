@@ -457,8 +457,8 @@ pub fn pack_start(data: &[u8], c: &Commands) -> std::result::Result<Option<usize
 
 /// A `git-receive-pack` result refusing the whole push, so `git push` prints why: each ref in
 /// `refused` with its reason, the others as not pushed. In side-band when the client asked for
-/// it. Empty when the client asked for neither report-status nor side-band: the caller answers
-/// an HTTP error instead.
+/// it. Empty when the client asked for no report (report-status or report-status-v2) and no
+/// side-band: the caller answers an HTTP error instead.
 pub fn refusal(commands: &[Command], caps: &[String], refused: &[(String, String)]) -> Vec<u8> {
     let has = |c: &str| caps.iter().any(|x| x == c);
     let clean = |s: &str| s.replace(['\n', '\r'], " ");
@@ -466,7 +466,8 @@ pub fn refusal(commands: &[Command], caps: &[String], refused: &[(String, String
         .first()
         .map_or_else(|| "the push is refused".to_string(), |(_, why)| clean(why));
     let mut report = Vec::new();
-    if has("report-status") {
+    // Git 2.29 and later ask for report-status-v2; its `ng <ref> <reason>` lines are v1's.
+    if has("report-status") || has("report-status-v2") {
         report.extend(pkt(b"unpack ok\n"));
         for c in commands {
             let why = refused
@@ -630,6 +631,20 @@ mod push_tests {
         want.extend(b"0000");
         assert_eq!(got, want);
         assert!(refusal(&cmds(), &[], &[("refs/heads/x".into(), "no".into())]).is_empty());
+    }
+
+    #[test]
+    fn a_refusal_reports_to_git_asking_for_report_status_v2() {
+        let refused = [("refs/heads/x".to_string(), "no".to_string())];
+        let v1 = refusal(&cmds(), &["report-status".into()], &refused);
+        let v2 = refusal(&cmds(), &["report-status-v2".into()], &refused);
+        assert_eq!(v1, v2);
+        let both = vec!["report-status-v2".to_string(), "side-band-64k".to_string()];
+        let framed = refusal(&cmds(), &both, &refused);
+        assert!(
+            framed.len() > v2.len(),
+            "the report is inside the side-band"
+        );
     }
 
     #[test]

@@ -337,6 +337,21 @@ depend on the allowlist entry; the hand-back will say what was checked.
   `pigeon-ci-events` producer, both deploy routes: one new call,
   `GET /accounts/{a}/queues?name=<queue>&page=1` (wrangler's `ensureQueuesExistByConfig`),
   with Queues Read. It must name a queue in `CfProxy::queues`. No other call changed.
+- **Fixed: refused pushes showed no reason** (found live: git printed only "the remote end
+  hung up unexpectedly"). Git 2.29 and later ask for `report-status-v2`, and `git::refusal`
+  only built the report for `report-status`, so git got the side-band message and no report.
+  Both now get the same `unpack ok` / `ng <ref> <reason>` report. Reproduced and confirmed
+  fixed with git 2.43 against a local stand-in (`git http-backend` behind a server running
+  the proxy's own checks, `examples/push_check.rs`): every refusal now prints
+  `! [remote rejected] <ref> (<reason>)`. The proxy also now reads what git is still sending
+  (16 MiB at most) before it answers a refused push, so git reads the refusal rather than a
+  closed connection.
+- **The fast-forward check, tested against real git** (the live force push was blocked):
+  `not_forward` now takes the upstream fetch as a parameter, so a unit test and the stand-in
+  run the very same check with upstream history from `git pack-objects`. Accepted: new commits
+  on top of main; main moved to a `claude/` tip already pushed (empty pack). Refused, main
+  unchanged: a sibling commit; main moved back to its parent; main moved to a `claude/`
+  branch that diverged from it.
 - Only checkable live: whether Artifacts serves a `want` of a commit that is not a branch
   tip (`allowReachableSHA1InWant`); both the runner's fetch and `read_file` rely on it.
   Whether uploading a Worker with a queue producer binding needs more than Workers Scripts

@@ -500,8 +500,8 @@ mod tests {
             let got = commits(&r.pack(&c, None, extra)).unwrap();
             assert_eq!(got.unresolved, 0);
             assert_eq!(got.parents.len(), 3);
-            assert_eq!(got.parents[&c], [b.clone()]);
-            assert_eq!(got.parents[&b], [a.clone()]);
+            assert_eq!(got.parents[&c], std::slice::from_ref(&b));
+            assert_eq!(got.parents[&b], std::slice::from_ref(&a));
             assert!(got.parents[&a].is_empty());
         }
     }

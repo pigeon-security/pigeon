@@ -79,6 +79,21 @@ A missing or unknown credential gets 403, not 401, so git does not prompt for a 
 
 Session branches stay in Artifacts. The GitHub mirror copies only `main`.
 
+### Removing a session branch
+
+The proxy refuses every delete, so `claude/` branches pile up in Artifacts. A person removes one directly on Artifacts, not through the proxy:
+
+1. Mint a write token with the MCP tool `source_token` (`access: "write"`). It answers the token and the repository's Artifacts remote.
+2. Push the delete to that remote, passing the token as a header rather than in the URL, so it stays out of the shell history:
+
+   ```
+   git -c http.extraHeader="Authorization: Bearer $TOKEN" push <remote> --delete claude/route-check
+   ```
+
+3. Revoke the token with `source_revoke` and the id `source_token` gave.
+
+This needs the Artifacts host in the environment's allowed hosts, so do it from a machine that has it, not from a cloud session once the host is removed.
+
 ### CI runners
 
 A CI runner fetches with its job token (prefix `pgn_ci_`) instead of a proxy credential. A job token:
