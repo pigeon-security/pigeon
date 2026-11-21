@@ -169,6 +169,8 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
         Box::new(CfProxy {
             host: PROXY_HOST.into(),
             script: WORKER.into(),
+            // The queue producers in wrangler.toml.
+            queues: vec!["pigeon-ci-events".into()],
         }),
         Box::new(Models {
             gateway: "pigeon".into(),

@@ -38,8 +38,11 @@ pub struct Allowed {
     pub method: &'static str,
     /// Its path after [`PREFIX`]: literal segments, `{account}` and `{script}`.
     pub path: &'static str,
-    /// The `key=value` pairs its query may carry.
+    /// The `key=value` pairs its query may carry; `{queue}` stands for a queue the Worker
+    /// binds.
     pub query: &'static [&'static str],
+    /// The pairs of `query` it must carry.
+    pub needs: &'static [&'static str],
     /// The account permissions the token minted for it holds.
     pub permissions: &'static [&'static str],
 }
@@ -48,17 +51,20 @@ pub struct Allowed {
 pub const READ: &[&str] = &["Workers Scripts Read"];
 /// Changing the Worker.
 pub const WRITE: &[&str] = &["Workers Scripts Write"];
+/// Looking up a queue the Worker produces to.
+pub const QUEUES: &[&str] = &["Queues Read"];
 /// Uploading the Worker, which binds Secrets Store secrets.
 pub const UPLOAD: &[&str] = &["Workers Scripts Write", "Secrets Store Write"];
 
 /// The calls `wrangler deploy` makes (wrangler 4.166.0, recorded against a stand-in API and
 /// read in its source).
-pub const ALLOWED: [Allowed; 10] = [
+pub const ALLOWED: [Allowed; 11] = [
     // Whether the Worker exists, and its migration tag.
     Allowed {
         method: "GET",
         path: "/accounts/{account}/workers/services/{script}",
         query: &[],
+        needs: &[],
         permissions: READ,
     },
     // The Worker's secrets, so a deploy can't drop one bound in the config.
@@ -66,6 +72,7 @@ pub const ALLOWED: [Allowed; 10] = [
         method: "GET",
         path: "/accounts/{account}/workers/scripts/{script}/secrets",
         query: &[],
+        needs: &[],
         permissions: READ,
     },
     // Its deployments, to warn about gradual rollouts.
@@ -73,6 +80,7 @@ pub const ALLOWED: [Allowed; 10] = [
         method: "GET",
         path: "/accounts/{account}/workers/scripts/{script}/deployments",
         query: &[],
+        needs: &[],
         permissions: READ,
     },
     // Its settings, such as tags.
@@ -80,6 +88,7 @@ pub const ALLOWED: [Allowed; 10] = [
         method: "GET",
         path: "/accounts/{account}/workers/scripts/{script}/settings",
         query: &[],
+        needs: &[],
         permissions: READ,
     },
     // Uploads a version, when no Durable Object migration is pending.
@@ -87,6 +96,7 @@ pub const ALLOWED: [Allowed; 10] = [
         method: "POST",
         path: "/accounts/{account}/workers/scripts/{script}/versions",
         query: &["bindings_inherit=strict"],
+        needs: &[],
         permissions: UPLOAD,
     },
     // Deploys that version.
@@ -94,6 +104,7 @@ pub const ALLOWED: [Allowed; 10] = [
         method: "POST",
         path: "/accounts/{account}/workers/scripts/{script}/deployments",
         query: &[],
+        needs: &[],
         permissions: WRITE,
     },
     // Settings outside versions: logpush, tail consumers, observability, tags.
@@ -101,6 +112,7 @@ pub const ALLOWED: [Allowed; 10] = [
         method: "PATCH",
         path: "/accounts/{account}/workers/scripts/{script}/script-settings",
         query: &[],
+        needs: &[],
         permissions: WRITE,
     },
     // Uploads and deploys at once, when a migration is pending.
@@ -108,6 +120,7 @@ pub const ALLOWED: [Allowed; 10] = [
         method: "PUT",
         path: "/accounts/{account}/workers/scripts/{script}",
         query: &["excludeScript=true", "bindings_inherit=strict"],
+        needs: &[],
         permissions: UPLOAD,
     },
     // Its workers.dev settings.
@@ -115,13 +128,24 @@ pub const ALLOWED: [Allowed; 10] = [
         method: "GET",
         path: "/accounts/{account}/workers/workers/{script}",
         query: &[],
+        needs: &[],
         permissions: READ,
+    },
+    // Whether each queue the Worker produces to exists, looked up by name (wrangler's
+    // `ensureQueuesExistByConfig`). Only with the name of a queue the Worker binds.
+    Allowed {
+        method: "GET",
+        path: "/accounts/{account}/queues",
+        query: &["name={queue}", "page=1"],
+        needs: &["name={queue}"],
+        permissions: QUEUES,
     },
     // Keeps workers.dev and preview URLs off, as the config says.
     Allowed {
         method: "POST",
         path: "/accounts/{account}/workers/scripts/{script}/subdomain",
         query: &[],
+        needs: &[],
         permissions: WRITE,
     },
 ];
@@ -148,28 +172,43 @@ fn matches(pattern: &str, segments: &[&str], account: &str, script: &str) -> boo
 }
 
 /// Whether every pair of `query` is one `entry` allows, none repeated.
-fn query_ok(entry: &Allowed, query: Option<&str>) -> bool {
-    let Some(q) = query.filter(|q| !q.is_empty()) else {
-        return true;
+fn query_ok(entry: &Allowed, query: Option<&str>, queues: &[&str]) -> bool {
+    // Whether `piece` is the pair `pattern` stands for.
+    let is = |pattern: &str, piece: &str| {
+        if pattern.contains("{queue}") {
+            queues
+                .iter()
+                .any(|q| pattern.replace("{queue}", q) == piece)
+        } else {
+            pattern == piece
+        }
+    };
+    let pieces: Vec<&str> = match query.filter(|q| !q.is_empty()) {
+        Some(q) => q.split('&').collect(),
+        None => Vec::new(),
     };
     let mut seen: Vec<&str> = Vec::new();
-    for piece in q.split('&') {
-        if !entry.query.contains(&piece) || seen.contains(&piece) {
+    for piece in &pieces {
+        if !entry.query.iter().any(|p| is(p, piece)) || seen.contains(piece) {
             return false;
         }
         seen.push(piece);
     }
-    true
+    entry
+        .needs
+        .iter()
+        .all(|need| pieces.iter().any(|piece| is(need, piece)))
 }
 
-/// The allowed call `method path?query` is, on `account`'s Worker `script`; or why it isn't
-/// one. `path` is the raw request path, [`PREFIX`] included.
+/// The allowed call `method path?query` is, on `account`'s Worker `script`, which produces to
+/// `queues`; or why it isn't one. `path` is the raw request path, [`PREFIX`] included.
 pub fn allowed(
     method: &str,
     path: &str,
     query: Option<&str>,
     account: &str,
     script: &str,
+    queues: &[&str],
 ) -> std::result::Result<&'static Allowed, String> {
     let refused = |rest: &str| format!("pigeon's proxy does not allow {method} {rest}");
     let rest = path.strip_prefix(PREFIX).ok_or_else(|| refused(path))?;
@@ -185,7 +224,7 @@ pub fn allowed(
         .iter()
         .find(|e| e.method == method && matches(e.path, &segments, account, script))
         .ok_or_else(|| refused(rest))?;
-    if !query_ok(entry, query) {
+    if !query_ok(entry, query, queues) {
         return Err("pigeon's proxy does not allow this query".into());
     }
     Ok(entry)
@@ -208,6 +247,8 @@ pub struct CfProxy {
     pub host: String,
     /// The Worker it deploys, such as `pigeon-platform`.
     pub script: String,
+    /// The queues the Worker produces to, which a deploy looks up by name.
+    pub queues: Vec<String>,
 }
 
 impl CfProxy {
@@ -273,6 +314,7 @@ impl CfProxy {
             url.query(),
             &cx.account.id,
             &self.script,
+            &self.queues.iter().map(String::as_str).collect::<Vec<_>>(),
         ) {
             Ok(e) => e,
             Err(why) => return refuse(403, &why),
@@ -393,6 +435,7 @@ mod tests {
 
     const A: &str = "4f94676cb2cbe46fd985b089ca97ea27";
     const S: &str = "pigeon-platform";
+    const Q: &[&str] = &["pigeon-ci-events"];
 
     fn build(pattern: &str) -> String {
         format!(
@@ -402,7 +445,7 @@ mod tests {
     }
 
     fn full_query(e: &Allowed) -> Option<String> {
-        (!e.query.is_empty()).then(|| e.query.join("&"))
+        (!e.query.is_empty()).then(|| e.query.join("&").replace("{queue}", Q[0]))
     }
 
     #[test]
@@ -410,9 +453,15 @@ mod tests {
         for e in &ALLOWED {
             let p = build(e.path);
             let q = full_query(e);
-            assert_eq!(allowed(e.method, &p, q.as_deref(), A, S), Ok(e));
-            assert_eq!(allowed(e.method, &p, None, A, S), Ok(e));
-            assert_eq!(allowed(e.method, &p, Some(""), A, S), Ok(e));
+            assert_eq!(allowed(e.method, &p, q.as_deref(), A, S, Q), Ok(e));
+            for bare in [None, Some("")] {
+                let got = allowed(e.method, &p, bare, A, S, Q);
+                if e.needs.is_empty() {
+                    assert_eq!(got, Ok(e));
+                } else {
+                    assert!(got.is_err(), "{} needs {:?}", e.path, e.needs);
+                }
+            }
         }
     }
 
@@ -436,12 +485,23 @@ mod tests {
                 (e.method, p.replace(PREFIX, "/cf/client/v4/"), q, A, S),
                 (e.method, p.clone(), Some("foo=bar"), A, S),
             ] {
+                // A variation that changes nothing this call has (a script, a `workers`
+                // segment) is no variation.
+                let same = (script != S && !e.path.contains("{script}"))
+                    || (path == p
+                        && method == e.method
+                        && query == q
+                        && account == A
+                        && script == S);
+                if same {
+                    continue;
+                }
                 assert!(
-                    allowed(method, &path, query, account, script).is_err(),
+                    allowed(method, &path, query, account, script, Q).is_err(),
                     "{method} {path} {query:?}"
                 );
             }
-            assert!(allowed(e.method, &short, q, A, S).is_err(), "{short}");
+            assert!(allowed(e.method, &short, q, A, S, Q).is_err(), "{short}");
         }
     }
 
@@ -455,7 +515,8 @@ mod tests {
                 &put,
                 Some("bindings_inherit=strict&excludeScript=true"),
                 A,
-                S
+                S,
+                Q
             )
             .is_ok()
         );
@@ -465,9 +526,35 @@ mod tests {
             "excludeScript=false",
             "bindings_inherit=strict&x=1",
         ] {
-            assert!(allowed("PUT", &put, Some(q), A, S).is_err(), "{q}");
+            assert!(allowed("PUT", &put, Some(q), A, S, Q).is_err(), "{q}");
         }
-        assert!(allowed("POST", &ver, Some("excludeScript=true"), A, S).is_err());
+        assert!(allowed("POST", &ver, Some("excludeScript=true"), A, S, Q).is_err());
+    }
+
+    #[test]
+    fn a_queue_is_looked_up_only_by_a_name_the_worker_binds() {
+        let p = format!("{PREFIX}/accounts/{A}/queues");
+        for q in [
+            "name=pigeon-ci-events&page=1",
+            "name=pigeon-ci-events",
+            "page=1&name=pigeon-ci-events",
+        ] {
+            assert!(allowed("GET", &p, Some(q), A, S, Q).is_ok(), "{q}");
+        }
+        for q in [
+            "page=1",
+            "name=other",
+            "name=pigeon-ci-events&name=other",
+            "name=pigeon-ci-events&page=2",
+            "name=pigeon-ci-events&per_page=1000",
+            "name=pigeon-ci-events&name=pigeon-ci-events",
+        ] {
+            assert!(allowed("GET", &p, Some(q), A, S, Q).is_err(), "{q}");
+        }
+        assert!(allowed("GET", &p, Some("name=pigeon-ci-events"), A, S, &[]).is_err());
+        assert!(allowed("POST", &p, Some("name=pigeon-ci-events"), A, S, Q).is_err());
+        let consumers = format!("{PREFIX}/accounts/{A}/queues/q1/consumers");
+        assert!(allowed("POST", &consumers, None, A, S, Q).is_err());
     }
 
     #[test]
@@ -490,7 +577,7 @@ mod tests {
             ("GET", format!("{PREFIX}/accounts/{A}/workers/scripts")),
             ("GET", format!("{PREFIX}/accounts/{A}/secrets_store/stores")),
         ] {
-            assert!(allowed(m, &p, None, A, S).is_err(), "{m} {p}");
+            assert!(allowed(m, &p, None, A, S, Q).is_err(), "{m} {p}");
         }
     }
 
@@ -509,6 +596,7 @@ mod tests {
             "GET /accounts/{A}/workers/workers/pigeon-platform",
             "POST /accounts/{A}/workers/scripts/pigeon-platform/subdomain",
             "PUT /accounts/{A}/workers/scripts/pigeon-platform?excludeScript=true&bindings_inherit=strict",
+            "GET /accounts/{A}/queues?name=pigeon-ci-events&page=1",
         ];
         for call in recorded {
             let call = call.replace("{A}", A);
@@ -518,7 +606,7 @@ mod tests {
                 None => (target, None),
             };
             let path = format!("{PREFIX}{path}");
-            assert!(allowed(method, &path, query, A, S).is_ok(), "{call}");
+            assert!(allowed(method, &path, query, A, S, Q).is_ok(), "{call}");
         }
     }
 }

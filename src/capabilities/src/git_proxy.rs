@@ -11,6 +11,10 @@
 //! commits, and the repository's own history when the pack leaves some out, must show the old
 //! commit is an ancestor of the new one. A refused push is answered the way git reports a
 //! refused ref, so `git push` prints why. Every request is logged as one audit line.
+//!
+//! A CI runner fetches with its job token instead: only from this repository, only by
+//! upload-pack, only the one commit its grant names and only until the job's deadline. Its
+//! request is read whole first, so that every object it wants is checked; it never pushes.
 
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -31,6 +35,7 @@ use worker::{
     console_error,
 };
 
+use crate::ci;
 use crate::proxy::{self, Audit, Outcome, ProxyCaller};
 use crate::{Call as ToolCall, Capability, Context, Footprint, Serve, unknown};
 
@@ -447,11 +452,23 @@ impl GitProxy {
         if url.host_str() != Some(self.host.as_str()) {
             return refuse(404, "not found");
         }
-        *caller = match proxy::caller(cx.env, &req).await {
-            Ok(c) => Some(c),
-            // 403, not 401: a 401 would send git looking for a password to prompt for.
-            Err(e) => return refuse(403, &e.to_string()),
-        };
+        // A CI job token fetches its one commit; anything else needs a proxy credential.
+        let mut job_body = None;
+        match bearer(&req)? {
+            Some(t) if t.starts_with(ci::token::PREFIX) => {
+                match self.job(cx, &mut req, &url, &t, caller).await? {
+                    Ok(body) => job_body = body,
+                    Err((status, why)) => return refuse(status, &why),
+                }
+            }
+            _ => {
+                *caller = match proxy::caller(cx.env, &req).await {
+                    Ok(c) => Some(c),
+                    // 403, not 401: a 401 would send git looking for a password to prompt for.
+                    Err(e) => return refuse(403, &e.to_string()),
+                };
+            }
+        }
         let call = match route(
             req.method().as_ref(),
             url.path(),
@@ -516,9 +533,13 @@ impl GitProxy {
         });
         let body = match (call, push) {
             (Call::Refs(_), _) => Body::None,
-            (Call::Rpc(Service::UploadPack), _) => match req.inner().body() {
-                Some(s) => Body::Stream(s.into()),
-                None => Body::None,
+            (Call::Rpc(Service::UploadPack), _) => match job_body {
+                // A job's request, read whole to check its wants.
+                Some(b) => Body::Bytes(b),
+                None => match req.inner().body() {
+                    Some(s) => Body::Stream(s.into()),
+                    None => Body::None,
+                },
             },
             (Call::Rpc(Service::ReceivePack), Some(mut p)) => {
                 if rules.contains(&Rule::FastForward) {
@@ -579,6 +600,84 @@ impl GitProxy {
         ))
     }
 
+    /// Checks a CI job token's request: a fetch of the grant's one commit of this repository,
+    /// before its deadline, and nothing else; never a push. Sets `caller` once the grant is
+    /// known. Answers the request body when it was read to check its wants, or the status and
+    /// reason to refuse with.
+    #[allow(clippy::type_complexity)]
+    async fn job(
+        &self,
+        cx: &Context<'_>,
+        req: &mut Request,
+        url: &worker::Url,
+        presented: &str,
+        caller: &mut Option<ProxyCaller>,
+    ) -> Result<std::result::Result<Option<Vec<u8>>, (u16, String)>> {
+        let no = |status: u16, why: &str| Ok(Err((status, why.to_string())));
+        if !ci::token::reaches(url.path()) {
+            return no(403, "a job token only fetches its own commit");
+        }
+        let call = match route(
+            req.method().as_ref(),
+            url.path(),
+            url.query(),
+            &self.namespace,
+            &self.repo,
+        ) {
+            Ok(c) => c,
+            Err(why) => return no(404, why),
+        };
+        if !matches!(
+            call,
+            Call::Refs(Service::UploadPack) | Call::Rpc(Service::UploadPack)
+        ) {
+            return no(403, "a job token cannot push");
+        }
+        let Some(grant) = ci::job_grant(cx.env, presented).await? else {
+            return no(403, "the job token is unknown or has expired");
+        };
+        *caller = Some(ProxyCaller {
+            id: ci::token::lookup_hash(presented)
+                .map(|h| h[..proxy::ID_LEN].to_string())
+                .unwrap_or_default(),
+            label: format!("ci job {}", grant.job),
+            person: "ci".into(),
+        });
+        let repo = format!("{}/{}", self.namespace, self.repo);
+        let now = worker::js_sys::Date::now() as i64;
+        if !ci::token::allows_fetch(&grant, now, &repo, &grant.commit) {
+            return no(
+                403,
+                "the job token does not reach this repository, or has expired",
+            );
+        }
+        if call == Call::Refs(Service::UploadPack) {
+            return Ok(Ok(None));
+        }
+        let encoding = req.headers().get("Content-Encoding")?;
+        if encoding.is_some_and(|e| !e.eq_ignore_ascii_case("identity")) {
+            return no(415, "a job's fetch must be sent without content encoding");
+        }
+        let declared = req
+            .headers()
+            .get("Content-Length")?
+            .and_then(|n| n.parse::<usize>().ok());
+        if declared.is_some_and(|n| n > git::UPLOAD_REQUEST_MAX) {
+            return no(413, "a job's fetch request is too large");
+        }
+        let body = req.bytes().await?;
+        let asked = match git::upload_request(&body) {
+            Ok(a) => a,
+            Err(why) => return no(400, &why),
+        };
+        match job_fetch_allowed(&asked, |want| {
+            ci::token::allows_fetch(&grant, now, &repo, want)
+        }) {
+            Ok(()) => Ok(Ok(Some(body))),
+            Err(why) => no(403, why),
+        }
+    }
+
     /// The protected-branch updates in `p` that don't move forward, with why; `None` when
     /// every one does.
     async fn not_forward(
@@ -629,6 +728,68 @@ impl GitProxy {
         }
         None
     }
+}
+
+/// Whether a job may make upload-pack request `asked`, given `allowed` for each wanted object:
+/// a fetch (protocol v0, or v2's `fetch`) wanting at least one object, every one allowed, or a
+/// v2 `ls-refs` wanting nothing. Any other v2 command is refused.
+pub fn job_fetch_allowed(
+    asked: &git::UploadRequest,
+    allowed: impl Fn(&str) -> bool,
+) -> std::result::Result<(), &'static str> {
+    match asked.command.as_deref() {
+        None | Some("fetch") => {
+            if asked.wants.is_empty() {
+                return Err("a job's fetch must want its commit");
+            }
+            if asked.wants.iter().all(|w| allowed(w)) {
+                Ok(())
+            } else {
+                Err("a job token fetches only its own commit")
+            }
+        }
+        Some("ls-refs") if asked.wants.is_empty() => Ok(()),
+        _ => Err("a job token can only fetch"),
+    }
+}
+
+/// The regular file at `path` (such as `.pigeon/ci.toml`) in `commit` of repository
+/// `namespace/repo`, or `None` when there is none. Read with a git token minted for it and
+/// revoked after: the commit alone, one commit deep. For the platform's own use, such as CI
+/// reading a job's configuration.
+pub async fn read_file(
+    account: &Account,
+    namespace: &str,
+    repo: &str,
+    commit: &str,
+    path: &str,
+) -> Result<Option<Vec<u8>>> {
+    let (found, token) =
+        artifacts::session(account, namespace, repo, Access::Read, TOKEN_TTL).await?;
+    let remote = Remote {
+        url: found.remote.trim_end_matches('/').to_string(),
+        authorization: format!("Bearer {}", token.value),
+    };
+    let read = git::read_file(&remote, commit, path).await;
+    let revoked = match &token.id {
+        Some(id) => artifacts::revoke(account, namespace, repo, id).await,
+        None => Err(Error::RustError(
+            "a git token came back without an id".into(),
+        )),
+    };
+    let file = read?;
+    revoked?;
+    Ok(file)
+}
+
+/// The bearer token `req` carries, if any.
+fn bearer(req: &Request) -> Result<Option<String>> {
+    Ok(req.headers().get("Authorization")?.and_then(|h| {
+        let (scheme, rest) = h.trim().split_once(' ')?;
+        scheme
+            .eq_ignore_ascii_case("bearer")
+            .then(|| rest.trim().to_string())
+    }))
 }
 
 /// A push refused as git reports it: 200 with every ref refused, or 403 when the client asked
@@ -904,6 +1065,41 @@ mod tests {
         );
         assert_eq!(decide(&empty), Walk::Need(vec![ahead.clone()]));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_job_fetches_only_what_it_is_allowed() {
+        let a = "a".repeat(40);
+        let b = "b".repeat(40);
+        let req = |command: Option<&str>, wants: &[&String]| git::UploadRequest {
+            command: command.map(String::from),
+            wants: wants.iter().map(|w| (*w).clone()).collect(),
+        };
+        let only_a = |w: &str| w == a;
+        assert_eq!(job_fetch_allowed(&req(None, &[&a]), only_a), Ok(()));
+        assert_eq!(
+            job_fetch_allowed(&req(Some("fetch"), &[&a]), only_a),
+            Ok(())
+        );
+        assert_eq!(
+            job_fetch_allowed(&req(Some("ls-refs"), &[]), only_a),
+            Ok(())
+        );
+        for (command, wants) in [
+            (None, vec![&a, &b]),
+            (None, vec![&b]),
+            (None, vec![]),
+            (Some("fetch"), vec![]),
+            (Some("fetch"), vec![&b]),
+            (Some("ls-refs"), vec![&a]),
+            (Some("object-info"), vec![&a]),
+            (Some("bundle-uri"), vec![]),
+        ] {
+            assert!(
+                job_fetch_allowed(&req(command, &wants), only_a).is_err(),
+                "{command:?} {wants:?}"
+            );
+        }
     }
 
     #[test]

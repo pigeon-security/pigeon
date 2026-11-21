@@ -79,6 +79,21 @@ A missing or unknown credential gets 403, not 401, so git does not prompt for a 
 
 Session branches stay in Artifacts. The GitHub mirror copies only `main`.
 
+### CI runners
+
+A CI runner fetches with its job token (prefix `pgn_ci_`) instead of a proxy credential. A job token:
+
+- reaches only `GET info/refs?service=git-upload-pack` and `POST git-upload-pack` of the repository its grant names;
+- can never push, and never reaches `/cf/` or MCP;
+- fetches only the one commit its grant names, until the job's deadline. The proxy reads the whole request first (64 KiB at most) and refuses any `want` of another object, a `want-ref`, and any protocol v2 command other than `fetch` and `ls-refs`;
+- is refused if its request is compressed.
+
+Its audit lines name the caller as `ci job <job> (ci)`.
+
+### Reading a file at a commit
+
+The platform reads a file at a commit, such as `.pigeon/ci.toml`, with `git_proxy::read_file`: it mints a read token, fetches that commit alone (one commit deep), reads the file from the commit's tree, and revokes the token. The pack reader resolves deltas within the pack.
+
 ## Cloudflare API
 
 The base URL is:
@@ -98,13 +113,14 @@ The proxy passes on only the ten calls that `wrangler deploy` of `pigeon-platfor
 | `GET scripts/{s}/deployments` | Workers Scripts Read |
 | `GET scripts/{s}/settings` | Workers Scripts Read |
 | `GET workers/{s}` | Workers Scripts Read |
+| `GET /accounts/{account}/queues?name={queue}&page=1` | Queues Read |
 | `POST scripts/{s}/versions?bindings_inherit=strict` | Workers Scripts Write + Secrets Store Write |
 | `PUT scripts/{s}?excludeScript=true&bindings_inherit=strict` | Workers Scripts Write + Secrets Store Write |
 | `POST scripts/{s}/deployments` | Workers Scripts Write |
 | `PATCH scripts/{s}/script-settings` | Workers Scripts Write |
 | `POST scripts/{s}/subdomain` | Workers Scripts Write |
 
-The `PUT` is used when a Durable Object migration is pending.
+The `PUT` is used when a Durable Object migration is pending. The queues call checks that each queue the Worker produces to exists; it must name a queue in the proxy's settings (`pigeon-ci-events` today), so it can't list the account's queues.
 
 Each call gets a Cloudflare token with only that call's permissions. The token lives 5 minutes and is revoked before the answer returns.
 

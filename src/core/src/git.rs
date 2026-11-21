@@ -79,11 +79,26 @@ pub async fn fetch_filtered(
     haves: &[String],
     filter: Option<&str>,
 ) -> Result<Fetched> {
+    fetch_with(remote, caps, wants, haves, filter, None).await
+}
+
+/// [`fetch_filtered`], and with `depth` only that many commits of history, when the remote
+/// can make a shallow pack; when it can't, the history is whole.
+pub async fn fetch_with(
+    remote: &Remote,
+    caps: &[String],
+    wants: &[String],
+    haves: &[String],
+    filter: Option<&str>,
+    depth: Option<u32>,
+) -> Result<Fetched> {
     let filter = filter.filter(|_| caps.iter().any(|c| c == "filter"));
+    let depth = depth.filter(|_| caps.iter().any(|c| c == "shallow"));
     let asked: Vec<&str> = ["ofs-delta", "no-progress"]
         .into_iter()
         .filter(|c| caps.iter().any(|have| have == c))
         .chain(filter.map(|_| "filter"))
+        .chain(depth.map(|_| "shallow"))
         .collect();
     let mut body = Vec::new();
     for (i, want) in wants.iter().enumerate() {
@@ -93,6 +108,9 @@ pub async fn fetch_filtered(
             format!("want {want}\n")
         };
         body.extend(pkt(line.as_bytes()));
+    }
+    if let Some(d) = depth {
+        body.extend(pkt(format!("deepen {d}\n").as_bytes()));
     }
     if let Some(f) = filter {
         body.extend(pkt(format!("filter {f}\n").as_bytes()));
@@ -131,6 +149,27 @@ pub async fn fetch_filtered(
         acked,
         pack: answer[at..].to_vec(),
     })
+}
+
+/// The regular file at `path` (such as `.pigeon/ci.toml`) in `commit` of `remote`, or `None`
+/// when there is none: the commit alone is fetched, one commit deep, and its tree read.
+pub async fn read_file(remote: &Remote, commit: &str, path: &str) -> Result<Option<Vec<u8>>> {
+    let commit = commit.to_ascii_lowercase();
+    if !is_id(&commit) {
+        return Err(Error::RustError("not a commit id".into()));
+    }
+    let advertised = refs(remote, "git-upload-pack").await?;
+    let fetched = fetch_with(
+        remote,
+        &advertised.caps,
+        std::slice::from_ref(&commit),
+        &[],
+        None,
+        Some(1),
+    )
+    .await?;
+    let objects = crate::pack::objects(&fetched.pack).map_err(Error::RustError)?;
+    crate::pack::read_path(&objects, &commit, path).map_err(Error::RustError)
 }
 
 /// One ref update: from `old` (or [`ZERO`] to create) to `new`.
@@ -612,5 +651,169 @@ mod push_tests {
             at = next;
         }
         assert_eq!(unframed, plain);
+    }
+}
+
+// ---- what a fetch asks for, as a proxy reads it ----
+
+/// The most an upload-pack request body may be, when its wants are checked.
+pub const UPLOAD_REQUEST_MAX: usize = 64 * 1024;
+
+/// What an upload-pack request asks for.
+#[derive(Debug, PartialEq, Eq)]
+pub struct UploadRequest {
+    /// Protocol v2's command, such as `fetch` or `ls-refs`; `None` for protocol v0.
+    pub command: Option<String>,
+    /// Every object ID it wants, lowercase.
+    pub wants: Vec<String>,
+}
+
+/// What a complete `git-upload-pack` request body asks for, in protocol v0 or v2. A want of a
+/// ref by name (`want-ref`), or anything malformed, is an error.
+pub fn upload_request(body: &[u8]) -> std::result::Result<UploadRequest, String> {
+    let bad = |what: &str| format!("the request is malformed: {what}");
+    if body.len() > UPLOAD_REQUEST_MAX {
+        return Err(format!(
+            "the request is too large: over {UPLOAD_REQUEST_MAX} bytes"
+        ));
+    }
+    let mut command: Option<String> = None;
+    let mut wants = Vec::new();
+    let mut seen_delim = false;
+    let mut i = 0usize;
+    while i < body.len() {
+        let head = body
+            .get(i..i + 4)
+            .ok_or_else(|| bad("bytes after the last pkt-line"))?;
+        let mut len = 0usize;
+        for &b in head {
+            let d = (b as char)
+                .to_digit(16)
+                .ok_or_else(|| bad("a pkt-line length is not hex"))?;
+            len = len * 16 + d as usize;
+        }
+        match len {
+            0 | 2 => {
+                i += 4;
+                continue;
+            }
+            1 => {
+                seen_delim = true;
+                i += 4;
+                continue;
+            }
+            3 => return Err(bad("a pkt-line of length 3")),
+            _ => {}
+        }
+        let raw = body
+            .get(i + 4..i + len)
+            .ok_or_else(|| bad("a pkt-line runs past the end"))?;
+        i += len;
+        let raw = raw.strip_suffix(b"\n").unwrap_or(raw);
+        let line = std::str::from_utf8(raw).map_err(|_| bad("a pkt-line is not UTF-8"))?;
+        if let Some(name) = line.strip_prefix("command=") {
+            if seen_delim {
+                return Err(bad("a command after the delimiter"));
+            }
+            if command.is_some() {
+                return Err(bad("more than one command"));
+            }
+            command = Some(name.to_string());
+        } else if line.starts_with("want-ref ") {
+            return Err("want-ref is not accepted".to_string());
+        } else if let Some(rest) = line.strip_prefix("want ") {
+            let id = if command.is_some() {
+                rest
+            } else {
+                rest.split_whitespace().next().unwrap_or("")
+            };
+            let id = id.to_ascii_lowercase();
+            if !is_id(&id) {
+                return Err(bad("a want is not an object ID"));
+            }
+            wants.push(id);
+        } else if line.starts_with("want") {
+            return Err(bad("an unknown want line"));
+        }
+    }
+    Ok(UploadRequest { command, wants })
+}
+
+#[cfg(test)]
+mod upload_tests {
+    use super::*;
+
+    fn p(s: &str) -> Vec<u8> {
+        format!("{:04x}{}\n", s.len() + 5, s).into_bytes()
+    }
+
+    const A: &str = "0123456789abcdef0123456789abcdef01234567";
+    const B: &str = "fedcba9876543210fedcba9876543210fedcba98";
+
+    #[test]
+    fn reads_a_v0_fetch() {
+        let b = [
+            p(&format!("want {A} multi_ack ofs-delta")),
+            p(&format!("want {B}")),
+            b"0000".to_vec(),
+            p("done"),
+        ]
+        .concat();
+        let r = upload_request(&b).unwrap();
+        assert_eq!(r.command, None);
+        assert_eq!(r.wants, [A, B]);
+    }
+
+    #[test]
+    fn reads_a_v2_fetch_and_ls_refs() {
+        let b = [
+            p("command=fetch"),
+            p("agent=git/2.4"),
+            p("object-format=sha1"),
+            b"0001".to_vec(),
+            p("thin-pack"),
+            p(&format!("want {A}")),
+            p("done"),
+            b"0000".to_vec(),
+        ]
+        .concat();
+        let r = upload_request(&b).unwrap();
+        assert_eq!(r.command.as_deref(), Some("fetch"));
+        assert_eq!(r.wants, [A]);
+        let b = [
+            p("command=ls-refs"),
+            b"0001".to_vec(),
+            p("peel"),
+            p("ref-prefix refs/heads/"),
+            b"0000".to_vec(),
+        ]
+        .concat();
+        let r = upload_request(&b).unwrap();
+        assert_eq!(r.command.as_deref(), Some("ls-refs"));
+        assert!(r.wants.is_empty());
+        let r = upload_request(&p(&format!("want {}", A.to_uppercase()))).unwrap();
+        assert_eq!(r.wants, [A]);
+    }
+
+    #[test]
+    fn refuses_what_it_cannot_check() {
+        for b in [
+            p("want-ref refs/heads/main"),
+            p(&format!("wantx {A}")),
+            p("want 1234"),
+            b"0003".to_vec(),
+            b"0010want".to_vec(),
+            [p("done"), b"xy".to_vec()].concat(),
+            [p("command=fetch"), p("command=ls-refs")].concat(),
+            [b"0001".to_vec(), p("command=fetch")].concat(),
+            vec![b'0'; UPLOAD_REQUEST_MAX + 4],
+            b"0007\xff\xfe\n".to_vec(),
+        ] {
+            assert!(
+                upload_request(&b).is_err(),
+                "{:?}",
+                String::from_utf8_lossy(&b[..b.len().min(40)])
+            );
+        }
     }
 }

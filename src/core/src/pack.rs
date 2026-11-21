@@ -39,9 +39,33 @@ struct Object {
     id: Option<String>,
 }
 
+/// Every object in a pack, deltas resolved within it.
+pub struct Objects {
+    /// Each resolved object's kind (1 commit, 2 tree, 3 blob, 4 tag) and data, by ID.
+    pub by_id: HashMap<String, (u8, Vec<u8>)>,
+    /// Deltas whose base is outside the pack (a thin pack), so what they are is unknown.
+    pub unresolved: usize,
+}
+
 /// The commits in `pack` with their parents. The pack is untrusted: anything malformed, or
 /// inflating past [`INFLATED_MAX`], is an error.
 pub fn commits(pack: &[u8]) -> Result<Commits, String> {
+    let objects = objects(pack)?;
+    let mut parents_of = HashMap::new();
+    for (id, (kind, data)) in &objects.by_id {
+        if *kind == 1 {
+            parents_of.insert(id.clone(), parents(data)?);
+        }
+    }
+    Ok(Commits {
+        parents: parents_of,
+        unresolved: objects.unresolved,
+    })
+}
+
+/// Every object in `pack`, deltas resolved where their base is in the pack. The pack is
+/// untrusted: anything malformed, or inflating past [`INFLATED_MAX`], is an error.
+pub fn objects(pack: &[u8]) -> Result<Objects, String> {
     if pack.len() < 32 || pack.get(..4) != Some(b"PACK".as_slice()) {
         return Err(bad("no pack header"));
     }
@@ -148,17 +172,16 @@ pub fn commits(pack: &[u8]) -> Result<Commits, String> {
             break;
         }
     }
-    let mut out = Commits {
-        parents: HashMap::new(),
+    let mut out = Objects {
+        by_id: HashMap::new(),
         unresolved: 0,
     };
-    for o in &objects {
-        match (o.kind, &o.id) {
-            (1, Some(id)) => {
-                out.parents.insert(id.clone(), parents(&o.data)?);
+    for o in objects {
+        match o.id {
+            Some(id) if base_known(o.kind) => {
+                out.by_id.insert(id, (o.kind, o.data));
             }
-            (6 | 7, _) => out.unresolved += 1,
-            _ => {}
+            _ => out.unresolved += 1,
         }
     }
     Ok(out)
@@ -578,5 +601,282 @@ mod tests {
     fn walks_survive_cycles() {
         let g = graph(&[("a", &["b"]), ("b", &["a"])]);
         assert_eq!(walk("o", "a", &g, true), Walk::NotForward);
+    }
+}
+
+// ---- reading a file at a commit ----
+
+/// One entry of a tree.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Entry {
+    /// Its mode in ASCII octal, such as `100644` or `40000`.
+    pub mode: String,
+    pub name: String,
+    /// Its object's ID, 40 lowercase hex.
+    pub id: String,
+}
+
+/// A tree object's entries.
+pub fn tree_entries(data: &[u8]) -> Result<Vec<Entry>, String> {
+    let mut out = Vec::new();
+    let mut rest = data;
+    while !rest.is_empty() {
+        let sp = rest
+            .iter()
+            .position(|&b| b == b' ')
+            .ok_or_else(|| bad("a tree entry has no mode"))?;
+        let mode_bytes = rest
+            .get(..sp)
+            .ok_or_else(|| bad("a tree entry is truncated"))?;
+        if mode_bytes.is_empty()
+            || mode_bytes.len() > 6
+            || !mode_bytes.iter().all(|b| (b'0'..=b'7').contains(b))
+        {
+            return Err(bad("a tree entry has a bad mode"));
+        }
+        let mode = String::from_utf8_lossy(mode_bytes).into_owned();
+        rest = rest
+            .get(sp + 1..)
+            .ok_or_else(|| bad("a tree entry is truncated"))?;
+        let nul = rest
+            .iter()
+            .position(|&b| b == 0)
+            .ok_or_else(|| bad("a tree entry's name is unterminated"))?;
+        let name = rest
+            .get(..nul)
+            .and_then(|n| std::str::from_utf8(n).ok())
+            .ok_or_else(|| bad("a tree entry's name is not UTF-8"))?;
+        if name.is_empty() || name.contains('/') || name == "." || name == ".." {
+            return Err(bad("a tree entry has a bad name"));
+        }
+        let name = name.to_string();
+        rest = rest
+            .get(nul + 1..)
+            .ok_or_else(|| bad("a tree entry is truncated"))?;
+        let id = rest
+            .get(..20)
+            .ok_or_else(|| bad("a tree entry's id is truncated"))?;
+        let id = hex(id);
+        rest = rest.get(20..).unwrap_or_default();
+        out.push(Entry { mode, name, id });
+    }
+    Ok(out)
+}
+
+/// The ID of a commit's tree, from its first header line.
+pub fn commit_tree(data: &[u8]) -> Result<String, String> {
+    let end = data.iter().position(|&b| b == b'\n').unwrap_or(data.len());
+    let id = data
+        .get(..end)
+        .and_then(|line| line.strip_prefix(b"tree ".as_slice()))
+        .and_then(|id| std::str::from_utf8(id).ok())
+        .filter(|id| crate::git::is_id(id))
+        .ok_or_else(|| bad("a commit does not start with its tree"))?;
+    Ok(id.to_string())
+}
+
+/// The regular file at `path` (such as `.pigeon/ci.toml`) in `commit`'s tree, from `objects`;
+/// `None` when there is no regular file there.
+pub fn read_path(objects: &Objects, commit: &str, path: &str) -> Result<Option<Vec<u8>>, String> {
+    let parts: Vec<&str> = path.split('/').collect();
+    if path.is_empty()
+        || parts
+            .iter()
+            .any(|p| p.is_empty() || *p == "." || *p == "..")
+    {
+        return Err("not a file path".to_string());
+    }
+    let Some((1, commit_data)) = objects.by_id.get(commit) else {
+        return Err("the commit is not in the pack".to_string());
+    };
+    let mut tree_id = commit_tree(commit_data)?;
+    let last = parts.len() - 1;
+    for (i, part) in parts.iter().enumerate() {
+        let Some((2, tree_data)) = objects.by_id.get(&tree_id) else {
+            return Err("a tree is not in the pack".to_string());
+        };
+        let Some(entry) = tree_entries(tree_data)?
+            .into_iter()
+            .find(|e| e.name == *part)
+        else {
+            return Ok(None);
+        };
+        if i < last {
+            if entry.mode != "40000" {
+                return Ok(None);
+            }
+            tree_id = entry.id;
+        } else {
+            if entry.mode != "100644" && entry.mode != "100755" {
+                return Ok(None);
+            }
+            return match objects.by_id.get(&entry.id) {
+                Some((3, data)) => Ok(Some(data.clone())),
+                _ => Err("a blob is not in the pack".to_string()),
+            };
+        }
+    }
+    Ok(None)
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    fn id_of(kind_name: &str, data: &[u8]) -> String {
+        let mut h = Sha1::new();
+        h.update(format!("{kind_name} {}\0", data.len()).as_bytes());
+        h.update(data);
+        hex(&h.finalize())
+    }
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    fn tree(entries: &[(&str, &str, &str)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for (mode, name, id) in entries {
+            out.extend_from_slice(format!("{mode} {name}\0").as_bytes());
+            out.extend_from_slice(&unhex(id));
+        }
+        out
+    }
+
+    fn setup() -> (Objects, String) {
+        let a = b"[jobs]\n".to_vec();
+        let a_id = id_of("blob", &a);
+        let readme = b"hello\n".to_vec();
+        let readme_id = id_of("blob", &readme);
+        let link = b"ci.toml".to_vec();
+        let link_id = id_of("blob", &link);
+        let pigeon = tree(&[("100644", "ci.toml", &a_id), ("120000", "link", &link_id)]);
+        let pigeon_id = id_of("tree", &pigeon);
+        let root = tree(&[
+            ("40000", ".pigeon", &pigeon_id),
+            ("100644", "README", &readme_id),
+        ]);
+        let root_id = id_of("tree", &root);
+        let commit = format!("tree {root_id}\nauthor x\n\nmsg").into_bytes();
+        let commit_id = id_of("commit", &commit);
+        let mut by_id = HashMap::new();
+        by_id.insert(a_id, (3, a));
+        by_id.insert(readme_id, (3, readme));
+        by_id.insert(link_id, (3, link));
+        by_id.insert(pigeon_id, (2, pigeon));
+        by_id.insert(root_id, (2, root));
+        by_id.insert(commit_id.clone(), (1, commit));
+        (
+            Objects {
+                by_id,
+                unresolved: 0,
+            },
+            commit_id,
+        )
+    }
+
+    #[test]
+    fn reads_regular_files_only() {
+        let (o, c) = setup();
+        assert_eq!(
+            read_path(&o, &c, ".pigeon/ci.toml").unwrap(),
+            Some(b"[jobs]\n".to_vec())
+        );
+        assert_eq!(
+            read_path(&o, &c, "README").unwrap(),
+            Some(b"hello\n".to_vec())
+        );
+        for none in [
+            "nope",
+            ".pigeon",
+            ".pigeon/link",
+            "README/x",
+            ".pigeon/nope",
+        ] {
+            assert_eq!(read_path(&o, &c, none).unwrap(), None, "{none}");
+        }
+    }
+
+    #[test]
+    fn refuses_bad_paths_and_missing_objects() {
+        let (o, c) = setup();
+        for p in ["/a", "a/", "a//b", "../a", "./a", ""] {
+            assert!(read_path(&o, &c, p).is_err(), "{p}");
+        }
+        assert!(read_path(&o, &"0".repeat(40), "README").is_err());
+        let id = "ab".repeat(20);
+        for t in [
+            tree(&[("100644", "a/b", &id)]),
+            tree(&[("100644", "", &id)]),
+            tree(&[("9", "a", &id)]),
+            tree(&[("100644", "..", &id)]),
+            tree(&[("100644", "a", &id)])[..10].to_vec(),
+        ] {
+            assert!(tree_entries(&t).is_err());
+        }
+        // A tree whose subtree is missing from the pack.
+        let mut by_id = o.by_id.clone();
+        by_id.retain(|_, (k, d)| !(*k == 2 && d.starts_with(b"100644 ci.toml")));
+        let gone = Objects {
+            by_id,
+            unresolved: 0,
+        };
+        assert!(read_path(&gone, &c, ".pigeon/ci.toml").is_err());
+    }
+
+    /// Reads a file at a commit from a pack `git pack-objects` made, deltas and all.
+    #[test]
+    fn reads_a_file_from_a_real_pack() {
+        use std::process::{Command, Stdio};
+        let dir = std::env::temp_dir().join(format!("pigeon-read-path-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".pigeon")).unwrap();
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        let body = "[jobs.test]\nrun = \"cargo test\"\n".repeat(40);
+        std::fs::write(dir.join(".pigeon/ci.toml"), &body).unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "one"]);
+        let changed = format!("{body}# changed\n");
+        std::fs::write(dir.join(".pigeon/ci.toml"), &changed).unwrap();
+        git(&["commit", "-q", "-am", "two"]);
+        let head = git(&["rev-parse", "HEAD"]);
+        let mut child = Command::new("git")
+            .args([
+                "pack-objects",
+                "--stdout",
+                "--revs",
+                "-q",
+                "--delta-base-offset",
+            ])
+            .current_dir(&dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        {
+            use std::io::Write;
+            let mut stdin = child.stdin.take().unwrap();
+            stdin.write_all(format!("{head}\n").as_bytes()).unwrap();
+        }
+        let pack = child.wait_with_output().unwrap().stdout;
+        let objects = objects(&pack).unwrap();
+        assert_eq!(objects.unresolved, 0);
+        let got = read_path(&objects, &head, ".pigeon/ci.toml").unwrap();
+        assert_eq!(got.as_deref(), Some(changed.as_bytes()));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

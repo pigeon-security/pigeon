@@ -318,6 +318,30 @@ checked: `4f94676cb2cbe46fd985b089ca97ea27.artifacts.cloudflare.net` and `api.cl
 `github.com`: only after checking the session's own first clone and the GitHub tools don't
 depend on the allowlist entry; the hand-back will say what was checked.
 
+## Phase 5: CI runners and reading files (asked for after phase 4)
+
+- **Job tokens in the git proxy.** A `pgn_ci_` bearer is checked with `ci::token::reaches`,
+  then `ci::job_grant`; only upload-pack of the grant's repository, before its deadline. A
+  fetch is read whole (`git::upload_request`, 64 KiB at most, v0 and v2) and every `want`
+  must pass `ci::token::allows_fetch`; `want-ref`, v2 commands other than `fetch` and
+  `ls-refs`, compressed bodies and every push are refused (`git_proxy::job_fetch_allowed`,
+  unit-tested). Audited as `ci job <job> (ci)`.
+- **Reading a file at a commit.** `pack::objects` (every object, deltas resolved within the
+  pack), `pack::tree_entries`, `pack::commit_tree` and `pack::read_path` in core;
+  `git::read_file(remote, commit, path)` fetches the commit alone, one commit deep; the
+  capability-level `git_proxy::read_file(account, namespace, repo, commit, path)` mints and
+  revokes the read token around it, for the CI scheduler's `ProxyFiles`. Tested on a pack
+  `git pack-objects` made with deltas. The CI plan's note that `pack.rs` refuses deltas is out
+  of date: it resolves deltas whose base is in the pack, and a fetched pack is complete.
+- **The cf_proxy allowlist**, re-recorded with `wrangler.toml`'s migration v2 and its
+  `pigeon-ci-events` producer, both deploy routes: one new call,
+  `GET /accounts/{a}/queues?name=<queue>&page=1` (wrangler's `ensureQueuesExistByConfig`),
+  with Queues Read. It must name a queue in `CfProxy::queues`. No other call changed.
+- Only checkable live: whether Artifacts serves a `want` of a commit that is not a branch
+  tip (`allowReachableSHA1InWant`); both the runner's fetch and `read_file` rely on it.
+  Whether uploading a Worker with a queue producer binding needs more than Workers Scripts
+  Write.
+
 ## Risks
 
 - **Accepted risk (the person's decision, during phase 4): a proxy credential is effectively
