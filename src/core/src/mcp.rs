@@ -66,11 +66,7 @@ pub async fn answer(
             }
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
             match call(name, &args).await {
-                Ok(v) => json!({
-                    "content": [{ "type": "text", "text": text(&v) }],
-                    "structuredContent": v,
-                    "isError": false,
-                }),
+                Ok(v) => call_result(v),
                 Err(e) => json!({
                     "content": [{ "type": "text", "text": e.to_string() }],
                     "isError": true,
@@ -86,6 +82,34 @@ fn error(id: Value, code: i64, message: &str) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
 }
 
+/// A tool's successful result. MCP requires `structuredContent` to be an object, so a list or
+/// scalar goes in the text only; otherwise clients reject the whole result.
+fn call_result(v: Value) -> Value {
+    let mut r = json!({
+        "content": [{ "type": "text", "text": text(&v) }],
+        "isError": false,
+    });
+    if v.is_object() {
+        r["structuredContent"] = v;
+    }
+    r
+}
+
 fn text(v: &Value) -> String {
     serde_json::to_string_pretty(v).unwrap_or_default()
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn structured_content_only_for_objects() {
+        let obj = call_result(json!({ "a": 1 }));
+        assert_eq!(obj["structuredContent"], json!({ "a": 1 }));
+        let list = call_result(json!([{ "a": 1 }]));
+        assert!(list.get("structuredContent").is_none());
+        assert!(list["content"][0]["text"].as_str().unwrap().contains("\"a\""));
+    }
 }
