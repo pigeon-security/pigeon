@@ -251,6 +251,9 @@ pub fn land() -> land::Settings {
         deploy_job: "deploy".into(),
         // Its runner hands the deploy job its token; see ci/runner/entrypoint.sh.
         deploy_connector: Some("containers".into()),
+        // The MCP server portal on mcp.pigeon.dev lists this platform as server `pigeon`
+        // (docs/plans/mcp-portal.md).
+        portal_servers: vec!["pigeon".into()],
     }
 }
 

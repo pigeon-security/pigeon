@@ -16,6 +16,7 @@ pub mod git;
 pub mod gitobj;
 pub mod identity;
 pub mod mcp;
+pub mod mcp_portal;
 pub mod oauth;
 pub mod oidc;
 pub mod pack;

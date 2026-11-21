@@ -78,6 +78,9 @@ pub struct Settings {
     /// The CI connector the deploy job is pinned to: one whose runner can hand the job its
     /// token, such as `containers`.
     pub deploy_connector: Option<String>,
+    /// The MCP server portal servers (their server IDs, such as `pigeon`) to sync once a
+    /// landing has deployed, so the portal lists the deployed tools at once.
+    pub portal_servers: Vec<String>,
 }
 
 impl Settings {
@@ -687,6 +690,41 @@ impl Lander {
         Ok(true)
     }
 
+    /// Syncs the portal's servers after landing `id` deployed, and adds how each went to its
+    /// detail. A sync that fails leaves the landing landed: the portal syncs on its own within
+    /// hours, and the detail says so.
+    async fn sync_portal(&self, id: &str, detail: &str) {
+        let s = &self.settings;
+        if s.portal_servers.is_empty() {
+            return;
+        }
+        let account = match crate::ci::scheduler::account(&self.env, &s.parent).await {
+            Ok(a) => a,
+            Err(e) => {
+                console_error!("portal sync after {id}: {e}");
+                return;
+            }
+        };
+        let mut said = Vec::new();
+        for server in &s.portal_servers {
+            let outcome = match pigeon_core::mcp_portal::sync(&account, server).await {
+                Ok(v) => v["status"].as_str().unwrap_or("synced").to_string(),
+                Err(e) => {
+                    console_error!("portal sync of `{server}` after {id}: {e}");
+                    format!("not synced ({e})")
+                }
+            };
+            said.push(format!("portal server {server}: {outcome}"));
+        }
+        let text = format!("{detail}; {}", said.join("; "));
+        if let Err(e) = self.db.exec(
+            "UPDATE landings SET detail = ? WHERE id = ?",
+            vec![text.into(), id.into()],
+        ) {
+            console_error!("portal sync after {id}: {e}");
+        }
+    }
+
     /// A step that failed on the gateway's side: tried again, up to [`STEP_TRIES`], then an error.
     fn retry_or_fail(&self, id: &str, why: &str) -> Result<()> {
         let Some(row) = self.row(id)? else {
@@ -970,6 +1008,9 @@ impl Lander {
                 Some(job) => {
                     if let Some((passed, detail)) = self.job_ended(job).await? {
                         self.apply(&row, &Seen::JobEnded { passed }, Some(&detail))?;
+                        if passed {
+                            self.sync_portal(&row.id, &detail).await;
+                        }
                     }
                 }
             },

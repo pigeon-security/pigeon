@@ -166,6 +166,17 @@ then share that one service user, kept apart from people. That is phase 5, if wa
 - The portal **does** pass pigeon's `instructions` on, under "pigeon (Portal tool prefix: pigeon_)". The instructions need no rewording.
 - Still open: whether some sessions see this connector by a server UUID, as with the old one. If a session shows one, it is added to `PIGEON` in the generator.
 
+## Phase 3: the sync at deploy
+
+Once a landing's deploy job has passed, the Lander syncs each server in `land::Settings::portal_servers` (`pigeon`):
+- It calls `POST /accounts/{account}/access/ai-controls/mcp/servers/{id}/sync` with a token minted for that call alone, holding `MCP Portals Write` (`pigeon_core::mcp_portal`).
+- It appends the outcome to the landing's detail: `portal server pigeon: ready`, or `not synced (why)`.
+- A failed sync never fails a landing. The portal syncs on its own within about two hours anyway.
+
+With the sync in place, the person switched `call` off at the portal. A tool switched off there is then out of reach for every session using the portal.
+
+Per the docs, newly discovered tools are enabled by default. The docs don't say whether a tool switched off in the dashboard stays off after a sync. The first landing after `call` is switched off checks that.
+
 ## Phases
 
 | Phase | What | Who | Lands with |
