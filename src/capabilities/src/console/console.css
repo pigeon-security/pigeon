@@ -1,0 +1,124 @@
+/* The console: its header, tabs and account card, the sign-in panel, sections, the overview's
+   stat cards, the chart and the settings rows. It loads after the design system's stylesheet,
+   uses its custom properties, and adds the series colours and the icon ring. */
+
+/* Series colours and the icon ring: dark first, light by media query or data-theme */
+:root { --s1: #D46E9B; --s2: #6094DA; --s3: #D47A2A; --icon-ring: rgba(255, 255, 255, .45); }
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) { --s1: #9A3F68; --s2: #2C5E9E; --s3: #A9520F; }
+}
+:root[data-theme="light"] { --s1: #9A3F68; --s2: #2C5E9E; --s3: #A9520F; }
+
+/* Visually hidden, still read */
+.sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0; }
+
+/* Page */
+#console { box-sizing: border-box; max-width: 1120px; margin-inline: auto; padding-block: 18px 60px; padding-inline: max(16px, env(safe-area-inset-left, 0px)) max(16px, env(safe-area-inset-right, 0px)); }
+#console main { max-width: none; margin: 0; padding: 0; }
+.muted { color: var(--muted); }
+.c-error { color: var(--warn); }
+
+/* Header: the icon, the tabs, the session time and the account button */
+.c-header { display: flex; align-items: center; gap: 4px 20px; border-bottom: 1px solid var(--line); margin-bottom: 32px; }
+.c-brand, .c-right { padding-block: 10px; flex-shrink: 0; }
+.c-right { display: flex; align-items: center; gap: 12px; margin-left: auto; }
+nav.c-tabs { flex: 1; min-width: 0; align-self: stretch; display: flex; gap: 4px; overflow-x: auto; scrollbar-width: none; margin-bottom: -1px; }
+nav.c-tabs::-webkit-scrollbar { display: none; }
+a.c-tab { display: inline-flex; align-items: center; padding: 0 12px; font: 600 14px/1.2 var(--font-sans); color: var(--muted); text-decoration: none; white-space: nowrap; border-bottom: 2px solid transparent; }
+a.c-tab[aria-current="page"] { color: var(--ink); border-bottom-color: var(--accent); }
+.c-tab .n { font: 600 11px/1 var(--font-mono); background: var(--accent-soft); color: var(--ink); border-radius: 999px; padding: 3px 6px; margin-left: 7px; }
+@media (max-width: 640px) {
+  .c-header { flex-wrap: wrap; }
+  nav.c-tabs { order: 3; flex-basis: 100%; }
+  a.c-tab { padding-block: 10px; }
+}
+
+/* Icons, avatars and the account button */
+.c-icon, .c-avatar { display: block; width: 44px; height: 44px; border-radius: 22%; box-shadow: 0 0 0 1.33px var(--icon-ring); object-fit: cover; }
+.c-avatar.c-initials { display: grid; place-items: center; background: var(--accent-soft); color: var(--ink); font: 700 15px var(--font-sans); }
+button.c-me { appearance: none; background: none; border: 0; padding: 0; margin: 0; font: inherit; color: inherit; cursor: pointer; border-radius: 22%; }
+button.c-me[aria-expanded="true"] .c-avatar { box-shadow: 0 0 0 2px rgba(255, 255, 255, .7); }
+
+/* Session time */
+.c-time { display: inline-flex; align-items: center; gap: 8px; font: var(--type-eyebrow); letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+.c-time .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--good); }
+
+/* Account card */
+.c-me-wrap { position: relative; }
+.c-menu { position: absolute; right: 0; top: calc(100% + 10px); width: min(320px, calc(100vw - 32px)); z-index: 15; gap: 14px; }
+.c-menu-who { display: flex; align-items: center; gap: 12px; }
+.c-menu-who .c-avatar { width: 56px; height: 56px; flex-shrink: 0; }
+.c-menu-who > div { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0; }
+.c-menu-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.c-kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; margin: 0; font: var(--type-small); }
+.c-kv dt { color: var(--muted); }
+.c-kv dd { margin: 0; color: var(--ink2); min-width: 0; overflow-wrap: anywhere; }
+
+/* Sign-in panel */
+.c-signin { min-height: 60vh; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; }
+.c-signin .card { width: min(100%, 380px); align-items: center; gap: 18px; padding: 36px 28px; }
+.c-signin .card p { color: var(--muted); }
+
+/* Sections */
+.c-section { display: flex; flex-direction: column; gap: 18px; scroll-margin-top: 16px; }
+.c-section + .c-section { margin-top: 48px; }
+.c-section-h { display: flex; flex-direction: column; gap: 4px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+.c-section-h h2 { margin: 0; font: var(--type-title); }
+.c-section-h p { margin: 0; font: var(--type-small); color: var(--muted); }
+
+/* Overview: the alert and the stat cards */
+.c-alert { flex-direction: row; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 16px 24px; padding: 22px 28px; }
+.c-alert .msg { display: flex; flex-direction: column; gap: 8px; min-width: 0; flex: 1 1 280px; }
+.c-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: 24px; margin-top: 24px; }
+.c-stat { gap: 0; padding: 26px 28px 24px; }
+.c-stat .eyebrow { margin-bottom: 16px; }
+.c-stat-n { font: 700 44px/1 var(--font-sans); letter-spacing: -0.025em; font-variant-numeric: tabular-nums; margin-bottom: 22px; }
+.c-stat-link { align-self: flex-start; font: 600 14px/1.3 var(--font-sans); color: var(--accent); text-decoration: none; }
+.c-stat-link:hover { text-decoration: underline; }
+
+/* Pills with a colour swatch */
+.spill { display: inline-flex; align-items: center; gap: 8px; font: 500 13px/1.4 var(--font-sans); color: var(--muted); background: var(--chip); border: 1.5px solid var(--line); border-radius: var(--radius-pill); padding: 5px 13px 5px 11px; white-space: nowrap; }
+.spill i { display: block; flex-shrink: 0; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+.spill strong { color: var(--ink); font-weight: 600; }
+.pills { display: flex; flex-wrap: wrap; gap: 8px 10px; }
+
+/* The chart, its marks and its tooltip */
+.c-chart { position: relative; width: 100%; min-width: 0; }
+.c-chart svg { display: block; touch-action: pan-y; }
+.c-chart svg:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: 6px; }
+.c-grid { stroke: var(--line); stroke-opacity: .45; }
+.c-base { stroke: var(--line); }
+.c-axis { fill: var(--muted); font: 11px var(--font-mono); font-variant-numeric: tabular-nums; }
+.c-col { transition: opacity .12s; }
+.c-col.dim { opacity: .35; }
+.c-tip { position: absolute; pointer-events: none; z-index: 5; min-width: 170px; box-sizing: border-box; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; box-shadow: var(--shadow-offset) var(--shadow-offset) 0 var(--shadow); display: flex; flex-direction: column; gap: 5px; font: var(--type-small); }
+.c-tip-row { display: flex; align-items: center; gap: 8px; color: var(--ink2); }
+.c-tip-row i { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.c-tip-row b { margin-left: auto; color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+.c-tip-total { border-top: 1px solid var(--line); padding-top: 5px; }
+
+/* The range control */
+.c-range { display: inline-flex; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.c-range button { appearance: none; background: transparent; border: 0; padding: 6px 11px; font: 500 13px/1.3 var(--font-sans); color: var(--muted); cursor: pointer; }
+.c-range button[aria-pressed="true"] { background: var(--accent-soft); color: var(--ink); }
+.c-range button + button { border-left: 1px solid var(--line); }
+
+/* Tables behind a disclosure */
+details.c-table summary { font: var(--type-small); color: var(--muted); cursor: pointer; }
+.c-table table { width: 100%; border-collapse: collapse; font: var(--type-small); margin-top: 8px; }
+.c-table th { font: var(--type-eyebrow); letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+.c-table td { padding: 8px; border-bottom: 1px solid var(--line); color: var(--ink2); font-variant-numeric: tabular-nums; }
+.c-scroll { overflow-x: auto; }
+
+/* Settings: input rows, inputs, the quiet button, lists */
+.c-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.c-row > input { flex: 1 1 180px; }
+.c-input { box-sizing: border-box; width: 100%; min-width: 0; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--chip); color: var(--ink); font: var(--type-small); font-family: var(--font-mono); }
+.button.c-quiet { color: var(--ink); background: var(--chip); border: 1px solid var(--line); box-shadow: none; min-height: 32px; padding: 5px 10px; font-size: 13px; }
+.c-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 10px; }
+.c-list li { display: flex; align-items: center; gap: 12px; padding: 10px 12px; }
+.c-list li + li { border-top: 1px solid var(--line); }
+
+@media (prefers-reduced-motion: reduce) {
+  .c-col { transition: none; }
+}
