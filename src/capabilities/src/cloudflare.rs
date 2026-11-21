@@ -20,7 +20,13 @@ pub async fn call(token: &str, method: Method, path: &str, body: Option<&Value>)
     let request = Request::new_with_init(&format!("{API}{path}"), &init)?;
     let mut response = Fetch::Request(request).send().await?;
     let status = response.status_code();
-    let v: Value = response.json().await?;
+    let text = response.text().await?;
+    // Some calls, such as Artifacts' deletes, answer success with no body.
+    if text.trim().is_empty() && (200..300).contains(&status) {
+        return Ok(Value::Null);
+    }
+    let v: Value = serde_json::from_str(&text)
+        .map_err(|e| Error::RustError(format!("{path}: {status}: the answer is not JSON: {e}")))?;
     if v["success"].as_bool() == Some(true) {
         Ok(v["result"].clone())
     } else {
