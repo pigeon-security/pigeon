@@ -231,7 +231,7 @@ pub trait Connector {
 }
 pub struct Run { pub job: String, pub attempt: u32, pub repo: String, pub commit: String,
                  pub name: String, pub script: String, pub class: Class, pub timeout_min: u32,
-                 pub token: Option<String>, pub runner_url: String, pub git_url: String }
+                 pub token: Option<String>, pub runner_url: String, pub git_url: String }  // git_url on proxy.pigeon.dev
 pub struct Dispatched { pub handle: String, pub url: Option<String> }
 pub struct Hook { pub headers: Vec<(String, String)>, pub body: Vec<u8> }
 pub struct Seen { pub handle: String, pub report: Report, pub url: Option<String> }

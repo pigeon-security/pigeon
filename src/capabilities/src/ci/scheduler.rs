@@ -495,7 +495,7 @@ impl Scheduler {
                 timeout_min: job.timeout_min,
                 token,
                 runner_url: format!("https://{host}/ci/runner/{}", row.id),
-                git_url: format!("https://{host}/git/{}.git", row.repo),
+                git_url: format!("https://{}/git/{}.git", self.settings.proxy_host, row.repo),
             };
             let cx = self.cx();
             let result = connector

@@ -196,6 +196,7 @@ pub fn ci() -> ci::Settings {
         files: Box::new(ProxyFiles),
         repos: vec![format!("{NAMESPACE}/{REPO}")],
         host: HOST.into(),
+        proxy_host: PROXY_HOST.into(),
         parent: PARENT_TOKEN.into(),
         wait_limit_ms: 5 * 60_000,
     }

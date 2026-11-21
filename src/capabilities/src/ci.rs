@@ -84,7 +84,7 @@ pub struct Run {
     pub token: Option<String>,
     /// Where the runner reports: `https://{host}/ci/runner/{job}`.
     pub runner_url: String,
-    /// Where the runner fetches: `https://{host}/git/{repo}.git`.
+    /// Where the runner fetches: `https://{proxy_host}/git/{repo}.git`.
     pub git_url: String,
 }
 
@@ -198,8 +198,10 @@ pub struct Settings {
     pub files: Box<dyn Files>,
     /// The repositories CI may run, as `namespace/name`.
     pub repos: Vec<String>,
-    /// The platform's hostname.
+    /// The platform's hostname: runners report here.
     pub host: String,
+    /// The proxies' hostname: runners fetch through its git proxy.
+    pub proxy_host: String,
     /// The Secrets Store binding of the parent token, for the notes push.
     pub parent: String,
     /// How long a queued job waits for its first-ranked connector before any other will do.
