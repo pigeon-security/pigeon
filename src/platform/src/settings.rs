@@ -7,7 +7,7 @@ use pigeon_capabilities::deploys::Deploys;
 use pigeon_capabilities::mirror::{self, Mirror};
 use pigeon_capabilities::oauth::OAuth;
 use pigeon_capabilities::passkeys::Passkeys;
-use pigeon_capabilities::protected_host::ProtectedHost;
+use pigeon_capabilities::public_host::{PublicHost, Retire};
 use pigeon_capabilities::site::{Retired, Site};
 use pigeon_capabilities::source::Source;
 use pigeon_capabilities::users::Users;
@@ -20,7 +20,7 @@ pub const PARENT_TOKEN: &str = "CF_PARENT_TOKEN";
 
 const ZONE: &str = "pigeon.dev";
 
-/// The platform's hostname: behind Access, but for its `/auth` pages.
+/// The platform's hostname, in public: its paths check their callers themselves.
 pub const HOST: &str = "platform.pigeon.dev";
 const NAMESPACE: &str = "pigeon-security";
 const REPO: &str = "pigeon";
@@ -29,26 +29,24 @@ const BRANCH: &str = "main";
 /// The capabilities this Worker hosts.
 pub fn capabilities() -> Vec<Box<dyn Capability>> {
     vec![
-        Box::new(ProtectedHost {
+        // Every path on the platform checks its callers itself (/mcp and /oauth with OAuth,
+        // /auth with passkeys) or is open to all (/health), so no Access is in front of it.
+        Box::new(PublicHost {
             zone: ZONE.into(),
             host: HOST.into(),
             worker: WORKER.into(),
-            app: "pigeon-platform".into(),
-            service_token: "pigeon-platform".into(),
-            client_id_secret: "PLATFORM_ACCESS_CLIENT_ID".into(),
-            client_secret_secret: "PLATFORM_ACCESS_CLIENT_SECRET".into(),
-            // Claude sessions, which send their token in one header: Access takes only
-            // Authorization for it.
-            guests: vec!["pigeon-claude".into()],
-            token_header: Some("Authorization".into()),
-            // Paths that check their callers themselves: the passkey pages, OAuth's discovery
-            // and endpoints, and the MCP endpoint, which takes OAuth bearer tokens.
-            public_paths: vec![
-                "/auth".into(),
-                "/oauth".into(),
-                "/.well-known".into(),
-                "/mcp".into(),
-            ],
+            retire: Retire {
+                apps: ["", "/auth", "/oauth", "/.well-known", "/mcp"]
+                    .iter()
+                    .map(|path| format!("{HOST}{path}"))
+                    .collect(),
+                policies: vec!["pigeon-platform".into(), "pigeon-platform-public".into()],
+                service_tokens: vec!["pigeon-platform".into(), "pigeon-claude".into()],
+                secrets: vec![
+                    "PLATFORM_ACCESS_CLIENT_ID".into(),
+                    "PLATFORM_ACCESS_CLIENT_SECRET".into(),
+                ],
+            },
             tool: "setup_platform",
         }),
         Box::new(Site {

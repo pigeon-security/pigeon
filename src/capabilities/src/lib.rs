@@ -9,6 +9,7 @@ pub mod mirror;
 pub mod oauth;
 pub mod passkeys;
 pub mod protected_host;
+pub mod public_host;
 pub mod site;
 pub mod source;
 pub mod users;
