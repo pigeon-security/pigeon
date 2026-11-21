@@ -3,6 +3,13 @@
 //! `{gateway}_{provider}_{alias}`), sends requests through it and reads its logs. Requests carry
 //! `cf-aig-authorization`, a token minted for the call and revoked after; a provider's key never
 //! leaves Cloudflare.
+//!
+//! Each request also carries `cf-aig-metadata`, up to [`MAX_TAGS`] tags naming who sent it and
+//! why, and `cf-aig-collect-log-payload: false`, so the gateway logs keep tokens, cost, model,
+//! status and the tags but never the prompt or the answer. A gateway has no setting for that:
+//! it is per request (<https://developers.cloudflare.com/ai-gateway/observability/logging/>).
+//! The logs name a model as `anthropic/claude-haiku-5.5` where a request named
+//! `claude-haiku-5-5`; [`canonical_model`] reads both as one.
 
 use std::collections::BTreeMap;
 
@@ -28,6 +35,30 @@ pub const RUN_PERMISSIONS: [&str; 1] = ["AI Gateway Run"];
 pub const SECRET_SCOPE: &str = "ai_gateway";
 
 const GATEWAY: &str = "https://gateway.ai.cloudflare.com/v1";
+
+/// The header a request's tags go in, as a JSON object
+/// (<https://developers.cloudflare.com/ai-gateway/observability/custom-metadata/>).
+pub const METADATA_HEADER: &str = "cf-aig-metadata";
+
+/// The header that has a request's log kept without its request and response bodies.
+pub const PAYLOAD_HEADER: &str = "cf-aig-collect-log-payload";
+
+/// How many tags a request may carry: the gateway keeps the first five and drops the rest.
+pub const MAX_TAGS: usize = 5;
+
+/// The tags pigeon sends with a request, and reads back from its log.
+pub mod tag {
+    /// The ID of the user who sent it.
+    pub const CALLER: &str = "caller";
+    /// Their name.
+    pub const CALLER_NAME: &str = "caller_name";
+    /// The ID of the standard user they act for, when linked.
+    pub const FOR: &str = "for";
+    /// That user's name.
+    pub const FOR_NAME: &str = "for_name";
+    /// What the request was for, as its sender labelled it.
+    pub const TASK: &str = "task";
+}
 
 /// How long to wait before each retry of a request refused with 401: a token minted moments
 /// before may not have reached the gateway yet.
@@ -195,16 +226,47 @@ pub struct Ran {
     pub body: Value,
 }
 
+/// `tags` as the [`METADATA_HEADER`] value: a JSON object of the tags with a value, or `None`
+/// when none has one. More than [`MAX_TAGS`], or a key the gateway reserves (`cf.`), is an error
+/// rather than a tag the gateway would silently drop.
+pub fn metadata_header(tags: &[(&str, &str)]) -> Result<Option<String>> {
+    let kept: BTreeMap<&str, &str> = tags
+        .iter()
+        .filter(|(_, v)| !v.is_empty())
+        .copied()
+        .collect();
+    if kept.len() > MAX_TAGS {
+        return Err(worker::Error::RustError(format!(
+            "{} tags; the gateway keeps {MAX_TAGS}",
+            kept.len()
+        )));
+    }
+    if let Some(k) = kept.keys().find(|k| k.starts_with("cf.")) {
+        return Err(worker::Error::RustError(format!(
+            "`{k}`: the gateway reserves `cf.` tags"
+        )));
+    }
+    Ok((!kept.is_empty()).then(|| json!(kept).to_string()))
+}
+
 /// Sends `body` to `provider`'s `path` (such as `v1/messages`) through gateway `gateway`, with
-/// `headers` beside the gateway's own. The provider's key is the gateway's, so none is sent.
+/// `headers` beside the gateway's own and `tags` in [`METADATA_HEADER`]. The provider's key is
+/// the gateway's, so none is sent; the log keeps no payload ([`PAYLOAD_HEADER`]).
 pub async fn run(
     account: &Account,
     gateway: &str,
     provider: &str,
     path: &str,
     headers: &[(&str, &str)],
+    tags: &[(&str, &str)],
     body: &Value,
 ) -> Result<Ran> {
+    let metadata = metadata_header(tags)?;
+    let mut headers = headers.to_vec();
+    headers.push((PAYLOAD_HEADER, "false"));
+    if let Some(m) = &metadata {
+        headers.push((METADATA_HEADER, m));
+    }
     let token = Scoped::open(
         account,
         "ai-gateway-run",
@@ -212,7 +274,7 @@ pub async fn run(
     )
     .await?;
     let url = format!("{GATEWAY}/{}/{gateway}/{provider}/{path}", account.id);
-    let ran = send(token.value(), &url, headers, body).await;
+    let ran = send(token.value(), &url, &headers, body).await;
     token.finish(ran).await
 }
 
@@ -271,15 +333,95 @@ pub struct Log {
     pub status_code: Option<u16>,
     #[serde(default)]
     pub duration: Option<f64>,
+    /// The request's tags; the gateway lists them as a string holding a JSON object.
+    #[serde(default, deserialize_with = "tags_of")]
+    pub metadata: BTreeMap<String, String>,
+    /// Whether the gateway could keep the request and response bodies: `false` once
+    /// [`PAYLOAD_HEADER`] is sent, `None` for logs from before the gateway reported it.
+    #[serde(default)]
+    pub collect_log_payload: Option<bool>,
 }
 
-/// Gateway `gateway`'s logs since `since_ms` (milliseconds since the epoch), newest first, of
-/// `provider` only when named: at most `max`, so a busy gateway cannot run a call long.
+impl Log {
+    /// Tag `key`, when the request carried it.
+    pub fn tag(&self, key: &str) -> Option<&str> {
+        self.metadata.get(key).map(String::as_str)
+    }
+}
+
+/// A log's `metadata`, whether listed as a string holding a JSON object or as the object; a
+/// number or boolean reads as its text, and anything else as no tags.
+fn tags_of<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<BTreeMap<String, String>, D::Error> {
+    let v = Value::deserialize(d)?;
+    let v = match v {
+        Value::String(s) => serde_json::from_str(&s).unwrap_or(Value::Null),
+        v => v,
+    };
+    Ok(v.as_object()
+        .map(|o| {
+            o.iter()
+                .filter_map(|(k, v)| {
+                    let v = match v {
+                        Value::String(s) => s.clone(),
+                        Value::Number(_) | Value::Bool(_) => v.to_string(),
+                        _ => return None,
+                    };
+                    Some((k.clone(), v))
+                })
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+/// One name for a model whichever form names it: without a provider prefix (`anthropic/`),
+/// lower case, with `-` for `.`. So a request's `claude-haiku-5-5` and a log's
+/// `anthropic/claude-haiku-5.5` are both `claude-haiku-5-5`.
+pub fn canonical_model(model: &str) -> String {
+    let bare = model.rsplit('/').next().unwrap_or(model);
+    bare.trim().to_lowercase().replace('.', "-")
+}
+
+/// Which logs to count; an unset field keeps all.
+#[derive(Debug, Default, Clone)]
+pub struct Filter {
+    pub provider: Option<String>,
+    /// In either form [`canonical_model`] reads.
+    pub model: Option<String>,
+    /// A user's ID or name, as the sender or as the person the sender acted for.
+    pub caller: Option<String>,
+    pub task: Option<String>,
+}
+
+impl Filter {
+    /// Whether `log` is one to count.
+    pub fn keeps(&self, log: &Log) -> bool {
+        let caller = |c: &str| {
+            [tag::CALLER, tag::CALLER_NAME, tag::FOR, tag::FOR_NAME]
+                .iter()
+                .any(|k| log.tag(k) == Some(c))
+        };
+        self.provider.as_deref().is_none_or(|p| log.provider == p)
+            && self
+                .model
+                .as_deref()
+                .is_none_or(|m| canonical_model(&log.model) == canonical_model(m))
+            && self.caller.as_deref().is_none_or(caller)
+            && self
+                .task
+                .as_deref()
+                .is_none_or(|t| log.tag(tag::TASK) == Some(t))
+    }
+}
+
+/// Gateway `gateway`'s logs since `since_ms` (milliseconds since the epoch), newest first, those
+/// `filter` keeps only: at most `max`, so a busy gateway cannot run a call long.
 pub async fn logs(
     account: &Account,
     gateway: &str,
     since_ms: f64,
-    provider: Option<&str>,
+    filter: &Filter,
     max: usize,
 ) -> Result<Vec<Log>> {
     let token = Scoped::open(
@@ -288,7 +430,7 @@ pub async fn logs(
         vec![Policy::new(Scope::Account, &READ_PERMISSIONS)],
     )
     .await?;
-    let read = logs_with(token.value(), account, gateway, since_ms, provider, max).await;
+    let read = logs_with(token.value(), account, gateway, since_ms, filter, max).await;
     token.finish(read).await
 }
 
@@ -297,7 +439,7 @@ async fn logs_with(
     account: &Account,
     gateway: &str,
     since_ms: f64,
-    provider: Option<&str>,
+    filter: &Filter,
     max: usize,
 ) -> Result<Vec<Log>> {
     const PER_PAGE: usize = 50;
@@ -316,7 +458,7 @@ async fn logs_with(
             if Date::parse(&log.created_at) < since_ms {
                 return Ok(out);
             }
-            if provider.is_none_or(|p| log.provider == p) {
+            if filter.keeps(&log) {
                 out.push(log);
             }
             if out.len() >= max {
@@ -330,11 +472,54 @@ async fn logs_with(
     Ok(out)
 }
 
-/// Requests, tokens and cost for one provider's model.
+/// What [`summarize`] can group logs by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Dimension {
+    /// The provider and the model, in [`canonical_model`]'s form.
+    Model,
+    /// Who sent the request, and whom they acted for.
+    Caller,
+    /// The request's task label.
+    Task,
+}
+
+impl Dimension {
+    /// Every dimension, by its name.
+    pub const ALL: [(&'static str, Dimension); 3] = [
+        ("model", Dimension::Model),
+        ("caller", Dimension::Caller),
+        ("task", Dimension::Task),
+    ];
+
+    /// The dimension named `name`.
+    pub fn named(name: &str) -> Option<Dimension> {
+        Self::ALL.iter().find(|(n, _)| *n == name).map(|(_, d)| *d)
+    }
+
+    /// `log`'s fields along this dimension; a tag the request lacked is `None`.
+    fn of(self, log: &Log) -> Vec<(String, Option<String>)> {
+        let tags = |keys: &[&str]| {
+            keys.iter()
+                .map(|k| (k.to_string(), log.tag(k).map(String::from)))
+                .collect()
+        };
+        match self {
+            Dimension::Model => vec![
+                ("provider".into(), Some(log.provider.clone())),
+                ("model".into(), Some(canonical_model(&log.model))),
+            ],
+            Dimension::Caller => tags(&[tag::CALLER, tag::CALLER_NAME, tag::FOR, tag::FOR_NAME]),
+            Dimension::Task => tags(&[tag::TASK]),
+        }
+    }
+}
+
+/// Requests, tokens and cost for one group of logs.
 #[derive(Serialize, Debug, Default, PartialEq)]
 pub struct Usage {
-    pub provider: String,
-    pub model: String,
+    /// What the group shares, such as its `provider` and `model`, or its `caller`.
+    #[serde(flatten)]
+    pub group: BTreeMap<String, Option<String>>,
     pub requests: u64,
     pub failures: u64,
     pub cached: u64,
@@ -342,29 +527,30 @@ pub struct Usage {
     pub tokens_out: u64,
     /// As the gateway reports it; `None` when no request had a cost.
     pub cost: Option<f64>,
+    /// Requests whose log may hold their bodies: those sent without [`PAYLOAD_HEADER`].
+    pub payloads_kept: u64,
 }
 
-/// `logs` added up by provider and model, the costliest first.
-pub fn summarize(logs: &[Log]) -> Vec<Usage> {
-    let mut by: BTreeMap<(String, String), Usage> = BTreeMap::new();
+/// `logs` added up by the dimensions in `by`, the costliest first.
+pub fn summarize(logs: &[Log], by: &[Dimension]) -> Vec<Usage> {
+    let mut groups: BTreeMap<Vec<(String, Option<String>)>, Usage> = BTreeMap::new();
     for log in logs {
-        let u = by
-            .entry((log.provider.clone(), log.model.clone()))
-            .or_insert_with(|| Usage {
-                provider: log.provider.clone(),
-                model: log.model.clone(),
-                ..Usage::default()
-            });
+        let key: Vec<_> = by.iter().flat_map(|d| d.of(log)).collect();
+        let u = groups.entry(key.clone()).or_insert_with(|| Usage {
+            group: key.into_iter().collect(),
+            ..Usage::default()
+        });
         u.requests += 1;
         u.failures += u64::from(!log.success);
         u.cached += u64::from(log.cached);
         u.tokens_in += log.tokens_in.unwrap_or(0);
         u.tokens_out += log.tokens_out.unwrap_or(0);
+        u.payloads_kept += u64::from(log.collect_log_payload == Some(true));
         if let Some(c) = log.cost {
             u.cost = Some(u.cost.unwrap_or(0.0) + c);
         }
     }
-    let mut out: Vec<Usage> = by.into_values().collect();
+    let mut out: Vec<Usage> = groups.into_values().collect();
     out.sort_by(|a, b| {
         b.cost
             .unwrap_or(0.0)
@@ -394,25 +580,154 @@ mod tests {
         }
     }
 
+    fn tagged(mut l: Log, tags: &[(&str, &str)]) -> Log {
+        l.metadata = tags
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        l
+    }
+
+    fn field<'a>(u: &'a Usage, k: &str) -> Option<&'a str> {
+        u.group.get(k).and_then(|v| v.as_deref())
+    }
+
     #[test]
     fn usage_adds_up_by_provider_and_model_costliest_first() {
         let logs = [
-            log("anthropic", "haiku", true, 10, 5, Some(0.001)),
-            log("anthropic", "opus", true, 100, 50, Some(0.5)),
-            log("anthropic", "haiku", false, 3, 0, None),
+            log(
+                "anthropic",
+                "anthropic/claude-haiku-5.5",
+                true,
+                10,
+                5,
+                Some(0.001),
+            ),
+            log("anthropic", "claude-opus-5-5", true, 100, 50, Some(0.5)),
+            log("anthropic", "claude-haiku-5-5", false, 3, 0, None),
             log("openai", "gpt", true, 1, 1, None),
         ];
-        let u = summarize(&logs);
+        let u = summarize(&logs, &[Dimension::Model]);
         assert_eq!(u.len(), 3);
-        assert_eq!(u[0].model, "opus");
-        let haiku = u.iter().find(|x| x.model == "haiku").unwrap();
+        assert_eq!(field(&u[0], "model"), Some("claude-opus-5-5"));
+        let haiku = u
+            .iter()
+            .find(|x| field(x, "model") == Some("claude-haiku-5-5"))
+            .unwrap();
         assert_eq!((haiku.requests, haiku.failures), (2, 1));
         assert_eq!((haiku.tokens_in, haiku.tokens_out), (13, 5));
         assert_eq!(haiku.cost, Some(0.001));
         assert_eq!(
-            u.iter().find(|x| x.provider == "openai").unwrap().cost,
+            u.iter()
+                .find(|x| field(x, "provider") == Some("openai"))
+                .unwrap()
+                .cost,
             None
         );
+    }
+
+    #[test]
+    fn both_forms_of_a_model_name_are_one() {
+        assert_eq!(
+            canonical_model("anthropic/claude-haiku-5.5"),
+            "claude-haiku-5-5"
+        );
+        assert_eq!(canonical_model("claude-haiku-5-5"), "claude-haiku-5-5");
+        assert_eq!(canonical_model("Claude-Haiku-5.5"), "claude-haiku-5-5");
+        let f = Filter {
+            model: Some("claude-haiku-5-5".into()),
+            ..Filter::default()
+        };
+        assert!(f.keeps(&log(
+            "anthropic",
+            "anthropic/claude-haiku-5.5",
+            true,
+            0,
+            0,
+            None
+        )));
+        assert!(!f.keeps(&log(
+            "anthropic",
+            "anthropic/claude-opus-5.5",
+            true,
+            0,
+            0,
+            None
+        )));
+    }
+
+    #[test]
+    fn usage_groups_by_caller_and_task() {
+        let ada = [(tag::CALLER, "u1"), (tag::CALLER_NAME, "ada")];
+        let bot = [
+            (tag::CALLER, "s1"),
+            (tag::CALLER_NAME, "bot"),
+            (tag::FOR, "u1"),
+            (tag::FOR_NAME, "ada"),
+            (tag::TASK, "triage"),
+        ];
+        let logs = [
+            tagged(log("anthropic", "m", true, 1, 1, Some(0.1)), &ada),
+            tagged(log("anthropic", "m", true, 2, 2, Some(0.2)), &bot),
+            tagged(log("anthropic", "m", true, 3, 3, Some(0.3)), &bot),
+            log("anthropic", "m", true, 4, 4, None),
+        ];
+        let u = summarize(&logs, &[Dimension::Caller, Dimension::Task]);
+        assert_eq!(u.len(), 3);
+        assert_eq!(field(&u[0], "caller_name"), Some("bot"));
+        assert_eq!(field(&u[0], "task"), Some("triage"));
+        assert_eq!(field(&u[0], "for_name"), Some("ada"));
+        assert_eq!(u[0].requests, 2);
+        let untagged = u.iter().find(|x| field(x, "caller").is_none()).unwrap();
+        assert_eq!(untagged.tokens_in, 4);
+
+        let by_ada = Filter {
+            caller: Some("ada".into()),
+            ..Filter::default()
+        };
+        assert_eq!(logs.iter().filter(|l| by_ada.keeps(l)).count(), 3);
+        let triage = Filter {
+            task: Some("triage".into()),
+            ..Filter::default()
+        };
+        assert_eq!(logs.iter().filter(|l| triage.keeps(l)).count(), 2);
+    }
+
+    #[test]
+    fn a_logs_metadata_reads_from_a_json_string_or_an_object() {
+        let l: Log = serde_json::from_value(json!({
+            "metadata": "{\"caller\":\"u1\",\"n\":3,\"ok\":true}",
+            "collect_log_payload": false
+        }))
+        .unwrap();
+        assert_eq!(l.tag("caller"), Some("u1"));
+        assert_eq!(l.tag("n"), Some("3"));
+        assert_eq!(l.tag("ok"), Some("true"));
+        assert_eq!(l.collect_log_payload, Some(false));
+        let l: Log = serde_json::from_value(json!({ "metadata": { "task": "x" } })).unwrap();
+        assert_eq!(l.tag("task"), Some("x"));
+        for none in [json!(null), json!("not json"), json!(7)] {
+            let l: Log = serde_json::from_value(json!({ "metadata": none })).unwrap();
+            assert!(l.metadata.is_empty());
+        }
+        let l: Log = serde_json::from_value(json!({})).unwrap();
+        assert!(l.metadata.is_empty());
+    }
+
+    #[test]
+    fn the_metadata_header_holds_only_tags_with_a_value() {
+        assert_eq!(metadata_header(&[]).unwrap(), None);
+        assert_eq!(metadata_header(&[("task", "")]).unwrap(), None);
+        assert_eq!(
+            metadata_header(&[("caller", "u1"), ("task", "")]).unwrap(),
+            Some(r#"{"caller":"u1"}"#.into())
+        );
+        let six: Vec<(&str, &str)> = ["a", "b", "c", "d", "e", "f"]
+            .iter()
+            .map(|k| (*k, "v"))
+            .collect();
+        assert!(metadata_header(&six).is_err());
+        assert!(metadata_header(&[("cf.user_id", "x")]).is_err());
     }
 
     #[test]

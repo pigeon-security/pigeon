@@ -4,9 +4,13 @@
 //! ever reaches a caller or a chat. A request takes one common shape whatever the provider, and
 //! the gateway's logs answer how many requests, tokens and how much cost each model has used:
 //! the measure a router between providers, or between here and a provider, will decide by.
+//!
+//! Each request is tagged with who sent it (the caller, and the person they act for when
+//! linked) and an optional task label, so usage can be grouped and filtered by those as well as
+//! by model. The gateway logs keep those tags and the counts, never a prompt or an answer.
 
 use pigeon_core::Account;
-use pigeon_core::ai_gateway::{self, SECRET_SCOPE};
+use pigeon_core::ai_gateway::{self, Dimension, Filter, SECRET_SCOPE, tag};
 use pigeon_core::mcp::Tool;
 use pigeon_core::secrets_store::Writer;
 use serde::Serialize;
@@ -14,6 +18,7 @@ use serde_json::{Value, json};
 use worker::js_sys::Date;
 use worker::{Error, Fetch, Headers, Method, Request, RequestInit, Result};
 
+use crate::users::Caller;
 use crate::{Call, Capability, Context, Footprint, Slot, to_value, unknown};
 
 /// Model providers behind one gateway.
@@ -172,6 +177,53 @@ pub fn ask(args: &Value, provider: &Provider) -> Result<Ask> {
     })
 }
 
+/// The longest task label a request carries; a longer one is cut.
+const MAX_TASK_CHARS: usize = 100;
+
+/// The tags a request from `caller` carries, `task` among them when given.
+pub fn tags(caller: Option<&Caller>, task: Option<&str>) -> Vec<(&'static str, String)> {
+    let mut out = Vec::new();
+    if let Some(c) = caller {
+        out.push((tag::CALLER, c.user.id.clone()));
+        out.push((tag::CALLER_NAME, c.user.name.clone()));
+        if let Some(f) = &c.acting_for {
+            out.push((tag::FOR, f.id.clone()));
+            out.push((tag::FOR_NAME, f.name.clone()));
+        }
+    }
+    if let Some(t) = task.map(str::trim).filter(|t| !t.is_empty()) {
+        out.push((tag::TASK, t.chars().take(MAX_TASK_CHARS).collect()));
+    }
+    out
+}
+
+/// `args`' filter for `models_usage`.
+fn filter(args: &Value) -> Filter {
+    let s = |k: &str| args[k].as_str().map(String::from);
+    Filter {
+        provider: s("provider"),
+        model: s("model"),
+        caller: s("caller"),
+        task: s("task"),
+    }
+}
+
+/// `args`' grouping for `models_usage`: by model when none is named.
+fn dimensions(args: &Value) -> Result<Vec<Dimension>> {
+    let Some(names) = args["by"].as_array() else {
+        return Ok(vec![Dimension::Model]);
+    };
+    let mut out = Vec::new();
+    for n in names {
+        let n = n.as_str().unwrap_or_default();
+        let d = Dimension::named(n).ok_or_else(|| bad(&format!("cannot group by `{n}`")))?;
+        if !out.contains(&d) {
+            out.push(d);
+        }
+    }
+    Ok(out)
+}
+
 impl Models {
     fn secret(&self, p: &Provider) -> String {
         ai_gateway::secret_name(&self.gateway, p.slug, p.alias)
@@ -229,12 +281,15 @@ impl Models {
             Some(r) => r.clone(),
             None => p.dialect.body(&ask(args, p)?),
         };
+        let tags = tags(cx.caller, args["task"].as_str());
+        let tags: Vec<(&str, &str)> = tags.iter().map(|(k, v)| (*k, v.as_str())).collect();
         let ran = ai_gateway::run(
             cx.account,
             &self.gateway,
             p.slug,
             p.dialect.path(),
             p.dialect.headers(),
+            &tags,
             &body,
         )
         .await?;
@@ -257,26 +312,27 @@ impl Models {
             .as_f64()
             .unwrap_or(24.0)
             .clamp(0.1, 24.0 * 31.0);
+        let by = dimensions(args)?;
+        let filter = filter(args);
         let since = Date::now() - hours * 3_600_000.0;
-        let logs = ai_gateway::logs(
-            account,
-            &self.gateway,
-            since,
-            args["provider"].as_str(),
-            2_000,
-        )
-        .await?;
-        let by = ai_gateway::summarize(&logs);
-        let cost: f64 = by.iter().filter_map(|u| u.cost).sum();
+        let logs = ai_gateway::logs(account, &self.gateway, since, &filter, 2_000).await?;
+        let groups = ai_gateway::summarize(&logs, &by);
+        let cost: f64 = groups.iter().filter_map(|u| u.cost).sum();
+        let by: Vec<&str> = by
+            .iter()
+            .filter_map(|d| Dimension::ALL.iter().find(|(_, x)| x == d).map(|(n, _)| *n))
+            .collect();
         Ok(json!({
             "since": String::from(Date::new(&since.into()).to_iso_string()),
             "hours": hours,
             "requests": logs.len(),
             "truncated": logs.len() >= 2_000,
-            "tokens_in": by.iter().map(|u| u.tokens_in).sum::<u64>(),
-            "tokens_out": by.iter().map(|u| u.tokens_out).sum::<u64>(),
+            "tokens_in": groups.iter().map(|u| u.tokens_in).sum::<u64>(),
+            "tokens_out": groups.iter().map(|u| u.tokens_out).sum::<u64>(),
             "cost": cost,
-            "by_model": by,
+            "payloads_kept": groups.iter().map(|u| u.payloads_kept).sum::<u64>(),
+            "by": by,
+            "groups": groups,
         }))
     }
 }
@@ -305,7 +361,9 @@ impl Capability for Models {
                 description: "Send one request to a model through the AI gateway and get its \
                               answer: text, stop reason and tokens. Give `prompt`, or \
                               `messages` as [{role, content}]; `raw` sends a body in the \
-                              provider's own shape instead and answers its own.",
+                              provider's own shape instead and answers its own. The request is \
+                              tagged with its caller and `task`, for `models_usage`; its log \
+                              keeps no prompt or answer.",
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -315,7 +373,8 @@ impl Capability for Models {
                         "prompt": { "type": "string" },
                         "messages": { "type": "array", "items": { "type": "object" } },
                         "max_tokens": { "type": "integer", "description": "1024 by default." },
-                        "raw": { "type": "object" }
+                        "raw": { "type": "object" },
+                        "task": { "type": "string", "description": "A short label for what the request is for, such as `triage`; 100 characters at most." }
                     }
                 }),
             },
@@ -323,12 +382,23 @@ impl Capability for Models {
                 name: "models_usage",
                 description: "What the AI gateway's requests used over a window, from its \
                               logs: requests, failures, tokens in and out, and cost, in all and \
-                              by provider and model.",
+                              in groups: by provider and model unless `by` names others. \
+                              `model`, `caller` and `task` keep only the requests that match; \
+                              a model in either form (`claude-haiku-5-5`, \
+                              `anthropic/claude-haiku-5.5`).",
                 input_schema: json!({
                     "type": "object",
                     "properties": {
                         "hours": { "type": "number", "description": "24 by default, 744 at most." },
-                        "provider": { "type": "string", "enum": slugs }
+                        "provider": { "type": "string", "enum": slugs },
+                        "model": { "type": "string" },
+                        "caller": { "type": "string", "description": "A user's ID or name, who sent the request or was acted for." },
+                        "task": { "type": "string" },
+                        "by": {
+                            "type": "array",
+                            "items": { "type": "string", "enum": ["model", "caller", "task"] },
+                            "description": "What to group by; [\"model\"] by default."
+                        }
                     }
                 }),
             },
@@ -449,5 +519,50 @@ mod tests {
         assert_eq!(r.text, "Hello");
         assert_eq!((r.tokens_in, r.tokens_out), (Some(8), Some(2)));
         assert!(Dialect::Anthropic.reply(&json!({ "error": {} })).is_err());
+    }
+
+    fn user(id: &str, name: &str) -> crate::users::User {
+        crate::users::User {
+            id: id.into(),
+            kind: "standard".into(),
+            name: name.into(),
+            created_at: 0,
+        }
+    }
+
+    #[test]
+    fn a_request_is_tagged_with_its_caller_whom_they_act_for_and_its_task() {
+        let c = Caller {
+            user: user("s1", "bot"),
+            acting_for: Some(user("u1", "ada")),
+        };
+        let t = tags(Some(&c), Some(" triage "));
+        assert_eq!(
+            t,
+            [
+                (tag::CALLER, "s1".to_string()),
+                (tag::CALLER_NAME, "bot".into()),
+                (tag::FOR, "u1".into()),
+                (tag::FOR_NAME, "ada".into()),
+                (tag::TASK, "triage".into()),
+            ]
+        );
+        assert!(t.len() <= ai_gateway::MAX_TAGS);
+        assert!(tags(None, Some("  ")).is_empty());
+        let long = "x".repeat(500);
+        assert_eq!(tags(None, Some(&long))[0].1.len(), MAX_TASK_CHARS);
+    }
+
+    #[test]
+    fn usage_groups_by_model_unless_told_otherwise() {
+        assert_eq!(dimensions(&json!({})).unwrap(), [Dimension::Model]);
+        assert_eq!(
+            dimensions(&json!({ "by": ["caller", "task", "caller"] })).unwrap(),
+            [Dimension::Caller, Dimension::Task]
+        );
+        assert!(dimensions(&json!({ "by": ["colour"] })).is_err());
+        let f = filter(&json!({ "model": "anthropic/claude-haiku-5.5", "task": "t" }));
+        assert_eq!(f.model.as_deref(), Some("anthropic/claude-haiku-5.5"));
+        assert_eq!(f.task.as_deref(), Some("t"));
     }
 }
