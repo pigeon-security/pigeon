@@ -83,20 +83,9 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
             zone: ZONE.into(),
             host: HOST.into(),
             worker: WORKER.into(),
-            retire: Retire {
-                // As the protected host named them: `pigeon-platform`, and its public paths'
-                // `pigeon-platform<path>`.
-                apps: ["", "/auth", "/oauth", "/.well-known", "/mcp"]
-                    .iter()
-                    .map(|path| (format!("pigeon-platform{path}"), format!("{HOST}{path}")))
-                    .collect(),
-                policies: vec!["pigeon-platform".into(), "pigeon-platform-public".into()],
-                service_tokens: vec!["pigeon-platform".into(), "pigeon-claude".into()],
-                secrets: vec![
-                    "PLATFORM_ACCESS_CLIENT_ID".into(),
-                    "PLATFORM_ACCESS_CLIENT_SECRET".into(),
-                ],
-            },
+            // Its Access setup was retired, and that is done: nothing is retired again, so
+            // setting the host up never deletes an Access application, policy or token.
+            retire: Retire::default(),
             tool: "setup_platform",
         }),
         // The proxies' hostname, in public: the proxies check the proxy credential themselves.
