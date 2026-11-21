@@ -32,3 +32,14 @@ timeout_min = 45
 cpu = 4
 memory_gb = 12
 disk_gb = 20
+
+# Deploys the platform Worker from a landed commit, through the deploy proxy with its own job
+# token: only the `land` flow's deploy job can use it there. Runs the allowlist check first.
+[jobs.deploy]
+run = "ci/deploy/deploy.sh"
+timeout_min = 60
+
+[jobs.deploy.needs]
+cpu = 4
+memory_gb = 12
+disk_gb = 20

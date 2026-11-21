@@ -193,6 +193,34 @@ pub async fn read_file(remote: &Remote, commit: &str, path: &str) -> Result<Opti
     crate::pack::read_path(&objects, &commit, path).map_err(Error::RustError)
 }
 
+/// The IDs of what each of `paths` names in `commit` of `remote` (see `pack::path_id`): the
+/// commit alone is fetched, one commit deep, once for all of them.
+pub async fn path_ids(
+    remote: &Remote,
+    commit: &str,
+    paths: &[&str],
+) -> Result<Vec<Option<String>>> {
+    let commit = commit.to_ascii_lowercase();
+    if !is_id(&commit) {
+        return Err(Error::RustError("not a commit id".into()));
+    }
+    let advertised = refs(remote, "git-upload-pack").await?;
+    let fetched = fetch_with(
+        remote,
+        &advertised.caps,
+        std::slice::from_ref(&commit),
+        &[],
+        None,
+        Some(1),
+    )
+    .await?;
+    let objects = crate::pack::objects(&fetched.pack).map_err(Error::RustError)?;
+    paths
+        .iter()
+        .map(|p| crate::pack::path_id(&objects, &commit, p).map_err(Error::RustError))
+        .collect()
+}
+
 /// One ref update: from `old` (or [`ZERO`] to create) to `new`.
 pub struct Update {
     pub name: String,

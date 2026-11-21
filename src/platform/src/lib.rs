@@ -44,6 +44,34 @@ impl worker::DurableObject for CiScheduler {
     }
 }
 
+/// The Lander: landings, one live at a time, followed by its alarm. It runs CI's tools through
+/// this Worker's capabilities, as `/mcp` would.
+#[worker::durable_object]
+pub struct Lander {
+    inner: pigeon_capabilities::land::Lander,
+}
+
+impl worker::DurableObject for Lander {
+    fn new(state: worker::State, env: Env) -> Self {
+        let hosting = pigeon_capabilities::land::Hosting {
+            worker: settings::WORKER,
+            capabilities: settings::capabilities,
+            sources: SOURCES,
+        };
+        let inner = pigeon_capabilities::land::Lander::new(state, env, settings::land(), hosting)
+            .expect("the Lander's migrations apply");
+        Self { inner }
+    }
+
+    async fn fetch(&self, req: Request) -> Result<Response> {
+        self.inner.fetch(req).await
+    }
+
+    async fn alarm(&self) -> Result<Response> {
+        self.inner.alarm().await
+    }
+}
+
 /// Async model jobs: the index and each job's own object.
 #[worker::durable_object]
 pub struct ModelJobs {
@@ -242,8 +270,11 @@ async fn mcp_post(mut req: Request, env: &Env) -> Result<Response> {
                        CLOUDFLARE_API_BASE_URL=https://proxy.pigeon.dev/cf/client/v4; its \
                        environment's network secret for proxy.pigeon.dev authenticates both, so \
                        no token goes in a command. Push branches under claude/; main only moves \
-                       forward. source_token and deploy_token remain for callers without the \
-                       proxy credential.",
+                       forward; `land {branch}` takes a claude/ branch through CI's `test` \
+                       job, into main and onto the deployed platform, with land_status \
+                       following it. `call {tool, args}` reaches any tool deployed after \
+                       this session started. source_token and deploy_token remain for \
+                       callers without the proxy credential.",
     };
     let call = async |name: &str, args: &Value| -> Result<Value> {
         let cx = Context {

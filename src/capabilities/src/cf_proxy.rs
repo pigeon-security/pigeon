@@ -7,6 +7,10 @@
 //! gets a Cloudflare token of its own, holding only that call's permissions, minted when it
 //! arrives and revoked once the answer is back; the caller never sees it. Wrangler reaches it
 //! with `CLOUDFLARE_API_BASE_URL`. Every request is logged as one audit line.
+//!
+//! Besides a proxy credential, it takes one other bearer: the CI job token of the deploy job of
+//! the live landing, while that landing is `deploying` and for its commit only
+//! (`land::deploy_caller`). Its calls pass the same allowlist.
 
 use pigeon_core::mcp::Tool;
 use pigeon_core::tokens::{self, Policy, Scoped};
@@ -550,6 +554,19 @@ pub struct CfProxy {
     /// The Worker's container classes, such as `CiRunner`: their Durable Object namespaces
     /// are the container applications a deploy may read, create and change.
     pub containers: Vec<String>,
+    /// The repository landings deploy from, as `namespace/name`: a deploy job's token is taken
+    /// only when its grant is for this repository.
+    pub land_repo: String,
+}
+
+/// The bearer token `req` carries, if any.
+fn bearer(req: &Request) -> Result<Option<String>> {
+    Ok(req.headers().get("Authorization")?.and_then(|h| {
+        let (scheme, rest) = h.trim().split_once(' ')?;
+        scheme
+            .eq_ignore_ascii_case("bearer")
+            .then(|| rest.trim().to_string())
+    }))
 }
 
 /// The Durable Object namespace ids of `script`'s `classes`, looked up with a token minted for
@@ -647,9 +664,24 @@ impl CfProxy {
         if url.host_str() != Some(self.host.as_str()) {
             return refuse(404, "not found");
         }
-        *caller = match proxy::caller(cx.env, &req).await {
-            Ok(c) => Some(c),
-            Err(e) => return refuse(403, &e.to_string()),
+        *caller = match bearer(&req)? {
+            // A landing's deploy job, with its own job token.
+            Some(t) if t.starts_with(crate::ci::token::PREFIX) => {
+                match crate::land::deploy_caller(cx.env, &t, &self.land_repo).await? {
+                    Some(c) => Some(c),
+                    None => {
+                        return refuse(
+                            403,
+                            "a job token reaches this proxy only as the deploy job of a landing \
+                             that is deploying its commit",
+                        );
+                    }
+                }
+            }
+            _ => match proxy::caller(cx.env, &req).await {
+                Ok(c) => Some(c),
+                Err(e) => return refuse(403, &e.to_string()),
+            },
         };
         let method = req.method();
         // Container application calls name this Worker's container namespaces, so they are

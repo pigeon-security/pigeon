@@ -721,6 +721,38 @@ pub fn read_path(objects: &Objects, commit: &str, path: &str) -> Result<Option<V
     Ok(None)
 }
 
+/// The ID of what `path` names in `commit`'s tree, from `objects`: a file's blob or a
+/// directory's tree, `None` when nothing is there. Two commits with the same ID at a path hold
+/// the same content there.
+pub fn path_id(objects: &Objects, commit: &str, path: &str) -> Result<Option<String>, String> {
+    let parts: Vec<&str> = path.split('/').collect();
+    if path.is_empty()
+        || parts
+            .iter()
+            .any(|p| p.is_empty() || *p == "." || *p == "..")
+    {
+        return Err("not a path".to_string());
+    }
+    let Some((1, commit_data)) = objects.by_id.get(commit) else {
+        return Err("the commit is not in the pack".to_string());
+    };
+    let mut id = commit_tree(commit_data)?;
+    for part in parts {
+        let Some((2, tree_data)) = objects.by_id.get(&id) else {
+            // A file where a directory was expected: nothing is at the path.
+            return Ok(None);
+        };
+        match tree_entries(tree_data)?
+            .into_iter()
+            .find(|e| e.name == part)
+        {
+            Some(entry) => id = entry.id,
+            None => return Ok(None),
+        }
+    }
+    Ok(Some(id))
+}
+
 #[cfg(test)]
 mod path_tests {
     use super::*;
@@ -778,6 +810,19 @@ mod path_tests {
             },
             commit_id,
         )
+    }
+
+    #[test]
+    fn a_path_names_a_file_or_a_directory() {
+        let (o, c) = setup();
+        let file = path_id(&o, &c, ".pigeon/ci.toml").unwrap().unwrap();
+        assert_eq!(file, id_of("blob", b"[jobs]\n"));
+        let dir = path_id(&o, &c, ".pigeon").unwrap().unwrap();
+        assert_eq!(o.by_id[&dir].0, 2);
+        assert_eq!(path_id(&o, &c, "nope").unwrap(), None);
+        assert_eq!(path_id(&o, &c, "README/x").unwrap(), None);
+        assert!(path_id(&o, &c, "../x").is_err());
+        assert!(path_id(&o, &"0".repeat(40), "README").is_err());
     }
 
     #[test]

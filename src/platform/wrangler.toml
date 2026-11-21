@@ -38,6 +38,7 @@ bindings = [
   { name = "CI_SCHEDULER", class_name = "CiScheduler" },
   { name = "CI_RUNNER", class_name = "CiRunner" },
   { name = "MODEL_JOBS", class_name = "ModelJobs" },
+  { name = "LANDER", class_name = "Lander" },
 ]
 
 [[migrations]]
@@ -56,6 +57,11 @@ new_sqlite_classes = ["CiRunner"]
 [[migrations]]
 tag = "v4"
 new_sqlite_classes = ["ModelJobs"]
+
+# Landings: one object, whose alarm follows the live landing.
+[[migrations]]
+tag = "v5"
+new_sqlite_classes = ["Lander"]
 
 # CI job containers: one per job attempt, held by a CiRunner object, which picks the image and
 # the instance size on each start. The base image carries git, curl, coreutils, sh, a Rust

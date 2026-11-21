@@ -14,6 +14,7 @@ use pigeon_capabilities::deploys::Deploys;
 use pigeon_capabilities::dispatch::Dispatch;
 use pigeon_capabilities::git_proxy::GitProxy;
 use pigeon_capabilities::images::Images;
+use pigeon_capabilities::land::{self, Land};
 use pigeon_capabilities::mirror::{self, Mirror};
 use pigeon_capabilities::models::{Dialect, Models, Provider};
 use pigeon_capabilities::oauth::OAuth;
@@ -180,6 +181,7 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
             queues: vec!["pigeon-ci-events".into()],
             // The container classes in wrangler.toml's [[containers]].
             containers: vec!["CiRunner".into()],
+            land_repo: format!("{NAMESPACE}/{REPO}"),
         }),
         Box::new(Models {
             gateway: "pigeon".into(),
@@ -194,6 +196,8 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
             host: HOST.into(),
         }),
         Box::new(Ci { settings: ci() }),
+        // Landing: a session branch tested, moved into main and deployed, through `land`.
+        Box::new(Land { settings: land() }),
         Box::new(Deploys),
         // What the container applications run and the registry holds, read only.
         Box::new(Images),
@@ -246,6 +250,18 @@ fn buildkite_queues() -> Vec<buildkite::Queue> {
         q.push(buildkite::queue("macos-build", mac, 6, 28, 182));
     }
     q
+}
+
+/// Where landings go: the source repository's main, gated by CI jobs `test` and `deploy`.
+pub fn land() -> land::Settings {
+    land::Settings {
+        namespace: NAMESPACE.into(),
+        repo: REPO.into(),
+        main: format!("refs/heads/{BRANCH}"),
+        parent: PARENT_TOKEN.into(),
+        test_job: "test".into(),
+        deploy_job: "deploy".into(),
+    }
 }
 
 /// What async model jobs run with: the gateway `Models` sends through, and the parent token.

@@ -38,6 +38,7 @@ const CHART: &str = include_str!("console/chart.js");
 const OVERVIEW: &str = include_str!("console/overview.js");
 const KEYS: &str = include_str!("console/keys.js");
 const USERS: &str = include_str!("console/users.js");
+const LAND: &str = include_str!("console/land.js");
 const STYLES: &str = include_str!("console/console.css");
 const ICON: &[u8] = include_bytes!("console/icon.png");
 
@@ -213,6 +214,7 @@ impl Console {
                 "/console/overview.js" => page::asset(OVERVIEW, "text/javascript; charset=utf-8"),
                 "/console/keys.js" => page::asset(KEYS, "text/javascript; charset=utf-8"),
                 "/console/users.js" => page::asset(USERS, "text/javascript; charset=utf-8"),
+                "/console/land.js" => page::asset(LAND, "text/javascript; charset=utf-8"),
                 "/console/console.css" => page::asset(STYLES, "text/css; charset=utf-8"),
                 "/console/icon.png" => page::image(ICON, "image/png"),
                 p if p.starts_with("/console/api/") => {
@@ -331,14 +333,14 @@ impl Console {
                 self.passkeys
                     .sign_in_finish(env, &purpose, body, Some(&person.id))
                     .await?;
-                self.act(env, write, &target).await
+                self.act(env, write, &target, person).await
             }
             _ => Err(bad("not found")),
         }
     }
 
     /// Makes an approved write.
-    async fn act(&self, env: &Env, write: Write, target: &str) -> Result<Value> {
+    async fn act(&self, env: &Env, write: Write, target: &str, person: &User) -> Result<Value> {
         Ok(match write {
             Write::RemovePasskey => {
                 directory(env, "passkey.remove", json!({ "id": target })).await?;
@@ -350,6 +352,10 @@ impl Console {
                     "{} is disconnected: its tokens are revoked and it acts for no one.",
                     gone["name"].as_str().unwrap_or("The app")
                 ) })
+            }
+            Write::LandApprove => crate::land::approve(env, target, &person.name).await?,
+            Write::LandApproval => {
+                crate::land::set_approval(env, target == "on", &person.name).await?
             }
             Write::Invite => {
                 let user = directory(

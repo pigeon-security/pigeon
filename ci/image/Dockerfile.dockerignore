@@ -1,0 +1,3 @@
+# Only the runner goes into the build context.
+*
+!ci/runner/entrypoint.sh

@@ -11,6 +11,7 @@ pub mod deploys;
 pub mod dispatch;
 pub mod git_proxy;
 pub mod images;
+pub mod land;
 pub mod mirror;
 pub mod models;
 pub mod notify;

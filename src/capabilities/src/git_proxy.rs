@@ -808,6 +808,185 @@ pub async fn read_file(
     Ok(file)
 }
 
+/// Whether `new` moves a branch at `old` forward, from `pack`: the commits `new` reaches that
+/// `old` does not, as an upload-pack fetch wanting `new` and having `old` answers. A commit the
+/// pack leaves out is one `old` already reaches.
+pub fn moves_forward(old: &str, new: &str, pack: &[u8]) -> std::result::Result<bool, String> {
+    if old == new {
+        return Ok(true);
+    }
+    let known = if pack.is_empty() {
+        HashMap::new()
+    } else {
+        pack::commits(pack)?.parents
+    };
+    Ok(pack::walk(old, new, &known, true) == Walk::Forward)
+}
+
+/// What [`fast_forward`] did.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Moved {
+    /// The branch moved from `from` to the commit.
+    Moved { from: String },
+    /// The branch was already at the commit.
+    Already,
+    /// It did not move, for this reason.
+    Refused(String),
+}
+
+/// The tip of `branch` (a full ref) of repository `namespace/repo`, when it exists. Read with a
+/// git token minted for it and revoked after.
+pub async fn tip(
+    account: &Account,
+    namespace: &str,
+    repo: &str,
+    branch: &str,
+) -> Result<Option<String>> {
+    let (found, token) =
+        artifacts::session(account, namespace, repo, Access::Read, TOKEN_TTL).await?;
+    let remote = Remote {
+        url: found.remote.trim_end_matches('/').to_string(),
+        authorization: format!("Bearer {}", token.value),
+    };
+    let read = git::refs(&remote, Service::UploadPack.name()).await;
+    revoke(account, namespace, repo, &token).await?;
+    Ok(read?.refs.get(branch).cloned())
+}
+
+/// The IDs of what each of `paths` names in `commit` of `namespace/repo`, read with a git token
+/// minted for it and revoked after.
+pub async fn path_ids(
+    account: &Account,
+    namespace: &str,
+    repo: &str,
+    commit: &str,
+    paths: &[&str],
+) -> Result<Vec<Option<String>>> {
+    let (found, token) =
+        artifacts::session(account, namespace, repo, Access::Read, TOKEN_TTL).await?;
+    let remote = Remote {
+        url: found.remote.trim_end_matches('/').to_string(),
+        authorization: format!("Bearer {}", token.value),
+    };
+    let read = git::path_ids(&remote, commit, paths).await;
+    revoke(account, namespace, repo, &token).await?;
+    read
+}
+
+/// Whether `new` is a fast-forward of `branch`'s tip in `namespace/repo` now; the tip, and why
+/// not when it is not.
+pub async fn forward_of(
+    account: &Account,
+    namespace: &str,
+    repo: &str,
+    branch: &str,
+    new: &str,
+) -> Result<(String, Option<String>)> {
+    let (found, token) =
+        artifacts::session(account, namespace, repo, Access::Read, TOKEN_TTL).await?;
+    let remote = Remote {
+        url: found.remote.trim_end_matches('/').to_string(),
+        authorization: format!("Bearer {}", token.value),
+    };
+    let checked = check_forward(&remote, branch, new).await;
+    revoke(account, namespace, repo, &token).await?;
+    checked
+}
+
+/// [`forward_of`] on `remote`.
+async fn check_forward(
+    remote: &Remote,
+    branch: &str,
+    new: &str,
+) -> Result<(String, Option<String>)> {
+    let refs = git::refs(remote, Service::UploadPack.name()).await?;
+    let Some(old) = refs.refs.get(branch).cloned() else {
+        return Ok((ZERO.into(), Some(format!("{branch} does not exist"))));
+    };
+    if old == new {
+        return Ok((old, None));
+    }
+    let wants = [new.to_string()];
+    let got = git::fetch_filtered(
+        remote,
+        &refs.caps,
+        &wants,
+        std::slice::from_ref(&old),
+        Some("tree:0"),
+    )
+    .await?;
+    let forward = moves_forward(&old, new, &got.pack).map_err(Error::RustError)?;
+    let why = (!forward).then(|| {
+        format!("{new} is not a fast-forward of {branch} ({old}): rebase onto it and land again")
+    });
+    Ok((old, why))
+}
+
+/// Moves `branch` (a full ref, such as `refs/heads/main`) of `namespace/repo` to `new`, only
+/// forward: the platform's own push, with a write token minted for it and revoked after. The
+/// tip is read, `new` is checked to descend from it (commits only, walked as a push to the
+/// protected branch is), then the ref is updated from that tip with an empty pack, since every
+/// object is already there; Artifacts refuses the update if the tip moved in between.
+pub async fn fast_forward(
+    account: &Account,
+    namespace: &str,
+    repo: &str,
+    branch: &str,
+    new: &str,
+) -> Result<Moved> {
+    if !git::is_id(new) {
+        return Ok(Moved::Refused(format!("not a commit id: {new}")));
+    }
+    let (found, token) =
+        artifacts::session(account, namespace, repo, Access::Write, TOKEN_TTL).await?;
+    let remote = Remote {
+        url: found.remote.trim_end_matches('/').to_string(),
+        authorization: format!("Bearer {}", token.value),
+    };
+    let moved = async {
+        let (old, why) = check_forward(&remote, branch, new).await?;
+        if let Some(why) = why {
+            return Ok(Moved::Refused(why));
+        }
+        if old == new {
+            return Ok(Moved::Already);
+        }
+        let caps = git::refs(&remote, Service::ReceivePack.name()).await?.caps;
+        let update = git::Update {
+            name: branch.to_string(),
+            old: old.clone(),
+            new: new.to_string(),
+        };
+        let status = git::push(&remote, &caps, &[update], &pigeon_core::gitobj::pack(&[])).await?;
+        if status.iter().any(|s| s == &format!("ok {branch}")) {
+            Ok(Moved::Moved { from: old })
+        } else {
+            Ok(Moved::Refused(format!(
+                "Artifacts refused the update: {}",
+                status.join("; ")
+            )))
+        }
+    }
+    .await;
+    revoke(account, namespace, repo, &token).await?;
+    moved
+}
+
+/// Revokes a git token minted by `artifacts::session`.
+async fn revoke(
+    account: &Account,
+    namespace: &str,
+    repo: &str,
+    token: &artifacts::GitToken,
+) -> Result<()> {
+    match &token.id {
+        Some(id) => artifacts::revoke(account, namespace, repo, id).await,
+        None => Err(Error::RustError(
+            "a git token came back without an id".into(),
+        )),
+    }
+}
+
 /// The bearer token `req` carries, if any.
 fn bearer(req: &Request) -> Result<Option<String>> {
     Ok(req.headers().get("Authorization")?.and_then(|h| {
@@ -1204,6 +1383,39 @@ mod tests {
                 "{command:?} {wants:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_landing_moves_main_only_forward_against_real_history() {
+        let dir = std::env::temp_dir().join(format!("pigeon-ff-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        git(&dir, &["init", "-q", "-b", "main"], None);
+        git(&dir, &["config", "user.email", "t@example.com"], None);
+        git(&dir, &["config", "user.name", "t"], None);
+        let a = commit(&dir, "a");
+        let b = commit(&dir, "b");
+        let c = commit(&dir, "c");
+        git(&dir, &["checkout", "-q", "-b", "side", &a], None);
+        let d = commit(&dir, "d");
+        // What Artifacts answers a fetch wanting `new` and having `old`: commits only.
+        let pack = |new: &str, old: &str| {
+            git(
+                &dir,
+                &["pack-objects", "--stdout", "--revs", "-q"],
+                Some(&format!("{new}\n^{old}\n")),
+            )
+        };
+        assert_eq!(moves_forward(&a, &c, &pack(&c, &a)), Ok(true));
+        assert_eq!(moves_forward(&b, &c, &pack(&c, &b)), Ok(true));
+        assert_eq!(moves_forward(&c, &c, &[]), Ok(true));
+        // Backwards: nothing to send, and c is not an ancestor of a.
+        assert_eq!(moves_forward(&c, &a, &pack(&a, &c)), Ok(false));
+        // Sideways: d branches from a, so it is no fast-forward of c, nor c of d.
+        assert_eq!(moves_forward(&c, &d, &pack(&d, &c)), Ok(false));
+        assert_eq!(moves_forward(&d, &c, &pack(&c, &d)), Ok(false));
+        assert!(moves_forward(&a, &c, b"PACK junk").is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

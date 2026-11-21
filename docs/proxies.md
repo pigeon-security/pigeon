@@ -169,7 +169,11 @@ If a newer wrangler makes a call outside the list, the deploy fails and names th
 
 `ci/deploy/allowlist.sh` runs the pinned wrangler's real `deploy` against a stand-in for the API (`ci/deploy/standin.mjs`), both as for the existing Worker and as for a first deploy, records every call with its JSON body, and checks each against the allowlist and its body rules (`cf_proxy::unlisted`). It fails naming any call the proxy would refuse, so a wrangler upgrade or a new binding shows its new calls before a real deploy is refused halfway. CI runs it as the `allowlist` job; it needs Node 22 and `worker-build`, and no credential.
 
-A change to the allowlist only takes effect once it is deployed, and the deployed proxy is the one that has to let that deploy through. So when a deploy needs a call the deployed allowlist lacks (a new kind of binding, such as containers), deploy the change once directly with a `deploy_token`; later deploys can go through the proxy.
+A change to the allowlist only takes effect once it is deployed, and the deployed proxy is the one that has to let that deploy through. When the new call comes after the upload (the container application, settings and subdomain calls do), a landing deploys it anyway: the `deploy` job's first `wrangler deploy` uploads the new Worker and is refused at the new call, and `ci/deploy/deploy.sh` deploys once more, now through the new allowlist. When the new call comes before the upload (wrangler's lookups, the image preparation), the deploy job says so and the change has to be deployed once outside the land flow.
+
+### Landing deploys
+
+The `land` flow's `deploy` job (`ci/deploy/deploy.sh`, in a Container) deploys with its own CI job token as `CLOUDFLARE_API_TOKEN`. The proxy takes a job token (`pgn_ci_…`) only when the Lander says that job is the deploy job of the landing that is `deploying`, for the commit the token's grant names, in this repository; its calls pass the same allowlist, and its audit lines name the caller `land <id> deploy`. No stored or minted token is in the job.
 
 Wrangler turns some refusals into its own wording. For example, a refused image preparation shows as "Container image preparation is not enabled for this account". When a deploy through the proxy fails with an error like that, check the `cf` audit lines for a `refused` outcome first.
 
@@ -202,7 +206,7 @@ Whoever holds a proxy credential can upload and deploy `pigeon-platform`, and th
 - Revoke credentials that are not in use.
 - Watch the audit lines for `cf` deploys.
 
-A passkey approval held on the final deployment call is a possible mitigation. It was considered and not built; the risk is accepted for now.
+A passkey approval before a landing moves main and deploys is built, off by default: the console's Settings → Landing. A landing that changes `.pigeon/`, `ci/` or the pinned wrangler always waits for one. See `docs/plans/friction.md`.
 
 The MCP tools `source_token` and `deploy_token` still exist, for people and for the deploying session. Retiring them is a later decision.
 
