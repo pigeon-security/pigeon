@@ -253,7 +253,9 @@
       else body.append(el("p", { class: "muted", text: "Nothing to show yet." }));
       toHash();
       fresh.replaceChildren();
-      if (meta.at) fresh.append(meta.stale ? "refreshing…" : ago(meta.at),
+      // A drawing made ahead of the request says which commit it was made from.
+      if (data && data.built_from) fresh.append(`built from ${String(data.built_from).slice(0, 12)}`);
+      else if (meta.at) fresh.append(meta.stale ? "refreshing…" : ago(meta.at),
         el("button", { class: "c-link", type: "button", text: "refresh", onclick: () => ctx.reload() }));
       if (meta.stale && !refresh) again({ refresh: true, behind: true });
     } catch (e) {
