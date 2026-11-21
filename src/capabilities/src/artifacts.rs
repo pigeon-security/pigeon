@@ -301,7 +301,7 @@ async fn ensure_with(api: &Api<'_>, spec: &Spec) -> Result<Ensured> {
     let (v, repo_state) = match &spec.import_from {
         Some(url) => {
             let path = format!("{}/import", api.repo_path(&spec.namespace, &spec.name));
-            let body = json!({ "source": { "url": url, "branch": spec.default_branch } });
+            let body = json!({ "url": url, "branch": spec.default_branch });
             (
                 call(api.token, Method::Post, &path, Some(&body)).await?,
                 "imported",
