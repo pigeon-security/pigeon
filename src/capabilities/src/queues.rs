@@ -89,3 +89,69 @@ async fn ensure_with(token: &str, account: &str, spec: &Spec) -> Result<Ensured>
 fn rows(v: &Value) -> Vec<Value> {
     v.as_array().cloned().unwrap_or_default()
 }
+
+/// An event subscription: events from a Cloudflare service delivered to a queue.
+pub struct Subscription {
+    /// Its name; an existing subscription of that name is kept as it is.
+    pub name: String,
+    pub queue_id: String,
+    /// The service and what in it, such as `{"type": "artifacts.repo", ...}`. When the service
+    /// rejects the first form, the next is tried, for fields the docs name two ways.
+    pub sources: Vec<Value>,
+    /// Such as `["pushed"]`.
+    pub events: Vec<String>,
+}
+
+/// What [`subscribe`] did.
+#[derive(Serialize)]
+pub struct Subscribed {
+    pub id: Option<String>,
+    pub created: bool,
+}
+
+/// Has `subscription` exist; idempotent by name.
+pub async fn subscribe(account: &Account, subscription: &Subscription) -> Result<Subscribed> {
+    let token = Scoped::open(account, "queues", policies()).await?;
+    let subscribed = subscribe_with(token.value(), &account.id, subscription).await;
+    token.finish(subscribed).await
+}
+
+async fn subscribe_with(token: &str, account: &str, s: &Subscription) -> Result<Subscribed> {
+    let path = format!("/accounts/{account}/event_subscriptions/subscriptions");
+    // Listing finds one made before; if the account cannot list, creation goes ahead.
+    if let Ok(listed) = call(token, Method::Get, &format!("{path}?per_page=100"), None).await {
+        if let Some(found) = rows(&listed)
+            .into_iter()
+            .find(|x| x["name"].as_str() == Some(&s.name))
+        {
+            return Ok(Subscribed {
+                id: found["id"].as_str().map(String::from),
+                created: false,
+            });
+        }
+    }
+    let mut refused = Vec::new();
+    for source in &s.sources {
+        let body = json!({
+            "name": s.name,
+            "enabled": true,
+            "source": source,
+            "destination": { "type": "queues.queue", "queue_id": s.queue_id },
+            "events": s.events,
+        });
+        match call(token, Method::Post, &path, Some(&body)).await {
+            Ok(made) => {
+                return Ok(Subscribed {
+                    id: made["id"].as_str().map(String::from),
+                    created: true,
+                });
+            }
+            Err(e) if e.to_string().contains(": 400:") => refused.push(e.to_string()),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(Error::RustError(format!(
+        "no source form was accepted: {}",
+        refused.join("; ")
+    )))
+}

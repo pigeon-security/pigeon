@@ -446,3 +446,12 @@ async fn call(token: &str, method: Method, path: &str, body: Option<&Value>) -> 
         }
     }
 }
+
+/// The event-subscription source for repository `name` in `namespace`, in the two ways the
+/// docs name its repository field.
+pub fn events_source(namespace: &str, name: &str) -> Vec<Value> {
+    vec![
+        json!({ "type": "artifacts.repo", "namespace": namespace, "repo_name": name }),
+        json!({ "type": "artifacts.repo", "namespace": namespace, "repoName": name }),
+    ]
+}

@@ -95,9 +95,15 @@ async fn queue(batch: MessageBatch<Value>, env: Env, _ctx: Context) -> Result<()
 fn mirrors(event: &Value) -> bool {
     let p = event.get("payload").unwrap_or(event);
     let r#ref = p["ref"].as_str().unwrap_or_default();
-    let ours = ["repo", "repoName", "repo_name", "repository"]
+    // Artifacts names the repository in the event's `source`; older shapes put it in the payload.
+    let ours = ["repoName", "repo_name", "repo", "repository"]
         .iter()
-        .find_map(|k| p[*k].as_str().or_else(|| p[*k]["name"].as_str()))
+        .find_map(|k| {
+            event["source"][*k]
+                .as_str()
+                .or_else(|| p[*k].as_str())
+                .or_else(|| p[*k]["name"].as_str())
+        })
         .is_none_or(|repo| repo == SOURCE_REPO || repo.ends_with(&format!("/{SOURCE_REPO}")));
     ours && (r#ref == format!("refs/heads/{SOURCE_BRANCH}") || r#ref.starts_with("refs/tags/"))
 }
@@ -177,10 +183,12 @@ fn json<T: Serialize>(result: Result<T>) -> Result<Response> {
 struct SourceSetup {
     repo: artifacts::Ensured,
     events: queues::Ensured,
+    subscription: queues::Subscribed,
 }
 
-/// Has the source repository exist in Artifacts, imported from GitHub when created, and the
-/// queue its push events go to, consumed by this Worker; idempotent.
+/// Has the source repository exist in Artifacts, imported from GitHub when created, the queue
+/// its push events go to, consumed by this Worker, and the subscription that sends them there;
+/// idempotent.
 async fn setup_source(env: &Env) -> Result<SourceSetup> {
     let account = account(env).await?;
     let spec = artifacts::Spec {
@@ -199,7 +207,18 @@ async fn setup_source(env: &Env) -> Result<SourceSetup> {
         max_retries: 5,
     };
     let events = queues::ensure(&account, &events).await?;
-    Ok(SourceSetup { repo, events })
+    let subscription = queues::Subscription {
+        name: format!("{SOURCE_NAMESPACE}-{SOURCE_REPO}-pushed"),
+        queue_id: events.queue_id.clone(),
+        sources: artifacts::events_source(SOURCE_NAMESPACE, SOURCE_REPO),
+        events: vec!["pushed".into()],
+    };
+    let subscription = queues::subscribe(&account, &subscription).await?;
+    Ok(SourceSetup {
+        repo,
+        events,
+        subscription,
+    })
 }
 
 /// A git token handed to the caller, which is behind Access.
