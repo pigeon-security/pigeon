@@ -19,7 +19,21 @@ pub async fn call_raw(
     path: &str,
     body: Option<(&str, Vec<u8>)>,
 ) -> Result<Value> {
+    call_with(token, method, path, &[], body).await
+}
+
+/// [`call_raw`] with `extra` request headers, such as R2's `cf-r2-jurisdiction`.
+pub async fn call_with(
+    token: &str,
+    method: Method,
+    path: &str,
+    extra: &[(&str, &str)],
+    body: Option<(&str, Vec<u8>)>,
+) -> Result<Value> {
     let headers = Headers::new();
+    for (name, value) in extra {
+        headers.set(name, value)?;
+    }
     headers.set("Authorization", &format!("Bearer {token}"))?;
     let mut init = RequestInit::new();
     init.with_method(method);

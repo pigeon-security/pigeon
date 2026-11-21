@@ -222,7 +222,9 @@ fn iso(ms: f64) -> String {
 /// A token minted for one capability's calls. Call [`Scoped::finish`] to revoke it.
 pub struct Scoped<'a> {
     account: &'a crate::Account,
-    minted: Minted,
+    /// `None` for a linked account's bearer, which is used as it is and never revoked.
+    minted: Option<Minted>,
+    bearer: Option<&'a str>,
 }
 
 impl<'a> Scoped<'a> {
@@ -232,13 +234,30 @@ impl<'a> Scoped<'a> {
         purpose: &str,
         policies: Vec<Policy>,
     ) -> Result<Self> {
+        if let Some(bearer) = account.bearer.as_deref() {
+            return Ok(Self::linked(account, bearer));
+        }
         let minted = mint(
             &account.parent,
             &account.id,
             &MintRequest::new(purpose, policies),
         )
         .await?;
-        Ok(Self { account, minted })
+        Ok(Self {
+            account,
+            minted: Some(minted),
+            bearer: None,
+        })
+    }
+
+    /// A linked account's granted token, standing in for a minted one: what it may do is what
+    /// the account's owner granted, not `policies`.
+    fn linked(account: &'a crate::Account, bearer: &'a str) -> Self {
+        Self {
+            account,
+            minted: None,
+            bearer: Some(bearer),
+        }
     }
 
     /// [`Scoped::open`], with the token living `ttl_secs` instead of the default.
@@ -248,22 +267,37 @@ impl<'a> Scoped<'a> {
         policies: Vec<Policy>,
         ttl_secs: u64,
     ) -> Result<Self> {
+        if let Some(bearer) = account.bearer.as_deref() {
+            return Ok(Self::linked(account, bearer));
+        }
         let request = MintRequest {
             ttl_secs,
             ..MintRequest::new(purpose, policies)
         };
         let minted = mint(&account.parent, &account.id, &request).await?;
-        Ok(Self { account, minted })
+        Ok(Self {
+            account,
+            minted: Some(minted),
+            bearer: None,
+        })
     }
 
     /// The token's value, for API calls.
     pub fn value(&self) -> &str {
-        &self.minted.value
+        match (&self.minted, self.bearer) {
+            (Some(m), _) => &m.value,
+            (None, Some(b)) => b,
+            (None, None) => "",
+        }
     }
 
-    /// Revokes the token, then answers `result`: the work's own error comes first.
+    /// Revokes the token, then answers `result`: the work's own error comes first. A linked
+    /// account's granted token is not revoked.
     pub async fn finish<T>(self, result: Result<T>) -> Result<T> {
-        let revoked = revoke(&self.account.parent, &self.account.id, &self.minted.id).await;
+        let Some(minted) = self.minted else {
+            return result;
+        };
+        let revoked = revoke(&self.account.parent, &self.account.id, &minted.id).await;
         let value = result?;
         revoked?;
         Ok(value)

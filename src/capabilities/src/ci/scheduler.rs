@@ -249,6 +249,7 @@ pub(crate) async fn account(env: &Env, parent: &str) -> Result<Account> {
         id: env.var("CF_ACCOUNT_ID")?.to_string(),
         parent: parent_token,
         secrets_store: env.var("CF_SECRETS_STORE_ID")?.to_string(),
+        bearer: None,
     })
 }
 

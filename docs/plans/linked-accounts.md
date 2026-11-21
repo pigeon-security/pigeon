@@ -1,6 +1,6 @@
 # Linked accounts, instances and sites: noisypigeon.com through pigeon
 
-Status: **designed, revised with the person's answers; waiting for their go-ahead** (2026-11-21). Nothing is built. Branch
+Status: **phase 1 (core blocks) built; phases 2 onward to come** (2026-11-21). Nothing is built. Branch
 `claude/linked-accounts`. Phase 0 has tests only the person can run.
 
 ## Goal
@@ -614,6 +614,21 @@ not by this session.
 
 ## Log
 
+- 2026-11-21: phase 1 built on `claude/linked-accounts`. New blocks in `pigeon_core`:
+  - `cloudflare_oauth`, `github_app`, `r2` (REST only, with the blob/manifest/`live` layout),
+    `workers` (upload, workers.dev, routes that never take or delete another Worker's) and
+    `crypto` (AES-GCM through WebCrypto).
+  - `Account.bearer`: a linked account's granted token, used by `Scoped` as it is and never
+    revoked.
+  - `cloudflare::call_with`: extra headers, for R2's jurisdiction.
+
+  The smoke suite gained one scenario, `linked_account_github_app_and_site_layout`, and runs in
+  17 s. Executors: four `claude-sonnet-5-5` jobs (oauth, github_app, r2, workers with crypto).
+  All were used as returned, apart from two clippy fixes.
+
+  The local run of noisypigeon's build, part of phase 0, was refused in this session (running a
+  downloaded Zola binary on an external repository). The first `site-build` job in phase 4
+  records the output path, time and size instead.
 - 2026-11-21: the person's second answers, through the parent. GitHub over MCP (decision 6
   rewritten: the platform is an MCP client, with the REST exceptions listed); their login is a
   member of both accounts, so the OAuth client is private; phase 5b is left for later.

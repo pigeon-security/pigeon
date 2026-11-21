@@ -8,11 +8,14 @@ pub mod artifacts;
 pub mod buildkite;
 pub mod buildkite_hook;
 pub mod cloudflare;
+pub mod cloudflare_oauth;
 pub mod containers;
+pub mod crypto;
 pub mod custom_domain;
 pub mod design;
 pub mod durable;
 pub mod git;
+pub mod github_app;
 pub mod gitobj;
 pub mod identity;
 pub mod mcp;
@@ -22,11 +25,13 @@ pub mod oidc;
 pub mod pack;
 pub mod policy;
 pub mod queues;
+pub mod r2;
 pub mod registry;
 pub mod secrets_store;
 pub mod sign;
 pub mod tokens;
 pub mod webauthn;
+pub mod workers;
 pub mod zones;
 
 /// The Cloudflare account a block acts on. Cloned only to finish work after an answer has
@@ -39,4 +44,8 @@ pub struct Account {
     pub parent: String,
     /// The account's Secrets Store ID.
     pub secrets_store: String,
+    /// For an account linked to pigeon (not its own): the access token it was granted, used as
+    /// it is for every call instead of a token minted from `parent`, which is then empty. Never
+    /// printed: `Account` has no `Debug`.
+    pub bearer: Option<String>,
 }

@@ -1626,3 +1626,243 @@ fn site_on_the_apex() {
     let tools: Vec<String> = site.tools().iter().map(|t| t.name.to_string()).collect();
     assert_eq!(tools, ["site_publish"], "site_publish only");
 }
+
+#[test]
+fn linked_account_github_app_and_site_layout() {
+    use std::collections::BTreeSet;
+
+    use pigeon_core::cloudflare_oauth::{
+        Client, authorize_url, callback_params, challenge, needs_refresh, read_tokens,
+    };
+    use pigeon_core::github_app::{
+        jwt_signing_input, pkcs1_to_pkcs8, private_key_der, read_push, status_body, token_request,
+        verify_webhook,
+    };
+    use pigeon_core::r2::{self, Manifest};
+    use pigeon_core::sign::{hex, hmac_sha256};
+    use pigeon_core::webauthn::unb64url;
+    use pigeon_core::workers::{Route, RoutePlan, plan_route};
+    use rsa::pkcs1::EncodeRsaPrivateKey;
+    use rsa::pkcs8::EncodePrivateKey;
+
+    // (1) Linking: the authorize URL carries PKCE and state; the callback refuses errors and a
+    // missing state; tokens are read without echoing them, and refresh keeps the old refresh
+    // token when none comes back.
+    let client = Client {
+        client_id: "cid".into(),
+        redirect_uri: "https://platform.example/linked/callback".into(),
+        scopes: vec!["account.read".into(), "zone.read".into()],
+    };
+    let verifier = "v".repeat(43);
+    let url = authorize_url(&client, "st8", &challenge(&verifier));
+    assert!(
+        url.starts_with("https://dash.cloudflare.com/oauth2/auth?"),
+        "{url}"
+    );
+    for part in [
+        "response_type=code",
+        "client_id=cid",
+        "state=st8",
+        "code_challenge_method=S256",
+        "scope=account.read%20zone.read",
+        "redirect_uri=https%3A%2F%2Fplatform.example%2Flinked%2Fcallback",
+    ] {
+        assert!(url.contains(part), "{part} in {url}");
+    }
+    assert!(
+        pigeon_core::oauth::pkce(&verifier, &challenge(&verifier)),
+        "S256"
+    );
+    assert_eq!(
+        callback_params("code=c1&state=st8"),
+        Ok(("c1".to_string(), "st8".to_string()))
+    );
+    assert!(
+        callback_params("error=access_denied&state=st8").is_err(),
+        "denied"
+    );
+    assert!(callback_params("code=c1").is_err(), "no state");
+    let t = read_tokens(
+        r#"{"access_token":"at1","token_type":"Bearer","expires_in":3600,"refresh_token":"rt1"}"#,
+        1_000.0,
+        None,
+    )
+    .unwrap();
+    assert_eq!(t.refresh.as_deref(), Some("rt1"));
+    assert!(!needs_refresh(&t, 1_000.0), "fresh");
+    assert!(
+        needs_refresh(&t, 1_000.0 + 3_400_000.0),
+        "under five minutes left"
+    );
+    let again = read_tokens(
+        r#"{"access_token":"at2","token_type":"bearer","expires_in":60}"#,
+        0.0,
+        Some("rt1"),
+    )
+    .unwrap();
+    assert_eq!(
+        again.refresh.as_deref(),
+        Some("rt1"),
+        "the old refresh token is kept"
+    );
+    let refused = read_tokens(
+        r#"{"error":"invalid_grant","error_description":"reused"}"#,
+        0.0,
+        Some("rt-secret"),
+    )
+    .unwrap_err();
+    assert!(
+        refused.contains("invalid_grant") && !refused.contains("rt-secret"),
+        "{refused}"
+    );
+    assert!(
+        !format!("{t:?}").contains("at1"),
+        "Debug never shows a token"
+    );
+
+    // (2) The GitHub App: its key as GitHub hands it out (PKCS#1) becomes the PKCS#8 that
+    // WebCrypto imports; a JWT is short-lived; only a correct signature over these bytes passes.
+    let key = webhook_and_oidc_key();
+    let pkcs1 = key.to_pkcs1_der().unwrap();
+    let pkcs8 = key.to_pkcs8_der().unwrap();
+    assert_eq!(
+        pkcs1_to_pkcs8(pkcs1.as_bytes()),
+        pkcs8.as_bytes(),
+        "wrapped as rsa does"
+    );
+    let pem = |label: &str, der: &[u8]| {
+        let b64 = pigeon_core::git::base64(der);
+        let lines: Vec<&str> = b64
+            .as_bytes()
+            .chunks(64)
+            .map(|c| std::str::from_utf8(c).unwrap())
+            .collect();
+        format!(
+            "-----BEGIN {label}-----\n{}\n-----END {label}-----\n",
+            lines.join("\n")
+        )
+    };
+    assert_eq!(
+        private_key_der(&pem("RSA PRIVATE KEY", pkcs1.as_bytes())).as_deref(),
+        Some(pkcs8.as_bytes())
+    );
+    assert_eq!(
+        private_key_der(&pem("PRIVATE KEY", pkcs8.as_bytes())).as_deref(),
+        Some(pkcs8.as_bytes())
+    );
+    assert!(private_key_der(&pem("PUBLIC KEY", pkcs8.as_bytes())).is_none());
+    let input = jwt_signing_input("Iv1.abc", 1_000_000);
+    let (h, c) = input.split_once('.').unwrap();
+    let header: Value = serde_json::from_slice(&unb64url(h).unwrap()).unwrap();
+    let claims: Value = serde_json::from_slice(&unb64url(c).unwrap()).unwrap();
+    assert_eq!(header, json!({ "alg": "RS256", "typ": "JWT" }));
+    assert_eq!(
+        claims,
+        json!({ "iat": 999_940, "exp": 1_000_540, "iss": "Iv1.abc" })
+    );
+
+    let secret = b"gh-hook";
+    let body = br#"{"ref":"refs/heads/main","after":"abc123","deleted":false,"repository":{"full_name":"noisypigeon/pigeon"},"installation":{"id":42},"head_commit":{"message":"post"}}"#;
+    let good = format!("sha256={}", hex(&hmac_sha256(secret, body)));
+    assert!(verify_webhook(secret, body, Some(&good)));
+    assert!(!verify_webhook(secret, b"{}", Some(&good)), "other bytes");
+    assert!(!verify_webhook(b"other", body, Some(&good)), "other secret");
+    assert!(!verify_webhook(secret, body, None), "unsigned");
+    assert!(
+        !verify_webhook(secret, body, Some(&good[7..])),
+        "no sha256= prefix"
+    );
+    let push = read_push(Some("push"), body).unwrap().unwrap();
+    assert_eq!(
+        (
+            push.repo.as_str(),
+            push.git_ref.as_str(),
+            push.after.as_str(),
+            push.installation
+        ),
+        ("noisypigeon/pigeon", "refs/heads/main", "abc123", 42)
+    );
+    assert_eq!(read_push(Some("ping"), b"{}"), Ok(None));
+    assert!(
+        read_push(Some("push"), b"{}").is_err(),
+        "a push without its fields"
+    );
+    assert_eq!(
+        token_request(&["pigeon"], &[("contents", "read")]),
+        json!({ "repositories": ["pigeon"], "permissions": { "contents": "read" } })
+    );
+    let long = "x".repeat(300);
+    let status = status_body("success", Some("https://noisypigeon.com"), None, &long);
+    assert_eq!(status["description"].as_str().unwrap().chars().count(), 140);
+    assert!(status.get("log_url").is_none(), "absent urls are left out");
+
+    // (3) The site's layout: content-addressed blobs, a manifest per commit, directory paths
+    // resolved, nothing uploaded twice, and the live deploy never pruned.
+    let files = vec![
+        ("index.html".to_string(), b"<h1>home</h1>".to_vec()),
+        ("/posts/a/index.html".to_string(), b"<p>a</p>".to_vec()),
+        ("/img/p.jpg".to_string(), b"jpeg".to_vec()),
+        ("/img/copy.jpg".to_string(), b"jpeg".to_vec()),
+    ];
+    let manifest: Manifest = r2::manifest_of(&files);
+    assert!(manifest.contains_key("/index.html"), "paths start with /");
+    assert_eq!(
+        manifest["/img/p.jpg"].blob, manifest["/img/copy.jpg"].blob,
+        "same bytes, one blob"
+    );
+    assert_eq!(
+        manifest["/index.html"].content_type,
+        "text/html; charset=utf-8"
+    );
+    let present: BTreeSet<String> = [manifest["/img/p.jpg"].blob.clone()].into();
+    assert_eq!(
+        r2::missing(&manifest, &present).len(),
+        2,
+        "only what the bucket lacks"
+    );
+    for (request, served) in [
+        ("/", Some("/index.html")),
+        ("/posts/a", Some("/posts/a/index.html")),
+        ("/posts/a/", Some("/posts/a/index.html")),
+        ("/img/p.jpg", Some("/img/p.jpg")),
+        ("/nope", None),
+        ("/posts/../index.html", None),
+    ] {
+        assert_eq!(
+            r2::resolve(&manifest, request).as_deref(),
+            served,
+            "{request}"
+        );
+    }
+    let deploys: Vec<(String, u64)> = (0..5).map(|i| (format!("c{i}"), i)).collect();
+    let mut pruned = r2::prune(&deploys, "c0", 2);
+    pruned.sort();
+    assert_eq!(
+        pruned,
+        ["c1", "c2"],
+        "the oldest beyond two, never the live one"
+    );
+
+    // (4) The cutover route: created once, never taking a pattern another Worker serves.
+    let routes = vec![Route {
+        id: "r1".into(),
+        pattern: "noisypigeon.com/*".into(),
+        script: Some("old-site".into()),
+    }];
+    assert_eq!(
+        plan_route(&routes, "noisypigeon.com/*", "pigeon-site-blog"),
+        RoutePlan::Conflict("old-site".into())
+    );
+    assert_eq!(
+        plan_route(&[], "noisypigeon.com/*", "pigeon-site-blog"),
+        RoutePlan::Create
+    );
+    let ours = vec![Route {
+        script: Some("pigeon-site-blog".into()),
+        ..routes[0].clone()
+    }];
+    assert_eq!(
+        plan_route(&ours, "noisypigeon.com/*", "pigeon-site-blog"),
+        RoutePlan::Present("r1".into())
+    );
+}

@@ -20,7 +20,7 @@ up to date.
 | [mcp-portal.md](mcp-portal.md) | External MCP access through a Cloudflare MCP server portal: pigeon behind it with its own OAuth kept, tool-name prefixes in the settings generator, cutover and rollback, the person's dashboard steps | Done (phases 0 to 4): portal live, sync at deploy, `call` off at the portal, old connector removed, generator names only the portal's tools |
 | [console-hardening.md](console-hardening.md) | The console loads fast and section by section (snapshots, timeouts, retry), narrowed to Approvals, Architecture, Access and Cost | Deployed (phases 1 to 3, landing `slWijyeD5dnMaimB`) |
 | [ci-workflows.md](ci-workflows.md) | Whether Cloudflare Workflows should replace the hand-built CI and landing state machines: limits, cost, Rust support | Evaluated: don't adopt now; revisit with workers-rs Workflow support |
-| [linked-accounts.md](linked-accounts.md) | A second Cloudflare account linked by OAuth, instances in the console, static sites deployed from a GitHub repo through a GitHub App: noisypigeon.com | Designed and revised with the person's answers; waits for their go-ahead |
+| [linked-accounts.md](linked-accounts.md) | A second Cloudflare account linked by OAuth, instances in the console, static sites deployed from a GitHub repo through a GitHub App: noisypigeon.com | Phase 1 (core blocks) built; phases 2 onward to come |
 
 When a plan's status changes, change it in both places: the plan's first lines and this table.
 

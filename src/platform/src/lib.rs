@@ -226,6 +226,7 @@ async fn account(env: &Env) -> Result<Account> {
         id: env.var("CF_ACCOUNT_ID")?.to_string(),
         parent,
         secrets_store: env.var("CF_SECRETS_STORE_ID")?.to_string(),
+        bearer: None,
     })
 }
 
