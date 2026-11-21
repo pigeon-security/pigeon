@@ -15,19 +15,32 @@ use serde_json::json;
 
 const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
 
+/// The names sessions see pigeon's MCP server under: the claude.ai connector `Pigeon`, and the
+/// same connector by its server id, as some sessions list it. Rules name each tool under both,
+/// one by one: a server-wide `mcp__<server>__*` would also allow every tool the policy does not
+/// name (`call`, `deploy_token`, `source_token`).
+const PIGEON: [&str; 2] = ["Pigeon", "71fdea92-23ad-47d5-a156-53f536f8b55a"];
+
+/// A tool of claude-code-remote's, or of pigeon's (under each of [`PIGEON`]).
+enum Tool {
+    Remote(&'static str),
+    Pigeon(&'static str),
+    Bash(&'static str),
+}
+
 /// The Claude Code tools an allowed action kind is carried out with.
-fn tools(k: Kind) -> &'static [&'static str] {
+fn tools(k: Kind) -> &'static [Tool] {
     match k {
-        Kind::MessageSession => &["mcp__claude-code-remote__send_message"],
-        Kind::StartSession => &["mcp__claude-code-remote__create_session"],
-        Kind::ArchiveSession => &["mcp__claude-code-remote__archive_session"],
+        Kind::MessageSession => &[Tool::Remote("send_message")],
+        Kind::StartSession => &[Tool::Remote("create_session")],
+        Kind::ArchiveSession => &[Tool::Remote("archive_session")],
         Kind::Land => &[
-            "mcp__pigeon-platform__land",
-            "mcp__pigeon-platform__land_status",
-            "mcp__pigeon-platform__land_cancel",
+            Tool::Pigeon("land"),
+            Tool::Pigeon("land_status"),
+            Tool::Pigeon("land_cancel"),
         ],
         Kind::PushBranch | Kind::RewriteBranch | Kind::DeleteBranch => {
-            &["Bash(git push https://proxy.pigeon.dev/*)"]
+            &[Tool::Bash("git push https://proxy.pigeon.dev/*")]
         }
         Kind::HandoffBranch
         | Kind::Deploy
@@ -38,16 +51,28 @@ fn tools(k: Kind) -> &'static [&'static str] {
     }
 }
 
-/// The allow list: `policy_check` and `call`, then each unconditional allow rule's tools.
+/// `tool`'s permission rules, as the Claude Code docs write them: `mcp__<server>__<tool>`, and
+/// `Bash(<command>)` with `*` matching any text.
+fn rules(tool: &Tool) -> Vec<String> {
+    match tool {
+        Tool::Remote(t) => vec![format!("mcp__claude-code-remote__{t}")],
+        Tool::Pigeon(t) => PIGEON.iter().map(|s| format!("mcp__{s}__{t}")).collect(),
+        Tool::Bash(c) => vec![format!("Bash({c})")],
+    }
+}
+
+/// The allow list: `policy_check`, which only reads the policy, then each unconditional allow
+/// rule's tools. Never `call`: it reaches every pigeon tool, the policy's or not.
 fn allow_list(p: &Policy) -> Vec<String> {
     let mut allow: Vec<String> = Vec::new();
-    let mut add = |tool: &str| {
-        if !allow.iter().any(|t| t == tool) {
-            allow.push(tool.to_string());
+    let mut add = |tool: &Tool| {
+        for r in rules(tool) {
+            if !allow.contains(&r) {
+                allow.push(r);
+            }
         }
     };
-    add("mcp__pigeon-platform__policy_check");
-    add("mcp__pigeon-platform__call");
+    add(&Tool::Pigeon("policy_check"));
     for rule in &p.rules {
         if rule.decision != Decision::Allow || rule.approval.is_some() {
             continue;

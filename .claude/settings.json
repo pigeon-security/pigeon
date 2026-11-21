@@ -2,14 +2,17 @@
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
   "permissions": {
     "allow": [
-      "mcp__pigeon-platform__policy_check",
-      "mcp__pigeon-platform__call",
+      "mcp__Pigeon__policy_check",
+      "mcp__71fdea92-23ad-47d5-a156-53f536f8b55a__policy_check",
       "mcp__claude-code-remote__send_message",
       "mcp__claude-code-remote__create_session",
       "mcp__claude-code-remote__archive_session",
-      "mcp__pigeon-platform__land",
-      "mcp__pigeon-platform__land_status",
-      "mcp__pigeon-platform__land_cancel",
+      "mcp__Pigeon__land",
+      "mcp__71fdea92-23ad-47d5-a156-53f536f8b55a__land",
+      "mcp__Pigeon__land_status",
+      "mcp__71fdea92-23ad-47d5-a156-53f536f8b55a__land_status",
+      "mcp__Pigeon__land_cancel",
+      "mcp__71fdea92-23ad-47d5-a156-53f536f8b55a__land_cancel",
       "Bash(git push https://proxy.pigeon.dev/*)"
     ]
   }

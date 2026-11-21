@@ -125,17 +125,18 @@ The list holds:
 
 | Entry | Source |
 | --- | --- |
-| `mcp__pigeon-platform__policy_check` | always |
-| `mcp__pigeon-platform__call` | always |
+| `mcp__Pigeon__policy_check` | always (it only reads the policy) |
 | `mcp__claude-code-remote__send_message` | `agents-coordinate` |
 | `mcp__claude-code-remote__create_session` | `agents-coordinate` |
 | `mcp__claude-code-remote__archive_session` | `agents-coordinate` |
-| `mcp__pigeon-platform__land` | `land-and-deploy` |
-| `mcp__pigeon-platform__land_status` | `land-and-deploy` |
-| `mcp__pigeon-platform__land_cancel` | `land-and-deploy` |
+| `mcp__Pigeon__land` | `land-and-deploy` |
+| `mcp__Pigeon__land_status` | `land-and-deploy` |
+| `mcp__Pigeon__land_cancel` | `land-and-deploy` |
 | `Bash(git push https://proxy.pigeon.dev/*)` | `session-branches` |
 
-The format follows the Claude Code permissions docs. A tool entry is `mcp__<server>__<tool>`, the server named as in `.mcp.json`. A Bash rule uses `*` to match any text.
+Each pigeon tool is listed twice: under `Pigeon`, the claude.ai connector's name, and under `71fdea92-23ad-47d5-a156-53f536f8b55a`, the same connector's server id, which some sessions see instead. The format follows the Claude Code permissions docs: a tool is `mcp__<server>__<tool>`, the server segment literal. A server-wide `mcp__<server>__*` exists, but it would also allow every pigeon tool the policy does not name, so each tool is named. A Bash rule uses `*` to match any text.
+
+`call` is never in the list: it reaches every pigeon tool, `deploy_token` and `source_token` included, so pre-approving it would go around the policy. Landing 1 generated it, with the names of the `pigeon-platform` server in `.mcp.json`, a duplicate connector that asks for sign-in; the third landing corrected both, with the person's passkey.
 
 The gate fails when `.claude/settings.json` differs from what the generator writes.
 
@@ -184,7 +185,6 @@ Locally the suite runs in about 7 to 10 seconds. RSA key generation dominates.
 
 No rule was added for any of these. Each is a decision for the person.
 
-- `call` is pre-approved and reaches every platform tool.
-- Adding a scenario to `tests/smoke.rs` is "not in policy". `smoke-suite-fixed` only covers other test files.
+- Adding a scenario to `tests/smoke.rs` is "not in policy". The suite stays frozen as rule 6 reads; no rule for growing it.
 - A deploy of anything but a session branch is "not in policy".
 - The proxy cannot tell a rewrite of a session branch from a push.
