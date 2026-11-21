@@ -293,6 +293,12 @@ impl Capability for Land {
                     "required": ["id"]
                 }),
             },
+            Tool::bare(
+                "portal_sync",
+                "Sync the MCP server portal now, as a landing does once it has deployed: each \
+                 server's state afterwards (`ready`, `waiting`, `stale` or `error`), or why it \
+                 could not be synced.",
+            ),
         ]
     }
 
@@ -304,6 +310,17 @@ impl Capability for Land {
                     lander(cx.env, "status", json!({ "id": args["id"].as_str() })).await
                 }
                 "land_cancel" => self.cancel(cx, args).await,
+                "portal_sync" => {
+                    let mut out = serde_json::Map::new();
+                    for server in &self.settings.portal_servers {
+                        let v = match pigeon_core::mcp_portal::sync(cx.account, server).await {
+                            Ok(v) => v,
+                            Err(e) => json!({ "status": "not synced", "why": e.to_string() }),
+                        };
+                        out.insert(server.clone(), v);
+                    }
+                    Ok(Value::Object(out))
+                }
                 other => Err(unknown(other)),
             }
         })
@@ -698,16 +715,14 @@ impl Lander {
         if s.portal_servers.is_empty() {
             return;
         }
-        let account = match crate::ci::scheduler::account(&self.env, &s.parent).await {
-            Ok(a) => a,
-            Err(e) => {
-                console_error!("portal sync after {id}: {e}");
-                return;
-            }
-        };
+        let account = crate::ci::scheduler::account(&self.env, &s.parent).await;
         let mut said = Vec::new();
         for server in &s.portal_servers {
-            let outcome = match pigeon_core::mcp_portal::sync(&account, server).await {
+            let synced = match &account {
+                Ok(a) => pigeon_core::mcp_portal::sync(a, server).await,
+                Err(e) => Err(Error::RustError(e.to_string())),
+            };
+            let outcome = match synced {
                 Ok(v) => v["status"].as_str().unwrap_or("synced").to_string(),
                 Err(e) => {
                     console_error!("portal sync of `{server}` after {id}: {e}");
