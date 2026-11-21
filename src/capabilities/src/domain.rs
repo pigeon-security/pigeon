@@ -1,13 +1,13 @@
 //! A zone in the account, such as `pigeon.dev`, and its apex. The zone is added and its
 //! nameservers moved by hand; this capability checks it is active and builds on [`zero_trust`]
-//! to put the apex behind Access.
+//! to put the apex behind Access, or serves it from a Worker in public.
 
 use serde::{Deserialize, Serialize};
 use worker::{Error, Method, Result};
 
 use crate::cloudflare::call;
 use crate::tokens::{Policy, Scope, Scoped};
-use crate::zero_trust::{Protected, Protection};
+use crate::zero_trust::{Protected, Protection, Retired};
 use crate::{Account, zero_trust};
 
 /// A zone, as the API lists it.
@@ -62,28 +62,33 @@ pub async fn protect(account: &Account, zone: &str, protection: &Protection) -> 
     Ok(Guarded { zone, access })
 }
 
-/// What [`serve`] made.
+/// What [`serve`] did.
 #[derive(Serialize)]
 pub struct Served {
     pub zone: Zone,
-    pub access: Protected,
     pub custom_domain: String,
+    /// What was removed from an Access setup the apex no longer has, if one was named.
+    pub retired: Option<Retired>,
 }
 
-/// Serves zone `zone`'s apex from Worker `worker` behind Access; idempotent. Access holds the
-/// apex before the Worker serves it.
+/// Serves zone `zone`'s apex from Worker `worker`, public; idempotent. When `retire` names the
+/// Access setup the apex had, it is removed after the Worker serves the apex: its application,
+/// policy, service token and the token's secrets.
 pub async fn serve(
     account: &Account,
     zone: &str,
     worker: &str,
-    protection: &Protection,
+    retire: Option<&Protection>,
 ) -> Result<Served> {
-    let guarded = protect(account, zone, protection).await?;
-    let custom_domain =
-        crate::custom_domain::attach(account, &guarded.zone.id, &guarded.zone.name, worker).await?;
+    let zone = active(account, zone).await?;
+    let custom_domain = crate::custom_domain::attach(account, &zone.id, &zone.name, worker).await?;
+    let retired = match retire {
+        Some(protection) => Some(zero_trust::unprotect(account, &zone.name, protection).await?),
+        None => None,
+    };
     Ok(Served {
-        zone: guarded.zone,
-        access: guarded.access,
+        zone,
         custom_domain,
+        retired,
     })
 }

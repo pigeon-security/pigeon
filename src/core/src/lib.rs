@@ -64,15 +64,15 @@ async fn setup_platform(env: &Env) -> Result<Served> {
     subdomain::serve(&account(env).await?, &spec).await
 }
 
-/// Serves the zone's apex from the site Worker behind Access, letting in only the site's
-/// own service token; idempotent.
+/// Serves the zone's apex from the site Worker, public; idempotent. Removes the Access setup the
+/// apex had, if it is still there.
 async fn setup_site(env: &Env) -> Result<domain::Served> {
-    let protection = Protection {
+    let retired = Protection {
         app: "pigeon".into(),
         service_token: "pigeon-site".into(),
         client_id_secret: "SITE_ACCESS_CLIENT_ID".into(),
         client_secret_secret: "SITE_ACCESS_CLIENT_SECRET".into(),
     };
     let zone = env.var("ZONE")?.to_string();
-    domain::serve(&account(env).await?, &zone, SITE_WORKER, &protection).await
+    domain::serve(&account(env).await?, &zone, SITE_WORKER, Some(&retired)).await
 }

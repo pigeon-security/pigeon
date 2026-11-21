@@ -259,3 +259,103 @@ async fn store(
         None => Ok(()),
     }
 }
+
+/// What [`unprotect`] removed; each is `None` or empty when it was already gone.
+#[derive(Serialize)]
+pub struct Retired {
+    pub access_app: Option<String>,
+    pub policy: Option<String>,
+    pub service_token: Option<String>,
+    pub secrets: Vec<String>,
+}
+
+/// Takes `domain` out from behind Access and removes what `protection` named: the application
+/// on `domain`, its reusable policy, its service token, and the token's secrets in the Secrets
+/// Store; idempotent. The application goes first, so nothing is left holding the policy.
+pub async fn unprotect(
+    account: &Account,
+    domain: &str,
+    protection: &Protection,
+) -> Result<Retired> {
+    let token = Scoped::open(account, "zero-trust", policies()).await?;
+    let removed = unprotect_with(account, token.value(), domain, protection).await;
+    token.finish(removed).await
+}
+
+async fn unprotect_with(
+    account: &Account,
+    token: &str,
+    domain: &str,
+    protection: &Protection,
+) -> Result<Retired> {
+    let access = format!("/accounts/{}/access", account.id);
+    let app = remove(
+        token,
+        &access,
+        "apps",
+        list(token, &account.id, "apps").await?,
+        |a| a.domain == domain,
+    )
+    .await?;
+    let policy = remove(
+        token,
+        &access,
+        "policies",
+        list(token, &account.id, "policies").await?,
+        |p| p.name == protection.app,
+    )
+    .await?;
+    let service_token = remove(
+        token,
+        &access,
+        "service_tokens",
+        list(token, &account.id, "service_tokens").await?,
+        |t| t.name == protection.service_token,
+    )
+    .await?;
+    let writer = Writer::open(account).await?;
+    let secrets = remove_secrets(&writer, protection).await;
+    let secrets = writer.finish(secrets).await?;
+    Ok(Retired {
+        access_app: app,
+        policy,
+        service_token,
+        secrets,
+    })
+}
+
+/// Deletes the first of `listed` that `pick` matches, from `access/what`: its ID, or `None`.
+async fn remove(
+    token: &str,
+    access: &str,
+    what: &str,
+    listed: Vec<Listed>,
+    pick: impl Fn(&Listed) -> bool,
+) -> Result<Option<String>> {
+    let Some(found) = listed.into_iter().find(|l| pick(l)) else {
+        return Ok(None);
+    };
+    call(
+        token,
+        Method::Delete,
+        &format!("{access}/{what}/{}", found.id),
+        None,
+    )
+    .await?;
+    Ok(Some(found.id))
+}
+
+async fn remove_secrets(writer: &Writer<'_>, protection: &Protection) -> Result<Vec<String>> {
+    let names = [
+        &protection.client_id_secret,
+        &protection.client_secret_secret,
+    ];
+    let mut removed = Vec::new();
+    for secret in writer.list().await? {
+        if names.contains(&&secret.name) {
+            writer.delete(&secret.id).await?;
+            removed.push(secret.name);
+        }
+    }
+    Ok(removed)
+}

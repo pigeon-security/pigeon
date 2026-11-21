@@ -3,7 +3,7 @@
 use pigeon_capabilities::design::Page;
 
 /// The day the page was last brought in line with what is deployed.
-const AS_OF: &str = "2026-11-20";
+const AS_OF: &str = "2026-11-21";
 
 /// The page, rendered.
 pub fn page() -> String {
@@ -21,7 +21,7 @@ fn body() -> String {
 <header>
   <span class="eyebrow">pigeon · architecture</span>
   <h1>What's deployed</h1>
-  <p>Every request passes Cloudflare Access before a Worker sees it. pigeon-platform holds one parent token and mints a short-lived, scoped token for each capability it runs.</p>
+  <p>pigeon.dev is public; the platform sits behind Cloudflare Access. pigeon-platform holds one parent token and mints a short-lived, scoped token for each capability it runs.</p>
   <div class="pills"><span class="pill">as of {AS_OF}</span><span class="pill">2 Workers</span><span class="pill">6 capabilities</span></div>
 </header>
 
@@ -33,7 +33,11 @@ fn body() -> String {
     <article class="card">
       <div class="card-h"><span class="dot"></span><h3>Service-token callers</h3></div>
       <p>Machines holding an Access service token, sent as <code>CF-Access-Client-Id</code> and <code>CF-Access-Client-Secret</code>.</p>
-      <div class="pills"><span class="pill">pigeon-platform</span><span class="pill">pigeon-site</span></div>
+      <div class="pills"><span class="pill">pigeon-platform</span></div>
+    </article>
+    <article class="card">
+      <div class="card-h"><span class="dot"></span><h3>Visitors</h3></div>
+      <p>Anyone with a browser, on pigeon.dev.</p>
     </article>
     <article class="card">
       <div class="card-h"><span class="dot"></span><h3>Deploys</h3></div>
@@ -48,15 +52,15 @@ fn body() -> String {
   <span class="region-name">Cloudflare · pigeon-security</span>
 
   <section class="layer" aria-labelledby="l-access">
-    <span class="eyebrow" id="l-access">Layer 2 · Zero Trust Access</span>
+    <span class="eyebrow" id="l-access">Layer 2 · Hostnames</span>
     <div class="cards">
       <article class="card kind-access">
         <div class="card-h"><span class="dot"></span><h3>platform.pigeon.dev</h3><span class="pill accent">subdomain</span></div>
-        <ul class="kv"><li>admits <code>pigeon-platform</code> service token only</li><li>serves pigeon-platform</li></ul>
+        <ul class="kv"><li>Access: admits <code>pigeon-platform</code> service token only</li><li>serves pigeon-platform</li></ul>
       </article>
-      <article class="card kind-access">
+      <article class="card">
         <div class="card-h"><span class="dot"></span><h3>pigeon.dev</h3><span class="pill accent">domain</span></div>
-        <ul class="kv"><li>admits <code>pigeon-site</code> service token only</li><li>serves pigeon</li></ul>
+        <ul class="kv"><li>public, no Access</li><li>serves pigeon</li></ul>
       </article>
     </div>
   </section>
@@ -97,7 +101,7 @@ fn body() -> String {
         <div class="chain"><span>calls</span><span class="pill">zero_trust</span><span class="pill">custom domain</span></div>
       </article>
       <article class="card">
-        <div class="card-h"><h3>zero_trust</h3><span class="pill accent">protect</span></div>
+        <div class="card-h"><h3>zero_trust</h3><span class="pill accent">protect · unprotect</span></div>
         <div class="chain"><span>calls</span><span class="pill">secrets_store</span></div>
       </article>
       <article class="card">
@@ -125,7 +129,6 @@ fn body() -> String {
         <ul class="kv">
           <li><code>CF_PARENT_TOKEN</code> bound to pigeon-platform</li>
           <li><code>PLATFORM_ACCESS_CLIENT_ID</code>, <code>_SECRET</code></li>
-          <li><code>SITE_ACCESS_CLIENT_ID</code>, <code>_SECRET</code></li>
         </ul>
       </article>
       <article class="card kind-api">
@@ -154,7 +157,8 @@ fn body() -> String {
 
 <section class="layer" aria-label="Legend" style="margin-top:28px">
   <ul class="legend">
-    <li><span class="dot kind-access"></span>Access application</li>
+    <li><span class="dot kind-access"></span>Behind Access</li>
+    <li><span class="dot"></span>Public or client</li>
     <li><span class="dot kind-worker"></span>Worker</li>
     <li><span class="dot kind-store"></span>Secrets</li>
     <li><span class="dot kind-api"></span>Cloudflare API object</li>
