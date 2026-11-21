@@ -344,6 +344,7 @@ needs = { os = "linux", docker = true }
         let cfg = parse(include_str!("../../../../.pigeon/ci.toml")).unwrap();
         assert_eq!(cfg.jobs["smoke"].run, "ci/runner/smoke.sh");
         assert_eq!(cfg.jobs["smoke"].needs, Needs::default());
+        assert_eq!(cfg.jobs["smoke-fail"].run, "ci/runner/smoke-fail.sh");
     }
 
     #[test]

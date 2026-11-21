@@ -37,7 +37,8 @@ token=$PIGEON_JOB_TOKEN
 unset PIGEON_JOB_TOKEN v
 
 body=$(mktemp)
-trap 'rm -f "$body"' EXIT
+out=$(mktemp)
+trap 'rm -f "$body" "$out"' EXIT
 
 # Post a JSON body. The token goes to curl through stdin, never argv.
 report() {
@@ -81,23 +82,31 @@ if [ ! -f "/work/$PIGEON_SCRIPT" ] || [ -L "/work/$PIGEON_SCRIPT" ]; then
     finish '{"state":"finished","passed":false,"detail":"no such script"}'
 fi
 
-# Run the job without the token in its environment.
+# Run the job without the token in its environment. Its output goes to the container's log
+# and to a file, whose last 4 KiB go with the result (the gateway redacts token-shaped text).
 cd /work
 rc=0
-env -u PIGEON_JOB_TOKEN timeout "${PIGEON_TIMEOUT_MIN}m" sh "/work/$PIGEON_SCRIPT" || rc=$?
+env -u PIGEON_JOB_TOKEN timeout "${PIGEON_TIMEOUT_MIN}m" sh "/work/$PIGEON_SCRIPT" \
+    >"$out" 2>&1 || rc=$?
+cat "$out"
+tail=$(tail -c 4096 "$out" | base64 | tr -d '\n')
 
-# The final JSON. Details hold only digits and fixed words.
+# The final JSON. Details hold only digits and fixed words; the output is base64.
 case $rc in
     0)
-        json='{"state":"finished","passed":true}'
+        passed=true
+        detail=""
         ;;
     124)
-        json=$(printf '{"state":"finished","passed":false,"detail":"timed out after %s min"}' \
-            "$PIGEON_TIMEOUT_MIN")
+        passed=false
+        detail="timed out after $PIGEON_TIMEOUT_MIN min"
         ;;
     *)
-        json=$(printf '{"state":"finished","passed":false,"detail":"exit code %s"}' "$rc")
+        passed=false
+        detail="exit code $rc"
         ;;
 esac
+json=$(printf '{"state":"finished","passed":%s,"detail":"%s","exit_code":%s,"output_b64":"%s"}' \
+    "$passed" "$detail" "$rc" "$tail")
 
 finish "$json"

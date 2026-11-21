@@ -200,7 +200,9 @@ pub fn on_deadline(state: State, attempt: u32, now_ms: i64, deadline_ms: i64) ->
 ### The commit note (`ci/notes.rs`, core `gitobj.rs`)
 
 - One note per commit under `refs/notes/ci`, its text one line per final job:
-  `<job> <state> connector=<c> attempt=<n> duration=<s>s url=<u>`, sorted by job name.
+  `<job> <state> connector=<c> attempt=<n> exit=<code> duration=<ms>ms url=<u>`, sorted by job
+  name. `ci_status` also has the exit code and the last 4 KiB of the script's output, with
+  token-shaped strings redacted (`ci/output.rs`).
 - The scheduler keeps every note it has written (`notes` table). To write one it mints a
   write git token for the repository, reads `refs/notes/ci`'s tip (`git::refs`), builds a blob
   per note it keeps, a flat tree of them (`<40-hex commit>` → blob, sorted), and a commit whose

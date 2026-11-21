@@ -30,7 +30,7 @@ use super::token::{self, Grant};
 use super::{Cx, Dispatched, EVENTS, NewJob, Run, Seen, Settings, notify};
 
 /// The scheduler's schema, one statement per migration, applied in order and never edited.
-const MIGRATIONS: [&str; 9] = [
+const MIGRATIONS: [&str; 11] = [
     "CREATE TABLE jobs (id TEXT PRIMARY KEY, repo TEXT NOT NULL, commit_sha TEXT NOT NULL, name TEXT NOT NULL, job TEXT NOT NULL, class TEXT NOT NULL, pin TEXT, task TEXT, caller TEXT, caller_name TEXT, notify_url TEXT, notify_key TEXT, state TEXT NOT NULL, attempt INTEGER NOT NULL, connector TEXT, handle TEXT, url TEXT, excluded TEXT NOT NULL, token_hash TEXT, token_expires_at INTEGER, deadline_at INTEGER, claimed_at INTEGER, next_poll_at INTEGER, created_at INTEGER NOT NULL, queued_at INTEGER NOT NULL, dispatched_at INTEGER, started_at INTEGER, finished_at INTEGER, detail TEXT)",
     "CREATE INDEX jobs_state ON jobs (state)",
     "CREATE INDEX jobs_commit ON jobs (repo, commit_sha)",
@@ -40,6 +40,8 @@ const MIGRATIONS: [&str; 9] = [
     "CREATE TABLE outbox (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, job TEXT, repo TEXT, body TEXT, tries INTEGER NOT NULL, next_at INTEGER NOT NULL)",
     "CREATE TABLE notes (repo TEXT NOT NULL, commit_sha TEXT NOT NULL, text TEXT NOT NULL, pushed INTEGER NOT NULL, PRIMARY KEY (repo, commit_sha))",
     "CREATE TABLE pool (connector TEXT PRIMARY KEY, availability TEXT NOT NULL, checked_at INTEGER NOT NULL)",
+    "ALTER TABLE jobs ADD COLUMN exit_code INTEGER",
+    "ALTER TABLE jobs ADD COLUMN output TEXT",
 ];
 
 /// How long the pool's availability is trusted.
@@ -100,6 +102,8 @@ struct Row {
     started_at: Option<i64>,
     finished_at: Option<i64>,
     detail: Option<String>,
+    exit_code: Option<i64>,
+    output: Option<String>,
 }
 
 impl Row {
@@ -109,6 +113,13 @@ impl Row {
 
     fn attempt(&self) -> u32 {
         u32::try_from(self.attempt).unwrap_or(state::MAX_ATTEMPTS)
+    }
+
+    /// How long the script ran: from the runner's start (or the dispatch) to the end.
+    fn duration_ms(&self) -> Option<u64> {
+        self.finished_at
+            .zip(self.started_at.or(self.dispatched_at))
+            .map(|(f, s)| (f - s).max(0) as u64)
     }
 
     fn excluded(&self) -> Vec<String> {
@@ -130,6 +141,7 @@ impl Row {
             "created_at": self.created_at, "queued_at": self.queued_at,
             "dispatched_at": self.dispatched_at, "started_at": self.started_at,
             "finished_at": self.finished_at, "deadline_at": self.deadline_at,
+            "exit_code": self.exit_code, "duration_ms": self.duration_ms(),
         })
     }
 }
@@ -277,6 +289,7 @@ impl Scheduler {
                     vec![s("id").into()],
                 )?;
                 let mut out = row.public();
+                out["output"] = json!(row.output);
                 out["excluded"] = json!(row.excluded());
                 out["events"] = json!(events);
                 Ok(out)
@@ -297,6 +310,16 @@ impl Scheduler {
                     return Ok(Value::Null);
                 }
                 let detail = a["detail"].as_str().map(String::from);
+                if matches!(report, Report::Finished { .. }) && !row.state().terminal() {
+                    self.db.exec(
+                        "UPDATE jobs SET exit_code = ?, output = ? WHERE id = ?",
+                        vec![
+                            opt_i(a["exit_code"].as_i64()),
+                            opt(a["output"].as_str()),
+                            row.id.as_str().into(),
+                        ],
+                    )?;
+                }
                 self.apply(&row.id, &report, detail, None).await?;
                 self.reschedule().await?;
                 let row = self.row(&row.id)?.ok_or_else(|| bad("the job vanished"))?;
@@ -706,10 +729,8 @@ impl Scheduler {
                 state: r.state.clone(),
                 connector: r.connector.clone(),
                 attempt: r.attempt(),
-                duration_secs: r
-                    .finished_at
-                    .zip(r.started_at.or(r.dispatched_at))
-                    .map(|(f, s)| ((f - s).max(0) / 1000) as u64),
+                exit_code: r.exit_code,
+                duration_ms: r.duration_ms(),
                 url: r.url.clone(),
             })
             .collect();

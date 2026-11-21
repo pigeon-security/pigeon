@@ -19,7 +19,9 @@ pub struct Line {
     pub state: String,
     pub connector: Option<String>,
     pub attempt: u32,
-    pub duration_secs: Option<u64>,
+    /// What the script exited with, when its runner said.
+    pub exit_code: Option<i64>,
+    pub duration_ms: Option<u64>,
     pub url: Option<String>,
 }
 
@@ -35,21 +37,26 @@ fn or_dash(s: &Option<String>) -> String {
 }
 
 /// The note's text: one line per result, sorted by job,
-/// `<job> <state> connector=<c> attempt=<n> duration=<s>s url=<u>`, `-` for what is unknown.
+/// `<job> <state> connector=<c> attempt=<n> exit=<code> duration=<ms>ms url=<u>`, `-` for what
+/// is unknown.
 pub fn text(lines: &[Line]) -> String {
     let mut sorted: Vec<&Line> = lines.iter().collect();
     sorted.sort_by(|a, b| a.job.cmp(&b.job));
     let mut out = String::new();
     for l in sorted {
         let duration = l
-            .duration_secs
-            .map_or_else(|| "-".to_string(), |s| format!("{s}s"));
+            .duration_ms
+            .map_or_else(|| "-".to_string(), |ms| format!("{ms}ms"));
+        let exit = l
+            .exit_code
+            .map_or_else(|| "-".to_string(), |c| c.to_string());
         out.push_str(&format!(
-            "{} {} connector={} attempt={} duration={} url={}\n",
+            "{} {} connector={} attempt={} exit={} duration={} url={}\n",
             clean(&l.job),
             clean(&l.state),
             or_dash(&l.connector),
             l.attempt,
+            exit,
             duration,
             or_dash(&l.url),
         ));
@@ -105,7 +112,8 @@ mod tests {
             state: "succeeded".to_string(),
             connector: None,
             attempt: 1,
-            duration_secs: None,
+            exit_code: None,
+            duration_ms: None,
             url: url.map(|u| u.to_string()),
         }
     }
@@ -122,12 +130,13 @@ mod tests {
         let mut b = line("build", None);
         b.connector = Some("containers".to_string());
         b.attempt = 2;
-        b.duration_secs = Some(42);
+        b.exit_code = Some(0);
+        b.duration_ms = Some(103);
         let t = text(&[b, line("alpha", None)]);
         assert_eq!(
             t,
-            "alpha succeeded connector=- attempt=1 duration=- url=-\n\
-             build succeeded connector=containers attempt=2 duration=42s url=-\n"
+            "alpha succeeded connector=- attempt=1 exit=- duration=- url=-\n\
+             build succeeded connector=containers attempt=2 exit=0 duration=103ms url=-\n"
         );
         assert_eq!(text(&[]), "");
     }

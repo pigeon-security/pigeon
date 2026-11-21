@@ -5,3 +5,8 @@
 [jobs.smoke]
 run = "ci/runner/smoke.sh"
 timeout_min = 5
+
+# The same, failing on purpose: exits 1 after one line of output.
+[jobs.smoke-fail]
+run = "ci/runner/smoke-fail.sh"
+timeout_min = 5

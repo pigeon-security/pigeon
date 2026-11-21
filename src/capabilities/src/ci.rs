@@ -20,6 +20,7 @@ pub mod config;
 pub mod containers;
 pub mod notes;
 pub mod notify;
+pub mod output;
 pub mod route;
 pub mod scheduler;
 pub mod state;
@@ -579,13 +580,24 @@ impl Ci {
             Ok(r) => r,
             Err(why) => return Response::error(why, 400),
         };
+        // What the script exited with and printed, with a final report only.
+        let (exit_code, output) = match report {
+            Report::Finished { .. } => (
+                body["exit_code"].as_i64().filter(|c| (0..=255).contains(c)),
+                output::keep(body["output_b64"].as_str()),
+            ),
+            _ => (None, None),
+        };
         let detail: Option<String> = body["detail"]
             .as_str()
             .map(|d| d.chars().take(500).collect());
         let answer = scheduler(
             env,
             "runner",
-            json!({ "job": job, "hash": hash, "report": report, "detail": detail }),
+            json!({
+                "job": job, "hash": hash, "report": report, "detail": detail,
+                "exit_code": exit_code, "output": output,
+            }),
         )
         .await?;
         if answer.is_null() {
