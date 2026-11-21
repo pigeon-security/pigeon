@@ -83,14 +83,17 @@ pub fn initials(name: &str) -> String {
 }
 
 impl Console {
-    /// The person whose session cookie `req` carries, while it is fresh.
+    /// The person whose session cookie `req` carries, while it is fresh. The Directory answers a
+    /// session only while its user exists and is a person, and removes it otherwise; the kind is
+    /// checked again here, so nothing but a person is ever signed in.
     async fn signed(&self, env: &Env, req: &Request) -> Result<Option<Signed>> {
         let header = req.headers().get("Cookie")?.unwrap_or_default();
         let Some(token) = session::token_from(&header) else {
             return Ok(None);
         };
         let found = directory(env, "session.get", json!({ "hash": hash(token) })).await?;
-        Ok(serde_json::from_value(found).ok())
+        let signed: Option<Signed> = serde_json::from_value(found).ok();
+        Ok(signed.filter(|s| s.user.kind == "standard"))
     }
 
     /// Every hosted capability's sections, with the capability's name.
@@ -373,6 +376,12 @@ impl Console {
             .passkeys
             .sign_in_finish(env, SIGN_IN, body, None)
             .await?;
+        // Only a person signs in. The Directory refuses a session to anyone else too.
+        let user: Option<User> = serde_json::from_value(
+            directory(env, "users.get", json!({ "id": key.user_id })).await?,
+        )?;
+        user.filter(|u| u.kind == "standard")
+            .ok_or_else(|| bad("only a person can sign in to the console"))?;
         let (token, token_hash) = token(session::PREFIX)?;
         directory(
             env,
