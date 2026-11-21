@@ -5,7 +5,7 @@ Status: **phases 0 to 4 done** (21 November).
 - Every landing syncs the portal once it has deployed. `portal_sync` runs the same sync by hand.
 - The old "Pigeon" connector is removed. Its OAuth client `Claude` and the stray `probe` are revoked.
 - The settings generator names only the portal's tools. That change landed with the person's passkey.
-- Switching `call` off at the portal is the person's last step, in the dashboard.
+- `call` is switched off at the portal by the person. Through the portal, `pigeon_call` answers "Tool pigeon_call not found", and it stayed off across the post-deploy sync of the cutover landing (`rOtevR4LOJqLjt3d`, "portal server pigeon: ready"). A tool switched off in the dashboard survives a sync.
 
 Sources: Cloudflare's MCP portals page
 (https://developers.cloudflare.com/cloudflare-one/access-controls/ai-controls/mcp-portals/), its
@@ -176,7 +176,7 @@ Once a landing's deploy job has passed, the Lander syncs each server in `land::S
 
 With the sync in place, the person switched `call` off at the portal. A tool switched off there is then out of reach for every session using the portal.
 
-Per the docs, newly discovered tools are enabled by default. The docs don't say whether a tool switched off in the dashboard stays off after a sync. The first landing after `call` is switched off checks that.
+Per the docs, newly discovered tools are enabled by default. A tool switched off in the dashboard stays off after a sync (checked on 21 November with `call`).
 
 ## Phases
 
