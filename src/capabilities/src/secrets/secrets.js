@@ -22,7 +22,7 @@ async function digest(value) {
   return b64u.enc(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)));
 }
 
-async function save(name, input, button, status) {
+async function save(name, input, button, status, saved) {
   const value = input.value.trim();
   if (!value) {
     status.textContent = "Type the new value first.";
@@ -44,6 +44,7 @@ async function save(name, input, button, status) {
     });
     input.value = "";
     status.textContent = done.message;
+    saved();
   } catch (e) {
     status.textContent = e.message || String(e);
     status.dataset.bad = "1";
@@ -56,12 +57,8 @@ function row(s) {
   const state = s.set
     ? `set${s.modified ? ` · changed ${s.modified.slice(0, 16).replace("T", " ")}` : ""}`
     : "missing";
-  const head = el(
-    "div",
-    { class: "card-h" },
-    el("h3", { text: s.name }),
-    el("span", { class: s.set ? "pill" : "pill accent", text: state }),
-  );
+  const pill = el("span", { class: s.set ? "pill" : "pill accent", text: state });
+  const head = el("div", { class: "card-h" }, el("h3", { text: s.name }), pill);
   const card = el("article", { class: s.set ? "card" : "card accent", id: s.name }, head);
   if (!s.owner) {
     card.append(el("p", { text: "No capability declares this one, so it is listed only." }));
@@ -79,9 +76,19 @@ function row(s) {
   });
   const button = el("button", { class: "button", text: s.set ? "Replace" : "Set" });
   const status = el("p", { "data-status": "", role: "status" });
-  button.addEventListener("click", () => save(s.name, input, button, status));
+  // The row shows the write at once, without signing in again to list.
+  const saved = () => {
+    const now = new Date().toISOString();
+    pill.textContent = `set · changed ${now.slice(0, 16).replace("T", " ")}`;
+    pill.className = "pill";
+    card.className = "card";
+    input.placeholder = "New value";
+    button.textContent = "Replace";
+  };
+  const go = () => save(s.name, input, button, status, saved);
+  button.addEventListener("click", go);
   input.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") save(s.name, input, button, status);
+    if (e.key === "Enter") go();
   });
   card.append(el("div", { style: "display:flex;gap:8px;align-items:center" }, input, button), status);
   return card;
