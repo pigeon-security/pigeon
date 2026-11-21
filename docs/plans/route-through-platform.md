@@ -1,6 +1,6 @@
 # Routing cloud sessions' traffic through platform.pigeon.dev
 
-Status: planned. Phases are handed back one at a time; each is merged and deployed before the
+Status: phase 1 built, awaiting deploy. Phases are handed back one at a time; each is merged and deployed before the
 next starts.
 
 ## Why
@@ -29,6 +29,9 @@ environment's network secret for `platform.pigeon.dev`. The session's network pr
   style, and what to return. Tasks are tagged `route-p<phase>-<step>`.
   `claude-opus-5-5` for security-sensitive code (scopes, proxies, push rules, allowlist);
   `claude-sonnet-5-5` for routine code (pages, docs).
+  The connector's `models_run` call times out after 60 seconds, which is about 3,000 output
+  tokens. So each task asks for one small piece (pure functions, one set of handlers, one
+  script), and I finish any answer that is cut off, reviewing it like the rest.
 - **Parent session (`session_015XFA1jgveJDEE8NJjTaHKg`):** merges, deploys, runs the live
   checks.
 - **The person:** issues the proxy credential on `/tokens`, saves it as the network secret,
@@ -48,7 +51,7 @@ Proxied responses stream; the git token must be revoked after the stream ends, w
 One `console_log!` per proxied request, as one JSON object:
 
 ```json
-{"audit":"proxy","route":"git","caller":"<token label> (<person>)","token":"<first 8 chars of the token's hash>",
+{"audit":"proxy","route":"git","caller":"<token label> (<person>)","token":"<the credential's id: the first 12 chars of its hash>",
  "method":"POST","path":"/git/pigeon-security/pigeon.git/git-receive-pack","outcome":"forwarded|refused|failed",
  "status":200,"why":"<reason when refused or failed>"}
 ```

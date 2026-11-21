@@ -8,6 +8,7 @@ use pigeon_capabilities::mirror::{self, Mirror};
 use pigeon_capabilities::models::{Dialect, Models, Provider};
 use pigeon_capabilities::oauth::OAuth;
 use pigeon_capabilities::passkeys::Passkeys;
+use pigeon_capabilities::proxy::Tokens;
 use pigeon_capabilities::public_host::{PublicHost, Retire};
 use pigeon_capabilities::secrets::Secrets;
 use pigeon_capabilities::site::{Retired, Site};
@@ -32,7 +33,7 @@ const BRANCH: &str = "main";
 pub fn capabilities() -> Vec<Box<dyn Capability>> {
     vec![
         // Every path on the platform checks its callers itself (/mcp and /oauth with OAuth,
-        // /auth with passkeys) or is open to all (/health), so no Access is in front of it.
+        // /auth, /secrets and /tokens with passkeys) or is open to all (/health), so no Access is in front of it.
         Box::new(PublicHost {
             zone: ZONE.into(),
             host: HOST.into(),
@@ -101,6 +102,15 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
                 site_name: "pigeon".into(),
             },
             parent: PARENT_TOKEN.into(),
+        }),
+        // Proxy credentials: what a cloud session holds to reach /git/ and /cf/, issued on
+        // the passkey-gated /tokens page.
+        Box::new(Tokens {
+            host: HOST.into(),
+            passkeys: Passkeys {
+                host: HOST.into(),
+                site_name: "pigeon".into(),
+            },
         }),
         Box::new(Models {
             gateway: "pigeon".into(),

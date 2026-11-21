@@ -10,6 +10,7 @@ pub mod models;
 pub mod oauth;
 pub mod passkeys;
 pub mod protected_host;
+pub mod proxy;
 pub mod public_host;
 pub mod secrets;
 pub mod site;

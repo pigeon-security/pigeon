@@ -79,7 +79,7 @@ fn bad(why: &str) -> Error {
 // ---- the Directory ----
 
 /// The Directory's schema, one statement per migration, applied in order and never edited.
-const MIGRATIONS: [&str; 12] = [
+const MIGRATIONS: [&str; 13] = [
     "CREATE TABLE users (id TEXT PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL, created_at INTEGER NOT NULL)",
     "CREATE TABLE service_ids (access_client_id TEXT PRIMARY KEY, user_id TEXT NOT NULL)",
     "CREATE TABLE passkeys (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, point TEXT NOT NULL, sign_count INTEGER NOT NULL, name TEXT NOT NULL, created_at INTEGER NOT NULL, last_used_at INTEGER)",
@@ -92,6 +92,7 @@ const MIGRATIONS: [&str; 12] = [
     "CREATE TABLE oauth_requests (id TEXT PRIMARY KEY, client_id TEXT NOT NULL, redirect_uri TEXT NOT NULL, challenge TEXT NOT NULL, state TEXT, expires_at INTEGER NOT NULL)",
     "CREATE TABLE oauth_codes (hash TEXT PRIMARY KEY, client_id TEXT NOT NULL, redirect_uri TEXT NOT NULL, challenge TEXT NOT NULL, expires_at INTEGER NOT NULL)",
     "CREATE TABLE oauth_tokens (hash TEXT PRIMARY KEY, kind TEXT NOT NULL, client_id TEXT, service_user_id TEXT NOT NULL, expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL)",
+    "ALTER TABLE oauth_tokens ADD COLUMN label TEXT",
 ];
 
 /// The users, their passkeys and links: one Durable Object.
@@ -590,6 +591,60 @@ impl Directory {
                     vec![t.into()],
                 )?;
                 to_value(rows)
+            }
+            // Proxy credentials: kind 'proxy', held by the person who issued them, known
+            // outside the Directory only by the first 12 characters of their hash.
+            "proxy.token_add" => {
+                let ttl_ms = a["ttl_ms"]
+                    .as_i64()
+                    .filter(|v| *v > 0)
+                    .ok_or_else(|| bad("ttl_ms must be a positive whole number"))?;
+                self.db.exec(
+                    "INSERT INTO oauth_tokens (hash, kind, client_id, service_user_id, label, expires_at, created_at) VALUES (?, 'proxy', NULL, ?, ?, ?, ?)",
+                    vec![
+                        s("hash").into(),
+                        s("user_id").into(),
+                        s("label").into(),
+                        t.saturating_add(ttl_ms).into(),
+                        t.into(),
+                    ],
+                )?;
+                Value::Null
+            }
+            "proxy.token_get" => {
+                let row: Option<Value> = self.db.row(
+                    "SELECT substr(o.hash, 1, 12) AS id, o.label AS label, u.name AS person FROM oauth_tokens o JOIN users u ON u.id = o.service_user_id WHERE o.hash = ? AND o.kind = 'proxy' AND o.expires_at > ?",
+                    vec![s("hash").into(), t.into()],
+                )?;
+                row.unwrap_or(Value::Null)
+            }
+            "proxy.tokens" => {
+                let rows: Vec<Value> = self.db.rows(
+                    "SELECT substr(o.hash, 1, 12) AS id, o.label AS label, u.name AS person, o.created_at AS created_at, o.expires_at AS expires_at FROM oauth_tokens o LEFT JOIN users u ON u.id = o.service_user_id WHERE o.kind = 'proxy' AND o.expires_at > ? ORDER BY o.created_at DESC",
+                    vec![t.into()],
+                )?;
+                to_value(rows)
+            }
+            "proxy.token_remove" => {
+                #[derive(Deserialize)]
+                struct Count {
+                    n: i64,
+                }
+                let id = crate::proxy::id(s("id")).map_err(|e| bad(&e))?;
+                let count: Option<Count> = self.db.row(
+                    "SELECT COUNT(*) AS n FROM oauth_tokens WHERE substr(hash, 1, 12) = ? AND kind = 'proxy'",
+                    vec![id.into()],
+                )?;
+                match count.map_or(0, |c| c.n) {
+                    0 => return Err(bad("no such proxy credential")),
+                    1 => {}
+                    _ => return Err(bad("this id names more than one credential")),
+                }
+                self.db.exec(
+                    "DELETE FROM oauth_tokens WHERE substr(hash, 1, 12) = ? AND kind = 'proxy'",
+                    vec![id.into()],
+                )?;
+                Value::Null
             }
             other => return Err(bad(&format!("the Directory has no operation `{other}`"))),
         })
