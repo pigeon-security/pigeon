@@ -1,0 +1,546 @@
+# Linked accounts, instances and sites: noisypigeon.com through pigeon
+
+Status: **designed, waiting for the person's go-ahead** (2026-11-21). Nothing is built. Branch
+`claude/linked-accounts`. Phase 0 has tests only the person can run.
+
+## Goal
+
+The person's words: link another Cloudflare account to pigeon, take ownership of its zone(s),
+and deploy a website on that zone and/or a pigeon.dev subdomain. The aim is to deploy the
+noisypigeon.com blog through the platform, from the public repo `noisypigeon/pigeon`, using R2
+and a GitHub App. The GitHub App also talks to GitHub through GitHub's MCP server behind the
+portal. The console shows both instances: `pigeon-security/platform` and `noisypigeon`.
+
+Hard lines this plan keeps:
+- No new policy rules.
+- Tests only in `tests/smoke.rs`, which stays under 60 s.
+- Credentials never go through chat.
+- A change in the noisypigeon account touches only what pigeon made or was explicitly given. It
+  shows a dry run first and is safe to run twice.
+- Nothing serving noisypigeon.com changes (DNS, zone settings, rules, routes, buckets) without
+  the person's go-ahead **for that step, in the session that makes it**.
+
+## What is true today (checked 2026-11-21)
+
+### noisypigeon.com
+
+Read from `noisypigeon/pigeon` at `841e7fb`. noisypigeon.com is served by an earlier platform in
+that repository. It has no Worker:
+
+- **Content.** `workloads/noisypigeon.com/blog/` holds the blog's content, about 165 files and
+  28 MB, mostly images. `config.yaml` pins site template `blog` 1.0.2.
+- **Build.** `pigeon sites build workloads/noisypigeon.com/blog` (`src/pigeon-harness`) builds
+  it with Zola 0.23.6. The build needs no secrets, but it does need the repository's history,
+  because the template is read at a git tag.
+- **Bucket.** An EU-jurisdiction R2 bucket, `blog-noisypigeon-com`, in the noisypigeon account.
+  Every `x/index.html` is also written as `x` and `x/`.
+- **Custom domains.** R2 custom domains `noisypigeon.com` and `www.noisypigeon.com` on the
+  bucket. They own those DNS records.
+- **Rules.** Two zone rules: a URL rewrite, `noisypigeon.com/` → `/index.html`, and a single
+  redirect, `www` → apex (301).
+- **Other DNS records (Proton mail).** The apex unit owns Proton mail verification and DMARC
+  records. **pigeon must never touch them.**
+- **Tokens.** Hand-scoped tokens: `apex-noisypigeon.com` (DNS, Transform and Redirect Write) and
+  `site-noisypigeon.com-blog` (R2 Storage Write, Zone Read, DNS Write), rotated every 90 days.
+
+This session's network does not allow noisypigeon.com, so its live headers were not read. Phase
+0 asks for the host.
+
+### pigeon
+
+- **One Worker.** `pigeon-platform` serves platform.pigeon.dev, proxy.pigeon.dev and the apex
+  pigeon.dev, routed by host.
+- **Cloudflare calls.** Every call goes through `pigeon_core::Account { id, parent,
+  secrets_store }`, with a token minted from `CF_PARENT_TOKEN` and revoked after the call.
+- **Secrets.** Secrets are fixed `Slot`s bound in `wrangler.toml`. The console's Access tab sets
+  them with a passkey bound to the value's hash.
+- **Scope of the model.** Everything assumes one account, one zone (`settings::ZONE`) and one
+  repository (`pigeon-security/pigeon` in Artifacts, mirrored to GitHub by `GITHUB_MIRROR_TOKEN`,
+  a PAT).
+
+## Sources
+
+Cloudflare:
+- OAuth:
+  - [create a client](https://developers.cloudflare.com/fundamentals/oauth/create-an-oauth-client/)
+  - [authorizing](https://developers.cloudflare.com/fundamentals/oauth/authorizing-an-application/)
+  - [integrate](https://developers.cloudflare.com/fundamentals/oauth/integrate-with-cloudflare/)
+  - [launch, 2026-06-03](https://developers.cloudflare.com/changelog/post/2026-06-03-public-oauth-clients/)
+  - [oauth_clients API](https://developers.cloudflare.com/api/resources/iam/subresources/oauth_clients/)
+  - [oauth scopes](https://developers.cloudflare.com/api/resources/iam/subresources/oauth_scopes/methods/list/)
+- [Account-owned tokens](https://developers.cloudflare.com/fundamentals/api/get-started/account-owned-tokens/)
+  and their [verify](https://developers.cloudflare.com/api/resources/accounts/subresources/tokens/methods/verify/).
+- R2:
+  - [buckets](https://developers.cloudflare.com/api/resources/r2/subresources/buckets/methods/create/)
+  - [objects](https://developers.cloudflare.com/api/resources/r2/subresources/buckets/subresources/objects/)
+  - [custom domains](https://developers.cloudflare.com/api/resources/r2/subresources/buckets/subresources/domains/subresources/custom/methods/create/)
+  - [tokens and S3 credentials](https://developers.cloudflare.com/r2/api/tokens/)
+- Workers:
+  - [script upload](https://developers.cloudflare.com/api/resources/workers/subresources/scripts/methods/update/)
+  - [routes](https://developers.cloudflare.com/workers/configuration/routing/routes/)
+  - [custom domains](https://developers.cloudflare.com/workers/configuration/routing/custom-domains/)
+  - [static assets direct upload](https://developers.cloudflare.com/workers/static-assets/direct-upload/)
+  - [limits](https://developers.cloudflare.com/workers/platform/limits/)
+  - [workers.dev](https://developers.cloudflare.com/api/resources/workers/subresources/subdomains/)
+- [Ruleset phases](https://developers.cloudflare.com/ruleset-engine/reference/phases-list/).
+- [Secrets Store limits](https://developers.cloudflare.com/secrets-store/manage-secrets/).
+- [MCP server portals](https://developers.cloudflare.com/cloudflare-one/access-controls/ai-controls/mcp-portals/).
+
+GitHub (read from the github/docs sources and github/github-mcp-server):
+- App visibility:
+  - [registering](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/registering-a-github-app)
+  - [public or private](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/making-a-github-app-public-or-private)
+- App authentication:
+  - [JWT](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-json-web-token-jwt-for-a-github-app)
+  - [installation tokens](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-an-installation-access-token-for-a-github-app)
+  - [private keys](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/managing-private-keys-for-github-apps)
+  - [user tokens](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/refreshing-user-access-tokens)
+- Webhooks:
+  - [validating](https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries)
+  - [best practices](https://docs.github.com/en/webhooks/using-webhooks/best-practices-for-using-webhooks)
+  - [failed deliveries](https://docs.github.com/en/webhooks/using-webhooks/handling-failed-webhook-deliveries)
+- REST:
+  - [tarball](https://docs.github.com/en/rest/repos/contents#download-a-repository-archive-tar)
+  - [deployments](https://docs.github.com/en/rest/deployments/deployments#create-a-deployment)
+  - [statuses](https://docs.github.com/en/rest/deployments/statuses#create-a-deployment-status)
+- Remote MCP server:
+  - [remote server](https://github.com/github/github-mcp-server/blob/main/docs/remote-server.md)
+  - [governance](https://github.com/github/github-mcp-server/blob/main/docs/policies-and-governance.md)
+  - [host integration (no DCR)](https://github.com/github/github-mcp-server/blob/main/docs/host-integration.md)
+  - [app auth, local only](https://github.com/github/github-mcp-server/blob/main/docs/github-app-auth.md)
+
+Coordination:
+- The MCP portal planner (`session_015XFA1jS9tQyZ6y3cuBKdBc`): portal state, service tokens,
+  never PUT a portal's server mapping from code.
+- The Buildkite planner (`session_015XFA1jUggi6PutoW6hQGyh`): no platform-as-MCP-client design
+  exists; Buildkite uses REST from the Worker.
+- The parent session: OAuth is the primary way to link.
+
+## Decisions
+
+### 1. "Take ownership" means managing in place, not moving the zone
+
+The zone stays in the noisypigeon account. Moving it would delete the zone there and add it
+here, which re-issues nameservers and puts the Proton mail records at risk. pigeon is given a
+**declared** set of things in that account and manages only those:
+
+| Kind | Declared for noisypigeon | pigeon may |
+| --- | --- | --- |
+| Zone | `noisypigeon.com` | read the zone and list its DNS records, custom domains, routes and rules (inventory for the console) |
+| Worker | `pigeon-site-blog` (made by pigeon) | create, upload versions, roll back, delete |
+| Route | `noisypigeon.com/*` → `pigeon-site-blog` (made by pigeon) | create and delete, only with the person's go-ahead (the cutover) |
+| R2 bucket, custom domains, rules, DNS records | none | read only |
+
+Declarations live in `settings.rs`, so changing what pigeon may touch is a landing. The OAuth
+grant may cover more of the account; pigeon ignores the rest. Every resource pigeon makes is
+named `pigeon-…` and recorded, with its id, in the Directory's ledger for the instance. A delete
+or change is refused unless the id is in the ledger, or the name is declared and pigeon made it.
+This is the lesson of the deleted Access apps: never act on "everything matching a domain".
+
+**Question for the person:** is "in place" what you meant by ownership? If you want the zone
+moved into pigeon's account instead, that is a different and riskier plan.
+
+### 2. Linking: Cloudflare OAuth first, a hand-made account token as fallback
+
+**Primary: OAuth.** pigeon is a confidential OAuth client (authorization code, PKCE S256,
+`refresh_token` grant). Self-managed clients are on all plans.
+
+1. **Register the client.** Name `pigeon`. Redirect
+   `https://platform.pigeon.dev/linked/callback`. Scopes are the IDs that `GET /oauth/scopes`
+   lists for: Account Settings Read, Zone Read, DNS Read, Workers Scripts Write, Workers Routes
+   Write, and Workers R2 Storage Write if the person picks R2 serving (decision 3).
+   - By API: `POST /accounts/{pigeon}/oauth_clients`, with a token minted from the parent for
+     "OAuth Client Write". The secret is shown once, so pigeon writes it straight to the Secrets
+     Store as `CF_OAUTH_CLIENT_SECRET` and keeps `client_id` in settings. If the parent cannot
+     mint that permission, the person registers the client in the dashboard (Manage Account →
+     OAuth clients) and enters the secret on the Access tab.
+2. **Link.** The console's instance page shows **Link Cloudflare account** for a declared
+   instance with no link. The button sends the browser to `dash.cloudflare.com/oauth2/auth` with
+   `state` (a Directory challenge bound to the instance and the signed-in person) and a PKCE
+   verifier. The person signs in to Cloudflare and picks the noisypigeon account on the consent
+   screen.
+3. **Callback.** `GET /linked/callback` checks `state` and exchanges the code (client secret
+   plus verifier). Before storing anything it checks the grant against the declaration. It lists
+   accounts, finds the declared account id, and finds zone `noisypigeon.com` in it, active. On a
+   mismatch it stores nothing and revokes the grant.
+4. **Storage.** The access and refresh tokens go in the Directory under `link:{instance}`,
+   encrypted with AES-GCM. The key is `LINK_KEY`, a Secrets Store secret that the platform
+   generates once (`linked_setup`) and never shows. Only the platform reads it.
+   - A rotating refresh token can't live in a statically bound Secrets Store secret: a binding
+     reads one fixed name, and rewriting it on every refresh races with reads.
+   - What is stored: `{account_id, scopes, granted_by, granted_at, access_expires, refresh,
+     refresh_seen_at}`. Never shown and never logged.
+5. **Use.** `pigeon_core::Account` gains a credential kind:
+   - `Parent(token)` keeps today's mint and revoke.
+   - `Bearer(token)` uses the token as it is and revokes nothing.
+
+   Every core block (zones, Workers, R2, routes) works unchanged on a linked account through
+   `Scoped::open`, which then hands back the bearer. The linked capability refreshes the access
+   token when it has under 5 minutes left. Refresh is serialized in the Directory, because a
+   reused refresh token may invalidate the whole chain (not confirmed by the docs; phase 0
+   tests it).
+6. **Expiry and rotation.** The Access tab gets a row per link:
+   - account, scopes, granted by and when;
+   - access token expiry;
+   - the refresh token's last successful use;
+   - status `ok`, `refresh failed` or `revoked`.
+
+   `credentials_expiry` answers the same. There is nothing to rotate by hand: refresh rotates
+   the tokens. Re-linking (the same button) replaces a broken link.
+7. **Unlink.** Console: **Unlink** (passkey-bound to the instance). It calls
+   `dash.cloudflare.com/oauth2/revoke` and deletes `link:{instance}`. Resources pigeon made stay
+   as they are and are listed so the person can remove them. Removing them is a separate,
+   dry-run-first step (`instance_teardown`), and only works while still linked. The person can
+   also revoke from Cloudflare: Profile → Access Management → Connected Applications. pigeon
+   then sees `refresh failed` and says so.
+
+**Fallback: an account-owned API token** made by the person in the noisypigeon account. It has
+the same permissions, limited to zone `noisypigeon.com`, with an expiry. The person enters it on
+the Access tab as slot `CF_LINK_NOISYPIGEON`, bound in `wrangler.toml`.
+- Its `check_secret` calls `GET /accounts/{id}/tokens/verify` and makes one read of each kind.
+- Its expiry comes from `verify`'s `expires_on`.
+- To rotate: roll the token in the dashboard, then set the new value.
+- The fallback is used only if phase 0 shows that OAuth can't grant the noisypigeon account.
+
+**Open, for phase 0:**
+1. Can a private client owned by pigeon's account be granted the noisypigeon account? The docs
+   say private clients "can only be authorized by members of the parent account". If the
+   person's login is a member of both accounts, the consent screen should offer both.
+   Otherwise the choice is:
+   - make the client public: permanent, needs a logo, URL and a TXT record on pigeon.dev (pigeon
+     can add the record itself);
+   - own the client in the noisypigeon account: the person registers it there;
+   - fall back to a token.
+2. Access token lifetime, refresh token lifetime and rotation, read from a real authorization.
+3. The exact scope IDs, read from `GET /oauth/scopes`.
+
+### 3. Serving: a site Worker per account, with static assets; R2 for builds
+
+R2 custom domains can only serve a bucket in the same account. Workers Custom Domains and routes
+can only point at a Worker in the zone's account. So noisypigeon.com is served from the
+noisypigeon account, and `blog.pigeon.dev` from pigeon's.
+
+**Recommended:**
+- **Builds.** R2 in pigeon's account holds builds: bucket `pigeon-builds`, bound to
+  pigeon-platform as `BUILDS`, keyed `noisypigeon/blog/{commit}.tar.gz`. It keeps the last 20
+  per site (a lifecycle rule), so any target can be redeployed from it without building again.
+- **Serving.** A Worker with **Workers Static Assets** in each target account, `pigeon-site-blog`:
+  - The assets are uploaded with the direct-upload API (`assets-upload-session`). The upload
+    dedupes by hash, so 28 MB of images go up once.
+  - `html_handling: auto-trailing-slash` replaces the old `x` / `x/` copies.
+  - `not_found_handling: 404-page`.
+  - Each deploy is a Worker version, so a rollback deploys the previous version: one call, no
+    rebuild.
+  - Assets are served without invoking the Worker's script, and each version allows 20,000 files
+    of up to 25 MiB.
+
+**Alternative (the person's hint):** serve from an R2 bucket in each account, with a Worker that
+reads `{commit}/` objects through a pointer object (R2's REST object API: `PUT/GET/DELETE
+…/r2/buckets/{b}/objects/{key}`). It costs a Worker invocation and an R2 read per request,
+custom serving code, and pointer-based rollback. pigeon would gain R2 core blocks either way:
+bucket ensure, object put/get/list/delete, and the binding.
+
+**Question for the person:** static assets for serving with R2 for builds (recommended), or R2
+for serving too?
+
+Targets for the blog:
+
+| Target | Account | Hostname | How |
+| --- | --- | --- | --- |
+| preview | noisypigeon | `pigeon-site-blog.<sub>.workers.dev` | per-script workers.dev, on until cutover |
+| pigeon.dev | pigeon | `blog.pigeon.dev` (name to confirm) | Workers Custom Domain, made by `site_deploy` in pigeon's own zone |
+| live | noisypigeon | `noisypigeon.com` | a **Worker route** `noisypigeon.com/*` at cutover; no DNS change |
+
+**Why a route at cutover.**
+- "Routes take precedence over Custom Domains." A route Worker runs before the origin.
+- Adding a route on the hostname the R2 custom domain serves moves traffic to the Worker in one
+  call. Deleting it moves traffic back in one call. The bucket, its custom domains, DNS and the
+  Proton records are untouched.
+- The docs don't state outright that a route intercepts an **R2** custom domain (only forum
+  reports do), so phase 0 tests it on a throwaway hostname in pigeon's own zone.
+- The `www` → apex redirect runs in the dynamic redirect phase, first. The `/` → `/index.html`
+  rewrite also runs before the Worker, and static assets serve `/index.html` the same either way.
+
+**Built for one host only.** The build sets Zola's `base_url` to `https://noisypigeon.com`. On
+the preview and on `blog.pigeon.dev`, absolute links therefore point at noisypigeon.com. That is
+fine for checking content before the cutover. A per-target `base_url` (a second build) can come
+later if `blog.pigeon.dev` is meant as a mirror.
+
+### 4. Build: a CI job with Zola, fed by the GitHub App
+
+- **Trigger.** A push to `main` on `noisypigeon/pigeon` reaches
+  `https://platform.pigeon.dev/github/hook`.
+- **Check.** pigeon checks `X-Hub-Signature-256` (HMAC-SHA256, constant time) and answers within
+  10 s. It keeps `X-GitHub-Delivery` to refuse repeats. It accepts only the declared
+  installation id and repository.
+- **Build job.** The `sites` capability submits CI job `site-build` (Containers connector) for
+  `{instance: noisypigeon, site: blog, repo, commit}`:
+  - The job runs on a new image `pigeon-ci-site`: the base image plus Zola 0.23.6,
+    checksum-pinned as noisypigeon's Dockerfile pins it.
+  - It fetches the commit with full history (the template is read at a git tag). The fetch
+    goes through a new git proxy route for GitHub, which adds a 1-hour installation token
+    limited to that one repository and `contents: read`. The repository is public today, but
+    the job then doesn't depend on that, and the job never holds the token.
+  - It runs the repository's own build: `pigeon sites build workloads/noisypigeon.com/blog`.
+  - It uploads `public/` as a tarball to `PUT https://proxy.pigeon.dev/sites/build`, with its
+    job token. The grant names the instance, site and commit. pigeon writes it to `BUILDS`.
+- **Deploy.** The platform deploys the build to each target that is on. On GitHub it creates a
+  deployment (`environment: noisypigeon.com`) and deployment statuses, with `environment_url`
+  and a `log_url` to the console.
+- **Why a job and not the Worker.** A Rust build of the harness plus Zola doesn't fit in a
+  Worker. noisypigeon's build is its repository's contract, so pigeon runs it rather than
+  copying it.
+- **Policy.** `site-build` and its image land as gate changes (`ci/`, `.pigeon/ci.toml`),
+  approved by the delegate under `gate-changes`. No new rule.
+
+### 5. The GitHub App
+
+- **Owner and visibility.** Owner `pigeon-security`, named `pigeon`. Visibility **Any account**,
+  because a private app can be installed only on its owner's account, and `noisypigeon/pigeon`
+  belongs to the user `noisypigeon`. Installation is still the repository owner's choice, and
+  pigeon accepts webhooks only from declared installation ids.
+- **Installation.** On `noisypigeon` → **Only select repositories** → `pigeon`.
+- **Permissions:**
+  - Metadata: read.
+  - Contents: read, for fetch, tarball, file reads and the `push` event.
+  - Deployments: write, for deployments and statuses.
+  - Nothing else.
+- **Events.** `push`; `installation` and `installation_repositories` are app events and are
+  recorded.
+- **Webhook.** URL `https://platform.pigeon.dev/github/hook`. The secret is
+  `GITHUB_APP_WEBHOOK_SECRET`, generated by the person on GitHub and entered on the Access tab.
+- **Private key.** `GITHUB_APP_PRIVATE_KEY`, the downloaded PEM (PKCS#1, about 1.7 KB; the
+  Secrets Store takes up to 64 KiB). Core wraps it to PKCS#8 for WebCrypto. App id, client id
+  and installation id are not secret and go in `settings.rs`.
+- **Expiry.** App keys don't expire. The Access tab shows "never". To rotate, add a second key on
+  GitHub, set it, then delete the old one.
+- **Auth.**
+  - A JWT (RS256, `iat` −60 s, `exp` +9 min, `iss` the client id) buys an installation token.
+  - Each use gets a token narrowed to the one repository and the permissions it needs, lasting
+    at most an hour.
+  - Tokens stay in memory only and are cached per isolate until 5 minutes before expiry.
+- **Mirror.** `GITHUB_MIRROR_TOKEN` (the PAT pushing pigeon-security/pigeon) is unchanged.
+  Moving it to the App (installed on pigeon-security/pigeon with Contents: write) is possible
+  later, but out of scope.
+
+### 6. GitHub's MCP server through the portal
+
+What the docs settle:
+- GitHub's remote MCP (`https://api.githubcopilot.com/mcp/`) takes PATs, OAuth user tokens
+  (GitHub App or OAuth App) and installation tokens. It has **no** dynamic client registration.
+- It has no deployment tools, and no tarball or webhook tools.
+- The portal caps each tool call at 60 s.
+- A service-token client (the platform) reaches only servers without per-user auth, and those
+  servers act with the admin's credential.
+- An OAuth server set up by hand "requires per-user authentication", so a service token can't
+  reach it.
+- A `bearer` server holds one fixed credential. An installation token lasts an hour.
+
+The design, in two parts:
+1. **People's sessions (recommended).** Portal server `github` (no underscore): OAuth set up by
+   hand with the GitHub App's client id and secret. User tokens last 8 h, with 6-month refresh,
+   and the portal holds them. Each person acts as themselves, within the App's permissions and
+   installation, so sessions reach noisypigeon/pigeon through `mcp__Pigeon_MCP__github_*`. These
+   are not pre-approved: the settings generator is unchanged, and so is the policy.
+   - Dashboard steps are below.
+   - The App gains a callback URL,
+     `https://oauth-callbacks.cloudflareaccess.com/cdn-cgi/access/outbound-oauth-callback`.
+2. **The platform as MCP client (optional phase 6).** A second portal server, `github-platform`,
+   with `bearer` auth, `on_behalf: false`, and a Service Auth policy for a new Access service
+   token. Its `CF-Access-Client-Id`/`-Secret` become slots `MCP_PORTAL_CLIENT_ID`/`_SECRET`,
+   owned by the `github` capability.
+   - Every 50 minutes the platform mints a read-only installation token. It writes it to that
+     server's `auth_credentials` with the server update call: `PUT …/mcp/servers/github-platform`,
+     after a GET, sending the whole server back. It never writes the portal's mapping, as the
+     portal planner warned.
+   - `pigeon_core::mcp` gains a small Streamable-HTTP client: `initialize`, `tools/call`,
+     `Mcp-Session-Id`, and a 50 s deadline.
+   - It is used for reads the deploy record shows (the commit's message and author,
+     `get_commit`), with REST as the fallback.
+
+   The Buildkite planner rejected this pattern for Buildkite (60 s cap, the admin credential,
+   trimmed answers). For GitHub, REST is required anyway: webhooks, tokens, tarball and
+   deployments. **Question for the person:** do you still want phase 6, given that it adds a
+   moving credential and a hop for no capability REST lacks? Part 1 gives sessions GitHub
+   through the portal either way.
+
+### 7. Instances
+
+An **instance** is a named unit of what pigeon runs, declared in `settings.rs`:
+
+```rust
+pub struct Instance {
+    pub id: &'static str,                  // "pigeon-security/platform", "noisypigeon"
+    pub account: AccountRef,               // Home (the platform's) | Linked { id, link: LinkKind }
+    pub zones: Vec<&'static str>,          // ["pigeon.dev"], ["noisypigeon.com"]
+    pub repo: RepoRef,                     // Artifacts { namespace, repo } | GitHub { owner, repo, installation }
+    pub sites: Vec<SiteDecl>,              // targets, build job
+    pub manages: Vec<Managed>,             // decision 1's declared resources
+}
+```
+
+- `pigeon-security/platform` is today's platform:
+  - account `4f94…`, zone `pigeon.dev`;
+  - repository Artifacts `pigeon-security/pigeon` (GitHub mirror);
+  - sites: the apex architecture page and `blog.pigeon.dev`;
+  - deploys: landings.
+- `noisypigeon`:
+  - the linked account, zone `noisypigeon.com`;
+  - repository GitHub `noisypigeon/pigeon`;
+  - site `blog` with three targets;
+  - deploys: site deploys.
+
+The existing capabilities don't change shape. `Site`, `PublicHost`, `Source` and `Land` keep
+serving the platform instance, and the new `instances` capability presents both.
+
+**Console.** The header gains an instance switcher: two entries, the choice kept in the URL as
+`?i=noisypigeon` and in local storage. The four tabs stay. One tab is added:
+
+- **Instance** (`/instance`), with these sections:
+  - **Account**: id, link status, scopes, expiry, Link/Unlink.
+  - **Zones**: name, status, record count; pigeon-made resources flagged.
+  - **Sites**: each target's hostname, live version, Deploy/Roll back.
+  - **Repository**: provider, default branch, App installation.
+  - **Deploys**: the last 20, each with commit, time, outcome, target and log.
+- **Architecture** shows the chosen instance's model.
+- **Access** and **Cost** stay platform-wide. Access gains link and App rows.
+
+Speed, as in console-hardening:
+- Each section loads alone, with a 12 s timeout and Retry.
+- Zones and Sites are served from a Directory snapshot (fresh for 5 min), refreshed by the page
+  with `fresh=1`.
+- Deploys are Directory reads (well under 1 s).
+- The noisypigeon account is never called on the request path of another instance's tab.
+
+### 8. Architecture
+
+- `Footprint` gains `account: Option<String>` (None means home) on hostnames, Workers and
+  resources, and `zone` per hostname.
+- `Model` gains `accounts: [{id, name, linked_by, zones}]`.
+- The diagram draws one account box per account: pigeon's as today, noisypigeon's with its zone,
+  `pigeon-site-blog`, its route or preview, and a dashed "not pigeon's" group for the R2 bucket
+  and custom domains it only reads.
+- It also draws `pigeon-builds` (R2), the GitHub App and the `github` portal server as external
+  edges, and the `site-build` job.
+- These come from declarations and `wrangler.toml` (the `BUILDS` binding), never from live calls,
+  so the page still builds once per isolate and each deploy's `/architecture.json` check holds.
+
+### 9. Safety rules for anything outside pigeon's own account
+
+- Each mutating operation has a dry run, `instance_plan {instance}`. It reads the live state
+  (Workers, routes, custom domains on declared hostnames) and answers the list of changes with
+  before and after, and a digest of the plan.
+- `instance_apply` takes the digest and refuses if the live state no longer gives the same plan.
+  Applying twice is a no-op the second time.
+- Content deploys (a new Worker version of `pigeon-site-blog`) are automatic on push. They
+  change only pigeon's own Worker, and only once it exists.
+- Creating the Worker, enabling its workers.dev preview, the route (cutover) and its removal
+  (rollback) are console actions with a passkey bound to the plan digest, done only with the
+  person's go-ahead in the session.
+- Nothing ever deletes or edits DNS records, R2 buckets, R2 custom domains or rules in a linked
+  account. The core blocks for them are read-only by type: no write function exists for a
+  linked `Account`.
+
+## Phases
+
+Each phase is one landing (or none), checked live before the next starts. Executors are AI
+Gateway models (`models_submit`). Each gets one whole file or function set, with the interface
+and the surrounding code; I read every line returned, run fmt, clippy and the smoke suite
+myself, and land.
+
+| Phase | What | Live change | Who |
+| --- | --- | --- | --- |
+| 0 | Facts and tests: OAuth consent offers noisypigeon? token lifetimes and scope IDs; route-over-R2-custom-domain test on a throwaway `r2test.pigeon.dev` (pigeon's zone, removed after); run noisypigeon's build here and record its output path, time and size; noisypigeon.com's live headers | test resources in pigeon's account only | person (consent, network host), me |
+| 1 | Core: `Account` credential kind; `cloudflare_oauth` (authorize URL, exchange, refresh, revoke); `r2` (bucket ensure with jurisdiction, objects, binding); `workers` (upload with static assets, versions, deployments, routes, workers.dev, custom domain read); `github_app` (JWT, installation token, webhook verify, tarball, deployments); WebCrypto RS256 sign and AES-GCM. Smoke scenarios: OAuth exchange/refresh with recorded answers, GitHub webhook HMAC, the plan digest refusing drift | none | executors (sonnet: r2, workers, github_app; haiku: crypto wrappers), me |
+| 2 | `instances` capability: declarations, the Instance tab (read-only), the switcher, architecture accounts; `linked` capability: `linked_setup` (LINK_KEY, OAuth client), Link/Unlink, callback, refresh, expiry rows | console shows both instances; noisypigeon "not linked" | executors (sonnet: console JS, architecture render), me |
+| 2b | **Person:** register or confirm the OAuth client; press Link; consent to the noisypigeon account | link stored; inventory of noisypigeon.com shows | person |
+| 3 | GitHub App: `github` capability, `/github/hook`, slots, deployments; the GitHub git proxy route | none until the App exists | executors, me |
+| 3b | **Person:** create the App, set its key and webhook secret on the Access tab, install it on noisypigeon/pigeon | push events recorded | person |
+| 4 | `sites`: `site-build` job and `pigeon-ci-site` image (gate change, delegate), `/sites/build` upload, `pigeon-builds` bucket, deploy to targets, rollback, deploy records | with the person's go-ahead: `pigeon-site-blog` in the noisypigeon account with workers.dev preview; `blog.pigeon.dev` | executors, me |
+| 5 | **Cutover** of noisypigeon.com (below) | route `noisypigeon.com/*` | person's go-ahead, then me |
+| 6 | Optional: the platform calls GitHub MCP through the portal (decision 6, part 2) | portal server `github-platform`, service token | person decides |
+
+Part 1 of decision 6 (people's sessions reach GitHub through the portal) is a dashboard step for
+the person, possible any time after 3b.
+
+## Cutover of noisypigeon.com, and rollback
+
+Before:
+1. The preview (`workers.dev`) and `blog.pigeon.dev` serve the current commit's build.
+2. A page-by-page comparison of status, content type and body hash passes, for every path in the
+   build's file list, between the preview and live `https://noisypigeon.com`. This is a tool,
+   `site_compare`, run by me, and its report goes to the person. It needs this session's network
+   to allow `noisypigeon.com` and `www.noisypigeon.com` (and `*.workers.dev` for the preview; the
+   exact host is proposed in phase 4).
+3. The old publisher's last build and pigeon's are of the same commit.
+
+Step (one call, with the person's go-ahead in the session and their passkey on the plan):
+`instance_apply` with the plan "create route `noisypigeon.com/*` → `pigeon-site-blog`".
+
+Check, within a minute:
+- `https://noisypigeon.com/` and five deep paths answer 200 with `X-Served-By: pigeon-site-blog`.
+- `www.noisypigeon.com` still answers 301 to the apex.
+- MX and TXT records are unchanged: an inventory diff before and after shows no change.
+
+Rollback (one call, no passkey wait, because it restores the earlier state): delete the route
+pigeon made. The R2 custom domain serves the old bucket again at once. A person can do the same
+in the dashboard: noisypigeon account → Workers → `pigeon-site-blog` → Domains & Routes → delete
+the route. A bad deploy after the cutover is rolled back by deploying the previous Worker
+version, from the console's Sites section.
+
+Later, and only if the person asks: retire the old bucket's custom domains and the old publisher
+in noisypigeon/pigeon. That repository's own change, not pigeon's.
+
+## The person's one-time steps
+
+1. **Phase 0.**
+   - Say whether your Cloudflare login is a member of both accounts.
+   - Answer the questions above: ownership in place, static assets vs R2 serving, the pigeon.dev
+     hostname (`blog.pigeon.dev`?), and phase 6.
+   - Approve the network hosts `noisypigeon.com` and `www.noisypigeon.com` for this session when
+     asked (read-only checks).
+2. **OAuth client, only if pigeon can't register it by API.** pigeon account → Manage Account →
+   OAuth clients → Create:
+   - name `pigeon`;
+   - redirect `https://platform.pigeon.dev/linked/callback`;
+   - grant types authorization code and refresh token;
+   - the scopes phase 0 lists.
+
+   Enter its secret on Access → Secrets and credentials as `CF_OAUTH_CLIENT_SECRET`.
+3. **Link.** Console → switch to `noisypigeon` → Instance → Link Cloudflare account. On
+   Cloudflare, pick the noisypigeon account and allow.
+4. **GitHub App.** github.com/organizations/pigeon-security/settings/apps → New GitHub App:
+   - Name `pigeon`; homepage `https://pigeon.dev`.
+   - Webhook URL `https://platform.pigeon.dev/github/hook`. Generate a secret and enter it on the
+     Access tab as `GITHUB_APP_WEBHOOK_SECRET`; never paste it in chat.
+   - Permissions: Metadata read, Contents read, Deployments write. Events: Push.
+   - Where can it be installed: Any account.
+   - Create, then generate a private key and upload the `.pem`'s contents on the Access tab as
+     `GITHUB_APP_PRIVATE_KEY`. Delete the downloaded file.
+   - Install: Install App → noisypigeon → Only select repositories → `pigeon`. Tell the session
+     the App id and the installation id (both in the URL; neither is secret).
+5. **Optional: GitHub in sessions through the portal.**
+   - On the App, add the callback
+     `https://oauth-callbacks.cloudflareaccess.com/cdn-cgi/access/outbound-oauth-callback`, then
+     generate a client secret.
+   - In Zero Trust → MCP servers → Add:
+     - name and server id `github`;
+     - URL `https://api.githubcopilot.com/mcp/`;
+     - OAuth, manual, with the App's client id and secret;
+     - policy: your email.
+   - Add `github` to portal `pigeon`.
+6. **Cutover.** Say "go" for the route in the session that does it. Say "roll back" at any time.
+
+## What I need from the network
+
+This session (not the platform; the Worker's outbound calls aren't limited) needs
+`noisypigeon.com`, `www.noisypigeon.com` and the preview's `workers.dev` host for the live
+checks. I'll propose them with the environment tools when phase 0 or 4 reaches them, not before.
+`api.cloudflare.com`, `dash.cloudflare.com` and `api.github.com` are reached by the platform,
+not by this session.
+
+## Log
+
+- 2026-11-21: design. The noisypigeon repository and its live serving were read; the Cloudflare,
+  Cloudflare OAuth and GitHub docs checked; the portal and Buildkite planners consulted. The
+  parent session made OAuth the primary link.
