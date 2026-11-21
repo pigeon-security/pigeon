@@ -28,3 +28,49 @@ pub async fn sync(account: &Account, server: &str) -> Result<Value> {
     let synced = call(token.value(), Method::Post, &path, None).await;
     token.finish(synced).await
 }
+
+/// One call on the account's MCP servers (`…/access/ai-controls/mcp/servers{rest}`) with a
+/// token minted for it alone.
+async fn servers_call(
+    account: &Account,
+    method: Method,
+    rest: &str,
+    body: Option<&Value>,
+) -> Result<Value> {
+    let token = Scoped::open(
+        account,
+        "mcp-portal",
+        vec![Policy::new(Scope::Account, &PERMISSIONS)],
+    )
+    .await?;
+    let path = format!(
+        "/accounts/{}/access/ai-controls/mcp/servers{rest}",
+        account.id
+    );
+    let answered = call(token.value(), method, &path, body).await;
+    token.finish(answered).await
+}
+
+/// The account's MCP servers, as Cloudflare lists them (never their credentials).
+pub async fn servers(account: &Account) -> Result<Vec<Value>> {
+    match servers_call(account, Method::Get, "", None).await? {
+        Value::Array(a) => Ok(a),
+        _ => Err(worker::Error::RustError(
+            "Cloudflare answered MCP servers that are not a list".into(),
+        )),
+    }
+}
+
+/// Creates MCP server `body` (its `id`, `name`, `hostname`, `auth_type`, …).
+pub async fn create_server(account: &Account, body: &Value) -> Result<Value> {
+    servers_call(account, Method::Post, "", Some(body)).await
+}
+
+/// Updates MCP server `id`. A body without `auth_credentials` keeps the stored ones.
+pub async fn update_server(account: &Account, id: &str, body: &Value) -> Result<Value> {
+    if id.is_empty() || id.len() > 32 || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    {
+        return Err(worker::Error::RustError("not an MCP server ID".into()));
+    }
+    servers_call(account, Method::Put, &format!("/{id}"), Some(body)).await
+}

@@ -231,25 +231,56 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
     ]
 }
 
-/// The Buildkite organization's slug.
+/// The Buildkite organization's slug; empty leaves the connector off and sets nothing up.
 const BUILDKITE_ORG: &str = "";
-/// Buildkite's queues in cluster `pigeon`, one row per class: the queue's key, the class, and
-/// the hosted shape's vCPU, memory (GB) and disk (GB). Hosted Linux agents have docker, so each
-/// queue also runs its class's `-docker` jobs. Linux only for now.
-const BUILDKITE_QUEUES: [(&str, Size, bool, u32, u32, u32); 4] = [
-    // LINUX_AMD64_2X4
-    ("pigeon-linux-small", Size::Small, false, 2, 4, 47),
-    ("pigeon-linux-small", Size::Small, true, 2, 4, 47),
-    // LINUX_AMD64_4X16
-    ("pigeon-linux-medium", Size::Medium, false, 4, 16, 95),
-    ("pigeon-linux-medium", Size::Medium, true, 4, 16, 95),
+/// Buildkite's hosted queues in cluster `pigeon`, one row per class: the queue's key, its
+/// instance shape, the class, and the shape's vCPU, memory (GB) and disk (GB). Hosted Linux
+/// agents have docker, so each queue also runs its class's `-docker` jobs. Linux only for now.
+/// The setup makes each queue (docs/plans/buildkite-mcp.md).
+const BUILDKITE_QUEUES: [(&str, &str, Size, bool, u32, u32, u32); 4] = [
+    (
+        "pigeon-linux-small",
+        "LINUX_AMD64_2X4",
+        Size::Small,
+        false,
+        2,
+        4,
+        47,
+    ),
+    (
+        "pigeon-linux-small",
+        "LINUX_AMD64_2X4",
+        Size::Small,
+        true,
+        2,
+        4,
+        47,
+    ),
+    (
+        "pigeon-linux-medium",
+        "LINUX_AMD64_4X16",
+        Size::Medium,
+        false,
+        4,
+        16,
+        95,
+    ),
+    (
+        "pigeon-linux-medium",
+        "LINUX_AMD64_4X16",
+        Size::Medium,
+        true,
+        4,
+        16,
+        95,
+    ),
 ];
 
 fn buildkite_queues() -> Vec<buildkite::Queue> {
     BUILDKITE_QUEUES
         .iter()
-        .map(|&(key, size, docker, cpu, mem, disk)| {
-            buildkite::queue(key, buildkite::linux(size, docker), cpu, mem, disk)
+        .map(|&(key, shape, size, docker, cpu, mem, disk)| {
+            buildkite::queue(key, shape, buildkite::linux(size, docker), cpu, mem, disk)
         })
         .collect()
 }
@@ -268,6 +299,8 @@ pub fn land() -> land::Settings {
         // The MCP server portal on mcp.pigeon.dev lists this platform as server `pigeon`
         // (docs/plans/mcp-portal.md).
         portal_servers: vec!["pigeon".into()],
+        // Each CI connector's setup (Buildkite's) runs once a landing has deployed.
+        setup_connectors: true,
     }
 }
 
@@ -296,6 +329,15 @@ pub fn ci() -> ci::Settings {
                 // unconfigured.
                 org: BUILDKITE_ORG.into(),
                 pipeline: "pigeon".into(),
+                cluster: "pigeon".into(),
+                // Never cloned: every step skips checkout and fetches through the git proxy.
+                repository: "https://github.com/pigeon-security/pigeon.git".into(),
+                // Buildkite's MCP for sessions, behind the portal with the same token.
+                portal: Some((
+                    "buildkite".into(),
+                    "https://mcp.buildkite.com/direct".into(),
+                )),
+                parent: PARENT_TOKEN.into(),
                 queues: buildkite_queues(),
                 hosted_only: true,
             }),

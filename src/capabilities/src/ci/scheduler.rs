@@ -27,10 +27,11 @@ use super::notes::{self, Line};
 use super::route::{self, Availability, Candidate};
 use super::state::{self, Next, Report, State as JobState};
 use super::token::{self, Grant};
-use super::{Cx, Dispatched, EVENTS, NewJob, Run, Seen, Settings, notify};
+use super::{Cx, Dispatched, EVENTS, Held, NewJob, Run, Seen, Settings, SetupRun, notify};
+use pigeon_core::buildkite_setup::{Kind, Owned};
 
 /// The scheduler's schema, one statement per migration, applied in order and never edited.
-const MIGRATIONS: [&str; 11] = [
+const MIGRATIONS: [&str; 14] = [
     "CREATE TABLE jobs (id TEXT PRIMARY KEY, repo TEXT NOT NULL, commit_sha TEXT NOT NULL, name TEXT NOT NULL, job TEXT NOT NULL, class TEXT NOT NULL, pin TEXT, task TEXT, caller TEXT, caller_name TEXT, notify_url TEXT, notify_key TEXT, state TEXT NOT NULL, attempt INTEGER NOT NULL, connector TEXT, handle TEXT, url TEXT, excluded TEXT NOT NULL, token_hash TEXT, token_expires_at INTEGER, deadline_at INTEGER, claimed_at INTEGER, next_poll_at INTEGER, created_at INTEGER NOT NULL, queued_at INTEGER NOT NULL, dispatched_at INTEGER, started_at INTEGER, finished_at INTEGER, detail TEXT)",
     "CREATE INDEX jobs_state ON jobs (state)",
     "CREATE INDEX jobs_commit ON jobs (repo, commit_sha)",
@@ -42,6 +43,9 @@ const MIGRATIONS: [&str; 11] = [
     "CREATE TABLE pool (connector TEXT PRIMARY KEY, availability TEXT NOT NULL, checked_at INTEGER NOT NULL)",
     "ALTER TABLE jobs ADD COLUMN exit_code INTEGER",
     "ALTER TABLE jobs ADD COLUMN output TEXT",
+    "CREATE TABLE setup_owned (connector TEXT NOT NULL, kind TEXT NOT NULL, key TEXT NOT NULL, id TEXT NOT NULL, spec_hash TEXT, created_at INTEGER NOT NULL, PRIMARY KEY (connector, kind, key))",
+    "CREATE TABLE setup_keys (connector TEXT PRIMARY KEY, key TEXT NOT NULL, created_at INTEGER NOT NULL)",
+    "CREATE TABLE setup_runs (connector TEXT PRIMARY KEY, at INTEGER NOT NULL, applied INTEGER NOT NULL, report TEXT NOT NULL)",
 ];
 
 /// How long the pool's availability is trusted.
@@ -303,6 +307,91 @@ impl Scheduler {
         }
     }
 
+    /// What the scheduler holds for connector `name`'s setup.
+    fn held(&self, name: &str) -> Result<Held> {
+        #[derive(Deserialize)]
+        struct O {
+            kind: String,
+            key: String,
+            id: String,
+            spec_hash: Option<String>,
+        }
+        #[derive(Deserialize)]
+        struct K {
+            key: String,
+        }
+        let owned: Vec<O> = self.db.rows(
+            "SELECT kind, key, id, spec_hash FROM setup_owned WHERE connector = ? ORDER BY rowid",
+            vec![name.into()],
+        )?;
+        let key: Option<K> = self.db.row(
+            "SELECT key FROM setup_keys WHERE connector = ?",
+            vec![name.into()],
+        )?;
+        Ok(Held {
+            owned: owned
+                .into_iter()
+                .filter_map(|o| {
+                    Some(Owned {
+                        kind: Kind::parse(&o.kind)?,
+                        key: o.key,
+                        id: o.id,
+                        spec_hash: o.spec_hash,
+                    })
+                })
+                .collect(),
+            hook_key: key.map(|k| k.key),
+        })
+    }
+
+    /// Runs connector `name`'s setup (each connector's, when empty), applying it when
+    /// `apply`, and keeps what it made. Answers each connector's report.
+    async fn setup(&self, name: &str, apply: bool) -> Result<Value> {
+        let cx = self.cx();
+        let mut out = serde_json::Map::new();
+        for c in &self.settings.connectors {
+            if !name.is_empty() && c.name() != name {
+                continue;
+            }
+            let held = self.held(c.name())?;
+            let run = match c.setup(&cx, &held, apply).await {
+                Ok(Some(run)) => run,
+                Ok(None) => continue,
+                Err(e) => SetupRun {
+                    report: json!({ "error": e.to_string() }),
+                    ..SetupRun::default()
+                },
+            };
+            if let Some(key) = &run.hook_key {
+                self.db.exec(
+                    "INSERT OR REPLACE INTO setup_keys (connector, key, created_at) VALUES (?, ?, ?)",
+                    vec![c.name().into(), key.as_str().into(), now().into()],
+                )?;
+            }
+            for o in &run.record {
+                self.db.exec(
+                    "INSERT OR REPLACE INTO setup_owned (connector, kind, key, id, spec_hash, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    vec![
+                        c.name().into(),
+                        o.kind.name().into(),
+                        o.key.as_str().into(),
+                        o.id.as_str().into(),
+                        o.spec_hash.as_deref().map_or(SqlStorageValue::Null, Into::into),
+                        now().into(),
+                    ],
+                )?;
+            }
+            if apply {
+                self.db.exec(
+                    "INSERT OR REPLACE INTO setup_runs (connector, at, applied, report) VALUES (?, ?, 1, ?)",
+                    vec![c.name().into(), now().into(), run.report.to_string().into()],
+                )?;
+            }
+            out.insert(c.name().to_string(), run.report);
+        }
+        Ok(Value::Object(out))
+    }
+
     fn row(&self, id: &str) -> Result<Option<Row>> {
         self.db
             .row("SELECT * FROM jobs WHERE id = ?", vec![id.into()])
@@ -341,6 +430,11 @@ impl Scheduler {
                 out["events"] = json!(events);
                 Ok(out)
             }
+            "setup" => {
+                self.setup(s("connector"), a["apply"].as_bool() == Some(true))
+                    .await
+            }
+            "setup_key" => Ok(json!(self.held(s("connector"))?.hook_key)),
             "jobs" => self.jobs(a),
             "cancel" => self.cancel(s("id")).await,
             "commit" => {

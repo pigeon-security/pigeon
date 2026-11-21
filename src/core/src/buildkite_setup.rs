@@ -461,10 +461,10 @@ fn step(w: &Want, seen: &[Seen], owned: &[Owned], missing: &[String], before: &[
         .filter(|(path, want)| s.body.pointer(path) != Some(&fill(want, &ids)))
         .map(|(path, _)| path.trim_start_matches('/').replace('/', "."))
         .collect();
-    if let Some(secret) = &w.secret {
-        if mine.spec_hash.as_deref() != Some(secret.as_str()) {
-            fields.push("credentials".into());
-        }
+    if let Some(secret) = &w.secret
+        && mine.spec_hash.as_deref() != Some(secret.as_str())
+    {
+        fields.push("credentials".into());
     }
     if fields.is_empty() {
         Step::Ok {

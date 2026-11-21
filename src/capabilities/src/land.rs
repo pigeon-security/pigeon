@@ -81,6 +81,9 @@ pub struct Settings {
     /// The MCP server portal servers (their server IDs, such as `pigeon`) to sync once a
     /// landing has deployed, so the portal lists the deployed tools at once.
     pub portal_servers: Vec<String>,
+    /// Whether the CI connectors' setup (Buildkite's: docs/plans/buildkite-mcp.md) runs once a
+    /// landing has deployed, so the provider matches the deployed settings.
+    pub setup_connectors: bool,
 }
 
 impl Settings {
@@ -707,6 +710,44 @@ impl Lander {
         Ok(true)
     }
 
+    /// Runs the CI connectors' setup after landing `id` deployed, and adds what it did to the
+    /// detail: `buildkite: created queue pigeon-linux-small, …`, `ok`, or why not. A setup that
+    /// fails leaves the landing landed; the connector then reads as not set up.
+    async fn setup_connectors(&self, id: &str) {
+        if !self.settings.setup_connectors {
+            return;
+        }
+        let said = match crate::ci::setup(&self.env, true).await {
+            Ok(Value::Object(reports)) => reports
+                .iter()
+                .map(|(name, r)| format!("{name}: {}", crate::ci::setup_summary(r)))
+                .collect::<Vec<_>>(),
+            Ok(_) => Vec::new(),
+            Err(e) => vec![format!("CI setup: not run ({e})")],
+        };
+        if said.is_empty() {
+            return;
+        }
+        #[derive(serde::Deserialize)]
+        struct D {
+            detail: Option<String>,
+        }
+        let detail = match self
+            .db
+            .row::<D>("SELECT detail FROM landings WHERE id = ?", vec![id.into()])
+        {
+            Ok(Some(d)) => d.detail.unwrap_or_default(),
+            _ => String::new(),
+        };
+        let text = format!("{detail}; {}", said.join("; "));
+        if let Err(e) = self.db.exec(
+            "UPDATE landings SET detail = ? WHERE id = ?",
+            vec![text.into(), id.into()],
+        ) {
+            console_error!("CI setup after {id}: {e}");
+        }
+    }
+
     /// Syncs the portal's servers after landing `id` deployed, and adds how each went to its
     /// detail. A sync that fails leaves the landing landed: the portal syncs on its own within
     /// hours, and the detail says so.
@@ -1025,6 +1066,7 @@ impl Lander {
                         self.apply(&row, &Seen::JobEnded { passed }, Some(&detail))?;
                         if passed {
                             self.sync_portal(&row.id, &detail).await;
+                            self.setup_connectors(&row.id).await;
                         }
                     }
                 }

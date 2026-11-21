@@ -6,6 +6,11 @@
 //! `/ci/token`, so no secret passes through build settings, then runs the same runner as
 //! Containers: it fetches the commit through the git proxy and reports on `/ci/runner/{job}`.
 //!
+//! The connector also sets Buildkite up (see [`setup`]): the cluster, the hosted queues, the
+//! pipeline and its webhook, and the Cloudflare MCP server for Buildkite's MCP, all from these
+//! settings, after each landing's deploy. The webhook's key is generated there and kept by the
+//! scheduler.
+//!
 //! Webhooks (`build.running`, `build.finished`) are verified with their HMAC signature before
 //! anything in them is read, and only builds the gateway started, matched by handle, are acted
 //! on. A build that ends without its runner having reported is an infrastructure failure, which
@@ -22,20 +27,21 @@ use super::class::{Class, Offered, Size};
 use super::config::{Arch, Os};
 use super::route::Availability;
 use super::state::Report;
-use super::{Connector, Cx, Dispatched, Hook, Pending, Run, Seen};
+use super::{Connector, Cx, Dispatched, Held, Hook, Pending, Run, Seen, SetupRun};
 use crate::Slot;
 use crate::expiry::{self, Expiry};
 
+pub mod setup;
+
 /// The connector's name.
 pub const NAME: &str = "buildkite";
-/// The Secrets Store bindings of its two secrets.
+/// The Secrets Store binding of its one secret, the API token.
 pub const API_TOKEN: &str = "BUILDKITE_API_TOKEN";
-pub const WEBHOOK_TOKEN: &str = "BUILDKITE_WEBHOOK_TOKEN";
 /// Buildkite's OIDC issuer, shared by every organization, and its keys.
 pub const ISSUER: &str = "https://agent.buildkite.com";
 pub const JWKS: &str = "https://agent.buildkite.com/.well-known/jwks";
-/// The API token's scopes the connector needs.
-pub const SCOPES: [&str; 2] = ["read_builds", "write_builds"];
+/// The API token's scopes the connector needs at runtime.
+pub const SCOPES: [&str; 2] = pigeon_core::buildkite_setup::RUNTIME_SCOPES;
 /// How far a webhook's timestamp may be from now, either way.
 const HOOK_WINDOW_SECS: i64 = 300;
 
@@ -51,6 +57,8 @@ fn now_secs() -> i64 {
 pub struct Queue {
     /// The queue's key in the cluster, such as `pigeon-linux-small`.
     pub key: &'static str,
+    /// Its hosted agents' instance shape, such as `LINUX_AMD64_2X4`.
+    pub shape: &'static str,
     pub offered: Offered,
 }
 
@@ -59,6 +67,15 @@ pub struct Buildkite {
     /// The organization's and the pipeline's slugs.
     pub org: String,
     pub pipeline: String,
+    /// The cluster's name, which the setup makes.
+    pub cluster: String,
+    /// The pipeline's repository URL: Buildkite requires one, and never clones it, since every
+    /// step skips checkout.
+    pub repository: String,
+    /// The Cloudflare MCP server the setup keeps for Buildkite's MCP: its server ID and URL.
+    pub portal: Option<(String, String)>,
+    /// The Secrets Store binding of the parent token, for that server's Cloudflare calls.
+    pub parent: String,
     /// The queues jobs go to, by class.
     pub queues: Vec<Queue>,
     /// Whether only tokens from Buildkite's hosted agents are exchanged.
@@ -66,9 +83,17 @@ pub struct Buildkite {
 }
 
 /// A queue running `class` with these real limits.
-pub fn queue(key: &'static str, class: Class, cpu: u32, memory_gb: u32, disk_gb: u32) -> Queue {
+pub fn queue(
+    key: &'static str,
+    shape: &'static str,
+    class: Class,
+    cpu: u32,
+    memory_gb: u32,
+    disk_gb: u32,
+) -> Queue {
     Queue {
         key,
+        shape,
         offered: Offered {
             class,
             cpu,
@@ -287,39 +312,31 @@ impl Connector for Buildkite {
     }
 
     fn secrets(&self) -> Vec<Slot> {
-        vec![
-            Slot {
-                name: API_TOKEN.into(),
-                purpose: format!(
-                    "A Buildkite API access token for organization `{}`, with the scopes \
-                     read_builds and write_builds and nothing else (Buildkite: Personal \
-                     Settings, API Access Tokens, New API Access Token). The CI gateway uses \
-                     it to start, read and cancel builds of pipeline `{}`.",
-                    self.org, self.pipeline
-                ),
-                scopes: &[secrets_store::WORKERS],
-            },
-            Slot {
-                name: WEBHOOK_TOKEN.into(),
-                purpose: format!(
-                    "The token of pipeline `{}`'s webhook notification to \
-                     /ci/hooks/buildkite, sent as an HMAC signature in X-Buildkite-Signature \
-                     (Buildkite: the notification's Token field). The CI gateway checks every \
-                     delivery with it before reading it.",
-                    self.pipeline
-                ),
-                scopes: &[secrets_store::WORKERS],
-            },
-        ]
+        vec![Slot {
+            name: API_TOKEN.into(),
+            purpose: format!(
+                "The one Buildkite API access token for organization `{}` (Buildkite: \
+                     Personal Settings, API Access Tokens, New API Access Token; pick the \
+                     longest expiry), with these REST scopes and nothing else: {}. The CI \
+                     gateway uses it to set up and run pipeline `{}`, and the portal's \
+                     Buildkite server uses it for sessions.",
+                self.org,
+                pigeon_core::buildkite_setup::RUNTIME_SCOPES
+                    .iter()
+                    .chain(pigeon_core::buildkite_setup::SETUP_SCOPES.iter())
+                    .chain(pigeon_core::buildkite_setup::MCP_SCOPES.iter())
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                self.pipeline
+            ),
+            scopes: &[secrets_store::WORKERS],
+        }]
     }
 
-    /// The API token's expiry is what `GET /v2/access-token` answers in `expires_at`; the
-    /// webhook token is a shared signing key, which never expires.
+    /// The API token's expiry is what `GET /v2/access-token` answers in `expires_at`.
     fn secret_expiry<'a>(&'a self, cx: &'a Cx<'a>, name: &'a str) -> Pending<'a, Expiry> {
         Box::pin(async move {
-            if name == WEBHOOK_TOKEN {
-                return Ok(Expiry::Never);
-            }
             if name != API_TOKEN {
                 return Ok(Expiry::Unknown {
                     why: "Buildkite does not use this secret".into(),
@@ -332,9 +349,7 @@ impl Connector for Buildkite {
 
     fn available<'a>(&'a self, cx: &'a Cx<'a>) -> Pending<'a, Availability> {
         Box::pin(async move {
-            let (Some(token), Some(_)) =
-                (secret(cx, API_TOKEN).await, secret(cx, WEBHOOK_TOKEN).await)
-            else {
+            let Some(token) = secret(cx, API_TOKEN).await else {
                 return Ok(Availability::default());
             };
             if self.org.is_empty() || self.queues.is_empty() {
@@ -420,7 +435,17 @@ impl Connector for Buildkite {
 
     fn webhook<'a>(&'a self, cx: &'a Cx<'a>, h: &'a Hook) -> Pending<'a, Option<Seen>> {
         Box::pin(async move {
-            let key = secret(cx, WEBHOOK_TOKEN).await.unwrap_or_default();
+            // The key the setup generated, as the scheduler keeps it; none yet refuses all.
+            let key = super::scheduler(cx.env, "setup_key", json!({ "connector": NAME }))
+                .await?
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            if key.is_empty() {
+                return Err(bad(
+                    "no webhook key yet: the setup has not made the webhook",
+                ));
+            }
             hook::verify(
                 h.header("x-buildkite-signature"),
                 &h.body,
@@ -433,6 +458,15 @@ impl Connector for Buildkite {
                 hook::read(h.header("x-buildkite-event"), &h.body).map_err(|e| bad(&e))?,
             ))
         })
+    }
+
+    fn setup<'a>(
+        &'a self,
+        cx: &'a Cx<'a>,
+        held: &'a Held,
+        apply: bool,
+    ) -> Pending<'a, Option<SetupRun>> {
+        Box::pin(async move { setup::run(self, cx, held, apply).await.map(Some) })
     }
 
     fn exchange<'a>(&'a self, cx: &'a Cx<'a>, jwt: &'a str) -> Pending<'a, Option<String>> {

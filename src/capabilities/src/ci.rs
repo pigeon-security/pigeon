@@ -69,6 +69,23 @@ pub struct Cx<'a> {
     pub host: &'a str,
 }
 
+/// What the scheduler holds for a connector's setup: the resources it made, and the webhook key
+/// it generated.
+#[derive(Debug, Clone, Default)]
+pub struct Held {
+    pub owned: Vec<pigeon_core::buildkite_setup::Owned>,
+    pub hook_key: Option<String>,
+}
+
+/// One setup run: its report (steps, and with `apply` what was done), the records to keep
+/// (inserted or replaced by kind and key), and a webhook key to keep when it made one.
+#[derive(Debug, Clone, Default)]
+pub struct SetupRun {
+    pub report: Value,
+    pub record: Vec<pigeon_core::buildkite_setup::Owned>,
+    pub hook_key: Option<String>,
+}
+
 /// One attempt of a job, as a connector is asked to run it.
 #[derive(Debug, Clone, Serialize)]
 pub struct Run {
@@ -161,6 +178,18 @@ pub trait Connector {
     /// no limit of the gateway's own.
     fn limit(&self) -> Option<u32> {
         None
+    }
+
+    /// Makes the provider match what pigeon declares for this connector, or with `apply` false
+    /// only says what that would do, from `held`: what the scheduler recorded of earlier runs.
+    /// `None` for a connector with nothing to set up. See docs/plans/buildkite-mcp.md.
+    fn setup<'a>(
+        &'a self,
+        _cx: &'a Cx<'a>,
+        _held: &'a Held,
+        _apply: bool,
+    ) -> Pending<'a, Option<SetupRun>> {
+        Box::pin(async { Ok(None) })
     }
 
     /// Whether it is configured (its secrets set) and healthy, and how much room it has.
@@ -321,6 +350,58 @@ fn tags(
 /// Calls the scheduler.
 async fn scheduler(env: &Env, op: &str, args: Value) -> Result<Value> {
     pigeon_core::durable::call(env, BINDING, OBJECT, op, &args).await
+}
+
+/// Runs each connector's setup (applying it when `apply`): what the Lander calls once a landing
+/// has deployed, and `ci_buildkite_plan` without `apply`.
+pub async fn setup(env: &Env, apply: bool) -> Result<Value> {
+    scheduler(env, "setup", json!({ "apply": apply })).await
+}
+
+/// One line for a setup report: what was done, what is `ok`, and anything blocked, in conflict
+/// or failed. Never a secret: reports hold none.
+pub fn setup_summary(r: &Value) -> String {
+    if let Some(why) = r["off"].as_str().or_else(|| r["blocked"].as_str()) {
+        return why.to_string();
+    }
+    if let Some(e) = r["error"].as_str().filter(|_| r["steps"].is_null()) {
+        return format!("not run ({e})");
+    }
+    let mut parts: Vec<String> = r["done"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|d| d.as_str().map(String::from))
+        .collect();
+    let mut ok = 0;
+    for s in r["steps"].as_array().into_iter().flatten() {
+        let what = format!(
+            "{} {}",
+            s["kind"].as_str().unwrap_or(""),
+            s["key"].as_str().unwrap_or("")
+        );
+        match s["step"].as_str() {
+            Some("ok") => ok += 1,
+            Some("conflict") | Some("blocked") => parts.push(format!(
+                "{} {what}: {}",
+                s["step"].as_str().unwrap_or(""),
+                s["why"].as_str().unwrap_or("")
+            )),
+            Some("orphaned") => parts.push(format!("orphaned {what} (left alone)")),
+            _ => {}
+        }
+    }
+    if ok > 0 {
+        parts.push(format!("{ok} ok"));
+    }
+    if let Some(e) = r["error"].as_str() {
+        parts.push(format!("failed: {e}"));
+    }
+    if parts.is_empty() {
+        "nothing to do".into()
+    } else {
+        parts.join(", ")
+    }
 }
 
 /// The grant of job token `presented`, if it is a live job token: the interface the git proxy
@@ -826,6 +907,14 @@ impl Capability for Ci {
                     "properties": { "repo": job["repo"], "commit": job["commit"] }
                 }),
             },
+            Tool::bare(
+                "ci_buildkite_plan",
+                "What the Buildkite setup would change, read-only: each resource pigeon declares \
+                 (cluster, hosted queues, pipeline, webhook, the portal's Buildkite server) as \
+                 create, update (naming the fields), ok, conflict (exists and is not pigeon's: \
+                 never touched), blocked or orphaned (left alone), and the API token's missing \
+                 scopes. The setup itself runs only after a landing's deploy; it never deletes.",
+            ),
         ]
     }
 
@@ -857,6 +946,12 @@ impl Capability for Ci {
                     let repo = self.repo(args)?;
                     let commit = Self::commit(args)?.to_ascii_lowercase();
                     scheduler(cx.env, "commit", json!({ "repo": repo, "commit": commit })).await?
+                }
+                "ci_buildkite_plan" => {
+                    let report = setup(cx.env, false).await?;
+                    report.get(buildkite::NAME).cloned().unwrap_or(json!({
+                        "off": "the Buildkite connector is not configured in settings"
+                    }))
                 }
                 other => return Err(unknown(other)),
             })
