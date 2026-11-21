@@ -1878,6 +1878,7 @@ fn instances_are_data_a_person_approves() {
     // blog with a preview, the zone (off until the cutover) and the subdomain `noisypigeon`.
     let mut noisy: Instance = serde_json::from_value(template()).unwrap();
     noisy.id = "noisypigeon".into();
+    noisy.sites[0].bucket = "noisypigeon-com-site".into();
     noisy.title = "noisypigeon".into();
     noisy.zones = vec!["noisypigeon.com".into()];
     noisy.sites[0].build = Some("workloads/noisypigeon.com/blog".into());

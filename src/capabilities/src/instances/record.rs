@@ -76,8 +76,13 @@ pub enum RepoRef {
 pub struct SiteRecord {
     /// The site name, unique within the instance.
     pub name: String,
-    /// The bucket that holds the site files.
+    /// The bucket that holds the site files: by default [`bucket_for`] the site's hostname,
+    /// such as `noisypigeon-com-site`.
     pub bucket: String,
+    /// Whether `bucket` may differ from the name [`bucket_for`] gives. The person sees this in
+    /// the diff they approve.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bucket_override: bool,
     /// The Worker that serves the site.
     pub worker: String,
     /// The bucket jurisdiction, either "eu" or "fedramp".
@@ -262,6 +267,49 @@ fn check_resource_name(path: &str, value: &str, problems: &mut Vec<String>) {
     }
 }
 
+/// The bucket a site's files live in by default: its hostname with dots as hyphens, then
+/// `-site`. The hostname is the site's first zone target, else its first subdomain under the
+/// platform's zone; `noisypigeon.com` gives `noisypigeon-com-site`, `foo.pigeon.dev` gives
+/// `foo-pigeon-dev-site`. Other hostnames serving the same site share its bucket.
+pub fn bucket_for(site: &SiteRecord, platform_zone: &str) -> Option<String> {
+    let host = site
+        .targets
+        .iter()
+        .find_map(|t| match t {
+            Target::Zone { hostname, .. } => Some(hostname.clone()),
+            _ => None,
+        })
+        .or_else(|| {
+            site.targets.iter().find_map(|t| match t {
+                Target::Subdomain { label } => Some(subdomain_host(label, platform_zone)),
+                _ => None,
+            })
+        })?;
+    Some(format!("{}-site", host.replace('.', "-")))
+}
+
+fn check_bucket(path: &str, site: &SiteRecord, rules: &Rules, problems: &mut Vec<String>) {
+    let name = &site.bucket;
+    if !(3..=63).contains(&name.len()) || !label(name) {
+        problems.push(format!(
+            "The {path} \"{name}\" must be 3 to 63 characters of lowercase letters, digits and dashes."
+        ));
+        return;
+    }
+    if site.bucket_override {
+        return;
+    }
+    match bucket_for(site, rules.platform_zone) {
+        Some(expected) if expected != *name => problems.push(format!(
+            "The {path} \"{name}\" should be \"{expected}\", named after the site's hostname; set bucket_override to keep another name."
+        )),
+        None => problems.push(format!(
+            "The {path} is named after the site's hostname, but the site has no zone or subdomain target yet."
+        )),
+        _ => {}
+    }
+}
+
 fn uses_label(instance: &Instance, wanted: &str) -> bool {
     instance.sites.iter().any(|s| {
         s.targets
@@ -357,7 +405,7 @@ fn check_sites(
                 site.name
             ));
         }
-        check_resource_name(&format!("{p}.bucket"), &site.bucket, problems);
+        check_bucket(&format!("{p}.bucket"), site, rules, problems);
         check_resource_name(&format!("{p}.worker"), &site.worker, problems);
         if let Some(j) = &site.jurisdiction
             && j != "eu"

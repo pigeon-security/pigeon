@@ -122,6 +122,18 @@ pub fn initials(name: &str) -> String {
     }
 }
 
+/// The person signed in to the console on `req`, if any: the same check as the console's own
+/// pages, for other capabilities' console writes.
+pub async fn signed_person(env: &Env, req: &Request) -> Result<Option<User>> {
+    let header = req.headers().get("Cookie")?.unwrap_or_default();
+    let Some(token) = session::token_from(&header) else {
+        return Ok(None);
+    };
+    let found = directory(env, "session.get", json!({ "hash": hash(token) })).await?;
+    let signed: Option<Signed> = serde_json::from_value(found).ok();
+    Ok(signed.map(|s| s.user).filter(|u| u.kind == "standard"))
+}
+
 impl Console {
     /// The person whose session cookie `req` carries, while it is fresh. The Directory answers a
     /// session only while its user exists and is a person, and removes it otherwise; the kind is

@@ -53,7 +53,7 @@ pub fn template() -> Value {
         "repo": { "kind": "github", "full_name": "owner/repo", "installation": null },
         "sites": [{
             "name": "blog",
-            "bucket": "pigeon-site-blog",
+            "bucket": "example-com-site",
             "worker": "pigeon-site-blog",
             "jurisdiction": "eu",
             "build": "workloads/example.com/blog",
@@ -214,6 +214,15 @@ impl Instances {
     async fn serve(&self, cx: &Context<'_>, mut req: Request) -> Result<Response> {
         if req.method() != Method::Post {
             return Response::error("not found", 404);
+        }
+        // A console write: from the console's own page, by the person signed in to it.
+        let host = req.url()?.host_str().unwrap_or_default().to_string();
+        let origin = req.headers().get("Origin")?;
+        if !crate::console::session::same_origin(origin.as_deref(), &host) {
+            return Response::error("forbidden", 403);
+        }
+        if crate::console::signed_person(cx.env, &req).await?.is_none() {
+            return Response::error("sign in to the console first", 401);
         }
         let path = req.path();
         let body: Value = req.json().await.unwrap_or(Value::Null);
