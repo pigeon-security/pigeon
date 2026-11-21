@@ -25,32 +25,49 @@ pub const HOST: &str = "registry.cloudflare.com";
 /// The most catalog pages read, so a large registry cannot run a call long.
 const MAX_PAGES: usize = 20;
 
-/// A container application, as listed: never its secrets or environment.
+/// A container application, as listed: never its secrets or environment. Under the
+/// `durable_object` scheduling policy an application has no image, instance type or instance
+/// counts of its own: each container start names them (the Worker's `[containers.images]`), so
+/// those fields are left out and `note` says where the image is.
 #[derive(Serialize, Debug, PartialEq)]
 pub struct Application {
     pub id: Option<String>,
     pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub instance_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub instances: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_instances: Option<u64>,
     pub scheduling_policy: Option<String>,
     /// The Durable Object namespace it serves, under the `durable_object` policy.
     pub namespace: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<&'static str>,
 }
+
+/// What an application under the `durable_object` policy without an image of its own says.
+pub const PER_START: &str = "durable_object policy: each container start names its image \
+                             (the Worker's [containers.images] in wrangler.toml); the digests \
+                             are under `repositories`";
 
 /// `v`, one application as the API lists it, with only what [`Application`] keeps.
 pub fn application(v: &Value) -> Application {
     let s = |v: &Value| v.as_str().map(String::from);
+    let image = s(&v["configuration"]["image"]);
+    let per_start = image.is_none() && v["scheduling_policy"] == "durable_object";
     Application {
         id: s(&v["id"]),
         name: s(&v["name"]),
-        image: s(&v["configuration"]["image"]),
+        image,
         instance_type: s(&v["configuration"]["instance_type"]),
         instances: v["instances"].as_u64(),
         max_instances: v["max_instances"].as_u64(),
         scheduling_policy: s(&v["scheduling_policy"]),
         namespace: s(&v["durable_objects"]["namespace_id"]),
+        note: per_start.then_some(PER_START),
     }
 }
 
@@ -208,7 +225,16 @@ mod tests {
         assert_eq!(a.max_instances, Some(4));
         let text = serde_json::to_string(&a).unwrap();
         assert!(!text.contains("secret") && !text.contains("environment"));
+        assert_eq!(a.note, None);
         assert_eq!(application(&json!({})).name, None);
+        // As wrangler creates one under the durable_object policy: no configuration at all.
+        let bare = application(&json!({
+            "id": "a2", "name": "pigeon-platform-cirunner",
+            "scheduling_policy": "durable_object", "durable_objects": { "namespace_id": "ns1" }
+        }));
+        assert_eq!(bare.note, Some(PER_START));
+        let shown = serde_json::to_value(&bare).unwrap();
+        assert!(shown.get("image").is_none() && shown.get("instances").is_none());
     }
 
     #[test]
