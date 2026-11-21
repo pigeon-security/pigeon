@@ -1,7 +1,9 @@
 # External MCP access through a Cloudflare MCP server portal
 
-Status: **go-ahead given; the retire fix is built (landing 1)**. Phase 0 is checks the person
-makes in the Cloudflare dashboard; the later build phases wait on its answers.
+Status: **phases 0 and 1 done; phase 2 (the settings generator) landing**. The portal
+`pigeon` is live at `https://mcp.pigeon.dev/mcp` with the server `pigeon`, and the claude.ai
+connector "Pigeon MCP" reaches pigeon through it. The old "Pigeon" connector stays until
+cutover (phase 4).
 
 Sources: Cloudflare's MCP portals page
 (https://developers.cloudflare.com/cloudflare-one/access-controls/ai-controls/mcp-portals/), its
@@ -150,6 +152,18 @@ then share that one service user, kept apart from people. That is phase 5, if wa
 - The portal's dashboard logs record each call (server, capability, status). pigeon's own records stay the authority: `policy_decisions`, the proxy audit lines and AI Gateway tags.
 - The admin OAuth token can expire without notice. pigeon issued it, so phase 2 adds the portal client's refresh-token expiry to `credentials_expiry` and the console's Overview. Phase 2 also turns `X-Forwarded-User-Agent` into the `client` tag.
 - The 60 s cap on each tool call: `models_run` takes "about a minute at most". Through the portal, long requests use `models_submit`. `land` already returns at once.
+
+## What phase 0 and 1 found (21 November)
+
+- The account has MCP portals with no upgrade prompt, beta notice or limits shown.
+- The portal form proposed the subdomain `platform`, which would have pointed `platform.pigeon.dev` at the portal. The portal is on `mcp` instead. Code mode is **off**, Managed OAuth is on (localhost and loopback clients allowed), and the one redirect URI is `https://claude.ai/api/mcp/auth_callback`. The portal and the server share the Access policy `mcp-portal-owner`: Allow, the person's email.
+- The server form has no "Require user auth" switch. With OAuth (Automatic), each user still goes through pigeon's own sign-in. pigeon registered **two** clients, both named `Cloudflare MCP Portal` and both linked to Willow by passkey:
+  - `qR7emClaUd86…`: the admin connection, with a redirect on `dash.cloudflare.com/…/mcp-server/oauth-callback/pigeon`;
+  - `PVihBE3Hkjt-…`: the per-user connection, with the redirect `https://mcp.pigeon.dev/servers-callback`.
+- Through the connector, `users_whoami` answers *Cloudflare MCP Portal acting for Willow*, and `policy_check` answers as "Cloudflare MCP Portal, the delegate of Willow". The per-caller identity and the AI Gateway tags hold.
+- Tool names in a session are `mcp__Pigeon_MCP__pigeon_<tool>`, plus `portal_list_servers`, `portal_toggle_servers` and `portal_toggle_single_server`. The generator never lists the `portal_*` tools.
+- The portal **does** pass pigeon's `instructions` on, under "pigeon (Portal tool prefix: pigeon_)". The instructions need no rewording.
+- Still open: whether some sessions see this connector by a server UUID, as with the old one. If a session shows one, it is added to `PIGEON` in the generator.
 
 ## Phases
 

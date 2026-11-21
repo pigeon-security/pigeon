@@ -4,15 +4,19 @@
     "allow": [
       "mcp__Pigeon__policy_check",
       "mcp__71fdea92-23ad-47d5-a156-53f536f8b55a__policy_check",
+      "mcp__Pigeon_MCP__pigeon_policy_check",
       "mcp__claude-code-remote__send_message",
       "mcp__claude-code-remote__create_session",
       "mcp__claude-code-remote__archive_session",
       "mcp__Pigeon__land",
       "mcp__71fdea92-23ad-47d5-a156-53f536f8b55a__land",
+      "mcp__Pigeon_MCP__pigeon_land",
       "mcp__Pigeon__land_status",
       "mcp__71fdea92-23ad-47d5-a156-53f536f8b55a__land_status",
+      "mcp__Pigeon_MCP__pigeon_land_status",
       "mcp__Pigeon__land_cancel",
       "mcp__71fdea92-23ad-47d5-a156-53f536f8b55a__land_cancel",
+      "mcp__Pigeon_MCP__pigeon_land_cancel",
       "Bash(git push https://proxy.pigeon.dev/*)"
     ]
   }

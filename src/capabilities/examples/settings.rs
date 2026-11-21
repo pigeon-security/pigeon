@@ -15,11 +15,19 @@ use serde_json::json;
 
 const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
 
-/// The names sessions see pigeon's MCP server under: the claude.ai connector `Pigeon`, and the
-/// same connector by its server id, as some sessions list it. Rules name each tool under both,
-/// one by one: a server-wide `mcp__<server>__*` would also allow every tool the policy does not
-/// name (`call`, `deploy_token`, `source_token`).
-const PIGEON: [&str; 2] = ["Pigeon", "71fdea92-23ad-47d5-a156-53f536f8b55a"];
+/// The names sessions see pigeon's MCP tools under, as (server, tool prefix): the claude.ai
+/// connector `Pigeon` and the same connector by its server id, as some sessions list it, with
+/// pigeon's own tool names; and the connector `Pigeon MCP` (server `Pigeon_MCP`) to the
+/// Cloudflare MCP server portal on `mcp.pigeon.dev`, which lists pigeon's tools under its
+/// server id `pigeon`, as `pigeon_<tool>` (docs/plans/mcp-portal.md). Rules name each tool
+/// under each, one by one: a server-wide `mcp__<server>__*` would also allow every tool the
+/// policy does not name (`call`, `deploy_token`, `source_token`) and, through the portal, its
+/// own `portal_*` tools.
+const PIGEON: [(&str, &str); 3] = [
+    ("Pigeon", ""),
+    ("71fdea92-23ad-47d5-a156-53f536f8b55a", ""),
+    ("Pigeon_MCP", "pigeon_"),
+];
 
 /// A tool of claude-code-remote's, or of pigeon's (under each of [`PIGEON`]).
 enum Tool {
@@ -56,7 +64,10 @@ fn tools(k: Kind) -> &'static [Tool] {
 fn rules(tool: &Tool) -> Vec<String> {
     match tool {
         Tool::Remote(t) => vec![format!("mcp__claude-code-remote__{t}")],
-        Tool::Pigeon(t) => PIGEON.iter().map(|s| format!("mcp__{s}__{t}")).collect(),
+        Tool::Pigeon(t) => PIGEON
+            .iter()
+            .map(|(s, prefix)| format!("mcp__{s}__{prefix}{t}"))
+            .collect(),
         Tool::Bash(c) => vec![format!("Bash({c})")],
     }
 }
