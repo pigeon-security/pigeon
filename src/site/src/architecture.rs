@@ -182,7 +182,7 @@ fn body() -> String {
   <div class="cards">
     <article class="card">
       <div class="card-h"><h3>pigeon-security/pigeon</h3></div>
-      <ul class="kv"><li>read-only copy, for disaster recovery</li><li>follows Artifacts; never in the critical path</li></ul>
+      <ul class="kv"><li>read-only copy, for disaster recovery</li><li>follows Artifacts; never in the critical path</li><li>rulesets: <code>main</code> and tags move only by the mirror, never rewritten or deleted</li></ul>
     </article>
   </div>
 </section>
