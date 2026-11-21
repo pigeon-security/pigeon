@@ -1,6 +1,6 @@
 //! Secrets: the one way a value gets into the platform, so no one has to open Cloudflare's
 //! dashboard and no value passes through a chat. Each capability declares the secrets it needs;
-//! the console's Keys section lists them, set or missing, and lets a person replace one (the old
+//! the console's Access tab lists them, set or missing, and lets a person replace one (the old
 //! `/secrets` page redirects there). Seeing the list takes the console's session, and each write
 //! takes a passkey of its own whose challenge is bound to the
 //! secret's name and a hash of the new value, so an approval covers that one value. Before it is

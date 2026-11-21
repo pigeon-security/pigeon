@@ -3,7 +3,7 @@
 //! service account acting for the standard user. The Lander takes from it which landings wait
 //! for a passkey, and the git proxy which ref updates it lets through. Every decision is one
 //! audit line in the Worker's log; `policy_check`'s and the Lander's are also kept, the latest
-//! listed on the console's Overview.
+//! readable with [`recent`]. The console no longer lists them.
 
 use std::sync::OnceLock;
 
@@ -18,7 +18,7 @@ use crate::{Call, Capability, Context, unknown};
 /// The policy's text, as built into this Worker.
 pub const TEXT: &str = include_str!("../../../.pigeon/policy.toml");
 
-/// How many decisions the Overview lists.
+/// How many decisions are kept.
 pub const LISTED: usize = 10;
 
 /// The policy built into this Worker, parsed once; an error when the file does not parse,
@@ -64,7 +64,7 @@ pub fn audit_line(by: &str, req: &Request, a: &Answer) -> String {
     .to_string()
 }
 
-/// Writes `req`'s audit line and keeps the decision for the Overview.
+/// Writes `req`'s audit line and keeps the decision.
 pub async fn record(env: &Env, by: &str, req: &Request, a: &Answer) -> Result<()> {
     console_log!("{}", audit_line(by, req, a));
     directory(
@@ -79,7 +79,7 @@ pub async fn record(env: &Env, by: &str, req: &Request, a: &Answer) -> Result<()
     .map(|_| ())
 }
 
-/// The latest decisions kept, newest first, for the Overview.
+/// The latest decisions kept, newest first.
 pub async fn recent(env: &Env) -> Result<Value> {
     directory(env, "policy.recent", json!({ "limit": LISTED })).await
 }

@@ -141,7 +141,7 @@ async fn fetch(req: Request, env: Env, ctx: WorkerContext) -> Result<Response> {
         let hosted = hosted(&caps);
         return settings::site().serve(&hosted, req).await;
     }
-    // A route is a prefix, so the root, the console's Overview, is matched by name.
+    // A route is a prefix, so the root, the console's first tab, is matched by name.
     if let Some(c) = caps.iter().find(|c| {
         if path == "/" {
             c.name() == "console"
