@@ -206,10 +206,10 @@ the Access tab as slot `CF_LINK_NOISYPIGEON`, bound in `wrangler.toml`.
 - The fallback is used only if phase 0 shows that OAuth can't grant the noisypigeon account.
 
 **Open, for phase 0:**
-1. Can a private client owned by pigeon's account be granted the noisypigeon account? The docs
-   say private clients "can only be authorized by members of the parent account". If the
-   person's login is a member of both accounts, the consent screen should offer both.
-   Otherwise the choice is:
+1. The person's login is a member of both accounts (their answer, 2026-11-21), so the client is
+   **private**, owned by pigeon's account. The docs say private clients "can only be authorized
+   by members of the parent account". Phase 0 checks that the consent screen then offers the
+   noisypigeon account. If it doesn't, the choice is:
    - make the client public: permanent, needs a logo, URL and a TXT record on pigeon.dev (pigeon
      can add the record itself);
    - own the client in the noisypigeon account: the person registers it there;
@@ -359,46 +359,69 @@ checking content before the cutover; a per-target `base_url` can come later.
   Moving it to the App (installed on pigeon-security/pigeon with Contents: write) is possible
   later, but out of scope.
 
-### 6. GitHub's MCP server through the portal
+### 6. GitHub through its MCP server behind the portal, with REST only where MCP can't
 
-What the docs settle:
-- GitHub's remote MCP (`https://api.githubcopilot.com/mcp/`) takes PATs, OAuth user tokens
-  (GitHub App or OAuth App) and installation tokens. It has **no** dynamic client registration.
-- It has no deployment tools, and no tarball or webhook tools.
-- The portal caps each tool call at 60 s.
-- A service-token client (the platform) reaches only servers without per-user auth, and those
-  servers act with the admin's credential.
-- An OAuth server set up by hand "requires per-user authentication", so a service token can't
-  reach it.
-- A `bearer` server holds one fixed credential. An installation token lasts an hour.
+The person's answer: talk to GitHub over MCP. The platform is an MCP client of the portal
+(`https://mcp.pigeon.dev/mcp`). It reaches GitHub's remote MCP server
+(`https://api.githubcopilot.com/mcp/`) as portal server `github`, and uses GitHub's REST API
+only where the MCP server has no tool.
 
-The design, in two parts:
-1. **People's sessions (recommended).** Portal server `github` (no underscore): OAuth set up by
-   hand with the GitHub App's client id and secret. User tokens last 8 h, with 6-month refresh,
-   and the portal holds them. Each person acts as themselves, within the App's permissions and
-   installation, so sessions reach noisypigeon/pigeon through `mcp__Pigeon_MCP__github_*`. These
-   are not pre-approved: the settings generator is unchanged, and so is the policy.
-   - Dashboard steps are below.
-   - The App gains a callback URL,
-     `https://oauth-callbacks.cloudflareaccess.com/cdn-cgi/access/outbound-oauth-callback`.
-2. **The platform as MCP client (optional phase 6).** A second portal server, `github-platform`,
-   with `bearer` auth, `on_behalf: false`, and a Service Auth policy for a new Access service
-   token. Its `CF-Access-Client-Id`/`-Secret` become slots `MCP_PORTAL_CLIENT_ID`/`_SECRET`,
-   owned by the `github` capability.
-   - Every 50 minutes the platform mints a read-only installation token. It writes it to that
-     server's `auth_credentials` with the server update call: `PUT …/mcp/servers/github-platform`,
-     after a GET, sending the whole server back. It never writes the portal's mapping, as the
-     portal planner warned.
-   - `pigeon_core::mcp` gains a small Streamable-HTTP client: `initialize`, `tools/call`,
-     `Mcp-Session-Id`, and a 50 s deadline.
-   - It is used for reads the deploy record shows (the commit's message and author,
-     `get_commit`), with REST as the fallback.
+**How the platform gets through.** The constraints, all from the docs:
+- A headless client authenticates to the portal with an Access service token. Its
+  `CF-Access-Client-Id`/`-Secret` become slots `MCP_PORTAL_CLIENT_ID` and
+  `MCP_PORTAL_CLIENT_SECRET`, owned by the `github` capability, as the Buildkite planner advised.
+  The token needs a Service Auth policy on the portal **and** on the server.
+- A service-token session reaches only servers with `on_behalf: false`. Those act with the
+  server's admin credential.
+- An OAuth server set up by hand needs per-user auth, and GitHub's MCP has no dynamic client
+  registration. So the platform's server is `bearer`.
+- GitHub's MCP accepts GitHub App installation tokens. An installation token lasts an hour.
 
-   The Buildkite planner rejected this pattern for Buildkite (60 s cap, the admin credential,
-   trimmed answers). For GitHub, REST is required anyway: webhooks, tokens, tarball and
-   deployments. **Question for the person:** do you still want phase 6, given that it adds a
-   moving credential and a hop for no capability REST lacks? Part 1 gives sessions GitHub
-   through the portal either way.
+So, every 50 minutes and before first use, the platform:
+1. mints an installation token, limited to the declared repositories with `contents: read` and
+   `metadata: read`;
+2. writes it to the server's `auth_credentials` with the server update call
+   (`PUT …/access/ai-controls/mcp/servers/github`), after a GET, sending the server back whole.
+
+It never writes the portal's server mapping, as the portal planner warned. The server also sends
+`X-MCP-Readonly: true` and `X-MCP-Toolsets: repos`, as fixed headers in the bearer's
+`{"headers": …}` form. The minted token is never stored by pigeon, but Cloudflare holds it for
+its hour.
+
+`pigeon_core::mcp` gains a small Streamable-HTTP client:
+- `initialize`, then `tools/call`;
+- it carries `Mcp-Session-Id`;
+- a 50 s deadline under the portal's 60 s cap;
+- it answers the tool's content as JSON.
+
+Tool names through the portal are `github_<tool>`.
+
+**What goes over MCP:**
+
+| Need | MCP tool (via the portal as `github_…`) |
+| --- | --- |
+| The commit a push names, for the deploy record (message, author, time) | `get_commit` |
+| The repository section's recent commits and branches | `list_commits`, `list_branches` |
+| Read the site's declared config (`workloads/noisypigeon.com/blog/config.yaml`) before a build, to check it still names a static site | `get_file_contents` |
+| Agents' questions about the repository, through the platform | the same tools |
+
+**What stays on REST, and why** (the MCP server has no tool for any of these):
+
+| Need | REST call | Why not MCP |
+| --- | --- | --- |
+| Authenticate as the App and mint installation tokens, including the one the MCP server uses | `POST /app/installations/{id}/access_tokens` with an RS256 JWT | MCP needs a token before it can be called |
+| Receive pushes | the App's webhook, inbound to `/github/hook` | MCP has no events |
+| Record deploys on GitHub | `POST …/deployments`, `POST …/deployments/{id}/statuses` | the MCP server has no deployment tools |
+| Fetch the commit's whole tree for the build | git over HTTPS through pigeon's git proxy (a git protocol fetch, not REST) | one file per MCP call, under a 60 s cap, can't carry a repository and its history |
+
+If the portal or the MCP call fails, deploys still happen. The record then says "commit details
+unavailable (MCP: <why>)". MCP is never on the path that serves or deploys the site.
+
+**People's sessions**, recommended and possible any time after 3b: a second portal server,
+`github-you`, with OAuth set up by hand using the GitHub App's client id and secret, and
+per-user auth. Each person then reaches GitHub as themselves, within the App's permissions,
+through `mcp__Pigeon_MCP__github-you_*`. This is a dashboard step for the person. These tools are
+not pre-approved, so the generator and the policy are unchanged.
 
 ### 7. Instances
 
@@ -496,7 +519,7 @@ myself, and land.
 | 4 | `sites`: `site-build` job and `pigeon-ci-site` image (gate change, delegate), `/sites/build` upload, the site Worker's JS, deploy (blobs, manifest, `live`), rollback, prune, deploy records | with the person's go-ahead: bucket and Worker `pigeon-site-blog` in the noisypigeon account, workers.dev preview | executors, me |
 | 5 | **Cutover** of noisypigeon.com (below) | route `noisypigeon.com/*` | person's go-ahead, then me |
 | 5b | Optional: the pigeon.dev subdomain (host route in pigeon-platform, custom domain in pigeon.dev, edge cache) | a pigeon.dev hostname | person names it |
-| 6 | Optional: the platform calls GitHub MCP through the portal (decision 6, part 2) | portal server `github-platform`, service token | person decides |
+| 6 | The platform calls GitHub's MCP through the portal (decision 6): `pigeon_core::mcp` client, the server's credential rotation, the deploy record and the console's repository section over MCP | portal server `github`, service token (the person's dashboard steps) | executors, me; person (dashboard) |
 
 Part 1 of decision 6 (people's sessions reach GitHub through the portal) is a dashboard step for
 the person, possible any time after 3b.
@@ -532,9 +555,9 @@ in noisypigeon/pigeon. That repository's own change, not pigeon's.
 ## The person's one-time steps
 
 1. **Phase 0.**
-   - Say whether your Cloudflare login is a member of both accounts.
-   - Answer the open questions: phase 6, and the pigeon.dev subdomain's name (if wanted).
-     Ownership and serving were answered on 2026-11-21.
+   - Answered on 2026-11-21: ownership, serving, GitHub over MCP, and that the login is a
+     member of both accounts. Still open: the pigeon.dev subdomain's name, when wanted (phase 5b).
+   - On the consent screen in 2b, say whether the noisypigeon account is offered.
    - Approve the network hosts `noisypigeon.com` and `www.noisypigeon.com` for this session when
      asked (read-only checks).
 2. **OAuth client, only if pigeon can't register it by API.** pigeon account → Manage Account →
@@ -557,17 +580,29 @@ in noisypigeon/pigeon. That repository's own change, not pigeon's.
      `GITHUB_APP_PRIVATE_KEY`. Delete the downloaded file.
    - Install: Install App → noisypigeon → Only select repositories → `pigeon`. Tell the session
      the App id and the installation id (both in the URL; neither is secret).
-5. **Optional: GitHub in sessions through the portal.**
+5. **GitHub MCP for the platform (phase 6).** In Zero Trust:
+   - Access → Service credentials → Create service token `pigeon-platform-mcp`. Enter its client
+     id and secret on the console's Access tab as `MCP_PORTAL_CLIENT_ID` and
+     `MCP_PORTAL_CLIENT_SECRET`.
+   - MCP servers → Add:
+     - server id `github`;
+     - URL `https://api.githubcopilot.com/mcp/`;
+     - auth Bearer, any placeholder: pigeon replaces it within a minute;
+     - policy: Service Auth, that token.
+   - Portal `pigeon` → add server `github` with Require user auth **off**. Add a Service Auth
+     policy for the same token on the portal.
+   - Tell the session when done. pigeon then sets the bearer and syncs the server.
+6. **Optional: GitHub in your own sessions through the portal.**
    - On the App, add the callback
      `https://oauth-callbacks.cloudflareaccess.com/cdn-cgi/access/outbound-oauth-callback`, then
      generate a client secret.
    - In Zero Trust → MCP servers → Add:
-     - name and server id `github`;
+     - name and server id `github-you`;
      - URL `https://api.githubcopilot.com/mcp/`;
      - OAuth, manual, with the App's client id and secret;
      - policy: your email.
-   - Add `github` to portal `pigeon`.
-6. **Cutover.** Say "go" for the route in the session that does it. Say "roll back" at any time.
+   - Add `github-you` to portal `pigeon`, with Require user auth on.
+7. **Cutover.** Say "go" for the route in the session that does it. Say "roll back" at any time.
 
 ## What I need from the network
 
@@ -579,6 +614,9 @@ not by this session.
 
 ## Log
 
+- 2026-11-21: the person's second answers, through the parent. GitHub over MCP (decision 6
+  rewritten: the platform is an MCP client, with the REST exceptions listed); their login is a
+  member of both accounts, so the OAuth client is private; phase 5b is left for later.
 - 2026-11-21: the person's answers, through the parent. The platform account has no blog for
   now; the noisypigeon account holds the site's R2 bucket and DNS; a pigeon.dev subdomain may
   serve that bucket. Decisions 1 and 3 were rewritten: R2 serving through a Worker in the
