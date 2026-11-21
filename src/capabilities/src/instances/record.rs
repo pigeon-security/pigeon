@@ -30,6 +30,14 @@ pub struct Instance {
     /// The sites that belong to this instance.
     #[serde(default)]
     pub sites: Vec<SiteRecord>,
+    /// The one Worker in the instance's account that serves all its sites, on its zone, its
+    /// pigeon.dev subdomain or both: by default [`worker_for`], such as `noisypigeon`.
+    #[serde(default)]
+    pub worker: Option<String>,
+    /// Whether `worker` may differ from the name [`worker_for`] gives. The person sees this in
+    /// the diff they approve.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub worker_override: bool,
     /// The record version, which is not part of a diff.
     #[serde(default)]
     pub version: u64,
@@ -83,8 +91,6 @@ pub struct SiteRecord {
     /// the diff they approve.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub bucket_override: bool,
-    /// The Worker that serves the site.
-    pub worker: String,
     /// The bucket jurisdiction, either "eu" or "fedramp".
     #[serde(default)]
     pub jurisdiction: Option<String>,
@@ -126,6 +132,8 @@ pub struct Rules<'a> {
     pub platform_zone: &'a str,
     /// Subdomain labels that nobody may take.
     pub reserved_labels: &'a [String],
+    /// Worker names that nobody may take, such as `pigeon-platform`.
+    pub reserved_workers: &'a [String],
 }
 
 /// One difference between two records.
@@ -259,14 +267,6 @@ fn check_repo(instance: &Instance, problems: &mut Vec<String>) {
     }
 }
 
-fn check_resource_name(path: &str, value: &str, problems: &mut Vec<String>) {
-    if !(3..=63).contains(&value.len()) || !label(value) || !value.starts_with("pigeon-") {
-        problems.push(format!(
-            "The {path} \"{value}\" must be 3 to 63 characters of lowercase letters, digits and dashes, and start with \"pigeon-\"."
-        ));
-    }
-}
-
 /// The bucket a site's files live in by default: its hostname with dots as hyphens, then
 /// `-site`. The hostname is the site's first zone target, else its first subdomain under the
 /// platform's zone; `noisypigeon.com` gives `noisypigeon-com-site`, `foo.pigeon.dev` gives
@@ -307,6 +307,85 @@ fn check_bucket(path: &str, site: &SiteRecord, rules: &Rules, problems: &mut Vec
             "The {path} is named after the site's hostname, but the site has no zone or subdomain target yet."
         )),
         _ => {}
+    }
+}
+
+/// The name of an instance's Worker, from what it serves: its first zone without the TLD
+/// (`noisypigeon.com` gives `noisypigeon`, `foo.co.uk` gives `foo-co`), else its first pigeon.dev
+/// subdomain label. `Err` when the zone and a subdomain label name the instance differently, for
+/// the person to choose; `Ok(None)` when it serves nothing yet.
+pub fn worker_for(instance: &Instance) -> Result<Option<String>, String> {
+    let from_zone = instance.zones.first().and_then(|z| {
+        z.rsplit_once('.')
+            .map(|(rest, _tld)| rest.replace('.', "-"))
+    });
+    let labels: Vec<&String> = instance
+        .sites
+        .iter()
+        .flat_map(|s| s.targets.iter())
+        .filter_map(|t| match t {
+            Target::Subdomain { label } => Some(label),
+            _ => None,
+        })
+        .collect();
+    match from_zone {
+        Some(name) => match labels.iter().find(|l| ***l != name) {
+            Some(other) => Err(format!(
+                "the zone names this instance's Worker \"{name}\" but the subdomain is \"{other}\": make them the same, or set worker and worker_override"
+            )),
+            None => Ok(Some(name)),
+        },
+        None => Ok(labels.first().map(|l| (*l).clone())),
+    }
+}
+
+fn check_worker(
+    instance: &Instance,
+    others: &[Instance],
+    rules: &Rules,
+    problems: &mut Vec<String>,
+) {
+    let derived = worker_for(instance);
+    let Some(name) = &instance.worker else {
+        if !instance.sites.is_empty() {
+            match derived {
+                Ok(Some(n)) => problems.push(format!(
+                    "The worker is missing: it should be \"{n}\", one Worker for the whole instance."
+                )),
+                Ok(None) => problems.push(
+                    "The worker is missing, and the sites have no zone or subdomain to name it after.".into(),
+                ),
+                Err(why) => problems.push(format!("The worker: {why}.")),
+            }
+        }
+        return;
+    };
+    if !label(name) {
+        problems.push(format!(
+            "The worker \"{name}\" must be 1 to 63 characters of lowercase letters, digits and dashes."
+        ));
+    }
+    if rules.reserved_workers.iter().any(|r| r == name) {
+        problems.push(format!(
+            "The worker \"{name}\" is the platform's own and cannot be used."
+        ));
+    }
+    for other in others {
+        if other.id != instance.id && other.worker.as_deref() == Some(name.as_str()) {
+            problems.push(format!(
+                "The worker \"{name}\" is already used by instance {}.",
+                other.id
+            ));
+        }
+    }
+    if !instance.worker_override {
+        match derived {
+            Ok(Some(n)) if n != *name => problems.push(format!(
+                "The worker \"{name}\" should be \"{n}\", named after the instance's zone or subdomain; set worker_override to keep another name."
+            )),
+            Err(why) => problems.push(format!("The worker: {why}.")),
+            _ => {}
+        }
     }
 }
 
@@ -406,7 +485,6 @@ fn check_sites(
             ));
         }
         check_bucket(&format!("{p}.bucket"), site, rules, problems);
-        check_resource_name(&format!("{p}.worker"), &site.worker, problems);
         if let Some(j) = &site.jurisdiction
             && j != "eu"
             && j != "fedramp"
@@ -454,6 +532,7 @@ pub fn validate(instance: &Instance, others: &[Instance], rules: &Rules) -> Vec<
     check_zones(instance, rules, &mut problems);
     check_repo(instance, &mut problems);
     check_sites(instance, others, rules, &mut problems);
+    check_worker(instance, others, rules, &mut problems);
     if others.iter().any(|o| o.id == instance.id) {
         problems.push(format!(
             "An instance with id {} already exists.",

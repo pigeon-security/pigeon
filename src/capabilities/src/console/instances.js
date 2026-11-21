@@ -103,6 +103,7 @@
         ["Account", accountText(inst.account)],
         ["Zones", inst.zones && inst.zones.length ? inst.zones.join(", ") : "none"],
         ["Repository", repoText(inst.repo)],
+        ["Worker", inst.worker || "none (no sites yet)"],
         ["Version", String(inst.version)],
       ]));
   }
@@ -134,7 +135,6 @@
       el("div", { class: "card-h" }, el("strong", { text: site.name })),
       kv([
         ["Bucket", bucket],
-        ["Worker", site.worker],
         ["Build", site.build || "none"],
       ]),
       el("p", { class: "muted", text: "Targets" }),

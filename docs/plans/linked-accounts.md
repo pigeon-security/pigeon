@@ -131,8 +131,8 @@ What pigeon is given there is **declared**:
 | --- | --- | --- |
 | Zone | `noisypigeon.com` | read the zone and its DNS records, custom domains, routes and rules (the console's inventory) |
 | R2 bucket | `noisypigeon-com-site` (EU, made by pigeon; named after the site's hostname) | create; put, list and delete objects |
-| Worker | `pigeon-site-blog` (made by pigeon), bound to that bucket | create, upload versions, enable workers.dev |
-| Route | `noisypigeon.com/*` → `pigeon-site-blog` (made by pigeon) | create and delete, only with the person's go-ahead (the cutover) |
+| Worker | `noisypigeon` (made by pigeon), bound to that bucket | create, upload versions, enable workers.dev |
+| Route | `noisypigeon.com/*` → `noisypigeon` (made by pigeon) | create and delete, only with the person's go-ahead (the cutover) |
 | DNS records | only records pigeon creates for a declared hostname, tagged `pigeon` and recorded in the ledger. None are needed for the cutover | create and delete its own, with a dry run and the person's passkey |
 | The old bucket `blog-noisypigeon-com`, its R2 custom domains, the rules, every other DNS record (Proton) | none | read only |
 
@@ -236,7 +236,17 @@ The bucket `noisypigeon-com-site` is in the noisypigeon account, EU jurisdiction
 - `noisypigeon.pigeon.dev` serves the same site from the same bucket, so it gets no bucket of its
   own.
 
-The Worker's name is `pigeon-site-blog` until the person decides whether it follows the same rule. A Worker in the same account, `pigeon-site-blog`,
+**One Worker per instance** (the person, 2026-11-21: "They should share the worker. It either has
+a dedicated zone, a subdomain, or both."). The instance's zone (`noisypigeon.com`), its pigeon.dev
+subdomain (`noisypigeon.pigeon.dev`) or both are served by the same Worker in the instance's
+account, reading the same bucket.
+- The Worker is named after the instance: its zone without the TLD (`noisypigeon`), or its
+  subdomain label when it has no zone.
+- The rule is code (`record::worker_for`); the name is stored in the record (`worker`).
+- When the zone and the subdomain label disagree, validation asks the person to choose: make them
+  the same, or set `worker_override`.
+- Validation refuses the platform's own Workers (`pigeon-platform`) and a name another instance
+  uses. A Worker in the same account, `noisypigeon`,
 serves it through an R2 binding (`{"type":"r2_bucket", "jurisdiction":"eu"}` in the upload's
 metadata). pigeon uploads the Worker: one small JS module embedded in the platform.
 
@@ -275,7 +285,7 @@ The Worker, not the bucket, holds the hostnames, so the bucket gets no R2 custom
 
 | Target | Hostname | How | DNS |
 | --- | --- | --- | --- |
-| preview | `pigeon-site-blog.<sub>.workers.dev` | per-script workers.dev | none |
+| preview | `noisypigeon.<sub>.workers.dev` | per-script workers.dev | none |
 | live | `noisypigeon.com` | a **Worker route** `noisypigeon.com/*` at cutover | none: the apex record stays the old R2 custom domain's, and the route runs before it |
 | pigeon.dev subdomain (optional, later) | e.g. `noisypigeon.pigeon.dev` | below | in the platform account |
 
@@ -497,7 +507,7 @@ no new policy rule.
   - the linked account (its id filled in by the Link flow), zone `noisypigeon.com`;
   - repository GitHub `noisypigeon/pigeon` (installation id from phase 3b);
   - site `blog`:
-    - bucket `noisypigeon-com-site` (EU) and Worker `pigeon-site-blog`;
+    - bucket `noisypigeon-com-site` (EU) and Worker `noisypigeon`;
     - build `workloads/noisypigeon.com/blog`;
     - targets: Preview; Zone `noisypigeon.com` with route `noisypigeon.com/*`, off until the
       cutover; Subdomain `noisypigeon`, which gives `noisypigeon.pigeon.dev`.
@@ -527,7 +537,7 @@ Speed, as in console-hardening:
   resources, and `zone` per hostname.
 - `Model` gains `accounts: [{id, name, linked_by, zones}]`.
 - The diagram draws one account box per account: pigeon's as today, noisypigeon's with its zone,
-  the Worker `pigeon-site-blog`, its route or preview, and a dashed "not pigeon's" group for the
+  the Worker `noisypigeon`, its route or preview, and a dashed "not pigeon's" group for the
   old bucket and custom domains it only reads.
 - It also draws the noisypigeon R2 bucket `noisypigeon-com-site` inside that account, the GitHub App
   and the `github` portal server as external edges, the `site-build` job, and the pigeon.dev
@@ -547,7 +557,7 @@ Speed, as in console-hardening:
   before and after, and a digest of the plan.
 - `instance_apply` takes the digest and refuses if the live state no longer gives the same plan.
   Applying twice is a no-op the second time.
-- Content deploys (a new Worker version of `pigeon-site-blog`) are automatic on push. They
+- Content deploys (a new Worker version of `noisypigeon`) are automatic on push. They
   change only pigeon's own Worker, and only once it exists.
 - Creating the Worker, enabling its workers.dev preview, the route (cutover) and its removal
   (rollback) are console actions with a passkey bound to the plan digest, done only with the
@@ -571,7 +581,7 @@ myself, and land.
 | 2b | **Person:** register or confirm the OAuth client; press Link; consent to the noisypigeon account | link stored; inventory of noisypigeon.com shows | person |
 | 3 | GitHub App: `github` capability, `/github/hook`, slots, deployments; the GitHub git proxy route | none until the App exists | executors, me |
 | 3b | **Person:** create the App, set its key and webhook secret on the Access tab, install it on noisypigeon/pigeon | push events recorded | person |
-| 4 | `sites`: `site-build` job and `pigeon-ci-site` image (gate change, delegate), `/sites/build` upload, the site Worker's JS, deploy (blobs, manifest, `live`), rollback, prune, deploy records | with the person's go-ahead: bucket `noisypigeon-com-site` and Worker `pigeon-site-blog` in the noisypigeon account, workers.dev preview | executors, me |
+| 4 | `sites`: `site-build` job and `pigeon-ci-site` image (gate change, delegate), `/sites/build` upload, the site Worker's JS, deploy (blobs, manifest, `live`), rollback, prune, deploy records | with the person's go-ahead: bucket `noisypigeon-com-site` and Worker `noisypigeon` in the noisypigeon account, workers.dev preview | executors, me |
 | 5 | **Cutover** of noisypigeon.com (below) | route `noisypigeon.com/*` | person's go-ahead, then me |
 | 5b | The pigeon.dev subdomain from the record's `Subdomain` targets: pigeon-platform serves any approved label by host (no hostname in code), attaches its custom domain in pigeon.dev on approval, and proxies to the instance's Worker with edge cache | `noisypigeon.pigeon.dev` | executors, me; person approves the record |
 | 6 | The platform calls GitHub's MCP through the portal (decision 6): `pigeon_core::mcp` client, the server's credential rotation, the deploy record and the console's repository section over MCP | portal server `github`, service token (the person's dashboard steps) | executors, me; person (dashboard) |
@@ -591,16 +601,16 @@ Before:
 3. The old publisher's last build and pigeon's are of the same commit.
 
 Step (one call, with the person's go-ahead in the session and their passkey on the plan):
-`instance_apply` with the plan "create route `noisypigeon.com/*` → `pigeon-site-blog`".
+`instance_apply` with the plan "create route `noisypigeon.com/*` → `noisypigeon`".
 
 Check, within a minute:
-- `https://noisypigeon.com/` and five deep paths answer 200 with `X-Served-By: pigeon-site-blog`.
+- `https://noisypigeon.com/` and five deep paths answer 200 with `X-Served-By: noisypigeon`.
 - `www.noisypigeon.com` still answers 301 to the apex.
 - MX and TXT records are unchanged: an inventory diff before and after shows no change.
 
 Rollback (one call, no passkey wait, because it restores the earlier state): delete the route
 pigeon made. The R2 custom domain serves the old bucket again at once. A person can do the same
-in the dashboard: noisypigeon account → Workers → `pigeon-site-blog` → Domains & Routes → delete
+in the dashboard: noisypigeon account → Workers → `noisypigeon` → Domains & Routes → delete
 the route. A bad deploy after the cutover is rolled back by deploying the previous Worker
 version, from the console's Sites section.
 
@@ -669,6 +679,10 @@ not by this session.
 
 ## Log
 
+- 2026-11-21: the person, through the parent: one Worker per instance, named after its zone
+  without the TLD or its subdomain label: `noisypigeon`. `worker` moves from the site to the
+  instance, with `record::worker_for`, `worker_override` and collision checks against the
+  platform's Workers and other instances.
 - 2026-11-21: the person, through the parent: a site's bucket is named after its hostname
   (`noisypigeon-com-site`). Validation checks the rule unless the record sets `bucket_override`.
   Writes to `/instance/put/*` now also need the console's signed-in session and the console's

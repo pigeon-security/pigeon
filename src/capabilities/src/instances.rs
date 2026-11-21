@@ -51,10 +51,10 @@ pub fn template() -> Value {
         "account": { "kind": "linked", "account_id": null },
         "zones": ["example.com"],
         "repo": { "kind": "github", "full_name": "owner/repo", "installation": null },
+        "worker": "example",
         "sites": [{
             "name": "blog",
             "bucket": "example-com-site",
-            "worker": "pigeon-site-blog",
             "jurisdiction": "eu",
             "build": "workloads/example.com/blog",
             "targets": [
@@ -120,6 +120,25 @@ impl Instances {
         record::reserved_labels(&hosts, &self.zone)
     }
 
+    /// The Worker names an instance may not take: the hosting Worker's and every Worker a
+    /// capability declares.
+    fn workers(&self, cx: &Context<'_>) -> Vec<String> {
+        let mut names = vec![cx.hosted.worker.to_string()];
+        for c in cx.hosted.capabilities {
+            let f = c.footprint();
+            names.extend(f.workers.into_iter().map(|w| w.name));
+            names.extend(
+                f.hostnames
+                    .into_iter()
+                    .map(|h| h.worker)
+                    .filter(|w| !w.is_empty()),
+            );
+        }
+        names.sort();
+        names.dedup();
+        names
+    }
+
     /// Parses `text` and checks it against every other instance: the record, or the problems.
     async fn check(
         &self,
@@ -137,9 +156,11 @@ impl Instances {
         let current = everyone.iter().find(|i| i.id == record.id).cloned();
         let others: Vec<Instance> = everyone.into_iter().filter(|i| i.id != record.id).collect();
         let reserved = self.reserved(cx);
+        let workers = self.workers(cx);
         let rules = Rules {
             platform_zone: &self.zone,
             reserved_labels: &reserved,
+            reserved_workers: &workers,
         };
         let mut problems = record::validate(&record, &others, &rules);
         let at = current.as_ref().map_or(0, |c| c.version);

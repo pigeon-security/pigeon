@@ -1879,6 +1879,7 @@ fn instances_are_data_a_person_approves() {
     let mut noisy: Instance = serde_json::from_value(template()).unwrap();
     noisy.id = "noisypigeon".into();
     noisy.sites[0].bucket = "noisypigeon-com-site".into();
+    noisy.worker = Some("noisypigeon".into());
     noisy.title = "noisypigeon".into();
     noisy.zones = vec!["noisypigeon.com".into()];
     noisy.sites[0].build = Some("workloads/noisypigeon.com/blog".into());
@@ -1908,9 +1909,11 @@ fn instances_are_data_a_person_approves() {
         "pigeon.dev",
     );
     assert!(reserved.contains(&"platform".to_string()) && reserved.contains(&"mcp".to_string()));
+    let workers = vec!["pigeon-platform".to_string()];
     let rules = Rules {
         platform_zone: "pigeon.dev",
         reserved_labels: &reserved,
+        reserved_workers: &workers,
     };
     assert_eq!(
         validate(&noisy, std::slice::from_ref(&platform), &rules),
@@ -1936,7 +1939,25 @@ fn instances_are_data_a_person_approves() {
         &|i| i.sites[0].bucket = "blog-noisypigeon-com".into(),
         "pigeon-",
     );
-    refused(&|i| i.sites[0].worker = "my-worker".into(), "pigeon-");
+    // One Worker per instance, named after its zone (or its subdomain when it has no zone),
+    // never the platform's own or another instance's.
+    assert_eq!(noisy.worker.as_deref(), Some("noisypigeon"));
+    refused(
+        &|i| i.worker = Some("my-worker".into()),
+        "should be \"noisypigeon\"",
+    );
+    refused(&|i| i.worker = None, "worker is missing");
+    refused(
+        &|i| {
+            i.worker = Some("pigeon-platform".into());
+            i.worker_override = true;
+        },
+        "platform's own",
+    );
+    refused(
+        &|i| i.sites[0].targets[2] = Target::Subdomain { label: "np".into() },
+        "make them the same",
+    );
     refused(
         &|i| {
             i.sites[0].targets[1] = Target::Zone {
