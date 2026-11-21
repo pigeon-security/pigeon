@@ -1,17 +1,26 @@
-//! The pigeon.dev site: its pages, in pigeon's design system. Built for `wasm32-unknown-unknown`.
+//! The pigeon.dev site: its architecture page, read from the repository's own source and drawn
+//! in pigeon's design system. Built for `wasm32-unknown-unknown`.
 
 #[cfg(not(target_arch = "wasm32"))]
 compile_error!("pigeon-site builds for wasm32 only: cargo build --target wasm32-unknown-unknown");
 
-mod architecture;
+include!(concat!(env!("OUT_DIR"), "/sources.rs"));
 
+use pigeon_capabilities::architecture::{self, Source};
 use pigeon_capabilities::design;
 use worker::{Context, Env, Headers, Method, Request, Response, Result, event};
 
 #[event(fetch)]
 async fn fetch(req: Request, _env: Env, _ctx: Context) -> Result<Response> {
+    let sources: Vec<Source> = SOURCES
+        .iter()
+        .map(|(path, text)| Source { path, text })
+        .collect();
     match (req.method(), req.path().as_str()) {
-        (Method::Get, "/") => html(&architecture::page()),
+        (Method::Get, "/") => html(&architecture::page(&sources)),
+        (Method::Get, "/architecture.json") => {
+            Response::from_json(&architecture::describe(&sources))
+        }
         _ => Response::error("not found", 404),
     }
 }

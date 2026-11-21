@@ -2,8 +2,9 @@
 //! token it needs from it, revokes it after, and calls the other capabilities it builds on.
 //! Nothing here reads the Worker's environment.
 
+pub mod architecture;
 pub mod artifacts;
-pub mod cloudflare;
+mod cloudflare;
 mod custom_domain;
 pub mod design;
 pub mod domain;
