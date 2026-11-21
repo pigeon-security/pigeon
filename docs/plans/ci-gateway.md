@@ -1,6 +1,6 @@
 # The CI gateway
 
-Status: plan written; phase 1 next. Phases are handed back one at a time; each is merged and
+Status: plan written; phase 1 in progress. Phases are handed back one at a time; each is merged and
 deployed by the parent session before the next starts.
 
 Design: [CI gateway design](https://claude.ai/artifact/M5zwjixxfKwJn9PYUf9tcj). This plan turns
@@ -69,7 +69,7 @@ pub struct Needs {
     pub arch: Arch,        // amd64 (default), arm64
     pub cpu: u32,          // 2
     pub memory_gb: u32,    // 4
-    pub disk_gb: u32,      // 20
+    pub disk_gb: u32,      // 10
     pub docker: bool,      // false
     pub gpu: bool,         // false
     pub network: Network,  // egress (default) | none
@@ -403,11 +403,104 @@ with that secret. The workflow file reaches GitHub through the mirror, so it mus
 
 ## Confirmations
 
-FACTS
+Checked 2026-11-21. developers.cloudflare.com was read directly; Buildkite's and GitHub's
+docs were read from their official sources on GitHub (`buildkite/docs`, `github/docs`,
+`github/rest-api-description`, commits of 2026-11-20), because their sites are not reachable
+from this session; workers-rs from the `worker` 0.9.0 crate source.
+
+**Containers: one instance per job, and learning it exited.**
+- The `@cloudflare/containers` helper is deprecated in favour of the Durable Object container
+  API: each Durable Object owns one container, addressed by name, started with
+  `ctx.container.start({env, entrypoint, enableInternet, image, …})`; `start` returns before
+  the container is ready and throws if one is already running; `enableInternet` defaults to
+  off. [Migration guide](https://developers.cloudflare.com/containers/guides/migrate-to-durable-object-container-api/),
+  [API](https://developers.cloudflare.com/containers/api/durable-object-container/).
+- So a job is one `CiRunner` Durable Object named by the job id.
+- Exit: `monitor()` resolves on exit 0 and rejects with `exitCode` otherwise. A pending
+  `monitor()` holds the object for at most 15 minutes and does not survive a restart, so the
+  backstop is an alarm that checks `running` and calls `monitor()` again.
+  [API](https://developers.cloudflare.com/containers/api/durable-object-container/),
+  [status hooks](https://developers.cloudflare.com/containers/examples/status-hooks/).
+- workers-rs 0.9.0 has `State::container()` with `start`, `running`, `wait_for_exit`
+  (`monitor`), `destroy` and `signal`. Its `ContainerStartupOptions` has only `entrypoint`,
+  `enable_internet` and `env`, with no `image`; and `env` is built as a JS `Map`, where the API
+  takes a plain object, so env vars may not arrive. Phase 2 calls the JS API through
+  `State::as_raw()` where needed and checks env delivery live first.
+- Instance types: lite (1/16 vCPU, 256 MiB, 2 GB), basic (1/4, 1 GiB, 4 GB), standard-1 (1/2,
+  4 GiB, 8 GB), standard-2 (1, 6 GiB, 12 GB), standard-3 (2, 8 GiB, 16 GB), standard-4 (4,
+  12 GiB, 20 GB); at most 4 vCPU, 12 GiB and 20 GB per instance unless raised.
+  [Limits](https://developers.cloudflare.com/containers/platform/limits/).
+- Under the `durable_object` scheduling policy there is no `max_instances`, so the gateway
+  keeps its own concurrency count. [Scheduling policy](https://developers.cloudflare.com/containers/configuration/scheduling-policy/).
+- Images under that policy are named entries pinned by digest on `registry.cloudflare.com` (or
+  built from a Dockerfile); other registries are not accepted.
+  [Image management](https://developers.cloudflare.com/containers/guides/image-management/).
+- Docker inside a container works only as root `docker:dind` with
+  `--iptables=false --ip6tables=false --ip-forward=false` and host networking.
+  [FAQ](https://developers.cloudflare.com/containers/faq/).
+
+**Artifacts and `refs/notes/ci`: not confirmed.** The docs state no restriction on ref names
+and do not mention notes; push is v1 `git-receive-pack`, and the one ref limit is "1 MiB of
+branch and tag updates per push". [Git protocol](https://developers.cloudflare.com/artifacts/api/git-protocol/),
+[limits](https://developers.cloudflare.com/artifacts/platform/limits/). It is the first live
+check after phase 1. If Artifacts refuses the ref, the note stays in the scheduler (where
+`ci_commit` reads it) and the outbox gives up after its retries; nothing else depends on it.
+
+**Buildkite.**
+- Hosted Linux shapes: `LINUX_{AMD64,ARM64}_{2X4,4X16,8X32,16X64,32X128,64X256}` (vCPU × GB);
+  the Free plan gets only the small AMD64 shape and no ARM64; XL and up are Enterprise. Jobs up
+  to 8 hours; the Ubuntu image has docker. [Linux hosted agents](https://buildkite.com/docs/agent/buildkite-hosted/linux)
+  (source `pages/agent/buildkite_hosted/linux.md`).
+- OIDC: `buildkite-agent oidc request-token --audience …`; issuer `https://agent.buildkite.com`
+  for every organization, JWKS at `https://agent.buildkite.com/.well-known/jwks`, 5-minute
+  lifetime by default; claims include `organization_slug`, `pipeline_slug`, `build_id`,
+  `build_number`, `build_commit`, `step_key` and `job_id`. Since the issuer is shared, the
+  exchange must check `organization_slug` and `pipeline_slug`, not just the signature.
+  [OIDC](https://buildkite.com/docs/pipelines/security/oidc),
+  [CLI](https://buildkite.com/docs/agent/cli/reference/oidc).
+- Webhooks carry either `X-Buildkite-Token` or `X-Buildkite-Signature: timestamp=…,signature=…`
+  (hex HMAC-SHA256 of `"{timestamp}.{body}"` with the webhook token). The plan takes the
+  signature form and refuses timestamps older than 5 minutes.
+  [Webhooks](https://buildkite.com/docs/apis/webhooks/pipelines).
+- Builds: `POST /v2/organizations/{org}/pipelines/{pipeline}/builds` with `commit`, `branch`,
+  `env`, `meta_data`; cancel with `PUT …/builds/{number}/cancel`.
+  [Builds API](https://buildkite.com/docs/apis/rest-api/builds).
+
+**GitHub Actions.**
+- Dispatch now returns the run: with `return_run_details: true`,
+  `POST /repos/{o}/{r}/actions/workflows/{id}/dispatches` answers 200 with
+  `{workflow_run_id, run_url, html_url}` (204 and no body otherwise). So no matching by run
+  name is needed. [Workflow dispatch](https://docs.github.com/en/rest/actions/workflows#create-a-workflow-dispatch-event).
+- `workflow_run` webhook: actions `requested`, `in_progress`, `completed`; `workflow_run.id`,
+  `status`, `conclusion`, `head_sha`, `html_url`. Verified with `X-Hub-Signature-256:
+  sha256=<hex HMAC-SHA256 of the body>`, compared in constant time.
+  [Payloads](https://docs.github.com/en/webhooks/webhook-events-and-payloads#workflow_run),
+  [validation](https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries).
+- OIDC: issuer `https://token.actions.githubusercontent.com`, claims `repository`, `sha`,
+  `run_id`, `workflow_ref`, needs `permissions: id-token: write`.
+  [OIDC](https://docs.github.com/en/actions/reference/security/oidc). The JWKS URL comes from
+  the issuer's discovery document; phase 4 reads it there rather than hard-coding it.
+- Hosted runners: `ubuntu-latest` and `ubuntu-24.04-arm` are 4 vCPU / 16 GB on public
+  repositories, 2 vCPU / 8 GB on private ones, 14 GB disk.
+  [Hosted runners](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).
 
 ## Corrections to the design
 
-CORRECTIONS
+- **Containers sizes are small.** At most 4 vCPU and 12 GiB per instance, so Containers can
+  offer `small` (standard-3) and only a reduced `medium` (standard-4: 4 vCPU, 12 GiB, 20 GB).
+  A job asking `memory_gb` above 12 cannot go to Containers; `covers` checks real limits, so
+  routing sends it on. The default `disk_gb` is therefore 10, not 20, so a default job fits
+  standard-3's 16 GB.
+- **Docker on Containers is possible but heavy** (root dind with networking switched off);
+  phase 2 offers no `-docker` class on Containers. Docker jobs go to Buildkite or GitHub
+  Actions.
+- **The base image must be on `registry.cloudflare.com`, pinned by digest**, not any registry.
+- **The `notify` signing key is per job**, returned once by `ci_submit`: the design said
+  "signed POST" without naming a key, and a per-job key needs no new secret slot.
+- **Reading `ci.toml` needs a pack reader that resolves deltas**, which the route plan's
+  `pack.rs` does not do (it refuses deltas of commits). Phase 1 ships the interface; see
+  phase 1.
+- **The queue must exist before the deploy** that binds it as a producer.
 
 ## What can only be checked live
 
