@@ -196,9 +196,8 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
 pub fn ci() -> ci::Settings {
     ci::Settings {
         connectors: vec![Box::new(Containers {
-            // The base image's key under [containers.images] in wrangler.toml, set with the
-            // image itself; until then the connector is unconfigured.
-            image: None,
+            // The base image's key under [containers.images] in wrangler.toml.
+            image: Some("base".into()),
             limit: 4,
             entrypoint: vec!["/usr/local/bin/pigeon-ci-runner".into()],
         })],

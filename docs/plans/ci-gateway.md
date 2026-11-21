@@ -1,6 +1,6 @@
 # The CI gateway
 
-Status: phase 1 deployed; phase 2 built up to the base image, which the person provides. Phases are handed back one at a time; each is merged and
+Status: phase 1 deployed; phase 2 built, awaiting deploy. Phases are handed back one at a time; each is merged and
 deployed by the parent session before the next starts.
 
 Design: [CI gateway design](https://claude.ai/artifact/M5zwjixxfKwJn9PYUf9tcj). This plan turns
@@ -382,10 +382,21 @@ Before deploy, the person (or the parent, with the person's go-ahead) creates th
 | 5 | me | — | wrangler `[[containers]]`, wiring, review |
 
 Needs from the person: the base image's registry reference.
+
+Deploying a `durable_object` container calls, under
+`https://api.cloudflare.com/client/v4/accounts/{account}/` (read from wrangler 4.166.0's
+`prepareDurableObjectContainerApplications`, `applyApplication` and
+`createDurableObjectNamespaceResolver`): `POST containers/image-preparations` (polled every 2 s
+until the image is ready, up to 15 min); `GET containers/applications/{namespace_id}`, then
+`POST containers/applications` (first deploy) or `PATCH containers/applications/{namespace_id}`
+(when settings change); `GET workers/scripts/{script}/versions/{version_id}`; and
+`GET workers/durable_objects/namespaces?per_page=1000`. The Worker upload's metadata gains a
+`containers` entry (class name and images). The cf_proxy allowlist needs the `containers/`
+calls.
 Live checks: a job that passes, one that fails, one that times out, one whose container is
 killed (retried elsewhere or `error`), the note on the commit.
 
-**As built so far (waiting for the image).**
+**As built.** The base image is `pigeon-ci-base` (debian bookworm-slim with git, curl, coreutils, build-essential, pkg-config and Rust stable with the wasm target, clippy and rustfmt), digest-pinned in wrangler.toml as `[containers.images.base]`.
 - Confirmed from the docs: under `durable_object` each `start()` names the image (a key of
   `ctx.container.images`) and the instance; there is no default image; wrangler's
   `instance_type` and `max_instances` do not apply. Whether a class first deployed without a
@@ -398,7 +409,7 @@ killed (retried elsewhere or `error`), the note on the commit.
 - The scheduler enforces a connector's `limit()` (Containers: 4 live jobs).
 - `ci/runner/entrypoint.sh` (step 4, sonnet): the base image installs it as
   `/usr/local/bin/pigeon-ci-runner`, beside git, curl, coreutils and sh.
-- Left to do with the image: `image: Some("base")` in `settings::ci()`, and in wrangler.toml:
+- With the image: `image: Some("base")` in `settings::ci()`, and in wrangler.toml:
 
 ```toml
 # in [durable_objects].bindings

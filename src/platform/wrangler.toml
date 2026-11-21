@@ -36,6 +36,7 @@ secret_name = "GITHUB_MIRROR_TOKEN"
 bindings = [
   { name = "DIRECTORY", class_name = "Directory" },
   { name = "CI_SCHEDULER", class_name = "CiScheduler" },
+  { name = "CI_RUNNER", class_name = "CiRunner" },
 ]
 
 [[migrations]]
@@ -45,6 +46,20 @@ new_sqlite_classes = ["Directory"]
 [[migrations]]
 tag = "v2"
 new_sqlite_classes = ["CiScheduler"]
+
+[[migrations]]
+tag = "v3"
+new_sqlite_classes = ["CiRunner"]
+
+# CI job containers: one per job attempt, held by a CiRunner object, which picks the image and
+# the instance size on each start. The base image carries git, curl, coreutils, sh, a Rust
+# toolchain and the runner (ci/runner/entrypoint.sh) as /usr/local/bin/pigeon-ci-runner.
+[[containers]]
+class_name = "CiRunner"
+scheduling_policy = "durable_object"
+
+[containers.images.base]
+image = "registry.cloudflare.com/4f94676cb2cbe46fd985b089ca97ea27/pigeon-ci-base@sha256:195f9463688ba1b5c4973fcd3c3c83463ec428a9d88522c3ae71425f676d262b"
 
 # CI state changes, for other capabilities. The queue must exist before this deploys.
 [[queues.producers]]
