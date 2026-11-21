@@ -163,6 +163,10 @@ Wrangler will not start without a token. The value is a placeholder, and the net
 
 If a newer wrangler makes a call outside the list, the deploy fails and names the call. Check what the call does, then add it to `ALLOWED` in `src/capabilities/src/cf_proxy.rs`.
 
+A change to the allowlist only takes effect once it is deployed, and the deployed proxy is the one that has to let that deploy through. So when a deploy needs a call the deployed allowlist lacks (a new kind of binding, such as containers), deploy the change once directly with a `deploy_token`; later deploys can go through the proxy.
+
+Wrangler turns some refusals into its own wording. For example, a refused image preparation shows as "Container image preparation is not enabled for this account". When a deploy through the proxy fails with an error like that, check the `cf` audit lines for a `refused` outcome first.
+
 ## Audit log
 
 The Worker's logs hold one JSON line per proxied request:
