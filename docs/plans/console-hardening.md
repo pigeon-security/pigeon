@@ -1,6 +1,7 @@
 # Console hardening
 
 Status: mockup approved by the person on 2026-11-21; phase 1 built and landing. Branch `claude/console-hardening`.
+Mockup: [pigeon Console, focused](https://claude.ai/artifact/BLdr2D7rGU344aqP5KcYhv).
 
 The console at `platform.pigeon.dev` is slow to load and sometimes shows a network error. This
 plan finds why, makes every section load fast and on its own, and narrows the console to what
