@@ -99,7 +99,6 @@ fn text(v: &Value) -> String {
     serde_json::to_string_pretty(v).unwrap_or_default()
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -110,6 +109,11 @@ mod tests {
         assert_eq!(obj["structuredContent"], json!({ "a": 1 }));
         let list = call_result(json!([{ "a": 1 }]));
         assert!(list.get("structuredContent").is_none());
-        assert!(list["content"][0]["text"].as_str().unwrap().contains("\"a\""));
+        assert!(
+            list["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("\"a\"")
+        );
     }
 }
