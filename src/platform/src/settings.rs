@@ -172,6 +172,8 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
             script: WORKER.into(),
             // The queue producers in wrangler.toml.
             queues: vec!["pigeon-ci-events".into()],
+            // The container classes in wrangler.toml's [[containers]].
+            containers: vec!["CiRunner".into()],
         }),
         Box::new(Models {
             gateway: "pigeon".into(),

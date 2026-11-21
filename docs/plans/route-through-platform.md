@@ -357,6 +357,35 @@ depend on the allowlist entry; the hand-back will say what was checked.
   Whether uploading a Worker with a queue producer binding needs more than Workers Scripts
   Write.
 
+## Phase 6: container deploys through /cf/
+
+`wrangler.toml` gained a `[[containers]]` block (class `CiRunner`, image
+`registry.cloudflare.com/<account>/pigeon-ci-base@sha256:…`). Recorded against the stand-in
+with wrangler 4.166.0, first deploy (no application yet) and later ones (application exists),
+and read in wrangler's source:
+
+- A Worker with containers always deploys by the `PUT` upload (wrangler's
+  `canUseNewVersionsDeploymentsApi` is false with containers). The upload's metadata carries
+  the container; the proxy doesn't inspect upload bodies, so nothing changes there.
+- `POST /accounts/{a}/containers/image-preparations` with `{"image": …}`, polled until ready
+  (every 2 s, up to 15 min): allowed only for an image in this account's registry.
+- `GET …/workers/scripts/{s}/versions/{version}`: the namespace id of each bound Durable
+  Object class comes from the uploaded version.
+- `GET /accounts/{a}/containers/applications/{namespace}`; on 404 (the first deploy)
+  `POST /accounts/{a}/containers/applications` with `{name, scheduling_policy:
+  "durable_object", durable_objects: {namespace_id}}`. `PATCH …/applications/{namespace}`
+  only when the config's settings differ from the application's (`updateExisting`); allowed,
+  with only settings fields.
+- Not called on `wrangler deploy` here, so not allowed: `GET …/durable_objects/namespaces`
+  (only for unbound container classes, and `CiRunner` is bound) and `GET …/containers/me`
+  (only without an account id).
+- `{namespace}` must be one of the Worker's container classes' namespaces, which the proxy
+  looks up itself (`GET …/durable_objects/namespaces?per_page=1000`, its own token, Workers
+  Scripts Read) before an application call; the create body's `namespace_id` must be one too.
+- Permission names `Workers Containers Read` / `Workers Containers Write` are as the CI
+  session gave them; if Cloudflare names them otherwise, minting fails naming the similar
+  groups, and the constants in `cf_proxy.rs` change.
+
 ## Risks
 
 - **Accepted risk (the person's decision, during phase 4): a proxy credential is effectively

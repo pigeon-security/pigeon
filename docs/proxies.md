@@ -129,13 +129,20 @@ The proxy passes on only the ten calls that `wrangler deploy` of `pigeon-platfor
 | `GET scripts/{s}/settings` | Workers Scripts Read |
 | `GET workers/{s}` | Workers Scripts Read |
 | `GET /accounts/{account}/queues?name={queue}&page=1` | Queues Read |
+| `POST /accounts/{account}/containers/image-preparations` | Workers Containers Write |
+| `GET scripts/{s}/versions/{version}` | Workers Scripts Read |
+| `GET /accounts/{account}/containers/applications/{namespace}` | Workers Containers Read |
+| `POST /accounts/{account}/containers/applications` | Workers Containers Write |
+| `PATCH /accounts/{account}/containers/applications/{namespace}` | Workers Containers Write |
 | `POST scripts/{s}/versions?bindings_inherit=strict` | Workers Scripts Write + Secrets Store Write |
 | `PUT scripts/{s}?excludeScript=true&bindings_inherit=strict` | Workers Scripts Write + Secrets Store Write |
 | `POST scripts/{s}/deployments` | Workers Scripts Write |
 | `PATCH scripts/{s}/script-settings` | Workers Scripts Write |
 | `POST scripts/{s}/subdomain` | Workers Scripts Write |
 
-The `PUT` is used when a Durable Object migration is pending. The queues call checks that each queue the Worker produces to exists; it must name a queue in the proxy's settings (`pigeon-ci-events` today), so it can't list the account's queues.
+The `PUT` is used when a Durable Object migration is pending, and always when the Worker has containers.
+
+The container calls are limited to this Worker's own containers. `{namespace}` must be the Durable Object namespace of one of its container classes (`CiRunner`), which the proxy looks up itself before such a call. The image preparation must name an image in this account's registry (`registry.cloudflare.com/<account>/…`), and an application can only be created for one of those namespaces; the proxy checks both bodies. The queues call checks that each queue the Worker produces to exists; it must name a queue in the proxy's settings (`pigeon-ci-events` today), so it can't list the account's queues.
 
 Each call gets a Cloudflare token with only that call's permissions. The token lives 5 minutes and is revoked before the answer returns.
 
