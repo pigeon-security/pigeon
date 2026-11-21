@@ -174,6 +174,23 @@ impl Directory {
                 }
                 to_value(self.create(s("kind"), s("name"))?)
             }
+            "users.remove" => {
+                let user = self.user(s("id"))?.ok_or_else(|| bad("no such user"))?;
+                let id = user.id.as_str();
+                for q in [
+                    "DELETE FROM service_ids WHERE user_id = ?",
+                    "DELETE FROM passkeys WHERE user_id = ?",
+                    "DELETE FROM links WHERE service_user_id = ? OR standard_user_id = ?",
+                    "DELETE FROM link_requests WHERE service_user_id = ? OR standard_user_id = ?",
+                    "DELETE FROM oauth_tokens WHERE service_user_id = ?",
+                    "DELETE FROM oauth_clients WHERE service_user_id = ?",
+                    "DELETE FROM users WHERE id = ?",
+                ] {
+                    let args = vec![id.into(); q.matches('?').count()];
+                    self.db.exec(q, args)?;
+                }
+                json!({ "removed": user })
+            }
             "users.rename" => {
                 self.db.exec(
                     "UPDATE users SET name = ? WHERE id = ?",
@@ -748,6 +765,13 @@ impl Users {
                 directory(env, "link.remove", json!({ "service_user_id": id })).await?;
                 json!({ "unlinked": id })
             }
+            "users_remove" => {
+                let id = arg(args, "id")?;
+                if cx.caller.is_some_and(|c| c.user.id == id) {
+                    return Err(bad("a user cannot remove themselves"));
+                }
+                directory(env, "users.remove", json!({ "id": id })).await?
+            }
             "users_rename" => {
                 directory(
                     env,
@@ -818,6 +842,13 @@ impl Capability for Users {
                 "End a service user's link (the caller's, by default).",
                 "service_user_id",
                 false,
+            ),
+            one(
+                "users_remove",
+                "Remove a user and everything that is theirs: links, passkeys, tokens and OAuth \
+                 client. A caller cannot remove themselves.",
+                "id",
+                true,
             ),
             Tool {
                 name: "users_rename",
