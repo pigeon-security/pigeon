@@ -1,6 +1,6 @@
 # The CI gateway
 
-Status: phase 1 deployed; phase 2 built, awaiting deploy. Phases are handed back one at a time; each is merged and
+Status: phases 1 and 2 deployed; phase 3 built, awaiting the person's Buildkite setup and deploy. Phases are handed back one at a time; each is merged and
 deployed by the parent session before the next starts.
 
 Design: [CI gateway design](https://claude.ai/artifact/M5zwjixxfKwJn9PYUf9tcj). This plan turns
@@ -443,6 +443,41 @@ Needs from the person: a Buildkite organization, a pipeline named `pigeon` using
 agents, a hosted queue per class (names in settings), `BUILDKITE_API_TOKEN` and
 `BUILDKITE_WEBHOOK_TOKEN` set on the secrets page, and a webhook for `build.finished` (and
 `job.started`) to `https://platform.pigeon.dev/ci/hooks/buildkite`.
+
+**As built.**
+- Facts, read from `buildkite/docs` and `buildkite/agent` on GitHub (buildkite.com is not
+  reachable from the session): the steps editor interpolates only a fixed set of `BUILDKITE_*`
+  variables, but `build.env("X")` in a step's `if:` reads custom build env when the YAML steps
+  editor is on (`pages/pipelines/configure/conditionals.md`); `checkout: { skip: true }` skips
+  the checkout and works on hosted agents (`pages/pipelines/configure/git_checkout.md`);
+  webhook signatures are `timestamp=…,signature=<hex HMAC-SHA256 of "<ts>.<body>">`, with a
+  5-minute window advised; hosted shapes `LINUX_AMD64_2X4` (2 vCPU, 4 GB, 47 GB) and
+  `LINUX_AMD64_4X16` (4, 16, 95), the Free plan only the first.
+- The pipeline's steps are one static step per queue, chosen with
+  `if: build.env("PIGEON_QUEUE") == "<queue>"`, skipping checkout and running
+  `curl -fsSL https://platform.pigeon.dev/ci/buildkite.sh | sh` (`steps_yaml`). The YAML holds
+  no `$`, so nothing is interpolated.
+- `/ci/buildkite.sh` (served by the platform, `ci/runner/buildkite.sh`): requests the step's
+  OIDC token (audience `https://platform.pigeon.dev/ci/token`, 300 s), exchanges it at
+  `/ci/token` for the job's token, adds it to Buildkite's redactor, fetches `/ci/runner.sh`
+  (the same runner as Containers) and runs it with `PIGEON_WORK` in a temporary directory.
+- `/ci/token`: core `oidc.rs` verifies RS256 against `https://agent.buildkite.com/.well-known/jwks`
+  (issuer, audience, `exp`/`iat`/`nbf` with 60 s leeway, lifetime at most an hour); the
+  connector then requires `organization_slug`, `pipeline_slug`, `runner_environment =
+  buildkite-hosted`, UUID `build_id`/`job_id` and a positive `build_number`; the scheduler
+  mints a job token only for the live job whose handle is that build (`{number}/{uuid}`) on
+  that connector. A later exchange for the same build replaces the token.
+- Webhooks: verified first (core `buildkite_hook.rs`); a ping answers 200 and does nothing;
+  `build.running` is the start; `build.finished` without the runner having reported is a lost
+  runner (retried once elsewhere), `canceled` is cancelled; builds without the gateway's
+  `pigeon_job` meta-data, or not matching a live job's handle, are ignored.
+- Queues: `pigeon-linux-small` and `pigeon-linux-medium`, each offering its class with and
+  without docker. macOS (`macos-build`, `macos-arm64-large`) is behind `BUILDKITE_MACOS`, off.
+- No change to the git proxy or the Cloudflare API proxy: the Worker calls api.buildkite.com
+  and agent.buildkite.com directly, and runners fetch through the git proxy with job tokens,
+  which it already accepts.
+- Unconfirmed until live: the OIDC signing algorithm (assumed RS256; an ES256 key would be
+  refused with "the token algorithm is not RS256"), and that the hosted Linux image has curl.
 
 ### Phase 4: GitHub Actions
 
