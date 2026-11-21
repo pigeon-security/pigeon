@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "pigeon-platform": {
-      "type": "http",
-      "url": "https://platform.pigeon.dev/mcp"
-    }
-  }
-}

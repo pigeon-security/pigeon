@@ -110,10 +110,13 @@ Each ref update in a push is its own policy request:
 
 - The protected branch is `move_main`. The policy always refuses it. Main moves only by a landing.
 - A delete is `delete_branch`.
-- Anything else is `push_branch`. A rewrite reads as a push. Both are allowed on session branches.
+- An update of any other existing branch to another commit is asked as both `push_branch` and `rewrite_branch`:
+  - Allowed as both (session branches, today): the push streams, and once it has gone through the proxy reads the branch's history and records it as `rewrite_branch` when the old tip is not in the new one's history, `push_branch` otherwise.
+  - Allowed only as a push: the push is read whole and refused unless it moves forward, recorded as `rewrite_branch` denied when refused.
+- Anything else, a create included, is `push_branch`.
 - Tags and other refs are not in policy.
 
-Each update's decision is an audit line. The fast-forward check for a push to main stays in the code. It is unused while the policy refuses such pushes.
+Each update's decision is an audit line; a streamed update that may be a rewrite gets its line after the push. The fast-forward check (`not_forward`) serves the protected branch, should the policy ever allow pushing it, and a branch pushed but not rewritten.
 
 ## The generated Claude Code settings
 
@@ -136,7 +139,7 @@ The list holds:
 
 Each pigeon tool is listed twice: under `Pigeon`, the claude.ai connector's name, and under `71fdea92-23ad-47d5-a156-53f536f8b55a`, the same connector's server id, which some sessions see instead. The format follows the Claude Code permissions docs: a tool is `mcp__<server>__<tool>`, the server segment literal. A server-wide `mcp__<server>__*` exists, but it would also allow every pigeon tool the policy does not name, so each tool is named. A Bash rule uses `*` to match any text.
 
-`call` is never in the list: it reaches every pigeon tool, `deploy_token` and `source_token` included, so pre-approving it would go around the policy. Landing 1 generated it, with the names of the `pigeon-platform` server in `.mcp.json`, a duplicate connector that asks for sign-in; the third landing corrected both, with the person's passkey.
+`call` is never in the list: it reaches every pigeon tool, `deploy_token` and `source_token` included, so pre-approving it would go around the policy. Landing 1 generated it, with the names of the `pigeon-platform` server in `.mcp.json`, a duplicate connector that asks for sign-in; the third landing corrected both, with the person's passkey. The clean-up landing removed `.mcp.json` itself: its only entry was that duplicate.
 
 The gate fails when `.claude/settings.json` differs from what the generator writes.
 
@@ -187,4 +190,4 @@ No rule was added for any of these. Each is a decision for the person.
 
 - Adding a scenario to `tests/smoke.rs` is "not in policy". The suite stays frozen as rule 6 reads; no rule for growing it.
 - A deploy of anything but a session branch is "not in policy".
-- The proxy cannot tell a rewrite of a session branch from a push.
+- The proxy could not tell a rewrite of a session branch from a push. Fixed in the clean-up landing, in code: see "The git proxy" above.

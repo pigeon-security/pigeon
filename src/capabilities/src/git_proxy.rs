@@ -6,12 +6,15 @@
 //!
 //! Pushes follow the person's policy (`.pigeon/policy.toml`, see [`crate::policy`]), checked on
 //! the ref updates at the start of the push before anything is sent on: a branch under the
-//! session prefix is pushed, rewritten or deleted (`session-branches`); the protected branch
+//! session prefix is pushed, rewritten or deleted (`session-branches`), a rewrite (an update
+//! whose old tip is not in the new one's history) recorded as `rewrite_branch` once the push
+//! has gone through; the protected branch
 //! moves only by a landing's fast-forward (`main-forward-only`), never by a push; any other ref
 //! is not in policy. A refused push is answered the way git reports a refused ref, so
 //! `git push` prints why. Every request is logged as one audit line, and every ref update's
-//! policy decision as another. ([`not_forward`] stays for the fast-forward check a push of the
-//! protected branch would need, should the policy ever allow one.)
+//! policy decision as another. ([`not_forward`] checks before the push any update that must move
+//! forward: the protected branch, should the policy ever allow pushing it, or a branch the policy
+//! lets be pushed but not rewritten.)
 //!
 //! A CI runner fetches with its job token instead: only from this repository, only by
 //! upload-pack, only the one commit its grant names and only until the job's deadline. Its
@@ -175,9 +178,10 @@ pub fn vars(protected: &str, prefix: &str) -> Vars {
     }
 }
 
-/// What ref update `c` is to the policy: moving the protected branch, deleting a ref, or
-/// pushing one (a rewrite of a branch reads as a push: the policy treats them alike), with its
-/// target, the branch name without `refs/heads/`, or the whole name of any other ref.
+/// What ref update `c` is to the policy before the push is sent on: moving the protected
+/// branch, deleting a ref, or pushing one, with its target, the branch name without
+/// `refs/heads/`, or the whole name of any other ref. Whether a push is a rewrite needs the
+/// branch's history: see [`may_rewrite`].
 pub fn update(c: &Command, protected: &str) -> (Kind, String) {
     let target = c
         .name
@@ -194,7 +198,16 @@ pub fn update(c: &Command, protected: &str) -> (Kind, String) {
     (kind, target)
 }
 
-/// Whether ref update `c` is allowed, and how: the policy decides. Branches under the session
+/// Whether ref update `c` moves an existing branch other than the protected one to another
+/// existing commit: a push, or a rewrite (force-push) when `old` is not in `new`'s history.
+pub fn may_rewrite(c: &Command, protected: &str) -> bool {
+    c.name != protected && c.old != ZERO && c.new != ZERO
+}
+
+/// Whether ref update `c` is allowed, and how: the policy decides. An update that may be a
+/// rewrite is asked as both a push and a rewrite: allowed as both, it is streamed and recorded
+/// as whichever it was once pushed; allowed only as a push, it is read whole first and refused
+/// unless it moves forward. Branches under the session
 /// prefix are pushed, rewritten and deleted (`session-branches`); the protected branch moves
 /// only by a landing (`main-forward-only`), never by a push; anything else is not in policy.
 pub fn check(c: &Command, protected: &str, prefix: &str) -> std::result::Result<Rule, String> {
@@ -207,12 +220,30 @@ pub fn check(c: &Command, protected: &str, prefix: &str) -> std::result::Result<
         &crate::policy::request("git push", kind, &target),
     );
     match answer.decision {
+        Decision::Allow if may_rewrite(c, protected) => {
+            let rewrite = crate::policy::decide(
+                &vars(protected, prefix),
+                &crate::policy::request("git push", Kind::RewriteBranch, &target),
+            );
+            Ok(match rewrite.decision {
+                Decision::Allow => Rule::Stream,
+                Decision::Deny => Rule::FastForward,
+            })
+        }
         Decision::Allow => Ok(Rule::Stream),
         Decision::Deny => Err(match answer.rule {
             Some(rule) => format!("{} (policy rule {rule})", answer.reason),
             None => format!("{} (.pigeon/policy.toml)", answer.reason),
         }),
     }
+}
+
+/// Writes the audit line of ref update `c`, asked of the policy as `kind` by `who`.
+fn audit_update(vars: &Vars, who: &str, kind: Kind, c: &Command) {
+    let target = c.name.strip_prefix("refs/heads/").unwrap_or(&c.name);
+    let req = crate::policy::request(who, kind, target);
+    let answer = crate::policy::decide(vars, &req);
+    worker::console_log!("{}", crate::policy::audit_line("git_proxy", &req, &answer));
 }
 
 /// Every update's rule, or each refused update's ref and reason.
@@ -422,7 +453,8 @@ async fn upstream_history(
     Ok(pack::commits(&got.pack)?.parents)
 }
 
-/// The protected-branch updates in a push that don't move it forward, each with why; `None`
+/// The updates in a push that must move forward (rule [`Rule::FastForward`]: the protected
+/// branch, or a branch the policy lets be pushed but not rewritten) and don't, with why; `None`
 /// when every one does. `head` is the whole push body, `commands` its ref updates and `rules`
 /// theirs. When the pushed pack doesn't settle it, `upstream(old)` is asked once for the
 /// repository's history that `old` doesn't reach (see [`upstream_history`]); if `old` is an
@@ -481,19 +513,22 @@ where
         if forward {
             continue;
         }
-        return fail(if unresolved > 0 {
-            format!(
-                "{} could not be checked: the push stores objects as changes to others it \
+        return Some(vec![(
+            c.name.clone(),
+            if unresolved > 0 {
+                format!(
+                    "{} could not be checked: the push stores objects as changes to others it \
                  doesn't carry. Push the commit to a branch under {prefix} first, then move \
                  {} to it",
-                c.name, c.name
-            )
-        } else {
-            format!(
-                "{} only moves forward: push a commit that has the current one in its history",
-                c.name
-            )
-        });
+                    c.name, c.name
+                )
+            } else {
+                format!(
+                    "{} only moves forward: push a commit that has the current one in its history",
+                    c.name
+                )
+            },
+        )]);
     }
     None
 }
@@ -589,6 +624,7 @@ impl GitProxy {
         // A push's ref updates are read and checked before any token is minted.
         let mut push = None;
         let mut rules = Vec::new();
+        let mut who = String::new();
         if call == Call::Rpc(Service::ReceivePack) {
             let encoding = req.headers().get("Content-Encoding")?;
             if encoding.is_some_and(|e| !e.eq_ignore_ascii_case("identity")) {
@@ -598,17 +634,27 @@ impl GitProxy {
                 Ok(p) => p,
                 Err(why) => return refuse(400, &why),
             };
-            // One audit line per policy decision, as the push asked it.
-            let who = caller.as_ref().map_or("a CI job", |c| c.label.as_str());
+            // One audit line per policy decision, as the push asked it. An update that may be a
+            // rewrite is recorded once it is known which it was.
+            who = caller
+                .as_ref()
+                .map_or("a CI job", |c| c.label.as_str())
+                .to_string();
+            let pv = vars(&self.protected, &self.prefix);
             for c in &p.commands.commands {
-                let (kind, target) = update(c, &self.protected);
-                let req = crate::policy::request(who, kind, &target);
-                let answer = crate::policy::decide(&vars(&self.protected, &self.prefix), &req);
-                worker::console_log!("{}", crate::policy::audit_line("git_proxy", &req, &answer));
+                if !may_rewrite(c, &self.protected) {
+                    let (kind, _) = update(c, &self.protected);
+                    audit_update(&pv, &who, kind, c);
+                }
             }
             match check_all(&p.commands.commands, &self.protected, &self.prefix) {
                 Ok(r) => rules = r,
                 Err(refused) => {
+                    for c in &p.commands.commands {
+                        if may_rewrite(c, &self.protected) {
+                            audit_update(&pv, &who, Kind::PushBranch, c);
+                        }
+                    }
                     // Read what git is still sending, so it reads the refusal rather than
                     // stopping at a closed connection.
                     drain(&mut p.rest, BUFFERED_MAX).await;
@@ -631,6 +677,20 @@ impl GitProxy {
         let (ended, done) = oneshot::channel::<()>();
         let account: Account = cx.account.clone();
         let (namespace, name, id) = (self.namespace.clone(), self.repo.clone(), token.id.clone());
+        // Streamed updates that may be rewrites, recorded as push or rewrite once pushed.
+        let pending: Vec<Command> = push
+            .as_ref()
+            .map(|p| {
+                p.commands
+                    .commands
+                    .iter()
+                    .zip(&rules)
+                    .filter(|(c, r)| **r == Rule::Stream && may_rewrite(c, &self.protected))
+                    .map(|(c, _)| c.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let (pv, by) = (vars(&self.protected, &self.prefix), who.clone());
         worker.wait_until(async move {
             let _ = done.await;
             match id {
@@ -640,6 +700,18 @@ impl GitProxy {
                     }
                 }
                 None => console_error!("git proxy: a git token came back without an id"),
+            }
+            for c in &pending {
+                // The branch's tip now has `old` in its history unless the push rewrote it.
+                let kind = match contains(&account, &namespace, &name, &c.name, &c.old).await {
+                    Ok(false) => Kind::RewriteBranch,
+                    Ok(true) => Kind::PushBranch,
+                    Err(e) => {
+                        console_error!("git proxy: reading {}'s history: {e}", c.name);
+                        Kind::PushBranch
+                    }
+                };
+                audit_update(&pv, &by, kind, c);
             }
         });
         let body = match (call, push) {
@@ -658,9 +730,23 @@ impl GitProxy {
                         return refusal(&p.commands, &[(self.protected.clone(), why)]);
                     }
                     let upstream = |old: String| upstream_history(&remote, old);
-                    if let Some(refused) =
-                        not_forward(&p.head, &p.commands, &rules, &self.prefix, upstream).await
-                    {
+                    let refused =
+                        not_forward(&p.head, &p.commands, &rules, &self.prefix, upstream).await;
+                    let pv = vars(&self.protected, &self.prefix);
+                    for (c, rule) in p.commands.commands.iter().zip(&rules) {
+                        if *rule == Rule::FastForward && may_rewrite(c, &self.protected) {
+                            let no = refused
+                                .as_ref()
+                                .is_some_and(|r| r.iter().any(|(n, _)| *n == c.name));
+                            let kind = if no {
+                                Kind::RewriteBranch
+                            } else {
+                                Kind::PushBranch
+                            };
+                            audit_update(&pv, &who, kind, c);
+                        }
+                    }
+                    if let Some(refused) = refused {
                         return refusal(&p.commands, &refused);
                     }
                     Body::Bytes(p.head)

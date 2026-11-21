@@ -80,7 +80,7 @@ Each request gets its own Artifacts git token: read for fetch, write for push. T
 
 The proxy checks the push's ref updates before it mints any token. The rules are the person's policy, `.pigeon/policy.toml` (see `docs/plans/policy.md`): each ref update is asked of it.
 
-- A branch under `refs/heads/claude/` may be created, pushed, rewritten (force-pushed) or deleted: rule `session-branches`. The proxy cannot tell a rewrite from a push without the branch's history; the policy allows both.
+- A branch under `refs/heads/claude/` may be created, pushed, rewritten (force-pushed) or deleted: rule `session-branches`. A rewrite (the old tip not in the new one's history) is recorded as `rewrite_branch`: the proxy reads the branch's history once the push has gone through.
 - `main` is never pushed, created or deleted through the proxy: rule `main-forward-only`. It moves only by a landing's fast-forward (`land`).
 - Any other ref, tags included, is not in policy.
 - Ref names are checked strictly.
