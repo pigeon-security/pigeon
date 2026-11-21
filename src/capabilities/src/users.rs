@@ -429,24 +429,18 @@ fn parse<T: for<'de> Deserialize<'de>>(v: Value) -> Result<T> {
 // ---- who is calling ----
 
 /// The caller of `req`, from the Access token Access signed it with: a service token is a
-/// service user, made one the first time it calls. `None` for a request Access did not sign
-/// with a service token.
-pub async fn caller(
-    env: &Env,
-    account: &Account,
-    host: &str,
-    req: &Request,
-) -> Result<Option<Caller>> {
+/// service user, made one the first time it calls. An error says why there is none.
+pub async fn caller(env: &Env, account: &Account, host: &str, req: &Request) -> Result<Caller> {
     if req.headers().get(identity::HEADER)?.is_none() {
-        return Ok(None);
+        return Err(bad("the request carries no Access token"));
     }
     let expected = expected(env, account, host).await?;
-    let Some(claims) = identity::caller(req, &expected).await? else {
-        return Ok(None);
-    };
-    let Some(client_id) = claims.common_name else {
-        return Ok(None);
-    };
+    let claims = identity::caller(req, &expected)
+        .await?
+        .ok_or_else(|| bad("the request carries no Access token"))?;
+    let client_id = claims
+        .common_name
+        .ok_or_else(|| bad("the Access token names no service token"))?;
     let found = directory(
         env,
         "service.find",
@@ -454,7 +448,7 @@ pub async fn caller(
     )
     .await?;
     if !found.is_null() {
-        return parse(found).map(Some);
+        return parse(found);
     }
     let session = Session::open(account).await?;
     let name = session.service_token_name(&client_id).await;
@@ -468,7 +462,7 @@ pub async fn caller(
         json!({ "access_client_id": client_id, "name": name }),
     )
     .await?;
-    parse(added).map(Some)
+    parse(added)
 }
 
 /// The issuer and audience the host's Access tokens carry, kept in the Directory for a day.
@@ -535,7 +529,10 @@ impl Users {
                 .ok_or_else(|| bad("only a service user can do this"))
         };
         Ok(match tool {
-            "users_whoami" => to_value(cx.caller),
+            "users_whoami" => match cx.caller {
+                Some(c) => to_value(c),
+                None => json!({ "caller": null, "why": cx.caller_note }),
+            },
             "users_list" => directory(env, "users.list", json!({})).await?,
             "users_bootstrap" => {
                 let n = directory(env, "users.standard_count", json!({})).await?;

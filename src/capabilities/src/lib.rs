@@ -35,6 +35,8 @@ pub struct Context<'a> {
     pub hosted: &'a Hosted<'a>,
     /// Who is calling, when the request says: a service user through an Access service token.
     pub caller: Option<&'a users::Caller>,
+    /// Why there is no caller, when there is none.
+    pub caller_note: Option<&'a str>,
 }
 
 /// A Worker and the capabilities it hosts, with the repository's sources it was built from.

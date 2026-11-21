@@ -40,6 +40,7 @@ async fn fetch(req: Request, env: Env, _ctx: WorkerContext) -> Result<Response> 
             env: &env,
             hosted: &hosted,
             caller: None,
+            caller_note: None,
         };
         return c.fetch(&cx, req).await;
     }
@@ -71,6 +72,7 @@ async fn queue(batch: MessageBatch<Value>, env: Env, _ctx: WorkerContext) -> Res
         env: &env,
         hosted: &hosted,
         caller: None,
+        caller_note: None,
     };
     for c in wanting {
         match c.on_events(&cx).await {
@@ -113,13 +115,14 @@ async fn account(env: &Env) -> Result<Account> {
 /// hosted capability's.
 async fn mcp_post(mut req: Request, env: &Env) -> Result<Response> {
     let account = account(env).await?;
-    let caller: Option<Caller> = match users::caller(env, &account, settings::HOST, &req).await {
-        Ok(c) => c,
-        Err(e) => {
-            console_error!("caller unknown: {e}");
-            None
-        }
-    };
+    let (caller, note): (Option<Caller>, Option<String>) =
+        match users::caller(env, &account, settings::HOST, &req).await {
+            Ok(c) => (Some(c), None),
+            Err(e) => {
+                console_error!("caller unknown: {e}");
+                (None, Some(e.to_string()))
+            }
+        };
     let message: Value = match req.json().await {
         Ok(v) => v,
         Err(e) => return Response::error(format!("not JSON: {e}"), 400),
@@ -144,6 +147,7 @@ async fn mcp_post(mut req: Request, env: &Env) -> Result<Response> {
             env,
             hosted: &hosted,
             caller: caller.as_ref(),
+            caller_note: note.as_deref(),
         };
         owner.call(&cx, name, args).await
     };
