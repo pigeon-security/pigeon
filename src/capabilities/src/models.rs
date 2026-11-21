@@ -8,12 +8,18 @@
 //! Each request is tagged with who sent it (the caller, and the person they act for when
 //! linked) and an optional task label, so usage can be grouped and filtered by those as well as
 //! by model. The gateway logs keep those tags and the counts, never a prompt or an answer.
+//!
+//! `models_run` is one request, answered while the caller waits, about a minute at most. A
+//! longer one is a job: `models_submit` queues it, it streams through the same gateway with the
+//! same tags in a Durable Object of its own (`models/runner.rs`), and `models_status` and
+//! `models_result` follow and fetch it, with an optional signed notify when it ends.
 
 use pigeon_core::Account;
 use pigeon_core::ai_gateway::{self, Dimension, Filter, SECRET_SCOPE, tag};
 use pigeon_core::mcp::Tool;
 use pigeon_core::secrets_store::Writer;
-use serde::Serialize;
+use pigeon_core::webauthn::random;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use worker::js_sys::Date;
 use worker::{Error, Fetch, Headers, Method, Request, RequestInit, Result};
@@ -23,6 +29,9 @@ use crate::users::{Caller, User};
 use crate::{Call, Capability, Context, Footprint, Slot, to_value, unknown};
 
 pub mod daily;
+pub mod jobs;
+pub mod runner;
+pub mod stream;
 
 /// The most logs the console's chart reads for one window, so a busy gateway cannot run it long.
 const CHART_LOGS: usize = 5_000;
@@ -34,6 +43,8 @@ pub struct Models {
     pub providers: Vec<Provider>,
     /// Where a person sets a key, such as `https://platform.pigeon.dev/secrets`.
     pub secrets_page: String,
+    /// The platform's hostname, which a job's notify may not point at.
+    pub host: String,
 }
 
 /// A provider as the gateway knows it.
@@ -50,7 +61,8 @@ pub struct Provider {
 }
 
 /// How a provider's requests and answers are shaped.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Dialect {
     /// The Claude Platform's Messages API.
     Anthropic,
@@ -341,6 +353,85 @@ impl Models {
         }))
     }
 
+    /// Queues a job: the request in the common shape, streamed, with the caller's tags.
+    async fn submit(&self, cx: &Context<'_>, args: &Value) -> Result<Value> {
+        let caller = cx
+            .caller
+            .ok_or_else(|| bad("a job needs a caller, who alone can read its result"))?;
+        let p = self.provider(args["provider"].as_str())?;
+        let asked = ask(args, p)?;
+        let mut body = p.dialect.body(&asked);
+        body["stream"] = json!(true);
+        let timeout_ms = jobs::timeout_ms(&args["timeout_min"]).map_err(|e| bad(&e))?;
+        let notify_url = match args["notify"].as_str() {
+            Some(u) => Some(crate::notify::check_url(u, &self.host).map_err(|e| bad(&e))?),
+            None => None,
+        };
+        let notify_key = match notify_url {
+            Some(_) => Some(random()?),
+            None => None,
+        };
+        let task = args["task"]
+            .as_str()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(|t| t.chars().take(MAX_TASK_CHARS).collect::<String>());
+        let own = |v: &[(&str, &str)]| -> Vec<(String, String)> {
+            v.iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        };
+        let tags: Vec<(String, String)> = tags(Some(caller), task.as_deref())
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        let new = runner::New {
+            id: random()?[..22].to_string(),
+            caller: Some(caller.user.id.clone()),
+            caller_name: Some(caller.user.name.clone()),
+            for_id: caller.acting_for.as_ref().map(|f| f.id.clone()),
+            task,
+            provider: p.slug.into(),
+            model: asked.model.clone(),
+            notify_url,
+            notify_key: notify_key.clone(),
+            ask: runner::Ask {
+                dialect: p.dialect,
+                provider: p.slug.into(),
+                path: p.dialect.path().into(),
+                headers: own(p.dialect.headers()),
+                tags,
+                body,
+                timeout_ms,
+            },
+        };
+        let mut out = runner::call(
+            cx.env,
+            runner::INDEX,
+            "submit",
+            &serde_json::to_value(&new)?,
+        )
+        .await?;
+        if let Some(k) = notify_key {
+            out["notify_key"] = json!(k);
+            out["notify_key_note"] = json!(crate::notify::KEY_NOTE);
+        }
+        Ok(out)
+    }
+
+    /// `op` (`status` or `result`) of job `id`, for the caller.
+    async fn job(&self, cx: &Context<'_>, op: &str, args: &Value) -> Result<Value> {
+        let reader = cx.caller.map(|c| c.user.id.as_str()).unwrap_or_default();
+        let id = crate::arg(args, "id")?;
+        runner::call(
+            cx.env,
+            runner::INDEX,
+            op,
+            &json!({ "id": id, "reader": reader }),
+        )
+        .await
+    }
+
     async fn usage(&self, account: &Account, args: &Value) -> Result<Value> {
         let hours = args["hours"]
             .as_f64()
@@ -452,6 +543,53 @@ impl Capability for Models {
                 }),
             },
             Tool {
+                name: "models_submit",
+                description: "Queue a request to a model as a job, for answers that take longer \
+                              than models_run's minute: it streams through the AI gateway with \
+                              the same tags and no prompt or answer in the log, for up to \
+                              `timeout_min` (10 by default, 14 at most). Answers the job's id at \
+                              once; follow it with models_status and fetch it with \
+                              models_result. With `notify`, an https URL gets a signed POST when \
+                              it ends (the key is shown once). Four run at once; more wait.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "provider": { "type": "string", "enum": slugs, "description": "The first declared when omitted." },
+                        "model": { "type": "string", "description": "The provider's default when omitted." },
+                        "system": { "type": "string" },
+                        "prompt": { "type": "string" },
+                        "messages": { "type": "array", "items": { "type": "object" } },
+                        "max_tokens": { "type": "integer", "description": "1024 by default, 64000 at most." },
+                        "task": { "type": "string", "description": "A short label, as for models_run." },
+                        "timeout_min": { "type": "integer", "description": "1 to 14; 10 by default." },
+                        "notify": { "type": "string", "description": "An https URL to POST to when the job ends." }
+                    }
+                }),
+            },
+            Tool {
+                name: "models_status",
+                description: "A model job's state (queued, running, succeeded, failed, \
+                              timed_out, lost), its times, the characters streamed so far and, \
+                              once it ends, its tokens and any error. Only its sender, or the \
+                              person they act for, can see it.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": { "id": { "type": "string" } },
+                    "required": ["id"]
+                }),
+            },
+            Tool {
+                name: "models_result",
+                description: "A finished model job's answer: text, stop reason, tokens and any \
+                              error (a timed-out job keeps its text so far). Kept for 10 \
+                              minutes once read, and 24 hours from submission at most.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": { "id": { "type": "string" } },
+                    "required": ["id"]
+                }),
+            },
+            Tool {
                 name: "models_logs",
                 description: "The AI gateway's latest log entries, newest first: id, time, \
                               provider, model, status, success, cached, tokens in and out, \
@@ -508,6 +646,9 @@ impl Capability for Models {
                 "models_run" => self.run(cx, args).await?,
                 "models_usage" => self.usage(cx.account, args).await?,
                 "models_logs" => self.recent(cx.account, args).await?,
+                "models_submit" => self.submit(cx, args).await?,
+                "models_status" => self.job(cx, "status", args).await?,
+                "models_result" => self.job(cx, "result", args).await?,
                 other => return Err(unknown(other)),
             })
         })
@@ -563,6 +704,7 @@ impl Capability for Models {
     fn footprint(&self) -> Footprint {
         Footprint {
             gateways: vec![self.gateway.clone()],
+            objects: vec![runner::BINDING.into()],
             ..Footprint::default()
         }
     }

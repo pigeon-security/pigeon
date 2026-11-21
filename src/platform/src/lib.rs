@@ -44,6 +44,29 @@ impl worker::DurableObject for CiScheduler {
     }
 }
 
+/// Async model jobs: the index and each job's own object.
+#[worker::durable_object]
+pub struct ModelJobs {
+    inner: pigeon_capabilities::models::runner::ModelJobs,
+}
+
+impl worker::DurableObject for ModelJobs {
+    fn new(state: worker::State, env: Env) -> Self {
+        let inner =
+            pigeon_capabilities::models::runner::ModelJobs::new(state, env, settings::model_jobs())
+                .expect("the model jobs' migrations apply");
+        Self { inner }
+    }
+
+    async fn fetch(&self, req: Request) -> Result<Response> {
+        self.inner.fetch(req).await
+    }
+
+    async fn alarm(&self) -> Result<Response> {
+        self.inner.alarm().await
+    }
+}
+
 /// The CI runner's class: one per job attempt, holding that attempt's container.
 #[worker::durable_object]
 pub struct CiRunner {

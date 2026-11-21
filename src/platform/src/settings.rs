@@ -191,6 +191,7 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
                 key_help: "A Claude Platform API key, from the Claude Console's API keys page.",
             }],
             secrets_page: format!("https://{HOST}/settings#keys"),
+            host: HOST.into(),
         }),
         Box::new(Ci { settings: ci() }),
         Box::new(Deploys),
@@ -245,6 +246,14 @@ fn buildkite_queues() -> Vec<buildkite::Queue> {
         q.push(buildkite::queue("macos-build", mac, 6, 28, 182));
     }
     q
+}
+
+/// What async model jobs run with: the gateway `Models` sends through, and the parent token.
+pub fn model_jobs() -> pigeon_capabilities::models::runner::Settings {
+    pigeon_capabilities::models::runner::Settings {
+        gateway: "pigeon".into(),
+        parent: PARENT_TOKEN.into(),
+    }
 }
 
 /// The CI gateway's settings: its connectors in the order jobs prefer them (Containers, then

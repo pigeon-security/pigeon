@@ -37,6 +37,7 @@ bindings = [
   { name = "DIRECTORY", class_name = "Directory" },
   { name = "CI_SCHEDULER", class_name = "CiScheduler" },
   { name = "CI_RUNNER", class_name = "CiRunner" },
+  { name = "MODEL_JOBS", class_name = "ModelJobs" },
 ]
 
 [[migrations]]
@@ -50,6 +51,11 @@ new_sqlite_classes = ["CiScheduler"]
 [[migrations]]
 tag = "v3"
 new_sqlite_classes = ["CiRunner"]
+
+# Async model jobs: an index object and one object per job, which streams from its alarm.
+[[migrations]]
+tag = "v4"
+new_sqlite_classes = ["ModelJobs"]
 
 # CI job containers: one per job attempt, held by a CiRunner object, which picks the image and
 # the instance size on each start. The base image carries git, curl, coreutils, sh, a Rust

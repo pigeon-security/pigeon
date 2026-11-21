@@ -278,7 +278,65 @@ pub async fn run(
     token.finish(ran).await
 }
 
-async fn send(token: &str, url: &str, extra: &[(&str, &str)], body: &Value) -> Result<Ran> {
+/// What [`stream`] got: the provider's refusal, read whole, or what `read` made of its answer.
+pub enum Streamed<T> {
+    Refused(Ran),
+    Read(T),
+}
+
+/// How long a token minted for a streamed request lives: the ceiling if its revoke is lost. The
+/// gateway checks it when the request starts, not while it streams.
+const STREAM_TOKEN_TTL: u64 = 1_200;
+
+/// [`run`], with the provider's answer handed to `read` as it arrives rather than read whole:
+/// for a body that asks the provider to stream. `read` decides when to stop; once it returns,
+/// the token is revoked. The same tags and the same payload-free log as [`run`].
+#[allow(clippy::too_many_arguments)]
+pub async fn stream<T>(
+    account: &Account,
+    gateway: &str,
+    provider: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    tags: &[(&str, &str)],
+    body: &Value,
+    read: impl AsyncFnOnce(worker::ByteStream) -> Result<T>,
+) -> Result<Streamed<T>> {
+    let metadata = metadata_header(tags)?;
+    let mut headers = headers.to_vec();
+    headers.push((PAYLOAD_HEADER, "false"));
+    if let Some(m) = &metadata {
+        headers.push((METADATA_HEADER, m));
+    }
+    let token = Scoped::open_for(
+        account,
+        "ai-gateway-run",
+        vec![Policy::new(Scope::Account, &RUN_PERMISSIONS)],
+        STREAM_TOKEN_TTL,
+    )
+    .await?;
+    let url = format!("{GATEWAY}/{}/{gateway}/{provider}/{path}", account.id);
+    let streamed = async {
+        let mut response = open(token.value(), &url, &headers, body).await?;
+        let status = response.status_code();
+        if !(200..300).contains(&status) {
+            let text = response.text().await?;
+            let body = serde_json::from_str(&text).unwrap_or(Value::String(text));
+            return Ok(Streamed::Refused(Ran { status, body }));
+        }
+        Ok(Streamed::Read(read(response.stream()?).await?))
+    }
+    .await;
+    token.finish(streamed).await
+}
+
+/// Sends a request through the gateway, retried while it answers 401; the response, unread.
+async fn open(
+    token: &str,
+    url: &str,
+    extra: &[(&str, &str)],
+    body: &Value,
+) -> Result<worker::Response> {
     let bytes = body.to_string().into_bytes();
     let mut waits = NOT_YET_ACTIVE_WAITS_MS.iter();
     loop {
@@ -292,20 +350,25 @@ async fn send(token: &str, url: &str, extra: &[(&str, &str)], body: &Value) -> R
         init.with_method(Method::Post)
             .with_headers(headers)
             .with_body(Some(Uint8Array::from(bytes.as_slice()).into()));
-        let mut response = Fetch::Request(Request::new_with_init(url, &init)?)
+        let response = Fetch::Request(Request::new_with_init(url, &init)?)
             .send()
             .await?;
-        let status = response.status_code();
-        let text = response.text().await?;
-        if status == 401
+        if response.status_code() == 401
             && let Some(ms) = waits.next()
         {
             worker::Delay::from(std::time::Duration::from_millis(*ms)).await;
             continue;
         }
-        let body = serde_json::from_str(&text).unwrap_or(Value::String(text));
-        return Ok(Ran { status, body });
+        return Ok(response);
     }
+}
+
+async fn send(token: &str, url: &str, extra: &[(&str, &str)], body: &Value) -> Result<Ran> {
+    let mut response = open(token, url, extra, body).await?;
+    let status = response.status_code();
+    let text = response.text().await?;
+    let body = serde_json::from_str(&text).unwrap_or(Value::String(text));
+    Ok(Ran { status, body })
 }
 
 /// One request through a gateway, as its logs keep it.
