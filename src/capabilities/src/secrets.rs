@@ -41,13 +41,14 @@ fn bad(why: &str) -> Error {
     Error::RustError(why.to_string())
 }
 
-/// The Keys section of the console's Settings tab, which secrets and proxy credentials share.
+/// The Credentials section of the console's Access tab, which secrets and proxy credentials
+/// share.
 pub fn keys_section() -> Section {
     Section {
-        tab: Tab::Settings,
-        id: "keys",
-        title: "Keys",
-        description: "Secrets the capabilities need, and the credentials cloud sessions hold.",
+        tab: Tab::Access,
+        id: "credentials",
+        title: "Secrets and credentials",
+        description: "Each with its expiry. Values are never shown; setting or replacing one asks for your passkey, bound to that name.",
         order: 1,
         cost: None,
     }
@@ -150,8 +151,8 @@ impl Secrets {
 
     fn url(&self, name: Option<&str>) -> String {
         match name {
-            Some(n) => format!("https://{}/settings#{n}", self.host),
-            None => format!("https://{}/settings#keys", self.host),
+            Some(n) => format!("https://{}/access#{n}", self.host),
+            None => format!("https://{}/access#credentials", self.host),
         }
     }
 
@@ -166,7 +167,7 @@ impl Secrets {
     async fn serve(&self, cx: &Context<'_>, mut req: Request) -> Result<Response> {
         let path = req.path();
         match (req.method(), path.as_str()) {
-            (Method::Get, "/secrets") => page::redirect("/settings"),
+            (Method::Get, "/secrets") => page::redirect("/access"),
             (Method::Post, p) => {
                 let body: Value = req.json().await.unwrap_or(Value::Null);
                 let answer = match p {

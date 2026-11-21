@@ -1,6 +1,7 @@
-//! The console: one page at the platform's root, with a tab for each part of the platform
-//! (Overview, Architecture, Gateways, Settings) and a section for each capability that declares
-//! one. A person signs in once with a passkey and gets a session cookie: HttpOnly, SameSite
+//! The console: one page at the platform's root, with a tab for each part of the platform the
+//! person looks after (Approvals while something waits for them, Architecture, Access, Cost) and
+//! a section for each capability that declares one. Each section loads on its own, within
+//! [`SECTION_MS`]; the slow ones answer a snapshot at once ([`snapshot`]). A person signs in once with a passkey and gets a session cookie: HttpOnly, SameSite
 //! Strict, kept only as a hash in the Directory, ending after 30 minutes idle or 8 hours. The
 //! session lets them read; every write that changes a secret, a credential, a passkey or a link
 //! still takes a passkey of its own, bound to what it changes. Every POST must come from this
@@ -39,10 +40,9 @@ const SIGN_IN: &str = "console:sign-in";
 
 const APP: &str = include_str!("console/app.js");
 const CHART: &str = include_str!("console/chart.js");
-const OVERVIEW: &str = include_str!("console/overview.js");
 const KEYS: &str = include_str!("console/keys.js");
 const USERS: &str = include_str!("console/users.js");
-const LAND: &str = include_str!("console/land.js");
+const APPROVALS: &str = include_str!("console/approvals.js");
 const STYLES: &str = include_str!("console/console.css");
 const ICON: &[u8] = include_bytes!("console/icon.png");
 
@@ -170,68 +170,19 @@ impl Console {
         }
     }
 
-    /// What the overview shows: secrets the platform needs and lacks, credentials expiring
-    /// within a week or expired, every credential's expiry, each gateway's cost over the last
-    /// week with their total, and the policy's latest decisions.
-    async fn overview(cx: &Context<'_>, person: &User) -> Result<Value> {
-        let listing = sections::tabs(&Self::declared(cx));
-        let week = json!({ "days": 7 });
-        let mut answers = Vec::new();
-        let mut missing = Vec::new();
-        let mut expiring = Vec::new();
-        let mut credentials = Vec::new();
-        let wanted: Vec<&str> = listing
-            .iter()
-            .flat_map(|t| t.sections.iter())
-            .filter(|l| l.section.cost.is_some() || l.section.id == "keys")
-            .map(|l| l.section.id)
-            .collect();
-        // Every section at once, each within its time; one failing or slow section leaves its
-        // figure out rather than the whole overview.
-        let found = join_all(
-            wanted
-                .iter()
-                .map(|id| timed(SECTION_MS, Self::section(cx, id, person, &week))),
-        )
-        .await;
-        for (id, data) in wanted.iter().zip(found) {
-            let Ok(data) = data else {
-                continue;
-            };
-            if let Some(cost) = data["cost_7d"].as_f64() {
-                answers.push((id.to_string(), cost));
-            }
-            for found in [&data["missing"], &data["secrets"]["missing"]] {
-                if let Some(list) = found.as_array() {
-                    missing.extend(list.iter().cloned());
-                }
-            }
-            for owner in ["secrets", "proxy"] {
-                let found = &data[owner];
-                if let Some(list) = found["expiring"].as_array() {
-                    expiring.extend(list.iter().cloned());
-                }
-                if let Some(list) = found["expiry"].as_array() {
-                    credentials.extend(list.iter().cloned());
-                }
+    /// The tabs and their sections, with how many landings wait for the person on Approvals.
+    /// A Lander that does not answer in time leaves the count at 0, and the tab hidden.
+    async fn tabs(cx: &Context<'_>) -> Result<Value> {
+        let mut listing = sections::tabs(&Self::declared(cx));
+        let waiting = timed(SECTION_MS / 2, crate::land::awaiting(cx.env))
+            .await
+            .map_or(0, |w| w.len());
+        for t in &mut listing {
+            if t.tab == Tab::Approvals {
+                t.waiting = Some(waiting);
             }
         }
-        let (costs, total) = sections::costs(&listing, &answers);
-        let costs: Vec<Value> = listing
-            .iter()
-            .flat_map(|t| t.sections.iter().map(move |l| (t, l)))
-            .filter_map(|(t, l)| {
-                let name = l.section.cost?;
-                let cost = costs.iter().find(|(n, _)| *n == name).map(|(_, c)| *c);
-                Some(json!({ "name": name, "cost": cost, "path": format!("{}#{}", t.path, l.section.id) }))
-            })
-            .collect();
-        // The policy's latest decisions; left out, like a failing section, when unreadable.
-        let decided = crate::policy::recent(cx.env).await.unwrap_or(Value::Null);
-        Ok(json!({
-            "missing": missing, "expiring": expiring, "credentials": credentials,
-            "costs": costs, "total": total, "policy": decided,
-        }))
+        Ok(serde_json::to_value(listing)?)
     }
 
     /// The signed-in person, their picture and passkeys, how many apps act for them, and when
@@ -328,15 +279,17 @@ impl Console {
         let method = req.method();
         if method == Method::Get {
             return match path.as_str() {
-                p if Tab::from_path(p).is_some() => {
+                p if p == "/" || Tab::from_path(p).is_some() => {
                     page::html(&page::shell(&self.passkeys.site_name))
                 }
                 "/console/app.js" => page::asset(APP, "text/javascript; charset=utf-8"),
                 "/console/chart.js" => page::asset(CHART, "text/javascript; charset=utf-8"),
-                "/console/overview.js" => page::asset(OVERVIEW, "text/javascript; charset=utf-8"),
                 "/console/keys.js" => page::asset(KEYS, "text/javascript; charset=utf-8"),
                 "/console/users.js" => page::asset(USERS, "text/javascript; charset=utf-8"),
-                "/console/land.js" => page::asset(LAND, "text/javascript; charset=utf-8"),
+                "/console/approvals.js" => page::asset(APPROVALS, "text/javascript; charset=utf-8"),
+                p if sections::moved(p).is_some() => {
+                    page::redirect(sections::moved(p).unwrap_or("/"))
+                }
                 "/console/console.css" => page::asset(STYLES, "text/css; charset=utf-8"),
                 "/console/icon.png" => page::image(ICON, "image/png"),
                 p if p.starts_with("/console/api/") => {
@@ -350,12 +303,7 @@ impl Console {
                     let fresh = url.query_pairs().any(|(k, v)| k == "fresh" && v == "1");
                     let data = match p {
                         "/console/api/me" => Self::me(cx.env, &signed).await,
-                        "/console/api/tabs" => {
-                            Ok(serde_json::to_value(sections::tabs(&Self::declared(cx)))?)
-                        }
-                        "/console/api/overview" => {
-                            timed(SECTION_MS * 2, Self::overview(cx, &signed.user)).await
-                        }
+                        "/console/api/tabs" => Self::tabs(cx).await,
                         p => match p.strip_prefix("/console/api/section/") {
                             Some(id) if sections::anchor(id) => {
                                 let days = days(query.as_deref());
@@ -540,7 +488,15 @@ impl Capability for Console {
     /// The tabs' paths and the console's own; `/` itself is handed over by the platform, since
     /// a route is a prefix.
     fn routes(&self) -> Vec<&'static str> {
-        vec!["/console/", "/architecture", "/gateways", "/settings"]
+        vec![
+            "/console/",
+            "/approvals",
+            "/architecture",
+            "/access",
+            "/cost",
+            "/gateways",
+            "/settings",
+        ]
     }
 
     fn fetch<'a>(&'a self, cx: &'a Context<'a>, req: Request) -> Serve<'a> {

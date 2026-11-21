@@ -21,8 +21,8 @@ pub struct Snapshot {
 /// comes from Cloudflare's APIs. Directory-only sections answer fast enough without one.
 pub fn fresh_ms(id: &str) -> Option<i64> {
     match id {
-        "credentials" | "keys" => Some(5 * 60_000),
-        "cost" | "models" => Some(10 * 60_000),
+        "credentials" => Some(5 * 60_000),
+        "cost" => Some(10 * 60_000),
         _ => None,
     }
 }

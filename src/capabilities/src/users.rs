@@ -1018,18 +1018,28 @@ impl Capability for Users {
     }
 
     fn sections(&self) -> Vec<Section> {
-        vec![Section {
-            tab: Tab::Settings,
-            id: "users",
-            title: "Users",
-            description: "People, their passkeys, and the apps that act for them.",
-            order: 2,
-            cost: None,
-        }]
+        vec![
+            Section {
+                tab: Tab::Access,
+                id: "people",
+                title: "People",
+                description: "Who can sign in, with their passkeys. An invite is a one-time link to register a passkey.",
+                order: 2,
+                cost: None,
+            },
+            Section {
+                tab: Tab::Access,
+                id: "delegation",
+                title: "Delegation",
+                description: "Service accounts that act for a person. Agents ask your policy before acting, as their account.",
+                order: 3,
+                cost: None,
+            },
+        ]
     }
 
     /// Each person with their picture, passkeys and the apps acting for them; and apps acting
-    /// for no one.
+    /// for no one. People and Delegation show the same data, each its own part.
     fn section_data<'a>(
         &'a self,
         cx: &'a Context<'a>,

@@ -1,6 +1,6 @@
 # Console hardening
 
-Status: mockup approved by the person on 2026-11-21; phase 1 built and landing. Branch `claude/console-hardening`.
+Status: mockup approved by the person on 2026-11-21; phases 1 to 3 built on the branch, awaiting their landing. Branch `claude/console-hardening`.
 Mockup: [pigeon Console, focused](https://claude.ai/artifact/BLdr2D7rGU344aqP5KcYhv).
 
 The console at `platform.pigeon.dev` is slow to load and sometimes shows a network error. This
@@ -114,6 +114,27 @@ offers Retry.
   goal, the exact interface, the surrounding code, the code style, and asks for one whole file.
   No brief carries a credential or a person's data.
 - **Architecture planner:** the precomputed model (1f's source).
+
+## Built, and where it departs from the plan
+
+- **Snapshots refresh from the page, not with `wait_until`.** A stale snapshot is answered with
+  `X-Snapshot-Stale: 1`, and the page asks again with `fresh=1` behind what it shows. A refresh
+  after `wait_until` would have needed a `'static` copy of the request's context. Writes don't
+  drop snapshots; the page's reload after a write asks `fresh=1`.
+- **Only Credentials and Cost keep snapshots.** People, Delegation and Approvals read the
+  Directory or the Lander and answer in well under a second.
+- **Tests: none added.** `policy_check add_test tests/smoke.rs` answers `deny`, "not in policy":
+  the `smoke-suite-fixed` rule only excepts the smoke suite, and no rule allows adding to it.
+  The existing suite passes. Verification was Playwright against the real scripts with the API
+  stubbed, at 1000 px dark and 390 px light.
+- **No warning when a credential is about to expire.** The Overview used to show one at the top
+  of the page. The Access tab now shows each credential's expiry but nothing calls attention to
+  one about to run out; the Approvals banner is only for passkey approvals.
+- **Architecture** is left to the architecture planner (session `session_015XFA1mC8Le3vJWk6HpLW2U`):
+  same contract, `{"html"}`, made ahead of the request.
+- **Executors:** `approvals.js` and the new CSS from `claude-haiku-5-5`, the `users.js` split from
+  `claude-sonnet-5-5`, each read and adjusted here. `app.js` and the server side were written
+  here.
 
 ## Results
 

@@ -36,9 +36,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use worker::{Env, Error, Method, Request, Response, Result};
 
-use crate::console::sections::{Section, Tab};
 use crate::expiry::Expiry;
-use crate::users::{Caller, User};
+use crate::users::Caller;
 use crate::{Call, Capability, Context, Expiring, Footprint, Serve, Slot, arg, unknown};
 use class::{Class, Offered, class_for};
 use config::{Job, Needs};
@@ -738,32 +737,6 @@ fn reasons(list: &[(String, String)]) -> Vec<Value> {
 impl Capability for Ci {
     fn name(&self) -> &'static str {
         "ci"
-    }
-
-    /// CI's place in the console. It reports no cost: no connector says what a run cost.
-    fn sections(&self) -> Vec<Section> {
-        vec![Section {
-            tab: Tab::Gateways,
-            id: "ci",
-            title: "CI",
-            description: "Runs routed to CI connectors.",
-            order: 2,
-            cost: None,
-        }]
-    }
-
-    fn section_data<'a>(
-        &'a self,
-        _cx: &'a Context<'a>,
-        _id: &'a str,
-        _person: &'a User,
-        _query: &'a Value,
-    ) -> Call<'a> {
-        Box::pin(async {
-            Ok(
-                json!({ "html": "<p class=\"muted\">The CI gateway records which connector ran each job and for how long, but not what it cost, so CI is not in the total yet.</p>" }),
-            )
-        })
     }
 
     fn tools(&self) -> Vec<Tool> {

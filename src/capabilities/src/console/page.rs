@@ -11,14 +11,13 @@ use worker::{Headers, Response, Result};
 pub const CSP: &str = "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 /// The scripts the page loads, in order; `passkey.js` first, since the others use its helpers.
-pub const SCRIPTS: [&str; 7] = [
+pub const SCRIPTS: [&str; 6] = [
     "/auth/passkey.js",
     "/console/app.js",
     "/console/chart.js",
-    "/console/overview.js",
     "/console/keys.js",
     "/console/users.js",
-    "/console/land.js",
+    "/console/approvals.js",
 ];
 
 /// The console's stylesheet, on top of the design system's.
@@ -66,7 +65,7 @@ pub fn asset(body: &str, content_type: &str) -> Result<Response> {
 }
 
 /// A redirect to `location`, a path on this host; a browser keeps the request's fragment, so
-/// `/secrets#NAME` lands on `/settings#NAME`.
+/// `/secrets#NAME` lands on `/access#NAME`.
 pub fn redirect(location: &str) -> Result<Response> {
     let headers = Headers::new();
     headers.set("Location", location)?;

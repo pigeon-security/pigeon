@@ -1,5 +1,6 @@
-// The Models section of the Gateways tab: a stacked bar chart of model cost per day, by family,
-// with a tooltip by pointer or keyboard and the same numbers as a table below.
+// The Cost tab: the range's total and each model family's share as stat cards, then a stacked bar
+// chart of model cost per day, by family, with a tooltip by pointer or keyboard and the same
+// numbers as a table below.
 (() => {
   const { el, money, section } = window.pigeonConsole;
   const NS = "http://www.w3.org/2000/svg";
@@ -14,7 +15,7 @@
     return Math.max(0.01, [1, 2, 2.5, 5, 10].find((m) => m * p >= raw) * p);
   };
 
-  section("models", (body, data, ctx) => {
+  section("cost", (body, data, ctx) => {
     const { days, families } = data, n = days.length;
     const totals = days.map((_, i) => families.reduce((s, f) => s + (f.costs[i] || 0), 0));
     const max = Math.max(0, ...totals);
@@ -135,6 +136,14 @@
         el("tbody", {}, ...days.map((d, i) => el("tr", {},
           cell("td", short(d)), ...families.map((f) => cell("td", money(f.costs[i] || 0))), cell("td", money(totals[i])))).reverse()),
       )));
+
+    const range = `${n} day${n === 1 ? "" : "s"}`;
+    const stat = (label, value, swatch) => el("article", { class: "card c-stat" },
+      el("span", { class: "eyebrow" }, swatch && el("i", { class: "c-swatch", style: `background:${swatch}` }), label),
+      el("span", { class: "c-stat-n", text: value }));
+    body.append(el("div", { class: "c-stats", style: "margin-bottom:24px" },
+      stat(`Total, ${range}`, money(data.cost ?? totals.reduce((s, t) => s + t, 0))),
+      ...families.map((f) => stat(f.name, money(f.total), colour(f.name)))));
 
     body.append(el("article", { class: "card", style: "gap:16px;padding:24px 28px" },
       el("div", { style: "display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px" },

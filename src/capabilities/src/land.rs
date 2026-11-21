@@ -96,6 +96,21 @@ async fn lander(env: &Env, op: &str, args: Value) -> Result<Value> {
     durable::call(env, BINDING, OBJECT, op, &args).await
 }
 
+/// The landings waiting for a person's passkey, newest first. One is live at a time, so the
+/// latest few hold every one.
+pub async fn awaiting(env: &Env) -> Result<Vec<Value>> {
+    let recent = lander(env, "list", json!({ "limit": 20 })).await?;
+    Ok(recent
+        .as_array()
+        .map(|all| {
+            all.iter()
+                .filter(|l| l["state"] == "awaiting_approval")
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
 /// Approves landing `id` for `person`, a signed-in person who passed a passkey bound to it: the
 /// console's write.
 pub async fn approve(env: &Env, id: &str, person: &str) -> Result<Value> {
@@ -293,16 +308,16 @@ impl Capability for Land {
 
     fn sections(&self) -> Vec<Section> {
         vec![Section {
-            tab: Tab::Settings,
-            id: "landing",
-            title: "Landing",
-            description: "Session branches tested, merged into main and deployed.",
-            order: 3,
+            tab: Tab::Approvals,
+            id: "approvals",
+            title: "Waiting for you",
+            description: "Only what cannot go ahead without your passkey.",
+            order: 1,
             cost: None,
         }]
     }
 
-    /// The approval setting and the latest landings.
+    /// The landings waiting for a passkey.
     fn section_data<'a>(
         &'a self,
         cx: &'a Context<'a>,
@@ -310,11 +325,7 @@ impl Capability for Land {
         _person: &'a User,
         _query: &'a Value,
     ) -> Call<'a> {
-        Box::pin(async move {
-            let approval = lander(cx.env, "approval_get", json!({})).await?;
-            let recent = lander(cx.env, "list", json!({ "limit": 10 })).await?;
-            Ok(json!({ "approval": approval, "landings": recent }))
-        })
+        Box::pin(async move { Ok(json!({ "landings": awaiting(cx.env).await? })) })
     }
 
     fn footprint(&self) -> Footprint {
@@ -376,7 +387,7 @@ impl Row {
             "id": self.id, "branch": self.branch,
             "commit": (!self.commit_sha.is_empty()).then_some(&self.commit_sha),
             "main_was": (!self.main_at.is_empty()).then_some(&self.main_at),
-            "by": self.by_name, "state": self.state,
+            "by": self.by_name, "state": self.state, "awaiting_since": self.awaiting_since,
             "needs_approval": self.approval_reason, "approved_by": self.approved_by,
             "test_job": self.test_job, "deploy_job": self.deploy_job, "detail": self.detail,
             "created_at": self.created_at, "updated_at": self.updated_at,

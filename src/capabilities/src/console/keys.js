@@ -20,7 +20,7 @@
     return post(`${path}/finish`, { ...finishBody, challenge_id: begin.challenge_id, ...answer });
   }
 
-  section("keys", (body, data, ctx) => {
+  section("credentials", (body, data, ctx) => {
     const secrets = (data.secrets && data.secrets.secrets) || [];
     const tokens = (data.proxy && data.proxy.tokens) || [];
     const secretExpiry = (data.secrets && data.secrets.expiry) || [];

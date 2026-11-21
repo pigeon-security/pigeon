@@ -1,7 +1,7 @@
 //! The console's tabs and the sections capabilities put in them. A tab is one of four fixed
-//! pages, always listed in the header's order. A section is one part of a tab; several
-//! capabilities may fill the same one, as `secrets` and `proxy` both fill Keys, and the console
-//! lists it once with every owner. Pure: no I/O and no `worker` types.
+//! pages, listed in the header's order (Approvals only while something waits). A section is one
+//! part of a tab; several capabilities may fill the same one, as `secrets` and `proxy` both fill
+//! Credentials, and the console lists it once with every owner. Pure: no I/O and no `worker` types.
 
 use serde::Serialize;
 
@@ -9,44 +9,51 @@ use serde::Serialize;
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "lowercase")]
 pub enum Tab {
-    Overview,
+    /// What waits for the person's passkey; listed only while something does.
+    Approvals,
     Architecture,
-    Gateways,
-    Settings,
+    /// Secrets and credentials, people, and delegation.
+    Access,
+    Cost,
 }
 
 impl Tab {
     /// Every tab, in the header's order.
-    pub const ALL: [Tab; 4] = [
-        Tab::Overview,
-        Tab::Architecture,
-        Tab::Gateways,
-        Tab::Settings,
-    ];
+    pub const ALL: [Tab; 4] = [Tab::Approvals, Tab::Architecture, Tab::Access, Tab::Cost];
 
-    /// Its path: `/`, `/architecture`, `/gateways`, `/settings`.
+    /// Its path: `/approvals`, `/architecture`, `/access`, `/cost`.
     pub fn path(self) -> &'static str {
         match self {
-            Tab::Overview => "/",
+            Tab::Approvals => "/approvals",
             Tab::Architecture => "/architecture",
-            Tab::Gateways => "/gateways",
-            Tab::Settings => "/settings",
+            Tab::Access => "/access",
+            Tab::Cost => "/cost",
         }
     }
 
-    /// Its title, as the header shows it.
+    /// Its title in the header.
     pub fn title(self) -> &'static str {
         match self {
-            Tab::Overview => "Overview",
+            Tab::Approvals => "Approvals",
             Tab::Architecture => "Architecture",
-            Tab::Gateways => "Gateways",
-            Tab::Settings => "Settings",
+            Tab::Access => "Access",
+            Tab::Cost => "Cost",
         }
     }
 
-    /// The tab a request path opens: exact paths only, so `/settings/x` and `/Settings` are none.
+    /// The tab at `path`, if any.
     pub fn from_path(path: &str) -> Option<Tab> {
         Tab::ALL.into_iter().find(|tab| tab.path() == path)
+    }
+}
+
+/// Where the console's old tabs went: `/gateways` to Cost and `/settings` to Access. A browser
+/// keeps the fragment, so `/settings#NAME` still lands on that secret.
+pub fn moved(path: &str) -> Option<&'static str> {
+    match path {
+        "/gateways" => Some(Tab::Cost.path()),
+        "/settings" => Some(Tab::Access.path()),
+        _ => None,
     }
 }
 
@@ -81,6 +88,9 @@ pub struct TabListing {
     pub path: &'static str,
     pub title: &'static str,
     pub sections: Vec<Listed>,
+    /// How many things wait for the person, on the Approvals tab; the page hides the tab at 0.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<usize>,
 }
 
 /// Every tab with its sections, from `(capability name, section)` pairs: tabs in the header's
@@ -97,6 +107,7 @@ pub fn tabs(declared: &[(String, Section)]) -> Vec<TabListing> {
             tab,
             path: tab.path(),
             title: tab.title(),
+            waiting: None,
             sections: listed_in(tab, &valid),
         })
         .collect()

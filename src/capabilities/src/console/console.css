@@ -128,3 +128,22 @@ details.c-table summary { font: var(--type-small); color: var(--muted); cursor: 
 .pill.expired { color: var(--ink); background: var(--accent-soft); border-color: var(--warn); font-weight: 700; }
 .c-expiry li { flex-wrap: wrap; }
 .c-expiry li > div { flex: 1 1 220px; min-width: 0; }
+
+/* Section states: loading, failed, freshness; the waiting dot on a tab and the banner above */
+.pill.warn { background: transparent; color: var(--warn); border-color: var(--warn); }
+.c-section-h { flex-direction: row; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
+.c-section-h p { flex: 0 0 100%; max-width: none; }
+.c-skel { display: grid; gap: 10px; animation: c-pulse 1.3s ease-in-out infinite; }
+.c-skel i { display: block; height: 14px; border-radius: 6px; background: var(--chip); }
+.c-skel i:nth-child(2) { width: 82%; }
+.c-skel i:nth-child(3) { width: 64%; }
+@keyframes c-pulse { 50% { opacity: .45; } }
+@media (prefers-reduced-motion: reduce) { .c-skel { animation: none; } }
+.c-fail { display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: center; border: 1px dashed var(--warn); border-radius: var(--radius-button); padding: 12px 14px; }
+.c-fail p { flex: 1; min-width: 200px; margin: 0; font: 400 14px/1.45 var(--font-sans); }
+.c-fresh { margin-left: auto; display: inline-flex; gap: 8px; align-items: baseline; font: 400 12px/1.3 var(--font-mono); color: var(--muted); }
+.c-fresh button.c-link { border: 0; background: none; padding: 0; color: var(--accent); text-decoration: underline; text-underline-offset: 3px; cursor: pointer; font: inherit; }
+.c-waiting { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--warn); margin-left: 7px; vertical-align: middle; }
+.c-banner { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; border: 1.5px solid var(--warn); border-radius: var(--radius-card); background: var(--card); padding: 12px 16px; margin-bottom: 24px; }
+.c-banner p { flex: 1; min-width: 220px; margin: 0; }
+.c-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 8px; vertical-align: -1px; }

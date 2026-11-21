@@ -473,10 +473,10 @@ impl Capability for Models {
 
     fn sections(&self) -> Vec<Section> {
         vec![Section {
-            tab: Tab::Gateways,
-            id: "models",
-            title: "Models",
-            description: "Cost through the AI Gateway. No prompts or answers are kept.",
+            tab: Tab::Cost,
+            id: "cost",
+            title: "Cost",
+            description: "Model cost through the AI Gateway, per UTC day. No prompts or answers are kept; CI reports no cost yet.",
             order: 1,
             cost: Some("Model cost"),
         }]

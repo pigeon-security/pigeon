@@ -18,7 +18,7 @@ MCP refuses it, because MCP looks up only its own token kind. The proxies refuse
 
 ### Issue
 
-Open the console's Settings → Keys → Proxy credentials (https://platform.pigeon.dev/settings#credentials; the old `/tokens` page redirects there).
+Open the console's Access → Secrets and credentials → Proxy credentials (https://platform.pigeon.dev/access#credentials; the old `/tokens` and `/settings` pages redirect there).
 
 - Seeing the list takes the console's sign-in.
 - Issuing takes a passkey approval bound to the label and the lifetime.
@@ -44,7 +44,7 @@ Revoke from the same page. Revoking takes a passkey approval bound to the creden
 
 ### Expiry
 
-The console shows every credential's expiry: the Overview lists them all and warns at the top when one expires within 7 days or has expired; Settings → Keys shows it on each secret and each proxy credential. A proxy credential that has expired stays listed, flagged, for two weeks. The MCP tool `credentials_expiry` answers the same list, read-only. Nothing shows a value.
+The console's Access tab shows every credential's expiry, on each secret and each proxy credential. A proxy credential that has expired stays listed, flagged, for two weeks. The MCP tool `credentials_expiry` answers the same list, read-only. Nothing shows a value.
 
 | Credential | How its expiry is known |
 | --- | --- |
@@ -57,7 +57,7 @@ The console shows every credential's expiry: the Overview lists them all and war
 
 Each secret is checked against its issuer at most once a day (a failed check is retried after an hour), and again right after a new value is set. An issuer that refuses a token outright (a 401, or Cloudflare saying it is not `active`) shows it as expired. A capability reports its secrets' expiry with `Capability::secret_expiry`; the cache and the statuses are in `src/capabilities/src/expiry.rs`.
 
-To replace one before it bites: a proxy credential, issue a new one, save it as the environment's network secret, then revoke the old one; a secret, set its new value on Settings → Keys.
+To replace one before it bites: a proxy credential, issue a new one, save it as the environment's network secret, then revoke the old one; a secret, set its new value on Access → Secrets and credentials.
 
 ## Git
 

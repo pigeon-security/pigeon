@@ -1,5 +1,7 @@
 // The console's shell: the sign-in panel, the header with its tabs and account card, and each
-// tab's sections. The other console scripts register their renderers through
+// tab's sections. Every section loads on its own: a skeleton while it waits, one quiet retry
+// when the network drops, then a message with Retry; one slow or failed section never holds up
+// the rest. The other console scripts register their renderers through
 // window.pigeonConsole before the first render.
 (() => {
   const PP = window.pigeonPasskey;
@@ -7,7 +9,8 @@
   const site = root.dataset.site || "pigeon";
   const IDLE_MS = 30 * 60 * 1000;
   const sections = {}, tabFns = {};
-  let tabs = [], timer = null, menuEl = null, meBtn = null, gen = 0;
+  const TIMEOUT_MS = 12000, POLL_MS = 30000;
+  let tabs = [], timer = null, poller = null, menuEl = null, meBtn = null, gen = 0;
 
   const el = (tag, attrs, ...kids) => {
     const n = document.createElement(tag);
@@ -20,7 +23,11 @@
     for (const c of kids.flat()) if (c != null && c !== false) n.append(c instanceof Node ? c : String(c));
     return n;
   };
-  const money = (n) => "$" + Number(n || 0).toFixed(2);
+  // Cents, or four places for a cost under one cent that is not nothing.
+  const money = (n) => {
+    const v = Number(n || 0);
+    return "$" + (v > 0 && v < 0.01 ? v.toFixed(4) : v.toFixed(2));
+  };
 
   // A credential's expiry as a pill: its status, and the date or why it is not known. A row
   // carries only names, dates and statuses, never a value.
@@ -48,11 +55,31 @@
     try { const t = await r.text(); try { const j = JSON.parse(t); msg = j.error || j.message || t; } catch { msg = t || msg; } } catch {}
     throw new Error(msg);
   };
+  // A GET that gives up after TIMEOUT_MS. A dropped connection or a timeout is marked
+  // `retry`, as is the server's own 504; meta, when given, gets the snapshot's time and staleness.
   const get = async (path, meta) => {
-    const r = await fetch(path, { credentials: "same-origin" });
-    if (!r.ok) await fail(r);
+    const abort = new AbortController();
+    const t = setTimeout(() => abort.abort(), TIMEOUT_MS);
+    let r;
+    try {
+      r = await fetch(path, { credentials: "same-origin", signal: abort.signal });
+    } catch (e) {
+      const err = new Error(abort.signal.aborted
+        ? `No answer within ${TIMEOUT_MS / 1000} seconds.`
+        : "The connection dropped before an answer came.");
+      err.retry = true;
+      throw err;
+    } finally {
+      clearTimeout(t);
+    }
+    if (!r.ok) {
+      try { await fail(r); } catch (e) { if (r.status === 504 || r.status === 503) e.retry = true; throw e; }
+    }
     seen();
-    if (meta) meta.stale = r.headers.get("X-Snapshot-Stale") === "1";
+    if (meta) {
+      meta.stale = r.headers.get("X-Snapshot-Stale") === "1";
+      meta.at = Number(r.headers.get("X-Snapshot-At")) || null;
+    }
     return r.json();
   };
   const post = async (path, body) => {
@@ -72,7 +99,7 @@
 
   function signIn() {
     api.me = null; gen++;
-    clearInterval(timer); timer = null; menuEl = meBtn = null;
+    clearInterval(timer); timer = null; clearInterval(poller); poller = null; menuEl = meBtn = null;
     const status = el("p", { "data-status": true, role: "status" });
     const btn = el("button", { class: "button", type: "button", text: "Sign in with passkey", onclick: async () => {
       btn.disabled = true;
@@ -93,20 +120,36 @@
 
   async function start() {
     try {
-      api.me = await get("/console/api/me");
-      tabs = await get("/console/api/tabs");
+      [api.me, tabs] = await Promise.all([get("/console/api/me"), get("/console/api/tabs")]);
       render();
+      clearInterval(poller);
+      poller = setInterval(poll, POLL_MS);
     } catch (e) {
       if (!e.auth) root.replaceChildren(el("main", { class: "c-signin" },
         el("section", { class: "card" }, el("p", { role: "alert", text: e.message || String(e) }))));
     }
   }
 
+  // While the page is open and visible, the tab list is asked again, so a landing that starts
+  // waiting for the person shows up without a reload, and one approved elsewhere goes.
+  async function poll() {
+    if (!api.me || document.visibilityState !== "visible") return;
+    try {
+      const next = await get("/console/api/tabs");
+      const was = waiting(tabs), now = waiting(next);
+      tabs = next;
+      if (was !== now) render();
+    } catch {}
+  }
+  const waiting = (list) => list.reduce((n, t) => n + (t.waiting || 0), 0);
+  // The Approvals tab is listed with how many wait; at none it is not shown.
+  const visible = () => tabs.filter((t) => t.waiting !== 0);
+
   const avatar = (me) => me.avatar
     ? el("img", { class: "c-avatar", src: me.avatar, alt: "", width: 44, height: 44 })
     : el("span", { class: "c-avatar c-initials", "aria-hidden": "true", text: me.initials });
 
-  const navigate = (href) => { history.pushState(null, "", href); render(); };
+  const navigate = (href) => { history.pushState(null, "", href); scrolledTo = null; render(); };
   const linkClick = (e) => {
     if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
     e.preventDefault(); navigate(e.currentTarget.getAttribute("href"));
@@ -170,7 +213,7 @@
         } }),
         el("button", { class: "button c-quiet", type: "button", text: "Change picture", onclick: () => file.click() }),
         file,
-        el("a", { href: "/settings#users", text: "Manage passkeys", onclick: (e) => { setMenu(false); linkClick(e); } })),
+        el("a", { href: "/access#people", text: "Manage passkeys", onclick: (e) => { setMenu(false); linkClick(e); } })),
       status);
     meBtn = el("button", { class: "c-me", type: "button", "aria-expanded": "false", "aria-controls": "c-menu",
       "aria-label": `${me.name}: account`, onclick: () => setMenu(menuEl.hidden) }, avatar(me));
@@ -180,60 +223,93 @@
       el("a", { class: "c-brand", href: "/", onclick: linkClick },
         el("img", { class: "c-icon", src: "/console/icon.png", alt: site, width: 44, height: 44 })),
       el("nav", { class: "c-tabs", "aria-label": "Console" },
-        tabs.map((t) => el("a", { class: "c-tab", href: t.path, "aria-current": t === cur ? "page" : null, text: t.title, onclick: linkClick }))),
+        visible().map((t) => el("a", { class: "c-tab", href: t.path, "aria-current": t === cur ? "page" : null, onclick: linkClick },
+          t.title, t.waiting ? el("span", { class: "c-waiting", role: "img", "aria-label": `${t.waiting} waiting` }) : null))),
       el("div", { class: "c-right" }, time, el("div", { class: "c-me-wrap" }, meBtn, menuEl)));
   }
 
-  // A section answered from a stale snapshot is shown, then loaded fresh behind it. A reload
-  // after a write always asks for a fresh answer.
-  async function loadSection(s, body, days, g, fresh, behind) {
+  // "updated 4 min ago" for a snapshot's time.
+  const ago = (at) => {
+    const m = Math.floor((Date.now() - at) / 60000);
+    return m < 1 ? "updated just now" : m < 60 ? `updated ${m} min ago` : `updated ${Math.floor(m / 60)} h ago`;
+  };
+
+  // Loads section s into body and its freshness line into fresh. A section answered from a
+  // stale snapshot is shown, then loaded fresh behind it; if that fails, the snapshot stays. A
+  // reload after a write always asks fresh. A dropped connection is retried once, quietly.
+  async function loadSection(s, body, fresh, days, g, opts = {}) {
+    const { refresh, behind, retried } = opts;
+    if (!behind) body.replaceChildren(el("div", { class: "card c-skel", "aria-busy": "true", "aria-label": `Loading ${s.title}` }, el("i"), el("i"), el("i")));
+    const again = (o) => loadSection(s, body, fresh, days, g, o);
     try {
       const meta = {};
-      const data = await get(`/console/api/section/${encodeURIComponent(s.id)}?days=${days}${fresh ? "&fresh=1" : ""}`, meta);
+      const data = await get(`/console/api/section/${encodeURIComponent(s.id)}?days=${days}${refresh ? "&fresh=1" : ""}`, meta);
       if (g !== gen) return;
       body.replaceChildren();
       const fn = sections[s.id];
-      if (meta.stale && !fresh) setTimeout(() => loadSection(s, body, days, g, true, true), 0);
-      if (fn) await fn(body, data, { days, reload: (d) => loadSection(s, body, d ?? days, gen, true) });
+      const ctx = { days, reload: (d) => loadSection(s, body, fresh, d ?? days, gen, { refresh: true }) };
+      if (fn) await fn(body, data, ctx);
       else if (data && typeof data.html === "string") body.innerHTML = data.html; // the server's own architecture drawing
       else body.append(el("p", { class: "muted", text: "Nothing to show yet." }));
+      toHash();
+      fresh.replaceChildren();
+      if (meta.at) fresh.append(meta.stale ? "refreshing…" : ago(meta.at),
+        el("button", { class: "c-link", type: "button", text: "refresh", onclick: () => ctx.reload() }));
+      if (meta.stale && !refresh) again({ refresh: true, behind: true });
     } catch (e) {
+      if (g !== gen || e.auth) return;
+      if (e.retry && !retried) return setTimeout(() => again({ ...opts, retried: true }), 800);
       // A refresh behind a shown snapshot that fails leaves the snapshot in place.
-      if (g !== gen || e.auth || behind) return;
-      body.replaceChildren(el("p", { class: "c-error", role: "alert", text: e.message || String(e) }));
+      if (behind) { fresh.replaceChildren("refresh failed", el("button", { class: "c-link", type: "button", text: "retry", onclick: () => again({ refresh: true }) })); return; }
+      body.replaceChildren(el("div", { class: "c-fail", role: "alert" },
+        el("p", { text: `${s.title} did not load: ${e.message || e}. The rest of the console is unaffected.` }),
+        el("button", { class: "button c-quiet", type: "button", text: "Retry", onclick: () => again({ refresh }) })));
     }
   }
 
   async function render() {
     if (!api.me) return;
     const g = ++gen;
-    const cur = tabs.find((t) => t.path === location.pathname)
-      || tabs.find((t) => t.tab === "overview") || tabs[0];
+    const shown = visible();
+    const cur = shown.find((t) => t.path === location.pathname) || shown[0];
     const main = el("main", { id: "c-main" }, el("h1", { class: "sr-only", text: cur ? cur.title : site }));
     root.replaceChildren(header(cur), main);
     if (!cur) return;
+    const waits = waiting(tabs);
+    if (waits && cur.tab !== "approvals") {
+      const at = tabs.find((t) => t.tab === "approvals");
+      main.append(el("div", { class: "c-banner", role: "status" },
+        el("span", { class: "pill warn", text: "needs you" }),
+        el("p", { text: `${waits === 1 ? "A landing waits" : `${waits} landings wait`} for your passkey.` }),
+        el("a", { class: "button c-quiet", href: at ? at.path : "/approvals", text: "Review", onclick: linkClick })));
+    }
     try {
       if (tabFns[cur.tab]) await tabFns[cur.tab](main, { tabs });
       else {
         const list = [...(cur.sections || [])].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
-        await Promise.all(list.map((s) => {
+        for (const s of list) {
           const body = el("div", { class: "c-body" });
-          // The tab already names a section titled like it, so its heading is for screen readers only.
-          const head = s.title === cur.title
-            ? el("h2", { id: `h-${s.id}`, class: "sr-only", text: s.title })
-            : el("div", { class: "c-section-h" }, el("h2", { id: `h-${s.id}`, text: s.title }),
-              s.description && el("p", { text: s.description }));
+          const fresh = el("span", { class: "c-fresh" });
+          const head = el("div", { class: "c-section-h" }, el("h2", { id: `h-${s.id}`, text: s.title }), fresh,
+            s.description && el("p", { text: s.description }));
           main.append(el("section", { class: "c-section", id: s.id, "aria-labelledby": `h-${s.id}` }, head, body));
-          return loadSection(s, body, 7, g);
-        }));
+          loadSection(s, body, fresh, 7, g); // each on its own; none waits for another
+        }
       }
     } catch (e) {
       if (!e.auth && g === gen) main.append(el("p", { class: "c-error", role: "alert", text: e.message || String(e) }));
     }
-    if (g !== gen || !location.hash) return;
+    if (g === gen) toHash();
+  }
+
+  // Scrolls to the element the fragment names, once it exists: a section at once, a secret's
+  // row when its section has loaded. Only the first time it appears, so a refresh doesn't jump.
+  let scrolledTo = null;
+  function toHash() {
+    if (!location.hash || scrolledTo === location.href) return;
     let target = null;
     try { target = document.getElementById(decodeURIComponent(location.hash.slice(1))); } catch {}
-    if (target) target.scrollIntoView({ block: "start" });
+    if (target) { scrolledTo = location.href; target.scrollIntoView({ block: "start" }); }
   }
 
   addEventListener("popstate", () => render());

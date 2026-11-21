@@ -255,7 +255,7 @@ impl Tokens {
     async fn serve(&self, cx: &Context<'_>, mut req: Request) -> Result<Response> {
         let path = req.path();
         match (req.method(), path.as_str()) {
-            (Method::Get, "/tokens") => page::redirect("/settings#credentials"),
+            (Method::Get, "/tokens") => page::redirect("/access#credentials"),
             (
                 Method::Post,
                 "/tokens/issue/begin"

@@ -1,5 +1,8 @@
 # The console
 
+Superseded in part by [console-hardening.md](console-hardening.md): the tabs are now Approvals,
+Architecture, Access and Cost.
+
 Status: all three phases built and handed back together, at the person's request, awaiting
 deploy. Departures from the plan: the three passkey-bound writes live in `console/writes.rs`
 (pure: names, targets, purposes) with their handlers in `console.rs`, written by this session;

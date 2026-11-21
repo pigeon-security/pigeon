@@ -1,5 +1,6 @@
-// The Users section of the console's Settings tab: each person, their passkeys, and the apps (MCP
-// clients and agents) acting for them. Every write (removing a passkey, disconnecting an app,
+// The Access tab of the console has two sections. People lists each person and their passkeys, and
+// lets you invite someone new. Delegation lists the apps (MCP clients and agents) acting for each
+// person, and any that act for no one. Every write (removing a passkey, disconnecting an app,
 // inviting a person) is one passkey ceremony bound to what it changes.
 (() => {
   const { el, post, section } = window.pigeonConsole;
@@ -72,7 +73,15 @@
     return el("article", { class: "card", style: "gap:14px" },
       el("div", { class: "card-h" }, avatar, el("h3", { text: p.name }), el("span", { class: "pill accent", text: "person" })),
       block(`Passkeys · ${p.passkeys.length}`, keys),
-      block(`Apps · ${p.apps.length}`, appList(p.apps, status, ctx)),
+      status);
+  }
+
+  // One card per person who has at least one app acting for them.
+  function delegationCard(p, ctx) {
+    const status = statusLine();
+    return el("article", { class: "card", style: "gap:14px" },
+      el("h3", { text: `Acting for ${p.name}` }),
+      appList(p.apps, status, ctx),
       status);
   }
 
@@ -110,22 +119,30 @@
     return card;
   }
 
-  section("users", (body, data, ctx) => {
+  section("people", (body, data, ctx) => {
     const invite = inviteCard(ctx);
-    const head = el("div", { style: "display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px" },
-      el("h3", { text: "People" }),
+    // The section's own heading names it; the row holds only the invite button.
+    const head = el("div", { style: "display:flex;justify-content:flex-end;align-items:center;flex-wrap:wrap;gap:12px" },
       el("button", { class: "button c-quiet", type: "button", text: "Invite a person", onclick: () => {
         invite.hidden = !invite.hidden;
         if (!invite.hidden) invite.querySelector("input").focus();
       } }));
     const root = el("div", { class: "layer", style: "gap:16px" }, head, invite,
       ...(data.people || []).map((p) => personCard(p, ctx)));
+    body.append(root);
+  });
+
+  section("delegation", (body, data, ctx) => {
+    const root = el("div", { class: "layer", style: "gap:16px" });
+    const acting = (data.people || []).filter((p) => p.apps && p.apps.length);
     const unlinked = data.unlinked || [];
+    root.append(...acting.map((p) => delegationCard(p, ctx)));
     if (unlinked.length) {
       const status = statusLine();
       root.append(el("article", { class: "card accent" },
         el("h3", { text: "Not acting for anyone" }), appList(unlinked, status, ctx), status));
     }
+    if (!acting.length && !unlinked.length) root.append(appList([], null, ctx));
     body.append(root);
   });
 })();
