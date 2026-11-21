@@ -355,13 +355,19 @@ fn mcp_tools() -> Vec<mcp::Tool> {
         mcp::Tool {
             name: "deploy_token",
             description: "Mint a short-lived Cloudflare API token for `wrangler deploy` of this \
-                          account's Workers: Workers Scripts Write, Account Settings Read and \
-                          Secrets Store Read. Pass it as CLOUDFLARE_API_TOKEN, then revoke it \
-                          with revoke_api_token.",
+                          account's Workers: by default Workers Scripts Write, Account Settings \
+                          Read and Secrets Store Write (binding a Secrets Store secret needs \
+                          Write). Pass it as CLOUDFLARE_API_TOKEN, then revoke it with \
+                          revoke_api_token.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "ttl": { "type": "integer", "description": "Seconds; 1800 by default, 3600 at most." }
+                    "ttl": { "type": "integer", "description": "Seconds; 1800 by default, 3600 at most." },
+                    "permissions": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Account-scoped permission group names, instead of the default."
+                    }
                 }
             }),
         },
@@ -381,7 +387,7 @@ fn mcp_tools() -> Vec<mcp::Tool> {
 const DEPLOY_PERMISSIONS: [&str; 3] = [
     "Workers Scripts Write",
     "Account Settings Read",
-    "Secrets Store Read",
+    "Secrets Store Write",
 ];
 
 /// A Cloudflare API token handed to the caller, which is behind Access.
@@ -393,12 +399,19 @@ struct ApiToken {
     account_id: String,
 }
 
-/// Mints a deploy token living `ttl` seconds (30 minutes by default, an hour at most).
-async fn deploy_token(env: &Env, ttl: Option<u64>) -> Result<ApiToken> {
+/// Mints a deploy token living `ttl` seconds (30 minutes by default, an hour at most), holding
+/// `permissions` on the account, or [`DEPLOY_PERMISSIONS`].
+async fn deploy_token(
+    env: &Env,
+    ttl: Option<u64>,
+    permissions: Option<Vec<String>>,
+) -> Result<ApiToken> {
     let account = account(env).await?;
+    let permissions = permissions.unwrap_or_else(|| DEPLOY_PERMISSIONS.map(String::from).to_vec());
+    let names: Vec<&str> = permissions.iter().map(String::as_str).collect();
     let request = MintRequest {
         purpose: "deploy".into(),
-        policies: vec![Policy::new(Scope::Account, &DEPLOY_PERMISSIONS)],
+        policies: vec![Policy::new(Scope::Account, &names)],
         ttl_secs: ttl.unwrap_or(1_800).min(3_600),
     };
     let minted = tokens::mint(&account.parent, &account.id, &request).await?;
@@ -448,7 +461,14 @@ async fn mcp_post(mut req: Request, env: &Env) -> Result<Response> {
             "setup_source" => to_value(setup_source(env).await?),
             "setup_platform" => to_value(setup_platform(env).await?),
             "setup_site" => to_value(setup_site(env).await?),
-            "deploy_token" => to_value(deploy_token(env, args["ttl"].as_u64()).await?),
+            "deploy_token" => {
+                let permissions = args["permissions"].as_array().map(|a| {
+                    a.iter()
+                        .filter_map(|p| p.as_str().map(String::from))
+                        .collect()
+                });
+                to_value(deploy_token(env, args["ttl"].as_u64(), permissions).await?)
+            }
             "revoke_api_token" => {
                 let id = args["id"]
                     .as_str()
