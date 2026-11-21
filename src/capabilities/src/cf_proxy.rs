@@ -10,7 +10,9 @@
 //!
 //! Besides a proxy credential, it takes one other bearer: the CI job token of the deploy job of
 //! the live landing, while that landing is `deploying` and for its commit only
-//! (`land::deploy_caller`). Its calls pass the same allowlist.
+//! (`land::deploy_caller`). Its calls pass the same allowlist. `GET /cf/grant` asks only that:
+//! 200 for the live deploying landing's job token, 403 otherwise, so a deploy job not started by
+//! a landing stops before its build.
 
 use pigeon_core::mcp::Tool;
 use pigeon_core::tokens::{self, Policy, Scoped};
@@ -23,6 +25,32 @@ use crate::{Call, Capability, Context, Serve, unknown};
 
 /// Where the proxy is mounted, standing for `https://api.cloudflare.com/client/v4`.
 pub const PREFIX: &str = "/cf/client/v4";
+
+/// The pre-flight route: `GET /cf/grant` tells a CI job whether its job token is the deploy grant
+/// of the live landing. It sits outside [`PREFIX`], never reaches the allowlist and never calls
+/// the API.
+pub const GRANT_PATH: &str = "/cf/grant";
+
+/// Why a job token is turned away from this proxy.
+const JOB_TOKEN_REFUSED: &str = "a job token reaches this proxy only as the deploy job of a landing that is deploying its commit";
+
+/// The answer of `GET /cf/grant`, as a status and a message: `method` is the request method,
+/// `job_token` whether the bearer is a CI job token, `granted` whether that token is the deploy
+/// grant of the live landing deploying its commit.
+pub fn grant_answer(method: &str, job_token: bool, granted: bool) -> (u16, &'static str) {
+    if method != "GET" {
+        (405, "only GET answers /cf/grant")
+    } else if !job_token {
+        (403, "/cf/grant answers only a CI job token")
+    } else if !granted {
+        (403, JOB_TOKEN_REFUSED)
+    } else {
+        (
+            200,
+            "this job token is the deploy grant of the landing deploying its commit",
+        )
+    }
+}
 
 /// The API the proxy passes calls on to.
 const API: &str = "https://api.cloudflare.com/client/v4";
@@ -664,17 +692,41 @@ impl CfProxy {
         if url.host_str() != Some(self.host.as_str()) {
             return refuse(404, "not found");
         }
+        if url.path() == GRANT_PATH {
+            let token = bearer(&req)?.filter(|t| t.starts_with(crate::ci::token::PREFIX));
+            let job_token = token.is_some();
+            let method = req.method();
+            let name: &str = method.as_ref();
+            let found = match &token {
+                Some(t) if name == "GET" => {
+                    crate::land::deploy_caller(cx.env, t, &self.land_repo).await?
+                }
+                _ => None,
+            };
+            let granted = found.is_some();
+            *caller = found;
+            let (status, msg) = grant_answer(name, job_token, granted);
+            if status == 200 {
+                return Ok((
+                    Response::from_json(&json!({
+                        "success": true,
+                        "errors": [],
+                        "messages": [],
+                        "result": {"granted": true, "message": msg}
+                    }))?
+                    .with_status(200),
+                    None,
+                ));
+            }
+            return refuse(status, msg);
+        }
         *caller = match bearer(&req)? {
             // A landing's deploy job, with its own job token.
             Some(t) if t.starts_with(crate::ci::token::PREFIX) => {
                 match crate::land::deploy_caller(cx.env, &t, &self.land_repo).await? {
                     Some(c) => Some(c),
                     None => {
-                        return refuse(
-                            403,
-                            "a job token reaches this proxy only as the deploy job of a landing \
-                             that is deploying its commit",
-                        );
+                        return refuse(403, JOB_TOKEN_REFUSED);
                     }
                 }
             }
@@ -847,6 +899,17 @@ mod tests {
 
     fn full_query(e: &Allowed) -> Option<String> {
         (!e.query.is_empty()).then(|| e.query.join("&").replace("{queue}", Q[0]))
+    }
+
+    #[test]
+    fn the_grant_route_answers_only_a_deploying_landings_job_token() {
+        assert_eq!(grant_answer("POST", true, true).0, 405);
+        assert_eq!(grant_answer("GET", false, false).0, 403);
+        assert_eq!(grant_answer("GET", false, true).0, 403);
+        assert_eq!(grant_answer("GET", true, false), (403, JOB_TOKEN_REFUSED));
+        assert_eq!(grant_answer("GET", true, true).0, 200);
+        assert!(!GRANT_PATH.starts_with(PREFIX));
+        assert!(allowed("GET", GRANT_PATH, None, &scope(A, S)).is_err());
     }
 
     #[test]

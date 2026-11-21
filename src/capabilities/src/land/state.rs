@@ -3,14 +3,14 @@
 //!
 //! ```text
 //! checking ─► testing ─► [awaiting_approval] ─► merging ─► deploying ─► landed
-//!                │               │                 │            │
-//!                ▼               ▼                 ▼            ▼
-//!           test_failed       expired         merge_refused  deploy_failed
+//!    │           │               │                 │            │
+//!    ▼           ▼               ▼                 ▼            ▼
+//! refused   test_failed       expired         merge_refused  deploy_failed
 //! ```
 //!
-//! `checking` happens inside the `land` call: a landing that fails it is `refused` and never
-//! stored. Any live state can become `error` (the gateway failed) or, before `merging`,
-//! `cancelled`.
+//! `checking` runs in the Lander's alarm after `land` has answered: a landing that fails a check
+//! ends `refused`, with the reason. Any live state can become `error` (the gateway failed) or,
+//! before `merging`, `cancelled`.
 
 use serde::{Deserialize, Serialize};
 
@@ -18,11 +18,13 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum State {
+    Checking,
     Testing,
     AwaitingApproval,
     Merging,
     Deploying,
     Landed,
+    Refused,
     TestFailed,
     Expired,
     MergeRefused,
@@ -32,12 +34,14 @@ pub enum State {
 }
 
 impl State {
-    pub const ALL: [State; 11] = [
+    pub const ALL: [State; 13] = [
+        State::Checking,
         State::Testing,
         State::AwaitingApproval,
         State::Merging,
         State::Deploying,
         State::Landed,
+        State::Refused,
         State::TestFailed,
         State::Expired,
         State::MergeRefused,
@@ -48,11 +52,13 @@ impl State {
 
     pub fn name(self) -> &'static str {
         match self {
+            State::Checking => "checking",
             State::Testing => "testing",
             State::AwaitingApproval => "awaiting_approval",
             State::Merging => "merging",
             State::Deploying => "deploying",
             State::Landed => "landed",
+            State::Refused => "refused",
             State::TestFailed => "test_failed",
             State::Expired => "expired",
             State::MergeRefused => "merge_refused",
@@ -70,19 +76,30 @@ impl State {
     pub fn terminal(self) -> bool {
         !matches!(
             self,
-            State::Testing | State::AwaitingApproval | State::Merging | State::Deploying
+            State::Checking
+                | State::Testing
+                | State::AwaitingApproval
+                | State::Merging
+                | State::Deploying
         )
     }
 
     /// Whether `main` may still be untouched by it: it can be cancelled.
     pub fn cancellable(self) -> bool {
-        matches!(self, State::Testing | State::AwaitingApproval)
+        matches!(
+            self,
+            State::Checking | State::Testing | State::AwaitingApproval
+        )
     }
 }
 
 /// What the gateway saw of a landing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Seen {
+    /// Its checks passed.
+    Checked,
+    /// A check refused it.
+    CheckRefused,
     /// Its CI job (test or deploy) ended: passed or not.
     JobEnded { passed: bool },
     /// A person approved it.
@@ -106,6 +123,8 @@ pub fn next(state: State, needs_approval: bool, seen: &Seen) -> Option<State> {
     let to = match (state, seen) {
         (s, Seen::Failed) if !s.terminal() => Error,
         (s, Seen::Cancel) if s.cancellable() => Cancelled,
+        (Checking, Seen::Checked) => Testing,
+        (Checking, Seen::CheckRefused) => Refused,
         (Testing, Seen::JobEnded { passed: true }) if needs_approval => AwaitingApproval,
         (Testing, Seen::JobEnded { passed: true }) => Merging,
         (Testing, Seen::JobEnded { passed: false }) => TestFailed,
@@ -123,6 +142,8 @@ pub fn next(state: State, needs_approval: bool, seen: &Seen) -> Option<State> {
 /// Whether a landing may move from `from` to `to` at all: what [`next`] can answer.
 pub fn allowed(from: State, to: State) -> bool {
     let seen = [
+        Seen::Checked,
+        Seen::CheckRefused,
         Seen::JobEnded { passed: true },
         Seen::JobEnded { passed: false },
         Seen::Approved,
@@ -255,6 +276,10 @@ mod tests {
     #[test]
     fn the_happy_paths_with_and_without_approval() {
         let passed = Seen::JobEnded { passed: true };
+        assert_eq!(
+            next(State::Checking, false, &Seen::Checked),
+            Some(State::Testing)
+        );
         assert_eq!(next(State::Testing, false, &passed), Some(State::Merging));
         assert_eq!(
             next(State::Testing, true, &passed),
@@ -269,6 +294,36 @@ mod tests {
             Some(State::Deploying)
         );
         assert_eq!(next(State::Deploying, true, &passed), Some(State::Landed));
+    }
+
+    #[test]
+    fn checking_comes_first_and_refuses_on_its_own() {
+        assert_eq!(
+            next(State::Checking, false, &Seen::Checked),
+            Some(State::Testing)
+        );
+        assert_eq!(
+            next(State::Checking, false, &Seen::CheckRefused),
+            Some(State::Refused)
+        );
+        assert_eq!(
+            next(State::Checking, false, &Seen::Cancel),
+            Some(State::Cancelled)
+        );
+        assert_eq!(
+            next(State::Checking, false, &Seen::Failed),
+            Some(State::Error)
+        );
+        assert_eq!(
+            next(State::Checking, false, &Seen::JobEnded { passed: true }),
+            None
+        );
+        assert_eq!(next(State::Testing, false, &Seen::Checked), None);
+        assert_eq!(next(State::Testing, false, &Seen::CheckRefused), None);
+        assert!(!allowed(State::Checking, State::Merging));
+        assert!(!allowed(State::Checking, State::Landed));
+        assert!(!State::Checking.terminal());
+        assert!(State::Refused.terminal());
     }
 
     #[test]

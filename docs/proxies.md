@@ -165,6 +165,8 @@ The container calls are limited to this Worker's own containers. `{namespace}` m
 
 Each call gets a Cloudflare token with only that call's permissions. The token lives 5 minutes and is revoked before the answer returns.
 
+Outside `/cf/client/v4`, `GET /cf/grant` answers whether the bearer is a CI job token holding the deploy grant of the landing that is deploying its commit: 200 if so, 403 otherwise (a proxy credential included). It passes nothing on; the `deploy` job calls it before its build so a job submitted by hand stops at once.
+
 Anything else is refused in Cloudflare's error shape, with a message starting "pigeon's proxy does not allow ...".
 
 ### Deploying

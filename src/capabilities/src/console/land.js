@@ -8,7 +8,7 @@
   const statusLine = () => el("p", { "data-status": "", role: "status" });
   const short = (c) => (c || "").slice(0, 12);
   const branch = (b) => (b || "").replace(/^refs\/heads\//, "");
-  const tone = { landed: "good", awaiting_approval: "accent", testing: "", merging: "", deploying: "" };
+  const tone = { landed: "good", awaiting_approval: "accent", checking: "", testing: "", merging: "", deploying: "" };
 
   async function write(action, target) {
     const begin = await post(`/console/write/${action}/begin`, { target });
@@ -51,7 +51,7 @@
     const status = statusLine();
     const rows = [
       ["Branch", branch(l.branch)],
-      ["Commit", short(l.commit)],
+      l.commit && ["Commit", short(l.commit)],
       ["By", l.by],
       ["Started", when(l.created_at)],
       l.finished_at && ["Finished", when(l.finished_at)],
@@ -63,6 +63,10 @@
       el("div", { class: "card-h" }, el("h3", { text: `Landing ${l.id}` }),
         el("span", { class: `pill ${tone[l.state] || ""}`, text: l.state.replace(/_/g, " ") })),
       el("dl", { class: "c-kv" }, ...rows.flatMap(([k, v]) => [el("dt", { text: k }), el("dd", { text: String(v) })])));
+    if (l.state === "checking") {
+      card.append(el("p", { class: "muted", style: "margin:0",
+        text: "Checking the branch: its tip, that it is a fast-forward of main, and whether it needs approval." }));
+    }
     if (l.state === "awaiting_approval") {
       const btn = el("button", { class: "button", type: "button", text: `Approve ${short(l.commit)}`,
         onclick: () => run(btn, "land-approve", l.id, status, ctx) });
@@ -77,6 +81,6 @@
       settingCard(data.approval, ctx),
       list.length
         ? el("div", { class: "layer", style: "gap:12px" }, ...list.map((l) => landingCard(l, ctx)))
-        : el("p", { class: "muted", text: "No landings yet. A session lands its branch with the land tool." })));
+        : el("p", { class: "muted", text: "No landings yet. A session lands its branch with the land tool; it starts checking at once and shows here." })));
   });
 })();

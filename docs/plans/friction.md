@@ -153,12 +153,16 @@ checking ─► testing ─► [awaiting_approval] ─► merging ─► deployi
 
 Any live state can also become `error` (the gateway failed) or `cancelled` (`land_cancel`).
 
-1. **checking.** `branch` must be under `refs/heads/claude/` (given as `claude/x` or the full
-   ref). Its tip is read from the repository; with `commit`, the tip must equal it. The commit
-   must be a fast-forward of `main` (main's tip is in its history, or is it). Only one landing
-   is live at a time. Whether it needs approval is decided here (below).
-2. **testing.** The gateway submits CI job `test` at the commit (through the same dispatch as
-   `call`, tagged with the caller and `task: land <id>`), and follows it.
+1. **checking.** `land` itself checks only what is cheap: the caller, that `branch` is under
+   `refs/heads/claude/` (given as `claude/x` or the full ref), and that `commit`, when given, is a
+   full commit id. It stores the landing as `checking` and answers its id at once (only one
+   landing is live at a time, checked atomically in the `Lander`). The `Lander`'s alarm then
+   reads the branch's tip (with `commit`, the tip must equal it), checks the commit is a
+   fast-forward of `main` (main's tip is in its history, or is it), and decides whether it needs
+   approval (below). A failed check ends the landing `refused`, with the reason in its detail;
+   a gateway failure is retried, then `error`.
+2. **testing.** The `Lander` submits CI job `test` at the commit (through the same dispatch as
+   `call`, as the caller, tagged `task: land <id> test`), and follows it.
 3. **awaiting_approval**, only when approval is needed: a person approves on the console with a
    passkey bound to this landing and commit. It expires after 24 hours.
 4. **merging.** The platform moves `main` to the commit through its own git path: a write token
@@ -176,7 +180,8 @@ Any live state can also become `error` (the gateway failed) or `cancelled` (`lan
 
 `land_status {id?}` answers a landing (the latest when no id): its state, each step with its time
 and detail, the CI jobs with their states and URLs, the approval, and whether the note was
-pushed. `land_cancel {id}` stops a landing before `merging` (it cancels its CI job).
+pushed. `land_cancel {id}` stops a landing before `merging` (`checking`, `testing` or
+`awaiting_approval`; it cancels its CI job).
 
 ### The deploy grant: job token to `/cf/`
 
@@ -187,6 +192,10 @@ The `deploy` job reaches the Cloudflare API proxy with its own CI job token, nev
   deploy job of the live landing, in state `deploying`, for the grant's commit. Only then does
   the call go on, with the same allowlist and per-call tokens as any other; the audit line names
   `land <id> deploy`.
+- `GET /cf/grant` asks only that question: it answers 200 for the live deploying landing's job
+  token and 403 for anything else (405 for another method), with no allowlist, token or API call.
+  `ci/deploy/deploy.sh` calls it first, so a `deploy` job submitted by hand stops in seconds with
+  the refusal instead of after its build.
 - So the grant lives as long as the job (its deadline), covers one commit, one Worker and only
   the allowlisted calls, and stops when the landing leaves `deploying`.
 - A job token passed to the job's script: today the runner strips it. Commit 7 adds

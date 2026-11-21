@@ -1,6 +1,7 @@
 //! Landing: a session's branch to `main` and to the deployed platform, with no person in between
-//! unless one is asked for. `land {branch}` checks the branch's tip is a fast-forward of `main`
-//! under `refs/heads/claude/`, runs CI job `test` at it, waits for a person's passkey approval
+//! unless one is asked for. `land {branch}` answers at once, and the Lander's alarm checks the
+//! branch's tip is a fast-forward of `main` under `refs/heads/claude/` (a failed check ends it
+//! `refused`), then runs CI job `test` at it, waits for a person's passkey approval
 //! when the setting asks for one or the commit changes what the gate itself runs, moves `main`
 //! to it through the platform's own git path, and runs CI job `deploy` at it, which uploads the
 //! platform through the Cloudflare API proxy with its own job token. Every step is reported by
@@ -110,6 +111,38 @@ pub fn may_land(caller: &Caller) -> bool {
     caller.user.kind == "standard" || caller.acting_for.is_some()
 }
 
+/// The commit a landing expects at its branch's tip, from the `commit` argument: none, or a
+/// full commit id, lowercased.
+pub fn expected_commit(given: Option<&str>) -> std::result::Result<Option<String>, String> {
+    match given {
+        None | Some("") => Ok(None),
+        Some(c) => {
+            let lower = c.to_ascii_lowercase();
+            if git::is_id(&lower) {
+                Ok(Some(lower))
+            } else {
+                Err(format!(
+                    "`commit` is a full 40-character commit id, not `{c}`"
+                ))
+            }
+        }
+    }
+}
+
+/// Why a landing of `branch` is refused given its `tip` and the commit `expected` there, if it
+/// is.
+pub fn tip_refusal(branch: &str, tip: Option<&str>, expected: Option<&str>) -> Option<String> {
+    let Some(tip) = tip else {
+        return Some(format!("{branch} does not exist; push it first"));
+    };
+    match expected {
+        Some(e) if !e.eq_ignore_ascii_case(tip) => Some(format!(
+            "{branch} is at {tip}, not {e}: push the commit to land, or name the tip"
+        )),
+        _ => None,
+    }
+}
+
 /// The proxy caller a CI job token stands for at `/cf/`, when it is the deploy job of the live
 /// landing, in `deploying`, for the commit its grant names; `None` otherwise. The interface the
 /// Cloudflare API proxy calls.
@@ -140,7 +173,6 @@ pub async fn deploy_caller(env: &Env, presented: &str, repo: &str) -> Result<Opt
 
 impl Land {
     async fn land(&self, cx: &Context<'_>, args: &Value) -> Result<Value> {
-        let s = &self.settings;
         let caller = cx
             .caller
             .ok_or_else(|| bad("landing needs a caller with a person behind it"))?;
@@ -151,31 +183,7 @@ impl Land {
             ));
         }
         let branch = state::branch_ref(arg(args, "branch")?).map_err(|e| bad(&e))?;
-        let Some(tip) = git_proxy::tip(cx.account, &s.namespace, &s.repo, &branch).await? else {
-            return Err(bad(&format!("{branch} does not exist; push it first")));
-        };
-        if let Some(c) = args["commit"].as_str()
-            && !c.eq_ignore_ascii_case(&tip)
-        {
-            return Err(bad(&format!(
-                "{branch} is at {tip}, not {c}: push the commit to land, or name the tip"
-            )));
-        }
-        let (main_at, why) =
-            git_proxy::forward_of(cx.account, &s.namespace, &s.repo, &s.main, &tip).await?;
-        if let Some(why) = why {
-            return Err(bad(&why));
-        }
-        let on_main =
-            git_proxy::path_ids(cx.account, &s.namespace, &s.repo, &main_at, &state::GUARDED)
-                .await?;
-        let at_commit =
-            git_proxy::path_ids(cx.account, &s.namespace, &s.repo, &tip, &state::GUARDED).await?;
-        let guarded = state::guarded_changes(&on_main, &at_commit);
-        let setting = lander(cx.env, "approval_get", json!({})).await?["on"]
-            .as_bool()
-            .unwrap_or(false);
-        let reason = state::approval_reason(setting, &guarded);
+        let commit = expected_commit(args["commit"].as_str()).map_err(|e| bad(&e))?;
         let id = random()?[..16].to_string();
         let by = match &caller.acting_for {
             Some(f) => format!("{} for {}", caller.user.name, f.name),
@@ -185,39 +193,11 @@ impl Land {
             cx.env,
             "create",
             json!({
-                "id": id, "branch": branch, "commit": tip, "main_at": main_at,
-                "caller": caller, "by": by, "approval_reason": reason,
+                "id": id, "branch": branch, "commit": commit,
+                "caller": caller, "by": by,
             }),
         )
         .await?;
-        let submitted = crate::dispatch(
-            cx,
-            "ci_submit",
-            &json!({
-                "repo": s.repo_name(), "commit": tip, "job": s.test_job,
-                "task": format!("land {id} test"),
-            }),
-        )
-        .await;
-        match submitted {
-            Ok(job) => {
-                let job = job["id"].as_str().unwrap_or_default();
-                lander(
-                    cx.env,
-                    "job",
-                    json!({ "id": id, "kind": "test", "job": job }),
-                )
-                .await?;
-            }
-            Err(e) => {
-                lander(
-                    cx.env,
-                    "fail",
-                    json!({ "id": id, "why": format!("the test job could not be submitted: {e}") }),
-                )
-                .await?;
-            }
-        }
         lander(cx.env, "status", json!({ "id": id })).await
     }
 
@@ -255,10 +235,13 @@ impl Capability for Land {
             Tool {
                 name: "land",
                 description: "Land a session branch: its tip must be a fast-forward of main, \
-                              on a branch under claude/. Runs CI job `test` at it, waits for a \
-                              person's passkey approval on the console when one is needed, \
-                              moves main to it, then runs CI job `deploy`, which deploys the \
-                              platform through the deploy proxy. Answers at once; follow it \
+                              on a branch under claude/. Answers at once with the landing in \
+                              `checking`; the tip, the fast-forward and whether a person must \
+                              approve are checked in the background, and a failed check ends \
+                              it `refused` with the reason. Then it runs CI job `test` at the \
+                              commit, waits for a person's passkey approval on the console \
+                              when one is needed, moves main to it, and runs CI job `deploy`, \
+                              which deploys the platform through the deploy proxy. Follow it \
                               with land_status. One landing is live at a time.",
                 input_schema: json!({
                     "type": "object",
@@ -271,10 +254,11 @@ impl Capability for Land {
             },
             Tool {
                 name: "land_status",
-                description: "A landing (the latest when no id is given): its state (testing, \
-                              awaiting_approval, merging, deploying, landed, or how it \
-                              stopped), each step with its time and detail, its CI jobs, its \
-                              approval, and whether its note is on the commit.",
+                description: "A landing (the latest when no id is given): its state (checking, \
+                              testing, awaiting_approval, merging, deploying, landed, or how \
+                              it stopped: refused, test_failed, …), each step with its time \
+                              and detail, its CI jobs, its approval, and whether its note is \
+                              on the commit.",
                 input_schema: json!({
                     "type": "object",
                     "properties": { "id": { "type": "string" } }
@@ -282,8 +266,8 @@ impl Capability for Land {
             },
             Tool {
                 name: "land_cancel",
-                description: "Cancel a landing that has not touched main yet (testing or \
-                              awaiting approval), and its test job.",
+                description: "Cancel a landing that has not touched main yet (checking, \
+                              testing or awaiting approval), and its test job.",
                 input_schema: json!({
                     "type": "object",
                     "properties": { "id": { "type": "string" } },
@@ -389,8 +373,10 @@ impl Row {
 
     fn public(&self) -> Value {
         json!({
-            "id": self.id, "branch": self.branch, "commit": self.commit_sha,
-            "main_was": self.main_at, "by": self.by_name, "state": self.state,
+            "id": self.id, "branch": self.branch,
+            "commit": (!self.commit_sha.is_empty()).then_some(&self.commit_sha),
+            "main_was": (!self.main_at.is_empty()).then_some(&self.main_at),
+            "by": self.by_name, "state": self.state,
             "needs_approval": self.approval_reason, "approved_by": self.approved_by,
             "test_job": self.test_job, "deploy_job": self.deploy_job, "detail": self.detail,
             "created_at": self.created_at, "updated_at": self.updated_at,
@@ -410,7 +396,7 @@ pub struct Lander {
 }
 
 /// The live states, as SQL.
-const LIVE: &str = "('testing', 'awaiting_approval', 'merging', 'deploying')";
+const LIVE: &str = "('checking', 'testing', 'awaiting_approval', 'merging', 'deploying')";
 
 impl Lander {
     pub fn new(state: ObjectState, env: Env, settings: Settings, hosting: Hosting) -> Result<Self> {
@@ -456,25 +442,20 @@ impl Lander {
                 }
                 let t = now();
                 self.db.exec(
-                    "INSERT INTO landings (id, branch, commit_sha, main_at, caller, by_name, state, approval_reason, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'testing', ?, ?, ?)",
+                    "INSERT INTO landings (id, branch, commit_sha, main_at, caller, by_name, state, approval_reason, created_at, updated_at) VALUES (?, ?, ?, '', ?, ?, 'checking', NULL, ?, ?)",
                     vec![
                         s("id").into(),
                         s("branch").into(),
                         s("commit").into(),
-                        s("main_at").into(),
                         a["caller"].to_string().into(),
                         s("by").into(),
-                        opt(a["approval_reason"].as_str()),
                         t.into(),
                         t.into(),
                     ],
                 )?;
-                self.event(
-                    s("id"),
-                    State::Testing,
-                    Some("checked: a fast-forward of main"),
-                )?;
-                self.reschedule().await?;
+                self.event(s("id"), State::Checking, Some("checking the branch"))?;
+                // The checks start at once, in the alarm.
+                self.state.storage().set_alarm(0).await?;
                 Ok(Value::Null)
             }
             "job" => {
@@ -529,7 +510,7 @@ impl Lander {
                 let why = format!("cancelled by {}", s("by"));
                 if !self.apply(&row, &Seen::Cancel, Some(&why))? {
                     return Err(bad(&format!(
-                        "landing {} is {}; only one testing or awaiting approval can be cancelled",
+                        "landing {} is {}; only one checking, testing or awaiting approval can be cancelled",
                         row.id, row.state
                     )));
                 }
@@ -665,7 +646,13 @@ impl Lander {
             ],
         )?;
         self.event(&row.id, to, detail)?;
-        if to.terminal() {
+        if to.terminal() && row.main_at.is_empty() {
+            // It never passed its checks: nothing to note, its commit may be no commit at all.
+            self.db.exec(
+                "UPDATE landings SET note_pushed = 1 WHERE id = ?",
+                vec![row.id.as_str().into()],
+            )?;
+        } else if to.terminal() {
             let at = String::from(js_sys::Date::new(&(t as f64).into()).to_iso_string());
             let text = state::note(
                 &row.id,
@@ -751,20 +738,88 @@ impl Lander {
         crate::dispatch(&cx, tool, args).await
     }
 
+    /// The checks `land` leaves to the alarm: the branch's tip, that it is a fast-forward of
+    /// main, and whether a person must approve it. A failed check ends the landing `refused`.
+    async fn check(&self, row: Row) -> Result<()> {
+        let s = &self.settings;
+        let account = crate::ci::scheduler::account(&self.env, &s.parent).await?;
+        let tip = git_proxy::tip(&account, &s.namespace, &s.repo, &row.branch).await?;
+        let expected = (!row.commit_sha.is_empty()).then_some(row.commit_sha.as_str());
+        if let Some(why) = tip_refusal(&row.branch, tip.as_deref(), expected) {
+            self.apply(&row, &Seen::CheckRefused, Some(&why))?;
+            return Ok(());
+        }
+        let Some(tip) = tip else {
+            return Ok(());
+        };
+        let (main_at, why) =
+            git_proxy::forward_of(&account, &s.namespace, &s.repo, &s.main, &tip).await?;
+        if let Some(why) = why {
+            self.apply(&row, &Seen::CheckRefused, Some(&why))?;
+            return Ok(());
+        }
+        let on_main =
+            git_proxy::path_ids(&account, &s.namespace, &s.repo, &main_at, &state::GUARDED).await?;
+        let at_commit =
+            git_proxy::path_ids(&account, &s.namespace, &s.repo, &tip, &state::GUARDED).await?;
+        let guarded = state::guarded_changes(&on_main, &at_commit);
+        let reason = state::approval_reason(self.approval_on()?, &guarded);
+        // From here to the move nothing awaits; `apply` re-reads the row, so a cancel during the
+        // awaits above wins.
+        self.db.exec(
+            "UPDATE landings SET commit_sha = ?, main_at = ?, approval_reason = ?, updated_at = ? WHERE id = ? AND state = 'checking'",
+            vec![
+                tip.as_str().into(),
+                main_at.as_str().into(),
+                opt(reason.as_deref()),
+                now().into(),
+                row.id.as_str().into(),
+            ],
+        )?;
+        self.apply(
+            &row,
+            &Seen::Checked,
+            Some(&format!(
+                "checked: {tip} is a fast-forward of main at {main_at}"
+            )),
+        )?;
+        if let Some(r) = self.row(&row.id)?
+            && r.state() == State::Testing
+        {
+            Box::pin(self.step(r)).await?;
+        }
+        Ok(())
+    }
+
     /// The live landing's next step.
     async fn step(&self, row: Row) -> Result<()> {
         let s = &self.settings;
         match row.state() {
+            State::Checking => self.check(row).await?,
             State::Testing => {
                 let Some(job) = &row.test_job else {
-                    // Its submission is in flight in the `land` call; give it a few minutes.
-                    if now() - row.created_at > 5 * 60_000 {
-                        self.apply(
+                    let job = self
+                        .dispatch(
                             &row,
-                            &Seen::Failed,
-                            Some("the test job was never submitted"),
-                        )?;
-                    }
+                            "ci_submit",
+                            &json!({
+                                "repo": s.repo_name(), "commit": row.commit_sha,
+                                "job": s.test_job, "task": format!("land {} test", row.id),
+                            }),
+                        )
+                        .await?;
+                    let job = job["id"]
+                        .as_str()
+                        .ok_or_else(|| bad("CI answered no job id"))?;
+                    self.db.exec(
+                        "UPDATE landings SET test_job = ?, detail = ?, updated_at = ? WHERE id = ? AND state = 'testing'",
+                        vec![
+                            job.into(),
+                            format!("test job {job} submitted").into(),
+                            now().into(),
+                            row.id.as_str().into(),
+                        ],
+                    )?;
                     return Ok(());
                 };
                 if let Some((passed, detail)) = self.job_ended(job).await? {
@@ -1063,6 +1118,47 @@ mod tests {
                 .get(job)
                 .unwrap_or_else(|| panic!("no job `{job}`"));
             assert!(crate::ci::class::class_for(&j.needs).is_ok(), "{job}");
+        }
+    }
+
+    #[test]
+    fn a_commit_named_to_land_is_a_full_id() {
+        assert_eq!(expected_commit(None), Ok(None));
+        assert_eq!(expected_commit(Some("")), Ok(None));
+        let upper = "ABCDEF0123".repeat(4);
+        assert_eq!(
+            expected_commit(Some(&upper)),
+            Ok(Some("abcdef0123".repeat(4)))
+        );
+        assert!(expected_commit(Some("abc")).is_err());
+        assert!(expected_commit(Some(&"g".repeat(40))).is_err());
+    }
+
+    #[test]
+    fn a_check_refuses_a_missing_branch_or_another_tip() {
+        let branch = "refs/heads/claude/x";
+        let a = "a".repeat(40);
+        let b = "b".repeat(40);
+        let upper = "A".repeat(40);
+        assert!(
+            tip_refusal(branch, None, None)
+                .unwrap()
+                .contains("does not exist")
+        );
+        assert!(
+            tip_refusal(branch, Some(&a), Some(&b))
+                .unwrap()
+                .contains("not")
+        );
+        assert_eq!(tip_refusal(branch, Some(&a), Some(&upper)), None);
+        assert_eq!(tip_refusal(branch, Some(&a), None), None);
+    }
+
+    #[test]
+    fn every_live_state_is_in_live() {
+        for s in State::ALL.iter() {
+            let quoted = format!("'{}'", s.name());
+            assert_eq!(LIVE.contains(&quoted), !s.terminal(), "{}", s.name());
         }
     }
 }
