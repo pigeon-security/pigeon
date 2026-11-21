@@ -36,3 +36,26 @@ pub async fn call(token: &str, method: Method, path: &str, body: Option<&Value>)
         )))
     }
 }
+
+/// How long to wait before each retry of a call refused with 401.
+const NOT_YET_ACTIVE_WAITS_MS: [u64; 4] = [1_000, 2_000, 4_000, 8_000];
+
+/// [`call`] with a token minted moments before: retried while the API answers 401, since some
+/// services (Artifacts, event subscriptions) refuse a new token until it reaches them.
+pub async fn call_fresh(
+    token: &str,
+    method: Method,
+    path: &str,
+    body: Option<&Value>,
+) -> Result<Value> {
+    let mut waits = NOT_YET_ACTIVE_WAITS_MS.iter();
+    loop {
+        match call(token, method.clone(), path, body).await {
+            Err(e) if e.to_string().contains(": 401:") => match waits.next() {
+                Some(ms) => worker::Delay::from(std::time::Duration::from_millis(*ms)).await,
+                None => return Err(e),
+            },
+            other => return other,
+        }
+    }
+}

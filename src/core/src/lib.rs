@@ -212,6 +212,7 @@ async fn setup_source(env: &Env) -> Result<SourceSetup> {
         queue_id: events.queue_id.clone(),
         sources: artifacts::events_source(SOURCE_NAMESPACE, SOURCE_REPO),
         events: vec!["pushed".into()],
+        source_permissions: artifacts::EVENTS_PERMISSIONS.map(String::from).to_vec(),
     };
     let subscription = queues::subscribe(&account, &subscription).await?;
     Ok(SourceSetup {

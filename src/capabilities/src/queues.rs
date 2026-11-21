@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use worker::{Error, Method, Result};
 
 use crate::Account;
-use crate::cloudflare::call;
+use crate::cloudflare::{call, call_fresh};
 use crate::tokens::{Policy, Scope, Scoped};
 
 /// A queue and the Worker that consumes it.
@@ -100,6 +100,8 @@ pub struct Subscription {
     pub sources: Vec<Value>,
     /// Such as `["pushed"]`.
     pub events: Vec<String>,
+    /// Account permissions needed to read the source, such as `Artifacts Read`.
+    pub source_permissions: Vec<String>,
 }
 
 /// What [`subscribe`] did.
@@ -111,7 +113,16 @@ pub struct Subscribed {
 
 /// Has `subscription` exist; idempotent by name.
 pub async fn subscribe(account: &Account, subscription: &Subscription) -> Result<Subscribed> {
-    let token = Scoped::open(account, "queues", policies()).await?;
+    let mut policies = policies();
+    if !subscription.source_permissions.is_empty() {
+        let names: Vec<&str> = subscription
+            .source_permissions
+            .iter()
+            .map(String::as_str)
+            .collect();
+        policies.push(Policy::new(Scope::Account, &names));
+    }
+    let token = Scoped::open(account, "queues", policies).await?;
     let subscribed = subscribe_with(token.value(), &account.id, subscription).await;
     token.finish(subscribed).await
 }
@@ -119,7 +130,8 @@ pub async fn subscribe(account: &Account, subscription: &Subscription) -> Result
 async fn subscribe_with(token: &str, account: &str, s: &Subscription) -> Result<Subscribed> {
     let path = format!("/accounts/{account}/event_subscriptions/subscriptions");
     // Listing finds one made before; if the account cannot list, creation goes ahead.
-    if let Ok(listed) = call(token, Method::Get, &format!("{path}?per_page=100"), None).await {
+    if let Ok(listed) = call_fresh(token, Method::Get, &format!("{path}?per_page=100"), None).await
+    {
         if let Some(found) = rows(&listed)
             .into_iter()
             .find(|x| x["name"].as_str() == Some(&s.name))
@@ -139,7 +151,7 @@ async fn subscribe_with(token: &str, account: &str, s: &Subscription) -> Result<
             "destination": { "type": "queues.queue", "queue_id": s.queue_id },
             "events": s.events,
         });
-        match call(token, Method::Post, &path, Some(&body)).await {
+        match call_fresh(token, Method::Post, &path, Some(&body)).await {
             Ok(made) => {
                 return Ok(Subscribed {
                     id: made["id"].as_str().map(String::from),
