@@ -54,16 +54,18 @@ The loader refuses the whole file, not just the bad rule, for any of these:
 - a repeated rule id, or an action repeated within a rule
 - a missing or wrong `version`
 
-## The seven rules
+## The nine rules
 
 | Rule | Actions | Targets | Decision | Approval |
 | --- | --- | --- | --- | --- |
 | `agents-coordinate` | `message_session`, `start_session`, `archive_session`, `handoff_branch` | any | allow | none |
 | `land-and-deploy` | `land`, `deploy` | `@session/*` | allow | none |
+| `deploy-after-landing` | `deploy` | any | deny | none |
 | `session-branches` | `push_branch`, `rewrite_branch`, `delete_branch` | `@session/*` | allow | none |
 | `main-forward-only` | `move_main` | any | deny | none |
 | `policy-is-yours` | `change_policy` | any | allow | passkey; without it, deny and `needs` the passkey |
 | `smoke-suite-fixed` | `add_test` | any except `tests/smoke.rs` | deny | none |
+| `smoke-suite-grows` | `add_test` | `tests/smoke.rs` | allow | none |
 | `gate-changes` | `change_gate` | `ci/*`, `.pigeon/ci.toml`, `.cargo/*`, `rust-toolchain.toml`, `.npmrc`, `src/platform/.npmrc`, `src/platform/package.json`, `src/platform/package-lock.json` | allow | delegate |
 
 Notes on the table:
@@ -186,8 +188,8 @@ Locally the suite runs in about 7 to 10 seconds. RSA key generation dominates.
 
 ## Gaps left for the person
 
-No rule was added for any of these. Each is a decision for the person.
+The policy build left three gaps. The person closed them in the clean-up landings:
 
-- Adding a scenario to `tests/smoke.rs` is "not in policy". The suite stays frozen as rule 6 reads; no rule for growing it.
-- A deploy of anything but a session branch is "not in policy".
+- Adding a scenario to `tests/smoke.rs` was "not in policy". The person added `smoke-suite-grows` (allow), with their passkey.
+- A deploy of anything but a session branch was "not in policy". The person added `deploy-after-landing` (deny), with their passkey.
 - The proxy could not tell a rewrite of a session branch from a push. Fixed in the clean-up landing, in code: see "The git proxy" above.

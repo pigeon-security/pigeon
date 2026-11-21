@@ -96,10 +96,12 @@ fn policy_decisions() {
         [
             "agents-coordinate",
             "land-and-deploy",
+            "deploy-after-landing",
             "session-branches",
             "main-forward-only",
             "policy-is-yours",
             "smoke-suite-fixed",
+            "smoke-suite-grows",
             "gate-changes",
         ]
     );
@@ -131,6 +133,7 @@ fn policy_decisions() {
     allow("land", "claude/x", None, "land-and-deploy");
     allow("deploy", "claude/x", None, "land-and-deploy");
     allow("rewrite_branch", "claude/a/b", None, "session-branches");
+    allow("add_test", "tests/smoke.rs", None, "smoke-suite-grows");
     allow("delete_branch", "claude/x", None, "session-branches");
     allow(
         "change_policy",
@@ -168,6 +171,11 @@ fn policy_decisions() {
     );
     let test = decide("add_test", "src/core/src/git.rs", None);
     assert_eq!(test.rule.as_deref(), Some("smoke-suite-fixed"));
+    let deploy = decide("deploy", "main", None);
+    assert_eq!(
+        (deploy.decision, deploy.rule.as_deref()),
+        (Decision::Deny, Some("deploy-after-landing"))
+    );
     // No match: deny, "not in policy".
     for (a, t) in [
         ("land", "main"),
@@ -175,7 +183,6 @@ fn policy_decisions() {
         ("push_branch", "refs/tags/v1"),
         ("push_branch", "claudex/y"),
         ("change_gate", "src/core/src/lib.rs"),
-        ("add_test", "tests/smoke.rs"),
     ] {
         let got = decide(a, t, None);
         assert_eq!(

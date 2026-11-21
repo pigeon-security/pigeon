@@ -29,6 +29,12 @@ decision = "allow"
 reason = "a session branch lands through the gate, and the deploy after it is automatic"
 
 [[rule]]
+id = "deploy-after-landing"
+actions = ["deploy"]
+decision = "deny"
+reason = "a deploy follows a session branch's landing, nothing else"
+
+[[rule]]
 id = "session-branches"
 actions = ["push_branch", "rewrite_branch", "delete_branch"]
 targets = ["@session/*"]
@@ -54,6 +60,13 @@ actions = ["add_test"]
 except = ["tests/smoke.rs"]
 decision = "deny"
 reason = "tests live in the smoke suite only, tests/smoke.rs"
+
+[[rule]]
+id = "smoke-suite-grows"
+actions = ["add_test"]
+targets = ["tests/smoke.rs"]
+decision = "allow"
+reason = "a scenario may be added to the smoke suite, which stays under 60 s"
 
 [[rule]]
 id = "gate-changes"
