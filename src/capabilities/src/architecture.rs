@@ -14,6 +14,8 @@ use pigeon_core::mcp::Tool;
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::console::sections::{Section, Tab};
+use crate::users::User;
 use crate::{Call, Capability, Context, Footprint, Hosted, to_value, unknown};
 
 /// The architecture as a capability: its model, on demand.
@@ -22,6 +24,36 @@ pub struct Architecture;
 impl Capability for Architecture {
     fn name(&self) -> &'static str {
         "architecture"
+    }
+
+    fn sections(&self) -> Vec<Section> {
+        vec![Section {
+            tab: Tab::Architecture,
+            id: "architecture",
+            title: "Architecture",
+            description: "Drawn from the code and the capabilities' footprints.",
+            order: 1,
+            cost: None,
+        }]
+    }
+
+    /// The drawing, as HTML the console places as it is.
+    fn section_data<'a>(
+        &'a self,
+        cx: &'a Context<'a>,
+        _id: &'a str,
+        _person: &'a User,
+        _query: &'a Value,
+    ) -> Call<'a> {
+        Box::pin(async move {
+            let sources: Vec<Source> = cx
+                .hosted
+                .sources
+                .iter()
+                .map(|(path, text)| Source { path, text })
+                .collect();
+            Ok(serde_json::json!({ "html": render(&describe(&sources, cx.hosted)) }))
+        })
     }
 
     fn tools(&self) -> Vec<Tool> {
@@ -1123,7 +1155,8 @@ fn pills(items: &[String], class: &str) -> String {
     format!(r#"<div class="pills">{inner}</div>"#)
 }
 
-fn render(m: &Model) -> String {
+/// The drawing alone, without a page around it: for the architecture page and the console.
+pub fn render(m: &Model) -> String {
     let tool_count: usize = m.workers.iter().map(|w| w.tools.len()).sum();
     // Who uses each capability: Workers and other capabilities.
     let used_by = |name: &str| -> Vec<String> {

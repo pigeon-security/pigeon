@@ -47,7 +47,7 @@
     try { return t ? JSON.parse(t) : {}; } catch { return {}; }
   };
 
-  const api = { el, money, get, post, me: null,
+  const api = { el, money, get, post, me: null, navigate: (href) => navigate(href),
     section: (id, fn) => { sections[id] = fn; },
     tab: (name, fn) => { tabFns[name] = fn; },
     render: () => render() };
@@ -196,9 +196,12 @@
         const list = [...(cur.sections || [])].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
         await Promise.all(list.map((s) => {
           const body = el("div", { class: "c-body" });
-          main.append(el("section", { class: "c-section", id: s.id, "aria-labelledby": `h-${s.id}` },
-            el("div", { class: "c-section-h" }, el("h2", { id: `h-${s.id}`, text: s.title }),
-              s.description && el("p", { text: s.description })), body));
+          // The tab already names a section titled like it, so its heading is for screen readers only.
+          const head = s.title === cur.title
+            ? el("h2", { id: `h-${s.id}`, class: "sr-only", text: s.title })
+            : el("div", { class: "c-section-h" }, el("h2", { id: `h-${s.id}`, text: s.title }),
+              s.description && el("p", { text: s.description }));
+          main.append(el("section", { class: "c-section", id: s.id, "aria-labelledby": `h-${s.id}` }, head, body));
           return loadSection(s, body, 7, g);
         }));
       }

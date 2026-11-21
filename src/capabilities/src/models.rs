@@ -18,8 +18,14 @@ use serde_json::{Value, json};
 use worker::js_sys::Date;
 use worker::{Error, Fetch, Headers, Method, Request, RequestInit, Result};
 
-use crate::users::Caller;
+use crate::console::sections::{Section, Tab};
+use crate::users::{Caller, User};
 use crate::{Call, Capability, Context, Footprint, Slot, to_value, unknown};
+
+pub mod daily;
+
+/// The most logs the console's chart reads for one window, so a busy gateway cannot run it long.
+const CHART_LOGS: usize = 5_000;
 
 /// Model providers behind one gateway.
 pub struct Models {
@@ -340,6 +346,45 @@ impl Models {
 impl Capability for Models {
     fn name(&self) -> &'static str {
         "models"
+    }
+
+    fn sections(&self) -> Vec<Section> {
+        vec![Section {
+            tab: Tab::Gateways,
+            id: "models",
+            title: "Models",
+            description: "Cost through the AI Gateway. No prompts or answers are kept.",
+            order: 1,
+            cost: Some("Model cost"),
+        }]
+    }
+
+    /// Cost per day per model family over the last `days` days, from the gateway's logs.
+    fn section_data<'a>(
+        &'a self,
+        cx: &'a Context<'a>,
+        _id: &'a str,
+        _person: &'a User,
+        query: &'a Value,
+    ) -> Call<'a> {
+        Box::pin(async move {
+            let days = query["days"].as_u64().unwrap_or(7).clamp(1, 30) as usize;
+            let now = Date::new_0();
+            let today = String::from(now.to_iso_string());
+            // Reaching back past the start of the window's first UTC day; daily() trims.
+            let since = now.get_time() - (days as f64) * 86_400_000.0;
+            let logs = ai_gateway::logs(
+                cx.account,
+                &self.gateway,
+                since,
+                &Filter::default(),
+                CHART_LOGS,
+            )
+            .await?;
+            let mut answer = to_value(daily::daily(&logs, &today, days));
+            answer["truncated"] = json!(logs.len() >= CHART_LOGS);
+            Ok(answer)
+        })
     }
 
     fn tools(&self) -> Vec<Tool> {
