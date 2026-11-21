@@ -27,9 +27,10 @@ pub struct PublicHost {
 /// Names of an Access setup to remove.
 #[derive(Default)]
 pub struct Retire {
-    /// The domains of its applications, such as `platform.pigeon.dev` and
-    /// `platform.pigeon.dev/auth`.
-    pub apps: Vec<String>,
+    /// Its applications, as (name, domain), such as (`pigeon-platform`, `platform.pigeon.dev`)
+    /// and (`pigeon-platform/auth`, `platform.pigeon.dev/auth`): only a self-hosted application
+    /// with both that name and that domain is removed.
+    pub apps: Vec<(String, String)>,
     /// Its reusable policies, by name.
     pub policies: Vec<String>,
     /// Its service tokens, by name; every policy holding one goes too.
@@ -59,8 +60,8 @@ impl PublicHost {
         let session = Session::open(account).await?;
         let removed = async {
             let mut apps = Vec::new();
-            for domain in &r.apps {
-                apps.extend(session.remove_app(domain).await?);
+            for (name, domain) in &r.apps {
+                apps.extend(session.remove_app(name, domain).await?);
             }
             let mut tokens = Vec::new();
             for name in &r.service_tokens {

@@ -84,9 +84,11 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
             host: HOST.into(),
             worker: WORKER.into(),
             retire: Retire {
+                // As the protected host named them: `pigeon-platform`, and its public paths'
+                // `pigeon-platform<path>`.
                 apps: ["", "/auth", "/oauth", "/.well-known", "/mcp"]
                     .iter()
-                    .map(|path| format!("{HOST}{path}"))
+                    .map(|path| (format!("pigeon-platform{path}"), format!("{HOST}{path}")))
                     .collect(),
                 policies: vec!["pigeon-platform".into(), "pigeon-platform-public".into()],
                 service_tokens: vec!["pigeon-platform".into(), "pigeon-claude".into()],

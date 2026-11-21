@@ -124,7 +124,7 @@ export default {{
 async fn retire(account: &Account, apex: &str, r: &Retired) -> Result<Value> {
     let session = Session::open(account).await?;
     let removed = async {
-        let app = session.remove_app(apex).await?;
+        let app = session.remove_app(&r.app, apex).await?;
         let token = session.find_service_token(&r.service_token).await?;
         let policies = session.remove_policies(&r.app, token.as_deref()).await?;
         if let Some(id) = &token {

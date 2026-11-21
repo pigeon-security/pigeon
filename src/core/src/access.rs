@@ -203,13 +203,15 @@ impl<'a> Session<'a> {
         }
     }
 
-    /// Deletes the self-hosted application on `domain`: its ID, or `None` when there was none.
-    pub async fn remove_app(&self, domain: &str) -> Result<Option<String>> {
+    /// Deletes self-hosted application `name` on `domain`, as pigeon made it: its ID, or `None`
+    /// when there was none. An application of another name or type on the domain is someone
+    /// else's and stays.
+    pub async fn remove_app(&self, name: &str, domain: &str) -> Result<Option<String>> {
         let Some(a) = self
             .list("apps")
             .await?
             .into_iter()
-            .find(|a| a.ours_on(domain))
+            .find(|a| a.ours_on(domain) && a.name == name)
         else {
             return Ok(None);
         };
