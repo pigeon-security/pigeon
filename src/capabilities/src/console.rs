@@ -132,13 +132,16 @@ impl Console {
         }
     }
 
-    /// What the overview shows: secrets the platform needs and lacks, and each gateway's cost
-    /// over the last week with their total.
+    /// What the overview shows: secrets the platform needs and lacks, credentials expiring
+    /// within a week or expired, every credential's expiry, and each gateway's cost over the
+    /// last week with their total.
     async fn overview(cx: &Context<'_>, person: &User) -> Result<Value> {
         let listing = sections::tabs(&Self::declared(cx));
         let week = json!({ "days": 7 });
         let mut answers = Vec::new();
         let mut missing = Vec::new();
+        let mut expiring = Vec::new();
+        let mut credentials = Vec::new();
         for tab in &listing {
             for l in &tab.sections {
                 let wanted = l.section.cost.is_some() || l.section.id == "keys";
@@ -157,6 +160,15 @@ impl Console {
                         missing.extend(list.iter().cloned());
                     }
                 }
+                for owner in ["secrets", "proxy"] {
+                    let found = &data[owner];
+                    if let Some(list) = found["expiring"].as_array() {
+                        expiring.extend(list.iter().cloned());
+                    }
+                    if let Some(list) = found["expiry"].as_array() {
+                        credentials.extend(list.iter().cloned());
+                    }
+                }
             }
         }
         let (costs, total) = sections::costs(&listing, &answers);
@@ -169,7 +181,10 @@ impl Console {
                 Some(json!({ "name": name, "cost": cost, "path": format!("{}#{}", t.path, l.section.id) }))
             })
             .collect();
-        Ok(json!({ "missing": missing, "costs": costs, "total": total }))
+        Ok(json!({
+            "missing": missing, "expiring": expiring, "credentials": credentials,
+            "costs": costs, "total": total,
+        }))
     }
 
     /// The signed-in person, their picture and passkeys, how many apps act for them, and when

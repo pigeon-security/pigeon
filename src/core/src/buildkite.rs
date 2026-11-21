@@ -102,6 +102,16 @@ pub async fn scopes(token: &str) -> Result<Vec<String>> {
         .collect())
 }
 
+/// When API token `token` expires, as `GET /v2/access-token` answers it (`expires_at`):
+/// `None` when the answer names no expiry.
+pub async fn expires_at(token: &str) -> Result<Option<String>> {
+    let (status, body) = call(token, Method::Get, &format!("{API}/access-token"), None).await?;
+    if status != 200 {
+        return Err(refused("refused the API token", status, &body));
+    }
+    Ok(body["expires_at"].as_str().map(String::from))
+}
+
 /// The JSON document at `url`, such as an OIDC issuer's keys.
 pub async fn json(url: &str) -> Result<Value> {
     let mut res = Fetch::Url(

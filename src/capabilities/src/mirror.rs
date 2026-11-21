@@ -14,9 +14,10 @@ use pigeon_core::mcp::Tool;
 use pigeon_core::secrets_store;
 use serde::Serialize;
 use serde_json::Value;
-use worker::{Error, Result};
+use worker::{Error, Fetch, Headers, Request, RequestInit, Result};
 
-use crate::{Call, Capability, Context, Footprint, Slot, to_value, unknown};
+use crate::expiry::{self, Expiry};
+use crate::{Call, Capability, Context, Expiring, Footprint, Slot, to_value, unknown};
 
 /// The mirror as a capability: on every push to the source's branches or tags, and on demand.
 pub struct Mirror {
@@ -94,6 +95,39 @@ impl Capability for Mirror {
                 "the copy accepts pushes with it ({} refs)",
                 refs.refs.len()
             )))
+        })
+    }
+
+    /// GitHub answers a token's expiry in the `github-authentication-token-expiration` header
+    /// of any authenticated API call; `/rate_limit` costs nothing against the limit. No header
+    /// means the token does not expire.
+    fn secret_expiry<'a>(&'a self, cx: &'a Context<'a>, name: &'a str) -> Expiring<'a> {
+        Box::pin(async move {
+            if name != self.token_binding {
+                return Ok(Expiry::Unknown {
+                    why: "the mirror does not use this secret".into(),
+                });
+            }
+            if !is_github(&self.url) {
+                return Ok(Expiry::Unknown {
+                    why: "the copy is not on GitHub, so there is no way to ask".into(),
+                });
+            }
+            let token = secrets_store::read(&cx.env.secret_store(&self.token_binding)?)
+                .await?
+                .ok_or_else(|| Error::RustError("the token is not set".into()))?;
+            let headers = Headers::new();
+            headers.set("Authorization", &format!("Bearer {token}"))?;
+            headers.set("Accept", "application/vnd.github+json")?;
+            headers.set("User-Agent", "pigeon")?;
+            let mut init = RequestInit::new();
+            init.with_headers(headers);
+            let req = Request::new_with_init("https://api.github.com/rate_limit", &init)?;
+            let res = Fetch::Request(req).send().await?;
+            let header = res
+                .headers()
+                .get("github-authentication-token-expiration")?;
+            Ok(github_expiry(res.status_code(), header.as_deref()))
         })
     }
 
@@ -295,4 +329,51 @@ async fn mirror_with(source: &Source, from: &Remote, to: &Remote) -> Result<Repo
         }
     }
     Ok(Report { refs, pushed: true })
+}
+
+/// Whether the copy at `url` is on GitHub, whose API answers a token's expiry.
+fn is_github(url: &str) -> bool {
+    url.strip_prefix("https://")
+        .and_then(|r| r.split('/').next())
+        .is_some_and(|h| h.eq_ignore_ascii_case("github.com"))
+}
+
+/// What GitHub's answer with `status` and expiry header `header` says of a token's expiry.
+fn github_expiry(status: u16, header: Option<&str>) -> Expiry {
+    match status {
+        200..=299 => expiry::from_field(header),
+        401 => Expiry::Refused {
+            why: "GitHub refuses the token (401): it has expired or been revoked".into(),
+        },
+        other => Expiry::Unknown {
+            why: format!("GitHub answered {other}"),
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_github_expiry_comes_from_its_header() {
+        assert_eq!(
+            github_expiry(200, Some("2026-12-21 00:00:00 UTC")),
+            Expiry::At {
+                at_ms: 1_797_811_200_000
+            }
+        );
+        assert_eq!(github_expiry(200, None), Expiry::Never);
+        assert!(matches!(github_expiry(401, None), Expiry::Refused { .. }));
+        assert!(matches!(github_expiry(502, None), Expiry::Unknown { .. }));
+    }
+
+    #[test]
+    fn only_a_github_copy_can_be_asked() {
+        assert!(is_github("https://github.com/pigeon-security/pigeon.git"));
+        assert!(is_github("https://GitHub.com/a/b"));
+        assert!(!is_github("https://gitlab.com/a/b"));
+        assert!(!is_github("https://github.com.evil.example/a"));
+        assert!(!is_github("http://github.com/a/b"));
+    }
 }

@@ -9,6 +9,7 @@ pub mod ci;
 pub mod console;
 pub mod deploys;
 pub mod dispatch;
+pub mod expiry;
 pub mod git_proxy;
 pub mod images;
 pub mod land;
@@ -36,6 +37,9 @@ use worker::{Env, Error, Request, Response, Result};
 
 /// A tool call or event in flight.
 pub type Call<'a> = Pin<Box<dyn Future<Output = Result<Value>> + 'a>>;
+
+/// A secret's expiry being asked of its issuer.
+pub type Expiring<'a> = Pin<Box<dyn Future<Output = Result<expiry::Expiry>> + 'a>>;
 
 /// A request a capability serves, in flight.
 pub type Serve<'a> = Pin<Box<dyn Future<Output = Result<Response>> + 'a>>;
@@ -134,6 +138,16 @@ pub trait Capability {
     /// as handing it to the service that uses it. Answers what it did, for the person.
     fn secret_set<'a>(&'a self, _cx: &'a Context<'a>, _name: &'a str, _id: &'a str) -> Call<'a> {
         Box::pin(async { Ok(Value::Null) })
+    }
+
+    /// When its secret `name`, which is set, stops working, as the secret's issuer reports it.
+    /// Asked at most daily: [`expiry`] caches the answer. Never answers the value.
+    fn secret_expiry<'a>(&'a self, _cx: &'a Context<'a>, _name: &'a str) -> Expiring<'a> {
+        Box::pin(async {
+            Ok(expiry::Expiry::Unknown {
+                why: "there is no way to ask when this secret expires".into(),
+            })
+        })
     }
 }
 

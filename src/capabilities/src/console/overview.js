@@ -1,7 +1,8 @@
-// The console's Overview tab: what needs the person's attention, then each gateway's cost over
-// the last week with links to where it is broken down.
+// The console's Overview tab: what needs the person's attention (missing secrets, credentials
+// expiring within a week or expired), each gateway's cost over the last week with links to
+// where it is broken down, then every credential and when it expires.
 (() => {
-  const { el, money, get, navigate, tab } = window.pigeonConsole;
+  const { el, money, expiryPill, get, navigate, tab } = window.pigeonConsole;
 
   const go = (href) => (e) => {
     if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
@@ -26,6 +27,8 @@
     }
     const missing = d.missing || [];
     const costs = d.costs || [];
+    const expiring = d.expiring || [];
+    const credentials = d.credentials || [];
     const one = missing.length === 1;
     const layer = el("div", { class: "layer", style: "gap:24px" });
 
@@ -42,10 +45,36 @@
         })));
     }
 
+    if (expiring.length) {
+      const expired = expiring.filter((r) => r.status === "expired");
+      const first = expiring[0];
+      const where = first.kind === "proxy" ? "/settings#credentials" : `/settings#${encodeURIComponent(first.name)}`;
+      layer.append(el("article", { class: "card accent c-alert" },
+        el("div", { class: "msg" },
+          el("div", { class: "card-h" },
+            el("span", { class: "pill accent", text: expired.length ? "Expired" : "Expiring" }),
+            el("h3", { text: expiring.length === 1
+              ? `${first.name} ${first.status === "expired" ? "has expired" : `expires ${first.expires}`}`
+              : `${expiring.length} credentials expire within a week or have expired` })),
+          el("p", { text: expiring.map((r) => `${r.name} (${r.status === "expired" ? "expired" : r.expires})`).join(", ") })),
+        el("button", { class: "button", type: "button", text: "Replace it", onclick: () => navigate(where) })));
+    }
+
     layer.append(el("div", { class: "c-stats" },
       stat("Total cost", d.total, "Gateways", "/gateways"),
       ...costs.map((c) => stat(c.name, c.cost,
         c.name === "Model cost" ? "Models" : c.name.replace(/ cost$/, ""), c.path))));
+
+    if (credentials.length) {
+      layer.append(el("div", { class: "layer" },
+        el("h3", { text: "Credentials" }),
+        el("p", { class: "muted", style: "margin:0", text: "Each secret's expiry as its issuer reports it, checked at most daily, and each proxy credential's. Values are never shown." }),
+        el("ul", { class: "c-list c-expiry" }, ...credentials.map((r) => el("li", {},
+          el("div", {},
+            el("strong", { text: r.name }),
+            el("p", { class: "muted", style: "margin:0", text: `${r.kind === "proxy" ? "proxy credential" : "secret"} · ${r.owner}` })),
+          expiryPill(r))))));
+    }
 
     main.append(layer);
   });

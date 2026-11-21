@@ -37,8 +37,9 @@ use serde_json::{Value, json};
 use worker::{Env, Error, Method, Request, Response, Result};
 
 use crate::console::sections::{Section, Tab};
+use crate::expiry::Expiry;
 use crate::users::{Caller, User};
-use crate::{Call, Capability, Context, Footprint, Serve, Slot, arg, unknown};
+use crate::{Call, Capability, Context, Expiring, Footprint, Serve, Slot, arg, unknown};
 use class::{Class, Offered, class_for};
 use config::{Job, Needs};
 use route::Availability;
@@ -139,6 +140,16 @@ pub trait Connector {
     /// The secrets it needs set, declared on the secrets page.
     fn secrets(&self) -> Vec<Slot> {
         Vec::new()
+    }
+
+    /// When its secret `name`, which is set, stops working; see
+    /// [`Capability::secret_expiry`].
+    fn secret_expiry<'a>(&'a self, _cx: &'a Cx<'a>, _name: &'a str) -> Pending<'a, Expiry> {
+        Box::pin(async {
+            Ok(Expiry::Unknown {
+                why: "there is no way to ask when this secret expires".into(),
+            })
+        })
     }
 
     /// Whether its runner takes the job token in its environment; otherwise the runner
@@ -893,6 +904,24 @@ impl Capability for Ci {
             .iter()
             .flat_map(|c| c.secrets())
             .collect()
+    }
+
+    /// The connector that declares `name` answers.
+    fn secret_expiry<'a>(&'a self, cx: &'a Context<'a>, name: &'a str) -> Expiring<'a> {
+        Box::pin(async move {
+            let Some(c) = self
+                .settings
+                .connectors
+                .iter()
+                .find(|c| c.secrets().iter().any(|s| s.name == name))
+            else {
+                return Ok(Expiry::Unknown {
+                    why: "no CI connector uses this secret".into(),
+                });
+            };
+            let ccx = self.cx(cx.env);
+            c.secret_expiry(&ccx, name).await
+        })
     }
 
     fn footprint(&self) -> Footprint {

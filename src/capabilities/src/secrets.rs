@@ -18,9 +18,10 @@ use worker::{Env, Error, Headers, Method, Request, Response, Result};
 
 use crate::console::page;
 use crate::console::sections::{Section, Tab};
+use crate::expiry::{self, Expiry};
 use crate::passkeys::Passkeys;
 use crate::users::{User, directory};
-use crate::{Call, Capability, Context, Serve, Slot, arg, to_value, unknown};
+use crate::{Call, Capability, Context, Expiring, Serve, Slot, arg, to_value, unknown};
 
 /// The secrets page and its tools.
 pub struct Secrets {
@@ -30,12 +31,6 @@ pub struct Secrets {
     /// The Secrets Store binding holding the parent token, which this capability owns.
     pub parent: String,
 }
-
-/// The page's script: signing in to see the list and approving each write.
-const SCRIPT: &str = include_str!("secrets/secrets.js");
-
-/// The challenge purpose for seeing the list.
-const VIEW: &str = "secrets:view";
 
 /// The challenge purpose for writing `name` with a value whose hash is `digest`.
 fn write_purpose(name: &str, digest: &str) -> String {
@@ -132,6 +127,27 @@ impl Secrets {
         Ok(listing(&Self::declared(cx), &stored))
     }
 
+    /// Every declared secret's expiry: the set ones as their issuers report it, at most a day
+    /// old, and the missing ones as missing.
+    async fn expiry(cx: &Context<'_>, listed: &[Listed]) -> Vec<expiry::Row> {
+        let set: Vec<String> = listed
+            .iter()
+            .filter(|l| l.set)
+            .map(|l| l.name.clone())
+            .collect();
+        expiry::secrets(cx, &set).await
+    }
+
+    /// Every credential and when it expires, the ones that need a person first: declared
+    /// secrets and proxy credentials. Never a value.
+    async fn credentials(cx: &Context<'_>) -> Result<Value> {
+        let listed = Self::list(cx).await?;
+        let mut rows = Self::expiry(cx, &listed).await;
+        rows.extend(expiry::proxy(cx.env).await?);
+        rows.sort_by_key(|r| !r.needs_you());
+        Ok(json!({ "warn_days": expiry::WARN_DAYS, "credentials": rows }))
+    }
+
     fn url(&self, name: Option<&str>) -> String {
         match name {
             Some(n) => format!("https://{}/settings#{n}", self.host),
@@ -151,18 +167,9 @@ impl Secrets {
         let path = req.path();
         match (req.method(), path.as_str()) {
             (Method::Get, "/secrets") => page::redirect("/settings"),
-            (Method::Get, "/secrets/secrets.js") => {
-                let headers = Headers::new();
-                headers.set("Content-Type", "text/javascript; charset=utf-8")?;
-                headers.set("X-Content-Type-Options", "nosniff")?;
-                headers.set("Cache-Control", "no-store")?;
-                Ok(Response::ok(SCRIPT)?.with_headers(headers))
-            }
             (Method::Post, p) => {
                 let body: Value = req.json().await.unwrap_or(Value::Null);
                 let answer = match p {
-                    "/secrets/view/begin" => self.passkeys.sign_in_begin(cx.env, VIEW, None).await,
-                    "/secrets/view/finish" => self.view_finish(cx, &body).await,
                     "/secrets/put/begin" => self.put_begin(cx, &body).await,
                     "/secrets/put/finish" => self.put_finish(cx, &body).await,
                     _ => return Response::error("not found", 404),
@@ -178,15 +185,6 @@ impl Secrets {
             }
             _ => Response::error("not found", 404),
         }
-    }
-
-    async fn view_finish(&self, cx: &Context<'_>, body: &Value) -> Result<Value> {
-        let key = self
-            .passkeys
-            .sign_in_finish(cx.env, VIEW, body, None)
-            .await?;
-        let person = Self::person(cx.env, &key.user_id).await?;
-        Ok(json!({ "person": person.name, "secrets": Self::list(cx).await? }))
     }
 
     /// Starts approving one write: `name` must be a declared slot, `digest` the new value's
@@ -228,6 +226,8 @@ impl Secrets {
         let comment = format!("set on the secrets page by {}", person.name);
         let written = writer.put_scoped(name, value, &comment, scopes).await;
         let id = writer.finish(written).await?;
+        // A new value may expire differently: the next look asks its issuer again.
+        let _ = expiry::forget(cx.env, name).await;
         let mut message = format!(
             "{name} is set. Check: {}.",
             checked.as_str().unwrap_or("done")
@@ -284,6 +284,20 @@ impl Secrets {
     }
 }
 
+/// What Cloudflare's tokens/verify answer `v` says of a token's expiry: refused unless its
+/// status is `active`, else its `expires_on`, or never without one.
+pub fn cloudflare_expiry(v: &Value) -> Expiry {
+    match v["status"].as_str() {
+        Some("active") => expiry::from_field(v["expires_on"].as_str()),
+        other => Expiry::Refused {
+            why: format!(
+                "Cloudflare says the token is {}",
+                other.unwrap_or("unknown")
+            ),
+        },
+    }
+}
+
 impl Capability for Secrets {
     fn name(&self) -> &'static str {
         "secrets"
@@ -293,8 +307,9 @@ impl Capability for Secrets {
         vec![keys_section()]
     }
 
-    /// Every declared secret and the store's others, set or missing, never a value; and the
-    /// declared ones that are missing, for the overview.
+    /// Every declared secret and the store's others, set or missing, never a value; the
+    /// declared ones that are missing; and each declared one's expiry, with those expiring
+    /// within a week or expired, for the overview.
     fn section_data<'a>(
         &'a self,
         cx: &'a Context<'a>,
@@ -309,7 +324,12 @@ impl Capability for Secrets {
                 .filter(|s| !s.set && !s.owner.is_empty())
                 .map(|s| json!({ "name": s.name, "owner": s.owner, "purpose": s.purpose }))
                 .collect();
-            Ok(json!({ "secrets": secrets, "missing": missing }))
+            let expiry = Self::expiry(cx, &secrets).await;
+            let expiring: Vec<&expiry::Row> = expiry.iter().filter(|r| r.needs_you()).collect();
+            Ok(json!({
+                "secrets": secrets, "missing": missing,
+                "expiry": expiry, "expiring": expiring,
+            }))
         })
     }
 
@@ -320,6 +340,13 @@ impl Capability for Secrets {
                 "List the secrets the platform's capabilities need, and the store's others: \
                  each one's owner, purpose, whether it is set and when it last changed. Never \
                  values.",
+            ),
+            Tool::bare(
+                "credentials_expiry",
+                "List every credential the platform holds and when it expires: each declared \
+                 secret, as its issuer reports it (checked at most daily), and each proxy \
+                 credential. Each has a status: ok, soon (within 7 days), expired (or refused \
+                 by its issuer), unknown or missing. Read-only; never values.",
             ),
             Tool {
                 name: "secrets_request",
@@ -337,6 +364,7 @@ impl Capability for Secrets {
         Box::pin(async move {
             Ok(match tool {
                 "secrets_list" => to_value(Self::list(cx).await?),
+                "credentials_expiry" => Self::credentials(cx).await?,
                 "secrets_request" => {
                     let name = args["name"].as_str();
                     if let Some(n) = name {
@@ -351,6 +379,25 @@ impl Capability for Secrets {
 
     fn secrets(&self) -> Vec<Slot> {
         vec![self.own_slot()]
+    }
+
+    /// Cloudflare's tokens/verify answers the parent token's `expires_on`, when it has one.
+    fn secret_expiry<'a>(&'a self, cx: &'a Context<'a>, name: &'a str) -> Expiring<'a> {
+        Box::pin(async move {
+            if name != self.parent {
+                return Ok(Expiry::Unknown {
+                    why: "this capability does not use this secret".into(),
+                });
+            }
+            match tokens::verify_detail(&cx.account.parent, &cx.account.id).await {
+                Ok(v) => Ok(cloudflare_expiry(&v)),
+                Err(e) if e.to_string().contains(": 401:") => Ok(Expiry::Refused {
+                    why: "Cloudflare refuses the token (401): it has expired or been revoked"
+                        .into(),
+                }),
+                Err(e) => Err(e),
+            }
+        })
     }
 
     fn routes(&self) -> Vec<&'static str> {
@@ -403,10 +450,29 @@ mod tests {
     }
 
     #[test]
+    fn the_parent_tokens_expiry_comes_from_verify() {
+        let at = json!({ "status": "active", "expires_on": "2026-12-21T00:00:00Z" });
+        assert_eq!(
+            cloudflare_expiry(&at),
+            Expiry::At {
+                at_ms: 1_797_811_200_000
+            }
+        );
+        let never = json!({ "status": "active", "expires_on": null });
+        assert_eq!(cloudflare_expiry(&never), Expiry::Never);
+        for status in [json!("expired"), json!("disabled"), Value::Null] {
+            let v = json!({ "status": status, "expires_on": "2026-12-21T00:00:00Z" });
+            assert!(
+                matches!(cloudflare_expiry(&v), Expiry::Refused { .. }),
+                "{v}"
+            );
+        }
+    }
+
+    #[test]
     fn a_write_approval_is_bound_to_name_and_value() {
         let a = write_purpose("X", &hash("one"));
         assert_ne!(a, write_purpose("X", &hash("two")));
         assert_ne!(a, write_purpose("Y", &hash("one")));
-        assert_ne!(a, VIEW);
     }
 }

@@ -22,6 +22,22 @@
   };
   const money = (n) => "$" + Number(n || 0).toFixed(2);
 
+  // A credential's expiry as a pill: its status, and the date or why it is not known. A row
+  // carries only names, dates and statuses, never a value.
+  const expiryPill = (r) => {
+    const e = r.expiry || {};
+    const left = r.days_left;
+    const text = {
+      ok: e.kind === "never" ? "no expiry" : `expires ${r.expires} · ${left} days`,
+      soon: `expires ${r.expires} · ${left < 1 ? "today" : `${left} day${left === 1 ? "" : "s"}`}`,
+      expired: e.kind === "refused" ? "refused by its issuer" : `expired ${r.expires}`,
+      unknown: "expiry unknown",
+      missing: "not set",
+    }[r.status] || r.status;
+    const why = e.why || (r.checked_ms ? `checked ${new Date(r.checked_ms).toISOString().slice(0, 16).replace("T", " ")} UTC` : "");
+    return el("span", { class: `pill ${r.status}`, title: why || null, text });
+  };
+
   // Each answered request moves the idle limit on, up to the session's absolute end.
   const seen = () => {
     if (api.me) api.me.expires_at = Math.min(Date.now() + IDLE_MS, api.me.ends_at);
@@ -47,7 +63,7 @@
     try { return t ? JSON.parse(t) : {}; } catch { return {}; }
   };
 
-  const api = { el, money, get, post, me: null, navigate: (href) => navigate(href),
+  const api = { el, money, expiryPill, get, post, me: null, navigate: (href) => navigate(href),
     section: (id, fn) => { sections[id] = fn; },
     tab: (name, fn) => { tabFns[name] = fn; },
     render: () => render() };

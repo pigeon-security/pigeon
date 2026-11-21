@@ -122,3 +122,9 @@ details.c-table summary { font: var(--type-small); color: var(--muted); cursor: 
 @media (prefers-reduced-motion: reduce) {
   .c-col { transition: none; }
 }
+
+/* Credential expiry: a pill per status, and the list of every credential */
+.pill.soon { color: var(--ink); border-color: var(--warn); }
+.pill.expired { color: var(--ink); background: var(--accent-soft); border-color: var(--warn); font-weight: 700; }
+.c-expiry li { flex-wrap: wrap; }
+.c-expiry li > div { flex: 1 1 220px; min-width: 0; }

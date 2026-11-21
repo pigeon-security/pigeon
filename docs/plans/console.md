@@ -146,8 +146,8 @@ Kept as they are: `/secrets/put/*`, `/tokens/issue/*`, `/tokens/revoke/*`. New, 
 passkey ceremony bound to its target, on the session's person: `POST /console/passkey/remove/*`
 (purpose `passkey:remove:{id}`), `/console/app/disconnect/*` (`app:disconnect:{service_user_id}`,
 revokes its tokens and removes the link), `/console/invite/*` (`invite:{hash(name)}`, answers
-the single-use enrolment link). `/secrets/view/*` and `/tokens/view/*` stay for one release,
-then go.
+the single-use enrolment link). `/secrets/view/*` and `/tokens/view/*` stayed for one release
+and are now gone, with the old pages' scripts `secrets.js` and `tokens.js`.
 
 ## Phases
 

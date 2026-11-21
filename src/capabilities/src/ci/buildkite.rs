@@ -24,6 +24,7 @@ use super::route::Availability;
 use super::state::Report;
 use super::{Connector, Cx, Dispatched, Hook, Pending, Run, Seen};
 use crate::Slot;
+use crate::expiry::{self, Expiry};
 
 /// The connector's name.
 pub const NAME: &str = "buildkite";
@@ -218,6 +219,24 @@ async fn secret(cx: &Cx<'_>, binding: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// What Buildkite's answer to `GET /v2/access-token` says of the token's expiry. A token it
+/// refuses with 401 has expired or been revoked; one whose answer names no expiry is reported
+/// as unknown, since Buildkite does not promise to name one.
+fn buildkite_expiry(answer: Result<Option<String>>) -> Expiry {
+    match answer {
+        Ok(Some(at)) => expiry::from_field(Some(&at)),
+        Ok(None) => Expiry::Unknown {
+            why: "Buildkite's answer names no expiry".into(),
+        },
+        Err(e) if e.to_string().contains(": 401") => Expiry::Refused {
+            why: "Buildkite refuses the API token (401): it has expired or been revoked".into(),
+        },
+        Err(e) => Expiry::Unknown {
+            why: format!("the check failed: {e}"),
+        },
+    }
+}
+
 impl Buildkite {
     fn api<'a>(&'a self, token: &'a str) -> Pipeline<'a> {
         Pipeline {
@@ -292,6 +311,23 @@ impl Connector for Buildkite {
                 scopes: &[secrets_store::WORKERS],
             },
         ]
+    }
+
+    /// The API token's expiry is what `GET /v2/access-token` answers in `expires_at`; the
+    /// webhook token is a shared signing key, which never expires.
+    fn secret_expiry<'a>(&'a self, cx: &'a Cx<'a>, name: &'a str) -> Pending<'a, Expiry> {
+        Box::pin(async move {
+            if name == WEBHOOK_TOKEN {
+                return Ok(Expiry::Never);
+            }
+            if name != API_TOKEN {
+                return Ok(Expiry::Unknown {
+                    why: "Buildkite does not use this secret".into(),
+                });
+            }
+            let token = self.token(cx).await?;
+            Ok(buildkite_expiry(api::expires_at(&token).await))
+        })
     }
 
     fn available<'a>(&'a self, cx: &'a Cx<'a>) -> Pending<'a, Availability> {
@@ -557,5 +593,24 @@ mod tests {
             Report::Cancelled
         );
         assert_eq!(seen(Event::Finished(build("blocked", Some("j1")))), None);
+    }
+
+    #[test]
+    fn the_api_tokens_expiry_comes_from_access_token() {
+        assert_eq!(
+            buildkite_expiry(Ok(Some("2026-12-21T00:00:00.000Z".into()))),
+            Expiry::At {
+                at_ms: 1_797_811_200_000
+            }
+        );
+        assert!(matches!(buildkite_expiry(Ok(None)), Expiry::Unknown { .. }));
+        let refused = Err(Error::RustError(
+            "Buildkite refused the API token: 401 Authentication required".into(),
+        ));
+        assert!(matches!(buildkite_expiry(refused), Expiry::Refused { .. }));
+        let down = Err(Error::RustError(
+            "Buildkite refused the API token: 503 ".into(),
+        ));
+        assert!(matches!(buildkite_expiry(down), Expiry::Unknown { .. }));
     }
 }

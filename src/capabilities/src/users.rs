@@ -748,10 +748,12 @@ impl Directory {
                 )?;
                 row.unwrap_or(Value::Null)
             }
+            // The live ones, and with `expired_within_ms` also those expired that recently.
             "proxy.tokens" => {
+                let since = t - a["expired_within_ms"].as_i64().unwrap_or(0).max(0);
                 let rows: Vec<Value> = self.db.rows(
                     "SELECT substr(o.hash, 1, 12) AS id, o.label AS label, u.name AS person, o.created_at AS created_at, o.expires_at AS expires_at FROM oauth_tokens o LEFT JOIN users u ON u.id = o.service_user_id WHERE o.kind = 'proxy' AND o.expires_at > ? ORDER BY o.created_at DESC",
-                    vec![t.into()],
+                    vec![since.into()],
                 )?;
                 to_value(rows)
             }

@@ -170,6 +170,19 @@ pub async fn verify(token: &str, account: &str) -> Result<String> {
     Ok(v["status"].as_str().unwrap_or("unknown").to_string())
 }
 
+/// What Cloudflare says of `token` on `account`: its `status` and, when it has one, its
+/// `expires_on`. Never the token.
+pub async fn verify_detail(token: &str, account: &str) -> Result<Value> {
+    let v = call(
+        token,
+        Method::Get,
+        &format!("/accounts/{account}/tokens/verify"),
+        None,
+    )
+    .await?;
+    Ok(json!({ "status": v["status"], "expires_on": v["expires_on"] }))
+}
+
 /// `ms` since the epoch as RFC 3339 to the second, as the tokens API takes it.
 fn iso(ms: f64) -> String {
     let s = String::from(Date::new(&JsValue::from_f64(ms)).to_iso_string());

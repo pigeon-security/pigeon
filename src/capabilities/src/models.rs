@@ -683,6 +683,16 @@ impl Capability for Models {
         })
     }
 
+    /// A provider's API key: Anthropic's API, like the others', answers no expiry, and the
+    /// key is readable only by the AI gateway, so there is nothing to ask.
+    fn secret_expiry<'a>(&'a self, _cx: &'a Context<'a>, _name: &'a str) -> crate::Expiring<'a> {
+        Box::pin(async {
+            Ok(crate::expiry::Expiry::Unknown {
+                why: "the provider's API reports no key expiry".into(),
+            })
+        })
+    }
+
     /// A key just set: the gateway is set up and given it.
     fn secret_set<'a>(&'a self, cx: &'a Context<'a>, name: &'a str, id: &'a str) -> Call<'a> {
         Box::pin(async move {

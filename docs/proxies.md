@@ -18,9 +18,9 @@ MCP refuses it, because MCP looks up only its own token kind. The proxies refuse
 
 ### Issue
 
-Open https://platform.pigeon.dev/tokens. The page is gated by a passkey.
+Open the console's Settings → Keys → Proxy credentials (https://platform.pigeon.dev/settings#credentials; the old `/tokens` page redirects there).
 
-- Seeing the list takes a passkey.
+- Seeing the list takes the console's sign-in.
 - Issuing takes a passkey approval bound to the label and the lifetime.
 - Only a person can issue, not a service user.
 
@@ -41,6 +41,23 @@ The session's network proxy adds the header to every request to that host. Comma
 ### Revoke
 
 Revoke from the same page. Revoking takes a passkey approval bound to the credential's id, which is the first 12 characters of its hash. Only a person can revoke.
+
+### Expiry
+
+The console shows every credential's expiry: the Overview lists them all and warns at the top when one expires within 7 days or has expired; Settings → Keys shows it on each secret and each proxy credential. A proxy credential that has expired stays listed, flagged, for two weeks. The MCP tool `credentials_expiry` answers the same list, read-only. Nothing shows a value.
+
+| Credential | How its expiry is known |
+| --- | --- |
+| Proxy credentials | Their own `expires_at`, set when issued |
+| `CF_PARENT_TOKEN` | Cloudflare's `tokens/verify`, `expires_on` |
+| `GITHUB_MIRROR_TOKEN` | GitHub's `github-authentication-token-expiration` header, on `GET /rate_limit` |
+| `BUILDKITE_API_TOKEN` | Buildkite's `GET /v2/access-token`, `expires_at` (unknown when it names none) |
+| `BUILDKITE_WEBHOOK_TOKEN` | Never expires: a signing key pigeon and Buildkite share |
+| Claude Platform key | Unknown: the API reports no key expiry, and only the AI gateway can read it |
+
+Each secret is checked against its issuer at most once a day (a failed check is retried after an hour), and again right after a new value is set. An issuer that refuses a token outright (a 401, or Cloudflare saying it is not `active`) shows it as expired. A capability reports its secrets' expiry with `Capability::secret_expiry`; the cache and the statuses are in `src/capabilities/src/expiry.rs`.
+
+To replace one before it bites: a proxy credential, issue a new one, save it as the environment's network secret, then revoke the old one; a secret, set its new value on Settings → Keys.
 
 ## Git
 
@@ -81,18 +98,20 @@ Session branches stay in Artifacts. The GitHub mirror copies only `main`.
 
 ### Removing a session branch
 
-The proxy refuses every delete, so `claude/` branches pile up in Artifacts. A person removes one directly on Artifacts, not through the proxy:
+The proxy refuses every delete, so `claude/` branches pile up in Artifacts. The pigeon environment no longer allows the Artifacts host, so a person removes one directly on Artifacts from a session on the Default environment or from their own machine, with the Pigeon MCP tools:
 
-1. Mint a write token with the MCP tool `source_token` (`access: "write"`). It answers the token and the repository's Artifacts remote.
-2. Push the delete to that remote, passing the token as a header rather than in the URL, so it stays out of the shell history:
+1. Call `source_token` with `{"access": "write", "ttl": 300}`. Note the `id` and `remote` it answers.
+2. In any git checkout, read the token without putting it in the command or the history, push the delete, then forget the token:
 
    ```
+   read -rs TOKEN   # paste the token, then Enter
    git -c http.extraHeader="Authorization: Bearer $TOKEN" push <remote> --delete claude/route-check
+   unset TOKEN
    ```
 
-3. Revoke the token with `source_revoke` and the id `source_token` gave.
-
-This needs the Artifacts host in the environment's allowed hosts, so do it from a machine that has it, not from a cloud session once the host is removed.
+   Several branches go in one push: `--delete claude/a claude/b`.
+3. Call `source_revoke` with the `id` from step 1.
+4. Check from any pigeon session: `git ls-remote https://proxy.pigeon.dev/git/pigeon-security/pigeon.git 'refs/heads/claude/*'` no longer lists it.
 
 ### CI runners
 
@@ -170,6 +189,29 @@ If a newer wrangler makes a call outside the list, the deploy fails and names th
 `ci/deploy/allowlist.sh` runs the pinned wrangler's real `deploy` against a stand-in for the API (`ci/deploy/standin.mjs`), both as for the existing Worker and as for a first deploy, records every call with its JSON body, and checks each against the allowlist and its body rules (`cf_proxy::unlisted`). It fails naming any call the proxy would refuse, so a wrangler upgrade or a new binding shows its new calls before a real deploy is refused halfway. CI runs it as the `allowlist` job; it needs Node 22 and `worker-build`, and no credential.
 
 A change to the allowlist only takes effect once it is deployed, and the deployed proxy is the one that has to let that deploy through. When the new call comes after the upload (the container application, settings and subdomain calls do), a landing deploys it anyway: the `deploy` job's first `wrangler deploy` uploads the new Worker and is refused at the new call, and `ci/deploy/deploy.sh` deploys once more, now through the new allowlist. When the new call comes before the upload (wrangler's lookups, the image preparation), the deploy job says so and the change has to be deployed once outside the land flow.
+
+### Break-glass: deploying directly
+
+The pigeon environment no longer allows `api.cloudflare.com` or the Artifacts host, so the only deploys from it are through `/cf/`. When a change cannot deploy that way, such as a change to the deploy allowlist itself that the deployed proxy refuses before the upload, deploy once directly, from a session on the **Default** environment (which allows `api.cloudflare.com`) or from the person's own machine, with a `deploy_token`. Only a person should start this.
+
+1. Check out the commit to deploy. It should be what main will be: a landed main from `https://github.com/pigeon-security/pigeon` (the mirror copies main), or the `claude/` branch that is landing next.
+2. Call the Pigeon MCP tool `deploy_token` with `{"ttl": 1800}`. Note its `id`.
+3. From `src/platform`, with the token read from the prompt rather than written in the command:
+
+   ```
+   cd src/platform
+   npm ci
+   read -rs CLOUDFLARE_API_TOKEN && export CLOUDFLARE_API_TOKEN   # paste the token, then Enter
+   unset CLOUDFLARE_API_BASE_URL
+   CLOUDFLARE_ACCOUNT_ID=4f94676cb2cbe46fd985b089ca97ea27 WRANGLER_SEND_METRICS=false npx wrangler deploy
+   unset CLOUDFLARE_API_TOKEN
+   ```
+
+   This is the pinned wrangler, talking to `api.cloudflare.com` itself: no proxy and no allowlist.
+4. Call `revoke_api_token` with the `id` from step 2, whether or not the deploy worked.
+5. If the deployed commit is not on main yet, land its branch the usual way (`land`), so main and the deployed Worker agree. Once the fixed allowlist is live, that landing's deploy goes through `/cf/` again.
+
+In a session, the token is in the transcript from step 2 on: keep the lifetime short, and revoke it at once. Never save a `deploy_token` anywhere.
 
 ### Landing deploys
 

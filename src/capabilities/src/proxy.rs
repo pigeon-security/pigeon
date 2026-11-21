@@ -24,8 +24,6 @@ use crate::{Call, Capability, Context, Serve, unknown};
 pub const ID_LEN: usize = 12;
 /// What every proxy credential starts with.
 pub const PREFIX: &str = "pgn_px_";
-/// The challenge purpose for seeing the list.
-pub const VIEW: &str = "proxy-tokens:view";
 /// A credential's lifetime unless asked otherwise, in days, and at most.
 pub const DEFAULT_DAYS: i64 = 30;
 pub const MAX_DAYS: i64 = 90;
@@ -181,9 +179,6 @@ fn bad(why: &str) -> Error {
     Error::RustError(why.to_string())
 }
 
-/// The page's script: signing in to see the list, issuing and revoking.
-const SCRIPT: &str = include_str!("proxy/tokens.js");
-
 /// The holder of the proxy credential `req` carries as `Authorization: Bearer`, if it is live
 /// and reaches the request's path. Errors never repeat the header.
 pub async fn caller(env: &Env, req: &Request) -> Result<ProxyCaller> {
@@ -224,7 +219,7 @@ fn answer(value: &Value, status: u16) -> Result<Response> {
     Ok(res)
 }
 
-/// The `/tokens` page and its calls.
+/// The old `/tokens` page's redirect, and the console's issue and revoke calls.
 pub struct Tokens {
     /// The hostname the proxies are on, which a credential is saved for.
     pub proxy_host: String,
@@ -261,19 +256,9 @@ impl Tokens {
         let path = req.path();
         match (req.method(), path.as_str()) {
             (Method::Get, "/tokens") => page::redirect("/settings#credentials"),
-            (Method::Get, "/tokens/tokens.js") => {
-                let mut res = Response::ok(SCRIPT)?;
-                let h = res.headers_mut();
-                h.set("Content-Type", "text/javascript; charset=utf-8")?;
-                h.set("X-Content-Type-Options", "nosniff")?;
-                h.set("Cache-Control", "no-store")?;
-                Ok(res)
-            }
             (
                 Method::Post,
-                "/tokens/view/begin"
-                | "/tokens/view/finish"
-                | "/tokens/issue/begin"
+                "/tokens/issue/begin"
                 | "/tokens/issue/finish"
                 | "/tokens/revoke/begin"
                 | "/tokens/revoke/finish",
@@ -290,13 +275,6 @@ impl Tokens {
 
     async fn post(&self, env: &Env, path: &str, body: &Value) -> Result<Value> {
         match path {
-            "/tokens/view/begin" => self.passkeys.sign_in_begin(env, VIEW, None).await,
-            "/tokens/view/finish" => {
-                let key = self.passkeys.sign_in_finish(env, VIEW, body, None).await?;
-                let person = Self::person(env, &key.user_id).await?;
-                let tokens = directory(env, "proxy.tokens", json!({})).await?;
-                Ok(json!({ "person": person.name, "tokens": tokens }))
-            }
             "/tokens/issue/begin" => {
                 let (_, _, purpose) = Self::issue_input(body)?;
                 self.passkeys.sign_in_begin(env, &purpose, None).await
@@ -360,7 +338,9 @@ impl Capability for Tokens {
         vec![crate::secrets::keys_section()]
     }
 
-    /// The live proxy credentials: id, label, who issued each, when, and when it ends.
+    /// The live proxy credentials: id, label, who issued each, when, and when it ends; and
+    /// every one's expiry, with those ending within a week or ended in the last two, for the
+    /// overview.
     fn section_data<'a>(
         &'a self,
         cx: &'a Context<'a>,
@@ -370,7 +350,10 @@ impl Capability for Tokens {
     ) -> Call<'a> {
         Box::pin(async move {
             let tokens = directory(cx.env, "proxy.tokens", json!({})).await?;
-            Ok(json!({ "tokens": tokens }))
+            let expiry = crate::expiry::proxy(cx.env).await?;
+            let expiring: Vec<&crate::expiry::Row> =
+                expiry.iter().filter(|r| r.needs_you()).collect();
+            Ok(json!({ "tokens": tokens, "expiry": expiry, "expiring": expiring }))
         })
     }
 
@@ -466,9 +449,6 @@ mod tests {
             revoke_purpose("aaaaaaaaaaaa"),
             revoke_purpose("aaaaaaaaaaab")
         );
-        for p in [a, revoke_purpose("aaaaaaaaaaaa")] {
-            assert_ne!(p, VIEW);
-        }
     }
 
     #[test]

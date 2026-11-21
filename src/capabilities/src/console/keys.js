@@ -3,7 +3,7 @@
 // hold (issued once, revoked). A secret's value is never shown, logged or kept: inputs are
 // cleared after a write, and an issued credential stays on the page only until "Done".
 (() => {
-  const { el, post, section } = window.pigeonConsole;
+  const { el, post, section, expiryPill } = window.pigeonConsole;
   const { b64u, approve, say } = window.pigeonPasskey;
 
   const pad = (n) => String(n).padStart(2, "0");
@@ -23,6 +23,9 @@
   section("keys", (body, data, ctx) => {
     const secrets = (data.secrets && data.secrets.secrets) || [];
     const tokens = (data.proxy && data.proxy.tokens) || [];
+    const secretExpiry = (data.secrets && data.secrets.expiry) || [];
+    const proxyExpiry = (data.proxy && data.proxy.expiry) || [];
+    const expiryOf = (name) => secretExpiry.find((r) => r.name === name);
 
     function secretCard(s) {
       const set = !!s.set;
@@ -55,9 +58,11 @@
       return el("article", { class: set ? "card" : "card accent", id: s.name },
         el("div", { class: "card-h" },
           el("h3", { text: s.name }),
-          set
-            ? el("span", { class: "pill", text: `set · changed ${s.modified ? stamp(s.modified) : "unknown"}` })
-            : el("span", { class: "pill accent", text: "missing" })),
+          el("div", { class: "pills" },
+            set
+              ? el("span", { class: "pill", text: `set · changed ${s.modified ? stamp(s.modified) : "unknown"}` })
+              : el("span", { class: "pill accent", text: "missing" }),
+            set && expiryOf(s.name) ? expiryPill(expiryOf(s.name)) : null)),
         el("p", { text: `${s.owner} · ${s.purpose}` }),
         el("div", { class: "c-row" }, input, btn),
         status);
@@ -156,12 +161,17 @@
         }
       }
 
+      const row = proxyExpiry.find((r) => r.owner.startsWith(`${t.id} `));
       return el("li", {},
-        el("div", { style: "flex:1;min-width:0" },
+        el("div", {},
           el("strong", { text: t.label }),
           el("p", { class: "muted", style: "margin:0", text: `${t.id} · issued by ${t.person} · expires ${day(t.expires_at)}` })),
+        row ? expiryPill(row) : null,
         btn);
     }
+
+    // Expired credentials leave the live list; they stay here, flagged, for two weeks.
+    const ended = proxyExpiry.filter((r) => r.status === "expired");
 
     const credentials = el("div", { class: "layer", id: "credentials" },
       el("h3", { text: "Proxy credentials" }),
@@ -172,8 +182,15 @@
         issueStatus,
         result),
       tokens.length
-        ? el("ul", { class: "c-list" }, ...tokens.map(tokenRow))
+        ? el("ul", { class: "c-list c-expiry" }, ...tokens.map(tokenRow))
         : el("p", { class: "muted", text: "No proxy credentials yet." }),
+      ended.length
+        ? el("div", { class: "layer" },
+          el("span", { class: "eyebrow", text: "Expired in the last two weeks" }),
+          el("ul", { class: "c-list c-expiry" }, ...ended.map((r) => el("li", {},
+            el("div", {}, el("strong", { text: r.name }), el("p", { class: "muted", style: "margin:0", text: r.owner })),
+            expiryPill(r)))))
+        : null,
       listStatus);
 
     body.replaceChildren(el("div", { class: "layer", style: "gap:32px" }, secretsPart, credentials));

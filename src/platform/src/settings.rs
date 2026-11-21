@@ -154,7 +154,7 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
             parent: PARENT_TOKEN.into(),
         }),
         // Proxy credentials: what a cloud session holds to reach /git/ and /cf/, issued on
-        // the passkey-gated /tokens page.
+        // the console's Settings → Keys (the old /tokens page redirects there).
         Box::new(Tokens {
             proxy_host: PROXY_HOST.into(),
             passkeys: Passkeys {
