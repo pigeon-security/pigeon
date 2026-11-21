@@ -109,7 +109,10 @@ pub async fn mint(parent: &str, account: &str, request: &MintRequest) -> Result<
                 .iter()
                 .find(|g| g.name == *name && g.scopes.iter().any(|s| s == scope))
                 .ok_or_else(|| {
-                    Error::RustError(format!("no `{name}` permission group in {scope}"))
+                    Error::RustError(format!(
+                        "no `{name}` permission group in {scope}; similar: {}",
+                        similar(name, &groups)
+                    ))
                 })?;
             ids.push(json!({ "id": group.id }));
         }
@@ -206,5 +209,26 @@ impl<'a> Scoped<'a> {
         let value = result?;
         revoked?;
         Ok(value)
+    }
+}
+
+/// The group names sharing `name`'s first word, to show what a wrong name may have meant.
+fn similar(name: &str, groups: &[Group]) -> String {
+    let first = name
+        .split_whitespace()
+        .next()
+        .unwrap_or(name)
+        .to_lowercase();
+    let mut names: Vec<&str> = groups
+        .iter()
+        .filter(|g| g.name.to_lowercase().contains(&first))
+        .map(|g| g.name.as_str())
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    if names.is_empty() {
+        "none".into()
+    } else {
+        names.join(", ")
     }
 }

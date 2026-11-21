@@ -82,7 +82,7 @@ pub struct Ensured {
 fn policies() -> Vec<Policy> {
     vec![Policy::new(
         Scope::Account,
-        &["Artifacts Read", "Artifacts Edit"],
+        &["Artifacts Read", "Artifacts Write"],
     )]
 }
 
