@@ -214,6 +214,8 @@ async fn mcp_post(mut req: Request, env: &Env) -> Result<Response> {
         instructions: "pigeon's platform. Source code lives in Cloudflare Artifacts; GitHub is \
                        a read-only copy of main. A cloud session reaches git at \
                        https://proxy.pigeon.dev/git/pigeon-security/pigeon.git and deploys with \
+                       the pinned wrangler (`npm ci`, then `npx wrangler deploy`, in \
+                       src/platform: 4.166.0) and \
                        CLOUDFLARE_API_BASE_URL=https://proxy.pigeon.dev/cf/client/v4; its \
                        environment's network secret for proxy.pigeon.dev authenticates both, so \
                        no token goes in a command. Push branches under claude/; main only moves \

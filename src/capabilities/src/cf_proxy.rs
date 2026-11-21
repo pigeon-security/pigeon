@@ -315,6 +315,73 @@ pub fn allowed(
     Ok(entry)
 }
 
+/// The calls in `recorded` the proxy would refuse within `scope`, each with why. A recorded call
+/// is one line, `METHOD /path?query`, the path after the API's `/client/v4`, and optionally
+/// ` body=<base64>` holding its JSON body, which is then checked against the call's body rule:
+/// what `ci/deploy/standin.mjs` writes while a real `wrangler deploy` runs against it.
+pub fn unlisted(recorded: &[&str], scope: &Scope<'_>) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in recorded.iter().map(|l| l.trim()).filter(|l| !l.is_empty()) {
+        let (call, body) = match line.split_once(" body=") {
+            Some((c, b)) => (c, Some(b)),
+            None => (line, None),
+        };
+        let Some((method, target)) = call.split_once(' ') else {
+            out.push(format!("{line}: not a recorded call"));
+            continue;
+        };
+        let (path, query) = match target.split_once('?') {
+            Some((p, q)) => (p, Some(q)),
+            None => (target, None),
+        };
+        let entry = match allowed(method, &format!("{PREFIX}{path}"), query, scope) {
+            Ok(e) => e,
+            Err(why) => {
+                out.push(format!("{call}: {why}"));
+                continue;
+            }
+        };
+        let Some(body) = body else { continue };
+        match unbase64(body) {
+            Some(bytes) => {
+                if let Err(why) = body_ok(entry.body, &bytes, scope) {
+                    out.push(format!("{call}: {why}"));
+                }
+            }
+            None => out.push(format!("{call}: its recorded body is not base64")),
+        }
+    }
+    out
+}
+
+/// Standard base64, padded or not; `None` when not base64.
+fn unbase64(s: &str) -> Option<Vec<u8>> {
+    let value = |c: u8| -> Option<u32> {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        };
+        Some(u32::from(v))
+    };
+    let s = s.trim_end_matches('=');
+    let mut out = Vec::with_capacity(s.len() * 3 / 4);
+    let (mut acc, mut bits) = (0u32, 0u32);
+    for c in s.bytes() {
+        acc = (acc << 6) | value(c)?;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+            acc &= (1 << bits) - 1;
+        }
+    }
+    Some(out)
+}
+
 /// What a call's JSON body must be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BodyRule {
@@ -1047,6 +1114,50 @@ mod tests {
         ] {
             assert!(allowed(m, &p, None, &scope(A, S)).is_err(), "{m} {p}");
         }
+    }
+
+    #[test]
+    fn unlisted_names_each_refused_call_and_body() {
+        let image = format!(r#"{{"image":"registry.cloudflare.com/{A}/pigeon-ci-base:v3"}}"#);
+        let other = r#"{"image":"docker.io/library/alpine"}"#;
+        let b64 = |s: &str| pigeon_core::git::base64(s.as_bytes());
+        let recorded = [
+            format!("GET /accounts/{A}/workers/services/{S}"),
+            String::new(),
+            format!("GET /accounts/{A}/queues?name=pigeon-ci-events&page=1"),
+            format!(
+                "POST /accounts/{A}/containers/image-preparations body={}",
+                b64(&image)
+            ),
+            format!(
+                "POST /accounts/{A}/containers/image-preparations body={}",
+                b64(other)
+            ),
+            format!("GET /accounts/{A}/workers/durable_objects/namespaces?per_page=1000"),
+            format!("DELETE /accounts/{A}/workers/scripts/{S}"),
+            format!("POST /accounts/{A}/containers/image-preparations body=***"),
+            "nonsense".to_string(),
+        ];
+        let lines: Vec<&str> = recorded.iter().map(String::as_str).collect();
+        let found = unlisted(&lines, &scope(A, S));
+        assert_eq!(found.len(), 5, "{found:#?}");
+        assert!(found[0].contains("an image outside the account's registry"));
+        assert!(found[1].starts_with("GET /accounts/") && found[1].contains("namespaces"));
+        assert!(found[2].starts_with("DELETE"));
+        assert!(found[3].contains("not base64"));
+        assert!(found[4].contains("not a recorded call"));
+        assert!(unlisted(&lines[..4], &scope(A, S)).is_empty());
+    }
+
+    #[test]
+    fn unbase64_reads_what_base64_writes() {
+        for s in ["", "a", "ab", "abc", "{\"image\":\"x\"}"] {
+            assert_eq!(
+                unbase64(&pigeon_core::git::base64(s.as_bytes())).as_deref(),
+                Some(s.as_bytes())
+            );
+        }
+        assert_eq!(unbase64("a*b"), None);
     }
 
     /// The calls recorded from `wrangler deploy` of `src/platform` against a stand-in API, both

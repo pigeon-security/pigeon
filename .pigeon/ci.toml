@@ -10,3 +10,25 @@ timeout_min = 5
 [jobs.smoke-fail]
 run = "ci/runner/smoke-fail.sh"
 timeout_min = 5
+
+# pigeon's checks: fmt, clippy with warnings denied, the native tests, the platform's WASM check.
+# Every commit passes them before it lands.
+[jobs.test]
+run = "ci/runner/test.sh"
+timeout_min = 60
+
+[jobs.test.needs]
+cpu = 4
+memory_gb = 12
+disk_gb = 20
+
+# A dry `wrangler deploy` with the pinned wrangler against a stand-in for the Cloudflare API: fails
+# when it makes a call the deploy proxy's allowlist refuses.
+[jobs.allowlist]
+run = "ci/deploy/allowlist.sh"
+timeout_min = 45
+
+[jobs.allowlist.needs]
+cpu = 4
+memory_gb = 12
+disk_gb = 20

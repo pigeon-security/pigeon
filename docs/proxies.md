@@ -119,7 +119,7 @@ https://proxy.pigeon.dev/cf/client/v4
 
 It stands for `https://api.cloudflare.com/client/v4`.
 
-The proxy passes on only the ten calls that `wrangler deploy` of `pigeon-platform` makes. They were recorded from wrangler 4.166.0. All paths are under `/accounts/{account}/workers/`, where the account is the platform's and `{s}` is `pigeon-platform`.
+The proxy passes on only the calls that `wrangler deploy` of `pigeon-platform` makes, recorded from wrangler 4.166.0, the version `src/platform/package.json` pins. Paths without a leading `/` are under `/accounts/{account}/workers/`, where the account is the platform's and `{s}` is `pigeon-platform`.
 
 | Call | Permissions |
 | --- | --- |
@@ -150,7 +150,9 @@ Anything else is refused in Cloudflare's error shape, with a message starting "p
 
 ### Deploying
 
-Set these variables:
+Deploy with the pinned wrangler, from `src/platform`: `npm ci`, then `npx wrangler deploy`. Never a
+globally installed or `npx wrangler@latest` one: the allowlist matches 4.166.0's calls. Set these
+variables:
 
 ```
 CLOUDFLARE_API_BASE_URL=https://proxy.pigeon.dev/cf/client/v4
@@ -162,6 +164,10 @@ WRANGLER_SEND_METRICS=false
 Wrangler will not start without a token. The value is a placeholder, and the network proxy replaces the header.
 
 If a newer wrangler makes a call outside the list, the deploy fails and names the call. Check what the call does, then add it to `ALLOWED` in `src/capabilities/src/cf_proxy.rs`.
+
+### Checking the allowlist against what runs
+
+`ci/deploy/allowlist.sh` runs the pinned wrangler's real `deploy` against a stand-in for the API (`ci/deploy/standin.mjs`), both as for the existing Worker and as for a first deploy, records every call with its JSON body, and checks each against the allowlist and its body rules (`cf_proxy::unlisted`). It fails naming any call the proxy would refuse, so a wrangler upgrade or a new binding shows its new calls before a real deploy is refused halfway. CI runs it as the `allowlist` job; it needs Node 22 and `worker-build`, and no credential.
 
 A change to the allowlist only takes effect once it is deployed, and the deployed proxy is the one that has to let that deploy through. So when a deploy needs a call the deployed allowlist lacks (a new kind of binding, such as containers), deploy the change once directly with a `deploy_token`; later deploys can go through the proxy.
 
