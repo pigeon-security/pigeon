@@ -22,7 +22,7 @@ fn body() -> String {
   <span class="eyebrow">pigeon · architecture</span>
   <h1>What's deployed</h1>
   <p>pigeon.dev is public; the platform sits behind Cloudflare Access. pigeon-platform holds one parent token and mints a short-lived, scoped token for each capability it runs.</p>
-  <div class="pills"><span class="pill">as of {AS_OF}</span><span class="pill">2 Workers</span><span class="pill">7 capabilities</span></div>
+  <div class="pills"><span class="pill">as of {AS_OF}</span><span class="pill">2 Workers</span><span class="pill">8 capabilities</span></div>
 </header>
 
 <div class="arrow" aria-hidden="true"></div>
@@ -78,6 +78,7 @@ fn body() -> String {
           <li><code>POST /setup/site</code> → domain</li>
           <li><code>POST /setup/source</code> → artifacts</li>
           <li><code>POST /source/token</code> · <code>GET /source/tokens</code> · <code>DELETE /source/tokens/:id</code></li>
+          <li><code>POST /source/mirror</code> and Artifacts push events → mirror</li>
         </ul>
         <p>workers.dev and preview URLs off.</p>
       </article>
@@ -124,6 +125,11 @@ fn body() -> String {
         <div class="chain"><span>calls</span><span class="pill">secrets_store</span></div>
         <p>Git repositories on Cloudflare and the tokens that reach them.</p>
       </article>
+      <article class="card">
+        <div class="card-h"><h3>mirror</h3><span class="pill accent">mirror</span></div>
+        <div class="chain"><span>calls</span><span class="pill">artifacts</span></div>
+        <p>Copies an Artifacts repository to a read-only git host over git's HTTP protocol: branches only move forward, tags are only added.</p>
+      </article>
     </div>
   </section>
 
@@ -137,6 +143,7 @@ fn body() -> String {
         <ul class="kv">
           <li><code>CF_PARENT_TOKEN</code> bound to pigeon-platform</li>
           <li><code>PLATFORM_ACCESS_CLIENT_ID</code>, <code>_SECRET</code></li>
+          <li><code>GITHUB_MIRROR_TOKEN</code> bound to pigeon-platform</li>
         </ul>
       </article>
       <article class="card kind-api">
@@ -149,20 +156,24 @@ fn body() -> String {
       </article>
       <article class="card kind-api">
         <div class="card-h"><span class="dot"></span><h3>Artifacts</h3></div>
-        <ul class="kv"><li><code>pigeon-security/pigeon</code></li><li>imported from GitHub</li><li>git tokens: 15 min by default, 24 h at most</li></ul>
+        <ul class="kv"><li><code>pigeon-security/pigeon</code></li><li>the source of truth</li><li>git tokens: 15 min by default, 24 h at most</li></ul>
+      </article>
+      <article class="card kind-api">
+        <div class="card-h"><span class="dot"></span><h3>Queue</h3></div>
+        <ul class="kv"><li><code>pigeon-source-events</code></li><li>Artifacts push events, consumed by pigeon-platform</li></ul>
       </article>
     </div>
   </section>
 </section>
 
-<div class="arrow"><span>source</span></div>
+<div class="arrow"><span>mirror</span></div>
 
 <section class="region github" aria-label="GitHub">
   <span class="region-name">GitHub</span>
   <div class="cards">
     <article class="card">
       <div class="card-h"><h3>pigeon-security/pigeon</h3></div>
-      <ul class="kv"><li><code>src/core</code> · <code>src/site</code> · <code>src/capabilities</code></li><li><code>main</code> matches what's deployed</li></ul>
+      <ul class="kv"><li>read-only copy, for disaster recovery</li><li>follows Artifacts; never in the critical path</li></ul>
     </article>
   </div>
 </section>

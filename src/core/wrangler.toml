@@ -20,3 +20,16 @@ PLATFORM_HOST = "platform.pigeon.dev"
 binding = "CF_PARENT_TOKEN"
 store_id = "5185c227b9f34b4291045175695b78ec"
 secret_name = "CF_PARENT_TOKEN"
+
+# The GitHub mirror's push token: a fine-grained PAT on pigeon-security/pigeon only.
+[[secrets_store_secrets]]
+binding = "GITHUB_MIRROR_TOKEN"
+store_id = "5185c227b9f34b4291045175695b78ec"
+secret_name = "GITHUB_MIRROR_TOKEN"
+
+# Artifacts push events; each push to main or a tag mirrors to GitHub.
+[[queues.consumers]]
+queue = "pigeon-source-events"
+max_batch_size = 10
+max_batch_timeout = 5
+max_retries = 5

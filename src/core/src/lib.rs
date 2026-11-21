@@ -5,11 +5,16 @@ compile_error!("pigeon-core builds for wasm32 only: cargo build --target wasm32-
 
 use pigeon_capabilities::artifacts::{self, Access};
 use pigeon_capabilities::domain;
+use pigeon_capabilities::mirror::{self, Copy, Report, Source};
 use pigeon_capabilities::subdomain::{self, Served, Spec};
 use pigeon_capabilities::zero_trust::Protection;
 use pigeon_capabilities::{Account, secrets_store};
 use serde::Serialize;
-use worker::{Context, Env, Error, Method, Request, Response, Result, event};
+use serde_json::Value;
+use worker::{
+    Context, Env, Error, MessageBatch, Method, Request, Response, Result, console_error,
+    console_log, event,
+};
 
 /// The Secrets Store binding holding the parent token.
 const PARENT_TOKEN: &str = "CF_PARENT_TOKEN";
@@ -25,6 +30,11 @@ const SOURCE_NAMESPACE: &str = "pigeon-security";
 const SOURCE_REPO: &str = "pigeon";
 const SOURCE_BRANCH: &str = "main";
 const SOURCE_GITHUB: &str = "https://github.com/pigeon-security/pigeon";
+
+/// The read-only copy on GitHub, for disaster recovery, and the Secrets Store binding of the
+/// token that pushes to it.
+const MIRROR_URL: &str = "https://github.com/pigeon-security/pigeon.git";
+const MIRROR_TOKEN: &str = "GITHUB_MIRROR_TOKEN";
 
 /// How long a git token lives unless asked otherwise, and at most.
 const GIT_TOKEN_TTL: u64 = 900;
@@ -49,8 +59,62 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
             let id = &path["/source/tokens/".len()..];
             json(source_revoke(&env, id).await)
         }
+        (Method::Post, "/source/mirror") => json(source_mirror(&env).await),
         _ => Response::error("not found", 404),
     }
+}
+
+/// Artifacts push events: a push to the source's branch or a tag mirrors it to GitHub, once per
+/// batch. A failed mirror fails the batch, so the queue retries it; nothing waits on it.
+#[event(queue)]
+async fn queue(batch: MessageBatch<Value>, env: Env, _ctx: Context) -> Result<()> {
+    let pushed = batch.messages()?.iter().any(|m| mirrors(m.body()));
+    if !pushed {
+        return Ok(());
+    }
+    match source_mirror(&env).await {
+        Ok(report) => {
+            console_log!(
+                "mirror: {}",
+                serde_json::to_string(&report).unwrap_or_default()
+            );
+            Ok(())
+        }
+        Err(e) => {
+            console_error!("mirror failed: {e}");
+            Err(e)
+        }
+    }
+}
+
+/// Whether push event `event` moved the source's branch or a tag of the source repository.
+fn mirrors(event: &Value) -> bool {
+    let p = event.get("payload").unwrap_or(event);
+    let r#ref = p["ref"].as_str().unwrap_or_default();
+    let ours = ["repo", "repoName", "repo_name", "repository"]
+        .iter()
+        .find_map(|k| p[*k].as_str().or_else(|| p[*k]["name"].as_str()))
+        .is_none_or(|repo| repo == SOURCE_REPO || repo.ends_with(&format!("/{SOURCE_REPO}")));
+    ours && (r#ref == format!("refs/heads/{SOURCE_BRANCH}") || r#ref.starts_with("refs/tags/"))
+}
+
+/// Brings the GitHub copy up to the Artifacts source; does nothing when it is current.
+async fn source_mirror(env: &Env) -> Result<Report> {
+    let token = secrets_store::read(&env.secret_store(MIRROR_TOKEN)?)
+        .await?
+        .ok_or_else(|| {
+            Error::RustError(format!("`{MIRROR_TOKEN}` is not set in the Secrets Store"))
+        })?;
+    let source = Source {
+        namespace: SOURCE_NAMESPACE.into(),
+        repo: SOURCE_REPO.into(),
+        branches: vec![SOURCE_BRANCH.into()],
+    };
+    let copy = Copy {
+        url: MIRROR_URL.into(),
+        token,
+    };
+    mirror::mirror(&account(env).await?, &source, &copy).await
 }
 
 /// The account this Worker acts on, with the parent token read from its binding.
