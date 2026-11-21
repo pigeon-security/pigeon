@@ -7,11 +7,14 @@ pub mod artifacts;
 pub mod cloudflare;
 pub mod custom_domain;
 pub mod design;
+pub mod durable;
 pub mod git;
+pub mod identity;
 pub mod mcp;
 pub mod queues;
 pub mod secrets_store;
 pub mod tokens;
+pub mod webauthn;
 pub mod workers;
 pub mod zones;
 

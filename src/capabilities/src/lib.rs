@@ -6,9 +6,11 @@
 pub mod architecture;
 pub mod deploys;
 pub mod mirror;
+pub mod passkeys;
 pub mod protected_host;
 pub mod site;
 pub mod source;
+pub mod users;
 
 use std::future::Future;
 use std::pin::Pin;
@@ -17,10 +19,13 @@ use pigeon_core::Account;
 use pigeon_core::mcp::Tool;
 use serde::Serialize;
 use serde_json::Value;
-use worker::{Env, Error, Result};
+use worker::{Env, Error, Request, Response, Result};
 
 /// A tool call or event in flight.
 pub type Call<'a> = Pin<Box<dyn Future<Output = Result<Value>> + 'a>>;
+
+/// A request a capability serves, in flight.
+pub type Serve<'a> = Pin<Box<dyn Future<Output = Result<Response>> + 'a>>;
 
 /// What a capability acts with: the account, the hosting Worker's environment, and the other
 /// capabilities hosted beside it.
@@ -28,6 +33,8 @@ pub struct Context<'a> {
     pub account: &'a Account,
     pub env: &'a Env,
     pub hosted: &'a Hosted<'a>,
+    /// Who is calling, when the request says: a service user through an Access service token.
+    pub caller: Option<&'a users::Caller>,
 }
 
 /// A Worker and the capabilities it hosts, with the repository's sources it was built from.
@@ -59,6 +66,16 @@ pub trait Capability {
         Box::pin(async { Ok(Value::Null) })
     }
 
+    /// The path prefixes it serves over HTTP, such as `/auth/`.
+    fn routes(&self) -> Vec<&'static str> {
+        Vec::new()
+    }
+
+    /// Serves a request under one of its routes.
+    fn fetch<'a>(&'a self, _cx: &'a Context<'a>, _req: Request) -> Serve<'a> {
+        Box::pin(async { Response::error("not found", 404) })
+    }
+
     /// What it brings to the platform, for the architecture page.
     fn footprint(&self) -> Footprint {
         Footprint::default()
@@ -75,6 +92,8 @@ pub struct Footprint {
     pub queues: Vec<String>,
     pub repos: Vec<String>,
     pub mirrors: Vec<String>,
+    /// Durable Objects, by binding.
+    pub objects: Vec<String>,
 }
 
 /// A hostname a capability serves.
@@ -86,6 +105,8 @@ pub struct HostFootprint {
     pub by: String,
     /// The service tokens Access admits; empty when public.
     pub access: Vec<String>,
+    /// Paths on it that Access lets everyone through, which check callers themselves.
+    pub public_paths: Vec<String>,
 }
 
 /// A Worker a capability publishes, other than the one hosting it.

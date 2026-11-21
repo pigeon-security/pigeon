@@ -1,0 +1,685 @@
+//! Users: standard users, who are people, and service users, who are agents. A service user
+//! can be linked to a standard user, to act for them; the person approves the link with a
+//! passkey. Both kinds can do the same things for now. Every user has a display name and
+//! nothing else about them is kept.
+//!
+//! Users live in the `Directory`, a Durable Object with SQLite storage. A service user is an
+//! Access service token, made a user the first time it calls.
+
+use pigeon_core::Account;
+use pigeon_core::access::Session;
+use pigeon_core::durable::{self, Db, opt};
+use pigeon_core::identity::{self, Expected};
+use pigeon_core::mcp::Tool;
+use pigeon_core::webauthn::{CHALLENGE_TTL_MS, random};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use worker::wasm_bindgen;
+use worker::{DurableObject, Env, Error, Request, Response, Result, State, durable_object, js_sys};
+
+use crate::{Call, Capability, Context, Footprint, arg, to_value, unknown};
+
+/// The Directory's binding, and the one object of it.
+pub const BINDING: &str = "DIRECTORY";
+const OBJECT: &str = "directory";
+
+/// How long an enrolment link and a link request stay usable, in milliseconds.
+const ENROL_TTL_MS: i64 = 15 * 60 * 1000;
+const REQUEST_TTL_MS: i64 = 15 * 60 * 1000;
+
+/// How long the Access issuer and audience are kept before they are looked up again.
+const EXPECTED_TTL_MS: i64 = 24 * 60 * 60 * 1000;
+
+/// A user.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct User {
+    pub id: String,
+    /// `standard` (a person) or `service` (an agent).
+    pub kind: String,
+    pub name: String,
+    pub created_at: i64,
+}
+
+/// Who is calling: a user, and the standard user they act for when linked.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Caller {
+    pub user: User,
+    pub acting_for: Option<User>,
+}
+
+/// A passkey, as kept: its credential ID, uncompressed P-256 point (base64url) and counter.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Passkey {
+    pub id: String,
+    pub user_id: String,
+    pub point: String,
+    pub sign_count: i64,
+    pub name: String,
+    pub created_at: i64,
+    pub last_used_at: Option<i64>,
+}
+
+/// A request for a service user to act for a standard user.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct LinkRequest {
+    pub id: String,
+    pub service_user_id: String,
+    pub standard_user_id: String,
+    pub expires_at: i64,
+}
+
+fn now() -> i64 {
+    js_sys::Date::now() as i64
+}
+
+fn bad(why: &str) -> Error {
+    Error::RustError(why.to_string())
+}
+
+// ---- the Directory ----
+
+/// The Directory's schema, one statement per migration, applied in order and never edited.
+const MIGRATIONS: [&str; 8] = [
+    "CREATE TABLE users (id TEXT PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL, created_at INTEGER NOT NULL)",
+    "CREATE TABLE service_ids (access_client_id TEXT PRIMARY KEY, user_id TEXT NOT NULL)",
+    "CREATE TABLE passkeys (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, point TEXT NOT NULL, sign_count INTEGER NOT NULL, name TEXT NOT NULL, created_at INTEGER NOT NULL, last_used_at INTEGER)",
+    "CREATE TABLE links (service_user_id TEXT PRIMARY KEY, standard_user_id TEXT NOT NULL, approved_at INTEGER NOT NULL, approved_with TEXT NOT NULL)",
+    "CREATE TABLE link_requests (id TEXT PRIMARY KEY, service_user_id TEXT NOT NULL, standard_user_id TEXT NOT NULL, expires_at INTEGER NOT NULL)",
+    "CREATE TABLE challenges (id TEXT PRIMARY KEY, purpose TEXT NOT NULL, challenge TEXT NOT NULL, expires_at INTEGER NOT NULL)",
+    "CREATE TABLE enrolments (code TEXT PRIMARY KEY, user_id TEXT NOT NULL, expires_at INTEGER NOT NULL)",
+    "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, expires_at INTEGER NOT NULL)",
+];
+
+/// The users, their passkeys and links: one Durable Object.
+#[durable_object]
+pub struct Directory {
+    db: Db,
+}
+
+impl DurableObject for Directory {
+    fn new(state: State, _env: Env) -> Self {
+        let db = Db::open(&state, &MIGRATIONS).expect("the Directory's migrations apply");
+        Self { db }
+    }
+
+    async fn fetch(&self, req: Request) -> Result<Response> {
+        durable::serve(req, async |op, args| self.handle(op, &args)).await
+    }
+}
+
+impl Directory {
+    fn user(&self, id: &str) -> Result<Option<User>> {
+        self.db
+            .row("SELECT * FROM users WHERE id = ?", vec![id.into()])
+    }
+
+    fn create(&self, kind: &str, name: &str) -> Result<User> {
+        let user = User {
+            id: random()?[..22].to_string(),
+            kind: kind.into(),
+            name: name.into(),
+            created_at: now(),
+        };
+        self.db.exec(
+            "INSERT INTO users (id, kind, name, created_at) VALUES (?, ?, ?, ?)",
+            vec![
+                user.id.as_str().into(),
+                kind.into(),
+                name.into(),
+                user.created_at.into(),
+            ],
+        )?;
+        Ok(user)
+    }
+
+    /// The standard user `service_user_id` acts for.
+    fn acting_for(&self, service_user_id: &str) -> Result<Option<User>> {
+        self.db.row(
+            "SELECT u.* FROM links l JOIN users u ON u.id = l.standard_user_id WHERE l.service_user_id = ?",
+            vec![service_user_id.into()],
+        )
+    }
+
+    fn handle(&self, op: &str, a: &Value) -> Result<Value> {
+        let s = |k: &str| a[k].as_str().unwrap_or_default();
+        let t = now();
+        Ok(match op {
+            "users.list" => {
+                let users: Vec<User> = self
+                    .db
+                    .rows("SELECT * FROM users ORDER BY created_at", vec![])?;
+                let links: Vec<Value> = self.db.rows(
+                    "SELECT service_user_id, standard_user_id, approved_at FROM links",
+                    vec![],
+                )?;
+                #[derive(Deserialize, Serialize)]
+                struct Count {
+                    user_id: String,
+                    passkeys: i64,
+                }
+                let counts: Vec<Count> = self.db.rows(
+                    "SELECT user_id, COUNT(*) AS passkeys FROM passkeys GROUP BY user_id",
+                    vec![],
+                )?;
+                json!({ "users": users, "links": links, "passkeys": counts })
+            }
+            "users.get" => to_value(self.user(s("id"))?),
+            "users.create" => {
+                if !matches!(s("kind"), "standard" | "service") {
+                    return Err(bad("a user is standard or service"));
+                }
+                to_value(self.create(s("kind"), s("name"))?)
+            }
+            "users.rename" => {
+                self.db.exec(
+                    "UPDATE users SET name = ? WHERE id = ?",
+                    vec![s("name").into(), s("id").into()],
+                )?;
+                to_value(self.user(s("id"))?)
+            }
+            "users.standard_count" => {
+                #[derive(Deserialize)]
+                struct N {
+                    n: i64,
+                }
+                let n: Option<N> = self.db.row(
+                    "SELECT COUNT(*) AS n FROM users WHERE kind = 'standard'",
+                    vec![],
+                )?;
+                json!(n.map_or(0, |n| n.n))
+            }
+            "service.find" => {
+                #[derive(Deserialize)]
+                struct Row {
+                    user_id: String,
+                }
+                let row: Option<Row> = self.db.row(
+                    "SELECT user_id FROM service_ids WHERE access_client_id = ?",
+                    vec![s("access_client_id").into()],
+                )?;
+                match row
+                    .and_then(|r| self.user(&r.user_id).transpose())
+                    .transpose()?
+                {
+                    Some(user) => to_value(Caller {
+                        acting_for: self.acting_for(&user.id)?,
+                        user,
+                    }),
+                    None => Value::Null,
+                }
+            }
+            "service.add" => {
+                let user = self.create("service", s("name"))?;
+                self.db.exec(
+                    "INSERT INTO service_ids (access_client_id, user_id) VALUES (?, ?)",
+                    vec![s("access_client_id").into(), user.id.as_str().into()],
+                )?;
+                to_value(Caller {
+                    user,
+                    acting_for: None,
+                })
+            }
+            "enrol.create" => {
+                let code = random()?;
+                self.db.exec(
+                    "INSERT INTO enrolments (code, user_id, expires_at) VALUES (?, ?, ?)",
+                    vec![
+                        code.as_str().into(),
+                        s("user_id").into(),
+                        (t + ENROL_TTL_MS).into(),
+                    ],
+                )?;
+                json!(code)
+            }
+            "enrol.peek" | "enrol.take" => {
+                #[derive(Deserialize)]
+                struct Row {
+                    user_id: String,
+                }
+                let row: Option<Row> = self.db.row(
+                    "SELECT user_id FROM enrolments WHERE code = ? AND expires_at > ?",
+                    vec![s("code").into(), t.into()],
+                )?;
+                let row = row.ok_or_else(|| bad("this enrolment link is used or has expired"))?;
+                if op == "enrol.take" {
+                    self.db.exec(
+                        "DELETE FROM enrolments WHERE code = ?",
+                        vec![s("code").into()],
+                    )?;
+                }
+                to_value(self.user(&row.user_id)?)
+            }
+            "challenge.create" => {
+                let (id, challenge) = (random()?, random()?);
+                self.db.exec(
+                    "INSERT INTO challenges (id, purpose, challenge, expires_at) VALUES (?, ?, ?, ?)",
+                    vec![
+                        id.as_str().into(),
+                        s("purpose").into(),
+                        challenge.as_str().into(),
+                        (t + CHALLENGE_TTL_MS).into(),
+                    ],
+                )?;
+                json!({ "id": id, "challenge": challenge })
+            }
+            "challenge.take" => {
+                #[derive(Deserialize)]
+                struct Row {
+                    challenge: String,
+                }
+                let row: Option<Row> = self.db.row(
+                    "SELECT challenge FROM challenges WHERE id = ? AND purpose = ? AND expires_at > ?",
+                    vec![s("id").into(), s("purpose").into(), t.into()],
+                )?;
+                self.db.exec(
+                    "DELETE FROM challenges WHERE id = ? OR expires_at <= ?",
+                    vec![s("id").into(), t.into()],
+                )?;
+                json!(
+                    row.ok_or_else(|| bad("this challenge is used or has expired"))?
+                        .challenge
+                )
+            }
+            "passkey.add" => {
+                self.db.exec(
+                    "INSERT INTO passkeys (id, user_id, point, sign_count, name, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    vec![
+                        s("id").into(),
+                        s("user_id").into(),
+                        s("point").into(),
+                        a["sign_count"].as_i64().unwrap_or(0).into(),
+                        s("name").into(),
+                        t.into(),
+                    ],
+                )?;
+                Value::Null
+            }
+            "passkey.get" => to_value(
+                self.db
+                    .row::<Passkey>("SELECT * FROM passkeys WHERE id = ?", vec![s("id").into()])?,
+            ),
+            "passkey.touch" => {
+                self.db.exec(
+                    "UPDATE passkeys SET sign_count = ?, last_used_at = ? WHERE id = ?",
+                    vec![
+                        a["sign_count"].as_i64().unwrap_or(0).into(),
+                        t.into(),
+                        s("id").into(),
+                    ],
+                )?;
+                Value::Null
+            }
+            "passkey.list" => {
+                let user = a["user_id"].as_str();
+                let rows: Vec<Passkey> = self.db.rows(
+                    "SELECT * FROM passkeys WHERE ? IS NULL OR user_id = ? ORDER BY created_at",
+                    vec![opt(user), opt(user)],
+                )?;
+                to_value(rows)
+            }
+            "passkey.remove" => {
+                let key: Passkey = self
+                    .db
+                    .row("SELECT * FROM passkeys WHERE id = ?", vec![s("id").into()])?
+                    .ok_or_else(|| bad("no such passkey"))?;
+                let theirs: Vec<Passkey> = self.db.rows(
+                    "SELECT * FROM passkeys WHERE user_id = ?",
+                    vec![key.user_id.as_str().into()],
+                )?;
+                if theirs.len() <= 1 {
+                    return Err(bad("this is the user's last passkey; add another first"));
+                }
+                self.db
+                    .exec("DELETE FROM passkeys WHERE id = ?", vec![s("id").into()])?;
+                json!({ "removed": key.id })
+            }
+            "link.request" => {
+                let id = random()?;
+                self.db.exec(
+                    "INSERT INTO link_requests (id, service_user_id, standard_user_id, expires_at) VALUES (?, ?, ?, ?)",
+                    vec![
+                        id.as_str().into(),
+                        s("service_user_id").into(),
+                        s("standard_user_id").into(),
+                        (t + REQUEST_TTL_MS).into(),
+                    ],
+                )?;
+                json!(id)
+            }
+            "link.request_get" => {
+                let r: LinkRequest = self
+                    .db
+                    .row(
+                        "SELECT * FROM link_requests WHERE id = ? AND expires_at > ?",
+                        vec![s("id").into(), t.into()],
+                    )?
+                    .ok_or_else(|| bad("this link request is used or has expired"))?;
+                json!({
+                    "request": r,
+                    "service": self.user(&r.service_user_id)?,
+                    "standard": self.user(&r.standard_user_id)?,
+                })
+            }
+            "link.approve" => {
+                let r: LinkRequest = self
+                    .db
+                    .row(
+                        "SELECT * FROM link_requests WHERE id = ? AND expires_at > ?",
+                        vec![s("id").into(), t.into()],
+                    )?
+                    .ok_or_else(|| bad("this link request is used or has expired"))?;
+                self.db.exec(
+                    "INSERT OR REPLACE INTO links (service_user_id, standard_user_id, approved_at, approved_with) VALUES (?, ?, ?, ?)",
+                    vec![
+                        r.service_user_id.as_str().into(),
+                        r.standard_user_id.as_str().into(),
+                        t.into(),
+                        s("passkey_id").into(),
+                    ],
+                )?;
+                self.db.exec(
+                    "DELETE FROM link_requests WHERE id = ?",
+                    vec![s("id").into()],
+                )?;
+                to_value(r)
+            }
+            "link.remove" => {
+                self.db.exec(
+                    "DELETE FROM links WHERE service_user_id = ?",
+                    vec![s("service_user_id").into()],
+                )?;
+                Value::Null
+            }
+            "setting.get" => {
+                #[derive(Deserialize)]
+                struct Row {
+                    value: String,
+                }
+                let row: Option<Row> = self.db.row(
+                    "SELECT value FROM settings WHERE key = ? AND expires_at > ?",
+                    vec![s("key").into(), t.into()],
+                )?;
+                row.map_or(Value::Null, |r| json!(r.value))
+            }
+            "setting.put" => {
+                self.db.exec(
+                    "INSERT OR REPLACE INTO settings (key, value, expires_at) VALUES (?, ?, ?)",
+                    vec![
+                        s("key").into(),
+                        s("value").into(),
+                        (t + a["ttl_ms"].as_i64().unwrap_or(EXPECTED_TTL_MS)).into(),
+                    ],
+                )?;
+                Value::Null
+            }
+            other => return Err(bad(&format!("the Directory has no operation `{other}`"))),
+        })
+    }
+}
+
+/// Calls the Directory.
+pub async fn directory(env: &Env, op: &str, args: Value) -> Result<Value> {
+    durable::call(env, BINDING, OBJECT, op, &args).await
+}
+
+fn parse<T: for<'de> Deserialize<'de>>(v: Value) -> Result<T> {
+    Ok(serde_json::from_value(v)?)
+}
+
+// ---- who is calling ----
+
+/// The caller of `req`, from the Access token Access signed it with: a service token is a
+/// service user, made one the first time it calls. `None` for a request Access did not sign
+/// with a service token.
+pub async fn caller(
+    env: &Env,
+    account: &Account,
+    host: &str,
+    req: &Request,
+) -> Result<Option<Caller>> {
+    if req.headers().get(identity::HEADER)?.is_none() {
+        return Ok(None);
+    }
+    let expected = expected(env, account, host).await?;
+    let Some(claims) = identity::caller(req, &expected).await? else {
+        return Ok(None);
+    };
+    let Some(client_id) = claims.common_name else {
+        return Ok(None);
+    };
+    let found = directory(
+        env,
+        "service.find",
+        json!({ "access_client_id": client_id }),
+    )
+    .await?;
+    if !found.is_null() {
+        return parse(found).map(Some);
+    }
+    let session = Session::open(account).await?;
+    let name = session.service_token_name(&client_id).await;
+    let name = session
+        .finish(name)
+        .await?
+        .unwrap_or_else(|| client_id.clone());
+    let added = directory(
+        env,
+        "service.add",
+        json!({ "access_client_id": client_id, "name": name }),
+    )
+    .await?;
+    parse(added).map(Some)
+}
+
+/// The issuer and audience the host's Access tokens carry, kept in the Directory for a day.
+async fn expected(env: &Env, account: &Account, host: &str) -> Result<Expected> {
+    let key = format!("access.expected.{host}");
+    let kept = directory(env, "setting.get", json!({ "key": key })).await?;
+    if let Some(kept) = kept.as_str() {
+        let v: Value = serde_json::from_str(kept)?;
+        return Ok(Expected {
+            team_domain: v["team_domain"].as_str().unwrap_or_default().into(),
+            aud: v["aud"].as_str().unwrap_or_default().into(),
+        });
+    }
+    let session = Session::open(account).await?;
+    let found = async {
+        let team_domain = session.team_domain().await?;
+        let aud = session
+            .app_aud(host)
+            .await?
+            .ok_or_else(|| bad(&format!("no Access application on {host}")))?;
+        Ok((team_domain, aud))
+    }
+    .await;
+    let (team_domain, aud) = session.finish(found).await?;
+    let value = json!({ "team_domain": team_domain, "aud": aud }).to_string();
+    directory(env, "setting.put", json!({ "key": key, "value": value })).await?;
+    Ok(Expected { team_domain, aud })
+}
+
+// ---- the capability ----
+
+/// Users, on the hostname whose Access tokens say who calls and whose `/auth` pages take
+/// passkeys.
+pub struct Users {
+    pub host: String,
+}
+
+impl Users {
+    fn enrol_url(&self, code: &str) -> String {
+        format!("https://{}/auth/enrol?code={code}", self.host)
+    }
+
+    async fn standard_with_link(&self, env: &Env, name: &str) -> Result<Value> {
+        let user = directory(
+            env,
+            "users.create",
+            json!({ "kind": "standard", "name": name }),
+        )
+        .await?;
+        let id = user["id"].as_str().unwrap_or_default();
+        let code = directory(env, "enrol.create", json!({ "user_id": id })).await?;
+        Ok(json!({
+            "user": user,
+            "enrol": self.enrol_url(code.as_str().unwrap_or_default()),
+            "expires_in_minutes": ENROL_TTL_MS / 60_000,
+        }))
+    }
+
+    async fn run(&self, cx: &Context<'_>, tool: &str, args: &Value) -> Result<Value> {
+        let env = cx.env;
+        let service = || {
+            cx.caller
+                .filter(|c| c.user.kind == "service")
+                .ok_or_else(|| bad("only a service user can do this"))
+        };
+        Ok(match tool {
+            "users_whoami" => to_value(cx.caller),
+            "users_list" => directory(env, "users.list", json!({})).await?,
+            "users_bootstrap" => {
+                let n = directory(env, "users.standard_count", json!({})).await?;
+                if n.as_i64().unwrap_or(0) > 0 {
+                    return Err(bad("a standard user exists; invite with users_invite"));
+                }
+                self.standard_with_link(env, arg(args, "name")?).await?
+            }
+            "users_invite" => self.standard_with_link(env, arg(args, "name")?).await?,
+            "users_enrol" => {
+                let user: Option<User> = parse(
+                    directory(env, "users.get", json!({ "id": arg(args, "user_id")? })).await?,
+                )?;
+                let user = user
+                    .filter(|u| u.kind == "standard")
+                    .ok_or_else(|| bad("no such standard user"))?;
+                let code = directory(env, "enrol.create", json!({ "user_id": user.id })).await?;
+                json!({ "user": user, "enrol": self.enrol_url(code.as_str().unwrap_or_default()) })
+            }
+            "users_link" => {
+                let me = service()?;
+                let standard = match args["standard_user_id"].as_str() {
+                    Some(id) => id.to_string(),
+                    None => {
+                        let all: Vec<User> =
+                            parse(directory(env, "users.list", json!({})).await?["users"].clone())?;
+                        let people: Vec<User> =
+                            all.into_iter().filter(|u| u.kind == "standard").collect();
+                        match people.as_slice() {
+                            [one] => one.id.clone(),
+                            _ => return Err(bad("name the standard user: standard_user_id")),
+                        }
+                    }
+                };
+                let id = directory(
+                    env,
+                    "link.request",
+                    json!({ "service_user_id": me.user.id, "standard_user_id": standard }),
+                )
+                .await?;
+                json!({
+                    "approve": format!("https://{}/auth/link?request={}", self.host, id.as_str().unwrap_or_default()),
+                    "expires_in_minutes": REQUEST_TTL_MS / 60_000,
+                })
+            }
+            "users_unlink" => {
+                let id = match args["service_user_id"].as_str() {
+                    Some(id) => id.to_string(),
+                    None => service()?.user.id.clone(),
+                };
+                directory(env, "link.remove", json!({ "service_user_id": id })).await?;
+                json!({ "unlinked": id })
+            }
+            "users_rename" => {
+                directory(
+                    env,
+                    "users.rename",
+                    json!({ "id": arg(args, "id")?, "name": arg(args, "name")? }),
+                )
+                .await?
+            }
+            other => return Err(unknown(other)),
+        })
+    }
+}
+
+impl Capability for Users {
+    fn name(&self) -> &'static str {
+        "users"
+    }
+
+    fn tools(&self) -> Vec<Tool> {
+        let one =
+            |name: &'static str, description: &'static str, field: &str, required: bool| Tool {
+                name,
+                description,
+                input_schema: json!({
+                    "type": "object",
+                    "properties": { field: { "type": "string" } },
+                    "required": if required { vec![field] } else { vec![] },
+                }),
+            };
+        vec![
+            Tool::bare(
+                "users_whoami",
+                "Who is calling: the user, and the standard user they act for when linked.",
+            ),
+            Tool::bare(
+                "users_list",
+                "Every user, standard and service, with links and passkey counts.",
+            ),
+            one(
+                "users_bootstrap",
+                "Create the first standard user, only while there is none, and answer a \
+                 single-use link where they register a passkey.",
+                "name",
+                true,
+            ),
+            one(
+                "users_invite",
+                "Create a standard user and answer a single-use link where they register a \
+                 passkey.",
+                "name",
+                true,
+            ),
+            one(
+                "users_enrol",
+                "Answer a single-use link where a standard user registers another passkey.",
+                "user_id",
+                true,
+            ),
+            one(
+                "users_link",
+                "Ask for the calling service user to act for a standard user (the only one, \
+                 when there is one). Answers a link the person opens to approve with a passkey.",
+                "standard_user_id",
+                false,
+            ),
+            one(
+                "users_unlink",
+                "End a service user's link (the caller's, by default).",
+                "service_user_id",
+                false,
+            ),
+            Tool {
+                name: "users_rename",
+                description: "Change a user's display name.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": { "id": { "type": "string" }, "name": { "type": "string" } },
+                    "required": ["id", "name"]
+                }),
+            },
+        ]
+    }
+
+    fn call<'a>(&'a self, cx: &'a Context<'a>, tool: &'a str, args: &'a Value) -> Call<'a> {
+        Box::pin(self.run(cx, tool, args))
+    }
+
+    fn footprint(&self) -> Footprint {
+        Footprint {
+            objects: vec![BINDING.into()],
+            ..Footprint::default()
+        }
+    }
+}

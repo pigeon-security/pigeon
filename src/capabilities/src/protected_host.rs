@@ -29,6 +29,9 @@ pub struct ProtectedHost {
     pub guests: Vec<String>,
     /// A header Access also reads a service token from, as one JSON value.
     pub token_header: Option<String>,
+    /// Paths on the host Access lets everyone through, such as `/auth`, for pages that check
+    /// callers themselves.
+    pub public_paths: Vec<String>,
     /// The tool that sets it up, such as `setup_platform`.
     pub tool: &'static str,
 }
@@ -89,6 +92,14 @@ impl ProtectedHost {
         let app = s
             .app(&self.app, &self.host, &policy, self.token_header.as_deref())
             .await?;
+        if !self.public_paths.is_empty() {
+            let bypass = s.bypass_policy(&format!("{}-public", self.app)).await?;
+            for path in &self.public_paths {
+                let domain = format!("{}{path}", self.host);
+                s.app(&format!("{}{path}", self.app), &domain, &bypass, None)
+                    .await?;
+            }
+        }
         Ok((app, own, guests))
     }
 
@@ -154,6 +165,7 @@ impl Capability for ProtectedHost {
                 worker: self.worker.clone(),
                 by: self.name().into(),
                 access,
+                public_paths: self.public_paths.clone(),
             }],
             zone: Some(self.zone.clone()),
             secrets: vec![

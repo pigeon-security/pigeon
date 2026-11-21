@@ -104,6 +104,8 @@ pub struct Hostname {
     pub by: String,
     /// The service tokens Access admits; empty when public.
     pub access: Vec<String>,
+    /// Paths on it Access lets everyone through.
+    pub public_paths: Vec<String>,
 }
 
 #[derive(Serialize, Default)]
@@ -113,6 +115,8 @@ pub struct Resources {
     pub queues: Vec<String>,
     pub repos: Vec<String>,
     pub mirrors: Vec<String>,
+    /// Durable Objects, by binding.
+    pub objects: Vec<String>,
     /// Every permission a minted token can hold.
     pub permissions: Vec<String>,
 }
@@ -181,6 +185,7 @@ pub fn describe(sources: &[Source], hosted: &Hosted) -> Model {
                 worker: h.worker.clone(),
                 by: h.by.clone(),
                 access: h.access.clone(),
+                public_paths: h.public_paths.clone(),
             });
         }
         for w in &f.workers {
@@ -202,6 +207,7 @@ pub fn describe(sources: &[Source], hosted: &Hosted) -> Model {
         resources.queues.extend(f.queues.iter().cloned());
         resources.repos.extend(f.repos.iter().cloned());
         resources.mirrors.extend(f.mirrors.iter().cloned());
+        resources.objects.extend(f.objects.iter().cloned());
     }
     for part in blocks.iter().chain(&caps) {
         resources
@@ -213,6 +219,7 @@ pub fn describe(sources: &[Source], hosted: &Hosted) -> Model {
         &mut resources.queues,
         &mut resources.repos,
         &mut resources.mirrors,
+        &mut resources.objects,
         &mut resources.permissions,
     ] {
         list.sort();
@@ -840,6 +847,11 @@ fn diagram(m: &Model) -> String {
         } else {
             format!("Zero Trust application · admits {}", h.access.join(", "))
         };
+        let sub = if h.public_paths.is_empty() {
+            sub
+        } else {
+            format!("{sub} · public: {}", h.public_paths.join(", "))
+        };
         s.text(x + 16.0, y2 + 56.0, "dg-s", &sub, "start");
         let cw = chip_width(&h.by);
         s.chip(x + col_w - 16.0 - cw, y2 + 14.0, &h.by, true);
@@ -906,6 +918,9 @@ fn diagram(m: &Model) -> String {
     }
     if let Some(z) = &r.zone {
         cards.push(("Zone", z.clone(), "dg-cf"));
+    }
+    for o in &r.objects {
+        cards.push(("Durable Object", o.clone(), "dg-store"));
     }
     for repo in &r.repos {
         cards.push(("Artifacts", repo.clone(), "dg-cf"));
@@ -1177,6 +1192,7 @@ fn render(m: &Model) -> String {
         ("Queues", &r.queues),
         ("Artifacts", &r.repos),
         ("Mirrors", &r.mirrors),
+        ("Durable Objects", &r.objects),
     ]
     .iter()
     .filter(|(_, items)| !items.is_empty())

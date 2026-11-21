@@ -179,6 +179,7 @@ impl Capability for Site {
                 worker: self.worker.clone(),
                 by: self.name().into(),
                 access: Vec::new(),
+                public_paths: Vec::new(),
             }],
             workers: vec![WorkerFootprint {
                 name: self.worker.clone(),

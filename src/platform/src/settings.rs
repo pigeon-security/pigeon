@@ -5,9 +5,11 @@ use pigeon_capabilities::Capability;
 use pigeon_capabilities::architecture::Architecture;
 use pigeon_capabilities::deploys::Deploys;
 use pigeon_capabilities::mirror::{self, Mirror};
+use pigeon_capabilities::passkeys::Passkeys;
 use pigeon_capabilities::protected_host::ProtectedHost;
 use pigeon_capabilities::site::{Retired, Site};
 use pigeon_capabilities::source::Source;
+use pigeon_capabilities::users::Users;
 
 /// This Worker's name, as deployed.
 pub const WORKER: &str = "pigeon-platform";
@@ -16,6 +18,9 @@ pub const WORKER: &str = "pigeon-platform";
 pub const PARENT_TOKEN: &str = "CF_PARENT_TOKEN";
 
 const ZONE: &str = "pigeon.dev";
+
+/// The platform's hostname: behind Access, but for its `/auth` pages.
+pub const HOST: &str = "platform.pigeon.dev";
 const NAMESPACE: &str = "pigeon-security";
 const REPO: &str = "pigeon";
 const BRANCH: &str = "main";
@@ -25,7 +30,7 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
     vec![
         Box::new(ProtectedHost {
             zone: ZONE.into(),
-            host: "platform.pigeon.dev".into(),
+            host: HOST.into(),
             worker: WORKER.into(),
             app: "pigeon-platform".into(),
             service_token: "pigeon-platform".into(),
@@ -35,6 +40,8 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
             // Authorization for it.
             guests: vec!["pigeon-claude".into()],
             token_header: Some("Authorization".into()),
+            // The passkey pages, where the passkey is the only gate.
+            public_paths: vec!["/auth".into()],
             tool: "setup_platform",
         }),
         Box::new(Site {
@@ -67,6 +74,11 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
             url: "https://github.com/pigeon-security/pigeon.git".into(),
             token_binding: "GITHUB_MIRROR_TOKEN".into(),
             tool: "source_mirror",
+        }),
+        Box::new(Users { host: HOST.into() }),
+        Box::new(Passkeys {
+            host: HOST.into(),
+            site_name: "pigeon".into(),
         }),
         Box::new(Deploys),
         Box::new(Architecture),

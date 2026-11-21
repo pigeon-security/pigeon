@@ -40,6 +40,8 @@ struct Listed {
     client_id: String,
     #[serde(default)]
     domain: String,
+    #[serde(default)]
+    aud: String,
 }
 
 /// Access operations on one account, as one minted token. Call [`Session::finish`] to revoke
@@ -235,6 +237,64 @@ impl<'a> Session<'a> {
             .into_iter()
             .find(|t| t.name == name)
             .map(|t| t.id))
+    }
+
+    /// A reusable policy `name` that lets everyone through, for paths that check callers
+    /// themselves: its ID.
+    pub async fn bypass_policy(&self, name: &str) -> Result<String> {
+        let body = json!({ "name": name, "decision": "bypass", "include": [{ "everyone": {} }] });
+        let path = self.path("policies");
+        match self
+            .list("policies")
+            .await?
+            .into_iter()
+            .find(|p| p.name == name)
+        {
+            Some(p) => {
+                let at = format!("{path}/{}", p.id);
+                call(self.token.value(), Method::Put, &at, Some(&body)).await?;
+                Ok(p.id)
+            }
+            None => id(
+                &call(self.token.value(), Method::Post, &path, Some(&body)).await?,
+                "policy",
+            ),
+        }
+    }
+
+    /// The AUD tag of the application on `domain`, the audience of the tokens it signs.
+    pub async fn app_aud(&self, domain: &str) -> Result<Option<String>> {
+        Ok(self
+            .list("apps")
+            .await?
+            .into_iter()
+            .find(|a| a.domain == domain)
+            .map(|a| a.aud))
+    }
+
+    /// The team domain Access signs as, such as `team.cloudflareaccess.com`.
+    pub async fn team_domain(&self) -> Result<String> {
+        let v = call(
+            self.token.value(),
+            Method::Get,
+            &self.path("organizations"),
+            None,
+        )
+        .await?;
+        v["auth_domain"]
+            .as_str()
+            .map(String::from)
+            .ok_or_else(|| Error::RustError("the Access organization has no team domain".into()))
+    }
+
+    /// The name of the service token whose client ID is `client_id`, if it exists.
+    pub async fn service_token_name(&self, client_id: &str) -> Result<Option<String>> {
+        Ok(self
+            .list("service_tokens")
+            .await?
+            .into_iter()
+            .find(|t| t.client_id == client_id)
+            .map(|t| t.name))
     }
 
     /// Deletes service token `id`.

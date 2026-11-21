@@ -29,3 +29,11 @@ secret_name = "GITHUB_MIRROR_TOKEN"
 
 # Artifacts push events reach this Worker through the pigeon-source-events queue; the queue
 # and its consumer are set up by POST /setup/source, not here.
+
+# The Directory: users, passkeys and links, in one Durable Object with SQLite storage.
+[durable_objects]
+bindings = [{ name = "DIRECTORY", class_name = "Directory" }]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Directory"]

@@ -1,6 +1,7 @@
 //! pigeon-platform: the one Worker, hosting pigeon's capabilities behind Access. It answers
-//! `/health` and the MCP endpoint, hands queue events to the capabilities that want them, and
-//! does nothing else itself. Built for `wasm32-unknown-unknown` only.
+//! `/health` and the MCP endpoint, hands the paths a capability serves (such as `/auth/`) to it,
+//! hands queue events to the capabilities that want them, and does nothing else itself. Built
+//! for `wasm32-unknown-unknown` only.
 
 #[cfg(not(target_arch = "wasm32"))]
 compile_error!(
@@ -11,7 +12,11 @@ mod settings;
 
 include!(concat!(env!("OUT_DIR"), "/sources.rs"));
 
+use pigeon_capabilities::users::{self, Caller};
 use pigeon_capabilities::{Capability, Context, Hosted};
+
+/// The Directory's class, exported from this Worker for its Durable Object binding.
+pub use pigeon_capabilities::users::Directory;
 use pigeon_core::mcp::{self, Server};
 use pigeon_core::{Account, secrets_store};
 use serde_json::Value;
@@ -22,7 +27,23 @@ use worker::{
 
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, _ctx: WorkerContext) -> Result<Response> {
-    match (req.method(), req.path().as_str()) {
+    let path = req.path();
+    let caps = settings::capabilities();
+    if let Some(c) = caps
+        .iter()
+        .find(|c| c.routes().iter().any(|r| path.starts_with(r)))
+    {
+        let hosted = hosted(&caps);
+        let account = account(&env).await?;
+        let cx = Context {
+            account: &account,
+            env: &env,
+            hosted: &hosted,
+            caller: None,
+        };
+        return c.fetch(&cx, req).await;
+    }
+    match (req.method(), path.as_str()) {
         (Method::Get, "/health") => Response::ok("ok"),
         (Method::Post, "/mcp") => mcp_post(req, &env).await,
         (_, "/mcp") => Response::error("the MCP endpoint takes POST only", 405),
@@ -49,6 +70,7 @@ async fn queue(batch: MessageBatch<Value>, env: Env, _ctx: WorkerContext) -> Res
         account: &account,
         env: &env,
         hosted: &hosted,
+        caller: None,
     };
     for c in wanting {
         match c.on_events(&cx).await {
@@ -90,6 +112,14 @@ async fn account(env: &Env) -> Result<Account> {
 /// One MCP message, answered as JSON; a notification gets 202 and no body. The tools are every
 /// hosted capability's.
 async fn mcp_post(mut req: Request, env: &Env) -> Result<Response> {
+    let account = account(env).await?;
+    let caller: Option<Caller> = match users::caller(env, &account, settings::HOST, &req).await {
+        Ok(c) => c,
+        Err(e) => {
+            console_error!("caller unknown: {e}");
+            None
+        }
+    };
     let message: Value = match req.json().await {
         Ok(v) => v,
         Err(e) => return Response::error(format!("not JSON: {e}"), 400),
@@ -109,11 +139,11 @@ async fn mcp_post(mut req: Request, env: &Env) -> Result<Response> {
             .iter()
             .find(|c| c.tools().iter().any(|t| t.name == name))
             .ok_or_else(|| Error::RustError(format!("no tool `{name}`")))?;
-        let account = account(env).await?;
         let cx = Context {
             account: &account,
             env,
             hosted: &hosted,
+            caller: caller.as_ref(),
         };
         owner.call(&cx, name, args).await
     };
