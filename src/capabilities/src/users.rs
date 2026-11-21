@@ -82,7 +82,7 @@ fn bad(why: &str) -> Error {
 // ---- the Directory ----
 
 /// The Directory's schema, one statement per migration, applied in order and never edited.
-const MIGRATIONS: [&str; 15] = [
+const MIGRATIONS: [&str; 16] = [
     "CREATE TABLE users (id TEXT PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL, created_at INTEGER NOT NULL)",
     "CREATE TABLE service_ids (access_client_id TEXT PRIMARY KEY, user_id TEXT NOT NULL)",
     "CREATE TABLE passkeys (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, point TEXT NOT NULL, sign_count INTEGER NOT NULL, name TEXT NOT NULL, created_at INTEGER NOT NULL, last_used_at INTEGER)",
@@ -98,7 +98,11 @@ const MIGRATIONS: [&str; 15] = [
     "ALTER TABLE oauth_tokens ADD COLUMN label TEXT",
     "ALTER TABLE users ADD COLUMN avatar TEXT",
     "CREATE TABLE sessions (hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, created_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL)",
+    "CREATE TABLE policy_decisions (seq INTEGER PRIMARY KEY AUTOINCREMENT, at_ms INTEGER NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL, decision TEXT NOT NULL, rule TEXT, reason TEXT NOT NULL)",
 ];
+
+/// How many policy decisions the Directory keeps.
+const POLICY_KEPT: i64 = 200;
 
 /// The largest profile picture kept, as a `data:` URL: a 128 px square the browser made.
 const AVATAR_MAX: usize = 65_536;
@@ -541,6 +545,42 @@ impl Directory {
                     vec![s("service_user_id").into()],
                 )?;
                 Value::Null
+            }
+            "policy.log" => {
+                self.db.exec(
+                    "INSERT INTO policy_decisions (at_ms, actor, action, target, decision, rule, reason) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    vec![
+                        t.into(),
+                        s("actor").into(),
+                        s("action").into(),
+                        s("target").into(),
+                        s("decision").into(),
+                        opt(a["rule"].as_str()),
+                        s("reason").into(),
+                    ],
+                )?;
+                self.db.exec(
+                    "DELETE FROM policy_decisions WHERE seq <= (SELECT MAX(seq) FROM policy_decisions) - ?",
+                    vec![POLICY_KEPT.into()],
+                )?;
+                Value::Null
+            }
+            "policy.recent" => {
+                #[derive(Serialize, Deserialize)]
+                struct Decision {
+                    at_ms: i64,
+                    actor: String,
+                    action: String,
+                    target: String,
+                    decision: String,
+                    rule: Option<String>,
+                    reason: String,
+                }
+                let rows: Vec<Decision> = self.db.rows(
+                    "SELECT at_ms, actor, action, target, decision, rule, reason FROM policy_decisions ORDER BY seq DESC LIMIT ?",
+                    vec![a["limit"].as_i64().unwrap_or(10).clamp(1, POLICY_KEPT).into()],
+                )?;
+                to_value(rows)
             }
             "setting.get" => {
                 #[derive(Deserialize)]

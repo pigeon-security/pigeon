@@ -1,5 +1,6 @@
-//! A landing's states and the moves between them, which branches may land, which changes need a
-//! person's approval whatever the setting, and the note a landing leaves. Pure.
+//! A landing's states and the moves between them, which branches may land, which changes the
+//! policy keeps for the person's passkey or leaves to their delegate, and the note a landing
+//! leaves. Pure.
 //!
 //! ```text
 //! checking ─► testing ─► [awaiting_approval] ─► merging ─► deploying ─► landed
@@ -12,6 +13,7 @@
 //! ends `refused`, with the reason. Any live state can become `error` (the gateway failed) or,
 //! before `merging`, `cancelled`.
 
+use pigeon_core::policy::{Answer, Approval, Decision, Kind, Request};
 use serde::{Deserialize, Serialize};
 
 /// A landing's state.
@@ -189,11 +191,15 @@ pub fn branch_ref(given: &str) -> Result<String, String> {
     }
 }
 
-/// The paths whose content decides what the gate itself runs: the CI jobs and their scripts,
-/// how cargo builds and tests (its config and toolchain), and the deploy tool's version and
-/// where npm gets it. A landing that changes any of them needs a person's approval,
-/// whatever the setting: tests catch mistakes, and a commit defines its own tests.
-pub const GUARDED: [&str; 8] = [
+/// The paths whose content decides what the gate itself runs, and the policy over it: the
+/// policy and the settings generated from it, the CI jobs and their scripts, how cargo builds
+/// and tests (its config and toolchain), and the deploy tool's version and where npm gets it.
+/// The policy says what a change to each needs ([`approvals`]): tests catch mistakes, and a
+/// commit defines its own tests.
+pub const GUARDED: [&str; 11] = [
+    ".pigeon/policy.toml",
+    ".claude/settings.json",
+    ".pigeon/ci.toml",
     ".pigeon",
     "ci",
     ".cargo",
@@ -217,12 +223,62 @@ pub fn guarded_changes(
         .collect()
 }
 
-/// Why a landing needs approval, or `None`: the setting, or a change to a guarded path.
-pub fn approval_reason(setting: bool, guarded: &[&str]) -> Option<String> {
-    match (setting, guarded) {
+/// The policy's request for a change to guarded path `path`: the policy and the settings
+/// generated from it are `change_policy`; the rest `change_gate`, a directory as `dir/`.
+pub fn guarded_request(path: &str) -> Request {
+    let (kind, target) = match path {
+        ".pigeon/policy.toml" | ".claude/settings.json" => (Kind::ChangePolicy, path.to_string()),
+        ".pigeon" | "ci" | ".cargo" => (Kind::ChangeGate, format!("{path}/")),
+        _ => (Kind::ChangeGate, path.to_string()),
+    };
+    crate::policy::request("lander", kind, &target)
+}
+
+/// What a landing's changes to guarded paths need, as the policy answers.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Approvals {
+    /// What waits for the person's passkey, each with why: a change whose rule asks for it,
+    /// and one the policy denies or does not cover, which only the person can let through.
+    pub passkey: Vec<String>,
+    /// What the person's delegate approves, each with its rule.
+    pub delegate: Vec<String>,
+}
+
+/// What `changed`, the guarded paths a landing changes, need, with `decide` answering each.
+/// `.pigeon` itself counts only when neither file in it that the policy names changed: it then
+/// holds another change.
+pub fn approvals(changed: &[&str], mut decide: impl FnMut(&Request) -> Answer) -> Approvals {
+    let named = changed
+        .iter()
+        .any(|p| matches!(*p, ".pigeon/policy.toml" | ".pigeon/ci.toml"));
+    let mut out = Approvals::default();
+    for path in changed {
+        if *path == ".pigeon" && named {
+            continue;
+        }
+        let req = guarded_request(path);
+        let a = decide(&req);
+        let rule = a.rule.as_deref().unwrap_or("no rule");
+        match (a.decision, a.needs) {
+            (Decision::Allow, _) => {}
+            (Decision::Deny, Some(Approval::Delegate)) => {
+                out.delegate.push(format!("{} ({rule})", req.target));
+            }
+            (Decision::Deny, _) => out
+                .passkey
+                .push(format!("{} ({rule}: {})", req.target, a.reason)),
+        }
+    }
+    out
+}
+
+/// Why a landing waits for the person's passkey, or `None`: a change the policy keeps for the
+/// person, or the setting.
+pub fn approval_reason(setting: bool, passkey: &[String]) -> Option<String> {
+    match (setting, passkey) {
         (_, [_, ..]) => Some(format!(
-            "it changes what the gate runs ({}), which a person always approves",
-            guarded.join(", ")
+            "the policy keeps it for the person's passkey: {}",
+            passkey.join("; ")
         )),
         (true, []) => Some("the setting asks a person to approve every landing".into()),
         (false, []) => None,
@@ -425,20 +481,35 @@ mod tests {
     }
 
     #[test]
-    fn a_change_to_what_the_gate_runs_needs_a_person() {
+    fn the_policy_says_who_approves_a_guarded_change() {
         let mut main: Vec<Option<String>> = GUARDED.iter().map(|p| Some(p.to_string())).collect();
-        main[7] = None;
+        main[10] = None;
         assert!(guarded_changes(&main, &main).is_empty());
         let mut commit = main.clone();
-        commit[1] = Some("b2".into());
-        commit[7] = Some("new".into());
+        commit[0] = Some("p2".into());
+        commit[4] = Some("b2".into());
+        commit[10] = Some("new".into());
         let changed = guarded_changes(&main, &commit);
-        assert_eq!(changed, ["ci", "src/platform/package-lock.json"]);
-        assert!(
-            approval_reason(false, &changed)
-                .unwrap()
-                .contains("ci, src/platform")
+        assert_eq!(
+            changed,
+            [
+                ".pigeon/policy.toml",
+                "ci",
+                "src/platform/package-lock.json"
+            ]
         );
+        let vars = crate::git_proxy::vars("refs/heads/main", "refs/heads/claude/");
+        let a = approvals(&changed, |r| crate::policy::decide(&vars, r));
+        assert_eq!(a.passkey.len(), 1, "{a:?}");
+        assert!(a.passkey[0].starts_with(".pigeon/policy.toml (policy-is-yours"));
+        assert_eq!(
+            a.delegate,
+            [
+                "ci/ (gate-changes)",
+                "src/platform/package-lock.json (gate-changes)"
+            ]
+        );
+        assert!(approval_reason(false, &a.passkey).is_some());
         assert!(approval_reason(true, &[]).is_some());
         assert_eq!(approval_reason(false, &[]), None);
     }

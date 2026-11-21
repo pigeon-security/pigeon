@@ -18,6 +18,7 @@ pub mod models;
 pub mod notify;
 pub mod oauth;
 pub mod passkeys;
+pub mod policy;
 pub mod protected_host;
 pub mod proxy;
 pub mod public_host;

@@ -17,6 +17,7 @@ miniz_oxide = { version = "0.8", default-features = false, features = ["with-all
 hmac = "0.12"
 rsa = { version = "0.9", default-features = false, features = ["std"] }
 sha1 = { version = "0.10", default-features = false }
+toml = { version = "0.8", default-features = false, features = ["parse"] }
 
 [dev-dependencies]
 rand = "0.8"

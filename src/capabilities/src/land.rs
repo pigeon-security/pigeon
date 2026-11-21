@@ -19,6 +19,7 @@ use pigeon_core::durable::{self, Db, opt};
 use pigeon_core::git::{self, Remote, Update, ZERO};
 use pigeon_core::gitobj::{self, Object};
 use pigeon_core::mcp::Tool;
+use pigeon_core::policy::{Decision, Kind};
 use pigeon_core::webauthn::random;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -742,6 +743,23 @@ impl Lander {
     /// main, and whether a person must approve it. A failed check ends the landing `refused`.
     async fn check(&self, row: Row) -> Result<()> {
         let s = &self.settings;
+        // Landing itself is the policy's to allow (`land-and-deploy`).
+        let branch = row
+            .branch
+            .strip_prefix("refs/heads/")
+            .unwrap_or(&row.branch);
+        let req = crate::policy::request(&row.by_name, Kind::Land, branch);
+        let answer = crate::policy::decide(&git_proxy::vars(&s.main, state::PREFIX), &req);
+        crate::policy::record(&self.env, "lander", &req, &answer).await?;
+        if answer.decision != Decision::Allow {
+            let why = format!(
+                "the policy does not allow landing {branch}: {} ({})",
+                answer.reason,
+                answer.rule.as_deref().unwrap_or("no rule")
+            );
+            self.apply(&row, &Seen::CheckRefused, Some(&why))?;
+            return Ok(());
+        }
         let account = crate::ci::scheduler::account(&self.env, &s.parent).await?;
         let tip = git_proxy::tip(&account, &s.namespace, &s.repo, &row.branch).await?;
         let expected = (!row.commit_sha.is_empty()).then_some(row.commit_sha.as_str());
@@ -763,7 +781,23 @@ impl Lander {
         let at_commit =
             git_proxy::path_ids(&account, &s.namespace, &s.repo, &tip, &state::GUARDED).await?;
         let guarded = state::guarded_changes(&on_main, &at_commit);
-        let reason = state::approval_reason(self.approval_on()?, &guarded);
+        let vars = git_proxy::vars(&s.main, state::PREFIX);
+        let mut decided = Vec::new();
+        let approvals = state::approvals(&guarded, |req| {
+            let a = crate::policy::decide(&vars, req);
+            decided.push((req.clone(), a.clone()));
+            a
+        });
+        for (req, a) in &decided {
+            crate::policy::record(&self.env, "lander", req, a).await?;
+        }
+        let reason = state::approval_reason(self.approval_on()?, &approvals.passkey);
+        let delegated = (!approvals.delegate.is_empty()).then(|| {
+            format!(
+                "; the person's delegate approves {}",
+                approvals.delegate.join(", ")
+            )
+        });
         // From here to the move nothing awaits; `apply` re-reads the row, so a cancel during the
         // awaits above wins.
         self.db.exec(
@@ -780,7 +814,8 @@ impl Lander {
             &row,
             &Seen::Checked,
             Some(&format!(
-                "checked: {tip} is a fast-forward of main at {main_at}"
+                "checked: {tip} is a fast-forward of main at {main_at}{}",
+                delegated.unwrap_or_default()
             )),
         )?;
         if let Some(r) = self.row(&row.id)?

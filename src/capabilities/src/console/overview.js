@@ -1,6 +1,7 @@
 // The console's Overview tab: what needs the person's attention (missing secrets, credentials
 // expiring within a week or expired), each gateway's cost over the last week with links to
-// where it is broken down, then every credential and when it expires.
+// where it is broken down, every credential and when it expires, then the policy's latest
+// decisions.
 (() => {
   const { el, money, expiryPill, get, navigate, tab } = window.pigeonConsole;
 
@@ -74,6 +75,18 @@
             el("strong", { text: r.name }),
             el("p", { class: "muted", style: "margin:0", text: `${r.kind === "proxy" ? "proxy credential" : "secret"} · ${r.owner}` })),
           expiryPill(r))))));
+    }
+
+    const policy = Array.isArray(d.policy) ? d.policy : [];
+    if (policy.length) {
+      layer.append(el("div", { class: "layer" },
+        el("h3", { text: "Policy decisions" }),
+        el("p", { class: "muted", style: "margin:0", text: "The latest answers from .pigeon/policy.toml, given by the person's delegate. Every decision is also an audit line in the Worker's log." }),
+        el("ul", { class: "c-list" }, ...policy.map((p) => el("li", {},
+          el("div", {},
+            el("strong", { text: p.target ? `${p.action} ${p.target}` : p.action }),
+            el("p", { class: "muted", style: "margin:0", text: `${p.actor} · ${p.rule || "no rule"} · ${p.reason} · ${new Date(p.at_ms).toLocaleString()}` })),
+          el("span", { class: p.decision === "deny" ? "pill accent" : "pill", text: p.decision }))))));
     }
 
     main.append(layer);

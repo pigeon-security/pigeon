@@ -18,6 +18,7 @@ use pigeon_capabilities::mirror::{self, Mirror};
 use pigeon_capabilities::models::{Dialect, Models, Provider};
 use pigeon_capabilities::oauth::OAuth;
 use pigeon_capabilities::passkeys::Passkeys;
+use pigeon_capabilities::policy::Policy;
 use pigeon_capabilities::proxy::Tokens;
 use pigeon_capabilities::public_host::{PublicHost, Retire};
 use pigeon_capabilities::secrets::Secrets;
@@ -42,6 +43,8 @@ pub const PROXY_HOST: &str = "proxy.pigeon.dev";
 const NAMESPACE: &str = "pigeon-security";
 const REPO: &str = "pigeon";
 const BRANCH: &str = "main";
+/// The prefix of the branches sessions push, without its slash.
+const SESSION_PREFIX: &str = "claude";
 
 /// The branches the GitHub mirror copies: `main` only. Session branches (`claude/…`) stay in
 /// Artifacts and never reach GitHub.
@@ -162,14 +165,20 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
                 site_name: "pigeon".into(),
             },
         }),
+        // The person's policy, .pigeon/policy.toml: `policy_check`, as their delegate.
+        Box::new(Policy {
+            session_prefix: format!("{SESSION_PREFIX}/"),
+            main: BRANCH.into(),
+        }),
         // The git proxy: the source repository for cloud sessions holding a proxy credential.
-        // Sessions push to branches under claude/; main only moves forward.
+        // Its push rules are the policy's: session branches are pushed, rewritten and deleted;
+        // main moves only by a landing.
         Box::new(GitProxy {
             host: PROXY_HOST.into(),
             namespace: NAMESPACE.into(),
             repo: REPO.into(),
             protected: format!("refs/heads/{BRANCH}"),
-            prefix: "refs/heads/claude/".into(),
+            prefix: format!("refs/heads/{SESSION_PREFIX}/"),
         }),
         // The Cloudflare API proxy: the calls `wrangler deploy` of this Worker makes, for cloud
         // sessions holding a proxy credential.

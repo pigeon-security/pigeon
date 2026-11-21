@@ -19,6 +19,7 @@ pub mod mcp;
 pub mod oauth;
 pub mod oidc;
 pub mod pack;
+pub mod policy;
 pub mod queues;
 pub mod registry;
 pub mod secrets_store;

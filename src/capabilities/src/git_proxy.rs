@@ -4,13 +4,14 @@
 //! and revoked when its answer has been sent; the caller never sees it. Bodies stream both
 //! ways.
 //!
-//! Pushes follow rules, checked on the ref updates at the start of the push before anything is
-//! sent on: no ref is deleted, the protected branch only moves forward, and every other ref is
-//! a branch under the session prefix. Whether the protected branch moves forward can't be told
-//! from the ref updates alone, so a push that moves it is read whole (up to a cap): its pack's
-//! commits, and the repository's own history when the pack leaves some out, must show the old
-//! commit is an ancestor of the new one. A refused push is answered the way git reports a
-//! refused ref, so `git push` prints why. Every request is logged as one audit line.
+//! Pushes follow the person's policy (`.pigeon/policy.toml`, see [`crate::policy`]), checked on
+//! the ref updates at the start of the push before anything is sent on: a branch under the
+//! session prefix is pushed, rewritten or deleted (`session-branches`); the protected branch
+//! moves only by a landing's fast-forward (`main-forward-only`), never by a push; any other ref
+//! is not in policy. A refused push is answered the way git reports a refused ref, so
+//! `git push` prints why. Every request is logged as one audit line, and every ref update's
+//! policy decision as another. ([`not_forward`] stays for the fast-forward check a push of the
+//! protected branch would need, should the policy ever allow one.)
 //!
 //! A CI runner fetches with its job token instead: only from this repository, only by
 //! upload-pack, only the one commit its grant names and only until the job's deadline. Its
@@ -27,6 +28,7 @@ use pigeon_core::artifacts::{self, Access};
 use pigeon_core::git::{self, Command, Commands, Remote, ZERO};
 use pigeon_core::mcp::Tool;
 use pigeon_core::pack::{self, Walk};
+use pigeon_core::policy::{Decision, Kind, Vars};
 use serde_json::Value;
 use worker::js_sys::Uint8Array;
 use worker::wasm_bindgen::JsValue;
@@ -164,26 +166,53 @@ pub enum Rule {
     FastForward,
 }
 
-/// Whether ref update `c` is allowed, and how.
+/// The policy's names for `protected` and `prefix`: branch names without `refs/heads/`.
+pub fn vars(protected: &str, prefix: &str) -> Vars {
+    let short = |r: &str| r.strip_prefix("refs/heads/").unwrap_or(r).to_string();
+    Vars {
+        session_prefix: short(prefix),
+        main: short(protected),
+    }
+}
+
+/// What ref update `c` is to the policy: moving the protected branch, deleting a ref, or
+/// pushing one (a rewrite of a branch reads as a push: the policy treats them alike), with its
+/// target, the branch name without `refs/heads/`, or the whole name of any other ref.
+pub fn update(c: &Command, protected: &str) -> (Kind, String) {
+    let target = c
+        .name
+        .strip_prefix("refs/heads/")
+        .unwrap_or(&c.name)
+        .to_string();
+    let kind = if c.name == protected {
+        Kind::MoveMain
+    } else if c.new == ZERO {
+        Kind::DeleteBranch
+    } else {
+        Kind::PushBranch
+    };
+    (kind, target)
+}
+
+/// Whether ref update `c` is allowed, and how: the policy decides. Branches under the session
+/// prefix are pushed, rewritten and deleted (`session-branches`); the protected branch moves
+/// only by a landing (`main-forward-only`), never by a push; anything else is not in policy.
 pub fn check(c: &Command, protected: &str, prefix: &str) -> std::result::Result<Rule, String> {
     if !refname_ok(&c.name) {
         return Err("not a valid ref name".into());
     }
-    if c.new == ZERO {
-        return Err("deleting refs is not allowed".into());
+    let (kind, target) = update(c, protected);
+    let answer = crate::policy::decide(
+        &vars(protected, prefix),
+        &crate::policy::request("git push", kind, &target),
+    );
+    match answer.decision {
+        Decision::Allow => Ok(Rule::Stream),
+        Decision::Deny => Err(match answer.rule {
+            Some(rule) => format!("{} (policy rule {rule})", answer.reason),
+            None => format!("{} (.pigeon/policy.toml)", answer.reason),
+        }),
     }
-    if c.name == protected {
-        if c.old == ZERO {
-            return Err(format!("{protected} cannot be created through the proxy"));
-        }
-        return Ok(Rule::FastForward);
-    }
-    if c.name.starts_with(prefix) && c.name.len() > prefix.len() {
-        return Ok(Rule::Stream);
-    }
-    Err(format!(
-        "only {protected} and branches under {prefix} can be pushed"
-    ))
 }
 
 /// Every update's rule, or each refused update's ref and reason.
@@ -569,6 +598,14 @@ impl GitProxy {
                 Ok(p) => p,
                 Err(why) => return refuse(400, &why),
             };
+            // One audit line per policy decision, as the push asked it.
+            let who = caller.as_ref().map_or("a CI job", |c| c.label.as_str());
+            for c in &p.commands.commands {
+                let (kind, target) = update(c, &self.protected);
+                let req = crate::policy::request(who, kind, &target);
+                let answer = crate::policy::decide(&vars(&self.protected, &self.prefix), &req);
+                worker::console_log!("{}", crate::policy::audit_line("git_proxy", &req, &answer));
+            }
             match check_all(&p.commands.commands, &self.protected, &self.prefix) {
                 Ok(r) => rules = r,
                 Err(refused) => {
@@ -1190,16 +1227,17 @@ mod tests {
         let h = "a".repeat(40);
         let rule = |old: &str, new: &str, name: &str| check(&cmd(old, new, name), P, X);
         assert!(rule(&h, ZERO, P).is_err(), "delete main");
-        assert!(
-            rule(&h, ZERO, "refs/heads/claude/x").is_err(),
-            "delete a branch"
+        assert_eq!(
+            rule(&h, ZERO, "refs/heads/claude/x"),
+            Ok(Rule::Stream),
+            "delete a session branch"
         );
         assert!(rule(ZERO, &h, P).is_err(), "create main");
-        assert_eq!(rule(&h, &h, P), Ok(Rule::FastForward));
+        let pushed = rule(&h, &h, P).unwrap_err();
+        assert!(pushed.contains("main-forward-only"), "{pushed}");
         assert_eq!(rule(ZERO, &h, "refs/heads/claude/x"), Ok(Rule::Stream));
         assert_eq!(rule(&h, &h, "refs/heads/claude/a/b"), Ok(Rule::Stream));
         for name in [
-            "refs/heads/claude/",
             "refs/heads/claudex",
             "refs/heads/other",
             "refs/tags/v1",
@@ -1268,8 +1306,8 @@ mod tests {
     /// What the proxy decides about a push to main from `old` to `new`, from the body alone.
     fn decide(body: &[u8]) -> Walk {
         let c = git::commands(body).unwrap().unwrap();
-        let rules = check_all(&c.commands, P, X).unwrap();
-        assert_eq!(rules, [Rule::FastForward]);
+        // The policy refuses every push to main; the fast-forward check is judged alone.
+        assert!(check_all(&c.commands, P, X).is_err());
         let start = git::pack_start(body, &c).unwrap().unwrap();
         let known = pack::commits(&body[start..]).unwrap().parents;
         let u = &c.commands[0];
@@ -1298,7 +1336,7 @@ mod tests {
             format!("{:04x}{line}0000", line.len() + 4).into_bytes(),
         );
         let c = git::commands(&body).unwrap().unwrap();
-        let rules = check_all(&c.commands, P, X).unwrap();
+        let rules = vec![Rule::FastForward];
         let upstream = |old: String| {
             let tips =
                 String::from_utf8(git(dir, &["for-each-ref", "--format=%(objectname)"], None))
@@ -1467,7 +1505,7 @@ mod tests {
         ];
         let refused = check_all(&cs, P, X).unwrap_err();
         let names: Vec<&str> = refused.iter().map(|(n, _)| n.as_str()).collect();
-        assert_eq!(names, ["refs/tags/v1", "refs/heads/claude/y"]);
-        assert_eq!(check_all(&cs[..1], P, X), Ok(vec![Rule::FastForward]));
+        assert_eq!(names, [P, "refs/tags/v1"]);
+        assert_eq!(check_all(&cs[2..], P, X), Ok(vec![Rule::Stream]));
     }
 }

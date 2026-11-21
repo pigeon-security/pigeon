@@ -1,0 +1,64 @@
+# pigeon's policy: what agents acting for the person may do without asking. Read by
+# `pigeon_core::policy`, which refuses the whole file on anything it does not know (an action
+# kind, a key, a rule shape). The first rule that matches a request decides it; a request no
+# rule matches is denied, "not in policy".
+#
+# Only the person changes this file: a landing that touches it waits for their passkey
+# (rule `policy-is-yours`). `.claude/settings.json` is generated from the allow rules below by
+# `cargo run -p pigeon-capabilities --example settings`; never edit it by hand.
+#
+# Targets: a branch name without `refs/heads/`, or a repository path. `@session/` stands for
+# the platform's session branch prefix and `@main` for its protected branch, so the rules name
+# no provider. A trailing `*` matches anything after it; otherwise a target matches exactly.
+# No `targets` matches every target; `except` lists targets the rule leaves to the next.
+
+version = 1
+
+[[rule]]
+id = "agents-coordinate"
+actions = ["message_session", "start_session", "archive_session", "handoff_branch"]
+decision = "allow"
+reason = "agents message, start, steer and archive sessions and hand branches to each other"
+
+# A deploy's target is the session branch whose landing it follows.
+[[rule]]
+id = "land-and-deploy"
+actions = ["land", "deploy"]
+targets = ["@session/*"]
+decision = "allow"
+reason = "a session branch lands through the gate, and the deploy after it is automatic"
+
+[[rule]]
+id = "session-branches"
+actions = ["push_branch", "rewrite_branch", "delete_branch"]
+targets = ["@session/*"]
+decision = "allow"
+reason = "session branches are the agents' own: push, rewrite or delete them"
+
+[[rule]]
+id = "main-forward-only"
+actions = ["move_main"]
+decision = "deny"
+reason = "main moves only by a landing's fast-forward"
+
+[[rule]]
+id = "policy-is-yours"
+actions = ["change_policy"]
+decision = "allow"
+approval = "passkey"
+reason = "the policy is the person's: a change to it lands only with their passkey"
+
+[[rule]]
+id = "smoke-suite-fixed"
+actions = ["add_test"]
+except = ["tests/smoke.rs"]
+decision = "deny"
+reason = "tests live in the smoke suite only, tests/smoke.rs"
+
+[[rule]]
+id = "gate-changes"
+actions = ["change_gate"]
+targets = ["ci/*", ".pigeon/ci.toml", ".cargo/*", "rust-toolchain.toml", ".npmrc", "src/platform/.npmrc", "src/platform/package.json", "src/platform/package-lock.json"]
+decision = "allow"
+approval = "delegate"
+reason = "what the gate runs changes with the approval of the person's delegate"

@@ -133,8 +133,8 @@ impl Console {
     }
 
     /// What the overview shows: secrets the platform needs and lacks, credentials expiring
-    /// within a week or expired, every credential's expiry, and each gateway's cost over the
-    /// last week with their total.
+    /// within a week or expired, every credential's expiry, each gateway's cost over the last
+    /// week with their total, and the policy's latest decisions.
     async fn overview(cx: &Context<'_>, person: &User) -> Result<Value> {
         let listing = sections::tabs(&Self::declared(cx));
         let week = json!({ "days": 7 });
@@ -181,9 +181,11 @@ impl Console {
                 Some(json!({ "name": name, "cost": cost, "path": format!("{}#{}", t.path, l.section.id) }))
             })
             .collect();
+        // The policy's latest decisions; left out, like a failing section, when unreadable.
+        let decided = crate::policy::recent(cx.env).await.unwrap_or(Value::Null);
         Ok(json!({
             "missing": missing, "expiring": expiring, "credentials": credentials,
-            "costs": costs, "total": total,
+            "costs": costs, "total": total, "policy": decided,
         }))
     }
 
