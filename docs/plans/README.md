@@ -11,7 +11,7 @@ up to date.
 | Plan | What | Status |
 | --- | --- | --- |
 | [route-through-platform.md](route-through-platform.md) | Cloud sessions reach git and the Cloudflare API through the platform's proxies (`/git/`, `/cf/`) with a proxy credential, not pasted tokens; CI runners and file reads (phase 5) | Deployed (phases 1 to 5) |
-| [ci-gateway.md](ci-gateway.md) | The CI gateway: `.pigeon/ci.toml`, routing to connectors, the scheduler, job tokens, notes; Containers, Buildkite, GitHub Actions | Phases 1 and 2 deployed; phase 3 (Buildkite) being built on `claude/ci-gateway`; phase 4 to come |
+| [ci-gateway.md](ci-gateway.md) | The CI gateway: `.pigeon/ci.toml`, routing to connectors, the scheduler, job tokens, notes; Containers, Buildkite, GitHub Actions | Phases 1 and 2 deployed; phase 3 (Buildkite) built, its setup redesigned in buildkite-mcp.md; phase 4 to come |
 | [console.md](console.md) | The console at the platform's root: tabs, sections, passkey sign-in and passkey-bound writes | Deployed |
 | [policy.md](policy.md) | The person's policy (`.pigeon/policy.toml`), `policy_check`, the Lander and git proxy following it, the generated Claude Code settings, and the smoke suite that replaced the unit tests | Deployed (landings 1 and 2); agent instructions in landing 3 |
 | [one-worker.md](one-worker.md) | pigeon.dev served by `pigeon-platform`, routed by host; the separate `pigeon` Worker retired | Deployed (phases 1 to 4) |
@@ -24,6 +24,7 @@ up to date.
 | [tool-approvals.md](tool-approvals.md) | Calls to `deploy_token`, `source_token`, `setup_platform`, `users_remove`, `passkeys_remove` and `oauth_revoke` wait for the person's passkey on that exact call: `call_tool` in the policy, enforced in `dispatch`, approved on the console's Approvals tab | Phase 1 built; phase 2 (the person's rules) waits for their passkey |
 | [buildkite-mcp.md](buildkite-mcp.md) | Buildkite set up by pigeon: declared state in settings, reconciled through Buildkite's REST API after each deploy (only what pigeon made, never deleting); Buildkite's MCP server read-only behind the portal for sessions; one token and one OAuth grant by hand | Designed, awaiting the person's go-ahead |
 | [buildkite-mcp.md](buildkite-mcp.md) | Buildkite set up by pigeon: declared state in settings, reconciled through Buildkite's REST API after each deploy (only what pigeon made, never deleting); Buildkite's MCP server behind the portal with the same token, so sessions can act in Buildkite; one token by hand | Being built (one token, Buildkite MCP with write tools, by the person's choice) |
+| [buildkite-mcp.md](buildkite-mcp.md) | Buildkite set up by pigeon: declared state in settings, reconciled through Buildkite's REST API after each deploy (only what pigeon made, never deleting); Buildkite's MCP server behind the portal with the same token, so sessions can act in Buildkite; one token by hand | Built on `claude/buildkite-setup` (phases 1, 2, 4); awaiting the person's Buildkite token to land |
 
 When a plan's status changes, change it in both places: the plan's first lines and this table.
 

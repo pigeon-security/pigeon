@@ -51,8 +51,7 @@ The console's Access tab shows every credential's expiry, on each secret and eac
 | Proxy credentials | Their own `expires_at`, set when issued |
 | `CF_PARENT_TOKEN` | Cloudflare's `tokens/verify`, `expires_on` |
 | `GITHUB_MIRROR_TOKEN` | GitHub's `github-authentication-token-expiration` header, on `GET /rate_limit` |
-| `BUILDKITE_API_TOKEN` | Buildkite's `GET /v2/access-token`, `expires_at` (unknown when it names none) |
-| `BUILDKITE_WEBHOOK_TOKEN` | Never expires: a signing key pigeon and Buildkite share |
+| `BUILDKITE_API_TOKEN` | Buildkite's `GET /v2/access-token`, `expires_at` (unknown when it names none). The one Buildkite token: setup, connector and the portal's Buildkite server (`docs/plans/buildkite-mcp.md`). The webhook's key is not a secret on this list: pigeon generates it and the CI scheduler keeps it. |
 | Claude Platform key | Unknown: the API reports no key expiry, and only the AI gateway can read it |
 
 Each secret is checked against its issuer at most once a day (a failed check is retried after an hour), and again right after a new value is set. An issuer that refuses a token outright (a 401, or Cloudflare saying it is not `active`) shows it as expired. A capability reports its secrets' expiry with `Capability::secret_expiry`; the cache and the statuses are in `src/capabilities/src/expiry.rs`.

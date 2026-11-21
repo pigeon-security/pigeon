@@ -1,6 +1,6 @@
 # Buildkite, set up by pigeon: the CI gateway's Buildkite connector redesigned
 
-Status: **designed; the person chose one token for everything, Buildkite's MCP able to act for them** (21 November 2026). Being built phase by phase on `claude/buildkite-mcp`.
+Status: **phases 1, 2 and 4 built on `claude/buildkite-setup`, awaiting the person's token** (21 November 2026). The person chose one token for everything and Buildkite's MCP able to act for them. Nothing lands until `BUILDKITE_API_TOKEN` is set (§4, steps 1 to 3); the setup runs once `BUILDKITE_ORG` names the organization.
 It replaces the hand setup in [ci-gateway.md](ci-gateway.md) phase 3 ("Needs from the
 person"). The rest of that phase, as built on `claude/ci-gateway`, stays: the OIDC exchange,
 the webhook check, the bootstrap script and the queue table.
@@ -299,17 +299,18 @@ sync's does (`pigeon_core::mcp_portal`).
 - The setup writes the **server only, never the portal**: a portal `PUT` with `servers`
   replaces its whole server mapping, which is the portal planner's and the person's. The
   person attaches the server to portal `pigeon` once, in the dashboard (§4).
-- The server is then synced like `pigeon`: `buildkite` is added to `land::Settings::portal_servers`.
+- Once the server exists (phase 3), `buildkite` is added to `land::Settings::portal_servers` so it is synced like `pigeon`; before that, a sync of it would only fail.
 
 ### The connector, with the setup in place
 
 - `available()` is healthy only if both secrets are set, the token holds the **runtime** scopes
   (`read_builds`, `write_builds`), and the last apply left the pipeline `ok`.
-- `offers()` stays declared. But `dispatch` refuses a queue the last apply did not confirm,
+- *Deferred to after phase 2a (not built yet):* `offers()` stays declared, but `dispatch` refuses a queue the last apply did not confirm,
   with "queue pigeon-linux-medium is not set up in Buildkite (why)". That is an infrastructure
   failure, retried elsewhere once. For example, the Free plan refuses the 4X16 shape.
-- Everything else is as built: the OIDC exchange, the webhook check, the bootstrap and
-  `steps_yaml`.
+- The webhook check reads its key from the scheduler (`setup_key`); with no key yet it refuses
+  every delivery, and the gateway still learns of builds by polling every two minutes.
+- Everything else is as built: the OIDC exchange, the bootstrap and `steps_yaml`.
 
 ### Scopes for the one token
 
