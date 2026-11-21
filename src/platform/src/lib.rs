@@ -28,7 +28,7 @@ use worker::{
 };
 
 #[event(fetch)]
-async fn fetch(req: Request, env: Env, _ctx: WorkerContext) -> Result<Response> {
+async fn fetch(req: Request, env: Env, ctx: WorkerContext) -> Result<Response> {
     let path = req.path();
     let caps = settings::capabilities();
     if let Some(c) = caps
@@ -43,6 +43,7 @@ async fn fetch(req: Request, env: Env, _ctx: WorkerContext) -> Result<Response> 
             hosted: &hosted,
             caller: None,
             caller_note: None,
+            worker: Some(&ctx),
         };
         return c.fetch(&cx, req).await;
     }
@@ -75,6 +76,7 @@ async fn queue(batch: MessageBatch<Value>, env: Env, _ctx: WorkerContext) -> Res
         hosted: &hosted,
         caller: None,
         caller_note: None,
+        worker: None,
     };
     for c in wanting {
         match c.on_events(&cx).await {
@@ -168,6 +170,7 @@ async fn mcp_post(mut req: Request, env: &Env) -> Result<Response> {
             hosted: &hosted,
             caller: Some(&caller),
             caller_note: None,
+            worker: None,
         };
         owner.call(&cx, name, args).await
     };

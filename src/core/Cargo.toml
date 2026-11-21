@@ -13,3 +13,5 @@ serde_json = "1"
 p256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
 sha2 = { version = "0.10", default-features = false }
 getrandom = { version = "0.2", features = ["js"] }
+miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
+sha1 = { version = "0.10", default-features = false }

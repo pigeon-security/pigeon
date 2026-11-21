@@ -265,3 +265,335 @@ pub fn base64(bytes: &[u8]) -> String {
     }
     out
 }
+
+// ---- the start of a push, as a proxy reads it ----
+
+/// How long the command section of a push may be, at most.
+pub const COMMANDS_MAX: usize = 64 * 1024;
+
+/// One ref update a push asks for: `old` to `new`, either all zeros for none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Command {
+    pub old: String,
+    pub new: String,
+    pub name: String,
+}
+
+/// The command section of a `git-receive-pack` request.
+#[derive(Debug)]
+pub struct Commands {
+    pub commands: Vec<Command>,
+    /// The capabilities the client asked for, from the first command.
+    pub caps: Vec<String>,
+    /// Where the flush closing the commands ends.
+    pub end: usize,
+}
+
+/// The pkt-line at `at`: `Ok(None)` when `data` ends first; else its data (`None` for a
+/// flush) and where the next starts.
+#[allow(clippy::type_complexity)]
+fn next_pkt(data: &[u8], at: usize) -> std::result::Result<Option<(Option<&[u8]>, usize)>, String> {
+    let Some(head) = data.get(at..at + 4) else {
+        return Ok(None);
+    };
+    let bad = || "a malformed pkt-line length".to_string();
+    if !head.iter().all(u8::is_ascii_hexdigit) {
+        return Err(bad());
+    }
+    let len = usize::from_str_radix(std::str::from_utf8(head).map_err(|_| bad())?, 16)
+        .map_err(|_| bad())?;
+    match len {
+        0 => Ok(Some((None, at + 4))),
+        1..=3 => Err("an unexpected pkt-line delimiter".into()),
+        _ if at + len > data.len() => Ok(None),
+        _ => Ok(Some((Some(&data[at + 4..at + len]), at + len))),
+    }
+}
+
+/// Whether `s` is a SHA-1 object ID, in lowercase hex.
+pub fn is_id(s: &str) -> bool {
+    s.len() == 40 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Reads the command section at the start of a `git-receive-pack` request body: `Ok(None)`
+/// while more bytes are needed. Shallow lines before it are skipped; a signed push, a section
+/// over [`COMMANDS_MAX`] or anything malformed is an error.
+pub fn commands(data: &[u8]) -> std::result::Result<Option<Commands>, String> {
+    let mut at = 0;
+    let mut commands = Vec::new();
+    let mut caps = Vec::new();
+    loop {
+        let Some((line, next)) = next_pkt(data, at)? else {
+            if data.len() > COMMANDS_MAX {
+                return Err("the push's ref updates are too long".into());
+            }
+            return Ok(None);
+        };
+        if next > COMMANDS_MAX {
+            return Err("the push's ref updates are too long".into());
+        }
+        at = next;
+        let Some(line) = line else {
+            if commands.is_empty() {
+                return Err("the push has no ref updates".into());
+            }
+            return Ok(Some(Commands {
+                commands,
+                caps,
+                end: at,
+            }));
+        };
+        let line = line.strip_suffix(b"\n").unwrap_or(line);
+        if line.starts_with(b"push-cert") {
+            return Err("signed pushes are not accepted".into());
+        }
+        let line =
+            std::str::from_utf8(line).map_err(|_| "a ref update is not UTF-8".to_string())?;
+        if commands.is_empty() && line.starts_with("shallow ") {
+            continue;
+        }
+        let body = match line.split_once('\0') {
+            Some((body, asked)) if commands.is_empty() => {
+                caps = asked
+                    .split(' ')
+                    .filter(|c| !c.is_empty())
+                    .map(String::from)
+                    .collect();
+                body
+            }
+            Some(_) => return Err("a ref update is malformed".into()),
+            None => line,
+        };
+        let mut parts = body.splitn(3, ' ');
+        let (old, new, name) = (
+            parts.next().unwrap_or(""),
+            parts.next().unwrap_or(""),
+            parts.next().unwrap_or(""),
+        );
+        if !is_id(old) || !is_id(new) || name.is_empty() || name.contains(' ') {
+            return Err("a ref update is malformed".into());
+        }
+        commands.push(Command {
+            old: old.into(),
+            new: new.into(),
+            name: name.into(),
+        });
+    }
+}
+
+/// Where the pack begins in a push whose commands are `c`: past the push options, when the
+/// client sends them. `Ok(None)` while more bytes are needed.
+pub fn pack_start(data: &[u8], c: &Commands) -> std::result::Result<Option<usize>, String> {
+    let mut at = c.end;
+    if c.caps.iter().any(|x| x == "push-options") {
+        loop {
+            let Some((line, next)) = next_pkt(data, at)? else {
+                return Ok(None);
+            };
+            at = next;
+            if line.is_none() {
+                break;
+            }
+        }
+    }
+    Ok(Some(at))
+}
+
+/// A `git-receive-pack` result refusing the whole push, so `git push` prints why: each ref in
+/// `refused` with its reason, the others as not pushed. In side-band when the client asked for
+/// it. Empty when the client asked for neither report-status nor side-band: the caller answers
+/// an HTTP error instead.
+pub fn refusal(commands: &[Command], caps: &[String], refused: &[(String, String)]) -> Vec<u8> {
+    let has = |c: &str| caps.iter().any(|x| x == c);
+    let clean = |s: &str| s.replace(['\n', '\r'], " ");
+    let first = refused
+        .first()
+        .map_or_else(|| "the push is refused".to_string(), |(_, why)| clean(why));
+    let mut report = Vec::new();
+    if has("report-status") {
+        report.extend(pkt(b"unpack ok\n"));
+        for c in commands {
+            let why = refused
+                .iter()
+                .find(|(name, _)| *name == c.name)
+                .map_or_else(
+                    || "not pushed: another ref was refused".into(),
+                    |(_, w)| clean(w),
+                );
+            report.extend(pkt(format!("ng {} {why}\n", c.name).as_bytes()));
+        }
+        report.extend(b"0000");
+    }
+    let band = if has("side-band-64k") {
+        65_515
+    } else if has("side-band") {
+        995
+    } else {
+        return report;
+    };
+    let mut out = Vec::new();
+    out.extend(pkt(
+        &[&[2u8][..], format!("pigeon: {first}\n").as_bytes()].concat()
+    ));
+    for chunk in report.chunks(band) {
+        out.extend(pkt(&[&[1u8][..], chunk].concat()));
+    }
+    out.extend(b"0000");
+    out
+}
+
+#[cfg(test)]
+mod push_tests {
+    use super::*;
+
+    const A: &str = "1111111111111111111111111111111111111111";
+    const B: &str = "2222222222222222222222222222222222222222";
+
+    fn line(s: &str) -> Vec<u8> {
+        pkt(s.as_bytes())
+    }
+
+    fn body(lines: &[&str]) -> Vec<u8> {
+        let mut out: Vec<u8> = lines.iter().flat_map(|l| line(l)).collect();
+        out.extend(b"0000");
+        out
+    }
+
+    #[test]
+    fn reads_commands_and_caps() {
+        let first = format!("{A} {B} refs/heads/main\0report-status side-band-64k agent=git/2\n");
+        let second = format!("{ZERO} {B} refs/heads/claude/x\n");
+        let mut data = body(&[
+            "shallow 3333333333333333333333333333333333333333\n",
+            &first,
+            &second,
+        ]);
+        let end = data.len();
+        data.extend(b"PACK");
+        let c = commands(&data).unwrap().unwrap();
+        assert_eq!(c.end, end);
+        assert_eq!(c.caps, ["report-status", "side-band-64k", "agent=git/2"]);
+        assert_eq!(
+            c.commands,
+            [
+                Command {
+                    old: A.into(),
+                    new: B.into(),
+                    name: "refs/heads/main".into()
+                },
+                Command {
+                    old: ZERO.into(),
+                    new: B.into(),
+                    name: "refs/heads/claude/x".into()
+                },
+            ]
+        );
+        assert_eq!(pack_start(&data, &c).unwrap(), Some(end));
+    }
+
+    #[test]
+    fn waits_for_more_bytes() {
+        let data = body(&[&format!("{A} {B} refs/heads/x\0report-status")]);
+        for cut in [0, 3, 10, data.len() - 1] {
+            assert!(commands(&data[..cut]).unwrap().is_none(), "{cut}");
+        }
+        assert!(commands(&data).unwrap().is_some());
+    }
+
+    #[test]
+    fn refuses_what_it_cannot_read() {
+        let cases: Vec<Vec<u8>> = vec![
+            b"00x1".to_vec(),
+            b"0003".to_vec(),
+            b"0001".to_vec(),
+            b"0000".to_vec(),
+            body(&[&format!("{} {B} refs/heads/x", "A".repeat(40))]),
+            body(&[&format!("{A} {B}")]),
+            body(&[&format!("{A} {B} refs/heads/a b")]),
+            body(&[
+                &format!("{A} {B} refs/heads/x\0caps"),
+                &format!("{A} {B} refs/heads/y\0more"),
+            ]),
+            body(&["push-cert\0report-status"]),
+            vec![b'0'; COMMANDS_MAX + 5],
+        ];
+        for data in cases {
+            assert!(
+                commands(&data).is_err(),
+                "{:?}",
+                String::from_utf8_lossy(&data[..data.len().min(60)])
+            );
+        }
+        let long = format!("{A} {B} refs/heads/{}", "x".repeat(60_000));
+        let data = body(&[&long, &long]);
+        assert!(commands(&data).is_err());
+    }
+
+    #[test]
+    fn finds_the_pack_past_push_options() {
+        let mut data = body(&[&format!("{A} {B} refs/heads/x\0push-options")]);
+        let end = data.len();
+        data.extend(line("opt1\n"));
+        let c = commands(&data).unwrap().unwrap();
+        assert_eq!(c.end, end);
+        assert_eq!(pack_start(&data, &c).unwrap(), None);
+        data.extend(b"0000");
+        let start = data.len();
+        data.extend(b"PACK");
+        assert_eq!(pack_start(&data, &c).unwrap(), Some(start));
+    }
+
+    fn cmds() -> Vec<Command> {
+        vec![
+            Command {
+                old: A.into(),
+                new: ZERO.into(),
+                name: "refs/heads/x".into(),
+            },
+            Command {
+                old: ZERO.into(),
+                new: B.into(),
+                name: "refs/heads/claude/y".into(),
+            },
+        ]
+    }
+
+    #[test]
+    fn a_refusal_reports_every_ref() {
+        let caps = vec!["report-status".to_string()];
+        let got = refusal(
+            &cmds(),
+            &caps,
+            &[("refs/heads/x".into(), "deletes\nrefused".into())],
+        );
+        let mut want = line("unpack ok\n");
+        want.extend(line("ng refs/heads/x deletes refused\n"));
+        want.extend(line(
+            "ng refs/heads/claude/y not pushed: another ref was refused\n",
+        ));
+        want.extend(b"0000");
+        assert_eq!(got, want);
+        assert!(refusal(&cmds(), &[], &[("refs/heads/x".into(), "no".into())]).is_empty());
+    }
+
+    #[test]
+    fn a_refusal_goes_in_side_band_when_asked() {
+        let plain = refusal(
+            &cmds(),
+            &["report-status".into()],
+            &[("refs/heads/x".into(), "no".into())],
+        );
+        let caps = vec!["report-status".to_string(), "side-band-64k".to_string()];
+        let got = refusal(&cmds(), &caps, &[("refs/heads/x".into(), "no".into())]);
+        assert!(got.ends_with(b"0000"));
+        let (first, mut at) = read_pkt(&got, 0).unwrap();
+        assert_eq!(first.unwrap(), b"\x02pigeon: no\n");
+        let mut unframed: Vec<u8> = Vec::new();
+        while let (Some(l), next) = read_pkt(&got, at).unwrap() {
+            assert_eq!(l[0], 1);
+            unframed.extend_from_slice(&l[1..]);
+            at = next;
+        }
+        assert_eq!(unframed, plain);
+    }
+}

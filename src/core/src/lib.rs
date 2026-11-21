@@ -13,6 +13,7 @@ pub mod git;
 pub mod identity;
 pub mod mcp;
 pub mod oauth;
+pub mod pack;
 pub mod queues;
 pub mod secrets_store;
 pub mod tokens;

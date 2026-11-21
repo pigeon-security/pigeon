@@ -127,6 +127,28 @@ pub async fn mint(
     token.finish(minted).await
 }
 
+/// Repository `name` in `namespace` and a git token for it, living `ttl_secs`: both under one
+/// minted Cloudflare token, for a caller that needs the remote and a token together.
+pub async fn session(
+    account: &Account,
+    namespace: &str,
+    name: &str,
+    access: Access,
+    ttl_secs: u64,
+) -> Result<(Repo, GitToken)> {
+    let token = Scoped::open(account, "artifacts", policies()).await?;
+    let api = Api::new(account, token.value());
+    let both = async {
+        let repo = api.repo(namespace, name).await?.ok_or_else(|| {
+            Error::RustError(format!("repository `{namespace}/{name}` does not exist"))
+        })?;
+        let minted = api.mint(namespace, name, access, ttl_secs).await?;
+        Ok((repo, minted))
+    }
+    .await;
+    token.finish(both).await
+}
+
 /// The git tokens of repository `name` in `namespace`, live and past, without their values.
 pub async fn tokens(account: &Account, namespace: &str, name: &str) -> Result<Vec<Listed>> {
     let token = Scoped::open(account, "artifacts", policies()).await?;

@@ -42,6 +42,9 @@ pub struct Context<'a> {
     pub caller: Option<&'a users::Caller>,
     /// Why there is no caller, when there is none.
     pub caller_note: Option<&'a str>,
+    /// The Worker's context for the request being served, to finish work after the answer
+    /// has gone, such as revoking a token once a streamed body ends. `None` outside `fetch`.
+    pub worker: Option<&'a worker::Context>,
 }
 
 /// A Worker and the capabilities it hosts, with the repository's sources it was built from.
