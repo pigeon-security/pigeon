@@ -129,26 +129,47 @@ pub async fn fetch_with(
         Some(&body),
     )
     .await?;
+    fetched(&answer).map_err(|e| Error::RustError(format!("fetch: {e}")))
+}
+
+/// What an upload-pack answer holds: the IDs acknowledged before the pack, and the pack. Some
+/// servers (Artifacts among them) end the answer with a flush after the pack; it is dropped
+/// when the pack's own SHA-1 trailer shows it is not part of the pack.
+pub fn fetched(answer: &[u8]) -> std::result::Result<Fetched, String> {
     let mut acked = Vec::new();
     let mut at = 0;
     while at + 4 <= answer.len() && &answer[at..at + 4] != b"PACK" {
-        let (line, next) = read_pkt(&answer, at)?;
+        let (line, next) = read_pkt(answer, at).map_err(|e| e.to_string())?;
         at = next;
         let Some(line) = line else { continue };
         let line = String::from_utf8_lossy(&line);
         if let Some(sha) = line.strip_prefix("ACK ") {
             acked.push(sha.split_whitespace().next().unwrap_or("").to_string());
         } else if let Some(why) = line.strip_prefix("ERR ") {
-            return Err(Error::RustError(format!("fetch: {}", why.trim())));
+            return Err(why.trim().to_string());
         }
     }
     if at >= answer.len() {
-        return Err(Error::RustError("fetch: the remote sent no pack".into()));
+        return Err("the remote sent no pack".into());
     }
     Ok(Fetched {
         acked,
-        pack: answer[at..].to_vec(),
+        pack: without_trailing_flush(&answer[at..]).to_vec(),
     })
+}
+
+/// `pack` without a flush (`0000`) after it: dropped only when the 20 bytes before it are the
+/// SHA-1 of everything before them, so a pack whose own trailer ends in `0000` is kept whole.
+fn without_trailing_flush(pack: &[u8]) -> &[u8] {
+    use sha1::{Digest, Sha1};
+    if pack.len() >= 36 && pack.ends_with(b"0000") {
+        let body = &pack[..pack.len() - 24];
+        let trailer = &pack[pack.len() - 24..pack.len() - 4];
+        if Sha1::digest(body)[..] == *trailer {
+            return &pack[..pack.len() - 4];
+        }
+    }
+    pack
 }
 
 /// The regular file at `path` (such as `.pigeon/ci.toml`) in `commit` of `remote`, or `None`
@@ -752,6 +773,54 @@ pub fn upload_request(body: &[u8]) -> std::result::Result<UploadRequest, String>
         }
     }
     Ok(UploadRequest { command, wants })
+}
+
+#[cfg(test)]
+mod fetched_tests {
+    use super::*;
+
+    /// A real answer from Artifacts' upload-pack ("gitty/1.0") to a fetch of one commit with a
+    /// `have`: an ACK, the pack, then a flush after the pack's trailer.
+    const ARTIFACTS: &[u8] = include_bytes!("git/artifacts-fetch-response.bin");
+
+    #[test]
+    fn an_artifacts_answer_reads_as_a_whole_pack() {
+        assert!(ARTIFACTS.ends_with(b"0000"));
+        let f = fetched(ARTIFACTS).unwrap();
+        assert_eq!(f.acked, ["c5cdf866a7a88d61757eb18f164428619591ec2a"]);
+        assert!(f.pack.starts_with(b"PACK"));
+        assert!(!f.pack.ends_with(b"0000") || f.pack.len() + 4 != ARTIFACTS.len());
+        let objects = crate::pack::objects(&f.pack).unwrap();
+        assert_eq!(objects.unresolved, 0);
+        let commits = crate::pack::commits(&f.pack).unwrap();
+        assert!(
+            commits
+                .parents
+                .contains_key("8109724bc6cab394c7eb37afadebf99e04dc2dad")
+        );
+        // Before the fix, the flush was left on the pack.
+        let start = ARTIFACTS.windows(4).position(|w| w == b"PACK").unwrap();
+        assert!(crate::pack::objects(&ARTIFACTS[start..]).is_err());
+    }
+
+    #[test]
+    fn a_pack_keeps_a_trailer_that_ends_in_zeros() {
+        // A made-up pack whose trailer is not its SHA-1: nothing is cut.
+        let mut fake = b"PACK".to_vec();
+        fake.extend([0, 0, 0, 2, 0, 0, 0, 0]);
+        fake.extend(b"0123456789abcdef0000");
+        assert_eq!(without_trailing_flush(&fake), &fake[..]);
+        // A real empty pack with a flush after it: the flush goes.
+        use sha1::{Digest, Sha1};
+        let mut empty = b"PACK".to_vec();
+        empty.extend([0, 0, 0, 2, 0, 0, 0, 0]);
+        let sum = Sha1::digest(&empty);
+        empty.extend(&sum[..]);
+        let mut flushed = empty.clone();
+        flushed.extend(b"0000");
+        assert_eq!(without_trailing_flush(&flushed), &empty[..]);
+        assert_eq!(without_trailing_flush(&empty), &empty[..]);
+    }
 }
 
 #[cfg(test)]

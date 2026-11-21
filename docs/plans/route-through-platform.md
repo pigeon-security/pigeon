@@ -357,6 +357,16 @@ depend on the allowlist entry; the hand-back will say what was checked.
   Whether uploading a Worker with a queue producer binding needs more than Workers Scripts
   Write.
 
+- **Fixed live: `read_file` failed with "the pack is malformed: bytes left after the
+  objects".** Artifacts' upload-pack ("gitty/1.0") ends every answer with a flush (`0000`)
+  after the pack's SHA-1 trailer, shallow fetch or not. `git::fetch` kept those 4 bytes as
+  part of the pack. It now drops a trailing flush when the pack's trailer is the SHA-1 of what
+  precedes it (`git::fetched`, pure, tested on a captured Artifacts answer). This also means
+  the mirror no longer pushes those 4 bytes after its pack to GitHub. Checked against a
+  captured live depth-1 answer for `c5cdf86`: 95 objects, `.pigeon/ci.toml` read. Artifacts
+  advertises neither `ofs-delta` nor `filter`, so the fast-forward check's upstream history
+  comes without the tree filter (whole, which is fine at this size).
+
 ## Phase 6: container deploys through /cf/
 
 `wrangler.toml` gained a `[[containers]]` block (class `CiRunner`, image
