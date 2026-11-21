@@ -3,10 +3,12 @@
 #[cfg(not(target_arch = "wasm32"))]
 compile_error!("pigeon-core builds for wasm32 only: cargo build --target wasm32-unknown-unknown");
 
+use pigeon_capabilities::artifacts::{self, Access};
 use pigeon_capabilities::domain;
 use pigeon_capabilities::subdomain::{self, Served, Spec};
 use pigeon_capabilities::zero_trust::Protection;
 use pigeon_capabilities::{Account, secrets_store};
+use serde::Serialize;
 use worker::{Context, Env, Error, Method, Request, Response, Result, event};
 
 /// The Secrets Store binding holding the parent token.
@@ -17,6 +19,16 @@ const WORKER: &str = "pigeon-platform";
 
 /// The site Worker, which serves the zone's apex.
 const SITE_WORKER: &str = "pigeon";
+
+/// The source repository in Artifacts, imported from GitHub when created.
+const SOURCE_NAMESPACE: &str = "pigeon-security";
+const SOURCE_REPO: &str = "pigeon";
+const SOURCE_BRANCH: &str = "main";
+const SOURCE_GITHUB: &str = "https://github.com/pigeon-security/pigeon";
+
+/// How long a git token lives unless asked otherwise, and at most.
+const GIT_TOKEN_TTL: u64 = 900;
+const GIT_TOKEN_MAX_TTL: u64 = 86_400;
 
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
@@ -30,6 +42,13 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
             Ok(served) => Response::from_json(&served),
             Err(e) => Response::error(format!("setup failed: {e}"), 500),
         },
+        (Method::Post, "/setup/source") => json(setup_source(&env).await),
+        (Method::Post, "/source/token") => json(source_token(&env, &req).await),
+        (Method::Get, "/source/tokens") => json(source_tokens(&env).await),
+        (Method::Delete, path) if path.starts_with("/source/tokens/") => {
+            let id = &path["/source/tokens/".len()..];
+            json(source_revoke(&env, id).await)
+        }
         _ => Response::error("not found", 404),
     }
 }
@@ -75,4 +94,78 @@ async fn setup_site(env: &Env) -> Result<domain::Served> {
     };
     let zone = env.var("ZONE")?.to_string();
     domain::serve(&account(env).await?, &zone, SITE_WORKER, Some(&retired)).await
+}
+
+/// `result` as a JSON response, or its error as a 500.
+fn json<T: Serialize>(result: Result<T>) -> Result<Response> {
+    match result {
+        Ok(v) => Response::from_json(&v),
+        Err(e) => Response::error(format!("failed: {e}"), 500),
+    }
+}
+
+/// Has the source repository exist in Artifacts, imported from GitHub when created; idempotent.
+async fn setup_source(env: &Env) -> Result<artifacts::Ensured> {
+    let spec = artifacts::Spec {
+        namespace: SOURCE_NAMESPACE.into(),
+        name: SOURCE_REPO.into(),
+        default_branch: SOURCE_BRANCH.into(),
+        description: Some("pigeon-security/pigeon".into()),
+        import_from: Some(SOURCE_GITHUB.into()),
+    };
+    artifacts::ensure(&account(env).await?, &spec).await
+}
+
+/// A git token handed to the caller, which is behind Access.
+#[derive(Serialize)]
+struct Handed {
+    id: Option<String>,
+    token: String,
+    access: Access,
+    ttl_secs: u64,
+    remote: Option<String>,
+}
+
+/// Mints a git token for the source repository: `?access=read|write` (read by default) and
+/// `?ttl=<seconds>` (at most [`GIT_TOKEN_MAX_TTL`]).
+async fn source_token(env: &Env, req: &Request) -> Result<Handed> {
+    let url = req.url()?;
+    let mut access = Access::Read;
+    let mut ttl = GIT_TOKEN_TTL;
+    for (k, v) in url.query_pairs() {
+        match (k.as_ref(), v.as_ref()) {
+            ("access", "read") => access = Access::Read,
+            ("access", "write") => access = Access::Write,
+            ("ttl", s) => {
+                ttl = s
+                    .parse()
+                    .map_err(|_| Error::RustError(format!("ttl `{s}` is not a number")))?;
+            }
+            (k, v) => return Err(Error::RustError(format!("unknown parameter `{k}={v}`"))),
+        }
+    }
+    let ttl = ttl.min(GIT_TOKEN_MAX_TTL);
+    let account = account(env).await?;
+    let minted = artifacts::mint(&account, SOURCE_NAMESPACE, SOURCE_REPO, access, ttl).await?;
+    let remote = artifacts::repo(&account, SOURCE_NAMESPACE, SOURCE_REPO)
+        .await?
+        .map(|r| r.remote);
+    Ok(Handed {
+        id: minted.id,
+        token: minted.value,
+        access: minted.access,
+        ttl_secs: minted.ttl_secs,
+        remote,
+    })
+}
+
+/// The source repository's git tokens, without their values.
+async fn source_tokens(env: &Env) -> Result<Vec<artifacts::Listed>> {
+    artifacts::tokens(&account(env).await?, SOURCE_NAMESPACE, SOURCE_REPO).await
+}
+
+/// Revokes git token `id` of the source repository.
+async fn source_revoke(env: &Env, id: &str) -> Result<serde_json::Value> {
+    artifacts::revoke(&account(env).await?, SOURCE_NAMESPACE, SOURCE_REPO, id).await?;
+    Ok(serde_json::json!({ "revoked": id }))
 }

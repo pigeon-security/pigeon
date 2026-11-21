@@ -322,6 +322,7 @@ name = "pigeon-core"
 version = "0.1.0"
 dependencies = [
  "pigeon-capabilities",
+ "serde",
  "serde_json",
  "worker",
 ]

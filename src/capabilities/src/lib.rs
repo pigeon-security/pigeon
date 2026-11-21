@@ -2,6 +2,7 @@
 //! token it needs from it, revokes it after, and calls the other capabilities it builds on.
 //! Nothing here reads the Worker's environment.
 
+pub mod artifacts;
 pub mod cloudflare;
 mod custom_domain;
 pub mod design;

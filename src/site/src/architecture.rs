@@ -22,7 +22,7 @@ fn body() -> String {
   <span class="eyebrow">pigeon · architecture</span>
   <h1>What's deployed</h1>
   <p>pigeon.dev is public; the platform sits behind Cloudflare Access. pigeon-platform holds one parent token and mints a short-lived, scoped token for each capability it runs.</p>
-  <div class="pills"><span class="pill">as of {AS_OF}</span><span class="pill">2 Workers</span><span class="pill">6 capabilities</span></div>
+  <div class="pills"><span class="pill">as of {AS_OF}</span><span class="pill">2 Workers</span><span class="pill">7 capabilities</span></div>
 </header>
 
 <div class="arrow" aria-hidden="true"></div>
@@ -76,6 +76,8 @@ fn body() -> String {
           <li><code>GET /health</code></li>
           <li><code>POST /setup/platform</code> → subdomain</li>
           <li><code>POST /setup/site</code> → domain</li>
+          <li><code>POST /setup/source</code> → artifacts</li>
+          <li><code>POST /source/token</code> · <code>GET /source/tokens</code> · <code>DELETE /source/tokens/:id</code></li>
         </ul>
         <p>workers.dev and preview URLs off.</p>
       </article>
@@ -116,6 +118,12 @@ fn body() -> String {
         <div class="card-h"><h3>design</h3><span class="pill accent">Page</span></div>
         <p>Tokens, base styles and components. No token, no API calls.</p>
       </article>
+      <article class="card">
+        <div class="card-h"><h3>artifacts</h3></div>
+        <div class="pills"><span class="pill accent">ensure</span><span class="pill accent">mint</span><span class="pill accent">tokens</span><span class="pill accent">revoke</span><span class="pill accent">store</span></div>
+        <div class="chain"><span>calls</span><span class="pill">secrets_store</span></div>
+        <p>Git repositories on Cloudflare and the tokens that reach them.</p>
+      </article>
     </div>
   </section>
 
@@ -138,6 +146,10 @@ fn body() -> String {
       <article class="card kind-api">
         <div class="card-h"><span class="dot"></span><h3>Zone pigeon.dev</h3></div>
         <ul class="kv"><li>active</li><li>custom domains: pigeon.dev, platform.pigeon.dev</li></ul>
+      </article>
+      <article class="card kind-api">
+        <div class="card-h"><span class="dot"></span><h3>Artifacts</h3></div>
+        <ul class="kv"><li><code>pigeon-security/pigeon</code></li><li>imported from GitHub</li><li>git tokens: 15 min by default, 24 h at most</li></ul>
       </article>
     </div>
   </section>
