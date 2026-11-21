@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use worker::{Method, Result};
 
 use crate::Account;
-use crate::cloudflare::call_raw;
+use crate::cloudflare::{call, call_raw};
 use crate::tokens::{Policy, Scope, Scoped};
 
 /// What an upload's token holds.
@@ -59,4 +59,18 @@ pub async fn upload(account: &Account, script: &Script<'_>) -> Result<Value> {
     )
     .await;
     token.finish(uploaded).await
+}
+
+/// Deletes Worker `name`, with its routes and custom domains; answers false when it did not
+/// exist.
+pub async fn delete(account: &Account, name: &str) -> Result<bool> {
+    let policies = vec![Policy::new(Scope::Account, &PERMISSIONS)];
+    let token = Scoped::open(account, "workers", policies).await?;
+    let path = format!("/accounts/{}/workers/scripts/{name}?force=true", account.id);
+    let deleted = match call(token.value(), Method::Delete, &path, None).await {
+        Ok(_) => Ok(true),
+        Err(e) if e.to_string().contains(": 404:") => Ok(false),
+        Err(e) => Err(e),
+    };
+    token.finish(deleted).await
 }

@@ -1,0 +1,110 @@
+# One Worker: pigeon.dev served by pigeon-platform
+
+Status: phase 1 being built on `claude/one-worker`; phases 2 to 4 to come.
+
+pigeon.dev used to be served by a Worker of its own, `pigeon`. The `site` capability rendered
+the architecture page, uploaded it as that Worker's module with `pigeon_core::workers::upload`,
+and attached the apex to it. The page only changed when someone called `site_publish` again.
+
+The goal: one Worker, `pigeon-platform`, serves `platform.pigeon.dev`, `proxy.pigeon.dev` and
+`pigeon.dev`. It picks what to serve by the request's host. The old `pigeon` Worker is retired
+once the apex is live on the platform.
+
+## What is true today (checked 2026-11-21)
+
+- `platform.pigeon.dev` is **not** behind Access. `PublicHost` (`setup_platform`) retired its
+  Access applications. Every path checks its callers itself: `/mcp` and `/oauth` with OAuth,
+  the console, `/auth`, `/secrets` and `/tokens` with passkeys. `/health` is open. Live, `GET /`
+  answers 200 with no Access redirect. "Protected" therefore means each path's own check, and
+  no Access application is needed for this change, either new or removed.
+- `pigeon.dev` (the apex) is public. It is a Workers Custom Domain on Worker `pigeon`, serving
+  `GET /` and `GET /architecture.json`. Its old Access setup (application `pigeon`, service token
+  `pigeon-site`, secrets `SITE_ACCESS_CLIENT_ID` and `SITE_ACCESS_CLIENT_SECRET`) is retired on
+  every `site_publish`, each part skipped when already gone.
+- `wrangler.toml` declares no `routes`. All three hostnames are Custom Domains attached through
+  the API by setup tools (`pigeon_core::custom_domain::attach`, with `override_existing_origin`).
+  `wrangler deploy` keeps them as they are; the platform and proxy hosts have survived every
+  deploy. Wrangler's route and domain calls are not in the `/cf/` allowlist, so **routes stay
+  out of wrangler.toml**. Declaring them there would make every landing's deploy fail.
+
+## Design
+
+### Routing by host
+
+`src/platform/src/lib.rs`'s `fetch` asks the host first:
+
+| Host | Serves |
+| --- | --- |
+| `proxy.pigeon.dev` | `/git/`, `/cf/`, `/health`; 404 otherwise (unchanged) |
+| `pigeon.dev` (the zone apex) | `GET`/`HEAD` of `/` and `/architecture.json`, from the `site` capability; 404 for every other path and method, including `/mcp`, `/auth/`, `/oauth/`, `/.well-known/`, `/secrets`, `/tokens`, `/health`, `/git/` and `/cf/` |
+| anything else (`platform.pigeon.dev`) | as today: the console at `/`, capability routes, `/health`, `/mcp` |
+
+The apex is checked before any capability route. The console, OAuth and MCP are therefore
+unreachable on the public host, and nothing about the platform host changes.
+
+The rule is two pure functions, `site::is_apex(host, apex)` and `site::page(method, path)`.
+A smoke-suite check of them was written and passed locally, but it is not committed: the
+policy answers `add_test` on `tests/smoke.rs` with "not in policy" (deny). The live checks in
+phase 2 cover the same cases.
+
+### Rendering
+
+The site's pages are rendered at request time from the sources compiled into the Worker
+(`SOURCES`), the same way `site_publish` rendered them, and kept for the isolate's lifetime.
+Each deploy therefore serves its own architecture page, with nothing to publish. Responses keep
+the old Worker's headers (CSP, `nosniff`, `no-referrer`) and add `X-Served-By: pigeon-platform`,
+so the cutover can be checked from outside.
+
+### Tools
+
+- `site_publish` changes meaning: it attaches `pigeon.dev` to `pigeon-platform`. The attach is
+  one `PUT /workers/domains` with `override_existing_origin`, which moves the domain between
+  Workers without removing its DNS record or certificate. It keeps retiring the old Access
+  remnants, each skipped when gone. It no longer uploads anything.
+- `site_retire` (new, temporary): first checks with `GET /workers/domains?hostname=pigeon.dev`
+  that the apex's custom domain names `pigeon-platform`, and refuses otherwise. Only then does it
+  delete Worker `pigeon` (`DELETE /workers/scripts/pigeon?force=true`; skipped if already gone).
+  Because of that check, it cannot take the apex dark.
+
+### Footprint
+
+`Site::footprint` declares the hostname `pigeon.dev` served by `pigeon-platform`, `by: site`,
+public, and no Worker of its own. The `pigeon` `WorkerFootprint` goes. The architecture page then
+shows one Worker with three hostnames. Its `routes` for pigeon-platform are read from `lib.rs`,
+so the apex pages need no separate Worker entry. Coordinated with the architecture planner
+(`session_015XFA1mC8Le3vJWk6HpLW2U`), who owns regenerating the page per deploy. With this
+design, regeneration needs no publish step.
+
+## Phases
+
+The order keeps pigeon.dev serving throughout. The old Worker serves until the domain moves in
+one API call, and it is deleted only after the new Worker is seen serving.
+
+1. **Code (landing 1, `claude/one-worker`).** Host routing in `lib.rs`, rendering and the
+   new `site_publish` and `site_retire` in `site.rs`, `custom_domain::serving` and
+   `workers::delete` in `pigeon_core`, the footprint, and the wrangler.toml comment. Deploying it changes nothing live: the apex
+   still points at `pigeon`.
+   Check: `platform.pigeon.dev/health` is `ok` and `/` is the console; `pigeon.dev/` is
+   unchanged (no `X-Served-By`).
+2. **Cutover (a tool call, no landing).** `site_publish`.
+   Check: `pigeon.dev/` and `/architecture.json` answer 200 with `X-Served-By: pigeon-platform`;
+   `pigeon.dev/mcp`, `/auth/`, `/health` and `/git/x` answer 404; `platform.pigeon.dev` is
+   unchanged. If anything is wrong, roll back by moving the domain back: `custom_domain::attach`
+   to `pigeon` (the old Worker still exists). A person can do the same in the dashboard: Workers
+   → `pigeon` → Settings → Domains & Routes → add `pigeon.dev`.
+3. **Retire (a tool call, no landing).** `site_retire`.
+   Check: the old Worker is gone (the tool's answer), and `pigeon.dev` still serves as in phase 2.
+4. **Clean-up (landing 2).** Remove `site_retire`, the `Retired` type and the Access-remnant
+   retirement (the remnants were confirmed gone in phases 2 and 3), `workers::upload` and
+   `workers::delete` if nothing else uses them, and the `pigeon` names from `settings.rs`. Mark
+   this plan deployed.
+   Check: as in phase 2, and the architecture page lists one Worker.
+
+## For the person
+
+Nothing needs the dashboard if the phases go as planned: no Access application changes, and the
+Custom Domain move keeps DNS. The dashboard is only the rollback path given in phase 2.
+
+## Log
+
+(Filled in as phases land.)

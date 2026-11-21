@@ -2,7 +2,10 @@ name = "pigeon-platform"
 account_id = "4f94676cb2cbe46fd985b089ca97ea27"
 main = "build/worker/shim.mjs"
 compatibility_date = "2026-11-01"
-# Served only on platform.pigeon.dev, behind Access.
+# Served on platform.pigeon.dev, proxy.pigeon.dev and the apex pigeon.dev, routed by host in
+# src/lib.rs. Each is a Workers Custom Domain attached by its setup tool (setup_platform,
+# setup_proxy_host, site_publish), not a route here: wrangler's route calls are outside the
+# /cf/ allowlist, and a deploy keeps the custom domains as they are.
 workers_dev = false
 preview_urls = false
 

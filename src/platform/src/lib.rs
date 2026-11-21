@@ -1,6 +1,7 @@
-//! pigeon-platform: the one Worker, hosting pigeon's capabilities behind Access. It answers
-//! `/health` and the MCP endpoint, hands the paths a capability serves (such as `/auth/`) to it,
-//! keeps the proxies (`/git/`, `/cf/`) to their own hostname and that hostname to them,
+//! pigeon-platform: the one Worker, hosting pigeon's capabilities. It answers `/health` and the
+//! MCP endpoint, hands the paths a capability serves (such as `/auth/`) to it, keeps the proxies
+//! (`/git/`, `/cf/`) to their own hostname and that hostname to them, serves the public site on
+//! the zone's apex and nothing else there,
 //! hands queue events to the capabilities that want them, and does nothing else itself. Built
 //! for `wasm32-unknown-unknown` only.
 
@@ -15,6 +16,7 @@ include!(concat!(env!("OUT_DIR"), "/sources.rs"));
 
 use pigeon_capabilities::oauth;
 use pigeon_capabilities::proxy;
+use pigeon_capabilities::site;
 use pigeon_capabilities::users::{self, Caller};
 use pigeon_capabilities::{Capability, Context, Hosted};
 
@@ -134,6 +136,11 @@ async fn fetch(req: Request, env: Env, ctx: WorkerContext) -> Result<Response> {
         return Response::error("not found", 404);
     }
     let caps = settings::capabilities();
+    // The apex is the public site's alone: none of the platform's paths answer there.
+    if site::is_apex(&host, settings::ZONE) {
+        let hosted = hosted(&caps);
+        return settings::site().serve(&hosted, req).await;
+    }
     // A route is a prefix, so the root, the console's Overview, is matched by name.
     if let Some(c) = caps.iter().find(|c| {
         if path == "/" {

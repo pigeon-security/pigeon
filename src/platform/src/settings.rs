@@ -32,7 +32,8 @@ pub const WORKER: &str = "pigeon-platform";
 /// The Secrets Store binding holding the parent token.
 pub const PARENT_TOKEN: &str = "CF_PARENT_TOKEN";
 
-const ZONE: &str = "pigeon.dev";
+/// The zone, whose apex serves the public site.
+pub const ZONE: &str = "pigeon.dev";
 
 /// The platform's hostname, in public: its paths check their callers themselves.
 pub const HOST: &str = "platform.pigeon.dev";
@@ -74,6 +75,25 @@ const fn mirrors_no_session_branch(branches: &[&str]) -> bool {
     true
 }
 
+/// The public site on the zone's apex, served by this Worker. `pigeon` is the Worker that served
+/// it before, which `site_retire` deletes; `pigeon-site` and its secrets are the Access setup the
+/// apex had before that.
+pub fn site() -> Site {
+    Site {
+        zone: ZONE.into(),
+        worker: WORKER.into(),
+        old_worker: Some("pigeon".into()),
+        retire: Some(Retired {
+            app: "pigeon".into(),
+            service_token: "pigeon-site".into(),
+            secrets: [
+                "SITE_ACCESS_CLIENT_ID".into(),
+                "SITE_ACCESS_CLIENT_SECRET".into(),
+            ],
+        }),
+    }
+}
+
 /// The capabilities this Worker hosts.
 pub fn capabilities() -> Vec<Box<dyn Capability>> {
     vec![
@@ -96,19 +116,7 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
             retire: Retire::default(),
             tool: "setup_proxy_host",
         }),
-        Box::new(Site {
-            zone: ZONE.into(),
-            worker: "pigeon".into(),
-            compatibility_date: "2026-11-01",
-            retire: Some(Retired {
-                app: "pigeon".into(),
-                service_token: "pigeon-site".into(),
-                secrets: [
-                    "SITE_ACCESS_CLIENT_ID".into(),
-                    "SITE_ACCESS_CLIENT_SECRET".into(),
-                ],
-            }),
-        }),
+        Box::new(site()),
         Box::new(Source {
             namespace: NAMESPACE.into(),
             repo: REPO.into(),

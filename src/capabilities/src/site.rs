@@ -1,29 +1,28 @@
-//! The public site on a zone's apex. The hosting Worker renders its pages (the architecture
-//! page and its model, from the sources it was built with), publishes them as a Worker of their
-//! own and serves that on the apex, in public, retiring any Access setup the apex had. The site
-//! has no code of its own to deploy: publishing it again is how it changes.
+//! The public site on a zone's apex, served by the hosting Worker itself, by host: the
+//! architecture page and its model, rendered once per isolate from the sources the Worker was
+//! built with, so each deploy serves its own. `site_publish` moves the apex onto this Worker;
+//! `site_retire` deletes the Worker that served it before.
+
+use std::sync::OnceLock;
 
 use pigeon_core::access::Session;
-use pigeon_core::design;
 use pigeon_core::mcp::Tool;
 use pigeon_core::secrets_store::Writer;
-use pigeon_core::workers::{self, Script};
-use pigeon_core::{Account, custom_domain, zones};
-use serde::Serialize;
+use pigeon_core::{Account, custom_domain, design, workers, zones};
 use serde_json::{Value, json};
-use worker::Result;
+use worker::{Error, Headers, Request, Response, Result};
 
 use crate::architecture::{self, Source};
-use crate::{
-    Call, Capability, Context, Footprint, HostFootprint, WorkerFootprint, to_value, unknown,
-};
+use crate::{Call, Capability, Context, Footprint, HostFootprint, Hosted, to_value, unknown};
 
 /// The site.
 pub struct Site {
+    /// The apex, such as `pigeon.dev`.
     pub zone: String,
-    /// The Worker it is published as.
+    /// The Worker serving it: the hosting Worker itself.
     pub worker: String,
-    pub compatibility_date: &'static str,
+    /// A Worker that used to serve the apex, deleted by `site_retire`.
+    pub old_worker: Option<String>,
     /// An Access setup the apex had, removed when the site is published.
     pub retire: Option<Retired>,
 }
@@ -37,39 +36,73 @@ pub struct Retired {
 }
 
 /// The site's pages, by path.
-const PAGES: [&str; 2] = ["/", "/architecture.json"];
+pub const PAGES: [&str; 2] = ["/", "/architecture.json"];
 
-/// What publishing did.
-#[derive(Serialize)]
-struct Published {
-    worker: String,
-    pages: [&'static str; 2],
-    digest: String,
-    custom_domain: String,
-    retired: Option<Value>,
+/// The pages, rendered once per isolate: the HTML and the JSON model.
+static RENDERED: OnceLock<(String, String)> = OnceLock::new();
+
+/// Whether `host` is the apex `apex`, ignoring ASCII case.
+pub fn is_apex(host: &str, apex: &str) -> bool {
+    host.eq_ignore_ascii_case(apex)
+}
+
+/// The index in [`PAGES`] of the page answering `method path` on the apex: `GET` or `HEAD` of a
+/// page; `None` otherwise.
+pub fn page(method: &str, path: &str) -> Option<usize> {
+    if method != "GET" && method != "HEAD" {
+        return None;
+    }
+    PAGES.iter().position(|p| *p == path)
+}
+
+/// Renders the page and the model from the sources the Worker was built with.
+fn render(hosted: &Hosted<'_>) -> Result<(String, String)> {
+    let sources: Vec<Source> = hosted
+        .sources
+        .iter()
+        .map(|(path, text)| Source { path, text })
+        .collect();
+    let model = architecture::describe(&sources, hosted);
+    let html = architecture::page(&model);
+    let json = serde_json::to_string_pretty(&model)?;
+    Ok((html, json))
 }
 
 impl Site {
-    async fn publish(&self, cx: &Context<'_>) -> Result<Published> {
-        let sources: Vec<Source> = cx
-            .hosted
-            .sources
-            .iter()
-            .map(|(path, text)| Source { path, text })
-            .collect();
-        let model = architecture::describe(&sources, cx.hosted);
-        let html = architecture::page(&model);
-        let json = serde_json::to_string_pretty(&model)?;
-        let module = module(&[
-            (PAGES[0], "text/html; charset=utf-8", &html),
-            (PAGES[1], "application/json", &json),
-        ]);
-        let script = Script {
-            name: &self.worker,
-            module: &module,
-            compatibility_date: self.compatibility_date,
+    /// Serves a request to the apex: a page, or 404.
+    pub async fn serve(&self, hosted: &Hosted<'_>, req: Request) -> Result<Response> {
+        let method = req.method().to_string();
+        let Some(index) = page(&method, &req.path()) else {
+            return Response::error("not found", 404);
         };
-        workers::upload(cx.account, &script).await?;
+        let rendered = match RENDERED.get() {
+            Some(r) => r,
+            None => {
+                let r = render(hosted)?;
+                RENDERED.get_or_init(|| r)
+            }
+        };
+        let (body, content_type) = if index == 0 {
+            (&rendered.0, "text/html; charset=utf-8")
+        } else {
+            (&rendered.1, "application/json")
+        };
+        let headers = Headers::new();
+        headers.set("Content-Type", content_type)?;
+        headers.set("Content-Security-Policy", design::CSP)?;
+        headers.set("X-Content-Type-Options", "nosniff")?;
+        headers.set("Referrer-Policy", "no-referrer")?;
+        headers.set("X-Served-By", &self.worker)?;
+        let response = if method == "HEAD" {
+            Response::empty()?
+        } else {
+            Response::ok(body.as_str())?
+        };
+        Ok(response.with_headers(headers))
+    }
+
+    /// Moves the apex's custom domain onto this Worker, then retires the old Access setup.
+    async fn publish(&self, cx: &Context<'_>) -> Result<Value> {
         let zone = zones::active(cx.account, &self.zone).await?;
         let custom_domain =
             custom_domain::attach(cx.account, &zone.id, &zone.name, &self.worker).await?;
@@ -77,45 +110,27 @@ impl Site {
             Some(r) => Some(retire(cx.account, &zone.name, r).await?),
             None => None,
         };
-        Ok(Published {
-            worker: self.worker.clone(),
-            pages: PAGES,
-            digest: model.digest,
-            custom_domain,
-            retired,
-        })
+        Ok(json!({
+            "worker": self.worker,
+            "host": zone.name,
+            "pages": PAGES,
+            "custom_domain": custom_domain,
+            "retired": retired,
+        }))
     }
-}
 
-/// A module Worker that answers `GET` and `HEAD` for each of `pages` and 404 otherwise.
-fn module(pages: &[(&str, &str, &str)]) -> String {
-    let pages: serde_json::Map<String, Value> = pages
-        .iter()
-        .map(|(path, kind, body)| ((*path).to_string(), json!({ "type": kind, "body": body })))
-        .collect();
-    let headers = json!({
-        "Content-Security-Policy": design::CSP,
-        "X-Content-Type-Options": "nosniff",
-        "Referrer-Policy": "no-referrer",
-    });
-    format!(
-        r#"// Generated by pigeon-platform's site capability; publish the site again to change it.
-const PAGES = {};
-const HEADERS = {};
-export default {{
-  async fetch(request) {{
-    const page = PAGES[new URL(request.url).pathname];
-    if (!page || (request.method !== "GET" && request.method !== "HEAD")) {{
-      return new Response("not found", {{ status: 404 }});
-    }}
-    const headers = {{ ...HEADERS, "Content-Type": page.type }};
-    return new Response(request.method === "HEAD" ? null : page.body, {{ headers }});
-  }},
-}};
-"#,
-        Value::Object(pages),
-        headers
-    )
+    /// Deletes Worker `old`, but only once the apex's custom domain is on this Worker.
+    async fn retire_worker(&self, cx: &Context<'_>, old: &str) -> Result<Value> {
+        let serving = custom_domain::serving(cx.account, &self.zone).await?;
+        if serving.as_deref() != Some(self.worker.as_str()) {
+            return Err(Error::RustError(format!(
+                "{} is served by {serving:?}, not {}: run site_publish first",
+                self.zone, self.worker
+            )));
+        }
+        let deleted = workers::delete(cx.account, old).await?;
+        Ok(json!({ "old_worker": old, "deleted": deleted, "serving": serving }))
+    }
 }
 
 /// Takes the apex out from behind Access and removes what `r` names; each is skipped when it
@@ -156,19 +171,28 @@ impl Capability for Site {
     }
 
     fn tools(&self) -> Vec<Tool> {
-        vec![Tool::bare(
+        let mut tools = vec![Tool::bare(
             "site_publish",
-            "Render the public site from this Worker's own sources, publish it as its own \
-             Worker and serve it on the zone's apex, in public.",
-        )]
+            "Serve the public site on the zone's apex from this Worker, moving the apex's custom \
+             domain onto it, and retire the apex's old Access setup.",
+        )];
+        if self.old_worker.is_some() {
+            tools.push(Tool::bare(
+                "site_retire",
+                "Delete the Worker that used to serve the apex, once the apex's custom domain is \
+                 on this Worker; refuses otherwise.",
+            ));
+        }
+        tools
     }
 
     fn call<'a>(&'a self, cx: &'a Context<'a>, tool: &'a str, _args: &'a Value) -> Call<'a> {
         Box::pin(async move {
-            if tool != "site_publish" {
-                return Err(unknown(tool));
+            match (tool, &self.old_worker) {
+                ("site_publish", _) => Ok(to_value(self.publish(cx).await?)),
+                ("site_retire", Some(old)) => Ok(to_value(self.retire_worker(cx, old).await?)),
+                _ => Err(unknown(tool)),
             }
-            Ok(to_value(self.publish(cx).await?))
         })
     }
 
@@ -180,10 +204,6 @@ impl Capability for Site {
                 by: self.name().into(),
                 access: Vec::new(),
                 public_paths: Vec::new(),
-            }],
-            workers: vec![WorkerFootprint {
-                name: self.worker.clone(),
-                routes: PAGES.iter().map(|p| format!("GET {p}")).collect(),
             }],
             zone: Some(self.zone.clone()),
             ..Footprint::default()

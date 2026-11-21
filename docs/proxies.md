@@ -8,7 +8,7 @@ Cloud coding sessions used to reach the Artifacts git host, `api.cloudflare.com`
 
 Now sessions reach git and the Cloudflare API only through pigeon's proxies on `proxy.pigeon.dev`. The proxies hold the real credentials and mint a short-lived one for each request. MCP stays on `platform.pigeon.dev`.
 
-One Worker, `pigeon-platform`, serves both hosts. On `proxy.pigeon.dev` only `/git/`, `/cf/` and `/health` answer. On any other host, `/git/` and `/cf/` answer 404.
+One Worker, `pigeon-platform`, serves both hosts, and the public site on the apex `pigeon.dev` (see `docs/plans/one-worker.md`). On `proxy.pigeon.dev` only `/git/`, `/cf/` and `/health` answer. On any other host, `/git/` and `/cf/` answer 404.
 
 ## The proxy credential
 

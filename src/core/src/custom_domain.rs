@@ -21,6 +21,28 @@ pub async fn attach(
     token.finish(attached).await
 }
 
+/// The Worker serving `hostname` as a custom domain, if one does.
+pub async fn serving(account: &Account, hostname: &str) -> Result<Option<String>> {
+    let policies = vec![Policy::new(Scope::Account, &["Workers Scripts Read"])];
+    let token = Scoped::open(account, "custom-domain-read", policies).await?;
+    let path = format!(
+        "/accounts/{}/workers/domains?hostname={hostname}",
+        account.id
+    );
+    let found = call(token.value(), Method::Get, &path, None)
+        .await
+        .map(|v| {
+            v.as_array()?.iter().find(|d| {
+                d["hostname"]
+                    .as_str()
+                    .is_some_and(|h| h.eq_ignore_ascii_case(hostname))
+            })?["service"]
+                .as_str()
+                .map(String::from)
+        });
+    token.finish(found).await
+}
+
 fn policies() -> Vec<Policy> {
     vec![
         Policy::new(Scope::Account, &["Workers Scripts Write"]),
