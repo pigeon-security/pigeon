@@ -20,7 +20,7 @@ use serde_json::{Value, json};
 use worker::wasm_bindgen;
 use worker::{DurableObject, Env, Error, Request, Response, Result, State, durable_object, js_sys};
 
-use crate::{Call, Capability, Context, Footprint, arg, to_value, unknown};
+use crate::{Call, Capability, Context, arg, to_value, unknown};
 
 /// The Directory's binding, and the one object of it.
 pub const BINDING: &str = "DIRECTORY";
@@ -1134,12 +1134,5 @@ impl Capability for Users {
 
     fn call<'a>(&'a self, cx: &'a Context<'a>, tool: &'a str, args: &'a Value) -> Call<'a> {
         Box::pin(self.run(cx, tool, args))
-    }
-
-    fn footprint(&self) -> Footprint {
-        Footprint {
-            objects: vec![BINDING.into()],
-            ..Footprint::default()
-        }
     }
 }

@@ -10,7 +10,7 @@ use pigeon_core::{custom_domain, design, workers, zones};
 use serde_json::{Value, json};
 use worker::{Error, Headers, Request, Response, Result};
 
-use crate::architecture::{self, Source};
+use crate::architecture;
 use crate::{Call, Capability, Context, Footprint, HostFootprint, Hosted, to_value, unknown};
 
 /// The site.
@@ -43,17 +43,12 @@ pub fn page(method: &str, path: &str) -> Option<usize> {
     PAGES.iter().position(|p| *p == path)
 }
 
-/// Renders the page and the model from the sources the Worker was built with.
+/// The page and the model, from the architecture the Worker was built with: the same one
+/// `architecture_describe` and the console's Architecture tab show.
 fn render(hosted: &Hosted<'_>) -> Result<(String, String)> {
-    let sources: Vec<Source> = hosted
-        .sources
-        .iter()
-        .map(|(path, text)| Source { path, text })
-        .collect();
-    let model = architecture::describe(&sources, hosted);
-    let html = architecture::page(&model);
-    let json = serde_json::to_string_pretty(&model)?;
-    Ok((html, json))
+    let built = architecture::built(hosted);
+    let json = serde_json::to_string_pretty(&built.model)?;
+    Ok((built.page.clone(), json))
 }
 
 impl Site {

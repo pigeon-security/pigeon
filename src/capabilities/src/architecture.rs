@@ -8,10 +8,11 @@
 //!   Workers and resources each brings.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::OnceLock;
 
 use pigeon_core::design::{Page, escape};
 use pigeon_core::mcp::Tool;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::console::sections::{Section, Tab};
@@ -45,15 +46,7 @@ impl Capability for Architecture {
         _person: &'a User,
         _query: &'a Value,
     ) -> Call<'a> {
-        Box::pin(async move {
-            let sources: Vec<Source> = cx
-                .hosted
-                .sources
-                .iter()
-                .map(|(path, text)| Source { path, text })
-                .collect();
-            Ok(serde_json::json!({ "html": render(&describe(&sources, cx.hosted)) }))
-        })
+        Box::pin(async move { Ok(serde_json::json!({ "html": built(cx.hosted).html })) })
     }
 
     fn tools(&self) -> Vec<Tool> {
@@ -69,15 +62,41 @@ impl Capability for Architecture {
             if tool != "architecture_describe" {
                 return Err(unknown(tool));
             }
-            let sources: Vec<Source> = cx
-                .hosted
-                .sources
-                .iter()
-                .map(|(path, text)| Source { path, text })
-                .collect();
-            Ok(to_value(describe(&sources, cx.hosted)))
+            Ok(built(cx.hosted).model.clone())
         })
     }
+}
+
+/// The hosting Worker's architecture in every form it is shown in, built once per isolate: its
+/// sources and capabilities are fixed when it is built, so every deploy draws it anew and
+/// nothing else has to.
+pub struct Built {
+    /// The model, as `architecture_describe` answers it and `/architecture.json` serves it.
+    pub model: Value,
+    /// The drawing, as the console's Architecture tab places it.
+    pub html: String,
+    /// The whole page, as the site serves it.
+    pub page: String,
+    pub digest: String,
+}
+
+/// The architecture of the Worker `hosted` describes, built on first use.
+pub fn built(hosted: &Hosted) -> &'static Built {
+    static BUILT: OnceLock<Built> = OnceLock::new();
+    BUILT.get_or_init(|| {
+        let sources: Vec<Source> = hosted
+            .sources
+            .iter()
+            .map(|(path, text)| Source { path, text })
+            .collect();
+        let model = describe(&sources, hosted);
+        Built {
+            model: to_value(&model),
+            html: render(&model),
+            page: page(&model),
+            digest: model.digest.clone(),
+        }
+    })
 }
 
 /// One source file, by its path from the repository root.
@@ -97,6 +116,8 @@ pub struct Model {
     /// How many files it was read from, and a digest of them.
     pub files: usize,
     pub digest: String,
+    /// The commit it was built from (`PIGEON_COMMIT` at build time); empty for a local build.
+    pub commit: String,
 }
 
 /// A capability or a building block.
@@ -111,6 +132,8 @@ pub struct Part {
     /// The blocks and capabilities it is built from.
     pub calls: Vec<String>,
     pub permissions: Vec<String>,
+    /// The hosting Worker's bindings and queues (from its wrangler.toml) its code names.
+    pub bindings: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -147,12 +170,16 @@ pub struct Resources {
     pub queues: Vec<String>,
     pub repos: Vec<String>,
     pub mirrors: Vec<String>,
-    /// Durable Objects, by binding.
+    /// Durable Objects, as `BINDING (Class)`, from wrangler.toml.
     pub objects: Vec<String>,
+    /// Containers, as `Class (image key: image)`, from wrangler.toml.
+    pub containers: Vec<String>,
     /// AI gateways, by ID.
     pub gateways: Vec<String>,
     /// Every permission a minted token can hold.
     pub permissions: Vec<String>,
+    /// Bindings and queues wrangler.toml declares that no code names: drift to remove.
+    pub unused: Vec<String>,
 }
 
 /// The model of `sources` and the capabilities `hosted` hosts.
@@ -180,21 +207,65 @@ pub fn describe(sources: &[Source], hosted: &Hosted) -> Model {
     // The hosting Worker: its wrangler.toml and the Rust beside it.
     if let Some(toml) = sorted.iter().find(|s| {
         s.path.ends_with("wrangler.toml")
-            && Toml::read(s.text).name.as_deref() == Some(hosted.worker)
+            && Wrangler::read(s.text).name.as_deref() == Some(hosted.worker)
     }) {
         let dir = toml.path.trim_end_matches("wrangler.toml");
-        let config = Toml::read(toml.text);
+        let config = Wrangler::read(toml.text);
         let rust: String = sorted
             .iter()
             .filter(|s| s.path.starts_with(&format!("{dir}src/")) && s.path.ends_with(".rs"))
             .map(|s| code(s.text))
             .collect::<Vec<_>>()
             .join("\n");
+        // wrangler.toml is the authority for bindings: each is drawn once, from there, and
+        // attributed to the capabilities whose code names it.
+        let names: Vec<String> = config
+            .objects
+            .iter()
+            .map(|o| o.binding.clone())
+            .chain(config.secrets.iter().cloned())
+            .chain(config.producers.iter().cloned())
+            .chain(config.consumers.iter().cloned())
+            .collect();
+        for part in &mut caps {
+            part.bindings = named(&sorted, "src/capabilities/src/", &part.name, &names);
+        }
+        let own = strings(&rust);
+        resources.unused = names
+            .iter()
+            .filter(|n| !own.contains(n) && !caps.iter().any(|p| p.bindings.contains(n)))
+            .cloned()
+            .collect();
         resources.secrets.extend(config.secrets.iter().cloned());
+        resources.queues.extend(config.producers.iter().cloned());
+        resources.queues.extend(config.consumers.iter().cloned());
+        resources.objects.extend(
+            config
+                .objects
+                .iter()
+                .map(|o| format!("{} ({})", o.binding, o.class)),
+        );
+        resources
+            .containers
+            .extend(config.containers.iter().flat_map(|c| {
+                c.images
+                    .iter()
+                    .map(move |(key, image)| format!("{} ({key}: {})", c.class, image_name(image)))
+            }));
         workers.push(Worker {
             name: hosted.worker.to_string(),
             workers_dev: config.workers_dev,
-            routes: routes(&rust),
+            // The Worker's own routes, then each capability's path prefixes.
+            routes: routes(&rust)
+                .into_iter()
+                .chain(
+                    hosted
+                        .capabilities
+                        .iter()
+                        .flat_map(|c| c.routes())
+                        .map(|r| format!("* {r}")),
+                )
+                .collect(),
             tools: hosted
                 .capabilities
                 .iter()
@@ -214,9 +285,22 @@ pub fn describe(sources: &[Source], hosted: &Hosted) -> Model {
 
     for (by, f) in &footprints {
         for h in &f.hostnames {
+            // Several capabilities can serve one hostname, such as the proxies' host.
+            if let Some(seen) = hostnames
+                .iter_mut()
+                .find(|s: &&mut Hostname| s.host == h.host)
+            {
+                seen.by = format!("{}, {}", seen.by, h.by);
+                seen.public_paths.extend(h.public_paths.iter().cloned());
+                continue;
+            }
             hostnames.push(Hostname {
                 host: h.host.clone(),
-                worker: h.worker.clone(),
+                worker: if h.worker.is_empty() {
+                    hosted.worker.to_string()
+                } else {
+                    h.worker.clone()
+                },
                 by: h.by.clone(),
                 access: h.access.clone(),
                 public_paths: h.public_paths.clone(),
@@ -241,7 +325,6 @@ pub fn describe(sources: &[Source], hosted: &Hosted) -> Model {
         resources.queues.extend(f.queues.iter().cloned());
         resources.repos.extend(f.repos.iter().cloned());
         resources.mirrors.extend(f.mirrors.iter().cloned());
-        resources.objects.extend(f.objects.iter().cloned());
         resources.gateways.extend(f.gateways.iter().cloned());
     }
     for part in blocks.iter().chain(&caps) {
@@ -255,6 +338,7 @@ pub fn describe(sources: &[Source], hosted: &Hosted) -> Model {
         &mut resources.repos,
         &mut resources.mirrors,
         &mut resources.objects,
+        &mut resources.containers,
         &mut resources.gateways,
         &mut resources.permissions,
     ] {
@@ -272,6 +356,7 @@ pub fn describe(sources: &[Source], hosted: &Hosted) -> Model {
         resources,
         files: sorted.len(),
         digest: digest(&sorted),
+        commit: option_env!("PIGEON_COMMIT").unwrap_or_default().to_string(),
     }
 }
 
@@ -326,14 +411,16 @@ fn parts(sorted: &[&Source], dir: &str, capability: bool, blocks: &[String]) -> 
                 interface: interface(s.text),
                 calls: calls.into_iter().collect(),
                 permissions: permissions(&code),
+                bindings: Vec::new(),
             })
         })
         .collect();
     // Those built on most come first; then by name.
-    let depth: BTreeMap<String, usize> = out
-        .iter()
-        .map(|p| (p.name.clone(), depth_of(&p.name, &out, 0)))
-        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut depth: BTreeMap<String, usize> = BTreeMap::new();
+    for p in &out {
+        depth_of(&p.name, &out, &mut BTreeSet::new(), &mut depth);
+    }
     out.sort_by(|a, b| {
         depth[&b.name]
             .cmp(&depth[&a.name])
@@ -342,17 +429,58 @@ fn parts(sorted: &[&Source], dir: &str, capability: bool, blocks: &[String]) -> 
     out
 }
 
-fn depth_of(name: &str, all: &[Part], seen: usize) -> usize {
-    if seen > all.len() {
-        return 0;
+/// Which of `names` capability `name`'s code (its module and any submodules under `dir`) names
+/// as a string literal.
+fn named(sorted: &[&Source], dir: &str, name: &str, names: &[String]) -> Vec<String> {
+    let file = format!("{dir}{name}.rs");
+    let sub = format!("{dir}{name}/");
+    let literals: BTreeSet<String> = sorted
+        .iter()
+        .filter(|s| s.path == file || s.path.starts_with(&sub))
+        .flat_map(|s| strings(&code(s.text)))
+        .collect();
+    names
+        .iter()
+        .filter(|n| literals.contains(*n))
+        .cloned()
+        .collect()
+}
+
+/// An image reference without its registry, and its digest cut to 12 characters:
+/// `pigeon-ci-base@sha256:02b7487373a8`.
+fn image_name(image: &str) -> String {
+    let last = image.rsplit('/').next().unwrap_or(image);
+    match last.split_once("@sha256:") {
+        Some((name, digest)) => format!("{name}@sha256:{}", &digest[..digest.len().min(12)]),
+        None => last.to_string(),
     }
-    all.iter().find(|c| c.name == name).map_or(0, |c| {
-        c.calls
-            .iter()
-            .map(|d| 1 + depth_of(d, all, seen + 1))
-            .max()
-            .unwrap_or(0)
-    })
+}
+
+/// The longest chain of calls from `name`, each part counted once: a call back into the chain
+/// (a cycle) adds nothing. Memoized in `memo`, so it is linear in the calls; an unmemoized walk
+/// is exponential once capabilities call each other.
+fn depth_of(
+    name: &str,
+    all: &[Part],
+    chain: &mut BTreeSet<String>,
+    memo: &mut BTreeMap<String, usize>,
+) -> usize {
+    if let Some(&d) = memo.get(name) {
+        return d;
+    }
+    let Some(part) = all.iter().find(|c| c.name == name) else {
+        return 0;
+    };
+    chain.insert(name.to_string());
+    let mut d = 0;
+    for call in &part.calls {
+        if !chain.contains(call) {
+            d = d.max(1 + depth_of(call, all, chain, memo));
+        }
+    }
+    chain.remove(name);
+    memo.insert(name.to_string(), d);
+    d
 }
 
 /// The module's `//!` summary: its first paragraph, as one line.
@@ -482,48 +610,171 @@ fn permissions(text: &str) -> Vec<String> {
 
 // ---- Workers ----
 
-#[derive(Default)]
-struct Toml {
-    name: Option<String>,
-    workers_dev: bool,
-    vars: BTreeMap<String, String>,
-    secrets: Vec<String>,
+/// What a Worker's `wrangler.toml` declares: the authority for its bindings, which the model
+/// reads rather than any capability repeating them.
+#[derive(Default, Serialize, Clone, Debug)]
+pub struct Wrangler {
+    /// Worker name, if the file sets one.
+    pub name: Option<String>,
+    /// Whether workers.dev is enabled; true when the file doesn't say.
+    pub workers_dev: bool,
+    /// Plain string variables from the `[vars]` table.
+    pub vars: BTreeMap<String, String>,
+    /// Binding names of each secrets store secret, in file order.
+    pub secrets: Vec<String>,
+    /// Durable object bindings, in file order.
+    pub objects: Vec<Object>,
+    /// Container definitions, in file order.
+    pub containers: Vec<Container>,
+    /// Queue names used as producers, in file order.
+    pub producers: Vec<String>,
+    /// Queue names used as consumers, in file order.
+    pub consumers: Vec<String>,
 }
 
-impl Toml {
-    fn read(text: &str) -> Self {
-        let mut t = Self {
-            workers_dev: true,
-            ..Self::default()
-        };
-        let mut section = String::new();
-        for line in text.lines() {
-            let line = line.trim();
-            if line.starts_with('#') || line.is_empty() {
-                continue;
-            }
-            if line.starts_with('[') {
-                section = line.trim_matches(|c| c == '[' || c == ']').to_string();
-                continue;
-            }
-            let Some((key, value)) = line.split_once('=') else {
-                continue;
+/// A durable object binding and the class behind it.
+#[derive(Serialize, Clone, Debug)]
+pub struct Object {
+    /// Binding name used by the worker.
+    pub binding: String,
+    /// Name of the durable object class.
+    pub class: String,
+}
+
+/// A container definition with its images.
+#[derive(Serialize, Clone, Debug)]
+pub struct Container {
+    /// Name of the container class.
+    pub class: String,
+    /// Pairs of image key and image reference, sorted by key.
+    pub images: Vec<(String, String)>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Deserialize)]
+struct RawWrangler {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default = "default_true")]
+    workers_dev: bool,
+    #[serde(default)]
+    vars: BTreeMap<String, toml::Value>,
+    #[serde(default)]
+    secrets_store_secrets: Vec<RawSecret>,
+    #[serde(default)]
+    durable_objects: RawDurableObjects,
+    #[serde(default)]
+    containers: Vec<RawContainer>,
+    #[serde(default)]
+    queues: RawQueues,
+}
+
+#[derive(Deserialize)]
+struct RawSecret {
+    #[serde(default)]
+    binding: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct RawDurableObjects {
+    #[serde(default)]
+    bindings: Vec<RawObject>,
+}
+
+#[derive(Deserialize)]
+struct RawObject {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    class_name: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RawContainer {
+    #[serde(default)]
+    class_name: String,
+    #[serde(default)]
+    images: BTreeMap<String, RawImage>,
+}
+
+#[derive(Deserialize)]
+struct RawImage {
+    #[serde(default)]
+    image: String,
+}
+
+#[derive(Deserialize, Default)]
+struct RawQueues {
+    #[serde(default)]
+    producers: Vec<RawQueue>,
+    #[serde(default)]
+    consumers: Vec<RawQueue>,
+}
+
+#[derive(Deserialize)]
+struct RawQueue {
+    #[serde(default)]
+    queue: Option<String>,
+}
+
+impl Wrangler {
+    /// Parses wrangler TOML text, falling back to defaults if it is invalid.
+    pub fn read(text: &str) -> Self {
+        let Ok(raw) = toml::from_str::<RawWrangler>(text) else {
+            return Wrangler {
+                workers_dev: true,
+                ..Default::default()
             };
-            let (key, value) = (key.trim(), value.trim());
-            let quoted = strings(value).into_iter().next();
-            match (section.as_str(), key) {
-                ("", "name") => t.name = quoted,
-                ("", "workers_dev") => t.workers_dev = value == "true",
-                ("vars", k) => {
-                    if let Some(v) = quoted {
-                        t.vars.insert(k.to_string(), v);
-                    }
-                }
-                ("secrets_store_secrets", "binding") => t.secrets.extend(quoted),
-                _ => {}
-            }
+        };
+        Wrangler {
+            name: raw.name,
+            workers_dev: raw.workers_dev,
+            vars: raw
+                .vars
+                .into_iter()
+                .filter_map(|(k, v)| match v {
+                    toml::Value::String(s) => Some((k, s)),
+                    _ => None,
+                })
+                .collect(),
+            secrets: raw
+                .secrets_store_secrets
+                .into_iter()
+                .filter_map(|s| s.binding)
+                .collect(),
+            objects: raw
+                .durable_objects
+                .bindings
+                .into_iter()
+                .filter_map(|o| match (o.name, o.class_name) {
+                    (Some(binding), Some(class)) => Some(Object { binding, class }),
+                    _ => None,
+                })
+                .collect(),
+            containers: raw
+                .containers
+                .into_iter()
+                .map(|c| Container {
+                    class: c.class_name,
+                    images: c.images.into_iter().map(|(k, i)| (k, i.image)).collect(),
+                })
+                .collect(),
+            producers: raw
+                .queues
+                .producers
+                .into_iter()
+                .filter_map(|q| q.queue)
+                .collect(),
+            consumers: raw
+                .queues
+                .consumers
+                .into_iter()
+                .filter_map(|q| q.queue)
+                .collect(),
         }
-        t
     }
 }
 
@@ -952,8 +1203,28 @@ fn diagram(m: &Model) -> String {
     if let Some(z) = &r.zone {
         cards.push(("Zone", z.clone(), "dg-cf"));
     }
-    for o in &r.objects {
-        cards.push(("Durable Object", o.clone(), "dg-store"));
+    if !r.objects.is_empty() {
+        let classes: Vec<&str> = r
+            .objects
+            .iter()
+            .map(|o| {
+                o.split_once('(')
+                    .map_or(o.as_str(), |(_, rest)| rest.trim_end_matches(')'))
+            })
+            .collect();
+        cards.push((
+            "Durable Objects",
+            format!("{}: {}", r.objects.len(), classes.join(", ")),
+            "dg-store",
+        ));
+    }
+    if !r.containers.is_empty() {
+        let classes: Vec<&str> = r
+            .containers
+            .iter()
+            .map(|c| c.split_once(" (").map_or(c.as_str(), |(name, _)| name))
+            .collect();
+        cards.push(("Containers", classes.join(", "), "dg-cf"));
     }
     for repo in &r.repos {
         cards.push(("Artifacts", repo.clone(), "dg-cf"));
@@ -964,8 +1235,11 @@ fn diagram(m: &Model) -> String {
         .filter(|w| w.handlers.iter().any(|h| h == "queue"))
         .map(|w| w.name.as_str())
         .collect();
-    for q in &r.queues {
-        cards.push(("Queue", q.clone(), "dg-cf"));
+    if !r.queues.is_empty() {
+        cards.push(("Queue", r.queues.join(", "), "dg-cf"));
+    }
+    if !r.gateways.is_empty() {
+        cards.push(("AI Gateway", r.gateways.join(", "), "dg-cf"));
     }
     let bus_y = y3 + worker_h + 36.0;
     let y4 = bus_y + 62.0;
@@ -1227,6 +1501,9 @@ pub fn render(m: &Model) -> String {
         ("Artifacts", &r.repos),
         ("Mirrors", &r.mirrors),
         ("Durable Objects", &r.objects),
+        ("Containers", &r.containers),
+        ("AI gateways", &r.gateways),
+        ("Declared but unused", &r.unused),
     ]
     .iter()
     .filter(|(_, items)| !items.is_empty())
@@ -1251,7 +1528,7 @@ pub fn render(m: &Model) -> String {
 <header>
   <span class="eyebrow">pigeon · architecture</span>
   <h1>pigeon, layer by layer</h1>
-  <p>Read from the repository's own source each time the site is built, and drawn top to bottom in the order a request travels. Nothing here is written by hand.</p>
+  <p>Read from the platform's own source and wrangler.toml each time it is deployed, and drawn top to bottom in the order a request travels. Nothing here is written by hand.</p>
   <div class="pills"><span class="pill">{} Workers</span><span class="pill">{} capabilities</span><span class="pill">{} core blocks</span><span class="pill">{tool_count} MCP tools</span><span class="pill">digest {}</span></div>
 </header>
 <section aria-label="Diagram" style="margin-top:24px">{}</section>
@@ -1260,7 +1537,7 @@ pub fn render(m: &Model) -> String {
 {}
 {}
 </main>
-<footer>Generated from {} source files · digest {}</footer>"#,
+<footer>Generated from {} source files{} · digest {}</footer>"#,
         m.workers.len(),
         m.parts.iter().filter(|c| c.capability).count(),
         m.parts.iter().filter(|c| !c.capability).count(),
@@ -1271,6 +1548,11 @@ pub fn render(m: &Model) -> String {
         section("Foundation", "Core building blocks", &internal),
         section("Definitions", "Account resources", &resources),
         m.files,
+        if m.commit.is_empty() {
+            String::new()
+        } else {
+            format!(" at commit {}", escape(&m.commit[..m.commit.len().min(12)]))
+        },
         m.digest,
     )
 }

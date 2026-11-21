@@ -171,7 +171,6 @@ impl Capability for Mirror {
     fn footprint(&self) -> Footprint {
         Footprint {
             mirrors: vec![self.url.clone()],
-            secrets: vec![self.token_binding.clone()],
             ..Footprint::default()
         }
     }

@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use worker::{Env, Error, Headers, Method, Request, Response, Result};
 
 use crate::users::{Passkey, User, directory};
-use crate::{Call, Capability, Context, Footprint, Serve, arg, to_value, unknown};
+use crate::{Call, Capability, Context, Serve, arg, to_value, unknown};
 
 /// The passkeys' relying party: the hostname the `/auth` pages are on.
 pub struct Passkeys {
@@ -391,9 +391,5 @@ impl Capability for Passkeys {
 
     fn fetch<'a>(&'a self, cx: &'a Context<'a>, req: Request) -> Serve<'a> {
         Box::pin(self.serve(cx, req))
-    }
-
-    fn footprint(&self) -> Footprint {
-        Footprint::default()
     }
 }

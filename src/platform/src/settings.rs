@@ -2,7 +2,7 @@
 //! takes its settings from here.
 
 use pigeon_capabilities::Capability;
-use pigeon_capabilities::architecture::Architecture;
+use pigeon_capabilities::architecture::{Architecture, Wrangler};
 use pigeon_capabilities::cf_proxy::CfProxy;
 use pigeon_capabilities::ci::buildkite::{self, Buildkite};
 use pigeon_capabilities::ci::class::Size;
@@ -25,6 +25,11 @@ use pigeon_capabilities::secrets::Secrets;
 use pigeon_capabilities::site::Site;
 use pigeon_capabilities::source::Source;
 use pigeon_capabilities::users::Users;
+
+/// This Worker's wrangler.toml, the authority for its bindings, queues and containers.
+pub fn wrangler() -> Wrangler {
+    Wrangler::read(include_str!("../wrangler.toml"))
+}
 
 /// This Worker's name, as deployed.
 pub const WORKER: &str = "pigeon-platform";
@@ -175,10 +180,10 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
         Box::new(CfProxy {
             host: PROXY_HOST.into(),
             script: WORKER.into(),
-            // The queue producers in wrangler.toml.
-            queues: vec!["pigeon-ci-events".into()],
-            // The container classes in wrangler.toml's [[containers]].
-            containers: vec!["CiRunner".into()],
+            // The queues this Worker produces to and its container classes, as wrangler.toml
+            // declares them.
+            queues: wrangler().producers,
+            containers: wrangler().containers.into_iter().map(|c| c.class).collect(),
             land_repo: format!("{NAMESPACE}/{REPO}"),
         }),
         Box::new(Models {

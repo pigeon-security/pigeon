@@ -21,7 +21,7 @@ use worker::js_sys::Uint8Array;
 use worker::{Fetch, Headers, Method, Request, RequestInit, Response, Result, console_error};
 
 use crate::proxy::{self, Audit, Outcome, ProxyCaller};
-use crate::{Call, Capability, Context, Serve, unknown};
+use crate::{Call, Capability, Context, Footprint, HostFootprint, Serve, unknown};
 
 /// Where the proxy is mounted, standing for `https://api.cloudflare.com/client/v4`.
 pub const PREFIX: &str = "/cf/client/v4";
@@ -861,6 +861,19 @@ impl Capability for CfProxy {
 
     fn routes(&self) -> Vec<&'static str> {
         vec!["/cf/"]
+    }
+
+    fn footprint(&self) -> Footprint {
+        Footprint {
+            hostnames: vec![HostFootprint {
+                host: self.host.clone(),
+                worker: String::new(),
+                by: self.name().into(),
+                access: Vec::new(),
+                public_paths: self.routes().iter().map(|r| (*r).to_string()).collect(),
+            }],
+            ..Footprint::default()
+        }
     }
 
     fn fetch<'a>(&'a self, cx: &'a Context<'a>, req: Request) -> Serve<'a> {

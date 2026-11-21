@@ -927,7 +927,6 @@ impl Capability for Ci {
     fn footprint(&self) -> Footprint {
         Footprint {
             queues: vec![EVENTS_QUEUE.into()],
-            objects: vec![BINDING.into()],
             ..Footprint::default()
         }
     }

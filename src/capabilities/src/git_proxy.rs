@@ -42,7 +42,7 @@ use worker::{
 
 use crate::ci;
 use crate::proxy::{self, Audit, Outcome, ProxyCaller};
-use crate::{Call as ToolCall, Capability, Context, Footprint, Serve, unknown};
+use crate::{Call as ToolCall, Capability, Context, Footprint, HostFootprint, Serve, unknown};
 
 /// How long a git token minted for one request lives: the ceiling if its revoke is lost.
 const TOKEN_TTL: u64 = 900;
@@ -1200,6 +1200,13 @@ impl Capability for GitProxy {
 
     fn footprint(&self) -> Footprint {
         Footprint {
+            hostnames: vec![HostFootprint {
+                host: self.host.clone(),
+                worker: String::new(),
+                by: self.name().into(),
+                access: Vec::new(),
+                public_paths: self.routes().iter().map(|r| (*r).to_string()).collect(),
+            }],
             repos: vec![format!("{}/{}", self.namespace, self.repo)],
             ..Footprint::default()
         }

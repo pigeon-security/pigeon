@@ -718,7 +718,6 @@ impl Capability for Models {
     fn footprint(&self) -> Footprint {
         Footprint {
             gateways: vec![self.gateway.clone()],
-            objects: vec![runner::BINDING.into()],
             ..Footprint::default()
         }
     }

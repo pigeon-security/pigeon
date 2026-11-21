@@ -319,7 +319,6 @@ impl Capability for Land {
 
     fn footprint(&self) -> Footprint {
         Footprint {
-            objects: vec![BINDING.into()],
             repos: vec![self.settings.repo_name()],
             ..Footprint::default()
         }

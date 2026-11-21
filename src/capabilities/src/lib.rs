@@ -173,8 +173,6 @@ pub struct Footprint {
     pub queues: Vec<String>,
     pub repos: Vec<String>,
     pub mirrors: Vec<String>,
-    /// Durable Objects, by binding.
-    pub objects: Vec<String>,
     /// AI gateways, by ID.
     pub gateways: Vec<String>,
 }
@@ -183,6 +181,7 @@ pub struct Footprint {
 #[derive(Serialize, Clone)]
 pub struct HostFootprint {
     pub host: String,
+    /// The Worker serving it; empty for the Worker hosting the capability.
     pub worker: String,
     /// The capability serving it.
     pub by: String,
