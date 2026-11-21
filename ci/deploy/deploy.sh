@@ -12,6 +12,8 @@
 # an entry for a call wrangler makes after the upload, the first deploy uploads the new Worker
 # and is then refused at that call; the deploy is made once more, through the new allowlist. A
 # refused call before the upload cannot be fixed that way, and is reported.
+#
+# Once deployed, it checks the apex serves this commit's architecture page (see `published`).
 set -eu
 root=$(cd "$(dirname "$0")/../.." && pwd)
 
@@ -72,7 +74,33 @@ deploy() {
     return "$rc"
 }
 
-deploy 1 && exit 0
+# The architecture page is part of the Worker: built from its own sources and wrangler.toml, it
+# is served on the zone's apex as `/architecture.json`, naming the commit it was built from
+# (PIGEON_COMMIT, set for every job). Check the live page is this deploy's, so the published
+# architecture can never be older than the platform. One request a few times while the new
+# version rolls out; no job of its own.
+zone=$(sed -n 's/^ZONE = "\(.*\)"$/\1/p' "$root/src/platform/wrangler.toml" | head -n 1)
+published() {
+    printf '\n== the architecture page on %s names this commit\n' "$zone"
+    seen=
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+        seen=$(curl -sS --max-time 15 "https://$zone/architecture.json" 2>/dev/null \
+            | grep -o '"commit": *"[0-9a-f]*"' | head -n 1 | grep -o '[0-9a-f]\{40\}' || true)
+        if [ "$seen" = "$PIGEON_COMMIT" ]; then
+            echo "https://$zone/architecture.json is $PIGEON_COMMIT's"
+            return 0
+        fi
+        sleep 10
+    done
+    echo "https://$zone/architecture.json names commit '${seen:-none}', not $PIGEON_COMMIT:" >&2
+    echo "the apex is not serving this deploy's architecture page" >&2
+    return 1
+}
+
+if deploy 1; then
+    published
+    exit
+fi
 if ! grep -q "pigeon's proxy does not allow" "$log"; then
     echo "the deploy failed; see above" >&2
     exit 1
@@ -86,3 +114,4 @@ fi
 echo "refused after the upload: the new Worker, with its new allowlist, is up; deploying again" >&2
 sleep 30
 deploy 2
+published

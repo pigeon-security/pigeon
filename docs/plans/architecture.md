@@ -87,7 +87,7 @@ is the person's decision.
 | --- | --- | --- | --- |
 | 1 | Diagnose the 503; wrangler.toml as the authority (containers, objects with classes, queues, hosts); footprint clean-up; proxy hostname; `CfProxy` reads wrangler.toml; memo per isolate; commit provenance | `architecture.rs`, `lib.rs` (Footprint), the footprints, `settings.rs`, `platform/build.rs`, `platform/src/lib.rs` | one landing |
 | 2 | Draw what is new: grouped Durable Objects, the container, the AI gateway, the proxy host, unused bindings | `architecture.rs` (render) | with phase 1 |
-| 3 | Serve the page on the apex from the platform and retire `site_publish` and the `pigeon` Worker (with the merge planner); `deploy.sh` checks the live page's commit | `site.rs`, `ci/deploy/deploy.sh`, routing as agreed | one landing, after the merge |
+| 3 | `deploy.sh` checks that the live `/architecture.json` names the deployed commit. Serving the apex from the platform is the one-worker plan's (`docs/plans/one-worker.md`): `site::render` reads this plan's memo | `ci/deploy/deploy.sh` | one landing, after the cutover |
 | 4 | Docs: this plan's status, the README table, `console.md` and `site.rs` wording, the `docs/proxies.md` link | docs | with phase 3 |
 
 Each phase passes `ci/runner/test.sh` locally before it lands. After each landing, I check
@@ -108,9 +108,10 @@ I check each result, apply it, and run fmt, clippy and the smoke suite myself.
 
 ## Coordination
 
-- Merge planner (pigeon.dev into the platform): agree which module serves the apex, and that it
-  serves `/` and `/architecture.json` from `architecture`'s memo. I don't touch routing or hosts.
-- Console planner: the tab keeps `{html}`. I don't touch `console.rs`, `sections.rs` or `app.js`.
+- Merge planner (pigeon.dev into the platform): agreed. `site` serves the apex by host, from
+  `architecture::built`, and owns `site.rs`, Site's settings and its footprint.
+- Console planner: agreed. The tab answers `{html, built_from}`, and I don't touch `console.rs`,
+  `sections.rs` or `app.js`.
 - Policy planner: no overlap expected. I add no policy rules.
 
 ## Log
@@ -123,3 +124,7 @@ I check each result, apply it, and run fmt, clippy and the smoke suite myself.
   Executors: E1 (the wrangler.toml reader), E3 (layer-4 cards) and E5 (one card per Worker), all
   claude-sonnet-5-5 and all applied as returned. I made the footprint clean-up (E2) by hand
   instead: it was smaller than its spec. Held for the parent's landing hold.
+- 2026-11-21: rebased on `claude/one-worker` and landed as `claude/architecture-2` (this session
+  may not force-push), landing csQqlS0Y87gIBlKK. Live `architecture_describe` answers at once
+  with commit 0c9db6067d2d, 5 Durable Objects, the container, `proxy.pigeon.dev` and no unused
+  bindings. Phase 3's check is built on `claude/architecture-3`.
