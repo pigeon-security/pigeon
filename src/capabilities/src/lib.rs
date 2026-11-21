@@ -95,6 +95,21 @@ pub trait Capability {
         Footprint::default()
     }
 
+    /// The console sections it fills.
+    fn sections(&self) -> Vec<console::sections::Section> {
+        Vec::new()
+    }
+    /// Its data for console section `id`, for `person`, a signed-in person; `query` holds the
+    /// section's parameters, such as `days`. A section with a cost answers `cost_7d` in it.
+    fn section_data<'a>(
+        &'a self,
+        _cx: &'a Context<'a>,
+        _id: &'a str,
+        _person: &'a users::User,
+        _query: &'a Value,
+    ) -> Call<'a> {
+        Box::pin(async { Err(Error::RustError("no such section".into())) })
+    }
     /// The secrets it needs set, which the `secrets` page lists and lets a person change.
     fn secrets(&self) -> Vec<Slot> {
         Vec::new()

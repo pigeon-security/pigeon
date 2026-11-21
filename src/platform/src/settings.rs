@@ -6,6 +6,7 @@ use pigeon_capabilities::architecture::Architecture;
 use pigeon_capabilities::cf_proxy::CfProxy;
 use pigeon_capabilities::ci::containers::Containers;
 use pigeon_capabilities::ci::{self, Ci, ProxyFiles};
+use pigeon_capabilities::console::Console;
 use pigeon_capabilities::deploys::Deploys;
 use pigeon_capabilities::git_proxy::GitProxy;
 use pigeon_capabilities::mirror::{self, Mirror};
@@ -189,6 +190,14 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
         Box::new(Ci { settings: ci() }),
         Box::new(Deploys),
         Box::new(Architecture),
+        // The console: one page at the root, signed in to once with a passkey.
+        Box::new(Console {
+            host: HOST.into(),
+            passkeys: Passkeys {
+                host: HOST.into(),
+                site_name: "pigeon".into(),
+            },
+        }),
     ]
 }
 

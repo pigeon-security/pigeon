@@ -83,10 +83,14 @@ async fn fetch(req: Request, env: Env, ctx: WorkerContext) -> Result<Response> {
         return Response::error("not found", 404);
     }
     let caps = settings::capabilities();
-    if let Some(c) = caps
-        .iter()
-        .find(|c| c.routes().iter().any(|r| path.starts_with(r)))
-    {
+    // A route is a prefix, so the root, the console's Overview, is matched by name.
+    if let Some(c) = caps.iter().find(|c| {
+        if path == "/" {
+            c.name() == "console"
+        } else {
+            c.routes().iter().any(|r| path.starts_with(r))
+        }
+    }) {
         let hosted = hosted(&caps);
         let account = account(&env).await?;
         let cx = Context {

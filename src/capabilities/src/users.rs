@@ -79,7 +79,7 @@ fn bad(why: &str) -> Error {
 // ---- the Directory ----
 
 /// The Directory's schema, one statement per migration, applied in order and never edited.
-const MIGRATIONS: [&str; 13] = [
+const MIGRATIONS: [&str; 15] = [
     "CREATE TABLE users (id TEXT PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL, created_at INTEGER NOT NULL)",
     "CREATE TABLE service_ids (access_client_id TEXT PRIMARY KEY, user_id TEXT NOT NULL)",
     "CREATE TABLE passkeys (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, point TEXT NOT NULL, sign_count INTEGER NOT NULL, name TEXT NOT NULL, created_at INTEGER NOT NULL, last_used_at INTEGER)",
@@ -93,7 +93,30 @@ const MIGRATIONS: [&str; 13] = [
     "CREATE TABLE oauth_codes (hash TEXT PRIMARY KEY, client_id TEXT NOT NULL, redirect_uri TEXT NOT NULL, challenge TEXT NOT NULL, expires_at INTEGER NOT NULL)",
     "CREATE TABLE oauth_tokens (hash TEXT PRIMARY KEY, kind TEXT NOT NULL, client_id TEXT, service_user_id TEXT NOT NULL, expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL)",
     "ALTER TABLE oauth_tokens ADD COLUMN label TEXT",
+    "ALTER TABLE users ADD COLUMN avatar TEXT",
+    "CREATE TABLE sessions (hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, created_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL)",
 ];
+
+/// The largest profile picture kept, as a `data:` URL: a 128 px square the browser made.
+const AVATAR_MAX: usize = 65_536;
+
+/// Whether `avatar` is a picture the console made: a PNG, JPEG or WebP `data:` URL in base64,
+/// no larger than [`AVATAR_MAX`].
+pub fn avatar_ok(avatar: &str) -> bool {
+    let body = [
+        "data:image/png;base64,",
+        "data:image/jpeg;base64,",
+        "data:image/webp;base64,",
+    ]
+    .iter()
+    .find_map(|p| avatar.strip_prefix(p));
+    avatar.len() <= AVATAR_MAX
+        && body.is_some_and(|b| {
+            !b.is_empty()
+                && b.bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'/' | b'='))
+        })
+}
 
 /// The users, their passkeys and links: one Durable Object.
 #[durable_object]
@@ -185,6 +208,7 @@ impl Directory {
                     "DELETE FROM link_requests WHERE service_user_id = ? OR standard_user_id = ?",
                     "DELETE FROM oauth_tokens WHERE service_user_id = ?",
                     "DELETE FROM oauth_clients WHERE service_user_id = ?",
+                    "DELETE FROM sessions WHERE user_id = ?",
                     "DELETE FROM users WHERE id = ?",
                 ] {
                     let args = vec![id.into(); q.matches('?').count()];
@@ -198,6 +222,78 @@ impl Directory {
                     vec![s("name").into(), s("id").into()],
                 )?;
                 to_value(self.user(s("id"))?)
+            }
+            "user.avatar_set" => {
+                let avatar = s("avatar");
+                if !avatar.is_empty() && !avatar_ok(avatar) {
+                    return Err(bad(
+                        "a picture is a PNG, JPEG or WebP data URL of at most 64 KiB",
+                    ));
+                }
+                self.db.exec(
+                    "UPDATE users SET avatar = ? WHERE id = ?",
+                    vec![opt(Some(avatar).filter(|a| !a.is_empty())), s("id").into()],
+                )?;
+                json!({ "ok": true })
+            }
+            "user.avatar" => {
+                #[derive(Deserialize)]
+                struct Row {
+                    avatar: Option<String>,
+                }
+                let row: Option<Row> = self.db.row(
+                    "SELECT avatar FROM users WHERE id = ?",
+                    vec![s("id").into()],
+                )?;
+                json!(row.and_then(|r| r.avatar))
+            }
+            "session.create" => {
+                self.user(s("user_id"))?
+                    .filter(|u| u.kind == "standard")
+                    .ok_or_else(|| bad("only a person has a console session"))?;
+                self.db.exec(
+                    "INSERT INTO sessions (hash, user_id, created_at, last_seen_at) VALUES (?, ?, ?, ?)",
+                    vec![s("hash").into(), s("user_id").into(), t.into(), t.into()],
+                )?;
+                json!({ "created_at": t })
+            }
+            // A stale session is removed when it is looked up; a fresh one is seen now.
+            "session.get" => {
+                #[derive(Deserialize)]
+                struct Row {
+                    user_id: String,
+                    created_at: i64,
+                    last_seen_at: i64,
+                }
+                let row: Option<Row> = self.db.row(
+                    "SELECT user_id, created_at, last_seen_at FROM sessions WHERE hash = ?",
+                    vec![s("hash").into()],
+                )?;
+                let Some(row) = row else {
+                    return Ok(Value::Null);
+                };
+                let user = self.user(&row.user_id)?.filter(|u| u.kind == "standard");
+                if user.is_none()
+                    || !crate::console::session::fresh(row.created_at, row.last_seen_at, t)
+                {
+                    self.db.exec(
+                        "DELETE FROM sessions WHERE hash = ?",
+                        vec![s("hash").into()],
+                    )?;
+                    return Ok(Value::Null);
+                }
+                self.db.exec(
+                    "UPDATE sessions SET last_seen_at = ? WHERE hash = ?",
+                    vec![t.into(), s("hash").into()],
+                )?;
+                json!({ "user": user, "created_at": row.created_at, "last_seen_at": t })
+            }
+            "session.remove" => {
+                self.db.exec(
+                    "DELETE FROM sessions WHERE hash = ?",
+                    vec![s("hash").into()],
+                )?;
+                json!({ "ok": true })
             }
             "users.standard_count" => {
                 #[derive(Deserialize)]
@@ -926,5 +1022,28 @@ impl Capability for Users {
             objects: vec![BINDING.into()],
             ..Footprint::default()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_small_picture_data_url_is_a_picture() {
+        assert!(avatar_ok(
+            "data:image/webp;base64,UklGRiQAAABXRUJQVlA4IBgAAAAw"
+        ));
+        assert!(avatar_ok("data:image/png;base64,iVBORw0KGgo="));
+    }
+
+    #[test]
+    fn anything_else_is_not() {
+        assert!(!avatar_ok("data:image/svg+xml;base64,PHN2Zz4="));
+        assert!(!avatar_ok("https://example.com/me.png"));
+        assert!(!avatar_ok("data:image/png;base64,"));
+        assert!(!avatar_ok("data:image/png;base64,abc\"><script>"));
+        let big = format!("data:image/png;base64,{}", "A".repeat(AVATAR_MAX));
+        assert!(!avatar_ok(&big));
     }
 }
