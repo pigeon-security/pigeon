@@ -264,14 +264,16 @@ async fn store(
 #[derive(Serialize)]
 pub struct Retired {
     pub access_app: Option<String>,
-    pub policy: Option<String>,
+    /// The policy `protection.app` names, and any other policy that lets the service token in.
+    pub policies: Vec<String>,
     pub service_token: Option<String>,
     pub secrets: Vec<String>,
 }
 
 /// Takes `domain` out from behind Access and removes what `protection` named: the application
-/// on `domain`, its reusable policy, its service token, and the token's secrets in the Secrets
-/// Store; idempotent. The application goes first, so nothing is left holding the policy.
+/// on `domain`, its reusable policy and any other policy that lets its service token in, the
+/// token, and the token's secrets in the Secrets Store; idempotent. Each goes before what it
+/// holds: the application, then the policies, then the token.
 pub async fn unprotect(
     account: &Account,
     domain: &str,
@@ -297,14 +299,12 @@ async fn unprotect_with(
         |a| a.domain == domain,
     )
     .await?;
-    let policy = remove(
-        token,
-        &access,
-        "policies",
-        list(token, &account.id, "policies").await?,
-        |p| p.name == protection.app,
-    )
-    .await?;
+    let service = list(token, &account.id, "service_tokens")
+        .await?
+        .into_iter()
+        .find(|t| t.name == protection.service_token)
+        .map(|t| t.id);
+    let policies = remove_policies(token, &access, &protection.app, service.as_deref()).await?;
     let service_token = remove(
         token,
         &access,
@@ -318,7 +318,7 @@ async fn unprotect_with(
     let secrets = writer.finish(secrets).await?;
     Ok(Retired {
         access_app: app,
-        policy,
+        policies,
         service_token,
         secrets,
     })
@@ -355,6 +355,39 @@ async fn remove_secrets(writer: &Writer<'_>, protection: &Protection) -> Result<
         if names.contains(&&secret.name) {
             writer.delete(&secret.id).await?;
             removed.push(secret.name);
+        }
+    }
+    Ok(removed)
+}
+
+/// Deletes reusable policy `name` and every policy that includes service token `service`:
+/// their IDs.
+async fn remove_policies(
+    token: &str,
+    access: &str,
+    name: &str,
+    service: Option<&str>,
+) -> Result<Vec<String>> {
+    let listed = call(token, Method::Get, &format!("{access}/policies"), None).await?;
+    let mut removed = Vec::new();
+    for policy in listed.as_array().into_iter().flatten() {
+        let named = policy["name"].as_str() == Some(name);
+        let holds_token = service.is_some_and(|id| {
+            policy["include"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|rule| rule["service_token"]["token_id"].as_str() == Some(id))
+        });
+        if let (true, Some(id)) = (named || holds_token, policy["id"].as_str()) {
+            call(
+                token,
+                Method::Delete,
+                &format!("{access}/policies/{id}"),
+                None,
+            )
+            .await?;
+            removed.push(id.to_string());
         }
     }
     Ok(removed)
