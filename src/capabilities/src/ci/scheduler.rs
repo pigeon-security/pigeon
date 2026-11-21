@@ -57,6 +57,10 @@ const QUEUED_RECHECK_MS: i64 = 15_000;
 /// How many times a notify POST and a notes push are tried.
 const NOTIFY_TRIES: i64 = 3;
 const NOTE_TRIES: i64 = 10;
+/// How many times one notes push re-reads the tip after losing a race.
+const NOTE_RACE_TRIES: u32 = 3;
+/// How long an outbox item being sent is kept from being sent again.
+const OUTBOX_LEASE_MS: i64 = 5 * 60_000;
 
 const LIVE: &str = "('dispatched', 'running')";
 
@@ -181,6 +185,45 @@ pub fn after_dispatch(
     }
 }
 
+/// A commit's note lines from its finished jobs, oldest first: the latest result per job name,
+/// so two jobs finishing together each have their line and a rerun replaces its own.
+fn note_lines(finished: Vec<Row>) -> Vec<Line> {
+    let mut latest: std::collections::BTreeMap<String, Row> = Default::default();
+    for r in finished {
+        latest.insert(r.name.clone(), r);
+    }
+    latest
+        .into_values()
+        .map(|r| Line {
+            job: r.name.clone(),
+            state: r.state.clone(),
+            connector: r.connector.clone(),
+            attempt: r.attempt(),
+            exit_code: r.exit_code,
+            duration_ms: r.duration_ms(),
+            url: r.url.clone(),
+        })
+        .collect()
+}
+
+/// What a successful notes push leaves in the outbox.
+#[derive(Debug, PartialEq, Eq)]
+pub enum AfterPush {
+    /// Nothing: every note is pushed.
+    Done,
+    /// Another push: a note changed while this one was in flight.
+    Again,
+}
+
+/// What a successful notes push does next, with `unpushed` notes still marked unpushed.
+pub fn after_push(unpushed: i64) -> AfterPush {
+    if unpushed > 0 {
+        AfterPush::Again
+    } else {
+        AfterPush::Done
+    }
+}
+
 /// `a` with the gateway's own `limit` on live jobs applied: free slots are the fewer of what
 /// the connector says and what the limit leaves.
 pub fn with_limit(a: Availability, limit: Option<u32>, live: u32) -> Availability {
@@ -236,6 +279,9 @@ impl Scheduler {
 
     /// The alarm: dispatch, deadlines, polls, the outbox; then the next alarm.
     pub async fn alarm(&self) -> Result<Response> {
+        if let Err(e) = self.heal() {
+            console_error!("ci: queueing notes pushes: {e}");
+        }
         if let Err(e) = self.pump().await {
             console_error!("ci: dispatching: {e}");
         }
@@ -296,7 +342,11 @@ impl Scheduler {
             }
             "jobs" => self.jobs(a),
             "cancel" => self.cancel(s("id")).await,
-            "commit" => self.commit(s("repo"), s("commit")),
+            "commit" => {
+                self.heal()?;
+                self.reschedule().await?;
+                self.commit(s("repo"), s("commit"))
+            }
             "runner" => {
                 let report: Report = serde_json::from_value(a["report"].clone())?;
                 let Some(row) = self.db.row::<Row>(
@@ -718,44 +768,60 @@ impl Scheduler {
             "SELECT * FROM jobs WHERE repo = ? AND commit_sha = ? AND finished_at IS NOT NULL ORDER BY finished_at",
             vec![repo.into(), commit.into()],
         )?;
-        let mut latest: std::collections::BTreeMap<String, Row> = Default::default();
-        for r in rows {
-            latest.insert(r.name.clone(), r);
-        }
-        let lines: Vec<Line> = latest
-            .into_values()
-            .map(|r| Line {
-                job: r.name.clone(),
-                state: r.state.clone(),
-                connector: r.connector.clone(),
-                attempt: r.attempt(),
-                exit_code: r.exit_code,
-                duration_ms: r.duration_ms(),
-                url: r.url.clone(),
-            })
-            .collect();
         self.db.exec(
             "INSERT OR REPLACE INTO notes (repo, commit_sha, text, pushed) VALUES (?, ?, ?, 0)",
-            vec![repo.into(), commit.into(), notes::text(&lines).into()],
+            vec![
+                repo.into(),
+                commit.into(),
+                notes::text(&note_lines(rows)).into(),
+            ],
         )?;
-        #[derive(Deserialize)]
-        struct Count {
-            n: i64,
-        }
-        let pending = self
-            .db
-            .row::<Count>(
-                "SELECT COUNT(*) AS n FROM outbox WHERE kind = 'note' AND repo = ?",
-                vec![repo.into()],
-            )?
-            .map_or(0, |c| c.n);
-        if pending == 0 {
+        self.ensure_note_push(repo)
+    }
+
+    /// Queues a notes push for `repo` unless one is queued. A push in flight stays queued until
+    /// it ends, and on success is queued again while any note is still unpushed, so a note
+    /// rewritten during a push is never left behind.
+    fn ensure_note_push(&self, repo: &str) -> Result<()> {
+        if self.count(
+            "SELECT COUNT(*) AS n FROM outbox WHERE kind = 'note' AND repo = ?",
+            repo,
+        )? == 0
+        {
             self.db.exec(
                 "INSERT INTO outbox (kind, repo, tries, next_at) VALUES ('note', ?, 0, ?)",
                 vec![repo.into(), now().into()],
             )?;
         }
         Ok(())
+    }
+
+    /// Queues a push for every repository with a note not yet pushed and none queued: what
+    /// catches up a push lost before this fix.
+    fn heal(&self) -> Result<()> {
+        #[derive(Deserialize)]
+        struct Repo {
+            repo: String,
+        }
+        let repos: Vec<Repo> = self
+            .db
+            .rows("SELECT DISTINCT repo FROM notes WHERE pushed = 0", vec![])?;
+        for r in repos {
+            self.ensure_note_push(&r.repo)?;
+        }
+        Ok(())
+    }
+
+    /// The number `query` (one `?`, bound to `arg`) counts as `n`.
+    fn count(&self, query: &str, arg: &str) -> Result<i64> {
+        #[derive(Deserialize)]
+        struct Count {
+            n: i64,
+        }
+        Ok(self
+            .db
+            .row::<Count>(query, vec![arg.into()])?
+            .map_or(0, |c| c.n))
     }
 
     /// Live jobs past their deadline, and live jobs due a poll.
@@ -823,6 +889,11 @@ impl Scheduler {
             vec![now().into()],
         )?;
         for item in due {
+            // Leased while it is sent, so nothing else sends it at the same time.
+            self.db.exec(
+                "UPDATE outbox SET next_at = ? WHERE id = ?",
+                vec![(now() + OUTBOX_LEASE_MS).into(), item.id.into()],
+            )?;
             let (sent, limit) = match item.kind.as_str() {
                 "event" => (self.send_event(item.body.as_deref()).await, 1),
                 "notify" => (
@@ -837,7 +908,18 @@ impl Scheduler {
                 ),
                 _ => (Ok(()), 1),
             };
+            let unpushed = match (&sent, item.kind.as_str()) {
+                (Ok(()), "note") => self.count(
+                    "SELECT COUNT(*) AS n FROM notes WHERE repo = ? AND pushed = 0",
+                    item.repo.as_deref().unwrap_or_default(),
+                )?,
+                _ => 0,
+            };
             match sent {
+                Ok(()) if after_push(unpushed) == AfterPush::Again => self.db.exec(
+                    "UPDATE outbox SET tries = 0, next_at = ? WHERE id = ?",
+                    vec![now().into(), item.id.into()],
+                )?,
                 Ok(()) => self
                     .db
                     .exec("DELETE FROM outbox WHERE id = ?", vec![item.id.into()])?,
@@ -932,26 +1014,31 @@ impl Scheduler {
             .map(|n| (n.commit_sha.clone(), n.text.clone()))
             .collect();
         let pushed = async {
-            let refs = git::refs(&remote, "git-receive-pack").await?;
-            let tip = refs.refs.get(notes::REF).cloned();
-            let (objects, id) =
-                notes::commit(&pairs, tip.as_deref(), now() / 1000).map_err(|e| bad(&e))?;
-            let pack = gitobj::pack(&objects);
-            let update = Update {
-                name: notes::REF.to_string(),
-                old: tip.unwrap_or_else(|| ZERO.to_string()),
-                new: id,
-            };
-            let status = git::push(&remote, &refs.caps, &[update], &pack).await?;
-            if status.iter().any(|s| s == &format!("ok {}", notes::REF)) {
-                Ok(())
-            } else {
-                Err(bad(&format!(
-                    "push of {}: {}",
-                    notes::REF,
-                    status.join("; ")
-                )))
+            let mut last = String::new();
+            // Each try reads the ref's tip afresh, so a race lost to another push is retried
+            // over the new tip.
+            for attempt in 1..=NOTE_RACE_TRIES {
+                let refs = git::refs(&remote, "git-receive-pack").await?;
+                let tip = refs.refs.get(notes::REF).cloned();
+                let (objects, id) =
+                    notes::commit(&pairs, tip.as_deref(), now() / 1000).map_err(|e| bad(&e))?;
+                let pack = gitobj::pack(&objects);
+                let update = Update {
+                    name: notes::REF.to_string(),
+                    old: tip.clone().unwrap_or_else(|| ZERO.to_string()),
+                    new: id,
+                };
+                let status = git::push(&remote, &refs.caps, &[update], &pack).await?;
+                if status.iter().any(|s| s == &format!("ok {}", notes::REF)) {
+                    return Ok(());
+                }
+                last = status.join("; ");
+                console_error!(
+                    "ci: notes push for {repo} over {} refused (try {attempt}): {last}",
+                    tip.as_deref().unwrap_or("nothing")
+                );
             }
+            Err(bad(&format!("push of {}: {last}", notes::REF)))
         }
         .await;
         if let Some(id) = &minted.id
@@ -1345,6 +1432,74 @@ mod tests {
                 Next::Move(JobState::Failed)
             );
         });
+    }
+
+    fn finished(name: &str, state: &str, at: i64, exit: i64) -> Row {
+        Row {
+            id: format!("{name}-{at}"),
+            repo: "ns/r".into(),
+            commit_sha: "a".repeat(40),
+            name: name.into(),
+            job: "{}".into(),
+            class: "linux-amd64-small".into(),
+            pin: None,
+            task: None,
+            caller: None,
+            caller_name: None,
+            notify_url: None,
+            notify_key: None,
+            state: state.into(),
+            attempt: 1,
+            connector: Some("containers".into()),
+            handle: None,
+            url: None,
+            excluded: "[]".into(),
+            token_expires_at: None,
+            deadline_at: None,
+            claimed_at: None,
+            created_at: 0,
+            queued_at: 0,
+            dispatched_at: Some(at - 200),
+            started_at: Some(at - 100),
+            finished_at: Some(at),
+            detail: None,
+            exit_code: Some(exit),
+            output: None,
+        }
+    }
+
+    #[test]
+    fn two_jobs_finishing_together_on_one_commit_each_keep_their_line() {
+        // smoke finishes and its push goes out; smoke-fail finishes 7 s later on that commit.
+        let first = notes::text(&note_lines(vec![finished("smoke", "succeeded", 1_000, 0)]));
+        let second = notes::text(&note_lines(vec![
+            finished("smoke", "succeeded", 1_000, 0),
+            finished("smoke-fail", "failed", 8_000, 1),
+        ]));
+        assert_eq!(first.lines().count(), 1);
+        assert_eq!(second.lines().count(), 2);
+        assert!(
+            second.contains("smoke succeeded connector=containers attempt=1 exit=0 duration=100ms")
+        );
+        assert!(
+            second
+                .contains("smoke-fail failed connector=containers attempt=1 exit=1 duration=100ms")
+        );
+        // The first push marks only the text it pushed, so the rewritten note stays unpushed
+        // and the queued push goes again instead of being dropped.
+        assert_ne!(first, second);
+        assert_eq!(after_push(1), AfterPush::Again);
+        assert_eq!(after_push(0), AfterPush::Done);
+    }
+
+    #[test]
+    fn a_rerun_replaces_its_own_line() {
+        let lines = note_lines(vec![
+            finished("smoke", "failed", 1_000, 1),
+            finished("smoke", "succeeded", 2_000, 0),
+        ]);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].state, "succeeded");
     }
 
     #[test]
