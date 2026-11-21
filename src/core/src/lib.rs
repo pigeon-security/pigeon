@@ -5,6 +5,7 @@ compile_error!("pigeon-core builds for wasm32 only: cargo build --target wasm32-
 
 use pigeon_capabilities::artifacts::{self, Access};
 use pigeon_capabilities::domain;
+use pigeon_capabilities::mcp;
 use pigeon_capabilities::mirror::{self, Copy, Report, Source};
 use pigeon_capabilities::queues;
 use pigeon_capabilities::subdomain::{self, Served, Spec};
@@ -44,6 +45,11 @@ const SOURCE_EVENTS: &str = "pigeon-source-events";
 const GIT_TOKEN_TTL: u64 = 900;
 const GIT_TOKEN_MAX_TTL: u64 = 86_400;
 
+/// The service token Claude sessions reach the platform with, and the one header they send it
+/// in, as `{"cf-access-client-id": ..., "cf-access-client-secret": ...}`.
+const CLAUDE_SERVICE_TOKEN: &str = "pigeon-claude";
+const ACCESS_TOKEN_HEADER: &str = "cf-access-token";
+
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     match (req.method(), req.path().as_str()) {
@@ -64,6 +70,8 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
             json(source_revoke(&env, id).await)
         }
         (Method::Post, "/source/mirror") => json(source_mirror(&env).await),
+        (Method::Post, "/mcp") => mcp_post(req, &env).await,
+        (_, "/mcp") => Response::error("the MCP endpoint takes POST only", 405),
         _ => Response::error("not found", 404),
     }
 }
@@ -152,6 +160,8 @@ async fn setup_platform(env: &Env) -> Result<Served> {
             service_token: "pigeon-platform".into(),
             client_id_secret: "PLATFORM_ACCESS_CLIENT_ID".into(),
             client_secret_secret: "PLATFORM_ACCESS_CLIENT_SECRET".into(),
+            guests: vec![CLAUDE_SERVICE_TOKEN.into()],
+            token_header: Some(ACCESS_TOKEN_HEADER.into()),
         },
     };
     subdomain::serve(&account(env).await?, &spec).await
@@ -165,6 +175,8 @@ async fn setup_site(env: &Env) -> Result<domain::Served> {
         service_token: "pigeon-site".into(),
         client_id_secret: "SITE_ACCESS_CLIENT_ID".into(),
         client_secret_secret: "SITE_ACCESS_CLIENT_SECRET".into(),
+        guests: Vec::new(),
+        token_header: None,
     };
     let zone = env.var("ZONE")?.to_string();
     domain::serve(&account(env).await?, &zone, SITE_WORKER, Some(&retired)).await
@@ -236,21 +248,36 @@ struct Handed {
 /// `?ttl=<seconds>` (at most [`GIT_TOKEN_MAX_TTL`]).
 async fn source_token(env: &Env, req: &Request) -> Result<Handed> {
     let url = req.url()?;
-    let mut access = Access::Read;
-    let mut ttl = GIT_TOKEN_TTL;
+    let mut access = None;
+    let mut ttl = None;
     for (k, v) in url.query_pairs() {
         match (k.as_ref(), v.as_ref()) {
-            ("access", "read") => access = Access::Read,
-            ("access", "write") => access = Access::Write,
+            ("access", a) => access = Some(a.to_string()),
             ("ttl", s) => {
-                ttl = s
-                    .parse()
-                    .map_err(|_| Error::RustError(format!("ttl `{s}` is not a number")))?;
+                ttl = Some(
+                    s.parse()
+                        .map_err(|_| Error::RustError(format!("ttl `{s}` is not a number")))?,
+                );
             }
             (k, v) => return Err(Error::RustError(format!("unknown parameter `{k}={v}`"))),
         }
     }
-    let ttl = ttl.min(GIT_TOKEN_MAX_TTL);
+    mint_source_token(env, access.as_deref(), ttl).await
+}
+
+/// Mints a git token for the source repository: `access` is `read` (the default) or `write`,
+/// living `ttl` seconds (15 minutes by default, 24 hours at most).
+async fn mint_source_token(env: &Env, access: Option<&str>, ttl: Option<u64>) -> Result<Handed> {
+    let access = match access.unwrap_or("read") {
+        "read" => Access::Read,
+        "write" => Access::Write,
+        other => {
+            return Err(Error::RustError(format!(
+                "access `{other}` is not read or write"
+            )));
+        }
+    };
+    let ttl = ttl.unwrap_or(GIT_TOKEN_TTL).min(GIT_TOKEN_MAX_TTL);
     let account = account(env).await?;
     let minted = artifacts::mint(&account, SOURCE_NAMESPACE, SOURCE_REPO, access, ttl).await?;
     let remote = artifacts::repo(&account, SOURCE_NAMESPACE, SOURCE_REPO)
@@ -274,4 +301,88 @@ async fn source_tokens(env: &Env) -> Result<Vec<artifacts::Listed>> {
 async fn source_revoke(env: &Env, id: &str) -> Result<serde_json::Value> {
     artifacts::revoke(&account(env).await?, SOURCE_NAMESPACE, SOURCE_REPO, id).await?;
     Ok(serde_json::json!({ "revoked": id }))
+}
+
+/// The MCP server's tools: the platform's operations.
+fn mcp_tools() -> Vec<mcp::Tool> {
+    vec![
+        mcp::Tool {
+            name: "source_token",
+            description: "Mint a git token for the pigeon-security/pigeon Artifacts repository. \
+                          Git sends it as `Authorization: Bearer <token>`. Answers the token, \
+                          its id and the repository's remote.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "access": { "type": "string", "enum": ["read", "write"], "default": "read" },
+                    "ttl": { "type": "integer", "description": "Seconds; 900 by default, 86400 at most." }
+                }
+            }),
+        },
+        mcp::Tool::bare(
+            "source_tokens",
+            "List the repository's git tokens, live and past, without their values.",
+        ),
+        mcp::Tool {
+            name: "source_revoke",
+            description: "Revoke one of the repository's git tokens by id.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": { "id": { "type": "string" } },
+                "required": ["id"]
+            }),
+        },
+        mcp::Tool::bare(
+            "source_mirror",
+            "Bring the read-only GitHub copy up to the Artifacts repository now; it also runs on \
+             every push.",
+        ),
+        mcp::Tool::bare(
+            "setup_source",
+            "Make sure the Artifacts repository, its push-event queue and subscription exist.",
+        ),
+    ]
+}
+
+/// One MCP message, answered as JSON; a notification gets 202 and no body.
+async fn mcp_post(mut req: Request, env: &Env) -> Result<Response> {
+    let message: Value = match req.json().await {
+        Ok(v) => v,
+        Err(e) => return Response::error(format!("not JSON: {e}"), 400),
+    };
+    let server = mcp::Server {
+        name: "pigeon-platform",
+        version: env!("CARGO_PKG_VERSION"),
+        instructions: "pigeon's platform. Source code lives in Cloudflare Artifacts; GitHub is \
+                       a read-only copy. To push, mint a write token with source_token and send \
+                       it to git as `Authorization: Bearer <token>`.",
+    };
+    let tools = mcp_tools();
+    let call = async |name: &str, args: &Value| -> Result<Value> {
+        let value = match name {
+            "source_token" => {
+                let ttl = args["ttl"].as_u64();
+                to_value(mint_source_token(env, args["access"].as_str(), ttl).await?)
+            }
+            "source_tokens" => to_value(source_tokens(env).await?),
+            "source_revoke" => {
+                let id = args["id"]
+                    .as_str()
+                    .ok_or_else(|| Error::RustError("`id` is required".into()))?;
+                source_revoke(env, id).await?
+            }
+            "source_mirror" => to_value(source_mirror(env).await?),
+            "setup_source" => to_value(setup_source(env).await?),
+            other => return Err(Error::RustError(format!("no tool `{other}`"))),
+        };
+        Ok(value)
+    };
+    match mcp::answer(&server, &tools, &message, call).await {
+        Some(answer) => Response::from_json(&answer),
+        None => Ok(Response::empty()?.with_status(202)),
+    }
+}
+
+fn to_value<T: Serialize>(v: T) -> Value {
+    serde_json::to_value(v).unwrap_or(Value::Null)
 }

@@ -22,7 +22,7 @@ fn body() -> String {
   <span class="eyebrow">pigeon · architecture</span>
   <h1>What's deployed</h1>
   <p>pigeon.dev is public; the platform sits behind Cloudflare Access. pigeon-platform holds one parent token and mints a short-lived, scoped token for each capability it runs.</p>
-  <div class="pills"><span class="pill">as of {AS_OF}</span><span class="pill">2 Workers</span><span class="pill">9 capabilities</span></div>
+  <div class="pills"><span class="pill">as of {AS_OF}</span><span class="pill">2 Workers</span><span class="pill">10 capabilities</span></div>
 </header>
 
 <div class="arrow" aria-hidden="true"></div>
@@ -33,7 +33,7 @@ fn body() -> String {
     <article class="card">
       <div class="card-h"><span class="dot"></span><h3>Service-token callers</h3></div>
       <p>Machines holding an Access service token, sent as <code>CF-Access-Client-Id</code> and <code>CF-Access-Client-Secret</code>.</p>
-      <div class="pills"><span class="pill">pigeon-platform</span></div>
+      <div class="pills"><span class="pill">pigeon-platform</span><span class="pill">pigeon-claude</span></div>
     </article>
     <article class="card">
       <div class="card-h"><span class="dot"></span><h3>Visitors</h3></div>
@@ -56,7 +56,7 @@ fn body() -> String {
     <div class="cards">
       <article class="card kind-access">
         <div class="card-h"><span class="dot"></span><h3>platform.pigeon.dev</h3><span class="pill accent">subdomain</span></div>
-        <ul class="kv"><li>Access: admits <code>pigeon-platform</code> service token only</li><li>serves pigeon-platform</li></ul>
+        <ul class="kv"><li>Access: admits <code>pigeon-platform</code> and <code>pigeon-claude</code> service tokens only</li><li>serves pigeon-platform</li></ul>
       </article>
       <article class="card">
         <div class="card-h"><span class="dot"></span><h3>pigeon.dev</h3><span class="pill accent">domain</span></div>
@@ -79,6 +79,7 @@ fn body() -> String {
           <li><code>POST /setup/source</code> → artifacts, queues</li>
           <li><code>POST /source/token</code> · <code>GET /source/tokens</code> · <code>DELETE /source/tokens/:id</code></li>
           <li><code>POST /source/mirror</code> and Artifacts push events → mirror</li>
+          <li><code>POST /mcp</code> → mcp: the source tools for Claude sessions</li>
         </ul>
         <p>workers.dev and preview URLs off.</p>
       </article>
@@ -131,8 +132,12 @@ fn body() -> String {
         <p>Copies an Artifacts repository to a read-only git host over git's HTTP protocol: branches only move forward, tags are only added.</p>
       </article>
       <article class="card">
-        <div class="card-h"><h3>queues</h3><span class="pill accent">ensure</span></div>
-        <p>Has a queue exist and a Worker consume it.</p>
+        <div class="card-h"><h3>queues</h3><span class="pill accent">ensure · subscribe</span></div>
+        <p>Has a queue exist, a Worker consume it, and a service's events reach it.</p>
+      </article>
+      <article class="card">
+        <div class="card-h"><h3>mcp</h3><span class="pill accent">answer</span></div>
+        <p>A stateless MCP server over streamable HTTP: the platform's operations as tools.</p>
       </article>
     </div>
   </section>

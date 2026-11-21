@@ -115,12 +115,16 @@ async fn service_token_policy(
     token: &str,
     account: &str,
     name: &str,
-    service_token_id: &str,
+    service_token_ids: &[String],
 ) -> Result<String> {
+    let include: Vec<Value> = service_token_ids
+        .iter()
+        .map(|id| json!({ "service_token": { "token_id": id } }))
+        .collect();
     let body = json!({
         "name": name,
         "decision": "non_identity",
-        "include": [{ "service_token": { "token_id": service_token_id } }],
+        "include": include,
     });
     let path = format!("/accounts/{account}/access/policies");
     match list(token, account, "policies")
@@ -146,14 +150,20 @@ async fn self_hosted_app(
     name: &str,
     domain: &str,
     policy_id: &str,
+    token_header: Option<&str>,
 ) -> Result<String> {
-    let body = json!({
+    let mut body = json!({
         "name": name,
         "domain": domain,
         "type": "self_hosted",
         "session_duration": SESSION_DURATION,
         "policies": [{ "id": policy_id, "precedence": 1 }],
     });
+    if let Some(header) = token_header {
+        // The client ID and secret then also come as one JSON header:
+        // {"cf-access-client-id": ..., "cf-access-client-secret": ...}.
+        body["read_service_tokens_from_header"] = json!(header);
+    }
     let path = format!("/accounts/{account}/access/apps");
     match list(token, account, "apps")
         .await?
@@ -178,6 +188,13 @@ pub struct Protection {
     pub service_token: String,
     pub client_id_secret: String,
     pub client_secret_secret: String,
+    /// More service tokens the application lets in, by name, for callers outside the account
+    /// such as Claude sessions. Their secrets are not stored: each is answered once, when its
+    /// token is created.
+    pub guests: Vec<String>,
+    /// A header the application also reads a service token from, as one JSON value, for
+    /// callers that can send only one header.
+    pub token_header: Option<String>,
 }
 
 /// What [`protect`] made.
@@ -187,6 +204,15 @@ pub struct Protected {
     pub client_id: String,
     /// The Secrets Store names holding the client ID and secret.
     pub secrets: [String; 2],
+    pub guests: Vec<Guest>,
+}
+
+/// A guest service token. `client_secret` is present only in the answer that created it.
+#[derive(Serialize)]
+pub struct Guest {
+    pub name: String,
+    pub client_id: String,
+    pub client_secret: Option<String>,
 }
 
 /// Puts `domain` behind Access, letting in only `protection`'s service token; idempotent:
@@ -213,8 +239,27 @@ async fn protect_with(
     let writer = Writer::open(account).await?;
     let stored = store(&writer, token, &account.id, &service, protection).await;
     writer.finish(stored).await?;
-    let policy = service_token_policy(token, &account.id, &protection.app, &service.id).await?;
-    let app = self_hosted_app(token, &account.id, &protection.app, domain, &policy).await?;
+    let mut ids = vec![service.id.clone()];
+    let mut guests = Vec::new();
+    for name in &protection.guests {
+        let guest = service_token(token, &account.id, name).await?;
+        ids.push(guest.id);
+        guests.push(Guest {
+            name: name.clone(),
+            client_id: guest.client_id,
+            client_secret: guest.client_secret,
+        });
+    }
+    let policy = service_token_policy(token, &account.id, &protection.app, &ids).await?;
+    let app = self_hosted_app(
+        token,
+        &account.id,
+        &protection.app,
+        domain,
+        &policy,
+        protection.token_header.as_deref(),
+    )
+    .await?;
     Ok(Protected {
         access_app: app,
         client_id: service.client_id,
@@ -222,6 +267,7 @@ async fn protect_with(
             protection.client_id_secret.clone(),
             protection.client_secret_secret.clone(),
         ],
+        guests,
     })
 }
 

@@ -8,6 +8,7 @@ mod custom_domain;
 pub mod design;
 pub mod domain;
 mod git;
+pub mod mcp;
 pub mod mirror;
 pub mod queues;
 pub mod secrets_store;
