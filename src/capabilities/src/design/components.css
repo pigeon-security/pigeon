@@ -80,3 +80,32 @@
 /* Legend. */
 .legend { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 8px 22px; font: var(--type-small); color: var(--muted); }
 .legend li { display: inline-flex; align-items: center; gap: 8px; }
+
+/* Diagram: an inline SVG on the dotted page, scrolled sideways inside its frame when narrower
+   than it is drawn. Classes are dg-*. */
+.dg-canvas { border: 1.5px solid var(--line); border-radius: 16px; background: var(--region); padding: 8px; overflow-x: auto; }
+svg.diagram { display: block; width: 100%; min-width: 640px; height: auto; font-family: var(--font-sans); }
+.dg-shadow { fill: var(--shadow); }
+.dg-card { fill: var(--card); stroke: var(--line); stroke-width: 1.2; }
+.dg-card.dg-group { stroke-width: 1.5; }
+.dg-card.dg-inner { fill: var(--chip); }
+.dg-card.dg-access { stroke: var(--kind-access); stroke-width: 1.6; }
+.dg-card.dg-worker { stroke: var(--kind-worker); stroke-width: 1.6; }
+.dg-card.dg-store { stroke: var(--kind-store); stroke-width: 1.4; }
+.dg-card.dg-cf { stroke: var(--cloudflare); stroke-width: 1.4; stroke-opacity: 0.55; }
+.dg-card.dg-vendor { stroke: var(--github); stroke-width: 1.4; }
+.dg-zone { fill: var(--cloudflare-zone); stroke: var(--cloudflare); stroke-width: 2; }
+.dg-zone-name { fill: var(--cloudflare); font: 700 12px var(--font-mono); letter-spacing: 0.1em; }
+.dg-t { fill: var(--ink); font-weight: 700; font-size: 14px; }
+.dg-t.dg-big { font-size: 18px; }
+.dg-wname { fill: var(--kind-worker); }
+.dg-vname { fill: var(--github); }
+.dg-s { fill: var(--muted); font-size: 12px; }
+.dg-m { fill: var(--ink2); font-family: var(--font-mono); font-size: 11.5px; }
+.dg-e { fill: var(--muted); font: 600 10.5px var(--font-mono); letter-spacing: 0.06em; }
+.dg-lbl { fill: var(--muted); font: 11px var(--font-mono); }
+.dg-chip { fill: var(--chip); stroke: var(--line); }
+.dg-chip.accent { fill: var(--accent-soft); stroke: var(--accent); }
+.dg-link { fill: none; stroke: var(--muted); stroke-width: 1.8; }
+.dg-link.dashed { stroke-dasharray: 5 5; }
+.dg-head { fill: var(--muted); }

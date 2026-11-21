@@ -722,6 +722,470 @@ fn digest(sorted: &[&Source]) -> String {
 }
 
 // ---- rendering ----
+//
+// One diagram, top to bottom in the order a request travels: clients, the hostnames Access
+// holds or leaves public, the Workers behind them, the account resources they share, and the
+// copies outside Cloudflare. Definitions of the Workers and capabilities follow it.
+
+/// The canvas width and its outer margin; columns, gaps and rows follow from the model.
+const W: f64 = 1000.0;
+const M: f64 = 32.0;
+const GAP: f64 = 36.0;
+
+/// An SVG drawn in order.
+struct Svg(Vec<String>);
+
+impl Svg {
+    fn push(&mut self, s: String) {
+        self.0.push(s);
+    }
+
+    /// A card with the hard offset shadow.
+    fn card(&mut self, x: f64, y: f64, w: f64, h: f64, class: &str) {
+        self.push(format!(
+            r#"<rect class="dg-shadow" x="{:.0}" y="{:.0}" width="{w:.0}" height="{h:.0}" rx="14"/><rect class="dg-card {class}" x="{x:.0}" y="{y:.0}" width="{w:.0}" height="{h:.0}" rx="14"/>"#,
+            x + 3.0,
+            y + 3.0
+        ));
+    }
+
+    /// A card stacked on two more, for something there are many of.
+    fn stack(&mut self, x: f64, y: f64, w: f64, h: f64) {
+        for d in [10.0, 5.0] {
+            self.push(format!(
+                r#"<rect class="dg-card dg-inner" x="{:.0}" y="{:.0}" width="{:.0}" height="{h:.0}" rx="10"/>"#,
+                x + d,
+                y + d,
+                w - d
+            ));
+        }
+        self.push(format!(
+            r#"<rect class="dg-card dg-inner" x="{x:.0}" y="{y:.0}" width="{:.0}" height="{h:.0}" rx="10"/>"#,
+            w - 10.0
+        ));
+    }
+
+    fn text(&mut self, x: f64, y: f64, class: &str, s: &str, anchor: &str) {
+        self.push(format!(
+            r#"<text class="{class}" x="{x:.0}" y="{y:.0}" text-anchor="{anchor}">{}</text>"#,
+            escape(s)
+        ));
+    }
+
+    /// A pill from `x`; answers its width.
+    fn chip(&mut self, x: f64, y: f64, s: &str, accent: bool) -> f64 {
+        let w = chip_width(s);
+        let class = if accent { "dg-chip accent" } else { "dg-chip" };
+        self.push(format!(
+            r#"<rect class="{class}" x="{x:.0}" y="{y:.0}" width="{w:.0}" height="24" rx="12"/><text class="dg-m" x="{:.0}" y="{:.0}" text-anchor="middle">{}</text>"#,
+            x + w / 2.0,
+            y + 16.0,
+            escape(s)
+        ));
+        w
+    }
+
+    /// Pills in a row from `x`, as many as fit before `right`.
+    fn chips(&mut self, x: f64, y: f64, right: f64, items: &[String], accent: bool) {
+        let mut at = x;
+        for item in items {
+            if at + chip_width(item) > right {
+                break;
+            }
+            at += self.chip(at, y, item, accent) + 8.0;
+        }
+    }
+
+    /// A link along `d`, with an arrowhead unless `bare`.
+    fn link(&mut self, d: &str, dashed: bool, bare: bool) {
+        let class = if dashed { "dg-link dashed" } else { "dg-link" };
+        let head = if bare {
+            ""
+        } else {
+            r#" marker-end="url(#ah)""#
+        };
+        self.push(format!(r#"<path class="{class}" d="{d}"{head}/>"#));
+    }
+
+    fn label(&mut self, x: f64, y: f64, s: &str) {
+        self.text(x, y, "dg-lbl", s, "start");
+    }
+}
+
+/// `s` cut with an ellipsis to fit `width` at about `px` per character.
+fn fit(s: &str, width: f64, px: f64) -> String {
+    let max = (width / px).floor() as usize;
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let kept: String = s.chars().take(max.saturating_sub(1)).collect();
+    format!("{kept}…")
+}
+
+fn chip_width(s: &str) -> f64 {
+    s.chars().count() as f64 * 6.9 + 20.0
+}
+
+/// One column: a hostname and the Worker that serves it, or a Worker that serves none.
+struct Column<'a> {
+    host: Option<&'a Hostname>,
+    worker: Option<&'a Worker>,
+}
+
+fn columns(m: &Model) -> Vec<Column<'_>> {
+    let mut out: Vec<Column> = m
+        .hostnames
+        .iter()
+        .map(|h| Column {
+            host: Some(h),
+            worker: m.workers.iter().find(|w| w.name == h.worker),
+        })
+        .collect();
+    for w in &m.workers {
+        if !m.hostnames.iter().any(|h| h.worker == w.name) {
+            out.push(Column {
+                host: None,
+                worker: Some(w),
+            });
+        }
+    }
+    out
+}
+
+/// The capabilities that only shape pages, and so reach no account resource.
+const PAGE_ONLY: [&str; 3] = ["design", "architecture", "mcp"];
+
+fn diagram(m: &Model) -> String {
+    let cols = columns(m);
+    let n = cols.len().max(1) as f64;
+    let col_w = (W - 2.0 * M - (n - 1.0) * GAP) / n;
+    let col_x = |i: usize| M + i as f64 * (col_w + GAP);
+    let mut s = Svg(Vec::new());
+
+    // Layer 1: clients, above the hostname each reaches.
+    let y1 = 40.0;
+    s.text(M, 26.0, "dg-e", "LAYER 1 · CLIENTS", "start");
+    let group_h = 190.0;
+    for (i, c) in cols.iter().enumerate() {
+        let Some(h) = c.host else { continue };
+        let x = col_x(i);
+        s.card(x, y1, col_w, group_h, "dg-group");
+        let (title, inner): (&str, Vec<(String, String)>) = if h.access.is_empty() {
+            ("Visitors", vec![("Browser".into(), "anyone".into())])
+        } else {
+            (
+                "Access callers",
+                h.access
+                    .iter()
+                    .map(|t| (t.clone(), "service token".into()))
+                    .collect(),
+            )
+        };
+        s.text(x + 16.0, y1 + 32.0, "dg-t dg-big", title, "start");
+        let k = inner.len().max(1) as f64;
+        let iw = ((col_w - 32.0 - (k - 1.0) * 12.0) / k).min(220.0);
+        for (j, (name, kind)) in inner.iter().enumerate() {
+            let ix = x + 16.0 + j as f64 * (iw + 12.0);
+            s.card(ix, y1 + 50.0, iw, 90.0, "");
+            s.text(ix + 16.0, y1 + 78.0, "dg-t", name, "start");
+            s.chip(ix + 16.0, y1 + 94.0, kind, false);
+        }
+        let via = if h.access.is_empty() {
+            format!("{} · in public", h.host)
+        } else {
+            format!("{} · Access service token", h.host)
+        };
+        s.chip(x + 16.0, y1 + 152.0, &via, false);
+    }
+
+    // The Cloudflare region holds layers 2 to 4; its rectangle is drawn once its height is known.
+    let zone_top = y1 + group_h + 48.0;
+    let zone_at = s.0.len();
+    s.text(
+        M + 4.0,
+        zone_top + 26.0,
+        "dg-zone-name",
+        "CLOUDFLARE",
+        "start",
+    );
+
+    // Layer 2: hostnames, each a Zero Trust application or public.
+    let y2 = zone_top + 64.0;
+    s.text(M + 4.0, y2 - 12.0, "dg-e", "LAYER 2 · ZERO TRUST", "start");
+    let host_h = 76.0;
+    for (i, c) in cols.iter().enumerate() {
+        let Some(h) = c.host else { continue };
+        let x = col_x(i);
+        let cx = x + col_w / 2.0;
+        s.link(
+            &format!("M{cx:.0} {:.0}V{y2:.0}", y1 + group_h),
+            false,
+            false,
+        );
+        s.label(cx + 10.0, y1 + group_h + 26.0, "HTTPS");
+        let class = if h.access.is_empty() { "" } else { "dg-access" };
+        s.card(x, y2, col_w, host_h, class);
+        s.text(x + 16.0, y2 + 32.0, "dg-t dg-big", &h.host, "start");
+        let sub = if h.access.is_empty() {
+            "public · no Access".to_string()
+        } else {
+            format!("Zero Trust application · admits {}", h.access.join(", "))
+        };
+        s.text(x + 16.0, y2 + 56.0, "dg-s", &sub, "start");
+        let cw = chip_width(&h.by);
+        s.chip(x + col_w - 16.0 - cw, y2 + 14.0, &h.by, true);
+    }
+
+    // Layer 3: the Worker under each hostname.
+    let y3 = y2 + host_h + 64.0;
+    s.text(M + 4.0, y3 - 12.0, "dg-e", "LAYER 3 · WORKERS", "start");
+    let worker_h = 164.0;
+    for (i, c) in cols.iter().enumerate() {
+        let Some(w) = c.worker else { continue };
+        let x = col_x(i);
+        let cx = x + col_w / 2.0;
+        if c.host.is_some() {
+            s.link(
+                &format!("M{cx:.0} {:.0}V{y3:.0}", y2 + host_h),
+                false,
+                false,
+            );
+            s.label(cx + 10.0, y2 + host_h + 30.0, "serves");
+        }
+        s.card(x, y3, col_w, worker_h, "dg-worker");
+        s.text(
+            x + 16.0,
+            y3 + 32.0,
+            "dg-t dg-big dg-wname",
+            &w.name,
+            "start",
+        );
+        let mut flags: Vec<String> = w.handlers.clone();
+        flags.push(
+            if w.workers_dev {
+                "workers.dev on"
+            } else {
+                "workers.dev off"
+            }
+            .into(),
+        );
+        s.chips(x + 16.0, y3 + 46.0, x + col_w - 16.0, &flags, false);
+        s.stack(x + 16.0, y3 + 84.0, col_w - 32.0, 62.0);
+        let routes = format!("{} routes", w.routes.len());
+        s.text(x + 32.0, y3 + 108.0, "dg-t", &routes, "start");
+        let tools = if w.tools.is_empty() {
+            "no MCP tools".to_string()
+        } else {
+            format!("{} MCP tools on POST /mcp", w.tools.len())
+        };
+        s.text(x + 32.0, y3 + 128.0, "dg-s", &tools, "start");
+    }
+
+    // Layer 4: the account resources, shared on one bus by the Workers that reach them.
+    let r = &m.resources;
+    let mut cards: Vec<(&str, String, &str)> = Vec::new();
+    if !r.secrets.is_empty() {
+        cards.push((
+            "Secrets Store",
+            format!("{} secrets", r.secrets.len()),
+            "dg-store",
+        ));
+    }
+    if !r.permissions.is_empty() {
+        cards.push((
+            "API tokens",
+            format!("{} permissions, minted", r.permissions.len()),
+            "dg-cf",
+        ));
+    }
+    if let Some(z) = &r.zone {
+        cards.push(("Zone", z.clone(), "dg-cf"));
+    }
+    for repo in &r.repos {
+        cards.push(("Artifacts", repo.clone(), "dg-cf"));
+    }
+    let consumers: Vec<&str> = m
+        .workers
+        .iter()
+        .filter(|w| w.handlers.iter().any(|h| h == "queue"))
+        .map(|w| w.name.as_str())
+        .collect();
+    for q in &r.queues {
+        cards.push(("Queue", q.clone(), "dg-cf"));
+    }
+    let bus_y = y3 + worker_h + 36.0;
+    let y4 = bus_y + 62.0;
+    let k = cards.len().max(1) as f64;
+    let rgap = 20.0;
+    let rw = (W - 2.0 * M - (k - 1.0) * rgap) / k;
+    let rx = |j: usize| M + j as f64 * (rw + rgap);
+    let users: Vec<f64> = cols
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| {
+            c.worker
+                .is_some_and(|w| w.uses.iter().any(|u| !PAGE_ONLY.contains(&u.as_str())))
+        })
+        .map(|(i, _)| col_x(i) + col_w / 2.0)
+        .collect();
+    if !cards.is_empty() && !users.is_empty() {
+        let centers: Vec<f64> = (0..cards.len()).map(|j| rx(j) + rw / 2.0).collect();
+        let left = users
+            .iter()
+            .chain(&centers)
+            .cloned()
+            .fold(f64::MAX, f64::min);
+        let right = users
+            .iter()
+            .chain(&centers)
+            .cloned()
+            .fold(f64::MIN, f64::max);
+        for u in &users {
+            s.link(
+                &format!("M{u:.0} {:.0}V{bus_y:.0}", y3 + worker_h),
+                false,
+                true,
+            );
+        }
+        s.link(&format!("M{left:.0} {bus_y:.0}H{right:.0}"), false, true);
+        s.text(
+            users[0] - 10.0,
+            bus_y - 8.0,
+            "dg-lbl",
+            "bindings · minted tokens",
+            "end",
+        );
+        for c in &centers {
+            s.link(&format!("M{c:.0} {bus_y:.0}V{y4:.0}"), false, false);
+        }
+    }
+    s.text(
+        M + 4.0,
+        bus_y - 14.0,
+        "dg-e",
+        "LAYER 4 · ACCOUNT RESOURCES",
+        "start",
+    );
+    let res_h = 64.0;
+    let mut artifacts_x = None;
+    for (j, (title, sub, class)) in cards.iter().enumerate() {
+        let x = rx(j);
+        s.card(x, y4, rw, res_h, class);
+        s.text(
+            x + 14.0,
+            y4 + 28.0,
+            "dg-t",
+            &fit(title, rw - 28.0, 8.2),
+            "start",
+        );
+        s.text(
+            x + 14.0,
+            y4 + 48.0,
+            "dg-s",
+            &fit(sub, rw - 28.0, 6.4),
+            "start",
+        );
+        if *title == "Artifacts" {
+            artifacts_x = Some(x);
+        }
+        if *title == "Queue" {
+            let qx = x + rw / 2.0 + 28.0;
+            for (i, c) in cols.iter().enumerate() {
+                let consumes = c
+                    .worker
+                    .is_some_and(|w| consumers.contains(&w.name.as_str()));
+                if consumes && qx > col_x(i) && qx < col_x(i) + col_w {
+                    s.link(
+                        &format!("M{qx:.0} {y4:.0}V{:.0}", y3 + worker_h + 2.0),
+                        true,
+                        false,
+                    );
+                    s.label(qx + 8.0, bus_y + 24.0, "consumes");
+                }
+            }
+        }
+        if *title == "Queue" && j > 0 && cards[j - 1].0 == "Artifacts" {
+            let y = y4 + res_h / 2.0;
+            s.link(
+                &format!("M{:.0} {y:.0}H{:.0}", rx(j - 1) + rw, x - 2.0),
+                true,
+                false,
+            );
+        }
+    }
+    let zone_bottom = y4 + res_h + 28.0;
+    s.0.insert(
+        zone_at,
+        format!(
+            r#"<rect class="dg-zone" x="{:.0}" y="{zone_top:.0}" width="{:.0}" height="{:.0}" rx="18"/>"#,
+            M - 18.0,
+            W - 2.0 * (M - 18.0),
+            zone_bottom - zone_top
+        ),
+    );
+
+    // Outside Cloudflare: each mirror's read-only copy, fed from Artifacts.
+    let mut height = zone_bottom + 24.0;
+    if let (Some(ax), false) = (artifacts_x, r.mirrors.is_empty()) {
+        let vy = zone_bottom + 56.0;
+        let vw = 300.0_f64.min(W - 2.0 * M);
+        for (j, url) in r.mirrors.iter().enumerate() {
+            let x = (ax + j as f64 * (vw + GAP)).min(W - M - vw);
+            let from = ax + rw / 2.0;
+            let to = x + vw / 2.0;
+            s.link(
+                &format!(
+                    "M{from:.0} {:.0}V{:.0}H{to:.0}V{vy:.0}",
+                    y4 + res_h,
+                    vy - 24.0
+                ),
+                false,
+                false,
+            );
+            s.label(
+                from + 10.0,
+                zone_bottom + 22.0,
+                "mirror · fast-forward only",
+            );
+            let vendor = url
+                .split("//")
+                .nth(1)
+                .and_then(|h| h.split('/').next())
+                .unwrap_or(url);
+            s.card(x, vy, vw, 178.0, "dg-vendor");
+            s.text(x + 16.0, vy + 28.0, "dg-t dg-vname", vendor, "start");
+            s.card(x + 16.0, vy + 44.0, vw - 32.0, 46.0, "dg-inner");
+            s.text(x + vw / 2.0, vy + 64.0, "dg-t", "git smart HTTP", "middle");
+            s.text(
+                x + vw / 2.0,
+                vy + 81.0,
+                "dg-m",
+                "branches forward, tags added",
+                "middle",
+            );
+            s.link(
+                &format!("M{:.0} {:.0}V{:.0}", x + vw / 2.0, vy + 90.0, vy + 112.0),
+                false,
+                false,
+            );
+            s.label(x + vw / 2.0 + 8.0, vy + 105.0, "into");
+            let path = url
+                .split("//")
+                .nth(1)
+                .and_then(|h| h.split_once('/'))
+                .map_or(url.as_str(), |(_, p)| p);
+            s.stack(x + 16.0, vy + 114.0, vw - 32.0, 48.0);
+            s.text(x + 32.0, vy + 134.0, "dg-t", "read-only copy", "start");
+            s.text(x + 32.0, vy + 152.0, "dg-m", path, "start");
+        }
+        height = vy + 178.0 + 24.0;
+    }
+
+    format!(
+        r#"<div class="dg-canvas"><svg class="diagram" viewBox="0 0 {W:.0} {height:.0}" role="img" aria-label="pigeon's architecture, from clients through hostnames and Workers to account resources and mirrors"><defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path class="dg-head" d="M0 0L10 5L0 10z"/></marker></defs>{}</svg></div>"#,
+        s.0.concat()
+    )
+}
 
 fn pills(items: &[String], class: &str) -> String {
     if items.is_empty() {
@@ -734,255 +1198,131 @@ fn pills(items: &[String], class: &str) -> String {
     format!(r#"<div class="pills">{inner}</div>"#)
 }
 
-fn list(items: &[String]) -> String {
-    if items.is_empty() {
-        return String::new();
-    }
-    let inner: String = items
-        .iter()
-        .map(|i| format!("<li><code>{}</code></li>", escape(i)))
-        .collect();
-    format!(r#"<ul class="kv">{inner}</ul>"#)
-}
-
-fn layer(n: usize, title: &str, cards: &str) -> String {
-    format!(
-        r#"<section class="layer"><span class="eyebrow">Layer {n} · {}</span><div class="cards">{cards}</div></section>"#,
-        escape(title)
-    )
-}
-
-fn arrow(label: &str) -> String {
-    if label.is_empty() {
-        r#"<div class="arrow" aria-hidden="true"></div>"#.into()
-    } else {
-        format!(r#"<div class="arrow"><span>{}</span></div>"#, escape(label))
-    }
-}
-
 fn render(m: &Model) -> String {
-    let tokens: Vec<String> = m
-        .hostnames
-        .iter()
-        .flat_map(|h| h.access.iter().cloned())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
-    let public: Vec<&Hostname> = m.hostnames.iter().filter(|h| h.access.is_empty()).collect();
     let tool_count: usize = m.workers.iter().map(|w| w.tools.len()).sum();
-
-    let mut clients = String::new();
-    if !tokens.is_empty() {
-        clients.push_str(&format!(
-            r#"<article class="card"><div class="card-h"><span class="dot"></span><h3>Service-token callers</h3></div><p>Through Cloudflare Access, with a service token.</p>{}</article>"#,
-            pills(&tokens, "")
-        ));
-    }
-    if !public.is_empty() {
-        let hosts: Vec<String> = public.iter().map(|h| h.host.clone()).collect();
-        clients.push_str(&format!(
-            r#"<article class="card"><div class="card-h"><span class="dot"></span><h3>Visitors</h3></div><p>Anyone, in public.</p>{}</article>"#,
-            pills(&hosts, "")
-        ));
-    }
-
-    let hostnames: String = m
-        .hostnames
-        .iter()
-        .map(|h| {
-            let (kind, access) = if h.access.is_empty() {
-                ("", "public, no Access".to_string())
-            } else {
-                (" kind-access", format!("Access admits {}", h.access.join(", ")))
-            };
-            format!(
-                r#"<article class="card{kind}"><div class="card-h"><span class="dot"></span><h3>{}</h3><span class="pill accent">{}</span></div><ul class="kv"><li>{}</li><li>serves {}</li></ul></article>"#,
-                escape(&h.host),
-                escape(&h.by),
-                escape(&access),
-                escape(&h.worker)
+    // Who uses each capability: Workers and other capabilities.
+    let used_by = |name: &str| -> Vec<String> {
+        m.workers
+            .iter()
+            .filter(|w| w.uses.iter().any(|u| u == name))
+            .map(|w| w.name.clone())
+            .chain(
+                m.capabilities
+                    .iter()
+                    .filter(|c| c.calls.iter().any(|d| d == name))
+                    .map(|c| c.name.clone()),
             )
-        })
-        .collect();
-
-    let workers: String = m
-        .workers
-        .iter()
-        .map(|w| {
-            let mut body = list(&w.routes);
-            if !w.tools.is_empty() {
+            .collect()
+    };
+    let def = |c: &Capability| {
+        let mut body = pills(&c.interface, " accent");
+        for (what, items) in [
+            ("calls", c.calls.clone()),
+            ("used by", used_by(&c.name)),
+            ("token", c.permissions.clone()),
+        ] {
+            if !items.is_empty() {
                 body.push_str(&format!(
-                    r#"<span class="eyebrow">MCP tools</span>{}"#,
-                    pills(&w.tools, "")
+                    r#"<span class="eyebrow">{what}</span>{}"#,
+                    pills(&items, "")
                 ));
             }
-            let mut notes = vec![format!("handles {}", w.handlers.join(", "))];
-            notes.push(if w.workers_dev {
-                "workers.dev on".into()
-            } else {
-                "workers.dev off".into()
-            });
-            format!(
-                r#"<article class="card kind-worker"><div class="card-h"><span class="dot"></span><h3>{}</h3></div>{body}<span class="eyebrow">uses</span>{}<p>{}</p></article>"#,
-                escape(&w.name),
-                pills(&w.uses, " accent"),
-                escape(&notes.join(" · "))
-            )
-        })
-        .collect();
-
-    let card = |c: &Capability| {
-        let calls = if c.calls.is_empty() {
-            String::new()
-        } else {
-            let inner: String = c
-                .calls
-                .iter()
-                .map(|d| format!(r#"<span class="pill">{}</span>"#, escape(d)))
-                .collect();
-            format!(r#"<div class="chain"><span>calls</span>{inner}</div>"#)
-        };
-        let perms = if c.permissions.is_empty() {
-            String::new()
-        } else {
-            format!(
-                r#"<span class="eyebrow">token</span>{}"#,
-                pills(&c.permissions, "")
-            )
-        };
+        }
         format!(
-            r#"<article class="card"><div class="card-h"><h3>{}</h3></div>{}{calls}<p>{}</p>{perms}</article>"#,
+            r#"<article class="card"><div class="card-h"><h3>{}</h3></div><p>{}</p>{body}</article>"#,
             escape(&c.name),
-            pills(&c.interface, " accent"),
             escape(&c.summary)
         )
     };
-    let public_caps: String = m
+    let public: String = m
         .capabilities
         .iter()
         .filter(|c| c.public)
-        .map(card)
+        .map(def)
         .collect();
     let internal: String = m
         .capabilities
         .iter()
         .filter(|c| !c.public)
-        .map(card)
+        .map(def)
         .collect();
-
+    let workers: String = m
+        .workers
+        .iter()
+        .map(|w| {
+            let routes: String = w
+                .routes
+                .iter()
+                .map(|r| format!("<li><code>{}</code></li>", escape(r)))
+                .collect();
+            let mut body = format!(r#"<ul class="kv">{routes}</ul>"#);
+            for (what, items) in [
+                ("MCP tools", &w.tools),
+                ("uses", &w.uses),
+                ("Secrets Store bindings", &w.secrets),
+            ] {
+                if !items.is_empty() {
+                    body.push_str(&format!(
+                        r#"<span class="eyebrow">{what}</span>{}"#,
+                        pills(items, if what == "uses" { " accent" } else { "" })
+                    ));
+                }
+            }
+            format!(
+                r#"<article class="card kind-worker"><div class="card-h"><span class="dot"></span><h3>{}</h3></div>{body}</article>"#,
+                escape(&w.name)
+            )
+        })
+        .collect();
     let r = &m.resources;
-    let mut resources = String::new();
-    if !r.secrets.is_empty() {
-        resources.push_str(&format!(
-            r#"<article class="card kind-store"><div class="card-h"><span class="dot"></span><h3>Secrets Store</h3></div>{}</article>"#,
-            list(&r.secrets)
-        ));
-    }
-    if !r.permissions.is_empty() {
-        resources.push_str(&format!(
-            r#"<article class="card kind-api"><div class="card-h"><span class="dot"></span><h3>API tokens</h3></div><p>Minted from the parent token, one per call, revoked after; together they hold:</p>{}</article>"#,
-            pills(&r.permissions, "")
-        ));
-    }
-    if let Some(zone) = &r.zone {
-        let hosts: Vec<String> = m.hostnames.iter().map(|h| h.host.clone()).collect();
-        resources.push_str(&format!(
-            r#"<article class="card kind-api"><div class="card-h"><span class="dot"></span><h3>Zone {}</h3></div><p>custom domains</p>{}</article>"#,
-            escape(zone),
-            list(&hosts)
-        ));
-    }
-    for (title, items) in [("Artifacts", &r.repos), ("Queues", &r.queues)] {
-        if !items.is_empty() {
-            resources.push_str(&format!(
-                r#"<article class="card kind-api"><div class="card-h"><span class="dot"></span><h3>{title}</h3></div>{}</article>"#,
-                list(items)
-            ));
+    let resources: String = [
+        ("Secrets Store", &r.secrets),
+        ("API token permissions", &r.permissions),
+        ("Queues", &r.queues),
+        ("Artifacts", &r.repos),
+        ("Mirrors", &r.mirrors),
+    ]
+    .iter()
+    .filter(|(_, items)| !items.is_empty())
+    .map(|(title, items)| {
+        format!(
+            r#"<article class="card kind-api"><div class="card-h"><span class="dot"></span><h3>{title}</h3></div>{}</article>"#,
+            pills(items, "")
+        )
+    })
+    .collect();
+    let section = |eyebrow: &str, title: &str, cards: &str| {
+        if cards.is_empty() {
+            String::new()
+        } else {
+            format!(
+                r#"<section class="layer" style="margin-top:28px"><span class="eyebrow">{eyebrow}</span><h2>{title}</h2><div class="cards">{cards}</div></section>"#
+            )
         }
-    }
-
-    let mirror = if r.mirrors.is_empty() {
-        String::new()
-    } else {
-        let copies: String = r
-            .mirrors
-            .iter()
-            .map(|u| {
-                format!(
-                    r#"<article class="card"><div class="card-h"><h3>{}</h3></div><p>read-only copy, mirrored from Artifacts</p></article>"#,
-                    escape(u)
-                )
-            })
-            .collect();
-        format!(
-            r#"{}<section class="region github" aria-label="Mirror"><span class="region-name">Mirror</span><div class="cards">{copies}</div></section>"#,
-            arrow("mirror")
-        )
-    };
-
-    let mut n = 0;
-    let mut next = || {
-        n += 1;
-        n
-    };
-    let internal_layer = if internal.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "{}{}",
-            arrow(""),
-            layer(0, "Internal modules", &internal).replace("Layer 0 · ", "")
-        )
     };
     format!(
         r#"<main>
 <header>
   <span class="eyebrow">pigeon · architecture</span>
-  <h1>What's built</h1>
-  <p>Read from the repository's own source each time the site is built: capabilities, Workers, hostnames and the resources they name. Nothing here is written by hand.</p>
+  <h1>pigeon, layer by layer</h1>
+  <p>Read from the repository's own source each time the site is built, and drawn top to bottom in the order a request travels. Nothing here is written by hand.</p>
   <div class="pills"><span class="pill">{} Workers</span><span class="pill">{} capabilities</span><span class="pill">{tool_count} MCP tools</span><span class="pill">digest {}</span></div>
 </header>
+<section aria-label="Diagram" style="margin-top:24px">{}</section>
 {}
 {}
 {}
-<section class="region cloudflare" aria-label="Cloudflare">
-  <span class="region-name">Cloudflare</span>
-  {}
-  {}
-  {}
-  {}
-  {}
-  {}
-  {}
-  {}
-</section>
-{mirror}
-<section class="layer" aria-label="Legend" style="margin-top:28px">
-  <ul class="legend">
-    <li><span class="dot kind-access"></span>Behind Access</li>
-    <li><span class="dot"></span>Public or client</li>
-    <li><span class="dot kind-worker"></span>Worker</li>
-    <li><span class="dot kind-store"></span>Secrets</li>
-    <li><span class="dot kind-api"></span>Cloudflare API object</li>
-    <li><span class="pill accent">name</span>entry point</li>
-  </ul>
-</section>
+{}
 </main>
 <footer>Generated from {} source files · digest {}</footer>"#,
         m.workers.len(),
         m.capabilities.iter().filter(|c| c.public).count(),
         m.digest,
-        arrow(""),
-        layer(next(), "Clients", &clients),
-        arrow("HTTPS"),
-        layer(next(), "Hostnames", &hostnames),
-        arrow(""),
-        layer(next(), "Workers", &workers),
-        arrow("calls"),
-        layer(next(), "Capabilities", &public_caps),
-        internal_layer,
-        arrow("Cloudflare API · minted tokens"),
-        layer(next(), "Account resources", &resources),
+        diagram(m),
+        section("Definitions", "Workers", &workers),
+        section("Definitions", "Capabilities", &public),
+        section("Definitions", "Internal modules", &internal),
+        section("Definitions", "Account resources", &resources),
         m.files,
         m.digest,
     )
