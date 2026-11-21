@@ -73,6 +73,9 @@ pub struct Settings {
     /// The CI jobs, in `.pigeon/ci.toml`, that test and deploy a commit.
     pub test_job: String,
     pub deploy_job: String,
+    /// The CI connector the deploy job is pinned to: one whose runner can hand the job its
+    /// token, such as `containers`.
+    pub deploy_connector: Option<String>,
 }
 
 impl Settings {
@@ -793,16 +796,14 @@ impl Lander {
             }
             State::Deploying => match &row.deploy_job {
                 None => {
-                    let job = self
-                        .dispatch(
-                            &row,
-                            "ci_submit",
-                            &json!({
-                                "repo": s.repo_name(), "commit": row.commit_sha,
-                                "job": s.deploy_job, "task": format!("land {} deploy", row.id),
-                            }),
-                        )
-                        .await?;
+                    let mut submit = json!({
+                        "repo": s.repo_name(), "commit": row.commit_sha,
+                        "job": s.deploy_job, "task": format!("land {} deploy", row.id),
+                    });
+                    if let Some(c) = &s.deploy_connector {
+                        submit["connector"] = json!(c);
+                    }
+                    let job = self.dispatch(&row, "ci_submit", &submit).await?;
                     let job = job["id"]
                         .as_str()
                         .ok_or_else(|| bad("CI answered no job id"))?;

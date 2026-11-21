@@ -261,6 +261,8 @@ pub fn land() -> land::Settings {
         parent: PARENT_TOKEN.into(),
         test_job: "test".into(),
         deploy_job: "deploy".into(),
+        // Its runner hands the deploy job its token; see ci/runner/entrypoint.sh.
+        deploy_connector: Some("containers".into()),
     }
 }
 
