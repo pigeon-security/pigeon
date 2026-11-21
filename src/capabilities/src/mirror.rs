@@ -67,6 +67,7 @@ impl Capability for Mirror {
                  repository only, with Contents read and write.",
                 self.url
             ),
+            scopes: &[secrets_store::WORKERS],
         }]
     }
 

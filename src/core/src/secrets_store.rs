@@ -9,6 +9,9 @@ use crate::Account;
 use crate::cloudflare::call;
 use crate::tokens::{Policy, Scope, Scoped};
 
+/// The scope a secret needs for a Worker to bind it.
+pub const WORKERS: &str = "workers";
+
 /// The permission a writer's token holds, and nothing else.
 pub const WRITE_PERMISSION: &str = "Secrets Store Write";
 
@@ -56,10 +59,15 @@ impl<'a> Writer<'a> {
         Ok(serde_json::from_value(v)?)
     }
 
-    /// Creates secret `name`, readable by Workers; answers its id.
-    pub async fn create(&self, name: &str, value: &str, comment: &str) -> Result<String> {
-        let body =
-            json!([{ "name": name, "value": value, "scopes": ["workers"], "comment": comment }]);
+    /// Creates secret `name`, readable by the services in `scopes`; answers its id.
+    pub async fn create(
+        &self,
+        name: &str,
+        value: &str,
+        comment: &str,
+        scopes: &[&str],
+    ) -> Result<String> {
+        let body = json!([{ "name": name, "value": value, "scopes": scopes, "comment": comment }]);
         let v = call(self.token.value(), Method::Post, &self.path(), Some(&body)).await?;
         v[0]["id"]
             .as_str()
@@ -67,9 +75,9 @@ impl<'a> Writer<'a> {
             .ok_or_else(|| Error::RustError(format!("secret `{name}` came back without its id")))
     }
 
-    /// Replaces secret `id`'s value.
-    pub async fn update(&self, id: &str, value: &str) -> Result<()> {
-        let body = json!({ "value": value, "scopes": ["workers"] });
+    /// Replaces secret `id`'s value, readable by the services in `scopes`.
+    pub async fn update(&self, id: &str, value: &str, scopes: &[&str]) -> Result<()> {
+        let body = json!({ "value": value, "scopes": scopes });
         let path = format!("{}/{id}", self.path());
         call(self.token.value(), Method::Patch, &path, Some(&body)).await?;
         Ok(())
@@ -82,11 +90,28 @@ impl<'a> Writer<'a> {
         Ok(())
     }
 
-    /// Sets secret `name` to `value`, creating it or replacing its value.
+    /// Sets secret `name` to `value` for Workers, creating it or replacing its value.
     pub async fn put(&self, name: &str, value: &str, comment: &str) -> Result<()> {
+        self.put_scoped(name, value, comment, &[WORKERS])
+            .await
+            .map(|_| ())
+    }
+
+    /// Sets secret `name` to `value` for the services in `scopes`, creating it or replacing its
+    /// value; answers its id, which a replaced secret keeps.
+    pub async fn put_scoped(
+        &self,
+        name: &str,
+        value: &str,
+        comment: &str,
+        scopes: &[&str],
+    ) -> Result<String> {
         match self.list().await?.into_iter().find(|s| s.name == name) {
-            Some(secret) => self.update(&secret.id, value).await,
-            None => self.create(name, value, comment).await.map(|_| ()),
+            Some(secret) => self
+                .update(&secret.id, value, scopes)
+                .await
+                .map(|()| secret.id),
+            None => self.create(name, value, comment, scopes).await,
         }
     }
 

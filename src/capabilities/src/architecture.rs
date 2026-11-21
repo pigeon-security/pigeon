@@ -117,6 +117,8 @@ pub struct Resources {
     pub mirrors: Vec<String>,
     /// Durable Objects, by binding.
     pub objects: Vec<String>,
+    /// AI gateways, by ID.
+    pub gateways: Vec<String>,
     /// Every permission a minted token can hold.
     pub permissions: Vec<String>,
 }
@@ -208,6 +210,7 @@ pub fn describe(sources: &[Source], hosted: &Hosted) -> Model {
         resources.repos.extend(f.repos.iter().cloned());
         resources.mirrors.extend(f.mirrors.iter().cloned());
         resources.objects.extend(f.objects.iter().cloned());
+        resources.gateways.extend(f.gateways.iter().cloned());
     }
     for part in blocks.iter().chain(&caps) {
         resources
@@ -220,6 +223,7 @@ pub fn describe(sources: &[Source], hosted: &Hosted) -> Model {
         &mut resources.repos,
         &mut resources.mirrors,
         &mut resources.objects,
+        &mut resources.gateways,
         &mut resources.permissions,
     ] {
         list.sort();

@@ -10,7 +10,7 @@
 use pigeon_core::design::{Page, escape};
 use pigeon_core::mcp::Tool;
 use pigeon_core::oauth::hash;
-use pigeon_core::secrets_store::Writer;
+use pigeon_core::secrets_store::{self, Writer};
 use pigeon_core::tokens::{self, MintRequest, Policy, Scope};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -95,6 +95,7 @@ impl Secrets {
                       API token holding Account API Tokens Write and nothing else. It is checked \
                       by minting and revoking a token with it before it replaces the current one."
                 .into(),
+            scopes: &[secrets_store::WORKERS],
         }
     }
 
@@ -201,17 +202,33 @@ impl Secrets {
             .sign_in_finish(cx.env, &purpose, body, None)
             .await?;
         let person = Self::person(cx.env, &key.user_id).await?;
-        let checked = match owner {
-            Some(c) => c.check_secret(cx, name, value).await?,
-            None => self.check_parent(cx, value).await?,
+        let (checked, scopes) = match owner {
+            Some(c) => {
+                let slot = c.secrets().into_iter().find(|s| s.name == name);
+                let scopes = slot.map_or(&[secrets_store::WORKERS][..], |s| s.scopes);
+                (c.check_secret(cx, name, value).await?, scopes)
+            }
+            None => (self.check_parent(cx, value).await?, self.own_slot().scopes),
         };
         let writer = Writer::open(cx.account).await?;
         let comment = format!("set on the secrets page by {}", person.name);
-        let written = writer.put(name, value, &comment).await;
-        writer.finish(written).await?;
-        Ok(json!({
-            "message": format!("{name} is set. Check: {}.", checked.as_str().unwrap_or("done")),
-        }))
+        let written = writer.put_scoped(name, value, &comment, scopes).await;
+        let id = writer.finish(written).await?;
+        let mut message = format!(
+            "{name} is set. Check: {}.",
+            checked.as_str().unwrap_or("done")
+        );
+        if let Some(c) = owner {
+            // The value is stored either way; what the owner does with it is reported.
+            match c.secret_set(cx, name, &id).await {
+                Ok(Value::String(done)) => message.push_str(&format!(" Then: {done}.")),
+                Ok(_) => {}
+                Err(e) => {
+                    message.push_str(&format!(" But {} could not use it yet: {e}.", c.name()))
+                }
+            }
+        }
+        Ok(json!({ "message": message }))
     }
 
     /// The capability that declares `name`: `None` for this capability's own parent token. A
@@ -328,6 +345,7 @@ mod tests {
         Slot {
             name: name.into(),
             purpose: format!("{name} purpose"),
+            scopes: &[secrets_store::WORKERS],
         }
     }
 

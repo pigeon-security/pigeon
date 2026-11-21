@@ -3,6 +3,7 @@
 //! its own short-lived token from the [`Account`]'s parent token and revokes it after.
 
 pub mod access;
+pub mod ai_gateway;
 pub mod artifacts;
 pub mod cloudflare;
 pub mod custom_domain;

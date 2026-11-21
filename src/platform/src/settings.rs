@@ -5,6 +5,7 @@ use pigeon_capabilities::Capability;
 use pigeon_capabilities::architecture::Architecture;
 use pigeon_capabilities::deploys::Deploys;
 use pigeon_capabilities::mirror::{self, Mirror};
+use pigeon_capabilities::models::{Dialect, Models, Provider};
 use pigeon_capabilities::oauth::OAuth;
 use pigeon_capabilities::passkeys::Passkeys;
 use pigeon_capabilities::public_host::{PublicHost, Retire};
@@ -100,6 +101,17 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
                 site_name: "pigeon".into(),
             },
             parent: PARENT_TOKEN.into(),
+        }),
+        Box::new(Models {
+            gateway: "pigeon".into(),
+            providers: vec![Provider {
+                slug: "anthropic",
+                alias: "default",
+                dialect: Dialect::Anthropic,
+                default_model: "claude-haiku-5-5",
+                key_help: "A Claude Platform API key, from the Claude Console's API keys page.",
+            }],
+            secrets_page: format!("https://{HOST}/secrets"),
         }),
         Box::new(Deploys),
         Box::new(Architecture),

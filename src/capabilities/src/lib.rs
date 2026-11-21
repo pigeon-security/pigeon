@@ -6,6 +6,7 @@
 pub mod architecture;
 pub mod deploys;
 pub mod mirror;
+pub mod models;
 pub mod oauth;
 pub mod passkeys;
 pub mod protected_host;
@@ -101,6 +102,12 @@ pub trait Capability {
     ) -> Call<'a> {
         Box::pin(async { Ok(Value::String("not checked".into())) })
     }
+
+    /// Acts on its secret `name` having just been written, as Secrets Store secret `id`: such
+    /// as handing it to the service that uses it. Answers what it did, for the person.
+    fn secret_set<'a>(&'a self, _cx: &'a Context<'a>, _name: &'a str, _id: &'a str) -> Call<'a> {
+        Box::pin(async { Ok(Value::Null) })
+    }
 }
 
 /// A secret a capability needs: a Secrets Store secret, bound to Workers by its name.
@@ -110,6 +117,8 @@ pub struct Slot {
     pub name: String,
     /// What it is and where to get one, for the person setting it.
     pub purpose: String,
+    /// The services that may read it, such as `workers` or `ai_gateway`.
+    pub scopes: &'static [&'static str],
 }
 
 /// The hostnames, Workers and resources a capability brings.
@@ -124,6 +133,8 @@ pub struct Footprint {
     pub mirrors: Vec<String>,
     /// Durable Objects, by binding.
     pub objects: Vec<String>,
+    /// AI gateways, by ID.
+    pub gateways: Vec<String>,
 }
 
 /// A hostname a capability serves.
