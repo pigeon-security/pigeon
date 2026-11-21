@@ -1033,20 +1033,50 @@ struct Column<'a> {
 }
 
 fn columns(m: &Model) -> Vec<Column<'_>> {
-    let mut out: Vec<Column> = m
-        .hostnames
-        .iter()
-        .map(|h| Column {
-            host: Some(h),
-            worker: m.workers.iter().find(|w| w.name == h.worker),
-        })
-        .collect();
-    for w in &m.workers {
-        if !m.hostnames.iter().any(|h| h.worker == w.name) {
+    let mut out: Vec<Column> = Vec::new();
+    for (wi, w) in m.workers.iter().enumerate() {
+        let first = m.workers.iter().position(|x| x.name == w.name) == Some(wi);
+        let before = out.len();
+        if first {
+            for h in m.hostnames.iter().filter(|h| h.worker == w.name) {
+                out.push(Column {
+                    host: Some(h),
+                    worker: Some(w),
+                });
+            }
+        }
+        if out.len() == before {
             out.push(Column {
                 host: None,
                 worker: Some(w),
             });
+        }
+    }
+    for h in &m.hostnames {
+        if !m.workers.iter().any(|w| w.name == h.worker) {
+            out.push(Column {
+                host: Some(h),
+                worker: None,
+            });
+        }
+    }
+    out
+}
+
+/// Runs of adjacent columns with the same Worker: (first, last) indices, inclusive.
+fn spans(cols: &[Column]) -> Vec<(usize, usize)> {
+    let mut out: Vec<(usize, usize)> = Vec::new();
+    for (i, c) in cols.iter().enumerate() {
+        let joined = match (out.last(), c.worker) {
+            (Some(&(_, end)), Some(w)) => cols[end].worker.is_some_and(|p| p.name == w.name),
+            _ => false,
+        };
+        if joined {
+            if let Some(last) = out.last_mut() {
+                last.1 = i;
+            }
+        } else {
+            out.push((i, i));
         }
     }
     out
@@ -1125,7 +1155,13 @@ fn diagram(m: &Model) -> String {
         s.label(cx + 10.0, y1 + group_h + 26.0, "HTTPS");
         let class = if h.access.is_empty() { "" } else { "dg-access" };
         s.card(x, y2, col_w, host_h, class);
-        s.text(x + 16.0, y2 + 32.0, "dg-t dg-big", &h.host, "start");
+        s.text(
+            x + 16.0,
+            y2 + 32.0,
+            "dg-t dg-big",
+            &fit(&h.host, col_w - 32.0, 11.0),
+            "start",
+        );
         let sub = if h.access.is_empty() {
             "public · no Access".to_string()
         } else {
@@ -1136,28 +1172,36 @@ fn diagram(m: &Model) -> String {
         } else {
             format!("{sub} · public: {}", h.public_paths.join(", "))
         };
-        s.text(x + 16.0, y2 + 56.0, "dg-s", &sub, "start");
-        let cw = chip_width(&h.by);
-        s.chip(x + col_w - 16.0 - cw, y2 + 14.0, &h.by, true);
+        let sub = format!("{sub} · by {}", h.by);
+        s.text(
+            x + 16.0,
+            y2 + 56.0,
+            "dg-s",
+            &fit(&sub, col_w - 32.0, 6.4),
+            "start",
+        );
     }
 
     // Layer 3: the Worker under each hostname.
     let y3 = y2 + host_h + 64.0;
     s.text(M + 4.0, y3 - 12.0, "dg-e", "LAYER 3 · WORKERS", "start");
     let worker_h = 164.0;
-    for (i, c) in cols.iter().enumerate() {
-        let Some(w) = c.worker else { continue };
-        let x = col_x(i);
-        let cx = x + col_w / 2.0;
-        if c.host.is_some() {
-            s.link(
-                &format!("M{cx:.0} {:.0}V{y3:.0}", y2 + host_h),
-                false,
-                false,
-            );
-            s.label(cx + 10.0, y2 + host_h + 30.0, "serves");
+    for (a, b) in spans(&cols) {
+        let Some(w) = cols[a].worker else { continue };
+        let x = col_x(a);
+        let ww = col_x(b) + col_w - x;
+        for (i, c) in cols.iter().enumerate().take(b + 1).skip(a) {
+            if c.host.is_some() {
+                let cx = col_x(i) + col_w / 2.0;
+                s.link(
+                    &format!("M{cx:.0} {:.0}V{y3:.0}", y2 + host_h),
+                    false,
+                    false,
+                );
+                s.label(cx + 10.0, y2 + host_h + 30.0, "serves");
+            }
         }
-        s.card(x, y3, col_w, worker_h, "dg-worker");
+        s.card(x, y3, ww, worker_h, "dg-worker");
         s.text(
             x + 16.0,
             y3 + 32.0,
@@ -1171,8 +1215,8 @@ fn diagram(m: &Model) -> String {
             (None, true) => "workers.dev on".into(),
             (None, false) => "workers.dev off".into(),
         });
-        s.chips(x + 16.0, y3 + 46.0, x + col_w - 16.0, &flags, false);
-        s.stack(x + 16.0, y3 + 84.0, col_w - 32.0, 62.0);
+        s.chips(x + 16.0, y3 + 46.0, x + ww - 16.0, &flags, false);
+        s.stack(x + 16.0, y3 + 84.0, ww - 32.0, 62.0);
         let routes = format!("{} routes", w.routes.len());
         s.text(x + 32.0, y3 + 108.0, "dg-t", &routes, "start");
         let tools = if w.tools.is_empty() {
@@ -1277,7 +1321,7 @@ fn diagram(m: &Model) -> String {
         }
         s.link(&format!("M{left:.0} {bus_y:.0}H{right:.0}"), false, true);
         s.text(
-            users[0] - 10.0,
+            right,
             bus_y - 8.0,
             "dg-lbl",
             "bindings · minted tokens",
