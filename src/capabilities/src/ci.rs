@@ -533,17 +533,24 @@ impl Ci {
         let Some(hash) = presented.as_deref().and_then(token::lookup_hash) else {
             return Response::error("a job token is required", 401);
         };
+        let refused =
+            || Response::error("the job token is unknown, expired or not this job's", 401);
+        // The token is checked before the body is read, so a caller without one learns
+        // nothing from what the body gets wrong.
         if !token::reaches(&req.path()) {
-            return Response::error("not found", 404);
+            return refused();
+        }
+        let grant: Option<token::Grant> =
+            serde_json::from_value(scheduler(env, "grant", json!({ "hash": hash })).await?)
+                .unwrap_or(None);
+        let now = worker::js_sys::Date::now() as i64;
+        if !grant.is_some_and(|g| token::allows_job(&g, now, job)) {
+            return refused();
         }
         let body: Value = req.json().await.unwrap_or(Value::Null);
-        let report = match body["state"].as_str() {
-            Some("running") => Report::Started,
-            Some("finished") => match body["passed"].as_bool() {
-                Some(passed) => Report::Finished { passed },
-                None => return Response::error("`passed` must be true or false", 400),
-            },
-            _ => return Response::error("`state` must be running or finished", 400),
+        let report = match runner_report(&body) {
+            Ok(r) => r,
+            Err(why) => return Response::error(why, 400),
         };
         let detail: Option<String> = body["detail"]
             .as_str()
@@ -555,7 +562,7 @@ impl Ci {
         )
         .await?;
         if answer.is_null() {
-            return Response::error("the job token is unknown, expired or not this job's", 401);
+            return refused();
         }
         Response::from_json(&answer)
     }
@@ -572,6 +579,18 @@ impl Ci {
         }
         // `/ci/token`, the OIDC exchange, arrives with the Buildkite connector.
         Response::error("not found", 404)
+    }
+}
+
+/// What a runner's report body says, once its token has been checked.
+fn runner_report(body: &Value) -> std::result::Result<Report, &'static str> {
+    match body["state"].as_str() {
+        Some("running") => Ok(Report::Started),
+        Some("finished") => match body["passed"].as_bool() {
+            Some(passed) => Ok(Report::Finished { passed }),
+            None => Err("`passed` must be true or false"),
+        },
+        _ => Err("`state` must be running or finished"),
     }
 }
 
@@ -763,6 +782,20 @@ mod tests {
         assert_eq!(tags(None, Some("  ")), (None, None, None));
         let long = "x".repeat(500);
         assert_eq!(tags(None, Some(&long)).2.unwrap().len(), MAX_TASK_CHARS);
+    }
+
+    #[test]
+    fn a_runner_reports_running_or_a_result() {
+        assert_eq!(
+            runner_report(&json!({ "state": "running" })),
+            Ok(Report::Started)
+        );
+        assert_eq!(
+            runner_report(&json!({ "state": "finished", "passed": false })),
+            Ok(Report::Finished { passed: false })
+        );
+        assert!(runner_report(&json!({ "state": "finished" })).is_err());
+        assert!(runner_report(&Value::Null).is_err());
     }
 
     #[test]
