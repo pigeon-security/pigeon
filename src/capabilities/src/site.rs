@@ -1,14 +1,13 @@
 //! The public site on a zone's apex, served by the hosting Worker itself, by host: the
 //! architecture page and its model, rendered once per isolate from the sources the Worker was
-//! built with, so each deploy serves its own. `site_publish` moves the apex onto this Worker;
-//! `site_retire` deletes the Worker that served it before.
+//! built with, so each deploy serves its own. `site_publish` moves the apex onto this Worker.
 
 use std::sync::OnceLock;
 
 use pigeon_core::mcp::Tool;
-use pigeon_core::{custom_domain, design, workers, zones};
+use pigeon_core::{custom_domain, design, zones};
 use serde_json::{Value, json};
-use worker::{Error, Headers, Request, Response, Result};
+use worker::{Headers, Request, Response, Result};
 
 use crate::architecture;
 use crate::{Call, Capability, Context, Footprint, HostFootprint, Hosted, to_value, unknown};
@@ -19,8 +18,6 @@ pub struct Site {
     pub zone: String,
     /// The Worker serving it: the hosting Worker itself.
     pub worker: String,
-    /// A Worker that used to serve the apex, deleted by `site_retire`.
-    pub old_worker: Option<String>,
 }
 
 /// The site's pages, by path.
@@ -96,19 +93,6 @@ impl Site {
             "custom_domain": custom_domain,
         }))
     }
-
-    /// Deletes Worker `old`, but only once the apex's custom domain is on this Worker.
-    async fn retire_worker(&self, cx: &Context<'_>, old: &str) -> Result<Value> {
-        let serving = custom_domain::serving(cx.account, &self.zone).await?;
-        if serving.as_deref() != Some(self.worker.as_str()) {
-            return Err(Error::RustError(format!(
-                "{} is served by {serving:?}, not {}: run site_publish first",
-                self.zone, self.worker
-            )));
-        }
-        let deleted = workers::delete(cx.account, old).await?;
-        Ok(json!({ "old_worker": old, "deleted": deleted, "serving": serving }))
-    }
 }
 
 impl Capability for Site {
@@ -117,28 +101,19 @@ impl Capability for Site {
     }
 
     fn tools(&self) -> Vec<Tool> {
-        let mut tools = vec![Tool::bare(
+        vec![Tool::bare(
             "site_publish",
             "Serve the public site on the zone's apex from this Worker, moving the apex's custom \
              domain onto it. Changes no Access setup.",
-        )];
-        if self.old_worker.is_some() {
-            tools.push(Tool::bare(
-                "site_retire",
-                "Delete the Worker that used to serve the apex, once the apex's custom domain is \
-                 on this Worker; refuses otherwise.",
-            ));
-        }
-        tools
+        )]
     }
 
     fn call<'a>(&'a self, cx: &'a Context<'a>, tool: &'a str, _args: &'a Value) -> Call<'a> {
         Box::pin(async move {
-            match (tool, &self.old_worker) {
-                ("site_publish", _) => Ok(to_value(self.publish(cx).await?)),
-                ("site_retire", Some(old)) => Ok(to_value(self.retire_worker(cx, old).await?)),
-                _ => Err(unknown(tool)),
+            if tool != "site_publish" {
+                return Err(unknown(tool));
             }
+            Ok(to_value(self.publish(cx).await?))
         })
     }
 

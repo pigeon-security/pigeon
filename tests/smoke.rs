@@ -1566,3 +1566,63 @@ fn proxy_and_job_tokens() {
         assert!(!token::reaches(p), "{p}");
     }
 }
+
+/// The apex (pigeon.dev) answers only the site's pages; the platform's paths never answer there.
+#[test]
+fn site_on_the_apex() {
+    use pigeon_capabilities::Capability;
+    use pigeon_capabilities::site::{PAGES, Site, is_apex, page};
+
+    assert!(is_apex("pigeon.dev", "pigeon.dev"), "the apex");
+    assert!(is_apex("PIGEON.dev", "pigeon.dev"), "ignoring case");
+    for host in [
+        "platform.pigeon.dev",
+        "proxy.pigeon.dev",
+        "www.pigeon.dev",
+        "pigeon.dev.evil.com",
+    ] {
+        assert!(!is_apex(host, "pigeon.dev"), "{host} is not the apex");
+    }
+
+    for (i, path) in PAGES.iter().enumerate() {
+        assert_eq!(page("GET", path), Some(i), "GET {path}");
+        assert_eq!(page("HEAD", path), Some(i), "HEAD {path}");
+    }
+    for path in [
+        "/mcp",
+        "/auth/",
+        "/oauth/token",
+        "/.well-known/oauth-authorization-server",
+        "/secrets",
+        "/tokens",
+        "/health",
+        "/git/x",
+        "/cf/client/v4",
+        "/settings",
+        "/architecture.json/",
+        "//",
+    ] {
+        assert_eq!(page("GET", path), None, "GET {path} on the apex");
+    }
+    for (method, path) in [
+        ("POST", "/"),
+        ("PUT", "/architecture.json"),
+        ("DELETE", "/"),
+    ] {
+        assert_eq!(page(method, path), None, "{method} {path} on the apex");
+    }
+
+    let site = Site {
+        zone: "pigeon.dev".into(),
+        worker: "pigeon-platform".into(),
+    };
+    let fp = site.footprint();
+    assert_eq!(fp.hostnames.len(), 1, "one hostname");
+    let h = &fp.hostnames[0];
+    assert_eq!(h.host, "pigeon.dev", "the apex");
+    assert_eq!(h.worker, "pigeon-platform", "served by the platform");
+    assert!(h.access.is_empty(), "in public");
+    assert!(fp.workers.is_empty(), "no Worker of its own");
+    let tools: Vec<String> = site.tools().iter().map(|t| t.name.to_string()).collect();
+    assert_eq!(tools, ["site_publish"], "site_publish only");
+}

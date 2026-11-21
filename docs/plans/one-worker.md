@@ -1,6 +1,6 @@
 # One Worker: pigeon.dev served by pigeon-platform
 
-Status: phase 1 ready on `claude/one-worker`, **on hold**: the parent session paused all landings and Access, route and DNS changes on 2026-11-21 after the Access apps on pigeon.dev were found deleted. Phases 2 to 4 to come.
+Status: deployed (phases 1 to 4). The Access end state was agreed on 2026-11-21: `pigeon.dev` and `platform.pigeon.dev` both stay public at the edge.
 
 pigeon.dev used to be served by a Worker of its own, `pigeon`. The `site` capability rendered
 the architecture page, uploaded it as that Worker's module with `pigeon_core::workers::upload`,
@@ -10,7 +10,7 @@ The goal: one Worker, `pigeon-platform`, serves `platform.pigeon.dev`, `proxy.pi
 `pigeon.dev`. It picks what to serve by the request's host. The old `pigeon` Worker is retired
 once the apex is live on the platform.
 
-## What is true today (checked 2026-11-21)
+## What was true before (checked 2026-11-21)
 
 - `platform.pigeon.dev` is **not** behind Access. `PublicHost` (`setup_platform`) retired its
   Access applications. Every path checks its callers itself: `/mcp` and `/oauth` with OAuth,
@@ -42,10 +42,8 @@ once the apex is live on the platform.
 The apex is checked before any capability route. The console, OAuth and MCP are therefore
 unreachable on the public host, and nothing about the platform host changes.
 
-The rule is two pure functions, `site::is_apex(host, apex)` and `site::page(method, path)`.
-A smoke-suite check of them was written and passed locally, but it is not committed: the
-policy answers `add_test` on `tests/smoke.rs` with "not in policy" (deny). The live checks in
-phase 2 cover the same cases.
+The rule is two pure functions, `site::is_apex(host, apex)` and `site::page(method, path)`,
+checked by the smoke suite's `site_on_the_apex`.
 
 ### Rendering
 
@@ -118,4 +116,24 @@ one API call, and it is deleted only after the new Worker is seen serving.
 
 ## Log
 
-(Filled in as phases land.)
+- **Phase 1** landed as `8b20256` and `4d55d54` (after the Access-safety landings `9490e8a` and
+  `0023414`). It deployed with no live change.
+- **Departure:** the architecture page's `describe` never finished on the deployed code
+  (exponential `depth_of`). Cutting over before that was fixed would have served 503 on the
+  apex, so the cutover waited for the architecture plan's landing `0c9db60`. `site::render`
+  now reads that plan's shared memo, `architecture::built`.
+- **Phase 2:** the parent session ran `site_publish` at 20:25 UTC on the person's go-ahead.
+  Checked live: `/` and `/architecture.json` answer 200 with `X-Served-By: pigeon-platform` and
+  name commit `0c9db60`. On the apex, `/mcp`, `/auth/`, `/oauth/token`, `/.well-known/…`,
+  `/health`, `/git/x`, `/cf/client/v4`, `/settings`, `/tokens`, `POST /` and `POST /mcp` answer
+  404. `platform.pigeon.dev` and `proxy.pigeon.dev` are unchanged.
+- **Phase 3:** the parent session ran `site_retire` (this planner's session was not permitted
+  to call it). It answered `{"deleted":true,"old_worker":"pigeon","serving":"pigeon-platform"}`,
+  and the apex served throughout.
+- **Phase 4:** this clean-up.
+- The smoke-suite check `site_on_the_apex` waited for the person's rule `smoke-suite-grows`
+  (landed as `5864204`); before that, the policy answered `add_test` with "not in policy". It
+  lands with phase 4.
+- Executors: two `claude-sonnet-5-5` jobs (the core helpers and the site rewrite, both used after
+  review) and one `claude-haiku-5-5` job (the smoke check; cut off at its token limit and
+  rewritten by hand). About 7.4k tokens in and 8.8k out in all.

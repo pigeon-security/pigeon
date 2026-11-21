@@ -80,13 +80,11 @@ const fn mirrors_no_session_branch(branches: &[&str]) -> bool {
     true
 }
 
-/// The public site on the zone's apex, served by this Worker. `pigeon` is the Worker that served
-/// it before, which `site_retire` deletes.
+/// The public site on the zone's apex, served by this Worker.
 pub fn site() -> Site {
     Site {
         zone: ZONE.into(),
         worker: WORKER.into(),
-        old_worker: Some("pigeon".into()),
     }
 }
 

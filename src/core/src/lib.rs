@@ -26,7 +26,6 @@ pub mod secrets_store;
 pub mod sign;
 pub mod tokens;
 pub mod webauthn;
-pub mod workers;
 pub mod zones;
 
 /// The Cloudflare account a block acts on. Cloned only to finish work after an answer has
