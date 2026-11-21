@@ -46,7 +46,10 @@ impl Capability for Architecture {
         _person: &'a User,
         _query: &'a Value,
     ) -> Call<'a> {
-        Box::pin(async move { Ok(serde_json::json!({ "html": built(cx.hosted).html })) })
+        Box::pin(async move {
+            let built = built(cx.hosted);
+            Ok(serde_json::json!({ "html": built.html, "built_from": built.commit }))
+        })
     }
 
     fn tools(&self) -> Vec<Tool> {
@@ -78,6 +81,8 @@ pub struct Built {
     /// The whole page, as the site serves it.
     pub page: String,
     pub digest: String,
+    /// The commit it was built from, cut to 12 characters; empty for a local build.
+    pub commit: String,
 }
 
 /// The architecture of the Worker `hosted` describes, built on first use.
@@ -95,6 +100,7 @@ pub fn built(hosted: &Hosted) -> &'static Built {
             html: render(&model),
             page: page(&model),
             digest: model.digest.clone(),
+            commit: model.commit.chars().take(12).collect(),
         }
     })
 }
