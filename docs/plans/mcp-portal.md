@@ -1,9 +1,10 @@
 # External MCP access through a Cloudflare MCP server portal
 
-Status: **phases 0 and 1 done; phase 2 (the settings generator) landing**. The portal
-`pigeon` is live at `https://mcp.pigeon.dev/mcp` with the server `pigeon`, and the claude.ai
-connector "Pigeon MCP" reaches pigeon through it. The old "Pigeon" connector stays until
-cutover (phase 4).
+Status: **phases 0 to 2 deployed** (21 November). The portal `pigeon` is live at
+`https://mcp.pigeon.dev/mcp` with the server `pigeon`; the claude.ai connector "Pigeon MCP"
+reaches pigeon through it; the settings generator names its tools (landed with the person's
+passkey). Phase 3 (`call` off, a tool sync at deploy) is optional and waits on the person's
+go-ahead; phase 4, the cutover, waits until the connector has been used for a few days.
 
 Sources: Cloudflare's MCP portals page
 (https://developers.cloudflare.com/cloudflare-one/access-controls/ai-controls/mcp-portals/), its
