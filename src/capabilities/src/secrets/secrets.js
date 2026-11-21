@@ -1,6 +1,8 @@
 // The secrets page: sign in with a passkey to see the list, then replace a value with a passkey
 // approval of its own. The approval's challenge is bound to the secret's name and the SHA-256 of
 // the new value, worked out here, so the value itself is sent once, to be checked and written.
+// Its own scope: passkey.js declares the same names at the top level of the shared global scope.
+(() => {
 const { b64u, post, approve, say } = window.pigeonPasskey;
 
 const list = document.querySelector("[data-list]");
@@ -113,3 +115,4 @@ viewButton.addEventListener("click", async () => {
     viewButton.disabled = false;
   }
 });
+})();
