@@ -320,13 +320,14 @@ depend on the allowlist entry; the hand-back will say what was checked.
 
 ## Risks
 
-- **A proxy credential is effectively as powerful as the Cloudflare account.** Whoever holds
+- **Accepted risk (the person's decision, during phase 4): a proxy credential is effectively
+  as powerful as the Cloudflare account.** Whoever holds
   one can upload and deploy `pigeon-platform` through `/cf/`, and `pigeon-platform` holds the
   parent token, so new code could use that token for anything. Until that changes: keep
   credential lifetimes short, revoke those not in use, and watch the `cf` audit lines. A
   possible mitigation: the proxy holds the final `POST …/deployments` (and the `PUT` upload,
-  which deploys at once) until a person approves it with a passkey. Not built; for the
-  person to decide.
+  which deploys at once) until a person approves it with a passkey. The person chose to
+  leave it as it is for now: the mitigation is recorded here and not built.
 - A newer wrangler may add a call to `wrangler deploy`; it fails closed, naming the call, and
   needs an allowlist entry after review.
 - The push rules rely on Artifacts' receive-pack checking each update's old value, so a race

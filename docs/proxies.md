@@ -148,13 +148,13 @@ A line never holds a token, hash, header or body.
 
 ## Risks
 
-Whoever holds a proxy credential can upload and deploy `pigeon-platform`, and that Worker holds the parent token. A proxy credential is therefore effectively as powerful as the Cloudflare account.
+Whoever holds a proxy credential can upload and deploy `pigeon-platform`, and that Worker holds the parent token. A proxy credential is therefore effectively as powerful as the Cloudflare account. This is an accepted risk.
 
 - Keep lifetimes short.
 - Revoke credentials that are not in use.
 - Watch the audit lines for `cf` deploys.
 
-A passkey approval before the final deployment call is a possible later mitigation. It is not built.
+A passkey approval held on the final deployment call is a possible mitigation. It was considered and not built; the risk is accepted for now.
 
 The MCP tools `source_token` and `deploy_token` still exist, for people and for the deploying session. Retiring them is a later decision.
 
