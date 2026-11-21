@@ -1,7 +1,11 @@
 # The console
 
-Status: planned, phase 1 not started. Phases are handed back one at a time; each is merged and
-deployed by the parent session before the next starts.
+Status: all three phases built and handed back together, at the person's request, awaiting
+deploy. Departures from the plan: the three passkey-bound writes live in `console/writes.rs`
+(pure: names, targets, purposes) with their handlers in `console.rs`, written by this session;
+the writes' routes are `POST /console/write/{passkey-remove|app-disconnect|invite}/{begin|finish}`
+with `{target}`; the Architecture tab and the CI section answer `{html}`, which the shell places
+as it is.
 
 Design: [pigeon Console mockup](https://claude.ai/artifact/9HAYNKWic1VgqAUBDZemtg), agreed with
 the person on 2026-11-21. This plan turns it into steps. The mockup's numbers and people are
