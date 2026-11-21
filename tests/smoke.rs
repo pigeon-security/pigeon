@@ -1866,3 +1866,154 @@ fn linked_account_github_app_and_site_layout() {
         RoutePlan::Present("r1".into())
     );
 }
+
+#[test]
+fn instances_are_data_a_person_approves() {
+    use pigeon_capabilities::instances::record::{
+        self, AccountRef, Instance, Rules, Target, diff, reserved_labels, site_for_host, validate,
+    };
+    use pigeon_capabilities::instances::{template, write_purpose};
+
+    // The noisypigeon record as the person will approve it: a linked account, its zone, and the
+    // blog with a preview, the zone (off until the cutover) and the subdomain `noisypigeon`.
+    let mut noisy: Instance = serde_json::from_value(template()).unwrap();
+    noisy.id = "noisypigeon".into();
+    noisy.title = "noisypigeon".into();
+    noisy.zones = vec!["noisypigeon.com".into()];
+    noisy.sites[0].build = Some("workloads/noisypigeon.com/blog".into());
+    noisy.sites[0].targets = vec![
+        Target::Preview,
+        Target::Zone {
+            hostname: "noisypigeon.com".into(),
+            route: "noisypigeon.com/*".into(),
+            enabled: false,
+        },
+        Target::Subdomain {
+            label: "noisypigeon".into(),
+        },
+    ];
+    let platform: Instance = serde_json::from_value(json!({
+        "id": "pigeon-security/platform", "title": "pigeon",
+        "account": { "kind": "home" }, "zones": ["pigeon.dev"],
+        "repo": { "kind": "artifacts", "namespace": "pigeon-security", "repo": "pigeon" }
+    }))
+    .unwrap();
+    let reserved = reserved_labels(
+        &[
+            "platform.pigeon.dev".into(),
+            "proxy.pigeon.dev".into(),
+            "pigeon.dev".into(),
+        ],
+        "pigeon.dev",
+    );
+    assert!(reserved.contains(&"platform".to_string()) && reserved.contains(&"mcp".to_string()));
+    let rules = Rules {
+        platform_zone: "pigeon.dev",
+        reserved_labels: &reserved,
+    };
+    assert_eq!(
+        validate(&noisy, std::slice::from_ref(&platform), &rules),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        validate(&platform, &[noisy.clone()], &rules),
+        Vec::<String>::new()
+    );
+
+    // What pigeon may be given is checked: its own names, hostnames in the instance's zones,
+    // no platform hostnames, no subdomain taken twice, no unknown fields.
+    let refused = |change: &dyn Fn(&mut Instance), why: &str| {
+        let mut bad = noisy.clone();
+        change(&mut bad);
+        let problems = validate(&bad, std::slice::from_ref(&platform), &rules);
+        assert!(
+            problems.iter().any(|p| p.contains(why)),
+            "{why}: {problems:?}"
+        );
+    };
+    refused(
+        &|i| i.sites[0].bucket = "blog-noisypigeon-com".into(),
+        "pigeon-",
+    );
+    refused(&|i| i.sites[0].worker = "my-worker".into(), "pigeon-");
+    refused(
+        &|i| {
+            i.sites[0].targets[1] = Target::Zone {
+                hostname: "evil.example".into(),
+                route: "evil.example/*".into(),
+                enabled: true,
+            }
+        },
+        "not in this instance's zones",
+    );
+    refused(
+        &|i| {
+            i.sites[0].targets[2] = Target::Subdomain {
+                label: "platform".into(),
+            }
+        },
+        "reserved",
+    );
+    refused(&|i| i.zones.push("pigeon.dev".into()), "platform zone");
+    refused(
+        &|i| {
+            i.account = AccountRef::Linked {
+                account_id: Some("not-hex".into()),
+            }
+        },
+        "32 lowercase hex",
+    );
+    refused(
+        &|i| i.sites[0].build = Some("../etc".into()),
+        "relative path",
+    );
+    let mut taken = platform.clone();
+    taken.sites = noisy.sites.clone();
+    taken.sites[0].targets = vec![Target::Subdomain {
+        label: "noisypigeon".into(),
+    }];
+    let problems = validate(&taken, &[noisy.clone()], &rules);
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.contains("already used by instance noisypigeon")),
+        "{problems:?}"
+    );
+    let unknown = json!({ "id": "x", "title": "x", "account": { "kind": "home" }, "extra": 1 });
+    assert!(
+        serde_json::from_value::<Instance>(unknown).is_err(),
+        "unknown fields refused"
+    );
+
+    // The person sees exactly what changes, and the approval names the record and its hash.
+    let mut on = noisy.clone();
+    on.sites[0].targets[1] = Target::Zone {
+        hostname: "noisypigeon.com".into(),
+        route: "noisypigeon.com/*".into(),
+        enabled: true,
+    };
+    on.version = 7;
+    let changes = diff(Some(&noisy), &on);
+    assert_eq!(changes.len(), 1, "the version is not a change: {changes:?}");
+    assert_eq!(changes[0].path, "sites[0].targets[1].enabled");
+    assert_eq!(
+        (changes[0].from.clone(), changes[0].to.clone()),
+        (json!(false), json!(true))
+    );
+    assert!(
+        diff(None, &noisy).len() > 10,
+        "a new record lists every value"
+    );
+    assert_ne!(record::digest(&noisy), record::digest(&on));
+    assert_eq!(
+        write_purpose("noisypigeon", "abc"),
+        "instance:noisypigeon:abc"
+    );
+
+    // The subdomain is served by host, from the data alone.
+    let all = [platform, noisy];
+    let (i, site) = site_for_host(&all, "NoisyPigeon.pigeon.dev", "pigeon.dev").unwrap();
+    assert_eq!((i.id.as_str(), site.name.as_str()), ("noisypigeon", "blog"));
+    assert!(site_for_host(&all, "platform.pigeon.dev", "pigeon.dev").is_none());
+    assert!(site_for_host(&all, "noisypigeon.pigeon.dev.evil.com", "pigeon.dev").is_none());
+}

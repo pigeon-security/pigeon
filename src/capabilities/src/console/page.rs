@@ -11,13 +11,14 @@ use worker::{Headers, Response, Result};
 pub const CSP: &str = "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 /// The scripts the page loads, in order; `passkey.js` first, since the others use its helpers.
-pub const SCRIPTS: [&str; 6] = [
+pub const SCRIPTS: [&str; 7] = [
     "/auth/passkey.js",
     "/console/app.js",
     "/console/chart.js",
     "/console/keys.js",
     "/console/users.js",
     "/console/approvals.js",
+    "/console/instances.js",
 ];
 
 /// The console's stylesheet, on top of the design system's.

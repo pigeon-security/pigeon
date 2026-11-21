@@ -1,4 +1,4 @@
-//! The console's tabs and the sections capabilities put in them. A tab is one of four fixed
+//! The console's tabs and the sections capabilities put in them. A tab is one of five fixed
 //! pages, listed in the header's order (Approvals only while something waits). A section is one
 //! part of a tab; several capabilities may fill the same one, as `secrets` and `proxy` both fill
 //! Credentials, and the console lists it once with every owner. Pure: no I/O and no `worker` types.
@@ -11,6 +11,8 @@ use serde::Serialize;
 pub enum Tab {
     /// What waits for the person's passkey; listed only while something does.
     Approvals,
+    /// What pigeon runs, here and in linked accounts.
+    Instances,
     Architecture,
     /// Secrets and credentials, people, and delegation.
     Access,
@@ -19,12 +21,19 @@ pub enum Tab {
 
 impl Tab {
     /// Every tab, in the header's order.
-    pub const ALL: [Tab; 4] = [Tab::Approvals, Tab::Architecture, Tab::Access, Tab::Cost];
+    pub const ALL: [Tab; 5] = [
+        Tab::Approvals,
+        Tab::Instances,
+        Tab::Architecture,
+        Tab::Access,
+        Tab::Cost,
+    ];
 
-    /// Its path: `/approvals`, `/architecture`, `/access`, `/cost`.
+    /// Its path: `/approvals`, `/instances`, `/architecture`, `/access`, `/cost`.
     pub fn path(self) -> &'static str {
         match self {
             Tab::Approvals => "/approvals",
+            Tab::Instances => "/instances",
             Tab::Architecture => "/architecture",
             Tab::Access => "/access",
             Tab::Cost => "/cost",
@@ -35,6 +44,7 @@ impl Tab {
     pub fn title(self) -> &'static str {
         match self {
             Tab::Approvals => "Approvals",
+            Tab::Instances => "Instances",
             Tab::Architecture => "Architecture",
             Tab::Access => "Access",
             Tab::Cost => "Cost",

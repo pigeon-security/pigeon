@@ -12,6 +12,7 @@ pub mod dispatch;
 pub mod expiry;
 pub mod git_proxy;
 pub mod images;
+pub mod instances;
 pub mod land;
 pub mod mirror;
 pub mod models;

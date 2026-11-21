@@ -1,6 +1,6 @@
 # Linked accounts, instances and sites: noisypigeon.com through pigeon
 
-Status: **phase 1 (core blocks) built; phases 2 onward to come** (2026-11-21). Nothing is built. Branch
+Status: **phase 1 deployed; phase 2a (instance records and the Instances tab) built** (2026-11-21). Nothing is built. Branch
 `claude/linked-accounts`. Phase 0 has tests only the person can run.
 
 ## Goal
@@ -655,6 +655,19 @@ not by this session.
 
 ## Log
 
+- 2026-11-21: phase 2a built on `claude/instances`. Capability `instances`:
+  - `record` is pure: the shape, validation, digest, diff and lookup of subdomains by host.
+  - Records are kept in the Directory. A record changes through `/instance/put/{begin,finish}`,
+    with the signed-in person's passkey bound to the record's hash, after they see the diff.
+    The edit must be from the record's current version.
+  - The console gains a fifth tab, **Instances**, with a switcher and a JSON editor.
+  - `instances_list` is read-only.
+  - Smoke scenario: `instances_are_data_a_person_approves`. The suite runs in 21 s.
+  - Departure: agent proposals (`instance_propose`) wait for the shared approvals table (the
+    tool-approvals plan, section 4). Until then only the person edits, on the console.
+  - Executors: `claude-sonnet-5-5` for `record.rs` (one fix for a dependency the crate lacks)
+    and `instances.js` (write paths moved to `/instance/` so they don't fall under the
+    `/instances` tab route).
 - 2026-11-21: the person, through the parent: per-account values such as subdomains are data,
   not code; the first subdomain is `noisypigeon`. Decision 7 was rewritten: the shape in code,
   the values in Directory records, changed by `instance_propose` and the person's passkey.

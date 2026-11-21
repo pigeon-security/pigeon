@@ -43,6 +43,7 @@ const CHART: &str = include_str!("console/chart.js");
 const KEYS: &str = include_str!("console/keys.js");
 const USERS: &str = include_str!("console/users.js");
 const APPROVALS: &str = include_str!("console/approvals.js");
+const INSTANCES: &str = include_str!("console/instances.js");
 const STYLES: &str = include_str!("console/console.css");
 const ICON: &[u8] = include_bytes!("console/icon.png");
 
@@ -287,6 +288,7 @@ impl Console {
                 "/console/keys.js" => page::asset(KEYS, "text/javascript; charset=utf-8"),
                 "/console/users.js" => page::asset(USERS, "text/javascript; charset=utf-8"),
                 "/console/approvals.js" => page::asset(APPROVALS, "text/javascript; charset=utf-8"),
+                "/console/instances.js" => page::asset(INSTANCES, "text/javascript; charset=utf-8"),
                 p if sections::moved(p).is_some() => {
                     page::redirect(sections::moved(p).unwrap_or("/"))
                 }
@@ -491,6 +493,7 @@ impl Capability for Console {
         vec![
             "/console/",
             "/approvals",
+            "/instances",
             "/architecture",
             "/access",
             "/cost",

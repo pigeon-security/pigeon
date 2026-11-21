@@ -13,6 +13,7 @@ use pigeon_capabilities::deploys::Deploys;
 use pigeon_capabilities::dispatch::Dispatch;
 use pigeon_capabilities::git_proxy::GitProxy;
 use pigeon_capabilities::images::Images;
+use pigeon_capabilities::instances::Instances;
 use pigeon_capabilities::land::{self, Land};
 use pigeon_capabilities::mirror::{self, Mirror};
 use pigeon_capabilities::models::{Dialect, Models, Provider};
@@ -206,6 +207,15 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
         // `call {tool, args}`: any tool above by name, for sessions whose tool list predates it.
         Box::new(Dispatch),
         Box::new(Architecture),
+        // Instances: what pigeon runs, here and in linked accounts. Only their shape is code;
+        // every value is data a person approves on the console with their passkey.
+        Box::new(Instances {
+            zone: ZONE.into(),
+            passkeys: Passkeys {
+                host: HOST.into(),
+                site_name: "pigeon".into(),
+            },
+        }),
         // The console: one page at the root, signed in to once with a passkey.
         Box::new(Console {
             host: HOST.into(),
