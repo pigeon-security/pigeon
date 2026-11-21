@@ -16,7 +16,7 @@ use serde::Serialize;
 use serde_json::Value;
 use worker::{Error, Result};
 
-use crate::{Call, Capability, Context, Footprint, to_value, unknown};
+use crate::{Call, Capability, Context, Footprint, Slot, to_value, unknown};
 
 /// The mirror as a capability: on every push to the source's branches or tags, and on demand.
 pub struct Mirror {
@@ -57,6 +57,43 @@ impl Capability for Mirror {
             "Bring the read-only copy up to the Artifacts repository now; it also runs on every \
              push.",
         )]
+    }
+
+    fn secrets(&self) -> Vec<Slot> {
+        vec![Slot {
+            name: self.token_binding.clone(),
+            purpose: format!(
+                "Pushes to the read-only copy at {}. A GitHub fine-grained token on that \
+                 repository only, with Contents read and write.",
+                self.url
+            ),
+        }]
+    }
+
+    /// The copy must offer `value` its push service, which GitHub does only for a token that
+    /// can push.
+    fn check_secret<'a>(
+        &'a self,
+        _cx: &'a Context<'a>,
+        _name: &'a str,
+        value: &'a str,
+    ) -> Call<'a> {
+        Box::pin(async move {
+            let remote = Remote {
+                url: self.url.clone(),
+                authorization: format!(
+                    "Basic {}",
+                    git::base64(format!("x-access-token:{value}").as_bytes())
+                ),
+            };
+            let refs = git::refs(&remote, "git-receive-pack")
+                .await
+                .map_err(|e| Error::RustError(format!("the copy refused this token: {e}")))?;
+            Ok(Value::String(format!(
+                "the copy accepts pushes with it ({} refs)",
+                refs.refs.len()
+            )))
+        })
     }
 
     fn call<'a>(&'a self, cx: &'a Context<'a>, tool: &'a str, _args: &'a Value) -> Call<'a> {

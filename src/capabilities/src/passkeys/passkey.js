@@ -71,6 +71,9 @@ async function approve(o) {
   };
 }
 
+// For other pages' scripts, such as the secrets page, which run their own ceremonies.
+window.pigeonPasskey = { b64u, post, approve, say };
+
 for (const button of document.querySelectorAll("button[data-base]")) {
   button.addEventListener("click", async () => {
     const { base, ceremony, key, value } = button.dataset;

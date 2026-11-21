@@ -10,6 +10,7 @@ pub mod oauth;
 pub mod passkeys;
 pub mod protected_host;
 pub mod public_host;
+pub mod secrets;
 pub mod site;
 pub mod source;
 pub mod users;
@@ -84,6 +85,31 @@ pub trait Capability {
     fn footprint(&self) -> Footprint {
         Footprint::default()
     }
+
+    /// The secrets it needs set, which the `secrets` page lists and lets a person change.
+    fn secrets(&self) -> Vec<Slot> {
+        Vec::new()
+    }
+
+    /// Checks `value` would work as its secret `name` before it is written, so a mistyped value
+    /// never replaces a working one. Answers what it found, for the person.
+    fn check_secret<'a>(
+        &'a self,
+        _cx: &'a Context<'a>,
+        _name: &'a str,
+        _value: &'a str,
+    ) -> Call<'a> {
+        Box::pin(async { Ok(Value::String("not checked".into())) })
+    }
+}
+
+/// A secret a capability needs: a Secrets Store secret, bound to Workers by its name.
+#[derive(Serialize, Clone)]
+pub struct Slot {
+    /// Such as `GITHUB_MIRROR_TOKEN`.
+    pub name: String,
+    /// What it is and where to get one, for the person setting it.
+    pub purpose: String,
 }
 
 /// The hostnames, Workers and resources a capability brings.

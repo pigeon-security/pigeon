@@ -24,6 +24,9 @@ pub struct Secret {
     pub name: String,
     #[serde(default)]
     pub comment: Option<String>,
+    /// When its value last changed, as Cloudflare reports it.
+    #[serde(default)]
+    pub modified: Option<String>,
 }
 
 /// Writes to the account's store on a minted token. Call [`Writer::finish`] to revoke it.

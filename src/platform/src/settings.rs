@@ -8,6 +8,7 @@ use pigeon_capabilities::mirror::{self, Mirror};
 use pigeon_capabilities::oauth::OAuth;
 use pigeon_capabilities::passkeys::Passkeys;
 use pigeon_capabilities::public_host::{PublicHost, Retire};
+use pigeon_capabilities::secrets::Secrets;
 use pigeon_capabilities::site::{Retired, Site};
 use pigeon_capabilities::source::Source;
 use pigeon_capabilities::users::Users;
@@ -91,6 +92,14 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
                 host: HOST.into(),
                 site_name: "pigeon".into(),
             },
+        }),
+        Box::new(Secrets {
+            host: HOST.into(),
+            passkeys: Passkeys {
+                host: HOST.into(),
+                site_name: "pigeon".into(),
+            },
+            parent: PARENT_TOKEN.into(),
         }),
         Box::new(Deploys),
         Box::new(Architecture),
