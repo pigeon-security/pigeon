@@ -71,7 +71,7 @@ class_name = "CiRunner"
 scheduling_policy = "durable_object"
 
 [containers.images.base]
-image = "registry.cloudflare.com/4f94676cb2cbe46fd985b089ca97ea27/pigeon-ci-base@sha256:4fd505a9156f0e675d7f263992728bfb449d602729520480bd593f69610070c1"
+image = "registry.cloudflare.com/4f94676cb2cbe46fd985b089ca97ea27/pigeon-ci-base@sha256:02b7487373a845ae84c7ae631ba5c33b5b887d3d154ab2aba0f244ba2ac861a6"
 
 # CI state changes, for other capabilities. The queue must exist before this deploys.
 [[queues.producers]]
