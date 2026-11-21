@@ -78,19 +78,15 @@ Each request gets its own Artifacts git token: read for fetch, write for push. T
 
 ### Push rules
 
-The proxy checks the push's ref updates before it mints any token.
+The proxy checks the push's ref updates before it mints any token. The rules are the person's policy, `.pigeon/policy.toml` (see `docs/plans/policy.md`): each ref update is asked of it.
 
-- No ref may be deleted.
-- `main` cannot be created. It can only move forward (fast-forward).
-- Every other ref must be a branch under `refs/heads/claude/`.
+- A branch under `refs/heads/claude/` may be created, pushed, rewritten (force-pushed) or deleted: rule `session-branches`. The proxy cannot tell a rewrite from a push without the branch's history; the policy allows both.
+- `main` is never pushed, created or deleted through the proxy: rule `main-forward-only`. It moves only by a landing's fast-forward (`land`).
+- Any other ref, tags included, is not in policy.
 - Ref names are checked strictly.
 - Signed pushes are refused.
 
-A push that moves `main` is read whole, up to 16 MiB. The proxy checks that the new commit descends from the current one. It uses the pushed commits and, if needed, the repository's own history.
-
-If the push stores a needed commit as a delta against an object it does not carry, the push is refused. The advice is to push the commit to a `claude/` branch first, then move `main` to it.
-
-Refusals show in `git push` output as rejected refs with the reason.
+Refusals show in `git push` output as rejected refs, with the reason and the rule. Each ref update's decision is also an audit line (`"audit":"policy"`).
 
 A missing or unknown credential gets 403, not 401, so git does not prompt for a password.
 
@@ -98,7 +94,13 @@ Session branches stay in Artifacts. The GitHub mirror copies only `main`.
 
 ### Removing a session branch
 
-The proxy refuses every delete, so `claude/` branches pile up in Artifacts. The pigeon environment no longer allows the Artifacts host, so a person removes one directly on Artifacts from a session on the Default environment or from their own machine, with the Pigeon MCP tools:
+A session removes its own `claude/` branch through the proxy:
+
+```
+git push https://proxy.pigeon.dev/git/pigeon-security/pigeon.git --delete claude/route-check
+```
+
+Several branches go in one push: `--delete claude/a claude/b`. Before the policy, the proxy refused every delete; a person can still remove one directly on Artifacts, from a session on the Default environment or from their own machine, with the Pigeon MCP tools:
 
 1. Call `source_token` with `{"access": "write", "ttl": 300}`. Note the `id` and `remote` it answers.
 2. In any git checkout, read the token without putting it in the command or the history, push the delete, then forget the token:
@@ -250,7 +252,7 @@ Whoever holds a proxy credential can upload and deploy `pigeon-platform`, and th
 - Revoke credentials that are not in use.
 - Watch the audit lines for `cf` deploys.
 
-A passkey approval before a landing moves main and deploys is built, off by default: the console's Settings → Landing. A landing that changes `.pigeon/`, `ci/` or the pinned wrangler always waits for one. See `docs/plans/friction.md`.
+A passkey approval before a landing moves main and deploys is built, off by default: the console's Settings → Landing. What a landing's own changes need is the policy's (`docs/plans/policy.md`): a change to `.pigeon/policy.toml` or the generated `.claude/settings.json` always waits for the person's passkey (`policy-is-yours`); a change to what the gate runs (`ci/`, `.pigeon/ci.toml`, `.cargo/`, the toolchain, the npm files) is approved by the person's delegate without a wait (`gate-changes`).
 
 The MCP tools `source_token` and `deploy_token` still exist, for people and for the deploying session. Retiring them is a later decision.
 

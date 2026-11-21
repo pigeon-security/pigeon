@@ -13,8 +13,13 @@ up to date.
 | [route-through-platform.md](route-through-platform.md) | Cloud sessions reach git and the Cloudflare API through the platform's proxies (`/git/`, `/cf/`) with a proxy credential, not pasted tokens; CI runners and file reads (phase 5) | Deployed (phases 1 to 5) |
 | [ci-gateway.md](ci-gateway.md) | The CI gateway: `.pigeon/ci.toml`, routing to connectors, the scheduler, job tokens, notes; Containers, Buildkite, GitHub Actions | Phases 1 and 2 deployed; phase 3 (Buildkite) being built on `claude/ci-gateway`; phase 4 to come |
 | [console.md](console.md) | The console at the platform's root: tabs, sections, passkey sign-in and passkey-bound writes | Deployed |
+| [policy.md](policy.md) | The person's policy (`.pigeon/policy.toml`), `policy_check`, the Lander and git proxy following it, the generated Claude Code settings, and the smoke suite that replaced the unit tests | Deployed (landings 1 and 2); agent instructions in landing 3 |
 | [friction.md](friction.md) | `call`, the land flow, read-only diagnostics, the pinned wrangler and its allowlist check, async model jobs, housekeeping | Built on `claude/friction`, awaiting deploy (the last hand-merged one) |
 
 When a plan's status changes, change it in both places: the plan's first lines and this table.
+
+## For agents
+
+The person's policy, `.pigeon/policy.toml`, says what agents acting for them may do. Call `policy_check` (Pigeon MCP) before acting (a push, a landing, messaging or starting a session, a change to the gate) and again after any refusal. Act on `allow` as the person's standing instruction. On `deny`, stop and tell the person the rule and its reason. Never propose new rules or loosen one: only the person changes the policy, and a change to it lands only with their passkey. Tests live in `tests/smoke.rs` alone; `.claude/settings.json` is generated from the policy, never edited by hand.
 
 The first change taken into main by `land` (rather than merged by hand) was a one-line docs commit on `claude/land-check-2`.

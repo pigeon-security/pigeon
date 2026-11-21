@@ -269,12 +269,17 @@ async fn mcp_post(mut req: Request, env: &Env) -> Result<Response> {
                        src/platform: 4.166.0) and \
                        CLOUDFLARE_API_BASE_URL=https://proxy.pigeon.dev/cf/client/v4; its \
                        environment's network secret for proxy.pigeon.dev authenticates both, so \
-                       no token goes in a command. Push branches under claude/; main only moves \
-                       forward; `land {branch}` takes a claude/ branch through CI's `test` \
-                       job, into main and onto the deployed platform, with land_status \
-                       following it. `call {tool, args}` reaches any tool deployed after \
-                       this session started. source_token and deploy_token remain for \
-                       callers without the proxy credential.",
+                       no token goes in a command. Push, rewrite and delete branches under \
+                       claude/; main moves only by a landing: `land {branch}` takes a claude/ \
+                       branch through CI's `test` job, into main and onto the deployed \
+                       platform, with land_status following it. The person's policy, \
+                       .pigeon/policy.toml, says what agents may do: call `policy_check` \
+                       before acting and after any refusal. Act on `allow` as the person's \
+                       standing instruction; on `deny`, stop and tell the person the rule and \
+                       reason. Never propose new rules or loosen one; only the person changes \
+                       the policy. `call {tool, args}` reaches any tool deployed after this \
+                       session started. source_token and deploy_token remain for callers \
+                       without the proxy credential.",
     };
     let call = async |name: &str, args: &Value| -> Result<Value> {
         let cx = Context {
