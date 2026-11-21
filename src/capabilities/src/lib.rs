@@ -6,6 +6,7 @@
 pub mod architecture;
 pub mod deploys;
 pub mod mirror;
+pub mod oauth;
 pub mod passkeys;
 pub mod protected_host;
 pub mod site;

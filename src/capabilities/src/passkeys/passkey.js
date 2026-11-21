@@ -1,5 +1,6 @@
-// The browser's side of pigeon's passkey ceremonies: each button names a flow (enrol or
-// link) and the value it acts on; the server issues the challenge and checks the answer.
+// The browser's side of pigeon's passkey ceremonies: each button names its endpoint, whether
+// it creates or uses a passkey, and the value it acts on; the server issues the challenge,
+// checks the answer and replies with a message or a URL to go to.
 const b64u = {
   enc: (buf) =>
     btoa(String.fromCharCode(...new Uint8Array(buf)))
@@ -70,16 +71,21 @@ async function approve(o) {
   };
 }
 
-for (const button of document.querySelectorAll("button[data-flow]")) {
+for (const button of document.querySelectorAll("button[data-base]")) {
   button.addEventListener("click", async () => {
-    const { flow, key, value } = button.dataset;
+    const { base, ceremony, key, value } = button.dataset;
     button.disabled = true;
     say("Waiting for your passkey…");
     try {
-      const begin = await post(`/auth/${flow}/begin`, { [key]: value });
-      const answer = flow === "enrol" ? await enrol(begin.options) : await approve(begin.options);
-      const done = await post(`/auth/${flow}/finish`, { [key]: value, challenge_id: begin.challenge_id, ...answer });
-      say(done.message);
+      const begin = await post(`${base}/begin`, { [key]: value });
+      const answer = ceremony === "create" ? await enrol(begin.options) : await approve(begin.options);
+      const done = await post(`${base}/finish`, { [key]: value, challenge_id: begin.challenge_id, ...answer });
+      if (done.redirect) {
+        say("Signed in. Returning to the app…");
+        window.location.assign(done.redirect);
+      } else {
+        say(done.message);
+      }
     } catch (e) {
       say(e.message || String(e), true);
       button.disabled = false;

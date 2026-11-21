@@ -79,7 +79,7 @@ fn bad(why: &str) -> Error {
 // ---- the Directory ----
 
 /// The Directory's schema, one statement per migration, applied in order and never edited.
-const MIGRATIONS: [&str; 8] = [
+const MIGRATIONS: [&str; 12] = [
     "CREATE TABLE users (id TEXT PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL, created_at INTEGER NOT NULL)",
     "CREATE TABLE service_ids (access_client_id TEXT PRIMARY KEY, user_id TEXT NOT NULL)",
     "CREATE TABLE passkeys (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, point TEXT NOT NULL, sign_count INTEGER NOT NULL, name TEXT NOT NULL, created_at INTEGER NOT NULL, last_used_at INTEGER)",
@@ -88,6 +88,10 @@ const MIGRATIONS: [&str; 8] = [
     "CREATE TABLE challenges (id TEXT PRIMARY KEY, purpose TEXT NOT NULL, challenge TEXT NOT NULL, expires_at INTEGER NOT NULL)",
     "CREATE TABLE enrolments (code TEXT PRIMARY KEY, user_id TEXT NOT NULL, expires_at INTEGER NOT NULL)",
     "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, expires_at INTEGER NOT NULL)",
+    "CREATE TABLE oauth_clients (id TEXT PRIMARY KEY, name TEXT NOT NULL, redirect_uris TEXT NOT NULL, service_user_id TEXT NOT NULL, created_at INTEGER NOT NULL)",
+    "CREATE TABLE oauth_requests (id TEXT PRIMARY KEY, client_id TEXT NOT NULL, redirect_uri TEXT NOT NULL, challenge TEXT NOT NULL, state TEXT, expires_at INTEGER NOT NULL)",
+    "CREATE TABLE oauth_codes (hash TEXT PRIMARY KEY, client_id TEXT NOT NULL, redirect_uri TEXT NOT NULL, challenge TEXT NOT NULL, expires_at INTEGER NOT NULL)",
+    "CREATE TABLE oauth_tokens (hash TEXT PRIMARY KEY, kind TEXT NOT NULL, client_id TEXT, service_user_id TEXT NOT NULL, expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL)",
 ];
 
 /// The users, their passkeys and links: one Durable Object.
@@ -411,6 +415,164 @@ impl Directory {
                     ],
                 )?;
                 Value::Null
+            }
+            "link.set" => {
+                self.db.exec(
+                    "INSERT OR REPLACE INTO links (service_user_id, standard_user_id, approved_at, approved_with) VALUES (?, ?, ?, ?)",
+                    vec![
+                        s("service_user_id").into(),
+                        s("standard_user_id").into(),
+                        t.into(),
+                        s("passkey_id").into(),
+                    ],
+                )?;
+                Value::Null
+            }
+            "caller.of" => match self.user(s("user_id"))? {
+                Some(user) => to_value(Caller {
+                    acting_for: self.acting_for(&user.id)?,
+                    user,
+                }),
+                None => Value::Null,
+            },
+            "oauth.client_add" => {
+                let user = self.create("service", s("name"))?;
+                let id = random()?[..22].to_string();
+                self.db.exec(
+                    "INSERT INTO oauth_clients (id, name, redirect_uris, service_user_id, created_at) VALUES (?, ?, ?, ?, ?)",
+                    vec![
+                        id.as_str().into(),
+                        s("name").into(),
+                        a["redirect_uris"].to_string().into(),
+                        user.id.as_str().into(),
+                        t.into(),
+                    ],
+                )?;
+                json!({ "id": id, "service_user_id": user.id })
+            }
+            "oauth.client_get" => {
+                let row: Option<Value> = self.db.row(
+                    "SELECT * FROM oauth_clients WHERE id = ?",
+                    vec![s("id").into()],
+                )?;
+                row.unwrap_or(Value::Null)
+            }
+            "oauth.clients" => {
+                let rows: Vec<Value> = self.db.rows(
+                    "SELECT c.id, c.name, c.redirect_uris, c.service_user_id, c.created_at, l.standard_user_id FROM oauth_clients c LEFT JOIN links l ON l.service_user_id = c.service_user_id ORDER BY c.created_at",
+                    vec![],
+                )?;
+                to_value(rows)
+            }
+            "oauth.client_remove" => {
+                #[derive(Deserialize)]
+                struct Row {
+                    service_user_id: String,
+                }
+                let row: Option<Row> = self.db.row(
+                    "SELECT service_user_id FROM oauth_clients WHERE id = ?",
+                    vec![s("id").into()],
+                )?;
+                let row = row.ok_or_else(|| bad("no such OAuth client"))?;
+                for q in [
+                    "DELETE FROM oauth_tokens WHERE service_user_id = ?",
+                    "DELETE FROM links WHERE service_user_id = ?",
+                ] {
+                    self.db.exec(q, vec![row.service_user_id.as_str().into()])?;
+                }
+                self.db.exec(
+                    "DELETE FROM oauth_clients WHERE id = ?",
+                    vec![s("id").into()],
+                )?;
+                json!({ "removed": s("id"), "service_user_id": row.service_user_id })
+            }
+            "oauth.request_add" => {
+                let id = random()?;
+                self.db.exec(
+                    "INSERT INTO oauth_requests (id, client_id, redirect_uri, challenge, state, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    vec![
+                        id.as_str().into(),
+                        s("client_id").into(),
+                        s("redirect_uri").into(),
+                        s("challenge").into(),
+                        opt(a["state"].as_str()),
+                        (t + REQUEST_TTL_MS).into(),
+                    ],
+                )?;
+                json!(id)
+            }
+            "oauth.request_get" => {
+                let row: Option<Value> = self.db.row(
+                    "SELECT * FROM oauth_requests WHERE id = ? AND expires_at > ?",
+                    vec![s("id").into(), t.into()],
+                )?;
+                row.ok_or_else(|| bad("this sign-in request is used or has expired"))?
+            }
+            "oauth.request_remove" => {
+                self.db.exec(
+                    "DELETE FROM oauth_requests WHERE id = ?",
+                    vec![s("id").into()],
+                )?;
+                Value::Null
+            }
+            "oauth.code_add" => {
+                self.db.exec(
+                    "INSERT INTO oauth_codes (hash, client_id, redirect_uri, challenge, expires_at) VALUES (?, ?, ?, ?, ?)",
+                    vec![
+                        s("hash").into(),
+                        s("client_id").into(),
+                        s("redirect_uri").into(),
+                        s("challenge").into(),
+                        (t + a["ttl_ms"].as_i64().unwrap_or(120_000)).into(),
+                    ],
+                )?;
+                Value::Null
+            }
+            "oauth.code_take" => {
+                let row: Option<Value> = self.db.row(
+                    "SELECT * FROM oauth_codes WHERE hash = ? AND expires_at > ?",
+                    vec![s("hash").into(), t.into()],
+                )?;
+                self.db.exec(
+                    "DELETE FROM oauth_codes WHERE hash = ? OR expires_at <= ?",
+                    vec![s("hash").into(), t.into()],
+                )?;
+                row.ok_or_else(|| bad("invalid_grant: the code is used or has expired"))?
+            }
+            "oauth.token_add" => {
+                self.db.exec(
+                    "INSERT INTO oauth_tokens (hash, kind, client_id, service_user_id, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    vec![
+                        s("hash").into(),
+                        s("kind").into(),
+                        opt(a["client_id"].as_str()),
+                        s("service_user_id").into(),
+                        (t + a["ttl_ms"].as_i64().unwrap_or(3_600_000)).into(),
+                        t.into(),
+                    ],
+                )?;
+                Value::Null
+            }
+            "oauth.token_get" => {
+                let row: Option<Value> = self.db.row(
+                    "SELECT * FROM oauth_tokens WHERE hash = ? AND kind = ? AND expires_at > ?",
+                    vec![s("hash").into(), s("kind").into(), t.into()],
+                )?;
+                row.unwrap_or(Value::Null)
+            }
+            "oauth.token_remove" => {
+                self.db.exec(
+                    "DELETE FROM oauth_tokens WHERE hash = ?",
+                    vec![s("hash").into()],
+                )?;
+                Value::Null
+            }
+            "oauth.tokens" => {
+                let rows: Vec<Value> = self.db.rows(
+                    "SELECT kind, client_id, service_user_id, expires_at, created_at FROM oauth_tokens WHERE expires_at > ? ORDER BY created_at",
+                    vec![t.into()],
+                )?;
+                to_value(rows)
             }
             other => return Err(bad(&format!("the Directory has no operation `{other}`"))),
         })

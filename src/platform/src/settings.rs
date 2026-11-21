@@ -5,6 +5,7 @@ use pigeon_capabilities::Capability;
 use pigeon_capabilities::architecture::Architecture;
 use pigeon_capabilities::deploys::Deploys;
 use pigeon_capabilities::mirror::{self, Mirror};
+use pigeon_capabilities::oauth::OAuth;
 use pigeon_capabilities::passkeys::Passkeys;
 use pigeon_capabilities::protected_host::ProtectedHost;
 use pigeon_capabilities::site::{Retired, Site};
@@ -40,8 +41,9 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
             // Authorization for it.
             guests: vec!["pigeon-claude".into()],
             token_header: Some("Authorization".into()),
-            // The passkey pages, where the passkey is the only gate.
-            public_paths: vec!["/auth".into()],
+            // The passkey pages, where the passkey is the only gate, and OAuth's discovery and
+            // endpoints, which check their callers themselves.
+            public_paths: vec!["/auth".into(), "/oauth".into(), "/.well-known".into()],
             tool: "setup_platform",
         }),
         Box::new(Site {
@@ -79,6 +81,13 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
         Box::new(Passkeys {
             host: HOST.into(),
             site_name: "pigeon".into(),
+        }),
+        Box::new(OAuth {
+            host: HOST.into(),
+            passkeys: Passkeys {
+                host: HOST.into(),
+                site_name: "pigeon".into(),
+            },
         }),
         Box::new(Deploys),
         Box::new(Architecture),

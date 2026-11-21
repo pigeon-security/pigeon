@@ -7,7 +7,7 @@ use pigeon_core::design::{Page, escape};
 use pigeon_core::mcp::Tool;
 use pigeon_core::webauthn::{self, Assertion, Credential, Registration, RelyingParty, b64url};
 use serde_json::{Value, json};
-use worker::{Error, Headers, Method, Request, Response, Result};
+use worker::{Env, Error, Headers, Method, Request, Response, Result};
 
 use crate::users::{Passkey, User, directory};
 use crate::{Call, Capability, Context, Footprint, Serve, arg, to_value, unknown};
@@ -24,6 +24,17 @@ const CSP: &str = "default-src 'none'; script-src 'self'; connect-src 'self'; st
 
 /// The pages' script: it runs the browser's side of each ceremony.
 const SCRIPT: &str = include_str!("passkeys/passkey.js");
+
+/// A ceremony a page's button runs: it posts `{field: value}` to `{base}/begin`, asks the
+/// browser to `create` or `get` a passkey, and posts the answer to `{base}/finish`, which
+/// answers a message or a URL to go to.
+pub struct Action<'a> {
+    pub base: &'a str,
+    pub ceremony: &'a str,
+    pub field: &'a str,
+    pub value: &'a str,
+    pub label: &'a str,
+}
 
 fn bad(why: &str) -> Error {
     Error::RustError(why.to_string())
@@ -59,7 +70,13 @@ impl Passkeys {
                             escape(user["name"].as_str().unwrap_or_default()),
                             escape(&self.site_name)
                         ),
-                        Some(("enrol", "code", &code, "Register passkey")),
+                        Some(Action {
+                            base: "/auth/enrol",
+                            ceremony: "create",
+                            field: "code",
+                            value: &code,
+                            label: "Register passkey",
+                        }),
                     ),
                     Err(e) => self.page("Link not usable", &escape(&e.to_string()), None),
                 };
@@ -75,7 +92,13 @@ impl Passkeys {
                             escape(v["service"]["name"].as_str().unwrap_or_default()),
                             escape(v["standard"]["name"].as_str().unwrap_or_default())
                         ),
-                        Some(("link", "request", &request, "Approve with passkey")),
+                        Some(Action {
+                            base: "/auth/link",
+                            ceremony: "get",
+                            field: "request",
+                            value: &request,
+                            label: "Approve with passkey",
+                        }),
                     ),
                     Err(e) => self.page("Link not usable", &escape(&e.to_string()), None),
                 };
@@ -161,50 +184,55 @@ impl Passkeys {
         )
     }
 
-    /// Starts approving a link request with a passkey of its standard user.
-    async fn link_begin(&self, cx: &Context<'_>, body: &Value) -> Result<Value> {
-        let request = arg(body, "request")?;
-        let r = directory(cx.env, "link.request_get", json!({ "id": request })).await?;
-        let standard = r["standard"]["id"].as_str().unwrap_or_default();
-        let keys: Vec<Passkey> = serde_json::from_value(
-            directory(cx.env, "passkey.list", json!({ "user_id": standard })).await?,
-        )?;
-        if keys.is_empty() {
-            return Err(bad("this person has no passkey yet; enrol one first"));
-        }
-        let c = directory(
-            cx.env,
-            "challenge.create",
-            json!({ "purpose": format!("link:{request}") }),
-        )
-        .await?;
+    /// Starts a passkey sign-in for `purpose`, with a passkey of `user` when named, or any
+    /// registered passkey otherwise: the challenge's ID and the browser's options.
+    pub async fn sign_in_begin(
+        &self,
+        env: &Env,
+        purpose: &str,
+        user: Option<&str>,
+    ) -> Result<Value> {
+        let allow: Vec<String> = match user {
+            Some(user) => {
+                let keys: Vec<Passkey> = serde_json::from_value(
+                    directory(env, "passkey.list", json!({ "user_id": user })).await?,
+                )?;
+                if keys.is_empty() {
+                    return Err(bad("this person has no passkey yet; enrol one first"));
+                }
+                keys.into_iter().map(|k| k.id).collect()
+            }
+            None => Vec::new(),
+        };
+        let c = directory(env, "challenge.create", json!({ "purpose": purpose })).await?;
         Ok(json!({
             "challenge_id": c["id"],
-            "options": {
-                "challenge": c["challenge"],
-                "rpId": self.host,
-                "allow": keys.iter().map(|k| k.id.clone()).collect::<Vec<_>>(),
-            }
+            "options": { "challenge": c["challenge"], "rpId": self.host, "allow": allow },
         }))
     }
 
-    /// Checks the passkey belongs to the request's standard user, then links the service user.
-    async fn link_finish(&self, cx: &Context<'_>, body: &Value) -> Result<Value> {
-        let request = arg(body, "request")?;
+    /// Checks a passkey sign-in for `purpose`: the passkey, which must be `user`'s when named.
+    /// Its counter moves forward.
+    pub async fn sign_in_finish(
+        &self,
+        env: &Env,
+        purpose: &str,
+        body: &Value,
+        user: Option<&str>,
+    ) -> Result<Passkey> {
         let challenge = directory(
-            cx.env,
+            env,
             "challenge.take",
-            json!({ "id": arg(body, "challenge_id")?, "purpose": format!("link:{request}") }),
+            json!({ "id": arg(body, "challenge_id")?, "purpose": purpose }),
         )
         .await?;
-        let r = directory(cx.env, "link.request_get", json!({ "id": request })).await?;
         let assertion: Assertion = serde_json::from_value(body["assertion"].clone())?;
         let key: Option<Passkey> = serde_json::from_value(
-            directory(cx.env, "passkey.get", json!({ "id": assertion.id })).await?,
+            directory(env, "passkey.get", json!({ "id": assertion.id })).await?,
         )?;
         let key = key
-            .filter(|k| Some(k.user_id.as_str()) == r["standard"]["id"].as_str())
-            .ok_or_else(|| bad("this passkey is not the person's the link asks for"))?;
+            .filter(|k| user.is_none_or(|u| k.user_id == u))
+            .ok_or_else(|| bad("this passkey is not one this asks for"))?;
         let (id, origin) = self.rp();
         let rp = RelyingParty {
             id: &id,
@@ -222,11 +250,31 @@ impl Passkeys {
             &rp,
         )?;
         directory(
-            cx.env,
+            env,
             "passkey.touch",
             json!({ "id": key.id, "sign_count": count }),
         )
         .await?;
+        Ok(key)
+    }
+
+    /// Starts approving a link request with a passkey of its standard user.
+    async fn link_begin(&self, cx: &Context<'_>, body: &Value) -> Result<Value> {
+        let request = arg(body, "request")?;
+        let r = directory(cx.env, "link.request_get", json!({ "id": request })).await?;
+        let standard = r["standard"]["id"].as_str().unwrap_or_default();
+        self.sign_in_begin(cx.env, &format!("link:{request}"), Some(standard))
+            .await
+    }
+
+    /// Checks the passkey belongs to the request's standard user, then links the service user.
+    async fn link_finish(&self, cx: &Context<'_>, body: &Value) -> Result<Value> {
+        let request = arg(body, "request")?;
+        let r = directory(cx.env, "link.request_get", json!({ "id": request })).await?;
+        let standard = r["standard"]["id"].as_str().unwrap_or_default();
+        let key = self
+            .sign_in_finish(cx.env, &format!("link:{request}"), body, Some(standard))
+            .await?;
         directory(
             cx.env,
             "link.approve",
@@ -242,16 +290,16 @@ impl Passkeys {
         }))
     }
 
-    /// A page with a message and, optionally, a button that runs a ceremony:
-    /// `(flow, field, value, label)`.
-    fn page(&self, title: &str, message: &str, action: Option<(&str, &str, &str, &str)>) -> String {
-        let button = action.map_or(String::new(), |(flow, field, value, label)| {
+    /// A page with a message and, optionally, a button that runs a passkey ceremony.
+    pub fn page(&self, title: &str, message: &str, action: Option<Action<'_>>) -> String {
+        let button = action.map_or(String::new(), |a| {
             format!(
-                r#"<button class="button" data-flow="{}" data-key="{}" data-value="{}">{}</button>"#,
-                escape(flow),
-                escape(field),
-                escape(value),
-                escape(label)
+                r#"<button class="button" data-base="{}" data-ceremony="{}" data-key="{}" data-value="{}">{}</button>"#,
+                escape(a.base),
+                escape(a.ceremony),
+                escape(a.field),
+                escape(a.value),
+                escape(a.label)
             )
         });
         let body = format!(
@@ -268,7 +316,8 @@ impl Passkeys {
     }
 }
 
-fn html(page: &str) -> Result<Response> {
+/// `page` as a response, under the pages' security headers.
+pub fn html(page: &str) -> Result<Response> {
     let headers = Headers::new();
     headers.set("Content-Type", "text/html; charset=utf-8")?;
     headers.set("Content-Security-Policy", CSP)?;

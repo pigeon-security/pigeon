@@ -12,16 +12,18 @@ mod settings;
 
 include!(concat!(env!("OUT_DIR"), "/sources.rs"));
 
+use pigeon_capabilities::oauth;
 use pigeon_capabilities::users::{self, Caller};
 use pigeon_capabilities::{Capability, Context, Hosted};
 
 /// The Directory's class, exported from this Worker for its Durable Object binding.
 pub use pigeon_capabilities::users::Directory;
 use pigeon_core::mcp::{self, Server};
+use pigeon_core::oauth as oauth_core;
 use pigeon_core::{Account, secrets_store};
 use serde_json::Value;
 use worker::{
-    Context as WorkerContext, Env, Error, MessageBatch, Method, Request, Response, Result,
+    Context as WorkerContext, Env, Error, Headers, MessageBatch, Method, Request, Response, Result,
     console_error, console_log, event,
 };
 
@@ -115,14 +117,32 @@ async fn account(env: &Env) -> Result<Account> {
 /// hosted capability's.
 async fn mcp_post(mut req: Request, env: &Env) -> Result<Response> {
     let account = account(env).await?;
-    let (caller, note): (Option<Caller>, Option<String>) =
-        match users::caller(env, &account, settings::HOST, &req).await {
-            Ok(c) => (Some(c), None),
-            Err(e) => {
-                console_error!("caller unknown: {e}");
-                (None, Some(e.to_string()))
-            }
-        };
+    // An OAuth bearer token first, then the Access token; with neither, no tool runs.
+    let bearer = req
+        .headers()
+        .get("Authorization")?
+        .and_then(|a| a.strip_prefix("Bearer ").map(str::to_string));
+    let resolved = match &bearer {
+        Some(token) => oauth::caller(env, token).await,
+        None => users::caller(env, &account, settings::HOST, &req).await,
+    };
+    let caller: Caller = match resolved {
+        Ok(c) => c,
+        Err(e) => {
+            console_error!("caller unknown: {e}");
+            let metadata = format!(
+                "https://{}/.well-known/oauth-protected-resource",
+                settings::HOST
+            );
+            let headers = Headers::new();
+            headers.set("WWW-Authenticate", &oauth_core::challenge(&metadata))?;
+            let body =
+                serde_json::json!({ "error": "unauthorized", "error_description": e.to_string() });
+            return Ok(Response::from_json(&body)?
+                .with_status(401)
+                .with_headers(headers));
+        }
+    };
     let message: Value = match req.json().await {
         Ok(v) => v,
         Err(e) => return Response::error(format!("not JSON: {e}"), 400),
@@ -146,8 +166,8 @@ async fn mcp_post(mut req: Request, env: &Env) -> Result<Response> {
             account: &account,
             env,
             hosted: &hosted,
-            caller: caller.as_ref(),
-            caller_note: note.as_deref(),
+            caller: Some(&caller),
+            caller_note: None,
         };
         owner.call(&cx, name, args).await
     };
