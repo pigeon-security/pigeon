@@ -1,7 +1,7 @@
 # External MCP access through a Cloudflare MCP server portal
 
-Status: **designed, awaiting the person's go-ahead**. Nothing is built. Phase 0 is checks the
-person makes in the Cloudflare dashboard; the build phases wait on its answers.
+Status: **go-ahead given; the retire fix is built (landing 1)**. Phase 0 is checks the person
+makes in the Cloudflare dashboard; the later build phases wait on its answers.
 
 Sources: Cloudflare's MCP portals page
 (https://developers.cloudflare.com/cloudflare-one/access-controls/ai-controls/mcp-portals/), its
@@ -124,7 +124,7 @@ server. There are two coherent choices:
 ### 4. Access, the platform host and `setup_platform`
 
 - The portal's Access application (on `mcp.pigeon.dev`) has one Allow policy: emails = the person's address. Later, a Service Auth policy for named service tokens.
-- **Risk found:** `PublicHost::retire` deletes any Access app whose domain is exactly `platform.pigeon.dev`, `…/auth`, `…/oauth`, `…/.well-known` or `…/mcp` (`access::Session::remove_app` matches on domain only). If the portal's `mcp` application for the pigeon server sits on `platform.pigeon.dev/mcp`, running `setup_platform` again would delete it. Phase 0 checks the app's domain and type. If it collides, phase 2 makes `retire` skip apps of type `mcp` or `mcp_portal`.
+- **Risk found:** `PublicHost::retire` deletes any Access app whose domain is exactly `platform.pigeon.dev`, `…/auth`, `…/oauth`, `…/.well-known` or `…/mcp` (`access::Session::remove_app` matches on domain only). If the portal's `mcp` application for the pigeon server sits on `platform.pigeon.dev/mcp`, running `setup_platform` again would delete it. Fixed before any dashboard step (landing 1): `access::Session` now finds, updates, removes and reads the AUD of `self_hosted` applications only, the type pigeon makes, so a portal's `mcp` or `mcp_portal` application on the same domain is left alone.
 - The direct `platform.pigeon.dev/mcp` stays open to pigeon's OAuth: it is the rollback path, and the only path for headless agents with an issued token. Narrowing it to the portal's client is a later decision for the person.
 - The leftover Access-JWT path in `users::caller` stays for now. The docs give no sign that the portal signs requests to the server with an Access JWT. If phase 0 finds one, verifying its `email` claim against the person is a possible phase-3 alternative to the second OAuth hop.
 
@@ -149,7 +149,7 @@ then share that one service user, kept apart from people. That is phase 5, if wa
 | --- | --- | --- | --- |
 | 0 | Dashboard checks: plan availability; whether Access forwards an identity to the server; the domain and type of the server's Access app; whether `instructions` and `?optimize_context` pass through; the DCR `client_name` | Person (steps below), agent reads pigeon's logs and `oauth_clients` | — |
 | 1 | Create the portal and the pigeon server; add a claude.ai connector to it, side by side with the current "Pigeon" connector; try it from one session | Person | — |
-| 2 | Generator writes both name sets; instructions mention the prefix; `retire` skips portal apps (if phase 0 found a collision); `client` tag from `X-Forwarded-User-Agent`; portal client's expiry in `credentials_expiry`; smoke scenarios added to `tests/smoke.rs` only (generator output, retire filter) | Agent, through AI Gateway executors | `land`, with the person's **passkey** (settings.json changes) |
+| 2 | Generator writes both name sets; instructions mention the prefix; `client` tag from `X-Forwarded-User-Agent`; portal client's expiry in `credentials_expiry`; smoke scenarios added to `tests/smoke.rs` only (generator output, retire filter) | Agent, through AI Gateway executors | `land`, with the person's **passkey** (settings.json changes) |
 | 3 | Optional: `call` off at the portal, plus the deploy-time sync; per-tool switches for the dangerous tools | Person decides; agent builds | `land` (passkey if settings change) |
 | 4 | Cutover: remove the old "Pigeon" connector, revoke its OAuth client `Claude`, drop the old names from the generator; revoke `probe` | Person (connector, revokes), agent (generator) | `land` with **passkey** |
 | 5 | Optional: Cloudflare docs server, then other servers one by one; headless entry `pigeon-agents` | Person decides | dashboard only |

@@ -15,7 +15,7 @@ up to date.
 | [console.md](console.md) | The console at the platform's root: tabs, sections, passkey sign-in and passkey-bound writes | Deployed |
 | [policy.md](policy.md) | The person's policy (`.pigeon/policy.toml`), `policy_check`, the Lander and git proxy following it, the generated Claude Code settings, and the smoke suite that replaced the unit tests | Deployed (landings 1 and 2); agent instructions in landing 3 |
 | [friction.md](friction.md) | `call`, the land flow, read-only diagnostics, the pinned wrangler and its allowlist check, async model jobs, housekeeping | Built on `claude/friction`, awaiting deploy (the last hand-merged one) |
-| [mcp-portal.md](mcp-portal.md) | External MCP access through a Cloudflare MCP server portal: pigeon behind it with its own OAuth kept, tool-name prefixes in the settings generator, cutover and rollback, the person's dashboard steps | Designed, awaiting the go-ahead |
+| [mcp-portal.md](mcp-portal.md) | External MCP access through a Cloudflare MCP server portal: pigeon behind it with its own OAuth kept, tool-name prefixes in the settings generator, cutover and rollback, the person's dashboard steps | Go-ahead given; landing 1 (Access lookups leave portal apps alone) built |
 
 When a plan's status changes, change it in both places: the plan's first lines and this table.
 

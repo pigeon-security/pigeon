@@ -43,7 +43,22 @@ struct Listed {
     domain: String,
     #[serde(default)]
     aud: String,
+    /// The application's type: pigeon makes only `self_hosted` ones.
+    #[serde(default, rename = "type")]
+    kind: String,
 }
+
+impl Listed {
+    /// Whether this is pigeon's kind of application on `domain`: self-hosted. Others on the same
+    /// domain, such as the `mcp` application an MCP server portal makes for a server, are not
+    /// pigeon's to update, remove or verify tokens against.
+    fn ours_on(&self, domain: &str) -> bool {
+        self.domain == domain && self.kind == SELF_HOSTED
+    }
+}
+
+/// The application type pigeon makes.
+const SELF_HOSTED: &str = "self_hosted";
 
 /// Access operations on one account, as one minted token. Call [`Session::finish`] to revoke
 /// the token.
@@ -162,7 +177,7 @@ impl<'a> Session<'a> {
         let mut body = json!({
             "name": name,
             "domain": domain,
-            "type": "self_hosted",
+            "type": SELF_HOSTED,
             "session_duration": SESSION_DURATION,
             "policies": [{ "id": policy_id, "precedence": 1 }],
         });
@@ -174,7 +189,7 @@ impl<'a> Session<'a> {
             .list("apps")
             .await?
             .into_iter()
-            .find(|a| a.domain == domain)
+            .find(|a| a.ours_on(domain))
         {
             Some(a) => {
                 let at = format!("{path}/{}", a.id);
@@ -188,13 +203,13 @@ impl<'a> Session<'a> {
         }
     }
 
-    /// Deletes the application on `domain`: its ID, or `None` when there was none.
+    /// Deletes the self-hosted application on `domain`: its ID, or `None` when there was none.
     pub async fn remove_app(&self, domain: &str) -> Result<Option<String>> {
         let Some(a) = self
             .list("apps")
             .await?
             .into_iter()
-            .find(|a| a.domain == domain)
+            .find(|a| a.ours_on(domain))
         else {
             return Ok(None);
         };
@@ -263,13 +278,13 @@ impl<'a> Session<'a> {
         }
     }
 
-    /// The AUD tag of the application on `domain`, the audience of the tokens it signs.
+    /// The AUD tag of the self-hosted application on `domain`, the audience of the tokens it signs.
     pub async fn app_aud(&self, domain: &str) -> Result<Option<String>> {
         Ok(self
             .list("apps")
             .await?
             .into_iter()
-            .find(|a| a.domain == domain)
+            .find(|a| a.ours_on(domain))
             .map(|a| a.aud))
     }
 
