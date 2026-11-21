@@ -5,10 +5,8 @@
 
 use std::sync::OnceLock;
 
-use pigeon_core::access::Session;
 use pigeon_core::mcp::Tool;
-use pigeon_core::secrets_store::Writer;
-use pigeon_core::{Account, custom_domain, design, workers, zones};
+use pigeon_core::{custom_domain, design, workers, zones};
 use serde_json::{Value, json};
 use worker::{Error, Headers, Request, Response, Result};
 
@@ -23,16 +21,6 @@ pub struct Site {
     pub worker: String,
     /// A Worker that used to serve the apex, deleted by `site_retire`.
     pub old_worker: Option<String>,
-    /// An Access setup the apex had, removed when the site is published.
-    pub retire: Option<Retired>,
-}
-
-/// Names of an Access setup to remove: its application and policy, its service token, and the
-/// Secrets Store names of the token's client ID and secret.
-pub struct Retired {
-    pub app: String,
-    pub service_token: String,
-    pub secrets: [String; 2],
 }
 
 /// The site's pages, by path.
@@ -101,21 +89,16 @@ impl Site {
         Ok(response.with_headers(headers))
     }
 
-    /// Moves the apex's custom domain onto this Worker, then retires the old Access setup.
+    /// Moves the apex's custom domain onto this Worker. It touches no Access setup.
     async fn publish(&self, cx: &Context<'_>) -> Result<Value> {
         let zone = zones::active(cx.account, &self.zone).await?;
         let custom_domain =
             custom_domain::attach(cx.account, &zone.id, &zone.name, &self.worker).await?;
-        let retired = match &self.retire {
-            Some(r) => Some(retire(cx.account, &zone.name, r).await?),
-            None => None,
-        };
         Ok(json!({
             "worker": self.worker,
             "host": zone.name,
             "pages": PAGES,
             "custom_domain": custom_domain,
-            "retired": retired,
         }))
     }
 
@@ -133,38 +116,6 @@ impl Site {
     }
 }
 
-/// Takes the apex out from behind Access and removes what `r` names; each is skipped when it
-/// is already gone. The application goes first, then every policy holding the token, then the
-/// token, then its secrets.
-async fn retire(account: &Account, apex: &str, r: &Retired) -> Result<Value> {
-    let session = Session::open(account).await?;
-    let removed = async {
-        let app = session.remove_app(&r.app, apex).await?;
-        let token = session.find_service_token(&r.service_token).await?;
-        let policies = session.remove_policies(&r.app, token.as_deref()).await?;
-        if let Some(id) = &token {
-            session.remove_service_token(id).await?;
-        }
-        Ok(json!({ "access_app": app, "policies": policies, "service_token": token }))
-    }
-    .await;
-    let mut removed = session.finish(removed).await?;
-    let writer = Writer::open(account).await?;
-    let secrets = async {
-        let mut gone = Vec::new();
-        for secret in writer.list().await? {
-            if r.secrets.contains(&secret.name) {
-                writer.delete(&secret.id).await?;
-                gone.push(secret.name);
-            }
-        }
-        Ok(gone)
-    }
-    .await;
-    removed["secrets"] = json!(writer.finish(secrets).await?);
-    Ok(removed)
-}
-
 impl Capability for Site {
     fn name(&self) -> &'static str {
         "site"
@@ -174,7 +125,7 @@ impl Capability for Site {
         let mut tools = vec![Tool::bare(
             "site_publish",
             "Serve the public site on the zone's apex from this Worker, moving the apex's custom \
-             domain onto it, and retire the apex's old Access setup.",
+             domain onto it. Changes no Access setup.",
         )];
         if self.old_worker.is_some() {
             tools.push(Tool::bare(

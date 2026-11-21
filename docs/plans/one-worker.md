@@ -1,6 +1,6 @@
 # One Worker: pigeon.dev served by pigeon-platform
 
-Status: phase 1 being built on `claude/one-worker`; phases 2 to 4 to come.
+Status: phase 1 ready on `claude/one-worker`, **on hold**: the parent session paused all landings and Access, route and DNS changes on 2026-11-21 after the Access apps on pigeon.dev were found deleted. Phases 2 to 4 to come.
 
 pigeon.dev used to be served by a Worker of its own, `pigeon`. The `site` capability rendered
 the architecture page, uploaded it as that Worker's module with `pigeon_core::workers::upload`,
@@ -59,8 +59,12 @@ so the cutover can be checked from outside.
 
 - `site_publish` changes meaning: it attaches `pigeon.dev` to `pigeon-platform`. The attach is
   one `PUT /workers/domains` with `override_existing_origin`, which moves the domain between
-  Workers without removing its DNS record or certificate. It keeps retiring the old Access
-  remnants, each skipped when gone. It no longer uploads anything.
+  Workers without removing its DNS record or certificate. It no longer uploads anything, and it
+  changes no Access setup. The old `site_publish` deleted the Access app on exactly
+  `pigeon.dev`, the reusable policy `pigeon` and the service token `pigeon-site` on every call.
+  That would undo any restore of Access, so it is gone. If `pigeon-site` and its secrets
+  (`SITE_ACCESS_CLIENT_ID`, `SITE_ACCESS_CLIENT_SECRET`) are still unused leftovers, the person
+  removes them in the dashboard.
 - `site_retire` (new, temporary): first checks with `GET /workers/domains?hostname=pigeon.dev`
   that the apex's custom domain names `pigeon-platform`, and refuses otherwise. Only then does it
   delete Worker `pigeon` (`DELETE /workers/scripts/pigeon?force=true`; skipped if already gone).
@@ -94,16 +98,23 @@ one API call, and it is deleted only after the new Worker is seen serving.
    → `pigeon` → Settings → Domains & Routes → add `pigeon.dev`.
 3. **Retire (a tool call, no landing).** `site_retire`.
    Check: the old Worker is gone (the tool's answer), and `pigeon.dev` still serves as in phase 2.
-4. **Clean-up (landing 2).** Remove `site_retire`, the `Retired` type and the Access-remnant
-   retirement (the remnants were confirmed gone in phases 2 and 3), `workers::upload` and
+4. **Clean-up (landing 2).** Remove `site_retire`, `workers::upload` and
    `workers::delete` if nothing else uses them, and the `pigeon` names from `settings.rs`. Mark
    this plan deployed.
    Check: as in phase 2, and the architecture page lists one Worker.
 
 ## For the person
 
-Nothing needs the dashboard if the phases go as planned: no Access application changes, and the
-Custom Domain move keeps DNS. The dashboard is only the rollback path given in phase 2.
+- Confirm the intended Access end state. This plan assumed both `pigeon.dev` and
+  `platform.pigeon.dev` stay public at the edge, which matched the code (`PublicHost`) and
+  the live state before 2026-11-21. If Access apps are restored on `pigeon.dev` or the platform
+  host, routing by host still works, but the apex's two pages must stay outside any Access app
+  for the site to be public.
+- `setup_platform` (`PublicHost`'s `Retire`) still deletes, on every call, the Access apps on
+  `platform.pigeon.dev`, `/auth`, `/oauth`, `/.well-known` and `/mcp`, among others. That is
+  outside this plan and was reported to the parent session.
+- Phase 2 needs no dashboard work: the Custom Domain move keeps DNS. The dashboard is only the
+  rollback path given there.
 
 ## Log
 
