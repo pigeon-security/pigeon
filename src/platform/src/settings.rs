@@ -185,7 +185,7 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
                 default_model: "claude-haiku-5-5",
                 key_help: "A Claude Platform API key, from the Claude Console's API keys page.",
             }],
-            secrets_page: format!("https://{HOST}/secrets"),
+            secrets_page: format!("https://{HOST}/settings#keys"),
         }),
         Box::new(Ci { settings: ci() }),
         Box::new(Deploys),

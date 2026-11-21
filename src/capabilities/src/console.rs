@@ -9,6 +9,7 @@
 pub mod page;
 pub mod sections;
 pub mod session;
+pub mod writes;
 
 use pigeon_core::mcp::Tool;
 use pigeon_core::oauth::{hash, token};
@@ -20,6 +21,7 @@ use crate::passkeys::Passkeys;
 use crate::users::{Passkey, User, directory};
 use crate::{Call, Capability, Context, Serve, arg, unknown};
 use sections::{Section, Tab};
+use writes::Write;
 
 /// The console page and its API.
 pub struct Console {
@@ -278,6 +280,15 @@ impl Console {
                 res.headers().set("Set-Cookie", &session::clear())?;
                 Ok(res)
             }
+            p if p.starts_with("/console/write/") => {
+                let Some(signed) = self.signed(cx.env, &req).await? else {
+                    return answer(&json!({ "error": "sign in first" }), 401);
+                };
+                match self.write(cx.env, p, &signed.user, &body).await {
+                    Ok(v) => answer(&v, 200),
+                    Err(e) => answer(&json!({ "error": e.to_string() }), 400),
+                }
+            }
             "/console/api/avatar" => {
                 let Some(signed) = self.signed(cx.env, &req).await? else {
                     return answer(&json!({ "error": "sign in first" }), 401);
@@ -296,6 +307,62 @@ impl Console {
             }
             _ => Response::error("not found", 404),
         }
+    }
+
+    /// One of the console's writes, at `/console/write/{action}/{begin|finish}`: `begin` starts a
+    /// passkey approval by `person`, bound to the write and its target; `finish` checks it and
+    /// makes the change.
+    async fn write(&self, env: &Env, path: &str, person: &User, body: &Value) -> Result<Value> {
+        let rest = path.trim_start_matches("/console/write/");
+        let (action, step) = rest.split_once('/').ok_or_else(|| bad("not found"))?;
+        let write = Write::named(action).ok_or_else(|| bad("no such write"))?;
+        let target = write.target(arg(body, "target")?).map_err(|e| bad(&e))?;
+        let purpose = write.purpose(&target);
+        match step {
+            "begin" => {
+                self.passkeys
+                    .sign_in_begin(env, &purpose, Some(&person.id))
+                    .await
+            }
+            "finish" => {
+                self.passkeys
+                    .sign_in_finish(env, &purpose, body, Some(&person.id))
+                    .await?;
+                self.act(env, write, &target).await
+            }
+            _ => Err(bad("not found")),
+        }
+    }
+
+    /// Makes an approved write.
+    async fn act(&self, env: &Env, write: Write, target: &str) -> Result<Value> {
+        Ok(match write {
+            Write::RemovePasskey => {
+                directory(env, "passkey.remove", json!({ "id": target })).await?;
+                json!({ "message": "The passkey is removed." })
+            }
+            Write::DisconnectApp => {
+                let gone = directory(env, "app.disconnect", json!({ "id": target })).await?;
+                json!({ "message": format!(
+                    "{} is disconnected: its tokens are revoked and it acts for no one.",
+                    gone["name"].as_str().unwrap_or("The app")
+                ) })
+            }
+            Write::Invite => {
+                let user = directory(
+                    env,
+                    "users.create",
+                    json!({ "kind": "standard", "name": target }),
+                )
+                .await?;
+                let id = user["id"].as_str().unwrap_or_default();
+                let code = directory(env, "enrol.create", json!({ "user_id": id })).await?;
+                json!({
+                    "message": format!("{target} is added. Send them this link to register a passkey: it works once, within 15 minutes."),
+                    "link": format!("https://{}/auth/enrol?code={}", self.host, code.as_str().unwrap_or_default()),
+                })
+            }
+        })
     }
 
     /// Checks the passkey answer, which must be a person's, and starts their session: the new

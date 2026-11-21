@@ -11,6 +11,9 @@ use pigeon_core::access::Session;
 use pigeon_core::durable::{self, Db, opt};
 use pigeon_core::identity::{self, Expected};
 use pigeon_core::mcp::Tool;
+
+use crate::console::initials;
+use crate::console::sections::{Section, Tab};
 use pigeon_core::webauthn::{CHALLENGE_TTL_MS, random};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -287,6 +290,37 @@ impl Directory {
                     vec![t.into(), s("hash").into()],
                 )?;
                 json!({ "user": user, "created_at": row.created_at, "last_seen_at": t })
+            }
+            "people.list" => {
+                let people: Vec<Value> = self.db.rows(
+                    "SELECT id, name, created_at, avatar FROM users WHERE kind = 'standard' ORDER BY created_at",
+                    vec![],
+                )?;
+                let passkeys: Vec<Value> = self.db.rows(
+                    "SELECT id, user_id, name, created_at, last_used_at FROM passkeys ORDER BY created_at",
+                    vec![],
+                )?;
+                let apps: Vec<Value> = self.db.rows(
+                    "SELECT u.id AS id, u.name AS name, l.standard_user_id AS person, l.approved_at AS linked_at, (SELECT COUNT(*) FROM oauth_tokens o WHERE o.service_user_id = u.id AND o.kind != 'proxy' AND o.expires_at > ?) AS tokens FROM users u LEFT JOIN links l ON l.service_user_id = u.id WHERE u.kind = 'service' ORDER BY u.name",
+                    vec![t.into()],
+                )?;
+                json!({ "people": people, "passkeys": passkeys, "apps": apps })
+            }
+            // An app's own tokens go and its link goes; proxy credentials a person issued stay.
+            "app.disconnect" => {
+                let app = self
+                    .user(s("id"))?
+                    .filter(|u| u.kind == "service")
+                    .ok_or_else(|| bad("no such app"))?;
+                self.db.exec(
+                    "DELETE FROM oauth_tokens WHERE service_user_id = ? AND kind != 'proxy'",
+                    vec![s("id").into()],
+                )?;
+                self.db.exec(
+                    "DELETE FROM links WHERE service_user_id = ?",
+                    vec![s("id").into()],
+                )?;
+                json!({ "name": app.name })
             }
             "session.remove" => {
                 self.db.exec(
@@ -939,6 +973,49 @@ impl Users {
 impl Capability for Users {
     fn name(&self) -> &'static str {
         "users"
+    }
+
+    fn sections(&self) -> Vec<Section> {
+        vec![Section {
+            tab: Tab::Settings,
+            id: "users",
+            title: "Users",
+            description: "People, their passkeys, and the apps that act for them.",
+            order: 2,
+            cost: None,
+        }]
+    }
+
+    /// Each person with their picture, passkeys and the apps acting for them; and apps acting
+    /// for no one.
+    fn section_data<'a>(
+        &'a self,
+        cx: &'a Context<'a>,
+        _id: &'a str,
+        _person: &'a User,
+        _query: &'a Value,
+    ) -> Call<'a> {
+        Box::pin(async move {
+            let all = directory(cx.env, "people.list", json!({})).await?;
+            let list = |k: &str| all[k].as_array().cloned().unwrap_or_default();
+            let (passkeys, apps) = (list("passkeys"), list("apps"));
+            let people: Vec<Value> = list("people")
+                .into_iter()
+                .map(|p| {
+                    let id = p["id"].clone();
+                    json!({
+                        "id": id,
+                        "name": p["name"],
+                        "initials": initials(p["name"].as_str().unwrap_or_default()),
+                        "avatar": p["avatar"],
+                        "passkeys": passkeys.iter().filter(|k| k["user_id"] == id).collect::<Vec<_>>(),
+                        "apps": apps.iter().filter(|a| a["person"] == id).collect::<Vec<_>>(),
+                    })
+                })
+                .collect();
+            let unlinked: Vec<&Value> = apps.iter().filter(|a| a["person"].is_null()).collect();
+            Ok(json!({ "people": people, "unlinked": unlinked }))
+        })
     }
 
     fn tools(&self) -> Vec<Tool> {

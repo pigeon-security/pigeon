@@ -2,19 +2,21 @@
 //! `/cf/`, and nothing else. A proxy credential is a bearer token of its own kind, so the MCP
 //! endpoint, which looks up only access tokens, never accepts one; and the proxies accept
 //! nothing else. Its value is shown once, when it is issued, and kept only as a hash; its id is
-//! the first characters of that hash. The `/tokens` page lists, issues and revokes them: seeing
-//! the list takes a passkey, and issuing or revoking takes a passkey of its own whose challenge
+//! the first characters of that hash. The console's Keys section lists, issues and revokes them
+//! (the old `/tokens` page redirects there): seeing the list takes the console's session, and
+//! issuing or revoking takes a passkey of its own whose challenge
 //! is bound to that one credential's label and lifetime, or id. Every proxied request is logged
 //! as one audit line: who, which route, and what came of it.
 
-use pigeon_core::design::{Page, escape};
 use pigeon_core::mcp::Tool;
 use pigeon_core::oauth::{hash, token};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use worker::{Env, Error, Method, Request, Response, Result, console_log};
 
-use crate::passkeys::{Passkeys, html};
+use crate::console::page;
+use crate::console::sections::Section;
+use crate::passkeys::Passkeys;
 use crate::users::{User, directory};
 use crate::{Call, Capability, Context, Serve, unknown};
 
@@ -258,7 +260,7 @@ impl Tokens {
     async fn serve(&self, cx: &Context<'_>, mut req: Request) -> Result<Response> {
         let path = req.path();
         match (req.method(), path.as_str()) {
-            (Method::Get, "/tokens") => html(&self.page()),
+            (Method::Get, "/tokens") => page::redirect("/settings#credentials"),
             (Method::Get, "/tokens/tokens.js") => {
                 let mut res = Response::ok(SCRIPT)?;
                 let h = res.headers_mut();
@@ -347,25 +349,29 @@ impl Tokens {
             _ => Err(bad("not found")),
         }
     }
-
-    fn page(&self) -> String {
-        let body = format!(
-            r#"<main style="max-width:44rem"><span class="eyebrow">{} · proxy credentials</span><h1>Proxy credentials</h1><article class="card"><p>A proxy credential lets a cloud session reach the platform's git and Cloudflare API proxies on {}, and nothing else: MCP refuses it. Save it as the cloud environment's network secret for that host. Each one is shown once, when it is issued; issuing and revoking each take your passkey.</p><button class="button" data-view>Sign in with passkey</button><p data-status role="status"></p></article><div data-issue hidden class="layer" style="margin-top:16px"></div><div data-list class="layer" style="margin-top:16px"></div></main><script src="/auth/passkey.js" defer></script><script src="/tokens/tokens.js" defer></script>"#,
-            escape(&self.passkeys.site_name),
-            escape(&self.proxy_host)
-        );
-        Page {
-            title: "Proxy credentials",
-            description: "Issue and revoke proxy credentials",
-            body: &body,
-        }
-        .render()
-    }
 }
 
 impl Capability for Tokens {
     fn name(&self) -> &'static str {
         "proxy"
+    }
+
+    fn sections(&self) -> Vec<Section> {
+        vec![crate::secrets::keys_section()]
+    }
+
+    /// The live proxy credentials: id, label, who issued each, when, and when it ends.
+    fn section_data<'a>(
+        &'a self,
+        cx: &'a Context<'a>,
+        _id: &'a str,
+        _person: &'a User,
+        _query: &'a Value,
+    ) -> Call<'a> {
+        Box::pin(async move {
+            let tokens = directory(cx.env, "proxy.tokens", json!({})).await?;
+            Ok(json!({ "tokens": tokens }))
+        })
     }
 
     fn tools(&self) -> Vec<Tool> {

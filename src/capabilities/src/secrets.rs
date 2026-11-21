@@ -1,13 +1,13 @@
 //! Secrets: the one way a value gets into the platform, so no one has to open Cloudflare's
 //! dashboard and no value passes through a chat. Each capability declares the secrets it needs;
-//! the `/secrets` page lists them, set or missing, and lets a person replace one. Seeing the list
-//! takes a passkey, and each write takes a passkey of its own whose challenge is bound to the
+//! the console's Keys section lists them, set or missing, and lets a person replace one (the old
+//! `/secrets` page redirects there). Seeing the list takes the console's session, and each write
+//! takes a passkey of its own whose challenge is bound to the
 //! secret's name and a hash of the new value, so an approval covers that one value. Before it is
 //! written, the owning capability checks the value works. Values are never shown, logged or kept
 //! by pigeon: they go straight to the Secrets Store. Over MCP, secrets can be listed and a link
 //! to set one handed out, but never set.
 
-use pigeon_core::design::{Page, escape};
 use pigeon_core::mcp::Tool;
 use pigeon_core::oauth::hash;
 use pigeon_core::secrets_store::{self, Writer};
@@ -16,7 +16,9 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use worker::{Env, Error, Headers, Method, Request, Response, Result};
 
-use crate::passkeys::{Passkeys, html};
+use crate::console::page;
+use crate::console::sections::{Section, Tab};
+use crate::passkeys::Passkeys;
 use crate::users::{User, directory};
 use crate::{Call, Capability, Context, Serve, Slot, arg, to_value, unknown};
 
@@ -42,6 +44,18 @@ fn write_purpose(name: &str, digest: &str) -> String {
 
 fn bad(why: &str) -> Error {
     Error::RustError(why.to_string())
+}
+
+/// The Keys section of the console's Settings tab, which secrets and proxy credentials share.
+pub fn keys_section() -> Section {
+    Section {
+        tab: Tab::Settings,
+        id: "keys",
+        title: "Keys",
+        description: "Secrets the capabilities need, and the credentials cloud sessions hold.",
+        order: 1,
+        cost: None,
+    }
 }
 
 /// A declared secret and whether it is set: never its value.
@@ -120,8 +134,8 @@ impl Secrets {
 
     fn url(&self, name: Option<&str>) -> String {
         match name {
-            Some(n) => format!("https://{}/secrets#{n}", self.host),
-            None => format!("https://{}/secrets", self.host),
+            Some(n) => format!("https://{}/settings#{n}", self.host),
+            None => format!("https://{}/settings#keys", self.host),
         }
     }
 
@@ -136,7 +150,7 @@ impl Secrets {
     async fn serve(&self, cx: &Context<'_>, mut req: Request) -> Result<Response> {
         let path = req.path();
         match (req.method(), path.as_str()) {
-            (Method::Get, "/secrets") => html(&self.page()),
+            (Method::Get, "/secrets") => page::redirect("/settings"),
             (Method::Get, "/secrets/secrets.js") => {
                 let headers = Headers::new();
                 headers.set("Content-Type", "text/javascript; charset=utf-8")?;
@@ -268,24 +282,35 @@ impl Secrets {
             "it is active and can mint and revoke tokens".into(),
         ))
     }
-
-    fn page(&self) -> String {
-        let body = format!(
-            r#"<main style="max-width:44rem"><span class="eyebrow">{} · secrets</span><h1>Secrets</h1><article class="card"><p>The secrets the platform's capabilities need. Values are never shown: you can only replace one, and each change is approved with your passkey.</p><button class="button" data-view>Sign in with passkey</button><p data-status role="status"></p></article><div data-list class="layer" style="margin-top:16px"></div></main><script src="/auth/passkey.js" defer></script><script src="/secrets/secrets.js" defer></script>"#,
-            escape(&self.passkeys.site_name)
-        );
-        Page {
-            title: "Secrets",
-            description: "Set the platform's secrets",
-            body: &body,
-        }
-        .render()
-    }
 }
 
 impl Capability for Secrets {
     fn name(&self) -> &'static str {
         "secrets"
+    }
+
+    fn sections(&self) -> Vec<Section> {
+        vec![keys_section()]
+    }
+
+    /// Every declared secret and the store's others, set or missing, never a value; and the
+    /// declared ones that are missing, for the overview.
+    fn section_data<'a>(
+        &'a self,
+        cx: &'a Context<'a>,
+        _id: &'a str,
+        _person: &'a User,
+        _query: &'a Value,
+    ) -> Call<'a> {
+        Box::pin(async move {
+            let secrets = Self::list(cx).await?;
+            let missing: Vec<Value> = secrets
+                .iter()
+                .filter(|s| !s.set && !s.owner.is_empty())
+                .map(|s| json!({ "name": s.name, "owner": s.owner, "purpose": s.purpose }))
+                .collect();
+            Ok(json!({ "secrets": secrets, "missing": missing }))
+        })
     }
 
     fn tools(&self) -> Vec<Tool> {

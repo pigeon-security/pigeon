@@ -64,6 +64,15 @@ pub fn asset(body: &str, content_type: &str) -> Result<Response> {
     Ok(Response::ok(body)?.with_headers(headers))
 }
 
+/// A redirect to `location`, a path on this host; a browser keeps the request's fragment, so
+/// `/secrets#NAME` lands on `/settings#NAME`.
+pub fn redirect(location: &str) -> Result<Response> {
+    let headers = Headers::new();
+    headers.set("Location", location)?;
+    headers.set("Cache-Control", "no-store")?;
+    Ok(Response::empty()?.with_status(302).with_headers(headers))
+}
+
 /// The console's icon as a response, cached for an hour.
 pub fn image(body: &[u8], content_type: &str) -> Result<Response> {
     let headers = Headers::new();
