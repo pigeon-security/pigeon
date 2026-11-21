@@ -1,6 +1,6 @@
 # Console hardening
 
-Status: mockup approved by the person on 2026-11-21; phases 1 to 3 built on the branch, awaiting their landing. Branch `claude/console-hardening`.
+Status: deployed 2026-11-21 (landing `slWijyeD5dnMaimB`, main `2038674`). Branch `claude/console-hardening`.
 Mockup: [pigeon Console, focused](https://claude.ai/artifact/BLdr2D7rGU344aqP5KcYhv).
 
 The console at `platform.pigeon.dev` is slow to load and sometimes shows a network error. This
@@ -138,4 +138,23 @@ offers Retry.
 
 ## Results
 
-To be filled in after each landing: commit, landing id, the same timings as above.
+Phases 1 to 3 landed together: landing `slWijyeD5dnMaimB`, main `0c9db60` to `2038674`, test and
+deploy green, 2026-11-21 20:28 UTC. Timed the same way as before, through MCP, with about 0.4 s of
+tool overhead in each:
+
+| Server path | Before | After |
+| --- | --- | --- |
+| `architecture_describe` | 35 s, then 503 | 0.51 s |
+| `users_list` | 0.48 s | 0.42 s |
+| `secrets_list` | 2.1 s | 2.45 s |
+| `credentials_expiry` | 2.5 s | 2.39 s |
+| `models_usage`, 7 days | 2.0 s | 1.60 s |
+
+The Architecture fix is the architecture planner's (`depth_of` was exponential; now memoized),
+landed just before this. The MCP paths for secrets and cost changed little: a mint still makes
+its calls, and the permission-group cache helps only once an isolate has served one. What the
+console gains is not in these numbers: Credentials and Cost answer from their snapshot in one
+Directory read and refresh behind it, sections no longer wait for each other, and none can hang.
+The signed-in console API could not be timed from a session (it takes the person's passkey);
+the public routes answer: `/` and `/access` 0.42 s, `/gateways` 302 to `/cost`, `/console/api/tabs`
+401 without a session.
