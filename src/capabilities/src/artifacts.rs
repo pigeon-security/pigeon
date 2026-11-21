@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use worker::{Error, Method, Result};
 
 use crate::Account;
-use crate::cloudflare::call;
+use crate::cloudflare;
 use crate::secrets_store::Writer;
 use crate::tokens::{Policy, Scope, Scoped};
 
@@ -404,4 +404,22 @@ fn listed(v: &Value) -> Vec<Listed> {
 /// Whether listed row `v` is `name`: the row itself, or one of its `fields`.
 fn named(v: &Value, fields: &[&str], name: &str) -> bool {
     v.as_str() == Some(name) || fields.iter().any(|f| v[*f].as_str() == Some(name))
+}
+
+/// How long to wait before each retry of a call Artifacts refuses with 401.
+const NOT_YET_ACTIVE_WAITS_MS: [u64; 4] = [1_000, 2_000, 4_000, 8_000];
+
+/// [`cloudflare::call`], retried while Artifacts answers 401: it refuses a token minted moments
+/// before, until the token reaches it.
+async fn call(token: &str, method: Method, path: &str, body: Option<&Value>) -> Result<Value> {
+    let mut waits = NOT_YET_ACTIVE_WAITS_MS.iter();
+    loop {
+        match cloudflare::call(token, method.clone(), path, body).await {
+            Err(e) if e.to_string().contains(": 401:") => match waits.next() {
+                Some(ms) => worker::Delay::from(std::time::Duration::from_millis(*ms)).await,
+                None => return Err(e),
+            },
+            other => return other,
+        }
+    }
 }
