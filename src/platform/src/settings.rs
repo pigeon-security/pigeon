@@ -41,9 +41,14 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
             // Authorization for it.
             guests: vec!["pigeon-claude".into()],
             token_header: Some("Authorization".into()),
-            // The passkey pages, where the passkey is the only gate, and OAuth's discovery and
-            // endpoints, which check their callers themselves.
-            public_paths: vec!["/auth".into(), "/oauth".into(), "/.well-known".into()],
+            // Paths that check their callers themselves: the passkey pages, OAuth's discovery
+            // and endpoints, and the MCP endpoint, which takes OAuth bearer tokens.
+            public_paths: vec![
+                "/auth".into(),
+                "/oauth".into(),
+                "/.well-known".into(),
+                "/mcp".into(),
+            ],
             tool: "setup_platform",
         }),
         Box::new(Site {
