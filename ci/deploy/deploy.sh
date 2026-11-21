@@ -23,6 +23,7 @@ case ${PIGEON_GIT_URL:-} in
 esac
 
 "$root/ci/deploy/allowlist.sh"
+. "$root/ci/deploy/node.sh"
 
 account=$(sed -n 's/^account_id = "\(.*\)"$/\1/p' "$root/src/platform/wrangler.toml" | head -n 1)
 cd "$root/src/platform"

@@ -23,6 +23,7 @@ queues=$(awk '/^\[\[queues\.producers\]\]/{p=1;next} /^\[/{p=0} p && /^queue = /
 containers=$(awk '/^\[\[containers\]\]/{p=1;next} /^\[/{p=0} p && /^class_name = /{gsub(/"/,"",$3); print $3}' "$toml")
 [ -n "$account" ] && [ -n "$script" ] || { echo "wrangler.toml names no account_id or name" >&2; exit 2; }
 
+. "$root/ci/deploy/node.sh"
 cd "$platform"
 npm ci --no-audit --no-fund --loglevel=error
 

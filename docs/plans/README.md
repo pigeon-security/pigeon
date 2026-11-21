@@ -13,6 +13,6 @@ up to date.
 | [route-through-platform.md](route-through-platform.md) | Cloud sessions reach git and the Cloudflare API through the platform's proxies (`/git/`, `/cf/`) with a proxy credential, not pasted tokens; CI runners and file reads (phase 5) | Deployed (phases 1 to 5) |
 | [ci-gateway.md](ci-gateway.md) | The CI gateway: `.pigeon/ci.toml`, routing to connectors, the scheduler, job tokens, notes; Containers, Buildkite, GitHub Actions | Phases 1 and 2 deployed; phase 3 (Buildkite) being built on `claude/ci-gateway`; phase 4 to come |
 | [console.md](console.md) | The console at the platform's root: tabs, sections, passkey sign-in and passkey-bound writes | Deployed |
-| [friction.md](friction.md) | `call`, the land flow, read-only diagnostics, the pinned wrangler and its allowlist check, async model jobs, housekeeping | Being built on `claude/friction` |
+| [friction.md](friction.md) | `call`, the land flow, read-only diagnostics, the pinned wrangler and its allowlist check, async model jobs, housekeeping | Built on `claude/friction`, awaiting deploy (the last hand-merged one) |
 
 When a plan's status changes, change it in both places: the plan's first lines and this table.

@@ -1,6 +1,7 @@
 # Friction: what got in the way, removed
 
-Status: planned. Branch `claude/friction`, from `origin/claude/gracious-ride-526fue`. One hand-back
+Status: commits 0 to 6 built on `claude/friction`; commit 7 waits for CI's phase 3 to land.
+Branch `claude/friction`, from `origin/claude/gracious-ride-526fue`. One hand-back
 to the parent session (`session_015XFA1jgveJDEE8NJjTaHKg`), which merges and deploys it. It is
 meant to be the last hand-merged deploy: after it, work lands through `land`.
 
@@ -71,7 +72,7 @@ A live check should never need `deploy_token` and raw API calls.
   living 5 minutes from `POST containers/registries/registry.cloudflare.com/credentials`, then
   `GET https://registry.cloudflare.com/v2/_catalog?tags=true`, as wrangler 4.166.0's
   `containers images list` does). The credential never leaves the Worker. A new capability
-  `containers` (not under `ci*`).
+  `images` (`images.rs`, not under `ci*`) over a new core block, `registry.rs`.
 - **A change to the cf_proxy allowlist deploys through `land`**: see 6, "Allowlist changes".
 - Live only: that the logs endpoint returns `metadata` and `collect_log_payload` as recorded
   (they did for `models_usage`); which permission the registry credential call takes (the tool
@@ -104,7 +105,7 @@ A live check should never need `deploy_token` and raw API calls.
 | Tool | Does |
 | --- | --- |
 | `models_submit {provider?, model?, system?, prompt\|messages, max_tokens?, task?, notify?, timeout_min?}` | queues a job; answers its id, state and (with `notify`) the signing key once |
-| `models_status {id}` | state, times, tokens so far, the error if any |
+| `models_status {id}` | state, times, characters streamed so far, the error if any |
 | `models_result {id}` | the reply (text, stop reason, tokens), once finished |
 
 - **Where it runs.** Durable Object class `ModelJobs` (binding `MODEL_JOBS`, SQLite). Object
@@ -113,7 +114,8 @@ A live check should never need `deploy_token` and raw API calls.
   request through the AI Gateway with `stream: true`, the same tags (`caller`, `caller_name`,
   `for`, `for_name`, `task`) and `cf-aig-collect-log-payload: false`, reads the server-sent
   events as they come (`message_start`, `content_block_delta`, `message_delta`, `error`), writes
-  progress (tokens so far) to `index` every 15 seconds, and the result at the end.
+  progress (characters so far: the provider counts output tokens only at the end) to `index`
+  every 15 seconds, and the result at the end.
 - **Cap and timeout.** At most 4 jobs run at once; more wait `queued`, and a job is started as
   a slot frees. At most 50 jobs queued or running per platform; more are refused. Each job has a
   timeout (`timeout_min`, 1 to 14, 10 by default) enforced by the job's object, with `index`'s
@@ -196,11 +198,12 @@ The `deploy` job reaches the Cloudflare API proxy with its own CI job token, nev
 ### Allowlist changes
 
 The live proxy enforces the allowlist of the deployed platform, not the commit's. A commit that
-adds an allowlist entry for a call wrangler makes **after** the upload (all of today's
-container, settings and subdomain calls) deploys through `land`: the first `wrangler deploy`
+adds an allowlist entry for a call wrangler makes **after** the upload (the container
+application, settings and subdomain calls) deploys through `land`: the first `wrangler deploy`
 uploads the new Worker, then is refused at the new call; `deploy.sh` waits 30 seconds and
 deploys again, now through the new allowlist. A call made **before** the upload (wrangler's
-lookups) cannot be added this way; `deploy.sh` reports that the running proxy refused a call
+lookups, and the container image preparation, which wrangler 4.166.0 makes before uploading)
+cannot be added this way; `deploy.sh` reports that the running proxy refused a call
 made before the upload, and that one deploy has to be made outside the flow. The dry run against
 the stand-in uses the commit's own allowlist, so it passes in both cases.
 
@@ -317,6 +320,24 @@ deploy from a Container (time and memory of a release build on standard-4); the 
    `wrangler.toml` through a `land`).
 2. Say whether to require approval to land (off by default; the console's Settings → Landing).
 3. Optionally, decide whether `deploy_token` stays once `land` has worked.
+
+## As built
+
+- **Commit 1** also pinned wrangler (`src/platform/package.json` and its lockfile); commit 4 put
+  it to use.
+- **Commit 4.** The stand-in records JSON bodies too, so the body rules (image, application) are
+  checked as well as the paths. Run here against `src/platform` as it is: 26 calls over the two
+  modes, all on the allowlist, both before and after the new Durable Object classes.
+- **Commit 5.** `models_status` reports characters streamed so far, not tokens: Anthropic's
+  stream counts output tokens only at its end. A job's prompt is kept in `index` until it starts
+  and in its own object until it ends; its answer only in `index`.
+- **Commit 6.** The Lander runs CI's `ci_submit` and `ci_cancel` through `dispatch`, as the
+  landing's caller, so CI tags its jobs with that caller and `task: land <id> test|deploy`. The
+  approval setting lives in the Lander. The console's Landing section is on the Settings tab.
+  `ci/deploy/node.sh` fetches the pinned Node release (checksum-checked) when the image has
+  none, so the first landings deploy even before image v3 is in `wrangler.toml`.
+- **Image v3** (`ci/image/Dockerfile`) is written but not built here: this session has no
+  Docker daemon.
 
 ## Departures
 
