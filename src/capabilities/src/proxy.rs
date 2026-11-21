@@ -157,6 +157,19 @@ pub fn audit_line(caller: Option<&ProxyCaller>, a: &Audit<'_>) -> String {
     .to_string()
 }
 
+/// Whether a request for `path` on `host` is served, when the proxies have `proxy_host` to
+/// themselves: there, only the proxies and `/health`; anywhere else, everything but the
+/// proxies. So the credential a cloud session's network proxy adds for the proxy host never
+/// reaches the platform's other paths, and the proxies never answer on its other hosts.
+pub fn host_serves(host: &str, proxy_host: &str, path: &str) -> bool {
+    let proxied = path.starts_with("/git/") || path.starts_with("/cf/");
+    if host.eq_ignore_ascii_case(proxy_host) {
+        proxied || path == "/health"
+    } else {
+        !proxied
+    }
+}
+
 /// Writes `a`'s audit line to the Worker's log.
 pub fn audit(caller: Option<&ProxyCaller>, a: &Audit<'_>) {
     console_log!("{}", audit_line(caller, a));
@@ -211,8 +224,8 @@ fn answer(value: &Value, status: u16) -> Result<Response> {
 
 /// The `/tokens` page and its calls.
 pub struct Tokens {
-    /// The hostname the page and the proxies are on.
-    pub host: String,
+    /// The hostname the proxies are on, which a credential is saved for.
+    pub proxy_host: String,
     pub passkeys: Passkeys,
 }
 
@@ -313,7 +326,7 @@ impl Tokens {
                     "message": format!(
                         "Shown once. Save it as the cloud environment's network secret for {}: \
                          header Authorization, prefix Bearer.",
-                        self.host
+                        self.proxy_host
                     ),
                 }))
             }
@@ -337,8 +350,9 @@ impl Tokens {
 
     fn page(&self) -> String {
         let body = format!(
-            r#"<main style="max-width:44rem"><span class="eyebrow">{} · proxy credentials</span><h1>Proxy credentials</h1><article class="card"><p>A proxy credential lets a cloud session reach the platform's git and Cloudflare API proxies, and nothing else: MCP refuses it. Each one is shown once, when it is issued; issuing and revoking each take your passkey.</p><button class="button" data-view>Sign in with passkey</button><p data-status role="status"></p></article><div data-issue hidden class="layer" style="margin-top:16px"></div><div data-list class="layer" style="margin-top:16px"></div></main><script src="/auth/passkey.js" defer></script><script src="/tokens/tokens.js" defer></script>"#,
-            escape(&self.passkeys.site_name)
+            r#"<main style="max-width:44rem"><span class="eyebrow">{} · proxy credentials</span><h1>Proxy credentials</h1><article class="card"><p>A proxy credential lets a cloud session reach the platform's git and Cloudflare API proxies on {}, and nothing else: MCP refuses it. Save it as the cloud environment's network secret for that host. Each one is shown once, when it is issued; issuing and revoking each take your passkey.</p><button class="button" data-view>Sign in with passkey</button><p data-status role="status"></p></article><div data-issue hidden class="layer" style="margin-top:16px"></div><div data-list class="layer" style="margin-top:16px"></div></main><script src="/auth/passkey.js" defer></script><script src="/tokens/tokens.js" defer></script>"#,
+            escape(&self.passkeys.site_name),
+            escape(&self.proxy_host)
         );
         Page {
             title: "Proxy credentials",
@@ -412,6 +426,29 @@ mod tests {
         assert!(reached("refresh").is_empty());
         assert!(reached("").is_empty());
         assert!(reached("Proxy").is_empty());
+    }
+
+    #[test]
+    fn the_proxy_host_serves_only_the_proxies() {
+        let p = "proxy.pigeon.dev";
+        for (host, path, served) in [
+            (p, "/git/ns/r.git/info/refs", true),
+            (p, "/cf/client/v4/accounts", true),
+            (p, "/health", true),
+            ("PROXY.pigeon.dev", "/git/x", true),
+            (p, "/mcp", false),
+            (p, "/tokens", false),
+            (p, "/oauth/token", false),
+            (p, "/.well-known/oauth-protected-resource", false),
+            (p, "/", false),
+            ("platform.pigeon.dev", "/git/ns/r.git/info/refs", false),
+            ("platform.pigeon.dev", "/cf/client/v4/x", false),
+            ("platform.pigeon.dev", "/mcp", true),
+            ("platform.pigeon.dev", "/tokens", true),
+            ("platform.pigeon.dev", "/health", true),
+        ] {
+            assert_eq!(host_serves(host, p, path), served, "{host}{path}");
+        }
     }
 
     #[test]

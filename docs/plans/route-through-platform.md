@@ -1,4 +1,4 @@
-# Routing cloud sessions' traffic through platform.pigeon.dev
+# Routing cloud sessions' traffic through pigeon's platform
 
 Status: phase 1 deployed; phase 2 built, awaiting deploy. Phases are handed back one at a time; each is merged and deployed before the
 next starts.
@@ -15,9 +15,11 @@ also land in transcripts):
 | `api.cloudflare.com` | `wrangler deploy` | `deploy_token` API token, pasted |
 | `github.com` | the session's first clone | the session's own GitHub access |
 
-The goal: sessions talk only to `platform.pigeon.dev`. It holds the real credentials and mints
-a short-lived one for each request. The session holds one **proxy credential**, saved as the
-environment's network secret for `platform.pigeon.dev`. The session's network proxy adds it as
+The goal: sessions talk only to pigeon's platform: `platform.pigeon.dev` for MCP, as today,
+and `proxy.pigeon.dev` for git and the Cloudflare API. The platform Worker serves both; it
+holds the real credentials and mints a short-lived one for each request. The session holds
+one **proxy credential**, saved as the environment's network secret for `proxy.pigeon.dev`
+only. The session's network proxy adds it as
 `Authorization: Bearer …`, so no command, and no transcript, ever sees it.
 
 ## Who does what
@@ -87,7 +89,7 @@ Design:
   (`proxy-token:issue:<label>:<days>`); revoking takes one bound to the id
   (`proxy-token:revoke:<id>`). Only a person (`kind = standard`) may. The new token is shown
   once, with a copy button and the instruction to save it as the environment's network secret
-  for `platform.pigeon.dev`. Lifetime: 30 days by default, 90 at most.
+  for `proxy.pigeon.dev`. Lifetime: 30 days by default, 90 at most.
 - No MCP tool issues a proxy token: issuing one is a person's act.
 
 Steps:
@@ -105,20 +107,19 @@ Live checks after deploy: open `/tokens`, sign in, issue a token, see it listed,
 see it gone; `curl -H 'Authorization: Bearer <proxy token>' -X POST /mcp` answers 401.
 
 The person: issue a token and save it as the pigeon environment's network secret for
-`platform.pigeon.dev` (header `Authorization`, prefix `Bearer`). The session's existing MCP
-connector keeps its own OAuth token; the network secret only matters to requests that go
-through the session's proxy (git and wrangler).
+`proxy.pigeon.dev` (header `Authorization`, prefix `Bearer`).
 
-> **Open question for the live check:** whether the session's network proxy replaces the MCP
-> connector's own `Authorization` header with the network secret on `platform.pigeon.dev`. If
-> it does, MCP would see a proxy token and refuse it. The phase 1 live check must test MCP
-> after the secret is saved. If it breaks, the fix is to serve the proxies on a second
-> hostname, such as `proxy.pigeon.dev`, so the secret applies only there; accepting proxy
-> tokens on `/mcp` would widen them and is not an option. Flagged, not worked around.
+> **Decided (during phase 2): the proxies get a hostname of their own, `proxy.pigeon.dev`.**
+> A network secret on `platform.pigeon.dev` could have replaced the MCP connector's own
+> `Authorization` header there, and MCP would then refuse the request. With the secret on
+> `proxy.pigeon.dev` only, that can't happen. The Worker serves only `/git/`, `/cf/` and
+> `/health` on `proxy.pigeon.dev`, and answers 404 for `/git/` and `/cf/` on every other host
+> (`proxy::host_serves`, unit-tested). `proxy.pigeon.dev` is attached to the Worker by a
+> second `PublicHost` in `settings.rs`, set up with the `setup_proxy_host` tool.
 
 ## Phase 2: the git proxy
 
-**Adds:** `platform.pigeon.dev/git/{namespace}/{repo}.git/…`, streaming to Artifacts.
+**Adds:** `proxy.pigeon.dev/git/{namespace}/{repo}.git/…`, streaming to Artifacts.
 
 Routes, and nothing else (anything else is 404 before any token is minted):
 - `GET  /git/{ns}/{repo}.git/info/refs?service=git-upload-pack|git-receive-pack`
@@ -188,7 +189,7 @@ format with and without side-band; the pack reader on packs made by `git pack-ob
 "already upstream" histories.
 
 Live checks after deploy (from a session with the network secret saved):
-`git ls-remote https://platform.pigeon.dev/git/pigeon-security/pigeon.git`; a clone; a push to
+`git ls-remote https://proxy.pigeon.dev/git/pigeon-security/pigeon.git`; a clone; a push to
 `claude/route-check`; a push of a non-`claude/` branch (refused with the reason); a branch
 delete (refused); a force push to `main` (refused); a fast-forward of `main` from a
 `claude/*` branch (accepted; the parent session decides whether to run this one); the Worker
@@ -196,9 +197,8 @@ logs show one audit line per request and no token; `source_tokens` shows the min
 revoked.
 
 As built (differences from the above, decided while building):
-- The proxies' hostname is the setting `PROXY_HOST` in `settings.rs`, `platform.pigeon.dev`
-  for now. If the network secret must not reach `/mcp`, it becomes a hostname of its own;
-  the git proxy answers 404 on any other host.
+- The proxies' hostname is the setting `PROXY_HOST` in `settings.rs`: `proxy.pigeon.dev`
+  (see the decision under phase 1).
 - An unknown or missing credential gets 403, not 401: a 401 sends git looking for a password
   to prompt for. An upstream 401/403 (the proxy's own git token refused) becomes a 502.
 - Upstream history for the fast-forward check is asked for by wanting every upstream ref tip
@@ -219,7 +219,7 @@ caps a streamed push; a push to `main` is capped at 16 MiB by the buffer.
 
 ## Phase 3: the Cloudflare API proxy
 
-**Adds:** `platform.pigeon.dev/cf/client/v4/*` → `https://api.cloudflare.com/client/v4/*`.
+**Adds:** `proxy.pigeon.dev/cf/client/v4/*` → `https://api.cloudflare.com/client/v4/*`.
 
 Wrangler's base-URL variable, confirmed in wrangler 4.166.0's `wrangler-dist/cli.js`:
 `getCloudflareApiBaseUrlFromEnv = getEnvironmentVariableFactory({ variableName:
@@ -229,7 +229,7 @@ Wrangler's base-URL variable, confirmed in wrangler 4.166.0's `wrangler-dist/cli
 deploy runs with:
 
 ```
-CLOUDFLARE_API_BASE_URL=https://platform.pigeon.dev/cf/client/v4
+CLOUDFLARE_API_BASE_URL=https://proxy.pigeon.dev/cf/client/v4
 CLOUDFLARE_ACCOUNT_ID=4f94676cb2cbe46fd985b089ca97ea27
 CLOUDFLARE_API_TOKEN=unused      # wrangler won't start without one; the session's proxy replaces the header
 WRANGLER_SEND_METRICS=false
@@ -285,6 +285,9 @@ Steps:
 | --- | --- | --- | --- |
 | 1 | `route-p4-1` | sonnet | the docs page, from the merged code |
 | 2 | me | — | instructions text, review |
+
+`proxy.pigeon.dev` needs no allowlist entry of its own: saving a network secret for a host
+also allows requests to it.
 
 Hosts the person can remove from the environment's allowlist once phases 2 and 3 are live and
 checked: `4f94676cb2cbe46fd985b089ca97ea27.artifacts.cloudflare.net` and `api.cloudflare.com`.

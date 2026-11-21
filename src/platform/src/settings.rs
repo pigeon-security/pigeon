@@ -26,9 +26,10 @@ const ZONE: &str = "pigeon.dev";
 
 /// The platform's hostname, in public: its paths check their callers themselves.
 pub const HOST: &str = "platform.pigeon.dev";
-/// The hostname the proxies (`/git/`, later `/cf/`) answer on. The platform's own for now;
-/// a hostname of its own if the cloud environment's network secret must not reach `/mcp`.
-pub const PROXY_HOST: &str = HOST;
+/// The hostname the proxies (`/git/`, `/cf/`) answer on, and nothing else but `/health`. A
+/// hostname of their own, so the proxy credential a cloud environment's network proxy adds
+/// for it never reaches `/mcp` or replaces the MCP connector's own token.
+pub const PROXY_HOST: &str = "proxy.pigeon.dev";
 const NAMESPACE: &str = "pigeon-security";
 const REPO: &str = "pigeon";
 const BRANCH: &str = "main";
@@ -55,6 +56,14 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
                 ],
             },
             tool: "setup_platform",
+        }),
+        // The proxies' hostname, in public: the proxies check the proxy credential themselves.
+        Box::new(PublicHost {
+            zone: ZONE.into(),
+            host: PROXY_HOST.into(),
+            worker: WORKER.into(),
+            retire: Retire::default(),
+            tool: "setup_proxy_host",
         }),
         Box::new(Site {
             zone: ZONE.into(),
@@ -110,7 +119,7 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
         // Proxy credentials: what a cloud session holds to reach /git/ and /cf/, issued on
         // the passkey-gated /tokens page.
         Box::new(Tokens {
-            host: HOST.into(),
+            proxy_host: PROXY_HOST.into(),
             passkeys: Passkeys {
                 host: HOST.into(),
                 site_name: "pigeon".into(),

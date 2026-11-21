@@ -1,5 +1,6 @@
 //! pigeon-platform: the one Worker, hosting pigeon's capabilities behind Access. It answers
 //! `/health` and the MCP endpoint, hands the paths a capability serves (such as `/auth/`) to it,
+//! keeps the proxies (`/git/`, `/cf/`) to their own hostname and that hostname to them,
 //! hands queue events to the capabilities that want them, and does nothing else itself. Built
 //! for `wasm32-unknown-unknown` only.
 
@@ -13,6 +14,7 @@ mod settings;
 include!(concat!(env!("OUT_DIR"), "/sources.rs"));
 
 use pigeon_capabilities::oauth;
+use pigeon_capabilities::proxy;
 use pigeon_capabilities::users::{self, Caller};
 use pigeon_capabilities::{Capability, Context, Hosted};
 
@@ -30,6 +32,10 @@ use worker::{
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, ctx: WorkerContext) -> Result<Response> {
     let path = req.path();
+    let host = req.url()?.host_str().unwrap_or_default().to_string();
+    if !proxy::host_serves(&host, settings::PROXY_HOST, &path) {
+        return Response::error("not found", 404);
+    }
     let caps = settings::capabilities();
     if let Some(c) = caps
         .iter()
