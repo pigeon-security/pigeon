@@ -5,6 +5,8 @@
 pub mod access;
 pub mod ai_gateway;
 pub mod artifacts;
+pub mod buildkite;
+pub mod buildkite_hook;
 pub mod cloudflare;
 pub mod containers;
 pub mod custom_domain;
@@ -15,6 +17,7 @@ pub mod gitobj;
 pub mod identity;
 pub mod mcp;
 pub mod oauth;
+pub mod oidc;
 pub mod pack;
 pub mod queues;
 pub mod secrets_store;

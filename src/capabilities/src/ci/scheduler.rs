@@ -389,6 +389,25 @@ impl Scheduler {
                 }
                 Ok(Value::Null)
             }
+            "exchange" => {
+                // A connector verified a runner's OIDC token for run `handle`: the job must be
+                // that run's, live, on that connector. A new job token replaces any earlier one.
+                let Some(row) = self.db.row::<Row>(
+                    &format!(
+                        "SELECT * FROM jobs WHERE id = ? AND connector = ? AND handle = ? AND state IN {LIVE}"
+                    ),
+                    vec![s("job").into(), s("connector").into(), s("handle").into()],
+                )?
+                else {
+                    return Ok(Value::Null);
+                };
+                let (value, hash) = token::mint()?;
+                self.db.exec(
+                    "UPDATE jobs SET token_hash = ?, token_expires_at = deadline_at WHERE id = ?",
+                    vec![hash.as_str().into(), row.id.as_str().into()],
+                )?;
+                Ok(json!(value))
+            }
             "grant" => {
                 let row: Option<Row> = self.db.row(
                     &format!("SELECT * FROM jobs WHERE token_hash = ? AND state IN {LIVE}"),

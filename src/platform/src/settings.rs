@@ -4,6 +4,9 @@
 use pigeon_capabilities::Capability;
 use pigeon_capabilities::architecture::Architecture;
 use pigeon_capabilities::cf_proxy::CfProxy;
+use pigeon_capabilities::ci::buildkite::{self, Buildkite};
+use pigeon_capabilities::ci::class::{Class, Size};
+use pigeon_capabilities::ci::config::{Arch, Os};
 use pigeon_capabilities::ci::containers::Containers;
 use pigeon_capabilities::ci::{self, Ci, ProxyFiles};
 use pigeon_capabilities::console::Console;
@@ -201,17 +204,64 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
     ]
 }
 
+/// The Buildkite organization's slug.
+const BUILDKITE_ORG: &str = "";
+/// Whether macOS jobs may go to the cluster's `macos-build` queue. Off until decided.
+const BUILDKITE_MACOS: bool = false;
+
+/// Buildkite's queues in cluster `pigeon`, by class: hosted Linux agents (2 vCPU, 4 GB, 47 GB
+/// disk; 4 vCPU, 16 GB, 95 GB), with docker, so each also runs the class's `-docker` jobs.
+fn buildkite_queues() -> Vec<buildkite::Queue> {
+    let mut q = Vec::new();
+    for (key, size, cpu, mem, disk) in [
+        ("pigeon-linux-small", Size::Small, 2, 4, 47),
+        ("pigeon-linux-medium", Size::Medium, 4, 16, 95),
+    ] {
+        for docker in [false, true] {
+            q.push(buildkite::queue(
+                key,
+                buildkite::linux(size, docker),
+                cpu,
+                mem,
+                disk,
+            ));
+        }
+    }
+    if BUILDKITE_MACOS {
+        // MACOS_ARM64_M4_6X28: 6 vCPU, 28 GB, 182 GB.
+        let mac = Class {
+            os: Os::Macos,
+            arch: Arch::Arm64,
+            size: Size::Large,
+            docker: false,
+            gpu: false,
+        };
+        q.push(buildkite::queue("macos-build", mac, 6, 28, 182));
+    }
+    q
+}
+
 /// The CI gateway's settings: its connectors in the order jobs prefer them (Containers, then
 /// Buildkite, then GitHub Actions, each added in its own phase), the repositories it runs, and
 /// how long a queued job waits for its first choice.
 pub fn ci() -> ci::Settings {
     ci::Settings {
-        connectors: vec![Box::new(Containers {
-            // The base image's key under [containers.images] in wrangler.toml.
-            image: Some("base".into()),
-            limit: 4,
-            entrypoint: vec!["/usr/local/bin/pigeon-ci-runner".into()],
-        })],
+        connectors: vec![
+            Box::new(Containers {
+                // The base image's key under [containers.images] in wrangler.toml.
+                image: Some("base".into()),
+                limit: 4,
+                entrypoint: vec!["/usr/local/bin/pigeon-ci-runner".into()],
+            }),
+            Box::new(Buildkite {
+                // The organization's slug, from its Buildkite URL; empty leaves the connector
+                // unconfigured.
+                org: BUILDKITE_ORG.into(),
+                pipeline: "pigeon".into(),
+                queues: buildkite_queues(),
+                hosted_only: true,
+            }),
+        ],
         files: Box::new(ProxyFiles {
             parent: PARENT_TOKEN.into(),
         }),

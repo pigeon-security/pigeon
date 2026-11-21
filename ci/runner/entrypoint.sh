@@ -32,6 +32,9 @@ case $PIGEON_TIMEOUT_MIN in
     *[!0-9]*) exit 2 ;;
 esac
 
+# Where the commit is checked out: /work in a container, a temporary directory elsewhere.
+work=${PIGEON_WORK:-/work}
+
 # Keep the token in a plain shell variable (not exported).
 token=$PIGEON_JOB_TOKEN
 unset PIGEON_JOB_TOKEN v
@@ -51,19 +54,19 @@ CONF
 }
 
 # Fetch exactly one commit. The auth header lives only in git's environment.
-git init -q /work || exit 3
+git init -q "$work" || exit 3
 if ! GIT_TERMINAL_PROMPT=0 \
     GIT_CONFIG_COUNT=1 \
     GIT_CONFIG_KEY_0=http.extraHeader \
     GIT_CONFIG_VALUE_0="Authorization: Bearer $token" \
-    git -C /work fetch -q --depth 1 --no-tags "$PIGEON_GIT_URL" "$PIGEON_COMMIT"
+    git -C "$work" fetch -q --depth 1 --no-tags "$PIGEON_GIT_URL" "$PIGEON_COMMIT"
 then
     exit 3
 fi
-git -C /work checkout -q --detach FETCH_HEAD || exit 3
+git -C "$work" checkout -q --detach FETCH_HEAD || exit 3
 
 # The checked-out commit must be the one asked for.
-head=$(git -C /work rev-parse HEAD) || exit 3
+head=$(git -C "$work" rev-parse HEAD) || exit 3
 [ "$head" = "$PIGEON_COMMIT" ] || exit 3
 
 # A failed "running" report is not fatal; the final report is.
@@ -78,15 +81,15 @@ finish() {
 }
 
 # The script must be a regular file, not a symlink.
-if [ ! -f "/work/$PIGEON_SCRIPT" ] || [ -L "/work/$PIGEON_SCRIPT" ]; then
+if [ ! -f "$work/$PIGEON_SCRIPT" ] || [ -L "$work/$PIGEON_SCRIPT" ]; then
     finish '{"state":"finished","passed":false,"detail":"no such script"}'
 fi
 
 # Run the job without the token in its environment. Its output goes to the container's log
 # and to a file, whose last 4 KiB go with the result (the gateway redacts token-shaped text).
-cd /work
+cd "$work"
 rc=0
-env -u PIGEON_JOB_TOKEN timeout "${PIGEON_TIMEOUT_MIN}m" sh "/work/$PIGEON_SCRIPT" \
+env -u PIGEON_JOB_TOKEN timeout "${PIGEON_TIMEOUT_MIN}m" sh "$work/$PIGEON_SCRIPT" \
     >"$out" 2>&1 || rc=$?
 cat "$out"
 tail=$(tail -c 4096 "$out" | base64 | tr -d '\n')

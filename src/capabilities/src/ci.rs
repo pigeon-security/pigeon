@@ -15,6 +15,7 @@
 //! read; runners report on `/ci/runner/{job}` with their job token. Every job carries its
 //! caller and an optional `task` label, as model requests do.
 
+pub mod buildkite;
 pub mod class;
 pub mod config;
 pub mod containers;
@@ -161,6 +162,12 @@ pub trait Connector {
 
     /// Stops run `handle`.
     fn cancel<'a>(&'a self, cx: &'a Cx<'a>, handle: &'a str) -> Pending<'a, ()>;
+
+    /// Verifies an OIDC token a runner presents at `/ci/token` and answers the handle of the run
+    /// it vouches for; `None` when this connector's runners do not exchange tokens.
+    fn exchange<'a>(&'a self, _cx: &'a Cx<'a>, _jwt: &'a str) -> Pending<'a, Option<String>> {
+        Box::pin(async { Ok(None) })
+    }
 
     /// Verifies `hook` before anything in it is read, then answers what it says of a run;
     /// `None` when it is verified but not about a run. An error means unverified.
@@ -607,6 +614,52 @@ impl Ci {
         Response::from_json(&answer)
     }
 
+    /// `/ci/token`: a runner's OIDC token, verified by the connector that issued its run,
+    /// exchanged for a job token for that run's job only. The job token is answered once, as
+    /// plain text, and kept only as its hash.
+    async fn token(&self, env: &Env, mut req: Request) -> Result<Response> {
+        let refused = || Response::error("the token is refused", 401);
+        let Some(jwt) = bearer(&req) else {
+            return refused();
+        };
+        let body: Value = req.json().await.unwrap_or(Value::Null);
+        let Some(job) = body["job"]
+            .as_str()
+            .filter(|j| token::reaches(&format!("/ci/runner/{j}")))
+        else {
+            return Response::error("`job` is required", 400);
+        };
+        let cx = self.cx(env);
+        for c in &self.settings.connectors {
+            let handle = match c.exchange(&cx, &jwt).await {
+                Ok(Some(h)) => h,
+                Ok(None) => continue,
+                Err(e) => {
+                    // The reason, never the token.
+                    worker::console_error!("ci token exchange ({}): {e}", c.name());
+                    return refused();
+                }
+            };
+            let minted = scheduler(
+                env,
+                "exchange",
+                json!({ "connector": c.name(), "handle": handle, "job": job }),
+            )
+            .await?;
+            let Some(token) = minted.as_str() else {
+                worker::console_error!(
+                    "ci token exchange ({}): no live job {job} on {handle}",
+                    c.name()
+                );
+                return refused();
+            };
+            let mut res = Response::ok(token)?;
+            res.headers_mut().set("Cache-Control", "no-store")?;
+            return Ok(res);
+        }
+        refused()
+    }
+
     async fn serve(&self, cx: &Context<'_>, req: Request) -> Result<Response> {
         let path = req.path();
         if let Some(name) = path.strip_prefix("/ci/hooks/") {
@@ -617,9 +670,38 @@ impl Ci {
             let job = job.to_string();
             return self.runner(cx.env, req, &job).await;
         }
-        // `/ci/token`, the OIDC exchange, arrives with the Buildkite connector.
-        Response::error("not found", 404)
+        match (req.method(), path.as_str()) {
+            (Method::Post, "/ci/token") => self.token(cx.env, req).await,
+            (Method::Get, "/ci/buildkite.sh") => script(BUILDKITE_BOOTSTRAP),
+            (Method::Get, "/ci/runner.sh") => script(RUNNER),
+            _ => Response::error("not found", 404),
+        }
     }
+}
+
+/// The runner, served to Buildkite's bootstrap.
+const RUNNER: &str = include_str!("../../../ci/runner/entrypoint.sh");
+/// The bootstrap a Buildkite step runs: exchange its OIDC token, then run the runner.
+const BUILDKITE_BOOTSTRAP: &str = include_str!("../../../ci/runner/buildkite.sh");
+
+/// A shell script, served as text that is never cached.
+fn script(text: &str) -> Result<Response> {
+    let mut res = Response::ok(text)?;
+    let h = res.headers_mut();
+    h.set("Content-Type", "text/x-shellscript; charset=utf-8")?;
+    h.set("Cache-Control", "no-store")?;
+    h.set("X-Content-Type-Options", "nosniff")?;
+    Ok(res)
+}
+
+/// The bearer token `req` carries.
+fn bearer(req: &Request) -> Option<String> {
+    let h = req.headers().get("Authorization").ok().flatten()?;
+    let (scheme, rest) = h.trim().split_once(' ')?;
+    scheme
+        .eq_ignore_ascii_case("bearer")
+        .then(|| rest.trim().to_string())
+        .filter(|t| !t.is_empty())
 }
 
 /// What a runner's report body says, once its token has been checked.
