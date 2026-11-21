@@ -10,10 +10,11 @@ use crate::Account;
 use crate::cloudflare::call;
 use crate::tokens::{Policy, Scope, Scoped};
 
-/// What a session's token holds.
-pub const PERMISSIONS: [&str; 2] = [
+/// What a session's token holds: the organization read is for the team domain.
+pub const PERMISSIONS: [&str; 3] = [
     "Access: Apps and Policies Write",
     "Access: Service Tokens Write",
+    "Access: Organizations, Identity Providers, and Groups Read",
 ];
 
 /// How long a service token lives.
