@@ -145,11 +145,34 @@ pub async fn tokens(account: &Account, namespace: &str, name: &str) -> Result<Ve
 pub async fn revoke(account: &Account, namespace: &str, name: &str, id: &str) -> Result<()> {
     let token = Scoped::open(account, "artifacts", policies()).await?;
     let api = Api::new(account, token.value());
-    let path = format!("{}/tokens/{id}", api.repo_path(namespace, name));
-    let revoked = call(api.token, Method::Delete, &path, None)
-        .await
-        .map(|_| ());
+    let revoked = api.revoke(namespace, name, id).await;
     token.finish(revoked).await
+}
+
+impl Api<'_> {
+    /// Revokes token `id`, where tokens are minted: under the namespace first, then the
+    /// repository, moving on only when a path does not exist (404).
+    async fn revoke(&self, namespace: &str, name: &str, id: &str) -> Result<()> {
+        let at_namespace = format!("{}/{namespace}/tokens/{id}", self.namespaces());
+        let at_repo = format!("{}/tokens/{id}", self.repo_path(namespace, name));
+        let tries = [
+            (Method::Delete, at_namespace.clone()),
+            (Method::Delete, at_repo),
+            (Method::Post, format!("{at_namespace}/revoke")),
+        ];
+        let mut misses = Vec::new();
+        for (method, path) in tries {
+            match call(self.token, method, &path, None).await {
+                Ok(_) => return Ok(()),
+                Err(e) if e.to_string().contains(": 404:") => misses.push(e.to_string()),
+                Err(e) => return Err(e),
+            }
+        }
+        Err(Error::RustError(format!(
+            "no revoke path answered: {}",
+            misses.join("; ")
+        )))
+    }
 }
 
 /// Mints a git token and keeps it in the Secrets Store as `secret`, replacing what was there;
