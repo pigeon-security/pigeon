@@ -8,6 +8,7 @@ pub mod approval;
 pub mod artifacts;
 pub mod buildkite;
 pub mod buildkite_hook;
+pub mod buildkite_setup;
 pub mod cloudflare;
 pub mod cloudflare_oauth;
 pub mod containers;

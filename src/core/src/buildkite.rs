@@ -1,6 +1,7 @@
-//! Buildkite's REST API, as the CI gateway uses it: create a build on a pipeline, read one,
-//! cancel one, and check what an API token may do. The token goes in the `Authorization`
-//! header only; no error repeats it.
+//! Buildkite's REST API, as pigeon uses it. The CI gateway creates a build on a pipeline, reads
+//! one, cancels one, and checks what an API token may do. The setup reads and writes an
+//! organization's clusters, hosted queues, the pipeline and notification services. The token
+//! goes in the `Authorization` header only; no error repeats it.
 
 use serde_json::Value;
 use worker::{Error, Fetch, Headers, Method, Request, RequestInit, Result};
@@ -127,4 +128,204 @@ pub async fn json(url: &str) -> Result<Value> {
         )));
     }
     res.json().await
+}
+
+/// One call whose status must be among `ok`: its JSON body, else a refusal named `what`.
+async fn expect(
+    token: &str,
+    method: Method,
+    url: &str,
+    body: Option<&Value>,
+    ok: &[u16],
+    what: &str,
+) -> Result<Value> {
+    let (status, answer) = call(token, method, url, body).await?;
+    if ok.contains(&status) {
+        Ok(answer)
+    } else {
+        Err(refused(what, status, &answer))
+    }
+}
+
+/// One list call: the first page's items. pigeon's few resources fit in one page of 100.
+async fn list(token: &str, url: &str, noun: &str) -> Result<Vec<Value>> {
+    let what = format!("did not list {noun}");
+    match expect(token, Method::Get, url, None, &[200], &what).await? {
+        Value::Array(items) => Ok(items),
+        _ => Err(Error::RustError(format!(
+            "Buildkite answered {noun} that is not a list"
+        ))),
+    }
+}
+
+/// A path segment, checked: non-empty ASCII alphanumerics, `-`, `_` and `.`, at most 100
+/// bytes, and neither `.` nor `..`.
+fn segment(s: &str) -> Result<&str> {
+    let allowed = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.';
+    if s.is_empty() || s.len() > 100 || s == "." || s == ".." || !s.chars().all(allowed) {
+        return Err(Error::RustError("not a Buildkite identifier".into()));
+    }
+    Ok(s)
+}
+
+/// An organization, reached with an API token: what the setup reads and writes.
+pub struct Org<'a> {
+    pub token: &'a str,
+    pub org: &'a str,
+}
+
+impl Org<'_> {
+    fn base(&self) -> Result<String> {
+        Ok(format!("{API}/organizations/{}", segment(self.org)?))
+    }
+
+    /// The clusters: `GET …/clusters`.
+    pub async fn clusters(&self) -> Result<Vec<Value>> {
+        let url = format!("{}/clusters?per_page=100", self.base()?);
+        list(self.token, &url, "clusters").await
+    }
+
+    /// Creates a cluster: `POST …/clusters`.
+    pub async fn create_cluster(&self, body: &Value) -> Result<Value> {
+        let url = format!("{}/clusters", self.base()?);
+        expect(
+            self.token,
+            Method::Post,
+            &url,
+            Some(body),
+            &[201, 200],
+            "did not create the cluster",
+        )
+        .await
+    }
+
+    /// Updates a cluster: `PUT …/clusters/{id}`.
+    pub async fn update_cluster(&self, id: &str, body: &Value) -> Result<Value> {
+        let url = format!("{}/clusters/{}", self.base()?, segment(id)?);
+        expect(
+            self.token,
+            Method::Put,
+            &url,
+            Some(body),
+            &[200],
+            "did not update the cluster",
+        )
+        .await
+    }
+
+    /// A cluster's queues: `GET …/clusters/{cluster}/queues`.
+    pub async fn queues(&self, cluster: &str) -> Result<Vec<Value>> {
+        let url = format!(
+            "{}/clusters/{}/queues?per_page=100",
+            self.base()?,
+            segment(cluster)?
+        );
+        list(self.token, &url, "queues").await
+    }
+
+    /// Creates a queue, hosted when the body says so: `POST …/clusters/{cluster}/queues`.
+    pub async fn create_queue(&self, cluster: &str, body: &Value) -> Result<Value> {
+        let url = format!("{}/clusters/{}/queues", self.base()?, segment(cluster)?);
+        expect(
+            self.token,
+            Method::Post,
+            &url,
+            Some(body),
+            &[201, 200],
+            "did not create the queue",
+        )
+        .await
+    }
+
+    /// Updates a queue: `PUT …/clusters/{cluster}/queues/{id}`.
+    pub async fn update_queue(&self, cluster: &str, id: &str, body: &Value) -> Result<Value> {
+        let url = format!(
+            "{}/clusters/{}/queues/{}",
+            self.base()?,
+            segment(cluster)?,
+            segment(id)?
+        );
+        expect(
+            self.token,
+            Method::Put,
+            &url,
+            Some(body),
+            &[200],
+            "did not update the queue",
+        )
+        .await
+    }
+
+    /// Pipeline `slug`, or `None` when there is none: `GET …/pipelines/{slug}`.
+    pub async fn pipeline(&self, slug: &str) -> Result<Option<Value>> {
+        let url = format!("{}/pipelines/{}", self.base()?, segment(slug)?);
+        let (status, body) = call(self.token, Method::Get, &url, None).await?;
+        match status {
+            200 => Ok(Some(body)),
+            404 => Ok(None),
+            _ => Err(refused("did not answer for the pipeline", status, &body)),
+        }
+    }
+
+    /// Creates a pipeline: `POST …/pipelines`.
+    pub async fn create_pipeline(&self, body: &Value) -> Result<Value> {
+        let url = format!("{}/pipelines", self.base()?);
+        expect(
+            self.token,
+            Method::Post,
+            &url,
+            Some(body),
+            &[201, 200],
+            "did not create the pipeline",
+        )
+        .await
+    }
+
+    /// Updates a pipeline: `PATCH …/pipelines/{slug}`.
+    pub async fn update_pipeline(&self, slug: &str, body: &Value) -> Result<Value> {
+        let url = format!("{}/pipelines/{}", self.base()?, segment(slug)?);
+        expect(
+            self.token,
+            Method::Patch,
+            &url,
+            Some(body),
+            &[200],
+            "did not update the pipeline",
+        )
+        .await
+    }
+
+    /// The notification services: `GET …/services`.
+    pub async fn services(&self) -> Result<Vec<Value>> {
+        let url = format!("{}/services?per_page=100", self.base()?);
+        list(self.token, &url, "notification services").await
+    }
+
+    /// Creates a notification service: `POST …/services`.
+    pub async fn create_service(&self, body: &Value) -> Result<Value> {
+        let url = format!("{}/services", self.base()?);
+        expect(
+            self.token,
+            Method::Post,
+            &url,
+            Some(body),
+            &[201, 200],
+            "did not create the notification service",
+        )
+        .await
+    }
+
+    /// Updates a notification service: `PATCH …/services/{id}`.
+    pub async fn update_service(&self, id: &str, body: &Value) -> Result<Value> {
+        let url = format!("{}/services/{}", self.base()?, segment(id)?);
+        expect(
+            self.token,
+            Method::Patch,
+            &url,
+            Some(body),
+            &[200],
+            "did not update the notification service",
+        )
+        .await
+    }
 }

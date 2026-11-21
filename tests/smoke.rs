@@ -2314,4 +2314,237 @@ fn tool_call_approvals() {
     assert!(Write::ApprovalApprove.bound_to_digest());
     assert!(!Write::ApprovalDeny.bound_to_digest());
     assert!(Write::ApprovalApprove.target("not an id!").is_err());
+// ---- Buildkite setup ----
+
+/// The Buildkite setup's plan: a first run creates everything; the same state seen back is all
+/// `ok`; drift is an update naming only what drifted; a resource with pigeon's name that is not
+/// pigeon's (not recorded, another id, or its marker gone) is a conflict that blocks what
+/// depends on it and is never touched; a missing scope blocks everything; a recorded resource
+/// no longer declared is orphaned, never deleted; secrets never appear in a step.
+#[test]
+fn buildkite_setup_plan() {
+    use pigeon_core::buildkite_setup::{
+        self as bk, Declared, Kind, Owned, Seen, Step, description, hash, missing_scopes, plan,
+        wants,
+    };
+
+    let d = Declared {
+        org: "acme".into(),
+        cluster: "pigeon".into(),
+        pipeline: "pigeon".into(),
+        queues: vec![
+            ("pigeon-linux-small".into(), "LINUX_AMD64_2X4".into()),
+            ("pigeon-linux-medium".into(), "LINUX_AMD64_4X16".into()),
+        ],
+        repository: "https://github.com/pigeon-security/pigeon.git".into(),
+        steps: "steps: []\n".into(),
+        hook_url: "https://platform.example/ci/hooks/buildkite".into(),
+        host: "platform.example".into(),
+        portal: Some((
+            "buildkite".into(),
+            "https://mcp.buildkite.com/direct".into(),
+        )),
+    };
+    let key = hash("hook-key-secret");
+    let token = hash("bkua_token_secret");
+    let w = wants(&d, &key, &token);
+    let all_scopes: Vec<String> = bk::RUNTIME_SCOPES
+        .iter()
+        .chain(bk::SETUP_SCOPES.iter())
+        .map(|s| s.to_string())
+        .collect();
+    assert!(missing_scopes(&all_scopes).is_empty());
+    let names = |steps: &[Step]| -> Vec<String> {
+        steps
+            .iter()
+            .map(|s| {
+                let tag = serde_json::to_value(s).unwrap()["step"]
+                    .as_str()
+                    .unwrap()
+                    .to_string();
+                format!("{tag} {}:{}", s.kind().name(), s.key())
+            })
+            .collect()
+    };
+
+    // Nothing there, nothing recorded: everything is created, parents first.
+    let first = plan(&w, &[], &[], &[]);
+    assert_eq!(
+        names(&first),
+        [
+            "create cluster:pigeon",
+            "create queue:pigeon-linux-small",
+            "create queue:pigeon-linux-medium",
+            "create pipeline:pigeon",
+            "create service:hook",
+            "create portal_server:buildkite",
+        ]
+    );
+
+    // As Buildkite and Cloudflare would answer once the apply made it all, ids recorded.
+    let desc = |k: Kind, key: &str| description(k, key, "platform.example");
+    let mut seen = vec![
+        Seen {
+            kind: Kind::Cluster,
+            key: "pigeon".into(),
+            id: "c-1".into(),
+            description: desc(Kind::Cluster, "pigeon"),
+            body: json!({"name": "pigeon", "description": desc(Kind::Cluster, "pigeon")}),
+        },
+        Seen {
+            kind: Kind::Cluster,
+            key: "someone-elses".into(),
+            id: "c-9".into(),
+            description: "theirs".into(),
+            body: json!({"name": "someone-elses"}),
+        },
+    ];
+    for (q, shape) in [
+        ("pigeon-linux-small", "LINUX_AMD64_2X4"),
+        ("pigeon-linux-medium", "LINUX_AMD64_4X16"),
+    ] {
+        seen.push(Seen {
+            kind: Kind::Queue,
+            key: q.into(),
+            id: format!("q-{q}"),
+            description: desc(Kind::Queue, q),
+            body: json!({"key": q, "description": desc(Kind::Queue, q),
+                         "hosted_agents": {"instance_shape": {"name": shape}}}),
+        });
+    }
+    seen.push(Seen {
+        kind: Kind::Pipeline,
+        key: "pigeon".into(),
+        id: "p-1".into(),
+        description: desc(Kind::Pipeline, "pigeon"),
+        body: json!({"name": "pigeon", "description": desc(Kind::Pipeline, "pigeon"),
+                     "cluster_id": "c-1", "configuration": "steps: []\n",
+                     "default_branch": "main",
+                     "provider": {"settings": {"trigger_mode": "none"}}}),
+    });
+    seen.push(Seen {
+        kind: Kind::Service,
+        key: "hook".into(),
+        id: "s-1".into(),
+        description: desc(Kind::Service, "hook"),
+        body: json!({"description": desc(Kind::Service, "hook"),
+                     "settings": {"url": "https://platform.example/ci/hooks/buildkite",
+                                  "token": key, "token_mode": "signature",
+                                  "events": bk::HOOK_EVENTS}}),
+    });
+    seen.push(Seen {
+        kind: Kind::PortalServer,
+        key: "buildkite".into(),
+        id: "buildkite".into(),
+        description: desc(Kind::PortalServer, "buildkite"),
+        body: json!({"hostname": "https://mcp.buildkite.com/direct", "auth_type": "bearer",
+                     "description": desc(Kind::PortalServer, "buildkite")}),
+    });
+    let owned: Vec<Owned> = [
+        (Kind::Cluster, "pigeon", "c-1", None),
+        (
+            Kind::Queue,
+            "pigeon-linux-small",
+            "q-pigeon-linux-small",
+            None,
+        ),
+        (
+            Kind::Queue,
+            "pigeon-linux-medium",
+            "q-pigeon-linux-medium",
+            None,
+        ),
+        (Kind::Pipeline, "pigeon", "p-1", None),
+        (Kind::Service, "hook", "s-1", None),
+        (
+            Kind::PortalServer,
+            "buildkite",
+            "buildkite",
+            Some(token.clone()),
+        ),
+    ]
+    .into_iter()
+    .map(|(kind, key, id, spec_hash)| Owned {
+        kind,
+        key: key.into(),
+        id: id.into(),
+        spec_hash,
+    })
+    .collect();
+    let again = plan(&w, &seen, &owned, &[]);
+    assert!(
+        again.iter().all(|s| matches!(s, Step::Ok { .. })),
+        "{again:?}"
+    );
+
+    // Drift: someone changed the pipeline's steps and the webhook key, and the token rotated.
+    let mut drifted = seen.clone();
+    drifted[4].body["configuration"] = json!("steps: [evil]\n");
+    drifted[5].body["settings"]["token"] = json!(hash("other"));
+    let rotated = wants(&d, &key, &hash("bkua_new_token"));
+    let p = plan(&rotated, &drifted, &owned, &[]);
+    assert_eq!(
+        p[3],
+        Step::Update {
+            kind: Kind::Pipeline,
+            key: "pigeon".into(),
+            id: "p-1".into(),
+            fields: vec!["configuration".into()]
+        }
+    );
+    assert!(matches!(&p[4], Step::Update { fields, .. } if fields == &["settings.token"]));
+    assert!(matches!(&p[5], Step::Update { fields, .. } if fields == &["credentials"]));
+    let shown = serde_json::to_string(&p).unwrap();
+    assert!(!shown.contains("hook-key-secret") && !shown.contains("bkua_"));
+
+    // Conflicts: a cluster named `pigeon` that pigeon never recorded blocks all below it.
+    let p = plan(&w, &seen, &owned[3..], &[]);
+    assert!(
+        matches!(&p[0], Step::Conflict { id, why, .. } if id == "c-1" && why.contains("not pigeon's"))
+    );
+    assert!(p[1..5].iter().all(|s| matches!(s, Step::Blocked { .. })));
+    assert!(
+        matches!(p[5], Step::Ok { .. }),
+        "the portal server stands alone"
+    );
+    // ...recorded with another id, or its marker removed: still a conflict.
+    let mut other_id = owned.clone();
+    other_id[3].id = "p-2".into();
+    assert!(matches!(
+        &plan(&w, &seen, &other_id, &[])[3],
+        Step::Conflict { why, .. } if why.contains("not the one pigeon made")
+    ));
+    let mut unmarked = seen.clone();
+    unmarked[0].description = "hand-edited".into();
+    assert!(matches!(
+        &plan(&w, &unmarked, &owned, &[])[0],
+        Step::Conflict { why, .. } if why.contains("lost pigeon's marker")
+    ));
+
+    // A token without the setup's scopes: every step blocked, nothing attempted.
+    let missing = missing_scopes(&["read_builds".to_string(), "write_builds".to_string()]);
+    assert_eq!(missing.len(), bk::SETUP_SCOPES.len());
+    assert!(
+        plan(&w, &[], &[], &missing)
+            .iter()
+            .all(|s| matches!(s, Step::Blocked { why, .. } if why.contains("write_clusters")))
+    );
+
+    // The medium queue dropped from settings: reported orphaned, never deleted.
+    let mut fewer = d.clone();
+    fewer.queues.truncate(1);
+    let p = plan(&wants(&fewer, &key, &token), &seen, &owned, &[]);
+    assert_eq!(
+        p.last(),
+        Some(&Step::Orphaned {
+            kind: Kind::Queue,
+            key: "pigeon-linux-medium".into(),
+            id: "q-pigeon-linux-medium".into()
+        })
+    );
+
+    // The applier's fill: ids and secrets go into bodies only at apply time.
+    let filled = bk::fill(&w[3].create, &[("cluster", "c-1"), ("pipeline", "p-1")]);
+    assert_eq!(filled["cluster_id"], "c-1");
+    assert_eq!(w[4].create["settings"]["token"], "${hook_key}");
 }
