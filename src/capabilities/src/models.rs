@@ -211,7 +211,18 @@ fn filter(args: &Value) -> Filter {
         model: s("model"),
         caller: s("caller"),
         task: s("task"),
+        failed: args["failed"].as_bool().unwrap_or(false),
     }
+}
+
+/// The most log entries `models_logs` answers.
+const MAX_LOG_ENTRIES: usize = 200;
+
+/// How many entries `models_logs` answers: 20 unless asked, 1 to [`MAX_LOG_ENTRIES`].
+fn log_limit(args: &Value) -> usize {
+    args["limit"]
+        .as_u64()
+        .map_or(20, |n| n.clamp(1, MAX_LOG_ENTRIES as u64) as usize)
 }
 
 /// `args`' grouping for `models_usage`: by model when none is named.
@@ -311,6 +322,23 @@ impl Models {
         let mut reply = to_value(p.dialect.reply(&ran.body)?);
         reply["provider"] = json!(p.slug);
         Ok(reply)
+    }
+
+    /// The gateway's latest log entries: what each request was, never what it said.
+    async fn recent(&self, account: &Account, args: &Value) -> Result<Value> {
+        let hours = args["hours"]
+            .as_f64()
+            .unwrap_or(24.0)
+            .clamp(0.1, 24.0 * 31.0);
+        let limit = log_limit(args);
+        let since = Date::now() - hours * 3_600_000.0;
+        let logs = ai_gateway::logs(account, &self.gateway, since, &filter(args), limit).await?;
+        Ok(json!({
+            "since": String::from(Date::new(&since.into()).to_iso_string()),
+            "entries": logs.len(),
+            "more": logs.len() >= limit,
+            "logs": logs,
+        }))
     }
 
     async fn usage(&self, account: &Account, args: &Value) -> Result<Value> {
@@ -424,6 +452,26 @@ impl Capability for Models {
                 }),
             },
             Tool {
+                name: "models_logs",
+                description: "The AI gateway's latest log entries, newest first: id, time, \
+                              provider, model, status, success, cached, tokens in and out, \
+                              cost, duration, the request's tags (caller, task) and whether \
+                              its bodies were kept (`collect_log_payload`). Never a prompt or \
+                              an answer. `limit` 20 by default, 200 at most.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "hours": { "type": "number", "description": "How far back; 24 by default, 744 at most." },
+                        "limit": { "type": "integer", "description": "20 by default, 200 at most." },
+                        "provider": { "type": "string", "enum": slugs },
+                        "model": { "type": "string" },
+                        "caller": { "type": "string", "description": "A user's ID or name, who sent the request or was acted for." },
+                        "task": { "type": "string" },
+                        "failed": { "type": "boolean", "description": "Only requests that failed." }
+                    }
+                }),
+            },
+            Tool {
                 name: "models_usage",
                 description: "What the AI gateway's requests used over a window, from its \
                               logs: requests, failures, tokens in and out, and cost, in all and \
@@ -459,6 +507,7 @@ impl Capability for Models {
                 }
                 "models_run" => self.run(cx, args).await?,
                 "models_usage" => self.usage(cx.account, args).await?,
+                "models_logs" => self.recent(cx.account, args).await?,
                 other => return Err(unknown(other)),
             })
         })
@@ -609,5 +658,14 @@ mod tests {
         let f = filter(&json!({ "model": "anthropic/claude-haiku-5.5", "task": "t" }));
         assert_eq!(f.model.as_deref(), Some("anthropic/claude-haiku-5.5"));
         assert_eq!(f.task.as_deref(), Some("t"));
+        assert!(!f.failed);
+        assert!(filter(&json!({ "failed": true })).failed);
+    }
+
+    #[test]
+    fn logs_come_twenty_at_a_time_and_at_most_two_hundred() {
+        assert_eq!(log_limit(&json!({})), 20);
+        assert_eq!(log_limit(&json!({ "limit": 0 })), 1);
+        assert_eq!(log_limit(&json!({ "limit": 5000 })), MAX_LOG_ENTRIES);
     }
 }

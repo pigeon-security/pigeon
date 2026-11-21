@@ -10,6 +10,7 @@ pub mod console;
 pub mod deploys;
 pub mod dispatch;
 pub mod git_proxy;
+pub mod images;
 pub mod mirror;
 pub mod models;
 pub mod oauth;

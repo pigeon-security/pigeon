@@ -13,6 +13,7 @@ use pigeon_capabilities::console::Console;
 use pigeon_capabilities::deploys::Deploys;
 use pigeon_capabilities::dispatch::Dispatch;
 use pigeon_capabilities::git_proxy::GitProxy;
+use pigeon_capabilities::images::Images;
 use pigeon_capabilities::mirror::{self, Mirror};
 use pigeon_capabilities::models::{Dialect, Models, Provider};
 use pigeon_capabilities::oauth::OAuth;
@@ -193,6 +194,8 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
         }),
         Box::new(Ci { settings: ci() }),
         Box::new(Deploys),
+        // What the container applications run and the registry holds, read only.
+        Box::new(Images),
         // `call {tool, args}`: any tool above by name, for sessions whose tool list predates it.
         Box::new(Dispatch),
         Box::new(Architecture),

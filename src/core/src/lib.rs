@@ -20,6 +20,7 @@ pub mod oauth;
 pub mod oidc;
 pub mod pack;
 pub mod queues;
+pub mod registry;
 pub mod secrets_store;
 pub mod sign;
 pub mod tokens;

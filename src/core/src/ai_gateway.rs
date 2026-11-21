@@ -392,6 +392,8 @@ pub struct Filter {
     /// A user's ID or name, as the sender or as the person the sender acted for.
     pub caller: Option<String>,
     pub task: Option<String>,
+    /// Only requests that failed.
+    pub failed: bool,
 }
 
 impl Filter {
@@ -402,7 +404,8 @@ impl Filter {
                 .iter()
                 .any(|k| log.tag(k) == Some(c))
         };
-        self.provider.as_deref().is_none_or(|p| log.provider == p)
+        (!self.failed || !log.success)
+            && self.provider.as_deref().is_none_or(|p| log.provider == p)
             && self
                 .model
                 .as_deref()
@@ -712,6 +715,26 @@ mod tests {
         }
         let l: Log = serde_json::from_value(json!({})).unwrap();
         assert!(l.metadata.is_empty());
+    }
+
+    #[test]
+    fn a_log_never_carries_a_body_and_failed_keeps_failures() {
+        let l: Log = serde_json::from_value(json!({
+            "id": "l1", "model": "m", "success": false, "status_code": 529,
+            "request": "{\"messages\":[{\"content\":\"the prompt\"}]}",
+            "response": "the answer", "request_head": "x", "response_body": "y"
+        }))
+        .unwrap();
+        let shown = serde_json::to_string(&l).unwrap();
+        for leaked in ["the prompt", "the answer", "request", "response"] {
+            assert!(!shown.contains(leaked), "{leaked} in {shown}");
+        }
+        let failed = Filter {
+            failed: true,
+            ..Filter::default()
+        };
+        assert!(failed.keeps(&l));
+        assert!(!failed.keeps(&log("anthropic", "m", true, 0, 0, None)));
     }
 
     #[test]
