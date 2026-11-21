@@ -162,8 +162,13 @@ async fn mcp_post(mut req: Request, env: &Env) -> Result<Response> {
         name: settings::WORKER,
         version: env!("CARGO_PKG_VERSION"),
         instructions: "pigeon's platform. Source code lives in Cloudflare Artifacts; GitHub is \
-                       a read-only copy. To push, mint a write token with source_token and send \
-                       it to git as `Authorization: Bearer <token>`.",
+                       a read-only copy of main. A cloud session reaches git at \
+                       https://proxy.pigeon.dev/git/pigeon-security/pigeon.git and deploys with \
+                       CLOUDFLARE_API_BASE_URL=https://proxy.pigeon.dev/cf/client/v4; its \
+                       environment's network secret for proxy.pigeon.dev authenticates both, so \
+                       no token goes in a command. Push branches under claude/; main only moves \
+                       forward. source_token and deploy_token remain for callers without the \
+                       proxy credential.",
     };
     let call = async |name: &str, args: &Value| -> Result<Value> {
         let owner = caps

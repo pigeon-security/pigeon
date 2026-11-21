@@ -35,6 +35,34 @@ const NAMESPACE: &str = "pigeon-security";
 const REPO: &str = "pigeon";
 const BRANCH: &str = "main";
 
+/// The branches the GitHub mirror copies: `main` only. Session branches (`claude/…`) stay in
+/// Artifacts and never reach GitHub.
+const MIRRORED: &[&str] = &[BRANCH];
+const _: () = assert!(
+    mirrors_no_session_branch(MIRRORED),
+    "the GitHub mirror must not copy session branches"
+);
+
+/// Whether none of `branches` is a session branch, under `claude/`. At build time.
+const fn mirrors_no_session_branch(branches: &[&str]) -> bool {
+    let mut i = 0;
+    while i < branches.len() {
+        let b = branches[i].as_bytes();
+        let p = b"claude/";
+        if b.len() >= p.len() {
+            let mut j = 0;
+            while j < p.len() && b[j] == p[j] {
+                j += 1;
+            }
+            if j == p.len() {
+                return false;
+            }
+        }
+        i += 1;
+    }
+    true
+}
+
 /// The capabilities this Worker hosts.
 pub fn capabilities() -> Vec<Box<dyn Capability>> {
     vec![
@@ -91,7 +119,7 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
             source: mirror::Source {
                 namespace: NAMESPACE.into(),
                 repo: REPO.into(),
-                branches: vec![BRANCH.into()],
+                branches: MIRRORED.iter().map(|b| (*b).into()).collect(),
             },
             url: "https://github.com/pigeon-security/pigeon.git".into(),
             token_binding: "GITHUB_MIRROR_TOKEN".into(),

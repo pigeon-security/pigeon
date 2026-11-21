@@ -1,6 +1,6 @@
 # Routing cloud sessions' traffic through pigeon's platform
 
-Status: phases 1 and 2 deployed; phase 3 built, awaiting deploy. Phases are handed back one at a time; each is merged and deployed before the
+Status: phases 1 to 3 deployed; phase 4 built, awaiting merge. Operator docs: `docs/proxies.md`. Phases are handed back one at a time; each is merged and deployed before the
 next starts.
 
 ## Why
@@ -317,6 +317,20 @@ Hosts the person can remove from the environment's allowlist once phases 2 and 3
 checked: `4f94676cb2cbe46fd985b089ca97ea27.artifacts.cloudflare.net` and `api.cloudflare.com`.
 `github.com`: only after checking the session's own first clone and the GitHub tools don't
 depend on the allowlist entry; the hand-back will say what was checked.
+
+## Risks
+
+- **A proxy credential is effectively as powerful as the Cloudflare account.** Whoever holds
+  one can upload and deploy `pigeon-platform` through `/cf/`, and `pigeon-platform` holds the
+  parent token, so new code could use that token for anything. Until that changes: keep
+  credential lifetimes short, revoke those not in use, and watch the `cf` audit lines. A
+  possible mitigation: the proxy holds the final `POST …/deployments` (and the `PUT` upload,
+  which deploys at once) until a person approves it with a passkey. Not built; for the
+  person to decide.
+- A newer wrangler may add a call to `wrangler deploy`; it fails closed, naming the call, and
+  needs an allowlist entry after review.
+- The push rules rely on Artifacts' receive-pack checking each update's old value, so a race
+  between the fast-forward check and the push fails rather than rewinds `main`.
 
 ## What can only be checked live
 
