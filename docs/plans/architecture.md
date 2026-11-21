@@ -1,6 +1,6 @@
 # Architecture: one source, regenerated on every deploy
 
-Status: planned. Phase 1 is being built on `claude/architecture`. Landings are on hold while the
+Status: phases 1 and 2 built on `claude/architecture`, awaiting landing; phases 3 and 4 wait for the merge planner. Landings are on hold while the
 Access incident is open (parent session's instruction, 2026-11-21).
 
 ## Problem
@@ -117,3 +117,9 @@ I check each result, apply it, and run fmt, clippy and the smoke suite myself.
 
 - 2026-11-21: inventory and plan. The live `architecture_describe` answers 503. pigeon.dev shows
   the 10-capability model.
+- 2026-11-21: phases 1 and 2 built on `claude/architecture`, and the gate passes locally (smoke
+  suite 7 s). The 503's cause was `depth_of`, an unmemoized walk that is exponential on
+  capabilities calling each other in cycles (natively over 120 s; now 6 ms for 74 files).
+  Executors: E1 (the wrangler.toml reader), E3 (layer-4 cards) and E5 (one card per Worker), all
+  claude-sonnet-5-5 and all applied as returned. I made the footprint clean-up (E2) by hand
+  instead: it was smaller than its spec. Held for the parent's landing hold.
