@@ -1004,11 +1004,13 @@ mod tests {
             .stdout(Stdio::piped())
             .spawn()
             .unwrap();
-        let mut stdin = child.stdin.take().unwrap();
-        if let Some(i) = input {
-            stdin.write_all(i.as_bytes()).unwrap();
+        // Closed at the end of this block, so git sees the input end.
+        {
+            let mut stdin = child.stdin.take().unwrap();
+            if let Some(i) = input {
+                stdin.write_all(i.as_bytes()).unwrap();
+            }
         }
-        drop(stdin);
         let out = child.wait_with_output().unwrap();
         assert!(out.status.success(), "git {args:?}");
         out.stdout

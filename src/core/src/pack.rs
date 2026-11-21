@@ -442,10 +442,12 @@ mod tests {
                 .stdout(std::process::Stdio::piped())
                 .spawn()
                 .unwrap();
-            if let Some(i) = input {
-                child.stdin.take().unwrap().write_all(i.as_bytes()).unwrap();
+            // Taken, so it closes at the end of this statement and git sees the input end.
+            if let Some(mut stdin) = child.stdin.take()
+                && let Some(i) = input
+            {
+                stdin.write_all(i.as_bytes()).unwrap();
             }
-            drop(child.stdin.take());
             let out = child.wait_with_output().unwrap();
             assert!(out.status.success(), "git {args:?}");
             String::from_utf8_lossy(&out.stdout).trim().to_string()

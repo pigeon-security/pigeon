@@ -274,10 +274,8 @@ async fn mirror_with(source: &Source, from: &Remote, to: &Remote) -> Result<Repo
     let first_have = haves.first().cloned();
     updates.retain(|u| {
         let unknown = u.old != ZERO && Some(&u.old) == first_have.as_ref() && !known(&u.old);
-        if unknown {
-            if let Some(r) = refs.iter_mut().find(|r| r.name == u.name) {
-                r.outcome = "diverged".into();
-            }
+        if unknown && let Some(r) = refs.iter_mut().find(|r| r.name == u.name) {
+            r.outcome = "diverged".into();
         }
         !unknown
     });

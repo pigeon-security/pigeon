@@ -395,10 +395,10 @@ fn interface(text: &str) -> Vec<String> {
             .and_then(|r| r.split(':').next())
         {
             out.push(name.trim().to_string());
-        } else if let (Some(ty), Some(rest)) = (&within, line.strip_prefix("    ")) {
-            if let Some(name) = fn_name(rest) {
-                out.push(format!("{ty}::{name}"));
-            }
+        } else if let (Some(ty), Some(rest)) = (&within, line.strip_prefix("    "))
+            && let Some(name) = fn_name(rest)
+        {
+            out.push(format!("{ty}::{name}"));
         }
     }
     out
@@ -550,8 +550,7 @@ fn routes(text: &str) -> Vec<String> {
     out
 }
 
-/// The names of the `mcp::Tool`s defined.
-
+/// The Worker's event handlers `text` defines: `fetch`, `queue`, `scheduled`.
 fn handlers(text: &str) -> Vec<String> {
     ["fetch", "queue", "scheduled"]
         .into_iter()
@@ -559,8 +558,6 @@ fn handlers(text: &str) -> Vec<String> {
         .map(String::from)
         .collect()
 }
-
-/// The capabilities `text` uses through `pigeon_capabilities::`.
 
 // ---- text helpers ----
 

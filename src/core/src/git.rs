@@ -272,11 +272,11 @@ async fn send(
             .send()
             .await?;
         let status = response.status_code();
-        if status == 401 {
-            if let Some(ms) = waits.next() {
-                worker::Delay::from(std::time::Duration::from_millis(*ms)).await;
-                continue;
-            }
+        if status == 401
+            && let Some(ms) = waits.next()
+        {
+            worker::Delay::from(std::time::Duration::from_millis(*ms)).await;
+            continue;
         }
         let bytes = response.bytes().await?;
         if !(200..300).contains(&status) {

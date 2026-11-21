@@ -131,16 +131,14 @@ async fn subscribe_with(token: &str, account: &str, s: &Subscription) -> Result<
     let path = format!("/accounts/{account}/event_subscriptions/subscriptions");
     // Listing finds one made before; if the account cannot list, creation goes ahead.
     if let Ok(listed) = call_fresh(token, Method::Get, &format!("{path}?per_page=100"), None).await
-    {
-        if let Some(found) = rows(&listed)
+        && let Some(found) = rows(&listed)
             .into_iter()
             .find(|x| x["name"].as_str() == Some(&s.name))
-        {
-            return Ok(Subscribed {
-                id: found["id"].as_str().map(String::from),
-                created: false,
-            });
-        }
+    {
+        return Ok(Subscribed {
+            id: found["id"].as_str().map(String::from),
+            created: false,
+        });
     }
     let mut refused = Vec::new();
     for source in &s.sources {
