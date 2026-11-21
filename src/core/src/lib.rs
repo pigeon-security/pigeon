@@ -9,6 +9,7 @@ use pigeon_capabilities::mcp;
 use pigeon_capabilities::mirror::{self, Copy, Report, Source};
 use pigeon_capabilities::queues;
 use pigeon_capabilities::subdomain::{self, Served, Spec};
+use pigeon_capabilities::tokens::{self, MintRequest, Policy, Scope};
 use pigeon_capabilities::zero_trust::Protection;
 use pigeon_capabilities::{Account, secrets_store};
 use serde::Serialize;
@@ -342,7 +343,78 @@ fn mcp_tools() -> Vec<mcp::Tool> {
             "setup_source",
             "Make sure the Artifacts repository, its push-event queue and subscription exist.",
         ),
+        mcp::Tool::bare(
+            "setup_platform",
+            "Make sure platform.pigeon.dev is served by pigeon-platform behind Access, admitting \
+             the pigeon-platform and pigeon-claude service tokens.",
+        ),
+        mcp::Tool::bare(
+            "setup_site",
+            "Make sure pigeon.dev is served by the pigeon Worker, in public.",
+        ),
+        mcp::Tool {
+            name: "deploy_token",
+            description: "Mint a short-lived Cloudflare API token for `wrangler deploy` of this \
+                          account's Workers: Workers Scripts Write, Account Settings Read and \
+                          Secrets Store Read. Pass it as CLOUDFLARE_API_TOKEN, then revoke it \
+                          with revoke_api_token.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "ttl": { "type": "integer", "description": "Seconds; 1800 by default, 3600 at most." }
+                }
+            }),
+        },
+        mcp::Tool {
+            name: "revoke_api_token",
+            description: "Revoke a Cloudflare API token minted by deploy_token, by id.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": { "id": { "type": "string" } },
+                "required": ["id"]
+            }),
+        },
     ]
+}
+
+/// What a deploy token may do: what `wrangler deploy` needs for this account's Workers.
+const DEPLOY_PERMISSIONS: [&str; 3] = [
+    "Workers Scripts Write",
+    "Account Settings Read",
+    "Secrets Store Read",
+];
+
+/// A Cloudflare API token handed to the caller, which is behind Access.
+#[derive(Serialize)]
+struct ApiToken {
+    id: String,
+    token: String,
+    expires_on: String,
+    account_id: String,
+}
+
+/// Mints a deploy token living `ttl` seconds (30 minutes by default, an hour at most).
+async fn deploy_token(env: &Env, ttl: Option<u64>) -> Result<ApiToken> {
+    let account = account(env).await?;
+    let request = MintRequest {
+        purpose: "deploy".into(),
+        policies: vec![Policy::new(Scope::Account, &DEPLOY_PERMISSIONS)],
+        ttl_secs: ttl.unwrap_or(1_800).min(3_600),
+    };
+    let minted = tokens::mint(&account.parent, &account.id, &request).await?;
+    Ok(ApiToken {
+        id: minted.id,
+        token: minted.value,
+        expires_on: minted.expires_on,
+        account_id: account.id,
+    })
+}
+
+/// Revokes API token `id`, one this Worker minted.
+async fn revoke_api_token(env: &Env, id: &str) -> Result<Value> {
+    let account = account(env).await?;
+    tokens::revoke(&account.parent, &account.id, id).await?;
+    Ok(serde_json::json!({ "revoked": id }))
 }
 
 /// One MCP message, answered as JSON; a notification gets 202 and no body.
@@ -374,6 +446,15 @@ async fn mcp_post(mut req: Request, env: &Env) -> Result<Response> {
             }
             "source_mirror" => to_value(source_mirror(env).await?),
             "setup_source" => to_value(setup_source(env).await?),
+            "setup_platform" => to_value(setup_platform(env).await?),
+            "setup_site" => to_value(setup_site(env).await?),
+            "deploy_token" => to_value(deploy_token(env, args["ttl"].as_u64()).await?),
+            "revoke_api_token" => {
+                let id = args["id"]
+                    .as_str()
+                    .ok_or_else(|| Error::RustError("`id` is required".into()))?;
+                revoke_api_token(env, id).await?
+            }
             other => return Err(Error::RustError(format!("no tool `{other}`"))),
         };
         Ok(value)
