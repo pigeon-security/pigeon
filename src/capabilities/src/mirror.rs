@@ -7,6 +7,8 @@
 //! reported as diverged. Refusing non-fast-forward updates on the copy's side (a ruleset that
 //! blocks force pushes) backs the first rule up.
 
+use std::collections::BTreeMap;
+
 use pigeon_core::Account;
 use pigeon_core::artifacts::{self, Access};
 use pigeon_core::git::{self, Remote, Update, ZERO};
@@ -252,12 +254,17 @@ pub async fn mirror(account: &Account, source: &Source, copy: &Copy) -> Result<R
     report
 }
 
-async fn mirror_with(source: &Source, from: &Remote, to: &Remote) -> Result<Report> {
-    let theirs = git::refs(from, "git-upload-pack").await?;
-    let ours = git::refs(to, "git-receive-pack").await?;
+/// What bringing `ours`, the copy's refs, up to `theirs`, the source's, takes: each mirrored
+/// ref (the source's branches and every tag) with its outcome, and the updates to push. A tag
+/// is never moved.
+pub fn plan(
+    source: &Source,
+    theirs: &BTreeMap<String, String>,
+    ours: &BTreeMap<String, String>,
+) -> (Vec<RefReport>, Vec<Update>) {
     let mut refs = Vec::new();
     let mut updates = Vec::new();
-    let mirrored = theirs.refs.iter().filter(|(name, _)| {
+    let mirrored = theirs.iter().filter(|(name, _)| {
         name.starts_with("refs/tags/")
             || source
                 .branches
@@ -265,7 +272,7 @@ async fn mirror_with(source: &Source, from: &Remote, to: &Remote) -> Result<Repo
                 .any(|b| name.as_str() == format!("refs/heads/{b}"))
     });
     for (name, sha) in mirrored {
-        let copy = ours.refs.get(name).cloned();
+        let copy = ours.get(name).cloned();
         let outcome = match &copy {
             Some(c) if c == sha => "up-to-date",
             // A tag is never moved.
@@ -287,6 +294,25 @@ async fn mirror_with(source: &Source, from: &Remote, to: &Remote) -> Result<Repo
             outcome: outcome.to_string(),
         });
     }
+    (refs, updates)
+}
+
+/// Marks each ref the copy refused in `status`, its report-status lines, `rejected: <why>`.
+pub fn rejected(refs: &mut [RefReport], status: &[String]) {
+    for line in status {
+        if let Some(rest) = line.strip_prefix("ng ") {
+            let (name, why) = rest.split_once(' ').unwrap_or((rest, "refused"));
+            if let Some(r) = refs.iter_mut().find(|r| r.name == name) {
+                r.outcome = format!("rejected: {why}");
+            }
+        }
+    }
+}
+
+async fn mirror_with(source: &Source, from: &Remote, to: &Remote) -> Result<Report> {
+    let theirs = git::refs(from, "git-upload-pack").await?;
+    let ours = git::refs(to, "git-receive-pack").await?;
+    let (mut refs, mut updates) = plan(source, &theirs.refs, &ours.refs);
     if updates.is_empty() {
         return Ok(Report {
             refs,
@@ -320,26 +346,19 @@ async fn mirror_with(source: &Source, from: &Remote, to: &Remote) -> Result<Repo
         });
     }
     let status = git::push(to, &ours.caps, &updates, &fetched.pack).await?;
-    for line in status {
-        if let Some(rest) = line.strip_prefix("ng ") {
-            let (name, why) = rest.split_once(' ').unwrap_or((rest, "refused"));
-            if let Some(r) = refs.iter_mut().find(|r| r.name == name) {
-                r.outcome = format!("rejected: {why}");
-            }
-        }
-    }
+    rejected(&mut refs, &status);
     Ok(Report { refs, pushed: true })
 }
 
 /// Whether the copy at `url` is on GitHub, whose API answers a token's expiry.
-fn is_github(url: &str) -> bool {
+pub fn is_github(url: &str) -> bool {
     url.strip_prefix("https://")
         .and_then(|r| r.split('/').next())
         .is_some_and(|h| h.eq_ignore_ascii_case("github.com"))
 }
 
 /// What GitHub's answer with `status` and expiry header `header` says of a token's expiry.
-fn github_expiry(status: u16, header: Option<&str>) -> Expiry {
+pub fn github_expiry(status: u16, header: Option<&str>) -> Expiry {
     match status {
         200..=299 => expiry::from_field(header),
         401 => Expiry::Refused {
@@ -348,32 +367,5 @@ fn github_expiry(status: u16, header: Option<&str>) -> Expiry {
         other => Expiry::Unknown {
             why: format!("GitHub answered {other}"),
         },
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_github_expiry_comes_from_its_header() {
-        assert_eq!(
-            github_expiry(200, Some("2026-12-21 00:00:00 UTC")),
-            Expiry::At {
-                at_ms: 1_797_811_200_000
-            }
-        );
-        assert_eq!(github_expiry(200, None), Expiry::Never);
-        assert!(matches!(github_expiry(401, None), Expiry::Refused { .. }));
-        assert!(matches!(github_expiry(502, None), Expiry::Unknown { .. }));
-    }
-
-    #[test]
-    fn only_a_github_copy_can_be_asked() {
-        assert!(is_github("https://github.com/pigeon-security/pigeon.git"));
-        assert!(is_github("https://GitHub.com/a/b"));
-        assert!(!is_github("https://gitlab.com/a/b"));
-        assert!(!is_github("https://github.com.evil.example/a"));
-        assert!(!is_github("http://github.com/a/b"));
     }
 }

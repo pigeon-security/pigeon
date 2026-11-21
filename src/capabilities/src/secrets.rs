@@ -33,7 +33,7 @@ pub struct Secrets {
 }
 
 /// The challenge purpose for writing `name` with a value whose hash is `digest`.
-fn write_purpose(name: &str, digest: &str) -> String {
+pub fn write_purpose(name: &str, digest: &str) -> String {
     format!("secret:{name}:{digest}")
 }
 
@@ -406,73 +406,5 @@ impl Capability for Secrets {
 
     fn fetch<'a>(&'a self, cx: &'a Context<'a>, req: Request) -> Serve<'a> {
         Box::pin(self.serve(cx, req))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn slot(name: &str) -> Slot {
-        Slot {
-            name: name.into(),
-            purpose: format!("{name} purpose"),
-            scopes: &[secrets_store::WORKERS],
-        }
-    }
-
-    #[test]
-    fn declared_slots_come_first_set_or_missing_then_the_others_by_name() {
-        let declared = vec![
-            ("secrets".to_string(), slot("CF_PARENT_TOKEN")),
-            ("mirror".to_string(), slot("GITHUB_MIRROR_TOKEN")),
-        ];
-        let stored = vec![
-            ("ZETA".to_string(), None),
-            (
-                "CF_PARENT_TOKEN".to_string(),
-                Some("2026-11-01".to_string()),
-            ),
-            ("ALPHA".to_string(), None),
-        ];
-        let got = listing(&declared, &stored);
-        let names: Vec<&str> = got.iter().map(|l| l.name.as_str()).collect();
-        assert_eq!(
-            names,
-            ["CF_PARENT_TOKEN", "GITHUB_MIRROR_TOKEN", "ALPHA", "ZETA"]
-        );
-        assert!(got[0].set);
-        assert_eq!(got[0].modified.as_deref(), Some("2026-11-01"));
-        assert_eq!(got[0].owner, "secrets");
-        assert!(!got[1].set);
-        assert_eq!(got[1].owner, "mirror");
-        assert!(got[2].set && got[2].owner.is_empty());
-    }
-
-    #[test]
-    fn the_parent_tokens_expiry_comes_from_verify() {
-        let at = json!({ "status": "active", "expires_on": "2026-12-21T00:00:00Z" });
-        assert_eq!(
-            cloudflare_expiry(&at),
-            Expiry::At {
-                at_ms: 1_797_811_200_000
-            }
-        );
-        let never = json!({ "status": "active", "expires_on": null });
-        assert_eq!(cloudflare_expiry(&never), Expiry::Never);
-        for status in [json!("expired"), json!("disabled"), Value::Null] {
-            let v = json!({ "status": status, "expires_on": "2026-12-21T00:00:00Z" });
-            assert!(
-                matches!(cloudflare_expiry(&v), Expiry::Refused { .. }),
-                "{v}"
-            );
-        }
-    }
-
-    #[test]
-    fn a_write_approval_is_bound_to_name_and_value() {
-        let a = write_purpose("X", &hash("one"));
-        assert_ne!(a, write_purpose("X", &hash("two")));
-        assert_ne!(a, write_purpose("Y", &hash("one")));
     }
 }

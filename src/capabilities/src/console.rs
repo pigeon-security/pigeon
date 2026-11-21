@@ -439,24 +439,3 @@ impl Capability for Console {
         Box::pin(self.serve(cx, req))
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn days_default_to_a_week_and_stay_within_a_month() {
-        assert_eq!(days(None), 7);
-        assert_eq!(days(Some("30")), 30);
-        assert_eq!(days(Some("31")), 7);
-        assert_eq!(days(Some("0")), 7);
-        assert_eq!(days(Some("x")), 7);
-    }
-
-    #[test]
-    fn initials_take_the_first_and_last_words() {
-        assert_eq!(initials("Willow"), "W");
-        assert_eq!(initials("ada  king lovelace"), "AL");
-        assert_eq!(initials(""), "?");
-    }
-}

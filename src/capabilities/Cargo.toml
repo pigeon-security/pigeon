@@ -15,3 +15,15 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 futures-channel = { version = "0.3", default-features = false, features = ["std"] }
 wasm-streams = "0.7"
 toml = { version = "0.8", default-features = false, features = ["parse"] }
+
+[dev-dependencies]
+rsa = { version = "0.9", default-features = false, features = ["std"] }
+sha2 = "0.10"
+p256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
+rand = "0.8"
+
+# The smoke suite, pigeon's only tests: one end-to-end scenario per path, through public
+# interfaces with stubbed externals. See ci/runner/test.sh.
+[[test]]
+name = "smoke"
+path = "../../tests/smoke.rs"

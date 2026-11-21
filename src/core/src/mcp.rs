@@ -103,22 +103,3 @@ fn call_result(v: Value) -> Value {
 fn text(v: &Value) -> String {
     serde_json::to_string_pretty(v).unwrap_or_default()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn structured_content_only_for_objects() {
-        let obj = call_result(json!({ "a": 1 }));
-        assert_eq!(obj["structuredContent"], json!({ "a": 1 }));
-        let list = call_result(json!([{ "a": 1 }]));
-        assert!(list.get("structuredContent").is_none());
-        assert!(
-            list["content"][0]["text"]
-                .as_str()
-                .unwrap()
-                .contains("\"a\"")
-        );
-    }
-}

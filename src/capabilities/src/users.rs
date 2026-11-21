@@ -1143,26 +1143,3 @@ impl Capability for Users {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_small_picture_data_url_is_a_picture() {
-        assert!(avatar_ok(
-            "data:image/webp;base64,UklGRiQAAABXRUJQVlA4IBgAAAAw"
-        ));
-        assert!(avatar_ok("data:image/png;base64,iVBORw0KGgo="));
-    }
-
-    #[test]
-    fn anything_else_is_not() {
-        assert!(!avatar_ok("data:image/svg+xml;base64,PHN2Zz4="));
-        assert!(!avatar_ok("https://example.com/me.png"));
-        assert!(!avatar_ok("data:image/png;base64,"));
-        assert!(!avatar_ok("data:image/png;base64,abc\"><script>"));
-        let big = format!("data:image/png;base64,{}", "A".repeat(AVATAR_MAX));
-        assert!(!avatar_ok(&big));
-    }
-}
