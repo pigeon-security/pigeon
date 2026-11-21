@@ -54,7 +54,7 @@ pub fn template() -> Value {
         "worker": "example",
         "sites": [{
             "name": "blog",
-            "bucket": "example-com-site",
+            "bucket": "example-site",
             "jurisdiction": "eu",
             "build": "workloads/example.com/blog",
             "targets": [

@@ -1878,7 +1878,7 @@ fn instances_are_data_a_person_approves() {
     // blog with a preview, the zone (off until the cutover) and the subdomain `noisypigeon`.
     let mut noisy: Instance = serde_json::from_value(template()).unwrap();
     noisy.id = "noisypigeon".into();
-    noisy.sites[0].bucket = "noisypigeon-com-site".into();
+    noisy.sites[0].bucket = "noisypigeon-site".into();
     noisy.worker = Some("noisypigeon".into());
     noisy.title = "noisypigeon".into();
     noisy.zones = vec!["noisypigeon.com".into()];
@@ -1935,9 +1935,46 @@ fn instances_are_data_a_person_approves() {
             "{why}: {problems:?}"
         );
     };
+    // The bucket is named after the instance, like its Worker; another name needs the
+    // person's approved override, and no two instances share one.
+    assert_eq!(noisy.sites[0].bucket, "noisypigeon-site");
+    assert_eq!(
+        record::bucket_for(&noisy).as_deref(),
+        Some("noisypigeon-site")
+    );
     refused(
         &|i| i.sites[0].bucket = "blog-noisypigeon-com".into(),
-        "pigeon-",
+        "should be \"noisypigeon-site\"",
+    );
+    let mut kept = noisy.clone();
+    kept.sites[0].bucket = "blog-noisypigeon-com".into();
+    kept.sites[0].bucket_override = true;
+    assert_eq!(
+        validate(&kept, std::slice::from_ref(&platform), &rules),
+        Vec::<String>::new(),
+        "an approved override"
+    );
+    let mut foo = noisy.clone();
+    foo.id = "foo".into();
+    foo.zones.clear();
+    foo.worker = Some("foo".into());
+    foo.sites[0].targets = vec![Target::Subdomain {
+        label: "foo".into(),
+    }];
+    assert_eq!(
+        record::bucket_for(&foo).as_deref(),
+        Some("foo-site"),
+        "a subdomain-only instance"
+    );
+    let mut same_bucket = foo.clone();
+    same_bucket.sites[0].bucket = "noisypigeon-site".into();
+    same_bucket.sites[0].bucket_override = true;
+    let problems = validate(&same_bucket, std::slice::from_ref(&noisy), &rules);
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.contains("already used by instance noisypigeon")),
+        "{problems:?}"
     );
     // One Worker per instance, named after its zone (or its subdomain when it has no zone),
     // never the platform's own or another instance's.

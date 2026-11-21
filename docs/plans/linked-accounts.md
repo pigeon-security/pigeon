@@ -130,7 +130,7 @@ What pigeon is given there is **declared**:
 | Kind | Declared for noisypigeon | pigeon may |
 | --- | --- | --- |
 | Zone | `noisypigeon.com` | read the zone and its DNS records, custom domains, routes and rules (the console's inventory) |
-| R2 bucket | `noisypigeon-com-site` (EU, made by pigeon; named after the site's hostname) | create; put, list and delete objects |
+| R2 bucket | `noisypigeon-site` (EU, made by pigeon; named after the site's hostname) | create; put, list and delete objects |
 | Worker | `noisypigeon` (made by pigeon), bound to that bucket | create, upload versions, enable workers.dev |
 | Route | `noisypigeon.com/*` → `noisypigeon` (made by pigeon) | create and delete, only with the person's go-ahead (the cutover) |
 | DNS records | only records pigeon creates for a declared hostname, tagged `pigeon` and recorded in the ledger. None are needed for the cutover | create and delete its own, with a dry run and the person's passkey |
@@ -221,20 +221,19 @@ the Access tab as slot `CF_LINK_NOISYPIGEON`, bound in `wrangler.toml`.
 
 ### 3. Serving: from the R2 bucket in the noisypigeon account, through a Worker there
 
-The bucket `noisypigeon-com-site` is in the noisypigeon account, EU jurisdiction (header
+The bucket `noisypigeon-site` is in the noisypigeon account, EU jurisdiction (header
 `cf-r2-jurisdiction: eu`) like the old one.
 
-**Bucket names follow the site's hostname** (the person, 2026-11-21): dots become hyphens, then
-`-site`.
-- The hostname is the site's first zone target, else its first pigeon.dev subdomain:
-  `noisypigeon.com` gives `noisypigeon-com-site`, and a subdomain-only site `foo.pigeon.dev` gives
-  `foo-pigeon-dev-site`.
-- The rule is code (`record::bucket_for`, checked by validation). The name itself is stored in
-  the record.
-- A different name needs `bucket_override: true` in the record, which the person sees in the diff
-  they approve.
-- `noisypigeon.pigeon.dev` serves the same site from the same bucket, so it gets no bucket of its
-  own.
+**The bucket is named after the instance, like its Worker** (the person, 2026-11-21:
+`noisypigeon-site`, or `somesubdomain-site`).
+- The name is the instance's name plus `-site`. The instance's name is its zone without the TLD,
+  or its subdomain label.
+- So adding or removing a zone or subdomain later never renames the bucket. An instance's sites,
+  zone and subdomain all share it.
+- The rule is code (`record::bucket_for`, checked by validation). The name is stored in the
+  record.
+- Another name needs `bucket_override: true`, which the person sees in the diff they approve.
+- No two instances may share a bucket.
 
 **One Worker per instance** (the person, 2026-11-21: "They should share the worker. It either has
 a dedicated zone, a subdomain, or both."). The instance's zone (`noisypigeon.com`), its pigeon.dev
@@ -507,7 +506,7 @@ no new policy rule.
   - the linked account (its id filled in by the Link flow), zone `noisypigeon.com`;
   - repository GitHub `noisypigeon/pigeon` (installation id from phase 3b);
   - site `blog`:
-    - bucket `noisypigeon-com-site` (EU) and Worker `noisypigeon`;
+    - bucket `noisypigeon-site` (EU) and Worker `noisypigeon`;
     - build `workloads/noisypigeon.com/blog`;
     - targets: Preview; Zone `noisypigeon.com` with route `noisypigeon.com/*`, off until the
       cutover; Subdomain `noisypigeon`, which gives `noisypigeon.pigeon.dev`.
@@ -539,7 +538,7 @@ Speed, as in console-hardening:
 - The diagram draws one account box per account: pigeon's as today, noisypigeon's with its zone,
   the Worker `noisypigeon`, its route or preview, and a dashed "not pigeon's" group for the
   old bucket and custom domains it only reads.
-- It also draws the noisypigeon R2 bucket `noisypigeon-com-site` inside that account, the GitHub App
+- It also draws the noisypigeon R2 bucket `noisypigeon-site` inside that account, the GitHub App
   and the `github` portal server as external edges, the `site-build` job, and the pigeon.dev
   subdomain's edge from pigeon-platform to the noisypigeon Worker.
 - The code-derived model (from the sources and `wrangler.toml`) is still built once per isolate,
@@ -581,7 +580,7 @@ myself, and land.
 | 2b | **Person:** register or confirm the OAuth client; press Link; consent to the noisypigeon account | link stored; inventory of noisypigeon.com shows | person |
 | 3 | GitHub App: `github` capability, `/github/hook`, slots, deployments; the GitHub git proxy route | none until the App exists | executors, me |
 | 3b | **Person:** create the App, set its key and webhook secret on the Access tab, install it on noisypigeon/pigeon | push events recorded | person |
-| 4 | `sites`: `site-build` job and `pigeon-ci-site` image (gate change, delegate), `/sites/build` upload, the site Worker's JS, deploy (blobs, manifest, `live`), rollback, prune, deploy records | with the person's go-ahead: bucket `noisypigeon-com-site` and Worker `noisypigeon` in the noisypigeon account, workers.dev preview | executors, me |
+| 4 | `sites`: `site-build` job and `pigeon-ci-site` image (gate change, delegate), `/sites/build` upload, the site Worker's JS, deploy (blobs, manifest, `live`), rollback, prune, deploy records | with the person's go-ahead: bucket `noisypigeon-site` and Worker `noisypigeon` in the noisypigeon account, workers.dev preview | executors, me |
 | 5 | **Cutover** of noisypigeon.com (below) | route `noisypigeon.com/*` | person's go-ahead, then me |
 | 5b | The pigeon.dev subdomain from the record's `Subdomain` targets: pigeon-platform serves any approved label by host (no hostname in code), attaches its custom domain in pigeon.dev on approval, and proxies to the instance's Worker with edge cache | `noisypigeon.pigeon.dev` | executors, me; person approves the record |
 | 6 | The platform calls GitHub's MCP through the portal (decision 6): `pigeon_core::mcp` client, the server's credential rotation, the deploy record and the console's repository section over MCP | portal server `github`, service token (the person's dashboard steps) | executors, me; person (dashboard) |
@@ -679,12 +678,15 @@ not by this session.
 
 ## Log
 
+- 2026-11-21: the person, through the parent: the bucket takes the instance's name too,
+  `noisypigeon-site`. `bucket_for` now derives it from the instance (its Worker name), not
+  from a hostname, and validation also refuses a bucket another instance uses.
 - 2026-11-21: the person, through the parent: one Worker per instance, named after its zone
   without the TLD or its subdomain label: `noisypigeon`. `worker` moves from the site to the
   instance, with `record::worker_for`, `worker_override` and collision checks against the
   platform's Workers and other instances.
 - 2026-11-21: the person, through the parent: a site's bucket is named after its hostname
-  (`noisypigeon-com-site`). Validation checks the rule unless the record sets `bucket_override`.
+  (`noisypigeon-site`). Validation checks the rule unless the record sets `bucket_override`.
   Writes to `/instance/put/*` now also need the console's signed-in session and the console's
   own origin, which closes the gap found after 2a. Open: whether the Worker follows the same
   rule.

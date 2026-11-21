@@ -84,8 +84,8 @@ pub enum RepoRef {
 pub struct SiteRecord {
     /// The site name, unique within the instance.
     pub name: String,
-    /// The bucket that holds the site files: by default [`bucket_for`] the site's hostname,
-    /// such as `noisypigeon-com-site`.
+    /// The bucket that holds the site files: by default [`bucket_for`] the instance, such as
+    /// `noisypigeon-site`. An instance's sites share it.
     pub bucket: String,
     /// Whether `bucket` may differ from the name [`bucket_for`] gives. The person sees this in
     /// the diff they approve.
@@ -267,28 +267,24 @@ fn check_repo(instance: &Instance, problems: &mut Vec<String>) {
     }
 }
 
-/// The bucket a site's files live in by default: its hostname with dots as hyphens, then
-/// `-site`. The hostname is the site's first zone target, else its first subdomain under the
-/// platform's zone; `noisypigeon.com` gives `noisypigeon-com-site`, `foo.pigeon.dev` gives
-/// `foo-pigeon-dev-site`. Other hostnames serving the same site share its bucket.
-pub fn bucket_for(site: &SiteRecord, platform_zone: &str) -> Option<String> {
-    let host = site
-        .targets
-        .iter()
-        .find_map(|t| match t {
-            Target::Zone { hostname, .. } => Some(hostname.clone()),
-            _ => None,
-        })
-        .or_else(|| {
-            site.targets.iter().find_map(|t| match t {
-                Target::Subdomain { label } => Some(subdomain_host(label, platform_zone)),
-                _ => None,
-            })
-        })?;
-    Some(format!("{}-site", host.replace('.', "-")))
+/// The bucket an instance's sites live in by default: the instance's name, the same value as
+/// its Worker, then `-site`. `noisypigeon` gives `noisypigeon-site`; a subdomain-only instance
+/// `foo` gives `foo-site`. Adding or removing a zone or subdomain later never renames it.
+pub fn bucket_for(instance: &Instance) -> Option<String> {
+    let name = match &instance.worker {
+        Some(w) => Some(w.clone()),
+        None => worker_for(instance).ok().flatten(),
+    };
+    name.map(|n| format!("{n}-site"))
 }
 
-fn check_bucket(path: &str, site: &SiteRecord, rules: &Rules, problems: &mut Vec<String>) {
+fn check_bucket(
+    path: &str,
+    site: &SiteRecord,
+    instance: &Instance,
+    others: &[Instance],
+    problems: &mut Vec<String>,
+) {
     let name = &site.bucket;
     if !(3..=63).contains(&name.len()) || !label(name) {
         problems.push(format!(
@@ -296,15 +292,23 @@ fn check_bucket(path: &str, site: &SiteRecord, rules: &Rules, problems: &mut Vec
         ));
         return;
     }
+    for other in others {
+        if other.id != instance.id && other.sites.iter().any(|s| s.bucket == *name) {
+            problems.push(format!(
+                "The {path} \"{name}\" is already used by instance {}.",
+                other.id
+            ));
+        }
+    }
     if site.bucket_override {
         return;
     }
-    match bucket_for(site, rules.platform_zone) {
+    match bucket_for(instance) {
         Some(expected) if expected != *name => problems.push(format!(
-            "The {path} \"{name}\" should be \"{expected}\", named after the site's hostname; set bucket_override to keep another name."
+            "The {path} \"{name}\" should be \"{expected}\", named after the instance like its Worker; set bucket_override to keep another name."
         )),
         None => problems.push(format!(
-            "The {path} is named after the site's hostname, but the site has no zone or subdomain target yet."
+            "The {path} is named after the instance, but it has no zone or subdomain to name it after yet."
         )),
         _ => {}
     }
@@ -484,7 +488,7 @@ fn check_sites(
                 site.name
             ));
         }
-        check_bucket(&format!("{p}.bucket"), site, rules, problems);
+        check_bucket(&format!("{p}.bucket"), site, instance, others, problems);
         if let Some(j) = &site.jurisdiction
             && j != "eu"
             && j != "fedramp"
