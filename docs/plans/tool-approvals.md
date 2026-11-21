@@ -1,6 +1,6 @@
 # Passkey approval for risky tool calls
 
-Status: **phase 1 built** on `claude/tool-approvals-2` (21 November); the person chose option (a), relayed by the parent session. Phase 2 (the rules) waits for their passkey.
+Status: **phase 1 built** on `claude/tool-approvals-3` (21 November); the person chose option (a), relayed by the parent session. Phase 2 (the rules) waits for their passkey.
 
 The person asked: "Can you seed a session to require a pass key approval to use those tools?" The
 tools are the ones listed as candidates to switch off at the MCP portal:
@@ -244,7 +244,7 @@ directly" in `docs/proxies.md`, which today names only `deploy_token`.
 | Phase | What | Lands with | Live check |
 | --- | --- | --- | --- |
 | 1 | `pigeon_core::policy`: `Kind::CallTool` (`call_tool`), 14 kinds; generator arm `=> &[]`. New pure `pigeon_core::approval`: canonical digest, redaction, the state machine (create, decide, take, expire, with `now`). Directory table and `approval.*` ops. Capability `approvals`: `approvals_status`, the Approvals section's data, the audit lines. Console: writes `approval-approve` and `approval-deny`, cards in `approvals.js`, the tab count. `dispatch` asks `call_tool` only **when the policy has a `call_tool` rule**, so this landing changes nothing live. One smoke scenario. | `land` (no guarded paths) | `policy_check {call_tool, deploy_token}` answers `deny, not in policy` (no rule yet); every tool runs as before; Approvals tab unchanged |
-| 2 | The person's rule(s) in `.pigeon/policy.toml` (and, with option a, `tools-run`); the "when the policy has a `call_tool` rule" guard removed, so from now on every call is asked. Settings unchanged. | `land` with the person's **passkey** (`change_policy`) | Call `deploy_token {"ttl": 300}`: it pends with an id; the card shows on Approvals; approve with the passkey; call again with the id: a token comes back; `revoke_api_token` it; the same id again is refused as used; a call with `ttl` 301 and that id is refused; a deny and an expiry each recorded. `land` and `policy_check` still run without a prompt. |
+| 2 | The person's rules in `.pigeon/policy.toml`: `risky-tools-need-passkey` and `tools-run` (option a). From now on every call is asked. The guard stays (see "As built"). Settings unchanged. | `land` with the person's **passkey** (`change_policy`) | Call `deploy_token {"ttl": 300}`: it pends with an id; the card shows on Approvals; approve with the passkey; call again with the id: a token comes back; `revoke_api_token` it; the same id again is refused as used; a call with `ttl` 301 and that id is refused; a deny and an expiry each recorded. `land` and `policy_check` still run without a prompt. |
 | 3 | `docs/proxies.md` break-glass: the approval step and the person's own `wrangler login` fallback; this plan's as-built record; README row. | `land` | — |
 
 The smoke scenario (phase 1, in `tests/smoke.rs` only, well under a second): a policy text with
@@ -285,3 +285,8 @@ Executors (AI Gateway, `models_submit`) build fixed pieces, each with its files 
 - A failed audit line after an approved call has run never loses the call's answer: it is logged
   as an error instead.
 - Smoke scenario `tool_call_approvals`, the suite's 15th (the suite runs in 9 to 26 s here).
+- **The guard stays after phase 2.** `dispatch` asks the policy about tool calls only while it
+  has a `call_tool` rule. With the person's two rules that is always, so it changes nothing. It
+  matters only if the person someday removes every `call_tool` rule: tool calls then run as
+  before phase 2, rather than all being refused as "not in policy", `land` included, which is
+  the way to change the policy back.

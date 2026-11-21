@@ -103,6 +103,8 @@ fn policy_decisions() {
             "smoke-suite-fixed",
             "smoke-suite-grows",
             "gate-changes",
+            "risky-tools-need-passkey",
+            "tools-run",
         ]
     );
     // The rules name no provider: the session prefix is a placeholder.
@@ -2096,28 +2098,8 @@ fn tool_call_approvals() {
     use pigeon_core::approval::{self, Kind, Refusal, State};
     use pigeon_core::policy::{self, Approval, Decision};
 
-    // The person's rules, as phase 2 adds them: each of the six needs the passkey; every other
-    // tool runs as before.
-    let text = format!(
-        "{}\n{}",
-        pigeon_capabilities::policy::TEXT,
-        r#"
-[[rule]]
-id = "risky-tools-need-passkey"
-actions = ["call_tool"]
-targets = ["deploy_token", "source_token", "setup_platform", "users_remove", "passkeys_remove", "oauth_revoke"]
-decision = "allow"
-approval = "passkey"
-reason = "the person approves each call"
-
-[[rule]]
-id = "tools-run"
-actions = ["call_tool"]
-decision = "allow"
-reason = "every other tool runs as it does today"
-"#
-    );
-    let p = policy::parse(&text).unwrap();
+    // The person's rules: each of the six needs the passkey; every other tool runs as before.
+    let p = policy::parse(pigeon_capabilities::policy::TEXT).unwrap();
     for tool in GATED {
         let a = p.evaluate(&vars(), &request("call_tool", tool, None));
         assert_eq!(
@@ -2141,13 +2123,25 @@ reason = "every other tool runs as it does today"
         );
     }
 
-    // The policy built into the Worker gates nothing until the person's rule lands: calls are
-    // not asked about, and no tool's schema changes.
-    assert!(!approvals::asked());
-    let mut tools = vec![pigeon_core::mcp::Tool::bare("deploy_token", "mint")];
+    // The policy built into the Worker has the person's rules: every call is asked about, the
+    // six are gated, and only their schemas gain the approval argument.
+    assert!(approvals::asked());
+    for tool in GATED {
+        assert!(approvals::gated(tool), "{tool}");
+    }
+    assert!(!approvals::gated("land") && !approvals::gated("call"));
+    let mut tools = vec![
+        pigeon_core::mcp::Tool::bare("deploy_token", "mint"),
+        pigeon_core::mcp::Tool::bare("land", "land"),
+    ];
     approvals::annotate(&mut tools);
     assert!(
         tools[0].input_schema["properties"]
+            .get("approval")
+            .is_some()
+    );
+    assert!(
+        tools[1].input_schema["properties"]
             .get("approval")
             .is_none()
     );
