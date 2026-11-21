@@ -5,6 +5,7 @@
 
 pub mod architecture;
 pub mod cf_proxy;
+pub mod ci;
 pub mod deploys;
 pub mod git_proxy;
 pub mod mirror;

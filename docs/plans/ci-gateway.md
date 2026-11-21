@@ -116,7 +116,7 @@ disk, timeout, and `network = "none"` only where the connector can enforce it.
 ### Routing (`ci/route.rs`), pure
 
 ```rust
-pub struct Candidate<'a> { pub name: &'a str, pub offers: &'a [Offered], pub availability: Availability }
+pub struct Candidate<'a> { pub name: &'a str, pub rank: u32, pub offers: &'a [Offered], pub availability: Availability }
 pub struct Availability { pub configured: bool, pub healthy: bool, pub free: Option<u32>, pub queued: u32 }
 pub struct Ask<'a> { pub needs: &'a Needs, pub timeout_min: u32, pub pin: Option<&'a str>,
                      pub exclude: &'a [String] }
@@ -131,10 +131,10 @@ pub fn fallback_due(queued_at_ms: i64, now_ms: i64, wait_limit_ms: i64) -> bool;
 - **Availability:** unconfigured or unhealthy candidates move to `ruled_out` with the reason.
   Full ones (`free == Some(0)`) stay in `ranked` with `ready: false`: the job may queue for
   them.
-- **Rank:** candidates arrive in settings order. A pinned connector is the only one ranked (a
-  pin that does not match or is unavailable is a refusal naming why). Otherwise settings order,
-  ready before full, and among full ones the shorter `queued` first. Cost and limits are later
-  sort keys here.
+- **Rank:** a pinned connector is the only one ranked (a pin that does not match or is
+  unavailable is a refusal naming why). Otherwise the operator's order from settings (each
+  candidate has a `rank`; equal ranks tie), ties to the shorter `queued`. Room does not reorder:
+  a job waits for its first-ranked connector. Cost and limits are later sort keys here.
 - **Exclude:** connectors that already failed this job with an infrastructure error.
 - **Queue fallback:** a queued job is dispatched to the first ready pick; when no pick is ready
   it stays on the first one; once `fallback_due` it goes to any ready pick.
