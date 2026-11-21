@@ -243,7 +243,7 @@ new rule is added. So the setup writes only from state that has already passed t
 
 | Trigger | Does | Gate |
 | --- | --- | --- |
-| A landing's deploy: the Lander's post-deploy step, next to the portal sync on `claude/mcp-portal-sync` | `observe` → `plan` → `apply`. The outcome goes in the landing's detail, as the portal sync's does: `buildkite: 2 created, 3 ok` or `buildkite: blocked (why)`. **A failed setup never fails a landing.** The connector then reads as not healthy, and jobs go elsewhere. | `land-and-deploy` (allow) |
+| A landing's deploy: `Lander::reconcile_buildkite(id, detail)`, its own async fn behind its own `land::Settings` field, called right after the portal planner's `sync_portal` in the Deploying arm (after `apply(JobEnded { passed: true })`) | `observe` → `plan` → `apply`. The outcome goes in the landing's detail, as the portal sync's does: `buildkite: 2 created, 3 ok` or `buildkite: blocked (why)`. **A failed setup never fails a landing.** The connector then reads as not healthy, and jobs go elsewhere. | `land-and-deploy` (allow) |
 | `ci_buildkite_plan` (pigeon MCP, new, read-only) | `observe` → `plan`. Answers the steps, the token's missing scopes, its expiry, and the owned record. Never applies. | Reading; no action kind |
 | The console's CI section (phase 5, optional) | "Apply now", with a passkey approval bound to the plan's hash: for the first run, or after the person fixed something in Buildkite. | The person's passkey |
 
