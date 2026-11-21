@@ -2,6 +2,7 @@
 //! takes its settings from here.
 
 use pigeon_capabilities::Capability;
+use pigeon_capabilities::approvals::Approvals;
 use pigeon_capabilities::architecture::{Architecture, Wrangler};
 use pigeon_capabilities::cf_proxy::CfProxy;
 use pigeon_capabilities::ci::buildkite::{self, Buildkite};
@@ -159,6 +160,9 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
                 site_name: "pigeon".into(),
             },
         }),
+        // Passkey approval of the tool calls the policy gates: `approvals_status`, and the calls
+        // waiting on the console's Approvals tab.
+        Box::new(Approvals),
         // The person's policy, .pigeon/policy.toml: `policy_check`, as their delegate.
         Box::new(Policy {
             session_prefix: format!("{SESSION_PREFIX}/"),

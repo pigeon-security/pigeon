@@ -3,6 +3,7 @@
 //! tools and how to call one, the events it acts on, and its footprint (the hostnames, Workers
 //! and resources it brings), which the architecture page draws.
 
+pub mod approvals;
 pub mod architecture;
 pub mod cf_proxy;
 pub mod ci;
@@ -211,11 +212,23 @@ pub fn owner<'a>(
 }
 
 /// Runs tool `name` with `args` as `cx`'s caller: the one way a tool is run, whether `/mcp`
-/// was asked for it directly or through `call`, so both find it and fail the same way.
+/// was asked for it directly or through `call`, or the Lander runs it, so all find it and fail
+/// the same way. The person's policy is asked first ([`approvals::gate`]): a tool it gates runs
+/// only with the person's passkey approval of that exact call, used once.
 pub async fn dispatch(cx: &Context<'_>, name: &str, args: &Value) -> Result<Value> {
     let owner = owner(cx.hosted.capabilities, name)
         .ok_or_else(|| Error::RustError(pigeon_core::mcp::unknown_tool(name)))?;
-    owner.call(cx, name, args).await
+    match approvals::gate(cx, name, args).await? {
+        approvals::Gate::Run(args) => owner.call(cx, name, &args).await,
+        approvals::Gate::Approved(args, record) => {
+            let result = owner.call(cx, name, &args).await;
+            // The call has run and its approval is used: a failed audit line never loses its answer.
+            if let Err(e) = approvals::ran(cx.env, &record, result.is_ok()).await {
+                worker::console_error!("approval {} ran, not recorded: {e}", record.id);
+            }
+            result
+        }
+    }
 }
 
 /// `v` as JSON.

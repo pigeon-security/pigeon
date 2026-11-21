@@ -115,6 +115,7 @@ details.c-table summary { font: var(--type-small); color: var(--muted); cursor: 
 .c-row > input { flex: 1 1 180px; }
 .c-input { box-sizing: border-box; width: 100%; min-width: 0; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--chip); color: var(--ink); font: var(--type-small); font-family: var(--font-mono); }
 .button.c-quiet { color: var(--ink); background: var(--chip); border: 1px solid var(--line); box-shadow: none; min-height: 32px; padding: 5px 10px; font-size: 13px; }
+.c-code { margin: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--chip); font: 12px/1.5 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 .c-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 10px; }
 .c-list li { display: flex; align-items: center; gap: 12px; padding: 10px 12px; }
 .c-list li + li { border-top: 1px solid var(--line); }

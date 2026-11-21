@@ -1,5 +1,6 @@
 //! The console's own writes: removing a passkey, disconnecting an app, inviting a person,
-//! approving a landing and setting whether landings need approval. Each is
+//! approving a landing, setting whether landings need approval, and approving or denying a
+//! single action (a gated tool call). Each is
 //! approved with a passkey of the signed-in person whose challenge purpose names the write and
 //! its target, so an approval covers that one change and no other. Pure: what a write is, what
 //! it may target, and its purpose.
@@ -19,6 +20,11 @@ pub enum Write {
     LandApprove,
     /// Sets whether every landing waits for approval: `on` or `off`.
     LandApproval,
+    /// Approves a single action, by its approval's id. Its purpose names the action's digest
+    /// too, which only the Directory knows: see [`Write::bound_to_digest`].
+    ApprovalApprove,
+    /// Denies a single action, by its approval's id.
+    ApprovalDeny,
 }
 
 impl Write {
@@ -30,6 +36,8 @@ impl Write {
             "invite" => Some(Write::Invite),
             "land-approve" => Some(Write::LandApprove),
             "land-approval" => Some(Write::LandApproval),
+            "approval-approve" => Some(Write::ApprovalApprove),
+            "approval-deny" => Some(Write::ApprovalDeny),
             _ => None,
         }
     }
@@ -51,7 +59,11 @@ impl Write {
                 "on" | "off" => Ok(t.to_string()),
                 _ => Err("on or off".into()),
             },
-            Write::RemovePasskey | Write::DisconnectApp | Write::LandApprove => {
+            Write::RemovePasskey
+            | Write::DisconnectApp
+            | Write::LandApprove
+            | Write::ApprovalApprove
+            | Write::ApprovalDeny => {
                 let ok = (1..=200).contains(&t.len())
                     && t.bytes()
                         .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
@@ -73,6 +85,14 @@ impl Write {
             Write::Invite => format!("console:invite:{}", hash(target)),
             Write::LandApprove => format!("console:land-approve:{target}"),
             Write::LandApproval => format!("console:land-approval:{target}"),
+            Write::ApprovalApprove => format!("console:approval:{target}"),
+            Write::ApprovalDeny => format!("console:approval-deny:{target}"),
         }
+    }
+
+    /// Whether its purpose is the approval's, bound to the approved action's digest
+    /// (`pigeon_core::approval::purpose`), rather than [`Write::purpose`].
+    pub fn bound_to_digest(self) -> bool {
+        self == Write::ApprovalApprove
     }
 }

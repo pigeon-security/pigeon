@@ -24,9 +24,11 @@ The engine is deterministic. The first matching rule wins. A request that matche
 
 ## The policy file
 
-The set of action kinds is closed. There are 13:
+The set of action kinds is closed. There are 14:
 
-`message_session`, `start_session`, `archive_session`, `handoff_branch`, `land`, `deploy`, `push_branch`, `rewrite_branch`, `delete_branch`, `move_main`, `change_policy`, `change_gate`, `add_test`.
+`message_session`, `start_session`, `archive_session`, `handoff_branch`, `land`, `deploy`, `push_branch`, `rewrite_branch`, `delete_branch`, `move_main`, `change_policy`, `change_gate`, `add_test`, `call_tool`.
+
+`call_tool` (target: a tool's name) is asked by `dispatch` for every tool call once the policy has a `call_tool` rule; see `tool-approvals.md`.
 
 A rule has these keys:
 

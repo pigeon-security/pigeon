@@ -50,7 +50,10 @@ fn tools(k: Kind) -> &'static [Tool] {
         | Kind::MoveMain
         | Kind::ChangePolicy
         | Kind::ChangeGate
-        | Kind::AddTest => &[],
+        | Kind::AddTest
+        // A tool call is allowed by `dispatch` as it runs, never pre-approved: a rule for all
+        // tools would otherwise pre-approve `call` and the passkey-gated tools.
+        | Kind::CallTool => &[],
     }
 }
 

@@ -42,11 +42,13 @@ pub enum Kind {
     ChangeGate,
     /// Add a test.
     AddTest,
+    /// Call one of the platform's tools; the target is the tool's name.
+    CallTool,
 }
 
 impl Kind {
     /// Every kind, in declaration order.
-    pub const ALL: [Kind; 13] = [
+    pub const ALL: [Kind; 14] = [
         Kind::MessageSession,
         Kind::StartSession,
         Kind::ArchiveSession,
@@ -60,6 +62,7 @@ impl Kind {
         Kind::ChangePolicy,
         Kind::ChangeGate,
         Kind::AddTest,
+        Kind::CallTool,
     ];
 
     /// The snake_case name of this kind, as written in the policy file.
@@ -78,6 +81,7 @@ impl Kind {
             Kind::ChangePolicy => "change_policy",
             Kind::ChangeGate => "change_gate",
             Kind::AddTest => "add_test",
+            Kind::CallTool => "call_tool",
         }
     }
 

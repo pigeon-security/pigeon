@@ -171,13 +171,16 @@ impl Console {
         }
     }
 
-    /// The tabs and their sections, with how many landings wait for the person on Approvals.
-    /// A Lander that does not answer in time leaves the count at 0, and the tab hidden.
+    /// The tabs and their sections, with how many landings and tool calls wait for the person on
+    /// Approvals. One that does not answer in time counts 0; both so, the tab is hidden.
     async fn tabs(cx: &Context<'_>) -> Result<Value> {
         let mut listing = sections::tabs(&Self::declared(cx));
-        let waiting = timed(SECTION_MS / 2, crate::land::awaiting(cx.env))
-            .await
-            .map_or(0, |w| w.len());
+        let (landings, calls) = futures_util::future::join(
+            timed(SECTION_MS / 2, crate::land::awaiting(cx.env)),
+            timed(SECTION_MS / 2, crate::approvals::waiting(cx.env)),
+        )
+        .await;
+        let waiting = landings.map_or(0, |w| w.len()) + calls.unwrap_or(0);
         for t in &mut listing {
             if t.tab == Tab::Approvals {
                 t.waiting = Some(waiting);
@@ -397,7 +400,11 @@ impl Console {
         let (action, step) = rest.split_once('/').ok_or_else(|| bad("not found"))?;
         let write = Write::named(action).ok_or_else(|| bad("no such write"))?;
         let target = write.target(arg(body, "target")?).map_err(|e| bad(&e))?;
-        let purpose = write.purpose(&target);
+        let purpose = if write.bound_to_digest() {
+            crate::approvals::purpose(env, &target).await?
+        } else {
+            write.purpose(&target)
+        };
         match step {
             "begin" => {
                 self.passkeys
@@ -432,6 +439,8 @@ impl Console {
             Write::LandApproval => {
                 crate::land::set_approval(env, target == "on", &person.name).await?
             }
+            Write::ApprovalApprove => crate::approvals::decide(env, target, true, person).await?,
+            Write::ApprovalDeny => crate::approvals::decide(env, target, false, person).await?,
             Write::Invite => {
                 let user = directory(
                     env,

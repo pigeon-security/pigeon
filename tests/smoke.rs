@@ -2017,3 +2017,214 @@ fn instances_are_data_a_person_approves() {
     assert!(site_for_host(&all, "platform.pigeon.dev", "pigeon.dev").is_none());
     assert!(site_for_host(&all, "noisypigeon.pigeon.dev.evil.com", "pigeon.dev").is_none());
 }
+
+// ---- tool call approvals ----
+
+/// The six tools the person gates with their passkey (docs/plans/tool-approvals.md).
+const GATED: [&str; 6] = [
+    "deploy_token",
+    "source_token",
+    "setup_platform",
+    "users_remove",
+    "passkeys_remove",
+    "oauth_revoke",
+];
+
+#[test]
+fn tool_call_approvals() {
+    use pigeon_capabilities::approvals;
+    use pigeon_capabilities::console::writes::Write;
+    use pigeon_core::approval::{self, Kind, Refusal, State};
+    use pigeon_core::policy::{self, Approval, Decision};
+
+    // The person's rules, as phase 2 adds them: each of the six needs the passkey; every other
+    // tool runs as before.
+    let text = format!(
+        "{}\n{}",
+        pigeon_capabilities::policy::TEXT,
+        r#"
+[[rule]]
+id = "risky-tools-need-passkey"
+actions = ["call_tool"]
+targets = ["deploy_token", "source_token", "setup_platform", "users_remove", "passkeys_remove", "oauth_revoke"]
+decision = "allow"
+approval = "passkey"
+reason = "the person approves each call"
+
+[[rule]]
+id = "tools-run"
+actions = ["call_tool"]
+decision = "allow"
+reason = "every other tool runs as it does today"
+"#
+    );
+    let p = policy::parse(&text).unwrap();
+    for tool in GATED {
+        let a = p.evaluate(&vars(), &request("call_tool", tool, None));
+        assert_eq!(
+            (a.decision, a.needs, a.rule.as_deref()),
+            (
+                Decision::Deny,
+                Some(Approval::Passkey),
+                Some("risky-tools-need-passkey")
+            ),
+            "{tool}"
+        );
+        let a = p.evaluate(&vars(), &request("call_tool", tool, Some("passkey")));
+        assert_eq!(a.decision, Decision::Allow, "{tool} with the passkey");
+    }
+    for tool in ["land", "policy_check", "revoke_api_token", "call"] {
+        let a = p.evaluate(&vars(), &request("call_tool", tool, None));
+        assert_eq!(
+            (a.decision, a.rule.as_deref()),
+            (Decision::Allow, Some("tools-run")),
+            "{tool}"
+        );
+    }
+
+    // The policy built into the Worker gates nothing until the person's rule lands: calls are
+    // not asked about, and no tool's schema changes.
+    assert!(!approvals::asked());
+    let mut tools = vec![pigeon_core::mcp::Tool::bare("deploy_token", "mint")];
+    approvals::annotate(&mut tools);
+    assert!(
+        tools[0].input_schema["properties"]
+            .get("approval")
+            .is_none()
+    );
+
+    // A call's digest is of the call: key order does not matter; arguments and caller do.
+    let args = json!({ "ttl": 300, "permissions": ["Workers Scripts Write"] });
+    let digest = approval::call_digest("deploy_token", &args, "svc");
+    assert_eq!(
+        digest,
+        approval::call_digest(
+            "deploy_token",
+            &json!({ "permissions": ["Workers Scripts Write"], "ttl": 300 }),
+            "svc"
+        )
+    );
+    let other_args = approval::call_digest("deploy_token", &json!({ "ttl": 301 }), "svc");
+    assert_ne!(digest, other_args);
+    assert_ne!(digest, approval::call_digest("deploy_token", &args, "svc2"));
+    assert_ne!(digest, approval::call_digest("source_token", &args, "svc"));
+
+    // The person sees the call with secrets redacted; the digest is of the call as asked.
+    let shown =
+        approval::redact(&json!({ "ttl": 1, "api_token": "t", "nested": [{ "Secret": 1 }] }));
+    assert_eq!(
+        shown,
+        json!({ "ttl": 1, "api_token": approval::REDACTED, "nested": [{ "Secret": approval::REDACTED }] })
+    );
+
+    let t0 = 1_000_000;
+    let fresh = || {
+        approval::new(
+            "ap1".into(),
+            Kind::ToolCall,
+            "deploy_token".into(),
+            digest.clone(),
+            json!({ "tool": "deploy_token", "args": args, "caller": "svc" }),
+            Value::Null,
+            "svc".into(),
+            Some("willow".into()),
+            t0,
+        )
+    };
+
+    // Pending: it does not run, and only its person approves it, for its own digest.
+    let mut r = fresh();
+    assert_eq!(
+        (r.state, r.expires_ms),
+        (State::Pending, t0 + approval::TOOL_CALL_TTL_MS)
+    );
+    assert_eq!(
+        approval::take(&mut r, &digest, "svc", t0 + 1),
+        Err(Refusal::NotApproved("ap1".into()))
+    );
+    assert_eq!(
+        approval::decide(&mut r, true, &other_args, "willow", t0 + 2),
+        Err(Refusal::OtherCall("ap1".into()))
+    );
+    assert_eq!(
+        approval::decide(&mut r, true, &digest, "mallory", t0 + 2),
+        Err(Refusal::NotYours("ap1".into()))
+    );
+    assert_eq!(
+        approval::purpose("ap1", &digest),
+        format!("console:approval:ap1:{digest}")
+    );
+    approval::decide(&mut r, true, &digest, "willow", t0 + 3).unwrap();
+    assert_eq!(r.state, State::Approved);
+
+    // Approved: another caller or other arguments do not run it; the call itself runs once.
+    assert_eq!(
+        approval::take(&mut r, &digest, "svc2", t0 + 4),
+        Err(Refusal::OtherCaller("ap1".into()))
+    );
+    assert_eq!(
+        approval::take(&mut r, &other_args, "svc", t0 + 4),
+        Err(Refusal::OtherCall("ap1".into()))
+    );
+    approval::take(&mut r, &digest, "svc", t0 + 5).unwrap();
+    assert_eq!(r.state, State::Used);
+    assert_eq!(
+        approval::take(&mut r, &digest, "svc", t0 + 6),
+        Err(Refusal::Used("ap1".into()))
+    );
+
+    // Denied: it never runs.
+    let mut r = fresh();
+    approval::decide(&mut r, false, "", "willow", t0 + 1).unwrap();
+    assert_eq!(
+        approval::take(&mut r, &digest, "svc", t0 + 2),
+        Err(Refusal::Denied("ap1".into()))
+    );
+
+    // Expired: 10 minutes pending, or 10 minutes approved and unused; expiry is noted once.
+    let mut r = fresh();
+    let late = t0 + approval::TOOL_CALL_TTL_MS;
+    assert!(approval::expire(&mut r, late));
+    assert!(!approval::expire(&mut r, late + 1));
+    assert_eq!(
+        approval::decide(&mut r, true, &digest, "willow", late),
+        Err(Refusal::Expired("ap1".into()))
+    );
+    let mut r = fresh();
+    approval::decide(&mut r, true, &digest, "willow", t0 + 1).unwrap();
+    assert_eq!(
+        approval::take(&mut r, &digest, "svc", t0 + 1 + approval::USE_TTL_MS),
+        Err(Refusal::Expired("ap1".into()))
+    );
+    assert_eq!(r.state, State::Expired);
+
+    // A draft approved after its record moved on is not applied.
+    let mut d = approval::new(
+        "d1".into(),
+        Kind::InstanceDraft,
+        "noisypigeon".into(),
+        approval::payload_digest(&Kind::InstanceDraft, "noisypigeon", &json!({ "v": 1 })),
+        json!({}),
+        json!({ "v": 1 }),
+        "svc".into(),
+        None,
+        t0,
+    );
+    let dd = d.digest.clone();
+    approval::decide(&mut d, true, &dd, "anyone", t0 + 1).unwrap();
+    assert!(approval::stale_draft(&mut d, 2, 1));
+    assert_eq!(d.state, State::Expired);
+
+    // A kind this build does not know survives a read and write.
+    let k: Kind = serde_json::from_value(json!("later_kind")).unwrap();
+    assert_eq!(serde_json::to_value(&k).unwrap(), json!("later_kind"));
+
+    // The console's write is bound to the digest; a deny is its own write.
+    assert_eq!(
+        Write::named("approval-approve"),
+        Some(Write::ApprovalApprove)
+    );
+    assert!(Write::ApprovalApprove.bound_to_digest());
+    assert!(!Write::ApprovalDeny.bound_to_digest());
+    assert!(Write::ApprovalApprove.target("not an id!").is_err());
+}

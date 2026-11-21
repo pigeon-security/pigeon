@@ -266,7 +266,8 @@ async fn mcp_post(mut req: Request, env: &Env) -> Result<Response> {
     };
     let caps = settings::capabilities();
     let hosted = hosted(&caps);
-    let tools: Vec<mcp::Tool> = caps.iter().flat_map(|c| c.tools()).collect();
+    let mut tools: Vec<mcp::Tool> = caps.iter().flat_map(|c| c.tools()).collect();
+    pigeon_capabilities::approvals::annotate(&mut tools);
     let server = Server {
         name: settings::WORKER,
         version: env!("CARGO_PKG_VERSION"),

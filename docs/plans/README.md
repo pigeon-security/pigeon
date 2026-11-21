@@ -21,6 +21,7 @@ up to date.
 | [console-hardening.md](console-hardening.md) | The console loads fast and section by section (snapshots, timeouts, retry), narrowed to Approvals, Architecture, Access and Cost | Deployed (phases 1 to 3, landing `slWijyeD5dnMaimB`) |
 | [ci-workflows.md](ci-workflows.md) | Whether Cloudflare Workflows should replace the hand-built CI and landing state machines: limits, cost, Rust support | Evaluated: don't adopt now; revisit with workers-rs Workflow support |
 | [linked-accounts.md](linked-accounts.md) | A second Cloudflare account linked by OAuth, instances in the console, static sites deployed from a GitHub repo through a GitHub App: noisypigeon.com | Phase 1 deployed; phase 2a (instances) built |
+| [tool-approvals.md](tool-approvals.md) | Calls to `deploy_token`, `source_token`, `setup_platform`, `users_remove`, `passkeys_remove` and `oauth_revoke` wait for the person's passkey on that exact call: `call_tool` in the policy, enforced in `dispatch`, approved on the console's Approvals tab | Phase 1 built; phase 2 (the person's rules) waits for their passkey |
 
 When a plan's status changes, change it in both places: the plan's first lines and this table.
 

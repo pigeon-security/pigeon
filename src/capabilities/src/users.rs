@@ -8,6 +8,7 @@
 
 use pigeon_core::Account;
 use pigeon_core::access::Session;
+use pigeon_core::approval;
 use pigeon_core::durable::{self, Db, opt};
 use pigeon_core::identity::{self, Expected};
 use pigeon_core::mcp::Tool;
@@ -82,7 +83,7 @@ fn bad(why: &str) -> Error {
 // ---- the Directory ----
 
 /// The Directory's schema, one statement per migration, applied in order and never edited.
-const MIGRATIONS: [&str; 16] = [
+const MIGRATIONS: [&str; 17] = [
     "CREATE TABLE users (id TEXT PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL, created_at INTEGER NOT NULL)",
     "CREATE TABLE service_ids (access_client_id TEXT PRIMARY KEY, user_id TEXT NOT NULL)",
     "CREATE TABLE passkeys (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, point TEXT NOT NULL, sign_count INTEGER NOT NULL, name TEXT NOT NULL, created_at INTEGER NOT NULL, last_used_at INTEGER)",
@@ -99,7 +100,13 @@ const MIGRATIONS: [&str; 16] = [
     "ALTER TABLE users ADD COLUMN avatar TEXT",
     "CREATE TABLE sessions (hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, created_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL)",
     "CREATE TABLE policy_decisions (seq INTEGER PRIMARY KEY AUTOINCREMENT, at_ms INTEGER NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL, decision TEXT NOT NULL, rule TEXT, reason TEXT NOT NULL)",
+    // Approvals of single actions (`pigeon_core::approval`): the record as JSON, with the
+    // columns it is looked up by.
+    "CREATE TABLE approvals (id TEXT PRIMARY KEY, caller_id TEXT NOT NULL, digest TEXT NOT NULL, state TEXT NOT NULL, expires_ms INTEGER NOT NULL, record TEXT NOT NULL)",
 ];
+
+/// A day, in milliseconds: how long an ended approval is kept.
+const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 
 /// How many policy decisions the Directory keeps.
 const POLICY_KEPT: i64 = 200;
@@ -173,6 +180,61 @@ impl Directory {
             "SELECT u.* FROM links l JOIN users u ON u.id = l.standard_user_id WHERE l.service_user_id = ?",
             vec![service_user_id.into()],
         )
+    }
+
+    /// Approvals matching `query`, which selects `record`.
+    fn approvals_where(
+        &self,
+        query: &str,
+        args: Vec<worker::SqlStorageValue>,
+    ) -> Result<Vec<approval::Record>> {
+        #[derive(Deserialize)]
+        struct Row {
+            record: String,
+        }
+        let rows: Vec<Row> = self.db.rows(query, args)?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| serde_json::from_str(&r.record).ok())
+            .collect())
+    }
+
+    fn approval_get(&self, id: &str) -> Result<Option<approval::Record>> {
+        Ok(self
+            .approvals_where("SELECT record FROM approvals WHERE id = ?", vec![id.into()])?
+            .pop())
+    }
+
+    fn approval_put(&self, r: &approval::Record) -> Result<()> {
+        self.db.exec(
+            "INSERT OR REPLACE INTO approvals (id, caller_id, digest, state, expires_ms, record) VALUES (?, ?, ?, ?, ?, ?)",
+            vec![
+                r.id.as_str().into(),
+                r.caller_id.as_str().into(),
+                r.digest.as_str().into(),
+                r.state.name().into(),
+                r.expires_ms.into(),
+                serde_json::to_string(r)?.into(),
+            ],
+        )
+    }
+
+    /// Expires the open approvals past their time, answering them so each expiry is recorded
+    /// once, and forgets ended ones a day after they expired.
+    fn approvals_sweep(&self, now_ms: i64) -> Result<Vec<approval::Record>> {
+        let mut stale = self.approvals_where(
+            "SELECT record FROM approvals WHERE state IN ('pending', 'approved') AND expires_ms <= ?",
+            vec![now_ms.into()],
+        )?;
+        for r in &mut stale {
+            approval::expire(r, now_ms);
+            self.approval_put(r)?;
+        }
+        self.db.exec(
+            "DELETE FROM approvals WHERE state NOT IN ('pending', 'approved') AND expires_ms <= ?",
+            vec![(now_ms - DAY_MS).into()],
+        )?;
+        Ok(stale)
     }
 
     fn handle(&self, op: &str, a: &Value) -> Result<Value> {
@@ -817,6 +879,69 @@ impl Directory {
                     vec![id.into()],
                 )?;
                 Value::Null
+            }
+            "approval.create" => {
+                let expired = self.approvals_sweep(t)?;
+                let digest = s("digest");
+                let caller = s("caller_id");
+                let pending: Vec<approval::Record> = self.approvals_where(
+                    "SELECT record FROM approvals WHERE caller_id = ? AND state = 'pending'",
+                    vec![caller.into()],
+                )?;
+                if let Some(r) = pending.iter().find(|r| r.digest == digest) {
+                    return Ok(json!({ "record": r, "existing": true, "expired": expired }));
+                }
+                if pending.len() >= approval::MAX_PENDING_PER_CALLER {
+                    return Err(bad(&format!(
+                        "{} approvals already wait for this caller; ask again once one is decided or expired",
+                        pending.len()
+                    )));
+                }
+                let r = approval::new(
+                    random()?[..22].to_string(),
+                    approval::Kind::named(s("kind")),
+                    s("subject").into(),
+                    digest.into(),
+                    a["summary"].clone(),
+                    a["payload"].clone(),
+                    caller.into(),
+                    a["approver_id"].as_str().map(str::to_string),
+                    t,
+                );
+                self.approval_put(&r)?;
+                json!({ "record": r, "existing": false, "expired": expired })
+            }
+            "approval.list" => {
+                let expired = self.approvals_sweep(t)?;
+                let open: Vec<approval::Record> = self.approvals_where(
+                    "SELECT record FROM approvals WHERE state IN ('pending', 'approved') ORDER BY expires_ms",
+                    vec![],
+                )?;
+                json!({ "open": open, "expired": expired })
+            }
+            "approval.get" => to_value(self.approval_get(s("id"))?),
+            "approval.decide" | "approval.take" => {
+                let id = s("id");
+                let mut r = self
+                    .approval_get(id)?
+                    .ok_or_else(|| bad(&approval::Refusal::NotFound(id.into()).to_string()))?;
+                let done = if op == "approval.decide" {
+                    approval::decide(
+                        &mut r,
+                        a["approve"].as_bool().unwrap_or(false),
+                        s("digest"),
+                        s("person_id"),
+                        t,
+                    )
+                } else {
+                    approval::take(&mut r, s("digest"), s("caller_id"), t)
+                };
+                // A refusal may still have changed the record, such as expiring it.
+                self.approval_put(&r)?;
+                match done {
+                    Ok(()) => json!({ "record": r }),
+                    Err(why) => json!({ "record": r, "refused": why.to_string() }),
+                }
             }
             other => return Err(bad(&format!("the Directory has no operation `{other}`"))),
         })

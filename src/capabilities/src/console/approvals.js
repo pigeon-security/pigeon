@@ -1,6 +1,7 @@
-// The Approvals section of the console: landings that wait for the signed-in person's passkey.
-// Only landings in awaiting_approval are listed, with no settings and no history.
-// Each one is approved with a single passkey ceremony bound to that landing.
+// The Approvals section of the console: what waits for the signed-in person's passkey.
+// Landings in awaiting_approval, and single tool calls the policy gates (approvals capability).
+// Each is approved with a single passkey ceremony bound to it: a landing by its id, a tool call
+// by its approval's id and the call's digest. A tool call can also be denied.
 (() => {
   const { el, post, section } = window.pigeonConsole;
   const { approve, say } = window.pigeonPasskey;
@@ -56,11 +57,42 @@
       status);
   }
 
+  const until = (ms) => {
+    const mins = Math.max(0, Math.ceil((ms - Date.now()) / 60000));
+    return `expires in ${mins} min`;
+  };
+
+  // One card per tool call that waits for this person: the call, as its caller asked it.
+  function callCard(c, ctx) {
+    const status = statusLine();
+    const approveBtn = el("button", { class: "button", type: "button", text: "Approve with passkey",
+      onclick: () => run(approveBtn, "approval-approve", c.id, status, ctx) });
+    const denyBtn = el("button", { class: "button c-quiet", type: "button", text: "Deny",
+      onclick: () => run(denyBtn, "approval-deny", c.id, status, ctx) });
+    const args = JSON.stringify(c.args || {}, null, 2);
+    const rows = [
+      ["Asked by", c.acting_for ? `${c.caller}, acting for ${c.acting_for}` : c.caller],
+      ["Asked", when(c.created_ms)],
+      ["Call digest", c.digest],
+    ];
+    return el("article", { class: "card", style: "gap:10px" },
+      el("div", { class: "card-h" }, el("h3", { text: `Run ${c.tool}` }),
+        el("span", { class: "pill warn", text: until(c.expires_ms) })),
+      el("dl", { class: "c-kv" }, ...rows.flatMap(([k, v]) => [el("dt", { text: k }), el("dd", { text: String(v || "") })])),
+      el("pre", { class: "c-code", text: args }),
+      el("p", { class: "muted", text: "Approving lets this exact call run once, when its caller calls again within 10 minutes." }),
+      el("div", { class: "c-row" }, approveBtn, denyBtn),
+      status);
+  }
+
   section("approvals", (body, data, ctx) => {
-    const list = data.landings || [];
+    // With several owners the data comes by capability name; with one, as it is.
+    const landings = (data.land || data).landings || [];
+    const calls = (data.approvals || data).calls || [];
+    const cards = [...calls.map((c) => callCard(c, ctx)), ...landings.map((l) => approvalCard(l, ctx))];
     body.append(el("div", { class: "layer", style: "gap:16px" },
-      list.length
-        ? el("div", { class: "layer", style: "gap:12px" }, ...list.map((l) => approvalCard(l, ctx)))
-        : el("p", { class: "muted", text: "Nothing waits for you. Landings that need your passkey appear here, and this tab disappears when none do." })));
+      cards.length
+        ? el("div", { class: "layer", style: "gap:12px" }, ...cards)
+        : el("p", { class: "muted", text: "Nothing waits for you. Landings and tool calls that need your passkey appear here, and this tab disappears when none do." })));
   });
 })();
