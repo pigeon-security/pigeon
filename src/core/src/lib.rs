@@ -6,6 +6,7 @@ compile_error!("pigeon-core builds for wasm32 only: cargo build --target wasm32-
 use pigeon_capabilities::artifacts::{self, Access};
 use pigeon_capabilities::domain;
 use pigeon_capabilities::mirror::{self, Copy, Report, Source};
+use pigeon_capabilities::queues;
 use pigeon_capabilities::subdomain::{self, Served, Spec};
 use pigeon_capabilities::zero_trust::Protection;
 use pigeon_capabilities::{Account, secrets_store};
@@ -35,6 +36,9 @@ const SOURCE_GITHUB: &str = "https://github.com/pigeon-security/pigeon";
 /// token that pushes to it.
 const MIRROR_URL: &str = "https://github.com/pigeon-security/pigeon.git";
 const MIRROR_TOKEN: &str = "GITHUB_MIRROR_TOKEN";
+
+/// The queue Artifacts push events go to; this Worker consumes it.
+const SOURCE_EVENTS: &str = "pigeon-source-events";
 
 /// How long a git token lives unless asked otherwise, and at most.
 const GIT_TOKEN_TTL: u64 = 900;
@@ -168,8 +172,17 @@ fn json<T: Serialize>(result: Result<T>) -> Result<Response> {
     }
 }
 
-/// Has the source repository exist in Artifacts, imported from GitHub when created; idempotent.
-async fn setup_source(env: &Env) -> Result<artifacts::Ensured> {
+/// What [`setup_source`] did.
+#[derive(Serialize)]
+struct SourceSetup {
+    repo: artifacts::Ensured,
+    events: queues::Ensured,
+}
+
+/// Has the source repository exist in Artifacts, imported from GitHub when created, and the
+/// queue its push events go to, consumed by this Worker; idempotent.
+async fn setup_source(env: &Env) -> Result<SourceSetup> {
+    let account = account(env).await?;
     let spec = artifacts::Spec {
         namespace: SOURCE_NAMESPACE.into(),
         name: SOURCE_REPO.into(),
@@ -177,7 +190,16 @@ async fn setup_source(env: &Env) -> Result<artifacts::Ensured> {
         description: Some("pigeon-security/pigeon".into()),
         import_from: Some(SOURCE_GITHUB.into()),
     };
-    artifacts::ensure(&account(env).await?, &spec).await
+    let repo = artifacts::ensure(&account, &spec).await?;
+    let events = queues::Spec {
+        queue: SOURCE_EVENTS.into(),
+        worker: WORKER.into(),
+        batch_size: 10,
+        max_wait_ms: 5_000,
+        max_retries: 5,
+    };
+    let events = queues::ensure(&account, &events).await?;
+    Ok(SourceSetup { repo, events })
 }
 
 /// A git token handed to the caller, which is behind Access.

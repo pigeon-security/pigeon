@@ -9,6 +9,7 @@ pub mod design;
 pub mod domain;
 mod git;
 pub mod mirror;
+pub mod queues;
 pub mod secrets_store;
 pub mod subdomain;
 pub mod tokens;

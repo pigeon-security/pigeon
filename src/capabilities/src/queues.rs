@@ -1,0 +1,91 @@
+//! Cloudflare Queues: has a queue exist and a Worker consume it. Both are found by name first,
+//! so running it again changes nothing.
+
+use serde::Serialize;
+use serde_json::{Value, json};
+use worker::{Error, Method, Result};
+
+use crate::Account;
+use crate::cloudflare::call;
+use crate::tokens::{Policy, Scope, Scoped};
+
+/// A queue and the Worker that consumes it.
+pub struct Spec {
+    pub queue: String,
+    /// The consuming Worker's name.
+    pub worker: String,
+    /// At most this many messages per batch.
+    pub batch_size: u32,
+    /// How long a batch waits to fill, in milliseconds.
+    pub max_wait_ms: u32,
+    /// How many times a failed batch is retried before its messages are dropped.
+    pub max_retries: u32,
+}
+
+/// What [`ensure`] did.
+#[derive(Serialize)]
+pub struct Ensured {
+    pub queue_id: String,
+    pub queue_created: bool,
+    pub consumer_created: bool,
+}
+
+fn policies() -> Vec<Policy> {
+    vec![Policy::new(Scope::Account, &["Queues Write"])]
+}
+
+/// Has queue `spec.queue` exist, consumed by Worker `spec.worker`; idempotent. A consumer that
+/// exists keeps its settings.
+pub async fn ensure(account: &Account, spec: &Spec) -> Result<Ensured> {
+    let token = Scoped::open(account, "queues", policies()).await?;
+    let ensured = ensure_with(token.value(), &account.id, spec).await;
+    token.finish(ensured).await
+}
+
+async fn ensure_with(token: &str, account: &str, spec: &Spec) -> Result<Ensured> {
+    let queues = format!("/accounts/{account}/queues");
+    let listed = call(token, Method::Get, &format!("{queues}?per_page=100"), None).await?;
+    let existing = rows(&listed)
+        .into_iter()
+        .find(|q| q["queue_name"].as_str() == Some(&spec.queue))
+        .and_then(|q| q["queue_id"].as_str().map(String::from));
+    let (queue_id, queue_created) = match existing {
+        Some(id) => (id, false),
+        None => {
+            let body = json!({ "queue_name": spec.queue });
+            let made = call(token, Method::Post, &queues, Some(&body)).await?;
+            let id = made["queue_id"].as_str().map(String::from).ok_or_else(|| {
+                Error::RustError(format!("queue `{}` came back without its id", spec.queue))
+            })?;
+            (id, true)
+        }
+    };
+    let consumers = format!("{queues}/{queue_id}/consumers");
+    let listed = call(token, Method::Get, &consumers, None).await?;
+    let consumed = rows(&listed).iter().any(|c| {
+        c["script_name"].as_str() == Some(&spec.worker)
+            || c["script"].as_str() == Some(&spec.worker)
+            || c["service"].as_str() == Some(&spec.worker)
+    });
+    if !consumed {
+        let body = json!({
+            "type": "worker",
+            "script_name": spec.worker,
+            "settings": {
+                "batch_size": spec.batch_size,
+                "max_wait_time_ms": spec.max_wait_ms,
+                "max_retries": spec.max_retries,
+            },
+        });
+        call(token, Method::Post, &consumers, Some(&body)).await?;
+    }
+    Ok(Ensured {
+        queue_id,
+        queue_created,
+        consumer_created: !consumed,
+    })
+}
+
+fn rows(v: &Value) -> Vec<Value> {
+    v.as_array().cloned().unwrap_or_default()
+}

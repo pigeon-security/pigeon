@@ -27,9 +27,5 @@ binding = "GITHUB_MIRROR_TOKEN"
 store_id = "5185c227b9f34b4291045175695b78ec"
 secret_name = "GITHUB_MIRROR_TOKEN"
 
-# Artifacts push events; each push to main or a tag mirrors to GitHub.
-[[queues.consumers]]
-queue = "pigeon-source-events"
-max_batch_size = 10
-max_batch_timeout = 5
-max_retries = 5
+# Artifacts push events reach this Worker through the pigeon-source-events queue; the queue
+# and its consumer are set up by POST /setup/source, not here.

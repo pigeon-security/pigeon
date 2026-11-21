@@ -22,7 +22,7 @@ fn body() -> String {
   <span class="eyebrow">pigeon · architecture</span>
   <h1>What's deployed</h1>
   <p>pigeon.dev is public; the platform sits behind Cloudflare Access. pigeon-platform holds one parent token and mints a short-lived, scoped token for each capability it runs.</p>
-  <div class="pills"><span class="pill">as of {AS_OF}</span><span class="pill">2 Workers</span><span class="pill">8 capabilities</span></div>
+  <div class="pills"><span class="pill">as of {AS_OF}</span><span class="pill">2 Workers</span><span class="pill">9 capabilities</span></div>
 </header>
 
 <div class="arrow" aria-hidden="true"></div>
@@ -76,7 +76,7 @@ fn body() -> String {
           <li><code>GET /health</code></li>
           <li><code>POST /setup/platform</code> → subdomain</li>
           <li><code>POST /setup/site</code> → domain</li>
-          <li><code>POST /setup/source</code> → artifacts</li>
+          <li><code>POST /setup/source</code> → artifacts, queues</li>
           <li><code>POST /source/token</code> · <code>GET /source/tokens</code> · <code>DELETE /source/tokens/:id</code></li>
           <li><code>POST /source/mirror</code> and Artifacts push events → mirror</li>
         </ul>
@@ -129,6 +129,10 @@ fn body() -> String {
         <div class="card-h"><h3>mirror</h3><span class="pill accent">mirror</span></div>
         <div class="chain"><span>calls</span><span class="pill">artifacts</span></div>
         <p>Copies an Artifacts repository to a read-only git host over git's HTTP protocol: branches only move forward, tags are only added.</p>
+      </article>
+      <article class="card">
+        <div class="card-h"><h3>queues</h3><span class="pill accent">ensure</span></div>
+        <p>Has a queue exist and a Worker consume it.</p>
       </article>
     </div>
   </section>
