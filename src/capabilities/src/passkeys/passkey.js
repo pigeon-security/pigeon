@@ -9,10 +9,12 @@ const b64u = {
     Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((s.length + 3) % 4)), (c) => c.charCodeAt(0)),
 };
 
+// The page's status line; a page with several (the console) names the one to write to.
 const status = document.querySelector("[data-status]");
-const say = (text, bad) => {
-  status.textContent = text;
-  status.dataset.bad = bad ? "1" : "";
+const say = (text, bad, el = status) => {
+  if (!el) return;
+  el.textContent = text;
+  el.dataset.bad = bad ? "1" : "";
 };
 
 async function post(path, body) {
