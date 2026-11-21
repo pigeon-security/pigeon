@@ -177,23 +177,43 @@ pub trait Files {
     ) -> Pending<'a, Option<String>>;
 }
 
-/// Files read through the platform's git proxy. Until the proxy can fetch a commit and read a
-/// pack with deltas, it answers that it cannot.
-pub struct ProxyFiles;
+/// Files read through the git proxy's reader: the one commit, one deep, with a git token
+/// minted for the read and revoked after.
+pub struct ProxyFiles {
+    /// The Secrets Store binding of the parent token the git token is minted from.
+    pub parent: String,
+}
+
+/// The longest file read, such as `ci.toml`.
+const MAX_FILE_BYTES: usize = 64 * 1024;
 
 impl Files for ProxyFiles {
     fn read<'a>(
         &'a self,
-        _cx: &'a Cx<'a>,
-        _repo: &'a str,
-        _commit: &'a str,
-        _path: &'a str,
+        cx: &'a Cx<'a>,
+        repo: &'a str,
+        commit: &'a str,
+        path: &'a str,
     ) -> Pending<'a, Option<String>> {
-        Box::pin(async {
-            Err(bad(
-                "reading files at a commit waits for the git proxy: until it is live, give \
-                 `ci_route` the job's `needs` directly",
-            ))
+        Box::pin(async move {
+            let (namespace, name) = repo
+                .split_once('/')
+                .ok_or_else(|| bad(&format!("not a repository: {repo}")))?;
+            let account = scheduler::account(cx.env, &self.parent).await?;
+            let Some(bytes) =
+                crate::git_proxy::read_file(&account, namespace, name, commit, path).await?
+            else {
+                return Ok(None);
+            };
+            if bytes.len() > MAX_FILE_BYTES {
+                return Err(bad(&format!(
+                    "{path} is larger than {} KiB",
+                    MAX_FILE_BYTES / 1024
+                )));
+            }
+            String::from_utf8(bytes)
+                .map(Some)
+                .map_err(|_| bad(&format!("{path} is not UTF-8")))
         })
     }
 }

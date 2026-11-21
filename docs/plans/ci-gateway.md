@@ -329,13 +329,12 @@ pub trait Files { fn read<'a>(&'a self, cx: &'a Cx<'a>, repo: &'a str, commit: &
                              path: &'a str) -> Pending<'a, Option<String>>; }
 ```
 
-Phase 1 ships `ProxyFiles`, which answers "reading files at a commit waits for the git proxy",
-so `ci_submit {repo, commit, job}` refuses with that reason until the proxy's fetch (and a pack
-reader that resolves deltas) is live; tests use a fake. `ci_route` with `needs` given directly
-works from day one. A pack reader that resolves deltas is the route plan's phase 2 work
-(`pack.rs`, which refuses deltas today); when it lands, `ProxyFiles` reads the tree and blob
-through it. If it does not grow delta support, reading `ci.toml` needs it: called out in the
-hand-back.
+Phase 1 shipped `ProxyFiles` answering that it could not read yet. Since the routing plan's
+phase 5 (main 36024af), `ProxyFiles` reads through `git_proxy::read_file`, which fetches the one
+commit one deep with a git token minted for it and revoked after, and resolves deltas in
+`pack.rs`; files over 64 KiB or not UTF-8 are refused. The git proxy also accepts job tokens for
+upload-pack fetches of their grant's commit only, through `ci::job_grant`, `token::reaches` and
+`token::allows_fetch`.
 
 Tests (unit, native):
 - needs → class for every size boundary, docker and gpu suffixes, too big, unknown OS;

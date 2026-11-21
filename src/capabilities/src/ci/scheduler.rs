@@ -185,8 +185,8 @@ pub fn deadline(at_ms: i64, timeout_min: u32) -> i64 {
     at_ms + i64::from(timeout_min) * 60_000 + DEADLINE_GRACE_MS
 }
 
-/// The account the notes push mints its git token on.
-async fn account(env: &Env, parent: &str) -> Result<Account> {
+/// The account a git token is minted on, for the notes push and for reading `ci.toml`.
+pub(crate) async fn account(env: &Env, parent: &str) -> Result<Account> {
     let parent_token = secrets_store::read(&env.secret_store(parent)?)
         .await?
         .ok_or_else(|| bad(&format!("`{parent}` is not set in the Secrets Store")))?;

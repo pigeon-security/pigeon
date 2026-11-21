@@ -202,7 +202,9 @@ pub fn ci() -> ci::Settings {
             limit: 4,
             entrypoint: vec!["/usr/local/bin/pigeon-ci-runner".into()],
         })],
-        files: Box::new(ProxyFiles),
+        files: Box::new(ProxyFiles {
+            parent: PARENT_TOKEN.into(),
+        }),
         repos: vec![format!("{NAMESPACE}/{REPO}")],
         host: HOST.into(),
         proxy_host: PROXY_HOST.into(),

@@ -340,6 +340,13 @@ needs = { os = "linux", docker = true }
     }
 
     #[test]
+    fn the_repositorys_own_file_parses() {
+        let cfg = parse(include_str!("../../../../.pigeon/ci.toml")).unwrap();
+        assert_eq!(cfg.jobs["smoke"].run, "ci/runner/smoke.sh");
+        assert_eq!(cfg.jobs["smoke"].needs, Needs::default());
+    }
+
+    #[test]
     fn junk_is_refused() {
         assert!(one("run = \"a.sh\"\nneeds = { os = \"beos\" }").is_err());
         assert!(parse("").is_err());

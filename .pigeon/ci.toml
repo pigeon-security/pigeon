@@ -1,0 +1,7 @@
+# pigeon's CI jobs. The gateway reads this file at the commit being run; it never reads the
+# scripts. See docs/plans/ci-gateway.md.
+
+# A job that only proves the path end to end: the runner fetched this commit and ran a script.
+[jobs.smoke]
+run = "ci/runner/smoke.sh"
+timeout_min = 5
