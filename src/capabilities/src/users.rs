@@ -199,6 +199,58 @@ impl Directory {
             .collect())
     }
 
+    /// A setting's value while it is kept.
+    fn setting_value(&self, key: &str, t: i64) -> Result<Option<String>> {
+        #[derive(Deserialize)]
+        struct Row {
+            value: String,
+        }
+        let row: Option<Row> = self.db.row(
+            "SELECT value FROM settings WHERE key = ? AND expires_at > ?",
+            vec![key.into(), t.into()],
+        )?;
+        Ok(row.map(|r| r.value))
+    }
+
+    fn setting_keep(&self, key: &str, value: &str, until: i64) -> Result<()> {
+        self.db.exec(
+            "INSERT OR REPLACE INTO settings (key, value, expires_at) VALUES (?, ?, ?)",
+            vec![key.into(), value.into(), until.into()],
+        )?;
+        Ok(())
+    }
+
+    /// Applies approved instance draft `r`: the record it holds becomes the instance's next
+    /// version, unless the instance moved on since the draft was made, which expires it.
+    fn apply_draft(&self, r: &mut approval::Record, t: i64) -> Result<()> {
+        use crate::instances::{self, record::Instance};
+        let base = r.payload["base_version"].as_u64().unwrap_or(0);
+        let mut next: Instance = serde_json::from_value(r.payload["record"].clone())?;
+        let key = instances::key(&next.id);
+        let at = match self.setting_value(&key, t)? {
+            Some(text) => serde_json::from_str::<Instance>(&text)?.version,
+            None => 0,
+        };
+        if approval::stale_draft(r, at, base) {
+            return Ok(());
+        }
+        next.version = base + 1;
+        let until = t.saturating_add(instances::KEPT_MS);
+        self.setting_keep(&key, &serde_json::to_string(&next)?, until)?;
+        let mut ids: Vec<String> = match self.setting_value(instances::INDEX, t)? {
+            Some(text) => serde_json::from_str(&text)?,
+            None => Vec::new(),
+        };
+        if !ids.contains(&next.id) {
+            ids.push(next.id.clone());
+            ids.sort();
+            self.setting_keep(instances::INDEX, &serde_json::to_string(&ids)?, until)?;
+        }
+        r.state = approval::State::Used;
+        r.used_ms = Some(t);
+        Ok(())
+    }
+
     fn approval_get(&self, id: &str) -> Result<Option<approval::Record>> {
         Ok(self
             .approvals_where("SELECT record FROM approvals WHERE id = ?", vec![id.into()])?
@@ -936,6 +988,15 @@ impl Directory {
                 } else {
                     approval::take(&mut r, s("digest"), s("caller_id"), t)
                 };
+                // An approved instance draft is applied here, in the same call, so nothing can
+                // change the record between the check and the write.
+                if op == "approval.decide"
+                    && done.is_ok()
+                    && r.state == approval::State::Approved
+                    && r.kind.applies_on_approve()
+                {
+                    self.apply_draft(&mut r, t)?;
+                }
                 // A refusal may still have changed the record, such as expiring it.
                 self.approval_put(&r)?;
                 match done {

@@ -85,11 +85,35 @@
       status);
   }
 
+  // One card per instance draft an agent proposed: exactly what changes, applied on approval.
+  function draftCard(d, ctx) {
+    const status = statusLine();
+    const approveBtn = el("button", { class: "button", type: "button", text: "Approve with passkey",
+      onclick: () => run(approveBtn, "approval-approve", d.id, status, ctx) });
+    const denyBtn = el("button", { class: "button c-quiet", type: "button", text: "Deny",
+      onclick: () => run(denyBtn, "approval-deny", d.id, status, ctx) });
+    const show = (v) => (v === null || v === undefined ? "none" : JSON.stringify(v));
+    const changes = ((d.summary && d.summary.changes) || []).map((c) =>
+      el("li", { text: `${c.path}: ${show(c.from)} → ${show(c.to)}` }));
+    return el("article", { class: "card", style: "gap:10px" },
+      el("div", { class: "card-h" }, el("h3", { text: `Change instance ${d.instance}` }),
+        el("span", { class: "pill warn", text: until(d.expires_ms) })),
+      el("dl", { class: "c-kv" },
+        el("dt", { text: "From version" }), el("dd", { text: String((d.summary || {}).version_from ?? 0) }),
+        el("dt", { text: "Asked" }), el("dd", { text: when(d.created_ms) })),
+      el("ul", {}, ...changes),
+      el("p", { class: "muted", text: "Approving applies exactly these changes now, unless the instance changed since this was proposed." }),
+      el("div", { class: "c-row" }, approveBtn, denyBtn),
+      status);
+  }
+
   section("approvals", (body, data, ctx) => {
     // With several owners the data comes by capability name; with one, as it is.
     const landings = (data.land || data).landings || [];
     const calls = (data.approvals || data).calls || [];
-    const cards = [...calls.map((c) => callCard(c, ctx)), ...landings.map((l) => approvalCard(l, ctx))];
+    const drafts = (data.approvals || data).drafts || [];
+    const cards = [...calls.map((c) => callCard(c, ctx)), ...drafts.map((d) => draftCard(d, ctx)),
+      ...landings.map((l) => approvalCard(l, ctx))];
     body.append(el("div", { class: "layer", style: "gap:16px" },
       cards.length
         ? el("div", { class: "layer", style: "gap:12px" }, ...cards)

@@ -678,6 +678,14 @@ not by this session.
 
 ## Log
 
+- 2026-11-22: phase 2b part 1, agent proposals.
+  - `instance_propose` checks a record as the console does. It keeps the record as an
+    `instance_draft` approval for the person the caller acts for, holding the payload, the base
+    version and the diff.
+  - The Approvals tab shows the draft's changes. Approving with a passkey applies the record
+    inside the Directory's `approval.decide`, in the same call, only while the instance is still
+    at the base version. Otherwise the draft expires as stale.
+  - Built on the shared approvals table (tool-approvals, `7debe9f`).
 - 2026-11-21: the person, through the parent: the bucket takes the instance's name too,
   `noisypigeon-site`. `bucket_for` now derives it from the instance (its Worker name), not
   from a hostname, and validation also refuses a bucket another instance uses.

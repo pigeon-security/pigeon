@@ -2071,6 +2071,40 @@ fn instances_are_data_a_person_approves() {
         "instance:noisypigeon:abc"
     );
 
+    // An agent's proposal is a draft bound to the record and the version it was made from;
+    // approving applies it only while the instance is still at that version.
+    use pigeon_core::approval::{self as appr, Kind, State};
+    let payload = json!({ "record": on, "base_version": 3 });
+    let digest = appr::payload_digest(&Kind::InstanceDraft, "noisypigeon", &payload);
+    let moved = json!({ "record": on, "base_version": 4 });
+    assert_ne!(
+        digest,
+        appr::payload_digest(&Kind::InstanceDraft, "noisypigeon", &moved)
+    );
+    assert!(Kind::InstanceDraft.applies_on_approve());
+    let mut draft = appr::new(
+        "d1".into(),
+        Kind::InstanceDraft,
+        "noisypigeon".into(),
+        digest.clone(),
+        json!({ "changes": changes }),
+        payload,
+        "agent".into(),
+        Some("willow".into()),
+        0,
+    );
+    appr::decide(&mut draft, true, &digest, "willow", 1).unwrap();
+    assert_eq!(draft.state, State::Approved);
+    assert!(
+        !appr::stale_draft(&mut draft.clone(), 3, 3),
+        "still at its version: applied"
+    );
+    assert!(
+        appr::stale_draft(&mut draft, 4, 3),
+        "the record moved on: not applied"
+    );
+    assert_eq!(draft.state, State::Expired);
+
     // The subdomain is served by host, from the data alone.
     let all = [platform, noisy];
     let (i, site) = site_for_host(&all, "NoisyPigeon.pigeon.dev", "pigeon.dev").unwrap();

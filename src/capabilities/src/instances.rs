@@ -20,9 +20,9 @@ use crate::{Call, Capability, Context, Serve, arg, to_value, unknown};
 use record::{Instance, Rules};
 
 /// The Directory key holding the list of instance ids.
-const INDEX: &str = "instances:index";
+pub const INDEX: &str = "instances:index";
 /// How long a record is kept: for good, in practice (a century).
-const KEPT_MS: i64 = 100 * 365 * 24 * 3_600_000;
+pub const KEPT_MS: i64 = 100 * 365 * 24 * 3_600_000;
 /// The largest record accepted, in bytes.
 const MAX_RECORD: usize = 32 * 1024;
 
@@ -262,6 +262,51 @@ impl Instances {
         }
     }
 
+    /// An agent's proposal: checked as an edit on the console is, then kept as an instance
+    /// draft for the person the caller acts for to approve. Changes nothing itself.
+    async fn propose(&self, cx: &Context<'_>, args: &Value) -> Result<Value> {
+        let caller = cx
+            .caller
+            .ok_or_else(|| bad("proposing an instance needs a known caller"))?;
+        let person = caller
+            .acting_for
+            .as_ref()
+            .ok_or_else(|| bad("the caller acts for no person who could approve this"))?;
+        let text = serde_json::to_string(&args["record"])?;
+        let (record, current) = match self.check(cx, &text).await? {
+            Ok(pair) => pair,
+            Err(problems) => return Ok(json!({ "problems": problems })),
+        };
+        let changes = record::diff(current.as_ref(), &record);
+        if changes.is_empty() {
+            return Ok(json!({ "problems": ["nothing changes"] }));
+        }
+        let base = current.as_ref().map_or(0, |c| c.version);
+        let payload = json!({ "record": record, "base_version": base });
+        let kind = pigeon_core::approval::Kind::InstanceDraft;
+        let digest = pigeon_core::approval::payload_digest(&kind, &record.id, &payload);
+        let made = directory(
+            cx.env,
+            "approval.create",
+            json!({
+                "kind": kind.name(),
+                "subject": record.id,
+                "digest": digest,
+                "summary": { "instance": record.id, "version_from": base, "changes": changes },
+                "payload": payload,
+                "caller_id": caller.user.id,
+                "approver_id": person.id,
+            }),
+        )
+        .await?;
+        Ok(json!({
+            "approval": made["record"]["id"],
+            "waits_until_ms": made["record"]["expires_ms"],
+            "changes": changes,
+            "note": "Nothing changes until the person approves this on the console's Approvals tab.",
+        }))
+    }
+
     /// Every instance as the console shows it: its record and its link's state.
     async fn listed(&self, env: &Env) -> Result<Value> {
         let instances: Vec<Value> = all(env)
@@ -299,18 +344,33 @@ impl Capability for Instances {
     }
 
     fn tools(&self) -> Vec<Tool> {
-        vec![Tool::bare(
-            "instances_list",
-            "List the platform's instances: each one's account, zones, sites with their targets \
-             and subdomains, repository and version. Read-only: a person changes an instance on \
-             the console with their passkey.",
-        )]
+        vec![
+            Tool::bare(
+                "instances_list",
+                "List the platform's instances: each one's account, zones, sites with their \
+                 targets and subdomains, Worker, repository and version. Read-only.",
+            ),
+            Tool {
+                name: "instance_propose",
+                description: "Propose a new or changed instance record (the whole record, with \
+                              the `version` it was edited from). It is checked as the console \
+                              checks it and waits on the console's Approvals tab; it changes \
+                              nothing until the person approves it with their passkey. Answers \
+                              the approval's id and the changes, or the problems.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": { "record": { "type": "object" } },
+                    "required": ["record"]
+                }),
+            },
+        ]
     }
 
-    fn call<'a>(&'a self, cx: &'a Context<'a>, tool: &'a str, _args: &'a Value) -> Call<'a> {
+    fn call<'a>(&'a self, cx: &'a Context<'a>, tool: &'a str, args: &'a Value) -> Call<'a> {
         Box::pin(async move {
             match tool {
                 "instances_list" => Ok(to_value(all(cx.env).await?)),
+                "instance_propose" => self.propose(cx, args).await,
                 other => Err(unknown(other)),
             }
         })

@@ -354,6 +354,16 @@ pub async fn decide(env: &Env, id: &str, approve: bool, person: &User) -> Result
         )
         .await?;
     }
+    if r.kind == ApprovalKind::InstanceDraft {
+        return Ok(json!({ "message": match r.state {
+            State::Used => format!("Applied: instance `{}` has the approved record.", r.subject),
+            State::Expired => format!(
+                "Not applied: {}. Ask for a new proposal.",
+                r.note.as_deref().unwrap_or("the draft expired")
+            ),
+            _ => format!("Denied: instance `{}` is unchanged.", r.subject),
+        } }));
+    }
     Ok(json!({ "message": if approve {
         format!("Approved: `{}` runs once when its caller calls it again, within 10 minutes.", r.subject)
     } else {
@@ -453,7 +463,18 @@ impl Capability for Approvals {
                     })
                 })
                 .collect();
-            Ok(json!({ "calls": calls }))
+            let drafts: Vec<Value> = open
+                .iter()
+                .filter(|r| r.state == State::Pending && r.kind == ApprovalKind::InstanceDraft)
+                .map(|r| {
+                    json!({
+                        "id": r.id, "instance": r.subject, "summary": r.summary,
+                        "created_ms": r.created_ms, "expires_ms": r.expires_ms,
+                        "digest": r.digest.chars().take(12).collect::<String>(),
+                    })
+                })
+                .collect();
+            Ok(json!({ "calls": calls, "drafts": drafts }))
         })
     }
 }
