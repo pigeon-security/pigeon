@@ -12,16 +12,29 @@ struct PigeonApp: App {
     }
 }
 
-/// The signed-in or signed-out screen, by whether a session exists.
+/// The signed-in tabs or the sign-in screen, by whether a session exists.
 struct Root: View {
     let session: Session
+    @State private var approvals = ApprovalsModel()
 
     var body: some View {
-        NavigationStack {
+        Group {
             if session.signedIn {
-                PasskeysView(session: session)
+                TabView {
+                    NavigationStack { ApprovalsView(session: session, model: approvals) }
+                        .tabItem { Label("Approvals", systemImage: "checkmark.seal") }
+                        .badge(approvals.count)
+                    NavigationStack { ArchitectureView(session: session) }
+                        .tabItem { Label("Architecture", systemImage: "square.grid.2x2") }
+                    NavigationStack { AccessView(session: session) }
+                        .tabItem { Label("Access", systemImage: "key") }
+                    NavigationStack { CostView(session: session) }
+                        .tabItem { Label("Cost", systemImage: "chart.bar") }
+                }
+                // Counts waiting items for the badge even before the Approvals tab is opened.
+                .task { await approvals.load(session.client) }
             } else {
-                SignInView(session: session)
+                NavigationStack { SignInView(session: session) }
             }
         }
         .tint(Tokens.accent)

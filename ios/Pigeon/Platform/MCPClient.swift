@@ -50,13 +50,7 @@ final class MCPClient {
                 "jsonrpc": "2.0", "id": id, "method": method, "params": params,
             ] as [String: Any])
         for attempt in 0..<2 {
-            guard var pair = Keychain.load(TokenPair.self, for: Keychain.Key.tokens) else {
-                onSignedOut()
-                throw PlatformError.signedOut
-            }
-            if pair.expiresAt < Date().addingTimeInterval(30), attempt == 0 {
-                pair = try await refreshing(pair)
-            }
+            let pair = try await currentPair(attempt: attempt)
             var req = URLRequest(url: url)
             req.httpMethod = "POST"
             req.httpBody = body
@@ -87,6 +81,56 @@ final class MCPClient {
                 throw PlatformError.badResponse("no result")
             }
             return result
+        }
+        onSignedOut()
+        throw PlatformError.signedOut
+    }
+
+    /// The stored tokens, refreshed on the first attempt when they are about to end. No tokens
+    /// signs out. Shared by the MCP calls and [`post`].
+    private func currentPair(attempt: Int) async throws -> TokenPair {
+        guard var pair = Keychain.load(TokenPair.self, for: Keychain.Key.tokens) else {
+            onSignedOut()
+            throw PlatformError.signedOut
+        }
+        if pair.expiresAt < Date().addingTimeInterval(30), attempt == 0 {
+            pair = try await refreshing(pair)
+        }
+        return pair
+    }
+
+    /// POSTs `body` as JSON to `path` on the platform (such as `/console/write/x/begin`) with
+    /// the bearer token, and answers the JSON object. A 401 refreshes the tokens once and
+    /// retries. Any other failure is thrown with `step` and the platform's own `error` text.
+    func post(_ path: String, _ body: [String: Any], step: String) async throws -> [String: Any] {
+        guard let url = URL(string: OAuth.base.absoluteString + path) else {
+            throw PlatformError.badResponse("\(step): URL")
+        }
+        let payload = try JSONSerialization.data(withJSONObject: body)
+        for attempt in 0..<2 {
+            let pair = try await currentPair(attempt: attempt)
+            var req = URLRequest(url: url)
+            req.httpMethod = "POST"
+            req.httpBody = payload
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.setValue("application/json", forHTTPHeaderField: "Accept")
+            req.setValue("Bearer \(pair.access)", forHTTPHeaderField: "Authorization")
+            let (data, response) = try await URLSession.shared.data(for: req)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if status == 401 {
+                if attempt == 0 {
+                    _ = try await refreshing(pair)
+                    continue
+                }
+                break
+            }
+            let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            guard (200..<300).contains(status) else {
+                let why = json?["error"] as? String ?? "no error text"
+                throw PlatformError.server("\(step): HTTP \(status): \(why)")
+            }
+            guard let json else { throw PlatformError.badResponse("\(step): not a JSON object") }
+            return json
         }
         onSignedOut()
         throw PlatformError.signedOut

@@ -36,7 +36,7 @@ final class PasskeysModel {
         } catch PlatformError.signedOut {
             // The session has already signed out.
         } catch {
-            self.error = error.localizedDescription
+            self.error = "passkeys_list failed: \(error.localizedDescription)"
         }
     }
 }
@@ -54,6 +54,7 @@ struct PasskeysView: View {
                     Eyebrow(text: "Passkeys")
                     if let error = model.error {
                         Text(error).font(.token(Tokens.typeSmall)).foregroundStyle(Tokens.warn)
+                            .textSelection(.enabled)
                     }
                     ForEach(model.passkeys) { key in
                         VStack(alignment: .leading, spacing: 4) {

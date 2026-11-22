@@ -196,12 +196,15 @@ final class WebAuth: NSObject, ASWebAuthenticationPresentationContextProviding {
     nonisolated func presentationAnchor(for session: ASWebAuthenticationSession)
         -> ASPresentationAnchor
     {
-        MainActor.assumeIsolated {
-            let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-            let scene = scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
-            if let window = scene?.keyWindow ?? scene?.windows.first { return window }
-            if let scene { return UIWindow(windowScene: scene) }
-            return ASPresentationAnchor()
-        }
+        MainActor.assumeIsolated { WebAuth.appWindow() }
+    }
+
+    /// The app's own window, for any system sheet.
+    static func appWindow() -> ASPresentationAnchor {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        let scene = scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
+        if let window = scene?.keyWindow ?? scene?.windows.first { return window }
+        if let scene { return UIWindow(windowScene: scene) }
+        return ASPresentationAnchor()
     }
 }
