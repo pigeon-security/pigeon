@@ -5,6 +5,8 @@
 //! transferred to pigeon-dotest-b. It holds no secrets and only dummy data; every route asks
 //! for the header `X-Rehearsal: dotest`, a speed bump, not security. Built for
 //! `wasm32-unknown-unknown` only.
+//!
+//! Deployed by a landing of its own, after the one that listed it in ci/workers.toml.
 
 #[cfg(not(target_arch = "wasm32"))]
 compile_error!(
