@@ -15,7 +15,7 @@ struct SignInView: View {
                     .font(.token(Tokens.typeBody))
                     .foregroundStyle(Tokens.ink)
                     .multilineTextAlignment(.center)
-                Button("Sign in") { Task { await signIn() } }
+                Button(busy ? "Signing in…" : "Sign in") { Task { await signIn() } }
                     .buttonStyle(PrimaryButtonStyle())
                     .disabled(busy)
                 if let error {
@@ -35,9 +35,8 @@ struct SignInView: View {
         error = nil
         do {
             try await session.signIn()
-        } catch PlatformError.cancelled {
-            // The person closed the sheet; nothing to say.
         } catch {
+            // Every failure is shown, a closed sheet included: a silent button helps no one.
             self.error = error.localizedDescription
         }
     }

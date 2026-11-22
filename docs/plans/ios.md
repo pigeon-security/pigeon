@@ -714,3 +714,11 @@ a passkey. Enter every key and id on the console's secrets page once the slot ex
     phase 5 signs during the archive instead.
   - The skeleton already declares `ITSAppUsesNonExemptEncryption = NO`; the person confirms that
     answer in App Store Connect if asked.
+- 2026-11-22 (late): TestFlight build 38 (VALID) installed; "Sign in" did nothing. Causes:
+  the app gave ASWebAuthenticationSession a new window outside any scene as its anchor, and
+  platform.pigeon.dev served no apple-app-site-association, which an `https` callback needs;
+  both end as a cancelled session, which the sign-in screen hid. Phase 5 as built: core serves
+  `/.well-known/apple-app-site-association` (`webcredentials` for `{APPLE_TEAM_ID}.dev.pigeon.app`,
+  JSON, no redirect, 404 while the slot is unset) and a plain `/app/oauth` page for a callback
+  iOS did not intercept; the app anchors the sheet on its own window and shows every failure
+  with iOS's code. OAuth, passkey and approval rules are unchanged.

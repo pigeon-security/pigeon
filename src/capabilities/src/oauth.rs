@@ -8,7 +8,7 @@
 use pigeon_core::mcp::Tool;
 use pigeon_core::oauth::{self, encode, form, hash, pkce, redirect_allowed};
 use serde_json::{Value, json};
-use worker::{Env, Error, Method, Request, Response, Result};
+use worker::{Env, Error, Headers, Method, Request, Response, Result};
 
 use crate::passkeys::{Action, Passkeys, html};
 use crate::users::{Caller, User, directory};
@@ -88,6 +88,19 @@ impl OAuth {
             (Method::Get, p) if p.starts_with("/.well-known/oauth-protected-resource") => Ok(cors(
                 Response::from_json(&oauth::resource_metadata(&format!("{issuer}/mcp"), &issuer))?,
             )),
+            // The iOS app's associated domain (docs/plans/ios.md, phase 5): JSON, no redirect,
+            // 404 while APPLE_TEAM_ID is unset.
+            (Method::Get, "/.well-known/apple-app-site-association") => {
+                match crate::apple::aasa(cx.env).await {
+                    Some(doc) => {
+                        let headers = Headers::new();
+                        headers.set("Content-Type", "application/json")?;
+                        headers.set("Cache-Control", "public, max-age=3600")?;
+                        Ok(Response::from_json(&doc)?.with_headers(headers))
+                    }
+                    None => Response::error("not found", 404),
+                }
+            }
             (Method::Get, p) if p.starts_with("/.well-known/oauth-authorization-server") => {
                 Ok(cors(Response::from_json(&oauth::server_metadata(&issuer))?))
             }

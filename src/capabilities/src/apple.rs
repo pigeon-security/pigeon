@@ -128,6 +128,22 @@ pub fn seal_aad(certificate_id: &str) -> String {
     format!("apple:identity:{certificate_id}")
 }
 
+/// The apple-app-site-association document for `team`: it lets `dev.pigeon.app` use this host
+/// for passkeys and for its sign-in callback (`webcredentials`), as the app's associated-domains
+/// entitlement names it. None unless `team` is a team id, so a bad slot serves nothing.
+pub fn aasa_document(team: &str) -> Option<Value> {
+    apple::is_apple_id(team)
+        .then(|| json!({ "webcredentials": { "apps": [format!("{team}.{BUNDLE_ID}")] } }))
+}
+
+/// The AASA document from `APPLE_TEAM_ID`, or None while it is unset.
+pub async fn aasa(env: &Env) -> Option<Value> {
+    aasa_document(&secret(env, TEAM_ID).await?)
+}
+
+/// What `/app/oauth` shows when iOS did not hand the sign-in back to the app: never the code.
+pub const APP_RETURN_PAGE: &str = "<!doctype html><meta charset=utf-8><meta name=viewport content=\"width=device-width\"><title>Pigeon</title><body style=\"font:16px -apple-system,system-ui,sans-serif;margin:3rem 1.5rem;text-align:center\"><p>Sign-in is done here.</p><p>Return to the Pigeon app. If it still shows the sign-in screen, close this page and try again.</p></body>";
+
 /// The passkey purpose of each console write, naming the bundle id it acts on.
 pub fn purpose(write: &str) -> Option<String> {
     matches!(write, "adopt" | "identity").then(|| format!("apple:{write}:{BUNDLE_ID}"))
@@ -647,6 +663,13 @@ pub struct Apple {
 
 impl Apple {
     async fn serve(&self, cx: &Context<'_>, mut req: Request) -> Result<Response> {
+        if req.method() == Method::Get && req.path() == "/app/oauth" {
+            let headers = Headers::new();
+            headers.set("Content-Type", "text/html; charset=utf-8")?;
+            headers.set("Cache-Control", "no-store")?;
+            headers.set("Referrer-Policy", "no-referrer")?;
+            return Ok(Response::ok(APP_RETURN_PAGE)?.with_headers(headers));
+        }
         if req.method() != Method::Post {
             return Response::error("not found", 404);
         }
@@ -777,7 +800,7 @@ impl Capability for Apple {
     }
 
     fn routes(&self) -> Vec<&'static str> {
-        vec!["/apple/"]
+        vec!["/apple/", "/app/oauth"]
     }
 
     fn fetch<'a>(&'a self, cx: &'a Context<'a>, req: Request) -> Serve<'a> {

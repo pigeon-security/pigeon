@@ -1,6 +1,7 @@
 import AuthenticationServices
 import CryptoKit
 import Foundation
+import UIKit
 
 /// What can go wrong talking to the platform, with a message a person can read.
 enum PlatformError: LocalizedError {
@@ -15,7 +16,8 @@ enum PlatformError: LocalizedError {
         switch self {
         case .badResponse(let what): return "The platform answered something unexpected: \(what)."
         case .server(let text): return text
-        case .cancelled: return "Sign-in was cancelled."
+        case .cancelled:
+            return "Sign-in was closed before it finished. If you did not close it, the platform's link to this app may not be ready yet: try again in a few minutes."
         case .stateMismatch: return "Sign-in came back with the wrong state. Try again."
         case .signedOut: return "You are signed out. Sign in again."
         case .keychain(let status): return "The keychain refused the request (\(status))."
@@ -154,12 +156,8 @@ final class WebAuth: NSObject, ASWebAuthenticationPresentationContextProviding {
             ) { callback, error in
                 if let callback {
                     continuation.resume(returning: callback)
-                } else if let error = error as? ASWebAuthenticationSessionError,
-                    error.code == .canceledLogin
-                {
-                    continuation.resume(throwing: PlatformError.cancelled)
                 } else {
-                    continuation.resume(throwing: error ?? PlatformError.cancelled)
+                    continuation.resume(throwing: WebAuth.explain(error))
                 }
             }
             session.prefersEphemeralWebBrowserSession = false
@@ -171,9 +169,38 @@ final class WebAuth: NSObject, ASWebAuthenticationPresentationContextProviding {
         }
     }
 
+    /// A readable error for what the session answered: never silent, always with iOS's code.
+    nonisolated static func explain(_ error: Error?) -> Error {
+        guard let error else {
+            return PlatformError.badResponse("the sign-in sheet closed without an answer")
+        }
+        let ns = error as NSError
+        if let e = error as? ASWebAuthenticationSessionError {
+            switch e.code {
+            case .canceledLogin:
+                return PlatformError.cancelled
+            case .presentationContextNotProvided, .presentationContextInvalid:
+                return PlatformError.server(
+                    "iOS could not show the sign-in sheet (ASWebAuthenticationSession \(ns.code)).")
+            @unknown default:
+                break
+            }
+        }
+        return PlatformError.server(
+            "Sign-in stopped: \(ns.localizedDescription) (\(ns.domain) \(ns.code)).")
+    }
+
+    /// The app's own window, so the sheet is shown over it. A new window that belongs to no
+    /// scene is not a valid anchor, and iOS then refuses the session.
     nonisolated func presentationAnchor(for session: ASWebAuthenticationSession)
         -> ASPresentationAnchor
     {
-        ASPresentationAnchor()
+        MainActor.assumeIsolated {
+            let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+            let scene = scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
+            if let window = scene?.keyWindow ?? scene?.windows.first { return window }
+            if let scene { return UIWindow(windowScene: scene) }
+            return ASPresentationAnchor()
+        }
     }
 }
