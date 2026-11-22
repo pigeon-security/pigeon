@@ -105,8 +105,30 @@ pub enum Accounts {
     Parent(String),
     /// From core, as a credential scoped to the purposes asked and minted for the call in hand,
     /// over the [`PLATFORM`] binding: for `pigeon-ci-gateway`, which never holds the parent
-    /// token. Needs a signed caller.
+    /// token. Asked as the signed caller in hand, or, when no one is calling (the scheduler's
+    /// alarm), as the Worker itself ([`SCOPED_WORKER`]) with the key from its own
+    /// [`CALLER_KEY`] binding.
     Scoped,
+}
+
+/// The Worker that runs CI with [`Accounts::Scoped`]: the service it signs as when no one is
+/// calling.
+pub const SCOPED_WORKER: &str = "pigeon-ci-gateway";
+/// The Secrets Store binding of the key core signs callers with.
+pub const CALLER_KEY: &str = "CALLER_KEY";
+
+/// The caller [`SCOPED_WORKER`] signs its own requests as: itself, a service, acting for no
+/// one, as pigeon-proxy does.
+fn itself() -> Value {
+    json!({
+        "user": {
+            "id": format!("worker:{SCOPED_WORKER}"),
+            "kind": "service",
+            "name": SCOPED_WORKER,
+            "created_at": 0,
+        },
+        "acting_for": null,
+    })
 }
 
 /// The account to act on for `purposes` (such as [`PURPOSE_ARTIFACTS`]): with the parent token
@@ -115,10 +137,21 @@ pub async fn account(cx: &Cx<'_>, purposes: &[&str]) -> Result<Account> {
     match cx.accounts {
         Accounts::Parent(binding) => pigeon_core::account_from_env(cx.env, binding).await,
         Accounts::Scoped => {
-            let (Some(key), Some(caller)) = (cx.key, cx.caller) else {
-                return Err(bad(
-                    "a scoped credential is asked for a signed caller, and there is none here",
-                ));
+            // No one calling: the Worker asks as itself, with its own binding of the key.
+            let own_key;
+            let own_caller;
+            let (key, caller) = match (cx.key, cx.caller) {
+                (Some(key), Some(caller)) => (key, caller),
+                _ => {
+                    let store = cx.env.secret_store(CALLER_KEY).map_err(|_| {
+                        bad("no one is calling and this Worker binds no CALLER_KEY to ask as itself")
+                    })?;
+                    own_key = pigeon_core::secrets_store::read(&store)
+                        .await?
+                        .ok_or_else(|| bad("CALLER_KEY is not set in the Secrets Store"))?;
+                    own_caller = itself();
+                    (own_key.as_bytes(), &own_caller)
+                }
             };
             let request = CredentialRequest {
                 kind: "scoped".into(),
