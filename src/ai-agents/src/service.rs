@@ -169,11 +169,11 @@ impl Agents {
                 )
                 .await)
             }
-            "ai_agents_pause" => {
-                r(object::call(env, INDEX, "pause", &json!({ "paused": true })).await)
-            }
-            "ai_agents_resume" => {
-                r(object::call(env, INDEX, "pause", &json!({ "paused": false })).await)
+            "ai_agents_pause" | "ai_agents_resume" => {
+                let on = req.tool == "ai_agents_pause";
+                pause_args(&req.tool, a)?;
+                r(object::call(env, INDEX, "pause", &json!({ "paused": on })).await)
+                    .map(|_| pause_answer(on))
             }
             "ai_agents_inbox" => r(object::call(
                 env,
@@ -340,12 +340,14 @@ impl Service for Agents {
                     ),
                     tool(
                         "ai_agents_pause",
-                        "Pause every run: none takes another step or starts until ai_agents_resume.",
+                        "Pause EVERY run at once (it takes no run id): no run takes another step \
+                         and none starts until ai_agents_resume. To stop one run, use \
+                         ai_agents_stop with its `run`.",
                         json!({ "type": "object", "properties": {} }),
                     ),
                     tool(
                         "ai_agents_resume",
-                        "Resume runs after ai_agents_pause.",
+                        "Resume every run after ai_agents_pause.",
                         json!({ "type": "object", "properties": {} }),
                     ),
                     tool(
@@ -478,4 +480,28 @@ impl Service for Agents {
             }
         })
     }
+}
+
+/// Refuses arguments `ai_agents_pause` and `ai_agents_resume` do not take: both act on every run,
+/// and a `run` given to them was once taken as a per-run pause.
+pub fn pause_args(tool: &str, a: &Value) -> Result<(), String> {
+    match a.as_object() {
+        Some(o) if o.contains_key("run") => Err(format!(
+            "{tool} acts on every run and takes no `run`; to stop one run, use ai_agents_stop with its `run`"
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// What `ai_agents_pause` (`paused`) and `ai_agents_resume` answer: that it is every run.
+pub fn pause_answer(paused: bool) -> Value {
+    json!({
+        "paused": paused,
+        "scope": "every run",
+        "note": if paused {
+            "every run is paused: none takes a step or starts until ai_agents_resume"
+        } else {
+            "every run is resumed"
+        },
+    })
 }

@@ -2971,6 +2971,15 @@ fn ai_agents_loop_budgets_tools_and_turns() {
             && prompt.contains("ai_agents_report with run r9")
     );
     assert!(service::TOOLS.contains(&"ai_agents_handoff"));
+    // Pause is for every run, and says so: a `run` is refused, not taken as a per-run pause.
+    assert!(
+        service::pause_args("ai_agents_pause", &json!({ "run": "r1" }))
+            .unwrap_err()
+            .contains("ai_agents_stop")
+    );
+    assert!(service::pause_args("ai_agents_pause", &json!({})).is_ok());
+    assert_eq!(service::pause_answer(true)["scope"], "every run");
+    assert_eq!(service::pause_answer(false)["paused"], false);
 
     // Falling back to another model drops thinking it cannot read.
     let thought = [
