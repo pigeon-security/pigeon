@@ -32,13 +32,26 @@ secret_name = "BUILDKITE_API_TOKEN"
 binding = "PLATFORM"
 service = "pigeon-platform"
 
-# The scheduler and the runners stay core's classes for now (docs/plans/workers-split.md,
-# phase 4): this Worker reaches them by binding, and declares no class or migration of its own.
+# The CI scheduler: every CI job, in one object with SQLite storage and an alarm. Its class
+# moves here from pigeon-platform on this config's first deploy, with its rows and alarm
+# (rehearsed with pigeon-dotest-a and -b: docs/plans/do-rehearsal.md). It is never created here
+# first, and a transfer cannot be rolled back. pigeon-platform keeps its v2 migration and still
+# exports the class; its CI_SCHEDULER binding reaches the class here. The runners, which hold
+# the job containers, stay core's: a container class cannot be transferred, and the deploy job
+# that makes this transfer runs in one of them.
 [durable_objects]
 bindings = [
-  { name = "CI_SCHEDULER", class_name = "CiScheduler", script_name = "pigeon-platform" },
+  { name = "CI_SCHEDULER", class_name = "CiScheduler" },
   { name = "CI_RUNNER", class_name = "CiRunner", script_name = "pigeon-platform" },
 ]
+
+[[migrations]]
+tag = "v1"
+
+[[migrations.transferred_classes]]
+from = "CiScheduler"
+from_script = "pigeon-platform"
+to = "CiScheduler"
 
 # CI state changes, for other capabilities; core consumes them.
 [[queues.producers]]
