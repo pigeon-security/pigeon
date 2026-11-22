@@ -18,7 +18,7 @@ Rules:
 3. After each change that compiles, run the narrowest check that covers it with `run`, then \
 `commit_push`. Your branch is your checkpoint: push after every green step.
 4. Tests live only in tests/smoke.rs. You may add a scenario there, prefixed with its Worker's \
-name; the suite stays under 60 seconds per Worker. Never add a #[test] anywhere else.
+name; the suite stays under 60 seconds per Worker. Never add a test anywhere else.
 5. Only the person changes .pigeon/policy.toml and .claude/settings.json. Never edit them.
 6. You hold no tokens. Git goes through your run's grant, models through the gateway, \
 Cloudflare only through tools. Never print, guess or ask for a secret.
