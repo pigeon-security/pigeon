@@ -389,12 +389,18 @@ impl Capability for Observability {
 
     fn tools(&self) -> Vec<Tool> {
         vec![
-            Tool::bare(
-                "observability_monitors_plan",
-                "Dry run of the notification policies pigeon wants (Workers observability \
-                 alerts, billing usage alerts) and the account lacks. Asks the person's \
-                 approval when something is missing.",
-            ),
+            Tool {
+                name: "observability_monitors_plan",
+                description: "Dry run of the notification policies pigeon wants (Workers \
+                              observability alerts) and the account lacks. Asks the person's \
+                              approval when something is missing. With `check`, only reads: \
+                              the shape of Cloudflare's alert types and policies, field names \
+                              and counts, and asks nothing.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": { "check": { "type": "boolean", "description": "Read-only shape check; no approval is asked." } }
+                }),
+            },
             Tool {
                 name: "observability_monitors_apply",
                 description: "Creates the policies of an approved monitors plan, once. Only \
@@ -422,6 +428,9 @@ impl Capability for Observability {
     fn call<'a>(&'a self, cx: &'a Context<'a>, tool: &'a str, args: &'a Value) -> Call<'a> {
         Box::pin(async move {
             match tool {
+                "observability_monitors_plan" if args["check"] == true => {
+                    return monitors_check(cx).await;
+                }
                 "observability_monitors_plan" => return monitors_plan(self, cx).await,
                 "observability_monitors_apply" => return monitors_apply(self, cx, args).await,
                 "observability_summary" => {}
@@ -441,26 +450,18 @@ const NOTIFICATIONS_WRITE_PERMISSION: &str = "Notifications Write";
 const MONITOR_PREFIX: &str = "pigeon: ";
 /// Kind name of the approval for a monitors plan.
 const MONITORS_KIND: &str = "observability_monitors";
-/// Workers requests per month: about twice the expected month (see the plan's cost section).
-const WORKERS_REQUESTS_LIMIT: u64 = 20_000_000;
-/// Container memory in GB-hours per month: about twice the expected month.
-const CONTAINER_GB_HOURS_LIMIT: u64 = 100;
-/// Observability ingestion in GB per month: about twice the expected month.
-const OBSERVABILITY_GB_LIMIT: u64 = 10;
-/// Billing products to watch: policy label, API product name (unverified), limit.
-const BILLING_WATCHES: [(&str, &str, u64); 3] = [
-    ("Workers requests", "workers", WORKERS_REQUESTS_LIMIT),
-    ("Containers memory", "containers", CONTAINER_GB_HOURS_LIMIT),
-    (
-        "Observability ingestion",
-        "observability",
-        OBSERVABILITY_GB_LIMIT,
-    ),
+/// How long a monitors plan waits for the person, like a linked plan: 30 minutes.
+const MONITORS_PENDING_MS: i64 = 30 * 60 * 1000;
+/// The alert types pigeon wants. The billing usage watches are left out until their product
+/// and filter names are checked against the live API (docs/plans/observability.md).
+const WANTED_TYPES: [&str; 2] = [
+    "workers_observability_alert",
+    "workers_observability_real_time_issue",
 ];
 
 /// The alert types that `available` (the `available_alerts` result: groups of entries with a
 /// `type`) offers, each with its `filter_options` keys.
-fn available_types(available: &Value) -> BTreeMap<String, Vec<String>> {
+pub fn available_types(available: &Value) -> BTreeMap<String, Vec<String>> {
     let mut out = BTreeMap::new();
     let groups: Vec<&Value> = match available {
         Value::Object(m) => m.values().collect(),
@@ -491,15 +492,11 @@ fn available_types(available: &Value) -> BTreeMap<String, Vec<String>> {
 /// The wanted alert types that `available` does not offer.
 pub fn absent_types(available: &Value) -> Vec<String> {
     let have = available_types(available);
-    [
-        "workers_observability_alert",
-        "workers_observability_real_time_issue",
-        "billing_usage_alert",
-    ]
-    .into_iter()
-    .filter(|t| !have.contains_key(*t))
-    .map(str::to_string)
-    .collect()
+    WANTED_TYPES
+        .into_iter()
+        .filter(|t| !have.contains_key(*t))
+        .map(str::to_string)
+        .collect()
 }
 
 /// The notification policies pigeon wants that `existing` (the policies list) lacks by name.
@@ -532,20 +529,74 @@ pub fn plan_monitors(available: &Value, existing: &Value, scripts: &[String]) ->
         wanted
             .push(json!({ "name": name, "alert_type": kind, "filters": filters, "enabled": true }));
     }
-    if have.contains_key("billing_usage_alert") {
-        for (label, product, limit) in BILLING_WATCHES {
-            wanted.push(json!({
-                "name": format!("{MONITOR_PREFIX}{label} usage"),
-                "alert_type": "billing_usage_alert",
-                "filters": { "product": [product], "limit": [limit.to_string()] },
-                "enabled": true,
-            }));
-        }
-    }
     wanted
         .into_iter()
         .filter(|w| w["name"].as_str().is_some_and(|n| !names.contains(&n)))
         .collect()
+}
+
+/// The account's available alert types and its notification policies, read with a
+/// Notifications Read token.
+async fn read_alerts(cx: &Context<'_>) -> Result<(Value, Value)> {
+    let token = open(cx, NOTIFICATIONS_READ_PERMISSION).await?;
+    let id = &cx.account.id;
+    let work = async {
+        let get = |path: String| {
+            let t = token.value().to_string();
+            async move { pigeon_core::cloudflare::call_fresh(&t, Method::Get, &path, None).await }
+        };
+        let a = get(format!("/accounts/{id}/alerting/v3/available_alerts")).await?;
+        let p = get(format!("/accounts/{id}/alerting/v3/policies")).await?;
+        Ok((a, p))
+    }
+    .await;
+    token.finish(work).await
+}
+
+/// What `available` and `existing` look like, without their values: the alert type groups, the
+/// filter keys of the types pigeon wants or may want, how many policies there are and which are
+/// pigeon's, and the field names of a policy and of its `mechanisms`. For checking the API's
+/// shapes before a first apply.
+pub fn shape_report(available: &Value, existing: &Value) -> Value {
+    let types = available_types(available);
+    let groups: Vec<String> = match available {
+        Value::Object(m) => m.keys().cloned().collect(),
+        _ => Vec::new(),
+    };
+    let watched: BTreeMap<&String, &Vec<String>> = types
+        .iter()
+        .filter(|(t, _)| t.starts_with("workers_observability") || t.starts_with("billing"))
+        .collect();
+    let policies = existing.as_array().cloned().unwrap_or_default();
+    let keys = |v: &Value| -> Vec<String> {
+        v.as_object()
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default()
+    };
+    let first = policies.first().cloned().unwrap_or(Value::Null);
+    json!({
+        "available_alerts": {
+            "is": if available.is_object() { "object" } else if available.is_array() { "array" } else { "other" },
+            "groups": groups,
+            "types_recognised": types.len(),
+            "wanted_absent": WANTED_TYPES.iter().filter(|t| !types.contains_key(**t)).collect::<Vec<_>>(),
+            "filter_keys": watched,
+        },
+        "policies": {
+            "is_list": existing.is_array(),
+            "count": policies.len(),
+            "pigeon": policies.iter().filter_map(|p| p["name"].as_str()).filter(|n| n.starts_with(MONITOR_PREFIX)).collect::<Vec<_>>(),
+            "fields": keys(&first),
+            "mechanisms_fields": keys(&first["mechanisms"]),
+            "filters_fields": keys(&first["filters"]),
+        },
+    })
+}
+
+/// `observability_monitors_plan {check: true}`: the shape report, read-only.
+async fn monitors_check(cx: &Context<'_>) -> Result<Value> {
+    let (available, existing) = read_alerts(cx).await?;
+    Ok(shape_report(&available, &existing))
 }
 
 /// Reads the account's alert types and policies, and plans the missing monitors. Answers the
@@ -554,27 +605,21 @@ async fn monitors_planned(
     this: &Observability,
     cx: &Context<'_>,
 ) -> Result<(Vec<Value>, Vec<String>)> {
-    let token = open(cx, NOTIFICATIONS_READ_PERMISSION).await?;
-    let id = &cx.account.id;
-    let work = async {
-        let a = pigeon_core::cloudflare::call(
-            token.value(),
-            Method::Get,
-            &format!("/accounts/{id}/alerting/v3/available_alerts"),
-            None,
-        )
-        .await?;
-        let p = pigeon_core::cloudflare::call(
-            token.value(),
-            Method::Get,
-            &format!("/accounts/{id}/alerting/v3/policies"),
-            None,
-        )
-        .await?;
-        Ok((a, p))
+    let (available, existing) = read_alerts(cx).await?;
+    if available_types(&available).is_empty() {
+        return Err(Error::RustError(
+            "couldn't read the account's available alerts: no alert type was recognised in \
+             Cloudflare's answer, so nothing is planned"
+                .into(),
+        ));
     }
-    .await;
-    let (available, existing) = token.finish(work).await?;
+    if !existing.is_array() {
+        return Err(Error::RustError(
+            "couldn't read the account's notification policies: Cloudflare's answer is not a \
+             list, so nothing is planned"
+                .into(),
+        ));
+    }
     let scripts: Vec<String> = this.map.workers.iter().map(|w| w.script.clone()).collect();
     Ok((
         plan_monitors(&available, &existing, &scripts),
@@ -598,19 +643,18 @@ async fn monitors_plan(this: &Observability, cx: &Context<'_>) -> Result<Value> 
     if planned.is_empty() {
         return Ok(
             json!({ "plan": [], "applies": false, "skipped": skipped_note,
-            "note": "Everything is already in place." }),
+            "note": if skipped.is_empty() {
+                "Every policy pigeon wants is already in place."
+            } else {
+                "Nothing to create: the policies pigeon wants are in place or their alert types are not offered (see skipped)."
+            } }),
         );
     }
     let lines: Vec<String> = planned
         .iter()
         .map(|p| {
-            let unverified = if p["alert_type"] == "billing_usage_alert" {
-                " (unverified: product and filter names are from the API docs)"
-            } else {
-                ""
-            };
             format!(
-                "create `{}` ({}){unverified}",
+                "create `{}` ({})",
                 p["name"].as_str().unwrap_or(""),
                 p["alert_type"].as_str().unwrap_or("")
             )
@@ -630,6 +674,7 @@ async fn monitors_plan(this: &Observability, cx: &Context<'_>) -> Result<Value> 
             "payload": payload,
             "caller_id": caller.user.id,
             "approver_id": person.id,
+            "pending_ms": MONITORS_PENDING_MS,
         }),
     )
     .await?;
@@ -685,8 +730,11 @@ async fn monitors_apply(this: &Observability, cx: &Context<'_>, args: &Value) ->
     )
     .await?;
     let path = format!("/accounts/{}/alerting/v3/policies", cx.account.id);
+    // Each policy is posted on its own; the first refusal stops the rest, and the answer still
+    // lists what was created before it, since the approval is spent.
     let work = async {
         let mut created = Vec::new();
+        let mut failed = Value::Null;
         for p in planned.iter().filter(|p| {
             p["name"]
                 .as_str()
@@ -697,17 +745,36 @@ async fn monitors_apply(this: &Observability, cx: &Context<'_>, args: &Value) ->
                 "name": p["name"], "alert_type": p["alert_type"], "filters": p["filters"],
                 "enabled": p["enabled"], "mechanisms": {},
             });
-            let made =
-                pigeon_core::cloudflare::call(token.value(), Method::Post, &path, Some(&body))
-                    .await?;
-            created.push(json!({ "name": p["name"], "id": made["id"] }));
+            match pigeon_core::cloudflare::call_fresh(
+                token.value(),
+                Method::Post,
+                &path,
+                Some(&body),
+            )
+            .await
+            {
+                Ok(made) => created.push(json!({ "name": p["name"], "id": made["id"] })),
+                Err(e) => {
+                    failed = json!({
+                        "name": p["name"],
+                        "why": e.to_string().replace(cx.account.id.as_str(), "{account}"),
+                    });
+                    break;
+                }
+            }
         }
-        Ok(created)
+        Ok((created, failed))
     }
     .await;
-    let created = token.finish(work).await?;
-    Ok(json!({ "created": created,
-        "note": "No delivery is set: the person adds email in the dashboard (Alerts > Notifications)." }))
+    let (created, failed) = token.finish(work).await?;
+    let note = if failed.is_null() {
+        "No delivery is set: the person adds email in the dashboard (Alerts > Notifications)."
+    } else {
+        "Stopped at `failed`; the policies in `created` exist. This approval is spent: plan \
+         again for the rest (created ones are not planned again). No delivery is set: the \
+         person adds email in the dashboard (Alerts > Notifications)."
+    };
+    Ok(json!({ "created": created, "failed": failed, "note": note }))
 }
 
 /// The agent runs created in `[from_ms, to_ms]`, from `ai_agents_status`'s list: how many and

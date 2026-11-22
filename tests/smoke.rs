@@ -7184,45 +7184,64 @@ fn core_architecture_draws_every_worker_in_the_map() {
 
 #[test]
 fn core_observability_monitors_plan() {
-    use pigeon_capabilities::observability::{absent_types, plan_monitors};
+    use pigeon_capabilities::observability::{
+        absent_types, available_types, plan_monitors, shape_report,
+    };
     use serde_json::json;
 
-    let available = json!({ "workers": [
+    let available = json!({ "Workers": [
         { "type": "workers_observability_alert", "filter_options": [{ "Key": "services" }] },
         { "type": "billing_usage_alert", "filter_options": [{ "Key": "product" }] },
     ] });
-    let existing = json!([{ "name": "pigeon: Workers requests usage" }, { "name": "other" }]);
+    let existing = json!([{ "name": "pigeon: Workers errors", "mechanisms": { "email": [] },
+        "filters": { "services": ["x"] } }, { "name": "other" }]);
     let scripts = vec!["core".to_string(), "lander".to_string()];
-    let planned = plan_monitors(&available, &existing, &scripts);
-    let names: Vec<&str> = planned.iter().filter_map(|p| p["name"].as_str()).collect();
-    // An existing pigeon policy is not planned again.
-    assert!(!names.contains(&"pigeon: Workers requests usage"));
-    assert!(names.contains(&"pigeon: Containers memory usage"));
-    // The absent real-time type is skipped and reported.
+
+    // An existing pigeon policy is not planned again, and billing watches are not planned
+    // until their names are checked against the live API.
+    assert!(plan_monitors(&available, &existing, &scripts).is_empty());
+    let none = json!([]);
+    let planned = plan_monitors(&available, &none, &scripts);
+    assert_eq!(planned.len(), 1);
     assert!(
         planned
             .iter()
-            .all(|p| p["alert_type"] != "workers_observability_real_time_issue")
+            .all(|p| p["alert_type"] != "billing_usage_alert")
     );
+    // Filters name only the given scripts.
+    assert_eq!(
+        planned[0]["filters"],
+        json!({ "services": ["core", "lander"] })
+    );
+    // The absent real-time type is skipped and reported.
     assert_eq!(
         absent_types(&available),
         vec!["workers_observability_real_time_issue"]
     );
-    // Filters name only the given scripts.
-    let errors = planned
-        .iter()
-        .find(|p| p["alert_type"] == "workers_observability_alert");
+
+    // An answer of an unknown shape is told apart from an account that lacks the types: it
+    // recognises no type at all, which the plan refuses rather than calling it in place.
+    assert!(available_types(&json!({ "result": "unexpected" })).is_empty());
+    assert!(!available_types(&available).is_empty());
+
+    // The read-only shape check: field names and counts, no values.
+    let report = shape_report(&available, &existing);
+    assert_eq!(report["available_alerts"]["groups"], json!(["Workers"]));
+    assert_eq!(report["available_alerts"]["types_recognised"], 2);
     assert_eq!(
-        errors.map(|p| p["filters"].clone()),
-        Some(json!({ "services": ["core", "lander"] }))
+        report["available_alerts"]["filter_keys"]["billing_usage_alert"],
+        json!(["product"])
     );
-    // Planned policies are not planned again; only the one that was already there remains
-    // missing from this list.
-    let all: Vec<_> = planned
-        .iter()
-        .map(|p| json!({ "name": p["name"] }))
-        .collect();
-    assert!(plan_monitors(&available, &json!(all), &scripts).len() == 1);
+    assert_eq!(report["policies"]["count"], 2);
+    assert_eq!(
+        report["policies"]["pigeon"],
+        json!(["pigeon: Workers errors"])
+    );
+    assert_eq!(report["policies"]["mechanisms_fields"], json!(["email"]));
+    assert!(
+        !report.to_string().contains("\"x\""),
+        "a filter value leaked: {report}"
+    );
 }
 
 #[test]

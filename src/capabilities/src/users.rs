@@ -982,7 +982,7 @@ impl Directory {
                         pending.len()
                     )));
                 }
-                let r = approval::new(
+                let mut r = approval::new(
                     random()?[..22].to_string(),
                     approval::Kind::named(s("kind")),
                     s("subject").into(),
@@ -993,6 +993,12 @@ impl Directory {
                     a["approver_id"].as_str().map(str::to_string),
                     t,
                 );
+                // A plan the person reads before deciding may ask to wait longer than its kind's
+                // lifetime, up to a linked plan's 30 minutes, never more.
+                if let Some(ms) = a["pending_ms"].as_i64() {
+                    let ms = ms.clamp(60_000, approval::LINKED_PLAN_TTL_MS);
+                    r.expires_ms = t.saturating_add(ms);
+                }
                 self.approval_put(&r)?;
                 json!({ "record": r, "existing": false, "expired": expired })
             }

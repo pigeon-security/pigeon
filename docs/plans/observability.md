@@ -308,3 +308,12 @@ until the person approves a plan.
   and an `unavailable` line ("its Workers Logs may be off"); Cloudflare calls use `call_fresh`
   and `why` texts show `{account}` for the account id. Smoke: `core_observability_summary_folds`
   covers the redaction and the coverage fold.
+- 2026-11-22: (c), second round, on `claude/obs-c-fixes` (on (b)'s third round): the plan
+  refuses an `available_alerts` answer with no recognised type, or a policies answer that is
+  not a list, with "couldn't read", rather than "Everything is already in place"; apply posts
+  each policy on its own and, on a refusal, answers `created` so far plus `failed`; the
+  approval waits 30 minutes, like a linked plan (the directory's `approval.create` takes a
+  `pending_ms`, at most 30 minutes); the billing usage watches are dropped until their product
+  and filter names are checked live. `observability_monitors_plan {check: true}` reads the
+  alert types and policies and answers their shape only (groups, filter keys, counts, field
+  names), asking no approval: the live check to run before the person's first apply.
