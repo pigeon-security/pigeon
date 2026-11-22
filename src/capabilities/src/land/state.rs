@@ -3,14 +3,21 @@
 //! leaves. Pure.
 //!
 //! ```text
-//! checking ─► testing ─► [awaiting_approval] ─► merging ─► deploying ─► landed
-//!    │           │               │                 │            │
-//!    ▼           ▼               ▼                 ▼            ▼
-//! refused   test_failed       expired         merge_refused  deploy_failed
+//! checking ─► testing ─► [awaiting_approval] ─► ready ─► merging ─► merged ─► deploying ─► landed
+//!    │           │  ▲            │                │        │  │  │      │           │
+//!    ▼           ▼  └── retest ──┼────────────────┼────────┘  │  │      ▼           ▼
+//! refused   test_failed       expired          cancelled      │  │   landed      deploy_failed
+//!                                                             │  ▼  (superseded)
+//!                                              rebase_refused ◄┘ landed (docs only)
 //! ```
 //!
-//! `checking` runs in the Lander's alarm after `land` has answered: a landing that fails a check
-//! ends `refused`, with the reason. Any live state can become `error` (the gateway failed) or,
+//! Many landings are live at once. Each is checked and tested on its own, outside any lock.
+//! `ready` waits for the merge lock: one landing at a time is `merging`, which moves main by a
+//! compare-and-swap, rebasing the branch onto main itself when main moved and the two changed
+//! different paths. When main moved in paths the landing's tests cover, the rebased commit goes
+//! back to `testing`. `merged` waits for the deploy lane, one deploy at a time, which deploys
+//! the newest merged commit; older merged landings it covers end `landed`. A docs-only landing
+//! ends `landed` at the merge. Any live state can become `error` (the gateway failed) or,
 //! before `merging`, `cancelled`.
 
 use pigeon_core::policy::{Answer, Approval, Decision, Kind, Request};
@@ -23,30 +30,39 @@ pub enum State {
     Checking,
     Testing,
     AwaitingApproval,
+    /// Tested (and approved where needed), waiting for the merge lock.
+    Ready,
     Merging,
+    /// In main, waiting for the deploy lane.
+    Merged,
     Deploying,
     Landed,
     Refused,
     TestFailed,
     Expired,
     MergeRefused,
+    /// Main moved in a path the branch also changed, and the two could not be merged.
+    RebaseRefused,
     DeployFailed,
     Cancelled,
     Error,
 }
 
 impl State {
-    pub const ALL: [State; 13] = [
+    pub const ALL: [State; 16] = [
         State::Checking,
         State::Testing,
         State::AwaitingApproval,
+        State::Ready,
         State::Merging,
+        State::Merged,
         State::Deploying,
         State::Landed,
         State::Refused,
         State::TestFailed,
         State::Expired,
         State::MergeRefused,
+        State::RebaseRefused,
         State::DeployFailed,
         State::Cancelled,
         State::Error,
@@ -57,13 +73,16 @@ impl State {
             State::Checking => "checking",
             State::Testing => "testing",
             State::AwaitingApproval => "awaiting_approval",
+            State::Ready => "ready",
             State::Merging => "merging",
+            State::Merged => "merged",
             State::Deploying => "deploying",
             State::Landed => "landed",
             State::Refused => "refused",
             State::TestFailed => "test_failed",
             State::Expired => "expired",
             State::MergeRefused => "merge_refused",
+            State::RebaseRefused => "rebase_refused",
             State::DeployFailed => "deploy_failed",
             State::Cancelled => "cancelled",
             State::Error => "error",
@@ -81,7 +100,9 @@ impl State {
             State::Checking
                 | State::Testing
                 | State::AwaitingApproval
+                | State::Ready
                 | State::Merging
+                | State::Merged
                 | State::Deploying
         )
     }
@@ -90,7 +111,7 @@ impl State {
     pub fn cancellable(self) -> bool {
         matches!(
             self,
-            State::Checking | State::Testing | State::AwaitingApproval
+            State::Checking | State::Testing | State::AwaitingApproval | State::Ready
         )
     }
 }
@@ -112,6 +133,17 @@ pub enum Seen {
     Merged,
     /// `main` could not be moved.
     MergeRefused,
+    /// It took the lock or the lane it waited for: `ready` to `merging`, `merged` to
+    /// `deploying`.
+    Start,
+    /// Main moved in paths its tests cover: its rebased commit is tested again.
+    Retest,
+    /// Main moved in a path it also changed, and the two could not be merged.
+    RebaseRefused,
+    /// A docs-only landing reached main: nothing to deploy.
+    DocsMerged,
+    /// A newer landing's deploy carried its commit.
+    Superseded,
     /// It was asked to stop.
     Cancel,
     /// The gateway itself failed.
@@ -128,12 +160,19 @@ pub fn next(state: State, needs_approval: bool, seen: &Seen) -> Option<State> {
         (Checking, Seen::Checked) => Testing,
         (Checking, Seen::CheckRefused) => Refused,
         (Testing, Seen::JobEnded { passed: true }) if needs_approval => AwaitingApproval,
-        (Testing, Seen::JobEnded { passed: true }) => Merging,
+        (Testing, Seen::JobEnded { passed: true }) => Ready,
         (Testing, Seen::JobEnded { passed: false }) => TestFailed,
-        (AwaitingApproval, Seen::Approved) => Merging,
+        (AwaitingApproval, Seen::Approved) => Ready,
         (AwaitingApproval, Seen::ApprovalLapsed) => Expired,
-        (Merging, Seen::Merged) => Deploying,
+        (Ready, Seen::Start) => Merging,
+        (Merging, Seen::Merged) => Merged,
+        (Merging, Seen::DocsMerged) => Landed,
+        (Merging, Seen::Retest) => Testing,
         (Merging, Seen::MergeRefused) => MergeRefused,
+        (Merging, Seen::RebaseRefused) => RebaseRefused,
+        (Merged, Seen::Start) => Deploying,
+        (Merged, Seen::Superseded) => Landed,
+        (Merged, Seen::JobEnded { passed: false }) => DeployFailed,
         (Deploying, Seen::JobEnded { passed: true }) => Landed,
         (Deploying, Seen::JobEnded { passed: false }) => DeployFailed,
         _ => return None,
@@ -152,6 +191,11 @@ pub fn allowed(from: State, to: State) -> bool {
         Seen::ApprovalLapsed,
         Seen::Merged,
         Seen::MergeRefused,
+        Seen::Start,
+        Seen::Retest,
+        Seen::RebaseRefused,
+        Seen::DocsMerged,
+        Seen::Superseded,
         Seen::Cancel,
         Seen::Failed,
     ];
@@ -220,6 +264,22 @@ pub fn guarded_changes(
         .zip(on_main.iter().zip(at_commit))
         .filter(|(_, (a, b))| a != b)
         .map(|(p, _)| *p)
+        .collect()
+}
+
+/// The guarded paths among `changed`, the paths a landing changed: a guarded file itself, or
+/// anything under a guarded directory.
+pub fn guarded_in(changed: &[&str]) -> Vec<&'static str> {
+    GUARDED
+        .iter()
+        .filter(|g| {
+            changed.iter().any(|p| {
+                p == *g
+                    || p.strip_prefix(**g)
+                        .is_some_and(|rest| rest.starts_with('/'))
+            })
+        })
+        .copied()
         .collect()
 }
 

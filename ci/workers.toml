@@ -1,0 +1,36 @@
+# Which Worker owns each path, for landing in lanes (docs/plans/workers-split.md). The Lander
+# reads this file from main, never from the branch being landed, so a branch never chooses its
+# own lane; a change to it is a gate change (rule `gate-changes`), like the rest of ci/.
+#
+# A pattern ending in `*` matches any path starting with the text before it; any other pattern
+# matches exactly. The first entry that matches wins: docs, then shared, then each worker in
+# order; a path nothing matches is shared. tests/smoke.rs is test-shared: a change to it runs
+# the tests of the Workers the landing otherwise touches, and never makes it shared.
+version = 1
+
+# Merged without tests or a deploy.
+[docs]
+paths = ["docs/*"]
+
+# Every Worker's tests; deployed core first.
+[shared]
+paths = [
+    "src/core/*",
+    "src/contract/*",
+    "Cargo.toml",
+    "Cargo.lock",
+    ".cargo/*",
+    "rust-toolchain.toml",
+    ".pigeon/*",
+    ".claude/*",
+    "ci/*",
+]
+
+[[worker]]
+name = "core"
+script = "pigeon-platform"
+dir = "src/platform"
+paths = ["src/platform/*", "src/capabilities/*"]
+test_job = "test"
+deploy_job = "deploy"
+after = ["architecture", "portal_sync", "connectors_setup"]

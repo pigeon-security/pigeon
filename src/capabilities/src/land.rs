@@ -12,6 +12,7 @@
 //! its landing is `deploying` and only for its commit ([`deploy_caller`]). Who may land: a
 //! person, or an agent linked to one.
 
+pub mod merge;
 pub mod state;
 
 use pigeon_core::artifacts::{self, Access};
@@ -29,7 +30,7 @@ use worker::{
 };
 
 use crate::console::sections::{Section, Tab};
-use crate::git_proxy::{self, Moved};
+use crate::git_proxy;
 use crate::proxy::ProxyCaller;
 use crate::users::{Caller, User};
 use crate::{Call, Capability, Context, Footprint, Hosted, arg, unknown};
@@ -256,15 +257,20 @@ impl Capability for Land {
         vec![
             Tool {
                 name: "land",
-                description: "Land a session branch: its tip must be a fast-forward of main, \
-                              on a branch under claude/. Answers at once with the landing in \
-                              `checking`; the tip, the fast-forward and whether a person must \
-                              approve are checked in the background, and a failed check ends \
-                              it `refused` with the reason. Then it runs CI job `test` at the \
-                              commit, waits for a person's passkey approval on the console \
-                              when one is needed, moves main to it, and runs CI job `deploy`, \
-                              which deploys the platform through the deploy proxy. Follow it \
-                              with land_status. One landing is live at a time.",
+                description: "Land a session branch under claude/. Answers at once with the \
+                              landing in `checking`, and many landings run at once: each is \
+                              checked (its base on main, what it changed, whether a person \
+                              must approve) and tested on its own, outside any lock; a failed \
+                              check ends it `refused` with the reason. Once tested (and \
+                              approved where needed) it is `ready` for the merge lock: main \
+                              moves to it by compare-and-swap, and when main moved meanwhile \
+                              the Lander rebases the branch itself (tested again only when \
+                              main moved in what its tests cover; `rebase_refused` when both \
+                              changed the same file in ways that do not merge). Then it is \
+                              `merged`, and the deploy lane deploys the newest merged commit. \
+                              A docs-only landing needs no tests and no deploy. Never \
+                              force-push to make a landing fit. Follow it with land_status, \
+                              which shows the queue.",
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -362,11 +368,17 @@ impl Capability for Land {
 // ---- the Lander ----
 
 /// The Lander's schema, one statement per migration, applied in order and never edited.
-const MIGRATIONS: [&str; 4] = [
+const MIGRATIONS: [&str; 8] = [
     "CREATE TABLE landings (id TEXT PRIMARY KEY, branch TEXT NOT NULL, commit_sha TEXT NOT NULL, main_at TEXT NOT NULL, caller TEXT NOT NULL, by_name TEXT NOT NULL, state TEXT NOT NULL, approval_reason TEXT, approved_by TEXT, awaiting_since INTEGER, test_job TEXT, deploy_job TEXT, tries INTEGER NOT NULL DEFAULT 0, detail TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, finished_at INTEGER, note_pushed INTEGER NOT NULL DEFAULT 0, note_tries INTEGER NOT NULL DEFAULT 0)",
     "CREATE TABLE events (landing TEXT NOT NULL, at INTEGER NOT NULL, state TEXT NOT NULL, detail TEXT)",
     "CREATE TABLE notes (commit_sha TEXT PRIMARY KEY, text TEXT NOT NULL)",
     "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, by_name TEXT, at INTEGER NOT NULL)",
+    // Landing in lanes (docs/plans/workers-split.md): the branch's base on main, the commit its
+    // tests last passed at, whether it changes docs alone, and when it reached main.
+    "ALTER TABLE landings ADD COLUMN base TEXT",
+    "ALTER TABLE landings ADD COLUMN tested TEXT",
+    "ALTER TABLE landings ADD COLUMN docs_only INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE landings ADD COLUMN merged_at INTEGER",
 ];
 
 /// What the Lander needs from the hosting Worker, beside the settings: the capabilities it
@@ -398,6 +410,14 @@ struct Row {
     finished_at: Option<i64>,
     note_pushed: i64,
     note_tries: i64,
+    #[serde(default)]
+    base: Option<String>,
+    #[serde(default)]
+    tested: Option<String>,
+    #[serde(default)]
+    docs_only: i64,
+    #[serde(default)]
+    merged_at: Option<i64>,
 }
 
 impl Row {
@@ -415,8 +435,14 @@ impl Row {
             "test_job": self.test_job, "deploy_job": self.deploy_job, "detail": self.detail,
             "created_at": self.created_at, "updated_at": self.updated_at,
             "finished_at": self.finished_at, "note_pushed": self.note_pushed != 0,
-            "note_tries": self.note_tries,
+            "note_tries": self.note_tries, "base": self.base, "tested_at": self.tested,
+            "docs_only": self.docs_only != 0, "merged_at": self.merged_at,
         })
+    }
+
+    /// Whether it still waits for a person's approval: one is needed and none was given.
+    fn needs_approval(&self) -> bool {
+        self.approval_reason.is_some() && self.approved_by.is_none()
     }
 }
 
@@ -430,7 +456,8 @@ pub struct Lander {
 }
 
 /// The live states, as SQL.
-const LIVE: &str = "('checking', 'testing', 'awaiting_approval', 'merging', 'deploying')";
+const LIVE: &str =
+    "('checking', 'testing', 'awaiting_approval', 'ready', 'merging', 'merged', 'deploying')";
 
 impl Lander {
     pub fn new(state: ObjectState, env: Env, settings: Settings, hosting: Hosting) -> Result<Self> {
@@ -448,14 +475,17 @@ impl Lander {
         durable::serve(req, async |op, args| self.handle(op, &args).await).await
     }
 
-    /// The alarm: the live landing's next step, notes still to push, then the next alarm.
+    /// The alarm: each live landing's next step, oldest first; then the merge lock and the
+    /// deploy lane go to whoever waits for them; then notes still to push, and the next alarm.
     pub async fn alarm(&self) -> Result<Response> {
-        if let Some(row) = self.live()? {
-            let id = row.id.clone();
-            if let Err(e) = self.step(row).await {
-                console_error!("land: landing {id}: {e}");
-                self.retry_or_fail(&id, &e.to_string())?;
-            }
+        for row in self.all_live()? {
+            self.step_logged(row).await?;
+        }
+        if let Some(row) = self.take_merge_lock()? {
+            self.step_logged(row).await?;
+        }
+        if let Some(row) = self.take_deploy_lane()? {
+            self.step_logged(row).await?;
         }
         if let Err(e) = self.push_notes().await {
             console_error!("land: pushing notes: {e}");
@@ -468,9 +498,14 @@ impl Lander {
         let s = |k: &str| a[k].as_str().unwrap_or_default();
         match op {
             "create" => {
-                if let Some(live) = self.live()? {
+                let same: Option<Row> = self.db.row(
+                    &format!("SELECT * FROM landings WHERE state IN {LIVE} AND branch = ? LIMIT 1"),
+                    vec![s("branch").into()],
+                )?;
+                if let Some(live) = same {
                     return Err(bad(&format!(
-                        "landing {} of {} is {}; one lands at a time (land_status, land_cancel)",
+                        "landing {} of {} is {}; cancel it first (land_cancel) to land the \
+                         branch again",
                         live.id, live.branch, live.state
                     )));
                 }
@@ -529,6 +564,12 @@ impl Lander {
                 )?;
                 let mut out = row.public();
                 out["steps"] = json!(events);
+                out["queue"] = json!(
+                    self.all_live()?
+                        .iter()
+                        .map(|r| json!({ "id": r.id, "branch": r.branch, "state": r.state }))
+                        .collect::<Vec<_>>()
+                );
                 Ok(out)
             }
             "list" => {
@@ -544,7 +585,7 @@ impl Lander {
                 let why = format!("cancelled by {}", s("by"));
                 if !self.apply(&row, &Seen::Cancel, Some(&why))? {
                     return Err(bad(&format!(
-                        "landing {} is {}; only one checking, testing or awaiting approval can be cancelled",
+                        "landing {} is {}; only one checking, testing, awaiting approval or ready can be cancelled",
                         row.id, row.state
                     )));
                 }
@@ -567,7 +608,7 @@ impl Lander {
                 self.apply(&row, &Seen::Approved, Some(&why))?;
                 self.state.storage().set_alarm(0).await?;
                 Ok(json!({ "message": format!(
-                    "Approved: {} moves main to {} and deploys it.",
+                    "Approved: {} lands at {} once the merge lock is free.",
                     row.branch.trim_start_matches("refs/heads/"),
                     &row.commit_sha[..12.min(row.commit_sha.len())]
                 ) }))
@@ -644,6 +685,82 @@ impl Lander {
         )
     }
 
+    /// Every live landing, oldest first.
+    fn all_live(&self) -> Result<Vec<Row>> {
+        self.db.rows(
+            &format!("SELECT * FROM landings WHERE state IN {LIVE} ORDER BY created_at"),
+            vec![],
+        )
+    }
+
+    /// One landing's step; a failure on the gateway's side is tried again, then an error.
+    async fn step_logged(&self, row: Row) -> Result<()> {
+        let id = row.id.clone();
+        if let Err(e) = self.step(row).await {
+            console_error!("land: landing {id}: {e}");
+            self.retry_or_fail(&id, &e.to_string())?;
+        }
+        Ok(())
+    }
+
+    /// The merge lock for the oldest `ready` landing, when no landing holds it: that landing,
+    /// now `merging`.
+    fn take_merge_lock(&self) -> Result<Option<Row>> {
+        let held: Option<Row> = self.db.row(
+            "SELECT * FROM landings WHERE state = 'merging' LIMIT 1",
+            vec![],
+        )?;
+        if held.is_some() {
+            return Ok(None);
+        }
+        let next: Option<Row> = self.db.row(
+            "SELECT * FROM landings WHERE state = 'ready' ORDER BY created_at LIMIT 1",
+            vec![],
+        )?;
+        let Some(row) = next else {
+            return Ok(None);
+        };
+        self.apply(&row, &Seen::Start, Some("took the merge lock"))?;
+        self.row(&row.id)
+    }
+
+    /// The deploy lane for the newest `merged` landing, when no deploy is running: that
+    /// landing, now `deploying`. Main moves forward only, so its commit holds every older
+    /// merged landing's too.
+    fn take_deploy_lane(&self) -> Result<Option<Row>> {
+        let busy: Option<Row> = self.db.row(
+            "SELECT * FROM landings WHERE state = 'deploying' LIMIT 1",
+            vec![],
+        )?;
+        if busy.is_some() {
+            return Ok(None);
+        }
+        let next: Option<Row> = self.db.row(
+            "SELECT * FROM landings WHERE state = 'merged' ORDER BY merged_at DESC, created_at DESC LIMIT 1",
+            vec![],
+        )?;
+        let Some(row) = next else {
+            return Ok(None);
+        };
+        self.apply(&row, &Seen::Start, Some("took the deploy lane"))?;
+        self.row(&row.id)
+    }
+
+    /// The merged landings older than `row`, which its deploy carried: `seen` moves each.
+    fn settle_older(&self, row: &Row, seen: &Seen, detail: &str) -> Result<()> {
+        let older: Vec<Row> = self.db.rows(
+            "SELECT * FROM landings WHERE state = 'merged' AND merged_at <= ? AND id != ?",
+            vec![
+                row.merged_at.unwrap_or(i64::MAX).into(),
+                row.id.as_str().into(),
+            ],
+        )?;
+        for o in older {
+            self.apply(&o, seen, Some(detail))?;
+        }
+        Ok(())
+    }
+
     fn event(&self, id: &str, to: State, detail: Option<&str>) -> Result<()> {
         self.db.exec(
             "INSERT INTO events (landing, at, state, detail) VALUES (?, ?, ?, ?)",
@@ -663,18 +780,19 @@ impl Lander {
             return Ok(false);
         }
         let row = &current;
-        let Some(to) = state::next(row.state(), row.approval_reason.is_some(), seen) else {
+        let Some(to) = state::next(row.state(), row.needs_approval(), seen) else {
             return Ok(false);
         };
         let t = now();
         self.db.exec(
-            "UPDATE landings SET state = ?, detail = ?, tries = 0, updated_at = ?, finished_at = ?, awaiting_since = ? WHERE id = ? AND state = ?",
+            "UPDATE landings SET state = ?, detail = ?, tries = 0, updated_at = ?, finished_at = ?, awaiting_since = ?, merged_at = ? WHERE id = ? AND state = ?",
             vec![
                 to.name().into(),
                 opt(detail),
                 t.into(),
                 opt_i(to.terminal().then_some(t)),
                 opt_i((to == State::AwaitingApproval).then_some(t).or(row.awaiting_since)),
+                opt_i((to == State::Merged).then_some(t).or(row.merged_at)),
                 row.id.as_str().into(),
                 row.state.as_str().into(),
             ],
@@ -898,17 +1016,20 @@ impl Lander {
         let Some(tip) = tip else {
             return Ok(());
         };
-        let (main_at, why) =
-            git_proxy::forward_of(&account, &s.namespace, &s.repo, &s.main, &tip).await?;
-        if let Some(why) = why {
-            self.apply(&row, &Seen::CheckRefused, Some(&why))?;
-            return Ok(());
-        }
-        let on_main =
-            git_proxy::path_ids(&account, &s.namespace, &s.repo, &main_at, &state::GUARDED).await?;
-        let at_commit =
-            git_proxy::path_ids(&account, &s.namespace, &s.repo, &tip, &state::GUARDED).await?;
-        let guarded = state::guarded_changes(&on_main, &at_commit);
+        let session = merge::Session::open(&account, &s.namespace, &s.repo, Access::Read).await?;
+        let seen = merge::see(&session, &s.main, &tip).await;
+        session.close().await;
+        let seen = match seen? {
+            Ok(seen) => seen,
+            Err(why) => {
+                self.apply(&row, &Seen::CheckRefused, Some(&why))?;
+                return Ok(());
+            }
+        };
+        // What the branch changed since its base on main decides what it needs: approvals for
+        // the guarded paths among them, and no tests or deploy when they are docs alone.
+        let changed = seen.changed_paths();
+        let guarded = state::guarded_in(&changed);
         let vars = git_proxy::vars(&s.main, state::PREFIX);
         let mut decided = Vec::new();
         let approvals = state::approvals(&guarded, |req| {
@@ -926,13 +1047,29 @@ impl Lander {
                 approvals.delegate.join(", ")
             )
         });
+        let docs_only = seen.map.classify(&changed).docs_only;
+        let on = if seen.forward() {
+            format!("a fast-forward of main at {}", seen.main)
+        } else {
+            format!(
+                "based on {}, main is at {} (the Lander rebases it when it merges)",
+                seen.base, seen.main
+            )
+        };
+        let what = if docs_only {
+            "; docs only: no tests, no deploy".to_string()
+        } else {
+            format!("; {} paths changed", changed.len())
+        };
         // From here to the move nothing awaits; `apply` re-reads the row, so a cancel during the
         // awaits above wins.
         self.db.exec(
-            "UPDATE landings SET commit_sha = ?, main_at = ?, approval_reason = ?, updated_at = ? WHERE id = ? AND state = 'checking'",
+            "UPDATE landings SET commit_sha = ?, main_at = ?, base = ?, docs_only = ?, approval_reason = ?, updated_at = ? WHERE id = ? AND state = 'checking'",
             vec![
                 tip.as_str().into(),
-                main_at.as_str().into(),
+                seen.main.as_str().into(),
+                seen.base.as_str().into(),
+                i64::from(docs_only).into(),
                 opt(reason.as_deref()),
                 now().into(),
                 row.id.as_str().into(),
@@ -942,7 +1079,7 @@ impl Lander {
             &row,
             &Seen::Checked,
             Some(&format!(
-                "checked: {tip} is a fast-forward of main at {main_at}{}",
+                "checked: {tip} is {on}{what}{}",
                 delegated.unwrap_or_default()
             )),
         )?;
@@ -954,11 +1091,130 @@ impl Lander {
         Ok(())
     }
 
+    /// Moves main to the landing's commit, holding the merge lock: by compare-and-swap when it
+    /// is a fast-forward of main; otherwise rebased onto main by the Lander, and tested again
+    /// first when main moved in what its tests cover.
+    async fn merge(&self, session: &merge::Session<'_>, row: &Row) -> Result<()> {
+        let s = &self.settings;
+        let seen = match merge::see(session, &s.main, &row.commit_sha).await? {
+            Ok(seen) => seen,
+            Err(why) => {
+                self.apply(row, &Seen::MergeRefused, Some(&why))?;
+                return Ok(());
+            }
+        };
+        let reached = |detail: &str| -> Result<bool> {
+            let seen = if row.docs_only != 0 {
+                Seen::DocsMerged
+            } else {
+                Seen::Merged
+            };
+            self.apply(row, &seen, Some(detail))
+        };
+        // Main already holds it: a retry after a lost answer, or a branch already in main.
+        if seen.main == row.commit_sha || seen.base == row.commit_sha {
+            reached("main already contains the commit")?;
+            return Ok(());
+        }
+        if seen.forward() {
+            if merge::push(session, &s.main, Some(&seen.main), &row.commit_sha, &[]).await? {
+                reached(&format!(
+                    "main moved from {} to {}",
+                    seen.main, row.commit_sha
+                ))?;
+            } else {
+                self.note_detail(row, "main moved while merging; trying again")?;
+            }
+            return Ok(());
+        }
+        let rebased =
+            merge::rebase_onto_main(session, &seen, &row.commit_sha, WHO, now() / 1000).await?;
+        let r = match rebased {
+            Ok(r) => r,
+            Err(why) => {
+                self.apply(row, &Seen::RebaseRefused, Some(&why))?;
+                return Ok(());
+            }
+        };
+        if r.already {
+            self.db.exec(
+                "UPDATE landings SET commit_sha = ? WHERE id = ? AND state = 'merging'",
+                vec![r.commit.as_str().into(), row.id.as_str().into()],
+            )?;
+            reached(&format!("main at {} already holds its changes", r.commit))?;
+            return Ok(());
+        }
+        let merged = if r.merged.is_empty() {
+            String::new()
+        } else {
+            format!(", merging {} line by line", r.merged.join(", "))
+        };
+        if r.retest {
+            let name = merge::test_ref(&row.id);
+            let old = merge::tip(session, &name).await?;
+            if !merge::push(session, &name, old.as_deref(), &r.commit, &r.objects).await? {
+                return Err(bad(&format!(
+                    "the rebased commit {} could not be pushed to {name} for its tests",
+                    r.commit
+                )));
+            }
+            self.db.exec(
+                "UPDATE landings SET commit_sha = ?, base = ?, test_job = NULL WHERE id = ? AND state = 'merging'",
+                vec![
+                    r.commit.as_str().into(),
+                    seen.main.as_str().into(),
+                    row.id.as_str().into(),
+                ],
+            )?;
+            self.apply(
+                row,
+                &Seen::Retest,
+                Some(&format!(
+                    "main moved in what its tests cover; rebased onto {} as {}{merged}, testing it again",
+                    seen.main, r.commit
+                )),
+            )?;
+            return Ok(());
+        }
+        if merge::push(session, &s.main, Some(&seen.main), &r.commit, &r.objects).await? {
+            self.db.exec(
+                "UPDATE landings SET commit_sha = ?, base = ? WHERE id = ? AND state = 'merging'",
+                vec![
+                    r.commit.as_str().into(),
+                    seen.main.as_str().into(),
+                    row.id.as_str().into(),
+                ],
+            )?;
+            reached(&format!(
+                "rebased onto main at {} as {}{merged}; main moved in nothing its tests cover, so main moved to it",
+                seen.main, r.commit
+            ))?;
+        } else {
+            self.note_detail(row, "main moved while rebasing; trying again")?;
+        }
+        Ok(())
+    }
+
+    /// Sets a live landing's detail without moving it.
+    fn note_detail(&self, row: &Row, detail: &str) -> Result<()> {
+        self.db.exec(
+            "UPDATE landings SET detail = ?, updated_at = ? WHERE id = ?",
+            vec![detail.into(), now().into(), row.id.as_str().into()],
+        )
+    }
+
     /// The live landing's next step.
     async fn step(&self, row: Row) -> Result<()> {
         let s = &self.settings;
         match row.state() {
             State::Checking => self.check(row).await?,
+            State::Testing if row.docs_only != 0 => {
+                self.apply(
+                    &row,
+                    &Seen::JobEnded { passed: true },
+                    Some("docs only: nothing to test"),
+                )?;
+            }
             State::Testing => {
                 let Some(job) = &row.test_job else {
                     let job = self
@@ -997,13 +1253,13 @@ impl Lander {
                             ],
                         )?;
                     }
-                    self.apply(&row, &Seen::JobEnded { passed }, Some(&detail))?;
-                    if passed && let Some(r) = self.row(&row.id)? {
-                        // On to the merge at once when no approval is needed.
-                        if r.state() == State::Merging {
-                            Box::pin(self.step(r)).await?;
-                        }
+                    if passed {
+                        self.db.exec(
+                            "UPDATE landings SET tested = commit_sha WHERE id = ? AND state = 'testing'",
+                            vec![row.id.as_str().into()],
+                        )?;
                     }
+                    self.apply(&row, &Seen::JobEnded { passed }, Some(&detail))?;
                 }
             }
             State::AwaitingApproval => {
@@ -1018,49 +1274,11 @@ impl Lander {
             }
             State::Merging => {
                 let account = crate::ci::scheduler::account(&self.env, &s.parent).await?;
-                match git_proxy::fast_forward(
-                    &account,
-                    &s.namespace,
-                    &s.repo,
-                    &s.main,
-                    &row.commit_sha,
-                )
-                .await?
-                {
-                    Moved::Moved { from } => {
-                        let why = format!("main moved from {from} to {}", row.commit_sha);
-                        self.apply(&row, &Seen::Merged, Some(&why))?;
-                    }
-                    Moved::Already => {
-                        self.apply(&row, &Seen::Merged, Some("main was already at the commit"))?;
-                    }
-                    Moved::Refused(why) => {
-                        // A retry after a lost answer: main may already hold the commit, and
-                        // may even have moved on past it.
-                        if git_proxy::contains(
-                            &account,
-                            &s.namespace,
-                            &s.repo,
-                            &s.main,
-                            &row.commit_sha,
-                        )
-                        .await?
-                        {
-                            self.apply(
-                                &row,
-                                &Seen::Merged,
-                                Some("main already contains the commit"),
-                            )?;
-                        } else {
-                            self.apply(&row, &Seen::MergeRefused, Some(&why))?;
-                        }
-                    }
-                }
-                if let Some(r) = self.row(&row.id)?
-                    && r.state() == State::Deploying
-                {
-                    Box::pin(self.step(r)).await?;
-                }
+                let session =
+                    merge::Session::open(&account, &s.namespace, &s.repo, Access::Write).await?;
+                let merged = self.merge(&session, &row).await;
+                session.close().await;
+                merged?;
             }
             State::Deploying => match &row.deploy_job {
                 None => {
@@ -1089,8 +1307,22 @@ impl Lander {
                     if let Some((passed, detail)) = self.job_ended(job).await? {
                         self.apply(&row, &Seen::JobEnded { passed }, Some(&detail))?;
                         if passed {
+                            self.settle_older(
+                                &row,
+                                &Seen::Superseded,
+                                &format!("deployed with landing {}", row.id),
+                            )?;
                             self.sync_portal(&row.id, &detail).await;
                             self.setup_connectors(&row.id, &row.commit_sha).await;
+                        } else {
+                            self.settle_older(
+                                &row,
+                                &Seen::JobEnded { passed: false },
+                                &format!(
+                                    "the deploy of landing {}, which carried it, failed",
+                                    row.id
+                                ),
+                            )?;
                         }
                     }
                 }

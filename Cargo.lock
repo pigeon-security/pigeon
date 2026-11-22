@@ -592,6 +592,7 @@ dependencies = [
  "futures-channel",
  "futures-util",
  "p256",
+ "pigeon-contract",
  "pigeon-core",
  "rand",
  "rsa",
@@ -600,6 +601,17 @@ dependencies = [
  "sha2",
  "toml",
  "wasm-streams",
+ "worker",
+]
+
+[[package]]
+name = "pigeon-contract"
+version = "0.1.0"
+dependencies = [
+ "pigeon-core",
+ "serde",
+ "serde_json",
+ "sha2",
  "worker",
 ]
 

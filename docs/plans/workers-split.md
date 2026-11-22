@@ -1,6 +1,6 @@
 # Workers split: capabilities as their own Workers, landing in lanes
 
-Status: **designed, awaiting the person's go-ahead** (2026-11-22). Nothing built yet. Planner
+Status: **phase 1b built on `claude/land-queue` (with the contract crate), landing next** (2026-11-22). The person gave the go-ahead. Planner
 session `session_015XFA1nSZXE9BNYuPF5XL2j`, seeded by the parent `session_015XFA1jgveJDEE8NJjTaHKg`.
 
 ## Goal
@@ -184,7 +184,7 @@ src/ci/            pigeon-ci-gateway            ci Worker (phase 4)
 A capability Worker's crate depends on `pigeon-core` and `pigeon-contract` only, never on
 `pigeon-capabilities`. Otherwise a core change would silently change its binary.
 
-`.pigeon/workers.toml` is the path map:
+`ci/workers.toml` is the path map:
 
 ```toml
 # Which Worker each path belongs to. The first matching entry wins; a path no entry matches
@@ -226,9 +226,10 @@ is test-shared instead:
 
 The whole binary still compiles in every job, so a compile error anywhere fails all of them.
 
-The map is under `.pigeon/`, so a change to it is already a `change_gate` (delegate approval) by
-the existing guarded paths and rule `gate-changes`. No new rule is needed. The Lander reads it at
-main, so a branch never chooses its own lane.
+The map is under `ci/`, so a change to it is a `change_gate`, which rule `gate-changes`
+gives to the person's delegate. No new rule is needed. (`.pigeon/` was the first choice, but no
+rule covers a new file there, so every change would have waited for the person's passkey.) The
+Lander reads the map at main, so a branch never chooses its own lane.
 
 ## Landing in lanes
 
@@ -236,26 +237,26 @@ The Lander keeps its one Durable Object and its state machine. It gains a queue 
 lock.
 
 ```
-land ─► queued ─► checking ─► testing ─► [awaiting_approval] ─► ready ─► merging ─► merged ─► deploying(w…) ─► landed
+land ─► checking ─► testing ─► [awaiting_approval] ─► ready ─► merging ─► merged ─► deploying(w…) ─► landed
                    │            │                                 │ main moved in overlapping paths: retest
                    ▼            ▼                                 ▼ conflict on a path both changed
                 refused     test_failed                        rebase_refused
 ```
 
 Rules:
-1. **Queue, never refuse.** `land` always inserts and answers `queued` with a position.
-   - The same branch landed again replaces its queued entry and keeps its place.
-   - `land_status` shows the queue.
-   - `land_cancel` works until `merging`.
+1. **Queue, never refuse.** `land` always inserts, and the landing starts `checking` at once.
+   - A branch that already has a live landing is refused until that one is cancelled.
+   - `land_status` shows the queue (every live landing, oldest first).
+   - `land_cancel` works until `merging` (`ready` included).
 2. **Classify at check.** Changed paths come from `main..tip` against the map read at main.
    - Every path matches `docs`: the landing is docs-only.
    - Otherwise it is a set of affected Workers, with `shared` meaning all of them.
    - Guarded paths go to the policy exactly as today (passkey or delegate). Nothing about
      approvals changes.
 3. **Test outside the lock, in parallel.**
-   - Each queued landing past `checking` starts its affected Workers' test jobs at once, at its
+   - Each landing past `checking` starts its affected Workers' test jobs at once, at its
      own tip.
-   - Docs-only runs the `docs` job only: markdown links and nothing compiled, about 20 s.
+   - Docs-only runs no job: nothing it touches is compiled or deployed.
    - Several landings test at the same time, bounded by the CI connectors' capacity.
 4. **The lock covers only the swap of main.** One landing at a time, in queue order among those
    `ready`:
@@ -267,13 +268,13 @@ Rules:
        message and author, committer `pigeon <land@pigeon.dev>`, and parent main. No content
        merge happens.
      - If they overlap only in `tests/smoke.rs` or `docs/plans/README.md`, a line-level three-way
-       merge is tried. A clean merge counts as overlap; a conflict is `rebase_refused`, with the
+       merge is tried (`pigeon_core::merge3`). A clean merge counts as overlap; a conflict is `rebase_refused`, with the
        paths named.
      - Other overlap is also `rebase_refused`. The agent rebases and pushes again; rewriting a
        session branch is already allowed.
    - **Retest only on overlap.** If B touches a Worker the branch affects, or anything `shared`,
      the landing goes back to `testing` at the rebased commit, which the Lander pushes as
-     `refs/land/<id>` so CI can fetch it. Otherwise it merges at once.
+     `refs/heads/claude/land/<id>` so CI can fetch it as a branch tip. Otherwise it merges at once.
    - Agents never force-push to make a landing fit.
 5. **Deploy after merge, in lanes.**
    - Each affected Worker gets a deploy in its lane: one at a time per Worker, parallel across
@@ -330,12 +331,12 @@ With no bindings configured yet, behaviour is unchanged. That is the safety of 1
 | Task | Files | Executor |
 | --- | --- | --- |
 | T6 | `land/state.rs`: `queued`, `ready`, `merged`, `rebase_refused`, and the moves | sonnet |
-| T7 | `.pigeon/workers.toml` reader in `pigeon-core` (pure: map, classify, docs-only, overlap), `docs` job | sonnet |
+| T7 | `ci/workers.toml` reader in `pigeon-core` (pure: map, classify, docs-only, overlap), `docs` job | sonnet |
 | T8 | `land.rs`: queue, parallel test jobs outside the lock, CAS merge, path-set rebase (tree build with `gitobj`), `refs/land/<id>`, docs-only skip | sonnet, then me (the Lander is the riskiest file) |
 | T9 | Smoke: `core_land_queue_order`, `core_land_rebase_disjoint`, `core_land_rebase_overlap_refused`, `core_land_docs_only` | haiku |
 
 These rules need care:
-- `.pigeon/workers.toml` and the `docs` job in `.pigeon/ci.toml` are gate changes (delegate).
+- `ci/workers.toml` and the `docs` job in `.pigeon/ci.toml` are gate changes (delegate).
 - The first landing with a new Lander is landed by today's Lander, so this phase uses today's
   flow.
 - The Lander's SQLite gets migrations 5 and on (only appended, never edited).
@@ -476,6 +477,31 @@ over their in-flight work.
 
 ## Log
 
+- 2026-11-22: phase 1b built on `claude/land-queue`, with the contract crate (`src/contract`,
+  not yet used by a Worker).
+  - New pure modules in `pigeon-core`: `lanes` (the map), `rebase` (path-level rebase, merge
+    base) and `merge3`. The Lander uses them through `land/merge.rs`.
+  - Many landings are live at once. The alarm steps each, then gives the merge lock to the
+    oldest `ready` and the deploy lane to the newest `merged`.
+  - Checks now read the branch's base on main and what it changed since. Approvals come from
+    the guarded paths among those changes (`state::guarded_in`), not from comparing with main.
+  - A push to main whose answer was lost is found on the retry (main already holds every
+    change), so no empty commit lands.
+  - Departures:
+    - no `queued` state: a landing is checked at once;
+    - a branch with a live landing is refused rather than replaced;
+    - docs-only runs no job;
+    - the map is `ci/workers.toml`, not `.pigeon/workers.toml` (above);
+    - a rebased commit under test is pushed to `refs/heads/claude/land/<id>`, which nothing
+      deletes yet.
+  - Smoke: `land_from_check_to_landed` covers the new states;
+    `land_rebases_disjoint_branches_and_lanes` checks the Lander's rebase makes the same tree as
+    `git cherry-pick`; `contract_signed_callers_and_skew`. 21 scenarios, 13 s.
+  - Scenario names: core's stay as they are; a capability Worker's start with its name
+    (`sites_`, `models_`, `ci_`, `proxy_`).
+  - Executors: four `claude-sonnet-5-5` jobs (lanes, merge3, rebase, contract). Rebase and
+    contract hit the token cap; I finished rebase's last three helpers. I reviewed every line,
+    lowered merge3's table cap and reworded docs.
 - 2026-11-22: the person named the Workers: pigeon-platform, pigeon-ci-gateway,
   pigeon-model-gateway, pigeon-sites, pigeon-proxy (proxy is planned, no longer optional). The
   blog planner lands `pigeon_core::blog` as a leaf. The linked-accounts planner agreed the

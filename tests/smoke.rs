@@ -409,14 +409,23 @@ fn land_from_check_to_landed() {
     assert_eq!(policy.passkey.len(), 1);
     assert!(state::approval_reason(false, &policy.passkey).is_some());
 
-    // checking → testing → awaiting_approval → merging → deploying → landed.
+    // The guarded paths a landing changed, from the paths it changed since its base.
+    assert_eq!(
+        state::guarded_in(&["ci/runner/test.sh", "src/x.rs", ".pigeon/policy.toml"]),
+        [".pigeon/policy.toml", ".pigeon", "ci"]
+    );
+    assert!(state::guarded_in(&["cifar.rs", "docs/ci/x.md"]).is_empty());
+
+    // checking → testing → awaiting_approval → ready → merging → merged → deploying → landed.
     let passed = Seen::JobEnded { passed: true };
     let mut at = State::Checking;
     for (seen, to) in [
         (&Seen::Checked, State::Testing),
         (&passed, State::AwaitingApproval),
-        (&Seen::Approved, State::Merging),
-        (&Seen::Merged, State::Deploying),
+        (&Seen::Approved, State::Ready),
+        (&Seen::Start, State::Merging),
+        (&Seen::Merged, State::Merged),
+        (&Seen::Start, State::Deploying),
         (&passed, State::Landed),
     ] {
         let next = state::next(at, true, seen).unwrap();
@@ -425,13 +434,35 @@ fn land_from_check_to_landed() {
         at = next;
     }
     assert!(at.terminal());
-    // Without an approval to wait for, tests passing go straight to the merge.
+    // Without an approval to wait for, tests passing wait for the merge lock.
     assert_eq!(
         state::next(State::Testing, false, &passed),
-        Some(State::Merging)
+        Some(State::Ready)
+    );
+    // Main moved under a landing: tested again, refused, or (docs) landed with no deploy.
+    assert_eq!(
+        state::next(State::Merging, false, &Seen::Retest),
+        Some(State::Testing)
+    );
+    assert_eq!(
+        state::next(State::Merging, false, &Seen::RebaseRefused),
+        Some(State::RebaseRefused)
+    );
+    assert_eq!(
+        state::next(State::Merging, false, &Seen::DocsMerged),
+        Some(State::Landed)
+    );
+    // A newer landing's deploy carries the older merged ones, or fails for them.
+    assert_eq!(
+        state::next(State::Merged, false, &Seen::Superseded),
+        Some(State::Landed)
     );
     // Each step fails its own way, and nothing moves a final state or skips a step.
     let failed = Seen::JobEnded { passed: false };
+    assert_eq!(
+        state::next(State::Merged, false, &failed),
+        Some(State::DeployFailed)
+    );
     assert_eq!(
         state::next(State::Checking, false, &Seen::CheckRefused),
         Some(State::Refused)
@@ -454,7 +485,9 @@ fn land_from_check_to_landed() {
     );
     assert_eq!(state::next(State::Landed, false, &Seen::Cancel), None);
     assert!(!state::allowed(State::Checking, State::Merging));
-    assert!(State::Testing.cancellable() && !State::Merging.cancellable());
+    assert!(!state::allowed(State::Testing, State::Merging));
+    assert!(State::Ready.cancellable() && !State::Merging.cancellable());
+    assert!(!State::Merged.cancellable() && !State::Merged.terminal());
 
     // The merge: main moves only forward, judged from the pack (stubbed Artifacts).
     let pack_fwd = pack(&dir, &tip, &main_at);
@@ -487,6 +520,335 @@ fn land_from_check_to_landed() {
 }
 
 // ---- deploy proxy ----
+
+#[test]
+fn land_rebases_disjoint_branches_and_lanes() {
+    use pigeon_core::lanes::{self, Owner};
+    use pigeon_core::{merge3, pack, rebase};
+    use std::collections::BTreeMap;
+    use std::io::Write;
+
+    /// Writes (or deletes, on `None`) `files` and commits them; the commit's id.
+    fn change(dir: &Path, files: &[(&str, Option<&str>)], message: &str) -> String {
+        for (path, body) in files {
+            let at = dir.join(path);
+            match body {
+                Some(b) => {
+                    std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+                    std::fs::write(&at, b).unwrap();
+                }
+                None => std::fs::remove_file(&at).unwrap(),
+            }
+        }
+        git(dir, &["add", "-A"], None);
+        git(dir, &["commit", "-q", "-m", message], None);
+        String::from_utf8(git(dir, &["rev-parse", "HEAD"], None))
+            .unwrap()
+            .trim()
+            .to_string()
+    }
+    let lines = |edit: Option<(usize, &str)>| -> String {
+        (1..=12)
+            .map(|i| match edit {
+                Some((at, text)) if at == i => format!("{text}\n"),
+                _ => format!("line {i}\n"),
+            })
+            .collect()
+    };
+
+    // A base; a branch from it; main moving on from it in other paths, and in the smoke suite
+    // at another line.
+    let dir = repo("rebase");
+    let smoke = lines(None);
+    let base = change(
+        &dir,
+        &[
+            ("a.txt", Some("a\n")),
+            ("dir/b.txt", Some("b\n")),
+            ("docs/x.md", Some("x\n")),
+            ("tests/smoke.rs", Some(&smoke)),
+        ],
+        "base",
+    );
+    git(&dir, &["checkout", "-q", "-b", "claude/x"], None);
+    let ours_smoke = lines(Some((2, "branch scenario")));
+    let tip = change(
+        &dir,
+        &[
+            ("dir/b.txt", Some("b on the branch\n")),
+            ("new/c.txt", Some("c\n")),
+            ("tests/smoke.rs", Some(&ours_smoke)),
+        ],
+        "the branch",
+    );
+    git(&dir, &["checkout", "-q", "main"], None);
+    let theirs_smoke = lines(Some((10, "main scenario")));
+    let main = change(
+        &dir,
+        &[
+            ("a.txt", Some("a on main\n")),
+            ("docs/x.md", None),
+            ("tests/smoke.rs", Some(&theirs_smoke)),
+        ],
+        "main moved",
+    );
+
+    // What Artifacts would send: both tips and their history.
+    let packed = git(
+        &dir,
+        &["pack-objects", "--stdout", "--revs", "-q"],
+        Some(&format!("{tip}\n{main}\n")),
+    );
+    let objects = pack::objects(&packed).unwrap();
+    let parents = rebase::parents(&objects);
+    assert_eq!(
+        rebase::merge_base(&parents, &tip, &main),
+        Some(base.clone())
+    );
+    assert_eq!(
+        rebase::merge_base(&parents, &main, &main),
+        Some(main.clone())
+    );
+    let changed = rebase::changes(&objects, &base, &tip).unwrap();
+    let moved = rebase::changes(&objects, &base, &main).unwrap();
+    assert_eq!(
+        changed.keys().collect::<Vec<_>>(),
+        ["dir/b.txt", "new/c.txt", "tests/smoke.rs"]
+    );
+    assert_eq!(
+        moved.keys().collect::<Vec<_>>(),
+        ["a.txt", "docs/x.md", "tests/smoke.rs"]
+    );
+    assert_eq!(moved["docs/x.md"], None);
+
+    // Both changed the smoke suite, at different lines: merged line by line. The same line
+    // changed two ways, or two different insertions at one place, never merge.
+    let joined = merge3::merge(&smoke, &ours_smoke, &theirs_smoke).unwrap();
+    assert!(joined.contains("branch scenario\n") && joined.contains("main scenario\n"));
+    assert_eq!(
+        merge3::merge(&smoke, &lines(Some((5, "x"))), &lines(Some((5, "y")))),
+        None
+    );
+    assert_eq!(
+        merge3::merge("a\nb\n", "a\nX\nb\n", "a\nY\nb\n"),
+        None,
+        "two insertions at one place"
+    );
+    assert_eq!(
+        merge3::merge("a\n", "a\nb\n", "a\nb\n").as_deref(),
+        Some("a\nb\n")
+    );
+
+    // The branch laid onto main: the same tree git's own cherry-pick makes.
+    let blob = pigeon_core::gitobj::Object::blob(joined.as_bytes());
+    let mut changes: BTreeMap<String, rebase::Change> = changed.clone();
+    changes.insert("tests/smoke.rs".into(), Some(("100644".into(), blob.id())));
+    let (tree, trees) = rebase::apply(&objects, &main, &changes).unwrap();
+    let original = &objects.by_id[&tip].1;
+    let made = rebase::commit(
+        original,
+        &tree,
+        &main,
+        "pigeon <land@pigeon.dev>",
+        1_800_000_000,
+    )
+    .unwrap();
+    let id = made.id();
+    let mut new = vec![blob];
+    new.extend(trees);
+    new.push(made);
+    let mut child = Command::new("git")
+        .args(["unpack-objects", "-q"])
+        .current_dir(&dir)
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(&pigeon_core::gitobj::pack(&new))
+        .unwrap();
+    assert!(child.wait().unwrap().success());
+    let read = |args: &[&str]| String::from_utf8(git(&dir, args, None)).unwrap();
+    assert_eq!(read(&["rev-parse", &format!("{id}^")]).trim(), main);
+    assert!(read(&["cat-file", "-p", &id]).contains("\nauthor smoke <smoke@example.com>"));
+    git(&dir, &["fsck", "--no-progress", "--no-dangling"], None);
+    git(&dir, &["checkout", "-q", "-b", "picked", &main], None);
+    git(&dir, &["cherry-pick", "--allow-empty", &tip], None);
+    assert_eq!(
+        read(&["rev-parse", "HEAD^{tree}"]).trim(),
+        tree,
+        "the Lander's rebase and git's cherry-pick make the same tree"
+    );
+    // Nothing to apply leaves main's tree as it is; a path under a file is refused.
+    assert_eq!(
+        rebase::apply(&objects, &main, &BTreeMap::new()).unwrap().0,
+        {
+            read(&["rev-parse", &format!("{main}^{{tree}}")])
+                .trim()
+                .to_string()
+        }
+    );
+    let mut under_file = BTreeMap::new();
+    under_file.insert(
+        "a.txt/x".to_string(),
+        Some(("100644".into(), blob_id(&dir))),
+    );
+    assert!(rebase::apply(&objects, &main, &under_file).is_err());
+
+    // The lanes: the repository's map, read as the Lander reads it from main.
+    let map = lanes::parse(include_str!("../ci/workers.toml")).unwrap();
+    assert!(map.classify(&["docs/plans/workers-split.md"]).docs_only);
+    let core = map.classify(&["src/capabilities/src/land.rs", "tests/smoke.rs"]);
+    assert!(!core.docs_only && !core.shared && core.smoke);
+    assert_eq!(core.workers.iter().collect::<Vec<_>>(), ["core"]);
+    assert!(map.classify(&["src/core/src/git.rs"]).shared);
+    assert!(matches!(map.owner("README.md"), Owner::Shared));
+    // Main moving in docs never retests; in a path of the same Worker, or shared, it does.
+    let branch = ["src/capabilities/src/land.rs"];
+    assert!(!map.overlap(&branch, &["docs/proxies.md"]).retest);
+    assert!(map.overlap(&branch, &["src/platform/src/lib.rs"]).retest);
+    assert!(map.overlap(&branch, &["Cargo.lock"]).retest);
+    assert!(!map.overlap(&["docs/a.md"], &["src/core/src/git.rs"]).retest);
+    assert_eq!(map.deploy_order(&core).len(), 1);
+    assert_eq!(map.scripts(), ["pigeon-platform"]);
+    // A map that is not right is refused whole; main without one falls back to core alone.
+    for bad in [
+        "version = 2\n[docs]\npaths=[]\n[shared]\npaths=[]",
+        "version = 1\n[docs]\npaths=[\"/x\"]\n[shared]\npaths=[]\n[[worker]]\nname=\"core\"\nscript=\"s\"\ndir=\"d\"\npaths=[]\ntest_job=\"t\"\ndeploy_job=\"d\"",
+        "version = 1\n[docs]\npaths=[]\n[shared]\npaths=[]\n[[worker]]\nname=\"sites\"\nscript=\"s\"\ndir=\"d\"\npaths=[]\ntest_job=\"t\"\ndeploy_job=\"d\"",
+        "version = 1\nextra = 1\n[docs]\npaths=[]\n[shared]\npaths=[]",
+    ] {
+        assert!(lanes::parse(bad).is_err(), "{bad}");
+    }
+    let fallback = pigeon_capabilities::land::merge::fallback();
+    assert!(fallback.classify(&["docs/a.md"]).docs_only);
+    assert_eq!(
+        fallback
+            .classify(&["anything/else.rs"])
+            .workers
+            .iter()
+            .collect::<Vec<_>>(),
+        ["core"]
+    );
+}
+
+/// The id of a blob `git hash-object` stores in `dir`.
+fn blob_id(dir: &Path) -> String {
+    String::from_utf8(git(dir, &["hash-object", "-w", "--stdin"], Some("x\n")))
+        .unwrap()
+        .trim()
+        .to_string()
+}
+
+#[test]
+fn contract_signed_callers_and_skew() {
+    use pigeon_contract::{
+        Answer, CONTRACT, FailureKind, Manifest, Refused, accepts, sign, verify, wants,
+    };
+
+    // Core signs who calls, for one op and one body; the capability Worker checks all three.
+    let key = b"caller key";
+    let who = json!({ "user": { "name": "willow", "kind": "standard" }, "acting_for": null });
+    let body = br#"{"tool":"instance_plan","args":{}}"#;
+    let now = 1_800_000_000_000;
+    let header = sign(key, &who, "call", body, now, "n1");
+    let signed = verify(key, Some(&header), "call", body, now + 1_000).unwrap();
+    assert_eq!(signed.caller, who);
+    assert_eq!(signed.exp - signed.iat, pigeon_contract::MAX_AGE_MS);
+    for (key2, header2, op, body2, at, why) in [
+        (&key[..], None, "call", &body[..], now, Refused::Missing),
+        (
+            &key[..],
+            Some("no-dot"),
+            "call",
+            &body[..],
+            now,
+            Refused::Malformed,
+        ),
+        (
+            &b"another key"[..],
+            Some(header.as_str()),
+            "call",
+            &body[..],
+            now,
+            Refused::BadSignature,
+        ),
+        (
+            &key[..],
+            Some(header.as_str()),
+            "section",
+            &body[..],
+            now,
+            Refused::BadSignature,
+        ),
+        (
+            &key[..],
+            Some(header.as_str()),
+            "call",
+            &b"{}"[..],
+            now,
+            Refused::BadSignature,
+        ),
+        (
+            &key[..],
+            Some(header.as_str()),
+            "call",
+            &body[..],
+            now + 61_000,
+            Refused::Expired,
+        ),
+        (
+            &key[..],
+            Some(header.as_str()),
+            "call",
+            &body[..],
+            now - 6_000,
+            Refused::FromTheFuture,
+        ),
+    ] {
+        assert_eq!(verify(key2, header2, op, body2, at), Err(why), "{why}");
+    }
+    // A signature that claims a longer life than a minute is refused, however it was made.
+    let forged = {
+        let (_, tag) = header.split_once('.').unwrap();
+        let long = json!({ "caller": who, "iat": now, "exp": now + 3_600_000, "nonce": "n" });
+        let first = pigeon_core::webauthn::b64url(long.to_string().as_bytes());
+        format!("{first}.{tag}")
+    };
+    assert!(verify(key, Some(&forged), "call", body, now).is_err());
+
+    // Skew: this version and the one before are spoken; fields are added, never required.
+    assert!(accepts(CONTRACT) && !accepts(CONTRACT + 1));
+    let old: Manifest = serde_json::from_value(json!({
+        "contract": CONTRACT, "worker": "pigeon-sites",
+        "capabilities": [{ "name": "instances", "tools": [{ "name": "instance_plan" }] }],
+        "added_later": true,
+    }))
+    .unwrap();
+    assert_eq!(old.capabilities[0].tools[0].name, "instance_plan");
+    assert!(old.capabilities[0].routes.is_empty() && old.commit.is_empty());
+    let newer: Answer = serde_json::from_value(
+        json!({ "error": { "message": "m", "kind": "some_kind_from_later" } }),
+    )
+    .unwrap();
+    assert!(matches!(newer, Answer::Error(f) if f.kind == FailureKind::Failed));
+    assert_eq!(
+        serde_json::to_value(Answer::error(FailureKind::UnknownOp, "x")).unwrap(),
+        json!({ "error": { "message": "x", "kind": "unknown_op" } })
+    );
+    assert_eq!(
+        serde_json::to_value(Answer::Ok(json!(1))).unwrap(),
+        json!({ "ok": 1 })
+    );
+
+    // Event patterns: every key the pattern names, equal.
+    let event = json!({ "type": "push", "repo": "pigeon", "ref": "main" });
+    assert!(wants(&json!({ "type": "push" }), &event));
+    assert!(!wants(&json!({ "type": "push", "repo": "other" }), &event));
+    assert!(!wants(&json!("push"), &event));
+}
 
 #[test]
 fn deploy_proxy_allowlist() {
