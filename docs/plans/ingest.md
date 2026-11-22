@@ -1,6 +1,7 @@
 # Ingest: content-addressed files on R2, Iceberg as the record, Vectorize as the index
 
-Status: **designed** (2026-11-22). Nothing is built, deployed or enabled. Branch
+Status: **designed** (2026-11-22; decision 11 revised the same evening with the person's
+answer on where the data lives). Nothing is built, deployed or enabled. Branch
 `claude/ai-agent-AFc1coPrsJTT` (docs only). The first code it relies on, the email schema, is
 built off by default on the code branch named in [email.md](email.md).
 
@@ -87,7 +88,7 @@ keep working for now) and **R2 SQL is now "Basin SQL"**; Pipelines is **"Basin P
  Email Routing ──email()──┐
  Gmail / JMAP / IMAP ─────┤    1 identify ──▶ 2 extract ──▶ 3 classify + link ──▶ 4 chunk + embed
  uploader (local disks) ──┤      │  sha256, size,  │  pigeon-email,   │  rules, Workers AI,   │  Workers AI
- Super Slurper staging ───┘      │  sightings      │  toMarkdown,     │  entities, fields     │  embeddings
+ cloud copier, Slurper ───┘      │  sightings      │  toMarkdown,     │  entities, fields     │  embeddings
                                  │                 │  pHash, shingles │                       │
      every stage reads/writes:   ▼                 ▼  children ──▶ 1  ▼                       ▼
    R2 blobs/sha256/…  (originals, immutable)    Basin Pipelines ──▶ Iceberg tables      Vectorize
@@ -374,8 +375,8 @@ retrieval, a month's saving. The person decides (follow-ups).
 
 - **Continuous**: an R2 event notification (`object-create` on the whole bucket) sends each new
   object's key to `{instance}-backup`. The consumer streams the object from R2 to B2's
-  S3-compatible API (`PUT`, SigV4 signed in Rust; multipart above 5 GB), at the same key under
-  `pigeon/{instance}/`, with the SHA-256 in `x-amz-meta-sha256`. B2 checks its own SHA-1 on
+  S3-compatible API (`PUT`, SigV4 signed in Rust; multipart above 5 GB), at the same key in the
+  backup bucket, with the SHA-256 in `x-amz-meta-sha256`. B2 checks its own SHA-1 on
   upload.
 - **Everything is copied**, Iceberg data and metadata files included, so a restore has the
   record, not only the files.
@@ -384,57 +385,151 @@ retrieval, a month's saving. The person decides (follow-ups).
 - **Reconciliation**: a daily Cron lists a slice of the bucket (by key prefix, 1/256 per day for
   originals, all of the catalog prefix) and compares sizes with B2's listing; differences are
   re-queued. `data_status` shows the last full pass.
-- **Credentials**: a B2 application key restricted to the one bucket and the `pigeon/` prefix,
-  set by the person as a secret in the instance account (follow-ups). Server-side encryption
+- **Credentials**: a B2 application key restricted to the backup bucket, set by the person as a
+  secret in the instance account (follow-ups). Server-side encryption
   (SSE-B2) on the bucket.
 - **Restore**: Super Slurper copies B2 back into a new R2 bucket (B2 is a tested source). Iceberg
   tables are registered again from their latest metadata file (whether Basin Catalog can
   register an existing table is open; phase 0 checks, the fallback being a replay of the rows
   into new tables through the pipelines). Vectorize is rebuilt from `chunks`; D1 from Iceberg.
-- **The existing B2 bucket**: pigeon writes only under its own prefix and never lists, changes or
-  deletes anything else in it (assumed; see the Log).
+- **B2 is both a source and the backup target, kept apart.** The backup goes to a **new,
+  separate bucket** (`pigeon-backup-{instance}`), never to a bucket that holds source data.
+  Reasons: the source buckets stay strictly read-only (decision 11), one key never needs both
+  read on the sources and write on the backup, and a restore never has to tell the person's
+  original objects from pigeon's copies. The backup bucket's key is restricted to that bucket;
+  each source bucket's key is read-only (follow-ups). Object Lock on the backup bucket is an
+  option the person can turn on.
+- **The existing B2 data stays where it is** after ingest. pigeon never deletes or moves source
+  data; retiring a source bucket later is the person's own decision, made once the record
+  shows every object in it as sighted and its bytes held in R2 and in the backup bucket.
+  Until then the unique bytes are stored twice in B2 (source and backup), about $7–10 a month
+  per terabyte-and-a-half, which buys an independent backup.
 
-### 11. Bulk ingest of the 4–5 TB
+### 11. Bulk ingest: where the data is, and how it moves
 
-Assumed (no answer overnight): most of the raw data is on the person's disks or NAS, some may
-already be in B2. Both paths are designed; both dedupe before anything is processed.
+**Where it is** (the person, 2026-11-22, answering this decision):
 
-**The uploader** (a Rust command-line program in this repository, run by the person; phase 4):
-1. Walks the given folders. For each file: size, SHA-256 and BLAKE3, computed locally (fast
-   there; nothing leaves the machine for a duplicate).
-2. Asks the data Worker `have` for up to 1,000 SHA-256 values at a time; the Worker answers with
-   R2 `HEAD`s.
-3. Uploads only missing blobs to the data Worker, which streams them into R2 with the R2
-   binding: single PUT up to 95 MB (under the 100 MB request body limit of Free and Pro zones),
-   multipart for larger files, parts of 95 MB, resumable by part.
-4. Sends a sighting for every file, duplicate or not (path, modified time, the machine's name),
-   so the record knows every copy.
-5. Keeps a local journal (SQLite) so a stopped run resumes without hashing again.
+| Source | Size | Path |
+| --- | --- | --- |
+| DigitalOcean Spaces | 3.4 TB | cloud to cloud (main path) |
+| Scaleway Object Storage | 0.8 TB | cloud to cloud (main path) |
+| Backblaze B2 | 1–2 TB | cloud to cloud (main path) |
+| Local disks | ~1 TB | the uploader |
+| Mailboxes (several accounts) | 0.3–0.4 TB | [mail-connectors.md](mail-connectors.md) |
+| **All** | **~6.5–7.6 TB raw**, of which ~5.2–6.2 TB in the three clouds | |
 
-The uploader also reads mbox and `.eml` folders (Proton's export, Apple Mail folders) as
-`Source::Upload` and talks IMAP to a local Proton Mail Bridge (mail-connectors.md).
+The person's earlier estimate was about 1 TB unique. Phase 4's listing pass replaces both
+numbers with counts.
 
-**From an S3-compatible store (an existing B2 bucket)**: Super Slurper copies it into
-`staging/` in the instance bucket (free transfer from Cloudflare's side; B2 charges its egress,
-$0.01/GB, unless Backblaze's partner terms waive it). An R2 event on `staging/` feeds `ingest`,
-which hashes, moves new blobs to `blobs/` and deletes the staged copy. Duplicates cost one
-transfer each, which is why the uploader is the main path for local data.
+**Hard line: every source is read-only.** pigeon never writes, changes, tags or deletes anything
+in a source bucket. Each source account is declared read-only in the `storage` capability
+([storage-providers.md](storage-providers.md)), with a key that can only list and read (the
+person creates them; follow-ups). The code refuses a write tool on a read-only account, and the
+keys could not write anyway.
+
+**Step 1: list everything, move nothing.** A listing job in the data Worker walks every declared
+bucket with ListObjectsV2 (through `pigeon_core::s3`, the same client the `storage` tools use,
+not tool call by tool call) and appends one row per object to an Iceberg table
+`data.source_objects`: account, bucket, key, size, ETag, last modified, storage class, and the
+time listed. Listings are cheap: about 8 million objects is about 8,000 list calls. DigitalOcean
+and Scaleway do not charge per request; B2 charges list calls as class C transactions, with
+2,500 free a day and then $0.004 per 1,000 ([B2 pricing](https://www.backblaze.com/cloud-storage/pricing)),
+so a full pass costs cents.
+
+**Step 2: deduplicate from the listings alone, before any byte moves.** Objects are grouped by
+(size, ETag):
+- **Strong groups**: the ETag is a plain 32-hex MD5. That is the S3 rule for an object uploaded
+  in a single part without SSE-C or KMS, which the three providers follow for S3 uploads. Same
+  size plus same MD5 is treated as the same bytes, and only one copy of the group is fetched.
+- **Weak groups**: the ETag has a part count (`…-N`, multipart). The ETag then depends on the
+  part size used at upload, so two copies of one file can differ, and equal ETags are only
+  likely the same bytes. One copy is fetched and hashed; the others are fetched only if the
+  hash later disagrees with a sample (one more copy per group is hashed to check).
+- **Unknown**: objects uploaded through B2's native API, encrypted objects, or ETags in another
+  form. These are fetched and hashed after landing, like local files. Phase 0 checks the ETag
+  forms on a sample from each provider before the rule is trusted.
+- **Size alone never decides.** Objects with the same size and different ETags are distinct.
+
+Every listed object becomes a **sighting** of its group (decision 2), whether or not its bytes
+were fetched, so the record knows every copy and where it lives.
+
+**What this saves.** If the person's estimate holds (about 1–1.5 TB unique in 6.5–7.6 TB), the
+clouds hold 5.2–6.2 TB, of which perhaps 1–1.5 TB is unique, so listing-based dedup skips about
+4–5 TB of transfer, processing and R2 writes. In money the saving is small, because egress is
+cheap here (below): at most about $40–55 of egress avoided. The real gains are time (days of
+transfer), R2 Class A operations, and not hashing 4–5 TB in Workers. The listing pass reports the
+actual figure before anything moves, and the person sees it on `data_status`.
+
+**Step 3: pick the copy to fetch.** For each group, one source is chosen, in this order:
+1. **Backblaze B2**: downloads to Cloudflare are free under Backblaze's partner programme
+   ([B2 pricing](https://www.backblaze.com/cloud-storage/pricing); [the Cloudflare partnership](https://www.backblaze.com/blog/backblaze-and-cloudflare-partner-to-provide-free-data-transfer/)).
+   Phase 0 confirms that a transfer from the B2 S3 endpoint to R2 is billed as free; if it is
+   not, B2's general allowance still covers it (free egress up to 3 × the average stored, then
+   $0.01/GB).
+2. **Scaleway**: 75 GB of egress free each month, then €0.01/GB ([Scaleway pricing](https://www.scaleway.com/en/pricing/storage/)).
+3. **DigitalOcean Spaces**: 1,024 GiB of outbound transfer included per Spaces subscription,
+   then $0.01/GiB according to the docs ([Spaces pricing](https://docs.digitalocean.com/products/spaces/details/pricing/));
+   DigitalOcean's marketing pricing page shows a different figure, so the person checks the bill
+   after the first month (follow-ups).
+
+Within a provider, the copy in the bucket the person marks as primary wins; then the oldest.
+
+**Step 4: transfer.** Two mechanisms, chosen per bucket after the listing:
+- **Super Slurper** (Cloudflare's bulk copy, no charge on Cloudflare's side beyond R2
+  operations) for a bucket whose objects are mostly unique (say, over 70% chosen in step 3). It
+  copies a bucket or a prefix into `staging/{account}/{bucket}/` in the instance bucket. It takes
+  any S3-compatible source, and Backblaze B2, DigitalOcean Spaces and Scaleway are on its list of
+  tested providers ([Super Slurper](https://developers.cloudflare.com/r2/data-migration/super-slurper/);
+  [S3-compatible support](https://developers.cloudflare.com/changelog/2025-02-24-r2-super-slurper-s3-compatible-support/)).
+  It copies whole buckets or prefixes, not a list of keys, so it suits mostly-unique buckets
+  only. An R2 event on `staging/` feeds `ingest`, which hashes, keeps new blobs under `blobs/`
+  and deletes the staged copy.
+- **pigeon's copier** for everything else: a Queue of chosen objects, consumed by the data
+  Worker, which streams each object from the source (a signed GET through `pigeon_core::s3`)
+  straight into R2 (a single PUT up to 5 GB, multipart above), with no copy in Worker memory.
+  It hashes as it streams (SHA-256 and BLAKE3), so a landed object already has its content
+  address. It fetches only the chosen copy of each group.
+
+**Order.** B2 first (free egress, and its data has to be in R2 before its role as backup target
+is set up, decision 10), then Scaleway, then DigitalOcean. Within each: the strong groups first
+(they need no hashing to decide), largest objects first, so bytes move from the start; then the
+weak and unknown groups. Mail and local files run in parallel on their own paths.
 
 **Throughput** (estimates; phase 0 measures):
 
-| Step | Rate | 5 TB raw / 1 TB unique |
+| Step | Rate | For the clouds (~1–1.5 TB fetched) |
 | --- | --- | --- |
-| Local hashing (SHA-256 with SHA-NI plus BLAKE3) | disk-bound: ~150 MB/s on a hard disk, ~1 GB/s on SSD | 9 hours (HDD) or 1.5 hours (SSD) for 5 TB |
-| Upload of unique bytes | the person's uplink | 1 TB: 22 hours at 100 Mbit/s, 2.3 hours at 1 Gbit/s |
+| Listing | ~1,000 objects a call; tens of calls a second | ~8M objects in under an hour |
+| Copier | limited by the source; assume 50–100 MB/s from each provider at once | 1–1.5 TB in about 3–8 hours |
+| Super Slurper | Cloudflare's service; per-bucket, in parallel | measured in phase 0 |
+| Local uploader | the person's uplink (below) | ~1 TB: 22 hours at 100 Mbit/s, 2.3 hours at 1 Gbit/s |
 | Identify and extract | Queues at 5,000 messages/s, 250 consumers | not the bottleneck |
 | Embedding | 3,000 requests/min, batches of ~50 chunks | 5.1M vectors in about 35 minutes of model time |
 | Classification | 300 requests/min | ~800,000 items in about 44 hours; rules skip newsletters and notifications first |
 | Gmail backfill | 100 raw messages/min per user (mail-connectors.md) | 500,000 messages in about 3.5 days |
 
+**The uploader** (a Rust command-line program in this repository, run by the person; phase 4) is
+now the path for the ~1 TB on local disks only:
+1. Walks the given folders. For each file: size, SHA-256 and BLAKE3, computed locally (fast
+   there; nothing leaves the machine for a duplicate).
+2. Asks the data Worker `have` for up to 1,000 SHA-256 values at a time; the Worker answers from
+   the content addresses already in R2, including those that arrived from the clouds.
+3. Uploads only missing blobs to the data Worker, which streams them into R2: single PUT up to
+   95 MB (under the 100 MB request body limit of Free and Pro zones), multipart for larger
+   files, parts of 95 MB, resumable by part.
+4. Sends a sighting for every file, duplicate or not (path, modified time, the machine's name).
+5. Keeps a local journal (SQLite) so a stopped run resumes without hashing again.
+
+Running the uploader after the clouds means local copies of cloud data are found as duplicates
+by hash and never uploaded. The uploader also reads mbox and `.eml` folders (Proton's export,
+Apple Mail folders) as `Source::Upload` and talks IMAP to a local Proton Mail Bridge
+(mail-connectors.md).
+
 ### 12. Cost estimate
 
-**Assumptions** (to be replaced by phase 4's counts): 1 TB of unique bytes, 5 TB raw (about 8
-million files seen); unique items: 500,000 emails, 500,000 documents and attachments, 1.5 million
+**Assumptions** (to be replaced by phase 4's counts): about 1–1.5 TB of unique bytes in about
+6.5–7.6 TB raw (decision 11's table; about 8 million files seen); the item counts below are for
+1 TB unique and scale with it; unique items: 500,000 emails, 500,000 documents and attachments, 1.5 million
 images, 5,000 videos; text: about 2.4 billion tokens to embed (emails ~1,000 tokens, documents
 ~3,000, images ~260 each); 5.1 million chunks; 3,000 website queries a month.
 
@@ -452,20 +547,26 @@ One-time (the first full ingest):
 | Workers CPU | 2.5M items × ~50 ms = 125M CPU-ms, 30M included | ~$2 |
 | Basin Pipelines | ~35 GB of rows, 50 GB included | $0 |
 | D1 | ~32M near-duplicate rows written, 50M included | $0 |
-| **Total** | | **~$135 plus OCR** |
+| Source egress, DigitalOcean | only chosen copies; at most 3.4 TB if nothing were deduplicated: (3,482 − 1,024 included) GiB × $0.01 | $0–25 (check the bill: the marketing page shows another rate) |
+| Source egress, Scaleway | at most 0.8 TB: (800 − 75 free) GB × €0.01 | €0–7 |
+| Source egress, Backblaze B2 | to Cloudflare: free under the partner programme; else within 3 × stored | $0 |
+| Listing (8M objects) | ~8,000 list calls; B2 class C beyond 2,500 a day | under $1 |
+| Super Slurper | no charge on Cloudflare's side beyond R2 operations (already above) | $0 |
+| **Total** | | **~$135–170 plus OCR** (egress is the only new line, and dedup before transfer keeps it near the low end) |
 
 Monthly, once ingested:
 
 | Item | Working | Cost |
 | --- | --- | --- |
-| R2 storage | 1.06 TB Standard ($15.90), or with originals in IA ($10.90) | $11–16 |
+| R2 storage | 1.06–1.6 TB Standard ($16–24), or with originals in IA ($11–16) | $11–24 |
 | Vectorize storage | 5.1M × 768 = 3.9B dimensions, $0.05/100M | ~$2 |
 | Vectorize queries | (5.1M stored + 3,000 queries) × 768 = 3.9B queried dimensions, $0.01/M, only in months with queries | ~$39 (at 256 dimensions: ~$13) |
 | Basin SQL | ~2 TB scanned at $2.50/TB | ~$5 |
 | Basin Catalog | under 1M operations; compaction a few GB | under $1 |
-| Backblaze B2 | 1.06 TB × $6.95 | ~$7.40 |
+| Backblaze B2, backup bucket | 1.06–1.6 TB × $6.95 | ~$7.40–11 |
+| Backblaze B2, source buckets (the person's existing data, unchanged) | 1–2 TB × $6.95, already paid today | $0 new |
 | Workers Paid plan | base | $5 |
-| **Total** | | **~$70 a month** (about $45 at 256 dimensions) |
+| **Total** | | **~$70–85 a month** (about $45–60 at 256 dimensions) |
 
 The largest monthly line is Vectorize's query pricing, which counts every stored vector in each
 month with queries. Dimension is the lever: phase 0 compares recall at 768 and 256 dimensions
@@ -479,7 +580,7 @@ month with queries. Dimension is the lever: phase 0 compares recall at 768 and 2
 | 1 | Pure crates, off: `pigeon-ingest` with item and table row types, ids, the tier 2 and 3 indicators (text normalization, MinHash, pHash/dHash on decoded pixels), the alias normalizers, the freemail list; the Iceberg schemas as data; smoke scenarios | landing, code only | executors, planner |
 | 2 | The data Worker shell and its resources (data-worker.md phases 1–3) | person's passkey on the instance record | agent, person |
 | 3 | Email end to end: capture → identify → extract → classify (rules only) → embed; entity linking by address and domain | person enables `data.email` | agent |
-| 4 | The uploader and the Super Slurper path; real counts replace decision 12's assumptions | person runs it | agent, person |
+| 4 | The listing pass over every source bucket (read-only), dedup from listings, then the copier and Super Slurper per bucket (decision 11); real counts replace decision 12's assumptions; then the uploader for local disks | person declares the accounts; person runs the uploader | agent, person |
 | 5 | Model classification and fields; name matching; merges; `data_reprocess` | | agent |
 | 6 | Container jobs for large files and deletes | | agent |
 | 7 | B2 backup and reconciliation | person sets the B2 key | agent, person |
@@ -487,19 +588,29 @@ month with queries. Dimension is the lever: phase 0 compares recall at 768 and 2
 
 ## Follow-ups for the person
 
-1. Say where the 4–5 TB live today (disks, NAS, B2, other clouds) and whether "the Backblaze
-   bucket" exists and already holds some of it. The overnight assumption is in the Log.
-2. Backblaze: create (or pick) the bucket, turn on SSE-B2, and create an application key limited
-   to that bucket and the `pigeon/` prefix with read and write. Enter its key id and key on the
-   console's Access tab when phase 7 asks; never in chat.
-3. Choose the jurisdiction for each instance's data bucket (EU for noisypigeon, as its site?).
-4. Approve or decline Infrequent Access for originals after 30 days (decision 9).
-5. Workers Paid on each instance account (needed for Queues retention, Pipelines, CPU limits and
+1. **Name the source accounts**, one per provider account, as in storage-providers.md: for
+   example `digitalocean:legacy`, `scaleway:personal`, `backblaze:personal` (add more if you
+   have several accounts at one provider).
+2. **Create a read-only key per source account**, as storage-providers.md's follow-ups describe:
+   DigitalOcean Spaces read-only access key; Scaleway an application with object read only;
+   Backblaze an application key with `listBuckets`, `listFiles` and `readFiles` only. Enter each
+   on the console's Access tab when asked; never in chat.
+3. **List the buckets to include or skip** per account (default: include every bucket the key can
+   list), and mark one **primary** bucket where you know the same data is in several places
+   (decision 11, step 3).
+4. **Backblaze backup**: create a new bucket `pigeon-backup-{instance}` (not one of your source
+   buckets), turn on SSE-B2 (and Object Lock if you want it), and create an application key for
+   that bucket only, with read and write. Enter it on the Access tab when phase 7 asks.
+5. **Check the DigitalOcean bill** after the first month of transfer: the docs and the pricing
+   page disagree on the overage rate (decision 12).
+6. Choose the jurisdiction for each instance's data bucket (EU for noisypigeon, as its site?).
+7. Approve or decline Infrequent Access for originals after 30 days (decision 9).
+8. Workers Paid on each instance account (needed for Queues retention, Pipelines, CPU limits and
    Vectorize beyond the free tier).
-6. The Basin Pipelines sinks need an API token with R2 Admin Read & Write in the instance
+9. The Basin Pipelines sinks need an API token with R2 Admin Read & Write in the instance
    account. Whether pigeon can create it through the OAuth link is open (data-worker.md); if not,
    create it in the dashboard and enter it on the Access tab.
-7. Give phase 0 about 200 of your own items and 10 real questions ("all invoices from X in
+10. Give phase 0 about 200 of your own items and 10 real questions ("all invoices from X in
    2024") to judge models and dimensions against.
 
 ## Log
@@ -513,3 +624,13 @@ month with queries. Dimension is the lever: phase 0 compares recall at 768 and 2
   bucket; the uploader that hashes before upload is the main path, Super Slurper the second; B2
   is the backup target and pigeon writes only under `pigeon/{instance}/` in it. Nothing built for
   this plan beyond the email schema (email.md phase 1).
+- 2026-11-22 (evening): the person answered decision 11: 3.4 TB on DigitalOcean Spaces, 0.8 TB on
+  Scaleway, 1–2 TB on Backblaze B2, ~1 TB local, 0.3–0.4 TB in mailboxes. Decision 11 rewritten:
+  the main path is cloud to cloud; every source bucket is read-only; listings are deduplicated by
+  size and ETag (strong for plain MD5 ETags, weak for multipart, unknown hashed after landing)
+  before any transfer; copies are fetched from B2 first (free egress to Cloudflare), then
+  Scaleway, then DigitalOcean; Super Slurper for mostly-unique buckets, pigeon's streaming copier
+  for the rest; the uploader only for local disks. Decision 10: the backup goes to a new,
+  separate B2 bucket, and the existing B2 data stays where it is. Decision 12: egress and the new
+  volumes added. Egress prices read from the providers' pages (cited in decision 11) on
+  2026-11-22. Revised by the AI agents planner session at the person's request; docs only.
