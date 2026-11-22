@@ -717,7 +717,19 @@ impl Lander {
         if !self.settings.setup_connectors {
             return;
         }
-        let said = match crate::ci::setup(&self.env, true).await {
+        // Right after a deploy, the CI scheduler may still be the old version for a moment,
+        // which has no `setup`: wait for it to restart, up to two minutes.
+        let mut answer = crate::ci::setup(&self.env, true).await;
+        for _ in 0..6 {
+            match &answer {
+                Err(e) if e.to_string().contains("no operation `setup`") => {
+                    worker::Delay::from(std::time::Duration::from_secs(20)).await;
+                    answer = crate::ci::setup(&self.env, true).await;
+                }
+                _ => break,
+            }
+        }
+        let said = match answer {
             Ok(Value::Object(reports)) => reports
                 .iter()
                 .map(|(name, r)| format!("{name}: {}", crate::ci::setup_summary(r)))

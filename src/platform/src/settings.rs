@@ -232,7 +232,7 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
 }
 
 /// The Buildkite organization's slug; empty leaves the connector off and sets nothing up.
-const BUILDKITE_ORG: &str = "";
+const BUILDKITE_ORG: &str = "pigeon-security";
 /// Buildkite's hosted queues in cluster `pigeon`, one row per class: the queue's key, its
 /// instance shape, the class, and the shape's vCPU, memory (GB) and disk (GB). Hosted Linux
 /// agents have docker, so each queue also runs its class's `-docker` jobs. Linux only for now.

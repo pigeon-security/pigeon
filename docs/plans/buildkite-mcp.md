@@ -1,9 +1,9 @@
 # Buildkite, set up by pigeon: the CI gateway's Buildkite connector redesigned
 
-Status: **phases 1, 2 and 4 built on `claude/buildkite-setup`, awaiting the person's token** (21 November 2026). The person chose one token for everything and Buildkite's MCP able to act for them. Nothing lands until `BUILDKITE_API_TOKEN` is set (§4, steps 1 to 3); the setup runs once `BUILDKITE_ORG` names the organization.
-It replaces the hand setup in [ci-gateway.md](ci-gateway.md) phase 3 ("Needs from the
-person"). The rest of that phase, as built on `claude/ci-gateway`, stays: the OIDC exchange,
-the webhook check, the bootstrap script and the queue table.
+Status: **phases 1, 2 and 4 deployed** (landing `bYNS6ijvF7NRcFbB`, 22 November 2026), with
+Buildkite off; **phase 2a** (the organization `pigeon-security`, the first setup) landing on
+`claude/buildkite-org`. The person chose one token for everything and Buildkite's MCP able to act
+for them; the token is set.
 
 The person's goal: "redesign the CI gateway for BuildKite to use BuildKite MCP through the
 portal and server. The goal of this is we can setup everything we need in BuildKite through
@@ -395,6 +395,13 @@ This plan does not touch the generator.
 - The portal: detach `buildkite` from the portal in the dashboard (sessions lose the tools at once); remove it from `portal_servers` and the setup in a landing, then delete the server in the dashboard.
 - Any phase's code: revert the landing. The setup never deletes, so an old version leaves
   Buildkite as it was.
+
+## As found
+
+- **The first deploy's setup met the old scheduler** (`bYNS6ijvF7NRcFbB`): the Lander, already
+  the new version, called `setup` on the CI scheduler, which answered "no operation `setup`":
+  it was still the old version, having just finished the deploy job itself. The Lander now waits
+  20 s and asks again, up to six times, when the scheduler does not know `setup` yet.
 
 ## 6. Open points, checked live in phase 2a or 3
 
