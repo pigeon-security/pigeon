@@ -1,9 +1,10 @@
 # Cloudflare Observability for every pigeon Worker
 
-Status: in progress, nothing landed. Three slices, each on its own branch: (a) settings and
-coverage check, built; (b) the query client and `observability_summary`, built, in review;
-(c) monitors by plan and apply, not started. The person approves each landing, and does the
-follow-ups listed at the end. See the Log.
+Status: in progress, nothing landed. Three slices, each on its own branch, CI `test` green on
+each: (a) settings and coverage check, on the planner's branch `claude/ai-agent-QrV7alyFFsv6`;
+(b) the query client and `observability_summary`, on `claude/ai-agent-tOTEYTUOTkNp`; (c)
+monitors by plan and apply, on `claude/ai-agent-E57UIF16D9q8`, built on (b). The person
+approves each landing, and does the follow-ups listed at the end. See the Log.
 
 The request: turn on Cloudflare Observability (logging, traces, analytics, monitors, usage) for
 every Worker, and add one tool that gives high-level error stats and one view of cost.
@@ -236,9 +237,15 @@ until the person approves a plan.
 
 ## For the person
 
-- Approve each landing; (a) deploys all six Workers.
-- In the dashboard, create the Monitors listed above.
+- Approve each landing; (a) deploys all six Workers, and its policy audit line change is in
+  `src/core`, a shared path.
+- Land (b) before (c): (c) is built on (b)'s branch.
+- In the dashboard, create the Monitors listed above, and add email delivery to the
+  `pigeon: ...` notification policies that (c) creates (pigeon holds no person's email).
 - Optional: a Workers spending limit (an account setting).
+- Optional: if the parent token cannot grant `Account Analytics Read`, `Workers Observability
+  Write`, `Billing Read`, `Notifications Read` or `Notifications Write`, the tool lists that
+  source as unavailable; granting them is an account setting for the person.
 - Later: move enrolment and OAuth codes out of URL queries, then turn core's traces on; replace
   `Workers Observability Write` with the SQL API once its columns are confirmed.
 
@@ -273,3 +280,22 @@ until the person approves a plan.
   text only. The container key is as the wrangler configuration page gives it; the pinned
   wrangler (4.166.0) was not installed in the sandbox, so the `allowlist` job is what proves
   wrangler takes it.
+  CI: `test` PT3Hd8F9xASEdbfPmtg-qp failed on 2c5d5e3 (the scenario named `lanes::parse` from
+  the wrong module), then `test` 68-ckFNmO1kvef8KmMNvtP green on 137ea69; `allowlist`
+  GY5wzGTZ5rGSXgZUSw6bv7 green on 2c5d5e3 (core's dry deploy, all 28 calls allowed). The
+  allowlist job deploys core only, so the other five Workers' settings PATCH is proved by the
+  same `SETTINGS_KEYS` entry, not by a run.
+- 2026-11-23: slice (b), second round, on `claude/ai-agent-tOTEYTUOTkNp` @ 3a2d4f6 (from
+  ac183ca), CI `test` xOxLg_VYt-PAmPND0BmC3X green. Fixed findings 1 to 4; added the agent run
+  line (kind `metered`, outside the totals) and CI Containers seconds per class (no price: the
+  class sizes sit inside the connector, so `usd` is null), and `core_observability_summary_folds`.
+  Left: `spike_after_deploy` (needs hourly metrics), the CI price, the console Cost section.
+  Reviewed: the folds read only counts, dollars and whitelisted fields.
+- 2026-11-23: slice (c) on `claude/ai-agent-E57UIF16D9q8` @ 11f47c2 (from 3a2d4f6), CI `test`
+  nt71FPNDEucTHphLbuGOGu green: `observability_monitors_plan` and `_apply`, an approval of kind
+  `observability_monitors` (no `src/core` change), `core_observability_monitors_plan`. Apply
+  creates only `pigeon: ...` policies and never updates or deletes. Unverified against the live
+  API: the `available_alerts` shape, the script filter key, the billing product and filter
+  names (plan lines say so). Delivery: the directory keeps no email, so policies are created
+  with `mechanisms: {}`; Cloudflare may refuse that, and then apply returns its error. A
+  failure part-way leaves the policies made so far; planning again skips them.
