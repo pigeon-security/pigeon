@@ -77,6 +77,11 @@ pub struct Buildkite {
     pub portal: Option<(String, String)>,
     /// The queues jobs go to, by class.
     pub queues: Vec<Queue>,
+    /// Queues the setup makes that no job is routed to: key and instance shape. The release
+    /// signing queue (docs/plans/ios.md, §4) waits here until phase 4 gives it its pipeline.
+    pub held_queues: Vec<(&'static str, &'static str)>,
+    /// The image of the macOS queues: Buildkite's macOS version and its base image's Xcode.
+    pub macos: Option<(&'static str, &'static str)>,
     /// Whether only tokens from Buildkite's hosted agents are exchanged.
     pub hosted_only: bool,
 }
@@ -102,6 +107,17 @@ pub fn queue(
             max_timeout_min: 360,
             network_none: false,
         },
+    }
+}
+
+/// The macOS arm64 class (Apple silicon), with no docker: what `ios-check` needs.
+pub fn macos(size: Size) -> Class {
+    Class {
+        os: Os::Macos,
+        arch: Arch::Arm64,
+        size,
+        docker: false,
+        gpu: false,
     }
 }
 

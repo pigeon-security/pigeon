@@ -59,13 +59,29 @@ const BUILDKITE_QUEUES: [(&str, &str, Size, bool, u32, u32, u32); 4] = [
     ),
 ];
 
+/// The hosted macOS shape of both iOS queues (docs/plans/ios.md, §4): Apple M4, 6 vCPU, 28 GB.
+const MACOS_SHAPE: &str = "MACOS_ARM64_M4_6X28";
+/// Their image: macOS Tahoe 26.6 with Xcode 26.6, as `ios/.xcode-version` names.
+const MACOS_IMAGE: (&str, &str) = ("TAHOE_26_6", "26.6");
+
 fn buildkite_queues() -> Vec<buildkite::Queue> {
-    BUILDKITE_QUEUES
+    let mut queues: Vec<buildkite::Queue> = BUILDKITE_QUEUES
         .iter()
         .map(|&(key, shape, size, docker, cpu, mem, disk)| {
             buildkite::queue(key, shape, buildkite::linux(size, docker), cpu, mem, disk)
         })
-        .collect()
+        .collect();
+    // iOS builds (docs/plans/ios.md, phase 3): class macos/arm64, on the same `pigeon` pipeline
+    // and bootstrap as Linux. The disk figure is a floor for routing, not the shape's size.
+    queues.push(buildkite::queue(
+        "pigeon-macos",
+        MACOS_SHAPE,
+        buildkite::macos(Size::Medium),
+        6,
+        28,
+        100,
+    ));
+    queues
 }
 
 /// pigeon's CI settings: its connectors in the order jobs prefer them (Containers, then
@@ -99,6 +115,9 @@ pub fn settings(accounts: Accounts) -> Settings {
                     "https://mcp.buildkite.com/direct".into(),
                 )),
                 queues: buildkite_queues(),
+                // The release signing queue: made now, given its pipeline in phase 4.
+                held_queues: vec![("pigeon-macos-sign", MACOS_SHAPE)],
+                macos: Some(MACOS_IMAGE),
                 hosted_only: true,
             }),
         ],

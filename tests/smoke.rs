@@ -5105,6 +5105,7 @@ fn buildkite_setup_plan() {
             ("pigeon-linux-small".into(), "LINUX_AMD64_2X4".into()),
             ("pigeon-linux-medium".into(), "LINUX_AMD64_4X16".into()),
         ],
+        macos: None,
         repository: "https://github.com/pigeon-security/pigeon.git".into(),
         steps: "steps: []\n".into(),
         hook_url: "https://platform.example/ci/hooks/buildkite".into(),
@@ -5117,6 +5118,31 @@ fn buildkite_setup_plan() {
     let key = hash("hook-key-secret");
     let token = hash("bkua_token_secret");
     let w = wants(&d, &key, &token);
+
+    // A macOS queue carries its image (docs/plans/ios.md, phase 3); a Linux queue never does.
+    let mut mac = d.clone();
+    mac.queues
+        .push(("pigeon-macos".into(), "MACOS_ARM64_M4_6X28".into()));
+    mac.macos = Some(("TAHOE_26_6".into(), "26.6".into()));
+    let mw = wants(&mac, &key, &token);
+    let q = |k: &str| {
+        mw.iter()
+            .find(|x| x.kind == Kind::Queue && x.key == k)
+            .unwrap()
+    };
+    assert_eq!(
+        q("pigeon-macos").create["hostedAgents"],
+        json!({ "instanceShape": "MACOS_ARM64_M4_6X28",
+            "platformSettings": { "macos": { "macosVersion": "TAHOE_26_6", "xcodeVersion": "26.6" } } })
+    );
+    assert!(q("pigeon-macos").expect.contains(&(
+        "/hosted_agents/platform_settings/macos/macos_version".into(),
+        json!("TAHOE_26_6")
+    )));
+    assert_eq!(
+        q("pigeon-linux-small").create["hostedAgents"],
+        json!({ "instanceShape": "LINUX_AMD64_2X4" })
+    );
     let all_scopes: Vec<String> = bk::RUNTIME_SCOPES
         .iter()
         .chain(bk::SETUP_SCOPES.iter())

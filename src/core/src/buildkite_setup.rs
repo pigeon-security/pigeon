@@ -88,6 +88,10 @@ pub struct Declared {
     pub pipeline: String,
     /// The hosted queues: key and instance shape, such as `LINUX_AMD64_2X4`.
     pub queues: Vec<(String, String)>,
+    /// The image of every queue with a macOS shape (`MACOS_…`): Buildkite's macOS version, such
+    /// as `TAHOE_26_6`, and the Xcode its base image carries, such as `26.6`. `None` takes
+    /// Buildkite's default image.
+    pub macos: Option<(String, String)>,
     /// The pipeline's repository, never cloned (every step skips checkout).
     pub repository: String,
     /// The pipeline's steps YAML.
@@ -256,19 +260,31 @@ pub fn wants(d: &Declared, hook_key: &str, token: &str) -> Vec<Want> {
 
     for (key, shape) in &d.queues {
         let qd = desc(Kind::Queue, key);
+        let mut hosted = json!({ "instanceShape": shape });
+        let mut expect = vec![
+            ("/key".into(), json!(key)),
+            ("/description".into(), json!(qd)),
+            ("/hosted_agents/instance_shape/name".into(), json!(shape)),
+        ];
+        if let (true, Some((version, xcode))) = (shape.starts_with("MACOS_"), &d.macos) {
+            // Sent as the API's camelCase; Buildkite shows it back in snake_case.
+            hosted["platformSettings"] =
+                json!({ "macos": { "macosVersion": version, "xcodeVersion": xcode } });
+            expect.push((
+                "/hosted_agents/platform_settings/macos/macos_version".into(),
+                json!(version),
+            ));
+            expect.push((
+                "/hosted_agents/platform_settings/macos/base_image_xcode_version".into(),
+                json!(xcode),
+            ));
+        }
         out.push(Want {
             kind: Kind::Queue,
             key: key.clone(),
-            create: json!({
-                "key": key, "description": qd,
-                "hostedAgents": { "instanceShape": shape },
-            }),
-            update: json!({ "description": qd, "hostedAgents": { "instanceShape": shape } }),
-            expect: vec![
-                ("/key".into(), json!(key)),
-                ("/description".into(), json!(qd)),
-                ("/hosted_agents/instance_shape/name".into(), json!(shape)),
-            ],
+            create: json!({ "key": key, "description": qd, "hostedAgents": hosted }),
+            update: json!({ "description": qd, "hostedAgents": hosted }),
+            expect,
             secret: None,
             needs: Some(Kind::Cluster),
         });

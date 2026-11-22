@@ -24,11 +24,17 @@ pub fn declared(bk: &Buildkite, host: &str) -> Declared {
             queues.push((q.key.to_string(), q.shape.to_string()));
         }
     }
+    for (key, shape) in &bk.held_queues {
+        if !queues.iter().any(|(k, _)| k == key) {
+            queues.push((key.to_string(), shape.to_string()));
+        }
+    }
     Declared {
         org: bk.org.clone(),
         cluster: bk.cluster.clone(),
         pipeline: bk.pipeline.clone(),
         queues,
+        macos: bk.macos.map(|(v, x)| (v.to_string(), x.to_string())),
         repository: bk.repository.clone(),
         steps: super::steps_yaml(&keys, host),
         hook_url: format!("https://{host}/ci/hooks/{}", super::NAME),

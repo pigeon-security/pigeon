@@ -541,7 +541,7 @@ Phases 1 to 7 wait for the follow-ups they name.
 | 1a | `apple` capability: the four slots the person fills (`APPLE_TEAM_ID`, `APPLE_ASC_ISSUER_ID`, `APPLE_ASC_KEY_ID`, `APPLE_ASC_KEY`), each checked before it is written (the ids by form, the key by signing an ES256 token); the App Store Connect JWT and client (`pigeon_core::apple`); `apple_status` (read-only). No bindings yet: a binding to a missing secret fails the deploy | 1, 3 | code |
 | 1b | The four bindings in core's `wrangler.toml`, landed after the person has set all four slots. Then `apple_status` signs in and reads the bundle id, the app and its highest build number, the certificates and profiles (§6). `APPLE_SEAL_KEY` and `secret_expiry` from certificates move to phase 2 | 1a set | config |
 | 2 | Signing material: the console writes "Adopt `dev.pigeon.app`" (was "Register bundle id") and "Create signing identity" (CSR in the Worker), with sealed storage; `apple_status` shows pigeon's identities; `secret_expiry` on `APPLE_ASC_KEY` reports their earliest expiry. "Revoke old certificate" is left out: the old certificate is revoked in Apple's portal by the person (§6). Smoke: CSR DER against a byte fixture (and checked by `openssl req -verify` once, off the gate), the request bodies, the record and what is shown | 2, 3; then the person presses the two writes, and `APPLE_SEAL_KEY`'s binding lands between the two presses of "Create signing identity" | code |
-| 3 | Buildkite: `ios: Some(…)`, macOS queues and both pipelines in `Declared`, class `macos/arm64`, runner without `timeout` on macOS, `ios/ci/check.sh` on `pigeon-ios`. Live: one green `ios-check` | 6, 7 | code + live |
+| 3 | Buildkite, as built: the queues `pigeon-macos` (class `macos/arm64`, routed on the existing `pigeon` pipeline and bootstrap) and `pigeon-macos-sign` (made, no job routed to it), both `MACOS_ARM64_M4_6X28` on `TAHOE_26_6` with Xcode 26.6; the runner runs without `timeout` where macOS lacks it. The pipelines `pigeon-ios` and `pigeon-ios-release` move to phase 4 with the sign bootstrap they need. Live: one green `ios-check` submitted by hand; the Lander running it on `ios/` changes is a follow-up | 6, 7 | code + live |
 | 4 | Release: release records, `/ci/apple/session`, `/ci/apple/identity`, `/ci/buildkite-sign.sh`, the `/apple/` proxy allowlist, `ios/ci/archive.sh`, the processing poll, `ios_releases`. Live: build 1 reaches the internal TestFlight group | 2, 3, 4, 6 | code + live |
 | 5 | `/.well-known/apple-app-site-association` from `APPLE_TEAM_ID` (404 while unset); the app signs in on a device | 1 | code + live |
 | 6 | APNs: slots, provider token, `apns_devices`, `apns_register`/`apns_unregister`/`apns_send`, `/apns/` on the proxy, `aps-environment` in the app's entitlements, the platform's events. Live: HTTP/2 proven first | 5 | code + live |
@@ -687,3 +687,12 @@ a passkey. Enter every key and id on the console's secrets page once the slot ex
   changes the bundle id's capabilities, and Apple then marks existing App Store profiles for it
   invalid, the old "Pigeon App Store" profile included; the console says so beside the button.
   Nothing pigeon did not make is revoked or deleted.
+- 2026-11-22 (night): phase 3, narrowed. `ios-check` reaches a Mac through the CI gateway like
+  any job: the Buildkite connector offers class `macos/arm64` on `pigeon-macos`, a step on the
+  existing `pigeon` pipeline, so no new pipeline or token audience is needed. `pigeon-macos-sign`
+  is made now and waits for phase 4, which also declares `pigeon-ios-release` (its step runs
+  `/ci/buildkite-sign.sh`, written then). The queue's image is sent as
+  `hostedAgents.platformSettings.macos.{macosVersion, xcodeVersion}`; Buildkite's docs were not
+  reachable from the session, so the names follow what its API shows back
+  (`platform_settings.macos.{macos_version, base_image_xcode_version}`), and the setup's plan
+  checks the live queue after the deploy.

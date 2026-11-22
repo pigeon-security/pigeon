@@ -89,14 +89,19 @@ fi
 # in .pigeon/ci.toml: the deploy job, whose token the deploy proxy takes only while its landing
 # deploys). Its output goes to the container's log and to a file, whose last 4 KiB go with the
 # result (the gateway redacts token-shaped text).
+# macOS has no `timeout`: there the job runs without it, and the gateway's own limit and
+# Buildkite's end the job instead (docs/plans/ios.md, phase 3).
+limit=""
+if command -v timeout >/dev/null 2>&1; then
+    limit="timeout ${PIGEON_TIMEOUT_MIN}m"
+fi
 cd "$work"
 rc=0
 if [ "${PIGEON_PASS_TOKEN:-}" = 1 ]; then
-    PIGEON_JOB_TOKEN=$token timeout "${PIGEON_TIMEOUT_MIN}m" sh "$work/$PIGEON_SCRIPT" \
-        >"$out" 2>&1 || rc=$?
+    # $limit is unquoted on purpose: empty, or two words of digits and fixed text.
+    PIGEON_JOB_TOKEN=$token $limit sh "$work/$PIGEON_SCRIPT" >"$out" 2>&1 || rc=$?
 else
-    env -u PIGEON_JOB_TOKEN timeout "${PIGEON_TIMEOUT_MIN}m" sh "$work/$PIGEON_SCRIPT" \
-        >"$out" 2>&1 || rc=$?
+    env -u PIGEON_JOB_TOKEN $limit sh "$work/$PIGEON_SCRIPT" >"$out" 2>&1 || rc=$?
 fi
 cat "$out"
 tail=$(tail -c 4096 "$out" | base64 | tr -d '\n')
