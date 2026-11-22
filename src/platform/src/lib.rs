@@ -17,6 +17,7 @@ include!(concat!(env!("OUT_DIR"), "/sources.rs"));
 use pigeon_capabilities::oauth;
 use pigeon_capabilities::proxy;
 use pigeon_capabilities::site;
+use pigeon_capabilities::split;
 use pigeon_capabilities::users::{self, Caller};
 use pigeon_capabilities::{Capability, Context, Hosted};
 
@@ -132,10 +133,26 @@ use worker::{
 async fn fetch(req: Request, env: Env, ctx: WorkerContext) -> Result<Response> {
     let path = req.path();
     let host = req.url()?.host_str().unwrap_or_default().to_string();
+    // A capability Worker asking core, over its `PLATFORM` binding; never from the internet,
+    // which reaches this Worker only on its own hostnames.
+    if host == split::CORE_HOST {
+        let caps = settings::capabilities();
+        let hosted = hosted(&caps);
+        let account = account(&env).await?;
+        let cx = Context {
+            account: &account,
+            env: &env,
+            hosted: &hosted,
+            caller: None,
+            caller_note: None,
+            worker: Some(&ctx),
+        };
+        return split::serve(req, &cx).await;
+    }
     if !proxy::host_serves(&host, settings::PROXY_HOST, &path) {
         return Response::error("not found", 404);
     }
-    let caps = settings::capabilities();
+    let caps = split::all(&env, settings::capabilities(), settings::BINDINGS).await;
     // The apex is the public site's alone: none of the platform's paths answer there.
     if site::is_apex(&host, settings::ZONE) {
         let hosted = hosted(&caps);
@@ -174,7 +191,7 @@ async fn fetch(req: Request, env: Env, ctx: WorkerContext) -> Result<Response> {
 #[event(queue)]
 async fn queue(batch: MessageBatch<Value>, env: Env, _ctx: WorkerContext) -> Result<()> {
     let messages = batch.messages()?;
-    let caps = settings::capabilities();
+    let caps = split::all(&env, settings::capabilities(), settings::BINDINGS).await;
     let hosted = hosted(&caps);
     let wanting: Vec<&Box<dyn Capability>> = caps
         .iter()
@@ -264,7 +281,7 @@ async fn mcp_post(mut req: Request, env: &Env) -> Result<Response> {
         Ok(v) => v,
         Err(e) => return Response::error(format!("not JSON: {e}"), 400),
     };
-    let caps = settings::capabilities();
+    let caps = split::all(env, settings::capabilities(), settings::BINDINGS).await;
     let hosted = hosted(&caps);
     let mut tools: Vec<mcp::Tool> = caps.iter().flat_map(|c| c.tools()).collect();
     pigeon_capabilities::approvals::annotate(&mut tools);

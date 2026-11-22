@@ -1,6 +1,6 @@
 # Workers split: capabilities as their own Workers, landing in lanes
 
-Status: **phase 1b built on `claude/land-queue` (with the contract crate), landing next** (2026-11-22). The person gave the go-ahead. Planner
+Status: **phase 1b built on `claude/land-queue` (with the contract crate), landing next; phase 1a built on `claude/split-contract`, landing after it** (2026-11-22). The person gave the go-ahead. Planner
 session `session_015XFA1nSZXE9BNYuPF5XL2j`, seeded by the parent `session_015XFA1jgveJDEE8NJjTaHKg`.
 
 ## Goal
@@ -477,6 +477,23 @@ over their in-flight work.
 
 ## Log
 
+- 2026-11-22: phase 1a built on `claude/split-contract`, on top of 1b. It is dormant until a
+  binding exists: `settings::BINDINGS` is empty, so behaviour is unchanged.
+  - `remote::Remote` is a capability Worker's capability as a `Capability`. Its manifest is kept
+    60 s per isolate, a failure 10 s. Strings are interned once.
+  - `split::all` merges remote capabilities after the local ones. A remote one whose name, a
+    tool or a route clashes with a local one is left out, so a capability Worker never shadows
+    core. The merge is used for `/mcp`, routes and the queue.
+  - `split::serve` answers `credential` (kind `linked`: the instance's refreshed access token,
+    handed out for 10 minutes) and `dispatch` (through the same gate). A request reaches them
+    on host `core`, which only a service binding can send, with a signed caller.
+  - Tools: `workers_setup` (makes `CALLER_KEY` once, scoped to Workers) and
+    `manifest_refresh`. `CALLER_KEY` is bound in wrangler.toml only after `workers_setup` has
+    run live, in phase 2.
+  - Departure: the Lander still runs CI's tools through local capabilities only. That holds
+    until phase 4, when ci moves.
+  - Executor: one `claude-sonnet-5-5` job (`remote.rs`), used with one fix (`Tool` is not
+    `Clone`).
 - 2026-11-22: phase 1b built on `claude/land-queue`, with the contract crate (`src/contract`,
   not yet used by a Worker).
   - New pure modules in `pigeon-core`: `lanes` (the map), `rebase` (path-level rebase, merge

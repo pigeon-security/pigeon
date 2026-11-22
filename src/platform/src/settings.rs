@@ -24,9 +24,11 @@ use pigeon_capabilities::passkeys::Passkeys;
 use pigeon_capabilities::policy::Policy;
 use pigeon_capabilities::proxy::Tokens;
 use pigeon_capabilities::public_host::{PublicHost, Retire};
+use pigeon_capabilities::remote::Binding;
 use pigeon_capabilities::secrets::Secrets;
 use pigeon_capabilities::site::Site;
 use pigeon_capabilities::source::Source;
+use pigeon_capabilities::split::Split;
 use pigeon_capabilities::users::Users;
 
 /// This Worker's wrangler.toml, the authority for its bindings, queues and containers.
@@ -90,6 +92,11 @@ pub fn site() -> Site {
         worker: WORKER.into(),
     }
 }
+
+/// The capability Workers bound to this one, by their Service Bindings in wrangler.toml
+/// (docs/plans/workers-split.md). Their capabilities join this Worker's own at runtime, from
+/// each one's manifest.
+pub const BINDINGS: &[Binding] = &[];
 
 /// The capabilities this Worker hosts.
 pub fn capabilities() -> Vec<Box<dyn Capability>> {
@@ -211,6 +218,8 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
         Box::new(Images),
         // `call {tool, args}`: any tool above by name, for sessions whose tool list predates it.
         Box::new(Dispatch),
+        // The capability Workers: the caller key's setup and asking their manifests again.
+        Box::new(Split { bindings: BINDINGS }),
         Box::new(Architecture),
         // Instances: what pigeon runs, here and in linked accounts. Only their shape is code;
         // every value is data a person approves on the console with their passkey.

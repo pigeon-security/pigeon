@@ -25,9 +25,11 @@ pub mod policy;
 pub mod protected_host;
 pub mod proxy;
 pub mod public_host;
+pub mod remote;
 pub mod secrets;
 pub mod site;
 pub mod source;
+pub mod split;
 pub mod users;
 
 use std::future::Future;
@@ -35,7 +37,7 @@ use std::pin::Pin;
 
 use pigeon_core::Account;
 use pigeon_core::mcp::Tool;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use worker::{Env, Error, Request, Response, Result};
 
@@ -166,8 +168,10 @@ pub struct Slot {
     pub scopes: &'static [&'static str],
 }
 
-/// The hostnames, Workers and resources a capability brings.
-#[derive(Serialize, Default, Clone)]
+/// The hostnames, Workers and resources a capability brings. A capability Worker sends its own
+/// in its manifest, read back here.
+#[derive(Serialize, Deserialize, Default, Clone)]
+#[serde(default)]
 pub struct Footprint {
     pub hostnames: Vec<HostFootprint>,
     pub workers: Vec<WorkerFootprint>,
@@ -181,7 +185,8 @@ pub struct Footprint {
 }
 
 /// A hostname a capability serves.
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Default)]
+#[serde(default)]
 pub struct HostFootprint {
     pub host: String,
     /// The Worker serving it; empty for the Worker hosting the capability.
@@ -195,7 +200,8 @@ pub struct HostFootprint {
 }
 
 /// A Worker a capability publishes, other than the one hosting it.
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Default)]
+#[serde(default)]
 pub struct WorkerFootprint {
     pub name: String,
     pub routes: Vec<String>,
