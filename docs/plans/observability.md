@@ -317,3 +317,19 @@ until the person approves a plan.
   and filter names are checked live. `observability_monitors_plan {check: true}` reads the
   alert types and policies and answers their shape only (groups, filter keys, counts, field
   names), asking no approval: the live check to run before the person's first apply.
+- 2026-11-22: handoff from the Workers-split planner (the person made the Claude chat the only
+  entry point). (a) landed `I5VaqvJa7n93nkCM`: all six Workers green, Cloudflare took the
+  settings from the deploy token. (b), third round, landed `MpWuu6RbcV_Z6tKf`. (c), second
+  round, `qMApWFZOGahHO27l` (`2e9d2e5`), deploying at handoff. Next, for a gateway run:
+  1. `observability_monitors_plan {check: true}` and compare: `available_alerts.is` should be
+     `object` with groups of entries; `wanted_absent` should be empty; `filter_keys` for the two
+     `workers_observability_*` types should include one of `services`, `worker_name`,
+     `script_name` (else the policies go out with no script filter); `policies.mechanisms_fields`
+     shows what a real policy's delivery holds (the POST sends `mechanisms: {}`, which a
+     read-only check cannot prove Cloudflare accepts). Fix mismatches on a branch before the
+     person's first apply. The billing watches come back only with the product and filter names
+     the check shows under `filter_keys.billing_usage_alert`.
+  2. `observability_summary` once: an `unavailable` entry per source shows what the live API
+     shapes (telemetry result, `wallTime*`, billable usage rows) did not match. A Worker that
+     logs nothing in the window shows "its Workers Logs may be off": a known false positive.
+  3. Still not built: `spike_after_deploy`, the CI price, the console Cost section.

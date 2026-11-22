@@ -586,8 +586,100 @@ over their in-flight work.
    `deploy_token`, or the map lists them for the rehearsal and removes them after. The second
    way is a gate change (delegate).
 
+## Open items (handoff, 2026-11-22)
+
+The Workers-split planner session handed its work to AI Gateway planners and executors when the
+person made the Claude chat the only entry point. Everything still open in its area, with where
+it stands and the next step:
+
+In the Lander's queue at handoff (submitted by the parent session):
+
+1. `claude/obs-c-fixes` @ `2e9d2e5` (landing `qMApWFZOGahHO27l`, deploying): observability
+   slice (c), second round. Next: once deployed, run `observability_monitors_plan {check: true}`
+   (read-only, no approval) and compare with what the code assumes (observability.md, Log). Fix
+   any mismatch before the person's first `observability_monitors_apply`; never run apply.
+2. `claude/ios-release-admit-rebased` @ `38c95c2` (landing `AvIf4UbXFZgfxk9j`): releases check
+   main's head only at `/apple/release/start`. Reviewed sound (ios.md). Next: watch it land; a
+   `rebase_refused` needs a hand rebase (below).
+3. `claude/changelog-r2-binding` @ `41d6400` (landing `VkX0njqRAjiqgDUd`): core's
+   `[[r2_buckets]]` `CHANGELOG` → `pigeon-changelog` (F2b). Lanes core and proxy. Next: after
+   it deploys, `changelog_update` should answer without minting an R2 token (it reads and writes
+   through the binding); the 307-commit backfill is already in the bucket.
+
+Recorded, not started (no branch):
+
+4. Core stops exporting the transferred classes `CiScheduler` and `ModelJobs` (cleanup item 6;
+   needs a rehearsal first, as the transfers did).
+5. `CiRunner` (the CI runners) moves to the CI gateway (cleanup item 13): the last class core
+   hosts for another Worker. High risk; plan it like phase 4's transfer.
+6. Reuse the tested build at deploy (cleanup item 11): not designed.
+7. A new Worker in one landing, not two (cleanup item 4): until built, follow the procedure in
+   cleanup.md item 4.
+8. Skip the rollback when a failed deploy never uploaded: D rolls back even when the upload
+   never happened, which costs a deploy and can hide the cause.
+9. D's attribution of environment failures: an incident caused by the environment (a stale
+   shared target, Cloudflare not yet knowing a new Worker) is pinned on the landing that ran.
+10. Per-Worker caller keys: the capability Workers share one caller key with core today.
+11. Resolve the deploy map from main at deploy time, not from the build that deploys.
+12. Proxy-first ordering for allowlist changes: a landing that widens the deploy proxy's
+    allowlist and needs it in the same deploy must deploy the proxy first; today it lands the
+    allowlist alone first (as JPC_PDdTQ2o5Ip9W did before F2b).
+13. Cleanup items 8 (clearer first-deploy incident text), 10 (delete `claude/land/<id>` test
+    refs), 12 (revoke an AI agent run's git grant at its end): proposed, small.
+14. Open questions 1 and 2 above: 2 is settled (the rehearsal ran, its Workers are to be
+    deleted); 1 is settled by the job objects' scoped credentials (9755740). Close them.
+
+For the person:
+
+- Gate changes from cleanup.md (follow-ups 1 and 2: the wrangler config check, dropping the
+  duplicate platform check). They are `ci/` changes, so the person lands them.
+- Delete the `pigeon-dotest-a`, then `pigeon-dotest-b` scripts in the dashboard, and remove
+  their workers.dev hosts from the cloud environment's allowlist.
+- The architecture diagram the person found incorrect (architecture.md, Open items): revisit
+  before phases 6 to 8.
+- Observability: the parent token must be able to mint Account Analytics Read, Workers
+  Observability Write, Billing Read, Notifications Read and Notifications Write; after the
+  first monitors apply, add email delivery to each `pigeon: …` policy in the dashboard.
+
+What only this session knew (lessons for whoever picks this up):
+
+- The Lander's line merge is stricter than git's three-way merge: two branches that both append
+  to `tests/smoke.rs` or a plan's Log are refused at rebase (`rebase_refused`). Rebase by hand:
+  cherry-pick the branch's own commits onto the newest main, keep both appends, gate, push a
+  new `claude/*` branch, land that. Docs commits that only add Log lines usually resolve by
+  keeping both sides; a branch that carries an older copy of a plan's Log resolves by keeping
+  main's.
+- `land` takes the full 40-character commit; a short one is refused.
+- A branch stacked on a queued landing's exact commit needs no rebase once that landing merges
+  (a fast-forward); the Lander rebases later queued branches over earlier ones when their paths
+  are disjoint.
+- Run the gate (`sh ci/runner/test.sh`) from a scratch worktree with
+  `CARGO_TARGET_DIR=/workspace/pigeon/target`, one at a time: two builds in the shared target at
+  once give bogus failures. The smoke suite alone: `cargo test -p pigeon-capabilities --test
+  smoke --target x86_64-unknown-linux-gnu`; without `--target` it builds WASM and cannot run.
+- `PIGEON_WORKER_DIR=src/<w> sh ci/deploy/allowlist.sh` runs the pinned wrangler (4.166.0)
+  against the stand-in and checks every call against the deploy proxy's allowlist. Use it for
+  any `wrangler.toml` change; it found wrangler's `GET …/r2/buckets/{name}` for
+  `[[r2_buckets]]`, which had to be allowlisted (and given Workers R2 Storage Read) first.
+- After a Durable Object class transfer, the source Worker's binding must name the new host
+  (`script_name`), or Cloudflare refuses the upload (10061).
+- Containers with `scheduling_policy = "durable_object"` ignore `max_instances`, and wrangler
+  refuses it there. The CI container cap is 8; the account allows far more.
+- Cloudflare took the `[observability]` settings from the `cf_deploy` token (landing
+  `I5VaqvJa7n93nkCM`, all six Workers green): no extra permission is needed.
+- R2 was off on the account until 2026-11-22 (Cloudflare 10042); the person enabled it.
+- `git cherry-pick --abort` after a `--continue` that already committed resets the whole
+  sequence; check `git status` first (the commits survive and can be reset to).
+
 ## Log
 
+- 2026-11-22: handoff. The person made the Claude chat the only entry point; this planner
+  session wrapped up and handed its area to AI Gateway planners and executors. Landed since the
+  last entry: architecture phase 5 (`rVsuNNL51jCPJDTd`), the changelog follow-up
+  (`JPC_PDdTQ2o5Ip9W`), observability (a) (`I5VaqvJa7n93nkCM`, all six Workers) and (b)
+  (`MpWuu6RbcV_Z6tKf`, after this planner's fixes). Reviewed and rebased: the iOS release-job
+  fix, observability (c). R2 enabled by the person; the changelog backfilled 307 commits. What
+  is open is under Open items (handoff).
 - 2026-11-22: delivery speed, with the person's go-ahead: two landings after AI agents landing 2.
   - L1, the Lander (`claude/lanes-scope`):
     - A path belongs to every Worker whose patterns match. A library deploys exactly the
