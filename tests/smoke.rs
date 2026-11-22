@@ -2448,6 +2448,11 @@ fn ai_agents_loop_budgets_tools_and_turns() {
         &json!({ "exit": 0, "ms": 1200, "bytes": 3, "saved_at": "/tmp/out/1.log", "output": "ok\n", "timed_out": false }),
     );
     assert!(shown.starts_with("exit 0 after 1200 ms") && shown.contains("/tmp/out/1.log"));
+    let found = sandbox::shown(
+        "grep",
+        &json!({ "count": 2, "matches": ["a.rs:1:x", "b.rs:2:y"], "truncated": false }),
+    );
+    assert_eq!(found, "2 matches\na.rs:1:x\nb.rs:2:y");
     assert_eq!(sandbox::instance("executor"), "standard-4");
     // What a run is told: its branch, the rules, and only tools pigeon has.
     let sys = prompts::system(Role::Executor, "claude/ai-agent-r1");

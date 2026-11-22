@@ -119,11 +119,13 @@ pub fn shown(op: &str, answer: &Value) -> String {
             } else {
                 ""
             };
-            format!(
-                "{} matches{more}\n{}",
-                answer["count"],
-                answer["matches"].as_str().unwrap_or_default()
-            )
+            let lines: Vec<&str> = answer["matches"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect();
+            format!("{} matches{more}\n{}", answer["count"], lines.join("\n"))
         }
         "list" => {
             let entries: Vec<&str> = answer["entries"]
