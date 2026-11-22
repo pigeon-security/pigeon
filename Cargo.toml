@@ -13,8 +13,6 @@ members = [
     "src/ci-gateway",
     "src/proxies",
     "src/proxy",
-    "src/dotest-a",
-    "src/dotest-b",
     "src/ai-agents",
     "src/ai-agents-worker",
 ]

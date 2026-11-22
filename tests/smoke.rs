@@ -1195,9 +1195,7 @@ fn land_rebases_disjoint_branches_and_lanes() {
             "pigeon-model-gateway",
             "pigeon-ci-gateway",
             "pigeon-proxy",
-            "pigeon-ai-agents",
-            "pigeon-dotest-b",
-            "pigeon-dotest-a"
+            "pigeon-ai-agents"
         ]
     );
     assert!(map.worker("sites").unwrap().queues.is_empty());
@@ -1229,8 +1227,13 @@ fn land_rebases_disjoint_branches_and_lanes() {
     let names = |a: &lanes::Affected| -> Vec<String> {
         map.deploy_order(a).iter().map(|w| w.name.clone()).collect()
     };
-    let sites = map.classify(&["src/sites/src/lib.rs", "src/blog/src/pages.rs"]);
+    let sites = map.classify(&["src/sites/src/lib.rs"]);
     assert_eq!(names(&sites), ["sites"]);
+    // The blog is built into core (pigeon-capabilities links it) as well as sites.
+    assert_eq!(
+        names(&map.classify(&["src/blog/src/pages.rs"])),
+        ["core", "sites"]
+    );
     assert_eq!(map.worker("sites").unwrap().deploy_job, "deploy-sites");
     assert_eq!(
         names(&map.classify(&["src/contract/src/wire.rs"])),
@@ -1240,18 +1243,28 @@ fn land_rebases_disjoint_branches_and_lanes() {
             "model-gateway",
             "ci-gateway",
             "proxy",
-            "ai-agents",
-            "dotest-b",
-            "dotest-a"
+            "ai-agents"
         ]
     );
-    // The DO transfer rehearsal: the destination deploys before the source that binds to it.
-    assert_eq!(
-        names(&map.classify(&["src/dotest-a/wrangler.toml", "src/dotest-b/src/lib.rs"])),
-        ["dotest-b", "dotest-a"]
+    // CI's code deploys the two Workers built with it, core and the gateway, and no other; the
+    // gateway alone deploys for its own crate.
+    let ci_code = map.classify(&["src/ci/src/lib.rs"]);
+    assert!(!ci_code.shared && !ci_code.ordered);
+    assert_eq!(names(&ci_code), ["core", "ci-gateway"]);
+    // The gate and the image sources deploy nothing; the policy, compiled into pigeon-core,
+    // deploys everything; the contract and the map go core first.
+    assert!(
+        map.classify(&["ci/runner/test.sh", "ci/sandbox/Dockerfile"])
+            .workers
+            .is_empty()
     );
-    // CI's code is shared while core still links it; the gateway alone deploys for its crate.
-    assert!(map.classify(&["src/ci/src/lib.rs"]).shared);
+    assert!(map.classify(&[".pigeon/policy.toml"]).shared);
+    assert!(map.classify(&["src/contract/src/wire.rs"]).ordered);
+    assert!(!map.classify(&["src/core/src/git.rs"]).ordered);
+    assert_eq!(
+        names(&map.classify(&["ci/workers.toml"])),
+        ["core", "proxy"]
+    );
     assert_eq!(
         names(&map.classify(&["src/ci-gateway/src/lib.rs"])),
         ["ci-gateway"]
@@ -1260,8 +1273,12 @@ fn land_rebases_disjoint_branches_and_lanes() {
         map.worker("ci-gateway").unwrap().deploy_job,
         "deploy-ci-gateway"
     );
-    // The proxies' code is shared by core and the proxy Worker; the Worker's own crate is not.
-    assert!(map.classify(&["src/proxies/src/git_proxy.rs"]).shared);
+    // The proxies' code deploys core and the proxy Worker, which both link it; the Worker's own
+    // crate deploys it alone.
+    assert_eq!(
+        names(&map.classify(&["src/proxies/src/git_proxy.rs"])),
+        ["core", "proxy"]
+    );
     assert_eq!(names(&map.classify(&["src/proxy/src/lib.rs"])), ["proxy"]);
     assert_eq!(map.worker("proxy").unwrap().deploy_job, "deploy-proxy");
     assert!(
@@ -3642,9 +3659,7 @@ fn proxy_worker_caches_and_core_ops() {
             "pigeon-model-gateway",
             "pigeon-ci-gateway",
             "pigeon-proxy",
-            "pigeon-ai-agents",
-            "pigeon-dotest-b",
-            "pigeon-dotest-a"
+            "pigeon-ai-agents"
         ]
     );
     let broken = pigeon_proxies::cf_proxy::CfProxy::platform("h", "s", "not toml [", "nope", "r");

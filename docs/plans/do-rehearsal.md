@@ -72,7 +72,11 @@ Any other result is the fallback in workers-split.md, phase 3: no transfer, a ne
 
 ## Removing them
 
-The deploy proxy has no script DELETE. Delete `pigeon-dotest-a` and `pigeon-dotest-b` by hand in
-the dashboard (b first: it holds the class a's binding names), or leave them inert: they hold
-only dummy rows, and an alarm that fires once. Their map entries, jobs, deploy scripts and crates
-come out in a later landing, before or after the scripts are deleted.
+Done on 2026-11-22. Their map entries, jobs, deploy scripts and crates came out in the
+delivery-speed batch (workers-split.md, Log). Each shared landing had spent two of CI's four
+containers deploying them.
+
+The deploy proxy has no script DELETE, so the scripts are deleted by hand in the dashboard:
+`pigeon-dotest-a` first (its `PROBE` binding names the class in b), then `pigeon-dotest-b`. Left
+alone they are inert: dummy rows, and an alarm that fires once. The two workers.dev hostnames
+can then leave the session environment's network allowlist.

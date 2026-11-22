@@ -3,38 +3,76 @@
 # own lane; a change to it is a gate change (rule `gate-changes`), like the rest of ci/.
 #
 # A pattern ending in `*` matches any path starting with the text before it; any other pattern
-# matches exactly. The first entry that matches wins: docs, then shared, then each worker in
-# order; a path nothing matches is shared. tests/smoke.rs is test-shared: a change to it runs
-# the tests of the Workers the landing otherwise touches, and never makes it shared.
+# matches exactly. docs, then shared, then checks: the first of those that matches wins.
+# Otherwise a path belongs to every worker whose patterns match it (a library belongs to each
+# Worker built with it), and a path nothing matches is shared. tests/smoke.rs runs the tests and
+# deploys nothing by itself.
+#
+# The test: a path belongs to a Worker when changing it can change what that Worker runs: its
+# crate and the crates it links, files compiled in (include_str!), its wrangler.toml and its
+# deploy script. Anything that only the gate or CI's jobs read is a check.
 version = 1
 
 # Merged without tests or a deploy.
 [docs]
 paths = ["docs/*"]
 
-# Every Worker's tests; deployed core first.
+# Built into every Worker, or read by every deploy: every Worker deploys.
 [shared]
 paths = [
     "src/core/*",
     "src/contract/*",
-    "src/models/*",
-    # CI's code: core still serves it, and pigeon-ci-gateway too (phase 4).
-    "src/ci/*",
-    "src/proxies/*",
+    # pigeon-core compiles the policy in.
+    ".pigeon/policy.toml",
     "Cargo.toml",
+    # A change to the workspace's own entries alone picks no lane (lanes::lock_members_only).
     "Cargo.lock",
     ".cargo/*",
     "rust-toolchain.toml",
-    ".pigeon/*",
+    # Every deploy runs these.
+    "ci/deploy/deploy.sh",
+    "ci/deploy/allowlist.sh",
+    "ci/deploy/node.sh",
+    "ci/deploy/standin.mjs",
+]
+# Only these hold the other lanes until core has deployed them: the contract between core and
+# the capability Workers, and this map, which core and the proxy build the deploy scope from.
+# Any other landing's lanes, core's included, start together.
+core_first = ["src/contract/*", "ci/workers.toml"]
+
+# Tested, deployed nowhere: the gate and CI's jobs, Claude Code's settings (generated from the
+# policy, checked by the gate), and the image sources, whose images the Workers pin by digest.
+[checks]
+paths = [
+    "ci/runner/test.sh",
+    "ci/runner/smoke.sh",
+    "ci/runner/smoke-fail.sh",
+    "ci/runner/sleep.sh",
+    "ci/image/*",
+    "ci/sandbox/*",
+    ".pigeon/ci.toml",
     ".claude/*",
-    "ci/*",
+    ".gitignore",
 ]
 
 [[worker]]
 name = "core"
 script = "pigeon-platform"
 dir = "src/platform"
-paths = ["src/platform/*", "src/capabilities/*"]
+paths = [
+    "src/platform/*",
+    "src/capabilities/*",
+    # The crates core links, which other Workers link too.
+    "src/models/*",
+    "src/ci/*",
+    "src/proxies/*",
+    "src/blog/*",
+    "src/ai-agents/*",
+    # Compiled in: the map (core's deploy scope) and CI's runner scripts (src/ci).
+    "ci/workers.toml",
+    "ci/runner/entrypoint.sh",
+    "ci/runner/buildkite.sh",
+]
 test_job = "test"
 deploy_job = "deploy"
 after = ["architecture", "portal_sync"]
@@ -45,19 +83,19 @@ after = ["architecture", "portal_sync"]
 name = "sites"
 script = "pigeon-sites"
 dir = "src/sites"
-paths = ["src/sites/*", "src/blog/*"]
+paths = ["src/sites/*", "src/blog/*", "ci/deploy/deploy-sites.sh"]
 test_job = "test"
 deploy_job = "deploy-sites"
 after = ["portal_sync"]
 
-# The model gateway Worker: model requests through the AI Gateway, usage and async jobs, whose
-# class core still hosts (src/models is shared: core links it). A capability Worker behind
-# core (docs/plans/workers-split.md, phase 3).
+# The model gateway Worker: model requests through the AI Gateway, usage, and the async jobs'
+# class, which it hosts since the transfer. A capability Worker behind core
+# (docs/plans/workers-split.md, phase 3).
 [[worker]]
 name = "model-gateway"
 script = "pigeon-model-gateway"
 dir = "src/model-gateway"
-paths = ["src/model-gateway/*"]
+paths = ["src/model-gateway/*", "src/models/*", "ci/deploy/deploy-model-gateway.sh"]
 test_job = "test"
 deploy_job = "deploy-model-gateway"
 after = ["portal_sync"]
@@ -70,59 +108,46 @@ after = ["portal_sync"]
 name = "ci-gateway"
 script = "pigeon-ci-gateway"
 dir = "src/ci-gateway"
-paths = ["src/ci-gateway/*"]
+paths = [
+    "src/ci-gateway/*",
+    "src/ci/*",
+    "ci/runner/entrypoint.sh",
+    "ci/runner/buildkite.sh",
+    "ci/deploy/deploy-ci-gateway.sh",
+]
 test_job = "test"
 deploy_job = "deploy-ci-gateway"
 after = ["portal_sync", "connectors_setup"]
 queues = ["pigeon-ci-events"]
 containers = []
 
-# The proxy Worker: /git/ and /cf/ on proxy.pigeon.dev, with the proxies' code shared with core
-# (src/proxies, so shared). A capability Worker that never holds the parent token
-# (docs/plans/workers-split.md, phase 6).
+# The proxy Worker: /git/ and /cf/ on proxy.pigeon.dev. A capability Worker that never holds the
+# parent token (docs/plans/workers-split.md, phase 6). It builds the deploy scope from core's
+# wrangler.toml and this map, both compiled in.
 [[worker]]
 name = "proxy"
 script = "pigeon-proxy"
 dir = "src/proxy"
-paths = ["src/proxy/*"]
+paths = [
+    "src/proxy/*",
+    "src/proxies/*",
+    "src/platform/wrangler.toml",
+    "ci/workers.toml",
+    "ci/deploy/deploy-proxy.sh",
+]
 test_job = "test"
 deploy_job = "deploy-proxy"
 after = []
 
-
 # The AI agents Worker: planner and executor runs inside pigeon, their sandboxes (one container
 # per run) and the ai_agents_* tools. A capability Worker behind core (docs/plans/ai-agents.md).
-# Its crate src/ai-agents is linked only by it, and by the smoke suite.
+# Its crate src/ai-agents is linked by core too.
 [[worker]]
 name = "ai-agents"
 script = "pigeon-ai-agents"
 dir = "src/ai-agents-worker"
-paths = ["src/ai-agents-worker/*", "src/ai-agents/*"]
+paths = ["src/ai-agents-worker/*", "src/ai-agents/*", "ci/deploy/deploy-ai-agents.sh"]
 test_job = "test"
 deploy_job = "deploy-ai-agents"
 after = ["portal_sync"]
 containers = ["Sandbox"]
-# A throwaway Worker for the Durable Object transfer rehearsal (docs/plans/do-rehearsal.md;
-# docs/plans/workers-split.md, T17): the transfer's destination. Listed before dotest-a, whose
-# binding names it, so a landing that deploys both deploys it first. Its entry comes out once
-# the rehearsal is done.
-[[worker]]
-name = "dotest-b"
-script = "pigeon-dotest-b"
-dir = "src/dotest-b"
-paths = ["src/dotest-b/*"]
-test_job = "test"
-deploy_job = "deploy-dotest-b"
-after = []
-
-# A throwaway Worker for the Durable Object transfer rehearsal (docs/plans/do-rehearsal.md;
-# docs/plans/workers-split.md, T17): the transfer's source. Its entry comes out once the
-# rehearsal is done.
-[[worker]]
-name = "dotest-a"
-script = "pigeon-dotest-a"
-dir = "src/dotest-a"
-paths = ["src/dotest-a/*"]
-test_job = "test"
-deploy_job = "deploy-dotest-a"
-after = []

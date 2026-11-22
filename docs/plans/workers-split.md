@@ -588,6 +588,53 @@ over their in-flight work.
 
 ## Log
 
+- 2026-11-22: delivery speed, with the person's go-ahead: two landings after AI agents landing 2.
+  - L1, the Lander (`claude/lanes-scope`):
+    - A path belongs to every Worker whose patterns match. A library deploys exactly the
+      Workers built with it.
+    - `[checks]` paths, and the smoke suite alone, run the tests and deploy nothing.
+    - `[shared] core_first`: only those paths (the contract and this map) hold the other
+      lanes until core has deployed. Every other landing's lanes start together. Migration
+      17 adds `landings.ordered`, which defaults to waiting.
+    - A `Cargo.lock` change to the workspace's own entries alone picks no lane
+      (`lanes::lock_members_only`, read at the base and the tip). A registry or git package
+      change stays shared.
+    - `ci/workers.toml`, `Cargo.toml` and `.pigeon/ci.toml` merge line by line at rebase, and
+      the merged result is tested again.
+  - L2, the map and the rehearsal Workers (`claude/lanes-map`), after L1's Lander runs:
+    - `shared` keeps only what every Worker builds or every deploy runs: `src/core`,
+      `src/contract`, the policy (compiled into pigeon-core), the workspace manifest and
+      lockfile, the toolchain, and the four common deploy scripts.
+    - `src/models`, `src/ci`, `src/proxies`, `src/blog` and `src/ai-agents` belong to core and
+      to the one Worker each also builds.
+    - Each `deploy-<worker>.sh` belongs to its Worker. The map and core's `wrangler.toml`
+      belong to core and the proxy, which compile them in.
+    - The gate's scripts, `.pigeon/ci.toml`, `.claude/` and the image sources (`ci/image`,
+      `ci/sandbox`, pinned by digest) are checks.
+    - The stand-in stays shared: every deploy runs it, and incidents 1–3 were a stand-in gap.
+    - pigeon-dotest-a and -b are removed: crates, map entries, jobs and deploy scripts. Their
+      scripts are deleted by hand (docs/plans/do-rehearsal.md).
+  - Measured today:
+    - A single-Worker landing took 4.7–5.4 min end to end (checking 0.3 min, tests 2.3–2.8,
+      merge 0.1, its deploy 1.8–2.2); core alone, 6.7.
+    - A shared landing took 10–10.7 min, plus the 4-minute setup wait until
+      `_v5M4QIiUXbWonIP`. It ran 8 deploys on 4 containers: core first, then two waves.
+  - Expected after:
+    - A single-Worker landing still takes about 5 min.
+    - A change to `src/models` or `src/ci`, shared until now, goes from about 11–15 min to
+      about 6.5 min (core and its gateway in parallel).
+    - A gate, CI-job, image-source or smoke-only change goes from about 11 min to about
+      3 min (tests only).
+    - A shared landing deploys 6 Workers, not 8, and the lanes start together unless it
+      touches the contract or the map.
+  - Later, recorded and not done:
+    - Reuse the tested build at deploy, rather than building again in the deploy job.
+    - Let a landing deploy a Worker it adds, by resolving from the branch's map; today a new
+      Worker deploys on the next landing that touches it.
+    - More CI capacity for deploys.
+    - Proxy-first ordering for allowlist changes: the deploy proxy now runs in pigeon-proxy,
+      so a new allowlist entry a Worker's deploy needs should reach pigeon-proxy first.
+
 - 2026-11-22: phase 4's transfer done; the split is complete.
   - B2-prep (`a9c23d0`): with `Accounts::Scoped` and no one calling, CI asks core as the
     Worker itself (`worker:pigeon-ci-gateway`, key from its own `CALLER_KEY`), so the
