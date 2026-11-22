@@ -689,6 +689,57 @@ checks. I'll propose them with the environment tools when phase 0 or 4 reaches t
 `api.cloudflare.com`, `dash.cloudflare.com` and `api.github.com` are reached by the platform,
 not by this session.
 
+## Open items (2026-11-22, handoff)
+
+This planner session is archived, and its work passes to the AI Gateway planners and executors.
+Each item gives its state and the next step.
+
+1. **Linked accounts**: done and live. `linked_setup` ran (OAuth client `28a843c4…`), with
+   `offline_access` so links get refresh tokens. noisypigeon is linked to account
+   `45017763d00a05ee9ff3aaaa15f05145`. `linked_check` and `linked_status` are read-only.
+   - Next: none. If a link stops refreshing, run `linked_check` first.
+2. **OAuth scopes** (`linked_scopes`, landed as `8b1d517`): read-only; it lists Cloudflare's
+   404 OAuth scopes.
+   - All nine needs of the data Worker exist as scopes: Pipelines, R2 Data Catalog (plus R2
+     SQL Read), Email Routing, Zone Settings, Workers AI, API Tokens, Vectorize, Queues and D1.
+     None needs a token made by hand.
+   - API Tokens exists only as Write (account and user). It is the riskiest scope.
+   - Next: no scope is added to the client yet. Adding scopes for data-enabled links, and a
+     re-link prompt for existing links, is data-worker.md need 2. The person approves each
+     scope, and API Tokens Write separately.
+3. **Instances** (plan/apply, `instance_subdomains`): done. Plans observe, dry-run, bind the
+   digest to the person's passkey and re-check on apply. They touch only what pigeon made and
+   never delete.
+   - Next: the record shape for `data` (data-worker.md need 1). Nothing is built yet.
+4. **noisypigeon**: done and live.
+   - Bucket `noisypigeon-site` (eu) and Worker `noisypigeon` exist.
+   - noisypigeon.com and www are Workers Custom Domains, with www redirecting to the apex.
+   - noisypigeon.pigeon.dev is served by pigeon-sites.
+   - Mail on the zone was removed on purpose by the person.
+   - Next: none. Any DNS or zone change needs the person's go-ahead for that step.
+5. **Sites** (`site_deploy` in pigeon-sites, landed): it reads the GitHub tarball, renders, and
+   writes blobs, then the manifest, then `live`.
+   - Next: a console view of deploys, and pruning old `deploys/*.json` and unreferenced blobs.
+     Neither is started.
+6. **GitHub App** `pigeon-security` (App 5869577, installation 184534958, secrets in the
+   Secrets Store): done. `/github/hook` records pushes at `github:deploy:{instance}`, and the
+   minute cron's `run_pending` deploys them (3-minute lease, 5 tries).
+7. **Deploy on push**: built but not yet confirmed on a real push. `github_status` shows
+   `latest_deploy` null; the last push was 779a1ad, before the cron.
+   - Next: after the person's next push to noisypigeon/noisypigeon, or a redelivery from the
+     App's settings, check that `github_status.latest_deploy` names the new commit, and that
+     `x-pigeon-commit` on https://noisypigeon.com matches. If it doesn't, read the pending entry
+     and the cron log.
+8. **Two more instances, later**: not started. Each follows noisypigeon's path:
+   1. approve the record;
+   2. link;
+   3. plan and apply (bucket, Worker, domains);
+   4. install the App on the repository;
+   5. `site_deploy`.
+   One is likely `willowgraysen` (data-worker.md follow-up 1).
+9. **Housekeeping**: the branches `claude/linked-link-2`, `claude/linked-link-3` and
+   `claude/github-bindings` were pushed to GitHub by mistake. The person can delete them there.
+
 ## Log
 
 - 2026-11-22, 05:40: **noisypigeon.pigeon.dev serves** (phase 5b), from the person's phone.

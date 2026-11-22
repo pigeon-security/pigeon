@@ -290,6 +290,21 @@ Numbered so they can answer item by item. None of this is built by this plan.
 5. When phase 3 asks, say go for each step that touches willowgraysen.com's DNS (email routing
    on its capture subdomain).
 
+## Open items (2026-11-22, handoff from the instances and linked-accounts planner)
+
+- **Need 2 (OAuth scopes), answered**: `linked_scopes` (core, `8b1d517`) shows that all the
+  scopes this plan names exist as OAuth scopes, so no hand-made token is needed for any of them:
+  - `pipelines.write`, `r2-catalog.write` (plus `r2-catalog-sql.read`);
+  - `email-routing-rule.write`, `zone-settings.write`;
+  - `ai.read`, `vectorize.write`, `queues.write`, `d1.write`.
+  Email Sending (`email-sending.write`) exists too.
+- **Need 9 (the Pipelines sink token)**: possible through the link with
+  `account-api-tokens.write`. It is the riskiest scope, since its holder can create tokens. The
+  recommendation is to ask for it only if the person approves it separately, and otherwise to
+  have them make the sink token by hand.
+- **Needs 1 and 3–8, 10**: not started. They pass to the AI Gateway planners and executors with
+  the rest of linked-accounts.md's open items.
+
 ## Log
 
 - 2026-11-22: design written overnight from the person's brief (#6), after reading the instance
