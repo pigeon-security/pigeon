@@ -1,6 +1,6 @@
 # Passkey approval for risky tool calls
 
-Status: **phase 1 built** on `claude/tool-approvals-3` (21 November); the person chose option (a), relayed by the parent session. Phase 2 (the rules) waits for their passkey.
+Status: **done** (22 November). Phase 1 landed `5VE9A34eRm8GmG_j` (main `51e246b`); phase 2, the person's rules, landed `X0XXqMKxz7EJP_pr` (main `7debe9f`) with their passkey; phase 3 is this docs landing.
 
 The person asked: "Can you seed a session to require a pass key approval to use those tools?" The
 tools are the ones listed as candidates to switch off at the MCP portal:
@@ -290,3 +290,12 @@ Executors (AI Gateway, `models_submit`) build fixed pieces, each with its files 
   matters only if the person someday removes every `call_tool` rule: tool calls then run as
   before phase 2, rather than all being refused as "not in policy", `land` included, which is
   the way to change the policy back.
+
+## Live check (22 November, after phase 2)
+
+- `deploy_token {"ttl": 300}` through the portal answered "needs the person's passkey for this call: approval `Dz2stcAdc6aABdOMTyHgw2` waits on the console's Approvals tab until 00:33 UTC" and minted nothing.
+- The person approved the card "Run deploy_token" with their passkey.
+- The same call with `"approval": "Dz2stcAdc6aABdOMTyHgw2"` answered a token (id `d1c3568b…`), revoked at once with `revoke_api_token`.
+- The same call again answered "approval Dz2stcAdc6aABdOMTyHgw2 is used": it ran once and not twice.
+- `land`, `land_status` and `policy_check` ran throughout with no approval (rule `tools-run`).
+- Sessions started before the phase 2 deploy list the gated tools without the `approval` argument until they restart; passing it works anyway.

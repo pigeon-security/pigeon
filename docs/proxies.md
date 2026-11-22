@@ -198,7 +198,7 @@ A change to the allowlist only takes effect once it is deployed, and the deploye
 The pigeon environment no longer allows `api.cloudflare.com` or the Artifacts host, so the only deploys from it are through `/cf/`. When a change cannot deploy that way, such as a change to the deploy allowlist itself that the deployed proxy refuses before the upload, deploy once directly, from a session on the **Default** environment (which allows `api.cloudflare.com`) or from the person's own machine, with a `deploy_token`. Only a person should start this.
 
 1. Check out the commit to deploy. It should be what main will be: a landed main from `https://github.com/pigeon-security/pigeon` (the mirror copies main), or the `claude/` branch that is landing next.
-2. Call the Pigeon MCP tool `deploy_token` with `{"ttl": 1800}`. Note its `id`.
+2. Call the Pigeon MCP tool `deploy_token` with `{"ttl": 1800}`. Each call needs the person's passkey (rule `risky-tools-need-passkey`, `docs/plans/tool-approvals.md`): the first call answers an approval id and mints nothing. The person approves that call on the console's Approvals tab; then call `deploy_token` again with the same arguments and `"approval": "<id>"`. Note the token's `id`. Approving needs only the platform Worker, its Directory and the person's passkey, none of the land flow, CI or the proxies.
 3. From `src/platform`, with the token read from the prompt rather than written in the command:
 
    ```
@@ -215,6 +215,20 @@ The pigeon environment no longer allows `api.cloudflare.com` or the Artifacts ho
 5. If the deployed commit is not on main yet, land its branch the usual way (`land`), so main and the deployed Worker agree. Once the fixed allowlist is live, that landing's deploy goes through `/cf/` again.
 
 In a session, the token is in the transcript from step 2 on: keep the lifetime short, and revoke it at once. Never save a `deploy_token` anywhere.
+
+### When the platform itself is down
+
+If `pigeon-platform` does not answer (a bad deploy, the Worker or its Directory failing), there is no `deploy_token` to call or approve. The person deploys with their own Cloudflare login and nothing of pigeon's, on their own machine, from `src/platform` of a good commit:
+
+```
+cd src/platform
+npm ci
+npx wrangler login              # the person's own Cloudflare account, in the browser
+npx wrangler rollback           # back to the last good version; or, for a good commit:
+CLOUDFLARE_ACCOUNT_ID=4f94676cb2cbe46fd985b089ca97ea27 WRANGLER_SEND_METRICS=false npx wrangler deploy
+```
+
+Then land the fix the usual way, so main and the deployed Worker agree.
 
 ### Landing deploys
 
