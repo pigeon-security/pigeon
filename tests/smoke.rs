@@ -3346,6 +3346,15 @@ fn apple_release_numbers_steps_and_upload() {
         assert!(may(state, "upload").is_err(), "{state}");
     }
     assert!(release::open("processing") && !release::open("complete"));
+    // Apple's upload state is an object; its errors and warnings are kept as the detail.
+    let st = json!({ "state": "FAILED", "errors": [{ "code": "90000", "description": "Bad bundle" }],
+        "warnings": [{ "code": "W1", "description": "Old SDK" }] });
+    assert_eq!(release::upload_state(&st), "FAILED");
+    assert_eq!(release::upload_state(&json!("COMPLETE")), "COMPLETE");
+    assert_eq!(
+        release::upload_problems(&st),
+        "errors: 90000 Bad bundle; warnings: W1 Old SDK"
+    );
     assert_eq!(release::JOB, "ios-release");
 
     assert!(is_version("0.2.0") && is_version("1") && is_version("10.4"));

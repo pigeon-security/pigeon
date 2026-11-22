@@ -56,6 +56,10 @@ xcodebuild archive \
   CURRENT_PROJECT_VERSION="$number"
 version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
   build/Pigeon.xcarchive/Products/Applications/Pigeon.app/Info.plist)
+# The unsigned archive carries no entitlements, and the export keeps only those already in the
+# app's signature. An ad-hoc signature (no key) with the app's entitlements carries them over.
+codesign --force --sign - --entitlements Pigeon/Pigeon.entitlements \
+  build/Pigeon.xcarchive/Products/Applications/Pigeon.app
 
 # The identity, once. Nothing below prints it.
 call identity -o "$secret/identity.json"

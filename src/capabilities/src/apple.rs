@@ -1185,6 +1185,28 @@ pub mod release {
         } })
     }
 
+    /// A build upload's state: `{state, errors, warnings, infos}` in App Store Connect's answer
+    /// (`BuildUpload.Attributes.State`), or a bare string.
+    pub fn upload_state(st: &Value) -> &str {
+        st["state"].as_str().or(st.as_str()).unwrap_or_default()
+    }
+
+    /// The errors and warnings of a build upload's state, at most 500 characters.
+    pub fn upload_problems(st: &Value) -> String {
+        let mut out = Vec::new();
+        for kind in ["errors", "warnings"] {
+            for d in st[kind].as_array().into_iter().flatten() {
+                let code = d["code"].as_str().unwrap_or_default();
+                let msg = d["description"]
+                    .as_str()
+                    .or(d["message"].as_str())
+                    .unwrap_or_default();
+                out.push(format!("{kind}: {code} {msg}"));
+            }
+        }
+        out.join("; ").chars().take(500).collect()
+    }
+
     /// `ios_releases`: the latest releases, newest first, those still processing read fresh.
     pub async fn list(env: &Env) -> Result<Value> {
         let ids = jobs(env).await?;
@@ -1203,7 +1225,8 @@ pub mod release {
                 .await
                 {
                     Ok(v) => {
-                        let state = v["data"]["attributes"]["state"].as_str().unwrap_or_default();
+                        let st = &v["data"]["attributes"]["state"];
+                        let state = upload_state(st);
                         r.processing = v["included"]
                             .as_array()
                             .into_iter()
@@ -1216,9 +1239,14 @@ pub mod release {
                             "COMPLETE" => r.state = "complete".into(),
                             "FAILED" => {
                                 r.state = "failed".into();
-                                r.detail = Some(v["data"]["attributes"].to_string().chars().take(300).collect());
+                                r.detail = Some(upload_problems(st));
                             }
-                            _ => {}
+                            _ => {
+                                let p = upload_problems(st);
+                                if !p.is_empty() {
+                                    r.detail = Some(p);
+                                }
+                            }
                         }
                         r.updated_ms = now_ms();
                         store(env, &r).await?;
