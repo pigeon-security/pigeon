@@ -83,6 +83,40 @@
           el("p", { text: "No capability declares this one, so it is listed only." })))));
     }
 
+    // Apple signing (docs/plans/ios.md, phase 2): two writes, each with a passkey, shown once the
+    // App Store Connect key is set. Neither touches a certificate or profile pigeon did not make.
+    function appleWrite(path, label, note) {
+      const status = el("p", { "data-status": "", role: "status" });
+      const btn = el("button", { class: "button", type: "button", text: label });
+      btn.onclick = async () => {
+        btn.disabled = true;
+        say("Waiting for your passkey…", false, status);
+        try {
+          const done = await ceremony(path, {}, {});
+          say(done.message, false, status);
+        } catch (e) {
+          say(e.message, true, status);
+        } finally {
+          btn.disabled = false;
+        }
+      };
+      return el("article", { class: "card" },
+        el("div", { class: "card-h" }, el("h3", { text: label })),
+        el("p", { text: note }),
+        el("div", { class: "c-row" }, btn),
+        status);
+    }
+    const appleKey = secrets.find((s) => s.name === "APPLE_ASC_KEY");
+    const applePart = appleKey && appleKey.set
+      ? el("div", { class: "layer", id: "apple" },
+        el("h3", { text: "Apple signing" }),
+        el("p", { class: "muted", style: "margin:0", text: "For the app dev.pigeon.app. apple_status shows what Apple holds." }),
+        appleWrite("/apple/adopt", "Adopt dev.pigeon.app",
+          "Registers the bundle id if Apple has none, and adds Push Notifications and Associated Domains where missing. Apple marks existing App Store profiles for this bundle id invalid when its capabilities change."),
+        appleWrite("/apple/identity", "Create signing identity",
+          "Makes a key in pigeon, an Apple Distribution certificate for it and an App Store profile. The first press only makes APPLE_SEAL_KEY, which seals the key; press again once its binding has landed."))
+      : null;
+
     const issueStatus = el("p", { "data-status": "", role: "status" });
     const result = el("div", { class: "layer" });
     const label = el("input", { class: "c-input", maxlength: "64", "aria-label": "Label", placeholder: "Label, such as ci-gateway session" });
@@ -193,6 +227,6 @@
         : null,
       listStatus);
 
-    body.replaceChildren(el("div", { class: "layer", style: "gap:32px" }, secretsPart, credentials));
+    body.replaceChildren(el("div", { class: "layer", style: "gap:32px" }, secretsPart, applePart, credentials));
   });
 })();

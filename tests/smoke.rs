@@ -3085,7 +3085,13 @@ fn apple_ids_token_and_slots() {
     assert_eq!(asc::api_error(500, "<html>"), "App Store Connect 500");
 
     // The console's slots: the four the person fills, in order, all for Workers.
-    let slots: Vec<String> = Apple.secrets().into_iter().map(|s| s.name).collect();
+    let apple_cap = Apple {
+        passkeys: pigeon_capabilities::passkeys::Passkeys {
+            host: "platform.example.com".into(),
+            site_name: "pigeon".into(),
+        },
+    };
+    let slots: Vec<String> = apple_cap.secrets().into_iter().map(|s| s.name).collect();
     assert_eq!(slots, apple::SLOTS.map(String::from).to_vec());
     assert_eq!(
         slots,
@@ -3096,9 +3102,136 @@ fn apple_ids_token_and_slots() {
             "APPLE_ASC_KEY"
         ]
     );
-    let tools: Vec<&str> = Apple.tools().iter().map(|t| t.name).collect();
+    let tools: Vec<&str> = apple_cap.tools().iter().map(|t| t.name).collect();
     assert_eq!(tools, ["apple_status"]);
+    assert_eq!(apple_cap.routes(), ["/apple/"]);
     assert_eq!(asc::BUNDLE_ID, "dev.pigeon.app");
+}
+
+/// Phase 2 (docs/plans/ios.md): the CSR's DER, laid out byte for byte; the bodies sent to Apple;
+/// the console writes' passkey purposes; and an identity's record, sealed key and all, which
+/// round-trips through the Directory and is never shown.
+#[test]
+fn apple_signing_identity_requests_and_records() {
+    use pigeon_capabilities::apple::{self, Identity, Profile};
+    use pigeon_core::apple::{b64, csr, unb64};
+
+    // A stand-in public key and signature; the layout around them is what is checked.
+    let spki = [0x30, 0x03, 0x02, 0x01, 0x05];
+    let info = csr::request_info(&spki, apple::COMMON_NAME);
+    let mut want = vec![0x30, 0x2c, 0x02, 0x01, 0x00]; // info, version 0
+    want.extend([0x30, 0x20, 0x31, 0x1e, 0x30, 0x1c]); // subject: one RDN, one attribute
+    want.extend([0x06, 0x03, 0x55, 0x04, 0x03, 0x0c, 0x15]); // commonName, UTF8String
+    want.extend(b"pigeon dev.pigeon.app");
+    want.extend(spki);
+    want.extend([0xa0, 0x00]); // no attributes
+    assert_eq!(info, want);
+
+    let req = csr::request(&info, &[0xab; 256]);
+    assert_eq!(req[..4], [0x30, 0x82, 0x01, 0x42]); // long-form length, 322 bytes
+    assert_eq!(req[4..50], info[..]);
+    assert_eq!(
+        req[50..65],
+        [
+            0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b, 0x05,
+            0x00
+        ]
+    ); // sha256WithRSAEncryption, NULL
+    assert_eq!(req[65..70], [0x03, 0x82, 0x01, 0x01, 0x00]); // BIT STRING, no unused bits
+    assert_eq!(req.len(), 70 + 256);
+    assert_eq!(csr::tlv(0x04, &[0; 200])[..3], [0x04, 0x81, 0xc8]);
+
+    // Apple takes standard base64 with padding; base64url is refused when reading.
+    assert_eq!(b64(&[0xfb, 0xff, 0x01]), "+/8B");
+    assert_eq!(b64(&[1, 2, 3, 4, 5]), "AQIDBAU=");
+    assert_eq!(unb64("AQID\nBAU=").unwrap(), [1, 2, 3, 4, 5]);
+    assert_eq!(unb64("+/8B").unwrap(), [0xfb, 0xff, 0x01]);
+    assert!(unb64("-_8B").is_none());
+
+    // The bodies: a DISTRIBUTION certificate from the CSR, an App Store profile for one
+    // certificate and the bundle id.
+    let body = apple::certificate_request(&req);
+    assert_eq!(body["data"]["type"], "certificates");
+    assert_eq!(
+        body["data"]["attributes"]["certificateType"],
+        "DISTRIBUTION"
+    );
+    assert_eq!(
+        unb64(body["data"]["attributes"]["csrContent"].as_str().unwrap()).unwrap(),
+        req
+    );
+    let body = apple::profile_request("pigeon dev.pigeon.app 2026-11-22", "BUNDLE1", "CERT1");
+    assert_eq!(
+        body,
+        json!({ "data": { "type": "profiles",
+            "attributes": { "name": "pigeon dev.pigeon.app 2026-11-22", "profileType": "IOS_APP_STORE" },
+            "relationships": {
+                "bundleId": { "data": { "type": "bundleIds", "id": "BUNDLE1" } },
+                "certificates": { "data": [{ "type": "certificates", "id": "CERT1" }] },
+            } } })
+    );
+
+    // Adopt adds only what is missing.
+    assert_eq!(
+        apple::missing(
+            &apple::CAPABILITIES,
+            &["PUSH_NOTIFICATIONS".into(), "IN_APP_PURCHASE".into()]
+        ),
+        ["ASSOCIATED_DOMAINS"]
+    );
+    assert!(
+        apple::missing(&apple::CAPABILITIES, &apple::CAPABILITIES.map(String::from)).is_empty()
+    );
+
+    // Each write's passkey names it and the bundle id; nothing else is a write.
+    assert_eq!(
+        apple::purpose("adopt").unwrap(),
+        "apple:adopt:dev.pigeon.app"
+    );
+    assert_eq!(
+        apple::purpose("identity").unwrap(),
+        "apple:identity:dev.pigeon.app"
+    );
+    assert!(apple::purpose("revoke").is_none());
+    assert_eq!(apple::seal_aad("CERT1"), "apple:identity:CERT1");
+
+    // The record: the sealed key and the bytes round-trip, the expiry is the earlier of the
+    // certificate's and the profile's, and what is shown holds none of the secret parts.
+    let sealed =
+        pigeon_core::webauthn::b64url(&pigeon_core::crypto::join_sealed(&[7; 12], &[9; 40]));
+    let (iv, ct) =
+        pigeon_core::crypto::split_sealed(&pigeon_core::webauthn::unb64url(&sealed).unwrap())
+            .map(|(a, b)| (a.to_vec(), b.to_vec()))
+            .unwrap();
+    assert_eq!((iv, ct), (vec![7; 12], vec![9; 40]));
+    assert!(pigeon_core::crypto::split_sealed(&[0; 27]).is_none());
+    let id = Identity {
+        id: "CERT1".into(),
+        serial: "ABC123".into(),
+        expires: "2027-11-22T10:00:00.000+00:00".into(),
+        certificate: "CERTIFICATE-BYTES".into(),
+        sealed_key: sealed.clone(),
+        made_by: "willow".into(),
+        made_ms: 1,
+        profile: Some(Profile {
+            id: "PROF1".into(),
+            uuid: "u-1".into(),
+            name: "pigeon dev.pigeon.app 2026-11-22".into(),
+            expires: "2027-11-20T10:00:00.000+00:00".into(),
+            content: "PROFILE-BYTES".into(),
+        }),
+    };
+    let back: Identity = serde_json::from_str(&serde_json::to_string(&id).unwrap()).unwrap();
+    assert_eq!(back, id);
+    assert_eq!(
+        id.expires_ms(),
+        pigeon_core::expiry::parse_time("2027-11-20T10:00:00Z")
+    );
+    let shown = id.shown().to_string();
+    for secret in [sealed.as_str(), "CERTIFICATE-BYTES", "PROFILE-BYTES"] {
+        assert!(!shown.contains(secret), "{secret}");
+    }
+    assert!(shown.contains("ABC123") && shown.contains("PROF1"));
 }
 
 // ---- storage ----

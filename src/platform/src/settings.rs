@@ -203,9 +203,14 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
             token_binding: "GITHUB_MIRROR_TOKEN".into(),
             tool: "source_mirror",
         }),
-        // App Store Connect (docs/plans/ios.md, phase 1): slots and a read-only status; off
-        // until the person sets the slots and their bindings land.
-        Box::new(Apple),
+        // App Store Connect (docs/plans/ios.md): slots, a read-only status, and the console's
+        // passkey-bound writes that adopt the bundle id and make pigeon's signing identity.
+        Box::new(Apple {
+            passkeys: Passkeys {
+                host: HOST.into(),
+                site_name: "pigeon".into(),
+            },
+        }),
         // Read-only object storage; with no accounts declared its tools only explain setup.
         Box::new(Storage {
             accounts: storage_accounts(),

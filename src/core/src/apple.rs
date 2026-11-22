@@ -151,11 +151,30 @@ pub fn api_error(status: u16, body: &str) -> String {
 
 /// GETs `path` (with its query) from the API with `token`, and answers the JSON body.
 pub async fn get(token: &str, path: &str) -> Result<serde_json::Value> {
+    send(Method::Get, token, path, None).await
+}
+
+/// POSTs a JSON:API document to `path` with `token`, and answers the JSON body.
+pub async fn post(token: &str, path: &str, body: &serde_json::Value) -> Result<serde_json::Value> {
+    send(Method::Post, token, path, Some(body)).await
+}
+
+async fn send(
+    method: Method,
+    token: &str,
+    path: &str,
+    body: Option<&serde_json::Value>,
+) -> Result<serde_json::Value> {
     let headers = Headers::new();
     headers.set("Authorization", &format!("Bearer {token}"))?;
     headers.set("Accept", "application/json")?;
+    if body.is_some() {
+        headers.set("Content-Type", "application/json")?;
+    }
     let mut init = RequestInit::new();
-    init.with_method(Method::Get).with_headers(headers);
+    init.with_method(method)
+        .with_headers(headers)
+        .with_body(body.map(|b| JsValue::from_str(&b.to_string())));
     let mut res = Fetch::Request(Request::new_with_init(&format!("{API}{path}"), &init)?)
         .send()
         .await?;
@@ -165,4 +184,151 @@ pub async fn get(token: &str, path: &str) -> Result<serde_json::Value> {
         return Err(bad(&api_error(status, &body)));
     }
     serde_json::from_str(&body).map_err(|_| bad("App Store Connect answered something not JSON"))
+}
+
+/// Standard base64 with padding, as App Store Connect takes a CSR and gives a certificate.
+pub fn b64(bytes: &[u8]) -> String {
+    let mut s: String = b64url(bytes)
+        .chars()
+        .map(|c| match c {
+            '-' => '+',
+            '_' => '/',
+            c => c,
+        })
+        .collect();
+    while !s.len().is_multiple_of(4) {
+        s.push('=');
+    }
+    s
+}
+
+/// The bytes of standard base64 (padding and whitespace allowed). None for anything else.
+pub fn unb64(s: &str) -> Option<Vec<u8>> {
+    if s.contains(['-', '_']) {
+        return None;
+    }
+    let url: String = s
+        .chars()
+        .filter(|c| !c.is_ascii_whitespace())
+        .map(|c| match c {
+            '+' => '-',
+            '/' => '_',
+            c => c,
+        })
+        .collect();
+    crate::webauthn::unb64url(&url).ok()
+}
+
+/// A certificate signing request (PKCS#10) for an Apple Distribution certificate, in pure DER.
+/// WebCrypto makes the RSA key and signs; this module only lays out the bytes.
+pub mod csr {
+    /// sha256WithRSAEncryption, 1.2.840.113549.1.1.11.
+    const SHA256_WITH_RSA: [u8; 9] = [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b];
+    /// commonName, 2.5.4.3.
+    const COMMON_NAME: [u8; 3] = [0x55, 0x04, 0x03];
+
+    /// One DER element: tag, length (short or long form), content.
+    pub fn tlv(tag: u8, content: &[u8]) -> Vec<u8> {
+        let mut out = vec![tag];
+        let n = content.len();
+        if n < 0x80 {
+            out.push(n as u8);
+        } else {
+            let bytes: Vec<u8> = n
+                .to_be_bytes()
+                .into_iter()
+                .skip_while(|b| *b == 0)
+                .collect();
+            out.push(0x80 | bytes.len() as u8);
+            out.extend(bytes);
+        }
+        out.extend_from_slice(content);
+        out
+    }
+
+    fn seq(parts: &[&[u8]]) -> Vec<u8> {
+        tlv(0x30, &parts.concat())
+    }
+
+    /// The signature algorithm: `SEQUENCE { OID sha256WithRSAEncryption, NULL }`.
+    pub fn algorithm() -> Vec<u8> {
+        seq(&[&tlv(0x06, &SHA256_WITH_RSA), &[0x05, 0x00]])
+    }
+
+    /// `CertificationRequestInfo`: version 0, the subject `CN=common_name`, the public key as
+    /// WebCrypto exports it (`spki`, a `SubjectPublicKeyInfo`), and no attributes. These are the
+    /// bytes the key signs.
+    pub fn request_info(spki_der: &[u8], common_name: &str) -> Vec<u8> {
+        let cn = seq(&[&tlv(0x06, &COMMON_NAME), &tlv(0x0c, common_name.as_bytes())]);
+        let subject = seq(&[&tlv(0x31, &cn)]);
+        seq(&[&[0x02, 0x01, 0x00], &subject, spki_der, &[0xa0, 0x00]])
+    }
+
+    /// The request: the info, the algorithm, and the signature as a BIT STRING.
+    pub fn request(info: &[u8], signature: &[u8]) -> Vec<u8> {
+        let mut bits = vec![0x00];
+        bits.extend_from_slice(signature);
+        seq(&[info, &algorithm(), &tlv(0x03, &bits)])
+    }
+}
+
+/// What "Create signing identity" makes before Apple sees anything: a fresh RSA-2048 key
+/// (PKCS#8 DER, to be sealed) and a CSR for it (DER). The key is made by WebCrypto, extractable
+/// only so that it can be sealed, and signs its own request.
+pub struct NewKey {
+    pub pkcs8: Vec<u8>,
+    pub csr: Vec<u8>,
+}
+
+/// Makes a [`NewKey`] whose request names `common_name`.
+pub async fn new_key(common_name: &str) -> Result<NewKey> {
+    let subtle = Reflect::get(
+        &Reflect::get(&js_sys::global(), &"crypto".into())?,
+        &"subtle".into(),
+    )?;
+    let call = |name: &str, args: &Array| -> Result<JsFuture> {
+        let f: Function = Reflect::get(&subtle, &name.into())?.dyn_into()?;
+        let p = f.apply(&subtle, args)?;
+        Ok(JsFuture::from(Promise::resolve(&p)))
+    };
+    let alg = JSON::parse(r#"{"name":"RSASSA-PKCS1-v1_5","modulusLength":2048,"hash":"SHA-256"}"#)?;
+    Reflect::set(
+        &alg,
+        &"publicExponent".into(),
+        &Uint8Array::from(&[0x01u8, 0x00, 0x01][..]),
+    )?;
+    let pair = call(
+        "generateKey",
+        &Array::of3(
+            &alg,
+            &JsValue::TRUE,
+            &Array::of2(&"sign".into(), &"verify".into()),
+        ),
+    )?
+    .await?;
+    let private = Reflect::get(&pair, &"privateKey".into())?;
+    let public = Reflect::get(&pair, &"publicKey".into())?;
+    let export = |format: &str, key: &JsValue| call("exportKey", &Array::of2(&format.into(), key));
+    let spki = Uint8Array::new(&export("spki", &public)?.await?).to_vec();
+    let pkcs8 = Uint8Array::new(&export("pkcs8", &private)?.await?).to_vec();
+    let info = csr::request_info(&spki, common_name);
+    let signature = call(
+        "sign",
+        &Array::of3(
+            &"RSASSA-PKCS1-v1_5".into(),
+            &private,
+            &Uint8Array::from(info.as_slice()),
+        ),
+    )?
+    .await?;
+    let signature = Uint8Array::new(&signature).to_vec();
+    if signature.len() != 256 {
+        return Err(bad(
+            "the new key gave a signature of the wrong length for RSA-2048",
+        ));
+    }
+    Ok(NewKey {
+        pkcs8,
+        csr: csr::request(&info, &signature),
+    })
 }

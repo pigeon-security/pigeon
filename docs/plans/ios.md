@@ -190,7 +190,10 @@ of the tree. Keeping them in slots also keeps all five together on one page.
     Secrets Store keeps small values. It is sealed with `APPLE_SEAL_KEY` (AES-256-GCM, as
     linked accounts seal tokens).
   - The sealed key, the certificate's DER and the profile's bytes are kept in the Directory as
-    rows `apple_identities` and `apple_profiles`, keyed by Apple's ids.
+    rows `apple_identities` and `apple_profiles`, keyed by Apple's ids. *As built (phase 2):*
+    one Directory setting per identity, `apple:identity:{certificate id}`, holding the
+    certificate, the sealed key and its profile together, and `apple:identities` listing them.
+    The key is sealed with the certificate's id as associated data.
   - So the root of trust is in the Secrets Store, and nothing readable sits outside it.
   - *Departure from the brief*, which asked for certificates and profiles "stored in the Secrets
     Store". Storing them whole there was the first choice, but it would not fit. Phase 1 checks
@@ -504,8 +507,9 @@ bundle id. What that means:
   1. phase 2 creates pigeon's certificate and profile beside the old ones (Apple allows a few
      distribution certificates per team; `apple_status` lists them);
   2. after pigeon's first build reaches TestFlight (phase 4), the person revokes the old
-     certificate on the console ("Revoke old certificate", a passkey-bound write) and deletes
-     the old profile;
+     certificate and deletes the old profile in Apple's developer portal (Certificates,
+     Identifiers & Profiles). Phase 2 has no console write for it: pigeon never touches signing
+     material it did not make;
   3. the old `.p12` and its password, wherever they are kept (noisypigeon's control plane held
      them as `APPLE_DIST_P12` and `APPLE_DIST_P12_PASSWORD`), are deleted there.
   Revoking a distribution certificate does not affect builds already on TestFlight or the App
@@ -536,7 +540,7 @@ Phases 1 to 7 wait for the follow-ups they name.
 | 0 | This plan. `ios/` skeleton + `pigeon_core::design::swift` + smoke `platform_design_tokens_for_ios`. `pigeon_ci::buildkite::ios` (off) + smoke `ci_buildkite_ios_pipelines` | review; follow-up 8 before landing `ios/` | docs; code (off) |
 | 1a | `apple` capability: the four slots the person fills (`APPLE_TEAM_ID`, `APPLE_ASC_ISSUER_ID`, `APPLE_ASC_KEY_ID`, `APPLE_ASC_KEY`), each checked before it is written (the ids by form, the key by signing an ES256 token); the App Store Connect JWT and client (`pigeon_core::apple`); `apple_status` (read-only). No bindings yet: a binding to a missing secret fails the deploy | 1, 3 | code |
 | 1b | The four bindings in core's `wrangler.toml`, landed after the person has set all four slots. Then `apple_status` signs in and reads the bundle id, the app and its highest build number, the certificates and profiles (§6). `APPLE_SEAL_KEY` and `secret_expiry` from certificates move to phase 2 | 1a set | config |
-| 2 | Signing material: the console writes "Register bundle id", "Create signing identity" (CSR in the Worker) and "Revoke old certificate", with sealed storage. Smoke: CSR DER and JWT claims against fixtures; sealed round trip | 2, 3 | code |
+| 2 | Signing material: the console writes "Adopt `dev.pigeon.app`" (was "Register bundle id") and "Create signing identity" (CSR in the Worker), with sealed storage; `apple_status` shows pigeon's identities; `secret_expiry` on `APPLE_ASC_KEY` reports their earliest expiry. "Revoke old certificate" is left out: the old certificate is revoked in Apple's portal by the person (§6). Smoke: CSR DER against a byte fixture (and checked by `openssl req -verify` once, off the gate), the request bodies, the record and what is shown | 2, 3; then the person presses the two writes, and `APPLE_SEAL_KEY`'s binding lands between the two presses of "Create signing identity" | code |
 | 3 | Buildkite: `ios: Some(…)`, macOS queues and both pipelines in `Declared`, class `macos/arm64`, runner without `timeout` on macOS, `ios/ci/check.sh` on `pigeon-ios`. Live: one green `ios-check` | 6, 7 | code + live |
 | 4 | Release: release records, `/ci/apple/session`, `/ci/apple/identity`, `/ci/buildkite-sign.sh`, the `/apple/` proxy allowlist, `ios/ci/archive.sh`, the processing poll, `ios_releases`. Live: build 1 reaches the internal TestFlight group | 2, 3, 4, 6 | code + live |
 | 5 | `/.well-known/apple-app-site-association` from `APPLE_TEAM_ID` (404 while unset); the app signs in on a device | 1 | code + live |
@@ -672,3 +676,14 @@ a passkey. Enter every key and id on the console's secrets page once the slot ex
   `MACOS_ARM64_M4_6X28` on `TAHOE_26_6` with Xcode 26.6; nothing was created by hand. The
   person set the four Apple slots (a new Team key `pigeon-platform`, App Manager); phase 1b
   binds them.
+- 2026-11-22 (night): the person approved phase 2 and the two gate branches. The `ios/*` and
+  `src/email/*` lanes and the `ios-check`/`ios-archive` jobs landed together (landing
+  `0S5WTJxNtAI6j2B9`, approved by the delegate under `gate-changes`). Phase 2 as built: the
+  CSR is laid out in `pigeon_core::apple::csr` and verified once against openssl (`openssl req
+  -verify`: signature OK); the key is made by WebCrypto (RSASSA-PKCS1-v1_5, 2048, SHA-256).
+  The first press of "Create signing identity" makes `APPLE_SEAL_KEY` in the Secrets Store and
+  asks Apple nothing; its binding lands next; the second press makes the certificate and the
+  profile. A new identity is refused while pigeon holds one with more than 30 days left. "Adopt"
+  changes the bundle id's capabilities, and Apple then marks existing App Store profiles for it
+  invalid, the old "Pigeon App Store" profile included; the console says so beside the button.
+  Nothing pigeon did not make is revoked or deleted.
