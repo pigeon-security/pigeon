@@ -1,0 +1,577 @@
+//! Deploy lanes, one per Worker (docs/plans/workers-split.md, phase 5). Pure.
+//!
+//! Each Worker has a lane that runs at most one deploy at a time; lanes run in parallel. A lane
+//! deploys the newest merged commit that affects its Worker ("deploy latest") and so carries
+//! every older merged landing for that Worker: main moves forward only, and landings merge one
+//! at a time with strictly increasing `merged_at`, so a deploy at the commit merged at `covers`
+//! holds every landing merged at or before it.
+//!
+//! A landing that affects core deploys core first: no other lane deploys a commit at or after
+//! such a landing's merge until core has deployed one that covers it. Then the other lanes run
+//! in parallel.
+//!
+//! A landing is landed once every Worker it affects has deployed a commit at or after its merge.
+//! It is deploy_failed once an incident (a lane's deploy that failed, attributed by
+//! [`bisect`]) finds it the cause, or finds its commit holds the cause, or cannot isolate the
+//! cause; error once a lane's deploy carrying it could not be run on the gateway's side. A
+//! failed deploy outside an incident (one an older Lander recorded) fails what it carried.
+
+use super::state::Seen;
+
+/// A live landing in main, waiting for its deploys: `merged` or `deploying`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Merged {
+    pub id: String,
+    /// When it reached main; strictly increasing in main's order.
+    pub merged_at: i64,
+    /// Its commit on main.
+    pub commit: String,
+    /// The Workers it affects, by name.
+    pub workers: Vec<String>,
+}
+
+/// How a lane's deploy stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeployState {
+    Running,
+    Succeeded,
+    /// Its CI job ended without passing.
+    Failed,
+    /// The gateway could not run it.
+    Error,
+}
+
+impl DeployState {
+    pub fn name(self) -> &'static str {
+        match self {
+            DeployState::Running => "running",
+            DeployState::Succeeded => "succeeded",
+            DeployState::Failed => "failed",
+            DeployState::Error => "error",
+        }
+    }
+
+    pub fn named(s: &str) -> Option<DeployState> {
+        [
+            DeployState::Running,
+            DeployState::Succeeded,
+            DeployState::Failed,
+            DeployState::Error,
+        ]
+        .into_iter()
+        .find(|d| d.name() == s)
+    }
+}
+
+/// One deploy of one Worker, as the lanes need it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Deploy {
+    pub worker: String,
+    /// The `merged_at` of the landing whose commit it deploys: it carries every landing merged
+    /// at or before.
+    pub covers: i64,
+    pub state: DeployState,
+    /// Part of an incident ([`bisect`]): the deploy whose failure opened it, or one of its
+    /// rollback, bisect or restore deploys. Its failure is the incident's to judge, so it fails
+    /// no landing by itself; a success covers as any other.
+    pub incident: bool,
+}
+
+/// A deploy a lane starts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Start {
+    pub worker: String,
+    /// The landing whose commit it deploys: the newest the lane may deploy.
+    pub landing: String,
+    pub commit: String,
+    pub covers: i64,
+    /// The landings it carries, oldest first, the target last.
+    pub carries: Vec<String>,
+}
+
+/// Whether `worker` has deployed a commit at or after `merged_at`.
+pub fn covered(deploys: &[Deploy], worker: &str, merged_at: i64) -> bool {
+    deploys
+        .iter()
+        .any(|d| d.worker == worker && d.state == DeployState::Succeeded && d.covers >= merged_at)
+}
+
+/// The deploy for `worker` that carried a landing merged at `merged_at` and did not pass, if
+/// one did and the Worker never deployed the landing otherwise.
+fn failed_for(deploys: &[Deploy], worker: &str, merged_at: i64) -> Option<DeployState> {
+    if covered(deploys, worker, merged_at) {
+        return None;
+    }
+    deploys
+        .iter()
+        .filter(|d| d.worker == worker && d.covers >= merged_at && !d.incident)
+        .map(|d| d.state)
+        .find(|s| matches!(s, DeployState::Failed | DeployState::Error))
+}
+
+/// What a live merged landing has come to, as the move its state takes: `JobEnded { passed:
+/// true }` once every Worker it affects deployed it, `JobEnded { passed: false }` once a deploy
+/// that carried it failed, `Failed` once one could not be run; `None` while it waits.
+pub fn outcome(landing: &Merged, deploys: &[Deploy]) -> Option<Seen> {
+    let mut all = true;
+    for w in &landing.workers {
+        match failed_for(deploys, w, landing.merged_at) {
+            Some(DeployState::Error) => return Some(Seen::Failed),
+            Some(_) => return Some(Seen::JobEnded { passed: false }),
+            None => {}
+        }
+        all &= covered(deploys, w, landing.merged_at);
+    }
+    all.then_some(Seen::JobEnded { passed: true })
+}
+
+/// The deploys the lanes start next, given the live merged landings (any order) and every
+/// deploy so far; `core` names the Worker that deploys first. A lane with a running deploy, or
+/// `held` by an open incident, starts nothing. Core first, then the other lanes by name.
+pub fn starts(core: &str, landings: &[Merged], deploys: &[Deploy], held: &[&str]) -> Vec<Start> {
+    let mut sorted: Vec<&Merged> = landings.iter().collect();
+    sorted.sort_by_key(|l| l.merged_at);
+    // Still waiting for `w`: affects it, not deployed by it, and no deploy of it failed for it.
+    let waits = |l: &Merged, w: &str| -> bool {
+        l.workers.iter().any(|x| x == w)
+            && !covered(deploys, w, l.merged_at)
+            && failed_for(deploys, w, l.merged_at).is_none()
+    };
+    let mut lanes: Vec<&str> = sorted
+        .iter()
+        .flat_map(|l| l.workers.iter().map(String::as_str))
+        .collect();
+    lanes.sort_by_key(|w| (*w != core, *w));
+    lanes.dedup();
+    let mut out = Vec::new();
+    for w in lanes {
+        let busy = deploys
+            .iter()
+            .any(|d| d.worker == w && d.state == DeployState::Running);
+        if busy || held.contains(&w) {
+            continue;
+        }
+        // Another lane deploys nothing at or after a landing core has still to deploy.
+        let block = if w == core {
+            i64::MAX
+        } else {
+            sorted
+                .iter()
+                .filter(|l| waits(l, w) && l.workers.iter().any(|x| x == core))
+                .filter(|l| !covered(deploys, core, l.merged_at))
+                .map(|l| l.merged_at)
+                .min()
+                .unwrap_or(i64::MAX)
+        };
+        let carried: Vec<&&Merged> = sorted
+            .iter()
+            .filter(|l| waits(l, w) && l.merged_at < block)
+            .collect();
+        let Some(target) = carried.last() else {
+            continue;
+        };
+        out.push(Start {
+            worker: w.to_string(),
+            landing: target.id.clone(),
+            commit: target.commit.clone(),
+            covers: target.merged_at,
+            carries: carried.iter().map(|l| l.id.clone()).collect(),
+        });
+    }
+    out
+}
+
+/// One deploy as a landing's note and `land_status` name it: the Worker, why it ran, its job,
+/// the commit it deployed, and the landings it included with their commits, such as
+/// `sites:lane:job7@1a2b3c4d5e6f[L1@0f0e0d0c0b0a+L2@1a2b3c4d5e6f]`.
+pub fn deploy_note(
+    worker: &str,
+    purpose: Purpose,
+    job: &str,
+    commit: &str,
+    included: &[Included],
+) -> String {
+    let short = |c: &str| c.chars().take(12).collect::<String>();
+    let list: Vec<String> = included
+        .iter()
+        .map(|l| format!("{}@{}", l.id, short(&l.commit)))
+        .collect();
+    format!(
+        "{worker}:{}:{job}@{}[{}]",
+        purpose.name(),
+        short(commit),
+        list.join("+")
+    )
+}
+
+// ---- incidents: a failed deploy, attributed ----
+//
+// "Deploy latest" lets one deploy carry several landings, so its failure must be attributed.
+// When a lane's deploy fails, the lane opens an incident: it redeploys the Worker's last good
+// build at once (a rollback), then deploys the commits of the landings the failed deploy
+// included, one at a time, oldest first, until one fails (a bisect). A landing's commit on main
+// holds every landing merged before it, so deploying landing X's commit tests X together with
+// everything before it: oldest first therefore finds the first commit that fails, and the
+// landing that made it is the cause. The newest included commit is already known to fail (the
+// deploy that opened the incident), so it is never deployed again. After a bisect step fails,
+// the newest good build is deployed again (a restore), so the Worker is not left on a failing
+// build. At most [`REDEPLOYS`] redeploys per incident; a bisect step is only tried when a
+// restore after it still fits.
+
+/// How many redeploys one incident may make: its rollback, bisect steps and restores together.
+pub const REDEPLOYS: usize = 4;
+
+/// A landing a deploy included: its id, its commit on main and when it merged.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Included {
+    pub id: String,
+    pub commit: String,
+    pub merged_at: i64,
+}
+
+/// A build of a Worker known good: the commit of a deploy of it that passed, and the
+/// `merged_at` that commit covers.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Good {
+    pub commit: String,
+    pub covers: i64,
+}
+
+/// Why a deploy runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Purpose {
+    /// The lane's own deploy of its newest merged commit.
+    Lane,
+    /// An incident's first redeploy: the Worker's last good build.
+    Rollback,
+    /// An incident's deploy of one included landing's commit.
+    Bisect,
+    /// An incident's redeploy of the newest good build after a bisect step failed.
+    Restore,
+}
+
+impl Purpose {
+    pub fn name(self) -> &'static str {
+        match self {
+            Purpose::Lane => "lane",
+            Purpose::Rollback => "rollback",
+            Purpose::Bisect => "bisect",
+            Purpose::Restore => "restore",
+        }
+    }
+
+    pub fn named(s: &str) -> Option<Purpose> {
+        [
+            Purpose::Lane,
+            Purpose::Rollback,
+            Purpose::Bisect,
+            Purpose::Restore,
+        ]
+        .into_iter()
+        .find(|p| p.name() == s)
+    }
+}
+
+/// How one of an incident's redeploys ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tried {
+    Passed,
+    /// Its job ended without passing.
+    Failed,
+    /// The gateway could not run it.
+    Error,
+}
+
+/// What an incident does next.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Next {
+    /// Deploy `commit` (covering `covers`), carrying `carries`.
+    Deploy {
+        purpose: Purpose,
+        commit: String,
+        covers: i64,
+        carries: Vec<String>,
+    },
+    /// It is over.
+    Done(Verdict),
+}
+
+/// How an incident ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Verdict {
+    /// The landing found to be the cause, if one was.
+    pub guilty: Option<String>,
+    /// The included landings whose commits deployed and passed during the incident.
+    pub passed: Vec<String>,
+    /// Each included landing that ends `deploy_failed`, with why.
+    pub failed: Vec<(String, String)>,
+    /// The good build the Worker is left on; `None` when it may still be on a failing build.
+    pub on: Option<Good>,
+    /// The redeploys it made.
+    pub redeploys: usize,
+    /// One line for `land_status`.
+    pub summary: String,
+}
+
+/// The verdict once `included[..idx]` passed, with the cause `guilty` (its index and why) if
+/// one was found, the Worker left `on` a good build or not, and `why` the cause was not found.
+fn verdict(
+    worker: &str,
+    included: &[Included],
+    idx: usize,
+    guilty: Option<(usize, String)>,
+    on: Option<Good>,
+    used: usize,
+    why: &str,
+) -> Next {
+    let passed: Vec<String> = included[..idx.min(included.len())]
+        .iter()
+        .map(|l| l.id.clone())
+        .collect();
+    let left = match &on {
+        Some(g) => format!("{worker} is on the good build {}", g.commit),
+        None => format!("{worker} may still be on a failing build: a person must look"),
+    };
+    let (cause, failed, summary) = match guilty {
+        Some((g, reason)) => {
+            let cause = &included[g];
+            let mut failed = vec![(cause.id.clone(), reason)];
+            for l in &included[g + 1..] {
+                failed.push((
+                    l.id.clone(),
+                    format!(
+                        "not deployed: its commit {} holds landing {}, which broke {worker}'s deploy",
+                        l.commit, cause.id
+                    ),
+                ));
+            }
+            let summary = format!(
+                "{worker}'s deploy failed; landing {} ({}) is the cause; {left}; {used} redeploys",
+                cause.id, cause.commit
+            );
+            (Some(cause.id.clone()), failed, summary)
+        }
+        None => {
+            let failed = included[idx.min(included.len())..]
+                .iter()
+                .map(|l| {
+                    (
+                        l.id.clone(),
+                        format!("could not isolate: {worker}'s deploy failed and {why}"),
+                    )
+                })
+                .collect();
+            let summary = format!(
+                "{worker}'s deploy failed; could not isolate the cause ({why}); {left}; {used} redeploys"
+            );
+            (None, failed, summary)
+        }
+    };
+    Next::Done(Verdict {
+        guilty: cause,
+        passed,
+        failed,
+        on,
+        redeploys: used,
+        summary,
+    })
+}
+
+/// The incident of `worker`'s lane: given the Worker's last good build before the failed
+/// deploy (`None` when there is none), the landings that deploy included (oldest first; the
+/// newest's commit is the one that failed), how each redeploy so far ended, in order, and the
+/// redeploys allowed: what it deploys next, or its verdict.
+pub fn bisect(
+    worker: &str,
+    last_good: Option<&Good>,
+    included: &[Included],
+    tried: &[Tried],
+    budget: usize,
+) -> Next {
+    let k = included.len();
+    let ids = |n: usize| -> Vec<String> { included[..n].iter().map(|l| l.id.clone()).collect() };
+    let mut good: Option<Good> = last_good.cloned();
+    // Whether the Worker is on a good build; at first it is on the one that failed.
+    let mut on_good = false;
+    // The included landings before `idx` deployed and passed.
+    let mut idx = 0;
+    let mut guilty: Option<(usize, String)> = None;
+    let mut used = 0;
+    let mut outcomes = tried.iter();
+    loop {
+        // Back to the newest good build first: the rollback, or a restore after a failed step.
+        if !on_good {
+            match good.clone() {
+                Some(g) => {
+                    if used >= budget {
+                        let why = "the incident used its redeploys";
+                        return verdict(worker, included, idx, guilty, None, used, why);
+                    }
+                    match outcomes.next() {
+                        None => {
+                            let purpose = if used == 0 {
+                                Purpose::Rollback
+                            } else {
+                                Purpose::Restore
+                            };
+                            return Next::Deploy {
+                                purpose,
+                                commit: g.commit,
+                                covers: g.covers,
+                                carries: ids(idx),
+                            };
+                        }
+                        Some(Tried::Passed) => on_good = true,
+                        // A good build that failed to deploy again is tried again, in budget.
+                        Some(Tried::Failed) => {}
+                        Some(Tried::Error) => {
+                            let why = "a redeploy could not be run";
+                            return verdict(worker, included, idx, guilty, None, used + 1, why);
+                        }
+                    }
+                    used += 1;
+                    continue;
+                }
+                None if guilty.is_some() => {
+                    let why = format!("there is no earlier good build of {worker}");
+                    return verdict(worker, included, idx, guilty, None, used, &why);
+                }
+                // No good build to go back to: bisect from the failing one.
+                None => {}
+            }
+        }
+        if guilty.is_some() {
+            return verdict(worker, included, idx, guilty, good, used, "");
+        }
+        let on = good.clone().filter(|_| on_good);
+        if k == 0 {
+            return verdict(
+                worker,
+                included,
+                0,
+                None,
+                on,
+                used,
+                "it included no landing",
+            );
+        }
+        // Every commit before the newest passed: the newest, known to fail, is the cause.
+        if idx + 1 >= k {
+            let last = &included[k - 1];
+            let why = format!(
+                "{worker}'s deploy failed at its commit {}, and every earlier commit it carried deployed",
+                last.commit
+            );
+            guilty = Some((k - 1, why));
+            continue;
+        }
+        // A step, and a restore should it fail.
+        let need = if good.is_some() { 2 } else { 1 };
+        if used + need > budget {
+            let why = "the incident used its redeploys";
+            return verdict(worker, included, idx, None, on, used, why);
+        }
+        let step = &included[idx];
+        match outcomes.next() {
+            None => {
+                return Next::Deploy {
+                    purpose: Purpose::Bisect,
+                    commit: step.commit.clone(),
+                    covers: step.merged_at,
+                    carries: ids(idx + 1),
+                };
+            }
+            Some(Tried::Passed) => {
+                good = Some(Good {
+                    commit: step.commit.clone(),
+                    covers: step.merged_at,
+                });
+                on_good = true;
+                idx += 1;
+            }
+            Some(Tried::Failed) => {
+                let why = format!(
+                    "deploying its commit {} to {worker} failed: the first failing commit of those the deploy carried",
+                    step.commit
+                );
+                guilty = Some((idx, why));
+                on_good = false;
+            }
+            Some(Tried::Error) => {
+                let why = "a bisect deploy could not be run";
+                return verdict(worker, included, idx, None, None, used + 1, why);
+            }
+        }
+        used += 1;
+    }
+}
+
+/// Why each landing a failed core deploy carried ends `deploy_failed`.
+pub const CORE_NOT_BISECTED: &str = "core deploy failed; not bisected (core runs the Lander)";
+
+/// The incident of core's lane. It differs from [`bisect`] because the Lander runs in core:
+/// every core deploy restarts it, so core is never bisected, and core is only rolled back to a
+/// build that holds this Lander (one covering at least `lander_since`, the `merged_at` of the
+/// first core deploy this Lander saw pass). Given core's last good build before the failed
+/// deploy at `failed_commit`, the landings it included, and how the rollback went (if it
+/// ran): the rollback, or the verdict. Every carried landing ends `deploy_failed`
+/// ([`CORE_NOT_BISECTED`]). With no such build, or a rollback that did not pass, the incident
+/// is stuck: core is left as the job left it, for a person to recover by hand.
+pub fn core_incident(
+    last_good: Option<&Good>,
+    lander_since: Option<i64>,
+    failed_commit: &str,
+    included: &[Included],
+    tried: &[Tried],
+) -> Next {
+    let target = last_good
+        .filter(|g| lander_since.is_some_and(|since| g.covers >= since))
+        .cloned();
+    let failed: Vec<(String, String)> = included
+        .iter()
+        .map(|l| (l.id.clone(), CORE_NOT_BISECTED.to_string()))
+        .collect();
+    let stuck = |why: &str, redeploys: usize| {
+        Next::Done(Verdict {
+            guilty: None,
+            passed: Vec::new(),
+            failed: failed.clone(),
+            on: None,
+            redeploys,
+            summary: format!(
+                "the core deploy at commit {failed_commit} failed; {why}; core is left as the job \
+                 left it; recovery is by hand (docs/proxies.md, break-glass)"
+            ),
+        })
+    };
+    let Some(target) = target else {
+        return stuck(
+            "there is no earlier good build of core that holds this Lander",
+            0,
+        );
+    };
+    match tried.first() {
+        None => Next::Deploy {
+            purpose: Purpose::Rollback,
+            commit: target.commit,
+            covers: target.covers,
+            carries: Vec::new(),
+        },
+        Some(Tried::Passed) => Next::Done(Verdict {
+            guilty: None,
+            passed: Vec::new(),
+            failed: failed.clone(),
+            summary: format!(
+                "the core deploy at commit {failed_commit} failed; core is back on the good build \
+                 {}; the landings it carried were not bisected (core runs the Lander)",
+                target.commit
+            ),
+            on: Some(target),
+            redeploys: 1,
+        }),
+        Some(_) => stuck(
+            &format!("the rollback to {} did not pass", target.commit),
+            1,
+        ),
+    }
+}

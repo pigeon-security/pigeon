@@ -15,10 +15,12 @@
 //! `ready` waits for the merge lock: one landing at a time is `merging`, which moves main by a
 //! compare-and-swap, rebasing the branch onto main itself when main moved and the two changed
 //! different paths. When main moved in paths the landing's tests cover, the rebased commit goes
-//! back to `testing`. `merged` waits for the deploy lane, one deploy at a time, which deploys
-//! the newest merged commit; older merged landings it covers end `landed`. A docs-only landing
-//! ends `landed` at the merge. Any live state can become `error` (the gateway failed) or,
-//! before `merging`, `cancelled`.
+//! back to `testing`. `merged` waits for the deploy lanes, one per Worker (`super::lanes`): it
+//! is `deploying` once a deploy carrying it starts, and `landed` once every Worker it affects
+//! deployed a commit at or after its merge (`landed` straight from `merged`, superseded, when
+//! that happened without it ever being started); `deploy_failed` once a deploy carrying it
+//! failed. A docs-only landing ends `landed` at the merge. Any live state can become `error`
+//! (the gateway failed) or, before `merging`, `cancelled`.
 
 use pigeon_core::policy::{Answer, Approval, Decision, Kind, Request};
 use serde::{Deserialize, Serialize};
@@ -33,7 +35,7 @@ pub enum State {
     /// Tested (and approved where needed), waiting for the merge lock.
     Ready,
     Merging,
-    /// In main, waiting for the deploy lane.
+    /// In main, waiting for its Workers' deploy lanes.
     Merged,
     Deploying,
     Landed,

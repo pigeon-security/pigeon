@@ -519,6 +519,347 @@ fn land_from_check_to_landed() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn land_deploys_in_lanes_per_worker() {
+    use pigeon_capabilities::land::lanes::{self, Deploy, DeployState, Merged, Start};
+    use pigeon_capabilities::land::state::{self, Seen, State};
+    let m = |id: &str, at: i64, workers: &[&str]| Merged {
+        id: id.into(),
+        merged_at: at,
+        commit: format!("c{at}"),
+        workers: workers.iter().map(|w| w.to_string()).collect(),
+    };
+    let d = |worker: &str, covers: i64, state: DeployState| Deploy {
+        worker: worker.into(),
+        covers,
+        state,
+        incident: false,
+    };
+    let start = |worker: &str, at: i64, carries: &[&str]| Start {
+        worker: worker.into(),
+        landing: carries.last().unwrap().to_string(),
+        commit: format!("c{at}"),
+        covers: at,
+        carries: carries.iter().map(|c| c.to_string()).collect(),
+    };
+    use DeployState::{Error, Failed, Running, Succeeded};
+    let passed = Some(Seen::JobEnded { passed: true });
+    let failed = Some(Seen::JobEnded { passed: false });
+
+    // A shared landing (core and sites), then sites alone, then core alone: core deploys the
+    // newest commit for it, carrying the shared one; sites waits for core to deploy that.
+    let (l1, l2, l3) = (
+        m("L1", 1, &["core", "sites"]),
+        m("L2", 2, &["sites"]),
+        m("L3", 3, &["core"]),
+    );
+    let all = [l1.clone(), l2.clone(), l3.clone()];
+    assert_eq!(
+        lanes::starts("core", &all, &[], &[]),
+        [start("core", 3, &["L1", "L3"])]
+    );
+    let mut deploys = vec![d("core", 3, Running)];
+    assert!(lanes::starts("core", &all, &deploys, &[]).is_empty());
+    assert_eq!(lanes::outcome(&l1, &deploys), None);
+    // Core deployed: core alone is landed; sites now deploys its newest, carrying the shared.
+    deploys[0].state = Succeeded;
+    assert_eq!(lanes::outcome(&l3, &deploys), passed);
+    assert_eq!(lanes::outcome(&l1, &deploys), None);
+    let live = [l1.clone(), l2.clone()];
+    assert_eq!(
+        lanes::starts("core", &live, &deploys, &[]),
+        [start("sites", 2, &["L1", "L2"])]
+    );
+    // One deploy per lane: a sites landing merged meanwhile waits, then goes alone.
+    deploys.push(d("sites", 2, Running));
+    let l4 = m("L4", 4, &["sites"]);
+    let live = [l1.clone(), l2.clone(), l4.clone()];
+    assert!(lanes::starts("core", &live, &deploys, &[]).is_empty());
+    deploys[1].state = Succeeded;
+    assert_eq!(lanes::outcome(&l1, &deploys), passed);
+    assert_eq!(lanes::outcome(&l2, &deploys), passed);
+    assert_eq!(lanes::outcome(&l4, &deploys), None);
+    assert_eq!(
+        lanes::starts("core", std::slice::from_ref(&l4), &deploys, &[]),
+        [start("sites", 4, &["L4"])]
+    );
+
+    // Lanes run in parallel: core and models start together; sites waits behind the shared
+    // landing, since its newer commit holds the shared change.
+    let deploys = vec![d("core", 3, Succeeded), d("sites", 4, Succeeded)];
+    let (l5, l6, l7) = (
+        m("L5", 5, &["core", "sites"]),
+        m("L6", 6, &["sites"]),
+        m("L7", 7, &["models"]),
+    );
+    let live = [l7.clone(), l6.clone(), l5.clone()];
+    assert_eq!(
+        lanes::starts("core", &live, &deploys, &[]),
+        [start("core", 5, &["L5"]), start("models", 7, &["L7"])]
+    );
+
+    // A failed deploy fails every landing it carried for that Worker, and only those: a later
+    // landing for the Worker deploys alone, and one the Worker had already deployed stays landed.
+    let deploys = vec![
+        d("core", 5, Succeeded),
+        d("sites", 4, Succeeded),
+        d("sites", 6, Failed),
+    ];
+    assert_eq!(lanes::outcome(&l5, &deploys), failed);
+    assert_eq!(lanes::outcome(&l6, &deploys), failed);
+    assert_eq!(lanes::outcome(&l4, &deploys), passed);
+    let l8 = m("L8", 8, &["sites"]);
+    let live = [l5.clone(), l6.clone(), l8.clone()];
+    assert_eq!(
+        lanes::starts("core", &live, &deploys, &[]),
+        [start("sites", 8, &["L8"])]
+    );
+    // A deploy the gateway could not run ends its landings in error.
+    assert_eq!(
+        lanes::outcome(&l8, &[d("sites", 8, Error)]),
+        Some(Seen::Failed)
+    );
+    assert!(
+        lanes::starts(
+            "core",
+            std::slice::from_ref(&l8),
+            &[d("sites", 8, Error)],
+            &[]
+        )
+        .is_empty()
+    );
+    for s in [Running, Succeeded, Failed, Error] {
+        assert_eq!(DeployState::named(s.name()), Some(s));
+    }
+
+    // The landing's moves are the ones it had: started, then landed or failed; landed straight
+    // from merged when deploys it never saw start covered it.
+    assert_eq!(
+        state::next(State::Merged, false, &Seen::Start),
+        Some(State::Deploying)
+    );
+    assert_eq!(
+        state::next(State::Deploying, false, &passed.clone().unwrap()),
+        Some(State::Landed)
+    );
+    assert_eq!(
+        state::next(State::Deploying, false, &failed.clone().unwrap()),
+        Some(State::DeployFailed)
+    );
+    assert_eq!(
+        state::next(State::Merged, false, &Seen::Superseded),
+        Some(State::Landed)
+    );
+    assert_eq!(
+        state::next(State::Deploying, false, &Seen::Failed),
+        Some(State::Error)
+    );
+}
+
+#[test]
+fn land_attributes_a_failed_deploy() {
+    use Tried::{Error, Failed, Passed};
+    use pigeon_capabilities::land::lanes::{
+        self, Deploy, DeployState, Good, Included, Merged, Next, Purpose, REDEPLOYS, Tried,
+    };
+    let inc = |ids: &[i64]| -> Vec<Included> {
+        ids.iter()
+            .map(|at| Included {
+                id: format!("L{at}"),
+                commit: format!("c{at}"),
+                merged_at: *at,
+            })
+            .collect()
+    };
+    let good = |at: i64| Good {
+        commit: format!("c{at}"),
+        covers: at,
+    };
+    let deploy = |purpose: Purpose, at: i64, carries: &[&str]| Next::Deploy {
+        purpose,
+        commit: format!("c{at}"),
+        covers: at,
+        carries: carries.iter().map(|c| c.to_string()).collect(),
+    };
+    let done = |next: Next| match next {
+        Next::Done(v) => v,
+        other => panic!("not done: {other:?}"),
+    };
+    let ids = |failed: &[(String, String)]| -> Vec<String> {
+        failed.iter().map(|(id, _)| id.clone()).collect()
+    };
+
+    // Sites was last good at c3; its deploy of c7 carried L5, L6 and L7, and failed. Roll back
+    // at once, then deploy the included commits oldest first. L7's commit is known to fail, so
+    // it is never deployed again: when L5 and L6 pass, L7 is the cause.
+    let three = inc(&[5, 6, 7]);
+    let g3 = good(3);
+    let next = |tried: &[Tried]| lanes::bisect("sites", Some(&g3), &three, tried, REDEPLOYS);
+    assert_eq!(next(&[]), deploy(Purpose::Rollback, 3, &[]));
+    assert_eq!(next(&[Passed]), deploy(Purpose::Bisect, 5, &["L5"]));
+    assert_eq!(
+        next(&[Passed, Passed]),
+        deploy(Purpose::Bisect, 6, &["L5", "L6"])
+    );
+    let v = done(next(&[Passed, Passed, Passed]));
+    assert_eq!(v.guilty.as_deref(), Some("L7"));
+    assert_eq!(v.passed, ["L5", "L6"]);
+    assert_eq!(ids(&v.failed), ["L7"]);
+    assert_eq!(v.on, Some(good(6)));
+    assert_eq!(v.redeploys, 3);
+
+    // A commit (L5's: L5 and everything before it) fails: L5 is the first failing one. The
+    // Worker goes back to c3 at once; L6 and L7 hold L5's change, so they fail with it.
+    assert_eq!(next(&[Passed, Failed]), deploy(Purpose::Restore, 3, &[]));
+    let v = done(next(&[Passed, Failed, Passed]));
+    assert_eq!(v.guilty.as_deref(), Some("L5"));
+    assert!(v.passed.is_empty());
+    assert_eq!(ids(&v.failed), ["L5", "L6", "L7"]);
+    assert!(v.failed[1].1.contains("holds landing L5"));
+    assert_eq!(v.on, Some(good(3)));
+    // L6 fails after L5 passed: back to L5's commit, the newest good build.
+    assert_eq!(
+        next(&[Passed, Passed, Failed]),
+        deploy(Purpose::Restore, 5, &["L5"])
+    );
+    let v = done(next(&[Passed, Passed, Failed, Passed]));
+    assert_eq!(v.guilty.as_deref(), Some("L6"));
+    assert_eq!(v.passed, ["L5"]);
+    assert_eq!(ids(&v.failed), ["L6", "L7"]);
+    assert_eq!((v.on, v.redeploys), (Some(good(5)), REDEPLOYS));
+
+    // At most four redeploys: with five landings carried, two pass and the budget no longer
+    // holds a step and its restore. The Worker stays on the newest good build; the rest could
+    // not be isolated.
+    let five = inc(&[5, 6, 7, 8, 9]);
+    let v = done(lanes::bisect(
+        "sites",
+        Some(&g3),
+        &five,
+        &[Passed, Passed, Passed],
+        REDEPLOYS,
+    ));
+    assert_eq!(v.guilty, None);
+    assert_eq!(v.passed, ["L5", "L6"]);
+    assert_eq!(ids(&v.failed), ["L7", "L8", "L9"]);
+    assert!(v.failed[0].1.starts_with("could not isolate"));
+    assert_eq!(v.on, Some(good(6)));
+    assert!(v.summary.contains("could not isolate"));
+
+    // One landing carried: the rollback alone attributes it.
+    let one = inc(&[5]);
+    assert_eq!(
+        lanes::bisect("sites", Some(&g3), &one, &[], REDEPLOYS),
+        deploy(Purpose::Rollback, 3, &[])
+    );
+    let v = done(lanes::bisect(
+        "sites",
+        Some(&g3),
+        &one,
+        &[Passed],
+        REDEPLOYS,
+    ));
+    assert_eq!((v.guilty.as_deref(), v.redeploys), (Some("L5"), 1));
+
+    // The good build will not deploy again: tried within the budget, then the person is told
+    // the Worker may still be on a failing build.
+    let v = done(next(&[Failed, Failed, Failed, Failed]));
+    assert_eq!((v.guilty.clone(), v.on.clone()), (None, None));
+    assert_eq!(ids(&v.failed), ["L5", "L6", "L7"]);
+    assert!(v.summary.contains("a person must look"));
+    // A redeploy the gateway could not run ends it unisolated, the Worker's build unknown.
+    let v = done(next(&[Passed, Error]));
+    assert_eq!((v.guilty.clone(), v.on.clone()), (None, None));
+
+    // No earlier good build: bisect from the failing one; the cause is found but the Worker
+    // cannot be taken back.
+    let two = inc(&[5, 6]);
+    assert_eq!(
+        lanes::bisect("sites", None, &two, &[], REDEPLOYS),
+        deploy(Purpose::Bisect, 5, &["L5"])
+    );
+    let v = done(lanes::bisect("sites", None, &two, &[Failed], REDEPLOYS));
+    assert_eq!((v.guilty.as_deref(), v.on.clone()), (Some("L5"), None));
+    let v = done(lanes::bisect("sites", None, &two, &[Passed], REDEPLOYS));
+    assert_eq!((v.guilty.as_deref(), v.on), (Some("L6"), Some(good(5))));
+
+    // An incident's failed deploys fail no landing by themselves; its successes cover.
+    let l5 = Merged {
+        id: "L5".into(),
+        merged_at: 5,
+        commit: "c5".into(),
+        workers: vec!["sites".into()],
+    };
+    let d = |covers: i64, state: DeployState, incident: bool| Deploy {
+        worker: "sites".into(),
+        covers,
+        state,
+        incident,
+    };
+    assert_eq!(
+        lanes::outcome(&l5, &[d(7, DeployState::Failed, true)]),
+        None
+    );
+    assert_eq!(
+        lanes::outcome(
+            &l5,
+            &[
+                d(7, DeployState::Failed, true),
+                d(5, DeployState::Succeeded, true)
+            ]
+        ),
+        Some(pigeon_capabilities::land::state::Seen::JobEnded { passed: true })
+    );
+    // A lane held by an open incident starts nothing.
+    assert!(lanes::starts("core", std::slice::from_ref(&l5), &[], &["sites"]).is_empty());
+
+    // Core runs the Lander: never bisected (each step would restart it mid-incident), and
+    // rolled back only to a build that holds this Lander, here one covering merge 3 or later.
+    use pigeon_capabilities::land::lanes::CORE_NOT_BISECTED;
+    let core = |good: Option<&Good>, since: Option<i64>, tried: &[Tried]| {
+        lanes::core_incident(good, since, "c7", &three, tried)
+    };
+    assert_eq!(
+        core(Some(&g3), Some(3), &[]),
+        deploy(Purpose::Rollback, 3, &[])
+    );
+    let v = done(core(Some(&g3), Some(3), &[Passed]));
+    assert_eq!(
+        (v.guilty.clone(), v.on.clone(), v.redeploys),
+        (None, Some(good(3)), 1)
+    );
+    assert_eq!(ids(&v.failed), ["L5", "L6", "L7"]);
+    assert!(v.failed.iter().all(|(_, why)| why == CORE_NOT_BISECTED));
+    // Its last good build predates this Lander, or none is known to hold it: stuck, by hand.
+    for since in [Some(4), None] {
+        let v = done(core(Some(&g3), since, &[]));
+        assert_eq!((v.on.clone(), v.redeploys), (None, 0));
+        assert!(v.summary.contains("the core deploy at commit c7 failed"));
+        assert!(v.summary.contains("left as the job left it"));
+        assert!(v.summary.contains("docs/proxies.md, break-glass"));
+        assert_eq!(ids(&v.failed), ["L5", "L6", "L7"]);
+    }
+    assert!(matches!(core(None, Some(3), &[]), Next::Done(_)));
+    // A rollback that does not pass is not tried again: stuck.
+    let v = done(core(Some(&g3), Some(3), &[Failed]));
+    assert_eq!((v.on.clone(), v.redeploys), (None, 1));
+    assert!(v.summary.contains("recovery is by hand"));
+
+    // What a deploy included, as the note and land_status name it.
+    assert_eq!(
+        lanes::deploy_note("sites", Purpose::Lane, "j1", "c7", &inc(&[5, 7])),
+        "sites:lane:j1@c7[L5@c5+L7@c7]"
+    );
+    for p in [
+        Purpose::Lane,
+        Purpose::Rollback,
+        Purpose::Bisect,
+        Purpose::Restore,
+    ] {
+        assert_eq!(Purpose::named(p.name()), Some(p));
+    }
+}
+
 // ---- deploy proxy ----
 
 #[test]

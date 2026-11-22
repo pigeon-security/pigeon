@@ -3,15 +3,17 @@
 //! branch's tip is a fast-forward of `main` under `refs/heads/claude/` (a failed check ends it
 //! `refused`), then runs CI job `test` at it, waits for a person's passkey approval
 //! when the setting asks for one or the commit changes what the gate itself runs, moves `main`
-//! to it through the platform's own git path, and runs CI job `deploy` at it, which uploads the
-//! platform through the Cloudflare API proxy with its own job token. Every step is reported by
-//! `land_status` and the result is noted on the commit under `refs/notes/land`.
+//! to it through the platform's own git path, and deploys each Worker it affects in that
+//! Worker's lane ([`lanes`]): the Worker's deploy job uploads it through the Cloudflare API
+//! proxy with its own job token. Every step is reported by `land_status` and the result is
+//! noted on the commit under `refs/notes/land`.
 //!
-//! Landings live in the `Lander`, a Durable Object with SQLite storage whose alarm follows the
-//! live one; one landing is live at a time. The deploy job's token reaches `/cf/` only while
-//! its landing is `deploying` and only for its commit ([`deploy_caller`]). Who may land: a
-//! person, or an agent linked to one.
+//! Landings live in the `Lander`, a Durable Object with SQLite storage whose alarm runs while
+//! a landing or a deploy is live; many landings are live at once. A deploy job's token reaches
+//! `/cf/` only while its deploy is running, only for its commit and its Worker's script
+//! ([`deploy_caller`]). Who may land: a person, or an agent linked to one.
 
+pub mod lanes;
 pub mod merge;
 pub mod state;
 
@@ -52,6 +54,8 @@ const NOTE_TRIES: i64 = 10;
 /// The CI scheduler, whose job states the Lander follows.
 const CI_BINDING: &str = "CI_SCHEDULER";
 const CI_OBJECT: &str = "scheduler";
+/// The Worker the map requires, deployed before any other a landing affects.
+const CORE_WORKER: &str = "core";
 
 fn now() -> i64 {
     js_sys::Date::now() as i64
@@ -170,9 +174,9 @@ pub fn tip_refusal(branch: &str, tip: Option<&str>, expected: Option<&str>) -> O
     }
 }
 
-/// The proxy caller a CI job token stands for at `/cf/`, when it is the deploy job of the live
-/// landing, in `deploying`, for the commit its grant names; `None` otherwise. The interface the
-/// Cloudflare API proxy calls.
+/// The proxy caller a CI job token stands for at `/cf/`, when it is the job of a running deploy
+/// in a Worker's lane, for the commit its grant names, scoped to that Worker's script; `None`
+/// otherwise. The interface the Cloudflare API proxy calls.
 pub async fn deploy_caller(env: &Env, presented: &str, repo: &str) -> Result<Option<ProxyCaller>> {
     let Some(grant) = crate::ci::job_grant(env, presented).await? else {
         return Ok(None);
@@ -272,7 +276,10 @@ impl Capability for Land {
                               the Lander rebases the branch itself (tested again only when \
                               main moved in what its tests cover; `rebase_refused` when both \
                               changed the same file in ways that do not merge). Then it is \
-                              `merged`, and the deploy lane deploys the newest merged commit. \
+                              `merged`, and each Worker it affects deploys in its own lane \
+                              (one deploy per Worker at a time, Workers in parallel, core \
+                              first when it is affected), the newest merged commit for that \
+                              Worker; it is `landed` once each has deployed it. \
                               A docs-only landing needs no tests and no deploy. Never \
                               force-push to make a landing fit. Follow it with land_status, \
                               which shows the queue.",
@@ -373,7 +380,7 @@ impl Capability for Land {
 // ---- the Lander ----
 
 /// The Lander's schema, one statement per migration, applied in order and never edited.
-const MIGRATIONS: [&str; 11] = [
+const MIGRATIONS: [&str; 16] = [
     "CREATE TABLE landings (id TEXT PRIMARY KEY, branch TEXT NOT NULL, commit_sha TEXT NOT NULL, main_at TEXT NOT NULL, caller TEXT NOT NULL, by_name TEXT NOT NULL, state TEXT NOT NULL, approval_reason TEXT, approved_by TEXT, awaiting_since INTEGER, test_job TEXT, deploy_job TEXT, tries INTEGER NOT NULL DEFAULT 0, detail TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, finished_at INTEGER, note_pushed INTEGER NOT NULL DEFAULT 0, note_tries INTEGER NOT NULL DEFAULT 0)",
     "CREATE TABLE events (landing TEXT NOT NULL, at INTEGER NOT NULL, state TEXT NOT NULL, detail TEXT)",
     "CREATE TABLE notes (commit_sha TEXT PRIMARY KEY, text TEXT NOT NULL)",
@@ -389,6 +396,22 @@ const MIGRATIONS: [&str; 11] = [
     "ALTER TABLE landings ADD COLUMN workers TEXT",
     "ALTER TABLE landings ADD COLUMN deploys TEXT",
     "ALTER TABLE landings ADD COLUMN deploy_worker TEXT",
+    // Deploy lanes, one per Worker (phase 5): each deploy of one Worker at one commit. `covers`
+    // is the `merged_at` of the landing whose commit it deploys (`landing`): it carries every
+    // landing for that Worker merged at or before, listed in `carries` (JSON). `state` is
+    // running, succeeded, failed or error. Landings no longer use `deploys` and
+    // `deploy_worker`, except one a Lander before lanes left deploying (`adopt_legacy`).
+    "CREATE TABLE deploys (id INTEGER PRIMARY KEY AUTOINCREMENT, worker TEXT NOT NULL, landing TEXT NOT NULL, commit_sha TEXT NOT NULL, covers INTEGER NOT NULL, carries TEXT NOT NULL, job TEXT, state TEXT NOT NULL, tries INTEGER NOT NULL DEFAULT 0, detail TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, finished_at INTEGER)",
+    // Attribution: the landings a deploy included with their commits and merge times (JSON
+    // `[{id, commit, merged_at}]`), why it ran (lane, rollback, bisect or restore) and the
+    // incident it belongs to.
+    "ALTER TABLE deploys ADD COLUMN included TEXT",
+    "ALTER TABLE deploys ADD COLUMN purpose TEXT",
+    "ALTER TABLE deploys ADD COLUMN incident INTEGER",
+    // A lane's deploy that failed, being attributed (`lanes::bisect`): the deploy that failed,
+    // the Worker's last good build before it (JSON `{commit, covers}`), the landings it
+    // included, and how it ended: open, isolated or unisolated, the guilty landing, a summary.
+    "CREATE TABLE incidents (id INTEGER PRIMARY KEY AUTOINCREMENT, worker TEXT NOT NULL, failed_deploy INTEGER NOT NULL, landing TEXT NOT NULL, last_good TEXT, included TEXT NOT NULL, state TEXT NOT NULL, guilty TEXT, summary TEXT, redeploys INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, finished_at INTEGER)",
 ];
 
 /// What the Lander needs from the hosting Worker, beside the settings: the capabilities it
@@ -484,6 +507,115 @@ impl Row {
     }
 }
 
+/// One deploy in a Worker's lane.
+#[derive(Deserialize, Debug, Clone)]
+struct DeployRow {
+    id: i64,
+    worker: String,
+    landing: String,
+    commit_sha: String,
+    covers: i64,
+    carries: String,
+    job: Option<String>,
+    state: String,
+    tries: i64,
+    detail: Option<String>,
+    created_at: i64,
+    updated_at: i64,
+    finished_at: Option<i64>,
+    #[serde(default)]
+    included: Option<String>,
+    #[serde(default)]
+    purpose: Option<String>,
+    #[serde(default)]
+    incident: Option<i64>,
+}
+
+impl DeployRow {
+    fn pure(&self) -> lanes::Deploy {
+        lanes::Deploy {
+            worker: self.worker.clone(),
+            covers: self.covers,
+            // A state this build does not know is taken as an error: it never covers a landing.
+            state: lanes::DeployState::named(&self.state).unwrap_or(lanes::DeployState::Error),
+            incident: self.incident.is_some(),
+        }
+    }
+
+    fn carries(&self) -> Vec<String> {
+        serde_json::from_str(&self.carries).unwrap_or_default()
+    }
+
+    /// The landings it included with their commits; `None` for a deploy made before they were
+    /// recorded.
+    fn included(&self) -> Option<Vec<lanes::Included>> {
+        self.included
+            .as_deref()
+            .and_then(|i| serde_json::from_str(i).ok())
+    }
+
+    fn purpose(&self) -> lanes::Purpose {
+        self.purpose
+            .as_deref()
+            .and_then(lanes::Purpose::named)
+            .unwrap_or(lanes::Purpose::Lane)
+    }
+
+    fn public(&self) -> Value {
+        json!({
+            "id": self.id, "worker": self.worker, "landing": self.landing,
+            "commit": self.commit_sha, "purpose": self.purpose().name(),
+            "incident": self.incident, "carries": self.carries(),
+            "included": self.included.as_deref().and_then(|i| serde_json::from_str::<Value>(i).ok()),
+            "job": self.job, "state": self.state,
+            "tries": self.tries, "detail": self.detail, "created_at": self.created_at,
+            "updated_at": self.updated_at, "finished_at": self.finished_at,
+        })
+    }
+}
+
+/// A lane's failed deploy being attributed.
+#[derive(Deserialize, Debug, Clone)]
+struct IncidentRow {
+    id: i64,
+    worker: String,
+    failed_deploy: i64,
+    landing: String,
+    last_good: Option<String>,
+    included: String,
+    state: String,
+    guilty: Option<String>,
+    summary: Option<String>,
+    redeploys: i64,
+    created_at: i64,
+    updated_at: i64,
+    finished_at: Option<i64>,
+}
+
+impl IncidentRow {
+    fn last_good(&self) -> Option<lanes::Good> {
+        self.last_good
+            .as_deref()
+            .and_then(|g| serde_json::from_str(g).ok())
+    }
+
+    fn included(&self) -> Vec<lanes::Included> {
+        serde_json::from_str(&self.included).unwrap_or_default()
+    }
+
+    fn public(&self) -> Value {
+        json!({
+            "id": self.id, "worker": self.worker, "failed_deploy": self.failed_deploy,
+            "landing": self.landing,
+            "last_good": self.last_good.as_deref().and_then(|g| serde_json::from_str::<Value>(g).ok()),
+            "included": serde_json::from_str::<Value>(&self.included).ok(),
+            "state": self.state, "guilty": self.guilty, "summary": self.summary,
+            "redeploys": self.redeploys, "created_at": self.created_at,
+            "updated_at": self.updated_at, "finished_at": self.finished_at,
+        })
+    }
+}
+
 /// The Lander's logic; the hosting Worker's Durable Object class wraps it.
 pub struct Lander {
     db: Db,
@@ -513,8 +645,9 @@ impl Lander {
         durable::serve(req, async |op, args| self.handle(op, &args).await).await
     }
 
-    /// The alarm: each live landing's next step, oldest first; then the merge lock and the
-    /// deploy lane go to whoever waits for them; then notes still to push, and the next alarm.
+    /// The alarm: each live landing's next step, oldest first; then the merge lock goes to
+    /// whoever waits for it; then the deploy lanes, one per Worker; then notes still to push,
+    /// and the next alarm.
     pub async fn alarm(&self) -> Result<Response> {
         for row in self.all_live()? {
             self.step_logged(row).await?;
@@ -522,9 +655,7 @@ impl Lander {
         if let Some(row) = self.take_merge_lock()? {
             self.step_logged(row).await?;
         }
-        if let Some(row) = self.take_deploy_lane()? {
-            self.step_logged(row).await?;
-        }
+        self.lanes().await?;
         if let Err(e) = self.push_notes().await {
             console_error!("land: pushing notes: {e}");
         }
@@ -602,6 +733,32 @@ impl Lander {
                 )?;
                 let mut out = row.public();
                 out["steps"] = json!(events);
+                // Each deploy that carried it, with the landings and commits it included, and
+                // each incident that judged it (with its rollback, bisect and restore deploys).
+                let like = format!("%\"{}\"%", row.id);
+                let deploys: Vec<DeployRow> = self.db.rows(
+                    "SELECT * FROM deploys WHERE carries LIKE ? OR incident IN (SELECT id FROM incidents WHERE included LIKE ?) ORDER BY id",
+                    vec![like.as_str().into(), like.as_str().into()],
+                )?;
+                out["deploys"] = json!(deploys.iter().map(DeployRow::public).collect::<Vec<_>>());
+                let incidents: Vec<IncidentRow> = self.db.rows(
+                    "SELECT * FROM incidents WHERE included LIKE ? ORDER BY id",
+                    vec![like.as_str().into()],
+                )?;
+                out["incidents"] = json!(
+                    incidents
+                        .iter()
+                        .map(IncidentRow::public)
+                        .collect::<Vec<_>>()
+                );
+                // The latest incidents still open, that could not isolate their cause, or that
+                // may have left a Worker on a failing build: for the person.
+                let open: Vec<IncidentRow> = self.db.rows(
+                    "SELECT * FROM incidents WHERE state IN ('open', 'unisolated', 'stuck') ORDER BY id DESC LIMIT 10",
+                    vec![],
+                )?;
+                out["incidents_to_see"] =
+                    json!(open.iter().map(IncidentRow::public).collect::<Vec<_>>());
                 out["queue"] = json!(
                     self.all_live()?
                         .iter()
@@ -686,6 +843,24 @@ impl Lander {
                 } }))
             }
             "deploy_grant" => {
+                if s("job").is_empty() {
+                    return Ok(Value::Null);
+                }
+                // A running deploy in a Worker's lane, for that Worker's script alone.
+                let lane: Option<DeployRow> = self.db.row(
+                    "SELECT * FROM deploys WHERE state = 'running' AND job = ? AND commit_sha = ? LIMIT 1",
+                    vec![s("job").into(), s("commit").into()],
+                )?;
+                if let Some(d) = lane {
+                    let Some(w) = self.settings.map.worker(&d.worker) else {
+                        return Ok(Value::Null);
+                    };
+                    let by = self
+                        .row(&d.landing)?
+                        .map_or_else(|| "land".to_string(), |r| r.by_name);
+                    return Ok(json!({ "id": d.landing, "by": by, "script": w.script }));
+                }
+                // A deploy a Lander before lanes started, until it is adopted.
                 let row: Option<Row> = self.db.row(
                     "SELECT * FROM landings WHERE state = 'deploying' AND deploy_job = ? AND commit_sha = ?",
                     vec![s("job").into(), s("commit").into()],
@@ -713,6 +888,21 @@ impl Lander {
             .db
             .row("SELECT value FROM settings WHERE key = 'approval'", vec![])?;
         Ok(v.is_some_and(|v| v.value == "on"))
+    }
+
+    /// The `merged_at` covered by the first core deploy this Lander saw pass: a core build at or
+    /// after it holds this Lander, so core may be rolled back to it. `None` until one passed.
+    fn core_lander_since(&self) -> Result<Option<i64>> {
+        #[derive(Deserialize)]
+        struct V {
+            value: String,
+        }
+        let v: Option<V> = self.db.row(
+            "SELECT value FROM settings WHERE key = 'core_lander_since'",
+            vec![],
+        )?;
+        Ok(v.and_then(|v| serde_json::from_str::<Value>(&v.value).ok())
+            .and_then(|v| v["covers"].as_i64()))
     }
 
     fn row(&self, id: &str) -> Result<Option<Row>> {
@@ -766,68 +956,628 @@ impl Lander {
         self.row(&row.id)
     }
 
-    /// The deploy lane for the newest `merged` landing, when no deploy is running: that
-    /// landing, now `deploying`. Main moves forward only, so its commit holds every older
-    /// merged landing's too.
-    fn take_deploy_lane(&self) -> Result<Option<Row>> {
-        let busy: Option<Row> = self.db.row(
-            "SELECT * FROM landings WHERE state = 'deploying' LIMIT 1",
+    /// The deploy lanes, one per Worker: adopts a deploy a Lander before lanes left running,
+    /// steps each running deploy, settles the merged landings whose deploys have ended, and
+    /// starts what each idle lane deploys next.
+    async fn lanes(&self) -> Result<()> {
+        self.adopt_legacy()?;
+        let running: Vec<DeployRow> = self.db.rows(
+            "SELECT * FROM deploys WHERE state = 'running' ORDER BY id",
             vec![],
         )?;
-        if busy.is_some() {
-            return Ok(None);
+        for d in running {
+            self.deploy_logged(d).await?;
         }
-        let next: Option<Row> = self.db.row(
-            "SELECT * FROM landings WHERE state = 'merged' ORDER BY merged_at DESC, created_at DESC LIMIT 1",
-            vec![],
-        )?;
-        let Some(row) = next else {
-            return Ok(None);
-        };
-        // Main moves forward only, so the newest merged commit holds every older merged
-        // landing's too: it deploys every Worker any of them affects, so none is lost.
-        let carried: Vec<Row> = self.db.rows(
-            "SELECT * FROM landings WHERE state = 'merged' AND merged_at <= ?",
-            vec![row.merged_at.unwrap_or(i64::MAX).into()],
-        )?;
-        let union: std::collections::BTreeSet<String> =
-            carried.iter().flat_map(Row::workers).collect();
-        let affected = pigeon_core::lanes::Affected {
-            docs_only: false,
-            shared: false,
-            smoke: false,
-            workers: union,
-        };
-        let mut order: Vec<String> = self
-            .settings
-            .map
-            .deploy_order(&affected)
-            .iter()
-            .map(|w| w.name.clone())
-            .collect();
-        if order.is_empty() {
-            order.push("core".to_string());
+        for d in self.drive_incidents()? {
+            self.deploy_logged(d).await?;
         }
-        self.db.exec(
-            "UPDATE landings SET deploys = ?, deploy_worker = NULL, deploy_job = NULL WHERE id = ? AND state = 'merged'",
-            vec![serde_json::to_string(&order)?.into(), row.id.as_str().into()],
-        )?;
-        let why = format!("took the deploy lane: {}", order.join(", "));
-        self.apply(&row, &Seen::Start, Some(&why))?;
-        self.row(&row.id)
+        self.settle()?;
+        for d in self.start_lanes()? {
+            self.deploy_logged(d).await?;
+        }
+        Ok(())
     }
 
-    /// The merged landings older than `row`, which its deploy carried: `seen` moves each.
-    fn settle_older(&self, row: &Row, seen: &Seen, detail: &str) -> Result<()> {
-        let older: Vec<Row> = self.db.rows(
-            "SELECT * FROM landings WHERE state = 'merged' AND merged_at <= ? AND id != ?",
+    /// Inserts a running deploy, its job still to submit, and answers it.
+    #[allow(clippy::too_many_arguments)]
+    fn insert_deploy(
+        &self,
+        worker: &str,
+        landing: &str,
+        commit: &str,
+        covers: i64,
+        carries: &[String],
+        included: &[lanes::Included],
+        purpose: lanes::Purpose,
+        incident: Option<i64>,
+    ) -> Result<DeployRow> {
+        let t = now();
+        self.db.exec(
+            "INSERT INTO deploys (worker, landing, commit_sha, covers, carries, included, purpose, incident, state, detail, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?)",
             vec![
-                row.merged_at.unwrap_or(i64::MAX).into(),
-                row.id.as_str().into(),
+                worker.into(),
+                landing.into(),
+                commit.into(),
+                covers.into(),
+                serde_json::to_string(carries)?.into(),
+                serde_json::to_string(included)?.into(),
+                purpose.name().into(),
+                opt_i(incident),
+                format!("{worker} to deploy at {commit} ({})", purpose.name()).into(),
+                t.into(),
+                t.into(),
             ],
         )?;
-        for o in older {
-            self.apply(&o, seen, Some(detail))?;
+        // Nothing awaits between the insert and this read.
+        self.db
+            .row("SELECT * FROM deploys ORDER BY id DESC LIMIT 1", vec![])?
+            .ok_or_else(|| bad("the deploy just started is not there"))
+    }
+
+    /// The landings a deploy included, with their commits: as recorded, or, for a deploy made
+    /// before they were, its carried landings as they stand.
+    fn included_of(&self, d: &DeployRow) -> Result<Vec<lanes::Included>> {
+        if let Some(i) = d.included() {
+            return Ok(i);
+        }
+        let mut out = Vec::new();
+        for id in d.carries() {
+            if let Some(r) = self.row(&id)? {
+                out.push(lanes::Included {
+                    merged_at: r.merged_at.unwrap_or(r.updated_at),
+                    commit: r.commit_sha,
+                    id,
+                });
+            }
+        }
+        out.sort_by_key(|l| l.merged_at);
+        Ok(out)
+    }
+
+    /// Opens an incident for lane deploy `d`, which just failed: its Worker's last good build
+    /// before it, and the landings it included, are what [`lanes::bisect`] works from.
+    fn open_incident(&self, d: &DeployRow) -> Result<()> {
+        let included = self.included_of(d)?;
+        let good: Option<DeployRow> = self.db.row(
+            "SELECT * FROM deploys WHERE worker = ? AND state = 'succeeded' AND id < ? ORDER BY id DESC LIMIT 1",
+            vec![d.worker.as_str().into(), d.id.into()],
+        )?;
+        let last_good = good.map(|g| lanes::Good {
+            commit: g.commit_sha,
+            covers: g.covers,
+        });
+        let t = now();
+        let summary = if d.worker == CORE_WORKER {
+            format!(
+                "the core deploy of {} failed; rolling core back to its last good build that holds this Lander, if there is one; not bisected (core runs the Lander)",
+                d.commit_sha
+            )
+        } else {
+            format!(
+                "{}'s deploy of {} failed; {}, then deploying the {} included commits one at a time, oldest first",
+                d.worker,
+                d.commit_sha,
+                match &last_good {
+                    Some(g) => format!("rolling back to {}", g.commit),
+                    None => "no earlier good build to roll back to".to_string(),
+                },
+                included.len()
+            )
+        };
+        self.db.exec(
+            "INSERT INTO incidents (worker, failed_deploy, landing, last_good, included, state, summary, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?)",
+            vec![
+                d.worker.as_str().into(),
+                d.id.into(),
+                d.landing.as_str().into(),
+                opt(last_good
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()?
+                    .as_deref()),
+                serde_json::to_string(&included)?.into(),
+                summary.as_str().into(),
+                t.into(),
+                t.into(),
+            ],
+        )?;
+        #[derive(Deserialize)]
+        struct I {
+            id: i64,
+        }
+        let inc: I = self
+            .db
+            .row("SELECT id FROM incidents ORDER BY id DESC LIMIT 1", vec![])?
+            .ok_or_else(|| bad("the incident just opened is not there"))?;
+        self.db.exec(
+            "UPDATE deploys SET incident = ? WHERE id = ?",
+            vec![inc.id.into(), d.id.into()],
+        )?;
+        for l in &included {
+            if let Some(r) = self.row(&l.id)?
+                && !r.state().terminal()
+            {
+                self.note_detail(&r, &format!("incident {}: {summary}", inc.id))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Each open incident with no deploy running: its next redeploy, started (answered, its
+    /// job still to submit), or its verdict, applied to the landings it included.
+    fn drive_incidents(&self) -> Result<Vec<DeployRow>> {
+        let open: Vec<IncidentRow> = self.db.rows(
+            "SELECT * FROM incidents WHERE state = 'open' ORDER BY id",
+            vec![],
+        )?;
+        let mut out = Vec::new();
+        for inc in open {
+            let mine: Vec<DeployRow> = self.db.rows(
+                "SELECT * FROM deploys WHERE incident = ? AND id != ? ORDER BY id",
+                vec![inc.id.into(), inc.failed_deploy.into()],
+            )?;
+            if mine.iter().any(|d| d.state == "running") {
+                continue;
+            }
+            let tried: Vec<lanes::Tried> = mine
+                .iter()
+                .map(|d| match d.state.as_str() {
+                    "succeeded" => lanes::Tried::Passed,
+                    "failed" => lanes::Tried::Failed,
+                    _ => lanes::Tried::Error,
+                })
+                .collect();
+            let included = inc.included();
+            let last_good = inc.last_good();
+            let t = now();
+            // Core runs the Lander: rolled back only to a build holding this Lander, never
+            // bisected (`lanes::core_incident`).
+            let next = if inc.worker == CORE_WORKER {
+                let failed: Option<DeployRow> = self.deploy(inc.failed_deploy)?;
+                let failed_commit = failed.map(|d| d.commit_sha).unwrap_or_default();
+                lanes::core_incident(
+                    last_good.as_ref(),
+                    self.core_lander_since()?,
+                    &failed_commit,
+                    &included,
+                    &tried,
+                )
+            } else {
+                lanes::bisect(
+                    &inc.worker,
+                    last_good.as_ref(),
+                    &included,
+                    &tried,
+                    lanes::REDEPLOYS,
+                )
+            };
+            match next {
+                lanes::Next::Deploy {
+                    purpose,
+                    commit,
+                    covers,
+                    carries,
+                } => {
+                    let with: Vec<lanes::Included> = included
+                        .iter()
+                        .filter(|l| carries.contains(&l.id))
+                        .cloned()
+                        .collect();
+                    let d = self.insert_deploy(
+                        &inc.worker,
+                        &inc.landing,
+                        &commit,
+                        covers,
+                        &carries,
+                        &with,
+                        purpose,
+                        Some(inc.id),
+                    )?;
+                    self.db.exec(
+                        "UPDATE incidents SET redeploys = ?, summary = ?, updated_at = ? WHERE id = ?",
+                        vec![
+                            (tried.len() as i64 + 1).into(),
+                            format!(
+                                "{}'s deploy failed; redeploy {} of at most {} ({}): {commit}",
+                                inc.worker,
+                                tried.len() + 1,
+                                lanes::REDEPLOYS,
+                                purpose.name()
+                            )
+                            .into(),
+                            t.into(),
+                            inc.id.into(),
+                        ],
+                    )?;
+                    out.push(d);
+                }
+                lanes::Next::Done(v) => {
+                    let state = match (&v.guilty, &v.on) {
+                        (_, None) => "stuck",
+                        (Some(_), Some(_)) => "isolated",
+                        (None, Some(_)) => "unisolated",
+                    };
+                    self.db.exec(
+                        "UPDATE incidents SET state = ?, guilty = ?, summary = ?, redeploys = ?, updated_at = ?, finished_at = ? WHERE id = ? AND state = 'open'",
+                        vec![
+                            state.into(),
+                            opt(v.guilty.as_deref()),
+                            v.summary.as_str().into(),
+                            (v.redeploys as i64).into(),
+                            t.into(),
+                            t.into(),
+                            inc.id.into(),
+                        ],
+                    )?;
+                    for (id, why) in &v.failed {
+                        if let Some(r) = self.row(id)? {
+                            let why = format!("incident {}: {why}", inc.id);
+                            self.apply(&r, &Seen::JobEnded { passed: false }, Some(&why))?;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// The live landings in main, waiting for their deploys, as the lanes see them.
+    fn merged(&self) -> Result<Vec<(Row, lanes::Merged)>> {
+        let rows: Vec<Row> = self.db.rows(
+            "SELECT * FROM landings WHERE state IN ('merged', 'deploying') ORDER BY merged_at, created_at",
+            vec![],
+        )?;
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let m = lanes::Merged {
+                    id: r.id.clone(),
+                    merged_at: r.merged_at.unwrap_or(r.updated_at),
+                    commit: r.commit_sha.clone(),
+                    workers: r.workers(),
+                };
+                (r, m)
+            })
+            .collect())
+    }
+
+    /// The deploys that can still matter to `merged` (not empty): the running ones, and those
+    /// that carried a commit at or after the oldest one's merge.
+    fn deploys_for(&self, merged: &[(Row, lanes::Merged)]) -> Result<Vec<lanes::Deploy>> {
+        let oldest = merged.iter().map(|(_, m)| m.merged_at).min().unwrap_or(0);
+        let rows: Vec<DeployRow> = self.db.rows(
+            "SELECT * FROM deploys WHERE state = 'running' OR covers >= ?",
+            vec![oldest.into()],
+        )?;
+        Ok(rows.iter().map(DeployRow::pure).collect())
+    }
+
+    /// Moves each live merged landing whose deploys have come to an end: `landed` once every
+    /// Worker it affects deployed a commit at or after its merge, `deploy_failed` (or `error`)
+    /// once a deploy that carried it did not pass (or could not run).
+    fn settle(&self) -> Result<()> {
+        let merged = self.merged()?;
+        if merged.is_empty() {
+            return Ok(());
+        }
+        let deploys = self.deploys_for(&merged)?;
+        for (row, m) in &merged {
+            let Some(seen) = lanes::outcome(m, &deploys) else {
+                continue;
+            };
+            let (seen, detail) = match seen {
+                Seen::JobEnded { passed: true } => (
+                    // Carried by deploys that started before it reached `deploying`.
+                    if row.state() == State::Merged {
+                        Seen::Superseded
+                    } else {
+                        seen
+                    },
+                    format!("deployed: {}", m.workers.join(", ")),
+                ),
+                Seen::JobEnded { passed: false } => (
+                    seen,
+                    "a deploy that carried it failed (see its deploys)".to_string(),
+                ),
+                _ => (
+                    seen,
+                    "a deploy that carried it could not be run (see its deploys)".to_string(),
+                ),
+            };
+            self.apply(row, &seen, Some(&detail))?;
+        }
+        Ok(())
+    }
+
+    /// Starts what each idle lane deploys next ([`lanes::starts`]): a running deploy whose job
+    /// is still to submit, with the merged landings it carries now `deploying`.
+    fn start_lanes(&self) -> Result<Vec<DeployRow>> {
+        let merged = self.merged()?;
+        if merged.is_empty() {
+            return Ok(Vec::new());
+        }
+        let deploys = self.deploys_for(&merged)?;
+        let plain: Vec<lanes::Merged> = merged.iter().map(|(_, m)| m.clone()).collect();
+        // A lane with an open incident is the incident's until it ends.
+        #[derive(Deserialize)]
+        struct W {
+            worker: String,
+        }
+        let held: Vec<W> = self.db.rows(
+            "SELECT DISTINCT worker FROM incidents WHERE state = 'open'",
+            vec![],
+        )?;
+        let held: Vec<&str> = held.iter().map(|w| w.worker.as_str()).collect();
+        let mut out = Vec::new();
+        for st in lanes::starts(CORE_WORKER, &plain, &deploys, &held) {
+            let included: Vec<lanes::Included> = st
+                .carries
+                .iter()
+                .filter_map(|id| plain.iter().find(|m| &m.id == id))
+                .map(|m| lanes::Included {
+                    id: m.id.clone(),
+                    commit: m.commit.clone(),
+                    merged_at: m.merged_at,
+                })
+                .collect();
+            let d = self.insert_deploy(
+                &st.worker,
+                &st.landing,
+                &st.commit,
+                st.covers,
+                &st.carries,
+                &included,
+                lanes::Purpose::Lane,
+                None,
+            )?;
+            let why = format!(
+                "{}'s lane deploys {} (landing {}), carrying {}",
+                st.worker,
+                st.commit,
+                st.landing,
+                st.carries.join(", ")
+            );
+            for id in &st.carries {
+                if let Some((row, _)) = merged.iter().find(|(r, _)| &r.id == id) {
+                    self.apply(row, &Seen::Start, Some(&why))?;
+                }
+            }
+            out.push(d);
+        }
+        Ok(out)
+    }
+
+    /// A landing a Lander before lanes left `deploying` (its `deploys` list set) hands its
+    /// deploy to the lanes: the Workers it already deployed count as deployed at its commit, its
+    /// running job as a running deploy, and the lanes deploy the rest.
+    fn adopt_legacy(&self) -> Result<()> {
+        let legacy: Vec<Row> = self.db.rows(
+            "SELECT * FROM landings WHERE state = 'deploying' AND deploys IS NOT NULL",
+            vec![],
+        )?;
+        for row in legacy {
+            let covers = row.merged_at.unwrap_or(row.updated_at);
+            // What the old deploy lane carried: every merged landing up to this one.
+            let carried: Vec<Row> = self.db.rows(
+                "SELECT * FROM landings WHERE state IN ('merged', 'deploying') AND merged_at <= ?",
+                vec![covers.into()],
+            )?;
+            let mut ids: Vec<String> = carried.iter().map(|r| r.id.clone()).collect();
+            if !ids.contains(&row.id) {
+                ids.push(row.id.clone());
+            }
+            let carries = serde_json::to_string(&ids)?;
+            let union: std::collections::BTreeSet<String> = carried
+                .iter()
+                .chain(std::iter::once(&row))
+                .flat_map(Row::workers)
+                .collect();
+            let affected = pigeon_core::lanes::Affected {
+                docs_only: false,
+                shared: false,
+                smoke: false,
+                workers: union,
+            };
+            let order: Vec<String> = self
+                .settings
+                .map
+                .deploy_order(&affected)
+                .iter()
+                .map(|w| w.name.clone())
+                .collect();
+            let left = row.deploys();
+            let t = now();
+            let insert = |worker: &str, state: &str, job: Option<&str>, detail: &str| {
+                self.db.exec(
+                    "INSERT INTO deploys (worker, landing, commit_sha, covers, carries, job, state, detail, created_at, updated_at, finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    vec![
+                        worker.into(),
+                        row.id.as_str().into(),
+                        row.commit_sha.as_str().into(),
+                        covers.into(),
+                        carries.as_str().into(),
+                        opt(job),
+                        state.into(),
+                        detail.into(),
+                        t.into(),
+                        t.into(),
+                        opt_i((state != "running").then_some(t)),
+                    ],
+                )
+            };
+            for w in order.iter().filter(|w| !left.contains(w)) {
+                insert(w, "succeeded", None, "deployed before deploy lanes")?;
+            }
+            if let Some(job) = row.deploy_job.as_deref().filter(|j| !j.is_empty()) {
+                let w = row
+                    .deploy_worker
+                    .clone()
+                    .or_else(|| left.first().cloned())
+                    .unwrap_or_else(|| CORE_WORKER.to_string());
+                insert(&w, "running", Some(job), "started before deploy lanes")?;
+            }
+            self.db.exec(
+                "UPDATE landings SET deploys = NULL WHERE id = ?",
+                vec![row.id.as_str().into()],
+            )?;
+        }
+        Ok(())
+    }
+
+    fn deploy(&self, id: i64) -> Result<Option<DeployRow>> {
+        self.db
+            .row("SELECT * FROM deploys WHERE id = ?", vec![id.into()])
+    }
+
+    /// One deploy's step; a failure on the gateway's side is tried again, then an error.
+    async fn deploy_logged(&self, d: DeployRow) -> Result<()> {
+        let id = d.id;
+        if let Err(e) = self.deploy_step(d).await {
+            console_error!("land: deploy {id}: {e}");
+            let Some(d) = self.deploy(id)? else {
+                return Ok(());
+            };
+            if d.tries + 1 >= STEP_TRIES {
+                self.end_deploy(&d, lanes::DeployState::Error, &e.to_string())?;
+            } else {
+                self.db.exec(
+                    "UPDATE deploys SET tries = tries + 1, detail = ?, updated_at = ? WHERE id = ? AND state = 'running'",
+                    vec![format!("retrying: {e}").into(), now().into(), id.into()],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Ends a running deploy.
+    fn end_deploy(&self, d: &DeployRow, to: lanes::DeployState, detail: &str) -> Result<()> {
+        let t = now();
+        self.db.exec(
+            "UPDATE deploys SET state = ?, detail = ?, updated_at = ?, finished_at = ? WHERE id = ? AND state = 'running'",
+            vec![
+                to.name().into(),
+                detail.into(),
+                t.into(),
+                t.into(),
+                d.id.into(),
+            ],
+        )
+    }
+
+    /// A running deploy's next step: its job submitted, or, once the job ended, its outcome
+    /// and, when it passed, its Worker's `after` steps.
+    async fn deploy_step(&self, d: DeployRow) -> Result<()> {
+        let s = &self.settings;
+        let worker = s
+            .map
+            .worker(&d.worker)
+            .ok_or_else(|| bad(&format!("the map has no Worker `{}` to deploy", d.worker)))?
+            .clone();
+        let Some(job) = &d.job else {
+            let landing = self
+                .row(&d.landing)?
+                .ok_or_else(|| bad(&format!("no landing {} to deploy", d.landing)))?;
+            let mut submit = json!({
+                "repo": s.repo_name(), "commit": d.commit_sha,
+                "job": worker.deploy_job,
+                "task": match d.purpose() {
+                    lanes::Purpose::Lane => format!("land {} deploy {}", d.landing, worker.name),
+                    p => format!(
+                        "land {} deploy {} ({} for incident {})",
+                        d.landing,
+                        worker.name,
+                        p.name(),
+                        d.incident.unwrap_or_default()
+                    ),
+                },
+            });
+            if let Some(c) = &s.deploy_connector {
+                submit["connector"] = json!(c);
+            }
+            let job = self.dispatch(&landing, "ci_submit", &submit).await?;
+            let job = job["id"]
+                .as_str()
+                .ok_or_else(|| bad("CI answered no job id"))?;
+            self.db.exec(
+                "UPDATE deploys SET job = ?, tries = 0, detail = ?, updated_at = ? WHERE id = ? AND state = 'running' AND job IS NULL",
+                vec![
+                    job.into(),
+                    format!("deploying {} at {}: job {job} submitted", worker.script, d.commit_sha)
+                        .into(),
+                    now().into(),
+                    d.id.into(),
+                ],
+            )?;
+            // Each landing it carries (for an incident's redeploy, each landing the incident
+            // judges) names it among its deploys, with the landings and commits it included:
+            // its note's `deploy=` and `land_status`.
+            let included = self.included_of(&d)?;
+            let named =
+                lanes::deploy_note(&worker.name, d.purpose(), job, &d.commit_sha, &included);
+            let targets = match d.incident {
+                Some(inc) => {
+                    let found: Option<IncidentRow> = self
+                        .db
+                        .row("SELECT * FROM incidents WHERE id = ?", vec![inc.into()])?;
+                    found.map(|i| i.included().into_iter().map(|l| l.id).collect())
+                }
+                None => None,
+            }
+            .unwrap_or_else(|| d.carries());
+            for id in targets {
+                self.db.exec(
+                    "UPDATE landings SET deploy_job = CASE WHEN deploy_job IS NULL OR deploy_job = '' THEN ? ELSE deploy_job || ',' || ? END, updated_at = ? WHERE id = ?",
+                    vec![
+                        named.as_str().into(),
+                        named.as_str().into(),
+                        now().into(),
+                        id.as_str().into(),
+                    ],
+                )?;
+            }
+            return Ok(());
+        };
+        let Some((passed, detail)) = self.job_ended(job).await? else {
+            return Ok(());
+        };
+        let detail = format!("{}: {detail}", worker.script);
+        let to = if passed {
+            lanes::DeployState::Succeeded
+        } else {
+            lanes::DeployState::Failed
+        };
+        self.end_deploy(&d, to, &detail)?;
+        // A lane's own deploy that failed is attributed: the Worker goes back to its last good
+        // build and the landings it included are deployed one at a time (`drive_incidents`).
+        // Nothing awaits between the two writes. The deploy job's own live check (core's
+        // architecture page) fails the job, so it counts here; the `after` steps below are
+        // best-effort and never do.
+        if !passed && d.incident.is_none() && d.purpose() == lanes::Purpose::Lane {
+            self.open_incident(&d)?;
+        }
+        // The first core deploy this Lander sees pass holds this Lander (main moves forward, and
+        // the build running it is at or before that commit): core's rollbacks go no further back.
+        if passed && d.worker == CORE_WORKER && d.purpose() == lanes::Purpose::Lane {
+            let at = now();
+            self.db.exec(
+                "INSERT INTO settings (key, value, by_name, at) VALUES ('core_lander_since', ?, 'lander', ?) ON CONFLICT(key) DO NOTHING",
+                vec![
+                    json!({ "commit": d.commit_sha, "covers": d.covers })
+                        .to_string()
+                        .into(),
+                    at.into(),
+                ],
+            )?;
+        }
+        if passed {
+            for step in &worker.after {
+                match step {
+                    After::PortalSync => self.sync_portal(d.id, &detail).await,
+                    After::ConnectorsSetup => self.setup_connectors(d.id, &d.commit_sha).await,
+                    // The deploy job itself checks the live architecture page.
+                    After::Architecture => {}
+                }
+            }
         }
         Ok(())
     }
@@ -855,6 +1605,21 @@ impl Lander {
             return Ok(false);
         };
         let t = now();
+        // The lanes order merges by `merged_at`: strictly increasing, in main's order (merges
+        // take one lock, one at a time).
+        let merged_at = if to == State::Merged {
+            #[derive(Deserialize)]
+            struct M {
+                m: Option<i64>,
+            }
+            let last = self
+                .db
+                .row::<M>("SELECT MAX(merged_at) AS m FROM landings", vec![])?
+                .and_then(|m| m.m);
+            Some(last.map_or(t, |l| t.max(l + 1)))
+        } else {
+            row.merged_at
+        };
         self.db.exec(
             "UPDATE landings SET state = ?, detail = ?, tries = 0, updated_at = ?, finished_at = ?, awaiting_since = ?, merged_at = ? WHERE id = ? AND state = ?",
             vec![
@@ -863,7 +1628,7 @@ impl Lander {
                 t.into(),
                 opt_i(to.terminal().then_some(t)),
                 opt_i((to == State::AwaitingApproval).then_some(t).or(row.awaiting_since)),
-                opt_i((to == State::Merged).then_some(t).or(row.merged_at)),
+                opt_i(merged_at),
                 row.id.as_str().into(),
                 row.state.as_str().into(),
             ],
@@ -899,10 +1664,10 @@ impl Lander {
         Ok(true)
     }
 
-    /// Runs the CI connectors' setup after landing `id` deployed, and adds what it did to the
-    /// detail: `buildkite: created queue pigeon-linux-small, …`, `ok`, or why not. A setup that
-    /// fails leaves the landing landed; the connector then reads as not set up.
-    async fn setup_connectors(&self, id: &str, deployed: &str) {
+    /// Runs the CI connectors' setup after deploy `id` (in a lane) passed, and adds what it did
+    /// to the deploy's detail: `buildkite: created queue pigeon-linux-small, …`, `ok`, or why
+    /// not. A setup that fails leaves the deploy passed; the connector then reads as not set up.
+    async fn setup_connectors(&self, id: i64, deployed: &str) {
         if !self.settings.setup_connectors {
             return;
         }
@@ -947,24 +1712,24 @@ impl Lander {
         }
         let detail = match self
             .db
-            .row::<D>("SELECT detail FROM landings WHERE id = ?", vec![id.into()])
+            .row::<D>("SELECT detail FROM deploys WHERE id = ?", vec![id.into()])
         {
             Ok(Some(d)) => d.detail.unwrap_or_default(),
             _ => String::new(),
         };
         let text = format!("{detail}; {}", said.join("; "));
         if let Err(e) = self.db.exec(
-            "UPDATE landings SET detail = ? WHERE id = ?",
+            "UPDATE deploys SET detail = ? WHERE id = ?",
             vec![text.into(), id.into()],
         ) {
             console_error!("CI setup after {id}: {e}");
         }
     }
 
-    /// Syncs the portal's servers after landing `id` deployed, and adds how each went to its
-    /// detail. A sync that fails leaves the landing landed: the portal syncs on its own within
-    /// hours, and the detail says so.
-    async fn sync_portal(&self, id: &str, detail: &str) {
+    /// Syncs the portal's servers after deploy `id` (in a lane) passed, and adds how each went
+    /// to its detail. A sync that fails leaves the deploy passed: the portal syncs on its own
+    /// within hours, and the detail says so.
+    async fn sync_portal(&self, id: i64, detail: &str) {
         let s = &self.settings;
         if s.portal_servers.is_empty() {
             return;
@@ -987,7 +1752,7 @@ impl Lander {
         }
         let text = format!("{detail}; {}", said.join("; "));
         if let Err(e) = self.db.exec(
-            "UPDATE landings SET detail = ? WHERE id = ?",
+            "UPDATE deploys SET detail = ? WHERE id = ?",
             vec![text.into(), id.into()],
         ) {
             console_error!("portal sync after {id}: {e}");
@@ -1368,88 +2133,6 @@ impl Lander {
                 session.close().await;
                 merged?;
             }
-            State::Deploying => {
-                let queue = row.deploys();
-                let name = queue.first().cloned().unwrap_or_else(|| "core".to_string());
-                let worker = s
-                    .map
-                    .worker(&name)
-                    .ok_or_else(|| bad(&format!("the map has no Worker `{name}` to deploy")))?
-                    .clone();
-                match &row.deploy_job {
-                    None => {
-                        let mut submit = json!({
-                            "repo": s.repo_name(), "commit": row.commit_sha,
-                            "job": worker.deploy_job,
-                            "task": format!("land {} deploy {}", row.id, worker.name),
-                        });
-                        if let Some(c) = &s.deploy_connector {
-                            submit["connector"] = json!(c);
-                        }
-                        let job = self.dispatch(&row, "ci_submit", &submit).await?;
-                        let job = job["id"]
-                            .as_str()
-                            .ok_or_else(|| bad("CI answered no job id"))?;
-                        self.db.exec(
-                            "UPDATE landings SET deploy_job = ?, deploy_worker = ?, detail = ?, updated_at = ? WHERE id = ?",
-                            vec![
-                                job.into(),
-                                worker.name.as_str().into(),
-                                format!("deploying {}: job {job} submitted", worker.script).into(),
-                                now().into(),
-                                row.id.as_str().into(),
-                            ],
-                        )?;
-                    }
-                    Some(job) => {
-                        let Some((passed, detail)) = self.job_ended(job).await? else {
-                            return Ok(());
-                        };
-                        let detail = format!("{}: {detail}", worker.script);
-                        if !passed {
-                            self.apply(&row, &Seen::JobEnded { passed }, Some(&detail))?;
-                            self.settle_older(
-                                &row,
-                                &Seen::JobEnded { passed: false },
-                                &format!(
-                                    "the deploy of landing {}, which carried it, failed",
-                                    row.id
-                                ),
-                            )?;
-                            return Ok(());
-                        }
-                        let rest: Vec<String> = queue.iter().skip(1).cloned().collect();
-                        if rest.is_empty() {
-                            self.apply(&row, &Seen::JobEnded { passed }, Some(&detail))?;
-                            self.settle_older(
-                                &row,
-                                &Seen::Superseded,
-                                &format!("deployed with landing {}", row.id),
-                            )?;
-                        } else {
-                            self.db.exec(
-                                "UPDATE landings SET deploys = ?, deploy_job = NULL, deploy_worker = NULL, detail = ?, updated_at = ? WHERE id = ? AND state = 'deploying'",
-                                vec![
-                                    serde_json::to_string(&rest)?.into(),
-                                    format!("{detail}; next {}", rest.join(", ")).into(),
-                                    now().into(),
-                                    row.id.as_str().into(),
-                                ],
-                            )?;
-                        }
-                        for step in &worker.after {
-                            match step {
-                                After::PortalSync => self.sync_portal(&row.id, &detail).await,
-                                After::ConnectorsSetup => {
-                                    self.setup_connectors(&row.id, &row.commit_sha).await;
-                                }
-                                // The deploy job itself checks the live architecture page.
-                                After::Architecture => {}
-                            }
-                        }
-                    }
-                }
-            }
             _ => {}
         }
         Ok(())
@@ -1530,7 +2213,12 @@ impl Lander {
     }
 
     async fn reschedule(&self) -> Result<()> {
-        let live = self.live()?.is_some();
+        // A deploy runs on after every landing it carried has ended (another lane failed).
+        let running: Option<Value> = self.db.row(
+            "SELECT id FROM deploys WHERE state = 'running' UNION ALL SELECT id FROM incidents WHERE state = 'open' LIMIT 1",
+            vec![],
+        )?;
+        let live = self.live()?.is_some() || running.is_some();
         let notes: Option<Value> = self.db.row(
             &format!(
                 "SELECT id FROM landings WHERE note_pushed = 0 AND note_tries < {NOTE_TRIES} AND finished_at IS NOT NULL LIMIT 1"

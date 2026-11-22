@@ -1,7 +1,10 @@
 # Workers split: capabilities as their own Workers, landing in lanes
 
-Status: **phase 1 landed (`520e778`); phase 2a built, landing next; 2b built** (2026-11-22). The person gave the go-ahead. Planner
-session `session_015XFA1nSZXE9BNYuPF5XL2j`, seeded by the parent `session_015XFA1jgveJDEE8NJjTaHKg`.
+Status: **phases 1 and 2 landed (`pigeon-sites` live and bound); T0 landed; phase 3 code (model
+gateway), phase 4 step 1 (CI gateway) and phase 6 code (proxy) landing in parallel; phase 5
+(deploy lanes per Worker, with failed deploys attributed by rollback and bisect) built,
+landing when the queue is quiet; no Durable Object moved
+yet** (2026-11-22).
 
 ## Goal
 
@@ -458,6 +461,86 @@ lanes once two or more Workers exist:
 Live check: three landings at once (docs, sites, core) with no refusal, each deploying only its
 own Worker.
 
+Status: **built on `claude/track-lanes`** (2026-11-22), not landed. How it works:
+- **A lane per Worker.** The Lander's new `deploys` table (migration 12) holds each deploy of
+  one Worker at one commit: `worker`, `landing` (whose commit), `commit_sha`, `covers` (that
+  landing's `merged_at`), `carries` (the landings it carries), `job`, `state` (`running`,
+  `succeeded`, `failed`, `error`), `tries`, `detail`. A lane has at most one `running` deploy;
+  lanes run in parallel.
+- **Deploy latest.** An idle lane deploys the newest merged landing that affects its Worker
+  and that it has not yet deployed, carrying the older ones. `merged_at` is now strictly
+  increasing, so "merged at or before `covers`" is "in that commit".
+- **Core first.** A lane other than core deploys no commit at or after a landing that affects
+  core and it, until core has deployed one covering that landing. This is today's
+  `deploy_order` rule (core first whenever core is affected, not only for shared changes).
+- **Landing states are unchanged.** A landing is `deploying` once a deploy carrying it starts;
+  `landed` once every Worker it affects deployed a commit at or after its merge;
+  `deploy_failed` when an incident (below) blames it, finds its commit holds the cause, or
+  cannot isolate the cause (`error` when the gateway could not run a lane's deploy). The pure
+  rules are `land::lanes::{starts, outcome, bisect}`.
+- **Attribution.** Each deploy records the landings it included with their commits
+  (`deploys.included`, migrations 13 to 15 add `included`, `purpose` and `incident`).
+  `land_status` shows every deploy that carried the landing or judged it, with `included`,
+  `purpose` (`lane`, `rollback`, `bisect`, `restore`) and `incident`. The landing's
+  `deploy_job`, and so its note's `deploy=`, lists each such deploy as
+  `worker:purpose:job@commit[L1@commit+L2@commit]`.
+- **Incidents: a failed deploy is attributed.** "Deploy latest" lets one deploy carry several
+  landings, so when a lane's deploy fails, the lane opens an incident (table `incidents`,
+  migration 16) and no other deploy of that Worker starts until it ends:
+  1. Redeploy the Worker's last good build (the commit of its last succeeded deploy) at once.
+  2. Deploy the included landings' commits one at a time, oldest first, until one fails. A
+     landing's commit on main holds every landing merged before it, so deploying landing X's
+     commit tests X together with everything before it. Oldest first therefore finds the
+     first commit that fails, and the landing that made it is the cause. The newest included
+     commit already failed, so it is never deployed again: when every earlier one passes, the
+     newest is the cause.
+  3. After a step fails, redeploy the newest good build (the last that passed, or the last
+     good), so the Worker is not left on the failing build.
+  4. The cause ends `deploy_failed` with the reason. The landings after it end
+     `deploy_failed` too: their commits hold the cause, so they cannot deploy without it.
+     They go out with a later landing that fixes it. Those that passed are deployed; they
+     end `landed` once their other Workers have deployed. Then the lane goes on from the
+     newest good build.
+  5. At most 4 redeploys per incident (rollback, steps and restores together). A step is
+     only tried when a restore after it still fits. If the cause is not found in budget, the
+     Worker stays on the newest good build, the untested landings end `deploy_failed` with
+     "could not isolate", and the incident stays in `land_status` (`incidents_to_see`, state
+     `unisolated`). An incident that could not get the Worker back onto a good build (no
+     earlier good build, a redeploy the gateway could not run, or the good build failing to
+     redeploy within budget) is `stuck`, and is shown there too.
+  - **Core is different, because the Lander runs in core** (`lanes::core_incident`). Each
+    core deploy restarts the Lander, so core is never bisected. Core is rolled back only to a
+    build that holds this Lander. The first core deploy this Lander sees pass is recorded in
+    the Lander's settings (`core_lander_since`: its commit and the `merged_at` it covers).
+    Main moves forward only, so any core build covering that merge or later holds this
+    Lander, and only such a build is a rollback target. Every landing the failed deploy
+    carried ends `deploy_failed` with "core deploy failed; not bisected (core runs the
+    Lander)". With no such target, or a rollback that does not pass (it is not tried again),
+    the incident is `stuck`. Its summary says the core deploy at commit X failed, core is
+    left as the job left it, and recovery is by hand (docs/proxies.md, break-glass). A
+    rollback that passes leaves the incident `unisolated`, shown in `incidents_to_see`. Until
+    the first core deploy with this Lander passes, a failed core deploy is always `stuck`.
+  - What counts as failing: the deploy job's result. Core's live check (the architecture
+    page) runs inside its deploy job, so it fails the job. The `after` steps (`portal_sync`,
+    `connectors_setup`) are best-effort and never fail a deploy. No Worker has a Lander-side
+    live check today.
+  - The deploy grant answers for any running deploy's job and commit, rollback, bisect and
+    restore deploys included. They run as the failed deploy's landing.
+- **Grants.** `deploy_grant` answers for the running deploy with that job and commit, with its
+  Worker's script; a Worker the map lacks gets no grant.
+- **`after` steps** run when a Worker's deploy passes and write to that deploy's detail.
+- **In flight.** A landing an older Lander left `deploying` (its `deploys` list set) is adopted
+  on the first alarm: the Workers it already deployed become `succeeded` deploys at its
+  commit, its running job a `running` deploy, and the lanes deploy the rest. Until then
+  `deploy_grant` still answers it the old way.
+- **Tests stay whole.** Every Worker's `test_job` is `test`, and a landing submits it once. It
+  runs `ci/runner/test.sh`: fmt and clippy over the whole workspace, the smoke suite (one
+  binary, `tests/smoke.rs`, which links every crate) and the WASM check. A per-Worker test job
+  would need either a smoke binary per Worker or a gate that knows which scenarios a Worker's
+  crates reach, and a change to `tests/smoke.rs` or a shared crate would still need all of
+  them. That is a gate redesign, so `test` stays one job; the map's `test_job` is where a
+  per-Worker job would go later.
+
 ### Phase 6: proxy (`pigeon-proxy`)
 
 The person named it, so it is planned. `/git/` and `/cf/` move to `pigeon-proxy`, served on
@@ -506,6 +589,27 @@ over their in-flight work.
 
 ## Log
 
+- 2026-11-22: live checks after the binds and the cutover.
+  - The person had the parent run the proxy cutover. Through pigeon-proxy, `git ls-remote`
+    takes 1.9–2.3 s (4.1 s cold), against 5.6–13.9 s through core. `git fetch` takes 2.0 s and
+    `/health` 0.1–0.5 s. Option (b), no parent token in the proxy, costs nothing measurable:
+    it reuses one 15-minute scoped token rather than minting and revoking one per request.
+  - The first core deploy through pigeon-proxy (models bind) uploaded and deployed, then
+    failed: wrangler said the version was "not found" and the container settings were "not
+    fully applied". The next core deploy (CI bind) went through the same path cleanly, so it
+    was transient.
+  - `models_providers` answers through pigeon-model-gateway (credential from core), and
+    `ci_pool` through pigeon-ci-gateway.
+- 2026-11-22: phase 5 gained attribution, as the person asked: each deploy records the
+  landings and commits it included (`land_status`, the note's `deploy=`). A lane's failed
+  deploy opens an incident: roll back to the last good build, bisect the included commits
+  oldest first, blame the first failing one, restore the newest good build, at most 4
+  redeploys (`lanes::bisect`). Migrations 13 to 16 are appended. Smoke:
+  `land_attributes_a_failed_deploy`; 26 scenarios, 11 s.
+  - Core guard: core is never bisected. It is rolled back only to a build at or after the
+    first core deploy this Lander saw pass (`core_lander_since` in settings); otherwise, or
+    when the rollback fails, the incident is `stuck` and recovery is by hand (break-glass).
+    Its carried landings end `deploy_failed` "not bisected (core runs the Lander)".
 - 2026-11-22: the three gateways deployed, and core bound them.
   - The landing that added them was deployed before core's map listed them, and the old Lander
     skips unknown Workers silently. A one-line landing touching only their crates deployed
@@ -616,6 +720,21 @@ over their in-flight work.
     serving the proxies, and the call goes through `/mcp` on platform.pigeon.dev, so it works
     even when `pigeon-proxy` cannot serve git (and so nothing can land). If step 4 had landed,
     land it back afterwards.
+- 2026-11-22: phase 5 (track D) built on `claude/track-lanes`, on `claude/split-prep`.
+  - Deploy lanes per Worker: the `deploys` table (migration 12, appended), the pure rules in
+    `land/lanes.rs` (`starts`, `outcome`), and the Lander's `lanes` step in place of the one
+    deploy lane (`take_deploy_lane`, `settle_older` and the `deploying` walk of `deploys` are
+    gone). Landing states and moves are unchanged.
+  - `merged_at` is strictly increasing (one more than the last when the clock ties).
+  - The alarm keeps running while a deploy runs, even when every landing it carried has
+    ended.
+  - A landing left `deploying` by the Lander before this one is adopted, so the landing that
+    deploys this change finishes.
+  - Tests stay one `test` job (phase 5, "Tests stay whole"); `ci/runner/test.sh` is
+    unchanged.
+  - Smoke: `land_deploys_in_lanes_per_worker`. 23 scenarios, 24 s.
+  - Departure: a landing naming a Worker the deployed Lander's map lacks now ends `error`
+    after its retries, where before that Worker was skipped.
 - 2026-11-22: phase 1 (1a and 1b) landed together, as landing `xKIrTa8WmsUYZ02v` (main at
   `520e778`).
 - 2026-11-22: the person asked for the remaining Workers in parallel. T0, the shared prep, was
