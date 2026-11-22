@@ -69,9 +69,12 @@ for d in "${profiles[@]}"; do
 done
 rm -f "$secret/identity.json"
 
-pw=$(openssl rand -hex 24)
-openssl x509 -inform DER -in "$secret/cert.der" -out "$secret/cert.pem"
-openssl pkcs12 -export -inkey "$secret/key.pem" -in "$secret/cert.pem" \
+# The system's LibreSSL, not a newer OpenSSL on PATH: OpenSSL 3 writes a .p12 (AES, SHA-256
+# MAC) that `security import` cannot read; LibreSSL writes the 3DES and SHA-1 form it can.
+ssl=/usr/bin/openssl
+pw=$($ssl rand -hex 24)
+$ssl x509 -inform DER -in "$secret/cert.der" -out "$secret/cert.pem"
+$ssl pkcs12 -export -inkey "$secret/key.pem" -in "$secret/cert.pem" \
   -out "$secret/id.p12" -passout "pass:$pw"
 rm -f "$secret/key.pem"
 security create-keychain -p "$pw" "$keychain"

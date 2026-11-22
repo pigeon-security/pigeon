@@ -968,15 +968,28 @@ pub mod release {
         let now = now_ms();
         let mut list = jobs(env).await?;
         for other in &list {
-            if let Some(o) = load(env, other).await?
-                && matches!(o.state.as_str(), "started" | "signing" | "uploading")
-                && now - o.updated_ms < 2 * 3_600_000
-            {
-                return Err(bad(&format!(
-                    "release {} (build {}) is still {}",
-                    o.job, o.build_number, o.state
-                )));
+            let Some(mut o) = load(env, other).await? else {
+                continue;
+            };
+            if !matches!(o.state.as_str(), "started" | "signing" | "uploading") {
+                continue;
             }
+            // A release whose job has ended without uploading is over: it failed.
+            let ended = crate::ci::job_status(env, &o.job)
+                .await
+                .map(|j| j["state"] != "running")
+                .unwrap_or(true);
+            if ended || now - o.updated_ms > 2 * 3_600_000 {
+                o.detail = Some(format!("its job ended while the release was {}", o.state));
+                o.state = "failed".into();
+                o.updated_ms = now;
+                store(env, &o).await?;
+                continue;
+            }
+            return Err(bad(&format!(
+                "release {} (build {}) is still {}",
+                o.job, o.build_number, o.state
+            )));
         }
         let token = token(env).await.ok_or_else(|| bad(SETUP))??;
         let apps = apple::get(
