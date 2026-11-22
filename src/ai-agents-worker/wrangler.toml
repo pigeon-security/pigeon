@@ -37,6 +37,8 @@ new_sqlite_classes = ["AiAgentRuns", "Sandbox"]
 
 # A run's sandbox: the CI base image with pigeon-sandboxd (ci/sandbox/Dockerfile). The image's
 # digest is pinned: v1's linux/amd64 manifest, built and pushed by the person from b20ae3c.
+# First deployed by its own landing, once core's map listed this Worker (the Lander reads
+# lanes from main, so the landing that adds a Worker's entry cannot deploy it).
 [[containers]]
 class_name = "Sandbox"
 scheduling_policy = "durable_object"
