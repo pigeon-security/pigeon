@@ -321,6 +321,15 @@ pub fn describe(sources: &[Source], hosted: &Hosted) -> Model {
             .map(|s| code(s.text))
             .collect::<Vec<_>>()
             .join("\n");
+        // Everything the Worker is built from, to tell whether a binding is used: its own crate,
+        // the crates its map entry lists (the libraries it links, such as src/ci for core) and
+        // the crates every Worker links. Its routes and handlers stay its own crate's.
+        let built: String = sorted
+            .iter()
+            .filter(|s| s.path.ends_with(".rs") && built_from(&entry, s.path))
+            .map(|s| code(s.text))
+            .collect::<Vec<_>>()
+            .join("\n");
         // The capabilities this Worker runs: its own, or a remote capability's, which names it.
         let on: Vec<&Box<dyn Capability>> = hosted
             .capabilities
@@ -341,7 +350,7 @@ pub fn describe(sources: &[Source], hosted: &Hosted) -> Model {
             for part in &mut caps {
                 part.bindings = named(&sorted, "src/capabilities/src/", &part.name, &names);
             }
-            let own = strings(&rust);
+            let own = strings(&built);
             resources.unused = names
                 .iter()
                 .filter(|n| !own.contains(n) && !caps.iter().any(|p| p.bindings.contains(n)))
@@ -533,6 +542,21 @@ pub fn describe(sources: &[Source], hosted: &Hosted) -> Model {
         digest: digest(&sorted),
         commit: option_env!("PIGEON_COMMIT").unwrap_or_default().to_string(),
     }
+}
+
+/// The crates every Worker links, so every Worker is built from them.
+const SHARED_CRATES: [&str; 2] = ["src/core/src/", "src/contract/src/"];
+
+/// Whether the Rust file at `path` is one `entry`'s Worker is built from: under its own crate,
+/// matched by one of its map entry's paths, or in a crate every Worker links.
+fn built_from(entry: &Entry, path: &str) -> bool {
+    (!entry.dir.is_empty() && path.starts_with(&format!("{}src/", entry.dir)))
+        || entry.lane.as_ref().is_some_and(|lane| {
+            lane.paths
+                .iter()
+                .any(|p| pigeon_core::lanes::matches(p, path))
+        })
+        || SHARED_CRATES.iter().any(|c| path.starts_with(c))
 }
 
 /// A Worker to draw: its script, its entry in ci/workers.toml and the directory of its files.

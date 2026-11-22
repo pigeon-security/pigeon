@@ -6785,7 +6785,18 @@ fn core_architecture_draws_every_worker_in_the_map() {
         let toml = std::fs::read_to_string(root.join(&w.dir).join("wrangler.toml"))
             .unwrap_or_else(|_| panic!("{} has a wrangler.toml", w.dir));
         files.push((format!("{}/wrangler.toml", w.dir), toml));
-        rust(&root.join(&w.dir).join("src"), &root, &mut files);
+    }
+    // Every crate's Rust, as core's build.rs embeds it: a Worker is built from the libraries it
+    // links too.
+    let mut crates: Vec<PathBuf> = std::fs::read_dir(root.join("src"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    crates.sort();
+    for krate in crates {
+        rust(&krate.join("src"), &root, &mut files);
     }
     let sources: Vec<Source> = files
         .iter()
@@ -6919,6 +6930,45 @@ fn core_architecture_draws_every_worker_in_the_map() {
         ("pigeon-ai-agents", "AI_AGENT_RUNS", "pigeon-ai-agents"),
     ] {
         assert_eq!(owner(w, binding).as_deref(), Some(host), "{w} {binding}");
+    }
+    // Core's declared bindings are all used somewhere it is built from.
+    let unused = strs(&model["resources"]["unused"]);
+    for linked in ["CI_RUNNER", "CI_SCHEDULER", "DIRECTORY", "LANDER"] {
+        assert!(
+            !unused.contains(&linked.to_string()),
+            "{linked} is not unused: {unused:?}"
+        );
+    }
+    // Whether a binding is used is read from every crate the Worker is built from, as its map
+    // entry lists them: one named only in a library core links is used; one named only in a
+    // crate core does not link is not.
+    {
+        let map = "version = 1\n[docs]\npaths = []\n[shared]\npaths = []\n[[worker]]\nname = \"core\"\nscript = \"pigeon-platform\"\ndir = \"src/platform\"\npaths = [\"src/platform/*\", \"src/lib/*\"]\ntest_job = \"test\"\ndeploy_job = \"deploy\"\n";
+        let toml = "name = \"pigeon-platform\"\n\n[[secrets_store_secrets]]\nbinding = \"IN_LIB\"\nstore_id = \"s\"\nsecret_name = \"IN_LIB\"\n\n[[secrets_store_secrets]]\nbinding = \"ELSEWHERE\"\nstore_id = \"s\"\nsecret_name = \"ELSEWHERE\"\n";
+        let files = [
+            ("ci/workers.toml", map),
+            ("src/platform/wrangler.toml", toml),
+            ("src/platform/src/lib.rs", "pub fn serve() {}\n"),
+            ("src/lib/src/lib.rs", "pub const KEY: &str = \"IN_LIB\";\n"),
+            (
+                "src/other/src/lib.rs",
+                "pub const KEY: &str = \"ELSEWHERE\";\n",
+            ),
+        ];
+        let sources: Vec<Source> = files
+            .iter()
+            .map(|(path, text)| Source { path, text })
+            .collect();
+        let none: Vec<Box<dyn Capability>> = Vec::new();
+        let hosted = Hosted {
+            worker: "pigeon-platform",
+            capabilities: &none,
+            sources: &files,
+        };
+        let model = serde_json::to_value(describe(&sources, &hosted)).unwrap();
+        let unused = strs(&model["resources"]["unused"]);
+        assert!(!unused.contains(&"IN_LIB".to_string()), "{unused:?}");
+        assert!(unused.contains(&"ELSEWHERE".to_string()), "{unused:?}");
     }
     let objects = strs(&model["resources"]["objects"]);
     for want in [
