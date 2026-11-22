@@ -20,7 +20,7 @@ pub const NAME: &str = "ai-agents";
 pub const WORKER: &str = "pigeon-ai-agents";
 
 /// Every tool the capability offers.
-pub const TOOLS: [&str; 9] = [
+pub const TOOLS: [&str; 10] = [
     "ai_agents_start",
     "ai_agents_status",
     "ai_agents_stop",
@@ -30,6 +30,7 @@ pub const TOOLS: [&str; 9] = [
     "ai_agents_answer",
     "ai_agents_register",
     "ai_agents_report",
+    "ai_agents_handoff",
 ];
 
 /// The console section's id; it sits on the Instances tab, with what else pigeon runs.
@@ -225,6 +226,13 @@ impl Agents {
                 )
                 .await)
             }
+            "ai_agents_handoff" => r(object::call(
+                env,
+                INDEX,
+                "handoff",
+                &json!({ "run": a["run"], "reader": reader }),
+            )
+            .await),
             "ai_agents_report" => r(object::call(
                 env,
                 INDEX,
@@ -372,6 +380,18 @@ impl Service for Agents {
                                 "step": { "type": "string" }
                             },
                             "required": ["run", "state"]
+                        }),
+                    ),
+                    tool(
+                        "ai_agents_handoff",
+                        "Move a gateway run to the Claude chat: it stops, and the answer is \
+                         a packet (its brief, branch, what it did and spent, and a prompt) to \
+                         start a Claude Code session with, then ai_agents_register it. For when \
+                         the person asks, or the model gateway keeps failing.",
+                        json!({
+                            "type": "object",
+                            "properties": { "run": { "type": "string" } },
+                            "required": ["run"]
                         }),
                     ),
                 ],

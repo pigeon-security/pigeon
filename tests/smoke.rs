@@ -2542,6 +2542,20 @@ fn ai_agents_loop_budgets_tools_and_turns() {
     );
     assert_eq!(tools::kind(Role::Executor, "wait_executors"), None);
 
+    // Handing a run to the Claude chat: the packet carries its brief, branch and a prompt.
+    let packet = object::handoff_packet(
+        &json!({ "run": "r9", "role": "executor", "branch": "claude/ai-agent-r9", "step": "run: cargo test", "spent": { "cost": "$1" } }),
+        "fix the thing",
+        Some("main"),
+    );
+    let prompt = packet["session_prompt"].as_str().unwrap();
+    assert!(
+        prompt.contains("fix the thing")
+            && prompt.contains("`claude/ai-agent-r9`")
+            && prompt.contains("ai_agents_report with run r9")
+    );
+    assert!(service::TOOLS.contains(&"ai_agents_handoff"));
+
     // Falling back to another model drops thinking it cannot read.
     let thought = [
         json!({ "role": "assistant", "content": [{ "type": "thinking", "thinking": "t", "signature": "s" }] }),

@@ -303,6 +303,29 @@ impl AiAgentRuns {
                 )?;
                 Ok(Value::Null)
             }
+            "handoff" => {
+                let id = s("run");
+                let row = self
+                    .row(&id)?
+                    .filter(|r| Self::may_read(r, &s("reader")))
+                    .ok_or_else(|| bad(format!("no run {id}, or not yours")))?;
+                if row.runtime != "gateway" {
+                    return Err(bad("only a gateway run is handed to the Claude chat"));
+                }
+                let live = row.ended_at.is_none();
+                if live {
+                    self.db.exec(
+                        "UPDATE runs SET stop_asked = 1, report = COALESCE(report, 'handed to the Claude chat') WHERE id = ?",
+                        vec![id.as_str().into()],
+                    )?;
+                    call(&self.env, &format!("run:{id}"), "halt", &json!({})).await?;
+                }
+                Ok(handoff_packet(
+                    &row.public(),
+                    &row.brief,
+                    row.base.as_deref(),
+                ))
+            }
             "children" => {
                 let rows: Vec<Row> = self.db.rows(
                     "SELECT * FROM runs WHERE parent_run = ? ORDER BY created_at",
@@ -1219,7 +1242,7 @@ impl AiAgentRuns {
                 r.state = "waiting".into();
                 self.tell(
                     &r,
-                    "the model provider keeps failing; trying again every 5 minutes",
+                    "the model provider keeps failing; trying again every 5 minutes (ai_agents_handoff moves it to the Claude chat)",
                     json!({ "waiting": wait }),
                 )
                 .await?;
@@ -1679,4 +1702,32 @@ pub fn children_summary(children: &Value, since: i64) -> String {
         "{live} executor(s) still running; executor_result has each report"
     ));
     lines.join("\n")
+}
+
+/// What a Claude Code session needs to take over a run: its brief, where its work is, what it
+/// had done and spent, and how to register itself. Pure.
+pub fn handoff_packet(public: &Value, brief: &str, base: Option<&str>) -> Value {
+    let branch = public["branch"].as_str().unwrap_or_default();
+    let run = public["run"].as_str().unwrap_or_default();
+    let prompt = format!(
+        "You take over pigeon AI agent run {run}, handed to the Claude chat by the person.\n\n\
+         Brief:\n\n{brief}\n\n\
+         Its work so far is on branch `{branch}` (started from `{}`); fetch it from Artifacts \
+         and go on from its tip. Its last step: {}. Its report so far: {}.\n\n\
+         Call ai_agents_report with run {run} as you go and at your end.",
+        base.unwrap_or("main"),
+        public["step"].as_str().unwrap_or("none"),
+        public["report"].as_str().unwrap_or("none"),
+    );
+    json!({
+        "run": run,
+        "role": public["role"],
+        "brief": brief,
+        "branch": branch,
+        "base": base.unwrap_or("main"),
+        "spent": public["spent"],
+        "session_prompt": prompt,
+        "next": "start a Claude Code session with session_prompt on this repository, then \
+                 ai_agents_register it with parent_run set to this run",
+    })
 }
