@@ -1,7 +1,8 @@
 //! pigeon-model-gateway: the models Worker (docs/plans/workers-split.md, phase 3). It serves
 //! the models capability ([`pigeon_models::ModelGateway`]): requests to model providers
 //! through one Cloudflare AI Gateway, their usage, and async model jobs, whose Durable Object
-//! class core (pigeon-platform) still hosts, reached over the `MODEL_JOBS` binding.
+//! class ([`ModelJobs`]) it hosts: the class moved here from pigeon-platform with
+//! `transferred_classes`, its objects and their rows with it (docs/plans/workers-split.md, T18).
 //! A capability Worker: it has no public surface, and answers only core over a Service Binding,
 //! through [`pigeon_contract::serve`], which checks the caller core signed. It holds no parent
 //! token: each Cloudflare call acts on a short-lived token core mints for the call in hand,
@@ -16,8 +17,17 @@ compile_error!(
 
 use pigeon_contract::{Answer, FailureKind};
 use pigeon_core::secrets_store;
+use pigeon_models::runner::{self, Token};
 use pigeon_models::{Dialect, ModelGateway, Models, Provider};
+use serde_json::json;
 use worker::{Context, Env, Request, Response, Result, event};
+// The `durable_object` macro's expansion names `wasm_bindgen` at the crate root.
+use worker::wasm_bindgen;
+
+/// This Worker's script name: the service it signs as when no one is calling.
+const WORKER: &str = "pigeon-model-gateway";
+/// The AI Gateway's ID, as core's settings name it.
+const AI_GATEWAY: &str = "pigeon";
 
 /// The Secrets Store binding of the key core signs callers with.
 const CALLER_KEY: &str = "CALLER_KEY";
@@ -30,7 +40,7 @@ const PROXY_HOST: &str = "proxy.pigeon.dev";
 fn gateway() -> ModelGateway {
     ModelGateway {
         models: Models {
-            gateway: "pigeon".into(),
+            gateway: AI_GATEWAY.into(),
             providers: vec![Provider {
                 slug: "anthropic",
                 alias: "default",
@@ -59,4 +69,40 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         return Ok(Response::from_json(&answer)?.with_status(503));
     };
     pigeon_contract::serve(req, &env, &gateway(), key.as_bytes()).await
+}
+
+/// Async model jobs: the index and each job's own object. A job's model call acts on an
+/// `ai_gateway` token core mints for it, asked as this Worker: the gateway holds no parent token.
+#[worker::durable_object]
+pub struct ModelJobs {
+    inner: runner::ModelJobs,
+}
+
+impl worker::DurableObject for ModelJobs {
+    fn new(state: worker::State, env: Env) -> Self {
+        let settings = runner::Settings {
+            gateway: AI_GATEWAY.into(),
+            token: Token::Scoped(itself()),
+        };
+        let inner =
+            runner::ModelJobs::new(state, env, settings).expect("the model jobs' migrations apply");
+        Self { inner }
+    }
+
+    async fn fetch(&self, req: Request) -> Result<Response> {
+        self.inner.fetch(req).await
+    }
+
+    async fn alarm(&self) -> Result<Response> {
+        self.inner.alarm().await
+    }
+}
+
+/// The caller this Worker signs its own `credential` requests as: itself, a service, acting for
+/// no one, as pigeon-proxy does.
+fn itself() -> serde_json::Value {
+    json!({
+        "user": { "id": format!("worker:{WORKER}"), "kind": "service", "name": WORKER, "created_at": 0 },
+        "acting_for": null,
+    })
 }

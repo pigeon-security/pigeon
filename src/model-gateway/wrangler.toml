@@ -26,9 +26,20 @@ secret_name = "CALLER_KEY"
 binding = "PLATFORM"
 service = "pigeon-platform"
 
-# The model job objects, still hosted by core for now (phase 3 moves the class here with
-# `transferred_classes`). No migrations here: the class is pigeon-platform's.
+# The model job objects. The class moves here from pigeon-platform on this config's first
+# deploy, with its objects and their rows and alarms (rehearsed with pigeon-dotest-a and -b:
+# docs/plans/do-rehearsal.md). It is never created here first, and a transfer cannot be rolled
+# back. pigeon-platform keeps its v4 migration and still exports the class; its MODEL_JOBS
+# binding reaches the class here.
 [durable_objects]
 bindings = [
-  { name = "MODEL_JOBS", class_name = "ModelJobs", script_name = "pigeon-platform" },
+  { name = "MODEL_JOBS", class_name = "ModelJobs" },
 ]
+
+[[migrations]]
+tag = "v1"
+
+[[migrations.transferred_classes]]
+from = "ModelJobs"
+from_script = "pigeon-platform"
+to = "ModelJobs"

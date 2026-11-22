@@ -694,6 +694,7 @@ dependencies = [
  "pigeon-contract",
  "pigeon-core",
  "pigeon-models",
+ "serde_json",
  "worker",
 ]
 
