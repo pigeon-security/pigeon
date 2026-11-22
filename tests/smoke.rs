@@ -1437,6 +1437,84 @@ fn contract_signed_callers_and_skew() {
     assert!(!wants(&json!("push"), &event));
 }
 
+/// Core's `dispatch` must see the bound Workers' tools (`models_submit` is the model gateway's),
+/// while a clashing remote tool is left out and the other ops use core's own capabilities.
+#[test]
+fn core_dispatch_reaches_bound_workers_tools() {
+    use pigeon_capabilities::remote::{Binding, Remote};
+    use pigeon_capabilities::{Call, Capability, Context, owner, split};
+    use pigeon_contract::{CORE_OPS, CapabilityManifest};
+    use pigeon_core::mcp::Tool;
+
+    struct Fake;
+    impl Capability for Fake {
+        fn name(&self) -> &'static str {
+            "lander"
+        }
+        fn tools(&self) -> Vec<Tool> {
+            vec![
+                Tool::bare("land", "Land."),
+                Tool::bare("land_status", "Status."),
+            ]
+        }
+        fn call<'a>(&'a self, _cx: &'a Context<'a>, _tool: &'a str, _args: &'a Value) -> Call<'a> {
+            Box::pin(async { Ok(Value::Null) })
+        }
+    }
+    let manifest = |v: Value| -> CapabilityManifest { serde_json::from_value(v).unwrap() };
+    let models = Remote::new(
+        &Binding {
+            binding: "MODELS",
+            worker: "pigeon-model-gateway",
+        },
+        manifest(json!({
+            "name": "models",
+            "tools": [{
+                "name": "models_submit",
+                "description": "Submit a model request.",
+                "inputSchema": { "type": "object" }
+            }]
+        })),
+    );
+    let clash = Remote::new(
+        &Binding {
+            binding: "OTHER",
+            worker: "pigeon-other",
+        },
+        manifest(json!({
+            "name": "other",
+            "tools": [{ "name": "land", "description": "Shadows core.", "inputSchema": { "type": "object" } }]
+        })),
+    );
+
+    let local_only: Vec<Box<dyn Capability>> = vec![Box::new(Fake)];
+    assert!(owner(&local_only, "models_submit").is_none());
+    let merged = split::merge(
+        vec![Box::new(Fake)],
+        vec![Box::new(models), Box::new(clash)],
+    );
+    let names: Vec<&str> = merged.iter().map(|c| c.name()).collect();
+    assert_eq!(names, ["lander", "models"]);
+    let found = owner(&merged, "models_submit").expect("models_submit is reachable");
+    assert_eq!(found.name(), "models");
+    assert_eq!(owner(&merged, "land").unwrap().name(), "lander");
+
+    assert!(split::op_needs_bound("dispatch"));
+    for op in [
+        "credential",
+        "service_user",
+        "verify",
+        "grant",
+        "deploy_grant",
+        "nope",
+    ] {
+        assert!(!split::op_needs_bound(op), "{op}");
+    }
+    for op in CORE_OPS.iter().filter(|o| **o != "dispatch") {
+        assert!(!split::op_needs_bound(op), "{op}");
+    }
+}
+
 #[test]
 fn deploy_proxy_allowlist() {
     use pigeon_capabilities::cf_proxy::{

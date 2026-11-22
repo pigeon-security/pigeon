@@ -186,7 +186,8 @@ pub struct Remote {
 }
 
 impl Remote {
-    fn new(binding: &Binding, spec: CapabilityManifest) -> Self {
+    /// Builds a bound Worker's capability from its manifest (used by the smoke suite too).
+    pub fn new(binding: &Binding, spec: CapabilityManifest) -> Self {
         let tools = spec
             .tools
             .iter()

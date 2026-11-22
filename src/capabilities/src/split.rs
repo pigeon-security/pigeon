@@ -52,8 +52,39 @@ pub async fn all(
     if bindings.is_empty() {
         return local;
     }
+    merge(local, remote::capabilities(env, bindings).await)
+}
+
+/// Whether core's op `op` (the path without its leading `/`) needs the bound Workers'
+/// capabilities. Only `dispatch` does: it runs any tool, wherever the tool lives. The other ops
+/// are core's own business.
+pub fn op_needs_bound(op: &str) -> bool {
+    op == "dispatch"
+}
+
+/// The capabilities core uses to serve op `op`: [`all`] when the op needs the bound Workers'
+/// ([`op_needs_bound`]), else `local` alone. `op` is the path without its leading `/`.
+pub async fn for_op(
+    env: &Env,
+    op: &str,
+    local: Vec<Box<dyn Capability>>,
+    bindings: &[Binding],
+) -> Vec<Box<dyn Capability>> {
+    if op_needs_bound(op) {
+        all(env, local, bindings).await
+    } else {
+        local
+    }
+}
+
+/// `local` with `remote` added after it. A remote capability whose name, a tool or a route is
+/// already taken by one in the list is left out, and logged.
+pub fn merge(
+    local: Vec<Box<dyn Capability>>,
+    remote: Vec<Box<dyn Capability>>,
+) -> Vec<Box<dyn Capability>> {
     let mut out = local;
-    for r in remote::capabilities(env, bindings).await {
+    for r in remote {
         let tools: Vec<&str> = r.tools().iter().map(|t| t.name).collect();
         let taken = out.iter().any(|c| {
             c.name() == r.name()
@@ -61,6 +92,8 @@ pub async fn all(
                 || c.routes().iter().any(|x| r.routes().contains(x))
         });
         if taken {
+            // The console exists only in a Worker; a native caller (the smoke suite) gets no line.
+            #[cfg(target_arch = "wasm32")]
             worker::console_error!(
                 "split: remote capability {} clashes with a local one; left out",
                 r.name()
