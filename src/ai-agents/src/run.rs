@@ -333,6 +333,10 @@ pub enum Recovery {
     },
     /// Every model failed: wait for the provider, and tell the person.
     WaitProvider,
+    /// The provider refused the transcript's thinking blocks (their signatures are bound to the
+    /// tool list, which a deploy that changes the tools changes): drop them from the stored
+    /// transcript and send the turn again on the same model.
+    StripThinking,
     /// Give up: the failure is not the provider's (a refused request, an over-long context).
     Fail,
 }
@@ -369,7 +373,18 @@ pub fn on_failure(
     index: usize,
     models: &[&str],
 ) -> Recovery {
-    if state == "cancelled" || !transient(state, error) {
+    if state == "cancelled" {
+        return Recovery::Fail;
+    }
+    if stale_thinking(error) {
+        // Once: stripping leaves no thinking block to refuse, so a second refusal is another fault.
+        return if failures < 2 {
+            Recovery::StripThinking
+        } else {
+            Recovery::Fail
+        };
+    }
+    if !transient(state, error) {
         return Recovery::Fail;
     }
     if failures < 2 {
@@ -380,6 +395,13 @@ pub fn on_failure(
     } else {
         Recovery::WaitProvider
     }
+}
+
+/// Whether the provider refused a thinking block's signature: the block was made for another
+/// request shape (another tool list, after a deploy that changed the tools).
+pub fn stale_thinking(error: &str) -> bool {
+    let e = error.to_ascii_lowercase();
+    e.contains("signature") && e.contains("thinking")
 }
 
 /// How many turns a fallback model is kept for before the first choice is tried again.

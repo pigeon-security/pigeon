@@ -2279,6 +2279,17 @@ fn ai_agents_loop_budgets_tools_and_turns() {
         run::on_failure("cancelled", "cancelled by its sender", 1, 0, models),
         Recovery::Fail
     );
+    // A deploy that changes the tool list makes the transcript's thinking signatures stale
+    // (planner Zzn8ssZs4JsC, 2026-11-22): strip them once and go on, rather than end the run.
+    let stale = "anthropic answered 400: {\"error\":{\"message\":\"messages.1.content.0: Invalid `signature` in `thinking` block. The block is bound to a different conversation. The `tools` list differs from the one this block was created with.\"}}";
+    assert_eq!(
+        run::on_failure("failed", stale, 1, 0, models),
+        Recovery::StripThinking
+    );
+    assert_eq!(
+        run::on_failure("failed", stale, 2, 0, models),
+        Recovery::Fail
+    );
     assert_eq!(task("r1", Role::Planner, 7), "ai-agent/r1/planner/7");
 
     // ---- budgets ----

@@ -761,6 +761,32 @@ impl AiAgentRuns {
             .is_some_and(|m| m["role"] == "user"))
     }
 
+    /// Removes the thinking blocks from every stored assistant message, for good: the provider
+    /// refused their signatures.
+    fn strip_stored_thinking(&self) -> Result<()> {
+        #[derive(Deserialize)]
+        struct M {
+            n: i64,
+            body: String,
+        }
+        let rows = self
+            .db
+            .rows::<M>("SELECT n, body FROM messages ORDER BY n", vec![])?;
+        for m in rows {
+            let Ok(body) = serde_json::from_str::<Value>(&m.body) else {
+                continue;
+            };
+            let stripped = transcript::strip_thinking(std::slice::from_ref(&body));
+            if let Some(new) = stripped.first().filter(|new| **new != body) {
+                self.db.exec(
+                    "UPDATE messages SET body = ? WHERE n = ?",
+                    vec![new.to_string().into(), m.n.into()],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     fn push_message(&self, m: &Value) -> Result<()> {
         self.db.exec(
             "INSERT INTO messages (n, body) VALUES ((SELECT COALESCE(MAX(n), 0) + 1 FROM messages), ?)",
@@ -1283,6 +1309,14 @@ impl AiAgentRuns {
                 )
                 .await?;
                 storage.set_alarm(run::PROVIDER_EVERY_MS).await
+            }
+            Recovery::StripThinking => {
+                self.strip_stored_thinking()?;
+                self.set(
+                    &format!("{clear}, failures = ?"),
+                    vec![i64::from(failures).into()],
+                )?;
+                storage.set_alarm(0).await
             }
             Recovery::Fail => {
                 let why = format!(
