@@ -7183,6 +7183,49 @@ fn core_architecture_draws_every_worker_in_the_map() {
 }
 
 #[test]
+fn core_observability_monitors_plan() {
+    use pigeon_capabilities::observability::{absent_types, plan_monitors};
+    use serde_json::json;
+
+    let available = json!({ "workers": [
+        { "type": "workers_observability_alert", "filter_options": [{ "Key": "services" }] },
+        { "type": "billing_usage_alert", "filter_options": [{ "Key": "product" }] },
+    ] });
+    let existing = json!([{ "name": "pigeon: Workers requests usage" }, { "name": "other" }]);
+    let scripts = vec!["core".to_string(), "lander".to_string()];
+    let planned = plan_monitors(&available, &existing, &scripts);
+    let names: Vec<&str> = planned.iter().filter_map(|p| p["name"].as_str()).collect();
+    // An existing pigeon policy is not planned again.
+    assert!(!names.contains(&"pigeon: Workers requests usage"));
+    assert!(names.contains(&"pigeon: Containers memory usage"));
+    // The absent real-time type is skipped and reported.
+    assert!(
+        planned
+            .iter()
+            .all(|p| p["alert_type"] != "workers_observability_real_time_issue")
+    );
+    assert_eq!(
+        absent_types(&available),
+        vec!["workers_observability_real_time_issue"]
+    );
+    // Filters name only the given scripts.
+    let errors = planned
+        .iter()
+        .find(|p| p["alert_type"] == "workers_observability_alert");
+    assert_eq!(
+        errors.map(|p| p["filters"].clone()),
+        Some(json!({ "services": ["core", "lander"] }))
+    );
+    // Planned policies are not planned again; only the one that was already there remains
+    // missing from this list.
+    let all: Vec<_> = planned
+        .iter()
+        .map(|p| json!({ "name": p["name"] }))
+        .collect();
+    assert!(plan_monitors(&available, &json!(all), &scripts).len() == 1);
+}
+
+#[test]
 fn core_observability_summary_folds() {
     use pigeon_capabilities::observability::*;
     use serde_json::json;

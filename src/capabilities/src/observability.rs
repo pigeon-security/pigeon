@@ -388,28 +388,326 @@ impl Capability for Observability {
     }
 
     fn tools(&self) -> Vec<Tool> {
-        vec![Tool {
-            name: "observability_summary",
-            description: "Read-only. Per-Worker requests, errors, CPU and wall time, top error \
+        vec![
+            Tool::bare(
+                "observability_monitors_plan",
+                "Dry run of the notification policies pigeon wants (Workers observability \
+                 alerts, billing usage alerts) and the account lacks. Asks the person's \
+                 approval when something is missing.",
+            ),
+            Tool {
+                name: "observability_monitors_apply",
+                description: "Creates the policies of an approved monitors plan, once. Only \
+                              policies named `pigeon: ...` are created.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": { "plan": { "type": "string", "description": "The approval id from the plan." } },
+                    "required": ["plan"]
+                }),
+            },
+            Tool {
+                name: "observability_summary",
+                description: "Read-only. Per-Worker requests, errors, CPU and wall time, top error \
                           messages and deploys, and what the platform costs, each line tagged \
                           billed (Cloudflare's invoice data) or estimated (list price or a \
                           gateway's estimate). Sources that failed are listed.",
-            input_schema: json!({
-                "type": "object",
-                "properties": { "hours": { "type": "integer", "description": "Window, 1 to 168; 24 by default." } }
-            }),
-        }]
+                input_schema: json!({
+                    "type": "object",
+                    "properties": { "hours": { "type": "integer", "description": "Window, 1 to 168; 24 by default." } }
+                }),
+            },
+        ]
     }
 
     fn call<'a>(&'a self, cx: &'a Context<'a>, tool: &'a str, args: &'a Value) -> Call<'a> {
         Box::pin(async move {
-            if tool != "observability_summary" {
-                return Err(crate::unknown(tool));
+            match tool {
+                "observability_monitors_plan" => return monitors_plan(self, cx).await,
+                "observability_monitors_apply" => return monitors_apply(self, cx, args).await,
+                "observability_summary" => {}
+                _ => return Err(crate::unknown(tool)),
             }
             let hours = args["hours"].as_u64().unwrap_or(24).clamp(1, 168);
             summary(self, cx, hours).await
         })
     }
+}
+
+/// Permission to read the account's notification policies and available alert types.
+const NOTIFICATIONS_READ_PERMISSION: &str = "Notifications Read";
+/// Permission to create notification policies.
+const NOTIFICATIONS_WRITE_PERMISSION: &str = "Notifications Write";
+/// Prefix of every policy name pigeon creates; apply touches no other.
+const MONITOR_PREFIX: &str = "pigeon: ";
+/// Kind name of the approval for a monitors plan.
+const MONITORS_KIND: &str = "observability_monitors";
+/// Workers requests per month: about twice the expected month (see the plan's cost section).
+const WORKERS_REQUESTS_LIMIT: u64 = 20_000_000;
+/// Container memory in GB-hours per month: about twice the expected month.
+const CONTAINER_GB_HOURS_LIMIT: u64 = 100;
+/// Observability ingestion in GB per month: about twice the expected month.
+const OBSERVABILITY_GB_LIMIT: u64 = 10;
+/// Billing products to watch: policy label, API product name (unverified), limit.
+const BILLING_WATCHES: [(&str, &str, u64); 3] = [
+    ("Workers requests", "workers", WORKERS_REQUESTS_LIMIT),
+    ("Containers memory", "containers", CONTAINER_GB_HOURS_LIMIT),
+    (
+        "Observability ingestion",
+        "observability",
+        OBSERVABILITY_GB_LIMIT,
+    ),
+];
+
+/// The alert types that `available` (the `available_alerts` result: groups of entries with a
+/// `type`) offers, each with its `filter_options` keys.
+fn available_types(available: &Value) -> BTreeMap<String, Vec<String>> {
+    let mut out = BTreeMap::new();
+    let groups: Vec<&Value> = match available {
+        Value::Object(m) => m.values().collect(),
+        Value::Array(a) => a.iter().collect(),
+        _ => Vec::new(),
+    };
+    for entry in groups.into_iter().flat_map(|g| match g {
+        Value::Array(a) => a.iter().collect::<Vec<_>>(),
+        other => vec![other],
+    }) {
+        let Some(kind) = entry["type"].as_str() else {
+            continue;
+        };
+        let keys = entry["filter_options"]
+            .as_array()
+            .map(|o| {
+                o.iter()
+                    .filter_map(|f| f["Key"].as_str().or_else(|| f["key"].as_str()))
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        out.insert(kind.to_string(), keys);
+    }
+    out
+}
+
+/// The wanted alert types that `available` does not offer.
+pub fn absent_types(available: &Value) -> Vec<String> {
+    let have = available_types(available);
+    [
+        "workers_observability_alert",
+        "workers_observability_real_time_issue",
+        "billing_usage_alert",
+    ]
+    .into_iter()
+    .filter(|t| !have.contains_key(*t))
+    .map(str::to_string)
+    .collect()
+}
+
+/// The notification policies pigeon wants that `existing` (the policies list) lacks by name.
+/// Types missing from `available` are skipped. Worker alerts are filtered to `scripts` when
+/// the type has a script filter. Each item is `{name, alert_type, filters, enabled}`.
+pub fn plan_monitors(available: &Value, existing: &Value, scripts: &[String]) -> Vec<Value> {
+    let have = available_types(available);
+    let names: Vec<&str> = existing
+        .as_array()
+        .map(|a| a.iter().filter_map(|p| p["name"].as_str()).collect())
+        .unwrap_or_default();
+    let mut wanted = Vec::new();
+    for (name, kind) in [
+        ("pigeon: Workers errors", "workers_observability_alert"),
+        (
+            "pigeon: Workers real-time issues",
+            "workers_observability_real_time_issue",
+        ),
+    ] {
+        let Some(keys) = have.get(kind) else {
+            continue;
+        };
+        let key = keys
+            .iter()
+            .find(|k| matches!(k.as_str(), "services" | "worker_name" | "script_name"));
+        let filters = match key {
+            Some(k) => json!({ k.as_str(): scripts }),
+            None => json!({}),
+        };
+        wanted
+            .push(json!({ "name": name, "alert_type": kind, "filters": filters, "enabled": true }));
+    }
+    if have.contains_key("billing_usage_alert") {
+        for (label, product, limit) in BILLING_WATCHES {
+            wanted.push(json!({
+                "name": format!("{MONITOR_PREFIX}{label} usage"),
+                "alert_type": "billing_usage_alert",
+                "filters": { "product": [product], "limit": [limit.to_string()] },
+                "enabled": true,
+            }));
+        }
+    }
+    wanted
+        .into_iter()
+        .filter(|w| w["name"].as_str().is_some_and(|n| !names.contains(&n)))
+        .collect()
+}
+
+/// Reads the account's alert types and policies, and plans the missing monitors. Answers the
+/// planned policies and the types that were skipped.
+async fn monitors_planned(
+    this: &Observability,
+    cx: &Context<'_>,
+) -> Result<(Vec<Value>, Vec<String>)> {
+    let token = open(cx, NOTIFICATIONS_READ_PERMISSION).await?;
+    let id = &cx.account.id;
+    let work = async {
+        let a = pigeon_core::cloudflare::call(
+            token.value(),
+            Method::Get,
+            &format!("/accounts/{id}/alerting/v3/available_alerts"),
+            None,
+        )
+        .await?;
+        let p = pigeon_core::cloudflare::call(
+            token.value(),
+            Method::Get,
+            &format!("/accounts/{id}/alerting/v3/policies"),
+            None,
+        )
+        .await?;
+        Ok((a, p))
+    }
+    .await;
+    let (available, existing) = token.finish(work).await?;
+    let scripts: Vec<String> = this.map.workers.iter().map(|w| w.script.clone()).collect();
+    Ok((
+        plan_monitors(&available, &existing, &scripts),
+        absent_types(&available),
+    ))
+}
+
+/// `observability_monitors_plan`: the dry run, and an approval when something is missing.
+async fn monitors_plan(this: &Observability, cx: &Context<'_>) -> Result<Value> {
+    let caller = cx
+        .caller
+        .ok_or_else(|| Error::RustError("planning needs a known caller".into()))?;
+    let person = caller.acting_for.as_ref().ok_or_else(|| {
+        Error::RustError("the caller acts for no person who could approve this".into())
+    })?;
+    let (planned, skipped) = monitors_planned(this, cx).await?;
+    let skipped_note: Vec<String> = skipped
+        .iter()
+        .map(|t| format!("skipped: `{t}` is not in the account's available alerts"))
+        .collect();
+    if planned.is_empty() {
+        return Ok(
+            json!({ "plan": [], "applies": false, "skipped": skipped_note,
+            "note": "Everything is already in place." }),
+        );
+    }
+    let lines: Vec<String> = planned
+        .iter()
+        .map(|p| {
+            let unverified = if p["alert_type"] == "billing_usage_alert" {
+                " (unverified: product and filter names are from the API docs)"
+            } else {
+                ""
+            };
+            format!(
+                "create `{}` ({}){unverified}",
+                p["name"].as_str().unwrap_or(""),
+                p["alert_type"].as_str().unwrap_or("")
+            )
+        })
+        .collect();
+    let payload = json!({ "policies": planned });
+    let kind = pigeon_core::approval::Kind::Other(MONITORS_KIND.into());
+    let digest = pigeon_core::approval::payload_digest(&kind, "monitors", &payload);
+    let made = crate::users::directory(
+        cx.env,
+        "approval.create",
+        json!({
+            "kind": kind.name(),
+            "subject": "monitors",
+            "digest": digest,
+            "summary": { "plan": lines, "skipped": skipped_note },
+            "payload": payload,
+            "caller_id": caller.user.id,
+            "approver_id": person.id,
+        }),
+    )
+    .await?;
+    Ok(json!({
+        "plan": lines,
+        "skipped": skipped_note,
+        "applies": true,
+        "approval": made["record"]["id"],
+        "waits_until_ms": made["record"]["expires_ms"],
+        "note": "Nothing is created until the person approves this plan on the console's \
+                 Approvals tab; then observability_monitors_apply {plan: <this approval>} \
+                 creates the policies once. Delivery is not set: the person adds it in the \
+                 dashboard.",
+    }))
+}
+
+/// `observability_monitors_apply`: creates the approved policies if the account still gives
+/// the same plan. Only policies named `pigeon: ...` are created; none is changed or deleted.
+async fn monitors_apply(this: &Observability, cx: &Context<'_>, args: &Value) -> Result<Value> {
+    let caller = cx
+        .caller
+        .ok_or_else(|| Error::RustError("applying needs a known caller".into()))?;
+    let approval_id = crate::arg(args, "plan")?;
+    let got = crate::users::directory(cx.env, "approval.get", json!({ "id": approval_id })).await?;
+    if got["kind"] != MONITORS_KIND {
+        return Err(Error::RustError(format!(
+            "there is no monitors plan approval {approval_id}"
+        )));
+    }
+    let (planned, _) = monitors_planned(this, cx).await?;
+    let kind = pigeon_core::approval::Kind::Other(MONITORS_KIND.into());
+    let digest =
+        pigeon_core::approval::payload_digest(&kind, "monitors", &json!({ "policies": planned }));
+    let taken = crate::users::directory(
+        cx.env,
+        "approval.take",
+        json!({ "id": approval_id, "digest": digest, "caller_id": caller.user.id }),
+    )
+    .await?;
+    if let Some(why) = taken["refused"].as_str() {
+        return Err(Error::RustError(format!(
+            "the plan does not run: {why}. If the account changed since it was approved, plan again."
+        )));
+    }
+    let token = Scoped::open_for(
+        cx.account,
+        "observability",
+        vec![Policy::new(
+            Scope::Account,
+            &[NOTIFICATIONS_WRITE_PERMISSION],
+        )],
+        TOKEN_TTL,
+    )
+    .await?;
+    let path = format!("/accounts/{}/alerting/v3/policies", cx.account.id);
+    let work = async {
+        let mut created = Vec::new();
+        for p in planned.iter().filter(|p| {
+            p["name"]
+                .as_str()
+                .is_some_and(|n| n.starts_with(MONITOR_PREFIX))
+        }) {
+            // The directory's user record has no email, so no delivery is set here.
+            let body = json!({
+                "name": p["name"], "alert_type": p["alert_type"], "filters": p["filters"],
+                "enabled": p["enabled"], "mechanisms": {},
+            });
+            let made =
+                pigeon_core::cloudflare::call(token.value(), Method::Post, &path, Some(&body))
+                    .await?;
+            created.push(json!({ "name": p["name"], "id": made["id"] }));
+        }
+        Ok(created)
+    }
+    .await;
+    let created = token.finish(work).await?;
+    Ok(json!({ "created": created,
+        "note": "No delivery is set: the person adds email in the dashboard (Alerts > Notifications)." }))
 }
 
 /// The agent runs created in `[from_ms, to_ms]`, from `ai_agents_status`'s list: how many and

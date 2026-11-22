@@ -364,6 +364,13 @@ pub async fn decide(env: &Env, id: &str, approve: bool, person: &User) -> Result
             _ => format!("Denied: instance `{}` is unchanged.", r.subject),
         } }));
     }
+    if r.kind.name() == "observability_monitors" {
+        return Ok(json!({ "message": if approve {
+            "Approved: the monitors plan is applied once by the agent that asked."
+        } else {
+            "Denied: no notification policy is created."
+        } }));
+    }
     if r.kind == ApprovalKind::LinkedPlan {
         return Ok(json!({ "message": if approve {
             format!("Approved: the plan for `{}` is applied once, by the agent that asked, if the account still gives the same plan.", r.subject)
