@@ -17,6 +17,7 @@ pub mod content;
 pub mod feeds;
 pub mod markdown;
 pub mod pages;
+pub mod repo;
 pub mod site;
 
 use std::collections::{BTreeMap, BTreeSet};

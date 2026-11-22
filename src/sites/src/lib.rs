@@ -1,9 +1,12 @@
 //! pigeon-sites: the sites Worker (docs/plans/workers-split.md). It renders consumer
-//! repositories with the `blog@1` template ([`pigeon_blog`]) and, next, deploys instance sites.
+//! repositories with the `blog@1` template ([`pigeon_blog`]) and deploys instance sites
+//! ([`deploy`]).
 //! A capability Worker: it has no public surface, and answers only core over a Service Binding,
 //! through [`pigeon_contract::serve`], which checks the caller core signed. It asks core for
 //! what it must not hold itself (a linked account's token) over its `PLATFORM` binding. Built
 //! for `wasm32-unknown-unknown` only.
+
+mod deploy;
 
 #[cfg(not(target_arch = "wasm32"))]
 compile_error!("pigeon-sites builds for wasm32 only: cargo build --target wasm32-unknown-unknown");
@@ -96,27 +99,49 @@ impl Service for Sites {
             commit: option_env!("PIGEON_COMMIT").unwrap_or_default().into(),
             capabilities: vec![CapabilityManifest {
                 name: "sites".into(),
-                tools: vec![ToolSpec {
-                    name: "site_render".into(),
-                    description: "Render a consumer repository's content with template blog@1, \
+                tools: vec![
+                    ToolSpec {
+                        name: "site_render".into(),
+                        description:
+                            "Render a consumer repository's content with template blog@1, \
                                   as a dry run: every path the site would hold, with its size \
                                   and type, and the template's digest; or the problems with \
                                   the content. Nothing is written. Served by pigeon-sites."
-                        .into(),
-                    input_schema: json!({
-                        "type": "object",
-                        "properties": {
-                            "site_toml": { "type": "string", "description": "The text of .pigeon/site.toml." },
-                            "posts": { "type": "array", "description": "content/posts/*.md as [name, text] pairs." },
-                            "pages": { "type": "array", "description": "content/pages/*.md as [name, text] pairs." },
-                            "statics": { "type": "array", "items": { "type": "string" }, "description": "Paths under static/." },
-                            "base_url": { "type": "string", "description": "Such as https://example.com." },
-                            "commit": { "type": "string", "description": "The short commit, for the footer." },
-                            "commit_year": { "type": "integer" }
-                        },
-                        "required": ["site_toml"]
-                    }),
-                }],
+                                .into(),
+                        input_schema: json!({
+                            "type": "object",
+                            "properties": {
+                                "site_toml": { "type": "string", "description": "The text of .pigeon/site.toml." },
+                                "posts": { "type": "array", "description": "content/posts/*.md as [name, text] pairs." },
+                                "pages": { "type": "array", "description": "content/pages/*.md as [name, text] pairs." },
+                                "statics": { "type": "array", "items": { "type": "string" }, "description": "Paths under static/." },
+                                "base_url": { "type": "string", "description": "Such as https://example.com." },
+                                "commit": { "type": "string", "description": "The short commit, for the footer." },
+                                "commit_year": { "type": "integer" }
+                            },
+                            "required": ["site_toml"]
+                        }),
+                    },
+                    ToolSpec {
+                        name: "site_deploy".into(),
+                        description:
+                            "Deploy an instance's site: its GitHub repository at `rev` (a \
+                                  commit or branch; main when omitted), rendered with blog@1 \
+                                  and written to the bucket its record names, then made live. \
+                                  Only adds objects and moves `live`, so the previous deploy \
+                                  stays whole. Answers the commit and counts, or the content's \
+                                  problems. Served by pigeon-sites."
+                                .into(),
+                        input_schema: json!({
+                            "type": "object",
+                            "properties": {
+                                "instance": { "type": "string" },
+                                "rev": { "type": "string", "description": "A commit or branch; main when omitted." }
+                            },
+                            "required": ["instance"]
+                        }),
+                    },
+                ],
                 ..CapabilityManifest::default()
             }],
         }
@@ -124,12 +149,39 @@ impl Service for Sites {
 
     fn call<'a>(
         &'a self,
-        _env: &'a Env,
-        _caller: &'a Signed,
+        env: &'a Env,
+        caller: &'a Signed,
         req: CallRequest,
     ) -> pigeon_contract::serve::Answering<'a> {
         Box::pin(async move {
             match req.tool.as_str() {
+                "site_deploy" => {
+                    let Some(instance) = req.args["instance"].as_str() else {
+                        return Answer::error(FailureKind::BadRequest, "`instance` is required");
+                    };
+                    let rev = req.args["rev"].as_str().unwrap_or("main");
+                    if rev.is_empty()
+                        || !rev
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || "-_./".contains(c))
+                    {
+                        return Answer::error(
+                            FailureKind::BadRequest,
+                            "`rev` must be a commit or branch",
+                        );
+                    }
+                    let key = match env.secret_store(CALLER_KEY) {
+                        Ok(b) => secrets_store::read(&b).await.ok().flatten(),
+                        Err(_) => None,
+                    };
+                    let Some(key) = key else {
+                        return Answer::error(FailureKind::Failed, "CALLER_KEY is not set");
+                    };
+                    match deploy::deploy(env, key.as_bytes(), caller, instance, rev).await {
+                        Ok(v) => Answer::Ok(v),
+                        Err(e) => Answer::error(FailureKind::Failed, e.to_string()),
+                    }
+                }
                 "site_render" => match render(&req.args) {
                     Ok(v) => Answer::Ok(v),
                     Err(why) => Answer::error(FailureKind::BadRequest, why),
