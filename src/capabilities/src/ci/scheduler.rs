@@ -31,7 +31,7 @@ use super::{Cx, Dispatched, EVENTS, Held, NewJob, Run, Seen, Settings, SetupRun,
 use pigeon_core::buildkite_setup::{Kind, Owned};
 
 /// The scheduler's schema, one statement per migration, applied in order and never edited.
-const MIGRATIONS: [&str; 14] = [
+const MIGRATIONS: [&str; 15] = [
     "CREATE TABLE jobs (id TEXT PRIMARY KEY, repo TEXT NOT NULL, commit_sha TEXT NOT NULL, name TEXT NOT NULL, job TEXT NOT NULL, class TEXT NOT NULL, pin TEXT, task TEXT, caller TEXT, caller_name TEXT, notify_url TEXT, notify_key TEXT, state TEXT NOT NULL, attempt INTEGER NOT NULL, connector TEXT, handle TEXT, url TEXT, excluded TEXT NOT NULL, token_hash TEXT, token_expires_at INTEGER, deadline_at INTEGER, claimed_at INTEGER, next_poll_at INTEGER, created_at INTEGER NOT NULL, queued_at INTEGER NOT NULL, dispatched_at INTEGER, started_at INTEGER, finished_at INTEGER, detail TEXT)",
     "CREATE INDEX jobs_state ON jobs (state)",
     "CREATE INDEX jobs_commit ON jobs (repo, commit_sha)",
@@ -46,6 +46,7 @@ const MIGRATIONS: [&str; 14] = [
     "CREATE TABLE setup_owned (connector TEXT NOT NULL, kind TEXT NOT NULL, key TEXT NOT NULL, id TEXT NOT NULL, spec_hash TEXT, created_at INTEGER NOT NULL, PRIMARY KEY (connector, kind, key))",
     "CREATE TABLE setup_keys (connector TEXT PRIMARY KEY, key TEXT NOT NULL, created_at INTEGER NOT NULL)",
     "CREATE TABLE setup_runs (connector TEXT PRIMARY KEY, at INTEGER NOT NULL, applied INTEGER NOT NULL, report TEXT NOT NULL)",
+    "CREATE TABLE setup_builds (build TEXT PRIMARY KEY, at INTEGER NOT NULL)",
 ];
 
 /// How long the pool's availability is trusted.
@@ -279,11 +280,57 @@ impl Scheduler {
 
     /// Answers an operation the capability sent with `durable::call`.
     pub async fn fetch(&self, req: Request) -> Result<Response> {
+        // A deploy's first request to this build's scheduler (the Lander's polls, a job, a
+        // setup call) brings the alarm forward when this build has not applied the setup yet.
+        if self.setup_pending().unwrap_or(false) {
+            let storage = self.state.storage();
+            if storage.get_alarm().await?.is_none_or(|c| c > now() + 1_000) {
+                storage.set_alarm(1_000).await?;
+            }
+        }
         durable::serve(req, async |op, args| self.handle(op, &args).await).await
+    }
+
+    /// Whether this build has yet to apply the connectors' setup: each deploy applies it once,
+    /// here, whichever build the Lander that follows the landing is.
+    fn setup_pending(&self) -> Result<bool> {
+        if super::BUILD.is_empty() {
+            return Ok(false);
+        }
+        #[derive(Deserialize)]
+        struct B {
+            #[allow(dead_code)]
+            build: String,
+        }
+        Ok(self
+            .db
+            .row::<B>(
+                "SELECT build FROM setup_builds WHERE build = ?",
+                vec![super::BUILD.into()],
+            )?
+            .is_none())
+    }
+
+    /// Notes that this build has applied the setup (even when it failed: the next deploy, or
+    /// the next landing's Lander, tries again; nothing loops).
+    fn setup_done(&self) -> Result<()> {
+        if super::BUILD.is_empty() {
+            return Ok(());
+        }
+        self.db.exec(
+            "INSERT OR REPLACE INTO setup_builds (build, at) VALUES (?, ?)",
+            vec![super::BUILD.into(), now().into()],
+        )
     }
 
     /// The alarm: dispatch, deadlines, polls, the outbox; then the next alarm.
     pub async fn alarm(&self) -> Result<Response> {
+        if self.setup_pending().unwrap_or(false) {
+            self.setup_done()?;
+            if let Err(e) = self.setup("", true).await {
+                console_error!("ci: setup after deploy: {e}");
+            }
+        }
         if let Err(e) = self.heal() {
             console_error!("ci: queueing notes pushes: {e}");
         }
@@ -440,10 +487,28 @@ impl Scheduler {
                         super::BUILD
                     )));
                 }
-                let reports = self
-                    .setup(s("connector"), a["apply"].as_bool() == Some(true))
-                    .await?;
-                Ok(json!({ "build": super::BUILD, "reports": reports }))
+                let apply = a["apply"].as_bool() == Some(true);
+                if apply {
+                    self.setup_done()?;
+                }
+                let reports = self.setup(s("connector"), apply).await?;
+                #[derive(Deserialize)]
+                struct R {
+                    connector: String,
+                    at: i64,
+                    report: String,
+                }
+                let last: Vec<R> = self
+                    .db
+                    .rows("SELECT connector, at, report FROM setup_runs", vec![])?;
+                let last: serde_json::Map<String, Value> = last
+                    .into_iter()
+                    .map(|r| {
+                        let report = serde_json::from_str(&r.report).unwrap_or(Value::Null);
+                        (r.connector, json!({ "at": r.at, "report": report }))
+                    })
+                    .collect();
+                Ok(json!({ "build": super::BUILD, "reports": reports, "last_applied": last }))
             }
             "setup_key" => Ok(json!(self.held(s("connector"))?.hook_key)),
             "jobs" => self.jobs(a),

@@ -124,7 +124,7 @@ pub fn steps_yaml(queues: &[&str], host: &str) -> String {
     let mut out = String::from("steps:\n");
     for q in queues {
         out.push_str(&format!(
-            "  - label: \":pigeon: {q}\"\n    key: \"{q}\"\n    if: build.env(\"PIGEON_QUEUE\") == \"{q}\"\n    agents:\n      queue: \"{q}\"\n    checkout:\n      skip: true\n    command: \"curl -fsSL --retry 3 https://{host}/ci/buildkite.sh | sh\"\n"
+            "  - label: \"pigeon {q}\"\n    key: \"{q}\"\n    if: build.env(\"PIGEON_QUEUE\") == \"{q}\"\n    agents:\n      queue: \"{q}\"\n    checkout:\n      skip: true\n    command: \"curl -fsSL --retry 3 https://{host}/ci/buildkite.sh | sh\"\n"
         ));
     }
     out

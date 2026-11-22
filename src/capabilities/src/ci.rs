@@ -968,12 +968,15 @@ impl Capability for Ci {
                 }
                 "ci_buildkite_plan" => {
                     let report = setup(cx.env, false, "").await?;
-                    report["reports"]
-                        .get(buildkite::NAME)
-                        .cloned()
-                        .unwrap_or(json!({
-                            "off": "the Buildkite connector is not configured in settings"
-                        }))
+                    let mut plan = report["reports"].get(buildkite::NAME).cloned().unwrap_or(
+                        json!({ "off": "the Buildkite connector is not configured in settings" }),
+                    );
+                    // What the last apply did: after each deploy, or a landing's Lander.
+                    if plan.is_object() {
+                        plan["last_applied"] = report["last_applied"][buildkite::NAME].clone();
+                        plan["scheduler_build"] = report["build"].clone();
+                    }
+                    plan
                 }
                 other => return Err(unknown(other)),
             })

@@ -216,6 +216,11 @@ pub async fn run(bk: &Buildkite, cx: &Cx<'_>, held: &Held, apply: bool) -> Resul
         .map(|o| o.id.clone())
         .unwrap_or_default();
     let mut done: Vec<String> = Vec::new();
+    let mut failed: Vec<String> = Vec::new();
+    // A cluster or pipeline that fails stops the run, since what follows needs it; a queue, the
+    // webhook or the portal server is a leaf, so the others are still tried (a plan that
+    // refuses one hosted shape still gets the rest).
+    let parent = |k: Kind| matches!(k, Kind::Cluster | Kind::Pipeline);
     for (step, want) in steps.iter().zip(&w) {
         let (create, id) = match step {
             Step::Create { .. } => (true, String::new()),
@@ -247,12 +252,12 @@ pub async fn run(bk: &Buildkite, cx: &Cx<'_>, held: &Held, apply: bool) -> Resul
         let made = match made {
             Ok(v) => v,
             Err(e) => {
-                report["error"] = json!(format!(
-                    "{} {}: {e}; the steps after it were not tried",
-                    want.kind.name(),
-                    want.key
-                ));
-                break;
+                failed.push(format!("{} {}: {e}", want.kind.name(), want.key));
+                if parent(want.kind) {
+                    failed.push("the steps after it were not tried".into());
+                    break;
+                }
+                continue;
             }
         };
         let id = if create {
@@ -264,12 +269,16 @@ pub async fn run(bk: &Buildkite, cx: &Cx<'_>, held: &Held, apply: bool) -> Resul
             id
         };
         if id.is_empty() {
-            report["error"] = json!(format!(
-                "{} {}: the answer names no id; the steps after it were not tried",
+            failed.push(format!(
+                "{} {}: the answer names no id",
                 want.kind.name(),
                 want.key
             ));
-            break;
+            if parent(want.kind) {
+                failed.push("the steps after it were not tried".into());
+                break;
+            }
+            continue;
         }
         match want.kind {
             Kind::Cluster => cluster = id.clone(),
@@ -292,6 +301,9 @@ pub async fn run(bk: &Buildkite, cx: &Cx<'_>, held: &Held, apply: bool) -> Resul
         ));
     }
     report["done"] = json!(done);
+    if !failed.is_empty() {
+        report["error"] = json!(failed.join("; "));
+    }
     run.report = report;
     Ok(run)
 }

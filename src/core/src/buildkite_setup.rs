@@ -239,7 +239,8 @@ pub fn wants(d: &Declared, hook_key: &str, token: &str) -> Vec<Want> {
     let desc = |kind, key: &str| description(kind, key, &d.host);
 
     let cluster_desc = desc(Kind::Cluster, &d.cluster);
-    let cluster = json!({ "name": d.cluster, "description": cluster_desc, "emoji": ":pigeon:" });
+    // No emoji: Buildkite accepts only its own emoji names, and refused `:pigeon:` (422).
+    let cluster = json!({ "name": d.cluster, "description": cluster_desc });
     out.push(Want {
         kind: Kind::Cluster,
         key: d.cluster.clone(),

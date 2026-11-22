@@ -410,6 +410,18 @@ This plan does not touch the generator.
   own in every answer, and the Lander waits (20 s, up to four minutes) until the answer is from
   its own build. Older schedulers, which name none, are waited out the same way.
 
+- **The scheduler applies once per build itself.** A landing's post-deploy step runs in the
+  Lander that was live before the deploy, so a fix to it takes effect one landing late. The
+  scheduler now notes the build that last applied the setup (`setup_builds`); the first request
+  to a new build's scheduler (the Lander's polls, a job) brings its alarm forward, and the alarm
+  applies the setup once for that build. The Lander's step still runs and reports in the
+  landing's detail; `ci_buildkite_plan` shows the last apply (`last_applied`) and the
+  scheduler's build. The setup is idempotent, so the two never conflict.
+- **The first real apply** (`linked-bindings`, `80822b8`) failed at the cluster, so nothing was
+  made: Buildkite accepts only its own emoji names and refused `:pigeon:` (422). The cluster
+  now has no emoji, and the steps' labels none either. Queues, the webhook and the portal server
+  no longer stop the run when one of them fails (a plan refusing the 4X16 shape still gets the
+  pipeline and webhook); a cluster or pipeline failure still does.
 - **The build check compared the wrong builds** (`hyarAqBBX6VeHbsw`): its post-deploy step ran
   in the old Lander, which expected its own (old) build and so accepted the old scheduler. The
   Lander now expects the commit the landing deployed (`commit_sha`), whichever build it is
