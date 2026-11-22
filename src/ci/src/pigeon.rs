@@ -78,7 +78,11 @@ pub fn settings(accounts: Accounts) -> Settings {
             Box::new(Containers {
                 // The base image's key under [containers.images] in core's wrangler.toml.
                 image: Some("base".into()),
-                limit: 4,
+                // Concurrent CI containers (standard-4: 4 vCPU, 12 GiB each). 8 covers a shared
+                // landing's six deploys with tests beside them; the account's default limits
+                // (15,000 vCPU, 60 TiB concurrent) leave room for far more, and the class's
+                // durable_object scheduling sets no max_instances.
+                limit: 8,
                 entrypoint: vec!["/usr/local/bin/pigeon-ci-runner".into()],
             }),
             Box::new(Buildkite {
