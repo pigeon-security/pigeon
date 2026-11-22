@@ -2829,12 +2829,9 @@ fn ai_agents_loop_budgets_tools_and_turns() {
             .0,
         "exec"
     );
-    // A run's command gets the image's cargo and node back on PATH (sandboxd's login shell drops them).
+    // A run's command goes as given: image v2's sandboxd runs `bash -c`, which keeps PATH.
     let (_, ran) = sandbox::op_for("run", &json!({ "cmd": "cargo --version" }), "b").unwrap();
-    assert_eq!(
-        ran["cmd"],
-        json!(format!("{}cargo --version", sandbox::RUN_PATH))
-    );
+    assert_eq!(ran["cmd"], json!("cargo --version"));
     assert!(sandbox::op_for("land", &json!({}), "b").is_none());
     // A planner reads its executors' branches through sandboxd's `fetch`, which holds the grant.
     assert_eq!(
