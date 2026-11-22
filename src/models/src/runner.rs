@@ -1,11 +1,13 @@
 //! Async model jobs, the objects that run them: one Durable Object class (`ModelJobs`, with
 //! SQLite) in two roles. Object `index` keeps every job's row: it queues jobs, starts them while
-//! fewer than [`jobs::MAX_RUNNING`] run, marks a silent one lost, sends notifies and deletes
+//! their lane has room ([`jobs::LANES`]), marks a silent one lost, sends notifies and deletes
 //! rows once kept long enough. Each job streams in its own object, `job:{id}`, from that
 //! object's alarm: the request goes through the AI Gateway with the caller's tags and no payload
 //! kept, its answer is read as it arrives, progress goes to `index` every 3 seconds and the
 //! result once at the end. The prompt is kept only until the job starts (in `index`) and while it
-//! runs (in its own object); the answer only in `index`, until it expires.
+//! runs (in its own object); the answer only in `index`, until it expires. Requests and answers
+//! that may be large (an AI agent's turn, its content blocks) are kept in `parts`, cut into pieces
+//! well under a row's limit.
 
 use futures_util::StreamExt;
 use futures_util::future::{Either, select};
@@ -29,10 +31,18 @@ pub const INDEX: &str = "index";
 
 /// Each object's schema, one statement per migration, applied in order and never edited. An
 /// index object uses `jobs`; a job object uses `run`.
-const MIGRATIONS: [&str; 2] = [
+const MIGRATIONS: [&str; 7] = [
     "CREATE TABLE jobs (id TEXT PRIMARY KEY, caller TEXT, caller_name TEXT, for_id TEXT, task TEXT, provider TEXT NOT NULL, model TEXT NOT NULL, state TEXT NOT NULL, request TEXT, timeout_ms INTEGER NOT NULL, created_at INTEGER NOT NULL, started_at INTEGER, deadline_at INTEGER, finished_at INTEGER, progress_at INTEGER, progress_chars INTEGER, tokens_in INTEGER, tokens_out INTEGER, stop_reason TEXT, reply_model TEXT, text TEXT, error TEXT, notify_url TEXT, notify_key TEXT, notify_tries INTEGER NOT NULL DEFAULT 0, notify_at INTEGER, read_at INTEGER, expires_at INTEGER NOT NULL)",
     "CREATE TABLE run (id TEXT PRIMARY KEY, request TEXT NOT NULL, started INTEGER NOT NULL DEFAULT 0)",
+    "ALTER TABLE jobs ADD COLUMN lane TEXT NOT NULL DEFAULT 'default'",
+    "ALTER TABLE jobs ADD COLUMN usage TEXT",
+    "ALTER TABLE run ADD COLUMN cancelled INTEGER NOT NULL DEFAULT 0",
+    "CREATE TABLE parts (owner TEXT NOT NULL, n INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY (owner, n))",
+    "CREATE INDEX jobs_lane_state ON jobs (lane, state)",
 ];
+
+/// The longest piece of a large value kept in one row of `parts`, in bytes.
+const PART_BYTES: usize = 512 * 1024;
 
 /// What the class needs from the hosting Worker.
 pub struct Settings {
@@ -93,8 +103,15 @@ pub struct New {
     pub notify_url: Option<String>,
     /// The key that notify is signed with.
     pub notify_key: Option<String>,
+    /// The lane it runs in.
+    #[serde(default = "default_lane")]
+    pub lane: String,
     /// The request itself.
     pub ask: Ask,
+}
+
+fn default_lane() -> String {
+    "default".into()
 }
 
 /// A job's row.
@@ -127,6 +144,9 @@ struct Row {
     notify_tries: i64,
     read_at: Option<i64>,
     expires_at: i64,
+    #[serde(default = "default_lane")]
+    lane: String,
+    usage: Option<String>,
 }
 
 impl Row {
@@ -142,6 +162,7 @@ impl Row {
             "provider": self.provider,
             "model": self.model,
             "task": self.task,
+            "lane": self.lane,
             "caller_name": self.caller_name,
             "created_at": self.created_at,
             "started_at": self.started_at,
@@ -213,6 +234,48 @@ impl ModelJobs {
         Response::ok("ok")
     }
 
+    /// Keeps `value` as `owner`'s pieces in `parts`, replacing any it had.
+    fn put_parts(&self, owner: &str, value: &str) -> Result<()> {
+        self.drop_parts(owner)?;
+        let mut rest = value;
+        let mut n = 0i64;
+        while !rest.is_empty() {
+            let mut cut = rest.len().min(PART_BYTES);
+            while !rest.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            let (piece, tail) = rest.split_at(cut);
+            self.db.exec(
+                "INSERT INTO parts (owner, n, data) VALUES (?, ?, ?)",
+                vec![owner.into(), n.into(), piece.into()],
+            )?;
+            rest = tail;
+            n += 1;
+        }
+        Ok(())
+    }
+
+    /// `owner`'s value from `parts`, joined; `None` when it has none.
+    fn get_parts(&self, owner: &str) -> Result<Option<String>> {
+        #[derive(Deserialize)]
+        struct Part {
+            data: String,
+        }
+        let parts: Vec<Part> = self.db.rows(
+            "SELECT data FROM parts WHERE owner = ? ORDER BY n",
+            vec![owner.into()],
+        )?;
+        if parts.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(parts.into_iter().map(|p| p.data).collect()))
+    }
+
+    fn drop_parts(&self, owner: &str) -> Result<()> {
+        self.db
+            .exec("DELETE FROM parts WHERE owner = ?", vec![owner.into()])
+    }
+
     async fn handle(&self, op: &str, a: &Value) -> Result<Value> {
         let s = |k: &str| a[k].as_str().unwrap_or_default();
         match op {
@@ -226,6 +289,7 @@ impl ModelJobs {
                 Ok(row.public())
             }
             "result" => self.result(s("id"), s("reader")).await,
+            "cancel" => self.cancel(s("id"), s("reader")).await,
             "progress" => {
                 self.db.exec(
                     "UPDATE jobs SET progress_at = ?, progress_chars = ? WHERE id = ? AND state = 'running'",
@@ -237,12 +301,17 @@ impl ModelJobs {
             // ---- a job object ----
             "start" => {
                 if self.run_row()?.is_none() {
+                    self.put_parts("run", &a["ask"].to_string())?;
                     self.db.exec(
-                        "INSERT INTO run (id, request) VALUES (?, ?)",
-                        vec![s("id").into(), a["ask"].to_string().into()],
+                        "INSERT INTO run (id, request) VALUES (?, '')",
+                        vec![s("id").into()],
                     )?;
                     self.state.storage().set_alarm(0).await?;
                 }
+                Ok(Value::Null)
+            }
+            "stop" => {
+                self.db.exec("UPDATE run SET cancelled = 1", vec![])?;
                 Ok(Value::Null)
             }
             other => Err(bad(&format!("no operation `{other}`"))),
@@ -263,22 +332,38 @@ impl ModelJobs {
     }
 
     fn count(&self, states: &str) -> Result<u32> {
+        self.count_in(states, None)
+    }
+
+    /// How many jobs are in `states`, in `lane` when one is named.
+    fn count_in(&self, states: &str, lane: Option<&str>) -> Result<u32> {
         #[derive(Deserialize)]
         struct N {
             n: i64,
         }
-        let n: Option<N> = self.db.row(
-            &format!("SELECT COUNT(*) AS n FROM jobs WHERE state IN {states}"),
-            vec![],
-        )?;
+        let n: Option<N> = match lane {
+            Some(l) => self.db.row(
+                &format!("SELECT COUNT(*) AS n FROM jobs WHERE state IN {states} AND lane = ?"),
+                vec![l.into()],
+            )?,
+            None => self.db.row(
+                &format!("SELECT COUNT(*) AS n FROM jobs WHERE state IN {states}"),
+                vec![],
+            )?,
+        };
         Ok(n.map_or(0, |n| n.n.max(0) as u32))
     }
 
     async fn submit(&self, new: New) -> Result<Value> {
         jobs::may_submit(self.count("('queued', 'running')")?).map_err(|e| bad(&e))?;
         let t = now();
+        // The request waits in `parts`, which holds a turn of any size.
+        self.put_parts(
+            &format!("req:{}", new.id),
+            &serde_json::to_string(&new.ask)?,
+        )?;
         self.db.exec(
-            "INSERT INTO jobs (id, caller, caller_name, for_id, task, provider, model, state, request, timeout_ms, created_at, notify_url, notify_key, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO jobs (id, caller, caller_name, for_id, task, provider, model, state, request, timeout_ms, created_at, notify_url, notify_key, expires_at, lane) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', NULL, ?, ?, ?, ?, ?, ?)",
             vec![
                 new.id.as_str().into(),
                 opt(new.caller.as_deref()),
@@ -287,12 +372,12 @@ impl ModelJobs {
                 opt(new.task.as_deref()),
                 new.provider.as_str().into(),
                 new.model.as_str().into(),
-                serde_json::to_string(&new.ask)?.into(),
                 new.ask.timeout_ms.into(),
                 t.into(),
                 opt(new.notify_url.as_deref()),
                 opt(new.notify_key.as_deref()),
                 jobs::expires_at(t, None).into(),
+                new.lane.as_str().into(),
             ],
         )?;
         self.pump().await?;
@@ -301,22 +386,34 @@ impl ModelJobs {
         Ok(row.public())
     }
 
-    /// Starts queued jobs, oldest first, while there is room.
+    /// Starts queued jobs, oldest first in each lane, while the lane has room.
     async fn pump(&self) -> Result<()> {
-        let room = jobs::to_start(self.count("('running')")?, self.count("('queued')")?);
+        for (lane, _) in jobs::LANES {
+            self.pump_lane(lane).await?;
+        }
+        Ok(())
+    }
+
+    async fn pump_lane(&self, lane: &str) -> Result<()> {
+        let room = jobs::to_start(
+            lane,
+            self.count_in("('running')", Some(lane))?,
+            self.count_in("('queued')", Some(lane))?,
+        );
         if room == 0 {
             return Ok(());
         }
         let queued: Vec<Row> = self.db.rows(
-            "SELECT * FROM jobs WHERE state = 'queued' ORDER BY created_at, id LIMIT ?",
-            vec![i64::from(room).into()],
+            "SELECT * FROM jobs WHERE state = 'queued' AND lane = ? ORDER BY created_at, id LIMIT ?",
+            vec![lane.into(), i64::from(room).into()],
         )?;
         for row in queued {
             let t = now();
-            let ask: Option<Value> = row
-                .request
-                .as_deref()
-                .and_then(|r| serde_json::from_str(r).ok());
+            let kept = match &row.request {
+                Some(r) => Some(r.clone()),
+                None => self.get_parts(&format!("req:{}", row.id))?,
+            };
+            let ask: Option<Value> = kept.as_deref().and_then(|r| serde_json::from_str(r).ok());
             let started = match ask {
                 Some(ask) => {
                     call(
@@ -331,13 +428,21 @@ impl ModelJobs {
             };
             match started {
                 // The request now lives in the job's object only.
-                Ok(_) => self.db.exec(
-                    "UPDATE jobs SET state = 'running', request = NULL, started_at = ?, deadline_at = ? WHERE id = ? AND state = 'queued'",
-                    vec![t.into(), (t + row.timeout_ms).into(), row.id.as_str().into()],
-                )?,
+                Ok(_) => {
+                    self.db.exec(
+                        "UPDATE jobs SET state = 'running', request = NULL, started_at = ?, deadline_at = ? WHERE id = ? AND state = 'queued'",
+                        vec![t.into(), (t + row.timeout_ms).into(), row.id.as_str().into()],
+                    )?;
+                    self.drop_parts(&format!("req:{}", row.id))?;
+                }
                 Err(e) => {
                     console_error!("models: starting job {}: {e}", row.id);
-                    self.end(&row, State::Failed, None, Some(&format!("could not start: {e}")))?;
+                    self.end(
+                        &row,
+                        State::Failed,
+                        None,
+                        Some(&format!("could not start: {e}")),
+                    )?;
                 }
             }
         }
@@ -358,8 +463,19 @@ impl ModelJobs {
         }
         let r = reply.cloned().unwrap_or(Value::Null);
         let t = now();
+        self.drop_parts(&format!("req:{}", row.id))?;
+        if let Some(blocks) = r["content"].as_array().filter(|b| !b.is_empty()) {
+            self.put_parts(
+                &format!("content:{}", row.id),
+                &Value::Array(blocks.clone()).to_string(),
+            )?;
+        }
+        let usage = r
+            .get("usage")
+            .filter(|u| u.is_object())
+            .map(Value::to_string);
         self.db.exec(
-            "UPDATE jobs SET state = ?, request = NULL, finished_at = ?, text = ?, reply_model = ?, stop_reason = ?, tokens_in = ?, tokens_out = ?, error = ?, notify_at = ? WHERE id = ? AND state = ?",
+            "UPDATE jobs SET state = ?, request = NULL, finished_at = ?, text = ?, reply_model = ?, stop_reason = ?, tokens_in = ?, tokens_out = ?, error = ?, notify_at = ?, usage = ? WHERE id = ? AND state = ?",
             vec![
                 to.name().into(),
                 t.into(),
@@ -370,6 +486,7 @@ impl ModelJobs {
                 opt_i(r["tokens_out"].as_i64()),
                 opt(error),
                 opt_i(row.notify_url.as_ref().map(|_| t)),
+                opt(usage.as_deref()),
                 row.id.as_str().into(),
                 row.state.as_str().into(),
             ],
@@ -410,18 +527,48 @@ impl ModelJobs {
             ],
         )?;
         self.reschedule().await?;
+        let parsed = |v: Option<String>| -> Value {
+            v.and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or(Value::Null)
+        };
         Ok(json!({
             "id": row.id,
             "state": row.state,
             "provider": row.provider,
             "model": row.reply_model.as_deref().unwrap_or(&row.model),
             "text": row.text,
+            "content": parsed(self.get_parts(&format!("content:{}", row.id))?),
             "stop_reason": row.stop_reason,
             "tokens_in": row.tokens_in,
             "tokens_out": row.tokens_out,
+            "usage": parsed(row.usage.clone()),
             "error": row.error,
             "kept_until": jobs::expires_at(row.created_at, Some(read_at)),
         }))
+    }
+
+    /// Cancels job `id` for `reader`: a queued one never starts; a running one is told to stop
+    /// and frees its slot at once.
+    async fn cancel(&self, id: &str, reader: &str) -> Result<Value> {
+        let row = self.readable(id, reader)?;
+        jobs::may_cancel(row.state()).map_err(|e| bad(&e))?;
+        let was_running = row.state() == State::Running;
+        self.end(
+            &row,
+            State::Cancelled,
+            None,
+            Some("cancelled by its sender"),
+        )?;
+        if was_running {
+            // The job's object stops reading at its next chunk; its report is then ignored.
+            if let Err(e) = call(&self.env, &format!("job:{id}"), "stop", &json!({})).await {
+                console_error!("models: stopping job {id}: {e}");
+            }
+        }
+        self.pump().await?;
+        self.reschedule().await?;
+        let row = self.row(id)?.ok_or_else(|| bad("the job vanished"))?;
+        Ok(row.public())
     }
 
     /// The index's alarm: lost jobs, the queue, notifies, expiry; then the next alarm.
@@ -452,6 +599,11 @@ impl ModelJobs {
         }
         self.db
             .exec("DELETE FROM jobs WHERE expires_at <= ?", vec![t.into()])?;
+        // Pieces whose job is gone: `req:{id}` and `content:{id}`.
+        self.db.exec(
+            "DELETE FROM parts WHERE substr(owner, instr(owner, ':') + 1) NOT IN (SELECT id FROM jobs)",
+            vec![],
+        )?;
         self.reschedule().await
     }
 
@@ -546,7 +698,12 @@ impl ModelJobs {
                 "UPDATE run SET started = 1 WHERE id = ?",
                 vec![row.id.as_str().into()],
             )?;
-            match serde_json::from_str::<Ask>(&row.request) {
+            let request = if row.request.is_empty() {
+                self.get_parts("run")?.unwrap_or_default()
+            } else {
+                row.request.clone()
+            };
+            match serde_json::from_str::<Ask>(&request) {
                 Ok(ask) => self.stream(&row.id, &ask).await,
                 Err(e) => {
                     json!({ "id": row.id, "state": "failed", "error": format!("its request is unreadable: {e}") })
@@ -555,6 +712,7 @@ impl ModelJobs {
         };
         // The request goes before the result is reported; the index keeps only the answer.
         self.db.exec("DELETE FROM run", vec![])?;
+        self.db.exec("DELETE FROM parts", vec![])?;
         for wait in [0u64, 1_000, 5_000] {
             worker::Delay::from(std::time::Duration::from_millis(wait)).await;
             match call(&self.env, INDEX, "finish", &report).await {
@@ -589,54 +747,85 @@ impl ModelJobs {
             .collect();
         let mut reading = Reading::default();
         let mut timed_out = false;
-        let env = &self.env;
-        let read = async |mut body: worker::ByteStream| -> Result<()> {
-            let mut reported = now();
-            loop {
-                let left = deadline - now();
-                if left <= 0 {
-                    timed_out = true;
-                    return Ok(());
-                }
-                let next = body.next();
-                let wait = worker::Delay::from(std::time::Duration::from_millis(left as u64));
-                futures_util::pin_mut!(next);
-                futures_util::pin_mut!(wait);
-                match select(next, wait).await {
-                    Either::Left((Some(chunk), _)) => reading.feed(ask.dialect, &chunk?),
-                    Either::Left((None, _)) => {
-                        reading.end(ask.dialect);
-                        return Ok(());
-                    }
-                    Either::Right(_) => {
+        let mut cancelled = false;
+        let mut tries = 0u32;
+        let streamed = loop {
+            let env = &self.env;
+            let db = &self.db;
+            let read = async |mut body: worker::ByteStream| -> Result<()> {
+                let mut reported = now();
+                loop {
+                    let left = deadline - now();
+                    if left <= 0 {
                         timed_out = true;
                         return Ok(());
                     }
-                }
-                if now() - reported >= jobs::PROGRESS_EVERY_MS {
-                    reported = now();
-                    let chars = reading.text.chars().count() as i64;
-                    if let Err(e) =
-                        call(env, INDEX, "progress", &json!({ "id": id, "chars": chars })).await
-                    {
-                        console_error!("models: progress of job {id}: {e}");
+                    let next = body.next();
+                    let wait = worker::Delay::from(std::time::Duration::from_millis(left as u64));
+                    futures_util::pin_mut!(next);
+                    futures_util::pin_mut!(wait);
+                    match select(next, wait).await {
+                        Either::Left((Some(chunk), _)) => reading.feed(ask.dialect, &chunk?),
+                        Either::Left((None, _)) => {
+                            reading.end(ask.dialect);
+                            return Ok(());
+                        }
+                        Either::Right(_) => {
+                            timed_out = true;
+                            return Ok(());
+                        }
+                    }
+                    // A cancel reaches this object as `stop` while it awaits the network.
+                    if stopped(db) {
+                        cancelled = true;
+                        return Ok(());
+                    }
+                    if now() - reported >= jobs::PROGRESS_EVERY_MS {
+                        reported = now();
+                        let chars = reading.text.chars().count() as i64;
+                        if let Err(e) =
+                            call(env, INDEX, "progress", &json!({ "id": id, "chars": chars })).await
+                        {
+                            console_error!("models: progress of job {id}: {e}");
+                        }
                     }
                 }
+            };
+            let streamed = ai_gateway::stream(
+                &account,
+                &self.settings.gateway,
+                &ask.provider,
+                &ask.path,
+                &headers,
+                &tags,
+                &ask.body,
+                read,
+            )
+            .await;
+            // A refusal before any of the answer arrived is sent again, a few times, while
+            // there is time: nothing was streamed, so nothing is paid for twice.
+            if let Ok(Streamed::Refused(ran)) = &streamed {
+                tries += 1;
+                if jobs::retryable(ran.status)
+                    && !stopped(&self.db)
+                    && let Some(wait) = jobs::retry_wait_ms(tries)
+                    && now() + (wait as i64) < deadline
+                {
+                    console_error!(
+                        "models: job {id} refused with {}; trying again in {wait} ms",
+                        ran.status
+                    );
+                    worker::Delay::from(std::time::Duration::from_millis(wait)).await;
+                    continue;
+                }
             }
+            break streamed;
         };
-        let streamed = ai_gateway::stream(
-            &account,
-            &self.settings.gateway,
-            &ask.provider,
-            &ask.path,
-            &headers,
-            &tags,
-            &ask.body,
-            read,
-        )
-        .await;
-        let reply = serde_json::to_value(reading.reply()).unwrap_or(Value::Null);
+        let mut reply = serde_json::to_value(reading.reply()).unwrap_or(Value::Null);
+        reply["content"] = reading.content();
+        reply["usage"] = reading.usage();
         let (state, error) = match streamed {
+            _ if cancelled => (State::Cancelled, Some("cancelled by its sender".into())),
             Err(e) => (State::Failed, Some(e.to_string())),
             Ok(Streamed::Refused(ran)) => {
                 let shown: String = ran.body.to_string().chars().take(500).collect();
@@ -663,6 +852,18 @@ impl ModelJobs {
         };
         json!({ "id": id, "state": state.name(), "reply": reply, "error": error })
     }
+}
+
+/// Whether this job object was told to stop.
+fn stopped(db: &Db) -> bool {
+    #[derive(Deserialize)]
+    struct C {
+        cancelled: i64,
+    }
+    db.row::<C>("SELECT cancelled FROM run LIMIT 1", vec![])
+        .ok()
+        .flatten()
+        .is_some_and(|c| c.cancelled != 0)
 }
 
 /// A job object's one row.

@@ -1,8 +1,9 @@
 //! A provider's streamed answer, read as it arrives: server-sent events, split anywhere across
-//! the chunks the network hands over, folded into the common reply shape. Pure: bytes in, the
-//! reply so far out.
+//! the chunks the network hands over, folded into the common reply shape. The content blocks
+//! (text, thinking, tool calls) and the cache usage are kept too, not only the text. Pure:
+//! bytes in, the reply so far out.
 
-use serde_json::Value;
+use serde_json::{Map, Value, json};
 
 use super::{Dialect, Reply};
 
@@ -15,14 +16,22 @@ pub struct Reading {
     data: Vec<String>,
     /// The model answering, as it says.
     pub model: String,
-    /// The text so far.
+    /// The text so far, from every text block.
     pub text: String,
+    /// The content blocks so far, by their index. A block not yet started is `Null`.
+    pub blocks: Vec<Value>,
+    /// Each block's tool input, as JSON text, until the block stops.
+    partial: Vec<String>,
     /// Why the answer stopped.
     pub stop_reason: Option<String>,
     /// The tokens read.
     pub tokens_in: Option<u64>,
     /// The tokens written so far.
     pub tokens_out: Option<u64>,
+    /// The tokens read from the provider's cache.
+    pub cache_read: Option<u64>,
+    /// The tokens written to the provider's cache.
+    pub cache_write: Option<u64>,
     /// The provider's error, when it sent one in the stream.
     pub error: Option<String>,
     /// Whether the provider said the answer is complete.
@@ -31,6 +40,18 @@ pub struct Reading {
 
 /// The longest line kept while waiting for its end: an event larger than this is an error.
 const MAX_LINE: usize = 1 << 20;
+
+/// The highest content block index accepted.
+const MAX_BLOCK: u64 = 1024;
+
+/// Appends `s` to the string field `key` of `map`, making the field when it is missing.
+fn append(map: &mut Map<String, Value>, key: &str, s: &str) {
+    if let Some(Value::String(cur)) = map.get_mut(key) {
+        cur.push_str(s);
+    } else {
+        map.insert(key.into(), Value::String(s.into()));
+    }
+}
 
 impl Reading {
     /// Reads `chunk`, the next bytes of the stream, as `dialect` streams.
@@ -65,6 +86,7 @@ impl Reading {
         self.feed(dialect, b"\n");
     }
 
+    /// Reads one whole event's data.
     fn event(&mut self, dialect: Dialect, data: &str) {
         let Ok(v) = serde_json::from_str::<Value>(data) else {
             return;
@@ -76,21 +98,17 @@ impl Reading {
                     if let Some(model) = m["model"].as_str() {
                         self.model = model.into();
                     }
-                    self.tokens_in = m["usage"]["input_tokens"].as_u64().or(self.tokens_in);
-                    self.tokens_out = m["usage"]["output_tokens"].as_u64().or(self.tokens_out);
+                    self.read_usage(&m["usage"]);
                 }
-                Some("content_block_delta") if v["delta"]["type"] == "text_delta" => {
-                    if let Some(t) = v["delta"]["text"].as_str() {
-                        self.text.push_str(t);
-                    }
-                }
+                Some("content_block_start") => self.block_start(&v),
+                Some("content_block_delta") => self.block_delta(&v),
+                Some("content_block_stop") => self.block_stop(&v),
                 Some("message_delta") => {
                     if let Some(r) = v["delta"]["stop_reason"].as_str() {
                         self.stop_reason = Some(r.into());
                     }
                     // Cumulative, as the provider counts them.
-                    self.tokens_in = v["usage"]["input_tokens"].as_u64().or(self.tokens_in);
-                    self.tokens_out = v["usage"]["output_tokens"].as_u64().or(self.tokens_out);
+                    self.read_usage(&v["usage"]);
                 }
                 Some("message_stop") => self.done = true,
                 Some("error") => {
@@ -106,6 +124,168 @@ impl Reading {
                 _ => {}
             },
         }
+    }
+
+    /// Reads a usage object, keeping each old value when the new one is absent.
+    fn read_usage(&mut self, u: &Value) {
+        self.tokens_in = u["input_tokens"].as_u64().or(self.tokens_in);
+        self.tokens_out = u["output_tokens"].as_u64().or(self.tokens_out);
+        self.cache_read = u["cache_read_input_tokens"].as_u64().or(self.cache_read);
+        self.cache_write = u["cache_creation_input_tokens"]
+            .as_u64()
+            .or(self.cache_write);
+    }
+
+    /// Makes room for block `i` and answers its place, or sets an error when `i` is too high.
+    fn room(&mut self, i: u64) -> Option<usize> {
+        if i > MAX_BLOCK {
+            self.error = Some(format!(
+                "the stream named content block {i}, more than {MAX_BLOCK}"
+            ));
+            return None;
+        }
+        let at = usize::try_from(i).ok()?;
+        if self.blocks.len() <= at {
+            self.blocks.resize(at + 1, Value::Null);
+        }
+        if self.partial.len() <= at {
+            self.partial.resize(at + 1, String::new());
+        }
+        Some(at)
+    }
+
+    /// Reads a `content_block_start` event.
+    fn block_start(&mut self, v: &Value) {
+        let Some(i) = v["index"].as_u64().and_then(|i| self.room(i)) else {
+            return;
+        };
+        if let Some(slot) = self.blocks.get_mut(i) {
+            *slot = v["content_block"].clone();
+        }
+        if let Some(buf) = self.partial.get_mut(i) {
+            buf.clear();
+        }
+    }
+
+    /// Reads a `content_block_delta` event.
+    fn block_delta(&mut self, v: &Value) {
+        let delta = &v["delta"];
+        let kind = delta["type"].as_str().unwrap_or("");
+        if kind == "text_delta"
+            && let Some(t) = delta["text"].as_str()
+        {
+            self.text.push_str(t);
+        }
+        let Some(i) = v["index"].as_u64().and_then(|i| self.room(i)) else {
+            return;
+        };
+        let Some(slot) = self.blocks.get_mut(i) else {
+            return;
+        };
+        if slot.is_null() {
+            *slot = json!({"type": "unknown"});
+        }
+        match kind {
+            "text_delta" => {
+                if let (Some(t), Some(m)) = (delta["text"].as_str(), slot.as_object_mut()) {
+                    append(m, "text", t);
+                }
+            }
+            "input_json_delta" => {
+                if let (Some(p), Some(buf)) =
+                    (delta["partial_json"].as_str(), self.partial.get_mut(i))
+                {
+                    buf.push_str(p);
+                }
+            }
+            "thinking_delta" => {
+                if let (Some(t), Some(m)) = (delta["thinking"].as_str(), slot.as_object_mut()) {
+                    append(m, "thinking", t);
+                }
+            }
+            "signature_delta" => {
+                if let (Some(s), Some(m)) = (delta["signature"].as_str(), slot.as_object_mut()) {
+                    m.insert("signature".into(), Value::String(s.into()));
+                }
+            }
+            _ => {
+                // A kind not known yet: keep it only when it is plain text fields.
+                if let (Some(fields), Some(m)) = (delta.as_object(), slot.as_object_mut()) {
+                    let plain = fields.iter().all(|(k, val)| k == "type" || val.is_string());
+                    if plain {
+                        for (k, val) in fields {
+                            if k == "type" {
+                                continue;
+                            }
+                            if let Some(s) = val.as_str() {
+                                append(m, k, s);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Reads a `content_block_stop` event.
+    fn block_stop(&mut self, v: &Value) {
+        let Some(i) = v["index"].as_u64() else {
+            return;
+        };
+        if i > MAX_BLOCK {
+            self.error = Some(format!(
+                "the stream named content block {i}, more than {MAX_BLOCK}"
+            ));
+            return;
+        }
+        let Some(i) = usize::try_from(i).ok() else {
+            return;
+        };
+        let Some(buf) = self.partial.get_mut(i) else {
+            return;
+        };
+        let raw = std::mem::take(buf);
+        if !raw.is_empty() {
+            match serde_json::from_str::<Value>(&raw) {
+                Ok(input) => {
+                    if let Some(m) = self.blocks.get_mut(i).and_then(Value::as_object_mut) {
+                        m.insert("input".into(), input);
+                    }
+                }
+                Err(_) => {
+                    self.error = Some(format!("tool input for block {i} was not JSON"));
+                }
+            }
+        } else if let Some(m) = self.blocks.get_mut(i).and_then(Value::as_object_mut) {
+            let tool = matches!(
+                m.get("type").and_then(Value::as_str),
+                Some("tool_use" | "server_tool_use")
+            );
+            if tool && !m.get("input").is_some_and(Value::is_object) {
+                m.insert("input".into(), json!({}));
+            }
+        }
+    }
+
+    /// The content blocks so far, as a JSON array. Blocks not yet started are left out.
+    pub fn content(&self) -> Value {
+        Value::Array(
+            self.blocks
+                .iter()
+                .filter(|b| !b.is_null())
+                .cloned()
+                .collect(),
+        )
+    }
+
+    /// The usage so far, as a JSON object. What is not known is null.
+    pub fn usage(&self) -> Value {
+        json!({
+            "input_tokens": self.tokens_in,
+            "output_tokens": self.tokens_out,
+            "cache_read_input_tokens": self.cache_read,
+            "cache_creation_input_tokens": self.cache_write,
+        })
     }
 
     /// The reply so far.

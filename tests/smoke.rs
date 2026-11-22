@@ -1635,7 +1635,7 @@ fn models_request() {
     assert_eq!(jobs::timeout_ms(&Value::Null), Ok(10 * 60_000));
     assert!(jobs::timeout_ms(&json!(15)).is_err());
     assert!(jobs::may_submit(jobs::MAX_OPEN).is_err());
-    assert_eq!(jobs::to_start(jobs::MAX_RUNNING, 3), 0);
+    assert_eq!(jobs::to_start("default", jobs::MAX_RUNNING, 3), 0);
     assert!(
         jobs::allowed(State::Queued, State::Running)
             && jobs::allowed(State::Running, State::Succeeded)
@@ -1656,6 +1656,162 @@ fn models_request() {
         0,
     );
     assert!(!note.to_string().contains("Hello"));
+}
+
+/// An AI agent's turn as a model job (docs/plans/ai-agents.md): the whole request checked, its stream
+/// read into content blocks and cache usage, its lane and its cancel.
+#[test]
+fn models_turns_blocks_and_lanes() {
+    use pigeon_models::Dialect;
+    use pigeon_models::jobs::{self, State};
+    use pigeon_models::stream::Reading;
+    use pigeon_models::turn::{self, MAX_TOKENS};
+
+    // The request: checked, given its model and bounds, always streamed.
+    let req = json!({
+        "system": [{ "type": "text", "text": "rules", "cache_control": { "type": "ephemeral" } }],
+        "tools": [{ "name": "read_file", "input_schema": { "type": "object" } }],
+        "messages": [{ "role": "user", "content": "go" }],
+        "thinking": { "type": "adaptive" }
+    });
+    let t = turn::turn(
+        &req,
+        &json!(["compact-2026-01-12", "compact-2026-01-12"]),
+        "claude-haiku-5-5",
+    )
+    .unwrap();
+    assert_eq!(t.model, "claude-haiku-5-5");
+    assert_eq!(t.body["stream"], true);
+    assert_eq!(t.body["max_tokens"], turn::DEFAULT_MAX_TOKENS);
+    assert_eq!(t.beta.as_deref(), Some("compact-2026-01-12"));
+    let refused = |r: Value, betas: Value| turn::turn(&r, &betas, "claude-haiku-5-5").unwrap_err();
+    assert!(
+        refused(
+            json!({ "messages": [{ "role": "user", "content": "x" }], "stream": false }),
+            Value::Null
+        )
+        .contains("stream")
+    );
+    assert!(
+        refused(
+            json!({ "messages": [{ "role": "user", "content": "x" }], "service_tier": "x" }),
+            Value::Null
+        )
+        .contains("service_tier")
+    );
+    assert!(refused(json!({ "messages": [] }), Value::Null).contains("empty"));
+    assert!(
+        refused(
+            json!({ "messages": [{ "role": "system", "content": "x" }] }),
+            Value::Null
+        )
+        .contains("messages[0]")
+    );
+    assert!(
+        refused(
+            json!({ "messages": [{ "role": "user", "content": "x" }], "model": "gpt-9" }),
+            Value::Null
+        )
+        .contains("Claude")
+    );
+    assert!(refused(json!({ "messages": [{ "role": "user", "content": "x" }], "max_tokens": MAX_TOKENS + 1 }), Value::Null).contains("max_tokens"));
+    assert!(
+        refused(
+            json!({ "messages": [{ "role": "user", "content": "x" }] }),
+            json!(["files-api"])
+        )
+        .contains("files-api")
+    );
+    let big = "x".repeat(turn::MAX_BYTES);
+    assert!(
+        refused(
+            json!({ "messages": [{ "role": "user", "content": big }] }),
+            Value::Null
+        )
+        .contains("4 MiB")
+    );
+
+    // The stream: thinking with its signature, text, a tool call's input in pieces, cache usage.
+    let stream = concat!(
+        "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-sonnet-5-5\",\"usage\":{\"input_tokens\":3,\"output_tokens\":1,\"cache_read_input_tokens\":1201,\"cache_creation_input_tokens\":231}}}\n\n",
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"plan\"}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig\"}}\n\n",
+        "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"Reading.\"}}\n\n",
+        "data: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+        "data: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"read_file\",\"input\":{}}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\": \\\"src/\"}}\n\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"lib.rs\\\"}\"}}\n\n",
+        "data: {\"type\":\"content_block_stop\",\"index\":2}\n\n",
+        "data: {\"type\":\"content_block_start\",\"index\":3,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_2\",\"name\":\"list\",\"input\":{}}}\n\n",
+        "data: {\"type\":\"content_block_stop\",\"index\":3}\n\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":40}}\n\n",
+        "data: {\"type\":\"message_stop\"}\n\n",
+    );
+    for chunk in [1, 13, 4096] {
+        let mut r = Reading::default();
+        for piece in stream.as_bytes().chunks(chunk) {
+            r.feed(Dialect::Anthropic, piece);
+        }
+        r.end(Dialect::Anthropic);
+        assert!(
+            r.done && r.error.is_none(),
+            "chunks of {chunk}: {:?}",
+            r.error
+        );
+        assert_eq!(r.text, "Reading.");
+        let c = r.content();
+        assert_eq!(
+            c[0],
+            json!({ "type": "thinking", "thinking": "plan", "signature": "sig" })
+        );
+        assert_eq!(c[1], json!({ "type": "text", "text": "Reading." }));
+        assert_eq!(c[2]["input"], json!({ "path": "src/lib.rs" }));
+        assert_eq!(c[3]["input"], json!({}));
+        assert_eq!(r.stop_reason.as_deref(), Some("tool_use"));
+        let u = r.usage();
+        assert_eq!(
+            (
+                u["cache_read_input_tokens"].as_u64(),
+                u["cache_creation_input_tokens"].as_u64()
+            ),
+            (Some(1201), Some(231))
+        );
+        assert_eq!(u["output_tokens"], 40);
+    }
+    // A tool input that is not JSON is an error; an absurd block index too.
+    let mut r = Reading::default();
+    r.feed(Dialect::Anthropic, b"data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"t\",\"name\":\"x\",\"input\":{}}}\n\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{oops\"}}\n\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n");
+    assert!(r.error.as_deref().is_some_and(|e| e.contains("not JSON")));
+    let mut r = Reading::default();
+    r.feed(Dialect::Anthropic, b"data: {\"type\":\"content_block_start\",\"index\":99999,\"content_block\":{\"type\":\"text\"}}\n\n");
+    assert!(r.error.is_some() && r.blocks.is_empty());
+
+    // Lanes: each with its own cap; an unknown one refused.
+    assert_eq!(jobs::lane(&Value::Null), Ok("default"));
+    assert_eq!(jobs::lane(&json!("ai-agents")), Ok("ai-agents"));
+    assert!(jobs::lane(&json!("fast")).is_err());
+    assert_eq!(jobs::to_start("ai-agents", jobs::MAX_RUNNING, 10), 2);
+    assert_eq!(jobs::to_start("default", jobs::MAX_RUNNING, 10), 0);
+    assert_eq!(jobs::to_start("nope", 0, 10), 0);
+    // Cancel: from queued or running, never from an end.
+    assert!(
+        jobs::allowed(State::Queued, State::Cancelled)
+            && jobs::allowed(State::Running, State::Cancelled)
+    );
+    assert!(!jobs::allowed(State::Cancelled, State::Running));
+    assert!(
+        jobs::may_cancel(State::Running).is_ok() && jobs::may_cancel(State::Succeeded).is_err()
+    );
+    assert_eq!(State::named("cancelled"), Some(State::Cancelled));
+    // Retries before the first byte: overload and rate limits, a few times; never a bad request.
+    assert!(jobs::retryable(529) && jobs::retryable(429) && !jobs::retryable(400));
+    assert_eq!(
+        (jobs::retry_wait_ms(1), jobs::retry_wait_ms(4)),
+        (Some(1_000), None)
+    );
 }
 
 // ---- secrets ----

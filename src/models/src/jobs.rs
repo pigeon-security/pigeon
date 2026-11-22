@@ -3,9 +3,12 @@
 //! notify says. The objects that run them are in `runner.rs`.
 //!
 //! ```text
-//! queued ─► running ─► succeeded | failed | timed_out | lost
-//!    └─────────────────► failed (could not start)
+//! queued ─► running ─► succeeded | failed | timed_out | lost | cancelled
+//!    └─────────────────► failed (could not start) | cancelled
 //! ```
+//!
+//! Jobs run in lanes, each with its own cap: `default` for jobs people and planners send,
+//! `ai-agents` for AI agents' turns (`docs/plans/ai-agents.md`), so neither starves the other.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -26,6 +29,8 @@ pub enum State {
     TimedOut,
     /// Its runner stopped without a result: restarted mid-stream, or silent past its deadline.
     Lost,
+    /// Its sender, or the person they act for, cancelled it.
+    Cancelled,
 }
 
 impl State {
@@ -38,6 +43,7 @@ impl State {
             State::Failed => "failed",
             State::TimedOut => "timed_out",
             State::Lost => "lost",
+            State::Cancelled => "cancelled",
         }
     }
 
@@ -50,6 +56,7 @@ impl State {
             State::Failed,
             State::TimedOut,
             State::Lost,
+            State::Cancelled,
         ]
         .into_iter()
         .find(|x| x.name() == s)
@@ -64,14 +71,31 @@ impl State {
 /// Whether a job may move from `from` to `to`: only forward, never out of a final state.
 pub fn allowed(from: State, to: State) -> bool {
     match from {
-        State::Queued => matches!(to, State::Running | State::Failed),
+        State::Queued => matches!(to, State::Running | State::Failed | State::Cancelled),
         State::Running => to.terminal(),
         _ => false,
     }
 }
 
-/// How many jobs run at once; more wait, queued.
+/// How many jobs run at once in the `default` lane; more wait, queued.
 pub const MAX_RUNNING: u32 = 4;
+/// The lanes, each with how many of its jobs run at once.
+pub const LANES: [(&str, u32); 2] = [("default", MAX_RUNNING), ("ai-agents", 6)];
+
+/// The lane `asked` names (`default` when null), or why there is none.
+pub fn lane(asked: &Value) -> Result<&'static str, String> {
+    match asked {
+        Value::Null => Ok("default"),
+        v => {
+            let name = v.as_str().unwrap_or_default();
+            LANES
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map(|(n, _)| *n)
+                .ok_or_else(|| format!("`lane` must be `default` or `ai-agents`, not {v}"))
+        }
+    }
+}
 /// How many jobs may be queued or running at once; more are refused.
 pub const MAX_OPEN: u32 = 50;
 /// A job's timeout unless asked otherwise, in minutes.
@@ -114,9 +138,37 @@ pub fn may_submit(open: u32) -> Result<(), String> {
     }
 }
 
-/// How many queued jobs to start while `running` run.
-pub fn to_start(running: u32, queued: u32) -> u32 {
-    MAX_RUNNING.saturating_sub(running).min(queued)
+/// How many queued jobs of `lane` to start while `running` of its jobs run; none for a lane
+/// that does not exist.
+pub fn to_start(lane: &str, running: u32, queued: u32) -> u32 {
+    let cap = LANES
+        .iter()
+        .find(|(n, _)| *n == lane)
+        .map_or(0, |(_, c)| *c);
+    cap.saturating_sub(running).min(queued)
+}
+
+/// Whether a job in `state` may be cancelled: only one not yet ended.
+pub fn may_cancel(state: State) -> Result<(), String> {
+    if state.terminal() {
+        Err(format!("the job has already ended: {}", state.name()))
+    } else {
+        Ok(())
+    }
+}
+
+/// Whether a provider's refusal with `status`, before any of its answer arrived, is worth
+/// sending again: rate limits, overload and server errors.
+pub fn retryable(status: u16) -> bool {
+    matches!(status, 408 | 429 | 500 | 502 | 503 | 504 | 529)
+}
+
+/// How long to wait before sending a refused request again, after `tries` refusals; `None`
+/// once it has been tried enough.
+pub fn retry_wait_ms(tries: u32) -> Option<u64> {
+    [1_000, 4_000, 10_000]
+        .get(tries.saturating_sub(1) as usize)
+        .copied()
 }
 
 /// When a job's row goes: [`KEPT_MS`] after submission, or [`KEPT_AFTER_READ_MS`] after its

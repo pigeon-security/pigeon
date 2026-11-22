@@ -40,6 +40,7 @@ pub mod daily;
 pub mod jobs;
 pub mod runner;
 pub mod stream;
+pub mod turn;
 
 /// The capability's name.
 pub const NAME: &str = "models";
@@ -48,13 +49,14 @@ pub const NAME: &str = "models";
 pub const WORKER: &str = "pigeon-model-gateway";
 
 /// Every tool the capability offers.
-pub const TOOLS: [&str; 8] = [
+pub const TOOLS: [&str; 9] = [
     "models_setup",
     "models_providers",
     "models_run",
     "models_submit",
     "models_status",
     "models_result",
+    "models_cancel",
     "models_logs",
     "models_usage",
 ];
@@ -78,7 +80,7 @@ pub fn unknown(tool: &str) -> Error {
 pub fn purposes(tool: &str) -> Option<&'static [&'static str]> {
     match tool {
         "models_setup" => Some(&["ai_gateway", "secrets_store"]),
-        "models_submit" | "models_status" | "models_result" => None,
+        "models_submit" | "models_status" | "models_result" | "models_cancel" => None,
         _ => Some(&["ai_gateway"]),
     }
 }
@@ -290,6 +292,14 @@ pub fn ask(args: &Value, provider: &Provider) -> Result<Ask> {
     })
 }
 
+/// `pairs` as owned strings, for a job to carry.
+fn own(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+    pairs
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect()
+}
+
 /// The longest task label a request carries; a longer one is cut.
 const MAX_TASK_CHARS: usize = 100;
 
@@ -449,9 +459,31 @@ impl Models {
         let caller = who(caller_json)
             .ok_or_else(|| bad("a job needs a caller, who alone can read its result"))?;
         let p = self.provider(args["provider"].as_str())?;
-        let asked = ask(args, p)?;
-        let mut body = p.dialect.body(&asked);
-        body["stream"] = json!(true);
+        let mut headers = own(p.dialect.headers());
+        let (model, body) = match args.get("request").filter(|r| !r.is_null()) {
+            // An AI agent's turn: a whole Messages body, checked.
+            Some(request) => {
+                if !args["prompt"].is_null() || !args["messages"].is_null() {
+                    return Err(bad("give `request`, or `prompt`/`messages`, not both"));
+                }
+                let t =
+                    turn::turn(request, &args["betas"], p.default_model).map_err(|e| bad(&e))?;
+                if let Some(b) = t.beta {
+                    headers.push(("anthropic-beta".into(), b));
+                }
+                (t.model, t.body)
+            }
+            None => {
+                if !args["betas"].is_null() {
+                    return Err(bad("`betas` goes with `request` only"));
+                }
+                let asked = ask(args, p)?;
+                let mut body = p.dialect.body(&asked);
+                body["stream"] = json!(true);
+                (asked.model, body)
+            }
+        };
+        let lane = jobs::lane(&args["lane"]).map_err(|e| bad(&e))?;
         let timeout_ms = jobs::timeout_ms(&args["timeout_min"]).map_err(|e| bad(&e))?;
         let notify_url = match args["notify"].as_str() {
             Some(u) => Some(
@@ -469,11 +501,6 @@ impl Models {
             .map(str::trim)
             .filter(|t| !t.is_empty())
             .map(|t| t.chars().take(MAX_TASK_CHARS).collect::<String>());
-        let own = |v: &[(&str, &str)]| -> Vec<(String, String)> {
-            v.iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect()
-        };
         let tags: Vec<(String, String)> = tags(caller_json, task.as_deref())
             .into_iter()
             .map(|(k, v)| (k.to_string(), v))
@@ -486,14 +513,15 @@ impl Models {
             for_id: caller.acting_for.as_ref().map(|(id, _)| id.clone()),
             task,
             provider: p.slug.into(),
-            model: asked.model.clone(),
+            model,
             notify_url,
             notify_key: notify_key.clone(),
+            lane: lane.into(),
             ask: runner::Ask {
                 dialect: p.dialect,
                 provider: p.slug.into(),
                 path: p.dialect.path().into(),
-                headers: own(p.dialect.headers()),
+                headers,
                 tags,
                 body,
                 timeout_ms,
@@ -529,7 +557,14 @@ impl Models {
         let by = dimensions(args)?;
         let filter = filter(args);
         let since = Date::now() - hours * 3_600_000.0;
-        let logs = ai_gateway::logs(account, &self.gateway, since, &filter, 2_000).await?;
+        let mut logs = ai_gateway::logs(account, &self.gateway, since, &filter, 2_000).await?;
+        if let Some(prefix) = args["task_prefix"].as_str().filter(|p| !p.is_empty()) {
+            logs.retain(|l| {
+                l.metadata
+                    .get("task")
+                    .is_some_and(|t| t.starts_with(prefix))
+            });
+        }
         let groups = ai_gateway::summarize(&logs, &by);
         let cost: f64 = groups.iter().filter_map(|u| u.cost).sum();
         let by: Vec<&str> = by
@@ -613,7 +648,10 @@ impl Models {
                               `timeout_min` (10 by default, 14 at most). Answers the job's id at \
                               once; follow it with models_status and fetch it with \
                               models_result. With `notify`, an https URL gets a signed POST when \
-                              it ends (the key is shown once). Four run at once; more wait.",
+                              it ends (the key is shown once). Four run at once in the default \
+                              lane and six in the ai-agents lane; more wait. A refusal before any \
+                              answer arrives (overloaded, rate-limited) is tried again, up to 3 \
+                              times.",
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -625,14 +663,17 @@ impl Models {
                         "max_tokens": { "type": "integer", "description": "1024 by default, 64000 at most." },
                         "task": { "type": "string", "description": "A short label, as for models_run." },
                         "timeout_min": { "type": "integer", "description": "1 to 14; 10 by default." },
-                        "notify": { "type": "string", "description": "An https URL to POST to when the job ends." }
+                        "notify": { "type": "string", "description": "An https URL to POST to when the job ends." },
+                        "request": { "type": "object", "description": "Instead of prompt or messages: a whole Messages request (system blocks, tools, tool_choice, thinking, cache_control and the like), as an AI agent's turn sends it. The job streams it; models_result answers its content blocks and usage." },
+                        "betas": { "type": "array", "items": { "type": "string", "enum": turn::BETAS }, "description": "With `request`: the provider betas it uses." },
+                        "lane": { "type": "string", "enum": ["default", "ai-agents"], "description": "`ai-agents` for an AI agent's turn, which runs beside other jobs with its own cap; `default` otherwise." }
                     }
                 }),
             },
             Tool {
                 name: "models_status",
                 description: "A model job's state (queued, running, succeeded, failed, \
-                              timed_out, lost), its times, the characters streamed so far and, \
+                              timed_out, lost, cancelled), its times, the characters streamed so far and, \
                               once it ends, its tokens and any error. Only its sender, or the \
                               person they act for, can see it.",
                 input_schema: json!({
@@ -643,9 +684,22 @@ impl Models {
             },
             Tool {
                 name: "models_result",
-                description: "A finished model job's answer: text, stop reason, tokens and any \
-                              error (a timed-out job keeps its text so far). Kept for 10 \
-                              minutes once read, and 24 hours from submission at most.",
+                description: "A finished model job's answer: text, content blocks (tool calls \
+                              and thinking included), stop reason, tokens, usage with cache \
+                              reads and writes, and any error (a timed-out job keeps its text so \
+                              far). Kept for 10 minutes once read, and 24 hours from submission \
+                              at most.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": { "id": { "type": "string" } },
+                    "required": ["id"]
+                }),
+            },
+            Tool {
+                name: "models_cancel",
+                description: "Cancel a model job that has not ended: a queued one never starts, \
+                              a running one stops at its next chunk. Only its sender, or the \
+                              person they act for, can cancel it.",
                 input_schema: json!({
                     "type": "object",
                     "properties": { "id": { "type": "string" } },
@@ -688,6 +742,7 @@ impl Models {
                         "model": { "type": "string" },
                         "caller": { "type": "string", "description": "A user's ID or name, who sent the request or was acted for." },
                         "task": { "type": "string" },
+                        "task_prefix": { "type": "string", "description": "Only requests whose task starts with this, such as `ai-agent/` for every AI agent run's turns." },
                         "by": {
                             "type": "array",
                             "items": { "type": "string", "enum": ["model", "caller", "task"] },
@@ -765,6 +820,7 @@ impl Models {
             "models_submit" => self.submit(env, caller, args).await?,
             "models_status" => self.job(env, caller, "status", args).await?,
             "models_result" => self.job(env, caller, "result", args).await?,
+            "models_cancel" => self.job(env, caller, "cancel", args).await?,
             other => return Err(unknown(other)),
         })
     }
