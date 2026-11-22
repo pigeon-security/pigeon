@@ -1,10 +1,11 @@
 # Buildkite, set up by pigeon: the CI gateway's Buildkite connector redesigned
 
-Status: **phases 1, 2 and 4 deployed**, and the organization `pigeon-security` (landings
-`bYNS6ijvF7NRcFbB`, `fIjRWQBuxf6j0r8r`, 22 November 2026). **Phase 2a**, the first setup, has
-not run yet: both deploys' setups met the old scheduler (see "As found"); the build check lands
-on `claude/buildkite-build`. The person chose one token for everything and Buildkite's MCP able to act
-for them; the token is set.
+Status: **phases 1, 2, 2a and 4 deployed** (22 November 2026). pigeon set Buildkite up itself on
+landing `rvs7Rnt8h0cMfmzM` (`fc9e911`): cluster `pigeon`, hosted queues `pigeon-linux-small` and
+`pigeon-linux-medium`, pipeline `pigeon`, its webhook, and the Cloudflare MCP server `buildkite`.
+`ci_buildkite_plan` reads every step `ok`. The first `smoke` job ran on Buildkite (build 1) and
+succeeded. **Phase 3** waits on the person: attaching `buildkite` to the `pigeon` portal (§4,
+step 4). The person chose one token for everything and Buildkite's MCP able to act for them.
 
 The person's goal: "redesign the CI gateway for BuildKite to use BuildKite MCP through the
 portal and server. The goal of this is we can setup everything we need in BuildKite through
@@ -440,19 +441,18 @@ This plan does not touch the generator.
   not the problem (a missing scope answers 403). The services' answers name `provider` as an
   object (`{id, name}`); the plan checks no `provider`, so that difference is harmless.
 
-## 6. Open points, checked live in phase 2a or 3
+## 6. Open points
 
-- Whether a server created through the API gets its Access application (`type = "mcp"`) automatically, or the person adds the policy in step 4.
-- Whether `/direct` accepts the bearer token from the portal as documented (the portal forwards it as `Authorization: Bearer`).
-- Whether the API accepts a pipeline whose `repository` is the GitHub mirror with no GitHub app
-  connected, and whether `trigger_mode: "none"` is accepted for a provider that is not GitHub.
-  If not, the provider is plain git and `build_*: false`.
-- Whether a `secrets_store_secrets` binding deploys before its secret exists. Not tried: phase 1 waits for the token to be set instead.
-- Whether a deploy resets the Lander so its post-deploy step runs the new code. If not, the
-  step calls the scheduler, which a deploy also resets.
-- From ci-gateway.md, still open: the OIDC algorithm (RS256 assumed), and curl on the hosted
-  Linux image.
-- Buildkite's network hosts. The Worker reaches `api.buildkite.com` and `agent.buildkite.com`
-  directly, and the portal reaches `mcp.buildkite.com` from Cloudflare. **No session needs a
-  Buildkite host**, so no environment change is proposed. If live checks in 2a need a direct
-  read from a session, the hosts to propose are `api.buildkite.com` and `buildkite.com`.
+Settled live in phase 2a:
+- The API accepted the pipeline with the GitHub mirror as its `repository`, no GitHub app, and
+  `trigger_mode: "none"`.
+- The OIDC exchange works as built (RS256), and the hosted Linux image has curl: `smoke` on
+  Buildkite ran in about 10 s from start to report.
+- The plan allows `LINUX_AMD64_4X16`: both queues were created.
+- No session needed a Buildkite host; the Worker and the portal reach Buildkite themselves.
+- The secret binding: never tried before its secret existed; the token was set first.
+
+Still open, for phase 3:
+- Whether a server created through the API gets its Access application (`type = "mcp"`)
+  automatically, or the person adds the policy in step 4.
+- Whether `/direct` accepts the bearer token as the portal forwards it.
