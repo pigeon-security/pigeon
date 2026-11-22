@@ -45,6 +45,34 @@ pub struct Observed {
     /// Worker its custom domain serves now, if any.
     #[serde(default)]
     pub domains: Vec<SeenDomain>,
+    /// Each Subdomain target as the platform's own account has it.
+    #[serde(default)]
+    pub subdomains: Vec<SeenSubdomain>,
+}
+
+/// A Subdomain target's hostname in the platform's zone, as the platform's account has it.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct SeenSubdomain {
+    /// Such as `noisypigeon.pigeon.dev`.
+    pub hostname: String,
+    /// The platform zone's id, when it is found.
+    pub zone_id: Option<String>,
+    /// The Worker that serves platform subdomains by host (pigeon-sites).
+    pub worker: String,
+    /// The Worker its custom domain serves now, if any.
+    pub service: Option<String>,
+    /// The upstream kept for it (`subdomain:{hostname}`), if any.
+    pub upstream: Option<String>,
+}
+
+/// The Directory key of a subdomain's upstream, which the platform serves it from.
+pub fn subdomain_key(hostname: &str) -> String {
+    format!("subdomain:{}", hostname.to_ascii_lowercase())
+}
+
+/// The instance Worker's workers.dev address, which a subdomain is served from.
+pub fn upstream_for(worker: &str, account_subdomain: &str) -> String {
+    format!("https://{worker}.{account_subdomain}.workers.dev")
 }
 
 /// A Domain target's hostname as the account has it.
@@ -83,6 +111,14 @@ pub enum Step {
         zone_id: String,
         worker: String,
     },
+    /// Serve a platform subdomain, in the platform's own account, from the sites Worker, which
+    /// passes it through to the instance Worker's workers.dev address.
+    AttachSubdomain {
+        hostname: String,
+        zone_id: String,
+        worker: String,
+        upstream: String,
+    },
     /// Something with pigeon's name that pigeon did not make: left alone, and the plan stops.
     Conflict {
         what: String,
@@ -102,6 +138,7 @@ impl Step {
                 | Step::UploadWorker { .. }
                 | Step::EnableWorkersDev { .. }
                 | Step::AttachDomain { .. }
+                | Step::AttachSubdomain { .. }
         )
     }
 
@@ -235,6 +272,42 @@ pub fn plan(instance: &Instance, seen: &Observed, ledger: &Ledger) -> Vec<Step> 
             },
         });
     }
+    for seen_sub in &seen.subdomains {
+        let upstream = seen
+            .account_subdomain
+            .as_deref()
+            .map(|a| upstream_for(worker, a));
+        steps.push(match (&seen_sub.service, &seen_sub.zone_id, upstream) {
+            (_, _, None) => Step::Blocked {
+                why: format!(
+                    "{} is served from the instance's workers.dev address, and the account has \
+                     no workers.dev subdomain yet",
+                    seen_sub.hostname
+                ),
+            },
+            (Some(s), _, _) if *s != seen_sub.worker => Step::Conflict {
+                what: "subdomain".into(),
+                name: seen_sub.hostname.clone(),
+                why: format!("it is already served by Worker {s}"),
+            },
+            (Some(_), _, Some(u)) if seen_sub.upstream.as_deref() == Some(u.as_str()) => Step::Ok {
+                what: "subdomain".into(),
+                name: seen_sub.hostname.clone(),
+            },
+            (_, None, _) => Step::Blocked {
+                why: format!(
+                    "the platform's zone for {} was not found",
+                    seen_sub.hostname
+                ),
+            },
+            (_, Some(z), Some(u)) => Step::AttachSubdomain {
+                hostname: seen_sub.hostname.clone(),
+                zone_id: z.clone(),
+                worker: seen_sub.worker.clone(),
+                upstream: u,
+            },
+        });
+    }
     steps
 }
 
@@ -298,6 +371,16 @@ pub fn describe(steps: &[Step]) -> Vec<Value> {
             } => json!(format!(
                 "serve {hostname} from Worker {worker} as a Workers Custom Domain; Cloudflare \
                  creates its DNS record and certificate"
+            )),
+            Step::AttachSubdomain {
+                hostname,
+                worker,
+                upstream,
+                ..
+            } => json!(format!(
+                "serve {hostname} from Worker {worker} as a Workers Custom Domain in the \
+                 platform's account (Cloudflare creates its DNS record and certificate); it \
+                 passes requests through to {upstream}"
             )),
             Step::Conflict { what, name, why } => {
                 json!(format!(

@@ -3647,6 +3647,7 @@ fn instance_plans_touch_only_what_pigeon_made() {
         workers_dev: dev,
         account_subdomain: sub.map(str::to_string),
         domains: vec![],
+        subdomains: vec![],
     };
     let tags = |steps: &[Step]| -> Vec<String> {
         steps
@@ -3755,6 +3756,39 @@ fn instance_plans_touch_only_what_pigeon_made() {
     ));
     assert!(!due(&json!({ "state": "pending", "attempts": 5 }), 0.0));
     assert!(!due(&json!({ "state": "done", "attempts": 1 }), 0.0));
+
+    // A Subdomain target: attached in the platform's account, on the platform's Worker, with
+    // the instance Worker's workers.dev address as its upstream; unchanged once both are kept.
+    use pigeon_capabilities::instances::plan::{SeenSubdomain, upstream_for};
+    let mut sub = seen(true, true, Some(true), Some("np"));
+    sub.subdomains = vec![SeenSubdomain {
+        hostname: "noisypigeon.pigeon.dev".into(),
+        zone_id: Some("zp".into()),
+        worker: "pigeon-sites".into(),
+        service: None,
+        upstream: None,
+    }];
+    let up = upstream_for("noisypigeon", "np");
+    assert_eq!(up, "https://noisypigeon.np.workers.dev");
+    assert!(matches!(plan(&inst, &sub, &l).last(),
+        Some(Step::AttachSubdomain { upstream, worker, .. })
+            if *upstream == up && worker == "pigeon-sites"));
+    sub.subdomains[0].service = Some("pigeon-sites".into());
+    sub.subdomains[0].upstream = Some(up.clone());
+    assert!(matches!(
+        plan(&inst, &sub, &l).last(),
+        Some(Step::Ok { .. })
+    ));
+    sub.subdomains[0].service = Some("someone-else".into());
+    assert!(plan(&inst, &sub, &l).last().unwrap().stops());
+    let mut no_dev = sub.clone();
+    no_dev.account_subdomain = None;
+    no_dev.subdomains[0].service = None;
+    assert!(
+        plan(&inst, &no_dev, &l)
+            .iter()
+            .any(|s| matches!(s, Step::Blocked { .. }))
+    );
 
     // The digest binds the steps and the account.
     let d1 = digest(&inst, &"a".repeat(32), &first);

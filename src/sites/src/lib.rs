@@ -7,6 +7,7 @@
 //! for `wasm32-unknown-unknown` only.
 
 mod deploy;
+pub mod public;
 
 #[cfg(not(target_arch = "wasm32"))]
 compile_error!("pigeon-sites builds for wasm32 only: cargo build --target wasm32-unknown-unknown");
@@ -205,5 +206,16 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         );
         return Ok(Response::from_json(&answer)?.with_status(503));
     };
+    // A platform subdomain, such as noisypigeon.pigeon.dev, from the internet; core's calls
+    // over the binding come as https://capability/… and go to the contract.
+    let host = req
+        .url()?
+        .host_str()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let zone = env.var("ZONE")?.to_string();
+    if host.ends_with(&format!(".{zone}")) {
+        return public::serve(req, &env, key.as_bytes(), WORKER, &host).await;
+    }
     pigeon_contract::serve(req, &env, &Sites, key.as_bytes()).await
 }

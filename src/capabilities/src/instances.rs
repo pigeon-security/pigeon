@@ -20,6 +20,9 @@ use crate::users::{User, directory};
 use crate::{Call, Capability, Context, Serve, arg, to_value, unknown};
 use record::{Instance, Rules};
 
+/// The Worker that serves instances' platform subdomains, by host.
+pub const SITES_WORKER: &str = "pigeon-sites";
+
 /// The Directory key holding the list of instance ids.
 pub const INDEX: &str = "instances:index";
 /// How long a record is kept: for good, in practice (a century).
@@ -339,6 +342,26 @@ pub fn instances_section() -> Section {
     }
 }
 
+/// `instance_subdomains`: each Subdomain target whose plan was applied, with its upstream.
+async fn subdomains(env: &Env, zone: &str) -> Result<Value> {
+    let mut out = Vec::new();
+    for i in all(env).await? {
+        for t in i.sites.iter().flat_map(|s| s.targets.iter()) {
+            let record::Target::Subdomain { label } = t else {
+                continue;
+            };
+            let host = format!("{label}.{zone}");
+            let key = plan::subdomain_key(&host);
+            if let Value::String(upstream) =
+                directory(env, "setting.get", json!({ "key": key })).await?
+            {
+                out.push(json!({ "host": host, "instance": i.id, "upstream": upstream }));
+            }
+        }
+    }
+    Ok(Value::Array(out))
+}
+
 /// What an instance's account holds now, for [`plan::plan`]. Reads only.
 async fn observe(account: &pigeon_core::Account, instance: &Instance) -> Result<plan::Observed> {
     use pigeon_core::cloudflare::call;
@@ -419,6 +442,7 @@ async fn observe(account: &pigeon_core::Account, instance: &Instance) -> Result<
         workers_dev,
         account_subdomain,
         domains,
+        subdomains: Vec::new(),
     })
 }
 
@@ -443,9 +467,10 @@ impl Instances {
     /// A linked instance, its account (refreshed), what is there and the plan for it.
     async fn planned(
         &self,
-        env: &Env,
+        cx: &Context<'_>,
         id: &str,
     ) -> Result<(Instance, pigeon_core::Account, Vec<plan::Step>, String)> {
+        let env = cx.env;
         let instance = one(env, id)
             .await?
             .ok_or_else(|| bad(&format!("there is no instance {id}")))?;
@@ -471,10 +496,58 @@ impl Instances {
                 account.id
             )));
         }
-        let seen = observe(&account, &instance).await?;
+        let mut seen = observe(&account, &instance).await?;
+        seen.subdomains = self.observe_subdomains(cx, &instance).await?;
         let steps = plan::plan(&instance, &seen, &ledger(env, id).await?);
         let digest = plan::digest(&instance, &account.id, &steps);
         Ok((instance, account, steps, digest))
+    }
+
+    /// Each Subdomain target as the platform's own account has it. Reads only.
+    async fn observe_subdomains(
+        &self,
+        cx: &Context<'_>,
+        instance: &Instance,
+    ) -> Result<Vec<plan::SeenSubdomain>> {
+        let labels: Vec<&str> = instance
+            .sites
+            .iter()
+            .flat_map(|s| s.targets.iter())
+            .filter_map(|t| match t {
+                record::Target::Subdomain { label } => Some(label.as_str()),
+                _ => None,
+            })
+            .collect();
+        if labels.is_empty() {
+            return Ok(Vec::new());
+        }
+        let zone_id = pigeon_core::zones::active(cx.account, &self.zone)
+            .await
+            .ok()
+            .map(|z| z.id);
+        let mut out = Vec::new();
+        for label in labels {
+            let hostname = format!("{label}.{}", self.zone);
+            let service = pigeon_core::workers::custom_domains(cx.account, &hostname)
+                .await?
+                .iter()
+                .find(|d| d["hostname"].as_str() == Some(hostname.as_str()))
+                .and_then(|d| d["service"].as_str())
+                .map(str::to_string);
+            let key = plan::subdomain_key(&hostname);
+            let upstream = match directory(cx.env, "setting.get", json!({ "key": key })).await? {
+                Value::String(u) => Some(u),
+                _ => None,
+            };
+            out.push(plan::SeenSubdomain {
+                hostname,
+                zone_id: zone_id.clone(),
+                worker: SITES_WORKER.to_string(),
+                service,
+                upstream,
+            });
+        }
+        Ok(out)
     }
 
     /// `instance_plan`: the dry run, and an approval when there is something to apply.
@@ -487,7 +560,7 @@ impl Instances {
             .as_ref()
             .ok_or_else(|| bad("the caller acts for no person who could approve this"))?;
         let id = arg(args, "instance")?;
-        let (instance, account, steps, digest) = self.planned(cx.env, id).await?;
+        let (instance, account, steps, digest) = self.planned(cx, id).await?;
         let lines = plan::describe(&steps);
         if steps.iter().any(plan::Step::stops) {
             return Ok(json!({ "instance": id, "plan": lines, "applies": false,
@@ -538,7 +611,7 @@ impl Instances {
             .filter(|_| got["kind"] == "linked_plan")
             .ok_or_else(|| bad(&format!("there is no plan approval {approval_id}")))?
             .to_string();
-        let (_, account, steps, digest) = self.planned(cx.env, &id).await?;
+        let (_, account, steps, digest) = self.planned(cx, &id).await?;
         let taken = directory(
             cx.env,
             "approval.take",
@@ -602,6 +675,23 @@ impl Instances {
                     pigeon_core::custom_domain::attach(&account, zone_id, hostname, worker).await?;
                     format!("{hostname} is served by Worker {worker}")
                 }
+                plan::Step::AttachSubdomain {
+                    hostname,
+                    zone_id,
+                    worker,
+                    upstream,
+                } => {
+                    let key = plan::subdomain_key(hostname);
+                    directory(
+                        cx.env,
+                        "setting.put",
+                        json!({ "key": key, "value": upstream, "ttl_ms": KEPT_MS }),
+                    )
+                    .await?;
+                    pigeon_core::custom_domain::attach(cx.account, zone_id, hostname, worker)
+                        .await?;
+                    format!("{hostname} is served by {worker}, from {upstream}")
+                }
                 _ => continue,
             };
             plan::record(&mut l, step);
@@ -650,6 +740,11 @@ impl Capability for Instances {
                     "required": ["plan"]
                 }),
             },
+            Tool::bare(
+                "instance_subdomains",
+                "The platform subdomains approved plans attached, each with the instance \
+                 Worker's address it is served from: what pigeon-sites serves by host. Read-only.",
+            ),
             Tool {
                 name: "instance_propose",
                 description: "Propose a new or changed instance record (the whole record, with \
@@ -672,6 +767,7 @@ impl Capability for Instances {
                 "instances_list" => Ok(to_value(all(cx.env).await?)),
                 "instance_propose" => self.propose(cx, args).await,
                 "instance_plan" => self.plan(cx, args).await,
+                "instance_subdomains" => subdomains(cx.env, &self.zone).await,
                 "instance_apply" => self.apply(cx, args).await,
                 other => Err(unknown(other)),
             }
