@@ -95,4 +95,13 @@ impl Write {
     pub fn bound_to_digest(self) -> bool {
         self == Write::ApprovalApprove
     }
+
+    /// Whether the write may be made with a bearer token (the iOS app) instead of a cookie:
+    /// only deciding approvals and approving a landing. The passkey is still needed.
+    pub fn by_bearer(self) -> bool {
+        matches!(
+            self,
+            Write::ApprovalApprove | Write::ApprovalDeny | Write::LandApprove
+        )
+    }
 }

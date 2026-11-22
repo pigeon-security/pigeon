@@ -5640,6 +5640,63 @@ fn tool_call_approvals() {
     assert!(Write::ApprovalApprove.target("not an id!").is_err());
 }
 
+#[test]
+fn platform_approvals_list_and_bearer_writes() {
+    use pigeon_capabilities::approvals::listing;
+    use pigeon_capabilities::console::writes::Write;
+    use pigeon_core::approval::{self, Kind, State};
+
+    for (name, yes) in [
+        ("approval-approve", true),
+        ("approval-deny", true),
+        ("land-approve", true),
+        ("land-approval", false),
+        ("invite", false),
+        ("remove-passkey", false),
+        ("disconnect-app", false),
+    ] {
+        if let Some(w) = Write::named(name) {
+            assert_eq!(w.by_bearer(), yes, "{name}");
+        }
+    }
+    assert!(Write::ApprovalApprove.by_bearer() && Write::ApprovalDeny.by_bearer());
+    assert!(Write::LandApprove.by_bearer());
+    assert!(!Write::LandApproval.by_bearer() && !Write::Invite.by_bearer());
+    assert!(!Write::RemovePasskey.by_bearer() && !Write::DisconnectApp.by_bearer());
+
+    let make = |id: &str, kind: Kind, subject: &str| {
+        approval::new(
+            id.into(),
+            kind,
+            subject.into(),
+            "0123456789abcdef0123".into(),
+            json!({ "args": { "a": 1 }, "caller": "svc", "acting_for": "willow" }),
+            Value::Null,
+            "svc".into(),
+            None,
+            1_000,
+        )
+    };
+    let mut used = make("u1", Kind::ToolCall, "old_tool");
+    used.state = State::Used;
+    let open = vec![
+        make("c1", Kind::ToolCall, "deploy_token"),
+        make("d1", Kind::InstanceDraft, "noisypigeon"),
+        make("p1", Kind::LinkedPlan, "noisypigeon"),
+        used,
+    ];
+    let out = listing(&open);
+    assert_eq!(out["calls"].as_array().unwrap().len(), 1);
+    assert_eq!(out["calls"][0]["id"], "c1");
+    assert_eq!(out["calls"][0]["tool"], "deploy_token");
+    assert_eq!(out["calls"][0]["digest"], "0123456789ab");
+    assert_eq!(out["calls"][0]["acting_for"], "willow");
+    assert_eq!(out["drafts"][0]["instance"], "noisypigeon");
+    assert_eq!(out["plans"][0]["id"], "p1");
+    assert_eq!(out["drafts"].as_array().unwrap().len(), 1);
+    assert_eq!(out["plans"].as_array().unwrap().len(), 1);
+}
+
 // ---- Buildkite setup ----
 
 /// The Buildkite setup's plan: a first run creates everything; the same state seen back is all

@@ -342,7 +342,15 @@ impl Console {
         }
         let origin = req.headers().get("Origin")?;
         let content = req.headers().get("Content-Type")?;
-        if !session::same_origin(origin.as_deref(), &self.host)
+        let bearer = req
+            .headers()
+            .get("Authorization")?
+            .and_then(|h| h.strip_prefix("Bearer ").map(|t| t.trim().to_string()))
+            .filter(|t| !t.is_empty());
+        let is_write = path.starts_with("/console/write/");
+        // A bearer is not ambient, so the Origin check that guards the cookie is skipped for it.
+        let by_bearer = is_write && bearer.is_some();
+        if (!by_bearer && !session::same_origin(origin.as_deref(), &self.host))
             || !session::json_content(content.as_deref())
         {
             return answer(
@@ -376,6 +384,30 @@ impl Console {
                 Ok(res)
             }
             p if p.starts_with("/console/write/") => {
+                if let Some(token) = bearer {
+                    let allowed = p
+                        .trim_start_matches("/console/write/")
+                        .split_once('/')
+                        .and_then(|(a, _)| Write::named(a))
+                        .is_some_and(Write::by_bearer);
+                    if !allowed {
+                        return answer(
+                            &json!({ "error": "this write needs the console, not an app" }),
+                            403,
+                        );
+                    }
+                    let caller = match crate::oauth::caller(cx.env, &token).await {
+                        Ok(c) => c,
+                        Err(e) => return answer(&json!({ "error": e.to_string() }), 401),
+                    };
+                    let Some(person) = caller.acting_for.filter(|u| u.kind == "standard") else {
+                        return answer(&json!({ "error": "the app acts for no person" }), 403);
+                    };
+                    return match self.write(cx.env, p, &person, &body).await {
+                        Ok(v) => answer(&v, 200),
+                        Err(e) => answer(&json!({ "error": e.to_string() }), 400),
+                    };
+                }
                 let Some(signed) = self.signed(cx.env, &req).await? else {
                     return answer(&json!({ "error": "sign in first" }), 401);
                 };

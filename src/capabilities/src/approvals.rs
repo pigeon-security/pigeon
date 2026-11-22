@@ -389,6 +389,30 @@ pub async fn decide(env: &Env, id: &str, approve: bool, person: &User) -> Result
 pub struct Approvals;
 
 impl Approvals {
+    /// `approvals_list`: what waits for the person the caller is, or acts for.
+    async fn list(&self, cx: &Context<'_>) -> Result<Value> {
+        let caller = cx
+            .caller
+            .ok_or_else(|| Error::RustError("no caller".into()))?;
+        let person = if caller.user.kind == "standard" {
+            &caller.user
+        } else {
+            caller
+                .acting_for
+                .as_ref()
+                .filter(|u| u.kind == "standard")
+                .ok_or_else(|| {
+                    Error::RustError(
+                        "approvals_list is for a person or an app acting for one".into(),
+                    )
+                })?
+        };
+        let open = open_for(cx.env, person).await?;
+        let mut out = listing(&open);
+        out["landings"] = Value::Array(crate::land::awaiting(cx.env).await?);
+        Ok(out)
+    }
+
     async fn status(&self, cx: &Context<'_>, args: &Value) -> Result<Value> {
         let id = arg(args, "id")?;
         let caller = cx
@@ -423,22 +447,31 @@ impl Capability for Approvals {
     }
 
     fn tools(&self) -> Vec<Tool> {
-        vec![Tool {
-            name: "approvals_status",
-            description: "Where one of your tool calls' passkey approvals stands: pending, \
+        vec![
+            Tool {
+                name: "approvals_list",
+                description: "What waits for the person's passkey: tool calls, instance drafts, \
+                          linked plans and landings. For a person, or an app acting for one.",
+                input_schema: json!({ "type": "object", "properties": {} }),
+            },
+            Tool {
+                name: "approvals_status",
+                description: "Where one of your tool calls' passkey approvals stands: pending, \
                           approved (call the tool again with it), denied, expired or used.",
-            input_schema: json!({
-                "type": "object",
-                "properties": { "id": { "type": "string" } },
-                "required": ["id"]
-            }),
-        }]
+                input_schema: json!({
+                    "type": "object",
+                    "properties": { "id": { "type": "string" } },
+                    "required": ["id"]
+                }),
+            },
+        ]
     }
 
     fn call<'a>(&'a self, cx: &'a Context<'a>, tool: &'a str, args: &'a Value) -> Call<'a> {
         Box::pin(async move {
             match tool {
                 "approvals_status" => self.status(cx, args).await,
+                "approvals_list" => self.list(cx).await,
                 other => Err(unknown(other)),
             }
         })
@@ -465,41 +498,37 @@ impl Capability for Approvals {
     ) -> Call<'a> {
         Box::pin(async move {
             let open = open_for(cx.env, person).await?;
-            let calls: Vec<Value> = open
-                .iter()
-                .filter(|r| r.state == State::Pending && r.kind == ApprovalKind::ToolCall)
-                .map(|r| {
-                    json!({
-                        "id": r.id, "tool": r.subject, "args": r.summary["args"],
-                        "caller": r.summary["caller"], "acting_for": r.summary["acting_for"],
-                        "created_ms": r.created_ms, "expires_ms": r.expires_ms,
-                        "digest": r.digest.chars().take(12).collect::<String>(),
-                    })
-                })
-                .collect();
-            let drafts: Vec<Value> = open
-                .iter()
-                .filter(|r| r.state == State::Pending && r.kind == ApprovalKind::InstanceDraft)
-                .map(|r| {
-                    json!({
-                        "id": r.id, "instance": r.subject, "summary": r.summary,
-                        "created_ms": r.created_ms, "expires_ms": r.expires_ms,
-                        "digest": r.digest.chars().take(12).collect::<String>(),
-                    })
-                })
-                .collect();
-            let plans: Vec<Value> = open
-                .iter()
-                .filter(|r| r.state == State::Pending && r.kind == ApprovalKind::LinkedPlan)
-                .map(|r| {
-                    json!({
-                        "id": r.id, "instance": r.subject, "summary": r.summary,
-                        "created_ms": r.created_ms, "expires_ms": r.expires_ms,
-                        "digest": r.digest.chars().take(12).collect::<String>(),
-                    })
-                })
-                .collect();
-            Ok(json!({ "calls": calls, "drafts": drafts, "plans": plans }))
+            Ok(listing(&open))
         })
     }
+}
+
+/// The pending records of each kind as `{calls, drafts, plans}`, the fields the console's
+/// Approvals section and the `approvals_list` tool both answer. Other states and kinds are left out.
+pub fn listing(open: &[Record]) -> Value {
+    let pending = |kind: ApprovalKind| {
+        open.iter()
+            .filter(move |r| r.state == State::Pending && r.kind == kind)
+    };
+    let short = |r: &Record| r.digest.chars().take(12).collect::<String>();
+    let calls: Vec<Value> = pending(ApprovalKind::ToolCall)
+        .map(|r| {
+            json!({
+                "id": r.id, "tool": r.subject, "args": r.summary["args"],
+                "caller": r.summary["caller"], "acting_for": r.summary["acting_for"],
+                "created_ms": r.created_ms, "expires_ms": r.expires_ms,
+                "digest": short(r),
+            })
+        })
+        .collect();
+    let item = |r: &Record| {
+        json!({
+            "id": r.id, "instance": r.subject, "summary": r.summary,
+            "created_ms": r.created_ms, "expires_ms": r.expires_ms,
+            "digest": short(r),
+        })
+    };
+    let drafts: Vec<Value> = pending(ApprovalKind::InstanceDraft).map(item).collect();
+    let plans: Vec<Value> = pending(ApprovalKind::LinkedPlan).map(item).collect();
+    json!({ "calls": calls, "drafts": drafts, "plans": plans })
 }
