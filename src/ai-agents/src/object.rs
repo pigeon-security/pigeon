@@ -1452,8 +1452,12 @@ impl AiAgentRuns {
                 )
                 .map_err(|over| over.why(budget))?;
                 let id = crate::service::run_id().map_err(e)?;
-                let mut caller: Value = serde_json::from_str(&row.caller).unwrap_or(Value::Null);
-                caller["run"] = json!(id);
+                let mut planner_caller: Value =
+                    serde_json::from_str(&row.caller).unwrap_or(Value::Null);
+                if let Some(o) = planner_caller.as_object_mut() {
+                    o.remove("run");
+                }
+                let caller = run_caller(&self.env, &planner_caller, role, &id).await;
                 let branch = crate::service::branch(&id);
                 let base = input["base"].as_str().unwrap_or("main");
                 call(
@@ -1633,8 +1637,7 @@ pub async fn grant(env: &Env, caller: &Value, start: &Value) -> Result<String> {
     let platform = env.service(PLATFORM)?;
     let asked = json!({
         "kind": "run_grant",
-        "run": start["run"],
-        "branch": start["branch"],
+        "instance": start["run"],
         "scopes": [],
     });
     match pigeon_contract::ask(
@@ -1730,4 +1733,64 @@ pub fn handoff_packet(public: &Value, brief: &str, base: Option<&str>) -> Value 
         "next": "start a Claude Code session with session_prompt on this repository, then \
                  ai_agents_register it with parent_run set to this run",
     })
+}
+
+/// The service user key of a run of `role`: its delegate, linked to the person.
+pub fn service_key(role: Role) -> &'static str {
+    match role {
+        Role::Planner => "ai-agent:planner",
+        Role::Executor | Role::Mechanical => "ai-agent:executor",
+    }
+}
+
+/// Asks core for service user `key` (made on first ask; with a link request for the person
+/// `caller` acts for while it is not linked).
+pub async fn service_user(env: &Env, caller: &Value, key: &str) -> Result<Value> {
+    let k = caller_key(env).await?;
+    let nonce = pigeon_core::webauthn::random()?;
+    let platform = env.service(PLATFORM)?;
+    match pigeon_contract::ask(
+        &platform,
+        "https://core",
+        "service_user",
+        &json!({ "key": key }),
+        Some((k.as_bytes(), caller)),
+        &nonce,
+    )
+    .await?
+    {
+        Answer::Ok(v) => Ok(v),
+        Answer::Error(f) => Err(bad(f.message)),
+    }
+}
+
+/// The person `caller` (as core serializes it) stands for: the one it acts for, or itself.
+pub fn person_of(caller: &Value) -> Option<&str> {
+    caller["acting_for"]["id"]
+        .as_str()
+        .or_else(|| caller["user"]["id"].as_str())
+}
+
+/// Who run `run` acts as: its role's service user when that user is linked to the same person
+/// as `starter`; otherwise `starter` itself. Marked with the run's id either way. Pure.
+pub fn chosen_caller(starter: &Value, service: Option<&Value>, run: &str) -> Value {
+    let mut caller = match service {
+        Some(s)
+            if s["acting_for"]["id"].as_str().is_some()
+                && s["acting_for"]["id"].as_str() == person_of(starter) =>
+        {
+            json!({ "user": s["user"], "acting_for": s["acting_for"] })
+        }
+        _ => starter.clone(),
+    };
+    caller["run"] = json!(run);
+    caller
+}
+
+/// [`chosen_caller`], asking core for the role's service user; the starter when core cannot
+/// answer.
+pub async fn run_caller(env: &Env, starter: &Value, role: Role, run: &str) -> Value {
+    let service = service_user(env, starter, service_key(role)).await.ok();
+    let svc = service.as_ref().map(|s| &s["caller"]);
+    chosen_caller(starter, svc, run)
 }

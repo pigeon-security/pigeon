@@ -83,7 +83,7 @@ fn bad(why: &str) -> Error {
 // ---- the Directory ----
 
 /// The Directory's schema, one statement per migration, applied in order and never edited.
-const MIGRATIONS: [&str; 17] = [
+const MIGRATIONS: [&str; 18] = [
     "CREATE TABLE users (id TEXT PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL, created_at INTEGER NOT NULL)",
     "CREATE TABLE service_ids (access_client_id TEXT PRIMARY KEY, user_id TEXT NOT NULL)",
     "CREATE TABLE passkeys (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, point TEXT NOT NULL, sign_count INTEGER NOT NULL, name TEXT NOT NULL, created_at INTEGER NOT NULL, last_used_at INTEGER)",
@@ -103,6 +103,8 @@ const MIGRATIONS: [&str; 17] = [
     // Approvals of single actions (`pigeon_core::approval`): the record as JSON, with the
     // columns it is looked up by.
     "CREATE TABLE approvals (id TEXT PRIMARY KEY, caller_id TEXT NOT NULL, digest TEXT NOT NULL, state TEXT NOT NULL, expires_ms INTEGER NOT NULL, record TEXT NOT NULL)",
+    // AI agent runs' git grants (`run_grant`): the branch prefix they may push.
+    "ALTER TABLE oauth_tokens ADD COLUMN scope TEXT",
 ];
 
 /// A day, in milliseconds: how long an ended approval is kept.
@@ -897,10 +899,41 @@ impl Directory {
             }
             "proxy.token_get" => {
                 let row: Option<Value> = self.db.row(
-                    "SELECT substr(o.hash, 1, 12) AS id, o.label AS label, u.name AS person FROM oauth_tokens o JOIN users u ON u.id = o.service_user_id WHERE o.hash = ? AND o.kind = 'proxy' AND o.expires_at > ?",
+                    "SELECT substr(o.hash, 1, 12) AS id, o.label AS label, u.name AS person, CASE WHEN o.kind = 'run_grant' THEN o.scope END AS branch_prefix FROM oauth_tokens o JOIN users u ON u.id = o.service_user_id WHERE o.hash = ? AND o.kind IN ('proxy', 'run_grant') AND o.expires_at > ?",
                     vec![s("hash").into(), t.into()],
                 )?;
                 row.unwrap_or(Value::Null)
+            }
+            // An AI agent run's git grant (`docs/plans/ai-agents.md`): kind 'run_grant', held by
+            // the person the run acts for, pushing only the branches under `scope`.
+            "run_grant.add" => {
+                let ttl_ms = a["ttl_ms"]
+                    .as_i64()
+                    .filter(|v| *v > 0 && *v <= 24 * 3_600_000)
+                    .ok_or_else(|| bad("ttl_ms must be positive and at most a day"))?;
+                let scope = s("scope");
+                if !scope.starts_with("claude/ai-agent-") {
+                    return Err(bad(
+                        "a run grant's scope is an AI agent run's branch prefix",
+                    ));
+                }
+                self.db.exec(
+                    "INSERT INTO oauth_tokens (hash, kind, client_id, service_user_id, label, expires_at, created_at, scope) VALUES (?, 'run_grant', NULL, ?, ?, ?, ?, ?)",
+                    vec![
+                        s("hash").into(),
+                        s("user_id").into(),
+                        s("label").into(),
+                        t.saturating_add(ttl_ms).into(),
+                        t.into(),
+                        scope.into(),
+                    ],
+                )?;
+                // Expired grants go as new ones come.
+                self.db.exec(
+                    "DELETE FROM oauth_tokens WHERE kind = 'run_grant' AND expires_at <= ?",
+                    vec![t.into()],
+                )?;
+                Value::Null
             }
             // The live ones, and with `expired_within_ms` also those expired that recently.
             "proxy.tokens" => {

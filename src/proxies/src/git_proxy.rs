@@ -664,6 +664,19 @@ impl GitProxy {
                     audit_update(&pv, &who, kind, c);
                 }
             }
+            // An AI agent run's git grant pushes only its own branches.
+            if let Some(prefix) = caller.as_ref().and_then(|c| c.branch_prefix.as_deref())
+                && let Err(outside) = pigeon_core::proxy_caller::within_prefix(
+                    p.commands.commands.iter().map(|c| c.name.as_str()),
+                    prefix,
+                )
+            {
+                drain(&mut p.rest, BUFFERED_MAX).await;
+                let why = format!("this run's git grant pushes only {prefix}…");
+                let refused: Vec<(String, String)> =
+                    outside.into_iter().map(|r| (r, why.clone())).collect();
+                return refusal(&p.commands, &refused);
+            }
             match check_all(&p.commands.commands, &self.protected, &self.prefix) {
                 Ok(r) => rules = r,
                 Err(refused) => {
@@ -855,6 +868,7 @@ impl GitProxy {
             return no(403, "the job token is unknown or has expired");
         };
         *caller = Some(ProxyCaller {
+            branch_prefix: None,
             id: token::lookup_hash(presented)
                 .map(|h| h[..proxy::ID_LEN].to_string())
                 .unwrap_or_default(),

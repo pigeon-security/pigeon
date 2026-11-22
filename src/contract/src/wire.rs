@@ -12,7 +12,14 @@ pub const OPS: [&str; 6] = ["manifest", "call", "section", "fetch", "events", "s
 /// The ops core answers for capability Workers. `verify`, `grant` and `deploy_grant` are the
 /// proxy Worker's checks: each carries the credential it asks about, so it is signed with
 /// `CALLER_KEY` but for no caller.
-pub const CORE_OPS: [&str; 5] = ["credential", "dispatch", "verify", "grant", "deploy_grant"];
+pub const CORE_OPS: [&str; 6] = [
+    "credential",
+    "dispatch",
+    "verify",
+    "grant",
+    "deploy_grant",
+    "service_user",
+];
 
 /// The core ops a request signed for no caller may ask: the proxy Worker's checks, which carry
 /// the credential they ask about.

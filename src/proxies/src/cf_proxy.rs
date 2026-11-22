@@ -845,6 +845,10 @@ impl CfProxy {
                 }
             }
             _ => match proxy::caller(host, &req).await {
+                // An AI agent run's git grant reaches /git/ only.
+                Ok(c) if c.branch_prefix.is_some() => {
+                    return refuse(403, "an AI agent run's git grant reaches /git/ only");
+                }
                 Ok(c) => Some(c),
                 Err(e) => return refuse(403, &e.to_string()),
             },

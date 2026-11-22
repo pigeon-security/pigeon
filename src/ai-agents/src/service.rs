@@ -20,7 +20,7 @@ pub const NAME: &str = "ai-agents";
 pub const WORKER: &str = "pigeon-ai-agents";
 
 /// Every tool the capability offers.
-pub const TOOLS: [&str; 10] = [
+pub const TOOLS: [&str; 11] = [
     "ai_agents_start",
     "ai_agents_status",
     "ai_agents_stop",
@@ -31,6 +31,7 @@ pub const TOOLS: [&str; 10] = [
     "ai_agents_register",
     "ai_agents_report",
     "ai_agents_handoff",
+    "ai_agents_setup",
 ];
 
 /// The console section's id; it sits on the Instances tab, with what else pigeon runs.
@@ -41,8 +42,9 @@ pub struct Agents;
 
 /// The caller's user id, from the signed caller's JSON.
 fn reader(caller: &Signed) -> String {
-    caller.caller["user"]["id"]
-        .as_str()
+    // Runs are the person's: whoever stands for them (they, or a delegate acting for them)
+    // sees and acts on them, whichever delegate a run acts as.
+    object::person_of(&caller.caller)
         .unwrap_or_default()
         .to_string()
 }
@@ -101,9 +103,9 @@ impl Agents {
         }
         let (role, brief, base, budget) = start_args(args)?;
         let id = run_id().map_err(|e| e.to_string())?;
-        // The run acts as its starter, marked with the run's id for the audit.
-        let mut as_caller = caller.caller.clone();
-        as_caller["run"] = json!(id);
+        // The run acts as its role's service user, linked to the person; as its starter until
+        // that link is made. Marked with the run's id for the audit either way.
+        let as_caller = object::run_caller(env, &caller.caller, role, &id).await;
         let paused = object::call(env, INDEX, "paused", &json!({}))
             .await
             .map_err(|e| e.to_string())?;
@@ -225,6 +227,29 @@ impl Agents {
                     }),
                 )
                 .await)
+            }
+            "ai_agents_setup" => {
+                let mut out = serde_json::Map::new();
+                for role in [Role::Planner, Role::Executor] {
+                    let key = object::service_key(role);
+                    let v = object::service_user(env, &caller.caller, key)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    let linked = v["caller"]["acting_for"]["id"].as_str().is_some();
+                    out.insert(
+                        key.into(),
+                        json!({
+                            "name": v["caller"]["user"]["name"],
+                            "linked": linked,
+                            "approve": v["approve"],
+                        }),
+                    );
+                }
+                Ok(json!({
+                    "service_users": out,
+                    "note": "Runs act as these delegates once the person approves each link with \
+                             their passkey; until then a run acts as the caller who started it.",
+                }))
             }
             "ai_agents_handoff" => r(object::call(
                 env,
@@ -393,6 +418,14 @@ impl Service for Agents {
                             "properties": { "run": { "type": "string" } },
                             "required": ["run"]
                         }),
+                    ),
+                    tool(
+                        "ai_agents_setup",
+                        "Make sure the AI agents' two service users exist (\"Pigeon planner\" \
+                         and \"Pigeon executor\") and say whether each is linked to the \
+                         person; for each that is not, a link to approve with their passkey. \
+                         Runs act as these delegates once linked.",
+                        json!({ "type": "object", "properties": {} }),
                     ),
                 ],
                 sections: vec![SectionSpec {

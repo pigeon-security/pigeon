@@ -194,6 +194,7 @@ pub async fn deploy_caller(env: &Env, presented: &str, repo: &str) -> Result<Opt
         return Ok(None);
     };
     Ok(Some(ProxyCaller {
+        branch_prefix: None,
         id: crate::ci::token::lookup_hash(presented)
             .map(|h| h[..crate::proxy::ID_LEN].to_string())
             .unwrap_or_default(),

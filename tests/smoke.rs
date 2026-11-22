@@ -2392,6 +2392,77 @@ fn ai_agents_loop_budgets_tools_and_turns() {
             .unwrap()
             .contains("[tool run: {}]")
     );
+    // ---- the run's git grant (core and the proxies) ----
+    use pigeon_core::proxy_caller::within_prefix;
+    let prefix = pigeon_capabilities::proxy::run_branch_prefix("r1").unwrap();
+    assert_eq!(prefix, "claude/ai-agent-r1");
+    assert!(pigeon_capabilities::proxy::run_branch_prefix("../main").is_err());
+    assert!(pigeon_capabilities::proxy::run_branch_prefix("").is_err());
+    assert!(
+        within_prefix(
+            [
+                "refs/heads/claude/ai-agent-r1",
+                "refs/heads/claude/ai-agent-r1-wip"
+            ],
+            &prefix
+        )
+        .is_ok()
+    );
+    assert_eq!(
+        within_prefix(
+            [
+                "refs/heads/claude/ai-agent-r1",
+                "refs/heads/main",
+                "refs/heads/claude/ai-agent-r2"
+            ],
+            &prefix
+        )
+        .unwrap_err(),
+        ["refs/heads/main", "refs/heads/claude/ai-agent-r2"]
+    );
+    assert!(within_prefix(["refs/tags/v1"], &prefix).is_err());
+    // A grant is a proxy caller with a prefix; an older answer without one reads as none.
+    let old: pigeon_core::proxy_caller::ProxyCaller =
+        serde_json::from_value(json!({ "id": "x", "label": "l", "person": "p" })).unwrap();
+    assert!(old.branch_prefix.is_none());
+
+    // ---- who a run acts as ----
+    let starter = json!({ "user": { "id": "portal", "name": "Portal" }, "acting_for": { "id": "willow", "name": "Willow" } });
+    let linked = json!({ "user": { "id": "svc-exec", "name": "Pigeon executor" }, "acting_for": { "id": "willow", "name": "Willow" } });
+    let unlinked =
+        json!({ "user": { "id": "svc-exec", "name": "Pigeon executor" }, "acting_for": null });
+    let other = json!({ "user": { "id": "svc-exec", "name": "Pigeon executor" }, "acting_for": { "id": "mallory" } });
+    let as_svc = pigeon_ai_agents::object::chosen_caller(&starter, Some(&linked), "r1");
+    assert_eq!(
+        (
+            as_svc["user"]["id"].as_str(),
+            as_svc["acting_for"]["id"].as_str(),
+            as_svc["run"].as_str()
+        ),
+        (Some("svc-exec"), Some("willow"), Some("r1"))
+    );
+    for svc in [Some(&unlinked), Some(&other), None] {
+        let c = pigeon_ai_agents::object::chosen_caller(&starter, svc, "r1");
+        assert_eq!(
+            (c["user"]["id"].as_str(), c["run"].as_str()),
+            (Some("portal"), Some("r1")),
+            "falls back to the starter"
+        );
+    }
+    assert_eq!(
+        pigeon_ai_agents::object::person_of(&starter),
+        Some("willow")
+    );
+    assert_eq!(
+        pigeon_ai_agents::object::person_of(&json!({ "user": { "id": "willow" } })),
+        Some("willow")
+    );
+    assert_eq!(
+        pigeon_capabilities::split::service_user_name("ai-agent:executor"),
+        Some("Pigeon executor")
+    );
+    assert_eq!(pigeon_capabilities::split::service_user_name("root"), None);
+
     // ---- the Worker side's pure parts ----
     use pigeon_ai_agents::{object, prompts, sandbox, service};
     // A passkey wait, read from dispatch's own words.
@@ -3226,6 +3297,7 @@ fn proxy_and_job_tokens() {
         label: "env".into(),
         person: "Ana".into(),
         script: None,
+        branch_prefix: None,
     };
     let named: Value = serde_json::from_str(&proxy::audit_line(Some(&caller), &audit)).unwrap();
     assert_eq!(named["caller"], "env (Ana)");
@@ -3340,6 +3412,7 @@ fn proxy_worker_caches_and_core_ops() {
         label: "env".into(),
         person: "Ana".into(),
         script: None,
+        branch_prefix: None,
     };
     let (a, b) = (
         format!("pgn_px_{}", "a".repeat(43)),

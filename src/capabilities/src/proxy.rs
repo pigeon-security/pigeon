@@ -102,6 +102,39 @@ pub async fn verify(env: &Env, presented: &str) -> Result<Option<ProxyCaller>> {
     Ok(serde_json::from_value(found).ok())
 }
 
+/// How long an AI agent run's git grant lives, in milliseconds: longer than an executor's
+/// budget, shorter than a day.
+pub const RUN_GRANT_MS: i64 = 12 * 3_600_000;
+
+/// The branch prefix AI agent run `run` pushes under, when `run` is a run's id.
+pub fn run_branch_prefix(run: &str) -> std::result::Result<String, String> {
+    if run.is_empty() || run.len() > 32 || !run.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return Err("a run grant names its run: up to 32 letters and digits".into());
+    }
+    Ok(format!("claude/ai-agent-{run}"))
+}
+
+/// Mints AI agent run `run`'s git grant for `person` (a user id): a proxy credential that
+/// reaches `/git/` only and pushes only `claude/ai-agent-{run}…`, for [`RUN_GRANT_MS`].
+/// Answers the token, shown only to the run's sandbox, and when it expires.
+pub async fn issue_run_grant(env: &Env, person: &str, run: &str) -> Result<(String, i64)> {
+    let prefix = run_branch_prefix(run).map_err(|e| bad(&e))?;
+    let (secret, secret_hash) = pigeon_core::oauth::token(PREFIX)?;
+    directory(
+        env,
+        "run_grant.add",
+        json!({
+            "hash": secret_hash,
+            "user_id": person,
+            "label": format!("AI agent run {run}"),
+            "scope": prefix,
+            "ttl_ms": RUN_GRANT_MS,
+        }),
+    )
+    .await?;
+    Ok((secret, worker::js_sys::Date::now() as i64 + RUN_GRANT_MS))
+}
+
 /// The grant of CI job token `presented` when it is live and for repository `repo`: core's
 /// own check, and what its `grant` op answers the proxy Worker.
 pub async fn job_grant(env: &Env, presented: &str, repo: &str) -> Result<Option<Grant>> {

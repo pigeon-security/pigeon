@@ -137,6 +137,10 @@ pub async fn serve(mut req: Request, cx: &Context<'_>) -> Result<Response> {
         ..*cx
     };
     let answer = match op.as_str() {
+        "service_user" => {
+            let asked: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+            service_user(&cx, &asked).await
+        }
         "dispatch" => {
             let asked: Value = match serde_json::from_slice(&body) {
                 Ok(v) => v,
@@ -157,6 +161,67 @@ pub async fn serve(mut req: Request, cx: &Context<'_>) -> Result<Response> {
         Ok(v) => reply(Answer::Ok(v), 200),
         Err(e) => reply(Answer::error(FailureKind::Failed, e.to_string()), 200),
     }
+}
+
+/// The service users a capability Worker may ask core for, by key, with their names: the AI
+/// agent runs' delegates (docs/plans/ai-agents.md). A fixed table, so no Worker makes users of
+/// its own choosing.
+pub const SERVICE_USERS: [(&str, &str); 2] = [
+    ("ai-agent:planner", "Pigeon planner"),
+    ("ai-agent:executor", "Pigeon executor"),
+];
+
+/// The name of the service user `key` names, from [`SERVICE_USERS`].
+pub fn service_user_name(key: &str) -> Option<&'static str> {
+    SERVICE_USERS
+        .iter()
+        .find(|(k, _)| *k == key)
+        .map(|(_, n)| *n)
+}
+
+/// `service_user {key}`: the service user `key` names, made the first time it is asked for. It
+/// acts for a person only once they link it with their passkey: until then the answer carries
+/// a link request for the person the caller acts for, to approve at `/auth/link`.
+async fn service_user(cx: &Context<'_>, asked: &Value) -> Result<Value> {
+    let key = asked["key"].as_str().unwrap_or_default();
+    let name = service_user_name(key).ok_or_else(|| {
+        bad(&format!(
+            "no service user `{key}`; these are: ai-agent:planner, ai-agent:executor"
+        ))
+    })?;
+    let found =
+        crate::users::directory(cx.env, "service.find", json!({ "access_client_id": key })).await?;
+    let user = if found.is_null() {
+        crate::users::directory(
+            cx.env,
+            "service.add",
+            json!({ "access_client_id": key, "name": name }),
+        )
+        .await?
+    } else {
+        found
+    };
+    let person = cx
+        .caller
+        .and_then(|c| c.acting_for.as_ref())
+        .map(|p| p.id.clone());
+    let mut out = json!({ "caller": user });
+    if user["acting_for"].is_null()
+        && let Some(person) = person
+    {
+        let id = crate::users::directory(
+            cx.env,
+            "link.request",
+            json!({ "service_user_id": user["user"]["id"], "standard_user_id": person }),
+        )
+        .await?;
+        let host = cx.env.var("PLATFORM_HOST")?.to_string();
+        out["approve"] = json!(format!(
+            "https://{host}/auth/link?request={}",
+            id.as_str().unwrap_or_default()
+        ));
+    }
+    Ok(out)
 }
 
 /// One of the proxy Worker's checks, `op` with `body`, answered as core's own proxies answer
@@ -222,6 +287,28 @@ async fn credential(cx: &Context<'_>, r: &CredentialRequest) -> Result<Value> {
             })?)
         }
         "scoped" => scoped(cx, &r.scopes).await,
+        // An AI agent run's git grant (docs/plans/ai-agents.md): for a caller acting for a
+        // person, pushing only the run's own branches.
+        "run_grant" => {
+            let run = r
+                .instance
+                .as_deref()
+                .ok_or_else(|| bad("a run grant names its run"))?;
+            let caller = cx
+                .caller
+                .ok_or_else(|| bad("a run grant needs a caller acting for a person"))?;
+            let person = match (&caller.acting_for, caller.user.kind.as_str()) {
+                (Some(p), _) => p.id.clone(),
+                (None, "standard") => caller.user.id.clone(),
+                _ => return Err(bad("a run grant needs a caller acting for a person")),
+            };
+            let (token, expires_at) = crate::proxy::issue_run_grant(cx.env, &person, run).await?;
+            Ok(serde_json::to_value(Credential {
+                token,
+                account_id: String::new(),
+                expires_at,
+            })?)
+        }
         other => Err(bad(&format!("no credential of kind `{other}`"))),
     }
 }
