@@ -548,7 +548,8 @@ a passkey. Enter every key and id on the console's secrets page once the slot ex
    skeleton has no XCTest target, and the `pigeon-ios` pipeline only builds. Decide whether a
    Swift test target under `ios/` may exist. If it may, that is a change to the policy, which is
    yours.
-10. **Review and land** the three branches listed in the Log. Each is off or docs-only.
+10. **Review and land** the three branches listed in the Log. Each is off or docs-only. Land
+    the `ios/` branch only after step 8.
 
 ## Open points
 
@@ -573,7 +574,28 @@ a passkey. Enter every key and id on the console's secrets page once the slot ex
     - `passkeys_list` as the skeleton's list;
     - signing material sealed under a Secrets Store key rather than stored whole;
     - no Swift test target.
-  - Branches:
-    - this plan (docs) on `claude/ai-agent-37wDmGr46XoB`;
-    - the app skeleton and token generator (code, off) and the pipelines generator (code, off),
-      on executor branches named in the run's report.
+  - Branches (none landed; each passed the `test` job):
+    - `claude/ai-agent-37wDmGr46XoB`: this plan and its README row. Docs only.
+    - `claude/ai-agent-f7nXIc6mwynt` (`9461117`, CI `3jtodsZXm040WUp5eLeI2n`). Code, off:
+      - `pigeon_core::design::swift` and the example `design_swift`;
+      - smoke `platform_design_tokens_for_ios`;
+      - `ios/` with the skeleton.
+
+      Departures:
+      - a colour only in the light block is refused too;
+      - an added `Platform/Session.swift` holds the signed-in state;
+      - the MCP client sends `initialize` without `notifications/initialized` (the platform
+        answers notifications with nothing, so nothing is lost);
+      - the Swift is uncompiled: expect small fixes on a Mac.
+    - `claude/ai-agent-8sw9JfeIslZK` (`d9d4968`, CI `i1aLMuM0KtmxYR2hMDRe25`). Code, off:
+      - `pigeon_ci::buildkite::ios` and smoke `ci_buildkite_ios_pipelines`.
+
+      Departures:
+      - `validate` takes the sign queues as a parameter rather than guessing from the name;
+      - `shape` allows upper-case keys, for env names such as `PIGEON_JOB_KIND`.
+    - The two code branches touch `tests/smoke.rs` in separate sections (before
+      `// ---- console ----` and before `// ---- tool call approvals ----`), so they merge
+      cleanly in either order.
+  - The planner's sandbox could not fetch the executors' branches (the git proxy answered 403
+    to fetches from it). So their code was not read line by line here, only their reports and
+    CI. The reviewer reads them first.
