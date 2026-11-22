@@ -1,0 +1,246 @@
+# Cloudflare Observability for every pigeon Worker
+
+Status: planned 2026-11-22. Three slices, each on its own branch, none landed: (a) settings and
+coverage check, (b) the query client and `observability_summary`, (c) monitors by plan and
+apply. The person approves each landing, and does the follow-ups listed at the end.
+
+The request: turn on Cloudflare Observability (logging, traces, analytics, monitors, usage) for
+every Worker, and add one tool that gives high-level error stats and one view of cost.
+
+Sources: developers.cloudflare.com pages read on 2026-11-22. The date after each link is the
+page's own `dateModified`.
+
+- Workers Logs, its settings, sampling, limits and pricing:
+  https://developers.cloudflare.com/workers/observability/logs/workers-logs/ (2026-11-18)
+- Wrangler `[observability]` and container `observability`:
+  https://developers.cloudflare.com/workers/wrangler/configuration/#observability (2026-11-12)
+- Workers Traces: https://developers.cloudflare.com/workers/observability/traces/ (2026-11-12);
+  its spans and attributes:
+  https://developers.cloudflare.com/workers/observability/traces/spans-and-attributes/
+  (2026-10-16); known limitations (open beta):
+  https://developers.cloudflare.com/workers/observability/traces/known-limitations/ (2026-06-16)
+- Cloudflare Observability pricing, from 2026-12-01:
+  https://developers.cloudflare.com/observability/pricing/ (2026-11-11)
+- Workers metrics, invocation statuses:
+  https://developers.cloudflare.com/workers/observability/metrics-and-analytics/ (2026-11-12)
+- GraphQL Analytics API, Workers metrics:
+  https://developers.cloudflare.com/analytics/graphql-api/tutorials/querying-workers-metrics/
+  (2026-04-23); token permission `Account Analytics Read`:
+  https://developers.cloudflare.com/analytics/graphql-api/getting-started/authentication/api-token-auth/
+  (2026-04-23)
+- SQL API and its datasets (`logs.workersLogs`):
+  https://developers.cloudflare.com/analytics/sql-api/ (2026-10-02),
+  https://developers.cloudflare.com/analytics/sql-api/datasets/ (2026-10-27), and its Workers
+  binding: https://developers.cloudflare.com/analytics/sql-api/workers-binding/ (2026-10-02)
+- Workers Observability query API (`POST /accounts/{id}/workers/observability/telemetry/query`):
+  https://developers.cloudflare.com/api/resources/workers/subresources/observability/subresources/telemetry/methods/query/
+- Monitors: https://developers.cloudflare.com/notifications/monitors/ (2026-10-21); platform
+  notifications: https://developers.cloudflare.com/notifications/notification-available/
+  (2026-10-21); the policies API:
+  https://developers.cloudflare.com/api/resources/alerting/subresources/policies/methods/create/
+- Billable usage (alpha):
+  https://developers.cloudflare.com/api/resources/billing/subresources/usage/methods/get_account_usage_v1/
+- Workers pricing: https://developers.cloudflare.com/workers/platform/pricing/ (2026-11-18);
+  Containers pricing: https://developers.cloudflare.com/containers/pricing/ (2026-11-13);
+  Analytics Engine pricing: https://developers.cloudflare.com/analytics/analytics-engine/pricing/
+  (2026-04-23)
+- Tail request redaction (for what logs and traces may hold):
+  https://developers.cloudflare.com/workers/runtime-apis/handlers/tail/ (2026-06-15)
+- API token permission groups:
+  https://developers.cloudflare.com/fundamentals/api/reference/permissions/ (2026-11-15)
+
+## What Cloudflare offers
+
+| Piece | What it is | How it is turned on or read | Notes |
+| --- | --- | --- | --- |
+| Workers Logs | `console.*` lines and one invocation log per request, kept 7 days, queryable in the dashboard and by API | `[observability] enabled = true`; `head_sampling_rate` 0 to 1 (default 1); `[observability.logs] invocation_logs = false` drops the per-request log | 5 billion logs per account per day, then 1% sampling for the rest of the day. One log is at most 256 KB. |
+| Invocation logs | One event per invocation; its message is `<Method> <URL>` for fetch | On with logs unless `invocation_logs = false` | The URL is kept whole, query included. |
+| Workers Traces | Spans for the handler, `fetch` subrequests, bindings; open beta | `[observability.traces] enabled = true`, own `head_sampling_rate` (default 1) | Spans hold `url.full` and `url.query`, and only a fixed set of headers (`content-type`, `accept`, `accept-encoding`, ...): never `authorization` or `cookie`, never bodies (sizes only). Names may still change. |
+| Container logs | stdout and stderr of a Worker's containers | A `[[containers]]` block's `observability`; **if it is absent, the top-level `[observability]` applies** | CI job output and agent sandboxes would be kept unless turned off. |
+| Issues | Groups recurring failures | `[observability.issues] enabled = true` | Not asked for; not turned on here. |
+| Metrics | Requests, errors (exception, exceeded resources, internal error), subrequests, CPU and wall time quantiles, per script | Always on. GraphQL `workersInvocationsAdaptive`, permission `Account Analytics Read` | Up to one month per query, three months back. |
+| Query API | Workers Logs and Traces by key (`$metadata.service`, `$metadata.error`, `$metadata.message`, `$metadata.level`) with counts, group-bys and percentiles | `POST /workers/observability/telemetry/query`, view `calculations` | Accepts only `Workers Observability Write`: there is no read-only permission for it. |
+| SQL API | SQL over datasets, `logs.workersLogs` among them | `POST /client/v4/analytics/sql`, `Account Analytics Read` (some datasets ask more); or an `analytics` Workers binding with no token | Column names of `logs.workersLogs` are only given by the introspection endpoint, not in the docs. |
+| Analytics Engine | A Worker writes its own data points | A binding | Paid: 10 M points written and 1 M read queries a month included. Not needed: the metrics above cover requests and errors. |
+| Monitors | A SQL API query on a schedule: threshold, anomaly or SLO, to email, webhook or PagerDuty | **Dashboard only** (Alerts > Monitors); no API is documented | Sampling can hide single events, so a monitor on rare errors wants logs at 100%. |
+| Platform notifications | Fixed alert types, by API: `alerting/v3/policies`, `Notifications Write` | Alert types include `workers_observability_alert`, `workers_observability_real_time_issue`, `billing_usage_alert`, `billing_budget_alert` | Filters per type come from `GET alerting/v3/available_alerts` (`Notifications Read`). |
+| Billable usage | Per product: quantity, unit, billed and list cost, in the FinOps FOCUS shape | `GET /accounts/{id}/billable-usage` (alpha), current billing period by default | Rows also carry the billing account's name: never shown. |
+| Spending limit | Blocks new Worker invocations past a spend | Dashboard or `cf` CLI | An account setting: the person's choice. |
+
+### Pricing and quotas
+
+Until 2026-11-30, Workers Logs on Workers Paid: 20 million log events a month included, then
+$0.60 a million. From 2026-12-01, Cloudflare Observability pricing applies to Workers Logs,
+Workers Traces, container logs, AI Gateway logs and Issues together: 50 GB ingested and
+10 GB-month stored a billing cycle included, then $0.25 a GB ingested and $0.10 a GB-month.
+With 7-day retention, storage is about ingestion × 7 / 30, so storage charges start at about
+43 GB ingested a cycle. Metrics, the GraphQL API and the SQL API cost nothing extra.
+
+For the rest of the cost view: Workers Paid includes 10 M requests ($0.30 a million after) and
+30 M CPU ms ($0.02 a million after); Containers include 25 GiB-hours of memory, 375 vCPU-minutes
+and 200 GB-hours of disk a month ($0.0000025 a GiB-second, $0.000020 a vCPU-second,
+$0.00000007 a GB-second after).
+
+### What it will cost pigeon
+
+pigeon's traffic is small: core's cron runs every minute (about 43,200 invocations a month),
+plus MCP calls, console loads, CI and landing alarms, and service-binding calls between the six
+Workers. Even at 1 million invocations a month across all six, with invocation logs off and
+about three `console` lines of about 1 KB each per invocation, logs are about 3 GB a month, and
+traces at 10% of invocations, about ten 0.5 KB spans each, about 0.5 GB. That is under a tenth
+of the included 50 GB and about 0.8 GB-month of the included 10 GB-month: **an expected $0 a
+month above the Workers Paid subscription**. Before 2026-12-01 the same is about 3 million log
+events, inside the 20 million included. The risk is container output, which is why container
+logs stay off. `observability_summary` reports the billed figure once a month has run.
+
+## What each Worker turns on
+
+One block, the same in every Worker's `wrangler.toml` except core's `traces.enabled` (wrangler
+has no include, so the block is copied and the smoke suite keeps the copies equal):
+
+```toml
+# Cloudflare Observability (docs/plans/observability.md). Every Worker carries this same block;
+# the smoke scenario core_observability_on_every_worker fails when one does not.
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[observability.logs]
+# The per-request log keeps each URL whole, and some URLs carry one-use codes
+# (/auth/enrol?code=, OAuth callbacks): off. console lines are still kept.
+invocation_logs = false
+
+[observability.traces]
+enabled = true
+head_sampling_rate = 0.1
+```
+
+and, in each `[[containers]]` block, container logs off, since the top-level block would
+otherwise apply to them:
+
+```toml
+[containers.observability]
+enabled = false
+```
+
+The choices:
+
+- **Logs at 100%.** Volume is small, and a monitor on rare errors needs every one.
+- **No invocation logs.** Each holds the request URL whole. `/auth/enrol?code=` (an enrolment
+  link), `/linked/callback?code=` and OAuth redirects carry codes in the query. Request
+  headers are not documented as kept or redacted in Workers Logs, so they are not relied on.
+  Errors are still counted by the metrics, and pigeon's own `console_error!` lines carry the
+  messages.
+- **Traces at 10%, except core.** Traces never hold `authorization`, cookies or bodies, but
+  they hold `url.query` of the incoming request. Only core (`pigeon-platform`) serves the
+  enrolment and OAuth URLs, so core's block sets `[observability.traces] enabled = false` until
+  those codes leave the query string (a follow-up). The five other Workers trace at 10%.
+- **Container logs off** on core (the CI runners) and `pigeon-ai-agents` (`Sandbox`): job and
+  agent output may hold what the CI output redaction (`src/ci/src/output.rs`) misses, and it is
+  the one source that could be large.
+- **No Logpush, no tail consumers, no Issues.** None was asked for.
+- **What pigeon logs.** Logs were only seen live before; now they are kept 7 days. Slice (a)
+  reads every `console_*!` call and keeps people's names and emails out of them: the proxy's
+  audit line names the caller by credential and user id, not by label and person name.
+
+Deploys: wrangler sends the settings in the upload and in `PATCH .../script-settings`, and a
+container's `observability` in the application `PATCH`. All three are already in the deploy
+proxy's allowlist (`src/proxies/src/cf_proxy.rs`, `SETTINGS_KEYS` has `observability`), so
+**no allowlist or stand-in change is needed**. The `allowlist` CI job proves it on the branch.
+
+The coverage check: smoke scenario `core_observability_on_every_worker` reads `ci/workers.toml`
+(the map every lane is built from), opens each `[[worker]]`'s `dir/wrangler.toml` and fails
+unless it has the block above (logs on at a rate in (0, 1], invocation logs off, traces set
+either way), with traces off only where its table of exceptions says (core, with the reason),
+and every `[[containers]]` block has container logs off. A new Worker added to the map without
+the block fails the gate.
+
+## How core reads it
+
+A new capability in core, `observability` (`src/capabilities/src/observability.rs`), changes
+nothing in `src/core` and needs no new secret. Each call mints one token from the parent token
+(`pigeon_core::tokens::Scoped::open_for`, 300 s), uses it, and revokes it:
+
+| Permission | For | Read-only |
+| --- | --- | --- |
+| `Account Analytics Read` | GraphQL `workersInvocationsAdaptive`: requests, errors by status, CPU and wall time p50/p99, per script | yes |
+| `Workers Observability Write` | The query API: top error messages per Worker (`$metadata.level = error`, grouped by `$metadata.service` and `$metadata.message`/`$metadata.error`) | no: the only permission the endpoint accepts; the token is used for that one `POST` only and lives five minutes |
+| `Billing Read` | `GET /billable-usage` for the current period, per product | yes; it also reads the billing profile, so only whitelisted fields are kept |
+
+When a permission group name is not found or a source refuses, the tool answers the rest and
+says which source is missing and why. Dropping `Workers Observability Write` for the SQL API on
+`logs.workersLogs` (`Account Analytics Read` only) is a follow-up once that dataset's column
+names are read from the live introspection endpoint.
+
+## The tool: `observability_summary`
+
+Read-only. Arguments: `hours` (default 24, at most 168, the logs' retention). Answers:
+
+- `window`: from and to, UTC.
+- `workers`: one entry per Worker in `ci/workers.toml` (compiled in), by script name:
+  `requests`, `errors`, `error_rate`, `by_status` (exception, exceeded resources, internal
+  error), `cpu_ms_p50`/`p99`, `wall_ms_p50`/`p99` (source: metrics); `top_errors` (at most 5,
+  message cut to 200 characters, from logs); `deploys` in the window (the Lander's deploy id,
+  landing id, commit, state, finished time); `spike_after_deploy` when the error rate in the
+  hour after a deploy is over twice the window's rate.
+- `cost`, every line tagged `billed` or `estimated`, with its source:
+  - Cloudflare, billed: the current billing period's billable usage per product (service name,
+    quantity, unit, billed cost); never the billing account's name or ids.
+  - Workers, estimated: the window's requests and CPU ms at list price, before included usage.
+  - Models, estimated by the AI Gateway: `models_usage` for the window.
+  - AI agent runs, metered by pigeon: run spend from the AI agents Worker for runs in the
+    window.
+  - CI, estimated: Containers time of CI jobs in the window from the CI scheduler, at the
+    instance size's list price; Buildkite: not available (Buildkite's API has no cost data);
+    said so.
+  - `totals`: estimated total for the window; billed total for the period, kept apart.
+- `unavailable`: each source that failed, and why.
+
+No personal details or secrets: no user names or emails, no URLs with queries, no tokens.
+Error messages are pigeon's own `console_error!` text, which slice (a) keeps clean.
+
+The console: the Cost tab gains a "Platform" section with the same data, from the cost
+snapshot (10 minutes), when its renderer is small; otherwise that is a follow-up.
+
+## Monitors
+
+Cloudflare's Monitors (SQL threshold, anomaly, SLO) are documented for the dashboard only, so
+pigeon cannot create them by API; the platform notification policies can be. Slice (c):
+
+- `observability_monitors_plan`: reads the account's available alert types and existing
+  policies (`Notifications Read`), and plans the missing ones, by name `pigeon: ...`:
+  - `workers_observability_alert` and `workers_observability_real_time_issue` for pigeon's
+    scripts, when the available alerts allow it;
+  - `billing_usage_alert` for Workers, Containers and Cloudflare Observability ingestion at
+    thresholds in the plan (twice the expected month);
+  - delivery by email to the signed-in person's address (shown to them on the approval, not in
+    tool output).
+  Like `instance_plan`, a plan with changes asks the person's approval on the console.
+- `observability_monitors_apply {plan}`: once approved, creates exactly the planned policies
+  (`Notifications Write`), touching only policies named `pigeon: ...`; never deletes.
+- For the person, in the dashboard (Alerts > Monitors), the monitors pigeon cannot create, with
+  the SQL to paste: error rate per Worker over 5 minutes above 5% (SLO 99%), and any
+  `console_error!` line from the Lander or the CI scheduler in 15 minutes.
+
+## Slices
+
+| Slice | Branch | Changes | Lanes |
+| --- | --- | --- | --- |
+| (a) | executor branch, from this plan | the block in six `wrangler.toml` files, container logs off, the smoke scenario, personal details out of log lines | every Worker |
+| (b) | executor branch, from this plan | `observability` capability, the tool, a Lander `deploys` read, the Cost section | core |
+| (c) | executor branch, from (b) | monitors plan and apply, the dashboard monitors written up | core |
+
+Each is harmless until reviewed: (a) only keeps logs; (b) is read-only; (c) creates nothing
+until the person approves a plan.
+
+## For the person
+
+- Approve each landing; (a) deploys all six Workers.
+- In the dashboard, create the Monitors listed above.
+- Optional: a Workers spending limit (an account setting).
+- Later: move enrolment and OAuth codes out of URL queries, then turn core's traces on; replace
+  `Workers Observability Write` with the SQL API once its columns are confirmed.
+
+## Log
+
+- 2026-11-22: planned.
