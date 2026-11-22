@@ -1,6 +1,9 @@
 //! The `blog` template and its renderer: a consumer repository (`.pigeon/site.toml`,
 //! `content/posts`, `content/pages`, `static/`) in, a static site out. See `docs/plans/blog.md`.
 //!
+//! Self-contained: it uses no other module of this crate, only `serde`, `serde_json`, `toml`,
+//! `sha2` and `pulldown-cmark`, so it can move to its own crate or Worker as it is.
+//!
 //! Pure: no I/O, no clock, no environment. The same [`Input`] always renders the same bytes. The
 //! renderer never sees a static file's bytes, only its path: the deploy copies `static/x` to `/x`.
 //!
@@ -18,8 +21,6 @@ pub mod site;
 use std::collections::{BTreeMap, BTreeSet};
 
 use sha2::{Digest, Sha256};
-
-use crate::sign::hex;
 
 /// The template a consumer names in `site.toml`.
 pub const TEMPLATE: &str = "blog@1";
@@ -133,7 +134,7 @@ pub fn digest() -> String {
         h.update(name.as_bytes());
         h.update(css.as_bytes());
     }
-    hex(&h.finalize())
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Everything the templates read: the settings, the features and the content, resolved.
