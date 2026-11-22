@@ -2549,4 +2549,13 @@ fn buildkite_setup_plan() {
     let filled = bk::fill(&w[3].create, &[("cluster", "c-1"), ("pipeline", "p-1")]);
     assert_eq!(filled["cluster_id"], "c-1");
     assert_eq!(w[4].create["settings"]["token"], "${hook_key}");
+
+    // The Lander takes a setup answer only from a scheduler of its own build: one without a
+    // build (older than the check) or of another build is waited out; a local build checks
+    // nothing.
+    use pigeon_capabilities::ci::same_build;
+    assert!(same_build(&json!({"build": "abc", "reports": {}}), "abc"));
+    assert!(!same_build(&json!({"build": "old", "reports": {}}), "abc"));
+    assert!(!same_build(&json!({"buildkite": {"off": "…"}}), "abc"));
+    assert!(same_build(&json!({}), ""));
 }

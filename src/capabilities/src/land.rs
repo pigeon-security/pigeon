@@ -717,24 +717,35 @@ impl Lander {
         if !self.settings.setup_connectors {
             return;
         }
-        // Right after a deploy, the CI scheduler may still be the old version for a moment,
-        // which has no `setup`: wait for it to restart, up to two minutes.
+        // Right after a deploy, the CI scheduler may still be the old build for a moment: it
+        // then refuses (a build that checks), answers without its build or has no `setup` at all
+        // (older ones). Wait for this build's scheduler, up to four minutes. A scheduler that
+        // checks refuses another build's call, so it never applies stale settings; one older
+        // than the check may run its own, and is then asked again.
+        let build = crate::ci::BUILD;
         let mut answer = crate::ci::setup(&self.env, true).await;
-        for _ in 0..6 {
-            match &answer {
-                Err(e) if e.to_string().contains("no operation `setup`") => {
-                    worker::Delay::from(std::time::Duration::from_secs(20)).await;
-                    answer = crate::ci::setup(&self.env, true).await;
+        for _ in 0..12 {
+            let stale = match &answer {
+                Ok(v) => !crate::ci::same_build(v, build),
+                Err(e) => {
+                    let e = e.to_string();
+                    e.contains("no operation `setup`") || e.contains("the CI scheduler is build")
                 }
-                _ => break,
+            };
+            if !stale {
+                break;
             }
+            worker::Delay::from(std::time::Duration::from_secs(20)).await;
+            answer = crate::ci::setup(&self.env, true).await;
         }
         let said = match answer {
-            Ok(Value::Object(reports)) => reports
-                .iter()
+            Ok(v) if crate::ci::same_build(&v, build) => v["reports"]
+                .as_object()
+                .into_iter()
+                .flatten()
                 .map(|(name, r)| format!("{name}: {}", crate::ci::setup_summary(r)))
                 .collect::<Vec<_>>(),
-            Ok(_) => Vec::new(),
+            Ok(_) => vec!["CI setup: not run (the CI scheduler stayed on the old build; the next landing runs it)".into()],
             Err(e) => vec![format!("CI setup: not run ({e})")],
         };
         if said.is_empty() {

@@ -431,8 +431,19 @@ impl Scheduler {
                 Ok(out)
             }
             "setup" => {
-                self.setup(s("connector"), a["apply"].as_bool() == Some(true))
-                    .await
+                // A caller of another build (the old Lander, or a new one meeting this old
+                // scheduler) is refused, so stale settings are never applied.
+                let want = s("build");
+                if !want.is_empty() && !super::BUILD.is_empty() && want != super::BUILD {
+                    return Err(bad(&format!(
+                        "the CI scheduler is build {}, not {want}",
+                        super::BUILD
+                    )));
+                }
+                let reports = self
+                    .setup(s("connector"), a["apply"].as_bool() == Some(true))
+                    .await?;
+                Ok(json!({ "build": super::BUILD, "reports": reports }))
             }
             "setup_key" => Ok(json!(self.held(s("connector"))?.hook_key)),
             "jobs" => self.jobs(a),

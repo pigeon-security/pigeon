@@ -1,8 +1,9 @@
 # Buildkite, set up by pigeon: the CI gateway's Buildkite connector redesigned
 
-Status: **phases 1, 2 and 4 deployed** (landing `bYNS6ijvF7NRcFbB`, 22 November 2026), with
-Buildkite off; **phase 2a** (the organization `pigeon-security`, the first setup) landing on
-`claude/buildkite-org`. The person chose one token for everything and Buildkite's MCP able to act
+Status: **phases 1, 2 and 4 deployed**, and the organization `pigeon-security` (landings
+`bYNS6ijvF7NRcFbB`, `fIjRWQBuxf6j0r8r`, 22 November 2026). **Phase 2a**, the first setup, has
+not run yet: both deploys' setups met the old scheduler (see "As found"); the build check lands
+on `claude/buildkite-build`. The person chose one token for everything and Buildkite's MCP able to act
 for them; the token is set.
 
 The person's goal: "redesign the CI gateway for BuildKite to use BuildKite MCP through the
@@ -402,6 +403,12 @@ This plan does not touch the generator.
   the new version, called `setup` on the CI scheduler, which answered "no operation `setup`":
   it was still the old version, having just finished the deploy job itself. The Lander now waits
   20 s and asks again, up to six times, when the scheduler does not know `setup` yet.
+- **The second deploy met it again** (`fIjRWQBuxf6j0r8r`): this time the old scheduler knew
+  `setup` and answered with its own settings, `BUILDKITE_ORG` still empty ("no Buildkite
+  organization is set"). So the Lander now sends the commit it was built from
+  (`PIGEON_COMMIT`, [`ci::BUILD`]); the scheduler refuses a call from another build and names its
+  own in every answer, and the Lander waits (20 s, up to four minutes) until the answer is from
+  its own build. Older schedulers, which name none, are waited out the same way.
 
 ## 6. Open points, checked live in phase 2a or 3
 

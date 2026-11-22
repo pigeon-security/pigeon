@@ -354,8 +354,24 @@ async fn scheduler(env: &Env, op: &str, args: Value) -> Result<Value> {
 
 /// Runs each connector's setup (applying it when `apply`): what the Lander calls once a landing
 /// has deployed, and `ci_buildkite_plan` without `apply`.
+///
+/// The scheduler runs it only when it is the build this Worker is ([`BUILD`]); right after a
+/// deploy it may still be the old one for a moment. Its answer is `{build, reports}`, the
+/// reports by connector; an answer without `build` comes from a scheduler older than this check.
 pub async fn setup(env: &Env, apply: bool) -> Result<Value> {
-    scheduler(env, "setup", json!({ "apply": apply })).await
+    scheduler(env, "setup", json!({ "apply": apply, "build": BUILD })).await
+}
+
+/// The commit this Worker was built from (`PIGEON_COMMIT` at build time, which the deploy job
+/// sets); empty for a local build, which checks nothing.
+pub const BUILD: &str = match option_env!("PIGEON_COMMIT") {
+    Some(c) => c,
+    None => "",
+};
+
+/// Whether a setup answer comes from a scheduler of build `want`.
+pub fn same_build(answer: &Value, want: &str) -> bool {
+    want.is_empty() || answer["build"].as_str() == Some(want)
 }
 
 /// One line for a setup report: what was done, what is `ok`, and anything blocked, in conflict
@@ -949,9 +965,12 @@ impl Capability for Ci {
                 }
                 "ci_buildkite_plan" => {
                     let report = setup(cx.env, false).await?;
-                    report.get(buildkite::NAME).cloned().unwrap_or(json!({
-                        "off": "the Buildkite connector is not configured in settings"
-                    }))
+                    report["reports"]
+                        .get(buildkite::NAME)
+                        .cloned()
+                        .unwrap_or(json!({
+                            "off": "the Buildkite connector is not configured in settings"
+                        }))
                 }
                 other => return Err(unknown(other)),
             })
