@@ -147,15 +147,48 @@ async fn expect(
     }
 }
 
-/// One list call: the first page's items. pigeon's few resources fit in one page of 100.
+/// One list call: the items of a page, as Buildkite answers them, a bare array (clusters,
+/// queues) or `{items, links}` (notification services, cursor-paginated), and the next page's
+/// URL when there is one. pigeon's few resources fit in a page of 100.
+pub fn page(
+    answer: Value,
+    noun: &str,
+) -> std::result::Result<(Vec<Value>, Option<String>), String> {
+    match answer {
+        Value::Array(items) => Ok((items, None)),
+        Value::Object(mut o) => {
+            let next = o
+                .get("links")
+                .and_then(|l| l["next"].as_str())
+                .filter(|n| n.starts_with(&format!("{API}/")))
+                .map(String::from);
+            match o.remove("items") {
+                Some(Value::Array(items)) => Ok((items, next)),
+                _ => Err(format!("Buildkite answered {noun} that is not a list")),
+            }
+        }
+        _ => Err(format!("Buildkite answered {noun} that is not a list")),
+    }
+}
+
+/// Every page of a list, following `links.next` (on Buildkite's API only) for at most ten
+/// pages.
 async fn list(token: &str, url: &str, noun: &str) -> Result<Vec<Value>> {
     let what = format!("did not list {noun}");
-    match expect(token, Method::Get, url, None, &[200], &what).await? {
-        Value::Array(items) => Ok(items),
-        _ => Err(Error::RustError(format!(
-            "Buildkite answered {noun} that is not a list"
-        ))),
+    let mut all = Vec::new();
+    let mut url = url.to_string();
+    for _ in 0..10 {
+        let answer = expect(token, Method::Get, &url, None, &[200], &what).await?;
+        let (items, next) = page(answer, noun).map_err(Error::RustError)?;
+        all.extend(items);
+        match next {
+            Some(n) => url = n,
+            None => return Ok(all),
+        }
     }
+    Err(Error::RustError(format!(
+        "Buildkite answered more than ten pages of {noun}"
+    )))
 }
 
 /// A path segment, checked: non-empty ASCII alphanumerics, `-`, `_` and `.`, at most 100

@@ -2550,6 +2550,30 @@ fn buildkite_setup_plan() {
     assert_eq!(filled["cluster_id"], "c-1");
     assert_eq!(w[4].create["settings"]["token"], "${hook_key}");
 
+    // Buildkite's list answers: a bare array (clusters, queues), or `{items, links}` with a next
+    // page on Buildkite's API only (notification services); anything else is refused.
+    use pigeon_core::buildkite::page;
+    let (items, next) = page(json!([{"id": "c-1"}]), "clusters").unwrap();
+    assert_eq!((items.len(), next), (1, None));
+    let (items, next) = page(
+        json!({"items": [{"id": "s-1"}, {"id": "s-2"}],
+               "links": {"next": "https://api.buildkite.com/v2/organizations/acme/services?after=X"}}),
+        "services",
+    )
+    .unwrap();
+    assert_eq!(items.len(), 2);
+    assert!(next.unwrap().ends_with("after=X"));
+    let (_, next) = page(
+        json!({"items": [], "links": {"next": "https://evil.example/v2/x"}}),
+        "services",
+    )
+    .unwrap();
+    assert_eq!(
+        next, None,
+        "a next page off Buildkite's API is not followed"
+    );
+    assert!(page(json!({"message": "nope"}), "services").is_err());
+
     // The Lander takes a setup answer only from a scheduler of its own build: one without a
     // build (older than the check) or of another build is waited out; a local build checks
     // nothing.

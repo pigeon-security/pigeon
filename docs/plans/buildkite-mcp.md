@@ -410,6 +410,14 @@ This plan does not touch the generator.
   own in every answer, and the Lander waits (20 s, up to four minutes) until the answer is from
   its own build. Older schedulers, which name none, are waited out the same way.
 
+- **The third deploy's setup reached Buildkite** (`EObYbdM_9HTYjPeJ`) and stopped while
+  observing, before planning, so nothing was created: Buildkite lists notification services as
+  `{items, links}`, cursor-paginated, not as a bare array like clusters and queues
+  (`rest_api/organizations/notification_services.md`). The REST client now reads both shapes and
+  follows `links.next`, on Buildkite's API only, for at most ten pages. The token's scopes were
+  not the problem (a missing scope answers 403). The services' answers name `provider` as an
+  object (`{id, name}`); the plan checks no `provider`, so that difference is harmless.
+
 ## 6. Open points, checked live in phase 2a or 3
 
 - Whether a server created through the API gets its Access application (`type = "mcp"`) automatically, or the person adds the policy in step 4.
