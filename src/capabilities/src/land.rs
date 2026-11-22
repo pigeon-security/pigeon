@@ -18,6 +18,7 @@ pub mod merge;
 pub mod state;
 
 use pigeon_core::artifacts::{self, Access};
+use pigeon_core::attribution;
 use pigeon_core::durable::{self, Db, opt};
 use pigeon_core::git::{self, Remote, Update, ZERO};
 use pigeon_core::gitobj::{self, Object};
@@ -44,8 +45,6 @@ pub const BINDING: &str = "LANDER";
 pub const OBJECT: &str = "lander";
 /// The ref landing notes live under.
 pub const NOTES_REF: &str = "refs/notes/land";
-/// The author and committer of notes commits.
-const WHO: &str = "pigeon <land@pigeon.dev>";
 /// How many times a step that failed on the gateway's side is tried before the landing is an
 /// error.
 const STEP_TRIES: i64 = 5;
@@ -2069,8 +2068,14 @@ impl Lander {
             }
             return Ok(());
         }
-        let rebased =
-            merge::rebase_onto_main(session, &seen, &row.commit_sha, WHO, now() / 1000).await?;
+        let rebased = merge::rebase_onto_main(
+            session,
+            &seen,
+            &row.commit_sha,
+            attribution::LANDER,
+            now() / 1000,
+        )
+        .await?;
         let r = match rebased {
             Ok(r) => r,
             Err(why) => {
@@ -2353,7 +2358,14 @@ pub fn notes_commit(
     objects.push(tree);
     let parents: Vec<String> = parent.iter().map(|p| p.to_string()).collect();
     let message = format!("land: {} notes", notes.len());
-    let commit = Object::commit(&tree_id, &parents, WHO, unix_secs, &message)?;
+    let commit = Object::commit(
+        &tree_id,
+        &parents,
+        &attribution::author(),
+        attribution::LANDER,
+        unix_secs,
+        &message,
+    )?;
     let id = commit.id();
     objects.push(commit);
     Ok((objects, id))

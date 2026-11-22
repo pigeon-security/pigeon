@@ -9,6 +9,7 @@
 //! (`docs/plans/ai-agents.md`, decision 3); until core mints run grants the sandbox has no git
 //! credential, and a checkout of a private repository fails, saying so.
 
+use pigeon_core::attribution;
 use pigeon_core::containers::{self, Start};
 use pigeon_core::durable::{self, Db, opt};
 use serde::Deserialize;
@@ -82,6 +83,16 @@ pub fn not_ready(first: Option<&str>, last: &str) -> String {
         }
         _ => format!("the sandbox did not get ready: {last}"),
     }
+}
+
+/// The command that makes the person the author of the checkout's commits: git's `author.*`
+/// keys win over `user.*` for the author only, so the committer stays the run.
+pub fn author_config_cmd() -> String {
+    format!(
+        "git config author.name '{}' && git config author.email '{}'",
+        attribution::PERSON_NAME,
+        attribution::PERSON_EMAIL
+    )
 }
 
 /// The server's op for sandbox tool `name`, and the body it takes.
@@ -331,11 +342,26 @@ impl Sandbox {
                             "repo_url": REPO_URL,
                             "base": sb.base,
                             "branch": sb.branch,
-                            "name": format!("pigeon AI agent run {}", sb.run),
-                            "email": "ai-agents@pigeon.dev",
+                            "name": attribution::ai_agent_name(&sb.run),
+                            "email": attribution::AI_AGENTS_EMAIL,
                         }),
                     )
                     .await?;
+                // The person is the author of the run's commits; prepare's identity stays the
+                // committer (docs/plans/commit-attribution.md). A failure here is a failed try.
+                let set = self
+                    .post(
+                        sb,
+                        "exec",
+                        &json!({ "cmd": author_config_cmd(), "timeout_s": 30 }),
+                    )
+                    .await?;
+                if set["exit"] != 0 {
+                    return Err(bad(format!(
+                        "the commit author could not be set: {}",
+                        set["output"].as_str().unwrap_or_default()
+                    )));
+                }
                 Ok(v)
             }
             .await;

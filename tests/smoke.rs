@@ -1134,7 +1134,7 @@ fn land_rebases_disjoint_branches_and_lanes() {
         original,
         &tree,
         &main,
-        "pigeon <land@pigeon.dev>",
+        pigeon_core::attribution::LANDER,
         1_800_000_000,
     )
     .unwrap();
@@ -1337,6 +1337,133 @@ fn blob_id(dir: &Path) -> String {
         .unwrap()
         .trim()
         .to_string()
+}
+
+#[test]
+fn land_commit_attribution() {
+    use pigeon_core::gitobj::{self, Object};
+    use pigeon_core::{attribution, pack, rebase};
+    use std::io::Write;
+
+    let dir = repo("attribution");
+    let read = |args: &[&str]| String::from_utf8(git(&dir, args, None)).unwrap();
+    let head = || read(&["rev-parse", "HEAD"]).trim().to_string();
+    let unpack = |objects: &[Object]| {
+        let mut child = Command::new("git")
+            .args(["unpack-objects", "-q"])
+            .current_dir(&dir)
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(&gitobj::pack(objects))
+            .unwrap();
+        assert!(child.wait().unwrap().success());
+    };
+    let line = |id: &str, key: &str| -> String {
+        read(&["cat-file", "-p", id])
+            .lines()
+            .find(|l| l.starts_with(&format!("{key} ")))
+            .unwrap_or_default()
+            .to_string()
+    };
+
+    // A base; a branch commit by someone else at a fixed time and zone; main moving on.
+    let base = commit(&dir, "base");
+    git(&dir, &["checkout", "-q", "-b", "claude/x"], None);
+    std::fs::write(dir.join("g"), "branch\n").unwrap();
+    git(&dir, &["add", "g"], None);
+    let made = Command::new("git")
+        .args([
+            "commit",
+            "-q",
+            "--author",
+            "Someone Else <someone@example.com>",
+            "-m",
+            "the branch",
+        ])
+        .env("GIT_AUTHOR_DATE", "1700000000 +0200")
+        .current_dir(&dir)
+        .status()
+        .unwrap();
+    assert!(made.success());
+    let tip = head();
+    git(&dir, &["checkout", "-q", "main"], None);
+    let main = commit(&dir, "main moved");
+
+    // The Lander's rebase keeps the author line byte for byte and only sets the committer.
+    let packed = git(
+        &dir,
+        &["pack-objects", "--stdout", "--revs", "-q"],
+        Some(&format!("{tip}\n{main}\n")),
+    );
+    let objects = pack::objects(&packed).unwrap();
+    let changes = rebase::changes(&objects, &base, &tip).unwrap();
+    let (tree, trees) = rebase::apply(&objects, &main, &changes).unwrap();
+    let rebased = rebase::commit(
+        &objects.by_id[&tip].1,
+        &tree,
+        &main,
+        attribution::LANDER,
+        1_800_000_000,
+    )
+    .unwrap();
+    let id = rebased.id();
+    let mut new = trees;
+    new.push(rebased);
+    unpack(&new);
+    assert_eq!(
+        line(&id, "author"),
+        "author Someone Else <someone@example.com> 1700000000 +0200"
+    );
+    assert_eq!(line(&id, "author"), line(&tip, "author"));
+    assert_eq!(
+        line(&id, "committer"),
+        "committer pigeon <land@pigeon.dev> 1800000000 +0000"
+    );
+    assert!(!read(&["cat-file", "-p", &id]).contains("gpgsig"));
+    git(&dir, &["fsck", "--no-progress", "--no-dangling"], None);
+
+    // Notes commits pigeon writes name the person as author and pigeon as committer.
+    let who = |id: &str| read(&["log", "-1", "--format=%an <%ae>|%cn <%ce>", id]);
+    let note = vec![(main.clone(), "landing L1 state=landed\n".to_string())];
+    let (objects, land_id) =
+        pigeon_capabilities::land::notes_commit(&note, None, 1_795_000_000).unwrap();
+    unpack(&objects);
+    assert_eq!(
+        who(&land_id).trim(),
+        "noisypigeon <167243387+noisypigeon@users.noreply.github.com>|pigeon <land@pigeon.dev>"
+    );
+    let (objects, ci_id) = pigeon_ci::notes::commit(&note, None, 1_795_000_000).unwrap();
+    unpack(&objects);
+    assert_eq!(
+        who(&ci_id).trim(),
+        "noisypigeon <167243387+noisypigeon@users.noreply.github.com>|pigeon <ci@pigeon.dev>"
+    );
+    git(&dir, &["fsck", "--no-progress", "--no-dangling"], None);
+
+    // A forged header line is refused; AI agent runs set the same author in their checkout.
+    assert!(
+        Object::commit(
+            &tree,
+            &[],
+            "x <x@example.com>\nparent 0",
+            attribution::LANDER,
+            0,
+            "m"
+        )
+        .is_err()
+    );
+    assert!(Object::commit(&tree, &[], &attribution::author(), "", 0, "m").is_err());
+    assert_eq!(
+        pigeon_ai_agents::sandbox::author_config_cmd(),
+        "git config author.name 'noisypigeon' && git config author.email \
+         '167243387+noisypigeon@users.noreply.github.com'"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

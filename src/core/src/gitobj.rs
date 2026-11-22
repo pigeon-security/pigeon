@@ -105,21 +105,29 @@ impl Object {
         })
     }
 
-    /// A commit of `tree` with `parents`, by `who` (such as `pigeon <ci@pigeon.dev>`) at
-    /// `unix_secs`, UTC; the message gains a trailing newline when it has none.
+    /// A commit of `tree` with `parents`, written by `author` and committed by `committer`
+    /// (each such as `pigeon <ci@pigeon.dev>`, see [`crate::attribution`]) at `unix_secs`, UTC;
+    /// the message gains a trailing newline when it has none. An empty identity, or one holding
+    /// a newline or NUL, is refused.
     pub fn commit(
         tree: &str,
         parents: &[String],
-        who: &str,
+        author: &str,
+        committer: &str,
         unix_secs: i64,
         message: &str,
     ) -> Result<Object, String> {
+        for (what, who) in [("author", author), ("committer", committer)] {
+            if who.is_empty() || who.contains(['\n', '\0']) {
+                return Err(format!("bad {what}"));
+            }
+        }
         let mut s = format!("tree {}\n", to_hex(&parse_id(tree)?));
         for p in parents {
             s.push_str(&format!("parent {}\n", to_hex(&parse_id(p)?)));
         }
-        s.push_str(&format!("author {who} {unix_secs} +0000\n"));
-        s.push_str(&format!("committer {who} {unix_secs} +0000\n"));
+        s.push_str(&format!("author {author} {unix_secs} +0000\n"));
+        s.push_str(&format!("committer {committer} {unix_secs} +0000\n"));
         s.push('\n');
         s.push_str(message);
         if !message.ends_with('\n') {

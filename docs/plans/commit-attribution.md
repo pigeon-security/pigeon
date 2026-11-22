@@ -83,3 +83,12 @@ checkout that sets those two keys to the person. `prepare` keeps setting the com
 - Set the Claude Code identity as above, if wanted.
 - Optional, in `ci/`: give `sandboxd`'s `prepare` optional `author_name` and `author_email`
   fields that set `author.name`/`author.email`, so the extra `exec` can go.
+
+## Log
+
+- Built by the planner run itself: three executor sandboxes in a row failed to start
+  (`pigeon-sandboxd` `prepare`: `git clone` found `/work` not empty), so the planner built it.
+- Phases 1 to 3 as planned: `pigeon_core::attribution`; `gitobj::Object::commit` takes author and
+  committer and refuses an empty or multi-line one; the Lander and CI notes and the Lander's
+  rebase use it; the ai-agents sandbox sets `author.name`/`author.email` after `prepare` and
+  fails to get ready if it cannot. Smoke scenario `land_commit_attribution`.

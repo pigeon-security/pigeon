@@ -7,6 +7,7 @@ pub mod ai_gateway;
 pub mod apple;
 pub mod approval;
 pub mod artifacts;
+pub mod attribution;
 pub mod buildkite;
 pub mod buildkite_hook;
 pub mod buildkite_setup;

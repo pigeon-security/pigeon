@@ -4,13 +4,12 @@
 
 use std::collections::HashSet;
 
+use pigeon_core::attribution;
 use pigeon_core::gitobj::Object;
 use serde::{Deserialize, Serialize};
 
 /// The ref the notes live under.
 pub const REF: &str = "refs/notes/ci";
-/// The author and committer of notes commits.
-pub const WHO: &str = "pigeon <ci@pigeon.dev>";
 
 /// One final job result, as the note records it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,7 +95,14 @@ pub fn commit(
     objects.push(tree);
     let parents: Vec<String> = parent.iter().map(|p| p.to_string()).collect();
     let message = format!("ci: {} notes", notes.len());
-    let c = Object::commit(&tree_id, &parents, WHO, unix_secs, &message)?;
+    let c = Object::commit(
+        &tree_id,
+        &parents,
+        &attribution::author(),
+        attribution::CI,
+        unix_secs,
+        &message,
+    )?;
     let id = c.id();
     objects.push(c);
     Ok((objects, id))
