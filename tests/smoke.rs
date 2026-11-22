@@ -1950,7 +1950,18 @@ fn ci_route_and_run_on_a_fake_connector() {
     assert_eq!(names, local);
     assert!(names.contains(&"ci_submit") && names.contains(&"ci_buildkite_plan"));
     assert_eq!(cap.routes, ["/ci/"]);
-    assert_eq!(cap.footprint, json!({ "queues": ["pigeon-ci-events"] }));
+    assert_eq!(cap.footprint["queues"], json!(["pigeon-ci-events"]));
+    let external_names: Vec<&str> = cap.footprint["externals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|e| e["name"].as_str())
+        .collect();
+    assert_eq!(
+        external_names,
+        ["Cloudflare Containers", "Buildkite", "Buildkite MCP"],
+        "the connectors' services, in the operator's order"
+    );
     assert_eq!(cap.secrets.len(), 1);
     assert_eq!(cap.secrets[0].name, "BUILDKITE_API_TOKEN");
     assert_eq!(cap.secrets[0].scopes, ["workers"]);
@@ -6728,4 +6739,318 @@ fn core_changelog_from_history() {
         &json!({ "payload": { "ref": "refs/heads/main", "repo": "other" } })
     ));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The architecture model draws one Worker for each entry of ci/workers.toml, each from its own
+/// wrangler.toml, with its tools, Durable Object ownership, bindings and externals, and nothing
+/// secret. Every Worker of the map is in the model and in the drawing.
+#[test]
+fn core_architecture_draws_every_worker_in_the_map() {
+    use pigeon_capabilities::architecture::{
+        Architecture, Source, Wrangler, built, describe, render,
+    };
+    use pigeon_capabilities::public_host::{PublicHost, Retire};
+    use pigeon_capabilities::remote::{Binding, Remote};
+    use pigeon_capabilities::{Capability, Hosted};
+    use pigeon_contract::CapabilityManifest;
+
+    // The repository's files, as core embeds them: the map, each Worker's wrangler.toml and Rust.
+    let mut root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    while !root.join("ci/workers.toml").exists() {
+        assert!(root.pop(), "ci/workers.toml is above the checkout");
+    }
+    fn rust(dir: &Path, root: &Path, out: &mut Vec<(String, String)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+        paths.sort();
+        for p in paths {
+            if p.is_dir() {
+                rust(&p, root, out);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                let rel = p
+                    .strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                out.push((rel, std::fs::read_to_string(&p).unwrap()));
+            }
+        }
+    }
+    let map_text = std::fs::read_to_string(root.join("ci/workers.toml")).unwrap();
+    let map = pigeon_core::lanes::parse(&map_text).expect("the map parses");
+    let mut files: Vec<(String, String)> = vec![("ci/workers.toml".into(), map_text.clone())];
+    for w in &map.workers {
+        let toml = std::fs::read_to_string(root.join(&w.dir).join("wrangler.toml"))
+            .unwrap_or_else(|_| panic!("{} has a wrangler.toml", w.dir));
+        files.push((format!("{}/wrangler.toml", w.dir), toml));
+        rust(&root.join(&w.dir).join("src"), &root, &mut files);
+    }
+    let sources: Vec<Source> = files
+        .iter()
+        .map(|(path, text)| Source { path, text })
+        .collect();
+    let paths: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(p, t)| (p.as_str(), t.as_str()))
+        .collect();
+
+    // The capabilities core hosts: its own, and the capability Workers' from their manifests.
+    let remote =
+        |binding: &'static str, worker: &'static str, manifest: Value| -> Box<dyn Capability> {
+            let spec: CapabilityManifest = serde_json::from_value(manifest).unwrap();
+            Box::new(Remote::new(&Binding { binding, worker }, spec))
+        };
+    let tool = |name: &str| json!({ "name": name, "description": "A tool.", "inputSchema": { "type": "object" } });
+    let proxy_host = PublicHost {
+        zone: "pigeon.dev".into(),
+        host: "proxy.pigeon.dev".into(),
+        worker: "pigeon-proxy".into(),
+        also: vec!["pigeon-platform".into()],
+        retire: Retire::default(),
+        tool: "setup_proxy_host",
+    };
+    let capabilities: Vec<Box<dyn Capability>> = vec![
+        Box::new(Architecture),
+        Box::new(proxy_host),
+        remote(
+            "MODELS",
+            "pigeon-model-gateway",
+            json!({
+                "name": "models",
+                "tools": [tool("models_submit")],
+                "footprint": { "gateways": ["pigeon"], "externals": [
+                    { "name": "AI Gateway", "kind": "model gateway", "detail": "gateway pigeon" }
+                ] }
+            }),
+        ),
+        remote(
+            "CI",
+            "pigeon-ci-gateway",
+            json!({
+                "name": "ci",
+                "tools": [tool("ci_status")],
+                "footprint": { "queues": ["pigeon-ci-events"], "externals": [
+                    { "name": "Buildkite", "kind": "CI connector", "detail": "cluster pigeon" }
+                ] }
+            }),
+        ),
+        remote(
+            "SITES",
+            "pigeon-sites",
+            json!({ "name": "sites", "tools": [tool("site_render")] }),
+        ),
+        remote(
+            "AI_AGENTS",
+            "pigeon-ai-agents",
+            json!({ "name": "ai_agents", "tools": [tool("ai_agents_start")], "footprint": null }),
+        ),
+    ];
+    let hosted = Hosted {
+        worker: "pigeon-platform",
+        capabilities: &capabilities,
+        sources: &paths,
+    };
+    let described = describe(&sources, &hosted);
+    let drawing = render(&described);
+    let model = serde_json::to_value(&described).unwrap();
+
+    // One Worker per entry of the map, in its order, each in the drawing.
+    let all = model["workers"].as_array().unwrap();
+    let drawn: Vec<&str> = all.iter().map(|w| w["name"].as_str().unwrap()).collect();
+    let scripts: Vec<&str> = map.workers.iter().map(|w| w.script.as_str()).collect();
+    assert_eq!(drawn, scripts, "every Worker in ci/workers.toml, once");
+    assert!(
+        drawn.contains(&"pigeon-proxy"),
+        "the proxy Worker has no binding from core"
+    );
+    for script in &scripts {
+        assert!(drawing.contains(script), "{script} is in the drawing");
+    }
+    let worker = |name: &str| -> Value {
+        all.iter()
+            .find(|w| w["name"] == name)
+            .unwrap_or_else(|| panic!("{name} is drawn"))
+            .clone()
+    };
+    let strs = |v: &Value| -> Vec<String> {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s.as_str().unwrap().to_string())
+            .collect()
+    };
+
+    // Tools are the owning Worker's; core merges them into /mcp.
+    assert_eq!(
+        strs(&worker("pigeon-model-gateway")["tools"]),
+        ["models_submit"]
+    );
+    assert_eq!(strs(&worker("pigeon-ci-gateway")["tools"]), ["ci_status"]);
+    assert_eq!(strs(&worker("pigeon-sites")["tools"]), ["site_render"]);
+    assert_eq!(
+        worker("pigeon-model-gateway")["merged_into"],
+        "pigeon-platform"
+    );
+    let core_tools = strs(&worker("pigeon-platform")["tools"]);
+    assert!(core_tools.contains(&"architecture_describe".into()));
+    assert!(!core_tools.contains(&"models_submit".into()));
+    assert_eq!(worker("pigeon-ci-gateway")["lane"], "ci-gateway");
+    assert_eq!(
+        worker("pigeon-ci-gateway")["deploy_job"],
+        "deploy-ci-gateway"
+    );
+
+    // Durable Objects: each class under its host; a binding with `script_name` only reaches it.
+    let owner = |w: &str, binding: &str| {
+        worker(w)["objects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["binding"] == binding)
+            .map(|o| o["owner"].as_str().unwrap().to_string())
+    };
+    for (w, binding, host) in [
+        ("pigeon-platform", "CI_SCHEDULER", "pigeon-ci-gateway"),
+        ("pigeon-platform", "MODEL_JOBS", "pigeon-model-gateway"),
+        ("pigeon-platform", "CI_RUNNER", "pigeon-platform"),
+        ("pigeon-ci-gateway", "CI_RUNNER", "pigeon-platform"),
+        ("pigeon-ai-agents", "AI_AGENT_RUNS", "pigeon-ai-agents"),
+    ] {
+        assert_eq!(owner(w, binding).as_deref(), Some(host), "{w} {binding}");
+    }
+    let objects = strs(&model["resources"]["objects"]);
+    for want in [
+        "CI_SCHEDULER (CiScheduler)",
+        "MODEL_JOBS (ModelJobs)",
+        "AI_AGENT_RUNS (AiAgentRuns)",
+        "SANDBOXES (Sandbox)",
+    ] {
+        assert!(objects.iter().any(|o| o == want), "{want} is drawn");
+    }
+    assert_eq!(
+        objects
+            .iter()
+            .filter(|o| o.starts_with("CI_RUNNER"))
+            .count(),
+        1,
+        "CiRunner is drawn once, under core"
+    );
+    assert!(
+        strs(&model["resources"]["containers"])
+            .iter()
+            .any(|c| c.starts_with("Sandbox (sandbox: pigeon-ai-agent-sandbox@sha256:"))
+    );
+    assert!(strs(&worker("pigeon-ai-agents")["containers"]).contains(&"Sandbox".into()));
+
+    // Links: core's bindings, each other Worker's PLATFORM, and the cross-Worker objects.
+    let links: Vec<(&str, &str, &str)> = model["links"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| {
+            (
+                l["from"].as_str().unwrap(),
+                l["to"].as_str().unwrap(),
+                l["via"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    let has = |from: &str, to: &str, via: &str| links.contains(&(from, to, via));
+    for (binding, to) in [
+        ("SITES", "pigeon-sites"),
+        ("MODELS", "pigeon-model-gateway"),
+        ("CI", "pigeon-ci-gateway"),
+        ("AI_AGENTS", "pigeon-ai-agents"),
+    ] {
+        assert!(has("pigeon-platform", to, binding), "core binds {binding}");
+    }
+    for from in [
+        "pigeon-sites",
+        "pigeon-model-gateway",
+        "pigeon-ci-gateway",
+        "pigeon-proxy",
+        "pigeon-ai-agents",
+    ] {
+        assert!(has(from, "pigeon-platform", "PLATFORM"), "{from}: PLATFORM");
+    }
+    assert!(has(
+        "pigeon-platform",
+        "pigeon-ci-gateway",
+        "CI_SCHEDULER (CiScheduler)"
+    ));
+    assert!(has(
+        "pigeon-ci-gateway",
+        "pigeon-platform",
+        "CI_RUNNER (CiRunner)"
+    ));
+
+    // Queues, secrets, the proxy host and externals.
+    let queues = worker("pigeon-ci-gateway")["queues"].to_string();
+    assert!(queues.contains("pigeon-ci-events") && queues.contains("produces"));
+    assert!(strs(&worker("pigeon-sites")["secrets"]).contains(&"CALLER_KEY".into()));
+    assert!(strs(&worker("pigeon-ci-gateway")["secrets"]).contains(&"BUILDKITE_API_TOKEN".into()));
+    assert!(!strs(&worker("pigeon-sites")["secrets"]).contains(&"CF_PARENT_TOKEN".into()));
+    assert!(strs(&worker("pigeon-platform")["secrets"]).contains(&"CF_PARENT_TOKEN".into()));
+    let host = model["hostnames"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["host"] == "proxy.pigeon.dev")
+        .unwrap();
+    assert_eq!(host["worker"], "pigeon-proxy");
+    let externals: Vec<&str> = model["externals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(externals, ["AI Gateway", "Buildkite"]);
+    assert!(drawing.contains("Buildkite"));
+
+    // Nothing secret or personal: not the account, the Secrets Store, or the App's client id.
+    let core =
+        Wrangler::read(&std::fs::read_to_string(root.join("src/platform/wrangler.toml")).unwrap());
+    let text = format!("{model}{drawing}");
+    for var in [
+        "CF_ACCOUNT_ID",
+        "CF_SECRETS_STORE_ID",
+        "GITHUB_APP_CLIENT_ID",
+        "GITHUB_APP_ID",
+    ] {
+        assert!(
+            !text.contains(core.vars[var].as_str()),
+            "{var} is not drawn"
+        );
+    }
+
+    // Without the map, the hosting Worker is still drawn, alone.
+    let alone: Vec<Source> = sources
+        .iter()
+        .filter(|s| s.path != "ci/workers.toml")
+        .map(|s| Source {
+            path: s.path,
+            text: s.text,
+        })
+        .collect();
+    let fallback = serde_json::to_value(describe(&alone, &hosted)).unwrap();
+    assert_eq!(fallback["workers"].as_array().unwrap().len(), 1);
+
+    // The memo is kept while the capabilities stay, and rebuilt when they change.
+    let first = built(&hosted);
+    assert!(std::ptr::eq(first, built(&hosted)), "kept while unchanged");
+    let fewer: Vec<Box<dyn Capability>> = vec![Box::new(Architecture)];
+    let smaller = Hosted {
+        worker: "pigeon-platform",
+        capabilities: &fewer,
+        sources: &paths,
+    };
+    let second = built(&smaller);
+    assert!(
+        !std::ptr::eq(first, second),
+        "rebuilt for other capabilities"
+    );
+    assert!(first.html.contains("ci_status") || first.model.to_string().contains("ci_status"));
+    assert!(!second.model.to_string().contains("ci_status"));
 }

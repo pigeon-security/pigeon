@@ -134,6 +134,11 @@ I check each result, apply it, and run fmt, clippy and the smoke suite myself.
   `Ce7SwxUH5L93`) failed before they started: their sandboxes could not clone ("destination
   path '/work' already exists"). No code has changed. Phases 5 to 8 are still to do, with the
   phase 5 brief as given to those runs.
+- 2026-11-22: phase 5 built on `claude/ai-agent-avxmfnk1V4IV`: the model draws one Worker per
+  `ci/workers.toml` entry, with tools by Worker, object ownership, service bindings, externals,
+  the portal host, `PROXY_WORKER = pigeon-proxy`, the ai-agents footprint fixed and the memo
+  rebuilt when the capabilities change. Smoke scenario
+  `core_architecture_draws_every_worker_in_the_map`. Phases 6 to 8 are still to do. Not landed.
 
 ## After the split (2026-11-22)
 

@@ -333,6 +333,10 @@ fn expiry_of(v: &Value) -> Expiry {
 }
 
 impl Capability for Remote {
+    fn worker(&self) -> Option<&str> {
+        Some(self.worker)
+    }
+
     fn name(&self) -> &'static str {
         self.name
     }

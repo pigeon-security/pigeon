@@ -497,7 +497,8 @@ impl Service for Agents {
                     order: 50,
                     cost: None,
                 }],
-                footprint: json!({ "durable_objects": ["AiAgentRuns", "Sandbox"] }),
+                // Its objects and container come from its wrangler.toml, which the architecture reads.
+                footprint: Value::Null,
                 ..CapabilityManifest::default()
             }],
         }

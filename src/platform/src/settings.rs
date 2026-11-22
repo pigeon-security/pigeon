@@ -59,14 +59,10 @@ pub const HOST: &str = "platform.pigeon.dev";
 /// hostname of their own, so the proxy credential a cloud environment's network proxy adds
 /// for it never reaches `/mcp` or replaces the MCP connector's own token.
 pub const PROXY_HOST: &str = "proxy.pigeon.dev";
-/// The Worker `setup_proxy_host` attaches the proxy hostname to by default. Core serves the
-/// proxies until the cutover (docs/plans/workers-split.md, phase 6), which is one call,
-/// `setup_proxy_host {"worker": "pigeon-proxy"}`, and its rollback another,
-/// `setup_proxy_host {"worker": "pigeon-platform"}`. Once the cutover holds, this becomes
-/// [`PROXY_WORKER_NEXT`], so the default names the Worker serving the host.
-pub const PROXY_WORKER: &str = WORKER;
-/// The proxy Worker, which `setup_proxy_host` may attach the proxy hostname to instead.
-pub const PROXY_WORKER_NEXT: &str = "pigeon-proxy";
+/// The Worker `setup_proxy_host` attaches the proxy hostname to by default: the proxy Worker,
+/// which has served it since the cutover (docs/plans/workers-split.md, phase 6). Rolling back is
+/// one call, `setup_proxy_host {"worker": "pigeon-platform"}`.
+pub const PROXY_WORKER: &str = "pigeon-proxy";
 const NAMESPACE: &str = "pigeon-security";
 const REPO: &str = "pigeon";
 // CI's values live in `pigeon_ci::pigeon`, which `pigeon-ci-gateway` builds too: they must be
@@ -179,9 +175,8 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
             zone: ZONE.into(),
             host: PROXY_HOST.into(),
             worker: PROXY_WORKER.into(),
-            // The proxy Worker, which serves the same proxies: the cutover and its rollback are
-            // each one call, `setup_proxy_host {worker}`.
-            also: vec![PROXY_WORKER_NEXT.into()],
+            // Core serves the same proxies, so the rollback is one call, `setup_proxy_host {worker}`.
+            also: vec![WORKER.into()],
             retire: Retire::default(),
             tool: "setup_proxy_host",
         }),
@@ -362,6 +357,7 @@ pub fn land() -> land::Settings {
         // The MCP server portal on mcp.pigeon.dev lists this platform as server `pigeon`
         // (docs/plans/mcp-portal.md).
         portal_servers: vec!["pigeon".into()],
+        portal_host: format!("mcp.{ZONE}"),
         // Each CI connector's setup (Buildkite's) runs once a landing has deployed.
         setup_connectors: true,
         map: map(),

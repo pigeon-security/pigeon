@@ -1,6 +1,6 @@
 //! Embeds the repository's sources the architecture is read from: each crate's Rust under
-//! `src/*/src` and each `src/*/wrangler.toml`, sorted by path, so the page always matches the
-//! code it was built with.
+//! `src/*/src`, each `src/*/wrangler.toml` and the map of Workers `ci/workers.toml`, sorted by
+//! path, so the page always matches the code it was built with.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -22,6 +22,11 @@ fn main() {
             files.push(toml);
         }
         collect(&dir.join("src"), &mut files);
+    }
+    // The map of Workers, which says which Workers there are and how each deploys.
+    let map = root.join("ci/workers.toml");
+    if map.exists() {
+        files.push(map);
     }
     files.sort();
     let mut out = String::from(

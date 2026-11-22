@@ -289,6 +289,12 @@ pub trait Connector {
         })
     }
 
+    /// The services outside the platform it depends on, as `{name, kind, detail}` objects for the
+    /// architecture page. Public facts only: never a secret or an account id.
+    fn externals(&self) -> Vec<Value> {
+        Vec::new()
+    }
+
     /// Whether its runner takes the job token in its environment; otherwise the runner
     /// exchanges its own OIDC token for one at `/ci/token`.
     fn takes_token(&self) -> bool {
@@ -1156,6 +1162,12 @@ impl Ci {
 
     /// What CI brings to the platform, for the architecture page: its events queue.
     pub fn footprint(&self) -> Value {
-        json!({ "queues": [EVENTS_QUEUE] })
+        let externals: Vec<Value> = self
+            .settings
+            .connectors
+            .iter()
+            .flat_map(|c| c.externals())
+            .collect();
+        json!({ "queues": [EVENTS_QUEUE], "externals": externals })
     }
 }

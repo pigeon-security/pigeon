@@ -792,7 +792,10 @@ impl Models {
                 cost: Some(SECTION_COST.into()),
             }],
             routes: Vec::new(),
-            footprint: json!({ "gateways": [self.gateway] }),
+            footprint: json!({
+                "gateways": [self.gateway],
+                "externals": [{ "name": "AI Gateway", "kind": "model gateway", "detail": format!("gateway {}", self.gateway) }],
+            }),
             secrets: self.secrets(),
             wants: Vec::new(),
         }

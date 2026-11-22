@@ -599,6 +599,17 @@ impl Capability for Linked {
         "linked"
     }
 
+    fn footprint(&self) -> crate::Footprint {
+        crate::Footprint {
+            externals: vec![crate::External::new(
+                "Linked Cloudflare accounts",
+                "OAuth",
+                "other accounts linked to an instance with Cloudflare's OAuth consent",
+            )],
+            ..crate::Footprint::default()
+        }
+    }
+
     fn tools(&self) -> Vec<Tool> {
         vec![
             Tool::bare(

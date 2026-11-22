@@ -19,7 +19,7 @@ use serde_json::Value;
 use worker::{Error, Fetch, Headers, Request, RequestInit, Result};
 
 use crate::expiry::{self, Expiry};
-use crate::{Call, Capability, Context, Expiring, Footprint, Slot, to_value, unknown};
+use crate::{Call, Capability, Context, Expiring, External, Footprint, Slot, to_value, unknown};
 
 /// The mirror as a capability: on every push to the source's branches or tags, and on demand.
 pub struct Mirror {
@@ -171,6 +171,7 @@ impl Capability for Mirror {
     fn footprint(&self) -> Footprint {
         Footprint {
             mirrors: vec![self.url.clone()],
+            externals: vec![External::new("GitHub", "mirror", self.url.clone())],
             ..Footprint::default()
         }
     }

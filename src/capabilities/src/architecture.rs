@@ -8,7 +8,7 @@
 //!   Workers and resources each brings.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::OnceLock;
+use std::sync::{Mutex, PoisonError};
 
 use pigeon_core::design::{Page, escape};
 use pigeon_core::mcp::Tool;
@@ -85,24 +85,51 @@ pub struct Built {
     pub commit: String,
 }
 
-/// The architecture of the Worker `hosted` describes, built on first use.
+/// The architecture of the Worker `hosted` describes, built on first use and again whenever the
+/// capabilities it hosts change (a capability Worker's manifest arrived late, or changed), so a
+/// failed manifest never leaves its tools missing for the life of the isolate.
 pub fn built(hosted: &Hosted) -> &'static Built {
-    static BUILT: OnceLock<Built> = OnceLock::new();
-    BUILT.get_or_init(|| {
-        let sources: Vec<Source> = hosted
-            .sources
-            .iter()
-            .map(|(path, text)| Source { path, text })
-            .collect();
-        let model = describe(&sources, hosted);
-        Built {
-            model: to_value(&model),
-            html: render(&model),
-            page: page(&model),
-            digest: model.digest.clone(),
-            commit: model.commit.chars().take(12).collect(),
+    static BUILT: Mutex<Option<(String, &'static Built)>> = Mutex::new(None);
+    let signature = signature(hosted);
+    let mut kept = BUILT.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some((was, built)) = kept.as_ref()
+        && *was == signature
+    {
+        return built;
+    }
+    let sources: Vec<Source> = hosted
+        .sources
+        .iter()
+        .map(|(path, text)| Source { path, text })
+        .collect();
+    let model = describe(&sources, hosted);
+    // Leaked: a build is kept for the rest of the isolate, and a new one is made only when the
+    // capabilities change.
+    let built: &'static Built = Box::leak(Box::new(Built {
+        model: to_value(&model),
+        html: render(&model),
+        page: page(&model),
+        digest: model.digest.clone(),
+        commit: model.commit.chars().take(12).collect(),
+    }));
+    *kept = Some((signature, built));
+    built
+}
+
+/// What the model depends on besides the sources: each capability, its Worker and its tools.
+fn signature(hosted: &Hosted) -> String {
+    let mut out = hosted.worker.to_string();
+    for c in hosted.capabilities {
+        out.push('|');
+        out.push_str(c.name());
+        out.push('@');
+        out.push_str(c.worker().unwrap_or_default());
+        for t in c.tools() {
+            out.push(',');
+            out.push_str(t.name);
         }
-    })
+    }
+    out
 }
 
 /// One source file, by its path from the repository root.
@@ -118,6 +145,11 @@ pub struct Model {
     pub parts: Vec<Part>,
     pub workers: Vec<Worker>,
     pub hostnames: Vec<Hostname>,
+    /// How the Workers reach each other: service bindings, and Durable Objects another Worker
+    /// hosts.
+    pub links: Vec<Link>,
+    /// Services outside the platform's Workers, from the capabilities' footprints.
+    pub externals: Vec<Dependency>,
     pub resources: Resources,
     /// How many files it was read from, and a digest of them.
     pub files: usize,
@@ -142,19 +174,79 @@ pub struct Part {
     pub bindings: Vec<String>,
 }
 
-#[derive(Serialize)]
+/// A Worker of the platform.
+#[derive(Serialize, Default)]
 pub struct Worker {
+    /// Its script name, such as `pigeon-sites`.
     pub name: String,
+    /// Its name in ci/workers.toml, such as `sites`; none for a Worker the map does not list.
+    pub lane: Option<String>,
+    /// The CI job that deploys it.
+    pub deploy_job: Option<String>,
+    /// The steps that run after it deploys.
+    pub after: Vec<String>,
+    /// Where its facts were read from.
+    pub source: String,
     pub workers_dev: bool,
     pub routes: Vec<String>,
     pub tools: Vec<String>,
     /// `fetch`, `queue`, `scheduled`.
     pub handlers: Vec<String>,
     pub secrets: Vec<String>,
-    /// The capabilities it hosts.
+    /// The Cron Triggers in its wrangler.toml.
+    pub crons: Vec<String>,
+    /// Its service bindings.
+    pub services: Vec<Service>,
+    /// Its Durable Object bindings, with the Worker that hosts each class.
+    pub objects: Vec<WorkerObject>,
+    /// Its container classes.
+    pub containers: Vec<String>,
+    /// The queues it produces to or consumes.
+    pub queues: Vec<QueueUse>,
+    /// The Worker whose `/mcp` serves these tools, when it is not this one.
+    pub merged_into: Option<String>,
+    /// The capabilities it runs.
     pub uses: Vec<String>,
     /// The capability that publishes it, for a Worker with no code of its own.
     pub published_by: Option<String>,
+}
+
+/// A Durable Object binding of a Worker.
+#[derive(Serialize)]
+pub struct WorkerObject {
+    pub binding: String,
+    pub class: String,
+    /// The script of the Worker that hosts the class.
+    pub owner: String,
+}
+
+/// A queue a Worker produces to or consumes.
+#[derive(Serialize)]
+pub struct QueueUse {
+    pub queue: String,
+    /// `produces` or `consumes`.
+    pub role: String,
+}
+
+/// One Worker reaching another.
+#[derive(Serialize)]
+pub struct Link {
+    pub from: String,
+    pub to: String,
+    /// The binding's name, and for an object its class.
+    pub via: String,
+    /// `service binding` or `Durable Object`.
+    pub kind: String,
+}
+
+/// A service outside the platform's Workers.
+#[derive(Serialize)]
+pub struct Dependency {
+    pub name: String,
+    pub kind: String,
+    pub detail: String,
+    /// The capability that depends on it.
+    pub by: String,
 }
 
 #[derive(Serialize)]
@@ -210,45 +302,62 @@ pub fn describe(sources: &[Source], hosted: &Hosted) -> Model {
     let mut hostnames = Vec::new();
     let mut workers = Vec::new();
 
-    // The hosting Worker: its wrangler.toml and the Rust beside it.
-    if let Some(toml) = sorted.iter().find(|s| {
-        s.path.ends_with("wrangler.toml")
-            && Wrangler::read(s.text).name.as_deref() == Some(hosted.worker)
-    }) {
-        let dir = toml.path.trim_end_matches("wrangler.toml");
-        let config = Wrangler::read(toml.text);
+    // The Workers: one for each entry of ci/workers.toml, drawn from its own wrangler.toml and
+    // the Rust beside it. Core's embedded copy is what is read, so a card says where it came from.
+    let mut links: Vec<Link> = Vec::new();
+    for entry in entries(&sorted, hosted) {
+        let is_core = entry.script == hosted.worker;
+        let toml = sorted
+            .iter()
+            .find(|s| !entry.dir.is_empty() && s.path == format!("{}wrangler.toml", entry.dir));
+        let config = toml.map(|t| Wrangler::read(t.text)).unwrap_or_default();
         let rust: String = sorted
             .iter()
-            .filter(|s| s.path.starts_with(&format!("{dir}src/")) && s.path.ends_with(".rs"))
+            .filter(|s| {
+                !entry.dir.is_empty()
+                    && s.path.starts_with(&format!("{}src/", entry.dir))
+                    && s.path.ends_with(".rs")
+            })
             .map(|s| code(s.text))
             .collect::<Vec<_>>()
             .join("\n");
-        // wrangler.toml is the authority for bindings: each is drawn once, from there, and
-        // attributed to the capabilities whose code names it.
-        let names: Vec<String> = config
-            .objects
+        // The capabilities this Worker runs: its own, or a remote capability's, which names it.
+        let on: Vec<&Box<dyn Capability>> = hosted
+            .capabilities
             .iter()
-            .map(|o| o.binding.clone())
-            .chain(config.secrets.iter().cloned())
-            .chain(config.producers.iter().cloned())
-            .chain(config.consumers.iter().cloned())
+            .filter(|c| c.worker().unwrap_or(hosted.worker) == entry.script)
             .collect();
-        for part in &mut caps {
-            part.bindings = named(&sorted, "src/capabilities/src/", &part.name, &names);
+        if is_core && toml.is_some() {
+            // wrangler.toml is the authority for bindings: each is drawn once, from there, and
+            // attributed to the capabilities whose code names it.
+            let names: Vec<String> = config
+                .objects
+                .iter()
+                .map(|o| o.binding.clone())
+                .chain(config.secrets.iter().cloned())
+                .chain(config.producers.iter().cloned())
+                .chain(config.consumers.iter().cloned())
+                .collect();
+            for part in &mut caps {
+                part.bindings = named(&sorted, "src/capabilities/src/", &part.name, &names);
+            }
+            let own = strings(&rust);
+            resources.unused = names
+                .iter()
+                .filter(|n| !own.contains(n) && !caps.iter().any(|p| p.bindings.contains(n)))
+                .cloned()
+                .collect();
         }
-        let own = strings(&rust);
-        resources.unused = names
-            .iter()
-            .filter(|n| !own.contains(n) && !caps.iter().any(|p| p.bindings.contains(n)))
-            .cloned()
-            .collect();
         resources.secrets.extend(config.secrets.iter().cloned());
         resources.queues.extend(config.producers.iter().cloned());
         resources.queues.extend(config.consumers.iter().cloned());
+        // A class is drawn once, under the Worker that hosts it: a binding with `script_name`
+        // only reaches it.
         resources.objects.extend(
             config
                 .objects
                 .iter()
+                .filter(|o| o.script.is_none())
                 .map(|o| format!("{} ({})", o.binding, o.class)),
         );
         resources
@@ -258,36 +367,82 @@ pub fn describe(sources: &[Source], hosted: &Hosted) -> Model {
                     .iter()
                     .map(move |(key, image)| format!("{} ({key}: {})", c.class, image_name(image)))
             }));
+        for s in &config.services {
+            links.push(Link {
+                from: entry.script.clone(),
+                to: s.service.clone(),
+                via: s.binding.clone(),
+                kind: "service binding".into(),
+            });
+        }
+        for o in &config.objects {
+            if let Some(owner) = o.script.as_ref().filter(|s| **s != entry.script) {
+                links.push(Link {
+                    from: entry.script.clone(),
+                    to: owner.clone(),
+                    via: format!("{} ({})", o.binding, o.class),
+                    kind: "Durable Object".into(),
+                });
+            }
+        }
+        let tools: Vec<String> = on
+            .iter()
+            .flat_map(|c| c.tools())
+            .map(|t| t.name.to_string())
+            .collect();
         workers.push(Worker {
-            name: hosted.worker.to_string(),
+            name: entry.script.clone(),
+            lane: entry.lane.as_ref().map(|l| l.name.clone()),
+            deploy_job: entry.lane.as_ref().map(|l| l.deploy_job.clone()),
+            after: entry
+                .lane
+                .as_ref()
+                .map(|l| l.after.iter().map(|a| after_name(*a).to_string()).collect())
+                .unwrap_or_default(),
+            source: if toml.is_some() {
+                "wrangler.toml built into core".into()
+            } else {
+                "no wrangler.toml found: drawn from the map only".into()
+            },
             workers_dev: config.workers_dev,
-            // The Worker's own routes, then each capability's path prefixes.
+            // The Worker's own routes, then each of its capabilities' path prefixes.
             routes: routes(&rust)
                 .into_iter()
-                .chain(
-                    hosted
-                        .capabilities
-                        .iter()
-                        .flat_map(|c| c.routes())
-                        .map(|r| format!("* {r}")),
-                )
+                .chain(on.iter().flat_map(|c| c.routes()).map(|r| format!("* {r}")))
                 .collect(),
-            tools: hosted
-                .capabilities
-                .iter()
-                .flat_map(|c| c.tools())
-                .map(|t| t.name.to_string())
-                .collect(),
+            merged_into: (!is_core && !tools.is_empty()).then(|| hosted.worker.to_string()),
+            tools,
             handlers: handlers(&rust),
-            secrets: config.secrets,
-            uses: hosted
-                .capabilities
+            crons: config.crons.clone(),
+            secrets: config.secrets.clone(),
+            services: config.services.clone(),
+            objects: config
+                .objects
                 .iter()
-                .map(|c| c.name().to_string())
+                .map(|o| WorkerObject {
+                    binding: o.binding.clone(),
+                    class: o.class.clone(),
+                    owner: o.script.clone().unwrap_or_else(|| entry.script.clone()),
+                })
                 .collect(),
+            containers: config.containers.iter().map(|c| c.class.clone()).collect(),
+            queues: config
+                .producers
+                .iter()
+                .map(|q| QueueUse {
+                    queue: q.clone(),
+                    role: "produces".into(),
+                })
+                .chain(config.consumers.iter().map(|q| QueueUse {
+                    queue: q.clone(),
+                    role: "consumes".into(),
+                }))
+                .collect(),
+            uses: on.iter().map(|c| c.name().to_string()).collect(),
             published_by: None,
         });
     }
+    let mut externals: Vec<Dependency> = Vec::new();
 
     for (by, f) in &footprints {
         for h in &f.hostnames {
@@ -313,16 +468,27 @@ pub fn describe(sources: &[Source], hosted: &Hosted) -> Model {
             });
         }
         for w in &f.workers {
+            // A Worker the map already draws is not drawn again.
+            if workers.iter().any(|x: &Worker| x.name == w.name) {
+                continue;
+            }
             workers.push(Worker {
                 name: w.name.clone(),
-                workers_dev: false,
                 routes: w.routes.clone(),
-                tools: Vec::new(),
                 handlers: vec!["fetch".into()],
-                secrets: Vec::new(),
-                uses: Vec::new(),
                 published_by: Some(by.clone()),
+                ..Worker::default()
             });
+        }
+        for e in &f.externals {
+            if !externals.iter().any(|x| x.name == e.name) {
+                externals.push(Dependency {
+                    name: e.name.clone(),
+                    kind: e.kind.clone(),
+                    detail: e.detail.clone(),
+                    by: by.clone(),
+                });
+            }
         }
         if f.zone.is_some() {
             resources.zone.clone_from(&f.zone);
@@ -352,6 +518,7 @@ pub fn describe(sources: &[Source], hosted: &Hosted) -> Model {
         list.dedup();
     }
     hostnames.sort_by(|a, b| a.host.cmp(&b.host));
+    externals.sort_by(|a, b| a.name.cmp(&b.name));
 
     let mut parts = caps;
     parts.extend(blocks);
@@ -359,10 +526,72 @@ pub fn describe(sources: &[Source], hosted: &Hosted) -> Model {
         parts,
         workers,
         hostnames,
+        links,
+        externals,
         resources,
         files: sorted.len(),
         digest: digest(&sorted),
         commit: option_env!("PIGEON_COMMIT").unwrap_or_default().to_string(),
+    }
+}
+
+/// A Worker to draw: its script, its entry in ci/workers.toml and the directory of its files.
+struct Entry {
+    script: String,
+    lane: Option<pigeon_core::lanes::Worker>,
+    /// With a trailing slash; empty when the Worker's files were not found.
+    dir: String,
+}
+
+/// The path of the map of Workers among the sources.
+const MAP_PATH: &str = "ci/workers.toml";
+
+/// The Workers to draw: each entry of the map, then the hosting Worker if the map lacks it (or
+/// is missing or unreadable), so the page never draws nothing.
+fn entries(sorted: &[&Source], hosted: &Hosted) -> Vec<Entry> {
+    let mut out: Vec<Entry> = sorted
+        .iter()
+        .find(|s| s.path == MAP_PATH)
+        .and_then(|s| pigeon_core::lanes::parse(s.text).ok())
+        .map(|map| {
+            map.workers
+                .into_iter()
+                .map(|w| Entry {
+                    script: w.script.clone(),
+                    dir: format!("{}/", w.dir.trim_end_matches('/')),
+                    lane: Some(w),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if !out.iter().any(|e| e.script == hosted.worker) {
+        let dir = sorted
+            .iter()
+            .find(|s| {
+                s.path.ends_with("wrangler.toml")
+                    && Wrangler::read(s.text).name.as_deref() == Some(hosted.worker)
+            })
+            .map(|s| s.path.trim_end_matches("wrangler.toml").to_string())
+            .unwrap_or_default();
+        out.insert(
+            0,
+            Entry {
+                script: hosted.worker.to_string(),
+                lane: None,
+                dir,
+            },
+        );
+    }
+    out
+}
+
+/// A step that runs after a deploy, as the map spells it.
+fn after_name(step: pigeon_core::lanes::After) -> &'static str {
+    use pigeon_core::lanes::After;
+    match step {
+        After::Architecture => "architecture",
+        After::PortalSync => "portal_sync",
+        After::ConnectorsSetup => "connectors_setup",
     }
 }
 
@@ -638,6 +867,18 @@ pub struct Wrangler {
     pub producers: Vec<String>,
     /// Queue names used as consumers, in file order.
     pub consumers: Vec<String>,
+    /// Service bindings, in file order.
+    pub services: Vec<Service>,
+    /// Cron Triggers, in file order.
+    pub crons: Vec<String>,
+}
+
+/// A service binding: the name this Worker uses and the Worker it reaches.
+#[derive(Serialize, Clone, Debug)]
+pub struct Service {
+    pub binding: String,
+    /// The bound Worker's script name.
+    pub service: String,
 }
 
 /// A durable object binding and the class behind it.
@@ -647,6 +888,8 @@ pub struct Object {
     pub binding: String,
     /// Name of the durable object class.
     pub class: String,
+    /// The script that hosts the class, when it is not this Worker (`script_name`).
+    pub script: Option<String>,
 }
 
 /// A container definition with its images.
@@ -678,6 +921,24 @@ struct RawWrangler {
     containers: Vec<RawContainer>,
     #[serde(default)]
     queues: RawQueues,
+    #[serde(default)]
+    services: Vec<RawService>,
+    #[serde(default)]
+    triggers: RawTriggers,
+}
+
+#[derive(Deserialize)]
+struct RawService {
+    #[serde(default)]
+    binding: Option<String>,
+    #[serde(default)]
+    service: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct RawTriggers {
+    #[serde(default)]
+    crons: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -698,6 +959,8 @@ struct RawObject {
     name: Option<String>,
     #[serde(default)]
     class_name: Option<String>,
+    #[serde(default)]
+    script_name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -758,7 +1021,11 @@ impl Wrangler {
                 .bindings
                 .into_iter()
                 .filter_map(|o| match (o.name, o.class_name) {
-                    (Some(binding), Some(class)) => Some(Object { binding, class }),
+                    (Some(binding), Some(class)) => Some(Object {
+                        binding,
+                        class,
+                        script: o.script_name,
+                    }),
                     _ => None,
                 })
                 .collect(),
@@ -782,6 +1049,15 @@ impl Wrangler {
                 .into_iter()
                 .filter_map(|q| q.queue)
                 .collect(),
+            services: raw
+                .services
+                .into_iter()
+                .filter_map(|s| match (s.binding, s.service) {
+                    (Some(binding), Some(service)) => Some(Service { binding, service }),
+                    _ => None,
+                })
+                .collect(),
+            crons: raw.triggers.crons,
         }
     }
 }
@@ -1229,6 +1505,8 @@ fn diagram(m: &Model) -> String {
         s.text(x + 32.0, y3 + 108.0, "dg-t", &routes, "start");
         let tools = if w.tools.is_empty() {
             "no MCP tools".to_string()
+        } else if let Some(core) = &w.merged_into {
+            format!("{} MCP tools, merged into {core}'s /mcp", w.tools.len())
         } else {
             format!("{} MCP tools on POST /mcp", w.tools.len())
         };
@@ -1527,10 +1805,47 @@ pub fn render(m: &Model) -> String {
                 .map(|r| format!("<li><code>{}</code></li>", escape(r)))
                 .collect();
             let mut body = format!(r#"<ul class="kv">{routes}</ul>"#);
+            let services: Vec<String> = w
+                .services
+                .iter()
+                .map(|s| format!("{} → {}", s.binding, s.service))
+                .collect();
+            let objects: Vec<String> = w
+                .objects
+                .iter()
+                .map(|o| {
+                    if o.owner == w.name {
+                        format!("{} ({})", o.binding, o.class)
+                    } else {
+                        format!("{} ({}) on {}", o.binding, o.class, o.owner)
+                    }
+                })
+                .collect();
+            let queues: Vec<String> = w
+                .queues
+                .iter()
+                .map(|q| format!("{} {}", q.role, q.queue))
+                .collect();
+            let lane: Vec<String> = w
+                .lane
+                .iter()
+                .map(|l| format!("lane {l}"))
+                .chain(w.deploy_job.iter().map(|j| format!("deploy {j}")))
+                .chain(w.after.iter().map(|a| format!("after: {a}")))
+                .collect();
+            let merged: Vec<String> = w.merged_into.iter().cloned().collect();
             for (what, items) in [
+                ("Deploy", &lane),
                 ("MCP tools", &w.tools),
+                ("Tools merged into", &merged),
                 ("uses", &w.uses),
+                ("Service bindings", &services),
+                ("Durable Objects", &objects),
+                ("Containers", &w.containers),
+                ("Queues", &queues),
+                ("Cron Triggers", &w.crons),
                 ("Secrets Store bindings", &w.secrets),
+                ("Read from", &vec![w.source.clone()]),
             ] {
                 if !items.is_empty() {
                     body.push_str(&format!(
@@ -1566,6 +1881,19 @@ pub fn render(m: &Model) -> String {
         )
     })
     .collect();
+    let externals: String = m
+        .externals
+        .iter()
+        .map(|e| {
+            format!(
+                r#"<article class="card kind-api"><div class="card-h"><span class="dot"></span><h3>{}</h3></div><p>{}: {} (by {})</p></article>"#,
+                escape(&e.name),
+                escape(&e.kind),
+                escape(&e.detail),
+                escape(&e.by)
+            )
+        })
+        .collect();
     let section = |eyebrow: &str, title: &str, cards: &str| {
         if cards.is_empty() {
             String::new()
@@ -1588,6 +1916,7 @@ pub fn render(m: &Model) -> String {
 {}
 {}
 {}
+{}
 </main>
 <footer>Generated from {} source files{} · digest {}</footer>"#,
         m.workers.len(),
@@ -1599,6 +1928,7 @@ pub fn render(m: &Model) -> String {
         section("Definitions", "Capabilities", &public),
         section("Foundation", "Core building blocks", &internal),
         section("Definitions", "Account resources", &resources),
+        section("Definitions", "External services", &externals),
         m.files,
         if m.commit.is_empty() {
             String::new()

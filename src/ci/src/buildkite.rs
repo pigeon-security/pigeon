@@ -322,6 +322,24 @@ impl Connector for Buildkite {
         NAME
     }
 
+    fn externals(&self) -> Vec<Value> {
+        let mut keys: Vec<&str> = self.queues.iter().map(|q| q.key).collect();
+        keys.dedup();
+        let mut out = vec![json!({
+            "name": "Buildkite",
+            "kind": "CI connector",
+            "detail": format!("cluster {}, hosted queues {}", self.cluster, keys.join(", ")),
+        })];
+        if let Some((server, _)) = &self.portal {
+            out.push(json!({
+                "name": "Buildkite MCP",
+                "kind": "portal server",
+                "detail": format!("portal server `{server}`"),
+            }));
+        }
+        out
+    }
+
     fn offers(&self) -> Vec<Offered> {
         self.queues.iter().map(|q| q.offered.clone()).collect()
     }

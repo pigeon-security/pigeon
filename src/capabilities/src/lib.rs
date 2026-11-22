@@ -86,6 +86,12 @@ pub trait Capability {
     /// The MCP tools it offers.
     fn tools(&self) -> Vec<Tool>;
 
+    /// The script name of the Worker that runs it, when that is not the Worker hosting this
+    /// list: a remote capability names the capability Worker behind its binding.
+    fn worker(&self) -> Option<&str> {
+        None
+    }
+
     /// Runs `tool`, one of its own.
     fn call<'a>(&'a self, cx: &'a Context<'a>, tool: &'a str, args: &'a Value) -> Call<'a>;
 
@@ -187,6 +193,32 @@ pub struct Footprint {
     pub mirrors: Vec<String>,
     /// AI gateways, by ID.
     pub gateways: Vec<String>,
+    /// Services outside the platform's Workers it depends on.
+    pub externals: Vec<External>,
+}
+
+/// A service a capability depends on that is not one of the platform's Workers: drawn as an
+/// external service. It never holds a secret, an account id or a person's details.
+#[derive(Serialize, Deserialize, Clone, Default, Debug, PartialEq, Eq)]
+#[serde(default)]
+pub struct External {
+    /// Such as `Buildkite`.
+    pub name: String,
+    /// What it is for, in a few words, such as `CI connector`.
+    pub kind: String,
+    /// One line of public detail, such as a cluster name or a hostname.
+    pub detail: String,
+}
+
+impl External {
+    /// An external service from three short texts.
+    pub fn new(name: &str, kind: &str, detail: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            kind: kind.into(),
+            detail: detail.into(),
+        }
+    }
 }
 
 /// A hostname a capability serves.

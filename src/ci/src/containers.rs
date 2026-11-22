@@ -120,6 +120,14 @@ impl Connector for Containers {
         NAME
     }
 
+    fn externals(&self) -> Vec<Value> {
+        vec![json!({
+            "name": "Cloudflare Containers",
+            "kind": "CI connector",
+            "detail": "runners in core's CiRunner containers",
+        })]
+    }
+
     fn offers(&self) -> Vec<Offered> {
         vec![
             offered(Size::Small, 2, 8, 16),

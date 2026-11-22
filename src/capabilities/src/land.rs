@@ -37,7 +37,7 @@ use crate::console::sections::{Section, Tab};
 use crate::git_proxy;
 use crate::proxy::ProxyCaller;
 use crate::users::{Caller, User};
-use crate::{Call, Capability, Context, Footprint, Hosted, arg, unknown};
+use crate::{Call, Capability, Context, External, Footprint, Hosted, arg, unknown};
 use state::{Seen, State};
 
 /// The Lander's binding, and the one object of it.
@@ -86,6 +86,8 @@ pub struct Settings {
     /// The MCP server portal servers (their server IDs, such as `pigeon`) to sync once a
     /// landing has deployed, so the portal lists the deployed tools at once.
     pub portal_servers: Vec<String>,
+    /// The portal's hostname, such as `mcp.pigeon.dev`, for the architecture page.
+    pub portal_host: String,
     /// Whether the CI connectors' setup (Buildkite's: docs/plans/buildkite-mcp.md) runs once a
     /// landing has deployed, so the provider matches the deployed settings.
     pub setup_connectors: bool,
@@ -372,6 +374,19 @@ impl Capability for Land {
     fn footprint(&self) -> Footprint {
         Footprint {
             repos: vec![self.settings.repo_name()],
+            externals: if self.settings.portal_servers.is_empty() {
+                Vec::new()
+            } else {
+                vec![External::new(
+                    "MCP Server Portal",
+                    "portal",
+                    format!(
+                        "{}, servers {}",
+                        self.settings.portal_host,
+                        self.settings.portal_servers.join(", ")
+                    ),
+                )]
+            },
             ..Footprint::default()
         }
     }

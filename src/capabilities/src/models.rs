@@ -14,7 +14,7 @@ pub use pigeon_models::{
 
 use crate::console::sections::{Section, Tab};
 use crate::users::User;
-use crate::{Call, Capability, Context, Expiring, Footprint, Slot, to_value};
+use crate::{Call, Capability, Context, Expiring, External, Footprint, Slot, to_value};
 
 /// The caller in `cx` as JSON, as core signs it for a capability Worker; null for none.
 fn caller_json(cx: &Context<'_>) -> Value {
@@ -96,6 +96,11 @@ impl Capability for Models {
     fn footprint(&self) -> Footprint {
         Footprint {
             gateways: vec![self.gateway.clone()],
+            externals: vec![External::new(
+                "AI Gateway",
+                "model gateway",
+                format!("gateway {}", self.gateway),
+            )],
             ..Footprint::default()
         }
     }

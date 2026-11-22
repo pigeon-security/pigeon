@@ -320,6 +320,17 @@ impl Capability for Github {
         "github"
     }
 
+    fn footprint(&self) -> crate::Footprint {
+        crate::Footprint {
+            externals: vec![crate::External::new(
+                "GitHub App",
+                "app",
+                "reads instances' repositories; webhooks to /github/hook",
+            )],
+            ..crate::Footprint::default()
+        }
+    }
+
     fn tools(&self) -> Vec<Tool> {
         vec![Tool {
             name: "github_status",
