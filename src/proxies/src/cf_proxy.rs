@@ -105,7 +105,7 @@ pub const UPLOAD: &[&str] = &["Workers Scripts Write", "Secrets Store Write"];
 
 /// The calls `wrangler deploy` makes (wrangler 4.166.0, recorded against a stand-in API and
 /// read in its source).
-pub const ALLOWED: [Allowed; 16] = [
+pub const ALLOWED: [Allowed; 17] = [
     // Whether the Worker exists, and its migration tag.
     Allowed {
         method: "GET",
@@ -249,6 +249,15 @@ pub const ALLOWED: [Allowed; 16] = [
     Allowed {
         method: "POST",
         path: "/accounts/{account}/workers/scripts/{script}/subdomain",
+        query: &[],
+        needs: &[],
+        permissions: WRITE,
+        body: BodyRule::Any,
+    },
+    // Sets the Worker's cron triggers, as its config's [triggers] says.
+    Allowed {
+        method: "PUT",
+        path: "/accounts/{account}/workers/scripts/{script}/schedules",
         query: &[],
         needs: &[],
         permissions: WRITE,
