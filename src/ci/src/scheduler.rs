@@ -10,7 +10,6 @@
 //! object's single thread makes each change atomic; a job being dispatched is claimed first, so
 //! the alarm and a submit never dispatch it twice.
 
-use pigeon_core::Account;
 use pigeon_core::artifacts::{self, Access};
 use pigeon_core::durable::{self, Db, opt};
 use pigeon_core::git::{self, Remote, Update, ZERO};
@@ -27,7 +26,10 @@ use super::notes::{self, Line};
 use super::route::{self, Availability, Candidate};
 use super::state::{self, Next, Report, State as JobState};
 use super::token::{self, Grant};
-use super::{Cx, Dispatched, EVENTS, Held, NewJob, Run, Seen, Settings, SetupRun, notify};
+use super::{
+    Cx, Dispatched, EVENTS, Held, NewJob, PURPOSE_ARTIFACTS, Run, Seen, Settings, SetupRun,
+    account, notify,
+};
 use pigeon_core::buildkite_setup::{Kind, Owned};
 
 /// The scheduler's schema, one statement per migration, applied in order and never edited.
@@ -245,11 +247,6 @@ pub fn deadline(at_ms: i64, timeout_min: u32) -> i64 {
     at_ms + i64::from(timeout_min) * 60_000 + DEADLINE_GRACE_MS
 }
 
-/// The account a git token is minted on, for the notes push and for reading `ci.toml`.
-pub(crate) async fn account(env: &Env, parent: &str) -> Result<Account> {
-    pigeon_core::account_from_env(env, parent).await
-}
-
 /// The scheduler's logic; the hosting Worker's Durable Object class wraps it.
 pub struct Scheduler {
     db: Db,
@@ -343,6 +340,9 @@ impl Scheduler {
         Cx {
             env: &self.env,
             host: &self.settings.host,
+            accounts: &self.settings.accounts,
+            caller: None,
+            key: None,
         }
     }
 
@@ -1183,7 +1183,7 @@ impl Scheduler {
         let (ns, name) = repo
             .split_once('/')
             .ok_or_else(|| bad(&format!("not a repository: {repo}")))?;
-        let account = account(&self.env, &self.settings.parent).await?;
+        let account = account(&self.cx(), &[PURPOSE_ARTIFACTS]).await?;
         let found = artifacts::repo(&account, ns, name)
             .await?
             .ok_or_else(|| bad(&format!("no repository {repo}")))?;

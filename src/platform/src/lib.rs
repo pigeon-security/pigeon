@@ -24,16 +24,16 @@ use pigeon_capabilities::{Capability, Context, Hosted};
 /// The Directory's class, exported from this Worker for its Durable Object binding.
 pub use pigeon_capabilities::users::Directory;
 
-/// The CI scheduler's class: `ci::Scheduler` with the connectors from this Worker's settings,
-/// which the capabilities crate cannot see.
+/// The CI scheduler's class: `pigeon_ci::scheduler::Scheduler` with the connectors from this
+/// Worker's settings. Core hosts it; `pigeon-ci-gateway` reaches it by binding.
 #[worker::durable_object]
 pub struct CiScheduler {
-    inner: pigeon_capabilities::ci::scheduler::Scheduler,
+    inner: pigeon_ci::scheduler::Scheduler,
 }
 
 impl worker::DurableObject for CiScheduler {
     fn new(state: worker::State, env: Env) -> Self {
-        let inner = pigeon_capabilities::ci::scheduler::Scheduler::new(state, env, settings::ci())
+        let inner = pigeon_ci::scheduler::Scheduler::new(state, env, settings::ci())
             .expect("the CI scheduler's migrations apply");
         Self { inner }
     }
@@ -101,12 +101,12 @@ impl worker::DurableObject for ModelJobs {
 /// The CI runner's class: one per job attempt, holding that attempt's container.
 #[worker::durable_object]
 pub struct CiRunner {
-    inner: pigeon_capabilities::ci::containers::Runner,
+    inner: pigeon_ci::containers::Runner,
 }
 
 impl worker::DurableObject for CiRunner {
     fn new(state: worker::State, env: Env) -> Self {
-        let inner = pigeon_capabilities::ci::containers::Runner::new(state, env)
+        let inner = pigeon_ci::containers::Runner::new(state, env)
             .expect("the CI runner's migrations apply");
         Self { inner }
     }

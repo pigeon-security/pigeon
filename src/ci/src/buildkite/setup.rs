@@ -12,8 +12,7 @@ use serde_json::{Value, json};
 use worker::Result;
 
 use super::{API_TOKEN, Buildkite, secret};
-use crate::ci::scheduler::account;
-use crate::ci::{Cx, Held, SetupRun};
+use crate::{Cx, Held, PURPOSE_PORTAL, SetupRun, account};
 
 /// What pigeon declares for Buildkite, from the connector's settings.
 pub fn declared(bk: &Buildkite, host: &str) -> Declared {
@@ -169,7 +168,7 @@ pub async fn run(bk: &Buildkite, cx: &Cx<'_>, held: &Held, apply: bool) -> Resul
     let mut d = d;
     let mut notes: Vec<String> = Vec::new();
     let acct = match &d.portal {
-        Some(_) => match account(cx.env, &bk.parent).await {
+        Some(_) => match account(cx, &[PURPOSE_PORTAL]).await {
             Ok(a) => Some(a),
             Err(e) => {
                 notes.push(format!("the portal server is skipped: {e}"));

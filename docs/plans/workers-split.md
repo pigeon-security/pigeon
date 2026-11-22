@@ -526,6 +526,32 @@ over their in-flight work.
     correction); `pigeon-models` is a normal dependency of `pigeon-capabilities` (so no
     dev-dependency); the smoke lanes scenario also expects a shared change to deploy
     `model-gateway`; the secret `set` op asks `ai_gateway` only, as it writes no secret.
+- 2026-11-22: track B step 1 (phase 4, T19 in part) built on `claude/track-ci`, on top of T0.
+  Nothing moves live: core keeps serving CI and hosting both objects.
+  - `pigeon-ci` (`src/ci`) is the CI code, moved from `src/capabilities/src/ci*`. It does not
+    depend on `pigeon-capabilities`. The caller is JSON in `users::Caller`'s shape. Slots and
+    the footprint are contract specs.
+  - `Accounts`: `Parent(binding)` in core (the DOs, and core's local CI) or `Scoped` in the
+    gateway. `Scoped` asks core's `credential` op (kind `scoped`, purposes `artifacts` for the
+    `ci.toml` read, `mcp_portal` for Buildkite's setup) with the signed caller. The notes push
+    and the setup run in the scheduler, so they stay on the parent token until it moves.
+  - `pigeon_ci::pigeon::settings` holds pigeon's CI values (the Buildkite constants included)
+    for both Workers. Core asserts at build time that its hostnames are the same.
+  - `CiGateway` is the `Service`: the manifest (every ci tool, `/ci/`, the
+    `BUILDKITE_API_TOKEN` slot, footprint `pigeon-ci-events`), `call`, `fetch` and `secret`
+    (`expiry` from the connector).
+  - `pigeon-ci-gateway` (`src/ci-gateway`) serves it. It binds `CI_SCHEDULER` and `CI_RUNNER`
+    to core's classes (`script_name = "pigeon-platform"`), with no migrations or containers.
+    It also has `PLATFORM`, `CALLER_KEY`, `BUILDKITE_API_TOKEN` and the `CI_EVENTS` producer.
+  - Core keeps `ci::Local`, a thin `Capability` over `pigeon_ci::Ci`, and re-exports what
+    the Lander and the proxies use (`job_grant`, `token`, `setup`, `same_build`,
+    `setup_summary`). Core has no `CI` binding yet.
+  - The map: `src/ci/*` is shared while core links it. The `ci-gateway` entry has queue
+    `pigeon-ci-events` and no containers yet.
+  - The architecture page reads a capability's bindings from its own crate (`src/{name}/src`)
+    too, so CI's bindings are not shown as unused.
+  - Smoke: the ci scenario checks the gateway's manifest against core's tools.
+
 - 2026-11-22: phase 1 (1a and 1b) landed together, as landing `xKIrTa8WmsUYZ02v` (main at
   `520e778`).
 - 2026-11-22: the person asked for the remaining Workers in parallel. T0, the shared prep, was

@@ -16,20 +16,20 @@
 //! on. A build that ends without its runner having reported is an infrastructure failure, which
 //! the gateway retries elsewhere once.
 
+use pigeon_contract::SlotSpec;
 use pigeon_core::buildkite::{self as api, Pipeline};
 use pigeon_core::buildkite_hook::{self as hook, Event};
+use pigeon_core::expiry::{self, Expiry};
 use pigeon_core::oidc::{self, Expect};
 use pigeon_core::secrets_store;
 use serde_json::{Map, Value, json};
 use worker::{Error, Result, js_sys};
 
-use super::class::{Class, Offered, Size};
-use super::config::{Arch, Os};
-use super::route::Availability;
-use super::state::Report;
-use super::{Connector, Cx, Dispatched, Held, Hook, Pending, Run, Seen, SetupRun};
-use crate::Slot;
-use crate::expiry::{self, Expiry};
+use crate::class::{Class, Offered, Size};
+use crate::config::{Arch, Os};
+use crate::route::Availability;
+use crate::state::Report;
+use crate::{Connector, Cx, Dispatched, Held, Hook, Pending, Run, Seen, SetupRun};
 
 pub mod setup;
 
@@ -74,8 +74,6 @@ pub struct Buildkite {
     pub repository: String,
     /// The Cloudflare MCP server the setup keeps for Buildkite's MCP: its server ID and URL.
     pub portal: Option<(String, String)>,
-    /// The Secrets Store binding of the parent token, for that server's Cloudflare calls.
-    pub parent: String,
     /// The queues jobs go to, by class.
     pub queues: Vec<Queue>,
     /// Whether only tokens from Buildkite's hosted agents are exchanged.
@@ -311,8 +309,8 @@ impl Connector for Buildkite {
         self.queues.iter().map(|q| q.offered.clone()).collect()
     }
 
-    fn secrets(&self) -> Vec<Slot> {
-        vec![Slot {
+    fn secrets(&self) -> Vec<SlotSpec> {
+        vec![SlotSpec {
             name: API_TOKEN.into(),
             purpose: format!(
                 "The one Buildkite API access token for organization `{}` (Buildkite: \
@@ -330,7 +328,7 @@ impl Connector for Buildkite {
                     .join(", "),
                 self.pipeline
             ),
-            scopes: &[secrets_store::WORKERS],
+            scopes: vec![secrets_store::WORKERS.into()],
         }]
     }
 
@@ -436,7 +434,7 @@ impl Connector for Buildkite {
     fn webhook<'a>(&'a self, cx: &'a Cx<'a>, h: &'a Hook) -> Pending<'a, Option<Seen>> {
         Box::pin(async move {
             // The key the setup generated, as the scheduler keeps it; none yet refuses all.
-            let key = super::scheduler(cx.env, "setup_key", json!({ "connector": NAME }))
+            let key = crate::scheduler(cx.env, "setup_key", json!({ "connector": NAME }))
                 .await?
                 .as_str()
                 .unwrap_or_default()

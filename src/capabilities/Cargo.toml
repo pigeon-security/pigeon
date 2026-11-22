@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 pigeon-core = { path = "../core" }
+pigeon-ci = { path = "../ci" }
 pigeon-contract = { path = "../contract" }
 pigeon-models = { path = "../models" }
 worker = { version = "0.9.0", features = ["queue"] }

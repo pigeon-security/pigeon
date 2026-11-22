@@ -969,7 +969,7 @@ impl Lander {
         if s.portal_servers.is_empty() {
             return;
         }
-        let account = crate::ci::scheduler::account(&self.env, &s.parent).await;
+        let account = pigeon_core::account_from_env(&self.env, &s.parent).await;
         let mut said = Vec::new();
         for server in &s.portal_servers {
             let synced = match &account {
@@ -1038,7 +1038,7 @@ impl Lander {
     /// Runs `tool` as the landing's caller, through the same dispatch as `/mcp`.
     async fn dispatch(&self, row: &Row, tool: &str, args: &Value) -> Result<Value> {
         let caller: Caller = serde_json::from_str(&row.caller)?;
-        let account = crate::ci::scheduler::account(&self.env, &self.settings.parent).await?;
+        let account = pigeon_core::account_from_env(&self.env, &self.settings.parent).await?;
         let capabilities = crate::split::all(
             &self.env,
             (self.hosting.capabilities)(),
@@ -1082,7 +1082,7 @@ impl Lander {
             self.apply(&row, &Seen::CheckRefused, Some(&why))?;
             return Ok(());
         }
-        let account = crate::ci::scheduler::account(&self.env, &s.parent).await?;
+        let account = pigeon_core::account_from_env(&self.env, &s.parent).await?;
         let tip = git_proxy::tip(&account, &s.namespace, &s.repo, &row.branch).await?;
         let expected = (!row.commit_sha.is_empty()).then_some(row.commit_sha.as_str());
         if let Some(why) = tip_refusal(&row.branch, tip.as_deref(), expected) {
@@ -1361,7 +1361,7 @@ impl Lander {
                 }
             }
             State::Merging => {
-                let account = crate::ci::scheduler::account(&self.env, &s.parent).await?;
+                let account = pigeon_core::account_from_env(&self.env, &s.parent).await?;
                 let session =
                     merge::Session::open(&account, &s.namespace, &s.repo, Access::Write).await?;
                 let merged = self.merge(&session, &row).await;
@@ -1481,7 +1481,7 @@ impl Lander {
             vec![],
         )?;
         let s = &self.settings;
-        let account = crate::ci::scheduler::account(&self.env, &s.parent).await?;
+        let account = pigeon_core::account_from_env(&self.env, &s.parent).await?;
         let found = artifacts::repo(&account, &s.namespace, &s.repo)
             .await?
             .ok_or_else(|| bad("no repository to note"))?;

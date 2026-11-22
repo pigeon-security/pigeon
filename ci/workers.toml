@@ -18,6 +18,8 @@ paths = [
     "src/core/*",
     "src/contract/*",
     "src/models/*",
+    # CI's code: core still serves it, and pigeon-ci-gateway too (phase 4).
+    "src/ci/*",
     "Cargo.toml",
     "Cargo.lock",
     ".cargo/*",
@@ -58,3 +60,16 @@ paths = ["src/model-gateway/*"]
 test_job = "test"
 deploy_job = "deploy-model-gateway"
 after = ["portal_sync"]
+
+# The CI gateway Worker: CI's tools and /ci/ routes behind the contract. The scheduler and the
+# runners are still core's (docs/plans/workers-split.md, phase 4).
+[[worker]]
+name = "ci-gateway"
+script = "pigeon-ci-gateway"
+dir = "src/ci-gateway"
+paths = ["src/ci-gateway/*"]
+test_job = "test"
+deploy_job = "deploy-ci-gateway"
+after = ["portal_sync"]
+queues = ["pigeon-ci-events"]
+containers = []

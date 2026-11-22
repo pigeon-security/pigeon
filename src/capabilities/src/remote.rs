@@ -70,7 +70,7 @@ fn intern(s: &str) -> &'static str {
 }
 
 /// Leaks a list of scopes once per distinct list.
-fn intern_scopes(scopes: &[String]) -> &'static [&'static str] {
+pub(crate) fn intern_scopes(scopes: &[String]) -> &'static [&'static str] {
     let key = scopes.join(",");
     let found = SCOPES.with(|map| map.borrow().get(&key).copied());
     if let Some(found) = found {

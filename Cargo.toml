@@ -9,6 +9,8 @@ members = [
     "src/sites",
     "src/models",
     "src/model-gateway",
+    "src/ci",
+    "src/ci-gateway",
 ]
 
 [workspace.package]

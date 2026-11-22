@@ -714,18 +714,26 @@ fn land_rebases_disjoint_branches_and_lanes() {
     assert_eq!(map.deploy_order(&core).len(), 1);
     assert_eq!(
         map.scripts(),
-        ["pigeon-platform", "pigeon-sites", "pigeon-model-gateway"]
+        [
+            "pigeon-platform",
+            "pigeon-sites",
+            "pigeon-model-gateway",
+            "pigeon-ci-gateway"
+        ]
     );
     assert!(map.worker("sites").unwrap().queues.is_empty());
     // A Worker's deploy scope: its queues and container classes, from the map.
+    let ci = map.worker("ci-gateway").unwrap();
+    assert_eq!(ci.queues, ["pigeon-ci-events"]);
+    assert!(ci.containers.is_empty());
     let scoped = lanes::parse(&format!(
-        "{}\n[[worker]]\nname = \"ci-gateway\"\nscript = \"pigeon-ci-gateway\"\ndir = \"src/ci-gateway\"\npaths = [\"src/ci-gateway/*\"]\ntest_job = \"test\"\ndeploy_job = \"deploy-ci-gateway\"\nqueues = [\"pigeon-ci-events\"]\ncontainers = [\"CiRunner\"]\n",
+        "{}\n[[worker]]\nname = \"scoped\"\nscript = \"pigeon-scoped\"\ndir = \"src/scoped\"\npaths = [\"src/scoped/*\"]\ntest_job = \"test\"\ndeploy_job = \"deploy-scoped\"\nqueues = [\"pigeon-ci-events\"]\ncontainers = [\"CiRunner\"]\n",
         include_str!("../ci/workers.toml")
     ))
     .unwrap();
-    let ci = scoped.worker("ci-gateway").unwrap();
-    assert_eq!(ci.queues, ["pigeon-ci-events"]);
-    assert_eq!(ci.containers, ["CiRunner"]);
+    let scoped = scoped.worker("scoped").unwrap();
+    assert_eq!(scoped.queues, ["pigeon-ci-events"]);
+    assert_eq!(scoped.containers, ["CiRunner"]);
     // What a capability Worker may ask core to mint: a fixed table of purposes, nothing else.
     use pigeon_capabilities::split::purpose_permissions;
     assert!(
@@ -747,7 +755,17 @@ fn land_rebases_disjoint_branches_and_lanes() {
     assert_eq!(map.worker("sites").unwrap().deploy_job, "deploy-sites");
     assert_eq!(
         names(&map.classify(&["src/contract/src/wire.rs"])),
-        ["core", "sites", "model-gateway"]
+        ["core", "sites", "model-gateway", "ci-gateway"]
+    );
+    // CI's code is shared while core still links it; the gateway alone deploys for its crate.
+    assert!(map.classify(&["src/ci/src/lib.rs"]).shared);
+    assert_eq!(
+        names(&map.classify(&["src/ci-gateway/src/lib.rs"])),
+        ["ci-gateway"]
+    );
+    assert_eq!(
+        map.worker("ci-gateway").unwrap().deploy_job,
+        "deploy-ci-gateway"
     );
     assert!(
         !map.overlap(&["src/sites/src/lib.rs"], &["src/capabilities/src/land.rs"])
@@ -1004,14 +1022,12 @@ fn deploy_proxy_allowlist() {
 
 #[test]
 fn ci_route_and_run_on_a_fake_connector() {
-    use pigeon_capabilities::ci::Dispatched;
-    use pigeon_capabilities::ci::class::{Class, Offered, Size};
-    use pigeon_capabilities::ci::config::{self, Arch, Os};
-    use pigeon_capabilities::ci::route::{
-        Ask, Availability, Candidate, choose, fallback_due, route,
-    };
-    use pigeon_capabilities::ci::scheduler::{self, Outcome};
-    use pigeon_capabilities::ci::state::{self, Next, Report, State};
+    use pigeon_ci::Dispatched;
+    use pigeon_ci::class::{Class, Offered, Size};
+    use pigeon_ci::config::{self, Arch, Os};
+    use pigeon_ci::route::{Ask, Availability, Candidate, choose, fallback_due, route};
+    use pigeon_ci::scheduler::{self, Outcome};
+    use pigeon_ci::state::{self, Next, Report, State};
     // The repository's own jobs parse, and `test` asks for a medium machine.
     let cfg = config::parse(include_str!("../.pigeon/ci.toml")).unwrap();
     let test = &cfg.jobs["test"];
@@ -1165,6 +1181,32 @@ fn ci_route_and_run_on_a_fake_connector() {
         Next::Move(State::Failed)
     ));
     assert_eq!(scheduler::deadline(0, 60), (60 + 10) * 60_000);
+
+    // The gateway's manifest offers what core serves: the same tools, /ci/, the Buildkite
+    // token's slot and the events queue; it acts with scoped credentials, core with the parent.
+    use pigeon_contract::Service;
+    let core_ci = pigeon_ci::Ci {
+        settings: pigeon_ci::pigeon::settings(pigeon_ci::Accounts::Parent("P".into())),
+    };
+    let gateway = pigeon_ci::CiGateway::new(
+        pigeon_ci::pigeon::settings(pigeon_ci::Accounts::Scoped),
+        b"key".to_vec(),
+    );
+    let manifest = gateway.manifest();
+    assert_eq!(manifest.worker, "pigeon-ci-gateway");
+    let [cap] = &manifest.capabilities[..] else {
+        panic!("one capability")
+    };
+    assert_eq!(cap.name, "ci");
+    let names: Vec<&str> = cap.tools.iter().map(|t| t.name.as_str()).collect();
+    let local: Vec<&str> = core_ci.tools().iter().map(|t| t.name).collect();
+    assert_eq!(names, local);
+    assert!(names.contains(&"ci_submit") && names.contains(&"ci_buildkite_plan"));
+    assert_eq!(cap.routes, ["/ci/"]);
+    assert_eq!(cap.footprint, json!({ "queues": ["pigeon-ci-events"] }));
+    assert_eq!(cap.secrets.len(), 1);
+    assert_eq!(cap.secrets[0].name, "BUILDKITE_API_TOKEN");
+    assert_eq!(cap.secrets[0].scopes, ["workers"]);
 }
 
 // ---- models ----
@@ -1480,7 +1522,7 @@ fn mirror_push() {
 
 #[test]
 fn webhook_and_oidc() {
-    use pigeon_capabilities::ci::buildkite::{ISSUER, audience, vouched};
+    use pigeon_ci::buildkite::{ISSUER, audience, vouched};
     use pigeon_core::buildkite_hook::{Event, read, verify};
     use pigeon_core::oidc::{self, Expect};
     use pigeon_core::webauthn::b64url;
@@ -1806,8 +1848,8 @@ fn console_sign_in_and_a_write() {
 
 #[test]
 fn proxy_and_job_tokens() {
-    use pigeon_capabilities::ci::token::{self, Grant, PREFIX};
     use pigeon_capabilities::proxy::{self, Audit, DEFAULT_DAYS, Outcome, ProxyCaller};
+    use pigeon_ci::token::{self, Grant, PREFIX};
 
     // A session's proxy credential reaches the proxies only; an access token only /mcp.
     let paths = [
@@ -2995,7 +3037,7 @@ fn buildkite_setup_plan() {
     // The Lander takes a setup answer only from a scheduler of its own build: one without a
     // build (older than the check) or of another build is waited out; a local build checks
     // nothing.
-    use pigeon_capabilities::ci::same_build;
+    use pigeon_ci::same_build;
     assert!(same_build(&json!({"build": "abc", "reports": {}}), "abc"));
     assert!(!same_build(&json!({"build": "old", "reports": {}}), "abc"));
     assert!(!same_build(&json!({"buildkite": {"off": "…"}}), "abc"));

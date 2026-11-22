@@ -435,14 +435,16 @@ fn parts(sorted: &[&Source], dir: &str, capability: bool, blocks: &[String]) -> 
     out
 }
 
-/// Which of `names` capability `name`'s code (its module and any submodules under `dir`) names
-/// as a string literal.
+/// Which of `names` capability `name`'s code (its module and any submodules under `dir`, and
+/// its own crate under `src/{name}` when it has one) names as a string literal.
 fn named(sorted: &[&Source], dir: &str, name: &str, names: &[String]) -> Vec<String> {
     let file = format!("{dir}{name}.rs");
     let sub = format!("{dir}{name}/");
+    // A capability whose code is its own crate, `src/{name}` (such as `pigeon-ci`).
+    let krate = format!("src/{name}/src/");
     let literals: BTreeSet<String> = sorted
         .iter()
-        .filter(|s| s.path == file || s.path.starts_with(&sub))
+        .filter(|s| s.path == file || s.path.starts_with(&sub) || s.path.starts_with(&krate))
         .flat_map(|s| strings(&code(s.text)))
         .collect();
     names

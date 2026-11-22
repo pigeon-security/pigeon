@@ -605,6 +605,7 @@ dependencies = [
  "futures-util",
  "p256",
  "pigeon-blog",
+ "pigeon-ci",
  "pigeon-contract",
  "pigeon-core",
  "pigeon-models",
@@ -615,6 +616,28 @@ dependencies = [
  "sha2",
  "toml",
  "wasm-streams",
+ "worker",
+]
+
+[[package]]
+name = "pigeon-ci"
+version = "0.1.0"
+dependencies = [
+ "pigeon-contract",
+ "pigeon-core",
+ "serde",
+ "serde_json",
+ "toml",
+ "worker",
+]
+
+[[package]]
+name = "pigeon-ci-gateway"
+version = "0.1.0"
+dependencies = [
+ "pigeon-ci",
+ "pigeon-contract",
+ "pigeon-core",
  "worker",
 ]
 
@@ -674,6 +697,7 @@ name = "pigeon-platform"
 version = "0.1.0"
 dependencies = [
  "pigeon-capabilities",
+ "pigeon-ci",
  "pigeon-core",
  "pigeon-models",
  "serde_json",

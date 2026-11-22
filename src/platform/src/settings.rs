@@ -5,10 +5,7 @@ use pigeon_capabilities::Capability;
 use pigeon_capabilities::approvals::Approvals;
 use pigeon_capabilities::architecture::{Architecture, Wrangler};
 use pigeon_capabilities::cf_proxy::CfProxy;
-use pigeon_capabilities::ci::buildkite::{self, Buildkite};
-use pigeon_capabilities::ci::class::Size;
-use pigeon_capabilities::ci::containers::Containers;
-use pigeon_capabilities::ci::{self, Ci, ProxyFiles};
+use pigeon_capabilities::ci;
 use pigeon_capabilities::console::Console;
 use pigeon_capabilities::deploys::Deploys;
 use pigeon_capabilities::dispatch::Dispatch;
@@ -62,6 +59,28 @@ pub const HOST: &str = "platform.pigeon.dev";
 pub const PROXY_HOST: &str = "proxy.pigeon.dev";
 const NAMESPACE: &str = "pigeon-security";
 const REPO: &str = "pigeon";
+// CI's values live in `pigeon_ci::pigeon`, which `pigeon-ci-gateway` builds too: they must be
+// this Worker's.
+const _: () = assert!(
+    same(pigeon_ci::pigeon::HOST, HOST) && same(pigeon_ci::pigeon::PROXY_HOST, PROXY_HOST),
+    "pigeon_ci::pigeon's hostnames must be this Worker's"
+);
+
+/// Whether `a` and `b` are the same text. At build time.
+const fn same(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
 const BRANCH: &str = "main";
 /// The prefix of the branches sessions push, without its slash.
 const SESSION_PREFIX: &str = "claude";
@@ -233,7 +252,9 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
             host: HOST.into(),
             proxy_host: PROXY_HOST.into(),
         }),
-        Box::new(Ci { settings: ci() }),
+        Box::new(ci::Local {
+            ci: ci::Ci { settings: ci() },
+        }),
         // Landing: a session branch tested, moved into main and deployed, through `land`.
         Box::new(Land { settings: land() }),
         Box::new(Deploys),
@@ -275,60 +296,6 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
     ]
 }
 
-/// The Buildkite organization's slug; empty leaves the connector off and sets nothing up.
-const BUILDKITE_ORG: &str = "pigeon-security";
-/// Buildkite's hosted queues in cluster `pigeon`, one row per class: the queue's key, its
-/// instance shape, the class, and the shape's vCPU, memory (GB) and disk (GB). Hosted Linux
-/// agents have docker, so each queue also runs its class's `-docker` jobs. Linux only for now.
-/// The setup makes each queue (docs/plans/buildkite-mcp.md).
-const BUILDKITE_QUEUES: [(&str, &str, Size, bool, u32, u32, u32); 4] = [
-    (
-        "pigeon-linux-small",
-        "LINUX_AMD64_2X4",
-        Size::Small,
-        false,
-        2,
-        4,
-        47,
-    ),
-    (
-        "pigeon-linux-small",
-        "LINUX_AMD64_2X4",
-        Size::Small,
-        true,
-        2,
-        4,
-        47,
-    ),
-    (
-        "pigeon-linux-medium",
-        "LINUX_AMD64_4X16",
-        Size::Medium,
-        false,
-        4,
-        16,
-        95,
-    ),
-    (
-        "pigeon-linux-medium",
-        "LINUX_AMD64_4X16",
-        Size::Medium,
-        true,
-        4,
-        16,
-        95,
-    ),
-];
-
-fn buildkite_queues() -> Vec<buildkite::Queue> {
-    BUILDKITE_QUEUES
-        .iter()
-        .map(|&(key, shape, size, docker, cpu, mem, disk)| {
-            buildkite::queue(key, shape, buildkite::linux(size, docker), cpu, mem, disk)
-        })
-        .collect()
-}
-
 /// Where landings go: the source repository's main, gated by CI jobs `test` and `deploy`.
 pub fn land() -> land::Settings {
     land::Settings {
@@ -357,43 +324,8 @@ pub fn model_jobs() -> pigeon_models::runner::Settings {
     }
 }
 
-/// The CI gateway's settings: its connectors in the order jobs prefer them (Containers, then
-/// Buildkite, then GitHub Actions, each added in its own phase), the repositories it runs, and
-/// how long a queued job waits for its first choice.
-pub fn ci() -> ci::Settings {
-    ci::Settings {
-        connectors: vec![
-            Box::new(Containers {
-                // The base image's key under [containers.images] in wrangler.toml.
-                image: Some("base".into()),
-                limit: 4,
-                entrypoint: vec!["/usr/local/bin/pigeon-ci-runner".into()],
-            }),
-            Box::new(Buildkite {
-                // The organization's slug, from its Buildkite URL; empty leaves the connector
-                // unconfigured.
-                org: BUILDKITE_ORG.into(),
-                pipeline: "pigeon".into(),
-                cluster: "pigeon".into(),
-                // Never cloned: every step skips checkout and fetches through the git proxy.
-                repository: "https://github.com/pigeon-security/pigeon.git".into(),
-                // Buildkite's MCP for sessions, behind the portal with the same token.
-                portal: Some((
-                    "buildkite".into(),
-                    "https://mcp.buildkite.com/direct".into(),
-                )),
-                parent: PARENT_TOKEN.into(),
-                queues: buildkite_queues(),
-                hosted_only: true,
-            }),
-        ],
-        files: Box::new(ProxyFiles {
-            parent: PARENT_TOKEN.into(),
-        }),
-        repos: vec![format!("{NAMESPACE}/{REPO}")],
-        host: HOST.into(),
-        proxy_host: PROXY_HOST.into(),
-        parent: PARENT_TOKEN.into(),
-        wait_limit_ms: 5 * 60_000,
-    }
+/// The CI gateway's settings: pigeon's (`pigeon_ci::pigeon`), acting with the parent token,
+/// which this Worker holds.
+pub fn ci() -> pigeon_ci::Settings {
+    pigeon_ci::pigeon::settings(pigeon_ci::Accounts::Parent(PARENT_TOKEN.into()))
 }
