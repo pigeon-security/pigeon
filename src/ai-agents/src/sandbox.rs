@@ -55,6 +55,11 @@ pub async fn tool(env: &Env, run: &str, branch: &str, name: &str, input: &Value)
         .map_or_else(|| answer.to_string(), String::from))
 }
 
+/// Put before every `run` command. pigeon-sandboxd runs it in a login shell (`bash -lc`), and
+/// Debian's /etc/profile resets PATH, dropping the CI image's cargo and node (its Dockerfile sets
+/// them in PATH). Until the image's sandboxd runs `bash -c`, the run puts them back.
+pub const RUN_PATH: &str = "export PATH=/usr/local/cargo/bin:/usr/local/node/bin:$PATH; ";
+
 /// The server's op for sandbox tool `name`, and the body it takes.
 pub fn op_for(name: &str, input: &Value, branch: &str) -> Option<(&'static str, Value)> {
     Some(match name {
@@ -80,7 +85,10 @@ pub fn op_for(name: &str, input: &Value, branch: &str) -> Option<(&'static str, 
         ),
         "run" => (
             "exec",
-            json!({ "cmd": input["cmd"], "timeout_s": input["timeout_s"] }),
+            json!({
+                "cmd": input["cmd"].as_str().map(|c| format!("{RUN_PATH}{c}")),
+                "timeout_s": input["timeout_s"],
+            }),
         ),
         "commit_push" => (
             "commit_push",
