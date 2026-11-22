@@ -66,6 +66,10 @@ secret_name = "CALLER_KEY"
 binding = "SITES"
 service = "pigeon-sites"
 
+[[services]]
+binding = "MODELS"
+service = "pigeon-model-gateway"
+
 # The GitHub App (src/capabilities/src/github.rs): its private key and webhook secret, set by the
 # person on the Access tab; bound once they exist, since a binding to a missing secret fails the
 # deploy.

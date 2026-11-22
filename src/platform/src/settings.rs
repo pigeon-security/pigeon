@@ -27,7 +27,6 @@ use pigeon_capabilities::site::Site;
 use pigeon_capabilities::source::Source;
 use pigeon_capabilities::split::Split;
 use pigeon_capabilities::users::Users;
-use pigeon_models::{Dialect, Models, Provider};
 
 /// This Worker's wrangler.toml, the authority for its bindings, queues and containers.
 pub fn wrangler() -> Wrangler {
@@ -132,10 +131,16 @@ pub fn site() -> Site {
 /// The capability Workers bound to this one, by their Service Bindings in wrangler.toml
 /// (docs/plans/workers-split.md). Their capabilities join this Worker's own at runtime, from
 /// each one's manifest.
-pub const BINDINGS: &[Binding] = &[Binding {
-    binding: "SITES",
-    worker: "pigeon-sites",
-}];
+pub const BINDINGS: &[Binding] = &[
+    Binding {
+        binding: "SITES",
+        worker: "pigeon-sites",
+    },
+    Binding {
+        binding: "MODELS",
+        worker: "pigeon-model-gateway",
+    },
+];
 
 /// The capabilities this Worker hosts.
 pub fn capabilities() -> Vec<Box<dyn Capability>> {
@@ -251,19 +256,7 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
             containers: wrangler().containers.into_iter().map(|c| c.class).collect(),
             land_repo: format!("{NAMESPACE}/{REPO}"),
         }),
-        Box::new(Models {
-            gateway: "pigeon".into(),
-            providers: vec![Provider {
-                slug: "anthropic",
-                alias: "default",
-                dialect: Dialect::Anthropic,
-                default_model: "claude-haiku-5-5",
-                key_help: "A Claude Platform API key, from the Claude Console's API keys page.",
-            }],
-            secrets_page: format!("https://{HOST}/access#credentials"),
-            host: HOST.into(),
-            proxy_host: PROXY_HOST.into(),
-        }),
+        // Models: served by pigeon-model-gateway (BINDINGS); core hosts only its job objects.
         Box::new(ci::Local {
             ci: ci::Ci { settings: ci() },
         }),
