@@ -95,6 +95,17 @@ cpu = 4
 memory_gb = 12
 disk_gb = 20
 
+# Deploys the pigeon-ai-agents Worker (src/ai-agents-worker) from a landed commit, as `deploy` deploys core.
+[jobs.deploy-ai-agents]
+run = "ci/deploy/deploy-ai-agents.sh"
+timeout_min = 60
+token = true
+
+[jobs.deploy-ai-agents.needs]
+cpu = 4
+memory_gb = 12
+disk_gb = 20
+
 # Deploys the pigeon-dotest-a Worker (src/dotest-a), the DO transfer rehearsal's source
 # (docs/plans/do-rehearsal.md), as `deploy` deploys core.
 [jobs.deploy-dotest-a]

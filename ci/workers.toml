@@ -87,6 +87,19 @@ test_job = "test"
 deploy_job = "deploy-proxy"
 after = []
 
+
+# The AI agents Worker: planner and executor runs inside pigeon, their sandboxes (one container
+# per run) and the ai_agents_* tools. A capability Worker behind core (docs/plans/ai-agents.md).
+# Its crate src/ai-agents is linked only by it, and by the smoke suite.
+[[worker]]
+name = "ai-agents"
+script = "pigeon-ai-agents"
+dir = "src/ai-agents-worker"
+paths = ["src/ai-agents-worker/*", "src/ai-agents/*"]
+test_job = "test"
+deploy_job = "deploy-ai-agents"
+after = ["portal_sync"]
+containers = ["Sandbox"]
 # A throwaway Worker for the Durable Object transfer rehearsal (docs/plans/do-rehearsal.md;
 # docs/plans/workers-split.md, T17): the transfer's destination. Listed before dotest-a, whose
 # binding names it, so a landing that deploys both deploys it first. Its entry comes out once

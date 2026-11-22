@@ -1061,6 +1061,7 @@ fn land_rebases_disjoint_branches_and_lanes() {
             "pigeon-model-gateway",
             "pigeon-ci-gateway",
             "pigeon-proxy",
+            "pigeon-ai-agents",
             "pigeon-dotest-b",
             "pigeon-dotest-a"
         ]
@@ -1105,6 +1106,7 @@ fn land_rebases_disjoint_branches_and_lanes() {
             "model-gateway",
             "ci-gateway",
             "proxy",
+            "ai-agents",
             "dotest-b",
             "dotest-a"
         ]
@@ -3506,6 +3508,7 @@ fn proxy_worker_caches_and_core_ops() {
             "pigeon-model-gateway",
             "pigeon-ci-gateway",
             "pigeon-proxy",
+            "pigeon-ai-agents",
             "pigeon-dotest-b",
             "pigeon-dotest-a"
         ]
