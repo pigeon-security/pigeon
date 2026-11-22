@@ -105,7 +105,10 @@ pub fn site() -> Site {
 /// The capability Workers bound to this one, by their Service Bindings in wrangler.toml
 /// (docs/plans/workers-split.md). Their capabilities join this Worker's own at runtime, from
 /// each one's manifest.
-pub const BINDINGS: &[Binding] = &[];
+pub const BINDINGS: &[Binding] = &[Binding {
+    binding: "SITES",
+    worker: "pigeon-sites",
+}];
 
 /// The capabilities this Worker hosts.
 pub fn capabilities() -> Vec<Box<dyn Capability>> {

@@ -53,6 +53,19 @@ binding = "LINK_KEY"
 store_id = "5185c227b9f34b4291045175695b78ec"
 secret_name = "LINK_KEY"
 
+# The key that signs the caller core forwards to its capability Workers, made by workers_setup
+# (docs/plans/workers-split.md).
+[[secrets_store_secrets]]
+binding = "CALLER_KEY"
+store_id = "5185c227b9f34b4291045175695b78ec"
+secret_name = "CALLER_KEY"
+
+# The capability Workers: their tools join this Worker's from their manifests
+# (settings::BINDINGS). A binding's Worker must exist before this deploys.
+[[services]]
+binding = "SITES"
+service = "pigeon-sites"
+
 # Artifacts push events reach this Worker through the pigeon-source-events queue; the queue
 # and its consumer are set up by POST /setup/source, not here.
 
