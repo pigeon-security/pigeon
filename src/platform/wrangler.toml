@@ -95,14 +95,15 @@ secret_name = "GITHUB_APP_WEBHOOK_SECRET"
 # and its consumer are set up by POST /setup/source, not here.
 
 # The Directory: users, passkeys and links, in one Durable Object with SQLite storage. The CI
-# scheduler: every CI job, in one Durable Object with SQLite storage and an alarm. The model job
-# objects moved to pigeon-model-gateway (transferred_classes): once a class has moved, a binding
-# here must name the Worker that hosts it, or Cloudflare refuses the upload (10061). This Worker
-# keeps the class's v4 migration and its export.
+# scheduler (every CI job, with an alarm) moved to pigeon-ci-gateway and the model job objects
+# to pigeon-model-gateway (transferred_classes): once a class has moved, a binding here must name
+# the Worker that hosts it, or Cloudflare refuses the upload (10061). This Worker keeps both
+# classes' migrations and exports. The CI runners, which hold the job containers, are still
+# this Worker's.
 [durable_objects]
 bindings = [
   { name = "DIRECTORY", class_name = "Directory" },
-  { name = "CI_SCHEDULER", class_name = "CiScheduler" },
+  { name = "CI_SCHEDULER", class_name = "CiScheduler", script_name = "pigeon-ci-gateway" },
   { name = "CI_RUNNER", class_name = "CiRunner" },
   { name = "MODEL_JOBS", class_name = "ModelJobs", script_name = "pigeon-model-gateway" },
   { name = "LANDER", class_name = "Lander" },
