@@ -842,6 +842,7 @@ impl GitProxy {
                 .unwrap_or_default(),
             label: format!("ci job {}", grant.job),
             person: "ci".into(),
+            script: None,
         });
         let repo = format!("{}/{}", self.namespace, self.repo);
         let now = worker::js_sys::Date::now() as i64;

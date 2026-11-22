@@ -712,7 +712,37 @@ fn land_rebases_disjoint_branches_and_lanes() {
     assert!(map.overlap(&branch, &["Cargo.lock"]).retest);
     assert!(!map.overlap(&["docs/a.md"], &["src/core/src/git.rs"]).retest);
     assert_eq!(map.deploy_order(&core).len(), 1);
-    assert_eq!(map.scripts(), ["pigeon-platform"]);
+    assert_eq!(map.scripts(), ["pigeon-platform", "pigeon-sites"]);
+    // Each platform Worker deploys alone for its own paths; a shared change deploys core first.
+    let names = |a: &lanes::Affected| -> Vec<String> {
+        map.deploy_order(a).iter().map(|w| w.name.clone()).collect()
+    };
+    let sites = map.classify(&["src/sites/src/lib.rs", "src/blog/src/pages.rs"]);
+    assert_eq!(names(&sites), ["sites"]);
+    assert_eq!(map.worker("sites").unwrap().deploy_job, "deploy-sites");
+    assert_eq!(
+        names(&map.classify(&["src/contract/src/wire.rs"])),
+        ["core", "sites"]
+    );
+    assert!(
+        !map.overlap(&["src/sites/src/lib.rs"], &["src/capabilities/src/land.rs"])
+            .retest
+    );
+    assert!(
+        map.overlap(&["src/sites/src/lib.rs"], &["src/blog/src/lib.rs"])
+            .retest
+    );
+    // The deploy proxy finds the Worker a call is for in its path.
+    use pigeon_capabilities::cf_proxy::target_script;
+    assert_eq!(
+        target_script("/cf/client/v4/accounts/a/workers/scripts/pigeon-sites/versions"),
+        Some("pigeon-sites")
+    );
+    assert_eq!(
+        target_script("/cf/client/v4/accounts/a/workers/services/pigeon-sites"),
+        Some("pigeon-sites")
+    );
+    assert_eq!(target_script("/cf/client/v4/accounts/a/queues"), None);
     // A map that is not right is refused whole; main without one falls back to core alone.
     for bad in [
         "version = 2\n[docs]\npaths=[]\n[shared]\npaths=[]",
@@ -1859,6 +1889,7 @@ fn proxy_and_job_tokens() {
         id: "abcdefghijkl".into(),
         label: "env".into(),
         person: "Ana".into(),
+        script: None,
     };
     let named: Value = serde_json::from_str(&proxy::audit_line(Some(&caller), &audit)).unwrap();
     assert_eq!(named["caller"], "env (Ana)");

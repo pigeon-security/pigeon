@@ -49,3 +49,15 @@ disk_gb = 20
 [jobs.sleep]
 run = "ci/runner/sleep.sh"
 timeout_min = 10
+
+# Deploys the pigeon-sites Worker (src/sites) from a landed commit, as `deploy` deploys core: the
+# Lander runs it for a landing that changed sites (ci/workers.toml).
+[jobs.deploy-sites]
+run = "ci/deploy/deploy-sites.sh"
+timeout_min = 60
+token = true
+
+[jobs.deploy-sites.needs]
+cpu = 4
+memory_gb = 12
+disk_gb = 20

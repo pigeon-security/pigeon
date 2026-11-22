@@ -1,6 +1,6 @@
 # Workers split: capabilities as their own Workers, landing in lanes
 
-Status: **phase 1b built on `claude/land-queue` (with the contract crate), landing next; phase 1a built on `claude/split-contract`, landing after it** (2026-11-22). The person gave the go-ahead. Planner
+Status: **phase 1 landed (`520e778`); phase 2a built, landing next; 2b built** (2026-11-22). The person gave the go-ahead. Planner
 session `session_015XFA1nSZXE9BNYuPF5XL2j`, seeded by the parent `session_015XFA1jgveJDEE8NJjTaHKg`.
 
 ## Goal
@@ -344,24 +344,53 @@ These rules need care:
 
 ### Phase 2: sites, the pilot Worker
 
-This needs the blog and linked-accounts planners first: their branches land, or are rebased to
-put their code in `src/sites`.
+This waits on the blog and linked-accounts planners: `pigeon_core::blog` has landed;
+`instance_plan`/`instance_apply` have landed in core.
 
-| Task | What | Executor |
-| --- | --- | --- |
-| T10 | `src/sites`: crate, `wrangler.toml` (`pigeon-sites`, no routes, `workers_dev = false`, `CALLER_KEY`, `PLATFORM` service binding), `lib.rs` with `serve()` | haiku |
-| T11 | Move `pigeon_core::blog` to `pigeon-sites::blog` as it is | haiku |
-| T12 | Move `instance_plan`/`instance_apply`, `site_worker.js` and the R2/workers upload callers into sites. Linked tokens come through `PLATFORM.credential` | sonnet |
-| T13 | Core: `[[services]] SITES = pigeon-sites`, the `Remote` entry, `CfProxy` scripts from the map | me |
-| T14 | CI: `test-sites` and `deploy-sites` jobs, `deploy.sh` taking the Worker's dir and script, `test.sh` taking the scenario prefix | me (gate change, delegate) |
-| T15 | Smoke: `sites_*` scenarios moved from the blog and instance ones | haiku |
+Refined 2026-11-22 after reading the code. Phase 2 is three landings, in this order.
 
-Order and checks:
-- **Deploy order:** `pigeon-sites` first (a binding's target deploys first), then core. The first
-  deploy of `pigeon-sites` needs `CfProxy` to allow the script, so core with the new allowlist
-  lands first, with `SITES` not yet bound.
-- **Live check:** `tools/list` holds `instance_plan` from `pigeon-sites`. Then a docs change and
-  a sites change land at the same time, the second deploying only sites.
+1. **2a, core learns a second Worker.** Core only, no new Worker yet.
+   - The map lists `pigeon-sites` (dir `src/sites`, deploy job `deploy-sites`).
+   - Deploy jobs per Worker.
+     - The Lander deploys a landing's affected Workers one by one, in `deploy_order`.
+     - The deploy lane deploys the newest merged commit for the union of the Workers that it
+       and every older merged landing it supersedes affected, so no Worker's change is lost.
+   - The deploy grant names `{landing, worker, commit}`. The deploy proxy takes a job token
+     only for that Worker's script.
+     - A session's proxy credential may deploy any script in the map built into core.
+     - Each script's queues and container classes come from its own `wrangler.toml`.
+   - CI:
+     - `ci/deploy/deploy.sh` takes the Worker's directory (`PIGEON_WORKER_DIR`, default
+       `src/platform`); the architecture check runs for core only.
+     - `ci/deploy/deploy-sites.sh` sets it.
+     - `[jobs.deploy-sites]` in `.pigeon/ci.toml`.
+     - All three are gate changes (delegate).
+   - `workers_setup` runs live once afterwards, to make `CALLER_KEY`.
+2. **2b, the `pigeon-sites` Worker.** `src/sites` only.
+   - The crate, with `wrangler.toml`: no routes, `workers_dev = false`, `CALLER_KEY`, and a
+     `PLATFORM` service binding to `pigeon-platform`, which already exists.
+   - `serve()` implements `pigeon_contract::Service`.
+   - The blog renderer moves from `pigeon_core::blog` as it is.
+   - First tool: `site_render`, a dry run. It renders a consumer repository at a commit (read
+     through core's `dispatch` of `source`/GitHub reads) and answers the files and digest. It
+     proves a remote tool end to end.
+   - Its smoke scenarios are prefixed `sites_`.
+   - It deploys only `pigeon-sites`.
+3. **2c, core binds it.** `[[services]] SITES = pigeon-sites`, `CALLER_KEY`, and
+   `BINDINGS = [SITES]`. Core only. Live check: `tools/list` holds `site_render`, and calling
+   it round-trips the signed caller.
+
+Then the first independent landings: a docs change and a sites change landed at the same time,
+the second deploying only `pigeon-sites`.
+
+Departure from the first design: `instance_plan`/`instance_apply` stay in core for now. They
+need the instance record, its ledger and the passkey gate, which are core's. They move once
+those are reachable through the contract (`dispatch` of a record read and a ledger write). The
+new deploy step (render, R2 upload, `live`) is built directly in `pigeon-sites` with the
+linked-accounts planner, using `PLATFORM.credential`.
+
+Deploy order: core first, as agreed. A Service Binding's target must exist before the binder
+deploys, which is why the binding is a landing of its own (2c).
 
 ### Phase 3: models
 
@@ -477,6 +506,20 @@ over their in-flight work.
 
 ## Log
 
+- 2026-11-22: phase 1 (1a and 1b) landed together, as landing `xKIrTa8WmsUYZ02v` (main at
+  `520e778`).
+- 2026-11-22: phase 2a built on `claude/lanes-deploy`.
+  - The map lists `sites`.
+  - The Lander deploys each affected Worker in turn with its own job, and runs that Worker's
+    `after` steps. The deploy lane deploys the union of what the merged landings it carries
+    affected.
+  - The deploy grant names the Worker's script. The deploy proxy (`CfProxy.others`,
+    `target_script`) takes a job token only for that script, and a proxy credential for any
+    script in the map built into core. Another Worker gets no queues or container namespaces.
+  - `deploy.sh` and `allowlist.sh` take `PIGEON_WORKER_DIR`; `deploy-sites.sh`;
+    `[jobs.deploy-sites]`.
+  - Phase 2b (the `pigeon-sites` crate, `site_render`; the renderer becomes the `pigeon-blog`
+    crate) is built on `claude/sites-worker`.
 - 2026-11-22: phase 1a built on `claude/split-contract`, on top of 1b. It is dormant until a
   binding exists: `settings::BINDINGS` is empty, so behaviour is unchanged.
   - `remote::Remote` is a capability Worker's capability as a `Capability`. Its manifest is kept

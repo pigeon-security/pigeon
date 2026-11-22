@@ -36,6 +36,14 @@ pub fn wrangler() -> Wrangler {
     Wrangler::read(include_str!("../wrangler.toml"))
 }
 
+/// The path map (ci/workers.toml) this Worker was built with: which platform Workers there
+/// are, and which Worker owns each path. Checked by the smoke suite; an unreadable map leaves
+/// this Worker alone.
+pub fn map() -> pigeon_core::lanes::Map {
+    pigeon_core::lanes::parse(include_str!("../../../ci/workers.toml"))
+        .unwrap_or_else(|_| pigeon_capabilities::land::merge::fallback())
+}
+
 /// This Worker's name, as deployed.
 pub const WORKER: &str = "pigeon-platform";
 
@@ -191,6 +199,13 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
         Box::new(CfProxy {
             host: PROXY_HOST.into(),
             script: WORKER.into(),
+            // The other platform Workers, from the map built into this Worker.
+            others: map()
+                .scripts()
+                .into_iter()
+                .filter(|s| *s != WORKER)
+                .map(str::to_string)
+                .collect(),
             // The queues this Worker produces to and its container classes, as wrangler.toml
             // declares them.
             queues: wrangler().producers,
@@ -320,6 +335,7 @@ pub fn land() -> land::Settings {
         portal_servers: vec!["pigeon".into()],
         // Each CI connector's setup (Buildkite's) runs once a landing has deployed.
         setup_connectors: true,
+        map: map(),
     }
 }
 

@@ -1,5 +1,7 @@
 #!/bin/sh
-# The `deploy` job: deploys the platform Worker from the commit a landing moved main to. Before
+# The `deploy` job: deploys a platform Worker from the commit a landing moved main to: core
+# (src/platform), or the Worker in the directory PIGEON_WORKER_DIR names, as `deploy-sites` sets
+# it (docs/plans/workers-split.md). Before
 # anything else, the job asks the proxy (`/cf/grant`) whether its token is a landing's deploy
 # grant and stops at once when it is not, so a deploy submitted by hand fails in seconds rather
 # than after the build. It then runs the allowlist check against the stand-in (which builds the
@@ -59,8 +61,9 @@ fi
 "$root/ci/deploy/allowlist.sh"
 . "$root/ci/deploy/node.sh"
 
-account=$(sed -n 's/^account_id = "\(.*\)"$/\1/p' "$root/src/platform/wrangler.toml" | head -n 1)
-cd "$root/src/platform"
+dir=$root/${PIGEON_WORKER_DIR:-src/platform}
+account=$(sed -n 's/^account_id = "\(.*\)"$/\1/p' "$dir/wrangler.toml" | head -n 1)
+cd "$dir"
 log=$(mktemp)
 trap 'rm -f "$log"' EXIT
 
@@ -97,8 +100,15 @@ published() {
     return 1
 }
 
+# Only core serves the architecture page.
+check() {
+    if [ "${PIGEON_WORKER_DIR:-src/platform}" = src/platform ]; then
+        published
+    fi
+}
+
 if deploy 1; then
-    published
+    check
     exit
 fi
 if ! grep -q "pigeon's proxy does not allow" "$log"; then
@@ -114,4 +124,4 @@ fi
 echo "refused after the upload: the new Worker, with its new allowlist, is up; deploying again" >&2
 sleep 30
 deploy 2
-published
+check

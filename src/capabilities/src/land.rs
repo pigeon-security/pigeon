@@ -19,6 +19,7 @@ use pigeon_core::artifacts::{self, Access};
 use pigeon_core::durable::{self, Db, opt};
 use pigeon_core::git::{self, Remote, Update, ZERO};
 use pigeon_core::gitobj::{self, Object};
+use pigeon_core::lanes::After;
 use pigeon_core::mcp::Tool;
 use pigeon_core::policy::{Decision, Kind};
 use pigeon_core::webauthn::random;
@@ -85,6 +86,9 @@ pub struct Settings {
     /// Whether the CI connectors' setup (Buildkite's: docs/plans/buildkite-mcp.md) runs once a
     /// landing has deployed, so the provider matches the deployed settings.
     pub setup_connectors: bool,
+    /// The platform Workers and the paths each owns (ci/workers.toml, as this Worker was built
+    /// with): which Workers a landing deploys, in which order, with which job.
+    pub map: pigeon_core::lanes::Map,
 }
 
 impl Settings {
@@ -191,6 +195,7 @@ pub async fn deploy_caller(env: &Env, presented: &str, repo: &str) -> Result<Opt
             .unwrap_or_default(),
         label: format!("land {id} deploy"),
         person: found["by"].as_str().unwrap_or("land").to_string(),
+        script: found["script"].as_str().map(str::to_string),
     }))
 }
 
@@ -368,7 +373,7 @@ impl Capability for Land {
 // ---- the Lander ----
 
 /// The Lander's schema, one statement per migration, applied in order and never edited.
-const MIGRATIONS: [&str; 8] = [
+const MIGRATIONS: [&str; 11] = [
     "CREATE TABLE landings (id TEXT PRIMARY KEY, branch TEXT NOT NULL, commit_sha TEXT NOT NULL, main_at TEXT NOT NULL, caller TEXT NOT NULL, by_name TEXT NOT NULL, state TEXT NOT NULL, approval_reason TEXT, approved_by TEXT, awaiting_since INTEGER, test_job TEXT, deploy_job TEXT, tries INTEGER NOT NULL DEFAULT 0, detail TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, finished_at INTEGER, note_pushed INTEGER NOT NULL DEFAULT 0, note_tries INTEGER NOT NULL DEFAULT 0)",
     "CREATE TABLE events (landing TEXT NOT NULL, at INTEGER NOT NULL, state TEXT NOT NULL, detail TEXT)",
     "CREATE TABLE notes (commit_sha TEXT PRIMARY KEY, text TEXT NOT NULL)",
@@ -379,6 +384,11 @@ const MIGRATIONS: [&str; 8] = [
     "ALTER TABLE landings ADD COLUMN tested TEXT",
     "ALTER TABLE landings ADD COLUMN docs_only INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE landings ADD COLUMN merged_at INTEGER",
+    // Deploys per Worker: the Workers a landing affects (a JSON list of names), those its
+    // deploy has still to deploy, in order, and the one deploying now.
+    "ALTER TABLE landings ADD COLUMN workers TEXT",
+    "ALTER TABLE landings ADD COLUMN deploys TEXT",
+    "ALTER TABLE landings ADD COLUMN deploy_worker TEXT",
 ];
 
 /// What the Lander needs from the hosting Worker, beside the settings: the capabilities it
@@ -418,6 +428,12 @@ struct Row {
     docs_only: i64,
     #[serde(default)]
     merged_at: Option<i64>,
+    #[serde(default)]
+    workers: Option<String>,
+    #[serde(default)]
+    deploys: Option<String>,
+    #[serde(default)]
+    deploy_worker: Option<String>,
 }
 
 impl Row {
@@ -437,10 +453,29 @@ impl Row {
             "finished_at": self.finished_at, "note_pushed": self.note_pushed != 0,
             "note_tries": self.note_tries, "base": self.base, "tested_at": self.tested,
             "docs_only": self.docs_only != 0, "merged_at": self.merged_at,
+            "workers": self.workers.as_deref().and_then(|w| serde_json::from_str::<Value>(w).ok()),
+            "deploys_left": self.deploys.as_deref().and_then(|w| serde_json::from_str::<Value>(w).ok()),
+            "deploying": self.deploy_worker,
         })
     }
 
     /// Whether it still waits for a person's approval: one is needed and none was given.
+    /// The Workers it affects, by name; `core` for a landing checked before there were lanes.
+    fn workers(&self) -> Vec<String> {
+        self.workers
+            .as_deref()
+            .and_then(|w| serde_json::from_str(w).ok())
+            .unwrap_or_else(|| vec!["core".to_string()])
+    }
+
+    /// The Workers its deploy has still to deploy, in order.
+    fn deploys(&self) -> Vec<String> {
+        self.deploys
+            .as_deref()
+            .and_then(|w| serde_json::from_str(w).ok())
+            .unwrap_or_else(|| vec!["core".to_string()])
+    }
+
     fn needs_approval(&self) -> bool {
         self.approval_reason.is_some() && self.approved_by.is_none()
     }
@@ -653,7 +688,11 @@ impl Lander {
                     vec![s("job").into(), s("commit").into()],
                 )?;
                 Ok(match row {
-                    Some(r) if !s("job").is_empty() => json!({ "id": r.id, "by": r.by_name }),
+                    Some(r) if !s("job").is_empty() => {
+                        let name = r.deploy_worker.as_deref().unwrap_or("core");
+                        let script = self.settings.map.worker(name).map(|w| w.script.clone());
+                        json!({ "id": r.id, "by": r.by_name, "script": script })
+                    }
                     _ => Value::Null,
                 })
             }
@@ -742,7 +781,36 @@ impl Lander {
         let Some(row) = next else {
             return Ok(None);
         };
-        self.apply(&row, &Seen::Start, Some("took the deploy lane"))?;
+        // Main moves forward only, so the newest merged commit holds every older merged
+        // landing's too: it deploys every Worker any of them affects, so none is lost.
+        let carried: Vec<Row> = self.db.rows(
+            "SELECT * FROM landings WHERE state = 'merged' AND merged_at <= ?",
+            vec![row.merged_at.unwrap_or(i64::MAX).into()],
+        )?;
+        let union: std::collections::BTreeSet<String> =
+            carried.iter().flat_map(Row::workers).collect();
+        let affected = pigeon_core::lanes::Affected {
+            docs_only: false,
+            shared: false,
+            smoke: false,
+            workers: union,
+        };
+        let mut order: Vec<String> = self
+            .settings
+            .map
+            .deploy_order(&affected)
+            .iter()
+            .map(|w| w.name.clone())
+            .collect();
+        if order.is_empty() {
+            order.push("core".to_string());
+        }
+        self.db.exec(
+            "UPDATE landings SET deploys = ?, deploy_worker = NULL, deploy_job = NULL WHERE id = ? AND state = 'merged'",
+            vec![serde_json::to_string(&order)?.into(), row.id.as_str().into()],
+        )?;
+        let why = format!("took the deploy lane: {}", order.join(", "));
+        self.apply(&row, &Seen::Start, Some(&why))?;
         self.row(&row.id)
     }
 
@@ -1047,7 +1115,9 @@ impl Lander {
                 approvals.delegate.join(", ")
             )
         });
-        let docs_only = seen.map.classify(&changed).docs_only;
+        let affected = seen.map.classify(&changed);
+        let docs_only = affected.docs_only;
+        let workers = serde_json::to_string(&affected.workers)?;
         let on = if seen.forward() {
             format!("a fast-forward of main at {}", seen.main)
         } else {
@@ -1059,17 +1129,27 @@ impl Lander {
         let what = if docs_only {
             "; docs only: no tests, no deploy".to_string()
         } else {
-            format!("; {} paths changed", changed.len())
+            format!(
+                "; {} paths changed, for {}",
+                changed.len(),
+                affected
+                    .workers
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
         };
         // From here to the move nothing awaits; `apply` re-reads the row, so a cancel during the
         // awaits above wins.
         self.db.exec(
-            "UPDATE landings SET commit_sha = ?, main_at = ?, base = ?, docs_only = ?, approval_reason = ?, updated_at = ? WHERE id = ? AND state = 'checking'",
+            "UPDATE landings SET commit_sha = ?, main_at = ?, base = ?, docs_only = ?, workers = ?, approval_reason = ?, updated_at = ? WHERE id = ? AND state = 'checking'",
             vec![
                 tip.as_str().into(),
                 seen.main.as_str().into(),
                 seen.base.as_str().into(),
                 i64::from(docs_only).into(),
+                workers.into(),
                 opt(reason.as_deref()),
                 now().into(),
                 row.id.as_str().into(),
@@ -1280,41 +1360,46 @@ impl Lander {
                 session.close().await;
                 merged?;
             }
-            State::Deploying => match &row.deploy_job {
-                None => {
-                    let mut submit = json!({
-                        "repo": s.repo_name(), "commit": row.commit_sha,
-                        "job": s.deploy_job, "task": format!("land {} deploy", row.id),
-                    });
-                    if let Some(c) = &s.deploy_connector {
-                        submit["connector"] = json!(c);
+            State::Deploying => {
+                let queue = row.deploys();
+                let name = queue.first().cloned().unwrap_or_else(|| "core".to_string());
+                let worker = s
+                    .map
+                    .worker(&name)
+                    .ok_or_else(|| bad(&format!("the map has no Worker `{name}` to deploy")))?
+                    .clone();
+                match &row.deploy_job {
+                    None => {
+                        let mut submit = json!({
+                            "repo": s.repo_name(), "commit": row.commit_sha,
+                            "job": worker.deploy_job,
+                            "task": format!("land {} deploy {}", row.id, worker.name),
+                        });
+                        if let Some(c) = &s.deploy_connector {
+                            submit["connector"] = json!(c);
+                        }
+                        let job = self.dispatch(&row, "ci_submit", &submit).await?;
+                        let job = job["id"]
+                            .as_str()
+                            .ok_or_else(|| bad("CI answered no job id"))?;
+                        self.db.exec(
+                            "UPDATE landings SET deploy_job = ?, deploy_worker = ?, detail = ?, updated_at = ? WHERE id = ?",
+                            vec![
+                                job.into(),
+                                worker.name.as_str().into(),
+                                format!("deploying {}: job {job} submitted", worker.script).into(),
+                                now().into(),
+                                row.id.as_str().into(),
+                            ],
+                        )?;
                     }
-                    let job = self.dispatch(&row, "ci_submit", &submit).await?;
-                    let job = job["id"]
-                        .as_str()
-                        .ok_or_else(|| bad("CI answered no job id"))?;
-                    self.db.exec(
-                        "UPDATE landings SET deploy_job = ?, detail = ?, updated_at = ? WHERE id = ?",
-                        vec![
-                            job.into(),
-                            format!("deploy job {job} submitted").into(),
-                            now().into(),
-                            row.id.as_str().into(),
-                        ],
-                    )?;
-                }
-                Some(job) => {
-                    if let Some((passed, detail)) = self.job_ended(job).await? {
-                        self.apply(&row, &Seen::JobEnded { passed }, Some(&detail))?;
-                        if passed {
-                            self.settle_older(
-                                &row,
-                                &Seen::Superseded,
-                                &format!("deployed with landing {}", row.id),
-                            )?;
-                            self.sync_portal(&row.id, &detail).await;
-                            self.setup_connectors(&row.id, &row.commit_sha).await;
-                        } else {
+                    Some(job) => {
+                        let Some((passed, detail)) = self.job_ended(job).await? else {
+                            return Ok(());
+                        };
+                        let detail = format!("{}: {detail}", worker.script);
+                        if !passed {
+                            self.apply(&row, &Seen::JobEnded { passed }, Some(&detail))?;
                             self.settle_older(
                                 &row,
                                 &Seen::JobEnded { passed: false },
@@ -1323,10 +1408,40 @@ impl Lander {
                                     row.id
                                 ),
                             )?;
+                            return Ok(());
+                        }
+                        let rest: Vec<String> = queue.iter().skip(1).cloned().collect();
+                        if rest.is_empty() {
+                            self.apply(&row, &Seen::JobEnded { passed }, Some(&detail))?;
+                            self.settle_older(
+                                &row,
+                                &Seen::Superseded,
+                                &format!("deployed with landing {}", row.id),
+                            )?;
+                        } else {
+                            self.db.exec(
+                                "UPDATE landings SET deploys = ?, deploy_job = NULL, deploy_worker = NULL, detail = ?, updated_at = ? WHERE id = ? AND state = 'deploying'",
+                                vec![
+                                    serde_json::to_string(&rest)?.into(),
+                                    format!("{detail}; next {}", rest.join(", ")).into(),
+                                    now().into(),
+                                    row.id.as_str().into(),
+                                ],
+                            )?;
+                        }
+                        for step in &worker.after {
+                            match step {
+                                After::PortalSync => self.sync_portal(&row.id, &detail).await,
+                                After::ConnectorsSetup => {
+                                    self.setup_connectors(&row.id, &row.commit_sha).await;
+                                }
+                                // The deploy job itself checks the live architecture page.
+                                After::Architecture => {}
+                            }
                         }
                     }
                 }
-            },
+            }
             _ => {}
         }
         Ok(())

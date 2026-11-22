@@ -34,3 +34,14 @@ paths = ["src/platform/*", "src/capabilities/*"]
 test_job = "test"
 deploy_job = "deploy"
 after = ["architecture", "portal_sync", "connectors_setup"]
+
+# The sites Worker: the blog renderer and instance site deploys. A capability Worker behind
+# core (docs/plans/workers-split.md, phase 2).
+[[worker]]
+name = "sites"
+script = "pigeon-sites"
+dir = "src/sites"
+paths = ["src/sites/*", "src/blog/*"]
+test_job = "test"
+deploy_job = "deploy-sites"
+after = ["portal_sync"]

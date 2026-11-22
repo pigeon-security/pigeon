@@ -1,5 +1,6 @@
 #!/bin/sh
-# The allowlist check: a real `wrangler deploy` of src/platform, with the pinned wrangler, against
+# The allowlist check: a real `wrangler deploy` of a platform Worker (src/platform, or the
+# directory PIGEON_WORKER_DIR names, such as src/sites), with the pinned wrangler, against
 # a stand-in for the Cloudflare API (standin.mjs), once as for the Worker that exists and once as
 # for a first deploy; then every call it made, with its JSON body, is checked against the Cloudflare
 # API proxy's allowlist (`cf_proxy::unlisted`, through the `allowlist` example). Fails naming each
@@ -7,7 +8,7 @@
 # anywhere in the repository; the `allowlist` and `deploy` jobs run it.
 set -eu
 root=$(cd "$(dirname "$0")/../.." && pwd)
-platform=$root/src/platform
+platform=$root/${PIGEON_WORKER_DIR:-src/platform}
 toml=$platform/wrangler.toml
 work=$(mktemp -d)
 trap 'kill "$standin" 2>/dev/null || true; rm -rf "$work"' EXIT

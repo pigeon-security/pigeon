@@ -113,6 +113,10 @@ pub struct ProxyCaller {
     pub label: String,
     /// The person who issued it.
     pub person: String,
+    /// The one Worker script it may deploy, when it is a landing's deploy job; `None` for a
+    /// proxy credential, which may deploy any platform Worker.
+    #[serde(default)]
+    pub script: Option<String>,
 }
 
 /// What came of a proxied request.

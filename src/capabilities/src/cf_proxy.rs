@@ -278,6 +278,24 @@ fn is_version(s: &str) -> bool {
         && (s.len() == 32 || [8, 13, 18, 23].iter().all(|i| s.as_bytes()[*i] == b'-'))
 }
 
+/// The Worker script a call names in its path (`.../workers/scripts/{s}`, `.../services/{s}`
+/// or `.../workers/workers/{s}`), if it names one.
+pub fn target_script(path: &str) -> Option<&str> {
+    let rest = path.strip_prefix(PREFIX)?;
+    let parts: Vec<&str> = rest.split('/').skip(1).collect();
+    match parts.as_slice() {
+        [
+            "accounts",
+            _,
+            "workers",
+            "scripts" | "services" | "workers",
+            s,
+            ..,
+        ] => Some(s),
+        _ => None,
+    }
+}
+
 /// Whether `segments` match `pattern` one to one.
 fn matches(pattern: &str, segments: &[&str], scope: &Scope<'_>) -> bool {
     let parts: Vec<&str> = pattern.split('/').skip(1).collect();
@@ -577,6 +595,9 @@ pub struct CfProxy {
     pub host: String,
     /// The Worker it deploys, such as `pigeon-platform`.
     pub script: String,
+    /// The other platform Workers it deploys (docs/plans/workers-split.md), such as
+    /// `pigeon-sites`: no queues and no containers of their own yet.
+    pub others: Vec<String>,
     /// The queues the Worker produces to, which a deploy looks up by name.
     pub queues: Vec<String>,
     /// The Worker's container classes, such as `CiRunner`: their Durable Object namespaces
@@ -736,18 +757,43 @@ impl CfProxy {
             },
         };
         let method = req.method();
+        // The Worker the call is for: the one its path names, or this one. A landing's deploy
+        // job deploys only the Worker its grant names; a proxy credential, any platform Worker.
+        let target = target_script(url.path()).unwrap_or(&self.script);
+        let known = target == self.script || self.others.iter().any(|o| o == target);
+        let granted = caller
+            .as_ref()
+            .and_then(|c| c.script.as_deref())
+            .is_none_or(|s| s == target || target_script(url.path()).is_none());
+        if !known || !granted {
+            return refuse(
+                403,
+                &format!("pigeon's proxy does not deploy Worker {target} for this caller"),
+            );
+        }
+        // An account-wide call (queues, container applications) during another Worker's deploy
+        // is scoped to that Worker: it has no queues or containers of its own.
+        let own = caller
+            .as_ref()
+            .and_then(|c| c.script.as_deref())
+            .is_none_or(|s| s == self.script);
+        let core = target == self.script && own;
         // Container application calls name this Worker's container namespaces, so they are
         // looked up first; no other call needs them.
-        let namespaces = if url.path().contains("/containers/applications") {
+        let namespaces = if core && url.path().contains("/containers/applications") {
             container_namespaces(cx.account, &self.script, &self.containers).await?
         } else {
             Vec::new()
         };
-        let queues: Vec<&str> = self.queues.iter().map(String::as_str).collect();
+        let no_queues: Vec<String> = Vec::new();
+        let queues: Vec<&str> = if core { &self.queues } else { &no_queues }
+            .iter()
+            .map(String::as_str)
+            .collect();
         let namespaces: Vec<&str> = namespaces.iter().map(String::as_str).collect();
         let scope = Scope {
             account: &cx.account.id,
-            script: &self.script,
+            script: target,
             queues: &queues,
             namespaces: &namespaces,
         };
