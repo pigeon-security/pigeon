@@ -1,5 +1,6 @@
 //! pigeon-dotest-b: a throwaway Worker for the Durable Object transfer rehearsal
 //! (docs/plans/do-rehearsal.md; docs/plans/workers-split.md, T17): the transfer's destination.
+//! Deployed by a landing that touches only this crate (R3): its first deploy is the transfer.
 //! Its [`Probe`] is pigeon-dotest-a's code, copied: the class arrives here from pigeon-dotest-a
 //! with `transferred_classes`, and answers on this Worker's workers.dev URL what the object
 //! holds, to compare with what it held before. It holds no secrets and only dummy data; every
