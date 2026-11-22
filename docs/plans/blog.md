@@ -89,18 +89,27 @@ intro = "Hi, I’m Willow Graysen. This is my digital shoebox — …"   # Markd
 avatar = "/assets/images/site/avatar.png"
 social_preview = "/assets/images/site/social_preview.png"
 author_page = "/pages/about"
+author_name = ""             # optional: the byline and JSON-LD name; defaults to title
 alternate_names = ["Willow Finch", "Kara Finch", "Kara Graysen", "Luna Graysen"]   # optional
-icons = [{ src = "/assets/images/site/icon-192.png", sizes = "192x192", type = "image/png" }]   # optional
-
-[[site.nav]]
+[[site.nav]]                 # in order
 title = "About"
 link = "/pages/about"
+
+[[site.icons]]               # optional: the manifest's icons
+src = "/assets/images/site/icon-192.png"
+sizes = "192x192"
+type = "image/png"
 ```
+
+Unknown keys are refused. `static/` must hold the favicons `base.html` links
+(`/assets/images/site/{favicon-16x16,favicon-32x32,apple-touch-icon}.png`), and must not hold a path
+the renderer generates (`manifest.json`, `robots.txt`, `sitemap.xml`, …).
 
 - **Two keys beyond the agreed list.** `alternate_names` (the home page's JSON-LD) and `icons`
   (the manifest) are optional additions. Without them, today's output would lose both.
-- **Also optional:** `look.color` (`pigeon` by default; `gameboy` keeps today's colours), plus
-  `labels`, `banner` and `theme_color`, with the template's defaults.
+- **Also optional:** `[site.look]` (`color` is `pigeon` by default; `gameboy` keeps today's
+  colours), plus `[site.labels]`, `[site.banner]`, `[site.theme_color]` and `[site.og_image_size]`,
+  with the template's defaults.
 - **Front matter**, TOML `+++`:
   - Posts: `title` and `date` are required. Optional: `description`, `updated`, `aliases`,
     `[taxonomies] tags` and `[extra] og_image`.
@@ -193,8 +202,10 @@ Worker removes several pieces from linked-accounts phase 4:
 - the job-side GitHub git route;
 - the `/sites/build` upload.
 
-How a deploy uses it:
-1. The deploy fetches the repository at the commit.
+Agreed with the linked-accounts planner (2026-11-22). That planner dropped the CI site job, the
+Zola image and `/sites/build`. How a deploy uses the renderer:
+1. The deploy reads the repository through the GitHub App: the recursive git tree at the pushed
+   commit, then only the blobs whose git sha it hasn't stored yet.
 2. It passes the text files and the list of static paths to `render`.
 3. It streams static bytes straight to blobs: the renderer never holds images.
 4. It writes `Output.files` as blobs, then the manifest, then flips `live`.
@@ -224,8 +235,13 @@ and the console's Deploys section.
 
 ### 6. The architecture model and console
 
-- **Per deploy.** linked-accounts' deploy record gains `template`, `version` and `digest` from
-  `Output`. Agreement with that planner is pending.
+- **Per deploy.** Agreed with the linked-accounts planner: no record change. `SiteRecord.build`
+  is `.pigeon/site.toml`, and the template is read from it at deploy time. Each deploy record keeps
+  `template`, `template_version`, `template_digest`, the commit and any problems.
+- **One render per deploy.** `base_url` is `https://{the zone target}`, and the same files are
+  served on the preview, the subdomain and the zone. Every link and asset in the output is
+  root-relative. `base_url` appears only where an absolute URL is required: canonical,
+  `og:url`/`og:image`, JSON-LD, the feed, the sitemap and robots.txt.
 - **Console.** The Instance tab's **Sites** section shows, per site, the live deploy's
   `blog@1 · 1.0.0`. The Deploys list shows each deploy's version.
 - **Architecture.** The instances layer draws each site with its template and version, read
@@ -261,4 +277,7 @@ Zola rule it follows. I read every line, run fmt, clippy and the smoke suite, an
   0.23.6's markdown and sitemap code, and pigeon's instances and linked-accounts work.
   - A spike rendered the home page and one post with pulldown-cmark. Its wasm size was measured.
   - Building Zola for a byte comparison was refused in this session.
-  - The interface was proposed to the linked-accounts planner; their answer is pending.
+  - The interface was proposed to the linked-accounts planner, and they agreed: it runs in the
+    Worker, the tree and blobs are read through the GitHub App, and there is no record change.
+    They move the content into noisypigeon/noisypigeon with the `site.toml` schema above.
+    `/pages/names/` stays an alias on `lineage.md`.
