@@ -32,6 +32,7 @@ pub mod secrets;
 pub mod site;
 pub mod source;
 pub mod split;
+pub mod storage;
 pub mod users;
 
 use std::future::Future;

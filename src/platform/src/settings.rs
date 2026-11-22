@@ -26,6 +26,7 @@ use pigeon_capabilities::secrets::Secrets;
 use pigeon_capabilities::site::Site;
 use pigeon_capabilities::source::Source;
 use pigeon_capabilities::split::Split;
+use pigeon_capabilities::storage::{self, Storage};
 use pigeon_capabilities::users::Users;
 
 /// This Worker's wrangler.toml, the authority for its bindings, queues and containers.
@@ -150,6 +151,12 @@ pub const BINDINGS: &[Binding] = &[
     },
 ];
 
+/// The object storage accounts. Empty on purpose: storage stays off until the person declares
+/// an account here (see docs/plans/storage-providers.md).
+pub fn storage_accounts() -> Vec<storage::Account> {
+    Vec::new()
+}
+
 /// The capabilities this Worker hosts.
 pub fn capabilities() -> Vec<Box<dyn Capability>> {
     vec![
@@ -194,6 +201,10 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
             url: "https://github.com/pigeon-security/pigeon.git".into(),
             token_binding: "GITHUB_MIRROR_TOKEN".into(),
             tool: "source_mirror",
+        }),
+        // Read-only object storage; with no accounts declared its tools only explain setup.
+        Box::new(Storage {
+            accounts: storage_accounts(),
         }),
         Box::new(Users { host: HOST.into() }),
         Box::new(Passkeys {

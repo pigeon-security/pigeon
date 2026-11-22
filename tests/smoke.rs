@@ -2937,6 +2937,205 @@ fn expiry_readings() {
     assert!(matches!(github_expiry(502, None), Expiry::Unknown { .. }));
 }
 
+// ---- storage ----
+
+#[test]
+fn storage_reads_s3_compatible_accounts() {
+    use pigeon_capabilities::storage::{self, Account, Mode, Provider};
+    use pigeon_core::s3::{self, Endpoint, Keys};
+    let keys = Keys {
+        access_key_id: "AKIAIOSFODNN7EXAMPLE".into(),
+        secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".into(),
+    };
+    let aws = Endpoint {
+        base: "https://examplebucket.s3.amazonaws.com".into(),
+        region: "us-east-1".into(),
+    };
+    let date = "20130524T000000Z";
+
+    // AWS's published header-auth example.
+    let headers = s3::sign(
+        "GET",
+        &aws,
+        "/test.txt",
+        &[],
+        &[("range".into(), "bytes=0-9".into())],
+        s3::EMPTY_SHA256,
+        &keys,
+        date,
+    );
+    let auth = &headers
+        .iter()
+        .find(|(k, _)| k == "authorization")
+        .unwrap()
+        .1;
+    assert!(
+        auth.ends_with(
+            "Signature=f0e8bdb87c964420e857bd35b5d6ed310bd44f0170aba48dd91039c6036bdb41"
+        ),
+        "{auth}"
+    );
+    assert!(auth.contains("SignedHeaders=host;range;x-amz-content-sha256;x-amz-date"));
+    // AWS's published query-string example, past the tool's cap, so the inner function.
+    let url = s3::presign_url(&aws, "/test.txt", &keys, date, 86_400);
+    assert!(
+        url.ends_with(
+            "X-Amz-Signature=aeeed9bbccd4d02ee5c0109b86d86835f995330da4c265957d157751f604d404"
+        ),
+        "{url}"
+    );
+    assert!(url.contains(
+        "X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20130524%2Fus-east-1%2Fs3%2Faws4_request"
+    ));
+    assert!(s3::presign_get(&aws, "/test.txt", &keys, date, 86_400).is_err());
+    assert!(s3::presign_get(&aws, "/test.txt", &keys, date, 0).is_err());
+    assert!(s3::presign_get(&aws, "/test.txt", &keys, date, 3600).is_ok());
+
+    // Encoding.
+    assert_eq!(s3::uri_encode("a b/ü.txt", false), "a%20b/%C3%BC.txt");
+    assert_eq!(s3::uri_encode("a b/ü~-._", true), "a%20b%2F%C3%BC~-._");
+    assert_eq!(s3::object_path("bkt", "dir/a b"), "/bkt/dir/a%20b");
+
+    // Keys.
+    let k = s3::parse_keys(" AKID : sec/ret:x \n").unwrap();
+    assert_eq!(k.access_key_id, "AKID");
+    assert_eq!(k.secret_access_key, "sec/ret:x");
+    assert!(!format!("{k:?}").contains("sec/ret"));
+    for bad in ["", "nocolon", ":secret", "id:", "id:sec ret", "i d:secret"] {
+        let e = s3::parse_keys(bad).unwrap_err().to_string();
+        assert!(bad.len() < 4 || !e.contains(bad), "{e}");
+    }
+    assert!(
+        !s3::parse_keys("id:sec ret")
+            .unwrap_err()
+            .to_string()
+            .contains("sec ret")
+    );
+
+    // Recorded answers.
+    let buckets = s3::parse_list_buckets(
+        "<?xml version=\"1.0\"?><ListAllMyBucketsResult><Owner><ID>x</ID></Owner><Buckets>\
+         <Bucket><Name>photos</Name><CreationDate>2020-01-02T03:04:05.000Z</CreationDate></Bucket>\
+         <Bucket><Name>logs</Name><CreationDate>2021-01-02T03:04:05.000Z</CreationDate></Bucket>\
+         </Buckets></ListAllMyBucketsResult>",
+    )
+    .unwrap();
+    assert_eq!(buckets.len(), 2);
+    assert_eq!(buckets[1].name, "logs");
+    assert_eq!(buckets[0].created, "2020-01-02T03:04:05.000Z");
+    assert!(s3::parse_list_buckets("<Error/>").is_err());
+
+    let page = s3::parse_list_objects(
+        "<ListBucketResult><Name>b</Name><Prefix>a/</Prefix><IsTruncated>true</IsTruncated>\
+         <NextContinuationToken>tok/en==</NextContinuationToken>\
+         <Contents><Key>a/one.txt</Key><LastModified>2020-01-01T00:00:00.000Z</LastModified>\
+         <ETag>&quot;abc&quot;</ETag><Size>12</Size></Contents>\
+         <CommonPrefixes><Prefix>a/sub/</Prefix></CommonPrefixes></ListBucketResult>",
+    )
+    .unwrap();
+    assert_eq!(page.objects.len(), 1);
+    assert_eq!(page.objects[0].size, 12);
+    assert_eq!(page.objects[0].etag, "abc");
+    assert_eq!(page.prefixes, vec!["a/sub/".to_string()]);
+    assert_eq!(page.next.as_deref(), Some("tok/en=="));
+    let last = s3::parse_list_objects(
+        "<ListBucketResult><IsTruncated>false</IsTruncated>\
+         <Contents><Key>x &amp; y.txt</Key><Size>0</Size></Contents></ListBucketResult>",
+    )
+    .unwrap();
+    assert_eq!(last.objects[0].key, "x & y.txt");
+    assert_eq!(last.next, None);
+
+    assert_eq!(
+        s3::parse_error(
+            403,
+            "<Error><Code>AccessDenied</Code><Message>Access &lt;Denied&gt;</Message></Error>"
+        ),
+        "S3 403 AccessDenied: Access <Denied>"
+    );
+    assert_eq!(s3::parse_error(404, ""), "S3 404");
+    assert!(
+        s3::parse_error(
+            500,
+            &format!(
+                "<Error><Code>X</Code><Message>{}</Message></Error>",
+                "m".repeat(500)
+            )
+        )
+        .len()
+            <= 200
+    );
+
+    // Queries and dates.
+    let q = s3::list_objects_query(Some("a/"), Some("/"), 5000, Some("t"));
+    assert!(q.contains(&("max-keys".into(), "1000".into())));
+    assert!(q.contains(&("list-type".into(), "2".into())));
+    assert!(q.contains(&("continuation-token".into(), "t".into())));
+    let q = s3::list_objects_query(None, None, 0, None);
+    assert!(q.contains(&("max-keys".into(), "1".into())));
+    assert_eq!(q.len(), 2);
+    assert_eq!(s3::amz_date(1_369_353_600_000.0), "20130524T000000Z");
+    assert_eq!(s3::amz_date(1_700_000_000_000.0), "20231114T221320Z");
+
+    // The registry.
+    let sw = Account::scaleway("personal", "fr-par");
+    assert_eq!(sw.endpoint, "https://s3.fr-par.scw.cloud");
+    assert_eq!(sw.id(), "scaleway:personal");
+    assert_eq!(sw.binding(), "STORAGE_SCALEWAY_PERSONAL");
+    let docean = Account::digitalocean("old-one", "nyc3");
+    assert_eq!(docean.endpoint, "https://nyc3.digitaloceanspaces.com");
+    assert_eq!(docean.mode, Mode::ReadOnly);
+    assert_eq!(docean.binding(), "STORAGE_DIGITALOCEAN_OLD_ONE");
+    let b2 = Account::backblaze("bk", "us-west-004");
+    assert_eq!(b2.endpoint, "https://s3.us-west-004.backblazeb2.com");
+    assert_eq!(b2.provider, Provider::Backblaze);
+    assert!(storage::validate(&[sw.clone(), docean.clone(), b2.clone()]).is_ok());
+    assert!(storage::validate(&[]).is_ok());
+
+    let mut rw = docean.clone();
+    rw.mode = Mode::ReadWrite;
+    assert!(storage::validate(&[rw]).is_err());
+    for name in ["", "Bad", "-x", "x-", "a_b", &"a".repeat(33)] {
+        assert!(
+            storage::validate(&[Account::scaleway(name, "fr-par")]).is_err(),
+            "{name}"
+        );
+    }
+    assert!(storage::validate(&[sw.clone(), sw.clone()]).is_err());
+    let mut slash = sw.clone();
+    slash.endpoint.push('/');
+    assert!(storage::validate(&[slash]).is_err());
+    let mut http = sw.clone();
+    http.endpoint = "http://s3.fr-par.scw.cloud".into();
+    assert!(storage::validate(&[http]).is_err());
+    let mut shortb = sw.clone();
+    shortb.buckets = vec!["ab".into()];
+    assert!(storage::validate(&[shortb]).is_err());
+
+    // Finding, and the setup text with no accounts.
+    let e = storage::find(&[], "scaleway:personal")
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("STORAGE_<PROVIDER>_<NAME>"));
+    let e = storage::find(std::slice::from_ref(&sw), "scaleway:other")
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("scaleway:personal"));
+    assert_eq!(
+        storage::find(std::slice::from_ref(&sw), "scaleway:personal")
+            .unwrap()
+            .name,
+        "personal"
+    );
+
+    // Bucket limits.
+    let mut limited = sw.clone();
+    assert!(storage::bucket_allowed(&limited, "anything"));
+    limited.buckets = vec!["photos".into()];
+    assert!(storage::bucket_allowed(&limited, "photos"));
+    assert!(!storage::bucket_allowed(&limited, "logs"));
+}
+
 // ---- mirror ----
 
 #[test]
