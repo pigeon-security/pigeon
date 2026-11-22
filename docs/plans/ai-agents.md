@@ -691,4 +691,5 @@ pure and well under a second.
     field on core's `Caller`. Audit lines and approval cards name the run's delegate ("Pigeon
     executor"), and the run's id is in its model tasks (`ai-agent/{run}/…`) and its branch.
   - Revoking a run's grant when it ends is left for later. The grant lives 12 hours.
+- 2026-11-22: first live executor run through the model gateway (this commit).
 
