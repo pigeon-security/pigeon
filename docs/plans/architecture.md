@@ -129,8 +129,11 @@ I check each result, apply it, and run fmt, clippy and the smoke suite myself.
   with commit 0c9db6067d2d, 5 Durable Objects, the container, `proxy.pigeon.dev` and no unused
   bindings. Phase 3's check is built on `claude/architecture-3`.
 - 2026-11-22: after the Workers split. The model still describes one Worker. Findings and the
-  fix plan are in "After the split" below. Phases 5 to 8 are built on executor branches. Nothing
-  is landed: the person reviews first.
+  fix plan are in "After the split" below. Nothing is landed: the person reviews first.
+- 2026-11-22: phase 5 was not built. Three executor runs (`IOLExAeb1AJj`, `03Lpp6kAJPqz`,
+  `Ce7SwxUH5L93`) failed before they started: their sandboxes could not clone ("destination
+  path '/work' already exists"). No code has changed. Phases 5 to 8 are still to do, with the
+  phase 5 brief as given to those runs.
 
 ## After the split (2026-11-22)
 
@@ -195,10 +198,10 @@ Phases, each an executor branch built on the one before:
 
 | Phase | What | Branch |
 | --- | --- | --- |
-| 5 | Model: one Worker per `ci/workers.toml` entry from its `wrangler.toml` (`services`, `script_name`, crons read); tools attributed by Worker; Durable Object ownership; service-binding and cross-Worker object links; `externals`; the portal host; `PROXY_WORKER` set to `pigeon-proxy`; the ai-agents footprint fixed; the memo rebuilt when the capabilities change. Smoke scenario `architecture_draws_every_worker_in_the_map` | executor E6 |
-| 6 | Drawing: a Workers layer with core and the five capability Workers, binding arrows with their names, each Worker's objects, containers and secrets; an external services layer; the lanes | executor E7 |
-| 7 | Live per-Worker facts: each capability Worker sends its own `wrangler.toml` summary and commit in its manifest, so a capability-only landing shows at once, without a core deploy | executor E8 |
-| 8 | Instances layer (console and `architecture_describe` only): accounts as home or linked, zones, the instance Worker, buckets, hostnames. No account ids, titles or installation ids | executor E9 |
+| 5 | Model: one Worker per `ci/workers.toml` entry from its `wrangler.toml` (`services`, `script_name`, crons read); tools attributed by Worker; Durable Object ownership; service-binding and cross-Worker object links; `externals`; the portal host; `PROXY_WORKER` set to `pigeon-proxy`; the ai-agents footprint fixed; the memo rebuilt when the capabilities change. Smoke scenario `core_architecture_draws_every_worker_in_the_map` | executor |
+| 6 | Drawing: a Workers layer with core and the five capability Workers, binding arrows with their names, each Worker's objects, containers and secrets; an external services layer; the lanes | executor |
+| 7 | Live per-Worker facts: each capability Worker sends its own `wrangler.toml` summary and commit in its manifest, so a capability-only landing shows at once, without a core deploy | executor |
+| 8 | Instances layer (console and `architecture_describe` only): accounts as home or linked, zones, the instance Worker, buckets, hostnames. No account ids, titles or installation ids | executor |
 
 Gate: no change is needed for phases 5 to 8. For the record, if the person prefers not to rely
 on phase 7, the alternative is a gate change: add each capability Worker's `wrangler.toml` to
