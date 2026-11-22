@@ -23,6 +23,7 @@ toml = { version = "0.8", default-features = false, features = ["parse"] }
 [dev-dependencies]
 pigeon-ai-agents = { path = "../ai-agents" }
 pigeon-blog = { path = "../blog" }
+pigeon-email = { path = "../email" }
 rsa = { version = "0.9", default-features = false, features = ["std"] }
 sha2 = "0.10"
 p256 = { version = "0.13", default-features = false, features = ["ecdsa"] }

@@ -5,6 +5,9 @@
 //! `dot` with `kind-worker|access|store|api`, `region` (`.cloudflare`, `.github`,
 //! `region-name`), `layer` and `cards`, `arrow` (label in a `<span>`), `kv`, `chain`, `legend`.
 
+/// The tokens as Swift source for the iOS app.
+pub mod swift;
+
 /// Colours, radii, spacing and type, dark first, light by `prefers-color-scheme` or
 /// `[data-theme]`.
 pub const TOKENS: &str = include_str!("design/tokens.css");

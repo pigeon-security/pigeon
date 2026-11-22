@@ -3384,6 +3384,41 @@ fn webhook_and_oidc_sign(header: &Value, claims: &Value) -> String {
     format!("{signed}.{}", b64url(&sig.to_bytes()))
 }
 
+// ---- design ----
+
+#[test]
+fn platform_design_tokens_for_ios() {
+    use pigeon_core::design::swift;
+
+    // The committed Swift file is what the generator writes now.
+    let out = swift::generated().unwrap();
+    assert!(
+        include_str!("../ios/Pigeon/Design/Tokens.swift") == out,
+        "ios/Pigeon/Design/Tokens.swift drifted from tokens.css: run the design_swift example"
+    );
+
+    // Spot values.
+    assert!(out.ends_with("}\n") && !out.ends_with("\n\n"));
+    assert!(out.contains(
+        "static let background = dynamic(light: (0xF4, 0xEE, 0xE3, 1.0), dark: (0x14, 0x12, 0x1A, 1.0))"
+    ));
+    assert!(out.contains("static let accentSoft = dynamic("));
+    assert!(out.contains("static let radiusCard: CGFloat = 14"));
+    assert!(out.contains(
+        "static let typeEyebrow = TypeToken(weight: 600, size: 12, lineHeight: 1.3, mono: true)"
+    ));
+
+    // Errors name the token.
+    let css = |dark: &str, light: &str| {
+        format!(":root {{ {dark} }}\n:root[data-theme=\"light\"] {{ {light} }}\n")
+    };
+    let e = swift::tokens(&css("--a: #000000; --b: #111111;", "--a: #FFFFFF;")).unwrap_err();
+    assert!(e.contains("--b"), "{e}");
+    let e = swift::tokens(&css("--blur: 4em;", "")).unwrap_err();
+    assert!(e.contains("--blur"), "{e}");
+    assert!(swift::tokens(&css("--a: #000000;", "--a: #FFFFFF;")).is_ok());
+}
+
 // ---- console ----
 
 fn console_sign_in_and_a_write_assertion(
@@ -4436,6 +4471,118 @@ fn instances_are_data_a_person_approves() {
     assert!(site_for_host(&all, "noisypigeon.pigeon.dev.evil.com", "pigeon.dev").is_none());
 }
 
+// ---- Buildkite iOS pipelines ----
+
+#[test]
+fn ci_buildkite_ios_pipelines() {
+    use pigeon_ci::buildkite::ios::{Ios, Pipeline, off_note, pipelines, shape, validate, yaml};
+
+    // Off by default.
+    let off = pipelines(None).unwrap_err();
+    assert_eq!(off, off_note());
+    assert!(off.contains("docs/plans/ios.md"));
+
+    let ios = Ios {
+        host: "platform.example".into(),
+        build_pipeline: "pigeon-ios".into(),
+        release_pipeline: "pigeon-ios-release".into(),
+        queue: "pigeon-macos".into(),
+        sign_queue: "pigeon-macos-sign".into(),
+        release_branch: "main".into(),
+    };
+    let (build, release) = pipelines(Some(&ios)).unwrap();
+    let macos = ["pigeon-macos", "pigeon-macos-sign"];
+    let sign = ["pigeon-macos-sign"];
+    assert!(validate(&build, &macos, &sign).is_empty());
+    assert!(validate(&release, &macos, &sign).is_empty());
+
+    let want_build = "steps:
+  - label: \"iOS build and tests\"
+    key: \"ios-check\"
+    agents:
+      queue: \"pigeon-macos\"
+    checkout:
+      skip: true
+    command: \"curl -fsSL --retry 3 https://platform.example/ci/buildkite.sh | sh\"
+    env:
+      PIGEON_JOB_KIND: \"ios-check\"
+    timeout_in_minutes: 60
+";
+    let want_release = "steps:
+  - label: \"iOS archive, unsigned\"
+    key: \"ios-archive\"
+    branches: \"main\"
+    agents:
+      queue: \"pigeon-macos\"
+    checkout:
+      skip: true
+    command: \"curl -fsSL --retry 3 https://platform.example/ci/buildkite.sh | sh\"
+    env:
+      PIGEON_JOB_KIND: \"ios-archive\"
+    artifact_paths: [\"ios/build/Pigeon.xcarchive.zip\"]
+    timeout_in_minutes: 60
+  - label: \"iOS sign and upload to TestFlight\"
+    key: \"ios-sign-upload\"
+    depends_on: [\"ios-archive\"]
+    branches: \"main\"
+    agents:
+      queue: \"pigeon-macos-sign\"
+    checkout:
+      skip: true
+    command: \"curl -fsSL --retry 3 https://platform.example/ci/buildkite-sign.sh | sh\"
+    env:
+      PIGEON_JOB_KIND: \"ios-sign-upload\"
+    timeout_in_minutes: 30
+    concurrency_group: \"pigeon-ios-release/sign\"
+    concurrency: 1
+";
+    assert_eq!(yaml(&build), want_build);
+    assert_eq!(yaml(&release), want_release);
+    assert!(shape(&yaml(&build)).is_empty());
+    assert!(shape(&yaml(&release)).is_empty());
+
+    // The sign step.
+    let s = &release.steps[1];
+    assert_eq!(s.depends_on, vec!["ios-archive".to_string()]);
+    assert_eq!(s.concurrency, Some(1));
+    assert_eq!(s.branches.as_deref(), Some("main"));
+
+    // Refusals.
+    let problems = |p: &Pipeline| validate(p, &macos, &sign).join("\n");
+    let mut p = release.clone();
+    p.steps[0].queue = "linux".into();
+    assert!(problems(&p).contains("not a macOS queue"));
+    let mut p = release.clone();
+    p.steps[1].key = "ios-archive".into();
+    assert!(problems(&p).contains("duplicate key"));
+    let mut p = release.clone();
+    p.steps[1].depends_on = vec!["nope".into()];
+    assert!(problems(&p).contains("depends_on `nope`"));
+    let mut p = release.clone();
+    p.steps[0].depends_on = vec!["ios-sign-upload".into()];
+    assert!(problems(&p).contains("depends_on `ios-sign-upload`"));
+    let mut p = build.clone();
+    p.steps[0].command = "echo $HOME".into();
+    assert!(problems(&p).contains("holds `$`"));
+    let mut p = build.clone();
+    p.steps[0].label = "iOS :rocket:".into();
+    assert!(problems(&p).contains("label holds `:`"));
+    let mut p = build.clone();
+    p.steps[0].timeout_min = 0;
+    assert!(problems(&p).contains("timeout_min"));
+    let mut p = release.clone();
+    p.steps[1].concurrency = None;
+    p.steps[1].concurrency_group = None;
+    assert!(problems(&p).contains("signing step must have concurrency 1"));
+
+    // A label with a quote and a newline stays one escaped scalar.
+    let mut p = build.clone();
+    p.steps[0].label = "say \"hi\"\nnow".into();
+    let y = yaml(&p);
+    assert!(y.contains("  - label: \"say \\\"hi\\\"\\nnow\"\n"));
+    assert!(shape(&y).is_empty());
+}
+
 // ---- tool call approvals ----
 
 /// The six tools the person gates with their passkey (docs/plans/tool-approvals.md).
@@ -5425,4 +5572,219 @@ fn sites_deploy_reads_a_repository_tarball() {
     assert_eq!(pigeon_core::tarball::year_of(951_782_400), 2000);
     assert!(pigeon_core::tarball::read(b"not gzip").is_err());
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The email parser (`pigeon_email`): raw MIME in, a typed message and its blobs out. It covers
+/// headers kept in order, decoded subject and names, addresses with groups flattened, the
+/// bodies, attachments stored once by content, signals, a JSON round trip, and bad input
+/// returned as an error.
+#[test]
+fn email_parses_a_multipart_message() {
+    use pigeon_email::{ContentRef, Error, Message, Role, Source, parse};
+
+    let pdf = b"%PDF-1.4 test";
+    let names = [
+        "Received",
+        "Received",
+        "Authentication-Results",
+        "Message-ID",
+        "In-Reply-To",
+        "References",
+        "List-Id",
+        "List-Unsubscribe",
+        "Date",
+        "Subject",
+        "From",
+        "To",
+        "Cc",
+        "MIME-Version",
+        "Content-Type",
+    ];
+    let sample = [
+        "Received: from mx.example.net (mx.example.net [192.0.2.1])",
+        "\tby mail.example.org with ESMTPS; Mon, 23 Nov 2026 10:15:05 +0100",
+        "Received: from client.example.net by mx.example.net; Mon, 23 Nov 2026 10:15:02 +0100",
+        "Authentication-Results: mail.example.org; spf=pass smtp.mailfrom=example.com;",
+        " dkim=pass header.d=example.com; dmarc=pass header.from=example.com",
+        "Message-ID: <msg-1@example.com>",
+        "In-Reply-To: <prev-1@example.com>",
+        "References: <root-1@example.com> <prev-1@example.com>",
+        "List-Id: Billing news <news.example.com>",
+        "List-Unsubscribe: <mailto:unsub@example.com>",
+        "Date: Mon, 23 Nov 2026 10:15:00 +0100",
+        "Subject: =?UTF-8?B?UmVjaG51bmcgZsO8ciBOb3ZlbWJlcg==?=",
+        "From: =?UTF-8?B?QsO8cm8gQmlsbGluZw==?= <Billing@Example.COM>",
+        "To: Ann <ann@example.org>, bob@example.org",
+        "Cc: team: cy@example.org, Di <di@example.net>;",
+        "MIME-Version: 1.0",
+        "Content-Type: multipart/mixed; boundary=\"outer\"",
+        "",
+        "--outer",
+        "Content-Type: multipart/alternative; boundary=\"alt\"",
+        "",
+        "--alt",
+        "Content-Type: text/plain; charset=utf-8",
+        "",
+        "Your invoice is attached.",
+        "--alt",
+        "Content-Type: text/html; charset=utf-8",
+        "",
+        "<p>Your invoice is attached.</p>",
+        "--alt--",
+        "--outer",
+        "Content-Type: application/pdf; name=\"invoice.pdf\"",
+        "Content-Disposition: attachment; filename=\"invoice.pdf\"",
+        "Content-Transfer-Encoding: base64",
+        "",
+        "JVBERi0xLjQgdGVzdA==",
+        "--outer",
+        "Content-Type: image/png; name=\"logo.png\"",
+        "Content-Disposition: inline; filename=\"logo.png\"",
+        "Content-ID: <logo@x>",
+        "Content-Transfer-Encoding: base64",
+        "",
+        "iVBORw0KGgo=",
+        "--outer",
+        "Content-Type: application/pdf; name=\"copy.pdf\"",
+        "Content-Disposition: attachment; filename=\"copy.pdf\"",
+        "Content-Transfer-Encoding: base64",
+        "",
+        "JVBERi0xLjQgdGVzdA==",
+        "--outer--",
+        "",
+    ]
+    .join("\r\n");
+    let source = Source::EmailRouting {
+        envelope_from: "bounce@example.com".into(),
+        envelope_to: "Me@Example.ORG".into(),
+    };
+    let parsed = parse(sample.as_bytes(), source.clone()).unwrap();
+    let m = &parsed.message;
+
+    assert_eq!(m.schema, 1);
+    assert_eq!(m.raw, ContentRef::of(sample.as_bytes()));
+    let key = m.raw.key();
+    assert_eq!(
+        key,
+        format!(
+            "blobs/sha256/{}/{}/{}",
+            &m.raw.sha256[0..2],
+            &m.raw.sha256[2..4],
+            m.raw.sha256
+        )
+    );
+    assert_eq!(m.raw.sha256.len(), 64);
+
+    // Every header is kept, in order; the folded Received is unfolded in `decoded`.
+    let got: Vec<&str> = m.headers.iter().map(|h| h.name.as_str()).collect();
+    assert_eq!(got, names);
+    assert!(m.headers[0].value.contains("\r\n\tby mail.example.org"));
+    assert_eq!(
+        m.headers[0].decoded.as_deref(),
+        Some(
+            "from mx.example.net (mx.example.net [192.0.2.1]) \
+             by mail.example.org with ESMTPS; Mon, 23 Nov 2026 10:15:05 +0100"
+        )
+    );
+    assert_eq!(m.headers[3].decoded, None);
+
+    assert_eq!(m.subject.as_deref(), Some("Rechnung für November"));
+    assert_eq!(m.date.as_deref(), Some("2026-11-23T09:15:00Z"));
+    assert_eq!(m.message_id.as_deref(), Some("msg-1@example.com"));
+    assert_eq!(m.in_reply_to, ["prev-1@example.com"]);
+    assert_eq!(m.references, ["root-1@example.com", "prev-1@example.com"]);
+
+    assert_eq!(m.from.len(), 1);
+    assert_eq!(m.from[0].name.as_deref(), Some("Büro Billing"));
+    assert_eq!(m.from[0].address, "Billing@Example.COM");
+    assert_eq!(m.from[0].normalized, "billing@example.com");
+    assert_eq!(m.from[0].domain, "example.com");
+    assert_eq!(m.to.len(), 2);
+    let cc: Vec<&str> = m.cc.iter().map(|a| a.normalized.as_str()).collect();
+    assert_eq!(cc, ["cy@example.org", "di@example.net"]);
+    let people = m.participants();
+    for role in [Role::From, Role::To, Role::Cc] {
+        assert!(people.iter().any(|(r, _)| *r == role));
+    }
+    assert!(
+        people
+            .iter()
+            .any(|(r, a)| *r == Role::DeliveredTo && a.normalized == "me@example.org")
+    );
+    assert!(m.delivered_to.iter().any(|a| a.address == "Me@Example.ORG"));
+
+    assert!(
+        m.text
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Your invoice is attached.")
+    );
+    let html = m.html.as_ref().unwrap();
+    let html_bytes = b"<p>Your invoice is attached.</p>";
+    assert_eq!(html, &ContentRef::of(html_bytes));
+    assert!(
+        parsed
+            .blobs
+            .iter()
+            .any(|(c, b)| c == html && b == html_bytes)
+    );
+
+    assert_eq!(m.attachments.len(), 3);
+    let pdf_ref = ContentRef::of(pdf);
+    let pdfs: Vec<_> = m
+        .attachments
+        .iter()
+        .filter(|a| a.content_type == "application/pdf")
+        .collect();
+    assert_eq!(pdfs.len(), 2);
+    assert!(pdfs.iter().all(|a| a.content == pdf_ref));
+    assert_eq!(pdfs[0].filename.as_deref(), Some("invoice.pdf"));
+    assert_eq!(pdfs[1].filename.as_deref(), Some("copy.pdf"));
+    assert_eq!(
+        parsed.blobs.iter().filter(|(c, _)| *c == pdf_ref).count(),
+        1
+    );
+    // The HTML body, the PDF and the PNG: three distinct blobs.
+    assert_eq!(parsed.blobs.len(), 3);
+    let logo = m
+        .attachments
+        .iter()
+        .find(|a| a.content_type == "image/png")
+        .unwrap();
+    assert_eq!(logo.content_id.as_deref(), Some("logo@x"));
+    assert_eq!(logo.disposition.as_deref(), Some("inline"));
+
+    let s = &m.taxonomy.signals;
+    assert!(s.is_reply);
+    assert!(!s.is_forward);
+    assert!(s.has_attachments);
+    assert_eq!(
+        s.list_id.as_deref(),
+        Some("Billing news <news.example.com>")
+    );
+    assert!(s.list_unsubscribe);
+    for method in ["spf", "dkim", "dmarc"] {
+        assert!(
+            s.auth
+                .iter()
+                .any(|a| a.method == method && a.result == "pass")
+        );
+    }
+    assert_eq!(m.taxonomy.doc_type, None);
+    assert!(m.taxonomy.labels.is_empty());
+
+    // The JSON round trip keeps the message, and parsing twice gives the same result.
+    let json = serde_json::to_string(m).unwrap();
+    let back: Message = serde_json::from_str(&json).unwrap();
+    assert_eq!(&back, m);
+    assert_eq!(parse(sample.as_bytes(), source).unwrap(), parsed);
+
+    // Bad input is returned as an error, never a panic.
+    assert_eq!(
+        parse(b"", Source::Upload { name: None }).unwrap_err(),
+        Error::Empty
+    );
+    // mail-parser finds no header section in binary junk, so parse returns NotMime.
+    let junk = parse(b"\x00\x01 not mail", Source::Upload { name: None });
+    assert!(matches!(junk, Err(Error::NotMime(_))));
 }

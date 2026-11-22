@@ -31,6 +31,7 @@ use crate::route::Availability;
 use crate::state::Report;
 use crate::{Connector, Cx, Dispatched, Held, Hook, Pending, Run, Seen, SetupRun};
 
+pub mod ios;
 pub mod setup;
 
 /// The connector's name.
