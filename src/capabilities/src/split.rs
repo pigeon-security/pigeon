@@ -378,6 +378,7 @@ pub fn purpose_permissions(purpose: &str) -> Option<&'static [&'static str]> {
             "Queues Read",
             "Workers Containers Read",
             "Workers Containers Write",
+            "Workers R2 Storage Read",
         ],
         _ => return None,
     })

@@ -1672,10 +1672,28 @@ fn deploy_proxy_allowlist() {
                 .replace("{script}", script)
                 .replace("{version}", "01234567-89ab-cdef-0123-456789abcdef")
                 .replace("{namespace}", "ns1")
+                .replace("{bucket}", "pigeon-changelog")
         )
     };
     let query =
         |q: &[&str]| (!q.is_empty()).then(|| q.join("&").replace("{queue}", "pigeon-ci-events"));
+    // An R2 bucket's own record may be read; not a name that is no bucket's, not its objects,
+    // and not by any other method.
+    let r2 = |method: &str, rest: &str| {
+        allowed(
+            method,
+            &format!("{PREFIX}/accounts/{a}/r2/buckets/{rest}"),
+            None,
+            &scope(a, s),
+        )
+        .is_ok()
+    };
+    assert!(r2("GET", "pigeon-changelog"));
+    assert!(!r2("GET", "Pigeon_Changelog"));
+    assert!(!r2("GET", "-x-"));
+    assert!(!r2("GET", "pigeon-changelog/objects/main/state.json"));
+    assert!(!r2("PUT", "pigeon-changelog"));
+    assert!(!r2("DELETE", "pigeon-changelog"));
     // Every call wrangler's deploy makes is allowed, for this account and Worker only.
     for e in &ALLOWED {
         let path = build(e.path, a, s);

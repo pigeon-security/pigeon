@@ -94,6 +94,8 @@ pub struct Allowed {
 pub const READ: &[&str] = &["Workers Scripts Read"];
 /// Changing the Worker.
 pub const WRITE: &[&str] = &["Workers Scripts Write"];
+/// Reading an R2 bucket's own record (not its objects).
+pub const R2_READ: &[&str] = &["Workers R2 Storage Read"];
 /// Reading the Worker's container applications.
 pub const CONTAINERS_READ: &[&str] = &["Workers Containers Read"];
 /// Preparing its container image, and creating or changing its container applications.
@@ -105,7 +107,7 @@ pub const UPLOAD: &[&str] = &["Workers Scripts Write", "Secrets Store Write"];
 
 /// The calls `wrangler deploy` makes (wrangler 4.166.0, recorded against a stand-in API and
 /// read in its source).
-pub const ALLOWED: [Allowed; 18] = [
+pub const ALLOWED: [Allowed; 19] = [
     // Whether the Worker exists, and its migration tag.
     Allowed {
         method: "GET",
@@ -245,6 +247,18 @@ pub const ALLOWED: [Allowed; 18] = [
         permissions: CONTAINERS_WRITE,
         body: BodyRule::ApplicationPatch,
     },
+    // An R2 bucket a Worker binds: `wrangler deploy` reads the bucket's record ([[r2_buckets]])
+    // before the upload. The bucket's own record only, never its objects, and any bucket name:
+    // the allowed name cannot come from the config being deployed, which the deploying proxy
+    // has not built yet.
+    Allowed {
+        method: "GET",
+        path: "/accounts/{account}/r2/buckets/{bucket}",
+        query: &[],
+        needs: &[],
+        permissions: R2_READ,
+        body: BodyRule::Any,
+    },
     // The account's workers.dev subdomain, read when a Worker's config turns workers.dev on
     // (the Durable Object rehearsal's throwaway Workers do). Read only: it names the account's
     // subdomain, nothing more.
@@ -300,6 +314,16 @@ pub struct Scope<'a> {
 }
 
 /// Whether `s` is a Worker version id: a UUID, with or without its hyphens.
+/// Whether `s` is an R2 bucket name: 3 to 63 of `[a-z0-9-]`, starting and ending alphanumeric.
+fn is_bucket(s: &str) -> bool {
+    let b = s.as_bytes();
+    (3..=63).contains(&b.len())
+        && b.iter()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
+        && b[0] != b'-'
+        && b[b.len() - 1] != b'-'
+}
+
 fn is_version(s: &str) -> bool {
     let hex = s.bytes().filter(|b| *b != b'-').count();
     (s.len() == 36 || s.len() == 32)
@@ -335,6 +359,7 @@ fn matches(pattern: &str, segments: &[&str], scope: &Scope<'_>) -> bool {
             "{script}" => *s == scope.script,
             "{version}" => is_version(s),
             "{namespace}" => scope.namespaces.contains(s),
+            "{bucket}" => is_bucket(s),
             literal => *s == literal,
         })
 }

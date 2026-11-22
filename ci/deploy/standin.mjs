@@ -59,6 +59,8 @@ function answer(method, path, query, body) {
   if (method === "POST" && /^workers\/scripts\/[^/]+\/deployments$/.test(rest)) return [200, ok({ id: randomUUID(), strategy: "percentage", versions: [] })];
   if (method === "PATCH" && /^workers\/scripts\/[^/]+\/script-settings$/.test(rest)) return [200, ok({ logpush: false, tail_consumers: [], observability: null, tags: [] })];
   if (method === "GET" && rest === "workers/subdomain") return [200, ok({ subdomain: "stand-in" })];
+  if (method === "GET" && /^r2\/buckets\/[a-z0-9-]+$/.test(rest))
+    return [200, ok({ name: rest.slice("r2/buckets/".length), location: "ENAM", creation_date: "2026-11-22T00:00:00Z" })];
   if (method === "POST" && /^workers\/scripts\/[^/]+\/subdomain$/.test(rest)) return [200, ok({ enabled: false, previews_enabled: false })];
   if (method === "PUT" && /^workers\/scripts\/[^/]+\/schedules$/.test(rest)) {
     let schedules = [];
