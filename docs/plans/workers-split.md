@@ -86,15 +86,16 @@ never transferred.
 
 ## End state
 
-Four platform Workers in one repository, with an optional fifth:
+Five platform Workers in one repository, named by the person: `pigeon-platform` (core),
+`pigeon-ci-gateway`, `pigeon-model-gateway`, `pigeon-sites` and `pigeon-proxy`.
 
 | Worker | Script | Owns | Durable Objects | Secrets |
 | --- | --- | --- | --- | --- |
 | core | `pigeon-platform` | identity (users, passkeys, oauth), policy, approvals, dispatch, secrets, instances records, linked accounts, land, source and mirror, the console shell, architecture, the pigeon.dev page, the proxies (until phase 6) | `Directory`, `Lander` | `CF_PARENT_TOKEN`, `GITHUB_MIRROR_TOKEN`, `CF_OAUTH_CLIENT_SECRET`, `LINK_KEY`, `CALLER_KEY` |
-| ci | `pigeon-ci` | gateway, scheduler, runner and container, Buildkite setup and webhooks, `ci_*` and `containers_images` | `CiScheduler`, `CiRunner` (+ container) | `BUILDKITE_API_TOKEN`, `CALLER_KEY` |
-| models | `pigeon-models` | AI Gateway, `models_*`, model jobs | `ModelJobs` | `CALLER_KEY` |
+| ci | `pigeon-ci-gateway` | gateway, scheduler, runner and container, Buildkite setup and webhooks, `ci_*` and `containers_images` | `CiScheduler`, `CiRunner` (+ container) | `BUILDKITE_API_TOKEN`, `CALLER_KEY` |
+| models | `pigeon-model-gateway` | AI Gateway, `models_*`, model jobs | `ModelJobs` | `CALLER_KEY` |
 | sites | `pigeon-sites` | `blog@1` renderer, instance site deploys (render, R2 upload, routes, subdomains), `instance_plan` / `instance_apply` | none | `CALLER_KEY` |
-| proxy (optional) | `pigeon-proxy` | `/git/`, `/cf/` on proxy.pigeon.dev | none | decided in phase 6 |
+| proxy | `pigeon-proxy` | `/git/`, `/cf/` on proxy.pigeon.dev | none | decided in phase 6 |
 
 A capability Worker never holds the parent token or a linked account's OAuth tokens. It asks
 core for a short-lived, scoped token through the contract's `credential` op (below). Core mints
@@ -124,7 +125,7 @@ Back the other way, a capability Worker calls core through its `PLATFORM` bindin
 
 | Op | Request | Answer |
 | --- | --- | --- |
-| `credential` | `{caller, purpose: {kind, instance?, scopes}}` | `{token, expires_at}`: a minted Cloudflare token or a linked account's access token, under 15 min |
+| `credential` | `{caller, purpose: {kind, instance?, scopes}}` | `{token, account_id, expires_at}`: a minted Cloudflare token (under 15 min), or a linked account's access token, already refreshed, with its own expiry (at most 1 h) |
 | `dispatch` | `{caller, tool, args}` | a core tool's answer, through core's gate (for example ci asking `users_whoami`) |
 
 Rules:
@@ -175,8 +176,9 @@ src/contract/      pigeon-contract      the contract (new; shared)
 src/capabilities/  pigeon-capabilities  core's capabilities, Remote (core)
 src/platform/      pigeon-platform      core Worker
 src/sites/         pigeon-sites         sites Worker: lib + wrangler.toml (phase 2)
-src/models/        pigeon-models        models Worker (phase 3)
-src/ci/            pigeon-ci            ci Worker (phase 4)
+src/proxy/         pigeon-proxy         proxy Worker (phase 6)
+src/models/        pigeon-model-gateway        models Worker (phase 3)
+src/ci/            pigeon-ci-gateway            ci Worker (phase 4)
 ```
 
 A capability Worker's crate depends on `pigeon-core` and `pigeon-contract` only, never on
@@ -364,23 +366,23 @@ Order and checks:
 
 | Task | What |
 | --- | --- |
-| T16 | `src/models` crate, moving `models.rs`, `models/*` and `ai_gateway` callers. Gateway and parent tokens come through `credential` |
+| T16 | `src/model-gateway` crate, moving `models.rs`, `models/*` and `ai_gateway` callers. Gateway and parent tokens come through `credential` |
 | T17 | Rehearsal, before anything live: two throwaway scripts in pigeon's account (`pigeon-dotest-a`, `pigeon-dotest-b`) with a SQLite class holding rows and a pending alarm. Transfer a→b with `transferred_classes`, then check rows, ids (`idFromName`) and the alarm. Then delete both. These deploys need names the proxy does not allow, so the person deploys them once with a `deploy_token`, or the map gains them for the rehearsal |
-| T18 | `pigeon-models` with `[[migrations]] tag = "v1"`, `transferred_classes = [{from = "ModelJobs", from_script = "pigeon-platform", to = "ModelJobs"}]`. Core's `MODEL_JOBS` binding gains `script_name = "pigeon-models"` in the same release and stops exporting the class after the transfer |
+| T18 | `pigeon-model-gateway` with `[[migrations]] tag = "v1"`, `transferred_classes = [{from = "ModelJobs", from_script = "pigeon-platform", to = "ModelJobs"}]`. Core's `MODEL_JOBS` binding gains `script_name = "pigeon-model-gateway"` in the same release and stops exporting the class after the transfer |
 
 Order, rollback and fallback:
 - **Order:**
   1. Drain: no running model job. `models_status` shows none, and `models_submit` refuses for
      the window.
-  2. Deploy `pigeon-models` (the transfer happens here).
+  2. Deploy `pigeon-model-gateway` (the transfer happens here).
   3. Deploy core with the `script_name` binding and `MODELS` service binding.
   4. Live check: `models_submit` haiku, then `models_result`.
 - **Rollback:** a transfer cannot be rolled back. Before step 2, cancelling is "redeploy without
-  the transfer". After it, roll back by fixing forward in `pigeon-models`. Core's binding keeps
-  pointing there. If `pigeon-models` cannot serve, a new class `ModelJobs2` in core
+  the transfer". After it, roll back by fixing forward in `pigeon-model-gateway`. Core's binding keeps
+  pointing there. If `pigeon-model-gateway` cannot serve, a new class `ModelJobs2` in core
   (`new_sqlite_classes`) takes new jobs, and history stays readable through the old binding.
   Model jobs are minutes long, so losing in-flight ones is the worst case, and step 1 avoids it.
-- **Fallback if the rehearsal shows ids or alarms lost:** no transfer. `pigeon-models` gets a new
+- **Fallback if the rehearsal shows ids or alarms lost:** no transfer. `pigeon-model-gateway` gets a new
   class. Core keeps `ModelJobs` read-only until its last job ends, then a later release deletes
   it (`deleted_classes`).
 
@@ -388,7 +390,7 @@ Order, rollback and fallback:
 
 | Task | What |
 | --- | --- |
-| T19 | `src/ci` crate: `ci.rs`, `ci/*`, the Buildkite setup, the containers connector and the scheduler and runner shims from `src/platform/src/lib.rs`. The Buildkite webhook moves to a forwarded route |
+| T19 | `src/ci-gateway` crate: `ci.rs`, `ci/*`, the Buildkite setup, the containers connector and the scheduler and runner shims from `src/platform/src/lib.rs`. The Buildkite webhook moves to a forwarded route |
 | T20 | The Lander's CI use goes through the contract: `dispatch` of `ci_submit`/`ci_status`/`ci_cancel` and a `job_grant` op. It no longer reads `CI_SCHEDULER` directly |
 | T21 | The deploy proxy's `deploy_caller` asks ci for job grants over the binding |
 
@@ -398,17 +400,17 @@ Durable Objects:
   window. A landing's test can't run during the window, so it is scheduled when the queue is
   empty.
 - **`CiRunner` (container)** is not transferred; the docs say nothing about container classes.
-  `pigeon-ci` declares a new class `CiRunner` with `new_sqlite_classes` and its `[[containers]]`.
+  `pigeon-ci-gateway` declares a new class `CiRunner` with `new_sqlite_classes` and its `[[containers]]`.
   Runner objects are per job attempt, so nothing needs to survive. Core deletes its `CiRunner`
   (`deleted_classes`) one release later, once the drain shows no live attempt.
 - **Order:**
   1. Drain.
-  2. Deploy `pigeon-ci` (transfer plus the new runner class). The container image is pushed by
+  2. Deploy `pigeon-ci-gateway` (transfer plus the new runner class). The container image is pushed by
      the same deploy.
-  3. Deploy core with `CI_SCHEDULER script_name = "pigeon-ci"`, the `CI` service binding and the
+  3. Deploy core with `CI_SCHEDULER script_name = "pigeon-ci-gateway"`, the `CI` service binding and the
      forwarded webhook route.
   4. Live: the `smoke` job on Containers and on Buildkite, then a landing end to end.
-- **Rollback:** before step 2, nothing has moved. After it, fix forward in `pigeon-ci`. If the
+- **Rollback:** before step 2, nothing has moved. After it, fix forward in `pigeon-ci-gateway`. If the
   scheduler cannot serve, core's old Lander can still land through a hand-made `deploy_token`
   deploy (docs/proxies.md, break-glass), which needs no CI.
 - `CI_EVENTS` moves with ci as a producer. Its consumer stays core's queue handler, which fans
@@ -426,11 +428,21 @@ lanes once two or more Workers exist:
 Live check: three landings at once (docs, sites, core) with no refusal, each deploying only its
 own Worker.
 
-### Phase 6 (optional): proxy
+### Phase 6: proxy (`pigeon-proxy`)
 
-This is worth it only if proxy deploys turn out to be the frequent ones. `/git/` and `/cf/` read
-the Directory (proxy credentials) and the Lander (deploy grants), so a proxy Worker would call
-core on every request. Decide after phase 5, using the landing history.
+The person named it, so it is planned. `/git/` and `/cf/` move to `pigeon-proxy`, served on
+proxy.pigeon.dev (its custom domain moves from `pigeon-platform`: the one capability Worker with
+a public hostname, since the proxy credential is checked there). The proxies need the Directory
+(proxy credentials) and the Lander and `pigeon-ci-gateway` (deploy grants). So:
+- `pigeon-proxy` asks core `verify {credential}` over `PLATFORM` and caches the answer for 60 s,
+  per isolate, keyed by a hash of the credential. Revocation therefore takes up to 60 s.
+- A deploy grant is never cached: it is asked each time.
+- The cost is one extra invocation per git or API request. The gain is that a change to the
+  allowlist or git proxy deploys without core.
+- The `deploy.sh` caveat (a proxy change that the deployed proxy refuses before the upload)
+  stays, but now only for `pigeon-proxy`'s own deploys.
+- Cutover: deploy `pigeon-proxy` with no domain, check it on its own, then move the custom
+  domain in one call (`setup_proxy_host` names the new script). Rollback is moving it back.
 
 ## Parallel work and landings
 
@@ -439,16 +451,16 @@ core on every request. Decide after phase 5, using the landing history.
 | A | T1, T2, T3, T4 (contract) ‖ T6, T7, T9 (queue), then T8 | two landings, back to back today; 1b first if the blog and linked planners also want to land, since it queues them |
 | B | T10–T15 (sites) ‖ T16 (models code move, no transfer yet) ‖ T17 rehearsal | sites in one landing; models code waits on T17 |
 | C | T18 (models transfer) ‖ T19–T21 (ci code) | models, then ci (drained window) |
-| D | phase 5 | one landing |
+| D | phase 5 ‖ phase 6 code | lanes, then proxy with its domain move |
 
 Before each landing I check `land_status` and the other planners' branches, and land nothing
 over their in-flight work.
 
 ## Coordination
 
-- **Blog planner.** `blog@1` stays as built. Its home after phase 2 is `src/sites/src/blog/`.
-  Their landing is not held for this. If phase 2 is ready first, I move their code; if theirs is,
-  T11 is the move.
+- **Blog planner.** `blog@1` lands now in `pigeon-core` as a leaf module (no other core module,
+  nothing calls it). T11 moves it unchanged to `src/sites/src/blog/`. Until then a change to it
+  is a `shared` change, so keep it rare.
 - **Linked-accounts planner.** `instance_plan`/`instance_apply` and site deploys move to
   `pigeon-sites`. The OAuth tokens stay in core's Directory. Sites asks
   `PLATFORM.credential {kind: "linked", instance}` for a short-lived access token.
@@ -456,15 +468,18 @@ over their in-flight work.
 
 ## Open questions for the person
 
-1. Model job runner: may `pigeon-models` hold a minted gateway token for a job's lifetime (up to
+1. Model job runner: may `pigeon-model-gateway` hold a minted gateway token for a job's lifetime (up to
    about 15 min)? The alternative is asking core per stream chunk.
 2. The DO rehearsal (T17) deploys two throwaway scripts. Either you deploy them once with a
    `deploy_token`, or the map lists them for the rehearsal and removes them after. The second
    way is a gate change (delegate).
-3. Phase 6 (proxy): decide later, as above?
 
 ## Log
 
+- 2026-11-22: the person named the Workers: pigeon-platform, pigeon-ci-gateway,
+  pigeon-model-gateway, pigeon-sites, pigeon-proxy (proxy is planned, no longer optional). The
+  blog planner lands `pigeon_core::blog` as a leaf. The linked-accounts planner agreed the
+  `credential` seam.
 - 2026-11-22: design. Read the plans, `policy.toml`, `ci.toml`, `ci/`, `src/platform` and the
   capabilities named in the brief. Read the blog and instance branches in flight. Checked
   Cloudflare's DO migration, Containers and Service Binding docs.
