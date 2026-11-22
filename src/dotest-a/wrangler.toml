@@ -11,9 +11,11 @@ preview_urls = false
 [build]
 command = "cargo install -q worker-build@0.9.0 && worker-build --release"
 
+# The class moved to pigeon-dotest-b (its `transferred_classes`): this binding reaches it there.
+# This Worker keeps its v1 migration and still exports the class.
 [durable_objects]
 bindings = [
-  { name = "PROBE", class_name = "Probe" },
+  { name = "PROBE", class_name = "Probe", script_name = "pigeon-dotest-b" },
 ]
 
 [[migrations]]
