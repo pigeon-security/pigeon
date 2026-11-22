@@ -136,7 +136,13 @@ async fn fetch(req: Request, env: Env, ctx: WorkerContext) -> Result<Response> {
     // A capability Worker asking core, over its `PLATFORM` binding; never from the internet,
     // which reaches this Worker only on its own hostnames.
     if host == split::CORE_HOST {
-        let caps = settings::capabilities();
+        // `dispatch` runs any tool, so it needs the bound Workers' capabilities too (an AI agent
+        // run's `models_submit` is the model gateway's); the proxy's checks need core's alone.
+        let caps = if path == "/dispatch" {
+            split::all(&env, settings::capabilities(), settings::BINDINGS).await
+        } else {
+            settings::capabilities()
+        };
         let hosted = hosted(&caps);
         let account = account(&env).await?;
         let cx = Context {
