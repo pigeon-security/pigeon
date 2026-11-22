@@ -309,19 +309,19 @@ impl Instances {
 
     /// Every instance as the console shows it: its record and its link's state.
     async fn listed(&self, env: &Env) -> Result<Value> {
-        let instances: Vec<Value> = all(env)
-            .await?
-            .into_iter()
-            .map(|i| {
-                let link = match i.account {
-                    record::AccountRef::Home => json!({ "status": "this account" }),
-                    record::AccountRef::Linked { .. } => json!({ "status": "not linked" }),
-                };
-                let mut v = to_value(i);
-                v["link"] = link;
-                v
-            })
-            .collect();
+        let mut instances: Vec<Value> = Vec::new();
+        for i in all(env).await? {
+            let link = match i.account {
+                record::AccountRef::Home => json!({ "status": "this account" }),
+                record::AccountRef::Linked { .. } => {
+                    let l = crate::linked::link(env, &i.id).await?;
+                    crate::linked::status(l.as_ref(), worker::js_sys::Date::now())
+                }
+            };
+            let mut v = to_value(i);
+            v["link"] = link;
+            instances.push(v);
+        }
         Ok(json!({ "zone": self.zone, "instances": instances, "template": template() }))
     }
 }

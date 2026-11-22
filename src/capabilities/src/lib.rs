@@ -15,6 +15,7 @@ pub mod git_proxy;
 pub mod images;
 pub mod instances;
 pub mod land;
+pub mod linked;
 pub mod mirror;
 pub mod models;
 pub mod notify;

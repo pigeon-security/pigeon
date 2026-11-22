@@ -16,6 +16,7 @@ use pigeon_capabilities::git_proxy::GitProxy;
 use pigeon_capabilities::images::Images;
 use pigeon_capabilities::instances::Instances;
 use pigeon_capabilities::land::{self, Land};
+use pigeon_capabilities::linked::Linked;
 use pigeon_capabilities::mirror::{self, Mirror};
 use pigeon_capabilities::models::{Dialect, Models, Provider};
 use pigeon_capabilities::oauth::OAuth;
@@ -213,6 +214,15 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
         Box::new(Architecture),
         // Instances: what pigeon runs, here and in linked accounts. Only their shape is code;
         // every value is data a person approves on the console with their passkey.
+        // Linked accounts: another Cloudflare account linked to an instance with Cloudflare's
+        // OAuth consent, its tokens sealed in the Directory.
+        Box::new(Linked {
+            host: HOST.into(),
+            passkeys: Passkeys {
+                host: HOST.into(),
+                site_name: "pigeon".into(),
+            },
+        }),
         Box::new(Instances {
             zone: ZONE.into(),
             passkeys: Passkeys {

@@ -678,6 +678,17 @@ not by this session.
 
 ## Log
 
+- 2026-11-22: phase 2b part 2, the Link flow, built. Capability `linked`:
+  - `linked_setup` registers the OAuth client by API (scope IDs matched by name from
+    `/oauth/scopes`). It writes `CF_OAUTH_CLIENT_SECRET` and `LINK_KEY` to the Secrets Store.
+  - On the console: Link → Cloudflare consent → `/linked/callback`. The callback checks the
+    state, exchanges the code and checks the account against the record. The tokens are kept
+    AES-GCM-sealed in the Directory.
+  - Unlink needs the passkey. `account_for` refreshes before use, storing the new tokens first.
+    `linked_status` is read-only.
+  - Departure: the two secrets' `wrangler.toml` bindings land *after* `linked_setup` has
+    created them, because a binding to a missing secret could fail a deploy once main has
+    moved. Until then the flow answers "not set up".
 - 2026-11-22: phase 2b part 1, agent proposals.
   - `instance_propose` checks a record as the console does. It keeps the record as an
     `instance_draft` approval for the person the caller acts for, holding the payload, the base

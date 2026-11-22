@@ -108,6 +108,52 @@
       ]));
   }
 
+  // Link sends the browser to Cloudflare's consent screen; Unlink asks for the passkey.
+  function linkRow(inst, ctx) {
+    const status = el("p", { "data-status": "", role: "status" });
+    const linked = inst.link && inst.link.status !== "not linked";
+    const linkBtn = el("button", { class: "button", type: "button",
+      text: linked ? "Link again" : "Link Cloudflare account" });
+    linkBtn.onclick = async () => {
+      linkBtn.disabled = true;
+      try {
+        const begin = await post("/linked/begin", { instance: inst.id });
+        location.href = begin.url;
+      } catch (e) {
+        say(e.message, true, status);
+        linkBtn.disabled = false;
+      }
+    };
+    const kids = [linkBtn];
+    if (linked) {
+      const unlinkBtn = el("button", { class: "button secondary", type: "button", text: "Unlink" });
+      unlinkBtn.onclick = async () => {
+        unlinkBtn.disabled = true;
+        try {
+          say("Waiting for your passkey…", false, status);
+          const begin = await post("/linked/unlink/begin", { instance: inst.id });
+          const answer = await approve(begin.options);
+          const done = await post("/linked/unlink/finish",
+            { instance: inst.id, challenge_id: begin.challenge_id, ...answer });
+          say(done.message || "Unlinked.", false, status);
+          setTimeout(() => ctx.reload(), 1500);
+        } catch (e) {
+          say(e.message, true, status);
+          unlinkBtn.disabled = false;
+        }
+      };
+      kids.push(unlinkBtn);
+    }
+    const lines = [];
+    if (inst.link && inst.link.status === "linked") {
+      lines.push(el("p", { class: "muted", text:
+        `Linked to ${inst.link.account_name || ""} (${inst.link.account_id}) by ${inst.link.linked_by || "someone"}.` }));
+    } else if (inst.link && inst.link.why) {
+      lines.push(el("p", { class: "muted", text: `Refreshing failed: ${inst.link.why}` }));
+    }
+    return el("div", { class: "layer", style: "gap:8px" }, ...lines, el("div", { class: "c-row" }, ...kids), status);
+  }
+
   // One line per publishing target
   function targetLine(t, zone) {
     if (t.kind === "preview") {
@@ -262,6 +308,7 @@
       if (!inst) return;
 
       view.append(instanceCard(inst));
+      if (inst.account && inst.account.kind === "linked") view.append(linkRow(inst, ctx));
       for (const site of inst.sites || []) view.append(siteCard(site, data.zone));
 
       const editorArea = el("div", {});

@@ -2559,3 +2559,69 @@ fn buildkite_setup_plan() {
     assert!(!same_build(&json!({"buildkite": {"off": "…"}}), "abc"));
     assert!(same_build(&json!({}), ""));
 }
+
+#[test]
+fn linking_a_cloudflare_account() {
+    use pigeon_capabilities::linked::{Link, PERMISSIONS, choose_account, scope_ids, status};
+
+    // The client asks for exactly the scopes pigeon needs, found by their permission names.
+    let listed = json!([
+        { "id": "account-settings.read", "name": "Account Settings Read" },
+        { "id": "zone.read", "name": "Zone Read" },
+        { "id": "dns.write", "name": "DNS Write" },
+        { "id": "workers-scripts.write", "name": "Workers Scripts Write" },
+        { "id": "workers-routes.write", "name": "Workers Routes Write" },
+        { "id": "r2.write", "name": "Workers R2 Storage Write" },
+        { "id": "zone.write", "name": "Zone Write" }
+    ]);
+    let (ids, missing) = scope_ids(&listed);
+    assert_eq!(ids.len(), PERMISSIONS.len());
+    assert!(
+        missing.is_empty() && !ids.contains(&"zone.write".to_string()),
+        "nothing more"
+    );
+    let (_, missing) = scope_ids(&json!([]));
+    assert_eq!(
+        missing.len(),
+        PERMISSIONS.len(),
+        "a missing scope is named, not skipped"
+    );
+
+    // The account a link takes: the one the record names, or the only one granted.
+    let granted = vec![
+        ("a".repeat(32), "noisypigeon".to_string()),
+        ("b".repeat(32), "other".to_string()),
+    ];
+    let a = "a".repeat(32);
+    assert_eq!(choose_account(Some(&a), &granted).unwrap().1, "noisypigeon");
+    assert!(
+        choose_account(Some(&"c".repeat(32)), &granted).is_err(),
+        "not granted"
+    );
+    assert!(
+        choose_account(None, &granted).is_err(),
+        "several: the person chooses"
+    );
+    assert_eq!(choose_account(None, &granted[..1]).unwrap().0, a);
+    assert!(choose_account(None, &[]).is_err());
+
+    // What the console shows of a link never holds its sealed tokens.
+    let l = Link {
+        instance: "noisypigeon".into(),
+        account_id: a.clone(),
+        account_name: "noisypigeon".into(),
+        linked_by: "Willow".into(),
+        linked_ms: 1,
+        expires_at_ms: 10.0,
+        scope: None,
+        sealed: "SEALED-TOKENS".into(),
+        refreshed_ms: None,
+        failed: None,
+    };
+    let shown = status(Some(&l), 5.0).to_string();
+    assert!(
+        shown.contains("linked") && !shown.contains("SEALED-TOKENS"),
+        "{shown}"
+    );
+    assert_eq!(status(None, 0.0)["status"], "not linked");
+}
