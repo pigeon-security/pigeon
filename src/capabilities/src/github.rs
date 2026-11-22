@@ -4,8 +4,9 @@
 //! installation token, narrowed to one instance's repository, through [`installation_token`].
 //! `/github/hook` checks each delivery's `X-Hub-Signature-256` before reading it, accepts pushes
 //! only from the installation an instance's record names, and records the latest push per
-//! instance. A push to `main` starts the sites Worker's `site_deploy` after the answer has gone
-//! (`wait_until`), acting for the person who linked the instance; `github_status` shows how the
+//! instance. A push to `main` is kept as a pending deploy; the platform's minute cron runs it
+//! ([`run_pending`]) through the sites Worker's `site_deploy`, acting for the person who linked
+//! the instance, and tries again a deploy a redeploy cut off. `github_status` shows how the
 //! latest went.
 
 use pigeon_core::github_app as app;
@@ -93,6 +94,96 @@ pub fn deploy_key(instance: &str) -> String {
     format!("github:deploy:{instance}")
 }
 
+/// How long a deploy that started may run before it counts as cut off and is tried again.
+const LEASE_MS: f64 = 3.0 * 60_000.0;
+/// How many times a deploy is tried before it is left failed.
+const MAX_ATTEMPTS: u64 = 5;
+
+async fn keep(env: &Env, key: &str, value: &Value) -> Result<()> {
+    directory(
+        env,
+        "setting.put",
+        json!({ "key": key, "value": value.to_string(), "ttl_ms": PUSH_KEPT_MS }),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Whether a kept deploy should run now: pending, or started longer ago than its lease (a
+/// redeploy or a limit cut it off), and not tried too often. Pure.
+pub fn due(kept: &Value, now_ms: f64) -> bool {
+    let attempts = kept["attempts"].as_u64().unwrap_or(0);
+    if attempts >= MAX_ATTEMPTS {
+        return false;
+    }
+    match kept["state"].as_str() {
+        Some("pending") => true,
+        Some("running") => now_ms - kept["started_ms"].as_f64().unwrap_or(0.0) > LEASE_MS,
+        _ => false,
+    }
+}
+
+/// Runs every due push-started deploy, one instance at a time: from the platform's
+/// minute cron. Each is marked running before it starts and done or failed after, so one cut
+/// off is tried again once its lease runs out.
+pub async fn run_pending(env: &Env) -> Result<Vec<Value>> {
+    let mut ran = Vec::new();
+    for i in instances::all(env).await? {
+        let key = deploy_key(&i.id);
+        let mut kept = match directory(env, "setting.get", json!({ "key": key })).await? {
+            Value::String(t) => serde_json::from_str::<Value>(&t).unwrap_or(Value::Null),
+            _ => continue,
+        };
+        let now = worker::Date::now().as_millis() as f64;
+        if !due(&kept, now) {
+            continue;
+        }
+        let commit = kept["commit"].as_str().unwrap_or_default().to_string();
+        kept["state"] = json!("running");
+        kept["started_ms"] = json!(now);
+        kept["attempts"] = json!(kept["attempts"].as_u64().unwrap_or(0) + 1);
+        keep(env, &key, &kept).await?;
+        let outcome = match deployer(env, &i.id).await {
+            Ok(person) => {
+                crate::remote::call_owned(
+                    env.clone(),
+                    SITES_BINDING,
+                    "sites",
+                    "site_deploy",
+                    json!({ "instance": i.id, "rev": commit }),
+                    person,
+                )
+                .await
+            }
+            Err(e) => Err(e),
+        };
+        let done_ms = worker::Date::now().as_millis();
+        match outcome {
+            Ok(v) if v["deployed"] == true => {
+                kept["state"] = json!("done");
+                kept["result"] = v;
+            }
+            Ok(v) => {
+                // The content has problems: trying again gives the same answer.
+                kept["state"] = json!("failed");
+                kept["result"] = v;
+            }
+            Err(e) => {
+                kept["state"] = json!(if kept["attempts"].as_u64().unwrap_or(0) >= MAX_ATTEMPTS {
+                    "failed"
+                } else {
+                    "pending"
+                });
+                kept["error"] = json!(e.to_string());
+            }
+        }
+        kept["finished_ms"] = json!(done_ms);
+        keep(env, &key, &kept).await?;
+        ran.push(json!({ "instance": i.id, "state": kept["state"] }));
+    }
+    Ok(ran)
+}
+
 /// Who a push-started deploy acts for: the person who linked the instance's account. A webhook
 /// has no caller of its own, and the sites Worker and core's credentials serve only a person's.
 async fn deployer(env: &Env, instance: &str) -> Result<Value> {
@@ -173,52 +264,19 @@ impl Github {
         .await?;
         let deploying = push.git_ref == DEPLOY_REF && !push.deleted;
         if deploying {
-            match deployer(cx.env, &instance.id).await {
-                Ok(person) => {
-                    let env = cx.env.clone();
-                    let id = instance.id.clone();
-                    let commit = push.after.clone();
-                    let started = cx.worker.map(|w| {
-                        w.wait_until(async move {
-                            let outcome = crate::remote::call_owned(
-                                env.clone(),
-                                SITES_BINDING,
-                                "sites",
-                                "site_deploy",
-                                json!({ "instance": id, "rev": commit }),
-                                person,
-                            )
-                            .await;
-                            let kept = match outcome {
-                                Ok(v) => json!({ "ok": v, "at_ms": worker::Date::now().as_millis() }),
-                                Err(e) => json!({ "error": e.to_string(), "at_ms": worker::Date::now().as_millis() }),
-                            };
-                            let _ = directory(
-                                &env,
-                                "setting.put",
-                                json!({ "key": deploy_key(&id), "value": kept.to_string(), "ttl_ms": PUSH_KEPT_MS }),
-                            )
-                            .await;
-                        });
-                    });
-                    if started.is_none() {
-                        return answer(500, json!({ "error": "no Worker context to deploy in" }));
-                    }
-                }
-                Err(e) => {
-                    return answer(
-                        202,
-                        json!({ "recorded": instance.id, "deploy": format!("not started: {e}") }),
-                    );
-                }
-            }
+            // Kept, not run here: the minute's cron runs it (run_pending), so a deploy survives
+            // the webhook's time limit and a redeploy of this Worker.
+            let pending = json!({
+                "state": "pending", "commit": push.after, "at_ms": at, "attempts": 0,
+            });
+            keep(cx.env, &deploy_key(&instance.id), &pending).await?;
         }
         answer(
             202,
             json!({
                 "recorded": instance.id,
                 "commit": push.after,
-                "deploy": if deploying { "started" } else { "not for this ref" },
+                "deploy": if deploying { "queued: runs within a minute" } else { "not for this ref" },
             }),
         )
     }

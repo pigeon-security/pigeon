@@ -188,6 +188,16 @@ async fn fetch(req: Request, env: Env, ctx: WorkerContext) -> Result<Response> {
 
 /// Queue messages: each capability that wants one of the batch acts once. A failure fails the
 /// batch, so the queue retries it.
+/// The minute's cron: push-started site deploys that wait or were cut off.
+#[event(scheduled)]
+async fn scheduled(_event: worker::ScheduledEvent, env: Env, _ctx: worker::ScheduleContext) {
+    match pigeon_capabilities::github::run_pending(&env).await {
+        Ok(ran) if !ran.is_empty() => console_log!("github deploys: {ran:?}"),
+        Ok(_) => {}
+        Err(e) => console_error!("github deploys failed: {e}"),
+    }
+}
+
 #[event(queue)]
 async fn queue(batch: MessageBatch<Value>, env: Env, _ctx: WorkerContext) -> Result<()> {
     let messages = batch.messages()?;

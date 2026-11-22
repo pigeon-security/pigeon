@@ -3741,6 +3741,21 @@ fn instance_plans_touch_only_what_pigeon_made() {
     assert!(instance_for(&records, "noisypigeon/noisypigeon", 8).is_none());
     assert!(instance_for(&records, "someone/else", 7).is_none());
 
+    // A push-started deploy runs when pending, or when its run was cut off (its lease is
+    // over), and stops being tried after five attempts or once done.
+    use pigeon_capabilities::github::due;
+    assert!(due(&json!({ "state": "pending", "attempts": 0 }), 0.0));
+    assert!(!due(
+        &json!({ "state": "running", "started_ms": 1000.0, "attempts": 1 }),
+        60_000.0
+    ));
+    assert!(due(
+        &json!({ "state": "running", "started_ms": 1000.0, "attempts": 1 }),
+        300_000.0
+    ));
+    assert!(!due(&json!({ "state": "pending", "attempts": 5 }), 0.0));
+    assert!(!due(&json!({ "state": "done", "attempts": 1 }), 0.0));
+
     // The digest binds the steps and the account.
     let d1 = digest(&inst, &"a".repeat(32), &first);
     assert_ne!(d1, digest(&inst, &"a".repeat(32), &again));
