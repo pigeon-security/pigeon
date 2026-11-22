@@ -5144,6 +5144,24 @@ fn buildkite_setup_plan() {
 
 #[test]
 fn linking_a_cloudflare_account() {
+    // linked_scopes: each data-Worker need matched to Cloudflare's scope names, ignoring case;
+    // a need no scope offers comes back empty.
+    {
+        use pigeon_capabilities::linked::needs_found;
+        let listed = json!([
+            { "id": "pipelines.write", "name": "Pipelines Write" },
+            { "id": "email-routing.write", "name": "Email Routing Rules Write" },
+            { "id": "zone.read", "name": "Zone Read" },
+        ]);
+        let found = needs_found(&listed, &["Pipelines", "email routing", "Workers AI"]);
+        assert_eq!(found["Pipelines"][0]["id"], "pipelines.write");
+        assert_eq!(
+            found["email routing"][0]["name"],
+            "Email Routing Rules Write"
+        );
+        assert_eq!(found["Workers AI"], json!([]));
+    }
+
     use pigeon_capabilities::linked::{Link, PERMISSIONS, choose_account, scope_ids, status};
 
     // The client asks for exactly the scopes pigeon needs, found by their permission names.

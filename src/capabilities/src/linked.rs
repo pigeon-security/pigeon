@@ -111,6 +111,41 @@ pub fn scope_ids(listed: &Value) -> (Vec<String>, Vec<String>) {
     (ids, missing)
 }
 
+/// What the planned per-instance data Worker (docs/plans/data-worker.md) would need a linked
+/// account to grant, as words to look for in Cloudflare's scope names.
+pub const DATA_NEEDS: [&str; 9] = [
+    "Pipelines",
+    "Data Catalog",
+    "Email Routing",
+    "Zone Settings",
+    "Workers AI",
+    "API Tokens",
+    "Vectorize",
+    "Queues",
+    "D1",
+];
+
+/// For each of `needs`, the scopes in Cloudflare's list (`{id, name, ...}` entries) whose name
+/// contains it, ignoring case: an empty list means no OAuth scope offers it. Pure.
+pub fn needs_found(listed: &Value, needs: &[&str]) -> Value {
+    let all = listed.as_array().cloned().unwrap_or_default();
+    let mut out = serde_json::Map::new();
+    for need in needs {
+        let want = need.to_ascii_lowercase();
+        let found: Vec<Value> = all
+            .iter()
+            .filter(|s| {
+                s["name"]
+                    .as_str()
+                    .is_some_and(|n| n.to_ascii_lowercase().contains(&want))
+            })
+            .map(|s| json!({ "id": s["id"], "name": s["name"] }))
+            .collect();
+        out.insert((*need).to_string(), Value::Array(found));
+    }
+    Value::Object(out)
+}
+
 /// Which granted account a link may take for an instance whose record names `wanted`: that one
 /// when the grant has it; the only one when the record names none; otherwise why not.
 pub fn choose_account(
@@ -587,6 +622,13 @@ impl Capability for Linked {
                 }),
             },
             Tool::bare(
+                "linked_scopes",
+                "Cloudflare's OAuth scope list, read-only: every scope a linked account could \
+                 grant (id, name, category), and which of the data Worker's needs \
+                 (docs/plans/data-worker.md) it offers. Writes nothing; touches no OAuth client \
+                 and no link.",
+            ),
+            Tool::bare(
                 "linked_status",
                 "Each instance's link: the account, who linked it, when the access token \
                  expires, and whether refreshing failed. Never a token.",
@@ -599,6 +641,28 @@ impl Capability for Linked {
             match tool {
                 "linked_setup" => self.setup(cx).await,
                 "linked_check" => self.check(cx, args).await,
+                "linked_scopes" => {
+                    // A short-lived token, as linked_setup's, used only to read the list.
+                    let token = Scoped::open(
+                        cx.account,
+                        "oauth-scopes",
+                        vec![Policy::new(Scope::Account, &["OAuth Client Write"])],
+                    )
+                    .await?;
+                    let listed = call(token.value(), Method::Get, "/oauth/scopes", None).await;
+                    let listed = token.finish(listed).await?;
+                    let scopes: Vec<Value> = listed
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|s| json!({ "id": s["id"], "name": s["name"], "category": s["category"] }))
+                        .collect();
+                    Ok(json!({
+                        "count": scopes.len(),
+                        "data_needs": needs_found(&listed, &DATA_NEEDS),
+                        "scopes": scopes,
+                    }))
+                }
                 "linked_status" => {
                     let mut out = serde_json::Map::new();
                     for i in instances::all(cx.env).await? {
