@@ -672,6 +672,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "pigeon-dotest-a"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "worker",
+]
+
+[[package]]
 name = "pigeon-model-gateway"
 version = "0.1.0"
 dependencies = [

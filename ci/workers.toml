@@ -86,3 +86,15 @@ paths = ["src/proxy/*"]
 test_job = "test"
 deploy_job = "deploy-proxy"
 after = []
+
+# A throwaway Worker for the Durable Object transfer rehearsal (docs/plans/do-rehearsal.md;
+# docs/plans/workers-split.md, T17): the transfer's source. Its entry comes out once the
+# rehearsal is done.
+[[worker]]
+name = "dotest-a"
+script = "pigeon-dotest-a"
+dir = "src/dotest-a"
+paths = ["src/dotest-a/*"]
+test_job = "test"
+deploy_job = "deploy-dotest-a"
+after = []

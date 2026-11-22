@@ -105,7 +105,7 @@ pub const UPLOAD: &[&str] = &["Workers Scripts Write", "Secrets Store Write"];
 
 /// The calls `wrangler deploy` makes (wrangler 4.166.0, recorded against a stand-in API and
 /// read in its source).
-pub const ALLOWED: [Allowed; 17] = [
+pub const ALLOWED: [Allowed; 18] = [
     // Whether the Worker exists, and its migration tag.
     Allowed {
         method: "GET",
@@ -244,6 +244,17 @@ pub const ALLOWED: [Allowed; 17] = [
         needs: &[],
         permissions: CONTAINERS_WRITE,
         body: BodyRule::ApplicationPatch,
+    },
+    // The account's workers.dev subdomain, read when a Worker's config turns workers.dev on
+    // (the Durable Object rehearsal's throwaway Workers do). Read only: it names the account's
+    // subdomain, nothing more.
+    Allowed {
+        method: "GET",
+        path: "/accounts/{account}/workers/subdomain",
+        query: &[],
+        needs: &[],
+        permissions: READ,
+        body: BodyRule::Any,
     },
     // Keeps workers.dev and preview URLs off, as the config says.
     Allowed {

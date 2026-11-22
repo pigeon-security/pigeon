@@ -58,6 +58,7 @@ function answer(method, path, query, body) {
   }
   if (method === "POST" && /^workers\/scripts\/[^/]+\/deployments$/.test(rest)) return [200, ok({ id: randomUUID(), strategy: "percentage", versions: [] })];
   if (method === "PATCH" && /^workers\/scripts\/[^/]+\/script-settings$/.test(rest)) return [200, ok({ logpush: false, tail_consumers: [], observability: null, tags: [] })];
+  if (method === "GET" && rest === "workers/subdomain") return [200, ok({ subdomain: "stand-in" })];
   if (method === "POST" && /^workers\/scripts\/[^/]+\/subdomain$/.test(rest)) return [200, ok({ enabled: false, previews_enabled: false })];
   if (method === "GET" && rest === "workers/durable_objects/namespaces") {
     return [200, ok(classes.map((c) => ({ id: namespaceId(c), class: c, script: script || process.env.STANDIN_SCRIPT, name: c, use_sqlite: true })), { result_info: { page: 1, per_page: 1000, count: classes.length, total_count: classes.length, total_pages: 1 } })];

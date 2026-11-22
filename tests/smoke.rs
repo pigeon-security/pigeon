@@ -1060,7 +1060,8 @@ fn land_rebases_disjoint_branches_and_lanes() {
             "pigeon-sites",
             "pigeon-model-gateway",
             "pigeon-ci-gateway",
-            "pigeon-proxy"
+            "pigeon-proxy",
+            "pigeon-dotest-a"
         ]
     );
     assert!(map.worker("sites").unwrap().queues.is_empty());
@@ -1097,7 +1098,14 @@ fn land_rebases_disjoint_branches_and_lanes() {
     assert_eq!(map.worker("sites").unwrap().deploy_job, "deploy-sites");
     assert_eq!(
         names(&map.classify(&["src/contract/src/wire.rs"])),
-        ["core", "sites", "model-gateway", "ci-gateway", "proxy"]
+        [
+            "core",
+            "sites",
+            "model-gateway",
+            "ci-gateway",
+            "proxy",
+            "dotest-a"
+        ]
     );
     // CI's code is shared while core still links it; the gateway alone deploys for its crate.
     assert!(map.classify(&["src/ci/src/lib.rs"]).shared);
@@ -2509,7 +2517,8 @@ fn proxy_worker_caches_and_core_ops() {
             "pigeon-sites",
             "pigeon-model-gateway",
             "pigeon-ci-gateway",
-            "pigeon-proxy"
+            "pigeon-proxy",
+            "pigeon-dotest-a"
         ]
     );
     let broken = pigeon_proxies::cf_proxy::CfProxy::platform("h", "s", "not toml [", "nope", "r");
