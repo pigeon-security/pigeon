@@ -6523,3 +6523,123 @@ fn sandbox_prepare_retry() {
     );
     let _ = std::fs::remove_dir_all(&base);
 }
+
+#[test]
+fn core_changelog_from_history() {
+    use pigeon_capabilities::changelog::wants_event;
+    use pigeon_core::changelog::{
+        Entry, State, date_utc, landing_of, newest_days, render, subject, walk,
+    };
+    use pigeon_core::pack;
+    use std::collections::BTreeMap;
+
+    let dir = repo("changelog");
+    // Commits at fixed times: two on 2026-11-21 UTC (the second at 00:30 +02:00 on the 22nd,
+    // still the 21st in UTC), then two on 2026-11-22 UTC.
+    let at = |message: &str, date: &str| -> String {
+        std::fs::write(dir.join("f"), message).unwrap();
+        git(&dir, &["add", "f"], None);
+        let ok = Command::new("git")
+            .args(["commit", "-q", "-m", message])
+            .env("GIT_AUTHOR_DATE", date)
+            .env("GIT_COMMITTER_DATE", date)
+            .current_dir(&dir)
+            .status()
+            .unwrap();
+        assert!(ok.success());
+        String::from_utf8(git(&dir, &["rev-parse", "HEAD"], None))
+            .unwrap()
+            .trim()
+            .to_string()
+    };
+    let a = at("first\n\nbody", "2026-11-21T09:00:00+00:00");
+    let b = at("second", "2026-11-22T00:30:00+02:00");
+    let c = at("third", "2026-11-22T08:00:00+00:00");
+    let d = at("fourth", "2026-11-22T20:00:00+00:00");
+    let all = |tip: &str| {
+        pack::objects(&git(
+            &dir,
+            &["pack-objects", "--stdout", "--revs", "-q"],
+            Some(&format!("{tip}\n")),
+        ))
+        .unwrap()
+    };
+
+    // Backfill: every commit, newest first, with its subject and committer time.
+    let full = walk(&all(&d), &d, None).unwrap();
+    let shas: Vec<&str> = full.iter().map(|e| e.sha.as_str()).collect();
+    assert_eq!(shas, [d.as_str(), c.as_str(), b.as_str(), a.as_str()]);
+    assert_eq!(full[3].subject, "first");
+    assert_eq!(date_utc(full[2].unix), "2026-11-21");
+    // Incremental: only what is new since the last processed commit, which joins the old
+    // entries into the full list; a stop not on the history is an error.
+    let old = walk(&all(&b), &b, None).unwrap();
+    let since = pack::objects(&pack(&dir, &d, &b)).unwrap();
+    let mut new = walk(&since, &d, Some(&b)).unwrap();
+    assert_eq!(new.len(), 2);
+    new.extend(old);
+    assert_eq!(new, full);
+    assert!(walk(&all(&d), &d, Some(&"0".repeat(40))).is_err());
+    assert!(
+        walk(&since, &d, None).is_err(),
+        "a missing commit is an error"
+    );
+
+    // The render: dates newest first, short ids, a landing id only where a note names it.
+    let mut landings = BTreeMap::new();
+    landings.insert(d.clone(), "L1".to_string());
+    let md = render(&full, &landings, None);
+    let day22 = md.find("## 2026-11-22").unwrap();
+    let day21 = md.find("## 2026-11-21").unwrap();
+    assert!(md.starts_with("# Changelog of main\n") && day22 < day21);
+    assert!(md.contains(&format!("- fourth (`{}`, landing `L1`)\n", &d[..7])));
+    assert!(md.contains(&format!("- third (`{}`)\n", &c[..7])));
+    assert!(md.find("- fourth").unwrap() < md.find("- third").unwrap());
+    assert!(md[day21..].contains("- second") && md[day21..].contains("- first"));
+    let one = render(&full, &landings, Some(1));
+    assert!(one.contains("## 2026-11-22") && !one.contains("## 2026-11-21"));
+    assert_eq!(newest_days(&md, 1).trim_end(), one.trim_end());
+    assert_eq!(newest_days(&md, 5), md);
+
+    // Notes, dates and subjects.
+    assert_eq!(
+        landing_of("landing L1 state=landed by=x test=- deploy=- approved_by=- at=t\n"),
+        Some("L1".to_string())
+    );
+    assert_eq!(landing_of("junk"), None);
+    assert_eq!(landing_of("landing state=x"), None);
+    assert_eq!(date_utc(0), "1970-01-01");
+    assert_eq!(date_utc(1_709_164_800), "2024-02-29");
+    assert_eq!(date_utc(-1), "1969-12-31");
+    let _ = date_utc(i64::MIN);
+    assert_eq!(subject("  \n"), "(no subject)");
+    assert_eq!(subject(&"x".repeat(150)).chars().count(), 101);
+    let state = State {
+        version: 1,
+        main: d.clone(),
+        entries: vec![Entry {
+            sha: d.clone(),
+            unix: 1,
+            subject: "s".into(),
+        }],
+    };
+    let back: State = serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap();
+    assert_eq!(back, state);
+
+    // It follows pushes to main and the landing notes of its repository, nothing else.
+    let push = |r: &str| json!({ "payload": { "ref": r, "repo": "pigeon" } });
+    assert!(wants_event("pigeon", "main", &push("refs/heads/main")));
+    assert!(wants_event("pigeon", "main", &push("refs/notes/land")));
+    assert!(!wants_event("pigeon", "main", &push("refs/heads/claude/x")));
+    assert!(!wants_event(
+        "pigeon",
+        "main",
+        &push("refs/notes/changelog")
+    ));
+    assert!(!wants_event(
+        "pigeon",
+        "main",
+        &json!({ "payload": { "ref": "refs/heads/main", "repo": "other" } })
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+}

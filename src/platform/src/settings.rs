@@ -6,6 +6,7 @@ use pigeon_capabilities::apple::Apple;
 use pigeon_capabilities::approvals::Approvals;
 use pigeon_capabilities::architecture::{Architecture, Wrangler};
 use pigeon_capabilities::cf_proxy::CfProxy;
+use pigeon_capabilities::changelog::Changelog;
 use pigeon_capabilities::ci;
 use pigeon_capabilities::console::Console;
 use pigeon_capabilities::deploys::Deploys;
@@ -324,6 +325,14 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
                 host: HOST.into(),
                 site_name: "pigeon".into(),
             },
+        }),
+        // The changelog of main (docs/plans/changelog.md): last of this Worker's own, so a
+        // queue batch runs it after the mirror; its event handler never fails the batch.
+        Box::new(Changelog {
+            namespace: NAMESPACE.into(),
+            repo: REPO.into(),
+            branch: BRANCH.into(),
+            bucket: "pigeon-changelog".into(),
         }),
     ]
 }

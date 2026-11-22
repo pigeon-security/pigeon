@@ -11,6 +11,7 @@ pub mod attribution;
 pub mod buildkite;
 pub mod buildkite_hook;
 pub mod buildkite_setup;
+pub mod changelog;
 pub mod cloudflare;
 pub mod cloudflare_oauth;
 pub mod containers;

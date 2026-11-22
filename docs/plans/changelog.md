@@ -27,7 +27,7 @@ Why this cannot hold anything up:
 - The Lander, CI and deploys never wait for the queue. The queue consumer runs after the push
   has been answered, in its own invocation.
 - The changelog is the last capability in `settings::capabilities()`, so in a batch it runs
-  after the mirror and every other consumer.
+  after the mirror and core's other capabilities (bound Workers' capabilities may come after it).
 - Its `on_events` always answers `Ok`. A failure is logged with `console_error!` and answered as
   a value. The consumer fails a batch on any `Err`, which would make the queue retry the mirror
   too; the changelog never causes that.
@@ -120,3 +120,15 @@ An example (the landing id is made up):
 - **An alternative store**, if R2 is not wanted: the same objects in git under a ref of their
   own (say `refs/notes/changelog`), as the landing and CI notes are, which the mirror does not
   copy. That would make pigeon commits, which follow docs/plans/commit-attribution.md.
+
+## Log
+
+- Built by the planner run itself: three executor sandboxes in a row failed to start
+  (`pigeon-sandboxd` `prepare`: `git clone` found `/work` not empty).
+- Built as designed: `pigeon_core::changelog` (walk, landing_of, date_utc, subject, render,
+  newest_days, State), `pigeon_capabilities::changelog` (wants pushes of main and
+  `refs/notes/land`; `on_events` only logs failures; tools `changelog` and `changelog_update`),
+  registered last among core's own capabilities with bucket `pigeon-changelog`. Smoke scenario
+  `core_changelog_from_history`.
+- Not yet run live: nothing is landed. The first run after landing (or `changelog_update`)
+  makes the bucket and backfills main.
