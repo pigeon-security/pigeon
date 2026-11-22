@@ -66,6 +66,19 @@ secret_name = "CALLER_KEY"
 binding = "SITES"
 service = "pigeon-sites"
 
+# The GitHub App (src/capabilities/src/github.rs): its private key and webhook secret, set by the
+# person on the Access tab; bound once they exist, since a binding to a missing secret fails the
+# deploy.
+[[secrets_store_secrets]]
+binding = "GITHUB_APP_PRIVATE_KEY"
+store_id = "5185c227b9f34b4291045175695b78ec"
+secret_name = "GITHUB_APP_PRIVATE_KEY"
+
+[[secrets_store_secrets]]
+binding = "GITHUB_APP_WEBHOOK_SECRET"
+store_id = "5185c227b9f34b4291045175695b78ec"
+secret_name = "GITHUB_APP_WEBHOOK_SECRET"
+
 # Artifacts push events reach this Worker through the pigeon-source-events queue; the queue
 # and its consumer are set up by POST /setup/source, not here.
 
