@@ -1,7 +1,10 @@
 //! The changelog of main (docs/plans/changelog.md): made after the fact from git history, on
 //! each Artifacts push to main or to the landing notes, and kept as R2 objects in pigeon's own
 //! account. It never commits, and it never holds up a landing, a deploy or CI: it runs from the
-//! queue after every other capability, and a failure is only logged.
+//! queue after every other capability, a run that takes longer than [`RUN_LIMIT_MS`] is left
+//! for the next push, and a failure is only logged. It reads and writes the bucket through
+//! core's [`BINDING`] when core has one (no token at all), and otherwise through the R2 API
+//! with short-lived tokens minted from the parent token.
 
 use std::collections::BTreeMap;
 
@@ -23,6 +26,11 @@ const MARKDOWN_KEY: &str = "main/CHANGELOG.md";
 const STATE_KEY: &str = "main/state.json";
 /// How long the Artifacts read token lives; it is revoked when the run ends.
 const READ_TOKEN_TTL: u64 = 300;
+/// The R2 binding of the changelog's bucket in core's wrangler.toml, when it has one.
+pub const BINDING: &str = "CHANGELOG";
+/// How long a run from the queue may take, wall clock; then it stops and the next push catches
+/// up, so the batch is never held.
+pub const RUN_LIMIT_MS: u64 = 60_000;
 
 /// The changelog as a capability: on pushes to main or the landing notes, and on demand.
 pub struct Changelog {
@@ -47,14 +55,51 @@ impl Changelog {
         }
     }
 
+    /// The object at `key`, if there is one.
+    async fn get(&self, cx: &Context<'_>, key: &str) -> Result<Option<Vec<u8>>> {
+        if let Ok(bound) = cx.env.bucket(BINDING) {
+            return match bound.get(key).execute().await? {
+                Some(object) => match object.body() {
+                    Some(body) => Ok(Some(body.bytes().await?)),
+                    None => Ok(Some(Vec::new())),
+                },
+                None => Ok(None),
+            };
+        }
+        r2::get(cx.account, &self.bucket(), key).await
+    }
+
+    /// Writes each `(key, content type, body)`; through the API, the bucket is made first when
+    /// it is missing.
+    async fn put_all(&self, cx: &Context<'_>, items: Vec<(&str, &str, Vec<u8>)>) -> Result<()> {
+        if let Ok(bound) = cx.env.bucket(BINDING) {
+            for (key, content_type, body) in items {
+                bound
+                    .put(key, worker::Data::Bytes(body))
+                    .http_metadata(worker::HttpMetadata {
+                        content_type: Some(content_type.to_string()),
+                        ..Default::default()
+                    })
+                    .execute()
+                    .await?;
+            }
+            return Ok(());
+        }
+        let bucket = self.bucket();
+        r2::ensure_bucket(cx.account, &bucket).await?;
+        for (key, content_type, body) in items {
+            r2::put(cx.account, &bucket, key, content_type, body).await?;
+        }
+        Ok(())
+    }
+
     /// Brings the stored changelog up to main: from the last processed commit, or from nothing
     /// when `full`, when nothing is stored, or when the stored commit is not on main.
     async fn update(&self, cx: &Context<'_>, full: bool) -> Result<Value> {
-        let bucket = self.bucket();
         let stored = if full {
             None
         } else {
-            r2::get(cx.account, &bucket, STATE_KEY)
+            self.get(cx, STATE_KEY)
                 .await?
                 .and_then(|b| serde_json::from_slice::<State>(&b).ok())
                 .filter(|s| s.version == VERSION)
@@ -81,17 +126,19 @@ impl Changelog {
             console_error!("changelog: revoking the read token: {e}");
         }
         let (state, markdown, added, rebuilt) = made?;
-        r2::ensure_bucket(cx.account, &bucket).await?;
-        r2::put(
-            cx.account,
-            &bucket,
-            MARKDOWN_KEY,
-            "text/markdown; charset=utf-8",
-            markdown.into_bytes(),
+        let body = serde_json::to_vec(&state).map_err(|e| bad(e.to_string()))?;
+        self.put_all(
+            cx,
+            vec![
+                (
+                    MARKDOWN_KEY,
+                    "text/markdown; charset=utf-8",
+                    markdown.into_bytes(),
+                ),
+                (STATE_KEY, "application/json", body),
+            ],
         )
         .await?;
-        let body = serde_json::to_vec(&state).map_err(|e| bad(e.to_string()))?;
-        r2::put(cx.account, &bucket, STATE_KEY, "application/json", body).await?;
         Ok(json!({
             "main": state.main,
             "added": added,
@@ -162,15 +209,15 @@ impl Changelog {
 
     /// The stored changelog, or its newest `days` date sections.
     async fn read(&self, cx: &Context<'_>, days: Option<usize>) -> Result<Value> {
-        let bucket = self.bucket();
-        let Some(markdown) = r2::get(cx.account, &bucket, MARKDOWN_KEY).await? else {
+        let Some(markdown) = self.get(cx, MARKDOWN_KEY).await? else {
             return Ok(json!({
                 "markdown": null,
                 "note": "no run has written the changelog yet; changelog_update makes it now",
             }));
         };
         let markdown = String::from_utf8_lossy(&markdown).into_owned();
-        let main = r2::get(cx.account, &bucket, STATE_KEY)
+        let main = self
+            .get(cx, STATE_KEY)
             .await?
             .and_then(|b| serde_json::from_slice::<State>(&b).ok())
             .map(|s| s.main);
@@ -279,14 +326,26 @@ impl Capability for Changelog {
         wants_event(&self.repo, &self.branch, event)
     }
 
-    /// Never fails the batch: the queue would retry every other capability's work with it.
+    /// Never fails or holds the batch: the queue would retry every other capability's work
+    /// with it. A run past [`RUN_LIMIT_MS`] is dropped; the next push brings the changelog up to
+    /// date from where the last finished run left it.
     fn on_events<'a>(&'a self, cx: &'a Context<'a>) -> Call<'a> {
         Box::pin(async move {
-            match self.update(cx, false).await {
-                Ok(v) => Ok(v),
-                Err(e) => {
+            let run = self.update(cx, false);
+            let limit = worker::Delay::from(std::time::Duration::from_millis(RUN_LIMIT_MS));
+            futures_util::pin_mut!(run);
+            futures_util::pin_mut!(limit);
+            match futures_util::future::select(run, limit).await {
+                futures_util::future::Either::Left((Ok(v), _)) => Ok(v),
+                futures_util::future::Either::Left((Err(e), _)) => {
                     console_error!("changelog failed: {e}");
                     Ok(json!({ "error": e.to_string() }))
+                }
+                futures_util::future::Either::Right(_) => {
+                    console_error!(
+                        "changelog: stopped after {RUN_LIMIT_MS} ms; the next push catches up"
+                    );
+                    Ok(json!({ "error": "timed out", "limit_ms": RUN_LIMIT_MS }))
                 }
             }
         })
