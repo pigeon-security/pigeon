@@ -29,7 +29,8 @@ a bearer header. The Worker works around it with v1 (landed first: `PREPARE_SETU
 
 ## Rebuild and pin (the person)
 
-From the repository's root, at this branch's commit:
+This source lands first, alone (it changes nothing live until an image is built from it). From
+a clone of main at or after that landing, at the repository's root:
 
     docker build --platform linux/amd64 -f ci/sandbox/Dockerfile -t pigeon-ai-agent-sandbox:v2 .
     cd src/platform && npm ci && npx wrangler containers push pigeon-ai-agent-sandbox:v2
@@ -39,6 +40,7 @@ output) and pin it in `src/ai-agents-worker/wrangler.toml`:
 
     image = "registry.cloudflare.com/4f94676cb2cbe46fd985b089ca97ea27/pigeon-ai-agent-sandbox@sha256:<digest>"
 
-Land that pin together with this branch (the Worker's `fetch` tool needs v2: v1 answers 404).
+Land that pin together with the Worker side (the `fetch` agent tool, on
+`claude/sandboxd-v2-worker`), which needs v2: v1 answers 404 to `fetch`.
 After it is deployed, a follow-up drops the Worker's v1 workarounds: `RUN_PATH`,
 `PREPARE_SETUP` and `PREPARE_TEARDOWN` in `src/ai-agents/src/sandbox.rs` (harmless with v2).

@@ -178,6 +178,7 @@ pub fn step_line(name: &str, input: &Value) -> String {
         "grep" => format!("grep: {}", s("pattern")),
         "list" => format!("list: {}", input["path"].as_str().unwrap_or(".")),
         "commit_push" => "commit and push".to_string(),
+        "fetch" => format!("fetch: {}", s("ref")),
         "ci_submit" => format!("CI: {} on {}", s("job"), s("commit")),
         other => other.to_string(),
     };

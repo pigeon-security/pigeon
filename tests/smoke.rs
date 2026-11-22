@@ -2836,6 +2836,18 @@ fn ai_agents_loop_budgets_tools_and_turns() {
         json!(format!("{}cargo --version", sandbox::RUN_PATH))
     );
     assert!(sandbox::op_for("land", &json!({}), "b").is_none());
+    // A planner reads its executors' branches through sandboxd's `fetch`, which holds the grant.
+    assert_eq!(
+        sandbox::op_for("fetch", &json!({ "ref": "claude/ai-agent-r2" }), "b"),
+        Some(("fetch", json!({ "ref": "claude/ai-agent-r2" })))
+    );
+    assert_eq!(
+        sandbox::shown(
+            "fetch",
+            &json!({ "commit": "abc", "at": "origin/claude/ai-agent-r2" })
+        ),
+        "fetched abc at `origin/claude/ai-agent-r2`"
+    );
     let shown = sandbox::shown(
         "exec",
         &json!({ "exit": 0, "ms": 1200, "bytes": 3, "saved_at": "/tmp/out/1.log", "output": "ok\n", "timed_out": false }),

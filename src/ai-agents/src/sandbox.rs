@@ -127,6 +127,7 @@ pub fn op_for(name: &str, input: &Value, branch: &str) -> Option<(&'static str, 
                 "timeout_s": input["timeout_s"],
             }),
         ),
+        "fetch" => ("fetch", json!({ "ref": input["ref"] })),
         "commit_push" => (
             "commit_push",
             json!({ "message": input["message"], "branch": branch }),
@@ -186,6 +187,11 @@ pub fn shown(op: &str, answer: &Value) -> String {
             };
             format!("{}{more}", entries.join("\n"))
         }
+        "fetch" => format!(
+            "fetched {} at `{}`",
+            answer["commit"].as_str().unwrap_or_default(),
+            answer["at"].as_str().unwrap_or_default()
+        ),
         "commit_push" if answer["nothing"] == true => {
             format!("nothing to commit; the branch is at {}", answer["commit"])
         }

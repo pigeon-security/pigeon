@@ -43,13 +43,14 @@ pub const PLANNER_PIGEON: [&str; 9] = [
 pub const GUARDED: [&str; 2] = [".pigeon/policy.toml", ".claude/settings.json"];
 
 /// Tools that run in the container, in the order they are offered.
-const SANDBOX: [&str; 7] = [
+const SANDBOX: [&str; 8] = [
     "read_file",
     "write_file",
     "edit_file",
     "list",
     "grep",
     "run",
+    "fetch",
     "commit_push",
 ];
 
@@ -110,6 +111,7 @@ pub fn idempotent(name: &str) -> bool {
     matches!(
         name,
         "read_file"
+            | "fetch"
             | "list"
             | "grep"
             | "policy_check"
@@ -207,6 +209,17 @@ fn sandbox_definitions() -> Vec<Value> {
                     "timeout_s": {"type": "integer", "minimum": 1, "maximum": 840, "default": 600, "description": "Seconds before the command is stopped (14 minutes at most)."}
                 },
                 "required": ["cmd"]
+            }),
+        ),
+        tool(
+            "fetch",
+            "Fetches a branch of the repository (an executor's branch, main) into the checkout as `origin/<branch>`, with your run's git grant, which `run` does not have (a `git fetch` there fails with 403). Answers the branch's commit. Then read it with `run`, such as `git diff main...origin/<branch>`.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "ref": {"type": "string", "description": "The branch, such as `claude/ai-agent-r1`, or a full 40-character commit id."}
+                },
+                "required": ["ref"]
             }),
         ),
         tool(
@@ -516,6 +529,10 @@ pub fn check(role: Role, name: &str, input: &Value) -> Result<(), String> {
         }
         "commit_push" => {
             need_text(obj, "message", MAX_MESSAGE_BYTES)?;
+            Ok(())
+        }
+        "fetch" => {
+            need_text(obj, "ref", 200)?;
             Ok(())
         }
         "ask_person" => {
