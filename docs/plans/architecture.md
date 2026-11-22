@@ -128,3 +128,80 @@ I check each result, apply it, and run fmt, clippy and the smoke suite myself.
   may not force-push), landing csQqlS0Y87gIBlKK. Live `architecture_describe` answers at once
   with commit 0c9db6067d2d, 5 Durable Objects, the container, `proxy.pigeon.dev` and no unused
   bindings. Phase 3's check is built on `claude/architecture-3`.
+- 2026-11-22: after the Workers split. The model still describes one Worker. Findings and the
+  fix plan are in "After the split" below. Phases 5 to 8 are built on executor branches. Nothing
+  is landed: the person reviews first.
+
+## After the split (2026-11-22)
+
+pigeon now runs as six Workers (`ci/workers.toml`). The model is still built for the Worker
+that hosts the `architecture` capability (core). It reads only core's `wrangler.toml`. The
+other Workers show up only as names in `split`'s footprint. Checked against the live
+`architecture_describe` at commit `126b615e6dc7` (digest `599cd96c`).
+
+### How it is produced today
+
+- `src/platform/build.rs` embeds every `src/*/src/**.rs` and every `src/*/wrangler.toml` as
+  `SOURCES`. It does not embed `ci/workers.toml`. Core reads that file only for its lanes
+  (`settings::map`).
+- `architecture::describe(sources, hosted)` finds the one `wrangler.toml` whose `name` is
+  `hosted.worker` and draws one Worker from it. Every other Worker, hostname and resource comes
+  from the `footprint()` of each hosted capability, local or remote (the manifests).
+- `architecture::built` keeps the first result per isolate in a `OnceLock`. It is served by
+  `architecture_describe`, the console tab and the apex (`/`, `/architecture.json`).
+
+### What is wrong or missing
+
+| Area | Live model says | Truth |
+| --- | --- | --- |
+| Workers | `pigeon-platform`, and four empty cards "published by split" | Six Workers. **`pigeon-proxy` is missing**, because core has no binding to it (it calls core over `PLATFORM`) |
+| Capability Workers | No routes, handlers, secrets, Durable Objects, containers or tools | Each has its own `wrangler.toml`, `CALLER_KEY`, a `PLATFORM` binding, and its own tools |
+| Tools | Every tool is on `pigeon-platform` | `models_*` are the model gateway's, `ci_*` the CI gateway's, `ai_agents_*` the AI agents Worker's, `site_render`/`site_deploy` the sites Worker's. Core merges them into `/mcp` |
+| Service bindings | Not modelled | Core binds `SITES`, `MODELS`, `CI`, `AI_AGENTS`. Each of the five others binds `PLATFORM` to core. Calls carry a caller signed with `CALLER_KEY` |
+| Durable Object ownership | `CI_SCHEDULER (CiScheduler)` and `MODEL_JOBS (ModelJobs)` drawn as core's | `CiScheduler` belongs to `pigeon-ci-gateway` and `ModelJobs` to `pigeon-model-gateway` (classes moved today). Core binds them with `script_name`. The reader ignores `script_name` |
+| Durable Objects missing | | `AiAgentRuns` and `Sandbox` (ai-agents). The ci-gateway's `CI_RUNNER` points at core's `CiRunner` |
+| Containers | `CiRunner` only | Also `Sandbox` (image `pigeon-ai-agent-sandbox`), one per AI agent run, in `pigeon-ai-agents` |
+| Queues | `pigeon-ci-events` as core's | Both core and the CI gateway produce to it |
+| Secrets | One list of 12, all core's | Core's 12 plus `CALLER_KEY` in every Worker and `BUILDKITE_API_TOKEN` in the CI gateway. Only core holds `CF_PARENT_TOKEN` |
+| `proxy.pigeon.dev` | Served by `pigeon-platform` | Served by `pigeon-proxy` since the cutover (workers-split log, 2026-11-22). `settings::PROXY_WORKER` still names core: step 4 of that cutover ("land `PROXY_WORKER = PROXY_WORKER_NEXT`") was never done |
+| Sites hostnames | Only `pigeon.dev` (core) | `pigeon-sites` serves the instance subdomains on pigeon.dev, such as `noisypigeon.pigeon.dev`. `noisypigeon.com` is served by the instance Worker in the linked account, from its own R2 bucket. These are instance records (Directory data), not code |
+| MCP Server Portal | Not drawn | Claude reaches `/mcp` through the Cloudflare MCP Server Portal at `mcp.pigeon.dev` (servers `pigeon` and `buildkite`). The Lander syncs it after deploys (`portal_sync`) |
+| External services | AI gateway `pigeon` and the GitHub mirror only | Also Buildkite (cluster `pigeon`, hosted Linux and macOS queues), Cloudflare Containers as the second CI connector, the GitHub App, and linked Cloudflare accounts (OAuth) |
+| The Lander | A capability card | Per-Worker deploy lanes from `ci/workers.toml`, with attribution, rollback and bisect. The map is not drawn |
+| `ai-agents` footprint | | Sends `{"durable_objects": [...]}`, a key `Footprint` does not have, so it is dropped silently |
+| Memo | | The `OnceLock` keeps the first build. If a capability Worker's manifest failed on that request, its tools stay missing until the isolate ends |
+| Staleness across lanes | | Core embeds every Worker's `wrangler.toml` when core builds. A landing that changes only a capability Worker deploys only that Worker's lane. Core's picture of that Worker stays old until core next deploys |
+| Stale summaries | `models`: "as core hosts them until its binding … lands" | Out of date wording in `src/capabilities/src/models.rs`. Core also still exports a `ModelJobs` class that nothing binds now. Noted for the workers-split owner. Not fixed here |
+
+Nothing secret is drawn today. `wrangler.toml`'s `account_id`, Secrets Store id and
+`GITHUB_APP_CLIENT_ID` are read by the reader but are not in the model. The fix keeps it so,
+and a smoke check enforces it.
+
+### Fix plan
+
+The authority for each fact, so nothing is written twice:
+
+| Fact | Source |
+| --- | --- |
+| Which Workers exist, their lane, deploy job and `after` steps | `ci/workers.toml`, embedded in core |
+| Each Worker's bindings, Durable Objects (and which script owns each class), containers, queues, secrets, service bindings, crons | That Worker's `wrangler.toml`. Live from its manifest when it answers; core's embedded copy otherwise, marked as such |
+| Each Worker's routes and handlers | Its crate's Rust (`(Method::X, "/path")`, `#[event]`) |
+| Which tools each Worker serves | The capability registry: core's `settings::capabilities()` and each binding's manifest. A remote capability names its Worker |
+| Hostnames | Footprints (`public_host`, `site`, the proxies), with `PROXY_WORKER` fixed |
+| External services (Buildkite, the portal, GitHub App, linked accounts, AI gateway, mirror) | A new `Footprint.externals`, filled from the settings each capability already uses (CI's connectors, the Lander's portal servers, `github`, `linked`, `models`, `mirror`) |
+| Instance sites (`noisypigeon.*`) | The instance records, only on the console tab and `architecture_describe`. Never on the public apex page (linked-accounts plan, §8) |
+
+Phases, each an executor branch built on the one before:
+
+| Phase | What | Branch |
+| --- | --- | --- |
+| 5 | Model: one Worker per `ci/workers.toml` entry from its `wrangler.toml` (`services`, `script_name`, crons read); tools attributed by Worker; Durable Object ownership; service-binding and cross-Worker object links; `externals`; the portal host; `PROXY_WORKER` set to `pigeon-proxy`; the ai-agents footprint fixed; the memo rebuilt when the capabilities change. Smoke scenario `architecture_draws_every_worker_in_the_map` | executor E6 |
+| 6 | Drawing: a Workers layer with core and the five capability Workers, binding arrows with their names, each Worker's objects, containers and secrets; an external services layer; the lanes | executor E7 |
+| 7 | Live per-Worker facts: each capability Worker sends its own `wrangler.toml` summary and commit in its manifest, so a capability-only landing shows at once, without a core deploy | executor E8 |
+| 8 | Instances layer (console and `architecture_describe` only): accounts as home or linked, zones, the instance Worker, buckets, hostnames. No account ids, titles or installation ids | executor E9 |
+
+Gate: no change is needed for phases 5 to 8. For the record, if the person prefers not to rely
+on phase 7, the alternative is a gate change: add each capability Worker's `wrangler.toml` to
+core's `paths` in `ci/workers.toml`, so a binding change redeploys core. I do not propose it:
+it makes core deploy for every capability Worker's binding change. The proxy Worker has no
+binding from core and so sends no manifest; its card stays drawn from core's build and says so.
