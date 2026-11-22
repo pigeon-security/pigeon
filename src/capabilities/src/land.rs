@@ -381,7 +381,7 @@ impl Capability for Land {
 // ---- the Lander ----
 
 /// The Lander's schema, one statement per migration, applied in order and never edited.
-const MIGRATIONS: [&str; 16] = [
+const MIGRATIONS: [&str; 17] = [
     "CREATE TABLE landings (id TEXT PRIMARY KEY, branch TEXT NOT NULL, commit_sha TEXT NOT NULL, main_at TEXT NOT NULL, caller TEXT NOT NULL, by_name TEXT NOT NULL, state TEXT NOT NULL, approval_reason TEXT, approved_by TEXT, awaiting_since INTEGER, test_job TEXT, deploy_job TEXT, tries INTEGER NOT NULL DEFAULT 0, detail TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, finished_at INTEGER, note_pushed INTEGER NOT NULL DEFAULT 0, note_tries INTEGER NOT NULL DEFAULT 0)",
     "CREATE TABLE events (landing TEXT NOT NULL, at INTEGER NOT NULL, state TEXT NOT NULL, detail TEXT)",
     "CREATE TABLE notes (commit_sha TEXT PRIMARY KEY, text TEXT NOT NULL)",
@@ -413,6 +413,9 @@ const MIGRATIONS: [&str; 16] = [
     // the Worker's last good build before it (JSON `{commit, covers}`), the landings it
     // included, and how it ended: open, isolated or unisolated, the guilty landing, a summary.
     "CREATE TABLE incidents (id INTEGER PRIMARY KEY AUTOINCREMENT, worker TEXT NOT NULL, failed_deploy INTEGER NOT NULL, landing TEXT NOT NULL, last_good TEXT, included TEXT NOT NULL, state TEXT NOT NULL, guilty TEXT, summary TEXT, redeploys INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, finished_at INTEGER)",
+    // Whether the other lanes wait for core to deploy a landing first (the map's
+    // `core_first`); landings from before default to waiting, as they all did.
+    "ALTER TABLE landings ADD COLUMN ordered INTEGER NOT NULL DEFAULT 1",
 ];
 
 /// What the Lander needs from the hosting Worker, beside the settings: the capabilities it
@@ -461,6 +464,13 @@ struct Row {
     deploys: Option<String>,
     #[serde(default)]
     deploy_worker: Option<String>,
+    #[serde(default = "waits_for_core")]
+    ordered: i64,
+}
+
+/// A landing row read without the `ordered` column waits for core, as every landing once did.
+fn waits_for_core() -> i64 {
+    1
 }
 
 impl Row {
@@ -1236,6 +1246,7 @@ impl Lander {
                     merged_at: r.merged_at.unwrap_or(r.updated_at),
                     commit: r.commit_sha.clone(),
                     workers: r.workers(),
+                    ordered: r.ordered != 0,
                 };
                 (r, m)
             })
@@ -1378,6 +1389,7 @@ impl Lander {
                 shared: false,
                 smoke: false,
                 workers: union,
+                ordered: false,
             };
             let order: Vec<String> = self
                 .settings
@@ -1889,7 +1901,14 @@ impl Lander {
                 approvals.delegate.join(", ")
             )
         });
-        let affected = seen.map.classify(&changed);
+        // A lockfile change in the workspace's own entries alone follows the crates' own
+        // manifests, which pick their lanes.
+        let for_lanes: Vec<&str> = changed
+            .iter()
+            .copied()
+            .filter(|p| !(seen.lock_members_only && *p == pigeon_core::lanes::LOCK))
+            .collect();
+        let affected = seen.map.classify(&for_lanes);
         let docs_only = affected.docs_only;
         let workers = serde_json::to_string(&affected.workers)?;
         let on = if seen.forward() {
@@ -1902,28 +1921,36 @@ impl Lander {
         };
         let what = if docs_only {
             "; docs only: no tests, no deploy".to_string()
+        } else if affected.workers.is_empty() {
+            format!("; {} paths changed: tests, no deploy", changed.len())
         } else {
             format!(
-                "; {} paths changed, for {}",
+                "; {} paths changed, for {}{}",
                 changed.len(),
                 affected
                     .workers
                     .iter()
                     .cloned()
                     .collect::<Vec<_>>()
-                    .join(", ")
+                    .join(", "),
+                if affected.ordered && affected.workers.len() > 1 {
+                    " (core first)"
+                } else {
+                    ""
+                }
             )
         };
         // From here to the move nothing awaits; `apply` re-reads the row, so a cancel during the
         // awaits above wins.
         self.db.exec(
-            "UPDATE landings SET commit_sha = ?, main_at = ?, base = ?, docs_only = ?, workers = ?, approval_reason = ?, updated_at = ? WHERE id = ? AND state = 'checking'",
+            "UPDATE landings SET commit_sha = ?, main_at = ?, base = ?, docs_only = ?, workers = ?, ordered = ?, approval_reason = ?, updated_at = ? WHERE id = ? AND state = 'checking'",
             vec![
                 tip.as_str().into(),
                 seen.main.as_str().into(),
                 seen.base.as_str().into(),
                 i64::from(docs_only).into(),
                 workers.into(),
+                i64::from(affected.ordered).into(),
                 opt(reason.as_deref()),
                 now().into(),
                 row.id.as_str().into(),

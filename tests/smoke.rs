@@ -528,6 +528,7 @@ fn land_deploys_in_lanes_per_worker() {
         merged_at: at,
         commit: format!("c{at}"),
         workers: workers.iter().map(|w| w.to_string()).collect(),
+        ordered: true,
     };
     let d = |worker: &str, covers: i64, state: DeployState| Deploy {
         worker: worker.into(),
@@ -678,6 +679,117 @@ fn ci_retries_a_pinned_job_on_its_connector() {
 }
 
 #[test]
+fn lanes_scope_paths_and_order_only_the_contract() {
+    use pigeon_capabilities::land::lanes::{self, Merged};
+    use pigeon_core::lanes::{self as map_lanes, Owner};
+    let map = map_lanes::parse(
+        r#"
+version = 1
+[docs]
+paths = ["docs/*"]
+[shared]
+paths = ["src/core/*", "src/contract/*", "Cargo.lock"]
+core_first = ["src/contract/*", "ci/workers.toml"]
+[checks]
+paths = ["ci/runner/test.sh", ".pigeon/ci.toml"]
+[[worker]]
+name = "core"
+script = "pigeon-platform"
+dir = "src/platform"
+paths = ["src/platform/*", "src/models/*", "ci/workers.toml"]
+test_job = "test"
+deploy_job = "deploy"
+[[worker]]
+name = "model-gateway"
+script = "pigeon-model-gateway"
+dir = "src/model-gateway"
+paths = ["src/model-gateway/*", "src/models/*"]
+test_job = "test"
+deploy_job = "deploy-model-gateway"
+[[worker]]
+name = "sites"
+script = "pigeon-sites"
+dir = "src/sites"
+paths = ["src/sites/*"]
+test_job = "test"
+deploy_job = "deploy-sites"
+"#,
+    )
+    .unwrap();
+    let names = |a: &map_lanes::Affected| a.workers.iter().cloned().collect::<Vec<_>>();
+    // A library both link deploys both, and only them; it is not the contract.
+    let models = map.classify(&["src/models/src/runner.rs"]);
+    assert_eq!(names(&models), ["core", "model-gateway"]);
+    assert!(!models.shared && !models.ordered);
+    assert!(matches!(map.owner("src/models/src/lib.rs"), Owner::Workers(ws) if ws.len() == 2));
+    // The gate, CI's jobs and the smoke suite: tested, deployed nowhere, never docs-only.
+    for checks in [
+        &["ci/runner/test.sh"][..],
+        &[".pigeon/ci.toml"],
+        &["tests/smoke.rs"],
+    ] {
+        let a = map.classify(checks);
+        assert!(
+            !a.docs_only && !a.shared && a.workers.is_empty(),
+            "{checks:?}"
+        );
+    }
+    // Shared deploys everything; core goes first only for the contract (or the map).
+    let core_lib = map.classify(&["src/core/src/git.rs"]);
+    assert!(core_lib.shared && !core_lib.ordered && core_lib.workers.len() == 3);
+    assert!(map.classify(&["src/contract/src/wire.rs"]).ordered);
+    assert!(map.classify(&["ci/workers.toml"]).ordered);
+    // Main moving a checks path retests; moving another Worker's path does not.
+    assert!(
+        map.overlap(&["src/sites/src/lib.rs"], &["ci/runner/test.sh"])
+            .retest
+    );
+    assert!(
+        !map.overlap(&["src/sites/src/lib.rs"], &["src/models/src/lib.rs"])
+            .retest
+    );
+    // A map without `core_first` keeps the older rule: whatever affects core is ordered.
+    let old = map_lanes::parse(
+        "version = 1\n[docs]\npaths = []\n[shared]\npaths = []\n[[worker]]\nname = \"core\"\nscript = \"p\"\ndir = \"src/p\"\npaths = [\"src/p/*\"]\ntest_job = \"test\"\ndeploy_job = \"deploy\"\n",
+    )
+    .unwrap();
+    assert!(old.classify(&["src/p/x.rs"]).ordered);
+
+    // The lockfile: a change to the workspace's own entries alone is not shared; a registry
+    // package added or bumped is, and so is a lockfile that does not parse.
+    let lock = |extra_dep: &str, serde: &str| {
+        format!(
+            "version = 4\n\n[[package]]\nname = \"pigeon-model-gateway\"\nversion = \"0.1.0\"\ndependencies = [\n \"pigeon-core\",{extra_dep}\n]\n\n[[package]]\nname = \"serde_json\"\nversion = \"{serde}\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"00\"\n"
+        )
+    };
+    let before = lock("", "1.0.140");
+    assert!(map_lanes::lock_members_only(
+        &before,
+        &lock("\n \"serde_json\",", "1.0.140")
+    ));
+    assert!(!map_lanes::lock_members_only(&before, &lock("", "1.0.141")));
+    assert!(!map_lanes::lock_members_only(&before, "not a lockfile ["));
+
+    // Lanes: an unordered landing for core and the gateway deploys both at once; an ordered one
+    // holds the gateway until core has deployed it.
+    let m = |id: &str, at: i64, ordered: bool| Merged {
+        id: id.into(),
+        merged_at: at,
+        commit: format!("c{at}"),
+        workers: vec!["core".into(), "model-gateway".into()],
+        ordered,
+    };
+    let starting = |l: Merged| {
+        lanes::starts("core", &[l], &[], &[])
+            .into_iter()
+            .map(|s| s.worker)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(starting(m("U", 1, false)), ["core", "model-gateway"]);
+    assert_eq!(starting(m("O", 1, true)), ["core"]);
+}
+
+#[test]
 fn land_attributes_a_failed_deploy() {
     use Tried::{Error, Failed, Passed};
     use pigeon_capabilities::land::lanes::{
@@ -810,6 +922,7 @@ fn land_attributes_a_failed_deploy() {
         merged_at: 5,
         commit: "c5".into(),
         workers: vec!["sites".into()],
+        ordered: true,
     };
     let d = |covers: i64, state: DeployState, incident: bool| Deploy {
         worker: "sites".into(),

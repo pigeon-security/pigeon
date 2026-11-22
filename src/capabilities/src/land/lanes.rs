@@ -6,9 +6,10 @@
 //! at a time with strictly increasing `merged_at`, so a deploy at the commit merged at `covers`
 //! holds every landing merged at or before it.
 //!
-//! A landing that affects core deploys core first: no other lane deploys a commit at or after
-//! such a landing's merge until core has deployed one that covers it. Then the other lanes run
-//! in parallel.
+//! A landing that affects core and is `ordered` (it changed a path in the map's `core_first`,
+//! such as the contract between the Workers) deploys core first: no other lane deploys a commit
+//! at or after such a landing's merge until core has deployed one that covers it. Then the other
+//! lanes run in parallel. Any other landing's lanes, core's included, run in parallel at once.
 //!
 //! A landing is landed once every Worker it affects has deployed a commit at or after its merge.
 //! It is deploy_failed once an incident (a lane's deploy that failed, attributed by
@@ -28,6 +29,8 @@ pub struct Merged {
     pub commit: String,
     /// The Workers it affects, by name.
     pub workers: Vec<String>,
+    /// Whether the other lanes wait for core to deploy it first.
+    pub ordered: bool,
 }
 
 /// How a lane's deploy stands.
@@ -151,13 +154,13 @@ pub fn starts(core: &str, landings: &[Merged], deploys: &[Deploy], held: &[&str]
         if busy || held.contains(&w) {
             continue;
         }
-        // Another lane deploys nothing at or after a landing core has still to deploy.
+        // Another lane deploys nothing at or after an ordered landing core has still to deploy.
         let block = if w == core {
             i64::MAX
         } else {
             sorted
                 .iter()
-                .filter(|l| waits(l, w) && l.workers.iter().any(|x| x == core))
+                .filter(|l| waits(l, w) && l.ordered && l.workers.iter().any(|x| x == core))
                 .filter(|l| !covered(deploys, core, l.merged_at))
                 .map(|l| l.merged_at)
                 .min()

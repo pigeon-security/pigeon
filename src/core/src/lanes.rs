@@ -4,6 +4,11 @@
 //! the Lander can pick tests, spot docs-only landings, decide on retests and order deploys. The
 //! Lander reads the map from main, never from the branch being landed, so a branch never picks
 //! its own lane. See docs/plans/workers-split.md.
+//!
+//! A path belongs to every Worker whose patterns match it: a library such as `src/models` is
+//! built into each Worker that links it. `[checks]` paths run the tests and deploy nothing (the
+//! gate, CI's job definitions). `[shared] core_first` names the paths whose change makes the
+//! other lanes wait until core has deployed it (the contract between them).
 
 use std::collections::BTreeSet;
 
@@ -22,6 +27,11 @@ pub struct Map {
     pub docs: Vec<String>,
     /// Patterns for paths that run every Worker's tests.
     pub shared: Vec<String>,
+    /// Patterns for paths that run the tests and deploy nothing.
+    pub checks: Vec<String>,
+    /// Patterns for paths whose change deploys core before any other lane; `None` (a map without
+    /// the key) keeps the older rule: every landing that affects core.
+    pub core_first: Option<Vec<String>>,
     /// The Workers, in file order.
     pub workers: Vec<Worker>,
 }
@@ -66,7 +76,7 @@ pub enum After {
 }
 
 /// The entry that owns a path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Owner<'a> {
     /// The path is documentation.
     Docs,
@@ -74,8 +84,10 @@ pub enum Owner<'a> {
     Shared,
     /// The path is the test-shared path, [`SMOKE`].
     Smoke,
-    /// The path belongs to this Worker.
-    Worker(&'a Worker),
+    /// The path runs the tests and deploys nothing.
+    Checks,
+    /// The path belongs to these Workers (at least one), in file order.
+    Workers(Vec<&'a Worker>),
 }
 
 /// The effect of a set of changed paths.
@@ -87,8 +99,10 @@ pub struct Affected {
     pub shared: bool,
     /// True when [`SMOKE`] is among the changed paths.
     pub smoke: bool,
-    /// The names of the Workers whose tests must run.
+    /// The names of the Workers to deploy.
     pub workers: BTreeSet<String>,
+    /// True when the other lanes wait for core to deploy it first ([`Map::core_first`]).
+    pub ordered: bool,
 }
 
 /// How a branch's changes relate to what main changed meanwhile.
@@ -108,6 +122,11 @@ pub fn parse(text: &str) -> Result<Map, String> {
     }
     check_patterns("docs.paths", &raw.docs.paths)?;
     check_patterns("shared.paths", &raw.shared.paths)?;
+    if let Some(first) = &raw.shared.core_first {
+        check_patterns("shared.core_first", first)?;
+    }
+    let checks = raw.checks.map(|c| c.paths).unwrap_or_default();
+    check_patterns("checks.paths", &checks)?;
     if raw.worker.is_empty() {
         return Err("worker: at least one worker is required".to_string());
     }
@@ -138,6 +157,8 @@ pub fn parse(text: &str) -> Result<Map, String> {
     Ok(Map {
         docs: raw.docs.paths,
         shared: raw.shared.paths,
+        checks,
+        core_first: raw.shared.core_first,
         workers: raw.worker,
     })
 }
@@ -156,8 +177,9 @@ pub fn matches(pattern: &str, path: &str) -> bool {
 impl Map {
     /// Returns the entry that owns the path.
     ///
-    /// The order is [`SMOKE`] first, then docs, then shared, then the Workers in file order. The
-    /// first match wins, and a path nothing matches is shared.
+    /// The order is [`SMOKE`] first, then docs, then shared, then checks; the first of those to
+    /// match wins. Otherwise the path belongs to every Worker whose patterns match it, and a path
+    /// nothing matches is shared.
     pub fn owner(&self, path: &str) -> Owner<'_> {
         if path == SMOKE {
             return Owner::Smoke;
@@ -168,13 +190,18 @@ impl Map {
         if self.shared.iter().any(|p| matches(p, path)) {
             return Owner::Shared;
         }
-        match self
+        if self.checks.iter().any(|p| matches(p, path)) {
+            return Owner::Checks;
+        }
+        let owners: Vec<&Worker> = self
             .workers
             .iter()
-            .find(|w| w.paths.iter().any(|p| matches(p, path)))
-        {
-            Some(w) => Owner::Worker(w),
-            None => Owner::Shared,
+            .filter(|w| w.paths.iter().any(|p| matches(p, path)))
+            .collect();
+        if owners.is_empty() {
+            Owner::Shared
+        } else {
+            Owner::Workers(owners)
         }
     }
 
@@ -185,9 +212,8 @@ impl Map {
 
     /// Classifies a set of changed paths.
     ///
-    /// A change to [`SMOKE`] runs the tests of the Workers the other paths affect. When no other
-    /// path affects a Worker, it runs every Worker's tests. It never makes the change shared or
-    /// docs-only.
+    /// A change to [`SMOKE`] or to a checks path runs the tests and deploys nothing by itself; it
+    /// never makes the change shared or docs-only. A shared path deploys every Worker.
     pub fn classify(&self, changed: &[&str]) -> Affected {
         let mut docs_only = !changed.is_empty();
         let mut shared = false;
@@ -204,20 +230,28 @@ impl Map {
                     smoke = true;
                     docs_only = false;
                 }
-                Owner::Worker(w) => {
-                    workers.insert(w.name.clone());
+                Owner::Checks => docs_only = false,
+                Owner::Workers(ws) => {
+                    workers.extend(ws.iter().map(|w| w.name.clone()));
                     docs_only = false;
                 }
             }
         }
-        if shared || (smoke && workers.is_empty()) {
+        if shared {
             workers = self.workers.iter().map(|w| w.name.clone()).collect();
         }
+        let ordered = match &self.core_first {
+            Some(first) => changed
+                .iter()
+                .any(|path| first.iter().any(|p| matches(p, path))),
+            None => workers.contains(CORE),
+        };
         Affected {
             docs_only,
             shared,
             smoke,
             workers,
+            ordered,
         }
     }
 
@@ -236,8 +270,8 @@ impl Map {
         let retest = !affected.docs_only
             && main_moved.iter().any(|&path| match self.owner(path) {
                 Owner::Docs => false,
-                Owner::Shared | Owner::Smoke => true,
-                Owner::Worker(w) => affected.workers.contains(w.name.as_str()),
+                Owner::Shared | Owner::Smoke | Owner::Checks => true,
+                Owner::Workers(ws) => ws.iter().any(|w| affected.workers.contains(&w.name)),
             });
         Overlap { same_paths, retest }
     }
@@ -270,22 +304,63 @@ impl Map {
     }
 }
 
+/// The lockfile, whose change is shared unless [`lock_members_only`] says otherwise.
+pub const LOCK: &str = "Cargo.lock";
+
+/// Whether a lockfile change from `before` to `after` touches only the workspace's own crates'
+/// entries (those without a `source`): such a change follows from those crates' own
+/// `Cargo.toml` changes, which carry their lanes, so the lockfile need not deploy every Worker.
+/// Any other difference (a package from a registry or git added, removed or changed, or a
+/// lockfile either side that does not parse) is false: the change stays shared.
+pub fn lock_members_only(before: &str, after: &str) -> bool {
+    fn packages(text: &str) -> Option<(toml::Table, Vec<toml::Value>)> {
+        let mut table: toml::Table = toml::from_str(text).ok()?;
+        let packages = match table.remove("package") {
+            Some(toml::Value::Array(a)) => a,
+            None => Vec::new(),
+            Some(_) => return None,
+        };
+        Some((table, packages))
+    }
+    fn external(packages: &[toml::Value]) -> Vec<&toml::Value> {
+        packages
+            .iter()
+            .filter(|p| p.get("source").is_some())
+            .collect()
+    }
+    let (Some((head_a, a)), Some((head_b, b))) = (packages(before), packages(after)) else {
+        return false;
+    };
+    head_a == head_b && external(&a) == external(&b)
+}
+
 /// The file as it is read, before validation.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Raw {
     version: u32,
     docs: Section,
-    shared: Section,
+    shared: Shared,
+    #[serde(default)]
+    checks: Option<Section>,
     #[serde(default)]
     worker: Vec<Worker>,
 }
 
-/// A `[docs]` or `[shared]` table.
+/// A `[docs]` or `[checks]` table.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Section {
     paths: Vec<String>,
+}
+
+/// The `[shared]` table.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Shared {
+    paths: Vec<String>,
+    #[serde(default)]
+    core_first: Option<Vec<String>>,
 }
 
 /// Checks every pattern in a list.

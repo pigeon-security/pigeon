@@ -22,7 +22,14 @@ const TOKEN_TTL: u64 = 900;
 /// The map's path in the repository.
 pub const MAP_PATH: &str = "ci/workers.toml";
 /// The files both sides may change, merged line by line ([`merge3`]).
-pub const TEXT_MERGE: [&str; 2] = [lanes::SMOKE, "docs/plans/README.md"];
+pub const TEXT_MERGE: [&str; 5] = [
+    lanes::SMOKE,
+    "docs/plans/README.md",
+    // Lists that parallel landings each add an entry to; a merged result is tested again.
+    MAP_PATH,
+    "Cargo.toml",
+    ".pigeon/ci.toml",
+];
 /// The map when main has none, or one that does not parse: docs merge alone, and everything
 /// else is core's, so every other change is tested and deployed as today.
 const FALLBACK: &str = r#"
@@ -93,6 +100,9 @@ pub struct Seen {
     pub objects: Objects,
     /// The map, as main has it.
     pub map: Map,
+    /// The commit changed `Cargo.lock` only in the workspace's own crates' entries
+    /// ([`lanes::lock_members_only`]), so the lockfile picks no lane by itself.
+    pub lock_members_only: bool,
 }
 
 impl Seen {
@@ -177,6 +187,14 @@ pub async fn see(
     let changed = rebase::changes(&objects, &base, commit).map_err(bad)?;
     let main_moved = rebase::changes(&objects, &base, &main).map_err(bad)?;
     let map = map_at(&objects, &main);
+    let lock_members_only = if changed.contains_key(lanes::LOCK) {
+        let text = |b: Option<Vec<u8>>| b.and_then(|b| String::from_utf8(b).ok());
+        let before = text(git::read_file(remote, &base, lanes::LOCK).await?);
+        let after = text(git::read_file(remote, commit, lanes::LOCK).await?);
+        matches!((before, after), (Some(b), Some(a)) if lanes::lock_members_only(&b, &a))
+    } else {
+        false
+    };
     Ok(Ok(Seen {
         main,
         base,
@@ -184,6 +202,7 @@ pub async fn see(
         main_moved,
         objects,
         map,
+        lock_members_only,
     }))
 }
 
@@ -215,6 +234,8 @@ pub fn fallback() -> Map {
     lanes::parse(FALLBACK).unwrap_or(Map {
         docs: Vec::new(),
         shared: Vec::new(),
+        checks: Vec::new(),
+        core_first: None,
         workers: Vec::new(),
     })
 }
