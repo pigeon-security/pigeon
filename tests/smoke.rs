@@ -1772,7 +1772,7 @@ fn deploy_proxy_allowlist() {
 /// (docs/plans/observability.md): logs on, invocation logs off, traces set, container logs off.
 #[test]
 fn core_observability_on_every_worker() {
-    use pigeon_capabilities::land::lanes;
+    use pigeon_core::lanes;
     // Workers whose traces are off, and why. Every other Worker traces.
     let traces_off = [(
         "core",
