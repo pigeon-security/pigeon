@@ -815,10 +815,11 @@ impl Capability for Apple {
 }
 
 /// iOS releases (docs/plans/ios.md, phase 4). A release is one run of CI job `ios-release` at
-/// main's head, on Buildkite's hosted macOS. The job's own token is its only credential; with it
-/// the job asks core, in order and once each:
+/// main's head when it starts, on Buildkite's hosted macOS. The job's own token is its only
+/// credential; with it the job asks core, in order and once each:
 ///
-/// 1. `/apple/release/start`: its build number, above every build Apple holds for the app;
+/// 1. `/apple/release/start`: its build number, above every build Apple holds for the app. Main's
+///    head is checked here only; later steps trust the release record's commit;
 /// 2. `/apple/release/identity`: pigeon's signing identity (certificate, key, profile), once;
 /// 3. `/apple/release/upload`: core takes the signed IPA and uploads it to App Store Connect
 ///    itself, with Apple's `buildUploads` API, so the Mac never holds the API key or a token.
@@ -836,6 +837,8 @@ pub mod release {
     const LIST: &str = "apple:releases";
     /// The last build number given out.
     const LAST: &str = "apple:release:last_number";
+    /// How long a release record stays usable after its last update: 2 hours, in milliseconds.
+    pub const EXPIRY: i64 = 2 * 3_600_000;
     /// How many releases `ios_releases` shows.
     const SHOWN: usize = 10;
 
@@ -880,11 +883,52 @@ pub mod release {
         }
     }
 
+    /// Whether `step` may go ahead for `job` at `commit`. Main's head matters only at `start`:
+    /// a job answering `start` again, or any later step, is trusted by its release record, which
+    /// proves the release started at main's head. `main_head` is ignored after `start`.
+    pub fn admit(
+        step: &str,
+        job: &str,
+        commit: &str,
+        main_head: Option<&str>,
+        record: Option<&Release>,
+        now_ms: i64,
+    ) -> std::result::Result<(), String> {
+        match step {
+            "start" => {
+                if record.is_some_and(|r| r.job == job && r.commit.eq_ignore_ascii_case(commit)) {
+                    return Ok(());
+                }
+                match main_head {
+                    Some(h) if h.eq_ignore_ascii_case(commit) => Ok(()),
+                    _ => Err("a release is cut only from main's head".into()),
+                }
+            }
+            "identity" | "upload" => {
+                let r = record.ok_or("no release for this job: start it first")?;
+                if r.job != job {
+                    return Err("the release belongs to another job".into());
+                }
+                if !r.commit.eq_ignore_ascii_case(commit) {
+                    return Err("the release's commit is not this job's commit".into());
+                }
+                if !open(&r.state) {
+                    return Err("the release is over".into());
+                }
+                if now_ms - r.updated_ms > EXPIRY {
+                    return Err("the release has expired".into());
+                }
+                Ok(())
+            }
+            _ => Err("not a release step".into()),
+        }
+    }
+
     /// The tool.
     pub fn tool() -> Tool {
         Tool {
             name: "ios_releases",
-            description: "Read-only: the latest iOS releases (CI job ios-release at main's head): \
+            description: "Read-only: the latest iOS releases (CI job ios-release, cut at main's head): \
                           each one's build number, commit, state and Apple's processing state, \
                           read fresh from App Store Connect for those still processing. Start a \
                           release with ci_submit of job ios-release at main's head.",
@@ -916,11 +960,12 @@ pub mod release {
     }
 
     /// The release job a request's token stands for: a live job token of a running `ios-release`
-    /// job on Buildkite (hosted agents only, which the connector enforces), at main's head.
+    /// job on Buildkite (hosted agents only, which the connector enforces). It answers the job id,
+    /// the commit and the repository; `serve` checks main's head, at `start` only.
     async fn caller(
         cx: &Context<'_>,
         req: &Request,
-    ) -> std::result::Result<(String, String), (u16, String)> {
+    ) -> std::result::Result<(String, String, String), (u16, String)> {
         let auth = req
             .headers()
             .get("Authorization")
@@ -945,25 +990,43 @@ pub mod release {
                 "a release runs on Buildkite's hosted macOS, while it runs",
             ));
         }
-        let (ns, repo) = grant
-            .repo
-            .split_once('/')
-            .ok_or_else(|| deny(403, "not a repository"))?;
-        let main = crate::git_proxy::tip(cx.account, ns, repo, BRANCH)
-            .await
-            .map_err(|e| deny(500, &e.to_string()))?;
-        if main.as_deref().map(str::to_ascii_lowercase) != Some(grant.commit.to_ascii_lowercase()) {
-            return Err(deny(403, "a release is cut only from main's head"));
-        }
-        Ok((grant.job, grant.commit))
+        Ok((grant.job, grant.commit, grant.repo))
     }
 
     pub async fn serve(cx: &Context<'_>, mut req: Request) -> Result<Response> {
         let step = req.path().trim_start_matches("/apple/release/").to_string();
-        let (job, commit) = match caller(cx, &req).await {
+        let (job, commit, repo) = match caller(cx, &req).await {
             Ok(c) => c,
             Err((code, why)) => return Response::error(why, code),
         };
+        if !matches!(step.as_str(), "start" | "identity" | "upload") {
+            return Response::error("not found", 404);
+        }
+        let record = load(cx.env, &job).await?;
+        let mut head = None;
+        if step == "start"
+            && record
+                .as_ref()
+                .is_none_or(|r| !r.commit.eq_ignore_ascii_case(&commit))
+        {
+            let Some((ns, name)) = repo.split_once('/') else {
+                return Response::error("not a repository", 403);
+            };
+            head = match crate::git_proxy::tip(cx.account, ns, name, BRANCH).await {
+                Ok(h) => h,
+                Err(e) => return Response::error(e.to_string(), 500),
+            };
+        }
+        if let Err(why) = admit(
+            &step,
+            &job,
+            &commit,
+            head.as_deref(),
+            record.as_ref(),
+            now_ms(),
+        ) {
+            return Response::error(why, 403);
+        }
         let answer = match step.as_str() {
             "start" => start(cx.env, &job, &commit).await,
             "identity" => identity(cx.env, &job).await,
@@ -1008,7 +1071,7 @@ pub mod release {
                 .await
                 .map(|j| j["state"] != "running")
                 .unwrap_or(true);
-            if ended || now - o.updated_ms > 2 * 3_600_000 {
+            if ended || now - o.updated_ms > EXPIRY {
                 o.detail = Some(format!("its job ended while the release was {}", o.state));
                 o.state = "failed".into();
                 o.updated_ms = now;

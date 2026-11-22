@@ -3735,6 +3735,61 @@ fn apple_release_numbers_steps_and_upload() {
     assert_eq!(pigeon_core::apple::p8_der(&pem).unwrap(), vec![0x30; 100]);
 }
 
+/// A release is admitted at main's head only at start; later steps trust the job's own record.
+#[test]
+fn apple_release_admits_by_record() {
+    use pigeon_capabilities::apple::release::{EXPIRY, Release, admit};
+
+    let now = 10_000_000_000;
+    let rec = |job: &str, commit: &str, state: &str, updated: i64| Release {
+        job: job.into(),
+        commit: commit.into(),
+        build_number: 7,
+        state: state.into(),
+        version: None,
+        certificate: None,
+        upload: None,
+        processing: None,
+        detail: None,
+        started_ms: updated,
+        updated_ms: updated,
+    };
+
+    // a. Start at main's head; then main moves and the later steps still pass.
+    assert!(admit("start", "j1", "A", Some("A"), None, now).is_ok());
+    let started = rec("j1", "A", "started", now);
+    let signing = rec("j1", "A", "signing", now);
+    assert!(admit("identity", "j1", "A", Some("B"), Some(&started), now).is_ok());
+    assert!(admit("upload", "j1", "A", Some("B"), Some(&signing), now).is_ok());
+    assert!(admit("start", "j1", "A", None, Some(&started), now).is_ok());
+
+    // b. A commit that was never main's head is refused, and so is a step with no record.
+    assert!(admit("start", "j3", "C", Some("A"), None, now).is_err());
+    assert!(admit("identity", "j3", "C", Some("C"), None, now).is_err());
+    assert!(admit("upload", "j3", "C", Some("C"), None, now).is_err());
+
+    // c. Another job's record does not carry over.
+    for step in ["identity", "upload"] {
+        assert!(admit(step, "j2", "A", Some("A"), Some(&signing), now).is_err());
+    }
+    assert!(admit("start", "j2", "A", Some("B"), None, now).is_err());
+    assert!(admit("start", "j2", "A", Some("B"), Some(&started), now).is_err());
+
+    // d. A record of another commit, a finished record, or an old one is refused.
+    let other = rec("j1", "B", "started", now);
+    assert!(admit("identity", "j1", "A", None, Some(&other), now).is_err());
+    for state in ["complete", "failed"] {
+        let over = rec("j1", "A", state, now);
+        assert!(admit("identity", "j1", "A", None, Some(&over), now).is_err());
+        assert!(admit("upload", "j1", "A", None, Some(&over), now).is_err());
+    }
+    let old = rec("j1", "A", "signing", now - EXPIRY - 1);
+    assert!(admit("upload", "j1", "A", None, Some(&old), now).is_err());
+    let edge = rec("j1", "A", "signing", now - EXPIRY);
+    assert!(admit("upload", "j1", "A", None, Some(&edge), now).is_ok());
+    assert!(admit("other", "j1", "A", Some("A"), Some(&started), now).is_err());
+}
+
 // ---- storage ----
 
 #[test]
