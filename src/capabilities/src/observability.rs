@@ -24,6 +24,10 @@ const BILLING_PERMISSION: &str = "Billing Read";
 const TOKEN_TTL: u64 = 300;
 /// The longest a message is kept, in characters.
 const MESSAGE_CHARS: usize = 200;
+/// How long one source may take, in milliseconds: a mint, its call (with `call_fresh`'s waits
+/// for a new token, 15 s at most) and the revoke. The sources run together, so the tool answers
+/// in about this long even when an upstream hangs.
+const SOURCE_LIMIT_MS: u64 = 25_000;
 /// How many error messages are kept per Worker.
 const TOP_ERRORS: usize = 5;
 /// Workers list price, dollars per million requests, before included usage.
@@ -135,8 +139,35 @@ pub fn telemetry_query(id: &str, from_ms: i64, to_ms: i64) -> Value {
     })
 }
 
-/// Folds the logs query's result into the top five messages per Worker, each cut to 200
-/// characters. Groups are read as `{key, value}` pairs next to a `count`.
+/// The logs query body that counts every event by Worker, any level: which Workers' logs hold
+/// anything in the window.
+pub fn telemetry_services_query(id: &str, from_ms: i64, to_ms: i64) -> Value {
+    json!({
+        "queryId": id,
+        "timeframe": { "from": from_ms, "to": to_ms },
+        "view": "calculations",
+        "limit": 100,
+        "parameters": {
+            "calculations": [{ "operator": "count" }],
+            "groupBys": [{ "type": "string", "value": "$metadata.service" }],
+        },
+    })
+}
+
+/// The Workers that [`telemetry_services_query`]'s result has any events for.
+pub fn fold_services(result: &Value) -> std::collections::BTreeSet<String> {
+    result["calculations"][0]["aggregates"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|row| row["groups"].as_array().into_iter().flatten())
+        .filter(|g| g["key"] == "$metadata.service")
+        .filter_map(|g| g["value"].as_str().map(str::to_string))
+        .collect()
+}
+
+/// Folds the logs query's result into the top five messages per Worker, each redacted
+/// ([`redact`]) and cut to 200 characters. Groups are read as `{key, value}` pairs next to a `count`.
 pub fn fold_errors(result: &Value) -> BTreeMap<String, Vec<Value>> {
     let rows = result["calculations"][0]["aggregates"]
         .as_array()
@@ -165,11 +196,88 @@ pub fn fold_errors(result: &Value) -> BTreeMap<String, Vec<Value>> {
             let top = v
                 .into_iter()
                 .take(TOP_ERRORS)
-                .map(|(count, m)| json!({ "count": count, "message": cut(&m) }))
+                .map(|(count, m)| json!({ "count": count, "message": cut(&redact(&m)) }))
                 .collect();
             (service, top)
         })
         .collect()
+}
+
+/// The characters that can be part of a URL, an email or a token: what [`redact`] looks at.
+fn wordy(c: char) -> bool {
+    c.is_ascii_alphanumeric() || "._%+-/=:@?&~#".contains(c)
+}
+
+/// Whether `piece` looks like a secret: 20 characters or more of letters, digits, `_`, `-` and
+/// `.`, with both letters and digits. Tokens, keys, JWTs, hex and UUID ids all match; words and
+/// version numbers do not.
+fn secret_like(piece: &str) -> bool {
+    piece.len() >= 20
+        && piece
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_-.".contains(c))
+        && piece.chars().any(|c| c.is_ascii_digit())
+        && piece.chars().any(|c| c.is_ascii_alphabetic())
+}
+
+/// One run of [`wordy`] characters, redacted: a URL query becomes `?[query]`, an email
+/// `[email]`, and each piece between `/`, `:`, `=`, `&`, `?`, `#`, `@`, `+`, `%` or `~` that is
+/// [`secret_like`] becomes `[redacted]`.
+fn redact_run(run: &str) -> String {
+    let (head, query) = match run.find('?') {
+        Some(i) if run[i..].len() > 1 => (&run[..i], true),
+        _ => (run, false),
+    };
+    let at = head.find('@');
+    if at.is_some_and(|i| i > 0 && head[i + 1..].contains('.')) && !head.contains("://") {
+        return "[email]".to_string();
+    }
+    let mut out = String::new();
+    let mut piece = String::new();
+    let flush = |piece: &mut String, out: &mut String| {
+        out.push_str(if secret_like(piece) {
+            "[redacted]"
+        } else {
+            piece
+        });
+        piece.clear();
+    };
+    for c in head.chars() {
+        if "/:=&?#@+%~".contains(c) {
+            flush(&mut piece, &mut out);
+            out.push(c);
+        } else {
+            piece.push(c);
+        }
+    }
+    flush(&mut piece, &mut out);
+    if query {
+        out.push_str("?[query]");
+    }
+    out
+}
+
+/// `text` with what could be a secret or a person taken out: URL queries (one-use codes ride in
+/// them), emails, and token-like strings. Error-level log lines are returned word for word
+/// otherwise, and an upstream error or an uncaught exception can carry a response body.
+pub fn redact(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut run = String::new();
+    for c in text.chars() {
+        if wordy(c) {
+            run.push(c);
+        } else {
+            if !run.is_empty() {
+                out.push_str(&redact_run(&run));
+                run.clear();
+            }
+            out.push(c);
+        }
+    }
+    if !run.is_empty() {
+        out.push_str(&redact_run(&run));
+    }
+    out
 }
 
 /// `text` cut to 200 characters.
@@ -372,68 +480,123 @@ async fn open<'a>(cx: &Context<'a>, permission: &str) -> Result<Scoped<'a>> {
     .await
 }
 
-/// Builds the answer for the last `hours`. A source that cannot be read goes to `unavailable`
-/// and the rest is still answered.
+/// `work`, or an error once [`SOURCE_LIMIT_MS`] has passed.
+async fn within<T>(work: impl std::future::Future<Output = Result<T>>) -> Result<T> {
+    let limit = worker::Delay::from(std::time::Duration::from_millis(SOURCE_LIMIT_MS));
+    futures_util::pin_mut!(work);
+    futures_util::pin_mut!(limit);
+    match futures_util::future::select(work, limit).await {
+        futures_util::future::Either::Left((v, _)) => v,
+        futures_util::future::Either::Right(_) => Err(Error::RustError(format!(
+            "no answer within {} s",
+            SOURCE_LIMIT_MS / 1000
+        ))),
+    }
+}
+
+/// Mints a token with `permission`, runs `work` with it and revokes it, all within
+/// [`SOURCE_LIMIT_MS`]. The error says which step failed, with the account id taken out.
+async fn with_token<'a, F, Fut>(
+    cx: &Context<'a>,
+    permission: &str,
+    work: F,
+) -> std::result::Result<Value, String>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = Result<Value>>,
+{
+    let hide = |e: Error| e.to_string().replace(cx.account.id.as_str(), "{account}");
+    let outcome = within(async {
+        let token = open(cx, permission)
+            .await
+            .map_err(|e| Error::RustError(format!("the token was not minted: {e}")))?;
+        let done = work(token.value().to_string()).await;
+        token.finish(done).await
+    })
+    .await;
+    outcome.map_err(hide)
+}
+
+/// Builds the answer for the last `hours`. The sources run together, each within
+/// [`SOURCE_LIMIT_MS`]; a source that cannot be read goes to `unavailable` and the rest is
+/// still answered.
 async fn summary(this: &Observability, cx: &Context<'_>, hours: u64) -> Result<Value> {
     let to = Date::now();
     let from = to - hours as f64 * 3_600_000.0;
     let mut unavailable = Vec::new();
-    let id = &cx.account.id;
+    let id = cx.account.id.as_str();
+    let hide = |e: Error| e.to_string().replace(id, "{account}");
 
     // Metrics: Account Analytics Read.
-    let mut metrics = BTreeMap::new();
-    match open(cx, ANALYTICS_PERMISSION).await {
-        Ok(token) => {
-            let work = graphql(token.value(), &graphql_query(id, &iso(from), &iso(to))).await;
-            match token.finish(work).await {
-                Ok(v) => metrics = fold_invocations(&v),
-                Err(e) => unavailable.push(missing("metrics", &e.to_string())),
+    let metrics_work = with_token(cx, ANALYTICS_PERMISSION, |t| async move {
+        graphql(&t, &graphql_query(id, &iso(from), &iso(to))).await
+    });
+    // Logs: Workers Observability Write, the only permission the query endpoint takes, for two
+    // POSTs: the error lines, and which Workers have any events at all.
+    let logs_work = with_token(cx, OBSERVABILITY_PERMISSION, |t| async move {
+        let path = format!("/accounts/{id}/workers/observability/telemetry/query");
+        let errors = telemetry_query(&format!("pigeon-{}", to as i64), from as i64, to as i64);
+        let services =
+            telemetry_services_query(&format!("pigeon-s-{}", to as i64), from as i64, to as i64);
+        let post = |body: Value| {
+            let (t, path) = (t.clone(), path.clone());
+            async move {
+                pigeon_core::cloudflare::call_fresh(&t, Method::Post, &path, Some(&body)).await
             }
-        }
-        Err(e) => unavailable.push(missing(
-            "metrics",
-            &format!("the token was not minted: {e}"),
-        )),
-    }
-
-    // Logs: Workers Observability Write, for the one POST only.
-    let mut errors = BTreeMap::new();
-    match open(cx, OBSERVABILITY_PERMISSION).await {
-        Ok(token) => {
-            let body = telemetry_query(&format!("pigeon-{}", to as i64), from as i64, to as i64);
-            let path = format!("/accounts/{id}/workers/observability/telemetry/query");
-            let work =
-                pigeon_core::cloudflare::call(token.value(), Method::Post, &path, Some(&body))
-                    .await;
-            match token.finish(work).await {
-                Ok(v) => errors = fold_errors(&v),
-                Err(e) => unavailable.push(missing("logs", &e.to_string())),
-            }
-        }
-        Err(e) => unavailable.push(missing("logs", &format!("the token was not minted: {e}"))),
-    }
-
+        };
+        let (errors, services) = futures_util::future::join(post(errors), post(services)).await;
+        Ok(json!({ "errors": errors?, "services": services? }))
+    });
     // Billable usage: Billing Read.
-    let mut billed = Vec::new();
-    match open(cx, BILLING_PERMISSION).await {
-        Ok(token) => {
-            let path = format!("/accounts/{id}/billable-usage");
-            let work = pigeon_core::cloudflare::call(token.value(), Method::Get, &path, None).await;
-            match token.finish(work).await {
-                Ok(v) => billed = fold_billing(&v),
-                Err(e) => unavailable.push(missing("billable usage", &e.to_string())),
-            }
-        }
-        Err(e) => unavailable.push(missing(
-            "billable usage",
-            &format!("the token was not minted: {e}"),
-        )),
-    }
+    let billing_work = with_token(cx, BILLING_PERMISSION, |t| async move {
+        let path = format!("/accounts/{id}/billable-usage");
+        pigeon_core::cloudflare::call_fresh(&t, Method::Get, &path, None).await
+    });
+    let deploys_work = within(crate::land::deploys_since(cx.env, from as i64));
+    let (models_args, agents_args, ci_args) = (
+        json!({ "hours": hours }),
+        json!({ "limit": 100 }),
+        json!({ "limit": 200 }),
+    );
+    let models_work = within(crate::dispatch(cx, "models_usage", &models_args));
+    let agents_work = within(crate::dispatch(cx, "ai_agents_status", &agents_args));
+    let ci_work = within(crate::dispatch(cx, "ci_jobs", &ci_args));
 
-    let deploys = match crate::land::deploys_since(cx.env, from as i64).await {
+    let ((metrics_v, logs_v, billing_v), (deploys_v, models_v, agents_v, ci_v)) =
+        futures_util::future::join(
+            futures_util::future::join3(metrics_work, logs_work, billing_work),
+            futures_util::future::join4(deploys_work, models_work, agents_work, ci_work),
+        )
+        .await;
+
+    let metrics = match metrics_v {
+        Ok(v) => fold_invocations(&v),
+        Err(why) => {
+            unavailable.push(missing("metrics", &why));
+            BTreeMap::new()
+        }
+    };
+    let (errors, services) = match logs_v {
+        Ok(v) => (
+            fold_errors(&v["errors"]),
+            Some(fold_services(&v["services"])),
+        ),
+        Err(why) => {
+            unavailable.push(missing("logs", &why));
+            (BTreeMap::new(), None)
+        }
+    };
+    let billed = match billing_v {
+        Ok(v) => fold_billing(&v),
+        Err(why) => {
+            unavailable.push(missing("billable usage", &why));
+            Vec::new()
+        }
+    };
+    let deploys = match deploys_v {
         Ok(v) => v,
         Err(e) => {
-            unavailable.push(missing("deploys", &e.to_string()));
+            unavailable.push(missing("deploys", &hide(e)));
             Vec::new()
         }
     };
@@ -446,7 +609,24 @@ async fn summary(this: &Observability, cx: &Context<'_>, hours: u64) -> Result<V
         let mut entry = s.public();
         entry["name"] = json!(w.name);
         entry["script"] = json!(w.script);
-        entry["top_errors"] = json!(errors.get(&w.script).cloned().unwrap_or_default());
+        // A Worker that served requests but has no log events at all: its logs are probably
+        // off, so "no errors" would be a guess. Say so rather than answer an empty list.
+        let silent = services
+            .as_ref()
+            .is_some_and(|seen| s.requests > 0.0 && !seen.contains(&w.script));
+        if silent {
+            entry["top_errors"] = Value::Null;
+            unavailable.push(missing(
+                &format!("logs for {}", w.name),
+                &format!(
+                    "no log events in the window although it served {} requests; its Workers \
+                     Logs may be off, so its errors are unknown",
+                    s.requests
+                ),
+            ));
+        } else {
+            entry["top_errors"] = json!(errors.get(&w.script).cloned().unwrap_or_default());
+        }
         entry["deploys"] = json!(
             deploys
                 .iter()
@@ -475,7 +655,7 @@ async fn summary(this: &Observability, cx: &Context<'_>, hours: u64) -> Result<V
             json!({ "requests": requests, "cpu_ms": cpu_ms }),
         ));
     }
-    match crate::dispatch(cx, "models_usage", &json!({ "hours": hours })).await {
+    match models_v {
         Ok(v) => {
             let cut_short = v["truncated"] == true;
             cost.push(line(
@@ -490,11 +670,11 @@ async fn summary(this: &Observability, cx: &Context<'_>, hours: u64) -> Result<V
                 json!({ "requests": v["requests"], "tokens_in": v["tokens_in"], "tokens_out": v["tokens_out"], "truncated": cut_short }),
             ));
         }
-        Err(e) => unavailable.push(missing("models cost", &e.to_string())),
+        Err(e) => unavailable.push(missing("models cost", &hide(e))),
     }
 
     // Agent run spend: metered, and already inside the Models line, so never summed.
-    match crate::dispatch(cx, "ai_agents_status", &json!({ "limit": 100 })).await {
+    match agents_v {
         Ok(v) => match fold_agent_runs(&v, from as i64, to as i64) {
             Ok((count, usd)) => cost.push(line(
                 "AI agent runs",
@@ -505,12 +685,12 @@ async fn summary(this: &Observability, cx: &Context<'_>, hours: u64) -> Result<V
             )),
             Err(why) => unavailable.push(missing("AI agent run spend", &why)),
         },
-        Err(e) => unavailable.push(missing("AI agent run spend", &e.to_string())),
+        Err(e) => unavailable.push(missing("AI agent run spend", &hide(e))),
     }
 
     // CI Containers time: seconds only, since the class sizes are not readable from a pure
     // function in the CI crate (they sit inside the connector's method).
-    match crate::dispatch(cx, "ci_jobs", &json!({ "limit": 200 })).await {
+    match ci_v {
         Ok(v) => match fold_ci_jobs(&v, from as i64, to as i64) {
             Ok((seconds, listed)) => cost.push(line(
                 "CI Containers",
@@ -525,7 +705,7 @@ async fn summary(this: &Observability, cx: &Context<'_>, hours: u64) -> Result<V
             )),
             Err(why) => unavailable.push(missing("CI Containers time", &why)),
         },
-        Err(e) => unavailable.push(missing("CI Containers time", &e.to_string())),
+        Err(e) => unavailable.push(missing("CI Containers time", &hide(e))),
     }
     unavailable.push(missing(
         "Buildkite cost",

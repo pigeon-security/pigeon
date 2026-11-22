@@ -299,3 +299,12 @@ until the person approves a plan.
   names (plan lines say so). Delivery: the directory keeps no email, so policies are created
   with `mechanisms: {}`; Cloudflare may refuse that, and then apply returns its error. A
   failure part-way leaves the policies made so far; planning again skips them.
+- 2026-11-22: Workers-split planner's review of (a), (b) and (c) for the person, who chose:
+  land (a), fix and land (b), fix (c). (b), third round, on `claude/obs-b-fixes` (from 3a2d4f6,
+  on (a)): `top_errors` messages go through `redact` (URL queries, emails, token-like strings)
+  before the cut; the sources run together, each within 25 s (mint, call, revoke), so a hung
+  upstream costs one `unavailable` line rather than the tool; a second logs query counts events
+  by Worker, and a Worker that served requests with no events at all gets `top_errors: null`
+  and an `unavailable` line ("its Workers Logs may be off"); Cloudflare calls use `call_fresh`
+  and `why` texts show `{account}` for the account id. Smoke: `core_observability_summary_folds`
+  covers the redaction and the coverage fold.

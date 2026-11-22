@@ -7223,6 +7223,47 @@ fn core_observability_summary_folds() {
     assert_eq!(cut_one, Some(200));
     assert_eq!(cut(&long).chars().count(), 200);
 
+    // Redaction: a message comes back without URL queries, emails or token-like strings, and
+    // the words around them stay.
+    let leaky = "GET https://pigeon.dev/app/oauth?code=Zx9-abc&state=1 failed for ada@example.com: \
+                 Bearer eyJhbGciOi.J9eyJzdWIiOiIx.SflKxwRJSMeKKF2QT4 (account \
+                 0123456789abcdef0123456789abcdef) at src/lib.rs:232 v4.166.0";
+    let clean = redact(leaky);
+    for gone in [
+        "code=",
+        "Zx9-abc",
+        "ada@",
+        "example.com",
+        "eyJhbGciOi",
+        "0123456789abcdef",
+    ] {
+        assert!(!clean.contains(gone), "{gone} left in {clean}");
+    }
+    for kept in [
+        "GET https://pigeon.dev/app/oauth?[query]",
+        "failed for [email]",
+        "Bearer [redacted]",
+        "(account [redacted])",
+        "src/lib.rs:232",
+        "v4.166.0",
+    ] {
+        assert!(clean.contains(kept), "{kept} missing from {clean}");
+    }
+    let rows = vec![json!({ "count": 1.0, "groups": [
+        { "key": "$metadata.service", "value": "pigeon-proxy" },
+        { "key": "$metadata.message", "value": leaky } ] })];
+    let errors = fold_errors(&json!({ "calculations": [{ "aggregates": rows }] }));
+    assert_eq!(errors["pigeon-proxy"][0]["message"], json!(cut(&clean)));
+
+    // Logs coverage: the Workers with any events, so one whose logs are off is told apart from
+    // one with no errors.
+    let seen = fold_services(&json!({ "calculations": [{ "aggregates": [
+        { "count": 9.0, "groups": [{ "key": "$metadata.service", "value": "pigeon-platform" }] },
+        { "count": 2.0, "groups": [{ "key": "$metadata.service", "value": "pigeon-sites" }] } ] }] }));
+    assert!(seen.contains("pigeon-platform") && seen.contains("pigeon-sites"));
+    assert!(!seen.contains("pigeon-proxy"));
+    assert!(fold_services(&json!({})).is_empty());
+
     // Billing: two units of one service stay apart; the account name never comes out.
     let billing = fold_billing(&json!([
         { "ServiceName": "Workers", "ConsumedUnit": "requests", "ConsumedQuantity": "100", "BilledCost": 1.0, "BillingAccountName": "Secret Co" },
