@@ -79,14 +79,13 @@ impl worker::DurableObject for Lander {
 /// Async model jobs: the index and each job's own object.
 #[worker::durable_object]
 pub struct ModelJobs {
-    inner: pigeon_capabilities::models::runner::ModelJobs,
+    inner: pigeon_models::runner::ModelJobs,
 }
 
 impl worker::DurableObject for ModelJobs {
     fn new(state: worker::State, env: Env) -> Self {
-        let inner =
-            pigeon_capabilities::models::runner::ModelJobs::new(state, env, settings::model_jobs())
-                .expect("the model jobs' migrations apply");
+        let inner = pigeon_models::runner::ModelJobs::new(state, env, settings::model_jobs())
+            .expect("the model jobs' migrations apply");
         Self { inner }
     }
 

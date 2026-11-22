@@ -1,6 +1,6 @@
 //! Async model jobs, the pure part: their states and the moves between them, how many run at
 //! once, how long each may take and how long its result is kept, who may read it, and what a
-//! notify says. The objects that run them are in `models/runner.rs`.
+//! notify says. The objects that run them are in `runner.rs`.
 //!
 //! ```text
 //! queued ─► running ─► succeeded | failed | timed_out | lost
@@ -14,16 +14,22 @@ use serde_json::{Value, json};
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum State {
+    /// Waiting for room to run.
     Queued,
+    /// Streaming its answer.
     Running,
+    /// Its answer is complete.
     Succeeded,
+    /// It could not start, or its provider refused it.
     Failed,
+    /// It ran out of time; its text so far is kept.
     TimedOut,
     /// Its runner stopped without a result: restarted mid-stream, or silent past its deadline.
     Lost,
 }
 
 impl State {
+    /// Its name, as kept and shown.
     pub fn name(self) -> &'static str {
         match self {
             State::Queued => "queued",
@@ -35,6 +41,7 @@ impl State {
         }
     }
 
+    /// The state named `s`.
     pub fn named(s: &str) -> Option<State> {
         [
             State::Queued,
@@ -67,9 +74,10 @@ pub fn allowed(from: State, to: State) -> bool {
 pub const MAX_RUNNING: u32 = 4;
 /// How many jobs may be queued or running at once; more are refused.
 pub const MAX_OPEN: u32 = 50;
-/// A job's timeout unless asked otherwise, and at most, in minutes. At most 14: a job streams in
-/// an alarm, which has 15 minutes of wall time.
+/// A job's timeout unless asked otherwise, in minutes.
 pub const DEFAULT_TIMEOUT_MIN: u64 = 10;
+/// A job's timeout at most, in minutes. At most 14: a job streams in an alarm, which has 15
+/// minutes of wall time.
 pub const MAX_TIMEOUT_MIN: u64 = 14;
 /// How long past its deadline a silent running job is taken as lost.
 pub const LOST_AFTER_MS: i64 = 2 * 60_000;

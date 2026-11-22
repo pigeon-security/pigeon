@@ -19,7 +19,6 @@ use pigeon_capabilities::instances::Instances;
 use pigeon_capabilities::land::{self, Land};
 use pigeon_capabilities::linked::Linked;
 use pigeon_capabilities::mirror::{self, Mirror};
-use pigeon_capabilities::models::{Dialect, Models, Provider};
 use pigeon_capabilities::oauth::OAuth;
 use pigeon_capabilities::passkeys::Passkeys;
 use pigeon_capabilities::policy::Policy;
@@ -31,6 +30,7 @@ use pigeon_capabilities::site::Site;
 use pigeon_capabilities::source::Source;
 use pigeon_capabilities::split::Split;
 use pigeon_capabilities::users::Users;
+use pigeon_models::{Dialect, Models, Provider};
 
 /// This Worker's wrangler.toml, the authority for its bindings, queues and containers.
 pub fn wrangler() -> Wrangler {
@@ -350,8 +350,8 @@ pub fn land() -> land::Settings {
 }
 
 /// What async model jobs run with: the gateway `Models` sends through, and the parent token.
-pub fn model_jobs() -> pigeon_capabilities::models::runner::Settings {
-    pigeon_capabilities::models::runner::Settings {
+pub fn model_jobs() -> pigeon_models::runner::Settings {
+    pigeon_models::runner::Settings {
         gateway: "pigeon".into(),
         parent: PARENT_TOKEN.into(),
     }

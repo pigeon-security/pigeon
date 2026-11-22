@@ -13,10 +13,15 @@ pub struct Reading {
     pending: Vec<u8>,
     /// The current event's `data:` lines.
     data: Vec<String>,
+    /// The model answering, as it says.
     pub model: String,
+    /// The text so far.
     pub text: String,
+    /// Why the answer stopped.
     pub stop_reason: Option<String>,
+    /// The tokens read.
     pub tokens_in: Option<u64>,
+    /// The tokens written so far.
     pub tokens_out: Option<u64>,
     /// The provider's error, when it sent one in the stream.
     pub error: Option<String>,

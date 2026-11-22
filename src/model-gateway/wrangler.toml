@@ -1,0 +1,34 @@
+name = "pigeon-model-gateway"
+account_id = "4f94676cb2cbe46fd985b089ca97ea27"
+main = "build/worker/shim.mjs"
+compatibility_date = "2026-11-01"
+# A capability Worker (docs/plans/workers-split.md): no public surface. Core (pigeon-platform)
+# reaches it over a service binding, and it reaches core over PLATFORM. Nothing routes here
+# from the internet.
+workers_dev = false
+preview_urls = false
+
+[build]
+command = "cargo install -q worker-build@0.9.0 && worker-build --release"
+
+[vars]
+CF_ACCOUNT_ID = "4f94676cb2cbe46fd985b089ca97ea27"
+CF_SECRETS_STORE_ID = "5185c227b9f34b4291045175695b78ec"
+
+# The key core signs callers with, made once by core's `workers_setup`.
+[[secrets_store_secrets]]
+binding = "CALLER_KEY"
+store_id = "5185c227b9f34b4291045175695b78ec"
+secret_name = "CALLER_KEY"
+
+# Core: short-lived Cloudflare credentials for the call in hand, and its tools through its gate.
+[[services]]
+binding = "PLATFORM"
+service = "pigeon-platform"
+
+# The model job objects, still hosted by core for now (phase 3 moves the class here with
+# `transferred_classes`). No migrations here: the class is pigeon-platform's.
+[durable_objects]
+bindings = [
+  { name = "MODEL_JOBS", class_name = "ModelJobs", script_name = "pigeon-platform" },
+]

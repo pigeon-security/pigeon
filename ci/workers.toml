@@ -17,6 +17,7 @@ paths = ["docs/*"]
 paths = [
     "src/core/*",
     "src/contract/*",
+    "src/models/*",
     "Cargo.toml",
     "Cargo.lock",
     ".cargo/*",
@@ -44,4 +45,16 @@ dir = "src/sites"
 paths = ["src/sites/*", "src/blog/*"]
 test_job = "test"
 deploy_job = "deploy-sites"
+after = ["portal_sync"]
+
+# The model gateway Worker: model requests through the AI Gateway, usage and async jobs, whose
+# class core still hosts (src/models is shared: core links it). A capability Worker behind
+# core (docs/plans/workers-split.md, phase 3).
+[[worker]]
+name = "model-gateway"
+script = "pigeon-model-gateway"
+dir = "src/model-gateway"
+paths = ["src/model-gateway/*"]
+test_job = "test"
+deploy_job = "deploy-model-gateway"
 after = ["portal_sync"]

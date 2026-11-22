@@ -96,9 +96,11 @@ pub fn days_ending(today: &str, n: usize) -> Vec<String> {
 /// One family's cost on each day, and over all of them.
 #[derive(Serialize, Debug, PartialEq)]
 pub struct Family {
+    /// The family, such as `haiku`.
     pub name: &'static str,
     /// Its cost on each day of the window, oldest first.
     pub costs: Vec<f64>,
+    /// Its cost over the whole window.
     pub total: f64,
 }
 

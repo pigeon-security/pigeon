@@ -607,6 +607,7 @@ dependencies = [
  "pigeon-blog",
  "pigeon-contract",
  "pigeon-core",
+ "pigeon-models",
  "rand",
  "rsa",
  "serde",
@@ -647,11 +648,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "pigeon-model-gateway"
+version = "0.1.0"
+dependencies = [
+ "pigeon-contract",
+ "pigeon-core",
+ "pigeon-models",
+ "worker",
+]
+
+[[package]]
+name = "pigeon-models"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "pigeon-contract",
+ "pigeon-core",
+ "serde",
+ "serde_json",
+ "worker",
+]
+
+[[package]]
 name = "pigeon-platform"
 version = "0.1.0"
 dependencies = [
  "pigeon-capabilities",
  "pigeon-core",
+ "pigeon-models",
  "serde_json",
  "worker",
 ]

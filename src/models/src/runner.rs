@@ -22,8 +22,9 @@ use super::Dialect;
 use super::jobs::{self, State};
 use super::stream::Reading;
 
-/// The class's binding, and the one index object.
+/// The class's binding.
 pub const BINDING: &str = "MODEL_JOBS";
+/// The one index object.
 pub const INDEX: &str = "index";
 
 /// Each object's schema, one statement per migration, applied in order and never edited. An
@@ -44,28 +45,44 @@ pub struct Settings {
 /// A request as a job carries it, from submission until it has run.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Ask {
+    /// How the provider's requests and answers are shaped.
     pub dialect: Dialect,
+    /// The gateway's name for the provider.
     pub provider: String,
+    /// The provider's path, under the gateway's.
     pub path: String,
+    /// Headers the request needs beside the gateway's.
     pub headers: Vec<(String, String)>,
+    /// The tags the request carries in the gateway's logs.
     pub tags: Vec<(String, String)>,
     /// The provider's request body, asking for a stream.
     pub body: Value,
+    /// How long it may run, in milliseconds.
     pub timeout_ms: i64,
 }
 
 /// A job as submitted.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct New {
+    /// The job's id.
     pub id: String,
+    /// Who sent it.
     pub caller: Option<String>,
+    /// The sender's name.
     pub caller_name: Option<String>,
+    /// The person the sender acts for, when any.
     pub for_id: Option<String>,
+    /// Its task label.
     pub task: Option<String>,
+    /// The gateway's name for its provider.
     pub provider: String,
+    /// The model asked.
     pub model: String,
+    /// Where to POST when it ends.
     pub notify_url: Option<String>,
+    /// The key that notify is signed with.
     pub notify_key: Option<String>,
+    /// The request itself.
     pub ask: Ask,
 }
 
@@ -159,6 +176,7 @@ pub struct ModelJobs {
 }
 
 impl ModelJobs {
+    /// The objects' logic, its migrations applied.
     pub fn new(state: ObjectState, env: Env, settings: Settings) -> Result<Self> {
         let db = Db::open(&state, &MIGRATIONS)?;
         Ok(Self {
@@ -169,6 +187,7 @@ impl ModelJobs {
         })
     }
 
+    /// Answers one operation from another object or the capability.
     pub async fn fetch(&self, req: Request) -> Result<Response> {
         durable::serve(req, async |op, args| self.handle(op, &args).await).await
     }
@@ -444,7 +463,7 @@ impl ModelJobs {
             row.finished_at.unwrap_or_else(now),
         )
         .to_string();
-        let status = crate::notify::post(url, key, body.as_bytes()).await;
+        let status = pigeon_core::notify::post(url, key, body.as_bytes()).await;
         let tries = row.notify_tries as u32 + 1;
         let next = match &status {
             Ok(s) if (200..300).contains(s) => None,
@@ -539,7 +558,7 @@ impl ModelJobs {
     /// Streams `ask` until it ends, fails or runs out of time; the `finish` report.
     async fn stream(&self, id: &str, ask: &Ask) -> Value {
         let deadline = now() + ask.timeout_ms;
-        let account = match crate::ci::scheduler::account(&self.env, &self.settings.parent).await {
+        let account = match pigeon_core::account_from_env(&self.env, &self.settings.parent).await {
             Ok(a) => a,
             Err(e) => return json!({ "id": id, "state": "failed", "error": e.to_string() }),
         };

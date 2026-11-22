@@ -506,6 +506,26 @@ over their in-flight work.
 
 ## Log
 
+- 2026-11-22: phase 3 code built on `claude/track-models` (T16; nothing deployed, no transfer).
+  - `models.rs` and `models/*` moved (`git mv`) to a new library crate, `pigeon-models`
+    (`src/models`), which does not depend on `pigeon-capabilities`. Its functions take the
+    account and the caller as core signs it (JSON), so one logic serves both sides:
+    `ModelGateway` (a `pigeon_contract::Service`: the same 8 tools, the `cost` section, the
+    provider key slot, footprint `{"gateways": ["pigeon"]}`; call, section and secret ops) and
+    `runner::ModelJobs`, unchanged.
+  - The `pigeon-model-gateway` Worker (`src/model-gateway`, wasm only, shaped as
+    `pigeon-sites`). Each Cloudflare call acts on a `scoped` credential from core
+    (`ai_gateway`; `models_setup` adds `secrets_store`), as an `Account` bearer. It reaches the
+    job objects over `MODEL_JOBS` with `script_name = "pigeon-platform"`, no migrations.
+  - Core still hosts the `ModelJobs` class (over `pigeon_models::runner`, with the parent token)
+    and, until its binding to the gateway lands, the models tools: `src/capabilities/src/models.rs`
+    is now a thin `Capability` over `pigeon_models::Models`, so nothing vanishes in between.
+  - The map lists `model-gateway`; `src/models/*` is shared (core links it), so a shared change
+    deploys core, sites, then the gateway.
+  - Departures: core keeps `Models` in `settings::capabilities()` (the coordinator's
+    correction); `pigeon-models` is a normal dependency of `pigeon-capabilities` (so no
+    dev-dependency); the smoke lanes scenario also expects a shared change to deploy
+    `model-gateway`; the secret `set` op asks `ai_gateway` only, as it writes no secret.
 - 2026-11-22: phase 1 (1a and 1b) landed together, as landing `xKIrTa8WmsUYZ02v` (main at
   `520e778`).
 - 2026-11-22: the person asked for the remaining Workers in parallel. T0, the shared prep, was

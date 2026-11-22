@@ -712,7 +712,10 @@ fn land_rebases_disjoint_branches_and_lanes() {
     assert!(map.overlap(&branch, &["Cargo.lock"]).retest);
     assert!(!map.overlap(&["docs/a.md"], &["src/core/src/git.rs"]).retest);
     assert_eq!(map.deploy_order(&core).len(), 1);
-    assert_eq!(map.scripts(), ["pigeon-platform", "pigeon-sites"]);
+    assert_eq!(
+        map.scripts(),
+        ["pigeon-platform", "pigeon-sites", "pigeon-model-gateway"]
+    );
     assert!(map.worker("sites").unwrap().queues.is_empty());
     // A Worker's deploy scope: its queues and container classes, from the map.
     let scoped = lanes::parse(&format!(
@@ -744,7 +747,7 @@ fn land_rebases_disjoint_branches_and_lanes() {
     assert_eq!(map.worker("sites").unwrap().deploy_job, "deploy-sites");
     assert_eq!(
         names(&map.classify(&["src/contract/src/wire.rs"])),
-        ["core", "sites"]
+        ["core", "sites", "model-gateway"]
     );
     assert!(
         !map.overlap(&["src/sites/src/lib.rs"], &["src/capabilities/src/land.rs"])
@@ -1168,9 +1171,9 @@ fn ci_route_and_run_on_a_fake_connector() {
 
 #[test]
 fn models_request() {
-    use pigeon_capabilities::models::jobs::{self, State};
-    use pigeon_capabilities::models::stream::Reading;
-    use pigeon_capabilities::models::{Dialect, Provider, ask};
+    use pigeon_models::jobs::{self, State};
+    use pigeon_models::stream::Reading;
+    use pigeon_models::{Dialect, Provider, ask};
     let provider = Provider {
         slug: "anthropic",
         alias: "default",
