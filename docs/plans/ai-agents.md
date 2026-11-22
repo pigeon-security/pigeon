@@ -1,10 +1,9 @@
 # AI agents: planners and executors through pigeon's model gateway
 
-Status: **phases 1 to 5 built on branches, AI agent side; core side and deploy wait for the split** (2026-11-22). Nothing landed. Nothing lands
-until the workers-split planner (`session_015XFA1nSZXE9BNYuPF5XL2j`) says the split is complete,
-docs included (the person, relayed by the parent). Planner session
-`session_015XFA1p5x6wTEFRENJaCUxN`, seeded by the parent `session_015XFA1jgveJDEE8NJjTaHKg`. Branch
-`claude/ai-agents` on Artifacts.
+Status: **landed and live** (2026-11-22). Phases 1 to 5 are on main; the `pigeon-ai-agents` Worker runs
+planners and executors through the model gateway on sandbox image v2 (`docs/plans/sandbox-v2.md`).
+Open items are listed before the Log. Planner session `session_015XFA1p5x6wTEFRENJaCUxN` (handed
+off 2026-11-22), seeded by the parent `session_015XFA1jgveJDEE8NJjTaHKg`.
 
 ## Goal
 
@@ -518,6 +517,24 @@ pure and well under a second.
 3. Both agent service users are linked to the person with their passkey. The parent tells the
    person when the `/auth/link` step is actually needed, and not before.
 4. Words alone choose the runtime for now. There is no toggle.
+
+## Open items (handoff, 2026-11-22 23:40 UTC)
+
+The AI agents planner session (`session_015XFA1p5x6wTEFRENJaCUxN`) is wrapping up: the person
+made the Claude chat the only entry point, and open work goes to AI Gateway planners and
+executors through it. Each item: state, next step, who it waits on.
+
+1. **A run that spends its budget before reporting** (overnight "What broke" 4: the data
+   planner). Not built. Proposal: at 90% of its cost budget a run gets one last turn whose only
+   tool is `ai_agents_report`. `ai_agents_extend` (landed) raises a live run's budget meanwhile.
+   Next: build it in `src/ai-agents` with a smoke scenario. Waits on: an AI Gateway executor.
+2. **Revoke a run's git grant when the run ends** (`cleanup.md` item 12). Not built; the grant
+   lives 12 hours. Next: revoke in the run's end path. Waits on: an AI Gateway executor.
+3. **The run id in core's audit lines** (Log, landing 1 "Departure"). Needs a field on core's
+   `Caller`. Next: design with core's owner. Waits on: a planner.
+4. **Local test runs.** The workspace's default target is wasm32, so `cargo test` natively needs
+   `--target x86_64-unknown-linux-gnu` (for example `cargo test --target
+   x86_64-unknown-linux-gnu --test smoke apple`). Worth a line in the agents' brief.
 
 ## Log
 

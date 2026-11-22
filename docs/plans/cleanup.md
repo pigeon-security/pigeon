@@ -363,7 +363,12 @@ alone (plus whatever the map adds for `src/capabilities`).
     `merge` could not run in the smoke suite. On WASM nothing changes.
   - This run's git grant pushes its own branch but cannot fetch, so the executors' diffs were
     reviewed from their reports and CI, not line by line. The reviewer should read both diffs.
+<<<<<<< HEAD
 - 2026-11-22: handoff from the Workers-split planner. Items 1 and 2 landed together
   (`3SKi_jbmv5_m6F2y`: commits `f0668a9`, `0baf513`). Items 3 and 7 wait on the person (gate
   changes). Items 4, 6, 8, 10, 11, 12 and 13 are open, unstarted; their next steps are in
   workers-split.md, Open items (handoff).
+=======
+- 2026-11-22 23:40 UTC: handoff. Items 1 and 2 landed (`f0668a9`, `0baf513`). Items 3 and 7
+  (gate changes) wait on the person's approval; item 12 is open in `ai-agents.md`, Open items 2.
+>>>>>>> e2b5c48 (plans: handoff of the AI agents planner's open items (AI agents, iOS, overnight, data, storage))

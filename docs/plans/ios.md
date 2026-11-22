@@ -1,10 +1,8 @@
 # iOS: code signing, APNs through the proxy, Buildkite pipelines, and the app
 
-Status: **design, with phase 0 built on branches, not landed** (23 November 2026). Phase 0 has
-three branches: this plan, the iOS app skeleton with generated design tokens, and the iOS
-pipelines' YAML generator. Both code branches stay off until the person turns them on. The
-signing and APNs capabilities are designed here and not built. Their phases wait for the
-person's Apple accounts and keys (see "Follow-ups for the person").
+Status: **phases 0 to 5 landed and live** (2026-11-22). TestFlight builds 38 and 39 are VALID;
+sign-in works on a device with build 39. Build 40 is held. Phases 6 (APNs) and 7 (screens) are
+not started. Open items are listed before the Log.
 
 The person's words: "Design a capability to do iOS code signing from the Apple side of things.
 Design a capability to do APNS notifications through the proxy. Extend the Buildkite capability
@@ -635,8 +633,41 @@ a passkey. Enter every key and id on the console's secrets page once the slot ex
 - ~~Buildkite hosted macOS~~: settled 2026-11-22 (Log). The org's plan has it; the shapes are
   `MACOS_ARM64_M4_6X28` and `MACOS_ARM64_M4_12X56`.
 - HTTP/2 from a Worker to APNs (§3): phase 6 proves it first.
-- Whether `ASWebAuthenticationSession`'s HTTPS callback needs `webcredentials` or `applinks` in
-  the association file. Phase 5 serves both for the app if needed. Neither opens any other path.
+- ~~Whether the HTTPS callback needs `webcredentials` or `applinks`~~: settled 2026-11-22 (Log):
+  `webcredentials` alone works on a device; the file serves both.
+
+## Open items (handoff, 2026-11-22 23:40 UTC)
+
+The AI agents planner session (`session_015XFA1p5x6wTEFRENJaCUxN`) is wrapping up: the person
+made the Claude chat the only entry point, and open work goes to AI Gateway planners and
+executors through it. Each item: state, next step, who it waits on.
+
+1. **Build 40: held** (the parent, 2026-11-22). Main carries the `applinks` entitlement and a
+   cancelled sign-in's error domain and code (`87a5b97`), not yet in any build. Next: the next
+   real iOS release carries them; run CI job `ios-release` at main's head (build number from
+   `next_number`, so 40 or higher). Waits on: the person deciding when to release.
+2. **The person's App Store steps**: answer export compliance for each build in App Store
+   Connect (the app declares `ITSAppUsesNonExemptEncryption = NO`); add testers; then, with
+   pigeon's identity in use, revoke the old distribution certificate and delete the old
+   "Pigeon App Store" profile in Apple's portal (Follow-up 2). Agents do not touch either.
+   Waits on: the person.
+3. **Phase 6, APNs.** Not started. Needs follow-up 5 (the APNs key in `APNS_KEY` /
+   `APNS_KEY_ID`). First step: prove HTTP/2 from a Worker to APNs (Open points). Waits on: the
+   person for the key, then an AI Gateway planner.
+4. **Phase 7, the app's screens 1:1 with the console** (§5), `approvals_list`, native passkey
+   writes. Not started; needs nothing from the person. Waits on: an AI Gateway planner.
+5. **`ios-release` checks main's head on every step** (`start`, `identity`, `upload`). A landing
+   that moves main during the 10–15 minute build fails the release (it happened twice).
+   Proposal: check main's head at `start` only, and bind later steps to the release's commit.
+   Code in `src/capabilities/src/apple.rs` (`release::caller`). Waits on: an executor, and the
+   person's yes since it narrows a check.
+6. **Apple's AASA CDN** still answered "Not Found" for `platform.pigeon.dev` at about 22:48 UTC,
+   while a reinstall worked. If a fresh install ever fails sign-in, check
+   `https://app-site-association.cdn-apple.com/a/v1/platform.pigeon.dev` first (agents' proxy
+   cannot reach it; the person can), then delete and reinstall the app.
+7. **Docs reachability from agents**: `developer.apple.com/tutorials/data/documentation/….json`
+   works; `apple.com` pages answer 403 through the proxy, and `buildkite.com` docs are
+   unreachable.
 
 ## Log
 

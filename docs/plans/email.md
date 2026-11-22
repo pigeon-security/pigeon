@@ -226,3 +226,6 @@ raw SHA-256 alone does not find them.
   a subdomain. Phase 1 handed to one executor with the schema above as its spec; the smoke
   scenario parses a multipart message with a folded header, encoded words, a group, an inline
   image and the same PDF twice. Nothing deployed.
+- 2026-11-22 23:40 UTC: handoff. The AI agents planner session wraps up; this plan's next
+  steps wait on the person's answers (`overnight-2026-11-22.md`, "#4–#7 Data platform" and
+  its handoff section), then an AI Gateway planner.

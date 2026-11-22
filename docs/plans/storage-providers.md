@@ -1,10 +1,9 @@
 # Object storage providers: Scaleway, DigitalOcean and Backblaze B2 through the portal
 
-Status: **phase 1 built on a branch, off by default** (22 November 2026). The account registry
-and the read-only tool surface (`storage`) are on `claude/ai-agent-q7VjHJXE6Mv0` (`2dabc75`, CI
-`test` passed), with no account declared, so the tools only say how to set one up. No
-credentials exist yet. Phase 2 starts when the person has made the first key (Follow-ups for
-the person, below).
+Status: **phase 1 landed, off by default** (22 November 2026, landing `FSRipNVPcpASWZka`). The
+read-only `storage` tools are on main with no account declared, so they only explain setup.
+No credentials exist yet. Phase 2 starts when the person has made the first key (Follow-ups for
+the person, below). Open items are listed before the Log.
 
 The person's words: "Add support for Scaleway MCP, Digital Ocean MCP and Backblaze MCP, going
 through the Cloudflare MCP Portal. We should support multiple accounts (i.e. 2x Scaleway or DO
@@ -375,6 +374,22 @@ a time; DigitalOcean first is the safest, as it is read-only.
    legacy, read-only accounts) get inline reads only?
 3. **"Consume into Pigeon Platform".** Copy into R2, index in place, or read on demand? This
    shapes phase 4 and whether `storage` becomes its own Worker.
+
+## Open items (handoff, 2026-11-22 23:40 UTC)
+
+The AI agents planner session (`session_015XFA1p5x6wTEFRENJaCUxN`) is wrapping up: the person
+made the Claude chat the only entry point, and open work goes to AI Gateway planners and
+executors through it. Each item: state, next step, who it waits on.
+
+1. **Accounts.** Nothing declared. Next: the person chooses account names, creates
+   least-privilege read-only keys (Scaleway, DigitalOcean read-only, B2) and asks for them to
+   be declared; each secret is set on the console with the passkey (Follow-ups). Waits on: the
+   person.
+2. **Phase 3, writes.** Not built; needs the write tools in the policy's passkey rule, which is
+   the person's change. Waits on: the person, then a planner.
+3. **The executor branch** `claude/ai-agent-q7VjHJXE6Mv0` (`2dabc75`) carries a duplicate
+   `docs/plans/storage-providers.md`; its code landed separately. Next: delete the branch.
+   Waits on: nobody (any session may).
 
 ## Log
 

@@ -634,3 +634,6 @@ month with queries. Dimension is the lever: phase 0 compares recall at 768 and 2
   separate B2 bucket, and the existing B2 data stays where it is. Decision 12: egress and the new
   volumes added. Egress prices read from the providers' pages (cited in decision 11) on
   2026-11-22. Revised by the AI agents planner session at the person's request; docs only.
+- 2026-11-22 23:40 UTC: handoff. The AI agents planner session wraps up; this plan's next
+  steps wait on the person's answers (`overnight-2026-11-22.md`, "#4–#7 Data platform" and
+  its handoff section), then an AI Gateway planner.

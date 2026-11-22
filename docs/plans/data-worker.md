@@ -313,3 +313,6 @@ Numbered so they can answer item by item. None of this is built by this plan.
   `linked::account_for` succeeds. MCP access is through pigeon's own server behind the portal,
   not a server per instance. Nothing in instance or linked-account code changed; the needs are
   listed above for their planner.
+- 2026-11-22 23:40 UTC: handoff. The AI agents planner session wraps up; this plan's next
+  steps wait on the person's answers (`overnight-2026-11-22.md`, "#4–#7 Data platform" and
+  its handoff section), then an AI Gateway planner.

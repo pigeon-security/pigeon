@@ -115,6 +115,28 @@ and `ios-archive` jobs in `.pigeon/ci.toml`; whether Swift tests may exist outsi
 - Mail: a Google Cloud project with the Gmail API and OAuth; a Fastmail read-only API token; an
   iCloud app-specific password; Proton Mail Bridge on the uploading machine; mailboxes to skip.
 
+## Follow-ups: state at handoff (2026-11-22 23:40 UTC)
+
+The AI agents planner session (`session_015XFA1p5x6wTEFRENJaCUxN`) is wrapping up: the person
+made the Claude chat the only entry point, and open work goes to AI Gateway planners and
+executors through it. Each item: state, next step, who it waits on.
+
+- **Sandbox bugs 1–3: done.** Image v2 (`docs/plans/sandbox-v2.md`): a sandboxd `fetch` op and
+  the agent `fetch` tool, a prepare that cleans `/work` and keeps its first error, `bash -c`; the
+  Worker's v1 workarounds are gone (`27b215f`).
+- **Bug 4, budget spent before reporting: open.** See `ai-agents.md`, Open items 1.
+- **The two held branches: landed** (`0baf513` dispatch coverage, `f0668a9` Lander covered
+  incidents).
+- **Lanes for `ios/*` and `src/email/*`: done** (`ci/workers.toml`).
+- **Gate changes in `cleanup.md` (follow-ups 1 and 2, items 3 and 7): open.** The `wrangler`
+  config check and dropping the duplicate platform check. Waits on: the person's approval of a
+  gate change.
+- **#2 storage:** `storage-providers.md`, Open items. **#3 iOS:** `ios.md`, Open items.
+- **#4–#7 data platform:** designed only (`email.md` phase 1 built as a library). Every next step
+  waits on the person's answers listed above under "#4–#7 Data platform", then an AI Gateway
+  planner per plan. The open question on where the 4–5 TB live (`ingest.md` decision 11) is
+  still the first one to ask.
+
 ## Log
 
 - 10:18 UTC: four planners queued; 10:26 the data planner restarted with the person's additions

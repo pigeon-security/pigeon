@@ -232,3 +232,6 @@ with the person's passkey:
   in 2026; Testing-status consent screens give 7-day refresh tokens, so the project must be In
   production. Proton Bridge serves only localhost, so Proton goes through the uploader first and
   through Tunnel plus Workers VPC later. Nothing built.
+- 2026-11-22 23:40 UTC: handoff. The AI agents planner session wraps up; this plan's next
+  steps wait on the person's answers (`overnight-2026-11-22.md`, "#4–#7 Data platform" and
+  its handoff section), then an AI Gateway planner.
