@@ -213,6 +213,28 @@ async fn save(env: &Env, identity: &Identity) -> Result<()> {
     Ok(())
 }
 
+/// The capability types a bundle id has, read with the bundle id itself (`include`), as Apple
+/// documents for `GET /v1/bundleIds/{id}`.
+async fn capabilities(token: &str, bundle: &str) -> Result<Vec<String>> {
+    let b = apple::get(
+        token,
+        &format!("/v1/bundleIds/{bundle}?include=bundleIdCapabilities"),
+    )
+    .await?;
+    Ok(capability_types(&b))
+}
+
+/// The capability types in a `GET /v1/bundleIds/{id}?include=bundleIdCapabilities` answer.
+pub fn capability_types(answer: &Value) -> Vec<String> {
+    answer["included"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|c| c["type"] == "bundleIdCapabilities")
+        .filter_map(|c| c["attributes"]["capabilityType"].as_str().map(String::from))
+        .collect()
+}
+
 /// The bundle id's App Store Connect id, or None when Apple has none.
 async fn bundle_id(token: &str) -> Result<Option<String>> {
     let ids = apple::get(
@@ -372,6 +394,13 @@ pub async fn status(env: &Env) -> Result<Value> {
         .cloned()
         .unwrap_or(Value::Null);
     let held = identities(env).await?;
+    let caps = match bundle["id"].as_str() {
+        Some(id) => match capabilities(&token, id).await {
+            Ok(c) => json!(c),
+            Err(e) => json!({ "unreadable": e.to_string() }),
+        },
+        None => Value::Null,
+    };
 
     let certs = apple::get(
         &token,
@@ -420,7 +449,7 @@ pub async fn status(env: &Env) -> Result<Value> {
             (Some(t), Some(seed)) => json!(t == seed),
             _ => Value::Null,
         },
-        "bundle_id": { "identifier": BUNDLE_ID, "registered": !bundle.is_null(), "id": bundle["id"] },
+        "bundle_id": { "identifier": BUNDLE_ID, "registered": !bundle.is_null(), "id": bundle["id"], "capabilities": caps },
         "app": if app.is_null() { Value::Null } else { json!({
             "id": app["id"],
             "name": app["attributes"]["name"],
@@ -460,17 +489,9 @@ async fn adopt(env: &Env) -> Result<String> {
             (id.to_string(), true)
         }
     };
-    let caps = apple::get(
-        &token,
-        &format!("/v1/bundleIds/{id}/bundleIdCapabilities?limit=200"),
-    )
-    .await?;
-    let have: Vec<String> = caps["data"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|c| c["attributes"]["capabilityType"].as_str().map(String::from))
-        .collect();
+    let have = capabilities(&token, &id)
+        .await
+        .map_err(|e| bad(&format!("reading {BUNDLE_ID}'s capabilities: {e}")))?;
     let add = missing(&CAPABILITIES, &have);
     for cap in &add {
         apple::post(
@@ -481,7 +502,8 @@ async fn adopt(env: &Env) -> Result<String> {
                 "relationships": { "bundleId": { "data": { "type": "bundleIds", "id": id } } },
             } }),
         )
-        .await?;
+        .await
+        .map_err(|e| bad(&format!("adding {cap} to {BUNDLE_ID}: {e}")))?;
     }
     let mut said = if registered {
         format!("Registered {BUNDLE_ID}.")

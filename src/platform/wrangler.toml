@@ -173,3 +173,10 @@ secret_name = "APPLE_ASC_KEY_ID"
 binding = "APPLE_ASC_KEY"
 store_id = "5185c227b9f34b4291045175695b78ec"
 secret_name = "APPLE_ASC_KEY"
+
+# Seals the distribution keys pigeon makes (docs/plans/ios.md, phase 2). pigeon made it on the
+# first press of "Create signing identity"; no one types it.
+[[secrets_store_secrets]]
+binding = "APPLE_SEAL_KEY"
+store_id = "5185c227b9f34b4291045175695b78ec"
+secret_name = "APPLE_SEAL_KEY"
