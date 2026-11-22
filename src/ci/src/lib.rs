@@ -568,6 +568,12 @@ pub async fn job_grant(env: &Env, presented: &str) -> Result<Option<token::Grant
     Ok(serde_json::from_value(found).unwrap_or(None))
 }
 
+/// One job's state, name, commit and connector, as `ci_status` answers: what core reads to
+/// check the job a token belongs to.
+pub async fn job_status(env: &Env, id: &str) -> Result<Value> {
+    scheduler(env, "status", json!({ "id": id })).await
+}
+
 impl Ci {
     /// What CI acts with for a request: `caller` as JSON when one is calling, and the key to
     /// ask core with when the accounts are [`Accounts::Scoped`].

@@ -4,8 +4,8 @@
 //! with the parent token ([`pigeon_ci::Accounts::Parent`]).
 
 pub use pigeon_ci::{
-    BINDING, BUILD, Ci, EVENTS, EVENTS_QUEUE, OBJECT, job_grant, same_build, setup, setup_summary,
-    token,
+    BINDING, BUILD, Ci, EVENTS, EVENTS_QUEUE, OBJECT, job_grant, job_status, same_build, setup,
+    setup_summary, token,
 };
 
 use pigeon_core::mcp::Tool;

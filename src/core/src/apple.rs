@@ -154,6 +154,129 @@ pub async fn get(token: &str, path: &str) -> Result<serde_json::Value> {
     send(Method::Get, token, path, None).await
 }
 
+/// PATCHes a JSON:API document to `path` with `token`, and answers the JSON body.
+pub async fn patch(token: &str, path: &str, body: &serde_json::Value) -> Result<serde_json::Value> {
+    send(Method::Patch, token, path, Some(body)).await
+}
+
+/// One part of a file to send to the URL Apple gave for it, as App Store Connect's
+/// `uploadOperations` describe it. Its URL is presigned, so no token goes with it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Part {
+    pub method: String,
+    pub url: String,
+    pub offset: usize,
+    pub length: usize,
+    pub headers: Vec<(String, String)>,
+}
+
+/// The parts `operations` ask for, checked against a file of `size` bytes: each an https URL
+/// with PUT or POST, inside the file, together covering it exactly once. None with the reason
+/// otherwise, before anything is sent.
+pub fn parts(
+    operations: &serde_json::Value,
+    size: usize,
+) -> std::result::Result<Vec<Part>, String> {
+    let ops = operations
+        .as_array()
+        .ok_or("Apple gave no upload operations")?;
+    let mut out = Vec::new();
+    for op in ops {
+        let method = op["method"]
+            .as_str()
+            .unwrap_or_default()
+            .to_ascii_uppercase();
+        if method != "PUT" && method != "POST" {
+            return Err(format!("an upload operation asks for {method}"));
+        }
+        let url = op["url"].as_str().unwrap_or_default();
+        if !url.starts_with("https://") {
+            return Err("an upload operation's URL is not https".into());
+        }
+        let (Some(offset), Some(length)) = (op["offset"].as_u64(), op["length"].as_u64()) else {
+            return Err("an upload operation has no offset or length".into());
+        };
+        let headers = op["requestHeaders"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|h| {
+                Some((
+                    h["name"].as_str()?.to_string(),
+                    h["value"].as_str()?.to_string(),
+                ))
+            })
+            .collect();
+        out.push(Part {
+            method,
+            url: url.to_string(),
+            offset: offset as usize,
+            length: length as usize,
+            headers,
+        });
+    }
+    out.sort_by_key(|p| p.offset);
+    let mut next = 0;
+    for p in &out {
+        if p.offset != next || p.length == 0 {
+            return Err("the upload operations do not cover the file in order".into());
+        }
+        next = p.offset + p.length;
+    }
+    if next != size {
+        return Err(format!(
+            "the upload operations cover {next} bytes of {size}"
+        ));
+    }
+    Ok(out)
+}
+
+/// Sends `bytes` as `part` to its presigned URL. Answers the status, or an error over 299.
+pub async fn send_part(part: &Part, bytes: &[u8]) -> Result<u16> {
+    let headers = Headers::new();
+    for (k, v) in &part.headers {
+        headers.set(k, v)?;
+    }
+    let body = js_sys::Uint8Array::from(&bytes[part.offset..part.offset + part.length]);
+    let mut init = RequestInit::new();
+    init.with_method(Method::from(part.method.clone()))
+        .with_headers(headers)
+        .with_body(Some(body.into()));
+    let res = Fetch::Request(Request::new_with_init(&part.url, &init)?)
+        .send()
+        .await?;
+    let status = res.status_code();
+    if status > 299 {
+        return Err(bad(&format!(
+            "Apple's upload URL answered {status} for bytes {}..{}",
+            part.offset,
+            part.offset + part.length
+        )));
+    }
+    Ok(status)
+}
+
+/// A PKCS#8 DER private key as PEM (`PRIVATE KEY`, 64-character lines).
+pub fn pkcs8_pem(der: &[u8]) -> String {
+    let body = b64(der);
+    let mut out = String::from("-----BEGIN PRIVATE KEY-----\n");
+    for chunk in body.as_bytes().chunks(64) {
+        out.push_str(std::str::from_utf8(chunk).unwrap_or_default());
+        out.push('\n');
+    }
+    out.push_str("-----END PRIVATE KEY-----\n");
+    out
+}
+
+/// Whether `v` is a version string App Store Connect takes: one to three dot-separated numbers.
+pub fn is_version(v: &str) -> bool {
+    let parts: Vec<&str> = v.split('.').collect();
+    (1..=3).contains(&parts.len())
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.len() <= 6 && p.bytes().all(|b| b.is_ascii_digit()))
+}
+
 /// POSTs a JSON:API document to `path` with `token`, and answers the JSON body.
 pub async fn post(token: &str, path: &str, body: &serde_json::Value) -> Result<serde_json::Value> {
     send(Method::Post, token, path, Some(body)).await

@@ -650,6 +650,9 @@ impl Apple {
         if req.method() != Method::Post {
             return Response::error("not found", 404);
         }
+        if req.path().starts_with("/apple/release/") {
+            return release::serve(cx, req).await;
+        }
         let host = req.url()?.host_str().unwrap_or_default().to_string();
         let origin = req.headers().get("Origin")?;
         if !crate::console::session::same_origin(origin.as_deref(), &host) {
@@ -698,21 +701,25 @@ impl Capability for Apple {
     }
 
     fn tools(&self) -> Vec<Tool> {
-        vec![Tool {
-            name: "apple_status",
-            description: "Read-only: which Apple slots are readable, whether the App Store Connect \
+        vec![
+            release::tool(),
+            Tool {
+                name: "apple_status",
+                description: "Read-only: which Apple slots are readable, whether the App Store Connect \
                           key signs in, and what Apple holds for dev.pigeon.app: the bundle id, \
                           the app record and its highest build number, the distribution \
                           certificates and App Store profiles (names, serials, expiry; never \
                           keys or profile bytes). With the slots unset it says how to set them.",
-            input_schema: json!({ "type": "object", "properties": {} }),
-        }]
+                input_schema: json!({ "type": "object", "properties": {} }),
+            },
+        ]
     }
 
     fn call<'a>(&'a self, cx: &'a Context<'a>, tool: &'a str, _args: &'a Value) -> Call<'a> {
         Box::pin(async move {
             match tool {
                 "apple_status" => status(cx.env).await,
+                "ios_releases" => release::list(cx.env).await,
                 other => Err(crate::unknown(other)),
             }
         })
@@ -775,5 +782,446 @@ impl Capability for Apple {
 
     fn fetch<'a>(&'a self, cx: &'a Context<'a>, req: Request) -> Serve<'a> {
         Box::pin(self.serve(cx, req))
+    }
+}
+
+/// iOS releases (docs/plans/ios.md, phase 4). A release is one run of CI job `ios-release` at
+/// main's head, on Buildkite's hosted macOS. The job's own token is its only credential; with it
+/// the job asks core, in order and once each:
+///
+/// 1. `/apple/release/start`: its build number, above every build Apple holds for the app;
+/// 2. `/apple/release/identity`: pigeon's signing identity (certificate, key, profile), once;
+/// 3. `/apple/release/upload`: core takes the signed IPA and uploads it to App Store Connect
+///    itself, with Apple's `buildUploads` API, so the Mac never holds the API key or a token.
+///
+/// `ios_releases` lists them and reads Apple's processing state. Nothing here touches a
+/// certificate or profile pigeon did not make.
+pub mod release {
+    use super::*;
+
+    /// The CI job a release runs as.
+    pub const JOB: &str = "ios-release";
+    /// The branch releases are cut from.
+    pub const BRANCH: &str = "refs/heads/main";
+    /// The Directory key listing the releases' job ids, oldest first.
+    const LIST: &str = "apple:releases";
+    /// The last build number given out.
+    const LAST: &str = "apple:release:last_number";
+    /// How many releases `ios_releases` shows.
+    const SHOWN: usize = 10;
+
+    /// One release, kept by its CI job id.
+    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+    pub struct Release {
+        pub job: String,
+        pub commit: String,
+        pub build_number: u64,
+        /// `started`, `signing`, `uploading`, `processing`, `complete` or `failed`.
+        pub state: String,
+        pub version: Option<String>,
+        /// The certificate the identity handed out was.
+        pub certificate: Option<String>,
+        /// Apple's buildUpload id, once uploaded.
+        pub upload: Option<String>,
+        /// Apple's processing state of the build, once it has one.
+        pub processing: Option<String>,
+        pub detail: Option<String>,
+        pub started_ms: i64,
+        pub updated_ms: i64,
+    }
+
+    /// Whether a release in `state` still waits on its job or on Apple.
+    pub fn open(state: &str) -> bool {
+        matches!(state, "started" | "signing" | "uploading" | "processing")
+    }
+
+    /// The next build number: above the last pigeon gave and above Apple's highest.
+    pub fn next_number(last: Option<u64>, apple_highest: Option<u64>) -> u64 {
+        last.unwrap_or(0).max(apple_highest.unwrap_or(0)) + 1
+    }
+
+    /// The step a release in `state` may take next, or why not. `step` is `identity` or `upload`.
+    pub fn may(state: &str, step: &str) -> std::result::Result<(), String> {
+        match (step, state) {
+            ("identity", "started") | ("upload", "signing") => Ok(()),
+            ("identity", _) => Err(format!(
+                "this release is {state}: the identity is handed out once, right after start"
+            )),
+            _ => Err(format!("this release is {state}, not waiting for its IPA")),
+        }
+    }
+
+    /// The tool.
+    pub fn tool() -> Tool {
+        Tool {
+            name: "ios_releases",
+            description: "Read-only: the latest iOS releases (CI job ios-release at main's head): \
+                          each one's build number, commit, state and Apple's processing state, \
+                          read fresh from App Store Connect for those still processing. Start a \
+                          release with ci_submit of job ios-release at main's head.",
+            input_schema: json!({ "type": "object", "properties": {} }),
+        }
+    }
+
+    async fn load(env: &Env, job: &str) -> Result<Option<Release>> {
+        Ok(match setting(env, &format!("apple:release:{job}")).await? {
+            Some(t) => Some(serde_json::from_str(&t)?),
+            None => None,
+        })
+    }
+
+    async fn store(env: &Env, r: &Release) -> Result<()> {
+        keep(
+            env,
+            &format!("apple:release:{}", r.job),
+            &serde_json::to_string(r)?,
+        )
+        .await
+    }
+
+    async fn jobs(env: &Env) -> Result<Vec<String>> {
+        Ok(match setting(env, LIST).await? {
+            Some(t) => serde_json::from_str(&t)?,
+            None => Vec::new(),
+        })
+    }
+
+    /// The release job a request's token stands for: a live job token of a running `ios-release`
+    /// job on Buildkite (hosted agents only, which the connector enforces), at main's head.
+    async fn caller(
+        cx: &Context<'_>,
+        req: &Request,
+    ) -> std::result::Result<(String, String), (u16, String)> {
+        let auth = req
+            .headers()
+            .get("Authorization")
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let presented = auth.strip_prefix("Bearer ").unwrap_or_default();
+        let deny = |code: u16, why: &str| (code, why.to_string());
+        let grant = crate::ci::job_grant(cx.env, presented)
+            .await
+            .map_err(|e| deny(500, &e.to_string()))?
+            .ok_or_else(|| deny(401, "a live CI job token is needed"))?;
+        let job = crate::ci::job_status(cx.env, &grant.job)
+            .await
+            .map_err(|e| deny(500, &e.to_string()))?;
+        if job["job"] != JOB {
+            return Err(deny(403, "only CI job ios-release makes releases"));
+        }
+        if job["connector"] != "buildkite" || job["state"] != "running" {
+            return Err(deny(
+                403,
+                "a release runs on Buildkite's hosted macOS, while it runs",
+            ));
+        }
+        let (ns, repo) = grant
+            .repo
+            .split_once('/')
+            .ok_or_else(|| deny(403, "not a repository"))?;
+        let main = crate::git_proxy::tip(cx.account, ns, repo, BRANCH)
+            .await
+            .map_err(|e| deny(500, &e.to_string()))?;
+        if main.as_deref().map(str::to_ascii_lowercase) != Some(grant.commit.to_ascii_lowercase()) {
+            return Err(deny(403, "a release is cut only from main's head"));
+        }
+        Ok((grant.job, grant.commit))
+    }
+
+    pub async fn serve(cx: &Context<'_>, mut req: Request) -> Result<Response> {
+        let step = req.path().trim_start_matches("/apple/release/").to_string();
+        let (job, commit) = match caller(cx, &req).await {
+            Ok(c) => c,
+            Err((code, why)) => return Response::error(why, code),
+        };
+        let answer = match step.as_str() {
+            "start" => start(cx.env, &job, &commit).await,
+            "identity" => identity(cx.env, &job).await,
+            "upload" => {
+                let version = req
+                    .url()?
+                    .query_pairs()
+                    .find(|(k, _)| k == "version")
+                    .map(|(_, v)| v.to_string())
+                    .unwrap_or_default();
+                let bytes = req.bytes().await?;
+                upload(cx.env, &job, &version, &bytes).await
+            }
+            _ => return Response::error("not found", 404),
+        };
+        let headers = Headers::new();
+        headers.set("Cache-Control", "no-store")?;
+        match answer {
+            Ok(v) => Ok(Response::from_json(&v)?.with_headers(headers)),
+            Err(e) => Ok(Response::from_json(&json!({ "error": e.to_string() }))?
+                .with_status(400)
+                .with_headers(headers)),
+        }
+    }
+
+    /// Starts (or, for the same job, answers again) a release with its build number.
+    async fn start(env: &Env, job: &str, commit: &str) -> Result<Value> {
+        if let Some(r) = load(env, job).await? {
+            return Ok(json!({ "build_number": r.build_number, "state": r.state }));
+        }
+        let now = now_ms();
+        let mut list = jobs(env).await?;
+        for other in &list {
+            if let Some(o) = load(env, other).await?
+                && matches!(o.state.as_str(), "started" | "signing" | "uploading")
+                && now - o.updated_ms < 2 * 3_600_000
+            {
+                return Err(bad(&format!(
+                    "release {} (build {}) is still {}",
+                    o.job, o.build_number, o.state
+                )));
+            }
+        }
+        let token = token(env).await.ok_or_else(|| bad(SETUP))??;
+        let apps = apple::get(
+            &token,
+            &format!("/v1/apps?filter[bundleId]={BUNDLE_ID}&fields[apps]=bundleId"),
+        )
+        .await?;
+        let app = apps["data"][0]["id"]
+            .as_str()
+            .ok_or_else(|| bad("App Store Connect has no app for dev.pigeon.app"))?;
+        let builds = apple::get(
+            &token,
+            &format!("/v1/builds?filter[app]={app}&fields[builds]=version&limit=200"),
+        )
+        .await?;
+        let highest = builds["data"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|b| b["attributes"]["version"].as_str()?.parse::<u64>().ok())
+            .max();
+        let last = setting(env, LAST).await?.and_then(|t| t.parse().ok());
+        let number = next_number(last, highest);
+        keep(env, LAST, &number.to_string()).await?;
+        let r = Release {
+            job: job.into(),
+            commit: commit.into(),
+            build_number: number,
+            state: "started".into(),
+            version: None,
+            certificate: None,
+            upload: None,
+            processing: None,
+            detail: None,
+            started_ms: now,
+            updated_ms: now,
+        };
+        store(env, &r).await?;
+        list.push(job.into());
+        keep(env, LIST, &serde_json::to_string(&list)?).await?;
+        Ok(json!({ "build_number": number, "state": r.state }))
+    }
+
+    /// Hands the release its signing identity, once: the newest pigeon identity with a profile
+    /// that has more than a day left.
+    async fn identity(env: &Env, job: &str) -> Result<Value> {
+        let mut r = load(env, job)
+            .await?
+            .ok_or_else(|| bad("start the release first"))?;
+        may(&r.state, "identity").map_err(|e| bad(&e))?;
+        let key = seal_key(env)
+            .await
+            .ok_or_else(|| bad("APPLE_SEAL_KEY is not readable"))?;
+        let now = now_ms();
+        let held = identities(env).await?;
+        let id = held
+            .iter()
+            .rev()
+            .find(|i| i.profile.is_some() && i.expires_ms().is_some_and(|t| t > now + 86_400_000))
+            .ok_or_else(|| {
+                bad("pigeon holds no signing identity: press Create signing identity")
+            })?;
+        let profile = id.profile.as_ref().ok_or_else(|| bad("no profile"))?;
+        let pkcs8 = crypto::open(&key, &id.sealed_key, seal_aad(&id.id).as_bytes()).await?;
+        let team = secret(env, TEAM_ID)
+            .await
+            .ok_or_else(|| bad("APPLE_TEAM_ID is not readable"))?;
+        // Marked handed out before it is answered: a lost answer means a new release, never a
+        // second copy.
+        r.state = "signing".into();
+        r.certificate = Some(id.id.clone());
+        r.updated_ms = now;
+        store(env, &r).await?;
+        Ok(json!({
+            "build_number": r.build_number,
+            "team_id": team,
+            "bundle_id": BUNDLE_ID,
+            "certificate": id.certificate,
+            "private_key": apple::pkcs8_pem(&pkcs8),
+            "profile": profile.content,
+            "profile_uuid": profile.uuid,
+            "profile_name": profile.name,
+        }))
+    }
+
+    /// Takes the signed IPA and uploads it to App Store Connect as the release's build.
+    async fn upload(env: &Env, job: &str, version: &str, ipa: &[u8]) -> Result<Value> {
+        let mut r = load(env, job)
+            .await?
+            .ok_or_else(|| bad("start the release first"))?;
+        may(&r.state, "upload").map_err(|e| bad(&e))?;
+        if !apple::is_version(version) {
+            return Err(bad(
+                "upload?version= must be the app's version, such as 0.2.0",
+            ));
+        }
+        if ipa.len() < 1024 || !ipa.starts_with(b"PK") {
+            return Err(bad("the body is not an IPA"));
+        }
+        r.state = "uploading".into();
+        r.version = Some(version.into());
+        r.updated_ms = now_ms();
+        store(env, &r).await?;
+        let done = send(env, &r, version, ipa).await;
+        r.updated_ms = now_ms();
+        match done {
+            Ok(id) => {
+                r.state = "processing".into();
+                r.upload = Some(id.clone());
+                store(env, &r).await?;
+                Ok(json!({ "build_number": r.build_number, "upload": id, "state": r.state }))
+            }
+            Err(e) => {
+                r.state = "failed".into();
+                r.detail = Some(e.to_string());
+                store(env, &r).await?;
+                Err(e)
+            }
+        }
+    }
+
+    async fn send(env: &Env, r: &Release, version: &str, ipa: &[u8]) -> Result<String> {
+        let token = token(env).await.ok_or_else(|| bad(SETUP))??;
+        let apps = apple::get(
+            &token,
+            &format!("/v1/apps?filter[bundleId]={BUNDLE_ID}&fields[apps]=bundleId"),
+        )
+        .await?;
+        let app = apps["data"][0]["id"]
+            .as_str()
+            .ok_or_else(|| bad("App Store Connect has no app for dev.pigeon.app"))?
+            .to_string();
+        let made = apple::post(
+            &token,
+            "/v1/buildUploads",
+            &upload_request(&app, version, r.build_number),
+        )
+        .await
+        .map_err(|e| bad(&format!("creating the build upload: {e}")))?;
+        let upload = made["data"]["id"]
+            .as_str()
+            .ok_or_else(|| bad("Apple made a build upload but answered no id"))?
+            .to_string();
+        let file = apple::post(
+            &token,
+            "/v1/buildUploadFiles",
+            &file_request(&upload, ipa.len()),
+        )
+        .await
+        .map_err(|e| bad(&format!("reserving the IPA's upload: {e}")))?;
+        let file_id = file["data"]["id"]
+            .as_str()
+            .ok_or_else(|| bad("Apple reserved the upload but answered no id"))?
+            .to_string();
+        let parts = apple::parts(&file["data"]["attributes"]["uploadOperations"], ipa.len())
+            .map_err(|e| bad(&e))?;
+        for part in &parts {
+            apple::send_part(part, ipa).await?;
+        }
+        apple::patch(
+            &token,
+            &format!("/v1/buildUploadFiles/{file_id}"),
+            &json!({ "data": { "type": "buildUploadFiles", "id": file_id,
+                "attributes": { "uploaded": true } } }),
+        )
+        .await
+        .map_err(|e| bad(&format!("committing the IPA's upload: {e}")))?;
+        Ok(upload)
+    }
+
+    /// The body that creates a build upload for the app.
+    pub fn upload_request(app: &str, version: &str, build_number: u64) -> Value {
+        json!({ "data": { "type": "buildUploads",
+            "attributes": {
+                "cfBundleShortVersionString": version,
+                "cfBundleVersion": build_number.to_string(),
+                "platform": "IOS",
+            },
+            "relationships": { "app": { "data": { "type": "apps", "id": app } } },
+        } })
+    }
+
+    /// The body that reserves the IPA's upload.
+    pub fn file_request(upload: &str, size: usize) -> Value {
+        json!({ "data": { "type": "buildUploadFiles",
+            "attributes": {
+                "assetType": "ASSET",
+                "fileName": "Pigeon.ipa",
+                "fileSize": size,
+                "uti": "com.apple.ipa",
+            },
+            "relationships": { "buildUpload": { "data": { "type": "buildUploads", "id": upload } } },
+        } })
+    }
+
+    /// `ios_releases`: the latest releases, newest first, those still processing read fresh.
+    pub async fn list(env: &Env) -> Result<Value> {
+        let ids = jobs(env).await?;
+        let mut out = Vec::new();
+        for job in ids.iter().rev().take(SHOWN) {
+            let Some(mut r) = load(env, job).await? else {
+                continue;
+            };
+            if r.state == "processing"
+                && let (Some(upload), Some(Ok(token))) = (r.upload.clone(), token(env).await)
+            {
+                match apple::get(
+                    &token,
+                    &format!("/v1/buildUploads/{upload}?include=build&fields[builds]=version,processingState"),
+                )
+                .await
+                {
+                    Ok(v) => {
+                        let state = v["data"]["attributes"]["state"].as_str().unwrap_or_default();
+                        r.processing = v["included"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .find(|i| i["type"] == "builds")
+                            .and_then(|b| b["attributes"]["processingState"].as_str())
+                            .map(String::from)
+                            .or(Some(state.to_string()));
+                        match state {
+                            "COMPLETE" => r.state = "complete".into(),
+                            "FAILED" => {
+                                r.state = "failed".into();
+                                r.detail = Some(v["data"]["attributes"].to_string().chars().take(300).collect());
+                            }
+                            _ => {}
+                        }
+                        r.updated_ms = now_ms();
+                        store(env, &r).await?;
+                    }
+                    Err(e) => r.detail = Some(e.to_string()),
+                }
+            }
+            out.push(json!({
+                "job": r.job, "commit": r.commit, "build_number": r.build_number,
+                "version": r.version, "state": r.state, "apple_processing": r.processing,
+                "certificate": r.certificate, "upload": r.upload, "detail": r.detail,
+                "started_ms": r.started_ms,
+            }));
+        }
+        Ok(
+            json!({ "releases": out, "open": out.iter().any(|r| open(r["state"].as_str().unwrap_or_default())) }),
+        )
     }
 }

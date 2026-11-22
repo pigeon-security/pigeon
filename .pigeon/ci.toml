@@ -116,13 +116,15 @@ timeout_min = 60
 os = "macos"
 arch = "arm64"
 
-# The iOS release archive (docs/plans/ios.md, phase 4): archives unsigned with the build number
-# the release gives it; signing and upload are a separate step on the signing queue. Its script,
-# ios/ci/archive.sh, lands with phase 4.
-[jobs.ios-archive]
-run = "ios/ci/archive.sh"
+# An iOS release (docs/plans/ios.md, phase 4): at main's head only, on a hosted macOS agent.
+# It archives the app unsigned, then takes pigeon's signing identity from core once, exports the
+# signed IPA and hands it to core, which uploads it to App Store Connect. Its job token is its
+# only credential, and core takes it only from this job, on Buildkite, at main's head.
+[jobs.ios-release]
+run = "ios/ci/release.sh"
 timeout_min = 60
+token = true
 
-[jobs.ios-archive.needs]
+[jobs.ios-release.needs]
 os = "macos"
 arch = "arm64"

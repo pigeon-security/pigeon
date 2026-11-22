@@ -3181,7 +3181,7 @@ fn apple_ids_token_and_slots() {
         ]
     );
     let tools: Vec<&str> = apple_cap.tools().iter().map(|t| t.name).collect();
-    assert_eq!(tools, ["apple_status"]);
+    assert_eq!(tools, ["ios_releases", "apple_status"]);
     assert_eq!(apple_cap.routes(), ["/apple/"]);
     assert_eq!(asc::BUNDLE_ID, "dev.pigeon.app");
 }
@@ -3310,6 +3310,91 @@ fn apple_signing_identity_requests_and_records() {
         assert!(!shown.contains(secret), "{secret}");
     }
     assert!(shown.contains("ABC123") && shown.contains("PROF1"));
+}
+
+/// Phase 4 (docs/plans/ios.md): a release's build number, its steps in order, the bodies that
+/// upload the IPA, and the upload parts Apple asks for, checked before a byte is sent.
+#[test]
+fn apple_release_numbers_steps_and_upload() {
+    use pigeon_capabilities::apple::release::{
+        self, file_request, may, next_number, upload_request,
+    };
+    use pigeon_core::apple::{is_version, parts, pkcs8_pem};
+
+    // Above Apple's highest (35 for the old app) and above pigeon's last, whichever is higher.
+    assert_eq!(next_number(None, Some(35)), 36);
+    assert_eq!(next_number(Some(40), Some(35)), 41);
+    assert_eq!(next_number(None, None), 1);
+
+    // Start, then the identity once, then the IPA once.
+    assert!(may("started", "identity").is_ok());
+    assert!(may("signing", "identity").is_err());
+    assert!(may("signing", "upload").is_ok());
+    for state in ["started", "uploading", "processing", "complete", "failed"] {
+        assert!(may(state, "upload").is_err(), "{state}");
+    }
+    assert!(release::open("processing") && !release::open("complete"));
+    assert_eq!(release::JOB, "ios-release");
+
+    assert!(is_version("0.2.0") && is_version("1") && is_version("10.4"));
+    for bad in ["", "1.2.3.4", "v1", "1..2", "1.2-beta"] {
+        assert!(!is_version(bad), "{bad}");
+    }
+
+    assert_eq!(
+        upload_request("APP1", "0.2.0", 36),
+        json!({ "data": { "type": "buildUploads",
+            "attributes": { "cfBundleShortVersionString": "0.2.0", "cfBundleVersion": "36", "platform": "IOS" },
+            "relationships": { "app": { "data": { "type": "apps", "id": "APP1" } } } } })
+    );
+    let f = file_request("UP1", 1234);
+    assert_eq!(f["data"]["attributes"]["uti"], "com.apple.ipa");
+    assert_eq!(f["data"]["attributes"]["assetType"], "ASSET");
+    assert_eq!(f["data"]["attributes"]["fileSize"], 1234);
+    assert_eq!(
+        f["data"]["relationships"]["buildUpload"]["data"]["id"],
+        "UP1"
+    );
+
+    // Parts must be https, PUT or POST, in order, covering the file exactly.
+    let op = |o: u64, l: u64| {
+        json!({ "method": "PUT", "url": "https://upload.example/x", "offset": o, "length": l,
+        "requestHeaders": [{ "name": "Content-Type", "value": "application/octet-stream" }] })
+    };
+    let ok = parts(&json!([op(100, 50), op(0, 100)]), 150).unwrap();
+    assert_eq!((ok[0].offset, ok[0].length, ok[1].offset), (0, 100, 100));
+    assert_eq!(
+        ok[0].headers,
+        [(
+            "Content-Type".to_string(),
+            "application/octet-stream".to_string()
+        )]
+    );
+    assert!(parts(&json!([op(0, 100)]), 150).is_err());
+    assert!(parts(&json!([op(0, 100), op(90, 60)]), 150).is_err());
+    assert!(
+        parts(
+            &json!([{ "method": "GET", "url": "https://x", "offset": 0, "length": 1 }]),
+            1
+        )
+        .is_err()
+    );
+    assert!(
+        parts(
+            &json!([{ "method": "PUT", "url": "http://x", "offset": 0, "length": 1 }]),
+            1
+        )
+        .is_err()
+    );
+    assert!(parts(&Value::Null, 1).is_err());
+
+    let pem = pkcs8_pem(&[0x30; 100]);
+    assert!(
+        pem.starts_with("-----BEGIN PRIVATE KEY-----\n")
+            && pem.ends_with("-----END PRIVATE KEY-----\n")
+    );
+    assert!(pem.lines().all(|l| l.len() <= 64));
+    assert_eq!(pigeon_core::apple::p8_der(&pem).unwrap(), vec![0x30; 100]);
 }
 
 // ---- storage ----
