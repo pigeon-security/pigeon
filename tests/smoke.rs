@@ -657,6 +657,27 @@ fn land_deploys_in_lanes_per_worker() {
 }
 
 #[test]
+fn ci_retries_a_pinned_job_on_its_connector() {
+    use pigeon_ci::scheduler::retry_away;
+    // A deploy job pinned to containers whose container stopped before reporting retries on
+    // containers (incident 6 failed it: "no connector can run it").
+    let (excluded, said) = retry_away(
+        Vec::new(),
+        "containers",
+        Some("containers"),
+        "the container stopped before reporting",
+    );
+    assert!(excluded.is_empty());
+    assert!(said.starts_with("retrying on containers"));
+    // Unpinned, the connector that lost it is excluded once, and the retry goes elsewhere.
+    let (excluded, said) = retry_away(vec!["buildkite".into()], "containers", None, "lost");
+    assert_eq!(excluded, ["buildkite", "containers"]);
+    assert_eq!(said, "retrying elsewhere: lost");
+    let (excluded, _) = retry_away(excluded, "containers", Some("buildkite"), "lost");
+    assert_eq!(excluded, ["buildkite", "containers"]);
+}
+
+#[test]
 fn land_attributes_a_failed_deploy() {
     use Tried::{Error, Failed, Passed};
     use pigeon_capabilities::land::lanes::{

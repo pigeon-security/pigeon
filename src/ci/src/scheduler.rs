@@ -192,6 +192,29 @@ pub fn after_dispatch(
     }
 }
 
+/// A retry's exclusions after connector `failed` lost an attempt, and what the job says: the
+/// connector is excluded, so the retry goes elsewhere, unless the job is pinned to it. A pinned
+/// job has nowhere else to go, and an infrastructure loss (a container that stopped before
+/// reporting) is no reason to fail it: it retries on the same connector, a fresh instance, within
+/// [`state::MAX_ATTEMPTS`].
+pub fn retry_away(
+    mut excluded: Vec<String>,
+    failed: &str,
+    pin: Option<&str>,
+    why: &str,
+) -> (Vec<String>, String) {
+    if pin == Some(failed) {
+        return (
+            excluded,
+            format!("retrying on {failed}, which it is pinned to: {why}"),
+        );
+    }
+    if !excluded.iter().any(|e| e == failed) {
+        excluded.push(failed.to_string());
+    }
+    (excluded, format!("retrying elsewhere: {why}"))
+}
+
 /// A commit's note lines from its finished jobs, oldest first: the latest result per job name,
 /// so two jobs finishing together each have their line and a rerun replaces its own.
 fn note_lines(finished: Vec<Row>) -> Vec<Line> {
@@ -835,22 +858,20 @@ impl Scheduler {
         Ok(())
     }
 
-    /// Puts a job back in the queue as its next attempt, away from `exclude`.
+    /// Puts a job back in the queue as its next attempt, away from `exclude`, or on it again
+    /// when the job is pinned there ([`retry_away`]).
     fn requeue(&self, row: &Row, exclude: &str, why: &str) -> Result<()> {
-        let mut excluded = row.excluded();
-        if !excluded.iter().any(|e| e == exclude) {
-            excluded.push(exclude.to_string());
-        }
+        let (excluded, said) = retry_away(row.excluded(), exclude, row.pin.as_deref(), why);
         self.db.exec(
             "UPDATE jobs SET state = 'queued', attempt = attempt + 1, excluded = ?, connector = NULL, handle = NULL, url = NULL, token_hash = NULL, token_expires_at = NULL, deadline_at = NULL, claimed_at = NULL, next_poll_at = NULL, dispatched_at = NULL, started_at = NULL, queued_at = ?, detail = ? WHERE id = ?",
             vec![
                 serde_json::to_string(&excluded)?.into(),
                 now().into(),
-                format!("retrying elsewhere: {why}").into(),
+                said.as_str().into(),
                 row.id.as_str().into(),
             ],
         )?;
-        self.changed(&row.id, Some(&format!("retrying elsewhere: {why}")))
+        self.changed(&row.id, Some(&said))
     }
 
     /// Ends a job in terminal state `to`; its token dies with it.
