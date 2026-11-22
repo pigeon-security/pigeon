@@ -15,11 +15,11 @@ use worker::{Error, Fetch, Headers, Method, Request, RequestInit, Result};
 use crate::{Call, Capability, Context};
 
 /// The metrics permission: GraphQL `workersInvocationsAdaptive`.
-const ANALYTICS: &str = "Account Analytics Read";
+const ANALYTICS_PERMISSION: &str = "Account Analytics Read";
 /// The only permission the logs query endpoint accepts.
-const OBSERVABILITY: &str = "Workers Observability Write";
+const OBSERVABILITY_PERMISSION: &str = "Workers Observability Write";
 /// The billable usage permission.
-const BILLING: &str = "Billing Read";
+const BILLING_PERMISSION: &str = "Billing Read";
 /// How long the token lives, in seconds.
 const TOKEN_TTL: u64 = 300;
 /// The longest a message is kept, in characters.
@@ -177,7 +177,8 @@ pub fn cut(text: &str) -> String {
     text.chars().take(MESSAGE_CHARS).collect()
 }
 
-/// Billable usage rows kept to the whitelisted FOCUS fields, summed per `ServiceName`. Every
+/// Billable usage rows kept to the whitelisted FOCUS fields, summed per `ServiceName` and
+/// `ConsumedUnit`, so requests and CPU time never add together. Every
 /// other field, such as the billing account's name and id, is dropped.
 pub fn fold_billing(result: &Value) -> Vec<Value> {
     let rows = result
@@ -185,27 +186,30 @@ pub fn fold_billing(result: &Value) -> Vec<Value> {
         .or_else(|| result["data"].as_array())
         .cloned()
         .unwrap_or_default();
-    let mut by: BTreeMap<String, Value> = BTreeMap::new();
+    let mut by: BTreeMap<(String, String), Value> = BTreeMap::new();
     for row in &rows {
         let Some(name) = row["ServiceName"].as_str() else {
             continue;
         };
-        let entry = by.entry(name.to_string()).or_insert_with(|| {
-            let mut kept =
-                json!({ "ServiceName": name, "ConsumedQuantity": 0.0, "BilledCost": 0.0 });
-            for k in [
-                "ServiceFamilyName",
-                "ConsumedUnit",
-                "BillingCurrency",
-                "ChargePeriodStart",
-                "ChargePeriodEnd",
-            ] {
-                if let Some(s) = row[k].as_str() {
-                    kept[k] = json!(s);
+        let unit = row["ConsumedUnit"].as_str().unwrap_or_default();
+        let entry = by
+            .entry((name.to_string(), unit.to_string()))
+            .or_insert_with(|| {
+                let mut kept =
+                    json!({ "ServiceName": name, "ConsumedQuantity": 0.0, "BilledCost": 0.0 });
+                for k in [
+                    "ServiceFamilyName",
+                    "ConsumedUnit",
+                    "BillingCurrency",
+                    "ChargePeriodStart",
+                    "ChargePeriodEnd",
+                ] {
+                    if let Some(s) = row[k].as_str() {
+                        kept[k] = json!(s);
+                    }
                 }
-            }
-            kept
-        });
+                kept
+            });
         for k in ["ConsumedQuantity", "BilledCost"] {
             let add = number(&row[k]);
             entry[k] = json!(entry[k].as_f64().unwrap_or(0.0) + add);
@@ -300,71 +304,131 @@ impl Capability for Observability {
     }
 }
 
-/// Mints the token: all three permissions, or the metrics one alone with the others unavailable.
-async fn mint<'a>(cx: &Context<'a>, unavailable: &mut Vec<Value>) -> Result<(Scoped<'a>, bool)> {
-    let all = Scoped::open_for(
-        cx.account,
-        "observability",
-        vec![Policy::new(
-            Scope::Account,
-            &[ANALYTICS, OBSERVABILITY, BILLING],
-        )],
-        TOKEN_TTL,
-    )
-    .await;
-    match all {
-        Ok(t) => Ok((t, true)),
-        Err(e) => {
-            let t = Scoped::open_for(
-                cx.account,
-                "observability",
-                vec![Policy::new(Scope::Account, &[ANALYTICS])],
-                TOKEN_TTL,
-            )
-            .await?;
-            for s in ["logs", "billable usage"] {
-                unavailable.push(missing(s, &format!("the token was not minted: {e}")));
-            }
-            Ok((t, false))
+/// The agent runs created in `[from_ms, to_ms]`, from `ai_agents_status`'s list: how many and
+/// their spend in dollars. Titles, briefs and names are never read. An error says what the
+/// shape lacked.
+pub fn fold_agent_runs(
+    answer: &Value,
+    from_ms: i64,
+    to_ms: i64,
+) -> std::result::Result<(u64, f64), String> {
+    let runs = answer["runs"]
+        .as_array()
+        .ok_or_else(|| "the answer has no `runs` list".to_string())?;
+    let (mut count, mut usd) = (0, 0.0);
+    for r in runs {
+        let Some(created) = r["created_at"].as_i64() else {
+            continue;
+        };
+        if created < from_ms || created > to_ms {
+            continue;
         }
+        count += 1;
+        let cost = &r["spent"]["cost"];
+        usd += cost
+            .as_f64()
+            .or_else(|| {
+                cost.as_str()
+                    .and_then(|s| s.trim_start_matches('$').parse().ok())
+            })
+            .unwrap_or(0.0);
     }
+    Ok((count, usd))
 }
 
-/// Builds the answer for the last `hours`.
+/// Seconds of Containers time per class for jobs that finished in `[from_ms, to_ms]`, and how
+/// many jobs came back. Only the `containers` connector counts.
+pub fn fold_ci_jobs(
+    answer: &Value,
+    from_ms: i64,
+    to_ms: i64,
+) -> std::result::Result<(BTreeMap<String, f64>, usize), String> {
+    let jobs = answer["jobs"]
+        .as_array()
+        .ok_or_else(|| "the answer has no `jobs` list".to_string())?;
+    let mut out: BTreeMap<String, f64> = BTreeMap::new();
+    for j in jobs {
+        let finished = j["finished_at"].as_i64().unwrap_or(-1);
+        if j["connector"] != "containers" || finished < from_ms || finished > to_ms {
+            continue;
+        }
+        let Some(ms) = j["duration_ms"].as_f64() else {
+            continue;
+        };
+        let class = j["class"].as_str().unwrap_or("unknown");
+        *out.entry(class.to_string()).or_default() += ms / 1000.0;
+    }
+    Ok((out, jobs.len()))
+}
+
+/// Opens a token for one source, living five minutes.
+async fn open<'a>(cx: &Context<'a>, permission: &str) -> Result<Scoped<'a>> {
+    Scoped::open_for(
+        cx.account,
+        "observability",
+        vec![Policy::new(Scope::Account, &[permission])],
+        TOKEN_TTL,
+    )
+    .await
+}
+
+/// Builds the answer for the last `hours`. A source that cannot be read goes to `unavailable`
+/// and the rest is still answered.
 async fn summary(this: &Observability, cx: &Context<'_>, hours: u64) -> Result<Value> {
     let to = Date::now();
     let from = to - hours as f64 * 3_600_000.0;
     let mut unavailable = Vec::new();
-    let (token, wide) = mint(cx, &mut unavailable).await?;
     let id = &cx.account.id;
-    let work = async {
-        let mut metrics = BTreeMap::new();
-        match graphql(token.value(), &graphql_query(id, &iso(from), &iso(to))).await {
-            Ok(v) => metrics = fold_invocations(&v),
-            Err(e) => unavailable.push(missing("metrics", &e.to_string())),
+
+    // Metrics: Account Analytics Read.
+    let mut metrics = BTreeMap::new();
+    match open(cx, ANALYTICS_PERMISSION).await {
+        Ok(token) => {
+            let work = graphql(token.value(), &graphql_query(id, &iso(from), &iso(to))).await;
+            match token.finish(work).await {
+                Ok(v) => metrics = fold_invocations(&v),
+                Err(e) => unavailable.push(missing("metrics", &e.to_string())),
+            }
         }
-        let mut errors = BTreeMap::new();
-        let mut billed = Vec::new();
-        if wide {
+        Err(e) => unavailable.push(missing(
+            "metrics",
+            &format!("the token was not minted: {e}"),
+        )),
+    }
+
+    // Logs: Workers Observability Write, for the one POST only.
+    let mut errors = BTreeMap::new();
+    match open(cx, OBSERVABILITY_PERMISSION).await {
+        Ok(token) => {
             let body = telemetry_query(&format!("pigeon-{}", to as i64), from as i64, to as i64);
             let path = format!("/accounts/{id}/workers/observability/telemetry/query");
-            match pigeon_core::cloudflare::call(token.value(), Method::Post, &path, Some(&body))
-                .await
-            {
+            let work =
+                pigeon_core::cloudflare::call(token.value(), Method::Post, &path, Some(&body))
+                    .await;
+            match token.finish(work).await {
                 Ok(v) => errors = fold_errors(&v),
                 Err(e) => unavailable.push(missing("logs", &e.to_string())),
             }
+        }
+        Err(e) => unavailable.push(missing("logs", &format!("the token was not minted: {e}"))),
+    }
+
+    // Billable usage: Billing Read.
+    let mut billed = Vec::new();
+    match open(cx, BILLING_PERMISSION).await {
+        Ok(token) => {
             let path = format!("/accounts/{id}/billable-usage");
-            match pigeon_core::cloudflare::call(token.value(), Method::Get, &path, None).await {
+            let work = pigeon_core::cloudflare::call(token.value(), Method::Get, &path, None).await;
+            match token.finish(work).await {
                 Ok(v) => billed = fold_billing(&v),
                 Err(e) => unavailable.push(missing("billable usage", &e.to_string())),
             }
         }
-        Ok::<_, Error>((metrics, errors, billed))
+        Err(e) => unavailable.push(missing(
+            "billable usage",
+            &format!("the token was not minted: {e}"),
+        )),
     }
-    .await;
-    // The token is revoked whatever happened.
-    let (metrics, errors, billed) = token.finish(work).await?;
 
     let deploys = match crate::land::deploys_since(cx.env, from as i64).await {
         Ok(v) => v,
@@ -412,17 +476,57 @@ async fn summary(this: &Observability, cx: &Context<'_>, hours: u64) -> Result<V
         ));
     }
     match crate::dispatch(cx, "models_usage", &json!({ "hours": hours })).await {
-        Ok(v) => cost.push(line(
-            "Models",
-            "estimated",
-            "AI Gateway",
-            v["cost"].as_f64(),
-            json!({ "requests": v["requests"], "tokens_in": v["tokens_in"], "tokens_out": v["tokens_out"] }),
-        )),
+        Ok(v) => {
+            let cut_short = v["truncated"] == true;
+            cost.push(line(
+                "Models",
+                "estimated",
+                if cut_short {
+                    "AI Gateway; the log listing was cut short, so this is a lower bound"
+                } else {
+                    "AI Gateway"
+                },
+                v["cost"].as_f64(),
+                json!({ "requests": v["requests"], "tokens_in": v["tokens_in"], "tokens_out": v["tokens_out"], "truncated": cut_short }),
+            ));
+        }
         Err(e) => unavailable.push(missing("models cost", &e.to_string())),
     }
-    unavailable.push(missing("AI agent run spend", "not yet collected"));
-    unavailable.push(missing("CI Containers time", "not yet collected"));
+
+    // Agent run spend: metered, and already inside the Models line, so never summed.
+    match crate::dispatch(cx, "ai_agents_status", &json!({ "limit": 100 })).await {
+        Ok(v) => match fold_agent_runs(&v, from as i64, to as i64) {
+            Ok((count, usd)) => cost.push(line(
+                "AI agent runs",
+                "metered",
+                "AI agents Worker; this is model use already counted in the Models line, so it is not added to either total",
+                Some(usd),
+                json!({ "runs": count, "listed": v["runs"].as_array().map_or(0, Vec::len) }),
+            )),
+            Err(why) => unavailable.push(missing("AI agent run spend", &why)),
+        },
+        Err(e) => unavailable.push(missing("AI agent run spend", &e.to_string())),
+    }
+
+    // CI Containers time: seconds only, since the class sizes are not readable from a pure
+    // function in the CI crate (they sit inside the connector's method).
+    match crate::dispatch(cx, "ci_jobs", &json!({ "limit": 200 })).await {
+        Ok(v) => match fold_ci_jobs(&v, from as i64, to as i64) {
+            Ok((seconds, listed)) => cost.push(line(
+                "CI Containers",
+                "estimated",
+                if listed >= 200 {
+                    "CI scheduler; 200 jobs came back, so older jobs in the window are missing. Seconds only: class sizes are not readable as a pure function, so no price is given"
+                } else {
+                    "CI scheduler. Seconds only: class sizes are not readable as a pure function, so no price is given"
+                },
+                None,
+                json!({ "seconds_by_class": seconds, "jobs_listed": listed, "truncated": listed >= 200 }),
+            )),
+            Err(why) => unavailable.push(missing("CI Containers time", &why)),
+        },
+        Err(e) => unavailable.push(missing("CI Containers time", &e.to_string())),
+    }
     unavailable.push(missing(
         "Buildkite cost",
         "Buildkite's API has no cost data",

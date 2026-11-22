@@ -7181,3 +7181,84 @@ fn core_architecture_draws_every_worker_in_the_map() {
     assert!(first.html.contains("ci_status") || first.model.to_string().contains("ci_status"));
     assert!(!second.model.to_string().contains("ci_status"));
 }
+
+#[test]
+fn core_observability_summary_folds() {
+    use pigeon_capabilities::observability::*;
+    use serde_json::json;
+
+    // Invocations: two statuses of one script fold into one entry.
+    let answer = json!({ "data": { "viewer": { "accounts": [{ "workersInvocationsAdaptive": [
+        { "sum": { "requests": 90.0, "errors": 0.0 }, "quantiles": { "cpuTimeP50": 1000.0, "cpuTimeP99": 5000.0, "wallTimeP50": 2000.0, "wallTimeP99": 9000.0 },
+          "dimensions": { "scriptName": "core", "status": "success" } },
+        { "sum": { "requests": 10.0, "errors": 10.0 }, "quantiles": { "cpuTimeP50": 1000.0, "cpuTimeP99": 8000.0, "wallTimeP50": 2000.0, "wallTimeP99": 3000.0 },
+          "dimensions": { "scriptName": "core", "status": "exception" } },
+    ] }] } } });
+    let scripts = fold_invocations(&answer);
+    let core = &scripts["core"];
+    assert_eq!(core.requests, 100.0);
+    assert_eq!(core.errors, 10.0);
+    assert!((core.error_rate() - 0.1).abs() < 1e-9);
+    assert_eq!(core.cpu_p99_us, 8000.0);
+    assert_eq!(core.by_status["exception"], 10.0);
+    assert!((core.cpu_ms_estimate() - 100.0).abs() < 1e-9);
+
+    // Errors: top five per Worker, messages cut to 200 characters.
+    let long = "x".repeat(500);
+    let mut rows = vec![json!({ "count": 3.0, "groups": [
+        { "key": "$metadata.service", "value": "core" },
+        { "key": "$metadata.message", "value": long } ] })];
+    for i in 0..6 {
+        rows.push(json!({ "count": i as f64, "groups": [
+            { "key": "$metadata.service", "value": "core" },
+            { "key": "$metadata.message", "value": format!("m{i}") } ] }));
+    }
+    let errors = fold_errors(&json!({ "calculations": [{ "aggregates": rows }] }));
+    assert_eq!(errors["core"].len(), 5);
+    assert_eq!(errors["core"][0]["message"], "m5");
+    let cut_one = errors["core"]
+        .iter()
+        .find(|e| e["count"] == 3.0)
+        .map(|e| e["message"].as_str().unwrap_or_default().chars().count());
+    assert_eq!(cut_one, Some(200));
+    assert_eq!(cut(&long).chars().count(), 200);
+
+    // Billing: two units of one service stay apart; the account name never comes out.
+    let billing = fold_billing(&json!([
+        { "ServiceName": "Workers", "ConsumedUnit": "requests", "ConsumedQuantity": "100", "BilledCost": 1.0, "BillingAccountName": "Secret Co" },
+        { "ServiceName": "Workers", "ConsumedUnit": "requests", "ConsumedQuantity": 50, "BilledCost": 0.5, "BillingAccountName": "Secret Co" },
+        { "ServiceName": "Workers", "ConsumedUnit": "cpu_ms", "ConsumedQuantity": 7, "BilledCost": 0.25 },
+    ]));
+    assert_eq!(billing.len(), 2);
+    let requests = billing.iter().find(|b| b["ConsumedUnit"] == "requests");
+    assert_eq!(
+        requests.map(|b| b["ConsumedQuantity"].as_f64()),
+        Some(Some(150.0))
+    );
+    assert_eq!(requests.map(|b| b["BilledCost"].as_f64()), Some(Some(1.5)));
+    assert!(!json!(billing).to_string().contains("Secret"));
+
+    // The Workers estimate: 2M requests and 10M CPU ms.
+    assert!((workers_estimate(2e6, 1e7) - 0.8).abs() < 1e-9);
+
+    // Agent runs: only the window's runs, counts and dollars.
+    let runs = json!({ "runs": [
+        { "created_at": 1500, "spent": { "cost": "$1.5" }, "brief": "secret brief" },
+        { "created_at": 1600, "spent": { "cost": "$0.25" } },
+        { "created_at": 100, "spent": { "cost": "$9" } },
+    ] });
+    assert_eq!(fold_agent_runs(&runs, 1000, 2000), Ok((2, 1.75)));
+    assert!(fold_agent_runs(&json!({}), 0, 1).is_err());
+
+    // CI jobs: Containers only, finished in the window, seconds per class.
+    let jobs = json!({ "jobs": [
+        { "class": "linux-amd64-small", "connector": "containers", "finished_at": 1500, "duration_ms": 30000 },
+        { "class": "linux-amd64-small", "connector": "containers", "finished_at": 1600, "duration_ms": 30000 },
+        { "class": "linux-amd64-small", "connector": "buildkite", "finished_at": 1600, "duration_ms": 99000 },
+        { "class": "linux-amd64-medium", "connector": "containers", "finished_at": 10, "duration_ms": 99000 },
+    ] });
+    let (seconds, listed) = fold_ci_jobs(&jobs, 1000, 2000).unwrap_or_default();
+    assert_eq!(listed, 4);
+    assert_eq!(seconds.len(), 1);
+    assert_eq!(seconds["linux-amd64-small"], 60.0);
+}
