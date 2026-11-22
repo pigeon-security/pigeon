@@ -2314,6 +2314,8 @@ fn tool_call_approvals() {
     assert!(Write::ApprovalApprove.bound_to_digest());
     assert!(!Write::ApprovalDeny.bound_to_digest());
     assert!(Write::ApprovalApprove.target("not an id!").is_err());
+}
+
 // ---- Buildkite setup ----
 
 /// The Buildkite setup's plan: a first run creates everything; the same state seen back is all
