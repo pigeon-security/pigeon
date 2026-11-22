@@ -1,6 +1,7 @@
 # The blog capability: template `blog@1` and its renderer
 
-Status: **designed, awaiting the person's go-ahead** (2026-11-22). Nothing is built. Branch
+Status: **phase 1 built on `claude/blog`, awaiting landing** (2026-11-22). The person approved
+the design and the extra fields (through the parent session). Branch
 `claude/blog`. Preview: https://claude.ai/artifact/JQPrj9GRS8WaQWoGMijnBk (home page and one post,
 rendered by a Rust spike from the real content).
 
@@ -272,6 +273,28 @@ Zola rule it follows. I read every line, run fmt, clippy and the smoke suite, an
    are needed for today's output and links.
 
 ## Log
+
+- 2026-11-22: phase 1 built. `pigeon_core::blog` has `site`, `content`, `markdown`, `pages`,
+  `feeds`, `v1/` (CSS byte copies and `UPSTREAM.md`) and `render`. Also new: the example
+  `cargo run -p pigeon-capabilities --example blog --target x86_64-unknown-linux-gnu -- <repo>
+  <out> [base_url]`, and the smoke scenario `blog_renders_a_consumer_repo`. The suite runs in
+  11 s.
+  - **Real content.** noisypigeon/noisypigeon at `2787e52` renders with no problems: 84 files
+    and 102 static. Every root-relative `href` and `src` in the output resolves to a file.
+  - **Escaping.** Text is escaped as Tera escapes it (`/` as `&#x2F;`), so the HTML matches what
+    Zola writes byte for byte where the templates allow.
+  - **Departures found while building.**
+    - Tag pages link posts root-relative, and alias pages redirect root-relative.
+    - The tag page's description escapes its quotes. Upstream leaves them unescaped, which ends
+      the attribute early.
+    - Zola transliterates non-ASCII letters in heading ids; this drops them. Today's content has
+      none.
+    - Footnotes use pulldown-cmark's markup, not Zola's. Today's content has none.
+  - **Bundle.** The platform's wasm today is 11.4 MB raw, 3.0 MB gzipped (release build, before
+    wasm-opt). The renderer is not linked until phase 3 calls it. The spike measured it at about
+    105 KB gzipped.
+  - **Executors.** None were used. The Pigeon connector's sign-in lapsed mid-phase, so
+    `models_submit` was unavailable, and I wrote `pages.rs` and `feeds.rs` myself.
 
 - 2026-11-22: design. Read: the old repository (template 1.0.2 to 1.0.5, harness, content), Zola
   0.23.6's markdown and sitemap code, and pigeon's instances and linked-accounts work.

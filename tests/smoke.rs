@@ -2733,3 +2733,226 @@ fn instance_plans_touch_only_what_pigeon_made() {
     assert_ne!(d1, digest(&inst, &"b".repeat(32), &first));
     assert_eq!(d1, digest(&inst, &"a".repeat(32), &first));
 }
+
+// ---- blog: a consumer repository rendered with blog@1 ----
+
+/// The blog renderer (`pigeon_core::blog`): a consumer repository in, a static site out, with
+/// Zola's URLs (posts, pages, alias redirects, tags, feed, sitemap), root-relative links, every
+/// problem reported at once, and the same bytes from the same input.
+#[test]
+fn blog_renders_a_consumer_repo() {
+    use pigeon_core::blog::{Input, render};
+
+    let site_toml = r#"
+template = "blog@1"
+features = ["math", "no-commit"]
+
+[site]
+title = "Example <Blog>"
+description = "Notes."
+intro = "Hi, I'm **Example**."
+avatar = "/assets/a.png"
+author_page = "/pages/about"
+alternate_names = ["Ex"]
+
+[[site.nav]]
+title = "About"
+link = "/pages/about"
+
+[[site.nav]]
+title = "Elsewhere"
+link = "https://example.org/me"
+
+[[site.icons]]
+src = "/assets/i.png"
+sizes = "192x192"
+type = "image/png"
+"#;
+    let post = |date: &str, extra: &str, body: &str| {
+        format!("+++\ntitle = \"Post {date}\"\ndate = {date}T10:00:00+00:00\n{extra}+++\n{body}\n")
+    };
+    let mut statics: std::collections::BTreeSet<String> = [
+        "assets/a.png",
+        "assets/i.png",
+        "assets/images/site/favicon-32x32.png",
+        "assets/images/site/favicon-16x16.png",
+        "assets/images/site/apple-touch-icon.png",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    let input = Input {
+        site_toml: site_toml.into(),
+        posts: vec![
+            (
+                "2024-05-01-older.md".into(),
+                post(
+                    "2024-05-01",
+                    "[taxonomies]\ntags = [\"Travel Notes\"]\n",
+                    "Old.",
+                ),
+            ),
+            (
+                "2025-02-03-newer.md".into(),
+                post(
+                    "2025-02-03",
+                    "aliases = [\"changelog/newer\"]\n[taxonomies]\ntags = [\"Travel Notes\"]\n",
+                    "## Hello\n\n## Hello\n\n[up](#hello)\n\n```rust\nlet a = 1 < 2;\n```\n",
+                ),
+            ),
+        ],
+        pages: vec![(
+            "about.md".into(),
+            "+++\ntitle = \"About\"\naliases = [\"pages/names\"]\n+++\nMe.\n".into(),
+        )],
+        statics: statics.clone(),
+        base_url: "https://example.com/".into(),
+        commit: "abc1234".into(),
+        commit_year: 2026,
+    };
+    let out = render(&input).expect("renders");
+    assert_eq!((out.template, out.version), ("blog@1", "1.0.0"));
+    assert_eq!(out.digest.len(), 64);
+    assert_eq!(
+        render(&input).unwrap(),
+        out,
+        "the same input renders the same bytes"
+    );
+
+    let file = |p: &str| String::from_utf8(out.files[p].0.clone()).unwrap();
+    for p in [
+        "index.html",
+        "posts/newer/index.html",
+        "posts/older/index.html",
+        "pages/about/index.html",
+        "pages/names/index.html",
+        "changelog/newer/index.html",
+        "tags/index.html",
+        "tags/travel-notes/index.html",
+        "posts/posts_feed.xml",
+        "sitemap.xml",
+        "robots.txt",
+        "manifest.json",
+        "404.html",
+        "assets/css/main.css",
+        "assets/css/tokens.css",
+        "assets/css/pigeon.css",
+    ] {
+        assert!(out.files.contains_key(p), "{p}");
+    }
+    assert_eq!(out.statics.len(), statics.len());
+
+    // The home page: newest first by year, the intro, escaped text, the pigeon look, JSON-LD.
+    let home = file("index.html");
+    let (newer, older) = (
+        home.find("&#x2F;posts&#x2F;newer&#x2F;").unwrap(),
+        home.find("&#x2F;posts&#x2F;older&#x2F;").unwrap(),
+    );
+    assert!(newer < older && home.find(">2025<").unwrap() < home.find(">2024<").unwrap());
+    assert!(home.contains("<p>Hi, I'm <strong>Example</strong>.</p>"));
+    assert!(home.contains("<title>Example &lt;Blog&gt; — Notes.</title>"));
+    assert!(home.contains("color-theme-pigeon") && home.contains("<h1 class=\"m-0\">"));
+    assert!(
+        home.contains("\"alternateName\": [\"Ex\"]")
+            && home.contains("\"sameAs\": [\"https://example.org/me\"]")
+    );
+    assert!(
+        home.contains("\"name\": \"Example \\u003cBlog>\""),
+        "JSON-LD escapes <"
+    );
+    assert!(
+        home.contains("katex@0.16.22") && !home.contains("abc1234"),
+        "math on, commit off"
+    );
+
+    // A post: Zola's heading ids, root-relative anchors, code blocks, absolute canonical URL.
+    let p = file("posts/newer/index.html");
+    assert!(
+        p.contains("<h2 id=\"hello\">Hello</h2>") && p.contains("<h2 id=\"hello-1\">Hello</h2>")
+    );
+    assert!(p.contains("<a href=\"/posts/newer/#hello\">up</a>"));
+    assert!(p.contains("<pre><code data-lang=\"rust\">let a = 1 &lt; 2;\n</code></pre>"));
+    assert!(p.contains("<link rel=\"canonical\" href=\"https:&#x2F;&#x2F;example.com&#x2F;posts&#x2F;newer&#x2F;\">"));
+    assert!(
+        p.contains("href=\"&#x2F;pages&#x2F;about\">Example &lt;Blog&gt;</a>"),
+        "byline"
+    );
+    assert!(p.contains("2025 February 3"));
+
+    // Aliases redirect, root-relative; tags list their posts.
+    assert!(file("pages/names/index.html").contains("const target = \"/pages/about/\";"));
+    let tag = file("tags/travel-notes/index.html");
+    assert!(
+        tag.contains("Tag: Travel Notes") && tag.contains("href=\"&#x2F;posts&#x2F;older&#x2F;\"")
+    );
+    assert!(tag.contains("content=\"Posts tagged &quot;Travel Notes&quot;.\""));
+
+    // Feed, sitemap, robots, manifest.
+    let feed = file("posts/posts_feed.xml");
+    assert!(feed.contains("<updated>2025-02-03T10:00:00+00:00</updated>"));
+    assert!(feed.find("/posts/newer/").unwrap() < feed.find("/posts/older/").unwrap());
+    let map = file("sitemap.xml");
+    assert!(map.contains("<loc>https://example.com/posts/newer/</loc>\n        <lastmod>2025-02-03T10:00:00Z</lastmod>"));
+    assert!(
+        map.contains("<loc>https://example.com/tags/travel-notes/</loc>") && !map.contains("names")
+    );
+    assert_eq!(
+        file("robots.txt"),
+        "User-agent: *\nAllow: /\n\nSitemap: https://example.com/sitemap.xml\n"
+    );
+    assert!(file("manifest.json").contains("\"type\": \"image/png\""));
+
+    // Everything wrong is reported at once, by file, and nothing renders.
+    let mut bad = input.clone();
+    bad.site_toml = site_toml.replace(
+        "features = [\"math\", \"no-commit\"]",
+        "features = [\"sparkles\"]\nlayout = \"x\"",
+    );
+    assert!(
+        render(&bad).unwrap_err()[0]
+            .message
+            .contains("unknown field `layout`")
+    );
+    bad.site_toml = site_toml.replace("\"math\", ", "\"sparkles\", ");
+    bad.posts
+        .push(("2025-01-01-mismatch.md".into(), post("2025-01-02", "", "x")));
+    bad.posts
+        .push(("Not Dated.md".into(), post("2025-01-02", "", "x")));
+    bad.posts.push((
+        "2025-03-03-taken.md".into(),
+        post("2025-03-03", "aliases = [\"pages/names\"]\n", "x"),
+    ));
+    bad.pages.push((
+        "extra.md".into(),
+        "+++\ntitle = \"X\"\ncolour = \"red\"\n+++\n".into(),
+    ));
+    statics.remove("assets/a.png");
+    statics.insert("robots.txt".into());
+    bad.statics = statics;
+    let problems: Vec<String> = render(&bad)
+        .unwrap_err()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let has = |file: &str, words: &str| {
+        problems
+            .iter()
+            .any(|p| p.starts_with(file) && p.contains(words))
+    };
+    assert!(
+        has(".pigeon/site.toml", "`sparkles` is not a feature"),
+        "{problems:#?}"
+    );
+    assert!(has(
+        "content/posts/2025-01-01-mismatch.md",
+        "is prefixed 2025-01-01, but its date is 2025-01-02"
+    ));
+    assert!(has("content/posts/Not Dated.md", "YYYY-MM-DD-slug.md"));
+    assert!(has("content/pages/extra.md", "unknown field `colour`"));
+    assert!(has(
+        ".pigeon/site.toml",
+        "avatar `/assets/a.png` is not under static/"
+    ));
+    assert!(has("static/robots.txt", "is generated by blog@1"));
+    assert!(has("content/", "/pages/names/ is also"), "{problems:#?}");
+}

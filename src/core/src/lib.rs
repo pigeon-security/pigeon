@@ -6,6 +6,7 @@ pub mod access;
 pub mod ai_gateway;
 pub mod approval;
 pub mod artifacts;
+pub mod blog;
 pub mod buildkite;
 pub mod buildkite_hook;
 pub mod buildkite_setup;
