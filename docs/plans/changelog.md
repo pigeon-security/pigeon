@@ -38,7 +38,7 @@ Why this cannot hold anything up:
 
 An R2 bucket in pigeon's own account, `pigeon-changelog`, written and read through Cloudflare's
 REST API with `pigeon_core::r2` (a scoped token opened from the account's parent token, as the
-site deploys do). It needs no new binding. The bucket is made on the first run
+site deploys do). Core binds it as `CHANGELOG` (the REST API is the fallback without the binding). The bucket is made on the first run
 (`r2::ensure_bucket`, safe to repeat).
 
 - `main/CHANGELOG.md`: the rendered changelog.
@@ -132,3 +132,11 @@ An example (the landing id is made up):
   `core_changelog_from_history`.
 - Not yet run live: nothing is landed. The first run after landing (or `changelog_update`)
   makes the bucket and backfills main.
+- 2026-11-22: follow-up (landing JPC_PDdTQ2o5Ip9W): a run from the queue stops after 60 s, and
+  the bucket is read and written through core's `CHANGELOG` binding when it has one (the R2 API
+  with scoped tokens otherwise); the deploy proxy lets wrangler read a bucket's record, which it
+  does for `[[r2_buckets]]`. The first live run returned Cloudflare 10042: R2 was not enabled on
+  the account.
+- 2026-11-22: the person enabled R2. `changelog_update` made `pigeon-changelog` and backfilled
+  main at aa6f6df: 307 commits, from 2026-11-20. Then core's `[[r2_buckets]]` `CHANGELOG` →
+  `pigeon-changelog`, so runs use the binding and mint no R2 token.

@@ -173,6 +173,14 @@ enabled = false
 binding = "CI_EVENTS"
 queue = "pigeon-ci-events"
 
+# The changelog of main (src/capabilities/src/changelog.rs, docs/plans/changelog.md): its bucket,
+# read and written through this binding instead of short-lived R2 API tokens. Bound once the
+# bucket existed (made by the first run, 2026-11-22), since a binding to a missing bucket fails
+# the deploy.
+[[r2_buckets]]
+binding = "CHANGELOG"
+bucket_name = "pigeon-changelog"
+
 # App Store Connect (src/capabilities/src/apple.rs, docs/plans/ios.md phase 1b): the team id,
 # the API key's issuer id, key id and .p8, set by the person on the secrets page; bound once all
 # four existed, since a binding to a missing secret fails the deploy.
