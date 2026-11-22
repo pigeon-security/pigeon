@@ -1,11 +1,12 @@
 # Buildkite, set up by pigeon: the CI gateway's Buildkite connector redesigned
 
-Status: **phases 1, 2, 2a and 4 deployed** (22 November 2026). pigeon set Buildkite up itself on
+Status: **done: phases 1 to 4 deployed** (22 November 2026). pigeon set Buildkite up itself on
 landing `rvs7Rnt8h0cMfmzM` (`fc9e911`): cluster `pigeon`, hosted queues `pigeon-linux-small` and
-`pigeon-linux-medium`, pipeline `pigeon`, its webhook, and the Cloudflare MCP server `buildkite`.
-`ci_buildkite_plan` reads every step `ok`. The first `smoke` job ran on Buildkite (build 1) and
-succeeded. **Phase 3** waits on the person: attaching `buildkite` to the `pigeon` portal (§4,
-step 4). The person chose one token for everything and Buildkite's MCP able to act for them.
+`pigeon-linux-medium`, pipeline `pigeon`, its webhook, and the Cloudflare MCP server `buildkite`;
+`ci_buildkite_plan` reads every step `ok`. On Buildkite, `smoke` succeeded (build 1) and
+`smoke-fail` failed with exit 1 (build 2), as they should. The person attached `buildkite` to the
+`pigeon` portal (§4, step 4), so sessions started since list `buildkite_*` tools. The person
+chose one token for everything and Buildkite's MCP able to act for them. Phase 5 is optional.
 
 The person's goal: "redesign the CI gateway for BuildKite to use BuildKite MCP through the
 portal and server. The goal of this is we can setup everything we need in BuildKite through
@@ -460,7 +461,7 @@ Settled live in phase 2a:
 - No session needed a Buildkite host; the Worker and the portal reach Buildkite themselves.
 - The secret binding: never tried before its secret existed; the token was set first.
 
-Still open, for phase 3:
-- Settled: a server created through the API gets **no** Access application; the person creates
-  it once in the dashboard (§4, step 4).
+Settled in phase 3:
+- A server created through the API gets **no** Access application; the person creates it once
+  in the dashboard (§4, step 4).
 - Whether `/direct` accepts the bearer token as the portal forwards it.
