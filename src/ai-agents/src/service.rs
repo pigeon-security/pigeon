@@ -20,7 +20,7 @@ pub const NAME: &str = "ai-agents";
 pub const WORKER: &str = "pigeon-ai-agents";
 
 /// Every tool the capability offers.
-pub const TOOLS: [&str; 11] = [
+pub const TOOLS: [&str; 13] = [
     "ai_agents_start",
     "ai_agents_status",
     "ai_agents_stop",
@@ -28,6 +28,8 @@ pub const TOOLS: [&str; 11] = [
     "ai_agents_resume",
     "ai_agents_inbox",
     "ai_agents_answer",
+    "ai_agents_extend",
+    "ai_agents_note",
     "ai_agents_register",
     "ai_agents_report",
     "ai_agents_handoff",
@@ -191,6 +193,27 @@ impl Agents {
                     INDEX,
                     "relay_answer",
                     &json!({ "run": run, "answer": answer, "reader": reader }),
+                )
+                .await)
+            }
+            "ai_agents_extend" => {
+                let run = a["run"].as_str().ok_or("give `run`")?;
+                r(object::call(
+                    env,
+                    INDEX,
+                    "extend",
+                    &json!({ "run": run, "add": extension(a), "reader": reader }),
+                )
+                .await)
+            }
+            "ai_agents_note" => {
+                let run = a["run"].as_str().ok_or("give `run`")?;
+                let text = note(a)?;
+                r(object::call(
+                    env,
+                    INDEX,
+                    "note",
+                    &json!({ "run": run, "text": text, "reader": reader }),
                 )
                 .await)
             }
@@ -374,6 +397,40 @@ impl Service for Agents {
                         }),
                     ),
                     tool(
+                        "ai_agents_extend",
+                        "Raise a live run's budget: each amount given is added to its limit, \
+                         within the hard caps ($100, 500 turns, 24 h of wall time, 6 h of \
+                         sandbox, 30 executors). Who extended it and by how much is kept in its \
+                         status under `extended`. Answers the run's status.",
+                        json!({
+                            "type": "object",
+                            "properties": {
+                                "run": { "type": "string" },
+                                "cost_usd": { "type": "number", "description": "Dollars to add." },
+                                "turns": { "type": "integer" },
+                                "wall_min": { "type": "integer" },
+                                "sandbox_min": { "type": "integer" },
+                                "executors": { "type": "integer", "description": "Planners only." }
+                            },
+                            "required": ["run"]
+                        }),
+                    ),
+                    tool(
+                        "ai_agents_note",
+                        "Send a live run a short note from the person (at most 4000 bytes). It \
+                         goes into the run's next turn as a message of its own, kept in its \
+                         transcript; it does not answer a pending question (ai_agents_answer \
+                         does).",
+                        json!({
+                            "type": "object",
+                            "properties": {
+                                "run": { "type": "string" },
+                                "text": { "type": "string" }
+                            },
+                            "required": ["run", "text"]
+                        }),
+                    ),
+                    tool(
                         "ai_agents_register",
                         "Record a Claude Code session started for a task (when the person \
                          asked for the work in the Claude chat) as a run, so it is listed and \
@@ -504,4 +561,31 @@ pub fn pause_answer(paused: bool) -> Value {
             "every run is resumed"
         },
     })
+}
+
+/// The amounts an `ai_agents_extend` call adds: its arguments without `run`. `cost` is taken
+/// as `cost_usd`.
+pub fn extension(a: &Value) -> Value {
+    let mut add = a.as_object().cloned().unwrap_or_default();
+    add.remove("run");
+    if let Some(c) = add.remove("cost") {
+        add.entry("cost_usd").or_insert(c);
+    }
+    Value::Object(add)
+}
+
+/// The text of an `ai_agents_note` call, checked.
+pub fn note(a: &Value) -> Result<String, String> {
+    let text = a["text"].as_str().unwrap_or_default().trim();
+    if text.is_empty() {
+        return Err("give `text`".into());
+    }
+    if text.len() > crate::transcript::MAX_NOTE_BYTES {
+        return Err(format!(
+            "`text` is {} bytes; a note is at most {}",
+            text.len(),
+            crate::transcript::MAX_NOTE_BYTES
+        ));
+    }
+    Ok(text.to_string())
 }

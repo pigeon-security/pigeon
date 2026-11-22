@@ -396,3 +396,36 @@ pub fn strip_thinking(messages: &[Value]) -> Vec<Value> {
         })
         .collect()
 }
+
+/// The longest note `ai_agents_note` takes, in bytes.
+pub const MAX_NOTE_BYTES: usize = 4000;
+
+/// How a note reads in the run's transcript.
+pub fn note_text(text: &str) -> String {
+    format!(
+        "A note from the person, sent while you work (ai_agents_note). Take it into account \
+         from now on; it does not answer a pending question:\n\n{text}"
+    )
+}
+
+/// Where queued notes go before a turn, given the transcript's last message: into it when it
+/// is the user's (results, a nudge, the brief), which keeps the roles alternating, else as a
+/// new user message. Answers the message to store, and whether it replaces the last one.
+pub fn with_notes(last: Option<&Value>, notes: &[String]) -> (Value, bool) {
+    let blocks: Vec<Value> = notes
+        .iter()
+        .map(|n| json!({"type": "text", "text": note_text(n)}))
+        .collect();
+    match last {
+        Some(m) if m["role"] == "user" => {
+            let mut content: Vec<Value> = match &m["content"] {
+                Value::String(s) => vec![json!({"type": "text", "text": s})],
+                Value::Array(a) => a.clone(),
+                _ => Vec::new(),
+            };
+            content.extend(blocks);
+            (json!({"role": "user", "content": content}), true)
+        }
+        _ => (json!({"role": "user", "content": blocks}), false),
+    }
+}

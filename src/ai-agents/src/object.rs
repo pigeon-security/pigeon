@@ -44,13 +44,17 @@ pub const MAX_QUEUED: u32 = 20;
 
 /// Each object's schema, one statement per migration, applied in order and never edited. The
 /// index uses `runs` and `flags`; a run object uses `run`, `messages` and `calls`.
-const MIGRATIONS: [&str; 6] = [
+const MIGRATIONS: [&str; 8] = [
     "CREATE TABLE runs (id TEXT PRIMARY KEY, role TEXT NOT NULL, runtime TEXT NOT NULL, state TEXT NOT NULL, parent_run TEXT, session_id TEXT, caller TEXT NOT NULL, by_id TEXT, for_id TEXT, brief TEXT NOT NULL, base TEXT, branch TEXT, budget TEXT NOT NULL, spent TEXT NOT NULL, step TEXT, waiting TEXT, report TEXT, created_at INTEGER NOT NULL, started_at INTEGER, ended_at INTEGER, stop_asked INTEGER NOT NULL DEFAULT 0)",
     "CREATE TABLE flags (k TEXT PRIMARY KEY, v TEXT NOT NULL)",
     "CREATE TABLE run (id TEXT PRIMARY KEY, role TEXT NOT NULL, caller TEXT NOT NULL, brief TEXT NOT NULL, base TEXT NOT NULL, branch TEXT NOT NULL, budget TEXT NOT NULL, spent TEXT NOT NULL, state TEXT NOT NULL, started_at INTEGER NOT NULL, model_index INTEGER NOT NULL DEFAULT 0, fallback_left INTEGER NOT NULL DEFAULT 0, failures INTEGER NOT NULL DEFAULT 0, job_id TEXT, job_kind TEXT, job_state TEXT, job_at INTEGER, job_error TEXT, last_usage TEXT, stop_reason TEXT, reported TEXT, report TEXT, nudges INTEGER NOT NULL DEFAULT 0, waiting TEXT, prepare_tries INTEGER NOT NULL DEFAULT 0)",
     "CREATE TABLE messages (n INTEGER PRIMARY KEY, body TEXT NOT NULL)",
     "CREATE TABLE calls (n INTEGER PRIMARY KEY, id TEXT NOT NULL, name TEXT NOT NULL, input TEXT NOT NULL, started INTEGER NOT NULL DEFAULT 0, done INTEGER NOT NULL DEFAULT 0, result TEXT, is_error INTEGER NOT NULL DEFAULT 0)",
     "ALTER TABLE runs ADD COLUMN assumed TEXT",
+    // ai_agents_extend: who raised a run's budget, by how much, when.
+    "ALTER TABLE runs ADD COLUMN extended TEXT",
+    // ai_agents_note: notes waiting for the run's next turn.
+    "ALTER TABLE run ADD COLUMN notes TEXT",
 ];
 
 fn now() -> i64 {
@@ -137,6 +141,7 @@ struct Row {
     ended_at: Option<i64>,
     stop_asked: i64,
     assumed: Option<String>,
+    extended: Option<String>,
 }
 
 impl Row {
@@ -181,6 +186,7 @@ impl Row {
             "ended_at": self.ended_at,
             "stop_asked": self.stop_asked != 0,
             "assumed": parsed(&self.assumed),
+            "extended": parsed(&self.extended),
         })
     }
 }
@@ -229,6 +235,7 @@ struct RunRow {
     nudges: i64,
     waiting: Option<String>,
     prepare_tries: i64,
+    notes: Option<String>,
 }
 
 /// One stored tool call.
@@ -306,6 +313,24 @@ impl AiAgentRuns {
                 .await
             }
             "report" => self.report(a),
+            "extend" => self.extend(a).await,
+            "note" => {
+                let id = s("run");
+                let row = self
+                    .row(&id)?
+                    .filter(|r| Self::may_read(r, &s("reader")))
+                    .ok_or_else(|| bad(format!("no run {id}, or not yours")))?;
+                if row.ended_at.is_some() || row.runtime != "gateway" {
+                    return Err(bad(format!("run {id} is not a live gateway run")));
+                }
+                call(
+                    &self.env,
+                    &format!("run:{id}"),
+                    "queue_note",
+                    &json!({ "text": a["text"] }),
+                )
+                .await
+            }
             "assume" => {
                 let id = s("run");
                 let row = self.row(&id)?.ok_or_else(|| bad("no such run"))?;
@@ -389,6 +414,21 @@ impl AiAgentRuns {
                 self.answered(&row, &call_id, &format!("The person answered: {text}"))
                     .await?;
                 Ok(json!({ "answered": true }))
+            }
+            "set_budget" => {
+                self.set("budget = ?", vec![a["budget"].to_string().into()])?;
+                Ok(Value::Null)
+            }
+            "queue_note" => {
+                let row = self.run_row()?.ok_or_else(|| bad("no run here"))?;
+                let mut notes: Vec<String> = row
+                    .notes
+                    .as_deref()
+                    .and_then(|n| serde_json::from_str(n).ok())
+                    .unwrap_or_default();
+                notes.push(s("text"));
+                self.set("notes = ?", vec![json!(notes).to_string().into()])?;
+                Ok(json!({ "queued": notes.len() }))
             }
             "halt" => {
                 self.db.exec("UPDATE run SET waiting = NULL", vec![])?;
@@ -577,6 +617,47 @@ impl AiAgentRuns {
             "paused": self.flag("paused")?,
             "runs": rows.iter().map(Row::public).collect::<Vec<_>>(),
         }))
+    }
+
+    /// `ai_agents_extend`: raises a live run's budget, in its object and here, and keeps who
+    /// asked and by how much in the run's `extended` list.
+    async fn extend(&self, a: &Value) -> Result<Value> {
+        let id = a["run"].as_str().unwrap_or_default();
+        let reader = a["reader"].as_str().unwrap_or_default();
+        let row = self
+            .row(id)?
+            .filter(|r| Self::may_read(r, reader))
+            .ok_or_else(|| bad(format!("no run {id}, or not yours")))?;
+        if row.ended_at.is_some() || row.runtime != "gateway" {
+            return Err(bad(format!("run {id} is not a live gateway run")));
+        }
+        let role = role_named(&row.role);
+        let current: Budget =
+            serde_json::from_str(&row.budget).unwrap_or_else(|_| Budget::default_for(role));
+        let (next, added) = budget::extend(role, &current, &a["add"]).map_err(bad)?;
+        call(
+            &self.env,
+            &format!("run:{id}"),
+            "set_budget",
+            &json!({ "budget": next }),
+        )
+        .await?;
+        let mut list: Vec<Value> = row
+            .extended
+            .as_deref()
+            .and_then(|v| serde_json::from_str(v).ok())
+            .unwrap_or_default();
+        list.push(json!({ "by": reader, "added": added, "at": now() }));
+        self.db.exec(
+            "UPDATE runs SET budget = ?, extended = ? WHERE id = ?",
+            vec![
+                serde_json::to_string(&next)?.into(),
+                Value::Array(list).to_string().into(),
+                id.into(),
+            ],
+        )?;
+        worker::console_log!("agents: run {id}'s budget extended by {reader}: {added}");
+        self.get(id, reader)
     }
 
     /// A run object reports where it is.
@@ -785,6 +866,43 @@ impl AiAgentRuns {
             }
         }
         Ok(())
+    }
+
+    /// Puts the notes queued by `ai_agents_note` in the transcript, before a turn.
+    fn take_notes(&self) -> Result<()> {
+        // Read now, not from the step's row: a note may have come in since.
+        let Some(row) = self.run_row()? else {
+            return Ok(());
+        };
+        let notes: Vec<String> = row
+            .notes
+            .as_deref()
+            .and_then(|n| serde_json::from_str(n).ok())
+            .unwrap_or_default();
+        if notes.is_empty() {
+            return Ok(());
+        }
+        #[derive(Deserialize)]
+        struct M {
+            n: i64,
+            body: String,
+        }
+        let last = self.db.row::<M>(
+            "SELECT n, body FROM messages ORDER BY n DESC LIMIT 1",
+            vec![],
+        )?;
+        let body = last
+            .as_ref()
+            .and_then(|m| serde_json::from_str::<Value>(&m.body).ok());
+        let (message, replaces) = transcript::with_notes(body.as_ref(), &notes);
+        match (replaces, last) {
+            (true, Some(m)) => self.db.exec(
+                "UPDATE messages SET body = ? WHERE n = ?",
+                vec![message.to_string().into(), m.n.into()],
+            )?,
+            _ => self.push_message(&message)?,
+        }
+        self.set("notes = NULL", vec![])
     }
 
     fn push_message(&self, m: &Value) -> Result<()> {
@@ -1078,6 +1196,7 @@ impl AiAgentRuns {
             self.push_message(&transcript::results_message(&results))?;
             self.db.exec("DELETE FROM calls", vec![])?;
         }
+        self.take_notes()?;
         let models = role.models();
         let index = (row.model_index.max(0) as usize).min(models.len() - 1);
         let model = models[index];

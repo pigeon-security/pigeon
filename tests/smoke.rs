@@ -2439,6 +2439,32 @@ fn ai_agents_loop_budgets_tools_and_turns() {
 
     // ---- budgets ----
     let b = Budget::asked(Role::Executor, &Value::Null).unwrap();
+    // ai_agents_extend adds to a live run's limits, within the hard caps, and says what it added.
+    let planner = Budget::default_for(Role::Planner);
+    let (more, added) = budget::extend(
+        Role::Planner,
+        &planner,
+        &json!({ "cost_usd": 10, "turns": 50, "wall_min": 60, "sandbox_min": 30, "executors": 4 }),
+    )
+    .unwrap();
+    assert_eq!(more.cost_micros, planner.cost_micros + 10_000_000);
+    assert_eq!(more.turns, planner.turns + 50);
+    assert_eq!(more.wall_ms, planner.wall_ms + 60 * 60_000);
+    assert_eq!(more.sandbox_ms, planner.sandbox_ms + 30 * 60_000);
+    assert_eq!(more.executors, planner.executors + 4);
+    assert_eq!(added["executors"], 4);
+    let over = budget::extend(Role::Planner, &planner, &json!({ "cost_usd": 90 })).unwrap_err();
+    assert!(
+        over.contains("over the cap") && over.contains("left"),
+        "{over}"
+    );
+    assert!(budget::extend(Role::Planner, &planner, &json!({ "turns": 301 })).is_err());
+    assert!(budget::extend(Role::Planner, &planner, &json!({ "wall_min": 961 })).is_err());
+    assert!(budget::extend(Role::Executor, &b, &json!({ "executors": 1 })).is_err());
+    assert!(budget::extend(Role::Planner, &planner, &json!({})).is_err());
+    assert!(budget::extend(Role::Planner, &planner, &json!({ "turns": 0 })).is_err());
+    assert!(budget::extend(Role::Planner, &planner, &json!({ "cost_usd": -1 })).is_err());
+    assert!(budget::extend(Role::Planner, &planner, &json!({ "budget": 1 })).is_err());
     assert_eq!((b.turns, b.cost_micros), (60, 5_000_000));
     assert_eq!(
         Budget::asked(Role::Planner, &Value::Null)
@@ -3125,6 +3151,39 @@ fn ai_agents_loop_budgets_tools_and_turns() {
     assert!(service::pause_args("ai_agents_pause", &json!({})).is_ok());
     assert_eq!(service::pause_answer(true)["scope"], "every run");
     assert_eq!(service::pause_answer(false)["paused"], false);
+    // ai_agents_extend takes its amounts beside `run`; `cost` is `cost_usd`.
+    assert_eq!(
+        service::extension(&json!({ "run": "r1", "cost": 5, "turns": 20 })),
+        json!({ "cost_usd": 5, "turns": 20 })
+    );
+    // ai_agents_note: a short text, which goes into the run's next turn without breaking the
+    // alternation of roles, and reads as the person's note.
+    assert!(service::note(&json!({ "run": "r1", "text": "  " })).is_err());
+    assert!(service::note(&json!({ "run": "r1", "text": "x".repeat(4001) })).is_err());
+    assert_eq!(
+        service::note(&json!({ "run": "r1", "text": " work in parallel " })).unwrap(),
+        "work in parallel"
+    );
+    let results = transcript::results_message(&[("t1".into(), "ok".into(), false)]);
+    let (merged, replaces) = transcript::with_notes(Some(&results), &["go faster".into()]);
+    assert!(replaces);
+    assert_eq!(merged["content"][0]["type"], "tool_result");
+    assert!(
+        merged["content"][1]["text"]
+            .as_str()
+            .unwrap()
+            .ends_with("go faster")
+    );
+    let brief = json!({ "role": "user", "content": "the brief" });
+    let (merged, _) = transcript::with_notes(Some(&brief), &["a".into(), "b".into()]);
+    assert_eq!(merged["content"][0]["text"], "the brief");
+    assert_eq!(merged["content"].as_array().unwrap().len(), 3);
+    let reply = json!({ "role": "assistant", "content": [{ "type": "text", "text": "done" }] });
+    let (alone, replaces) = transcript::with_notes(Some(&reply), &["n".into()]);
+    assert!(!replaces && alone["role"] == "user");
+    assert!(
+        service::TOOLS.contains(&"ai_agents_extend") && service::TOOLS.contains(&"ai_agents_note")
+    );
 
     // Falling back to another model drops thinking it cannot read.
     let thought = [

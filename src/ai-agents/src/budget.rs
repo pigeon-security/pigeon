@@ -179,6 +179,112 @@ impl Budget {
     }
 }
 
+/// Raises a live run's budget by `add` (`ai_agents_extend`): each field given is added to the
+/// current limit. The result stays within [`Budget::HARD`]; an addition that would pass it is
+/// refused, naming the field and the room left. Only a planner's executors may be raised.
+/// Answers the new budget and what was added, in the request's units.
+pub fn extend(role: Role, current: &Budget, add: &Value) -> Result<(Budget, Value), String> {
+    let Value::Object(map) = add else {
+        return Err(
+            "give at least one of cost_usd, turns, wall_min, sandbox_min, executors".into(),
+        );
+    };
+    const KNOWN: [&str; 5] = ["turns", "cost_usd", "wall_min", "sandbox_min", "executors"];
+    if let Some(k) = map.keys().find(|k| !KNOWN.contains(&k.as_str())) {
+        return Err(format!(
+            "refused the extension: unknown key `{k}`; known keys are {}",
+            KNOWN.join(", ")
+        ));
+    }
+    let hard = Budget::HARD;
+    let mut next = *current;
+    let mut added = serde_json::Map::new();
+    let room = |key: &str, now: u64, cap: u64, more: u64| -> Result<u64, String> {
+        let total = now.saturating_add(more);
+        if total > cap {
+            return Err(format!(
+                "refused `{key}`: adding {more} gives {total}, over the cap of {cap} ({} left)",
+                cap.saturating_sub(now)
+            ));
+        }
+        Ok(total)
+    };
+    if let Some(n) = pick_whole(map, "turns", u64::from(hard.turns), false)? {
+        next.turns = room("turns", u64::from(current.turns), u64::from(hard.turns), n)? as u32;
+        added.insert("turns".into(), n.into());
+    }
+    match map.get("cost_usd") {
+        None | Some(Value::Null) => {}
+        Some(v) => {
+            let usd = v
+                .as_f64()
+                .filter(|u| u.is_finite() && *u > 0.0)
+                .ok_or("refused `cost_usd`: it must be a number of dollars greater than zero")?;
+            let micros = (usd * 1e6).round() as u64;
+            let total = current.cost_micros.saturating_add(micros);
+            if micros == 0 {
+                return Err(
+                    "refused `cost_usd`: it must be greater than zero micro-dollars".into(),
+                );
+            }
+            if total > hard.cost_micros {
+                return Err(format!(
+                    "refused `cost_usd`: adding {} gives {}, over the cap of {} ({} left)",
+                    money(micros),
+                    money(total),
+                    money(hard.cost_micros),
+                    money(hard.cost_micros.saturating_sub(current.cost_micros))
+                ));
+            }
+            next.cost_micros = total;
+            added.insert("cost_usd".into(), usd.into());
+        }
+    }
+    let minutes = |ms: i64| u64::try_from(ms / MINUTE_MS).unwrap_or(0);
+    if let Some(n) = pick_whole(map, "wall_min", minutes(hard.wall_ms), false)? {
+        room(
+            "wall_min",
+            minutes(current.wall_ms),
+            minutes(hard.wall_ms),
+            n,
+        )?;
+        next.wall_ms = current
+            .wall_ms
+            .saturating_add((n as i64).saturating_mul(MINUTE_MS));
+        added.insert("wall_min".into(), n.into());
+    }
+    if let Some(n) = pick_whole(map, "sandbox_min", minutes(hard.sandbox_ms), false)? {
+        room(
+            "sandbox_min",
+            minutes(current.sandbox_ms),
+            minutes(hard.sandbox_ms),
+            n,
+        )?;
+        next.sandbox_ms = current
+            .sandbox_ms
+            .saturating_add((n as i64).saturating_mul(MINUTE_MS));
+        added.insert("sandbox_min".into(), n.into());
+    }
+    if let Some(n) = pick_whole(map, "executors", u64::from(hard.executors), false)? {
+        if role != Role::Planner {
+            return Err("refused `executors`: only a planner spawns executors".into());
+        }
+        next.executors = room(
+            "executors",
+            u64::from(current.executors),
+            u64::from(hard.executors),
+            n,
+        )? as u32;
+        added.insert("executors".into(), n.into());
+    }
+    if added.is_empty() {
+        return Err(
+            "give at least one of cost_usd, turns, wall_min, sandbox_min, executors".into(),
+        );
+    }
+    Ok((next, Value::Object(added)))
+}
+
 /// Reads an optional whole-number field from a request object.
 ///
 /// Missing or null gives `None`. Zero is refused unless `zero_ok` is set. Values above `cap`
