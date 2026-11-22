@@ -105,3 +105,24 @@ token = true
 cpu = 4
 memory_gb = 12
 disk_gb = 20
+
+# The iOS app (docs/plans/ios.md, phase 3): build it for the simulator, unsigned, on a macOS
+# agent (queue pigeon-macos). Advisory at first: a failure warns and does not block a landing.
+[jobs.ios-check]
+run = "ios/ci/check.sh"
+timeout_min = 60
+
+[jobs.ios-check.needs]
+os = "macos"
+arch = "arm64"
+
+# The iOS release archive (docs/plans/ios.md, phase 4): archives unsigned with the build number
+# the release gives it; signing and upload are a separate step on the signing queue. Its script,
+# ios/ci/archive.sh, lands with phase 4.
+[jobs.ios-archive]
+run = "ios/ci/archive.sh"
+timeout_min = 60
+
+[jobs.ios-archive.needs]
+os = "macos"
+arch = "arm64"
