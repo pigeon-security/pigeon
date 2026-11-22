@@ -36,11 +36,11 @@ tag = "v1"
 new_sqlite_classes = ["AiAgentRuns", "Sandbox"]
 
 # A run's sandbox: the CI base image with pigeon-sandboxd (ci/sandbox/Dockerfile). The image's
-# digest is pinned once it is pushed, as the CI base image's is.
+# digest is pinned: v1's linux/amd64 manifest, built and pushed by the person from b20ae3c.
 [[containers]]
 class_name = "Sandbox"
 scheduling_policy = "durable_object"
 max_instances = 4
 
 [containers.images.sandbox]
-image = "registry.cloudflare.com/4f94676cb2cbe46fd985b089ca97ea27/pigeon-ai-agent-sandbox:unpushed"
+image = "registry.cloudflare.com/4f94676cb2cbe46fd985b089ca97ea27/pigeon-ai-agent-sandbox@sha256:bb04ab3579a48f68b518d0aa22875ac7cf677c6739a7e754da06e79471728cc4"
