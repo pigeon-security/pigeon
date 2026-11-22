@@ -722,3 +722,8 @@ a passkey. Enter every key and id on the console's secrets page once the slot ex
   JSON, no redirect, 404 while the slot is unset) and a plain `/app/oauth` page for a callback
   iOS did not intercept; the app anchors the sheet on its own window and shows every failure
   with iOS's code. OAuth, passkey and approval rules are unchanged.
+- 2026-11-22 (night): build 39 still ended as a cancelled session on a device. Apple's docs only
+  say the callback host must be a domain associated with the app, without naming the service,
+  so the entitlement and the association file now name the host for `applinks` too, claiming
+  `/app/oauth*` only, beside `webcredentials`. A cancelled sign-in now shows iOS's error domain
+  and code like every other failure, and the app logs the full error.

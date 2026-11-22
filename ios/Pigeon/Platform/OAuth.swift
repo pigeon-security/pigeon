@@ -7,7 +7,7 @@ import UIKit
 enum PlatformError: LocalizedError {
     case badResponse(String)
     case server(String)
-    case cancelled
+    case cancelled(String)
     case stateMismatch
     case signedOut
     case keychain(OSStatus)
@@ -16,8 +16,8 @@ enum PlatformError: LocalizedError {
         switch self {
         case .badResponse(let what): return "The platform answered something unexpected: \(what)."
         case .server(let text): return text
-        case .cancelled:
-            return "Sign-in was closed before it finished. If you did not close it, the platform's link to this app may not be ready yet: try again in a few minutes."
+        case .cancelled(let code):
+            return "Sign-in was closed before it finished (\(code)). If you did not close it, the platform's link to this app may not be ready yet: try again in a few minutes."
         case .stateMismatch: return "Sign-in came back with the wrong state. Try again."
         case .signedOut: return "You are signed out. Sign in again."
         case .keychain(let status): return "The keychain refused the request (\(status))."
@@ -175,10 +175,11 @@ final class WebAuth: NSObject, ASWebAuthenticationPresentationContextProviding {
             return PlatformError.badResponse("the sign-in sheet closed without an answer")
         }
         let ns = error as NSError
+        NSLog("Pigeon sign-in: %@ %ld %@", ns.domain, ns.code, ns.userInfo.description)
         if let e = error as? ASWebAuthenticationSessionError {
             switch e.code {
             case .canceledLogin:
-                return PlatformError.cancelled
+                return PlatformError.cancelled("\(ns.domain) \(ns.code)")
             case .presentationContextNotProvided, .presentationContextInvalid:
                 return PlatformError.server(
                     "iOS could not show the sign-in sheet (ASWebAuthenticationSession \(ns.code)).")

@@ -129,11 +129,17 @@ pub fn seal_aad(certificate_id: &str) -> String {
 }
 
 /// The apple-app-site-association document for `team`: it lets `dev.pigeon.app` use this host
-/// for passkeys and for its sign-in callback (`webcredentials`), as the app's associated-domains
-/// entitlement names it. None unless `team` is a team id, so a bad slot serves nothing.
+/// for passkeys (`webcredentials`) and claims `/app/oauth` as its sign-in callback (`applinks`),
+/// as the app's associated-domains entitlement names both. None unless `team` is a team id, so a
+/// bad slot serves nothing.
 pub fn aasa_document(team: &str) -> Option<Value> {
-    apple::is_apple_id(team)
-        .then(|| json!({ "webcredentials": { "apps": [format!("{team}.{BUNDLE_ID}")] } }))
+    let app = format!("{team}.{BUNDLE_ID}");
+    apple::is_apple_id(team).then(|| {
+        json!({
+            "applinks": { "details": [{ "appIDs": [app], "components": [{ "/": "/app/oauth*" }] }] },
+            "webcredentials": { "apps": [app] },
+        })
+    })
 }
 
 /// The AASA document from `APPLE_TEAM_ID`, or None while it is unset.

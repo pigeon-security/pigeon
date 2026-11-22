@@ -14,7 +14,7 @@ targets:
     entitlements:
       path: Pigeon/Pigeon.entitlements
       properties:
-        com.apple.developer.associated-domains: ["webcredentials:platform.pigeon.dev"]
+        com.apple.developer.associated-domains: ["webcredentials:platform.pigeon.dev", "applinks:platform.pigeon.dev"]
     settings:
       base:
         # Swift 5 mode: AuthenticationServices' delegates are not annotated for Swift 6 isolation.

@@ -3427,11 +3427,18 @@ fn apple_ids_token_and_slots() {
     let tools: Vec<&str> = apple_cap.tools().iter().map(|t| t.name).collect();
     assert_eq!(tools, ["ios_releases", "apple_status"]);
     assert_eq!(apple_cap.routes(), ["/apple/", "/app/oauth"]);
-    // Phase 5: the AASA names only dev.pigeon.app under the team, and nothing for a bad team id;
+    // Phase 5: the AASA names only dev.pigeon.app under the team, for passkeys and for the
+    // /app/oauth callback only, and nothing for a bad team id;
     // the return page never echoes what it was called with.
     assert_eq!(
         apple::aasa_document("A1B2C3D4E5").unwrap(),
-        json!({ "webcredentials": { "apps": ["A1B2C3D4E5.dev.pigeon.app"] } })
+        json!({
+            "applinks": { "details": [{
+                "appIDs": ["A1B2C3D4E5.dev.pigeon.app"],
+                "components": [{ "/": "/app/oauth*" }],
+            }] },
+            "webcredentials": { "apps": ["A1B2C3D4E5.dev.pigeon.app"] },
+        })
     );
     assert!(apple::aasa_document("not-a-team").is_none());
     assert!(apple::aasa_document("").is_none());
