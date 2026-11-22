@@ -91,9 +91,19 @@ fn encode_pairs(pairs: &[(&str, &str)]) -> String {
         .join("&")
 }
 
-/// Build the URL that sends the person to Cloudflare to approve access.
+/// The scope that asks Cloudflare for a refresh token. A client registered with the
+/// `refresh_token` grant has it, but the authorization request must still ask for it: without
+/// it the grant has an access token and no refresh token, and ends within the hour.
+pub const OFFLINE_ACCESS: &str = "offline_access";
+
+/// Build the URL that sends the person to Cloudflare to approve access: the client's scopes
+/// and [`OFFLINE_ACCESS`].
 pub fn authorize_url(client: &Client, state: &str, challenge: &str) -> String {
-    let scope = client.scopes.join(" ");
+    let mut scopes: Vec<&str> = client.scopes.iter().map(String::as_str).collect();
+    if !scopes.contains(&OFFLINE_ACCESS) {
+        scopes.push(OFFLINE_ACCESS);
+    }
+    let scope = scopes.join(" ");
     let query = encode_pairs(&[
         ("response_type", "code"),
         ("client_id", &client.client_id),

@@ -1666,7 +1666,7 @@ fn linked_account_github_app_and_site_layout() {
         "client_id=cid",
         "state=st8",
         "code_challenge_method=S256",
-        "scope=account.read%20zone.read",
+        "scope=account.read%20zone.read%20offline_access",
         "redirect_uri=https%3A%2F%2Fplatform.example%2Flinked%2Fcallback",
     ] {
         assert!(url.contains(part), "{part} in {url}");

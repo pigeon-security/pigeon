@@ -549,6 +549,11 @@ async fn force_refresh_due(env: &Env, instance: &str) -> Result<()> {
     let k = sealing_key(env).await?;
     let opened = crypto::open(&k, &l.sealed, instance.as_bytes()).await?;
     let mut tokens: Tokens = serde_json::from_slice(&opened)?;
+    if tokens.refresh.is_none() {
+        return Err(bad(
+            "the link has no refresh token, so it cannot be refreshed: link it again",
+        ));
+    }
     tokens.expires_at_ms = 0.0;
     l.sealed = crypto::seal(&k, &serde_json::to_vec(&tokens)?, instance.as_bytes()).await?;
     keep(env, &key(instance), &serde_json::to_string(&l)?, KEPT_MS).await
