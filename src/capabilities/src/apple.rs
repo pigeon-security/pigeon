@@ -1191,7 +1191,7 @@ pub mod release {
         st["state"].as_str().or(st.as_str()).unwrap_or_default()
     }
 
-    /// The errors and warnings of a build upload's state, at most 500 characters.
+    /// The errors and warnings of a build upload's state, at most 1500 characters.
     pub fn upload_problems(st: &Value) -> String {
         let mut out = Vec::new();
         for kind in ["errors", "warnings"] {
@@ -1204,7 +1204,7 @@ pub mod release {
                 out.push(format!("{kind}: {code} {msg}"));
             }
         }
-        out.join("; ").chars().take(500).collect()
+        out.join("; ").chars().take(1500).collect()
     }
 
     /// `ios_releases`: the latest releases, newest first, those still processing read fresh.
