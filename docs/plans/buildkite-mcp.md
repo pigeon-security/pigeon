@@ -410,6 +410,16 @@ This plan does not touch the generator.
   own in every answer, and the Lander waits (20 s, up to four minutes) until the answer is from
   its own build. Older schedulers, which name none, are waited out the same way.
 
+- **The build check compared the wrong builds** (`hyarAqBBX6VeHbsw`): its post-deploy step ran
+  in the old Lander, which expected its own (old) build and so accepted the old scheduler. The
+  Lander now expects the commit the landing deployed (`commit_sha`), whichever build it is
+  itself.
+- **The first plan on the new code** (`ci_buildkite_plan`, through `call`): no missing scopes;
+  create cluster, both queues, pipeline and portal server; and a **conflict** on the webhook: a
+  notification service to `/ci/hooks/buildkite` exists that pigeon did not make (the one made by
+  hand for the old plan). As designed, it is left alone and blocks nothing else; the person
+  deletes it in Buildkite (Organization Settings → Notification Services), and the next deploy
+  creates pigeon's.
 - **The third deploy's setup reached Buildkite** (`EObYbdM_9HTYjPeJ`) and stopped while
   observing, before planning, so nothing was created: Buildkite lists notification services as
   `{items, links}`, cursor-paginated, not as a bare array like clusters and queues

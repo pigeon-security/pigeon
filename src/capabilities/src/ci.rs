@@ -358,8 +358,11 @@ async fn scheduler(env: &Env, op: &str, args: Value) -> Result<Value> {
 /// The scheduler runs it only when it is the build this Worker is ([`BUILD`]); right after a
 /// deploy it may still be the old one for a moment. Its answer is `{build, reports}`, the
 /// reports by connector; an answer without `build` comes from a scheduler older than this check.
-pub async fn setup(env: &Env, apply: bool) -> Result<Value> {
-    scheduler(env, "setup", json!({ "apply": apply, "build": BUILD })).await
+///
+/// `build` is the commit the caller expects the scheduler to be built from: the commit a landing
+/// just deployed; empty takes any scheduler.
+pub async fn setup(env: &Env, apply: bool, build: &str) -> Result<Value> {
+    scheduler(env, "setup", json!({ "apply": apply, "build": build })).await
 }
 
 /// The commit this Worker was built from (`PIGEON_COMMIT` at build time, which the deploy job
@@ -964,7 +967,7 @@ impl Capability for Ci {
                     scheduler(cx.env, "commit", json!({ "repo": repo, "commit": commit })).await?
                 }
                 "ci_buildkite_plan" => {
-                    let report = setup(cx.env, false).await?;
+                    let report = setup(cx.env, false, "").await?;
                     report["reports"]
                         .get(buildkite::NAME)
                         .cloned()

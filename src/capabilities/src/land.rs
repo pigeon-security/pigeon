@@ -713,17 +713,18 @@ impl Lander {
     /// Runs the CI connectors' setup after landing `id` deployed, and adds what it did to the
     /// detail: `buildkite: created queue pigeon-linux-small, …`, `ok`, or why not. A setup that
     /// fails leaves the landing landed; the connector then reads as not set up.
-    async fn setup_connectors(&self, id: &str) {
+    async fn setup_connectors(&self, id: &str, deployed: &str) {
         if !self.settings.setup_connectors {
             return;
         }
-        // Right after a deploy, the CI scheduler may still be the old build for a moment: it
-        // then refuses (a build that checks), answers without its build or has no `setup` at all
-        // (older ones). Wait for this build's scheduler, up to four minutes. A scheduler that
-        // checks refuses another build's call, so it never applies stale settings; one older
-        // than the check may run its own, and is then asked again.
-        let build = crate::ci::BUILD;
-        let mut answer = crate::ci::setup(&self.env, true).await;
+        // Right after a deploy, the CI scheduler may still be the old build for a moment, and
+        // so may this Lander: the expected build is the commit just deployed, not this Lander's
+        // own. A scheduler of another build refuses, one older than the check answers without
+        // its build, an older one still has no `setup`: wait for the deployed build's
+        // scheduler, up to four minutes. A scheduler that checks never applies stale settings;
+        // one older than the check may run its own, and is then asked again.
+        let build = deployed;
+        let mut answer = crate::ci::setup(&self.env, true, build).await;
         for _ in 0..12 {
             let stale = match &answer {
                 Ok(v) => !crate::ci::same_build(v, build),
@@ -736,7 +737,7 @@ impl Lander {
                 break;
             }
             worker::Delay::from(std::time::Duration::from_secs(20)).await;
-            answer = crate::ci::setup(&self.env, true).await;
+            answer = crate::ci::setup(&self.env, true, build).await;
         }
         let said = match answer {
             Ok(v) if crate::ci::same_build(&v, build) => v["reports"]
@@ -1089,7 +1090,7 @@ impl Lander {
                         self.apply(&row, &Seen::JobEnded { passed }, Some(&detail))?;
                         if passed {
                             self.sync_portal(&row.id, &detail).await;
-                            self.setup_connectors(&row.id).await;
+                            self.setup_connectors(&row.id, &row.commit_sha).await;
                         }
                     }
                 }
