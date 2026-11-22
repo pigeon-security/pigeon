@@ -201,7 +201,7 @@ All changes go in `src/models`, which is shared until the `ModelJobs` transfer. 
 | The SSE reader keeps **content blocks**: text, `tool_use` (input JSON joined from `input_json_delta`), thinking with its signature, and compaction blocks. `models_result` answers `content` beside `text`, and `usage` with cache read and write tokens | the loop needs `tool_use` |
 | Large bodies: the request and result are stored in the job object, chunked across rows. `index` keeps only the row | a transcript is hundreds of KB |
 | `models_cancel {id}` | the kill switch, budgets |
-| `lane: "ai-agents"`, a separate running cap (6, a setting) beside today's 4, so AI agent turns neither starve nor are starved by executor jobs | concurrency |
+| `lane: "ai-agents"`, a separate running cap (16 since 2026-11-22, first 6; a constant in `src/models/src/jobs.rs`) beside today's 4, so AI agent turns neither starve nor are starved by executor jobs | concurrency |
 | Retries inside a job: on 429, 529 or 5xx **before the first byte**, retry the same model (1 s, 4 s, 10 s). A failure after bytes is `failed` with the provider's error type, and the run decides | fallback (decision 6) |
 | `models_usage {task_prefix}` and a Cost tab series for `ai-agent/` tasks | cost per run |
 
@@ -307,12 +307,24 @@ deploys as for any session. A run waits on `land_status` like a session does.
 - The price table is only for enforcement. The Cost tab and `models_usage` read the gateway's own
   cost, as today.
 
-**Concurrency** (settings):
-- live runs: 2 planners and 6 executors;
-- model turns: the `ai-agents` lane, 6;
-- sandboxes: 4.
+**Concurrency** (constants, one place each; changed 2026-11-22, see the Log):
+- live runs: **one ceiling of 32 over every role** (`MAX_LIVE` in `src/ai-agents/src/object.rs`).
+  There is no per-role cap. A planner starts only while more than `EXECUTOR_RESERVE` (8) slots are
+  free, so at most 24 planners are live and executors always have room: a planner never waits
+  forever for its own executors. Executors (either kind) may use every slot.
+- sandboxes: one per live run, so the same 32. Nothing else caps them (Cloudflare does not, under
+  `scheduling_policy = "durable_object"`); cost and the model gateway are the real limits.
+- executors: each planner's `executors` budget (12 by default, 30 at most), carved from its own
+  cost, turn and wall budgets.
+- model turns: the `ai-agents` lane, 16. A run spends most of its time in tools, CI and its
+  sandbox, so 16 turns at once serve 32 live runs; a turn beyond them waits queued in the lane
+  (the run polls, and its wall budget keeps counting). The gateway's 50 open jobs (`MAX_OPEN`)
+  still leave room beside 32 runs, one turn each.
+- queued runs: 20 at most (`MAX_QUEUED`); more starts are refused.
 
-More runs wait `queued` in the `index` object, oldest first.
+More runs wait `queued` in the `index` object, oldest first within their role (planners among
+planners, executors among executors). The kill switch (`ai_agents_pause`, `ai_agents_stop`) is
+unchanged.
 
 **Visible.**
 - `models_usage {by: task, task_prefix: "ai-agent/"}` gives cost per run.
@@ -692,4 +704,16 @@ pure and well under a second.
     executor"), and the run's id is in its model tasks (`ai-agent/{run}/…`) and its branch.
   - Revoking a run's grant when it ends is left for later. The grant lives 12 hours.
 - 2026-11-22: first live executor run through the model gateway (this commit).
-
+- 2026-11-22: **the fixed planner cap goes.** Live runs were capped per role at 2 planners and 6
+  executors (`MAX_LIVE`), and a third planner queued behind the two. Now:
+  - one ceiling of 32 live gateway runs over every role (`MAX_LIVE`), which is also the ceiling on
+    sandboxes; a planner leaves 8 of them for executors (`EXECUTOR_RESERVE`), so planners can
+    never take every slot and starve their own executors; each role still starts oldest first;
+  - a planner's executors stay bounded by its `executors` budget, and pause and stop are the kill
+    switch as before;
+  - the model gateway's `ai-agents` lane goes from 6 to 16 turns at once, or it would be the
+    next queue;
+  - both stay constants, one place each: a setting changeable without a code edit would need a
+    new tool and a policy rule for it, not worth it for a number that changes rarely.
+  - The smoke suite admits five planners at once, fills to 24 planners and the 8 reserved
+    executors, holds the ceiling and keeps each role's queue in order.

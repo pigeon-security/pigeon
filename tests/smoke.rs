@@ -2034,7 +2034,8 @@ fn models_turns_blocks_and_lanes() {
     assert_eq!(jobs::lane(&Value::Null), Ok("default"));
     assert_eq!(jobs::lane(&json!("ai-agents")), Ok("ai-agents"));
     assert!(jobs::lane(&json!("fast")).is_err());
-    assert_eq!(jobs::to_start("ai-agents", jobs::MAX_RUNNING, 10), 2);
+    assert_eq!(jobs::to_start("ai-agents", jobs::MAX_RUNNING, 10), 10);
+    assert_eq!(jobs::to_start("ai-agents", 10, 10), 6);
     assert_eq!(jobs::to_start("default", jobs::MAX_RUNNING, 10), 0);
     assert_eq!(jobs::to_start("nope", 0, 10), 0);
     // Cancel: from queued or running, never from an end.
@@ -2706,6 +2707,82 @@ fn ai_agents_loop_budgets_tools_and_turns() {
 
     // ---- the Worker side's pure parts ----
     use pigeon_ai_agents::{object, prompts, sandbox, service};
+    // Live slots (docs/plans/ai-agents.md, decision 4): one ceiling over every role, no per-role
+    // planner cap, executors always keep a reserve, and each role starts oldest first.
+    {
+        use pigeon_ai_agents::Role;
+        let planner_cap = object::MAX_LIVE - object::EXECUTOR_RESERVE;
+        assert!(planner_cap > 2 && object::MAX_LIVE >= 32);
+        // Not the oldest of its role: waits, whatever the room.
+        assert!(!object::may_start(Role::Planner, 0, false));
+        assert!(!object::may_start(Role::Executor, 0, false));
+        // The index's admission, as `slot` runs it: queued runs, in created order, each taking a
+        // slot when it is the oldest queued of its role and `may_start` lets it.
+        let admit = |queue: &mut Vec<(Role, u32)>, live: &mut Vec<(Role, u32)>| {
+            loop {
+                let next = queue.iter().position(|(role, _)| {
+                    let oldest = queue
+                        .iter()
+                        .find(|(r, _)| (*r == Role::Planner) == (*role == Role::Planner))
+                        .map(|(_, n)| *n);
+                    let me = queue.iter().find(|(r, _)| r == role).map(|(_, n)| *n);
+                    object::may_start(*role, live.len() as u32, oldest == me)
+                });
+                match next {
+                    Some(i) => live.push(queue.remove(i)),
+                    None => break,
+                }
+            }
+        };
+        // Five planners queued at once all start: no more waiting behind two.
+        let mut live = vec![];
+        let mut queue: Vec<(Role, u32)> = (0..5).map(|n| (Role::Planner, n)).collect();
+        admit(&mut queue, &mut live);
+        assert_eq!(live.len(), 5);
+        assert!(queue.is_empty());
+        // Many more planners: they fill up to the ceiling less the reserve, oldest first.
+        let mut queue: Vec<(Role, u32)> = (5..40).map(|n| (Role::Planner, n)).collect();
+        admit(&mut queue, &mut live);
+        assert_eq!(live.len() as u32, planner_cap);
+        assert_eq!(
+            live.iter().map(|(_, n)| *n).collect::<Vec<_>>(),
+            (0..planner_cap).collect::<Vec<_>>()
+        );
+        assert_eq!(queue.first(), Some(&(Role::Planner, planner_cap)));
+        // Their executors still start, in the reserve, oldest first, up to the ceiling.
+        queue.extend((100..120).map(|n| {
+            (
+                if n % 2 == 0 {
+                    Role::Executor
+                } else {
+                    Role::Mechanical
+                },
+                n,
+            )
+        }));
+        admit(&mut queue, &mut live);
+        assert_eq!(live.len() as u32, object::MAX_LIVE);
+        let started: Vec<u32> = live[planner_cap as usize..]
+            .iter()
+            .map(|(_, n)| *n)
+            .collect();
+        assert_eq!(
+            started,
+            (100..100 + object::EXECUTOR_RESERVE).collect::<Vec<_>>()
+        );
+        // At the ceiling nothing starts.
+        assert!(!object::may_start(Role::Executor, object::MAX_LIVE, true));
+        assert!(!object::may_start(Role::Planner, planner_cap, true));
+        // A run ends: the oldest queued executor takes its place, not a planner (no room for one
+        // while the reserve is in use).
+        live.retain(|(_, n)| *n != 3);
+        admit(&mut queue, &mut live);
+        assert_eq!(
+            live.last(),
+            Some(&(Role::Executor, 100 + object::EXECUTOR_RESERVE))
+        );
+        assert_eq!(queue.first(), Some(&(Role::Planner, planner_cap)));
+    }
     // A passkey wait, read from dispatch's own words.
     let refusal = "`deploy_token` needs the person's passkey for this call: approval `aP3x_9-k` waits on the console's Approvals tab until 14:32 UTC. Once approved, call `deploy_token` again with the same arguments and \"approval\": \"aP3x_9-k\"; `approvals_status` says where it stands.";
     assert_eq!(object::approval_id(refusal).as_deref(), Some("aP3x_9-k"));

@@ -31,8 +31,14 @@ pub const CALLER_KEY: &str = "CALLER_KEY";
 /// The service binding to core.
 pub const PLATFORM: &str = "PLATFORM";
 
-/// How many runs may be live at once, by role: planners, and executors of either kind.
-pub const MAX_LIVE: [(Role, u32); 2] = [(Role::Planner, 2), (Role::Executor, 6)];
+/// How many gateway runs may be live at once (preparing, running or waiting), of every role
+/// together: the one ceiling on runs and so on sandboxes, one per run. There is no per-role cap;
+/// a planner's executors are bounded by its `executors` budget, and `ai_agents_pause` and
+/// `ai_agents_stop` stay the kill switch.
+pub const MAX_LIVE: u32 = 32;
+/// How many live slots a planner may not take: planners start only while more than this many
+/// are free, so executors always have room and a planner never waits forever on its own.
+pub const EXECUTOR_RESERVE: u32 = 8;
 /// How many runs may wait, queued, beyond the live ones.
 pub const MAX_QUEUED: u32 = 20;
 
@@ -57,6 +63,18 @@ fn bad(why: impl Into<String>) -> Error {
 
 fn opt_i(v: Option<i64>) -> SqlStorageValue {
     v.map_or(SqlStorageValue::Null, Into::into)
+}
+
+/// Whether a queued run of `role` may take a live slot while `live` runs of every role are
+/// live; `oldest` is whether it is the oldest queued run of its role (planners queue among
+/// planners, executors of either kind among themselves). An executor needs a slot under
+/// [`MAX_LIVE`]; a planner also leaves [`EXECUTOR_RESERVE`] of them free.
+pub fn may_start(role: Role, live: u32, oldest: bool) -> bool {
+    let cap = match role {
+        Role::Planner => MAX_LIVE.saturating_sub(EXECUTOR_RESERVE),
+        Role::Executor | Role::Mechanical => MAX_LIVE,
+    };
+    oldest && live < cap
 }
 
 /// Calls `op` on object `name`.
@@ -586,8 +604,9 @@ impl AiAgentRuns {
         Ok(Value::Null)
     }
 
-    /// Whether run `id` may take a live slot now: it already holds one, or its role has room
-    /// and the runs are not paused.
+    /// Whether run `id` may take a live slot now: it already holds one, or it is the oldest
+    /// queued run of its role, there is room under [`MAX_LIVE`] ([`may_start`]) and the runs are
+    /// not paused.
     fn slot(&self, id: &str) -> Result<Value> {
         let Some(row) = self.row(id)? else {
             return Ok(json!({ "ok": false, "why": "no such run" }));
@@ -598,12 +617,16 @@ impl AiAgentRuns {
         if self.flag("paused")? {
             return Ok(json!({ "ok": false, "why": "every run is paused" }));
         }
-        let (roles, cap) = if row.role == "planner" {
-            ("('planner')", MAX_LIVE[0].1)
+        let planner = row.role == "planner";
+        let roles = if planner {
+            "('planner')"
         } else {
-            ("('executor', 'mechanical')", MAX_LIVE[1].1)
+            "('executor', 'mechanical')"
         };
-        let live = self.count("('preparing', 'running', 'waiting')", roles)?;
+        let live = self.count(
+            "('preparing', 'running', 'waiting')",
+            "('planner', 'executor', 'mechanical')",
+        )?;
         // The oldest queued run of the role goes first.
         #[derive(Deserialize)]
         struct First {
@@ -615,7 +638,12 @@ impl AiAgentRuns {
             ),
             vec![],
         )?;
-        let ok = live < cap && first.is_some_and(|f| f.id == id);
+        let role = if planner {
+            Role::Planner
+        } else {
+            Role::Executor
+        };
+        let ok = may_start(role, live, first.is_some_and(|f| f.id == id));
         if ok {
             self.db.exec(
                 "UPDATE runs SET state = 'preparing' WHERE id = ? AND state = 'queued'",

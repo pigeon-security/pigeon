@@ -649,7 +649,7 @@ impl Models {
                               once; follow it with models_status and fetch it with \
                               models_result. With `notify`, an https URL gets a signed POST when \
                               it ends (the key is shown once). Four run at once in the default \
-                              lane and six in the ai-agents lane; more wait. A refusal before any \
+                              lane and sixteen in the ai-agents lane; more wait. A refusal before any \
                               answer arrives (overloaded, rate-limited) is tried again, up to 3 \
                               times.",
                 input_schema: json!({

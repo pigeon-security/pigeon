@@ -80,7 +80,7 @@ pub fn allowed(from: State, to: State) -> bool {
 /// How many jobs run at once in the `default` lane; more wait, queued.
 pub const MAX_RUNNING: u32 = 4;
 /// The lanes, each with how many of its jobs run at once.
-pub const LANES: [(&str, u32); 2] = [("default", MAX_RUNNING), ("ai-agents", 6)];
+pub const LANES: [(&str, u32); 2] = [("default", MAX_RUNNING), ("ai-agents", 16)];
 
 /// The lane `asked` names (`default` when null), or why there is none.
 pub fn lane(asked: &Value) -> Result<&'static str, String> {
