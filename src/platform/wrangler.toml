@@ -150,3 +150,26 @@ image = "registry.cloudflare.com/4f94676cb2cbe46fd985b089ca97ea27/pigeon-ci-base
 [[queues.producers]]
 binding = "CI_EVENTS"
 queue = "pigeon-ci-events"
+
+# App Store Connect (src/capabilities/src/apple.rs, docs/plans/ios.md phase 1b): the team id,
+# the API key's issuer id, key id and .p8, set by the person on the secrets page; bound once all
+# four existed, since a binding to a missing secret fails the deploy.
+[[secrets_store_secrets]]
+binding = "APPLE_TEAM_ID"
+store_id = "5185c227b9f34b4291045175695b78ec"
+secret_name = "APPLE_TEAM_ID"
+
+[[secrets_store_secrets]]
+binding = "APPLE_ASC_ISSUER_ID"
+store_id = "5185c227b9f34b4291045175695b78ec"
+secret_name = "APPLE_ASC_ISSUER_ID"
+
+[[secrets_store_secrets]]
+binding = "APPLE_ASC_KEY_ID"
+store_id = "5185c227b9f34b4291045175695b78ec"
+secret_name = "APPLE_ASC_KEY_ID"
+
+[[secrets_store_secrets]]
+binding = "APPLE_ASC_KEY"
+store_id = "5185c227b9f34b4291045175695b78ec"
+secret_name = "APPLE_ASC_KEY"

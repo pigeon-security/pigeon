@@ -609,8 +609,8 @@ a passkey. Enter every key and id on the console's secrets page once the slot ex
 - The Secrets Store's per-value size limit: phase 2 settles §2's storage note. noisypigeon's
   record found a Worker secret's limit at 5.1 kB (a `.p12` with the intermediate did not fit),
   which agrees with sealing the distribution key outside the Store.
-- Buildkite hosted macOS: the plan's availability and the exact instance shape name. buildkite.com
-  could not be reached from sessions in earlier plans.
+- ~~Buildkite hosted macOS~~: settled 2026-11-22 (Log). The org's plan has it; the shapes are
+  `MACOS_ARM64_M4_6X28` and `MACOS_ARM64_M4_12X56`.
 - HTTP/2 from a Worker to APNs (§3): phase 6 proves it first.
 - Whether `ASWebAuthenticationSession`'s HTTPS callback needs `webcredentials` or `applinks` in
   the association file. Phase 5 serves both for the app if needed. Neither opens any other path.
@@ -662,3 +662,13 @@ a passkey. Enter every key and id on the console's secrets page once the slot ex
   sets the slots), because a binding to a missing secret fails the deploy. The `ios/*` lane and
   the `ios-check`/`ios-archive` jobs are prepared on branches and held for the person (gate
   changes).
+- 2026-11-22 (evening): the person chose Buildkite's hosted macOS agents (follow-up 6(a)). Read
+  through the Buildkite MCP: the organization `pigeon-security` already has hosted macOS queues
+  that Buildkite made at sign-up (in "Default cluster": `macos-medium`, `macos-large` and
+  versioned ones), so hosted macOS is on its plan. Instance shapes: `MACOS_ARM64_M4_6X28` (M4,
+  6 vCPU, 28 GB) and `MACOS_ARM64_M4_12X56` (M4, 12 vCPU, 56 GB); images by `macos_version`
+  (`TAHOE_26_6`, `GOLDEN_GATE`, `SEQUOIA`, `SONOMA`) with `base_image_xcode_version` `26.6`.
+  Phase 3 declares `pigeon-macos` and `pigeon-macos-sign` in the pigeon cluster, both
+  `MACOS_ARM64_M4_6X28` on `TAHOE_26_6` with Xcode 26.6; nothing was created by hand. The
+  person set the four Apple slots (a new Team key `pigeon-platform`, App Manager); phase 1b
+  binds them.
