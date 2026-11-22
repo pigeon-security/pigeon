@@ -219,6 +219,19 @@ the Access tab as slot `CF_LINK_NOISYPIGEON`, bound in `wrangler.toml`.
 2. Access token lifetime, refresh token lifetime and rotation, read from a real authorization.
 3. The exact scope IDs, read from `GET /oauth/scopes`.
 
+**Answered, 2026-11-22, from the real link to noisypigeon:**
+1. The private client works: the person's consent screen offered the noisypigeon account, and
+   the grant names it (account `45017763…`, "noisypigeon").
+2. The access token lives **one hour** (`expires_in` 3600). A refresh token comes only when the
+   authorization request asks for **`offline_access`**: the client's `refresh_token` grant is not
+   enough, and the first link had no refresh token. `authorize_url` now always adds it. A refresh
+   works (`linked_check {refresh: true}` at 02:05 UTC gave a new one-hour token) and the answer's
+   refresh token replaces the old one, which is kept before the access token is used. Cloudflare
+   does not report the refresh token's own lifetime; until a refusal shows it, a link that is not
+   used for weeks may need linking again, which `linked_status` shows as "refresh failed".
+3. The scope IDs: `account-settings.read`, `zone.read`, `dns.write`, `workers-scripts.write`,
+   `workers-routes.write`, `workers-r2.write`, plus `offline_access`.
+
 ### 3. Serving: from the R2 bucket in the noisypigeon account, through a Worker there
 
 The bucket `noisypigeon-site` is in the noisypigeon account, EU jurisdiction (header
@@ -325,7 +338,7 @@ content stays in the noisypigeon bucket.
 preview and the subdomain, absolute links therefore point at noisypigeon.com. That is fine for
 checking content before the cutover; a per-target `base_url` can come later.
 
-### 4. Build: a CI job with Zola, fed by the GitHub App
+### 4. Build: a CI job with Zola, fed by the GitHub App (replaced 2026-11-22: see the Log)
 
 - **Trigger.** A push to `main` on `noisypigeon/pigeon` reaches
   `https://platform.pigeon.dev/github/hook`.
@@ -677,6 +690,19 @@ checks. I'll propose them with the environment tools when phase 0 or 4 reaches t
 not by this session.
 
 ## Log
+
+- 2026-11-22: linking works end to end. `linked_setup` registered the client (`28a843c4…`) and
+  wrote its secret and `LINK_KEY` to the Secrets Store; their bindings landed after. The person
+  approved both instance records and linked noisypigeon. `linked_check` (read-only: refresh,
+  then the account and its zones) found the first grant had no refresh token; the fix asks for
+  `offline_access`, and after linking again a refresh works (phase 0, item 2, above). The
+  noisypigeon record is at version 2: repository noisypigeon/noisypigeon, build
+  `.pigeon/site.toml`, account pinned. The blog moved there (commit `2787e52`): `.pigeon/site.toml`
+  in the blog planner's `blog@1` schema, `content/`, `static/assets/`. With the blog planner:
+  rendering runs in the platform Worker at deploy time (`pigeon_core::blog::render`, pure), so
+  decision 4's CI job, Zola and `/sites/build` go; the deploy reads the repository through the
+  GitHub App (git trees, changed blobs only) and keeps the template, its version and digest on
+  each deploy record.
 
 - 2026-11-22: phase 2b part 2, the Link flow, built. Capability `linked`:
   - `linked_setup` registers the OAuth client by API (scope IDs matched by name from
