@@ -226,8 +226,18 @@ pub const MAX_NUDGES: u32 = 2;
 pub const CHECK_EVERY_MS: i64 = 15_000;
 /// How often a planner looks at its executors, in ms.
 pub const EXECUTORS_EVERY_MS: i64 = 30_000;
-/// How long a run waits for the person's answer before it goes on without one, in ms.
-pub const ANSWER_PATIENCE_MS: i64 = 24 * 3_600_000;
+/// How long a run waits for the person's answer before it goes on without one, in ms: five
+/// minutes, the person's choice. What it then assumes goes in its report and the inbox.
+pub const ANSWER_PATIENCE_MS: i64 = 5 * 60_000;
+
+/// What the model reads when its question went unanswered for [`ANSWER_PATIENCE_MS`].
+pub fn unanswered(question: &str) -> String {
+    format!(
+        "No answer came within 5 minutes to: {question}\nChoose the conventional option and go \
+         on. Say in one line what you chose, and list it in your report under \"Assumed:\", so \
+         the person can see it and correct it."
+    )
+}
 /// How long a run waits on a failing provider before it fails, in ms.
 pub const PROVIDER_PATIENCE_MS: i64 = 60 * 60_000;
 /// How often a run tries a failing provider again, in ms.

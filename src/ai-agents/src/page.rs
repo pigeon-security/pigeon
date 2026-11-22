@@ -80,6 +80,24 @@ pub fn section(data: &Value) -> String {
         }
         out.push_str("</ul></div>");
     }
+    let assumed: Vec<String> = runs
+        .iter()
+        .flat_map(|r| {
+            r["assumed"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|q| format!("<li><code>{}</code> assumed an answer to <q>{}</q>; its report says what it chose.</li>", text(&r["run"]), text(&q["question"])))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    if !assumed.is_empty() {
+        out.push_str("<div class=\"card\"><h3>Went on without your answer</h3><p class=\"muted\">No answer came within 5 minutes, so each run made the conventional choice.</p><ul>");
+        for line in assumed {
+            out.push_str(&line);
+        }
+        out.push_str("</ul></div>");
+    }
     if runs.is_empty() {
         out.push_str(
             "<p class=\"muted\">No runs yet. Your Claude chat starts them with \

@@ -2510,6 +2510,16 @@ fn ai_agents_loop_budgets_tools_and_turns() {
     assert!(!html.contains("<script>") && html.contains("&lt;script&gt;"));
     assert!(html.contains("Claude chat") && html.contains("$0.42 · 7 turns"));
     assert!(page::section(&json!({ "paused": true, "runs": [] })).contains("paused"));
+    // An unanswered question: after 5 minutes the run goes on, and says what it assumed.
+    assert_eq!(run::ANSWER_PATIENCE_MS, 5 * 60_000);
+    let told = run::unanswered("Use A or B?");
+    assert!(told.contains("Use A or B?") && told.contains("Assumed:"));
+    let html = page::section(
+        &json!({ "runs": [{ "run": "r3", "state": "running", "assumed": [{ "question": "<i>A</i> or B?", "at": 1 }], "spent": {} }] }),
+    );
+    assert!(
+        html.contains("Went on without your answer") && html.contains("&lt;i&gt;A&lt;/i&gt; or B?")
+    );
     // A run waiting for an answer keeps its question, as the inbox and the section show it.
     let w: Wait =
         serde_json::from_value(json!({ "for": "answer", "call": "t1", "question": "q" })).unwrap();

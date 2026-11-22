@@ -38,12 +38,13 @@ pub const MAX_QUEUED: u32 = 20;
 
 /// Each object's schema, one statement per migration, applied in order and never edited. The
 /// index uses `runs` and `flags`; a run object uses `run`, `messages` and `calls`.
-const MIGRATIONS: [&str; 5] = [
+const MIGRATIONS: [&str; 6] = [
     "CREATE TABLE runs (id TEXT PRIMARY KEY, role TEXT NOT NULL, runtime TEXT NOT NULL, state TEXT NOT NULL, parent_run TEXT, session_id TEXT, caller TEXT NOT NULL, by_id TEXT, for_id TEXT, brief TEXT NOT NULL, base TEXT, branch TEXT, budget TEXT NOT NULL, spent TEXT NOT NULL, step TEXT, waiting TEXT, report TEXT, created_at INTEGER NOT NULL, started_at INTEGER, ended_at INTEGER, stop_asked INTEGER NOT NULL DEFAULT 0)",
     "CREATE TABLE flags (k TEXT PRIMARY KEY, v TEXT NOT NULL)",
     "CREATE TABLE run (id TEXT PRIMARY KEY, role TEXT NOT NULL, caller TEXT NOT NULL, brief TEXT NOT NULL, base TEXT NOT NULL, branch TEXT NOT NULL, budget TEXT NOT NULL, spent TEXT NOT NULL, state TEXT NOT NULL, started_at INTEGER NOT NULL, model_index INTEGER NOT NULL DEFAULT 0, fallback_left INTEGER NOT NULL DEFAULT 0, failures INTEGER NOT NULL DEFAULT 0, job_id TEXT, job_kind TEXT, job_state TEXT, job_at INTEGER, job_error TEXT, last_usage TEXT, stop_reason TEXT, reported TEXT, report TEXT, nudges INTEGER NOT NULL DEFAULT 0, waiting TEXT, prepare_tries INTEGER NOT NULL DEFAULT 0)",
     "CREATE TABLE messages (n INTEGER PRIMARY KEY, body TEXT NOT NULL)",
     "CREATE TABLE calls (n INTEGER PRIMARY KEY, id TEXT NOT NULL, name TEXT NOT NULL, input TEXT NOT NULL, started INTEGER NOT NULL DEFAULT 0, done INTEGER NOT NULL DEFAULT 0, result TEXT, is_error INTEGER NOT NULL DEFAULT 0)",
+    "ALTER TABLE runs ADD COLUMN assumed TEXT",
 ];
 
 fn now() -> i64 {
@@ -117,6 +118,7 @@ struct Row {
     started_at: Option<i64>,
     ended_at: Option<i64>,
     stop_asked: i64,
+    assumed: Option<String>,
 }
 
 impl Row {
@@ -160,8 +162,26 @@ impl Row {
             "started_at": self.started_at,
             "ended_at": self.ended_at,
             "stop_asked": self.stop_asked != 0,
+            "assumed": parsed(&self.assumed),
         })
     }
+}
+
+/// The questions in `rows` that went unanswered after `since` (ms), each with its run.
+fn assumed_since(rows: &[Row], since: i64) -> Vec<Value> {
+    rows.iter()
+        .flat_map(|r| {
+            let list: Vec<Value> = r
+                .assumed
+                .as_deref()
+                .and_then(|v| serde_json::from_str(v).ok())
+                .unwrap_or_default();
+            list.into_iter()
+                .filter(|q| q["at"].as_i64().is_some_and(|t| t > since))
+                .map(|q| json!({ "run": r.id, "question": q["question"], "at": q["at"] }))
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 /// A run object's one row.
@@ -268,6 +288,21 @@ impl AiAgentRuns {
                 .await
             }
             "report" => self.report(a),
+            "assume" => {
+                let id = s("run");
+                let row = self.row(&id)?.ok_or_else(|| bad("no such run"))?;
+                let mut list: Vec<Value> = row
+                    .assumed
+                    .as_deref()
+                    .and_then(|v| serde_json::from_str(v).ok())
+                    .unwrap_or_default();
+                list.push(json!({ "question": a["question"], "at": now() }));
+                self.db.exec(
+                    "UPDATE runs SET assumed = ? WHERE id = ?",
+                    vec![Value::Array(list).to_string().into(), id.as_str().into()],
+                )?;
+                Ok(Value::Null)
+            }
             "stop" => self.stop(a).await,
             "pause" => self.set_flag("paused", a["paused"].as_bool().unwrap_or(true)),
             "paused" => Ok(json!(self.flag("paused")?)),
@@ -280,7 +315,11 @@ impl AiAgentRuns {
                     .as_deref()
                     .and_then(|w| serde_json::from_str(w).ok());
                 let Some(Wait::Answer { call: call_id, .. }) = waiting else {
-                    return Err(bad("the run is not waiting for an answer"));
+                    return Err(bad(
+                        "the run is not waiting for an answer: after 5 minutes it went on with \
+                         the conventional choice (listed under `assumed` in ai_agents_inbox and \
+                         in its report); stop it or start a new run if that choice is wrong",
+                    ));
                 };
                 let text = s("answer");
                 if text.trim().is_empty() {
@@ -392,7 +431,18 @@ impl AiAgentRuns {
             .filter_map(|r| r.ended_at)
             .max()
             .unwrap_or(since);
+        // Questions that went unanswered since the cursor: what each run assumed instead.
+        let with_assumed: Vec<Row> = self.db.rows(
+            "SELECT * FROM runs WHERE assumed IS NOT NULL AND (by_id = ? OR for_id = ?) ORDER BY created_at DESC LIMIT 50",
+            vec![reader.into(), reader.into()],
+        )?;
+        let assumed = assumed_since(&with_assumed, since);
+        let cursor = assumed
+            .iter()
+            .filter_map(|q| q["at"].as_i64())
+            .fold(cursor, i64::max);
         Ok(json!({
+            "assumed": assumed,
             "waiting": waiting.iter().map(Row::public).collect::<Vec<_>>(),
             "ended": ended.iter().map(Row::public).collect::<Vec<_>>(),
             "next_since": cursor,
@@ -753,16 +803,21 @@ impl AiAgentRuns {
                 }
                 Some(Wait::Answer {
                     call: call_id,
+                    question,
                     since,
                     ..
                 }) if now() - since >= run::ANSWER_PATIENCE_MS => {
-                    self.answered(
-                        &row,
-                        call_id,
-                        "no answer came in 24 hours: choose the conventional option, say so in \
-                         your report, and go on",
+                    // The question goes in the inbox as assumed, so the person sees what the
+                    // run went on without.
+                    call(
+                        &self.env,
+                        INDEX,
+                        "assume",
+                        &json!({ "run": row.id, "question": question }),
                     )
-                    .await
+                    .await?;
+                    self.answered(&row, call_id, &run::unanswered(question))
+                        .await
                 }
                 // The provider's wait is over: back to work, and the next turn tries again.
                 Some(Wait::Provider { since }) if now() - since < run::PROVIDER_PATIENCE_MS => {
