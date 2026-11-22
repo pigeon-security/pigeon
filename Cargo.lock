@@ -586,6 +586,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
+name = "pigeon-ai-agents"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "pigeon-blog"
 version = "0.1.0"
 dependencies = [
@@ -604,6 +612,7 @@ dependencies = [
  "futures-channel",
  "futures-util",
  "p256",
+ "pigeon-ai-agents",
  "pigeon-blog",
  "pigeon-ci",
  "pigeon-contract",

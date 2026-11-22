@@ -15,6 +15,7 @@ members = [
     "src/proxy",
     "src/dotest-a",
     "src/dotest-b",
+    "src/ai-agents",
 ]
 
 [workspace.package]

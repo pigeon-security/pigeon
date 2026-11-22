@@ -1,0 +1,561 @@
+//! Which tools an AI agent run is offered, where each call goes, and whether a call's input is
+//! acceptable before it runs.
+//!
+//! This module is pure. It does no I/O and holds no state.
+
+use crate::Role;
+use serde_json::{Map, Value, json};
+
+/// Where a tool call is handled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    /// Runs in the run's container.
+    Sandbox,
+    /// Runs through pigeon's dispatch, as the run's caller.
+    Pigeon,
+    /// Handled by the run itself.
+    Agent,
+}
+
+/// Pigeon tools an executor (or mechanical run) may call.
+pub const EXECUTOR_PIGEON: [&str; 5] = [
+    "policy_check",
+    "ci_submit",
+    "ci_status",
+    "ci_commit",
+    "land_status",
+];
+
+/// Pigeon tools a planner may call. Executors never land: the person's rule.
+pub const PLANNER_PIGEON: [&str; 9] = [
+    "policy_check",
+    "ci_submit",
+    "ci_status",
+    "ci_commit",
+    "land_status",
+    "land",
+    "land_cancel",
+    "models_usage",
+    "architecture_describe",
+];
+
+/// Files that only the person may change.
+pub const GUARDED: [&str; 2] = [".pigeon/policy.toml", ".claude/settings.json"];
+
+/// Tools that run in the container, in the order they are offered.
+const SANDBOX: [&str; 7] = [
+    "read_file",
+    "write_file",
+    "edit_file",
+    "list",
+    "grep",
+    "run",
+    "commit_push",
+];
+
+/// Agent tools every role is offered.
+const AGENT_COMMON: [&str; 2] = ["ask_person", "report"];
+
+/// Agent tools only a planner is offered.
+const AGENT_PLANNER: [&str; 4] = [
+    "spawn_executor",
+    "executor_status",
+    "executor_result",
+    "executor_stop",
+];
+
+/// Largest `write_file` content, in bytes (1 MiB).
+const MAX_CONTENT_BYTES: usize = 1024 * 1024;
+
+/// Largest `run` command, in bytes (8 KiB).
+const MAX_CMD_BYTES: usize = 8 * 1024;
+
+/// Largest `grep` pattern, in bytes.
+const MAX_PATTERN_BYTES: usize = 500;
+
+/// Largest `commit_push` message, in bytes.
+const MAX_MESSAGE_BYTES: usize = 2000;
+
+/// Says where a tool call goes, or `None` if the role is not offered the tool.
+///
+/// Executor and Mechanical runs share one list. Planner agent tools are offered to planners
+/// only.
+pub fn kind(role: Role, name: &str) -> Option<Kind> {
+    if SANDBOX.contains(&name) {
+        return Some(Kind::Sandbox);
+    }
+    if AGENT_COMMON.contains(&name) {
+        return Some(Kind::Agent);
+    }
+    if role == Role::Planner && AGENT_PLANNER.contains(&name) {
+        return Some(Kind::Agent);
+    }
+    let pigeon: &[&str] = match role {
+        Role::Planner => &PLANNER_PIGEON,
+        Role::Executor | Role::Mechanical => &EXECUTOR_PIGEON,
+    };
+    if pigeon.contains(&name) {
+        return Some(Kind::Pigeon);
+    }
+    None
+}
+
+/// Says whether a call is safe to repeat after an interruption.
+pub fn idempotent(name: &str) -> bool {
+    matches!(
+        name,
+        "read_file"
+            | "list"
+            | "grep"
+            | "policy_check"
+            | "ci_status"
+            | "ci_commit"
+            | "land_status"
+            | "models_usage"
+            | "architecture_describe"
+            | "executor_status"
+            | "executor_result"
+    )
+}
+
+/// Builds one Anthropic tool definition.
+fn tool(name: &str, description: &str, input_schema: Value) -> Value {
+    json!({
+        "name": name,
+        "description": description,
+        "input_schema": input_schema,
+    })
+}
+
+/// Definitions for the sandbox tools, in offer order.
+fn sandbox_definitions() -> Vec<Value> {
+    vec![
+        tool(
+            "read_file",
+            "Reads lines of a file in the checkout and numbers them. Returns at most 2000 lines per call; use from_line and to_line to page.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path, relative to the checkout's root."},
+                    "from_line": {"type": "integer", "minimum": 1, "description": "First line to read (1-based)."},
+                    "to_line": {"type": "integer", "minimum": 1, "description": "Last line to read, not before from_line."}
+                },
+                "required": ["path"]
+            }),
+        ),
+        tool(
+            "write_file",
+            "Creates a file or replaces a whole file with the given content. For small changes to an existing file, prefer edit_file.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path, relative to the checkout's root."},
+                    "content": {"type": "string", "description": "The complete new content (at most 1 MiB)."}
+                },
+                "required": ["path", "content"]
+            }),
+        ),
+        tool(
+            "edit_file",
+            "Replaces the one exact occurrence of `old` with `new` in a file. Fails unless `old` occurs exactly once, so include enough context to make it unique.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path, relative to the checkout's root."},
+                    "old": {"type": "string", "description": "The exact text to replace. Must be non-empty and occur once."},
+                    "new": {"type": "string", "description": "The text to put in its place. Must differ from `old`."}
+                },
+                "required": ["path", "old", "new"]
+            }),
+        ),
+        tool(
+            "list",
+            "Lists files and directories under a path. Defaults to the checkout's root and a depth of 2.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Directory path, relative to the checkout's root."},
+                    "depth": {"type": "integer", "minimum": 1, "maximum": 4, "default": 2, "description": "How many levels to show."}
+                }
+            }),
+        ),
+        tool(
+            "grep",
+            "Finds lines matching a regular expression. Each match shows its file and line number. Returns at most 200 matches.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "Regular expression to look for (at most 500 bytes)."},
+                    "path": {"type": "string", "description": "File or directory to search, relative to the checkout's root."},
+                    "glob": {"type": "string", "description": "Only search files whose names match this glob, such as `*.rs`."}
+                },
+                "required": ["pattern"]
+            }),
+        ),
+        tool(
+            "run",
+            "Runs a shell command in the checkout's root. Answers its exit code and the end of its output. Builds and tests go here.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "cmd": {"type": "string", "description": "The shell command (at most 8 KiB)."},
+                    "timeout_s": {"type": "integer", "minimum": 1, "maximum": 1800, "default": 600, "description": "Seconds before the command is stopped."}
+                },
+                "required": ["cmd"]
+            }),
+        ),
+        tool(
+            "commit_push",
+            "Commits every change in the checkout and pushes the run's branch. Answers the new commit id.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "message": {"type": "string", "description": "The commit message (at most 2000 bytes)."}
+                },
+                "required": ["message"]
+            }),
+        ),
+    ]
+}
+
+/// Definitions for the AI agent tools the role is offered, in offer order.
+fn agent_definitions(role: Role) -> Vec<Value> {
+    let mut out = vec![
+        tool(
+            "ask_person",
+            "Asks the person a question and waits for the answer. Use it for choices that change what is built, not for things you can look up.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string", "description": "The question to ask."},
+                    "options": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 2,
+                        "maxItems": 6,
+                        "description": "Answers to offer, if the choice is a short list."
+                    }
+                },
+                "required": ["question"]
+            }),
+        ),
+        tool(
+            "report",
+            "Ends the run. Say what changed, the branch and its tip, the CI result, and what is left.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "state": {"type": "string", "enum": ["done", "failed"], "description": "`done` if the work is finished, `failed` if it is not."},
+                    "summary": {"type": "string", "description": "What changed, the branch and its tip, CI, and what is left."}
+                },
+                "required": ["state", "summary"]
+            }),
+        ),
+    ];
+    if role == Role::Planner {
+        out.push(tool(
+            "spawn_executor",
+            "Starts an executor run on a brief and answers its run id. The brief must stand alone, because the executor sees nothing else.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "brief": {"type": "string", "description": "A complete task description for the executor."},
+                    "kind": {"type": "string", "enum": ["code", "mechanical"], "default": "code", "description": "`code` for ordinary work, `mechanical` for simple repetitive edits."},
+                    "budget": {
+                        "type": "object",
+                        "description": "Limits for the executor. Leave out a field to use its default.",
+                        "properties": {
+                            "turns": {"type": "integer"},
+                            "cost_usd": {"type": "number"},
+                            "wall_min": {"type": "integer"},
+                            "sandbox_min": {"type": "integer"}
+                        }
+                    }
+                },
+                "required": ["brief"]
+            }),
+        ));
+        let run_schema = json!({
+            "type": "object",
+            "properties": {
+                "run": {"type": "string", "description": "The run id that spawn_executor gave."}
+            },
+            "required": ["run"]
+        });
+        out.push(tool(
+            "executor_status",
+            "Answers how an executor run is going: its state and what it has used so far.",
+            run_schema.clone(),
+        ));
+        out.push(tool(
+            "executor_result",
+            "Answers the final report of an executor run that has ended.",
+            run_schema.clone(),
+        ));
+        out.push(tool(
+            "executor_stop",
+            "Stops an executor run that is still going.",
+            run_schema,
+        ));
+    }
+    out
+}
+
+/// Builds the tool definitions offered to a role.
+///
+/// The order is sandbox tools, agent tools, then the pigeon tools. Pigeon tools come from
+/// `pigeon` as (name, description, input schema), in that order. Those the role is not offered
+/// are left out.
+pub fn definitions(role: Role, pigeon: &[(String, String, Value)]) -> Vec<Value> {
+    let mut out = sandbox_definitions();
+    out.extend(agent_definitions(role));
+    for (name, description, schema) in pigeon {
+        if kind(role, name) == Some(Kind::Pigeon) {
+            out.push(tool(name, description, schema.clone()));
+        }
+    }
+    out
+}
+
+/// Reads an optional string field. A field of another type is refused.
+fn get_str<'a>(obj: &'a Map<String, Value>, key: &str) -> Result<Option<&'a str>, String> {
+    match obj.get(key) {
+        None => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s.as_str())),
+        Some(_) => Err(format!("`{key}` must be a string; send it as text")),
+    }
+}
+
+/// Reads a required string field, which may be empty.
+fn need_str<'a>(obj: &'a Map<String, Value>, key: &str) -> Result<&'a str, String> {
+    get_str(obj, key)?.ok_or_else(|| format!("`{key}` is required; add it to the input"))
+}
+
+/// Reads a required, non-empty string field of at most `max` bytes.
+fn need_text<'a>(obj: &'a Map<String, Value>, key: &str, max: usize) -> Result<&'a str, String> {
+    let s = need_str(obj, key)?;
+    if s.is_empty() {
+        return Err(format!("`{key}` must not be empty; give it some text"));
+    }
+    if s.len() > max {
+        return Err(format!(
+            "`{key}` is {} bytes long and the limit is {max}; shorten it",
+            s.len()
+        ));
+    }
+    Ok(s)
+}
+
+/// Reads an optional whole number in `min..=max`.
+fn get_int(obj: &Map<String, Value>, key: &str, min: u64, max: u64) -> Result<Option<u64>, String> {
+    match obj.get(key) {
+        None => Ok(None),
+        Some(v) => match v.as_u64() {
+            Some(n) if n >= min && n <= max => Ok(Some(n)),
+            Some(n) => Err(format!(
+                "`{key}` is {n} but must be between {min} and {max}; pick a value in that range"
+            )),
+            None => Err(format!(
+                "`{key}` must be a whole number from {min} to {max}"
+            )),
+        },
+    }
+}
+
+/// Splits a path into its meaningful segments, dropping empty and `.` ones.
+fn segments(path: &str) -> Vec<&str> {
+    path.split(['/', '\\'])
+        .filter(|s| !s.is_empty() && *s != ".")
+        .collect()
+}
+
+/// Checks a path is relative, safe, and not inside `.git`.
+fn check_path(path: &str) -> Result<(), String> {
+    if path.is_empty() {
+        return Err("`path` must not be empty; give a path like `src/main.rs`".to_string());
+    }
+    if path.contains('\0') {
+        return Err("`path` must not contain a NUL character; remove it".to_string());
+    }
+    if path.starts_with('/') || path.starts_with('\\') {
+        return Err(format!(
+            "`path` must be relative to the checkout's root, so `{path}` is refused; drop the leading slash"
+        ));
+    }
+    let parts = segments(path);
+    if parts.contains(&"..") {
+        return Err(format!(
+            "`path` must stay inside the checkout, so `{path}` is refused; remove the `..` segments"
+        ));
+    }
+    if parts
+        .first()
+        .is_some_and(|p| p.eq_ignore_ascii_case(".git"))
+    {
+        return Err(format!(
+            "`path` must not point into `.git`, so `{path}` is refused; use commit_push for git work"
+        ));
+    }
+    Ok(())
+}
+
+/// Says whether a path names one of the GUARDED files.
+fn is_guarded(path: &str) -> bool {
+    let norm = segments(path).join("/");
+    GUARDED.iter().any(|g| g.eq_ignore_ascii_case(&norm))
+}
+
+/// Checks the `path` field, if present, and returns it.
+///
+/// When `required` is true, a missing path is refused.
+fn path_field(obj: &Map<String, Value>, required: bool) -> Result<Option<&str>, String> {
+    let path = get_str(obj, "path")?;
+    match path {
+        Some(p) => {
+            check_path(p)?;
+            Ok(Some(p))
+        }
+        None if required => Err("`path` is required; add it to the input".to_string()),
+        None => Ok(None),
+    }
+}
+
+/// Refuses a write to a guarded file.
+fn refuse_guarded(path: &str) -> Result<(), String> {
+    if is_guarded(path) {
+        return Err(format!("only the person changes `{path}`; ask them"));
+    }
+    Ok(())
+}
+
+/// Checks one call's input before it runs.
+///
+/// The role must be offered the tool, and the input must be an object. Each built-in tool then
+/// has its own rules. Pigeon tools get no further check here, because pigeon checks its own.
+pub fn check(role: Role, name: &str, input: &Value) -> Result<(), String> {
+    if kind(role, name).is_none() {
+        return Err(format!(
+            "`{name}` is not one of this run's tools; use only the tools you were offered"
+        ));
+    }
+    let obj = input
+        .as_object()
+        .ok_or_else(|| format!("the input to `{name}` must be a JSON object; send named fields"))?;
+    match name {
+        "read_file" => {
+            path_field(obj, true)?;
+            let from = get_int(obj, "from_line", 1, u64::MAX)?;
+            let to = get_int(obj, "to_line", 1, u64::MAX)?;
+            if let (Some(f), Some(t)) = (from, to)
+                && t < f
+            {
+                return Err(format!(
+                    "`to_line` ({t}) comes before `from_line` ({f}); swap them or raise `to_line`"
+                ));
+            }
+            Ok(())
+        }
+        "write_file" => {
+            if let Some(p) = path_field(obj, true)? {
+                refuse_guarded(p)?;
+            }
+            let content = need_str(obj, "content")?;
+            if content.len() > MAX_CONTENT_BYTES {
+                return Err(format!(
+                    "`content` is {} bytes long and the limit is {MAX_CONTENT_BYTES}; split it across several files",
+                    content.len()
+                ));
+            }
+            Ok(())
+        }
+        "edit_file" => {
+            if let Some(p) = path_field(obj, true)? {
+                refuse_guarded(p)?;
+            }
+            let old = need_str(obj, "old")?;
+            if old.is_empty() {
+                return Err("`old` must not be empty; give the exact text to replace".to_string());
+            }
+            let new = need_str(obj, "new")?;
+            if old == new {
+                return Err(
+                    "`old` and `new` are the same, so nothing would change; give a different `new`"
+                        .to_string(),
+                );
+            }
+            Ok(())
+        }
+        "list" => {
+            path_field(obj, false)?;
+            get_int(obj, "depth", 1, 4)?;
+            Ok(())
+        }
+        "grep" => {
+            path_field(obj, false)?;
+            need_text(obj, "pattern", MAX_PATTERN_BYTES)?;
+            get_str(obj, "glob")?;
+            Ok(())
+        }
+        "run" => {
+            need_text(obj, "cmd", MAX_CMD_BYTES)?;
+            get_int(obj, "timeout_s", 1, 1800)?;
+            Ok(())
+        }
+        "commit_push" => {
+            need_text(obj, "message", MAX_MESSAGE_BYTES)?;
+            Ok(())
+        }
+        "ask_person" => {
+            need_text(obj, "question", usize::MAX)?;
+            match obj.get("options") {
+                None => Ok(()),
+                Some(Value::Array(items)) => {
+                    if items.len() < 2 || items.len() > 6 {
+                        return Err(format!(
+                            "`options` has {} items but must have 2 to 6; adjust the list or leave it out",
+                            items.len()
+                        ));
+                    }
+                    if items.iter().any(|v| !v.is_string()) {
+                        return Err("every item in `options` must be a string".to_string());
+                    }
+                    Ok(())
+                }
+                Some(_) => Err("`options` must be an array of 2 to 6 strings".to_string()),
+            }
+        }
+        "report" => {
+            let state = need_str(obj, "state")?;
+            if state != "done" && state != "failed" {
+                return Err(format!(
+                    "`state` is `{state}` but must be `done` or `failed`; pick one"
+                ));
+            }
+            need_text(obj, "summary", usize::MAX)?;
+            Ok(())
+        }
+        "spawn_executor" => {
+            need_text(obj, "brief", usize::MAX)?;
+            if let Some(k) = get_str(obj, "kind")?
+                && k != "code"
+                && k != "mechanical"
+            {
+                return Err(format!(
+                    "`kind` is `{k}` but must be `code` or `mechanical`; pick one"
+                ));
+            }
+            match obj.get("budget") {
+                None | Some(Value::Object(_)) => Ok(()),
+                Some(_) => Err(
+                    "`budget` must be an object with fields like `turns` and `cost_usd`"
+                        .to_string(),
+                ),
+            }
+        }
+        "executor_status" | "executor_result" | "executor_stop" => {
+            need_text(obj, "run", usize::MAX)?;
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}

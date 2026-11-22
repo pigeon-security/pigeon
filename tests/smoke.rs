@@ -1814,6 +1814,593 @@ fn models_turns_blocks_and_lanes() {
     );
 }
 
+/// An AI agent run's logic (docs/plans/ai-agents.md, phase 2): its next action from what it knows,
+/// recovery from a failed turn, budgets and prices, the tools each role is offered and their
+/// checks, and the turn it sends.
+#[test]
+fn ai_agents_loop_budgets_tools_and_turns() {
+    use pigeon_ai_agents::budget::{self, Budget, Next, Over, Spent};
+    use pigeon_ai_agents::run::{self, Action, Call, Job, Recovery, State, View, Wait};
+    use pigeon_ai_agents::tools::{self, Kind};
+    use pigeon_ai_agents::transcript::{self, Spec};
+    use pigeon_ai_agents::{Role, task};
+
+    // ---- the loop ----
+    let view = |state: State| View {
+        state,
+        stop_asked: false,
+        paused: false,
+        job: None,
+        calls: &[],
+        turns: 0,
+        stop_reason: None,
+        reported: None,
+        nudges: 0,
+        waiting: None,
+    };
+    assert_eq!(run::next(&view(State::Queued)), Action::Prepare);
+    assert_eq!(
+        run::next(&view(State::Running)),
+        Action::Turn,
+        "the first turn"
+    );
+    assert_eq!(
+        run::next(&View {
+            stop_asked: true,
+            ..view(State::Waiting)
+        }),
+        Action::End(State::Stopped)
+    );
+    assert_eq!(
+        run::next(&View {
+            paused: true,
+            ..view(State::Running)
+        }),
+        Action::Check {
+            after_ms: run::CHECK_EVERY_MS
+        }
+    );
+    assert_eq!(run::next(&view(State::Done)), Action::Idle);
+    // A turn in flight is polled, often at first; read once it succeeds; retried once it ends.
+    assert_eq!(
+        run::next(&View {
+            job: Some((Job::Pending, 0)),
+            ..view(State::Running)
+        }),
+        Action::Poll { after_ms: 1_000 }
+    );
+    assert_eq!(
+        run::next(&View {
+            job: Some((Job::Pending, 60_000)),
+            ..view(State::Running)
+        }),
+        Action::Poll { after_ms: 5_000 }
+    );
+    assert_eq!(
+        run::next(&View {
+            job: Some((Job::Succeeded, 9)),
+            ..view(State::Running)
+        }),
+        Action::Read
+    );
+    assert_eq!(
+        run::next(&View {
+            job: Some((Job::Ended, 9)),
+            ..view(State::Running)
+        }),
+        Action::Retry
+    );
+    // Tool calls run in order; one interrupted is repeated only when that is safe.
+    let call = |name: &str, started: bool, done: bool| Call {
+        id: format!("t-{name}"),
+        name: name.into(),
+        started,
+        done,
+    };
+    let calls = [call("read_file", true, true), call("run", false, false)];
+    assert_eq!(
+        run::next(&View {
+            calls: &calls,
+            turns: 1,
+            ..view(State::Running)
+        }),
+        Action::Call { index: 1 }
+    );
+    let calls = [call("grep", true, false)];
+    assert_eq!(
+        run::next(&View {
+            calls: &calls,
+            turns: 1,
+            ..view(State::Running)
+        }),
+        Action::Call { index: 0 }
+    );
+    let calls = [call("commit_push", true, false)];
+    assert_eq!(
+        run::next(&View {
+            calls: &calls,
+            turns: 1,
+            ..view(State::Running)
+        }),
+        Action::Interrupted { index: 0 }
+    );
+    // Results in: the next turn. A report ends the run, once its calls are answered.
+    let calls = [call("run", true, true)];
+    assert_eq!(
+        run::next(&View {
+            calls: &calls,
+            turns: 1,
+            ..view(State::Running)
+        }),
+        Action::Turn
+    );
+    let calls = [call("report", true, true)];
+    assert_eq!(
+        run::next(&View {
+            calls: &calls,
+            turns: 3,
+            reported: Some(State::Done),
+            ..view(State::Running)
+        }),
+        Action::End(State::Done)
+    );
+    // Stopping without a tool or a report: nudged twice, then failed; cut off by max_tokens: go on.
+    let quiet = View {
+        turns: 2,
+        stop_reason: Some("end_turn"),
+        ..view(State::Running)
+    };
+    assert_eq!(run::next(&quiet), Action::Nudge);
+    assert_eq!(
+        run::next(&View {
+            nudges: run::MAX_NUDGES,
+            ..quiet.clone()
+        }),
+        Action::End(State::Failed)
+    );
+    assert_eq!(
+        run::next(&View {
+            stop_reason: Some("max_tokens"),
+            ..quiet
+        }),
+        Action::Turn
+    );
+    // Waiting: approvals and answers are looked at often, executors less, the provider rarely.
+    let approval = Wait::Approval {
+        id: "a1".into(),
+        call: "t1".into(),
+    };
+    assert_eq!(
+        run::next(&View {
+            waiting: Some(&approval),
+            ..view(State::Waiting)
+        }),
+        Action::Check {
+            after_ms: run::CHECK_EVERY_MS
+        }
+    );
+    assert_eq!(
+        run::next(&View {
+            waiting: Some(&Wait::Executors),
+            ..view(State::Waiting)
+        }),
+        Action::Check {
+            after_ms: run::EXECUTORS_EVERY_MS
+        }
+    );
+    assert_eq!(
+        run::next(&View {
+            waiting: Some(&Wait::Provider { since: 0 }),
+            ..view(State::Waiting)
+        }),
+        Action::Check {
+            after_ms: run::PROVIDER_EVERY_MS
+        }
+    );
+    // States move forward, and never out of an end.
+    assert!(
+        run::allowed(State::Running, State::Waiting)
+            && run::allowed(State::Waiting, State::Running)
+    );
+    assert!(
+        run::allowed(State::Queued, State::Stopped) && !run::allowed(State::Done, State::Running)
+    );
+    assert!(!run::allowed(State::Running, State::Queued));
+    assert_eq!(State::named("over_budget"), Some(State::OverBudget));
+
+    // ---- a failed turn ----
+    let models = Role::Executor.models();
+    assert_eq!(
+        run::on_failure("failed", "anthropic answered 529: overloaded", 1, 0, models),
+        Recovery::Again
+    );
+    assert_eq!(
+        run::on_failure("failed", "overloaded_error: Overloaded", 2, 0, models),
+        Recovery::Fallback { index: 1 }
+    );
+    assert_eq!(
+        run::on_failure("lost", "", 2, 1, models),
+        Recovery::WaitProvider
+    );
+    assert_eq!(
+        run::on_failure(
+            "failed",
+            "anthropic answered 400: prompt is too long",
+            1,
+            0,
+            models
+        ),
+        Recovery::Fail
+    );
+    assert_eq!(
+        run::on_failure("cancelled", "cancelled by its sender", 1, 0, models),
+        Recovery::Fail
+    );
+    assert_eq!(task("r1", Role::Planner, 7), "ai-agent/r1/planner/7");
+
+    // ---- budgets ----
+    let b = Budget::asked(Role::Executor, &Value::Null).unwrap();
+    assert_eq!((b.turns, b.cost_micros), (60, 5_000_000));
+    assert_eq!(
+        Budget::asked(Role::Planner, &Value::Null)
+            .unwrap()
+            .executors,
+        12
+    );
+    let b = Budget::asked(Role::Executor, &json!({ "cost_usd": 2.5, "wall_min": 30 })).unwrap();
+    assert_eq!((b.cost_micros, b.wall_ms), (2_500_000, 30 * 60_000));
+    assert!(
+        Budget::asked(Role::Executor, &json!({ "cost_usd": 101 }))
+            .unwrap_err()
+            .contains("cap")
+    );
+    assert!(
+        Budget::asked(Role::Executor, &json!({ "executors": 1 }))
+            .unwrap_err()
+            .contains("planner")
+    );
+    assert!(
+        Budget::asked(Role::Executor, &json!({ "tokens": 1 }))
+            .unwrap_err()
+            .contains("tokens")
+    );
+    assert!(Budget::asked(Role::Executor, &json!({ "turns": 0 })).is_err());
+    let planner = Budget::default_for(Role::Planner);
+    let left = Spent::left(
+        &planner,
+        &Spent {
+            cost_micros: 24_000_000,
+            ..Spent::default()
+        },
+        0,
+        1_000,
+    );
+    assert!(
+        Budget::default_for(Role::Executor)
+            .within(&left)
+            .unwrap_err()
+            .contains("cost")
+    );
+    let b = Budget::default_for(Role::Executor);
+    let spent = Spent {
+        turns: 59,
+        cost_micros: 4_900_000,
+        sandbox_ms: 0,
+        executors: 0,
+    };
+    assert_eq!(
+        budget::check(
+            &b,
+            &spent,
+            0,
+            1,
+            Next::Turn {
+                estimate_micros: 50_000
+            }
+        ),
+        Ok(())
+    );
+    assert_eq!(
+        budget::check(
+            &b,
+            &spent,
+            0,
+            1,
+            Next::Turn {
+                estimate_micros: 200_000
+            }
+        ),
+        Err(Over::Cost)
+    );
+    assert_eq!(
+        budget::check(&b, &Spent { turns: 60, ..spent }, 0, 1, Next::Tool),
+        Ok(())
+    );
+    assert_eq!(
+        budget::check(
+            &b,
+            &Spent { turns: 60, ..spent },
+            0,
+            1,
+            Next::Turn { estimate_micros: 0 }
+        ),
+        Err(Over::Turns)
+    );
+    assert_eq!(
+        budget::check(&b, &spent, 0, b.wall_ms, Next::Tool),
+        Err(Over::Wall)
+    );
+    assert_eq!(
+        budget::check(
+            &b,
+            &spent,
+            0,
+            1,
+            Next::Sandbox {
+                timeout_ms: b.sandbox_ms + 1
+            }
+        ),
+        Err(Over::Sandbox)
+    );
+    assert_eq!(
+        budget::check(&b, &spent, 0, 1, Next::Spawn { cost_micros: 0 }),
+        Err(Over::Executors)
+    );
+    assert_eq!(Over::Turns.why(&b), "the run used its 60 model turns");
+    // Prices: cache reads cheap, writes dear, an unknown model priced as the dearest.
+    let usage = json!({ "input_tokens": 1_000_000, "output_tokens": 0, "cache_read_input_tokens": 1_000_000, "cache_creation_input_tokens": 1_000_000 });
+    assert_eq!(
+        budget::cost_micros("claude-sonnet-5-5", &usage),
+        2_000_000 + 100_000 + 2_500_000
+    );
+    let split = json!({ "cache_creation_input_tokens": 2_000_000, "cache_creation": { "ephemeral_5m_input_tokens": 1_000_000, "ephemeral_1h_input_tokens": 1_000_000 } });
+    assert_eq!(
+        budget::cost_micros("claude-opus-5-5", &split),
+        5_000_000 + 8_000_000
+    );
+    assert_eq!(
+        budget::cost_micros("claude-haiku-5-5", &json!({ "output_tokens": 1 })),
+        1,
+        "rounded up"
+    );
+    assert_eq!(
+        budget::price("claude-sonnet-5-5-20261101"),
+        budget::price("claude-sonnet-5-5")
+    );
+    assert_eq!(
+        budget::price("some-model"),
+        budget::price("claude-fable-5-2")
+    );
+    assert_eq!(
+        budget::estimate_micros("claude-opus-5-5", 100_000, 32_000),
+        400_000 + 640_000
+    );
+    assert_eq!(budget::money(2_500_000), "$2.5");
+
+    // ---- tools ----
+    assert_eq!(tools::kind(Role::Executor, "run"), Some(Kind::Sandbox));
+    assert_eq!(tools::kind(Role::Executor, "ci_submit"), Some(Kind::Pigeon));
+    assert_eq!(
+        tools::kind(Role::Executor, "land"),
+        None,
+        "executors never land"
+    );
+    assert_eq!(tools::kind(Role::Planner, "land"), Some(Kind::Pigeon));
+    assert_eq!(tools::kind(Role::Executor, "spawn_executor"), None);
+    assert_eq!(
+        tools::kind(Role::Planner, "spawn_executor"),
+        Some(Kind::Agent)
+    );
+    assert_eq!(tools::kind(Role::Planner, "deploy_token"), None);
+    let pigeon = vec![
+        (
+            "ci_submit".to_string(),
+            "Run a CI job.".to_string(),
+            json!({ "type": "object" }),
+        ),
+        (
+            "land".to_string(),
+            "Land a branch.".to_string(),
+            json!({ "type": "object" }),
+        ),
+        (
+            "source_token".to_string(),
+            "A git token.".to_string(),
+            json!({ "type": "object" }),
+        ),
+    ];
+    let names = |role| -> Vec<String> {
+        tools::definitions(role, &pigeon)
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let exec = names(Role::Executor);
+    assert!(
+        exec.contains(&"ci_submit".into())
+            && !exec.contains(&"land".into())
+            && !exec.contains(&"source_token".into())
+    );
+    assert!(
+        names(Role::Planner).contains(&"land".into())
+            && names(Role::Planner).contains(&"executor_stop".into())
+    );
+    assert!(
+        tools::definitions(Role::Executor, &[])
+            .iter()
+            .all(|t| t["input_schema"]["type"] == "object")
+    );
+    let refused =
+        |name: &str, input: Value| tools::check(Role::Executor, name, &input).unwrap_err();
+    assert!(
+        refused(
+            "write_file",
+            json!({ "path": ".pigeon/policy.toml", "content": "" })
+        )
+        .contains("only the person")
+    );
+    assert!(
+        refused(
+            "edit_file",
+            json!({ "path": "./.claude//settings.json", "old": "a", "new": "b" })
+        )
+        .contains("only the person")
+    );
+    assert!(refused("read_file", json!({ "path": "../etc/passwd" })).contains(".."));
+    assert!(refused("read_file", json!({ "path": "/etc/passwd" })).contains("relative"));
+    assert!(refused("list", json!({ "path": ".git/config" })).contains(".git"));
+    assert!(
+        refused(
+            "edit_file",
+            json!({ "path": "a.rs", "old": "x", "new": "x" })
+        )
+        .contains("same")
+    );
+    assert!(refused("run", json!({ "cmd": "cargo test", "timeout_s": 3600 })).contains("1800"));
+    assert!(refused("report", json!({ "state": "maybe", "summary": "s" })).contains("done"));
+    assert!(
+        refused("land", json!({ "branch": "claude/x" })).contains("not one of this run's tools")
+    );
+    assert!(
+        tools::check(
+            Role::Executor,
+            "run",
+            &json!({ "cmd": "cargo test -p pigeon-ai-agents" })
+        )
+        .is_ok()
+    );
+    assert!(
+        tools::check(
+            Role::Executor,
+            "edit_file",
+            &json!({ "path": "src/a.rs", "old": "x", "new": "y" })
+        )
+        .is_ok()
+    );
+    assert!(
+        tools::idempotent("grep") && !tools::idempotent("commit_push") && !tools::idempotent("run")
+    );
+
+    // ---- the turn ----
+    let defs = tools::definitions(Role::Planner, &pigeon);
+    let messages = [json!({ "role": "user", "content": "the brief" })];
+    let spec = Spec {
+        role: Role::Planner,
+        model: "claude-opus-5-5",
+        system: "rules",
+        tools: &defs,
+    };
+    let req = transcript::request(&spec, &messages);
+    assert_eq!(
+        req["system"][0]["cache_control"]["ttl"], "1h",
+        "a planner waits: its prefix is kept an hour"
+    );
+    assert_eq!(
+        req["tools"].as_array().unwrap().last().unwrap()["cache_control"]["type"],
+        "ephemeral"
+    );
+    assert_eq!(req["tools"][0].get("cache_control"), None);
+    assert_eq!(
+        (
+            req["thinking"]["type"].as_str(),
+            req["output_config"]["effort"].as_str()
+        ),
+        (Some("adaptive"), Some("high"))
+    );
+    assert_eq!(req["cache_control"]["type"], "ephemeral");
+    let spec = Spec {
+        role: Role::Mechanical,
+        model: "claude-haiku-5-5",
+        system: "rules",
+        tools: &[],
+    };
+    let req = transcript::request(&spec, &messages);
+    assert!(req.get("thinking").is_none() && req.get("tools").is_none());
+    assert_eq!(req["system"][0]["cache_control"].get("ttl"), None);
+    // The request a turn sends passes the gateway's own checks (pigeon_models::turn).
+    let spec = Spec {
+        role: Role::Executor,
+        model: "claude-sonnet-5-5",
+        system: "rules",
+        tools: &defs,
+    };
+    assert!(
+        pigeon_models::turn::turn(
+            &transcript::request(&spec, &messages),
+            &Value::Null,
+            "claude-haiku-5-5"
+        )
+        .is_ok()
+    );
+    // Tool calls out, results back; long output cut in the middle, at char boundaries.
+    let content = json!([{ "type": "text", "text": "x" }, { "type": "tool_use", "id": "t1", "name": "run", "input": { "cmd": "ls" } }, { "type": "tool_use", "name": "nameless" }]);
+    assert_eq!(
+        transcript::tool_uses(&content),
+        vec![("t1".to_string(), "run".to_string(), json!({ "cmd": "ls" }))]
+    );
+    let msg = transcript::results_message(&[
+        ("t1".into(), "ok".into(), false),
+        ("t2".into(), "no".into(), true),
+    ]);
+    assert_eq!(msg["content"][0].get("is_error"), None);
+    assert_eq!(msg["content"][1]["is_error"], true);
+    let long = "é".repeat(20_000);
+    let cut = transcript::cut(&long, Some("/tmp/out/3"));
+    assert!(
+        cut.len() < transcript::MAX_RESULT_BYTES
+            && cut.contains("bytes cut; the whole output is in `/tmp/out/3`")
+    );
+    assert_eq!(transcript::cut("short", None), "short");
+    // Compaction: when the context is large; cut only where no tool result loses its call.
+    assert!(transcript::needs_compaction(
+        &json!({ "input_tokens": 10, "cache_read_input_tokens": 150_000 })
+    ));
+    assert!(!transcript::needs_compaction(
+        &json!({ "input_tokens": 10 })
+    ));
+    let mut history = vec![json!({ "role": "user", "content": "brief" })];
+    for i in 0..30 {
+        history.push(json!({ "role": "assistant", "content": [{ "type": "tool_use", "id": format!("t{i}"), "name": "run", "input": {} }] }));
+        history.push(json!({ "role": "user", "content": [{ "type": "tool_result", "tool_use_id": format!("t{i}"), "content": "ok" }] }));
+    }
+    assert_eq!(
+        transcript::cut_point(&history, 20),
+        None,
+        "no clean place to cut"
+    );
+    history.push(json!({ "role": "assistant", "content": [{ "type": "text", "text": "done?" }] }));
+    history.push(
+        json!({ "role": "user", "content": "Call `report` to end the run, or keep working." }),
+    );
+    history.push(json!({ "role": "assistant", "content": [{ "type": "text", "text": "ok" }] }));
+    let at = transcript::cut_point(&history, 4).unwrap();
+    assert_eq!(history[at]["role"], "user");
+    let kept = transcript::compacted("did things", &history[at..]);
+    assert_eq!(kept[0]["role"], "user");
+    assert_eq!(kept[1]["role"], "assistant");
+    assert!(
+        kept[0]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("did things")
+    );
+    let summary = transcript::summary_request("claude-haiku-5-5", &history[..at]);
+    assert!(
+        summary["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("[tool run: {}]")
+    );
+    // Falling back to another model drops thinking it cannot read.
+    let thought = [
+        json!({ "role": "assistant", "content": [{ "type": "thinking", "thinking": "t", "signature": "s" }] }),
+    ];
+    assert_eq!(
+        transcript::strip_thinking(&thought)[0]["content"][0]["text"],
+        "(thinking removed)"
+    );
+}
+
 // ---- secrets ----
 
 #[test]

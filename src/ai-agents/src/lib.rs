@@ -1,0 +1,60 @@
+//! AI agents: planner and executor runs inside pigeon (`docs/plans/ai-agents.md`). A run is an AI agent
+//! loop: it asks a model for its next turn through pigeon's model gateway, runs the tools the
+//! turn calls (in its sandbox, through pigeon's dispatch, or itself), and goes on until it
+//! reports, is stopped or runs out of budget.
+//!
+//! This crate is the loop's logic, pure: no I/O and no clock, so the smoke suite tests it
+//! natively. The Durable Object that drives a run, its sandbox and the Worker come later
+//! (phase 2's Worker side) and only carry out what [`run::next`] decides.
+//!
+//! - [`run`]: a run's states and the next action, from what the run knows.
+//! - [`budget`]: budgets per run, what is spent, and model prices.
+//! - [`transcript`]: the next turn's request, tool results, compaction.
+//! - [`tools`]: the tools each role is offered, and each call's checks.
+
+use serde::{Deserialize, Serialize};
+
+pub mod budget;
+pub mod run;
+pub mod tools;
+pub mod transcript;
+
+/// What an AI agent run is for.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Role {
+    /// Plans a piece of work, spawns executors and reviews what they push.
+    Planner,
+    /// Builds a well-specified piece of code in its sandbox and pushes it.
+    Executor,
+    /// An executor for mechanical changes (moves, renames, docs), on a cheaper model.
+    Mechanical,
+}
+
+impl Role {
+    /// Its name, as kept and shown.
+    pub fn name(self) -> &'static str {
+        match self {
+            Role::Planner => "planner",
+            Role::Executor => "executor",
+            Role::Mechanical => "mechanical",
+        }
+    }
+
+    /// The models a run of this role uses, first choice first; a turn falls back along the
+    /// list when its model keeps failing.
+    pub fn models(self) -> &'static [&'static str] {
+        match self {
+            Role::Planner => &["claude-opus-5-5", "claude-sonnet-5-5"],
+            Role::Executor => &["claude-sonnet-5-5", "claude-opus-5-5"],
+            Role::Mechanical => &["claude-haiku-5-5", "claude-sonnet-5-5"],
+        }
+    }
+}
+
+/// The model gateway's task label for turn `turn` of run `run`: cost per run is
+/// `models_usage {task_prefix: "ai-agent/{run}/"}`.
+pub fn task(run: &str, role: Role, turn: u32) -> String {
+    let t = format!("ai-agent/{run}/{}/{turn}", role.name());
+    t.chars().take(100).collect()
+}
