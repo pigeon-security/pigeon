@@ -268,6 +268,40 @@ async fn caller_key(env: &Env) -> Result<String> {
     secrets_store::read(&store).await?.ok_or_else(missing)
 }
 
+/// Calls `tool` of capability `capability` on the Worker bound as `binding`, as `caller`
+/// (a serialized [`crate::users::Caller`]), with owned inputs, so it can run after a request's
+/// answer has gone (`wait_until`). Answers the tool's result.
+pub async fn call_owned(
+    env: Env,
+    binding: &'static str,
+    capability: &str,
+    tool: &str,
+    args: Value,
+    caller: Value,
+) -> Result<Value> {
+    let fetcher = env.service(binding)?;
+    let key = caller_key(&env).await?;
+    let nonce = webauthn::random()?;
+    let body = json_of(&CallRequest {
+        capability: Some(capability.to_string()),
+        tool: tool.to_string(),
+        args,
+    })?;
+    match pigeon_contract::ask(
+        &fetcher,
+        BASE,
+        "call",
+        &body,
+        Some((key.as_bytes(), &caller)),
+        &nonce,
+    )
+    .await?
+    {
+        Answer::Ok(v) => Ok(v),
+        Answer::Error(f) => Err(failure(format!("{binding}: {}", f.message))),
+    }
+}
+
 fn caller_json(cx: &Context<'_>) -> Value {
     serde_json::to_value(cx.caller).unwrap_or(Value::Null)
 }

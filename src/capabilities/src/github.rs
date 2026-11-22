@@ -4,7 +4,9 @@
 //! installation token, narrowed to one instance's repository, through [`installation_token`].
 //! `/github/hook` checks each delivery's `X-Hub-Signature-256` before reading it, accepts pushes
 //! only from the installation an instance's record names, and records the latest push per
-//! instance. Starting a deploy from a push comes with the sites Worker's `site_deploy`.
+//! instance. A push to `main` starts the sites Worker's `site_deploy` after the answer has gone
+//! (`wait_until`), acting for the person who linked the instance; `github_status` shows how the
+//! latest went.
 
 use pigeon_core::github_app as app;
 use pigeon_core::mcp::Tool;
@@ -81,6 +83,33 @@ pub async fn installation_token(env: &Env, instance: &str) -> Result<(String, St
     Ok((t.token, t.expires_at))
 }
 
+/// The ref whose pushes deploy.
+pub const DEPLOY_REF: &str = "refs/heads/main";
+/// The capability Worker that deploys sites, as core binds it.
+const SITES_BINDING: &str = "SITES";
+
+/// The Directory key of `instance`'s latest push-started deploy and how it went.
+pub fn deploy_key(instance: &str) -> String {
+    format!("github:deploy:{instance}")
+}
+
+/// Who a push-started deploy acts for: the person who linked the instance's account. A webhook
+/// has no caller of its own, and the sites Worker and core's credentials serve only a person's.
+async fn deployer(env: &Env, instance: &str) -> Result<Value> {
+    let link = crate::linked::link(env, instance)
+        .await?
+        .ok_or_else(|| bad(&format!("instance {instance} is not linked")))?;
+    let listed = directory(env, "users.list", json!({})).await?;
+    let person = listed["users"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|u| u["kind"] == "standard" && u["name"] == link.linked_by.as_str())
+        .cloned()
+        .ok_or_else(|| bad(&format!("no person named {} linked it", link.linked_by)))?;
+    Ok(json!({ "user": person, "acting_for": null }))
+}
+
 /// The Directory key of `instance`'s latest push.
 pub fn push_key(instance: &str) -> String {
     format!("github:push:{instance}")
@@ -142,12 +171,54 @@ impl Github {
             json!({ "key": push_key(&instance.id), "value": kept.to_string(), "ttl_ms": PUSH_KEPT_MS }),
         )
         .await?;
+        let deploying = push.git_ref == DEPLOY_REF && !push.deleted;
+        if deploying {
+            match deployer(cx.env, &instance.id).await {
+                Ok(person) => {
+                    let env = cx.env.clone();
+                    let id = instance.id.clone();
+                    let commit = push.after.clone();
+                    let started = cx.worker.map(|w| {
+                        w.wait_until(async move {
+                            let outcome = crate::remote::call_owned(
+                                env.clone(),
+                                SITES_BINDING,
+                                "sites",
+                                "site_deploy",
+                                json!({ "instance": id, "rev": commit }),
+                                person,
+                            )
+                            .await;
+                            let kept = match outcome {
+                                Ok(v) => json!({ "ok": v, "at_ms": worker::Date::now().as_millis() }),
+                                Err(e) => json!({ "error": e.to_string(), "at_ms": worker::Date::now().as_millis() }),
+                            };
+                            let _ = directory(
+                                &env,
+                                "setting.put",
+                                json!({ "key": deploy_key(&id), "value": kept.to_string(), "ttl_ms": PUSH_KEPT_MS }),
+                            )
+                            .await;
+                        });
+                    });
+                    if started.is_none() {
+                        return answer(500, json!({ "error": "no Worker context to deploy in" }));
+                    }
+                }
+                Err(e) => {
+                    return answer(
+                        202,
+                        json!({ "recorded": instance.id, "deploy": format!("not started: {e}") }),
+                    );
+                }
+            }
+        }
         answer(
             202,
             json!({
                 "recorded": instance.id,
                 "commit": push.after,
-                "deploy": "not started: deploys start once the sites Worker's site_deploy is live",
+                "deploy": if deploying { "started" } else { "not for this ref" },
             }),
         )
     }
@@ -168,8 +239,14 @@ impl Github {
                     Value::String(t) => serde_json::from_str(&t).unwrap_or(Value::Null),
                     _ => Value::Null,
                 };
+            let deploy = match directory(cx.env, "setting.get", json!({ "key": deploy_key(&i.id) }))
+                .await?
+            {
+                Value::String(t) => serde_json::from_str(&t).unwrap_or(Value::Null),
+                _ => Value::Null,
+            };
             out.push(json!({ "instance": i.id, "repo": full_name,
-                "installation": installation, "latest_push": push }));
+                "installation": installation, "latest_push": push, "latest_deploy": deploy }));
         }
         Ok(json!({
             "app_id": ids(cx.env)?.0,
