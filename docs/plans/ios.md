@@ -727,3 +727,4 @@ a passkey. Enter every key and id on the console's secrets page once the slot ex
   so the entitlement and the association file now name the host for `applinks` too, claiming
   `/app/oauth*` only, beside `webcredentials`. A cancelled sign-in now shows iOS's error domain
   and code like every other failure, and the app logs the full error.
+  The association file also answered HEAD with 404 (only GET was routed); it now answers both.

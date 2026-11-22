@@ -88,9 +88,9 @@ impl OAuth {
             (Method::Get, p) if p.starts_with("/.well-known/oauth-protected-resource") => Ok(cors(
                 Response::from_json(&oauth::resource_metadata(&format!("{issuer}/mcp"), &issuer))?,
             )),
-            // The iOS app's associated domain (docs/plans/ios.md, phase 5): JSON, no redirect,
+            // The iOS app's associated domain (docs/plans/ios.md, phase 5): JSON, no redirect, HEAD too,
             // 404 while APPLE_TEAM_ID is unset.
-            (Method::Get, "/.well-known/apple-app-site-association") => {
+            (Method::Get | Method::Head, "/.well-known/apple-app-site-association") => {
                 match crate::apple::aasa(cx.env).await {
                     Some(doc) => {
                         let headers = Headers::new();
