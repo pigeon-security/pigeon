@@ -1,0 +1,20 @@
+[package]
+name = "pigeon-proxies"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# The proxies on the proxy host, `/git/` and `/cf/`: served by core (pigeon-platform) and by the
+# proxy Worker (pigeon-proxy), each through its own `Host`. Never depends on pigeon-capabilities.
+[dependencies]
+pigeon-core = { path = "../core" }
+pigeon-contract = { path = "../contract" }
+worker = "0.9.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+futures-channel = { version = "0.3", default-features = false, features = ["std"] }
+wasm-streams = "0.7"
+toml = { version = "0.8", default-features = false, features = ["parse"] }

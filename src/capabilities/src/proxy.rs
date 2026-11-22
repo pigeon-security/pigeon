@@ -7,12 +7,17 @@
 //! issuing or revoking takes a passkey of its own whose challenge
 //! is bound to that one credential's label and lifetime, or id. Every proxied request is logged
 //! as one audit line: who, which route, and what came of it.
+//!
+//! The checks the proxies make at request time are in [`pigeon_proxies::proxy`], shared with
+//! the proxy Worker, and re-exported here. [`Local`] is core's [`Host`] for them: its own
+//! Directory, CI scheduler and Lander, and the parent token.
 
+use pigeon_core::Account;
 use pigeon_core::mcp::Tool;
 use pigeon_core::oauth::{hash, token};
-use serde::Serialize;
+use pigeon_proxies::{Grant, Host, Pending, Purpose};
 use serde_json::{Value, json};
-use worker::{Env, Error, Method, Request, Response, Result, console_log};
+use worker::{Env, Error, Method, Request, Response, Result};
 
 use crate::console::page;
 use crate::console::sections::Section;
@@ -20,36 +25,14 @@ use crate::passkeys::Passkeys;
 use crate::users::{User, directory};
 use crate::{Call, Capability, Context, Serve, unknown};
 
-pub use pigeon_core::proxy_caller::ID_LEN;
-/// What every proxy credential starts with.
-pub const PREFIX: &str = "pgn_px_";
+pub use pigeon_proxies::proxy::{
+    Audit, ID_LEN, Outcome, PREFIX, ProxyCaller, audit, audit_line, host_serves, reaches,
+};
+
 /// A credential's lifetime unless asked otherwise, in days, and at most.
 pub const DEFAULT_DAYS: i64 = 30;
+/// The longest a credential may live, in days.
 pub const MAX_DAYS: i64 = 90;
-
-/// Whether `path` holds an encoded separator or dot, a backslash, or a dot segment.
-fn suspicious(path: &str) -> bool {
-    let lower = path.to_ascii_lowercase();
-    lower.contains("%2f")
-        || lower.contains("%5c")
-        || lower.contains("%2e")
-        || path.contains('\\')
-        || path.split('/').any(|seg| seg == ".." || seg == ".")
-}
-
-/// Whether a bearer token of `kind` may reach raw `path`: a `proxy` token only the proxies
-/// under `/git/` and `/cf/`, an `access` token only `/mcp`, any other kind nothing. No kind
-/// reaches a path with an encoded separator or dot, a backslash, or a dot segment.
-pub fn reaches(kind: &str, path: &str) -> bool {
-    if suspicious(path) {
-        return false;
-    }
-    match kind {
-        "proxy" => path.starts_with("/git/") || path.starts_with("/cf/"),
-        "access" => path == "/mcp",
-        _ => false,
-    }
-}
 
 /// The challenge purpose for issuing a credential labelled with hash `label_hash`, living
 /// `days`.
@@ -104,103 +87,62 @@ pub fn id(raw: &str) -> std::result::Result<&str, String> {
     }
 }
 
-pub use pigeon_core::proxy_caller::ProxyCaller;
-
-/// What came of a proxied request.
-#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum Outcome {
-    /// Sent on.
-    Forwarded,
-    /// Refused before anything was sent on.
-    Refused,
-    /// Sent on, or about to be, and it failed.
-    Failed,
-}
-
-/// One proxied request, for the audit line.
-pub struct Audit<'a> {
-    /// `git` or `cf`.
-    pub route: &'a str,
-    pub method: &'a str,
-    /// The request's path; a query string is cut off before it is logged.
-    pub path: &'a str,
-    pub outcome: Outcome,
-    pub status: Option<u16>,
-    /// Why, when refused or failed.
-    pub why: Option<&'a str>,
-}
-
-/// `a` as one JSON audit line. It holds the credential's id, never its value or hash.
-pub fn audit_line(caller: Option<&ProxyCaller>, a: &Audit<'_>) -> String {
-    let path = a.path.split_once('?').map_or(a.path, |(p, _)| p);
-    json!({
-        "audit": "proxy",
-        "route": a.route,
-        "caller": caller.map(|c| format!("{} ({})", c.label, c.person)),
-        "token": caller.map(|c| c.id.as_str()),
-        "method": a.method,
-        "path": path,
-        "outcome": a.outcome,
-        "status": a.status,
-        "why": a.why,
-    })
-    .to_string()
-}
-
-/// Whether a request for `path` on `host` is served, when the proxies have `proxy_host` to
-/// themselves: there, only the proxies and `/health`; anywhere else, everything but the
-/// proxies. So the credential a cloud session's network proxy adds for the proxy host never
-/// reaches the platform's other paths, and the proxies never answer on its other hosts.
-pub fn host_serves(host: &str, proxy_host: &str, path: &str) -> bool {
-    let proxied = path.starts_with("/git/") || path.starts_with("/cf/");
-    if host.eq_ignore_ascii_case(proxy_host) {
-        proxied || path == "/health"
-    } else {
-        !proxied
-    }
-}
-
-/// Writes `a`'s audit line to the Worker's log.
-pub fn audit(caller: Option<&ProxyCaller>, a: &Audit<'_>) {
-    console_log!("{}", audit_line(caller, a));
-}
-
 fn bad(why: &str) -> Error {
     Error::RustError(why.to_string())
 }
 
-/// The holder of the proxy credential `req` carries as `Authorization: Bearer`, if it is live
-/// and reaches the request's path. Errors never repeat the header.
-pub async fn caller(env: &Env, req: &Request) -> Result<ProxyCaller> {
-    let unknown = || bad("the proxy credential is unknown or has expired");
-    let header = req
-        .headers()
-        .get("Authorization")
-        .ok()
-        .flatten()
-        .ok_or_else(|| bad("no proxy credential"))?;
-    let (scheme, rest) = header
-        .trim()
-        .split_once(' ')
-        .ok_or_else(|| bad("no proxy credential"))?;
-    if !scheme.eq_ignore_ascii_case("bearer") {
-        return Err(bad("no proxy credential"));
-    }
-    let presented = rest.trim();
-    if !presented.starts_with(PREFIX) {
-        return Err(bad("not a proxy credential"));
-    }
-    if !reaches("proxy", &req.path()) {
-        return Err(bad("a proxy credential does not reach this path"));
-    }
-    let found = directory(env, "proxy.token_get", json!({ "hash": hash(presented) }))
-        .await
-        .map_err(|_| unknown())?;
+/// The holder of proxy credential `presented` (the whole bearer value), when it is live: the
+/// Directory's answer, by the credential's hash. Core's own check, and what its `verify` op
+/// answers the proxy Worker.
+pub async fn verify(env: &Env, presented: &str) -> Result<Option<ProxyCaller>> {
+    let found = directory(env, "proxy.token_get", json!({ "hash": hash(presented) })).await?;
     if found.is_null() {
-        return Err(unknown());
+        return Ok(None);
     }
-    serde_json::from_value(found).map_err(|_| unknown())
+    Ok(serde_json::from_value(found).ok())
+}
+
+/// The grant of CI job token `presented` when it is live and for repository `repo`: core's
+/// own check, and what its `grant` op answers the proxy Worker.
+pub async fn job_grant(env: &Env, presented: &str, repo: &str) -> Result<Option<Grant>> {
+    Ok(crate::ci::job_grant(env, presented)
+        .await?
+        .filter(|g| g.repo == repo))
+}
+
+/// Core as the proxies' [`Host`]: credentials from its Directory, job grants from its CI
+/// scheduler, deploy grants from its Lander, and its own account, holding the parent token,
+/// for every purpose.
+pub struct Local<'a> {
+    /// The request's context.
+    pub cx: &'a Context<'a>,
+}
+
+impl Host for Local<'_> {
+    fn account_id(&self) -> String {
+        self.cx.account.id.clone()
+    }
+
+    fn verify<'a>(&'a self, presented: &'a str) -> Pending<'a, Option<ProxyCaller>> {
+        Box::pin(verify(self.cx.env, presented))
+    }
+
+    fn job_grant<'a>(&'a self, presented: &'a str, repo: &'a str) -> Pending<'a, Option<Grant>> {
+        Box::pin(job_grant(self.cx.env, presented, repo))
+    }
+
+    fn deploy_grant<'a>(
+        &'a self,
+        presented: &'a str,
+        repo: &'a str,
+    ) -> Pending<'a, Option<ProxyCaller>> {
+        Box::pin(crate::land::deploy_caller(self.cx.env, presented, repo))
+    }
+
+    fn account<'a>(&'a self, _purpose: Purpose) -> Pending<'a, Account> {
+        let account = self.cx.account.clone();
+        Box::pin(async move { Ok(account) })
+    }
 }
 
 /// A JSON answer that is never cached.

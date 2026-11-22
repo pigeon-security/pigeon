@@ -718,7 +718,8 @@ fn land_rebases_disjoint_branches_and_lanes() {
             "pigeon-platform",
             "pigeon-sites",
             "pigeon-model-gateway",
-            "pigeon-ci-gateway"
+            "pigeon-ci-gateway",
+            "pigeon-proxy"
         ]
     );
     assert!(map.worker("sites").unwrap().queues.is_empty());
@@ -755,7 +756,7 @@ fn land_rebases_disjoint_branches_and_lanes() {
     assert_eq!(map.worker("sites").unwrap().deploy_job, "deploy-sites");
     assert_eq!(
         names(&map.classify(&["src/contract/src/wire.rs"])),
-        ["core", "sites", "model-gateway", "ci-gateway"]
+        ["core", "sites", "model-gateway", "ci-gateway", "proxy"]
     );
     // CI's code is shared while core still links it; the gateway alone deploys for its crate.
     assert!(map.classify(&["src/ci/src/lib.rs"]).shared);
@@ -767,6 +768,10 @@ fn land_rebases_disjoint_branches_and_lanes() {
         map.worker("ci-gateway").unwrap().deploy_job,
         "deploy-ci-gateway"
     );
+    // The proxies' code is shared by core and the proxy Worker; the Worker's own crate is not.
+    assert!(map.classify(&["src/proxies/src/git_proxy.rs"]).shared);
+    assert_eq!(names(&map.classify(&["src/proxy/src/lib.rs"])), ["proxy"]);
+    assert_eq!(map.worker("proxy").unwrap().deploy_job, "deploy-proxy");
     assert!(
         !map.overlap(&["src/sites/src/lib.rs"], &["src/capabilities/src/land.rs"])
             .retest
@@ -2027,6 +2032,160 @@ fn proxy_and_job_tokens() {
     ] {
         assert!(!token::reaches(p), "{p}");
     }
+}
+
+/// The proxy Worker's per-isolate memory: a scoped credential reused until a minute before it
+/// expires; a verified proxy credential kept a minute, by its hash, never its value; and the
+/// deploy proxy it builds matching core's. Grants are never kept, so there is nothing to keep.
+#[test]
+fn proxy_worker_caches_and_core_ops() {
+    use pigeon_capabilities::split::purpose_permissions;
+    use pigeon_contract::{CALLERLESS_OPS, CORE_OPS, Credential};
+    use pigeon_proxies::cache::{
+        Credentials, RENEW_BEFORE_MS, VERIFIED_FOR_MS, VERIFIED_MAX, Verified,
+    };
+    use pigeon_proxies::{ProxyCaller, Purpose};
+
+    // Scoped credentials, one per purpose, renewed a minute before they expire.
+    let mut creds = Credentials::new();
+    assert!(creds.get(Purpose::Git, 0).is_none());
+    let minted = |token: &str, expires_at: i64| Credential {
+        token: token.into(),
+        account_id: "acct".into(),
+        expires_at,
+    };
+    creds.put(Purpose::Git, minted("git-1", 900_000));
+    assert_eq!(creds.get(Purpose::Git, 0).unwrap().token, "git-1");
+    assert_eq!(
+        creds
+            .get(Purpose::Git, 900_000 - RENEW_BEFORE_MS - 1)
+            .unwrap()
+            .token,
+        "git-1"
+    );
+    assert!(creds.get(Purpose::Git, 900_000 - RENEW_BEFORE_MS).is_none());
+    assert!(creds.get(Purpose::Deploy, 0).is_none(), "kept per purpose");
+    creds.put(Purpose::Git, minted("git-2", 2_000_000));
+    assert_eq!(creds.get(Purpose::Git, 1_000_000).unwrap().token, "git-2");
+    assert_eq!(Purpose::Git.scoped(), "artifacts");
+    assert_eq!(Purpose::Deploy.scoped(), "cf_deploy");
+
+    // Verified proxy credentials: kept a minute, by hash; an unknown one is never kept.
+    let holder = |id: &str| ProxyCaller {
+        id: id.into(),
+        label: "env".into(),
+        person: "Ana".into(),
+        script: None,
+    };
+    let (a, b) = (
+        format!("pgn_px_{}", "a".repeat(43)),
+        format!("pgn_px_{}", "b".repeat(43)),
+    );
+    let mut verified = Verified::new();
+    assert!(verified.get(&a, 0).is_none());
+    verified.put(&a, holder("aaaaaaaaaaaa"), 1_000);
+    assert_eq!(verified.get(&a, 1_000).unwrap().id, "aaaaaaaaaaaa");
+    assert_eq!(
+        verified.get(&a, 1_000 + VERIFIED_FOR_MS - 1).unwrap().id,
+        "aaaaaaaaaaaa"
+    );
+    assert!(
+        verified.get(&a, 1_000 + VERIFIED_FOR_MS).is_none(),
+        "revocation within a minute"
+    );
+    assert!(verified.get(&b, 1_000).is_none(), "keyed by the credential");
+    assert_ne!(Verified::key(&a), a, "never the credential itself");
+    assert_eq!(
+        Verified::key(&a),
+        pigeon_core::oauth::hash(&a),
+        "the Directory's hash"
+    );
+    assert!(!Verified::key(&a).contains("pgn_px_"));
+    // Expired ones go on the next put, and the cache stays bounded.
+    verified.put(&b, holder("bbbbbbbbbbbb"), 1_000 + VERIFIED_FOR_MS);
+    assert_eq!(verified.len(), 1);
+    for i in 0..VERIFIED_MAX + 10 {
+        verified.put(
+            &format!("pgn_px_{i:043}"),
+            holder("cccccccccccc"),
+            2_000_000 + i as i64,
+        );
+    }
+    assert_eq!(verified.len(), VERIFIED_MAX);
+    assert!(
+        verified
+            .get(&format!("pgn_px_{:043}", 0), 2_000_100)
+            .is_none(),
+        "oldest went first"
+    );
+    assert!(
+        verified
+            .get(&format!("pgn_px_{:043}", VERIFIED_MAX + 9), 2_000_100)
+            .is_some()
+    );
+
+    // The ops core answers the proxy Worker: only its checks go without a caller.
+    for op in CALLERLESS_OPS {
+        assert!(CORE_OPS.contains(&op), "{op}");
+    }
+    assert!(!CALLERLESS_OPS.contains(&"credential") && !CALLERLESS_OPS.contains(&"dispatch"));
+    // `cf_deploy` is exactly the union of what the deploy proxy's allowlist names.
+    let mut union: Vec<&str> = pigeon_proxies::cf_proxy::ALLOWED
+        .iter()
+        .flat_map(|e| e.permissions.iter().copied())
+        .collect();
+    union.sort_unstable();
+    union.dedup();
+    let mut deploy: Vec<&str> = purpose_permissions("cf_deploy").unwrap().to_vec();
+    deploy.sort_unstable();
+    assert_eq!(deploy, union);
+
+    // The proxy Worker's deploy proxy, from the files built into it, is core's.
+    let cf = pigeon_proxies::cf_proxy::CfProxy::platform(
+        "proxy.pigeon.dev",
+        "pigeon-platform",
+        include_str!("../src/platform/wrangler.toml"),
+        include_str!("../ci/workers.toml"),
+        "pigeon-security/pigeon",
+    );
+    let core = pigeon_capabilities::architecture::Wrangler::read(include_str!(
+        "../src/platform/wrangler.toml"
+    ));
+    assert_eq!(cf.queues, core.producers);
+    assert_eq!(
+        cf.containers,
+        core.containers
+            .iter()
+            .map(|c| c.class.clone())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(cf.queues, ["pigeon-ci-events"]);
+    assert_eq!(cf.containers, ["CiRunner"]);
+    let others: Vec<&str> = cf.others.iter().map(|o| o.script.as_str()).collect();
+    assert_eq!(others, ["pigeon-sites", "pigeon-proxy"]);
+    let broken = pigeon_proxies::cf_proxy::CfProxy::platform("h", "s", "not toml [", "nope", "r");
+    assert!(broken.others.is_empty() && broken.queues.is_empty());
+
+    // The cutover moves the proxy host in one call, `setup_proxy_host {worker}`, and back.
+    use pigeon_capabilities::Capability;
+    use pigeon_capabilities::public_host::{PublicHost, Retire};
+    let host = |also: Vec<String>| PublicHost {
+        zone: "pigeon.dev".into(),
+        host: "proxy.pigeon.dev".into(),
+        worker: "pigeon-platform".into(),
+        also,
+        retire: Retire::default(),
+        tool: "setup_proxy_host",
+    };
+    let tools = host(vec!["pigeon-proxy".into()]).tools();
+    assert_eq!(
+        tools[0].input_schema["properties"]["worker"]["enum"],
+        json!(["pigeon-platform", "pigeon-proxy"])
+    );
+    assert_eq!(
+        host(Vec::new()).tools()[0].input_schema["properties"],
+        json!({})
+    );
 }
 
 /// The apex (pigeon.dev) answers only the site's pages; the platform's paths never answer there.

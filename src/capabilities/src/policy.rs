@@ -5,64 +5,20 @@
 //! audit line in the Worker's log; `policy_check`'s and the Lander's are also kept, the latest
 //! readable with [`recent`]. The console no longer lists them.
 
-use std::sync::OnceLock;
-
 use pigeon_core::mcp::Tool;
-use pigeon_core::policy::{self, Answer, Kind, Policy as Rules, Request, Vars};
+use pigeon_core::policy::{Answer, Kind, Request, Vars};
 use serde_json::{Value, json};
 use worker::{Env, Error, Result, console_log};
 
 use crate::users::{Caller, directory};
 use crate::{Call, Capability, Context, unknown};
 
-/// The policy's text, as built into this Worker.
-pub const TEXT: &str = include_str!("../../../.pigeon/policy.toml");
+/// The policy built into this Worker: its text, parsed once, deciding, and audit lines; in
+/// pigeon-core so the proxy Worker decides by the same rules.
+pub use pigeon_core::policy_file::{TEXT, audit_line, current, decide, request};
 
 /// How many decisions are kept.
 pub const LISTED: usize = 10;
-
-/// The policy built into this Worker, parsed once; an error when the file does not parse,
-/// which refuses everything it decides.
-pub fn current() -> std::result::Result<&'static Rules, String> {
-    static PARSED: OnceLock<std::result::Result<Rules, String>> = OnceLock::new();
-    PARSED
-        .get_or_init(|| policy::parse(TEXT))
-        .as_ref()
-        .map_err(Clone::clone)
-}
-
-/// `req` decided by the policy built into this Worker; when it does not parse, a deny naming why.
-pub fn decide(vars: &Vars, req: &Request) -> Answer {
-    match current() {
-        Ok(p) => p.evaluate(vars, req),
-        Err(e) => Answer {
-            decision: policy::Decision::Deny,
-            rule: None,
-            reason: format!("the policy does not parse: {e}"),
-            needs: None,
-        },
-    }
-}
-
-/// A request with no approval.
-pub fn request(actor: &str, action: Kind, target: &str) -> Request {
-    Request {
-        actor: actor.into(),
-        action,
-        target: target.into(),
-        context: policy::Context::default(),
-    }
-}
-
-/// `req` and its answer as one JSON audit line.
-pub fn audit_line(by: &str, req: &Request, a: &Answer) -> String {
-    json!({
-        "audit": "policy", "by": by, "actor": req.actor, "action": req.action.name(),
-        "target": req.target, "approval": req.context.approval.map(|x| x.name()),
-        "decision": a.decision, "rule": a.rule, "reason": a.reason,
-    })
-    .to_string()
-}
 
 /// Writes `req`'s audit line and keeps the decision.
 pub async fn record(env: &Env, by: &str, req: &Request, a: &Answer) -> Result<()> {

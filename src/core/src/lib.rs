@@ -31,6 +31,7 @@ pub mod oauth;
 pub mod oidc;
 pub mod pack;
 pub mod policy;
+pub mod policy_file;
 pub mod proxy_caller;
 pub mod queues;
 pub mod r2;

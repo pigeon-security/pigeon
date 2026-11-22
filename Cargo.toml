@@ -11,6 +11,8 @@ members = [
     "src/model-gateway",
     "src/ci",
     "src/ci-gateway",
+    "src/proxies",
+    "src/proxy",
 ]
 
 [workspace.package]

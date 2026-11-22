@@ -57,6 +57,14 @@ pub const HOST: &str = "platform.pigeon.dev";
 /// hostname of their own, so the proxy credential a cloud environment's network proxy adds
 /// for it never reaches `/mcp` or replaces the MCP connector's own token.
 pub const PROXY_HOST: &str = "proxy.pigeon.dev";
+/// The Worker `setup_proxy_host` attaches the proxy hostname to by default. Core serves the
+/// proxies until the cutover (docs/plans/workers-split.md, phase 6), which is one call,
+/// `setup_proxy_host {"worker": "pigeon-proxy"}`, and its rollback another,
+/// `setup_proxy_host {"worker": "pigeon-platform"}`. Once the cutover holds, this becomes
+/// [`PROXY_WORKER_NEXT`], so the default names the Worker serving the host.
+pub const PROXY_WORKER: &str = WORKER;
+/// The proxy Worker, which `setup_proxy_host` may attach the proxy hostname to instead.
+pub const PROXY_WORKER_NEXT: &str = "pigeon-proxy";
 const NAMESPACE: &str = "pigeon-security";
 const REPO: &str = "pigeon";
 // CI's values live in `pigeon_ci::pigeon`, which `pigeon-ci-gateway` builds too: they must be
@@ -141,13 +149,17 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
             // Its Access setup was retired, and that is done: nothing is retired again, so
             // setting the host up never deletes an Access application, policy or token.
             retire: Retire::default(),
+            also: Vec::new(),
             tool: "setup_platform",
         }),
         // The proxies' hostname, in public: the proxies check the proxy credential themselves.
         Box::new(PublicHost {
             zone: ZONE.into(),
             host: PROXY_HOST.into(),
-            worker: WORKER.into(),
+            worker: PROXY_WORKER.into(),
+            // The proxy Worker, which serves the same proxies: the cutover and its rollback are
+            // each one call, `setup_proxy_host {worker}`.
+            also: vec![PROXY_WORKER_NEXT.into()],
             retire: Retire::default(),
             tool: "setup_proxy_host",
         }),

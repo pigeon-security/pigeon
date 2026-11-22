@@ -9,8 +9,14 @@ pub const CONTRACT: u32 = 1;
 /// The ops a capability Worker answers; the op is the request path.
 pub const OPS: [&str; 6] = ["manifest", "call", "section", "fetch", "events", "secret"];
 
-/// The ops core answers for capability Workers.
-pub const CORE_OPS: [&str; 2] = ["credential", "dispatch"];
+/// The ops core answers for capability Workers. `verify`, `grant` and `deploy_grant` are the
+/// proxy Worker's checks: each carries the credential it asks about, so it is signed with
+/// `CALLER_KEY` but for no caller.
+pub const CORE_OPS: [&str; 5] = ["credential", "dispatch", "verify", "grant", "deploy_grant"];
+
+/// The core ops a request signed for no caller may ask: the proxy Worker's checks, which carry
+/// the credential they ask about.
+pub const CALLERLESS_OPS: [&str; 3] = ["verify", "grant", "deploy_grant"];
 
 /// Whether a peer speaking `version` is understood: this version or the one before it.
 pub fn accepts(version: u32) -> bool {
@@ -177,6 +183,25 @@ pub struct CredentialRequest {
     /// The scopes wanted.
     #[serde(default)]
     pub scopes: Vec<String>,
+}
+
+/// The proxy Worker's `verify` request: who holds a proxy credential. Answered with the holder
+/// (`{id, label, person, script}`) or null.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct VerifyRequest {
+    /// The credential as presented, `pgn_px_…`.
+    pub credential: String,
+}
+
+/// The proxy Worker's `grant` and `deploy_grant` requests: a CI job token's grant, or the
+/// caller it stands for as a landing's deploy job, for one repository. Answered with it or
+/// null.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct GrantRequest {
+    /// The job token as presented, `pgn_ci_…`.
+    pub token: String,
+    /// The repository, as `namespace/name`.
+    pub repo: String,
 }
 
 /// A credential core hands a capability Worker for the call in hand.

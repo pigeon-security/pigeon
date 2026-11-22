@@ -20,6 +20,7 @@ paths = [
     "src/models/*",
     # CI's code: core still serves it, and pigeon-ci-gateway too (phase 4).
     "src/ci/*",
+    "src/proxies/*",
     "Cargo.toml",
     "Cargo.lock",
     ".cargo/*",
@@ -73,3 +74,15 @@ deploy_job = "deploy-ci-gateway"
 after = ["portal_sync"]
 queues = ["pigeon-ci-events"]
 containers = []
+
+# The proxy Worker: /git/ and /cf/ on proxy.pigeon.dev, with the proxies' code shared with core
+# (src/proxies, so shared). A capability Worker that never holds the parent token
+# (docs/plans/workers-split.md, phase 6).
+[[worker]]
+name = "proxy"
+script = "pigeon-proxy"
+dir = "src/proxy"
+paths = ["src/proxy/*"]
+test_job = "test"
+deploy_job = "deploy-proxy"
+after = []

@@ -18,6 +18,10 @@ pub struct PublicHost {
     pub host: String,
     /// The Worker serving it.
     pub worker: String,
+    /// Other Workers the tool may attach the host to instead, when its `worker` argument names
+    /// one: for moving a host between Workers and back in one call (the proxy host's cutover to
+    /// `pigeon-proxy`). Without the argument the host goes to [`PublicHost::worker`].
+    pub also: Vec<String>,
     /// An Access setup the host had, removed when it is served.
     pub retire: Retire,
     /// The tool that sets it up, such as `setup_platform`.
@@ -42,14 +46,14 @@ pub struct Retire {
 impl PublicHost {
     /// Attaches the host to the Worker, then retires the Access setup, so the host is served
     /// throughout.
-    async fn serve(&self, account: &Account) -> Result<Value> {
+    async fn serve(&self, account: &Account, worker: &str) -> Result<Value> {
         let zone = zones::active(account, &self.zone).await?;
-        let custom_domain =
-            custom_domain::attach(account, &zone.id, &self.host, &self.worker).await?;
+        let custom_domain = custom_domain::attach(account, &zone.id, &self.host, worker).await?;
         let retired = self.retire(account).await?;
         Ok(json!({
             "zone": zone,
             "host": self.host,
+            "worker": worker,
             "custom_domain": custom_domain,
             "retired": retired,
         }))
@@ -102,19 +106,51 @@ impl Capability for PublicHost {
     }
 
     fn tools(&self) -> Vec<Tool> {
-        vec![Tool::bare(
-            self.tool,
-            "Make sure the hostname is served by its Worker in public, and that the Access setup \
-             it had is gone.",
-        )]
+        let description = "Make sure the hostname is served by its Worker in public, and that \
+                           the Access setup it had is gone.";
+        if self.also.is_empty() {
+            return vec![Tool::bare(self.tool, description)];
+        }
+        let mut workers = vec![self.worker.clone()];
+        workers.extend(self.also.iter().cloned());
+        vec![Tool {
+            name: self.tool,
+            description,
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "worker": {
+                        "type": "string",
+                        "enum": workers,
+                        "description": "The Worker to attach the hostname to; its own Worker when not given.",
+                    }
+                }
+            }),
+        }]
     }
 
-    fn call<'a>(&'a self, cx: &'a Context<'a>, tool: &'a str, _args: &'a Value) -> Call<'a> {
+    fn call<'a>(&'a self, cx: &'a Context<'a>, tool: &'a str, args: &'a Value) -> Call<'a> {
         Box::pin(async move {
             if tool != self.tool {
                 return Err(unknown(tool));
             }
-            Ok(to_value(self.serve(cx.account).await?))
+            let target = match args.get("worker").and_then(Value::as_str) {
+                None => self.worker.as_str(),
+                Some(w) if w == self.worker || self.also.iter().any(|a| a == w) => w,
+                Some(w) => {
+                    return Err(worker::Error::RustError(format!(
+                        "{} is not served by Worker `{w}`; it is served by `{}`{}",
+                        self.host,
+                        self.worker,
+                        if self.also.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" or {}", self.also.join(", "))
+                        }
+                    )));
+                }
+            };
+            Ok(to_value(self.serve(cx.account, target).await?))
         })
     }
 

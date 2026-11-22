@@ -11,6 +11,7 @@ pigeon-core = { path = "../core" }
 pigeon-ci = { path = "../ci" }
 pigeon-contract = { path = "../contract" }
 pigeon-models = { path = "../models" }
+pigeon-proxies = { path = "../proxies" }
 worker = { version = "0.9.0", features = ["queue"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

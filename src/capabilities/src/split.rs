@@ -1,13 +1,21 @@
 //! Core's side of the Workers split (docs/plans/workers-split.md): the capability Workers' tools
-//! merged with this Worker's own, the two ops a capability Worker asks core (`credential` and
-//! `dispatch`, at `https://core/<op>` over its `PLATFORM` binding), and two tools:
-//! `workers_setup`, which makes the key that signs callers, and `manifest_refresh`.
+//! merged with this Worker's own, the ops a capability Worker asks core (at
+//! `https://core/<op>` over its `PLATFORM` binding), and two tools: `workers_setup`, which makes
+//! the key that signs callers, and `manifest_refresh`.
+//!
+//! The ops: `credential` and `dispatch` for a signed caller; and the proxy Worker's checks,
+//! `verify` (who holds a proxy credential), `grant` (a CI job token's grant) and `deploy_grant`
+//! (the caller a landing's deploy job token stands for), signed with `CALLER_KEY` but for no
+//! caller, since each carries the credential it asks about.
 //!
 //! Core stays the front door. A capability Worker's call to `dispatch` runs through the same
 //! [`crate::dispatch`] as `/mcp`, gate included, as the caller core signed for it. A
 //! `credential` is only for a signed caller, and only for the call in hand.
 
-use pigeon_contract::{Answer, CORE_OPS, Credential, CredentialRequest, FailureKind};
+use pigeon_contract::{
+    Answer, CALLERLESS_OPS, CORE_OPS, Credential, CredentialRequest, FailureKind, GrantRequest,
+    VerifyRequest,
+};
 use pigeon_core::mcp::Tool;
 use pigeon_core::secrets_store::{self, Writer};
 use serde_json::{Value, json};
@@ -76,7 +84,8 @@ pub async fn caller_key(env: &Env) -> Result<Vec<u8>> {
 }
 
 /// Serves one op a capability Worker asks core: `credential` or `dispatch`, with the caller
-/// core signed for it. Every answer is JSON, as [`pigeon_contract::serve`] answers.
+/// core signed for it; or one of the proxy Worker's checks, signed for no caller. Every answer
+/// is JSON, as [`pigeon_contract::serve`] answers.
 pub async fn serve(mut req: Request, cx: &Context<'_>) -> Result<Response> {
     let op = req.path().trim_start_matches('/').to_string();
     let reply = |a: Answer, status: u16| -> Result<Response> {
@@ -100,6 +109,19 @@ pub async fn serve(mut req: Request, cx: &Context<'_>) -> Result<Response> {
             );
         }
     };
+    if CALLERLESS_OPS.contains(&op.as_str()) {
+        let answer = match proxy_check(cx.env, &op, &body).await {
+            Ok(Some(v)) => v,
+            Ok(None) => {
+                return reply(
+                    Answer::error(FailureKind::BadRequest, "the request does not parse"),
+                    400,
+                );
+            }
+            Err(e) => return reply(Answer::error(FailureKind::Failed, e.to_string()), 200),
+        };
+        return reply(Answer::Ok(answer), 200);
+    }
     let Ok(caller) = serde_json::from_value::<Caller>(signed.caller.clone()) else {
         return reply(
             Answer::error(
@@ -135,6 +157,33 @@ pub async fn serve(mut req: Request, cx: &Context<'_>) -> Result<Response> {
         Ok(v) => reply(Answer::Ok(v), 200),
         Err(e) => reply(Answer::error(FailureKind::Failed, e.to_string()), 200),
     }
+}
+
+/// One of the proxy Worker's checks, `op` with `body`, answered as core's own proxies answer
+/// it: the holder of a proxy credential, a job token's grant for a repository, or the caller a
+/// landing's deploy job token stands for; null for none. `None` when the body does not parse.
+async fn proxy_check(env: &Env, op: &str, body: &[u8]) -> Result<Option<Value>> {
+    Ok(Some(match op {
+        "verify" => {
+            let Ok(r) = serde_json::from_slice::<VerifyRequest>(body) else {
+                return Ok(None);
+            };
+            serde_json::to_value(crate::proxy::verify(env, &r.credential).await?)?
+        }
+        "grant" => {
+            let Ok(r) = serde_json::from_slice::<GrantRequest>(body) else {
+                return Ok(None);
+            };
+            serde_json::to_value(crate::proxy::job_grant(env, &r.token, &r.repo).await?)?
+        }
+        "deploy_grant" => {
+            let Ok(r) = serde_json::from_slice::<GrantRequest>(body) else {
+                return Ok(None);
+            };
+            serde_json::to_value(crate::land::deploy_caller(env, &r.token, &r.repo).await?)?
+        }
+        _ => return Ok(None),
+    }))
 }
 
 /// A short-lived credential for the call in hand. `linked`: the instance's linked-account
@@ -191,12 +240,25 @@ pub fn purpose_permissions(purpose: &str) -> Option<&'static [&'static str]> {
             "AI Gateway Write",
             "Secrets Store Write",
         ],
-        // Git tokens for the source repository: reading a job's config, pushing notes.
+        // Git tokens for the source repository: reading a job's config, pushing notes; and the
+        // proxy Worker's `/git/`, a git token per request, revoked after.
         "artifacts" => &["Artifacts Read", "Artifacts Write"],
         // A capability's own secrets, set on the secrets page.
         "secrets_store" => &["Secrets Store Write"],
         // The MCP server portal, synced after a setup.
         "mcp_portal" => &["MCP Portals Write"],
+        // The proxy Worker's `/cf/`: every call `wrangler deploy` of a platform Worker makes
+        // (reading and uploading the Worker, with its Secrets Store bindings), the queues it
+        // looks up and its container image and applications; the union of what the deploy
+        // proxy's allowlist names (`pigeon_proxies::cf_proxy::ALLOWED`).
+        "cf_deploy" => &[
+            "Workers Scripts Read",
+            "Workers Scripts Write",
+            "Secrets Store Write",
+            "Queues Read",
+            "Workers Containers Read",
+            "Workers Containers Write",
+        ],
         _ => return None,
     })
 }

@@ -609,6 +609,7 @@ dependencies = [
  "pigeon-contract",
  "pigeon-core",
  "pigeon-models",
+ "pigeon-proxies",
  "rand",
  "rsa",
  "serde",
@@ -700,6 +701,32 @@ dependencies = [
  "pigeon-ci",
  "pigeon-core",
  "pigeon-models",
+ "serde_json",
+ "worker",
+]
+
+[[package]]
+name = "pigeon-proxies"
+version = "0.1.0"
+dependencies = [
+ "futures-channel",
+ "futures-util",
+ "pigeon-contract",
+ "pigeon-core",
+ "serde",
+ "serde_json",
+ "toml",
+ "wasm-streams",
+ "worker",
+]
+
+[[package]]
+name = "pigeon-proxy"
+version = "0.1.0"
+dependencies = [
+ "pigeon-contract",
+ "pigeon-core",
+ "pigeon-proxies",
  "serde_json",
  "worker",
 ]

@@ -95,7 +95,7 @@ Five platform Workers in one repository, named by the person: `pigeon-platform` 
 | ci | `pigeon-ci-gateway` | gateway, scheduler, runner and container, Buildkite setup and webhooks, `ci_*` and `containers_images` | `CiScheduler`, `CiRunner` (+ container) | `BUILDKITE_API_TOKEN`, `CALLER_KEY` |
 | models | `pigeon-model-gateway` | AI Gateway, `models_*`, model jobs | `ModelJobs` | `CALLER_KEY` |
 | sites | `pigeon-sites` | `blog@1` renderer, instance site deploys (render, R2 upload, routes, subdomains), `instance_plan` / `instance_apply` | none | `CALLER_KEY` |
-| proxy | `pigeon-proxy` | `/git/`, `/cf/` on proxy.pigeon.dev | none | decided in phase 6 |
+| proxy | `pigeon-proxy` | `/git/`, `/cf/` on proxy.pigeon.dev | none | `CALLER_KEY` (never the parent token: scoped credentials and checks from core) |
 
 A capability Worker never holds the parent token or a linked account's OAuth tokens. It asks
 core for a short-lived, scoped token through the contract's `credential` op (below). Core mints
@@ -552,6 +552,57 @@ over their in-flight work.
     too, so CI's bindings are not shown as unused.
   - Smoke: the ci scenario checks the gateway's manifest against core's tools.
 
+- 2026-11-22: phase 6 code (track C) built on `claude/track-proxy`. Core's behaviour is
+  unchanged: it still serves proxy.pigeon.dev.
+  - The person's decision: `pigeon-proxy` never holds the parent token. It asks core over
+    `PLATFORM`, signed with `CALLER_KEY`.
+  - `pigeon-proxies` (`src/proxies`, shared): the git and deploy proxies' request handling,
+    moved from pigeon-capabilities, behind a `Host` trait (verify a proxy credential, a job
+    grant, a deploy grant, an account to mint with). Core's host is `proxy::Local` (its
+    Directory, `ci::job_grant`, `land::deploy_caller`, the parent token). The old paths
+    re-export everything, so the Lander and CI are untouched. The built-in policy
+    (`decide`, `request`, `audit_line`) moved to `pigeon_core::policy_file`.
+  - New core ops: `verify {credential}`, `grant {token, repo}`, `deploy_grant {token, repo}`,
+    signed with `CALLER_KEY` for no caller (only these three). New scoped purpose `cf_deploy`:
+    the union of the allowlist's permissions (the smoke suite checks it stays the union).
+  - `pigeon-proxy` (`src/proxy`): keeps each scoped credential until 60 s before it expires and
+    each verified proxy credential 60 s, by its hash (`pigeon_proxies::cache`); never a job or
+    deploy grant. Its `/cf/` calls use the `cf_deploy` token rather than one minted per call.
+  - The map lists `proxy` (`deploy-proxy`, `after = []`) and `src/proxies/*` is shared. Smoke:
+    `proxy_worker_caches_and_core_ops`; 23 scenarios, 13 s. `allowlist.sh` for `src/proxy`:
+    all 16 calls on the allowlist.
+  - Departures:
+    - core's `credential` op still needs a signed caller, so `pigeon-proxy` signs its
+      `credential` requests as itself: a service caller `worker:pigeon-proxy`, acting for no
+      one. It names no person.
+    - a job token whose grant is for another repository now reads "unknown or has expired"
+      (both hosts), since `grant` answers only for the repository asked; still 403.
+    - `setup_proxy_host` takes an optional `worker` (`PublicHost.also`), so the cutover and
+      the rollback need no landing: a broken proxy would block the landing that undoes it.
+      Without the argument it attaches to core, as before.
+    - core does not bind `CALLER_KEY` yet (2c). Until it does, core answers the proxy
+      Worker's ops 500 and the proxy Worker refuses everything but `/health`.
+  - **Cutover**, after `pigeon-proxy` has deployed (its first deploy goes through core's
+    deploy proxy, which allows it from the map) and core binds `CALLER_KEY`. `setup_proxy_host`
+    takes an optional `worker`: `pigeon-platform` (the default, `settings::PROXY_WORKER`) or
+    `pigeon-proxy` (`PROXY_WORKER_NEXT`). No landing is needed to move the host either way.
+    1. Call `setup_proxy_host {"worker": "pigeon-proxy"}`: it attaches proxy.pigeon.dev to
+       `pigeon-proxy`.
+    2. Check: `git ls-remote https://proxy.pigeon.dev/git/pigeon-security/pigeon.git`, a push
+       to a `claude/` branch and its delete, a CI job's fetch (the `smoke` job), and a
+       landing's deploy (`GET /cf/grant`, then the deploy). Audit lines now come from
+       `pigeon-proxy`'s logs.
+    3. Latency: time `git ls-remote` ten times before and after
+       (`for i in $(seq 10); do /usr/bin/time -f %e git ls-remote <remote> >/dev/null; done`).
+       The first request per isolate costs one `verify` and one `credential` round trip to
+       core; later ones within a minute, none beyond core's own. Expect the median within
+       about 50 ms of before; a deploy's `/cf/` calls, about the same.
+    4. Once it holds, land `PROXY_WORKER = PROXY_WORKER_NEXT` (one line, core), so the default
+       names the Worker that serves the host and a later `setup_proxy_host` keeps it there.
+  - **Rollback**: call `setup_proxy_host {"worker": "pigeon-platform"}`. Core never stopped
+    serving the proxies, and the call goes through `/mcp` on platform.pigeon.dev, so it works
+    even when `pigeon-proxy` cannot serve git (and so nothing can land). If step 4 had landed,
+    land it back afterwards.
 - 2026-11-22: phase 1 (1a and 1b) landed together, as landing `xKIrTa8WmsUYZ02v` (main at
   `520e778`).
 - 2026-11-22: the person asked for the remaining Workers in parallel. T0, the shared prep, was

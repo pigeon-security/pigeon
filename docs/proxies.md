@@ -8,7 +8,27 @@ Cloud coding sessions used to reach the Artifacts git host, `api.cloudflare.com`
 
 Now sessions reach git and the Cloudflare API only through pigeon's proxies on `proxy.pigeon.dev`. The proxies hold the real credentials and mint a short-lived one for each request. MCP stays on `platform.pigeon.dev`.
 
-One Worker, `pigeon-platform`, serves both hosts, and the public site on the apex `pigeon.dev` (see `docs/plans/one-worker.md`). On `proxy.pigeon.dev` only `/git/`, `/cf/` and `/health` answer. On any other host, `/git/` and `/cf/` answer 404.
+Today `pigeon-platform` (core) serves both hosts, and the public site on the apex `pigeon.dev` (see `docs/plans/one-worker.md`). On `proxy.pigeon.dev` only `/git/`, `/cf/` and `/health` answer. On any other host, `/git/` and `/cf/` answer 404.
+
+### The proxy Worker
+
+`pigeon-proxy` (`src/proxy`) serves the same proxies with the same code (`src/proxies`), and takes `proxy.pigeon.dev` over at the cutover (`docs/plans/workers-split.md`, phase 6). Until then core serves the host. `pigeon-proxy` answers only `/git/`, `/cf/` and `/health` on `proxy.pigeon.dev`, and 404 to everything else.
+
+It never holds the parent token. It asks core over its `PLATFORM` service binding, signing each request with `CALLER_KEY`:
+
+| Op | What | Kept |
+| --- | --- | --- |
+| `verify {credential}` | who holds a proxy credential | 60 s per isolate, keyed by the credential's hash |
+| `grant {token, repo}` | a CI job token's grant, for this repository | never |
+| `deploy_grant {token, repo}` | the caller a landing's deploy job token stands for | never |
+| `credential {kind: scoped}` | a 15-minute Cloudflare token: purpose `artifacts` for `/git/`, `cf_deploy` for `/cf/` | until 60 s before it expires |
+
+So once `pigeon-proxy` serves the host, **revoking a proxy credential takes up to 60 seconds** to reach it: an isolate that verified the credential in the last minute still accepts it. A new credential works at once (an unknown one is never kept). CI job grants and deploy grants are asked of core on every request.
+
+What else differs from core's proxies:
+
+- `/cf/` calls use the `cf_deploy` token core minted for the Worker, not one minted per call with only that call's permissions. `cf_deploy` is the union of the permissions in the table below. The allowlist and the body rules are the same.
+- `/git/` mints and revokes a git token per request as core does, through the `artifacts` token.
 
 ## The proxy credential
 
@@ -164,7 +184,7 @@ The `PUT` is used when a Durable Object migration is pending, and always when th
 
 The container calls are limited to this Worker's own containers. `{namespace}` must be the Durable Object namespace of one of its container classes (`CiRunner`), which the proxy looks up itself before such a call. The image preparation must name an image in this account's registry (`registry.cloudflare.com/<account>/…`), and an application can only be created for one of those namespaces; the proxy checks both bodies. The queues call checks that each queue the Worker produces to exists; it must name a queue in the proxy's settings (`pigeon-ci-events` today), so it can't list the account's queues.
 
-Each call gets a Cloudflare token with only that call's permissions. The token lives 5 minutes and is revoked before the answer returns.
+Served by core, each call gets a Cloudflare token with only that call's permissions. The token lives 5 minutes and is revoked before the answer returns. Served by `pigeon-proxy`, each call uses its `cf_deploy` token (above).
 
 Outside `/cf/client/v4`, `GET /cf/grant` answers whether the bearer is a CI job token holding the deploy grant of the landing that is deploying its commit: 200 if so, 403 otherwise (a proxy credential included). It passes nothing on; the `deploy` job calls it before its build so a job submitted by hand stops at once.
 
@@ -185,7 +205,7 @@ WRANGLER_SEND_METRICS=false
 
 Wrangler will not start without a token. The value is a placeholder, and the network proxy replaces the header.
 
-If a newer wrangler makes a call outside the list, the deploy fails and names the call. Check what the call does, then add it to `ALLOWED` in `src/capabilities/src/cf_proxy.rs`.
+If a newer wrangler makes a call outside the list, the deploy fails and names the call. Check what the call does, then add it to `ALLOWED` in `src/proxies/src/cf_proxy.rs`, and its permissions to `cf_deploy` in `src/capabilities/src/split.rs`.
 
 ### Checking the allowlist against what runs
 
@@ -282,9 +302,13 @@ Remove `github.com` only after checking that the session's first clone does not 
 
 | Area | Files |
 | --- | --- |
-| Proxy credential, host routing rule, audit line | `src/capabilities/src/proxy.rs` |
-| Git proxy | `src/capabilities/src/git_proxy.rs` |
-| Cloudflare API proxy | `src/capabilities/src/cf_proxy.rs` |
+| Proxy credential checks, host routing rule, audit line | `src/proxies/src/proxy.rs` |
+| Issuing and revoking credentials; core's `Host` (`Local`) | `src/capabilities/src/proxy.rs` |
+| Git proxy | `src/proxies/src/git_proxy.rs` (core's wrapper: `src/capabilities/src/git_proxy.rs`) |
+| Cloudflare API proxy | `src/proxies/src/cf_proxy.rs` (core's wrapper: `src/capabilities/src/cf_proxy.rs`) |
+| The proxy Worker and its `Host` (asking core) | `src/proxy/src/lib.rs` |
+| What the proxy Worker keeps per isolate | `src/proxies/src/cache.rs` |
+| Core's `verify`, `grant`, `deploy_grant` ops and the `cf_deploy` purpose | `src/capabilities/src/split.rs` |
 | Git and pack handling | `src/core/src/git.rs`, `src/core/src/pack.rs` |
 | Host routing | `src/platform/src/lib.rs` |
-| Proxy host and the mirrored branches | `src/platform/src/settings.rs` |
+| Proxy host, the Worker serving it (`PROXY_WORKER`) and the mirrored branches | `src/platform/src/settings.rs` |
