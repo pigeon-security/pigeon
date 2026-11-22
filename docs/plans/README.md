@@ -35,6 +35,7 @@ up to date.
 | [ingest.md](ingest.md) | The data pipeline: content-addressed blobs on R2, Iceberg tables in Basin Catalog as the record (items, sightings, entities, links, classifications, fields, chunks), Vectorize as a derived index, entity resolution, classification at ingest, the hybrid query, B2 backup, costs for 1 TB / 5 TB | Designed |
 | [data-worker.md](data-worker.md) | One data Worker per instance in the instance's own account, reached only through signed calls from core while the account link holds; `data_*` tools in pigeon's MCP behind the portal; willowgraysen; what it needs from the instances planner | Designed |
 | [mail-connectors.md](mail-connectors.md) | Backfill and sync of Gmail (OAuth, Gmail API), Fastmail (JMAP), iCloud (IMAP, app password) and Proton Mail (Bridge through the uploader) as raw MIME into the pipeline | Designed |
+| [overnight-2026-11-22.md](overnight-2026-11-22.md) | The overnight AI agent runs on the person's seven requests: what landed, what is held, what broke in the runs, and the person's follow-ups by workstream | Done (read this first in the morning) |
 
 When a plan's status changes, change it in both places: the plan's first lines and this table.
 
