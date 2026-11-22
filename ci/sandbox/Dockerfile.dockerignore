@@ -1,0 +1,5 @@
+# Only the exec server's sources go into the build context.
+*
+!ci/sandbox/sandboxd/Cargo.toml
+!ci/sandbox/sandboxd/Cargo.lock
+!ci/sandbox/sandboxd/src/**

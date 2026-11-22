@@ -1,0 +1,14 @@
+# pigeon-sandboxd: the exec server inside an AI agent run's sandbox container (ci/sandbox/Dockerfile,
+# docs/plans/ai-agents.md). A native Linux binary, outside the Worker workspace (which builds for
+# wasm), so it has a workspace of its own.
+[package]
+name = "pigeon-sandboxd"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+publish = false
+
+[dependencies]
+serde_json = "1"
+
+[workspace]
