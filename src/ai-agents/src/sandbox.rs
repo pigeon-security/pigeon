@@ -60,6 +60,43 @@ pub async fn tool(env: &Env, run: &str, branch: &str, name: &str, input: &Value)
 /// them in PATH). Until the image's sandboxd runs `bash -c`, the run puts them back.
 pub const RUN_PATH: &str = "export PATH=/usr/local/cargo/bin:/usr/local/node/bin:$PATH; ";
 
+/// Run in /work (by sandboxd's `exec`, before the model has a turn) ahead of each `prepare`.
+/// It empties /work unless it holds a checkout, so a retry after a failed clone or checkout is a
+/// fresh clone; sandboxd removes only `.git` when a checkout fails and leaves the files.
+///
+/// It also installs, for the clone only, a post-checkout hook that turns the partial clone into a
+/// full one while the clone still carries the run's git credential. sandboxd clones with
+/// `--filter=blob:none` and gives the credential to the clone alone, so checking out any other
+/// base (a planner's branch) or resuming the run's own branch fetched the missing blobs without
+/// it and failed. The hook runs inside `git clone`, whose environment holds the credential, and
+/// is removed by [`PREPARE_TEARDOWN`] before the model runs. Until the image's sandboxd clones
+/// in full (ci/sandbox, the next image).
+pub const PREPARE_SETUP: &str = concat!(
+    "set -e; ",
+    "if [ ! -d .git ]; then find . -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +; fi; ",
+    "h=\"$HOME/.pigeon-prepare-hooks\"; mkdir -p \"$h\"; ",
+    "printf '%s\\n' '#!/bin/sh' ",
+    "'[ \"$1\" = 0000000000000000000000000000000000000000 ] || exit 0' ",
+    "'git config --unset-all remote.origin.partialclonefilter || true' ",
+    "'exec git fetch -q --refetch --no-tags origin' > \"$h/post-checkout\"; ",
+    "chmod +x \"$h/post-checkout\"; ",
+    "git config --global core.hooksPath \"$h\""
+);
+
+/// Run after a `prepare` that succeeded: removes [`PREPARE_SETUP`]'s hook.
+pub const PREPARE_TEARDOWN: &str =
+    "git config --global --unset core.hooksPath || true; rm -rf -- \"$HOME/.pigeon-prepare-hooks\"";
+
+/// Why the sandbox did not get ready: the first error (the cause) and, when it differs, the last.
+pub fn not_ready(first: Option<&str>, last: &str) -> String {
+    match first {
+        Some(f) if f != last => {
+            format!("the sandbox did not get ready: {f} (and on the last try: {last})")
+        }
+        _ => format!("the sandbox did not get ready: {last}"),
+    }
+}
+
 /// The server's op for sandbox tool `name`, and the body it takes.
 pub fn op_for(name: &str, input: &Value, branch: &str) -> Option<(&'static str, Value)> {
     Some(match name {
@@ -270,32 +307,65 @@ impl Sandbox {
         if sb.prepared != 0 && containers::running(&self.state) {
             return Ok(json!({ "ready": true }));
         }
-        // The server takes a moment to listen after the container starts.
+        // The server takes a moment to listen after the container starts. Each try first clears
+        // what an earlier failed try left in /work, so a retry is a fresh clone; the first error
+        // is the one that says why, so it is kept and reported with the last.
+        let mut first: Option<String> = None;
         let mut last = String::new();
         for wait in [0u64, 500, 1_000, 2_000, 4_000, 8_000, 15_000] {
             worker::Delay::from(std::time::Duration::from_millis(wait)).await;
-            match self
-                .post(
-                    sb,
-                    "prepare",
-                    &json!({
-                        "repo_url": REPO_URL,
-                        "base": sb.base,
-                        "branch": sb.branch,
-                        "name": format!("pigeon AI agent run {}", sb.run),
-                        "email": "ai-agents@pigeon.dev",
-                    }),
-                )
-                .await
-            {
+            let tried = async {
+                let setup = self
+                    .post(
+                        sb,
+                        "exec",
+                        &json!({ "cmd": PREPARE_SETUP, "timeout_s": 60 }),
+                    )
+                    .await?;
+                if setup["exit"] != 0 {
+                    return Err(bad(format!(
+                        "clearing /work failed: {}",
+                        setup["output"].as_str().unwrap_or_default()
+                    )));
+                }
+                let v = self
+                    .post(
+                        sb,
+                        "prepare",
+                        &json!({
+                            "repo_url": REPO_URL,
+                            "base": sb.base,
+                            "branch": sb.branch,
+                            "name": format!("pigeon AI agent run {}", sb.run),
+                            "email": "ai-agents@pigeon.dev",
+                        }),
+                    )
+                    .await?;
+                let done = self
+                    .post(
+                        sb,
+                        "exec",
+                        &json!({ "cmd": PREPARE_TEARDOWN, "timeout_s": 60 }),
+                    )
+                    .await?;
+                if done["exit"] != 0 {
+                    return Err(bad("removing the prepare hook failed"));
+                }
+                Ok(v)
+            }
+            .await;
+            match tried {
                 Ok(v) => {
                     self.db.exec("UPDATE sb SET prepared = 1", vec![])?;
                     return Ok(v);
                 }
-                Err(e) => last = e.to_string(),
+                Err(e) => {
+                    last = e.to_string();
+                    first.get_or_insert_with(|| last.clone());
+                }
             }
         }
-        Err(bad(format!("the sandbox did not get ready: {last}")))
+        Err(bad(not_ready(first.as_deref(), &last)))
     }
 
     /// Posts op `op` to the container's server.

@@ -2847,6 +2847,7 @@ fn ai_agents_loop_budgets_tools_and_turns() {
     );
     assert_eq!(found, "2 matches\na.rs:1:x\nb.rs:2:y");
     assert_eq!(sandbox::instance("executor"), "standard-4");
+    sandbox_prepare_retry();
     // What a run is told: its branch, the rules, and only tools pigeon has.
     let sys = prompts::system(Role::Executor, "claude/ai-agent-r1");
     assert!(
@@ -6205,4 +6206,81 @@ fn email_parses_a_multipart_message() {
     // mail-parser finds no header section in binary junk, so parse returns NotMime.
     let junk = parse(b"\x00\x01 not mail", Source::Upload { name: None });
     assert!(matches!(junk, Err(Error::NotMime(_))));
+}
+
+/// The sandbox's prepare, retried after a failed first try (overnight 2026-11-22, bug 2): the
+/// Worker's setup empties what that try left in /work, and its hook makes the clone full while
+/// the clone holds the credential, so a checkout of another base needs no fetch afterwards.
+fn sandbox_prepare_retry() {
+    use pigeon_ai_agents::sandbox;
+    let base = std::env::temp_dir().join(format!("pigeon-smoke-sbprep-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let (home, work) = (base.join("home"), base.join("work"));
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&work).unwrap();
+    let origin = repo("sbprep-origin");
+    git(&origin, &["config", "uploadpack.allowFilter", "true"], None);
+    std::fs::write(origin.join("a.txt"), "a\n").unwrap();
+    git(&origin, &["add", "a.txt"], None);
+    commit(&origin, "one");
+    git(&origin, &["checkout", "-q", "-b", "claude/planner"], None);
+    std::fs::write(origin.join("b.txt"), "b\n").unwrap();
+    git(&origin, &["add", "b.txt"], None);
+    commit(&origin, "two");
+    git(&origin, &["checkout", "-q", "main"], None);
+    let sh = |cmd: &str, dir: &Path| {
+        let out = Command::new("bash")
+            .args(["-c", cmd])
+            .current_dir(dir)
+            .env("HOME", &home)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_ALLOW_PROTOCOL", "file")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{cmd}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    // What a failed first try leaves: the checkout's files, no .git.
+    std::fs::write(work.join("a.txt"), "left over\n").unwrap();
+    std::fs::create_dir_all(work.join("src")).unwrap();
+    sh(sandbox::PREPARE_SETUP, &work);
+    assert_eq!(
+        std::fs::read_dir(&work).unwrap().count(),
+        0,
+        "setup empties /work"
+    );
+    let url = format!("file://{}", origin.display());
+    sh(
+        &format!(
+            "git clone -q --no-tags --filter=blob:none -- {url} {}",
+            work.display()
+        ),
+        &base,
+    );
+    // The hook made it a full clone: with the origin gone, the planner's branch still checks out.
+    std::fs::rename(&origin, base.join("gone")).unwrap();
+    sh(
+        "git checkout -q -B claude/exec origin/claude/planner --",
+        &work,
+    );
+    assert!(work.join("b.txt").exists());
+    sh(sandbox::PREPARE_TEARDOWN, &work);
+    assert!(!home.join(".pigeon-prepare-hooks").exists());
+    // A checkout that is there already is kept.
+    sh(sandbox::PREPARE_SETUP, &work);
+    assert!(work.join("b.txt").exists() && work.join(".git").exists());
+    sh(sandbox::PREPARE_TEARDOWN, &work);
+    // The first error is the one reported, with the last.
+    assert_eq!(
+        sandbox::not_ready(Some("git checkout failed: 403"), "git clone failed: exists"),
+        "the sandbox did not get ready: git checkout failed: 403 (and on the last try: git clone failed: exists)"
+    );
+    assert_eq!(
+        sandbox::not_ready(Some("x"), "x"),
+        "the sandbox did not get ready: x"
+    );
+    let _ = std::fs::remove_dir_all(&base);
 }
