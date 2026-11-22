@@ -586,12 +586,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
+name = "pigeon-blog"
+version = "0.1.0"
+dependencies = [
+ "pulldown-cmark",
+ "pulldown-cmark-escape",
+ "serde",
+ "serde_json",
+ "sha2",
+ "toml",
+]
+
+[[package]]
 name = "pigeon-capabilities"
 version = "0.1.0"
 dependencies = [
  "futures-channel",
  "futures-util",
  "p256",
+ "pigeon-blog",
  "pigeon-contract",
  "pigeon-core",
  "rand",
@@ -623,8 +636,6 @@ dependencies = [
  "hmac",
  "miniz_oxide",
  "p256",
- "pulldown-cmark",
- "pulldown-cmark-escape",
  "rsa",
  "serde",
  "serde_json",
@@ -639,6 +650,17 @@ name = "pigeon-platform"
 version = "0.1.0"
 dependencies = [
  "pigeon-capabilities",
+ "pigeon-core",
+ "serde_json",
+ "worker",
+]
+
+[[package]]
+name = "pigeon-sites"
+version = "0.1.0"
+dependencies = [
+ "pigeon-blog",
+ "pigeon-contract",
  "pigeon-core",
  "serde_json",
  "worker",

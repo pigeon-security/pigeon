@@ -1,13 +1,14 @@
 //! The `blog` template and its renderer: a consumer repository (`.pigeon/site.toml`,
 //! `content/posts`, `content/pages`, `static/`) in, a static site out. See `docs/plans/blog.md`.
 //!
-//! Self-contained: it uses no other module of this crate, only `serde`, `serde_json`, `toml`,
-//! `sha2` and `pulldown-cmark`, so it can move to its own crate or Worker as it is.
+//! Its own crate (`pigeon-blog`), owned by the `pigeon-sites` Worker's lane
+//! (docs/plans/workers-split.md); it uses only `serde`, `serde_json`, `toml`, `sha2` and
+//! `pulldown-cmark`, and builds natively for the smoke suite.
 //!
 //! Pure: no I/O, no clock, no environment. The same [`Input`] always renders the same bytes. The
 //! renderer never sees a static file's bytes, only its path: the deploy copies `static/x` to `/x`.
 //!
-//! `blog@1` is noisypigeon's Zola theme `site-template-blog` at 1.0.5 (see `blog/v1/UPSTREAM.md`),
+//! `blog@1` is noisypigeon's Zola theme `site-template-blog` at 1.0.5 (see `v1/UPSTREAM.md`),
 //! with its templates written as Rust functions ([`pages`], [`feeds`]) and its Markdown rendered
 //! as Zola 0.23.6 renders it ([`markdown`]). Its URLs are Zola's, so links to a site built by the
 //! theme keep working.
@@ -30,9 +31,9 @@ pub const VERSION: &str = "1.0.0";
 
 /// The template's stylesheets, byte copies of upstream 1.0.5's, served at `/assets/css/`.
 pub const CSS: [(&str, &str); 3] = [
-    ("main.css", include_str!("blog/v1/main.css")),
-    ("tokens.css", include_str!("blog/v1/tokens.css")),
-    ("pigeon.css", include_str!("blog/v1/pigeon.css")),
+    ("main.css", include_str!("v1/main.css")),
+    ("tokens.css", include_str!("v1/tokens.css")),
+    ("pigeon.css", include_str!("v1/pigeon.css")),
 ];
 
 /// What a deploy hands the renderer.

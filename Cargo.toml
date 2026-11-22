@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["src/core", "src/contract", "src/capabilities", "src/platform"]
+members = ["src/core", "src/contract", "src/capabilities", "src/platform", "src/blog", "src/sites"]
 
 [workspace.package]
 version = "0.1.0"

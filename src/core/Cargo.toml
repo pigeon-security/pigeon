@@ -18,6 +18,4 @@ hmac = "0.12"
 rsa = { version = "0.9", default-features = false, features = ["std"] }
 sha1 = { version = "0.10", default-features = false }
 toml = { version = "0.8", default-features = false, features = ["parse"] }
-pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
-pulldown-cmark-escape = { version = "0.11", default-features = false }
 

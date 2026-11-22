@@ -7,7 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use pigeon_core::blog::{Input, render};
+use pigeon_blog::{Input, render};
 
 fn markdown_files(dir: &Path) -> Vec<(String, String)> {
     let mut out = Vec::new();

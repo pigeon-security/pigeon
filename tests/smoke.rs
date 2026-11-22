@@ -3129,12 +3129,12 @@ fn instance_plans_touch_only_what_pigeon_made() {
 
 // ---- blog: a consumer repository rendered with blog@1 ----
 
-/// The blog renderer (`pigeon_core::blog`): a consumer repository in, a static site out, with
+/// The blog renderer (`pigeon_blog`): a consumer repository in, a static site out, with
 /// Zola's URLs (posts, pages, alias redirects, tags, feed, sitemap), root-relative links, every
 /// problem reported at once, and the same bytes from the same input.
 #[test]
 fn blog_renders_a_consumer_repo() {
-    use pigeon_core::blog::{Input, render};
+    use pigeon_blog::{Input, render};
 
     let site_toml = r#"
 template = "blog@1"
