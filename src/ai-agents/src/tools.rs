@@ -70,6 +70,10 @@ const MAX_CONTENT_BYTES: usize = 1024 * 1024;
 /// Largest `run` command, in bytes (8 KiB).
 const MAX_CMD_BYTES: usize = 8 * 1024;
 
+/// The longest a `run` may take, in seconds: a run's step happens in an alarm, which has 15
+/// minutes of wall time.
+pub const MAX_RUN_S: u64 = 840;
+
 /// Largest `grep` pattern, in bytes.
 const MAX_PATTERN_BYTES: usize = 500;
 
@@ -199,7 +203,7 @@ fn sandbox_definitions() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "cmd": {"type": "string", "description": "The shell command (at most 8 KiB)."},
-                    "timeout_s": {"type": "integer", "minimum": 1, "maximum": 1800, "default": 600, "description": "Seconds before the command is stopped."}
+                    "timeout_s": {"type": "integer", "minimum": 1, "maximum": 840, "default": 600, "description": "Seconds before the command is stopped (14 minutes at most)."}
                 },
                 "required": ["cmd"]
             }),
@@ -498,7 +502,7 @@ pub fn check(role: Role, name: &str, input: &Value) -> Result<(), String> {
         }
         "run" => {
             need_text(obj, "cmd", MAX_CMD_BYTES)?;
-            get_int(obj, "timeout_s", 1, 1800)?;
+            get_int(obj, "timeout_s", 1, MAX_RUN_S)?;
             Ok(())
         }
         "commit_push" => {

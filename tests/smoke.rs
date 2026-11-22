@@ -1836,6 +1836,7 @@ fn ai_agents_loop_budgets_tools_and_turns() {
         stop_reason: None,
         reported: None,
         nudges: 0,
+        user_last: false,
         waiting: None,
     };
     assert_eq!(run::next(&view(State::Queued)), Action::Prepare);
@@ -2256,7 +2257,7 @@ fn ai_agents_loop_budgets_tools_and_turns() {
         )
         .contains("same")
     );
-    assert!(refused("run", json!({ "cmd": "cargo test", "timeout_s": 3600 })).contains("1800"));
+    assert!(refused("run", json!({ "cmd": "cargo test", "timeout_s": 900 })).contains("840"));
     assert!(refused("report", json!({ "state": "maybe", "summary": "s" })).contains("done"));
     assert!(
         refused("land", json!({ "branch": "claude/x" })).contains("not one of this run's tools")
@@ -2391,6 +2392,91 @@ fn ai_agents_loop_budgets_tools_and_turns() {
             .unwrap()
             .contains("[tool run: {}]")
     );
+    // ---- the Worker side's pure parts ----
+    use pigeon_ai_agents::{object, prompts, sandbox, service};
+    // A passkey wait, read from dispatch's own words.
+    let refusal = "`deploy_token` needs the person's passkey for this call: approval `aP3x_9-k` waits on the console's Approvals tab until 14:32 UTC. Once approved, call `deploy_token` again with the same arguments and \"approval\": \"aP3x_9-k\"; `approvals_status` says where it stands.";
+    assert_eq!(object::approval_id(refusal).as_deref(), Some("aP3x_9-k"));
+    assert_eq!(object::approval_id("ci_submit: no such job"), None);
+    assert_eq!(object::role_named("mechanical"), Role::Mechanical);
+    // Starting: an executor by default; planners later; a brief is required; base is checked.
+    let (role, brief, base, b) = service::start_args(&json!({ "brief": " fix it " })).unwrap();
+    assert_eq!(
+        (role, brief.as_str(), base.as_str(), b.turns),
+        (Role::Executor, "fix it", "main", 60)
+    );
+    assert!(
+        service::start_args(&json!({ "brief": "x", "role": "planner" }))
+            .unwrap_err()
+            .contains("phase 4")
+    );
+    assert!(
+        service::start_args(&json!({}))
+            .unwrap_err()
+            .contains("brief")
+    );
+    assert!(service::start_args(&json!({ "brief": "x", "base": "main..evil" })).is_err());
+    assert!(service::start_args(&json!({ "brief": "x", "budget": { "cost_usd": 500 } })).is_err());
+    assert_eq!(service::branch("r1"), "claude/ai-agent-r1");
+    // The policy's session branches cover a run's branch: no new rule.
+    let policy = pigeon_core::policy::parse(pigeon_capabilities::policy::TEXT).unwrap();
+    let push = policy.evaluate(
+        &vars(),
+        &request("push_branch", &service::branch("r1"), None),
+    );
+    assert_eq!(push.rule.as_deref(), Some("session-branches"));
+    // Sandbox tools map onto the server's ops; a commit pushes the run's branch only.
+    let (op, body) = sandbox::op_for(
+        "commit_push",
+        &json!({ "message": "m", "branch": "main" }),
+        "claude/ai-agent-r1",
+    )
+    .unwrap();
+    assert_eq!(
+        (op, body["branch"].as_str()),
+        ("commit_push", Some("claude/ai-agent-r1"))
+    );
+    assert_eq!(
+        sandbox::op_for("run", &json!({ "cmd": "ls" }), "b")
+            .unwrap()
+            .0,
+        "exec"
+    );
+    assert!(sandbox::op_for("land", &json!({}), "b").is_none());
+    let shown = sandbox::shown(
+        "exec",
+        &json!({ "exit": 0, "ms": 1200, "bytes": 3, "saved_at": "/tmp/out/1.log", "output": "ok\n", "timed_out": false }),
+    );
+    assert!(shown.starts_with("exit 0 after 1200 ms") && shown.contains("/tmp/out/1.log"));
+    assert_eq!(sandbox::instance("executor"), "standard-4");
+    // What a run is told: its branch, the rules, and only tools pigeon has.
+    let sys = prompts::system(Role::Executor, "claude/ai-agent-r1");
+    assert!(
+        sys.contains("claude/ai-agent-r1")
+            && sys.contains("tests/smoke.rs")
+            && sys.contains("never land")
+    );
+    assert!(
+        prompts::first_message(
+            &json!({ "brief": "do x", "base": "main", "branch": "claude/ai-agent-r1" })
+        )
+        .contains("do x")
+    );
+    let offered = prompts::pigeon_tools();
+    assert!(
+        tools::PLANNER_PIGEON
+            .iter()
+            .all(|t| offered.iter().any(|(n, _, _)| n == t)),
+        "every listed tool has a schema"
+    );
+    assert!(prompts::step_line("run", &json!({ "cmd": "a\nb" })).starts_with("run: a b"));
+    assert!(
+        prompts::step_line("run", &json!({ "cmd": "x".repeat(500) }))
+            .chars()
+            .count()
+            <= 120
+    );
+
     // Falling back to another model drops thinking it cannot read.
     let thought = [
         json!({ "role": "assistant", "content": [{ "type": "thinking", "thinking": "t", "signature": "s" }] }),

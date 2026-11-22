@@ -209,3 +209,57 @@ pub async fn destroy(state: &State, reason: &str) -> worker::Result<()> {
     }
     Ok(())
 }
+
+/// Posts `body` (JSON text) to `path` on the container's `port`, with `headers`; answers the
+/// status and the body as text. For a server the container runs, such as an AI agent sandbox's
+/// (`docs/plans/ai-agents.md`). An error when there is no container or the port cannot be reached.
+pub async fn post(
+    state: &State,
+    port: u16,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: &str,
+) -> worker::Result<(u16, String)> {
+    let container = container(state).ok_or_else(|| fail("this object has no container"))?;
+    let tcp = method(&container, "getTcpPort")?
+        .call1(&container, &JsValue::from_f64(f64::from(port)))
+        .map_err(|e| {
+            fail(format!(
+                "container port {port} unavailable: {}",
+                message(&e)
+            ))
+        })?;
+    let h = Object::new();
+    for (name, value) in headers {
+        set(&h, name, &JsValue::from_str(value))?;
+    }
+    set(&h, "Content-Type", &JsValue::from_str("application/json"))?;
+    let init = Object::new();
+    set(&init, "method", &JsValue::from_str("POST"))?;
+    set(&init, "headers", &h)?;
+    set(&init, "body", &JsValue::from_str(body))?;
+    let url = format!("http://container{path}");
+    let promise = method(&tcp, "fetch")?
+        .call2(&tcp, &JsValue::from_str(&url), &init)
+        .map_err(|e| fail(format!("container fetch failed: {}", message(&e))))?
+        .dyn_into::<Promise>()
+        .map_err(|_| fail("container fetch did not return a promise"))?;
+    let response = JsFuture::from(promise)
+        .await
+        .map_err(|e| fail(format!("container fetch failed: {}", message(&e))))?;
+    let status = Reflect::get(&response, &"status".into())
+        .ok()
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0) as u16;
+    let text = method(&response, "text")?
+        .call0(&response)
+        .map_err(|e| fail(format!("container answer unreadable: {}", message(&e))))?
+        .dyn_into::<Promise>()
+        .map_err(|_| fail("container answer unreadable"))?;
+    let text = JsFuture::from(text)
+        .await
+        .map_err(|e| fail(format!("container answer unreadable: {}", message(&e))))?
+        .as_string()
+        .unwrap_or_default();
+    Ok((status, text))
+}

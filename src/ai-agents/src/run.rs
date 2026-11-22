@@ -164,6 +164,9 @@ pub struct View<'a> {
     pub reported: Option<State>,
     /// How many times it was reminded to report.
     pub nudges: u32,
+    /// Whether the last message is the user's (a brief, results, a reminder, a summary): the
+    /// model's turn is next.
+    pub user_last: bool,
     /// What it waits for, when waiting.
     pub waiting: Option<&'a Wait>,
 }
@@ -282,8 +285,8 @@ pub fn next(v: &View) -> Action {
     if let Some(state) = v.reported {
         return Action::End(state);
     }
-    if v.turns == 0 || !v.calls.is_empty() {
-        // The first turn, or the results of the last turn's calls are in.
+    if v.turns == 0 || !v.calls.is_empty() || v.user_last {
+        // The first turn, the results of the last turn's calls, or a reminder: the model's turn.
         return Action::Turn;
     }
     // The model stopped without calling a tool and without reporting.

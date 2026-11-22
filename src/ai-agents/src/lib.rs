@@ -3,19 +3,29 @@
 //! turn calls (in its sandbox, through pigeon's dispatch, or itself), and goes on until it
 //! reports, is stopped or runs out of budget.
 //!
-//! This crate is the loop's logic, pure: no I/O and no clock, so the smoke suite tests it
-//! natively. The Durable Object that drives a run, its sandbox and the Worker come later
-//! (phase 2's Worker side) and only carry out what [`run::next`] decides.
+//! The loop's logic is pure (no I/O, no clock), so the smoke suite tests it natively:
 //!
 //! - [`run`]: a run's states and the next action, from what the run knows.
 //! - [`budget`]: budgets per run, what is spent, and model prices.
 //! - [`transcript`]: the next turn's request, tool results, compaction.
 //! - [`tools`]: the tools each role is offered, and each call's checks.
+//! - [`prompts`]: what a run is told.
+//!
+//! The Worker side carries out what [`run::next`] decides:
+//!
+//! - [`object`]: the runs' Durable Object (the index, and one object per run).
+//! - [`sandbox`]: a run's sandbox, a container with `pigeon-sandboxd` in it.
+//! - [`service`]: the `agents_*` tools behind the contract, as the `pigeon-ai-agents` Worker
+//!   serves them.
 
 use serde::{Deserialize, Serialize};
 
 pub mod budget;
+pub mod object;
+pub mod prompts;
 pub mod run;
+pub mod sandbox;
+pub mod service;
 pub mod tools;
 pub mod transcript;
 

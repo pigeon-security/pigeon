@@ -1,0 +1,46 @@
+name = "pigeon-ai-agents"
+account_id = "4f94676cb2cbe46fd985b089ca97ea27"
+main = "build/worker/shim.mjs"
+compatibility_date = "2026-11-01"
+# A capability Worker (docs/plans/workers-split.md, docs/plans/ai-agents.md): no public surface.
+# Core (pigeon-platform) reaches it over a service binding, and it reaches core over PLATFORM.
+workers_dev = false
+preview_urls = false
+
+[build]
+command = "cargo install -q worker-build@0.9.0 && worker-build --release"
+
+[vars]
+CF_ACCOUNT_ID = "4f94676cb2cbe46fd985b089ca97ea27"
+
+# The key core signs callers with, made once by core's `workers_setup`.
+[[secrets_store_secrets]]
+binding = "CALLER_KEY"
+store_id = "5185c227b9f34b4291045175695b78ec"
+secret_name = "CALLER_KEY"
+
+# Core: its tools through its gate (models, CI, the policy), as each run's caller.
+[[services]]
+binding = "PLATFORM"
+service = "pigeon-platform"
+
+[durable_objects]
+bindings = [
+  { name = "AI_AGENT_RUNS", class_name = "AiAgentRuns" },
+  { name = "SANDBOXES", class_name = "Sandbox" },
+]
+
+# Runs: an index object and one object per run, whose alarm takes the run's steps.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["AiAgentRuns", "Sandbox"]
+
+# A run's sandbox: the CI base image with pigeon-sandboxd (ci/sandbox/Dockerfile). The image's
+# digest is pinned once it is pushed, as the CI base image's is.
+[[containers]]
+class_name = "Sandbox"
+scheduling_policy = "durable_object"
+max_instances = 4
+
+[containers.images.sandbox]
+image = "registry.cloudflare.com/4f94676cb2cbe46fd985b089ca97ea27/pigeon-ai-agent-sandbox:unpushed"
