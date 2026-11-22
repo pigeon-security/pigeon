@@ -378,12 +378,47 @@ async fn observe(account: &pigeon_core::Account, instance: &Instance) -> Result<
         Err(e) if workers::is_not_found(&e.to_string()) || e.to_string().contains(": 404:") => None,
         Err(e) => return Err(e),
     };
+    let mut domains = Vec::new();
+    for t in site.map(|s| s.targets.as_slice()).unwrap_or_default() {
+        let record::Target::Domain { hostname } = t else {
+            continue;
+        };
+        let zone = instance
+            .zones
+            .iter()
+            .filter(|z| hostname == *z || hostname.ends_with(&format!(".{z}")))
+            .max_by_key(|z| z.len());
+        let zone_id = match zone {
+            Some(z) => {
+                let path = format!("/zones?account.id={}&name={z}", account.id);
+                let found = call(token, Method::Get, &path, None).await?;
+                found
+                    .as_array()
+                    .and_then(|a| a.first())
+                    .and_then(|z| z["id"].as_str())
+                    .map(str::to_string)
+            }
+            None => None,
+        };
+        let attached = workers::custom_domains(account, hostname).await?;
+        let service = attached
+            .iter()
+            .find(|d| d["hostname"].as_str() == Some(hostname))
+            .and_then(|d| d["service"].as_str())
+            .map(str::to_string);
+        domains.push(plan::SeenDomain {
+            hostname: hostname.clone(),
+            zone_id,
+            service,
+        });
+    }
     Ok(plan::Observed {
         account_id: account.id.clone(),
         bucket_exists,
         worker_exists,
         workers_dev,
         account_subdomain,
+        domains,
     })
 }
 
@@ -558,6 +593,14 @@ impl Instances {
                 plan::Step::EnableWorkersDev { name } => {
                     let url = workers::enable_workers_dev(&account, name).await?;
                     format!("preview at {url}")
+                }
+                plan::Step::AttachDomain {
+                    hostname,
+                    zone_id,
+                    worker,
+                } => {
+                    pigeon_core::custom_domain::attach(&account, zone_id, hostname, worker).await?;
+                    format!("{hostname} is served by Worker {worker}")
                 }
                 _ => continue,
             };

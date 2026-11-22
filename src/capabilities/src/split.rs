@@ -158,6 +158,20 @@ async fn credential(cx: &Context<'_>, r: &CredentialRequest) -> Result<Value> {
                 expires_at: now_ms() + LINKED_USE_MS,
             })?)
         }
+        "github" => {
+            let instance = r
+                .instance
+                .as_deref()
+                .ok_or_else(|| bad("a github credential names its instance"))?;
+            // GitHub's own expiry (an hour) is later; the token is used for one call, as a
+            // linked one is.
+            let (token, _) = crate::github::installation_token(cx.env, instance).await?;
+            Ok(serde_json::to_value(Credential {
+                token,
+                account_id: String::new(),
+                expires_at: now_ms() + LINKED_USE_MS,
+            })?)
+        }
         other => Err(bad(&format!("no credential of kind `{other}`"))),
     }
 }

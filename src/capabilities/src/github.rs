@@ -1,0 +1,270 @@
+//! The GitHub App: pigeon reads an instance's repository and hears its pushes as one App
+//! (`GITHUB_APP_ID` and `GITHUB_APP_CLIENT_ID` in the Worker's vars name it; its private key and webhook secret are Secrets Store secrets the
+//! person sets on the Access tab). The key never leaves core: other Workers get a short-lived
+//! installation token, narrowed to one instance's repository, through [`installation_token`].
+//! `/github/hook` checks each delivery's `X-Hub-Signature-256` before reading it, accepts pushes
+//! only from the installation an instance's record names, and records the latest push per
+//! instance. Starting a deploy from a push comes with the sites Worker's `site_deploy`.
+
+use pigeon_core::github_app as app;
+use pigeon_core::mcp::Tool;
+use pigeon_core::secrets_store;
+use serde_json::{Value, json};
+use worker::{Env, Error, Method, Request, Response, Result};
+
+use crate::expiry::Expiry;
+use crate::instances::{self, record::RepoRef};
+use crate::users::directory;
+use crate::{Call, Capability, Context, Expiring, Serve, Slot};
+
+/// The App's private key, the `.pem` GitHub generated.
+pub const PRIVATE_KEY: &str = "GITHUB_APP_PRIVATE_KEY";
+/// The App's webhook secret.
+pub const WEBHOOK_SECRET: &str = "GITHUB_APP_WEBHOOK_SECRET";
+/// What an installation token may do: read the repository, and record deployments.
+pub const PERMISSIONS: [(&str, &str); 2] = [("contents", "read"), ("deployments", "write")];
+/// How long a recorded push is kept.
+const PUSH_KEPT_MS: i64 = 90 * 24 * 3_600_000;
+
+/// The GitHub App capability.
+pub struct Github;
+
+/// The App's numeric id and client id, from the Worker's vars.
+pub fn ids(env: &Env) -> Result<(u64, String)> {
+    let id = env
+        .var("GITHUB_APP_ID")?
+        .to_string()
+        .parse()
+        .map_err(|_| bad("GITHUB_APP_ID is not a number"))?;
+    Ok((id, env.var("GITHUB_APP_CLIENT_ID")?.to_string()))
+}
+
+fn bad(why: &str) -> Error {
+    Error::RustError(why.to_string())
+}
+
+/// A secret through its binding; `None` until it is set and bound.
+async fn secret(env: &Env, name: &str) -> Option<String> {
+    let binding = env.secret_store(name).ok()?;
+    secrets_store::read(&binding).await.ok().flatten()
+}
+
+/// A JWT for the App, signed with `pem`.
+async fn jwt(pem: &str, client_id: &str) -> Result<String> {
+    let der = app::private_key_der(pem)
+        .ok_or_else(|| bad("that is not a PEM private key (BEGIN RSA PRIVATE KEY)"))?;
+    app::sign_jwt(&der, client_id, worker::Date::now().as_millis() / 1000).await
+}
+
+/// An installation token for `instance`'s repository: at most an hour, that repository only,
+/// with [`PERMISSIONS`]. Answers the token and its expiry (ISO 8601).
+pub async fn installation_token(env: &Env, instance: &str) -> Result<(String, String)> {
+    let (_, client_id) = ids(env)?;
+    let record = instances::one(env, instance)
+        .await?
+        .ok_or_else(|| bad(&format!("there is no instance {instance}")))?;
+    let Some(RepoRef::Github {
+        full_name,
+        installation: Some(installation),
+    }) = &record.repo
+    else {
+        return Err(bad(&format!(
+            "instance {instance} names no GitHub repository with an App installation"
+        )));
+    };
+    let pem = secret(env, PRIVATE_KEY)
+        .await
+        .ok_or_else(|| bad("the GitHub App's private key is not set up yet"))?;
+    let jwt = jwt(&pem, &client_id).await?;
+    let body = app::token_request(&[full_name.as_str()], &PERMISSIONS);
+    let t = app::installation_token(&jwt, *installation, &body).await?;
+    Ok((t.token, t.expires_at))
+}
+
+/// The Directory key of `instance`'s latest push.
+pub fn push_key(instance: &str) -> String {
+    format!("github:push:{instance}")
+}
+
+/// The instance whose record names `repo` (any case) and `installation`, if one does.
+pub fn instance_for<'a>(
+    records: &'a [instances::record::Instance],
+    repo: &str,
+    installation: u64,
+) -> Option<&'a instances::record::Instance> {
+    records.iter().find(|i| {
+        matches!(&i.repo, Some(RepoRef::Github { full_name, installation: Some(n) })
+            if full_name.eq_ignore_ascii_case(repo) && *n == installation)
+    })
+}
+
+fn answer(status: u16, body: Value) -> Result<Response> {
+    Ok(Response::from_json(&body)?.with_status(status))
+}
+
+impl Github {
+    async fn hook(&self, cx: &Context<'_>, mut req: Request) -> Result<Response> {
+        let Some(key) = secret(cx.env, WEBHOOK_SECRET).await else {
+            return answer(
+                503,
+                json!({ "error": "the webhook secret is not set up yet" }),
+            );
+        };
+        let signature = req.headers().get("X-Hub-Signature-256")?;
+        let event = req.headers().get("X-GitHub-Event")?;
+        let body = req.bytes().await?;
+        if !app::verify_webhook(key.as_bytes(), &body, signature.as_deref()) {
+            return answer(401, json!({ "error": "the signature does not match" }));
+        }
+        if event.as_deref() == Some("ping") {
+            return answer(200, json!({ "ok": "pong" }));
+        }
+        let push = match app::read_push(event.as_deref(), &body) {
+            Ok(Some(p)) => p,
+            Ok(None) => return answer(202, json!({ "ignored": event })),
+            Err(why) => return answer(400, json!({ "error": why })),
+        };
+        let records = instances::all(cx.env).await?;
+        let Some(instance) = instance_for(&records, &push.repo, push.installation) else {
+            return answer(
+                202,
+                json!({ "ignored": "no instance names this repository and installation" }),
+            );
+        };
+        let at = worker::Date::now().as_millis();
+        let kept = json!({
+            "commit": push.after, "ref": push.git_ref, "deleted": push.deleted,
+            "message": push.head_message, "at_ms": at,
+        });
+        directory(
+            cx.env,
+            "setting.put",
+            json!({ "key": push_key(&instance.id), "value": kept.to_string(), "ttl_ms": PUSH_KEPT_MS }),
+        )
+        .await?;
+        answer(
+            202,
+            json!({
+                "recorded": instance.id,
+                "commit": push.after,
+                "deploy": "not started: deploys start once the sites Worker's site_deploy is live",
+            }),
+        )
+    }
+
+    /// `github_status`: the App, and each GitHub instance's installation and latest push.
+    async fn status(&self, cx: &Context<'_>) -> Result<Value> {
+        let mut out = Vec::new();
+        for i in instances::all(cx.env).await? {
+            let Some(RepoRef::Github {
+                full_name,
+                installation,
+            }) = &i.repo
+            else {
+                continue;
+            };
+            let push =
+                match directory(cx.env, "setting.get", json!({ "key": push_key(&i.id) })).await? {
+                    Value::String(t) => serde_json::from_str(&t).unwrap_or(Value::Null),
+                    _ => Value::Null,
+                };
+            out.push(json!({ "instance": i.id, "repo": full_name,
+                "installation": installation, "latest_push": push }));
+        }
+        Ok(json!({
+            "app_id": ids(cx.env)?.0,
+            "key_set": secret(cx.env, PRIVATE_KEY).await.is_some(),
+            "webhook_secret_set": secret(cx.env, WEBHOOK_SECRET).await.is_some(),
+            "instances": out,
+        }))
+    }
+}
+
+impl Capability for Github {
+    fn name(&self) -> &'static str {
+        "github"
+    }
+
+    fn tools(&self) -> Vec<Tool> {
+        vec![Tool {
+            name: "github_status",
+            description: "The GitHub App: whether its key and webhook secret are set, and each \
+                          instance's repository, installation and latest push. Never a secret.",
+            input_schema: json!({ "type": "object", "properties": {} }),
+        }]
+    }
+
+    fn call<'a>(&'a self, cx: &'a Context<'a>, tool: &'a str, _args: &'a Value) -> Call<'a> {
+        Box::pin(async move {
+            match tool {
+                "github_status" => self.status(cx).await,
+                other => Err(crate::unknown(other)),
+            }
+        })
+    }
+
+    fn routes(&self) -> Vec<&'static str> {
+        vec!["/github/"]
+    }
+
+    fn fetch<'a>(&'a self, cx: &'a Context<'a>, req: Request) -> Serve<'a> {
+        Box::pin(async move {
+            if req.method() == Method::Post && req.path() == "/github/hook" {
+                return self.hook(cx, req).await;
+            }
+            Response::error("not found", 404)
+        })
+    }
+
+    fn secrets(&self) -> Vec<Slot> {
+        vec![
+            Slot {
+                name: PRIVATE_KEY.into(),
+                purpose: "The GitHub App's private key (the App's settings, Private keys, \
+                          Generate a private key). Paste the whole .pem file, then delete the \
+                          download. pigeon checks it signs in as the App before keeping it."
+                    .into(),
+                scopes: &[secrets_store::WORKERS],
+            },
+            Slot {
+                name: WEBHOOK_SECRET.into(),
+                purpose: "The GitHub App's webhook secret: a long random value, entered both \
+                          here and in the App's settings (Webhook secret), with the webhook URL \
+                          https://platform.pigeon.dev/github/hook and the Push event."
+                    .into(),
+                scopes: &[secrets_store::WORKERS],
+            },
+        ]
+    }
+
+    fn check_secret<'a>(&'a self, cx: &'a Context<'a>, name: &'a str, value: &'a str) -> Call<'a> {
+        Box::pin(async move {
+            if name == WEBHOOK_SECRET {
+                if value.trim().len() < 20 {
+                    return Err(bad("use a random value of at least 20 characters"));
+                }
+                return Ok(Value::String("long enough".into()));
+            }
+            if name != PRIVATE_KEY {
+                return Ok(Value::String("not checked".into()));
+            }
+            let (app_id, client_id) = ids(cx.env)?;
+            let jwt = jwt(value, &client_id).await?;
+            let found = app::app(&jwt).await?;
+            if found["id"].as_u64() != Some(app_id) {
+                return Err(bad(&format!(
+                    "this key signs in as App {}, not App {app_id}",
+                    found["id"]
+                )));
+            }
+            Ok(Value::String(format!(
+                "signs in as App {app_id} ({})",
+                found["slug"].as_str().unwrap_or("")
+            )))
+        })
+    }
+
+    fn secret_expiry<'a>(&'a self, _cx: &'a Context<'a>, _name: &'a str) -> Expiring<'a> {
+        Box::pin(async { Ok(Expiry::Never) })
+    }
+}

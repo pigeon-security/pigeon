@@ -166,6 +166,9 @@
         el("code", { text: t.route }),
         t.enabled ? ") — on" : ") — off until the cutover");
     }
+    if (t.kind === "domain") {
+      return el("li", {}, el("code", { text: t.hostname }), " (Workers Custom Domain)");
+    }
     if (t.kind === "subdomain") {
       return el("li", {},
         el("code", { text: t.label }),

@@ -41,6 +41,18 @@ pub struct Observed {
     pub workers_dev: Option<bool>,
     /// The account's workers.dev subdomain, if it has one.
     pub account_subdomain: Option<String>,
+    /// Each Domain target's hostname: its zone's id (if the zone is in the account) and the
+    /// Worker its custom domain serves now, if any.
+    #[serde(default)]
+    pub domains: Vec<SeenDomain>,
+}
+
+/// A Domain target's hostname as the account has it.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct SeenDomain {
+    pub hostname: String,
+    pub zone_id: Option<String>,
+    pub service: Option<String>,
 }
 
 /// One step of a plan.
@@ -64,6 +76,13 @@ pub enum Step {
     },
     /// Turn on the Worker's workers.dev address, the preview.
     EnableWorkersDev { name: String },
+    /// Serve a hostname from the Worker as a Workers Custom Domain; Cloudflare makes its DNS
+    /// record and certificate.
+    AttachDomain {
+        hostname: String,
+        zone_id: String,
+        worker: String,
+    },
     /// Something with pigeon's name that pigeon did not make: left alone, and the plan stops.
     Conflict {
         what: String,
@@ -79,7 +98,10 @@ impl Step {
     pub fn changes(&self) -> bool {
         matches!(
             self,
-            Step::CreateBucket { .. } | Step::UploadWorker { .. } | Step::EnableWorkersDev { .. }
+            Step::CreateBucket { .. }
+                | Step::UploadWorker { .. }
+                | Step::EnableWorkersDev { .. }
+                | Step::AttachDomain { .. }
         )
     }
 
@@ -182,6 +204,37 @@ pub fn plan(instance: &Instance, seen: &Observed, ledger: &Ledger) -> Vec<Step> 
             },
         });
     }
+    for target in &site.targets {
+        let super::record::Target::Domain { hostname } = target else {
+            continue;
+        };
+        let seen_domain = seen.domains.iter().find(|d| &d.hostname == hostname);
+        steps.push(match seen_domain {
+            Some(SeenDomain {
+                service: Some(s), ..
+            }) if s == worker => Step::Ok {
+                what: "custom domain".into(),
+                name: hostname.clone(),
+            },
+            Some(SeenDomain {
+                service: Some(s), ..
+            }) => Step::Conflict {
+                what: "custom domain".into(),
+                name: hostname.clone(),
+                why: format!("it is already served by Worker {s}"),
+            },
+            Some(SeenDomain {
+                zone_id: Some(z), ..
+            }) => Step::AttachDomain {
+                hostname: hostname.clone(),
+                zone_id: z.clone(),
+                worker: worker.into(),
+            },
+            _ => Step::Blocked {
+                why: format!("the zone of {hostname} is not in the linked account"),
+            },
+        });
+    }
     steps
 }
 
@@ -240,6 +293,12 @@ pub fn describe(steps: &[Step]) -> Vec<Value> {
                     "turn on {name}'s workers.dev address (the preview)"
                 ))
             }
+            Step::AttachDomain {
+                hostname, worker, ..
+            } => json!(format!(
+                "serve {hostname} from Worker {worker} as a Workers Custom Domain; Cloudflare \
+                 creates its DNS record and certificate"
+            )),
             Step::Conflict { what, name, why } => {
                 json!(format!(
                     "stop: {what} {name}: {why}; pigeon leaves it alone"

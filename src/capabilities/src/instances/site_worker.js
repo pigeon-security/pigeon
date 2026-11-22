@@ -38,9 +38,15 @@ export default {
     if (request.method !== "GET" && request.method !== "HEAD") {
       return plain(405, "Method not allowed.", { allow: "GET, HEAD" });
     }
+    const url = new URL(request.url);
+    // www is served as a redirect to the apex, so the site has one address.
+    if (url.hostname.startsWith("www.")) {
+      url.hostname = url.hostname.slice(4);
+      return Response.redirect(url.toString(), 301);
+    }
     let path;
     try {
-      path = decodeURIComponent(new URL(request.url).pathname);
+      path = decodeURIComponent(url.pathname);
     } catch {
       return plain(400, "Bad path.");
     }

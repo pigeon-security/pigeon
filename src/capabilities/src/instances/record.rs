@@ -118,6 +118,12 @@ pub enum Target {
         #[serde(default)]
         enabled: bool,
     },
+    /// A hostname in one of the instance zones, served by the instance's Worker as a Workers
+    /// Custom Domain: Cloudflare creates and owns its DNS record and certificate.
+    Domain {
+        /// The full hostname.
+        hostname: String,
+    },
     /// A subdomain of the platform zone.
     Subdomain {
         /// The single DNS label.
@@ -433,6 +439,21 @@ fn check_target(
             if !route.starts_with(&format!("{hostname}/")) {
                 problems.push(format!(
                     "The {path}.route \"{route}\" must start with \"{hostname}/\"."
+                ));
+            }
+        }
+        Target::Domain { hostname } => {
+            if !dns_name(hostname) {
+                problems.push(format!(
+                    "The {path}.hostname \"{hostname}\" is not a valid DNS name."
+                ));
+            } else if !instance
+                .zones
+                .iter()
+                .any(|z| hostname == z || hostname.ends_with(&format!(".{z}")))
+            {
+                problems.push(format!(
+                    "The {path}.hostname: hostname {hostname} is not in this instance's zones."
                 ));
             }
         }

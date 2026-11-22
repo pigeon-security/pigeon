@@ -415,6 +415,12 @@ pub async fn installation_token(
     }
 }
 
+/// The App itself, as GitHub describes it to the App's JWT: answers its `id`, `slug` and the
+/// rest. A key that signs a JWT GitHub accepts here belongs to that App.
+pub async fn app(jwt: &str) -> Result<Value> {
+    api("Bearer", jwt, Method::Get, "/app", None).await
+}
+
 /// Creates a deployment and answers its id.
 ///
 /// GitHub answers 202 without an id when it merged the base branch instead

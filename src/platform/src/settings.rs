@@ -13,6 +13,7 @@ use pigeon_capabilities::console::Console;
 use pigeon_capabilities::deploys::Deploys;
 use pigeon_capabilities::dispatch::Dispatch;
 use pigeon_capabilities::git_proxy::GitProxy;
+use pigeon_capabilities::github::Github;
 use pigeon_capabilities::images::Images;
 use pigeon_capabilities::instances::Instances;
 use pigeon_capabilities::land::{self, Land};
@@ -235,6 +236,8 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
         Box::new(Dispatch),
         // The capability Workers: the caller key's setup and asking their manifests again.
         Box::new(Split { bindings: BINDINGS }),
+        // The GitHub App: its key and webhook secret, /github/hook, installation tokens.
+        Box::new(Github),
         Box::new(Architecture),
         // Instances: what pigeon runs, here and in linked accounts. Only their shape is code;
         // every value is data a person approves on the console with their passkey.

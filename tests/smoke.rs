@@ -3050,7 +3050,7 @@ fn linking_a_cloudflare_account() {
 #[test]
 fn instance_plans_touch_only_what_pigeon_made() {
     use pigeon_capabilities::instances::plan::{
-        Ledger, Observed, Step, describe, digest, module_digest, plan, record,
+        Ledger, Observed, SeenDomain, Step, describe, digest, module_digest, plan, record,
     };
     use pigeon_capabilities::instances::record::Instance;
 
@@ -3071,6 +3071,7 @@ fn instance_plans_touch_only_what_pigeon_made() {
         worker_exists: worker,
         workers_dev: dev,
         account_subdomain: sub.map(str::to_string),
+        domains: vec![],
     };
     let tags = |steps: &[Step]| -> Vec<String> {
         steps
@@ -3119,6 +3120,51 @@ fn instance_plans_touch_only_what_pigeon_made() {
     // No workers.dev subdomain on the account: blocked, for the person.
     let blocked = plan(&inst, &seen(false, false, None, None), &empty);
     assert_eq!(tags(&blocked)[2], "blocked");
+
+    // A Domain target: attached when its zone is there and nothing serves it; ours reads back
+    // unchanged; another Worker's is a conflict.
+    let mut with_domain = inst.clone();
+    with_domain.sites[0].targets.push(
+        serde_json::from_value(json!({ "kind": "domain", "hostname": "noisypigeon.com" })).unwrap(),
+    );
+    let mut o = seen(true, true, Some(true), Some("np"));
+    o.domains = vec![SeenDomain {
+        hostname: "noisypigeon.com".into(),
+        zone_id: Some("z1".into()),
+        service: None,
+    }];
+    let d = plan(&with_domain, &o, &l);
+    assert!(matches!(d.last(), Some(Step::AttachDomain { zone_id, .. }) if zone_id == "z1"));
+    o.domains[0].service = Some("noisypigeon".into());
+    assert!(matches!(
+        plan(&with_domain, &o, &l).last(),
+        Some(Step::Ok { .. })
+    ));
+    o.domains[0].service = Some("someone-else".into());
+    assert!(plan(&with_domain, &o, &l).last().unwrap().stops());
+    o.domains[0] = SeenDomain {
+        hostname: "noisypigeon.com".into(),
+        zone_id: None,
+        service: None,
+    };
+    assert!(matches!(
+        plan(&with_domain, &o, &l).last(),
+        Some(Step::Blocked { .. })
+    ));
+
+    // A push is accepted only from the repository and installation an instance's record names.
+    use pigeon_capabilities::github::instance_for;
+    let mut gh = inst.clone();
+    gh.repo = Some(
+        serde_json::from_value(
+            json!({ "kind": "github", "full_name": "noisypigeon/noisypigeon", "installation": 7 }),
+        )
+        .unwrap(),
+    );
+    let records = vec![gh];
+    assert!(instance_for(&records, "NoisyPigeon/noisypigeon", 7).is_some());
+    assert!(instance_for(&records, "noisypigeon/noisypigeon", 8).is_none());
+    assert!(instance_for(&records, "someone/else", 7).is_none());
 
     // The digest binds the steps and the account.
     let d1 = digest(&inst, &"a".repeat(32), &first);
