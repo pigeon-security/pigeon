@@ -768,8 +768,13 @@ impl Lander {
                     "SELECT * FROM incidents WHERE state IN ('open', 'unisolated', 'stuck') ORDER BY id DESC LIMIT 10",
                     vec![],
                 )?;
-                out["incidents_to_see"] =
-                    json!(open.iter().map(IncidentRow::public).collect::<Vec<_>>());
+                // An incident of a Worker the map no longer has needs no action.
+                out["incidents_to_see"] = json!(
+                    open.iter()
+                        .filter(|i| self.settings.map.worker(&i.worker).is_some())
+                        .map(IncidentRow::public)
+                        .collect::<Vec<_>>()
+                );
                 out["queue"] = json!(
                     self.all_live()?
                         .iter()
@@ -1110,6 +1115,55 @@ impl Lander {
             {
                 self.note_detail(&r, &format!("incident {}: {summary}", inc.id))?;
             }
+        }
+        Ok(())
+    }
+
+    /// Closes each `unisolated` or `stuck` incident that a later succeeded lane deploy of its
+    /// Worker covers ([`lanes::incident_covered`]); the state becomes [`lanes::COVERED`].
+    fn close_covered(&self) -> Result<()> {
+        let open: Vec<IncidentRow> = self.db.rows(
+            "SELECT * FROM incidents WHERE state IN ('unisolated', 'stuck') ORDER BY id",
+            vec![],
+        )?;
+        for inc in open {
+            let Some(failed) = self.deploy(inc.failed_deploy)? else {
+                continue;
+            };
+            let green: Option<DeployRow> = self.db.row(
+                "SELECT * FROM deploys WHERE worker = ? AND state = 'succeeded' AND (purpose = 'lane' OR purpose IS NULL) ORDER BY id DESC LIMIT 1",
+                vec![inc.worker.as_str().into()],
+            )?;
+            let Some(green) = green else {
+                continue;
+            };
+            if !lanes::incident_covered(
+                &inc.state,
+                failed.id,
+                failed.covers,
+                green.id,
+                green.covers,
+            ) {
+                continue;
+            }
+            let t = now();
+            let summary = format!(
+                "{}; covered by deploy {} at {}, which passed",
+                inc.summary.as_deref().unwrap_or(""),
+                green.id,
+                green.commit_sha
+            );
+            self.db.exec(
+                "UPDATE incidents SET state = ?, summary = ?, updated_at = ?, finished_at = ? WHERE id = ? AND state = ?",
+                vec![
+                    lanes::COVERED.into(),
+                    summary.as_str().into(),
+                    t.into(),
+                    t.into(),
+                    inc.id.into(),
+                    inc.state.as_str().into(),
+                ],
+            )?;
         }
         Ok(())
     }
@@ -1581,6 +1635,13 @@ impl Lander {
                     at.into(),
                 ],
             )?;
+        }
+        // A green lane deploy closes the incidents it covers; best-effort.
+        if passed
+            && d.purpose() == lanes::Purpose::Lane
+            && let Err(e) = self.close_covered()
+        {
+            console_error!("close_covered failed: {e}");
         }
         if passed {
             for step in &worker.after {

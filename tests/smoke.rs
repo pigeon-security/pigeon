@@ -979,6 +979,16 @@ fn land_attributes_a_failed_deploy() {
     assert_eq!((v.on.clone(), v.redeploys), (None, 1));
     assert!(v.summary.contains("recovery is by hand"));
 
+    // A later green deploy that covers as much closes a stuck or unisolated incident.
+    assert!(lanes::incident_covered("stuck", 5, 3, 9, 3));
+    assert!(lanes::incident_covered("unisolated", 5, 3, 9, 4));
+    // Not an incident in another state, an earlier deploy, or one that covers less.
+    for state in ["open", "isolated", "covered"] {
+        assert!(!lanes::incident_covered(state, 5, 3, 9, 4));
+    }
+    assert!(!lanes::incident_covered("stuck", 5, 3, 4, 4));
+    assert!(!lanes::incident_covered("stuck", 5, 3, 9, 2));
+
     // What a deploy included, as the note and land_status name it.
     assert_eq!(
         lanes::deploy_note("sites", Purpose::Lane, "j1", "c7", &inc(&[5, 7])),

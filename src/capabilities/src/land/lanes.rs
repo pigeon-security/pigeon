@@ -509,6 +509,25 @@ pub fn bisect(
     }
 }
 
+/// The state of an incident that a later green lane deploy of its Worker covers.
+pub const COVERED: &str = "covered";
+
+/// Whether a later green deploy makes an incident moot. True only for an `unisolated` or
+/// `stuck` incident whose failed deploy (`failed_deploy`, carrying up to `failed_covers`) is
+/// followed by a later deploy (`green_deploy`) that covers at least as much. The caller passes
+/// only a succeeded lane deploy of the same Worker.
+pub fn incident_covered(
+    state: &str,
+    failed_deploy: i64,
+    failed_covers: i64,
+    green_deploy: i64,
+    green_covers: i64,
+) -> bool {
+    matches!(state, "unisolated" | "stuck")
+        && green_deploy > failed_deploy
+        && green_covers >= failed_covers
+}
+
 /// Why each landing a failed core deploy carried ends `deploy_failed`.
 pub const CORE_NOT_BISECTED: &str = "core deploy failed; not bisected (core runs the Lander)";
 
