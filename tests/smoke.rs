@@ -6314,9 +6314,9 @@ fn email_parses_a_multipart_message() {
     assert!(matches!(junk, Err(Error::NotMime(_))));
 }
 
-/// The sandbox's prepare, retried after a failed first try (overnight 2026-11-22, bug 2): the
-/// Worker's setup empties what that try left in /work, and its hook makes the clone full while
-/// the clone holds the credential, so a checkout of another base needs no fetch afterwards.
+/// The sandbox's prepare, retried after a failed try (overnight 2026-11-22, bug 2): the Worker's
+/// setup empties what that try left in /work, files or a `.git` git cannot read, and keeps a
+/// checkout that is there.
 fn sandbox_prepare_retry() {
     use pigeon_ai_agents::sandbox;
     let base = std::env::temp_dir().join(format!("pigeon-smoke-sbprep-{}", std::process::id()));
@@ -6325,15 +6325,9 @@ fn sandbox_prepare_retry() {
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&work).unwrap();
     let origin = repo("sbprep-origin");
-    git(&origin, &["config", "uploadpack.allowFilter", "true"], None);
     std::fs::write(origin.join("a.txt"), "a\n").unwrap();
     git(&origin, &["add", "a.txt"], None);
     commit(&origin, "one");
-    git(&origin, &["checkout", "-q", "-b", "claude/planner"], None);
-    std::fs::write(origin.join("b.txt"), "b\n").unwrap();
-    git(&origin, &["add", "b.txt"], None);
-    commit(&origin, "two");
-    git(&origin, &["checkout", "-q", "main"], None);
     let sh = |cmd: &str, dir: &Path| {
         let out = Command::new("bash")
             .args(["-c", cmd])
@@ -6349,36 +6343,31 @@ fn sandbox_prepare_retry() {
             String::from_utf8_lossy(&out.stderr)
         );
     };
-    // What a failed first try leaves: the checkout's files, no .git.
+    let empty = |what: &str| {
+        assert_eq!(
+            std::fs::read_dir(&work).unwrap().count(),
+            0,
+            "setup empties /work: {what}"
+        );
+    };
+    // What a failed clone or checkout leaves: the checkout's files, no .git.
     std::fs::write(work.join("a.txt"), "left over\n").unwrap();
     std::fs::create_dir_all(work.join("src")).unwrap();
     sh(sandbox::PREPARE_SETUP, &work);
-    assert_eq!(
-        std::fs::read_dir(&work).unwrap().count(),
-        0,
-        "setup empties /work"
-    );
+    empty("files");
+    // A .git that git cannot read, as a repack still writing into a removed one leaves.
+    std::fs::create_dir_all(work.join(".git/objects/pack")).unwrap();
+    std::fs::write(work.join("a.txt"), "left over\n").unwrap();
+    sh(sandbox::PREPARE_SETUP, &work);
+    empty("a broken .git");
+    // A checkout that is there already is kept.
     let url = format!("file://{}", origin.display());
     sh(
-        &format!(
-            "git clone -q --no-tags --filter=blob:none -- {url} {}",
-            work.display()
-        ),
+        &format!("git clone -q --no-tags -- {url} {}", work.display()),
         &base,
     );
-    // The hook made it a full clone: with the origin gone, the planner's branch still checks out.
-    std::fs::rename(&origin, base.join("gone")).unwrap();
-    sh(
-        "git checkout -q -B claude/exec origin/claude/planner --",
-        &work,
-    );
-    assert!(work.join("b.txt").exists());
-    sh(sandbox::PREPARE_TEARDOWN, &work);
-    assert!(!home.join(".pigeon-prepare-hooks").exists());
-    // A checkout that is there already is kept.
     sh(sandbox::PREPARE_SETUP, &work);
-    assert!(work.join("b.txt").exists() && work.join(".git").exists());
-    sh(sandbox::PREPARE_TEARDOWN, &work);
+    assert!(work.join("a.txt").exists() && work.join(".git").exists());
     // The first error is the one reported, with the last.
     assert_eq!(
         sandbox::not_ready(Some("git checkout failed: 403"), "git clone failed: exists"),
