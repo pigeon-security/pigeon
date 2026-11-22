@@ -1116,6 +1116,14 @@ impl AiAgentRuns {
                     "failures = failures + 1, job_error = ?",
                     vec![e.to_string().into()],
                 )?;
+                // Shown in ai_agents_status, so a refused turn does not look like thinking.
+                let why: String = e.to_string().chars().take(300).collect();
+                self.tell(
+                    row,
+                    &format!("could not submit its turn; retrying in 30 s: {why}"),
+                    Value::Null,
+                )
+                .await?;
                 self.state.storage().set_alarm(30_000).await
             }
         }
