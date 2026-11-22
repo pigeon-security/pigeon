@@ -32,7 +32,7 @@ that repository. It has no Worker:
 - **Build.** `pigeon sites build workloads/noisypigeon.com/blog` (`src/pigeon-harness`) builds
   it with Zola 0.23.6. The build needs no secrets, but it does need the repository's history,
   because the template is read at a git tag.
-- **Bucket.** An EU-jurisdiction R2 bucket, `blog-noisypigeon-com`, in the noisypigeon account.
+- **Bucket.** An EU-jurisdiction R2 bucket, `blog-noisypigeon-com`, read from the repository as in the noisypigeon account. (2026-11-22: wrong. R2 was not enabled on that account; see the Log.)
   Every `x/index.html` is also written as `x` and `x/`.
 - **Custom domains.** R2 custom domains `noisypigeon.com` and `www.noisypigeon.com` on the
   bucket. They own those DNS records.
@@ -690,6 +690,42 @@ checks. I'll propose them with the environment tools when phase 0 or 4 reaches t
 not by this session.
 
 ## Log
+
+- 2026-11-22, later: **noisypigeon.com serves from pigeon.** In order:
+  - **Outage found.** noisypigeon.com and www answered Cloudflare error 1000. The zone had moved
+    accounts, and the old R2 custom domains had become plain proxied A/AAAA records to
+    Cloudflare's own IPs; R2 was not even enabled on the noisypigeon account (10042 until the
+    person enabled it at 02:21), so `blog-noisypigeon-com` is not there. The site had been down
+    since the move, not because of pigeon. The person emptied the zone on purpose, mail records
+    included (mail is redone later, separately).
+  - **Resources, by plan.** `instance_plan` / `instance_apply` (instances/plan.rs, pure; a ledger
+    per instance of what pigeon made; anything else with pigeon's names is a conflict; nothing
+    is deleted; the person's passkey binds the plan's digest). They made bucket
+    `noisypigeon-site` (eu), Worker `noisypigeon` (instances/site_worker.js: `live` →
+    `deploys/{commit}.json` → `blobs/{sha}`, www → apex 301) and its workers.dev preview.
+  - **Custom domains instead of routes.** With the zone empty there is nothing proxied to route
+    over, so the cutover is `Target::Domain`: a Workers Custom Domain per hostname, attached by
+    the plan; Cloudflare makes and owns the DNS record and certificate. The record (v4) has
+    domain targets noisypigeon.com and www.noisypigeon.com; the zone/route target is gone.
+  - **Deploys live in pigeon-sites.** The person chose to wait for the sites Worker rather than
+    deploy from core. `site_deploy` (src/sites/src/deploy.rs) reads the record through core's
+    `dispatch`, the repository as one tarball (`pigeon_core::tarball`, pure; the App's
+    installation token, or codeload for a public repository), sorts it
+    (`pigeon_blog::repo::split`, pure), renders it (`pigeon_blog`) and writes the blobs the
+    bucket lacks, the manifest and `live` with core's `linked` credential. The first deploy
+    (2787e52, 186 files) took three calls: the portal drops a call after 60 s and a deploy only
+    uploads what is missing, so each call got further.
+  - **The GitHub App** is `pigeon-security` (App 5869577, client `Iv23liHG7HdcPPzrnNfn`, in the
+    Worker's vars), installed on noisypigeon/noisypigeon only (installation 184534958, in the
+    record). Its key and webhook secret are core's Secrets Store slots, bound once set; the key
+    is checked by signing in as the App before it is kept and never leaves core: other Workers
+    get an installation token narrowed to one repository (`credential {kind: "github"}`).
+    `/github/hook` checks the signature first and accepts only the record's repository and
+    installation. A push to `main` starts `site_deploy` through `wait_until`, for the person who
+    linked the instance; `github_status` shows the latest push and deploy.
+  - **Live.** 03:45 UTC: https://noisypigeon.com/ 200 (x-pigeon-commit 2787e52), www → apex 301.
+  - Still to do: `noisypigeon.pigeon.dev` (phase 5b, with the split planner, now in
+    pigeon-sites); the console's view of deploys; pruning old deploys.
 
 - 2026-11-22: linking works end to end. `linked_setup` registered the client (`28a843c4…`) and
   wrote its secret and `LINK_KEY` to the Secrets Store; their bindings landed after. The person
