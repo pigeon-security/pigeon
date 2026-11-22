@@ -144,6 +144,10 @@ pub const BINDINGS: &[Binding] = &[
         binding: "CI",
         worker: "pigeon-ci-gateway",
     },
+    Binding {
+        binding: "AI_AGENTS",
+        worker: "pigeon-ai-agents",
+    },
 ];
 
 /// The capabilities this Worker hosts.

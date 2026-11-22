@@ -78,6 +78,11 @@ service = "pigeon-model-gateway"
 binding = "CI"
 service = "pigeon-ci-gateway"
 
+# The AI agents Worker (docs/plans/ai-agents.md): deployed by landing 1, bound here after.
+[[services]]
+binding = "AI_AGENTS"
+service = "pigeon-ai-agents"
+
 # The GitHub App (src/capabilities/src/github.rs): its private key and webhook secret, set by the
 # person on the Access tab; bound once they exist, since a binding to a missing secret fails the
 # deploy.
