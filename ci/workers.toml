@@ -53,6 +53,12 @@ paths = [
     ".pigeon/ci.toml",
     ".claude/*",
     ".gitignore",
+    # The iOS app (docs/plans/ios.md): built only by macOS CI and the person's Mac; the Rust gate
+    # checks its generated tokens file. No Worker deploys it.
+    "ios/*",
+    # The email library (docs/plans/email.md): used by no Worker yet. Move it into its Worker's
+    # paths when one depends on it.
+    "src/email/*",
 ]
 
 [[worker]]
