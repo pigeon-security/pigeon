@@ -114,6 +114,12 @@ I check each result, apply it, and run fmt, clippy and the smoke suite myself.
   `sections.rs` or `app.js`.
 - Policy planner: no overlap expected. I add no policy rules.
 
+## Open items
+
+- 2026-11-22: the person reviewed a render of the generated diagram and found it incorrect; to
+  revisit with the person (what's wrong, and whether the drawing's layout or content should
+  change) before phases 6–8. No redesign until then.
+
 ## Log
 
 - 2026-11-21: inventory and plan. The live `architecture_describe` answers 503. pigeon.dev shows
