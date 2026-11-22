@@ -7,6 +7,21 @@ compatibility_date = "2026-11-01"
 workers_dev = false
 preview_urls = false
 
+# Cloudflare Observability (docs/plans/observability.md). Every Worker carries this same block;
+# the smoke scenario core_observability_on_every_worker fails when one does not.
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[observability.logs]
+# The per-request log keeps each URL whole, and some URLs carry one-use codes
+# (/auth/enrol?code=, OAuth callbacks): off. console lines are still kept.
+invocation_logs = false
+
+[observability.traces]
+enabled = true
+head_sampling_rate = 0.1
+
 [build]
 command = "cargo install -q worker-build@0.9.0 && worker-build --release"
 
@@ -46,3 +61,8 @@ scheduling_policy = "durable_object"
 
 [containers.images.sandbox]
 image = "registry.cloudflare.com/4f94676cb2cbe46fd985b089ca97ea27/pigeon-ai-agent-sandbox@sha256:4d913d674922fea46c61ae8a63103b821b67deeb40086838570047c2ff74bf88"
+
+# Container logs off: the top-level [observability] would otherwise keep this container's
+# output, which may hold what a job or run printed (docs/plans/observability.md).
+[containers.observability]
+enabled = false

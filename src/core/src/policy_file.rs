@@ -45,10 +45,11 @@ pub fn request(actor: &str, action: Kind, target: &str) -> Request {
     }
 }
 
-/// `req` and its answer as one JSON audit line.
+/// `req` and its answer as one JSON audit line. Worker logs are kept (docs/plans/observability.md),
+/// so it leaves out the actor, a person's or credential's name; the console's decision list keeps it.
 pub fn audit_line(by: &str, req: &Request, a: &Answer) -> String {
     json!({
-        "audit": "policy", "by": by, "actor": req.actor, "action": req.action.name(),
+        "audit": "policy", "by": by, "action": req.action.name(),
         "target": req.target, "approval": req.context.approval.map(|x| x.name()),
         "decision": a.decision, "rule": a.rule, "reason": a.reason,
     })

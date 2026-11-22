@@ -9,6 +9,21 @@ compatibility_date = "2026-11-01"
 workers_dev = false
 preview_urls = false
 
+# Cloudflare Observability (docs/plans/observability.md). Every Worker carries this same block;
+# the smoke scenario core_observability_on_every_worker fails when one does not.
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[observability.logs]
+# The per-request log keeps each URL whole, and some URLs carry one-use codes
+# (/auth/enrol?code=, OAuth callbacks): off. console lines are still kept.
+invocation_logs = false
+
+[observability.traces]
+enabled = true
+head_sampling_rate = 0.1
+
 [build]
 command = "cargo install -q worker-build@0.9.0 && worker-build --release"
 

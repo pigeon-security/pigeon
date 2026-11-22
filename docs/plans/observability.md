@@ -1,8 +1,9 @@
 # Cloudflare Observability for every pigeon Worker
 
-Status: planned 2026-11-22. Three slices, each on its own branch, none landed: (a) settings and
-coverage check, (b) the query client and `observability_summary`, (c) monitors by plan and
-apply. The person approves each landing, and does the follow-ups listed at the end.
+Status: in progress, nothing landed. Three slices, each on its own branch: (a) settings and
+coverage check, built; (b) the query client and `observability_summary`, built, in review;
+(c) monitors by plan and apply, not started. The person approves each landing, and does the
+follow-ups listed at the end. See the Log.
 
 The request: turn on Cloudflare Observability (logging, traces, analytics, monitors, usage) for
 every Worker, and add one tool that gives high-level error stats and one view of cost.
@@ -244,3 +245,31 @@ until the person approves a plan.
 ## Log
 
 - 2026-11-22: planned.
+- 2026-11-22: slice (b), first round, on `claude/ai-agent-QVk5DseSkLN4` @ ac183ca (executor
+  QVk5DseSkLN4): `observability_summary` in `src/capabilities/src/observability.rs` and the
+  Lander's read-only `deploys_since` op.
+- 2026-11-23: planner QrV7alyFFsv6 took over from Zzn8ssZs4JsC (its run ended on a deploy).
+  Review of ac183ca, CI `test` green (job bHxZW1Umh1K7JCGkOVaWK2): the Lander op, the tool's
+  registration and the folds read right; findings, sent to a second round of (b):
+  1. The permission consts are not named `*PERMISSION*`, so `architecture_describe` misses them.
+  2. One token for all three permissions: a missing group drops logs and billing together, and
+     a failed analytics mint fails the whole tool, deploys and model cost included. Mint per
+     source and degrade.
+  3. `fold_billing` sums `ConsumedQuantity` across units of one service (requests plus CPU ms).
+  4. Model cost drops `models_usage`'s `truncated`.
+  5. Not built: AI agent run spend, CI Containers time, `spike_after_deploy`, the console
+     section. The Log line said the smoke suite does not link the capabilities crate; it does
+     (`--test smoke` is pigeon-capabilities'), so the folds get a scenario.
+  6. Unchecked against the live API: the telemetry query's result shape, `wallTime*` field
+     names, the billable-usage row shape. The tool lists a failed source rather than failing.
+  Agent run spend is model use already in the Models line, so it is shown but kept out of the
+  totals.
+- 2026-11-23: slice (a) on the planner's branch `claude/ai-agent-QrV7alyFFsv6`: the block in
+  all six `wrangler.toml` files (core with traces off), `[containers.observability] enabled =
+  false` on `CiRunner` and `Sandbox`, the smoke scenario `core_observability_on_every_worker`.
+  Log lines: the deploy proxy's audit line no longer names the credential's label and person
+  (the token id stays); the policy audit line drops `actor` (a user's or credential's name;
+  the console's decision list keeps it). The other `console_*!` lines carry ids and error
+  text only. The container key is as the wrangler configuration page gives it; the pinned
+  wrangler (4.166.0) was not installed in the sandbox, so the `allowlist` job is what proves
+  wrangler takes it.

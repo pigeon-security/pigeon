@@ -68,13 +68,13 @@ pub struct Audit<'a> {
     pub why: Option<&'a str>,
 }
 
-/// `a` as one JSON audit line. It holds the credential's id, never its value or hash.
+/// `a` as one JSON audit line. It holds the credential's id, never its value or hash, nor its
+/// label or the person's name, since Worker logs are kept (docs/plans/observability.md).
 pub fn audit_line(caller: Option<&ProxyCaller>, a: &Audit<'_>) -> String {
     let path = a.path.split_once('?').map_or(a.path, |(p, _)| p);
     json!({
         "audit": "proxy",
         "route": a.route,
-        "caller": caller.map(|c| format!("{} ({})", c.label, c.person)),
         "token": caller.map(|c| c.id.as_str()),
         "method": a.method,
         "path": path,

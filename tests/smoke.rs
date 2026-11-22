@@ -240,6 +240,7 @@ fn policy_decisions() {
     assert_eq!(line["audit"], "policy");
     assert_eq!(line["rule"], "land-and-deploy");
     assert_eq!(line["decision"], "allow");
+    assert!(line.get("actor").is_none());
 }
 
 // ---- git proxy ----
@@ -1763,6 +1764,74 @@ fn deploy_proxy_allowlist() {
     assert_eq!(grant_answer("POST", true, true).0, 405);
     assert_eq!(grant_answer("GET", false, true).0, 403);
     assert_eq!(grant_answer("GET", true, false).0, 403);
+}
+
+// ---- observability ----
+
+/// Every Worker in the map keeps Cloudflare Observability on with the plan's settings
+/// (docs/plans/observability.md): logs on, invocation logs off, traces set, container logs off.
+#[test]
+fn core_observability_on_every_worker() {
+    use pigeon_capabilities::land::lanes;
+    // Workers whose traces are off, and why. Every other Worker traces.
+    let traces_off = [(
+        "core",
+        "serves the enrolment and OAuth URLs, whose codes sit in the query string",
+    )];
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let map = lanes::parse(include_str!("../ci/workers.toml")).unwrap();
+    assert!(!map.workers.is_empty());
+    for w in &map.workers {
+        let path = root.join(&w.dir).join("wrangler.toml");
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path:?}: {e}"));
+        let t: toml::Table = toml::from_str(&text).unwrap_or_else(|e| panic!("{path:?}: {e}"));
+        let o = t
+            .get("observability")
+            .unwrap_or_else(|| panic!("{}: no [observability]", w.name));
+        assert_eq!(
+            o.get("enabled").and_then(|v| v.as_bool()),
+            Some(true),
+            "{}",
+            w.name
+        );
+        let rate = o
+            .get("head_sampling_rate")
+            .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)));
+        assert!(
+            rate.is_some_and(|r| r > 0.0 && r <= 1.0),
+            "{}: head_sampling_rate {rate:?} is not in (0, 1]",
+            w.name
+        );
+        assert_eq!(
+            o.get("logs")
+                .and_then(|l| l.get("invocation_logs"))
+                .and_then(|v| v.as_bool()),
+            Some(false),
+            "{}: invocation logs keep whole URLs",
+            w.name
+        );
+        let traces = o
+            .get("traces")
+            .and_then(|tr| tr.get("enabled"))
+            .and_then(|v| v.as_bool());
+        let off = traces_off.iter().find(|(n, _)| *n == w.name);
+        assert_eq!(traces, Some(off.is_none()), "{}: traces {:?}", w.name, off);
+        for c in t
+            .get("containers")
+            .and_then(|c| c.as_array())
+            .into_iter()
+            .flatten()
+        {
+            assert_eq!(
+                c.get("observability")
+                    .and_then(|o| o.get("enabled"))
+                    .and_then(|v| v.as_bool()),
+                Some(false),
+                "{}: container logs must be off",
+                w.name
+            );
+        }
+    }
 }
 
 // ---- CI ----
@@ -4422,7 +4491,8 @@ fn proxy_and_job_tokens() {
         branch_prefix: None,
     };
     let named: Value = serde_json::from_str(&proxy::audit_line(Some(&caller), &audit)).unwrap();
-    assert_eq!(named["caller"], "env (Ana)");
+    // Logs are kept: the credential's id, never its label or the person's name.
+    assert!(named.get("caller").is_none() && !named.to_string().contains("Ana"));
     assert_eq!(named["token"], "abcdefghijkl");
     assert_eq!(named["status"], 200);
 
