@@ -691,6 +691,26 @@ not by this session.
 
 ## Log
 
+- 2026-11-22, 05:40: **noisypigeon.pigeon.dev serves** (phase 5b), from the person's phone.
+  - **In pigeon-sites, not core.** The split's end state gives sites the instance hostnames, so
+    core serves no site traffic. A Subdomain target is an `AttachSubdomain` plan step: a Workers
+    Custom Domain `{label}.{zone}` on `pigeon-sites`, in the platform's account, with the
+    person's passkey; the instance Worker's workers.dev address is kept as its upstream
+    (`subdomain:{host}`), listed by core's read-only `instance_subdomains`. pigeon-sites matches
+    such a host before the contract, asks core for the map as itself (`worker:pigeon-sites`,
+    kept five minutes) and passes GET and HEAD through, cached under the upstream's own
+    Cache-Control. No credential is on that path. Decision 3's "pigeon-platform serves it by
+    host" is replaced by this.
+  - **Push deploys run from a cron.** The hook only records a pending deploy; core's minute cron
+    (`github::run_pending`) runs it through `site_deploy`, with a three-minute lease and up to
+    five tries, so a redeploy or `waitUntil`'s limit (which lost the first test push, 779a1ad,
+    deployed by hand instead) cannot lose one. Confirming it on a real push is still open.
+  - **Incident.** The cron's first core deploy failed in the deploy job's allowlist dry run: the
+    proxy allowed `PUT …/workers/scripts/{script}/schedules` (38e3089) but the CI stand-in
+    (`ci/deploy/standin.mjs`) did not answer it. Production was untouched (the dry run comes
+    first) and the Lander rolled core back to its last good build each time. The stand-in learned
+    the call (4692601); a new proxy allowlist entry needs its stand-in route in the same landing.
+
 - 2026-11-22, later: **noisypigeon.com serves from pigeon.** In order:
   - **Outage found.** noisypigeon.com and www answered Cloudflare error 1000. The zone had moved
     accounts, and the old R2 custom domains had become plain proxied A/AAAA records to
@@ -724,8 +744,7 @@ not by this session.
     installation. A push to `main` starts `site_deploy` through `wait_until`, for the person who
     linked the instance; `github_status` shows the latest push and deploy.
   - **Live.** 03:45 UTC: https://noisypigeon.com/ 200 (x-pigeon-commit 2787e52), www → apex 301.
-  - Still to do: `noisypigeon.pigeon.dev` (phase 5b, with the split planner, now in
-    pigeon-sites); the console's view of deploys; pruning old deploys.
+  - Still to do: the console's view of deploys; pruning old deploys.
 
 - 2026-11-22: linking works end to end. `linked_setup` registered the client (`28a843c4…`) and
   wrote its secret and `LINK_KEY` to the Secrets Store; their bindings landed after. The person
