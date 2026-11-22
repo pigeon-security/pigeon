@@ -140,6 +140,10 @@ pub const BINDINGS: &[Binding] = &[
         binding: "MODELS",
         worker: "pigeon-model-gateway",
     },
+    Binding {
+        binding: "CI",
+        worker: "pigeon-ci-gateway",
+    },
 ];
 
 /// The capabilities this Worker hosts.
@@ -257,9 +261,8 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
             land_repo: format!("{NAMESPACE}/{REPO}"),
         }),
         // Models: served by pigeon-model-gateway (BINDINGS); core hosts only its job objects.
-        Box::new(ci::Local {
-            ci: ci::Ci { settings: ci() },
-        }),
+        // CI: served by pigeon-ci-gateway (BINDINGS); core hosts only its scheduler and runners,
+        // which the Lander and the proxies read through their bindings.
         // Landing: a session branch tested, moved into main and deployed, through `land`.
         Box::new(Land { settings: land() }),
         Box::new(Deploys),
@@ -299,6 +302,17 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
             },
         }),
     ]
+}
+
+/// The capabilities the Lander runs tools through: this Worker's, and CI's own, served here
+/// rather than by pigeon-ci-gateway, so landing never depends on the CI gateway answering
+/// (docs/plans/workers-split.md). The Lander keeps reading the scheduler through CI_SCHEDULER.
+pub fn lander_capabilities() -> Vec<Box<dyn Capability>> {
+    let mut caps = capabilities();
+    caps.push(Box::new(ci::Local {
+        ci: ci::Ci { settings: ci() },
+    }));
+    caps
 }
 
 /// Where landings go: the source repository's main, gated by CI jobs `test` and `deploy`.

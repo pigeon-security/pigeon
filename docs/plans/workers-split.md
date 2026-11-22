@@ -506,6 +506,19 @@ over their in-flight work.
 
 ## Log
 
+- 2026-11-22: the three gateways deployed, and core bound them.
+  - The landing that added them was deployed before core's map listed them, and the old Lander
+    skips unknown Workers silently. A one-line landing touching only their crates deployed
+    them (`Ms0Q5D6Geo0IlaC8`). Track D turns that skip into an error.
+  - Core bound `MODELS` and dropped its local models tools (`z-NDv9ZFLGM84OnJ`).
+  - Core binds `CI` (`claude/bind-ci`): `/mcp` and the `/ci/` routes go to
+    pigeon-ci-gateway. The Lander keeps CI's tools locally (`settings::lander_capabilities`;
+    a local tool wins a clash), so landing never depends on the CI gateway answering.
+  - The proxy cutover (`setup_proxy_host {"worker": "pigeon-proxy"}`) was refused by this
+    session's permission check as a destructive action. It was handed to the person through
+    the parent.
+  - Baseline with core serving the proxy: `/health` 0.1–0.6 s; `git ls-remote` 5.6–13.9 s
+    (mostly minting and revoking a git token per request).
 - 2026-11-22: phase 3 code built on `claude/track-models` (T16; nothing deployed, no transfer).
   - `models.rs` and `models/*` moved (`git mv`) to a new library crate, `pigeon-models`
     (`src/models`), which does not depend on `pigeon-capabilities`. Its functions take the

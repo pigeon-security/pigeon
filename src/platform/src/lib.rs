@@ -58,7 +58,7 @@ impl worker::DurableObject for Lander {
     fn new(state: worker::State, env: Env) -> Self {
         let hosting = pigeon_capabilities::land::Hosting {
             worker: settings::WORKER,
-            capabilities: settings::capabilities,
+            capabilities: settings::lander_capabilities,
             sources: SOURCES,
             bindings: settings::BINDINGS,
         };

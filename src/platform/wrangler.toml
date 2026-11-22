@@ -70,6 +70,10 @@ service = "pigeon-sites"
 binding = "MODELS"
 service = "pigeon-model-gateway"
 
+[[services]]
+binding = "CI"
+service = "pigeon-ci-gateway"
+
 # The GitHub App (src/capabilities/src/github.rs): its private key and webhook secret, set by the
 # person on the Access tab; bound once they exist, since a binding to a missing secret fails the
 # deploy.
