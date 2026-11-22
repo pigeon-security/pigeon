@@ -37,6 +37,19 @@ binding = "BUILDKITE_API_TOKEN"
 store_id = "5185c227b9f34b4291045175695b78ec"
 secret_name = "BUILDKITE_API_TOKEN"
 
+# Linked accounts (src/capabilities/src/linked.rs): the Cloudflare OAuth client's secret and the
+# key that seals each link's tokens. linked_setup writes both to the Secrets Store; the bindings
+# come after, since a binding to a secret that does not exist fails the deploy.
+[[secrets_store_secrets]]
+binding = "CF_OAUTH_CLIENT_SECRET"
+store_id = "5185c227b9f34b4291045175695b78ec"
+secret_name = "CF_OAUTH_CLIENT_SECRET"
+
+[[secrets_store_secrets]]
+binding = "LINK_KEY"
+store_id = "5185c227b9f34b4291045175695b78ec"
+secret_name = "LINK_KEY"
+
 # Artifacts push events reach this Worker through the pigeon-source-events queue; the queue
 # and its consumer are set up by POST /setup/source, not here.
 
