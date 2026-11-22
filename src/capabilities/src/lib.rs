@@ -24,6 +24,7 @@ pub mod models;
 /// Signed notifications, in pigeon-core so the capability Workers share them.
 pub use pigeon_core::notify;
 pub mod oauth;
+pub mod observability;
 pub mod passkeys;
 pub mod policy;
 pub mod protected_host;

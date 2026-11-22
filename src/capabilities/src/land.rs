@@ -112,6 +112,12 @@ async fn lander(env: &Env, op: &str, args: Value) -> Result<Value> {
     durable::call(env, BINDING, OBJECT, op, &args).await
 }
 
+/// The deploys that finished at or after `since_ms`, newest first, at most 50: read-only.
+pub async fn deploys_since(env: &Env, since_ms: i64) -> Result<Vec<Value>> {
+    let v = lander(env, "deploys_since", json!({ "since_ms": since_ms })).await?;
+    Ok(v.as_array().cloned().unwrap_or_default())
+}
+
 /// The landings waiting for a person's passkey, newest first. One is live at a time, so the
 /// latest few hold every one.
 pub async fn awaiting(env: &Env) -> Result<Vec<Value>> {
@@ -740,6 +746,16 @@ impl Lander {
                 }
                 self.reschedule().await?;
                 Ok(Value::Null)
+            }
+            "deploys_since" => {
+                let since = a["since_ms"].as_i64().unwrap_or(0);
+                let rows: Vec<DeployRow> = self.db.rows(
+                    "SELECT * FROM deploys WHERE finished_at >= ? ORDER BY id DESC LIMIT 50",
+                    vec![since.into()],
+                )?;
+                Ok(json!(
+                    rows.iter().map(DeployRow::public).collect::<Vec<_>>()
+                ))
             }
             "status" => {
                 let row = match a["id"].as_str() {

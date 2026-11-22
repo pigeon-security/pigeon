@@ -19,6 +19,7 @@ use pigeon_capabilities::land::{self, Land};
 use pigeon_capabilities::linked::Linked;
 use pigeon_capabilities::mirror::{self, Mirror};
 use pigeon_capabilities::oauth::OAuth;
+use pigeon_capabilities::observability::Observability;
 use pigeon_capabilities::passkeys::Passkeys;
 use pigeon_capabilities::policy::Policy;
 use pigeon_capabilities::proxy::Tokens;
@@ -286,6 +287,8 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
         // Landing: a session branch tested, moved into main and deployed, through `land`.
         Box::new(Land { settings: land() }),
         Box::new(Deploys),
+        // `observability_summary`: Worker metrics, error logs, deploys and cost, read only.
+        Box::new(Observability { map: map() }),
         // What the container applications run and the registry holds, read only.
         Box::new(Images),
         // `call {tool, args}`: any tool above by name, for sessions whose tool list predates it.
