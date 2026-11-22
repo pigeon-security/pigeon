@@ -1,0 +1,28 @@
+name = "pigeon-dotest-b"
+account_id = "4f94676cb2cbe46fd985b089ca97ea27"
+main = "build/worker/shim.mjs"
+compatibility_date = "2026-11-01"
+# A throwaway Worker for the Durable Object transfer rehearsal (docs/plans/do-rehearsal.md;
+# docs/plans/workers-split.md, T17): the transfer's destination. It holds no secrets and only
+# dummy rows, so it answers on its workers.dev URL, behind a header that is a speed bump, not
+# security.
+workers_dev = true
+preview_urls = false
+
+[build]
+command = "cargo install -q worker-build@0.9.0 && worker-build --release"
+
+[durable_objects]
+bindings = [
+  { name = "PROBE", class_name = "Probe" },
+]
+
+# The class, with its objects and their data, moves here from pigeon-dotest-a on this Worker's
+# first deploy. It is never created here first, and a transfer cannot be rolled back.
+[[migrations]]
+tag = "v1"
+
+[[migrations.transferred_classes]]
+from = "Probe"
+from_script = "pigeon-dotest-a"
+to = "Probe"

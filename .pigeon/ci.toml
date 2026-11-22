@@ -106,3 +106,15 @@ token = true
 cpu = 4
 memory_gb = 12
 disk_gb = 20
+
+# Deploys the pigeon-dotest-b Worker (src/dotest-b), the DO transfer rehearsal's destination
+# (docs/plans/do-rehearsal.md), as `deploy` deploys core.
+[jobs.deploy-dotest-b]
+run = "ci/deploy/deploy-dotest-b.sh"
+timeout_min = 60
+token = true
+
+[jobs.deploy-dotest-b.needs]
+cpu = 4
+memory_gb = 12
+disk_gb = 20

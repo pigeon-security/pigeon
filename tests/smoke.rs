@@ -1061,6 +1061,7 @@ fn land_rebases_disjoint_branches_and_lanes() {
             "pigeon-model-gateway",
             "pigeon-ci-gateway",
             "pigeon-proxy",
+            "pigeon-dotest-b",
             "pigeon-dotest-a"
         ]
     );
@@ -1104,8 +1105,14 @@ fn land_rebases_disjoint_branches_and_lanes() {
             "model-gateway",
             "ci-gateway",
             "proxy",
+            "dotest-b",
             "dotest-a"
         ]
+    );
+    // The DO transfer rehearsal: the destination deploys before the source that binds to it.
+    assert_eq!(
+        names(&map.classify(&["src/dotest-a/wrangler.toml", "src/dotest-b/src/lib.rs"])),
+        ["dotest-b", "dotest-a"]
     );
     // CI's code is shared while core still links it; the gateway alone deploys for its crate.
     assert!(map.classify(&["src/ci/src/lib.rs"]).shared);
@@ -2518,6 +2525,7 @@ fn proxy_worker_caches_and_core_ops() {
             "pigeon-model-gateway",
             "pigeon-ci-gateway",
             "pigeon-proxy",
+            "pigeon-dotest-b",
             "pigeon-dotest-a"
         ]
     );

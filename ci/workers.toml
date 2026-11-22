@@ -88,6 +88,19 @@ deploy_job = "deploy-proxy"
 after = []
 
 # A throwaway Worker for the Durable Object transfer rehearsal (docs/plans/do-rehearsal.md;
+# docs/plans/workers-split.md, T17): the transfer's destination. Listed before dotest-a, whose
+# binding names it, so a landing that deploys both deploys it first. Its entry comes out once
+# the rehearsal is done.
+[[worker]]
+name = "dotest-b"
+script = "pigeon-dotest-b"
+dir = "src/dotest-b"
+paths = ["src/dotest-b/*"]
+test_job = "test"
+deploy_job = "deploy-dotest-b"
+after = []
+
+# A throwaway Worker for the Durable Object transfer rehearsal (docs/plans/do-rehearsal.md;
 # docs/plans/workers-split.md, T17): the transfer's source. Its entry comes out once the
 # rehearsal is done.
 [[worker]]
