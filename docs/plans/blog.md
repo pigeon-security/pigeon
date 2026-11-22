@@ -1,6 +1,7 @@
 # The blog capability: template `blog@1` and its renderer
 
-Status: **phase 1 built on `claude/blog`, awaiting landing** (2026-11-22). The person approved
+Status: **phase 1 landed** (`d514e65`, landing `3akpW-sCEHBdpKtv`, 2026-11-22). Phases 2 and 3 are
+next; the renderer moves to the `sites` Worker in workers-split.md's phase 2. The person approved
 the design and the extra fields (through the parent session). Branch
 `claude/blog`. Preview: https://claude.ai/artifact/JQPrj9GRS8WaQWoGMijnBk (home page and one post,
 rendered by a Rust spike from the real content).
@@ -273,6 +274,10 @@ Zola rule it follows. I read every line, run fmt, clippy and the smoke suite, an
    are needed for today's output and links.
 
 ## Log
+
+- 2026-11-22: phase 1 landed (`d514e65`). The renderer uses no other pigeon-core module, so
+  the workers-split plan (phase 2, task T11) can move `src/core/src/blog*` unchanged into
+  `src/sites`. Until then, edits to it serialize with every other landing, so they wait.
 
 - 2026-11-22: phase 1 built. `pigeon_core::blog` has `site`, `content`, `markdown`, `pages`,
   `feeds`, `v1/` (CSS byte copies and `UPSTREAM.md`) and `render`. Also new: the example
