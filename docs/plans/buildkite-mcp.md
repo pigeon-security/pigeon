@@ -361,10 +361,18 @@ Once, in this order.
    `BUILDKITE_API_TOKEN` to the value and approve with your passkey. Then tell the session your
    organization slug. It is not a secret; it goes into `settings.rs` in phase 2's landing.
 4. **Buildkite in the portal** (phase 3, after a deploy has made the server). Zero Trust →
-   Access controls → MCP Portals → MCP servers: check `Buildkite` (id `buildkite`) is listed and
-   Ready, and give it the Access policy `mcp-portal-owner` if it has none. Then MCP Portals →
-   `pigeon` → Edit → Servers → **add `buildkite`**, every tool on. Sessions see `buildkite_*`
-   tools through "Pigeon MCP" from their next start.
+   Access controls → MCP Portals → MCP servers → `Buildkite` (id `buildkite`). A server made
+   through the API has **no Access application**, and the dashboard shows it as broken ("The
+   Access application for this portal was not found"): press **Create application**, and give
+   it the Access policy `mcp-portal-owner`. Then MCP Portals → `pigeon` → Edit → Servers →
+   **add `buildkite`**, every tool on. Sessions see `buildkite_*` tools through "Pigeon MCP" from
+   their next start.
+
+   This stays a dashboard step on purpose: the Access application and its policy decide who
+   may use a server that holds the Buildkite write token, which is the person's boundary, and
+   pigeon's code writes no Access state but its own `self_hosted` applications (the lesson of
+   the Access incident). It is done once; the setup afterwards only keeps the server's URL and
+   credential in step.
 
 That's all. No cluster, queue, pipeline, steps YAML, trigger setting, webhook, webhook token or
 portal credential is set up by hand, and the token is typed once.
@@ -453,6 +461,6 @@ Settled live in phase 2a:
 - The secret binding: never tried before its secret existed; the token was set first.
 
 Still open, for phase 3:
-- Whether a server created through the API gets its Access application (`type = "mcp"`)
-  automatically, or the person adds the policy in step 4.
+- Settled: a server created through the API gets **no** Access application; the person creates
+  it once in the dashboard (§4, step 4).
 - Whether `/direct` accepts the bearer token as the portal forwards it.
