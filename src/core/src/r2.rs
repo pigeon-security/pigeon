@@ -403,6 +403,19 @@ pub async fn ensure_bucket_with(token: &str, account_id: &str, bucket: &Bucket) 
     }
 }
 
+/// Tells whether the bucket exists. Reads only.
+pub async fn bucket_exists(account: &Account, bucket: &Bucket) -> Result<bool> {
+    let token = open(account, "r2 read bucket").await?;
+    let headers = bucket_headers(bucket);
+    let path = bucket_path(&account.id, bucket);
+    let r = match call_with(token.value(), Method::Get, &path, &headers, None).await {
+        Ok(_) => Ok(true),
+        Err(error) if has_status(&error, 404) => Ok(false),
+        Err(error) => Err(error),
+    };
+    token.finish(r).await
+}
+
 /// Makes sure the bucket exists. It is safe to run twice.
 pub async fn ensure_bucket(account: &Account, bucket: &Bucket) -> Result<Ensured> {
     let token = open(account, "r2 ensure bucket").await?;

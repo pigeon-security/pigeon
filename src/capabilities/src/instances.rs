@@ -6,6 +6,7 @@
 //! person named. The console's Instances tab shows every instance and edits one; over MCP they
 //! can only be listed.
 
+pub mod plan;
 pub mod record;
 
 use pigeon_core::mcp::Tool;
@@ -338,6 +339,235 @@ pub fn instances_section() -> Section {
     }
 }
 
+/// What an instance's account holds now, for [`plan::plan`]. Reads only.
+async fn observe(account: &pigeon_core::Account, instance: &Instance) -> Result<plan::Observed> {
+    use pigeon_core::cloudflare::call;
+    use pigeon_core::{r2, workers};
+    let site = instance.sites.first();
+    let bucket_exists = match site {
+        Some(s) => {
+            r2::bucket_exists(
+                account,
+                &r2::Bucket {
+                    name: s.bucket.clone(),
+                    jurisdiction: s.jurisdiction.clone(),
+                },
+            )
+            .await?
+        }
+        None => false,
+    };
+    let token = account
+        .bearer
+        .as_deref()
+        .ok_or_else(|| bad("the instance's account is not a linked one"))?;
+    let (worker_exists, workers_dev) = match instance.worker.as_deref() {
+        Some(w) if workers::exists(account, w).await? => {
+            let path = format!("/accounts/{}/workers/scripts/{w}/subdomain", account.id);
+            let sub = call(token, Method::Get, &path, None).await?;
+            (true, Some(sub["enabled"].as_bool() == Some(true)))
+        }
+        _ => (false, None),
+    };
+    let path = format!("/accounts/{}/workers/subdomain", account.id);
+    let account_subdomain = match call(token, Method::Get, &path, None).await {
+        Ok(v) => v["subdomain"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        Err(e) if workers::is_not_found(&e.to_string()) || e.to_string().contains(": 404:") => None,
+        Err(e) => return Err(e),
+    };
+    Ok(plan::Observed {
+        account_id: account.id.clone(),
+        bucket_exists,
+        worker_exists,
+        workers_dev,
+        account_subdomain,
+    })
+}
+
+async fn ledger(env: &Env, id: &str) -> Result<plan::Ledger> {
+    match directory(env, "setting.get", json!({ "key": plan::ledger_key(id) })).await? {
+        Value::String(text) => Ok(serde_json::from_str(&text)?),
+        _ => Ok(plan::Ledger::default()),
+    }
+}
+
+async fn keep_ledger(env: &Env, id: &str, l: &plan::Ledger) -> Result<()> {
+    directory(
+        env,
+        "setting.put",
+        json!({ "key": plan::ledger_key(id), "value": serde_json::to_string(l)?, "ttl_ms": KEPT_MS }),
+    )
+    .await?;
+    Ok(())
+}
+
+impl Instances {
+    /// A linked instance, its account (refreshed), what is there and the plan for it.
+    async fn planned(
+        &self,
+        env: &Env,
+        id: &str,
+    ) -> Result<(Instance, pigeon_core::Account, Vec<plan::Step>, String)> {
+        let instance = one(env, id)
+            .await?
+            .ok_or_else(|| bad(&format!("there is no instance {id}")))?;
+        let wanted = match &instance.account {
+            record::AccountRef::Linked {
+                account_id: Some(a),
+            } => a.clone(),
+            record::AccountRef::Linked { account_id: None } => {
+                return Err(bad(&format!(
+                    "instance {id} names no account yet: link it, then set account.account_id"
+                )));
+            }
+            record::AccountRef::Home => {
+                return Err(bad(&format!(
+                    "instance {id} runs in the platform's own account; plans are for linked ones"
+                )));
+            }
+        };
+        let account = crate::linked::account_for(env, &self.passkeys.host, id).await?;
+        if account.id != wanted {
+            return Err(bad(&format!(
+                "instance {id} is linked to account {}, but its record names {wanted}",
+                account.id
+            )));
+        }
+        let seen = observe(&account, &instance).await?;
+        let steps = plan::plan(&instance, &seen, &ledger(env, id).await?);
+        let digest = plan::digest(&instance, &account.id, &steps);
+        Ok((instance, account, steps, digest))
+    }
+
+    /// `instance_plan`: the dry run, and an approval when there is something to apply.
+    async fn plan(&self, cx: &Context<'_>, args: &Value) -> Result<Value> {
+        let caller = cx
+            .caller
+            .ok_or_else(|| bad("planning needs a known caller"))?;
+        let person = caller
+            .acting_for
+            .as_ref()
+            .ok_or_else(|| bad("the caller acts for no person who could approve this"))?;
+        let id = arg(args, "instance")?;
+        let (instance, account, steps, digest) = self.planned(cx.env, id).await?;
+        let lines = plan::describe(&steps);
+        if steps.iter().any(plan::Step::stops) {
+            return Ok(json!({ "instance": id, "plan": lines, "applies": false,
+                "note": "Something is in the way; nothing was asked or changed." }));
+        }
+        if !steps.iter().any(plan::Step::changes) {
+            return Ok(json!({ "instance": id, "plan": lines, "applies": false,
+                "note": "Everything is already in place." }));
+        }
+        let kind = pigeon_core::approval::Kind::LinkedPlan;
+        let made = directory(
+            cx.env,
+            "approval.create",
+            json!({
+                "kind": kind.name(),
+                "subject": id,
+                "digest": digest,
+                "summary": { "instance": id, "account_id": account.id,
+                             "version": instance.version, "plan": lines },
+                "payload": { "steps": steps },
+                "caller_id": caller.user.id,
+                "approver_id": person.id,
+            }),
+        )
+        .await?;
+        Ok(json!({
+            "instance": id,
+            "plan": lines,
+            "applies": true,
+            "approval": made["record"]["id"],
+            "waits_until_ms": made["record"]["expires_ms"],
+            "note": "Nothing changes until the person approves this plan on the console's \
+                     Approvals tab; then instance_apply with this approval applies it once.",
+        }))
+    }
+
+    /// `instance_apply`: the approved plan, if the account still gives the same one.
+    async fn apply(&self, cx: &Context<'_>, args: &Value) -> Result<Value> {
+        use pigeon_core::{r2, workers};
+        let caller = cx
+            .caller
+            .ok_or_else(|| bad("applying needs a known caller"))?;
+        let approval_id = arg(args, "approval")?;
+        let got = directory(cx.env, "approval.get", json!({ "id": approval_id })).await?;
+        let id = got["subject"]
+            .as_str()
+            .filter(|_| got["kind"] == "linked_plan")
+            .ok_or_else(|| bad(&format!("there is no plan approval {approval_id}")))?
+            .to_string();
+        let (_, account, steps, digest) = self.planned(cx.env, &id).await?;
+        let taken = directory(
+            cx.env,
+            "approval.take",
+            json!({ "id": approval_id, "digest": digest, "caller_id": caller.user.id }),
+        )
+        .await?;
+        if let Some(why) = taken["refused"].as_str() {
+            return Err(bad(&format!(
+                "the plan does not run: {why}. If the account changed since it was approved, \
+                 plan again."
+            )));
+        }
+        let mut l = ledger(cx.env, &id).await?;
+        let mut done = Vec::new();
+        for step in steps.iter().filter(|s| s.changes()) {
+            let outcome = match step {
+                plan::Step::CreateBucket { name, jurisdiction } => {
+                    let b = r2::Bucket {
+                        name: name.clone(),
+                        jurisdiction: jurisdiction.clone(),
+                    };
+                    let e = r2::ensure_bucket(&account, &b).await?;
+                    if !e.created {
+                        return Err(bad(&format!(
+                            "bucket {name} appeared before pigeon created it; it is not \
+                             recorded as pigeon's, and the steps after it were not tried"
+                        )));
+                    }
+                    format!("created bucket {name}")
+                }
+                plan::Step::UploadWorker {
+                    name,
+                    bucket,
+                    jurisdiction,
+                    ..
+                } => {
+                    let binding = workers::Binding::R2 {
+                        name: plan::SITE_BINDING.into(),
+                        bucket: bucket.clone(),
+                        jurisdiction: jurisdiction.clone(),
+                    };
+                    workers::upload(
+                        &account,
+                        name,
+                        plan::COMPATIBILITY_DATE,
+                        &[binding],
+                        plan::SITE_WORKER,
+                    )
+                    .await?;
+                    format!("uploaded Worker {name}")
+                }
+                plan::Step::EnableWorkersDev { name } => {
+                    let url = workers::enable_workers_dev(&account, name).await?;
+                    format!("preview at {url}")
+                }
+                _ => continue,
+            };
+            plan::record(&mut l, step);
+            keep_ledger(cx.env, &id, &l).await?;
+            done.push(outcome);
+        }
+        Ok(json!({ "instance": id, "done": done }))
+    }
+}
+
 impl Capability for Instances {
     fn name(&self) -> &'static str {
         "instances"
@@ -350,6 +580,32 @@ impl Capability for Instances {
                 "List the platform's instances: each one's account, zones, sites with their \
                  targets and subdomains, Worker, repository and version. Read-only.",
             ),
+            Tool {
+                name: "instance_plan",
+                description: "Dry run of what a linked instance needs in its account: its R2 \
+                              bucket, its site Worker and the Worker's workers.dev preview, \
+                              read live and compared with what pigeon made. Changes nothing. \
+                              When there is something to do and nothing in the way, the plan \
+                              waits on the console's Approvals tab for the person's passkey; \
+                              `instance_apply` then applies exactly that plan, once.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": { "instance": { "type": "string" } },
+                    "required": ["instance"]
+                }),
+            },
+            Tool {
+                name: "instance_apply",
+                description: "Apply a plan the person approved: reads the account again, \
+                              refuses if it no longer gives the same plan, then creates or \
+                              uploads each step in order and records it as pigeon's. Never \
+                              deletes anything, and never touches what pigeon did not make.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": { "approval": { "type": "string" } },
+                    "required": ["approval"]
+                }),
+            },
             Tool {
                 name: "instance_propose",
                 description: "Propose a new or changed instance record (the whole record, with \
@@ -371,6 +627,8 @@ impl Capability for Instances {
             match tool {
                 "instances_list" => Ok(to_value(all(cx.env).await?)),
                 "instance_propose" => self.propose(cx, args).await,
+                "instance_plan" => self.plan(cx, args).await,
+                "instance_apply" => self.apply(cx, args).await,
                 other => Err(unknown(other)),
             }
         })

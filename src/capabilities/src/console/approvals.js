@@ -107,12 +107,37 @@
       status);
   }
 
+  // One card per plan for a linked account: each step, applied once after approval.
+  function planCard(p, ctx) {
+    const status = statusLine();
+    const approveBtn = el("button", { class: "button", type: "button", text: "Approve with passkey",
+      onclick: () => run(approveBtn, "approval-approve", p.id, status, ctx) });
+    const denyBtn = el("button", { class: "button c-quiet", type: "button", text: "Deny",
+      onclick: () => run(denyBtn, "approval-deny", p.id, status, ctx) });
+    const summary = p.summary || {};
+    const steps = (summary.plan || []).map((line) => el("li", { text: String(line) }));
+    return el("article", { class: "card", style: "gap:10px" },
+      el("div", { class: "card-h" }, el("h3", { text: `Plan for ${p.instance}` }),
+        el("span", { class: "pill warn", text: until(p.expires_ms) })),
+      el("dl", { class: "c-kv" },
+        el("dt", { text: "Account" }), el("dd", { text: String(summary.account_id || "") }),
+        el("dt", { text: "Record version" }), el("dd", { text: String(summary.version ?? "") }),
+        el("dt", { text: "Asked" }), el("dd", { text: when(p.created_ms) }),
+        el("dt", { text: "Plan digest" }), el("dd", { text: p.digest })),
+      el("ol", {}, ...steps),
+      el("p", { class: "muted", text: "Approving lets exactly these steps run once. If the account no longer gives the same plan, nothing runs. Nothing is deleted." }),
+      el("div", { class: "c-row" }, approveBtn, denyBtn),
+      status);
+  }
+
   section("approvals", (body, data, ctx) => {
     // With several owners the data comes by capability name; with one, as it is.
     const landings = (data.land || data).landings || [];
     const calls = (data.approvals || data).calls || [];
     const drafts = (data.approvals || data).drafts || [];
+    const plans = (data.approvals || data).plans || [];
     const cards = [...calls.map((c) => callCard(c, ctx)), ...drafts.map((d) => draftCard(d, ctx)),
+      ...plans.map((p) => planCard(p, ctx)),
       ...landings.map((l) => approvalCard(l, ctx))];
     body.append(el("div", { class: "layer", style: "gap:16px" },
       cards.length

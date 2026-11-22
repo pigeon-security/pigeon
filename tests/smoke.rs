@@ -2649,3 +2649,87 @@ fn linking_a_cloudflare_account() {
     );
     assert_eq!(status(None, 0.0)["status"], "not linked");
 }
+
+/// A linked instance's plan: a first plan creates the bucket and uploads the Worker, then turns
+/// on its preview; what pigeon made reads back as unchanged; anything with pigeon's name that
+/// pigeon did not make is a conflict that stops the plan; a new Worker module is an update; no
+/// workers.dev subdomain blocks only until the person picks one; the digest moves with the steps.
+#[test]
+fn instance_plans_touch_only_what_pigeon_made() {
+    use pigeon_capabilities::instances::plan::{
+        Ledger, Observed, Step, describe, digest, module_digest, plan, record,
+    };
+    use pigeon_capabilities::instances::record::Instance;
+
+    let inst: Instance = serde_json::from_value(json!({
+        "id": "noisypigeon", "title": "noisypigeon",
+        "account": { "kind": "linked", "account_id": "a".repeat(32) },
+        "zones": ["noisypigeon.com"], "worker": "noisypigeon",
+        "sites": [{ "name": "blog", "bucket": "noisypigeon-site", "jurisdiction": "eu",
+            "build": ".pigeon/site.toml",
+            "targets": [{ "kind": "preview" },
+                { "kind": "zone", "hostname": "noisypigeon.com", "route": "noisypigeon.com/*", "enabled": false }] }],
+        "version": 2
+    }))
+    .unwrap();
+    let seen = |bucket: bool, worker: bool, dev: Option<bool>, sub: Option<&str>| Observed {
+        account_id: "a".repeat(32),
+        bucket_exists: bucket,
+        worker_exists: worker,
+        workers_dev: dev,
+        account_subdomain: sub.map(str::to_string),
+    };
+    let tags = |steps: &[Step]| -> Vec<String> {
+        steps
+            .iter()
+            .map(|s| {
+                serde_json::to_value(s).unwrap()["step"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect()
+    };
+
+    // Nothing there: create, upload, preview, in that order.
+    let empty = Ledger::default();
+    let first = plan(&inst, &seen(false, false, None, Some("np")), &empty);
+    assert_eq!(
+        tags(&first),
+        ["create_bucket", "upload_worker", "enable_workers_dev"]
+    );
+    assert!(first.iter().all(|s| !s.stops()));
+    assert_eq!(describe(&first).len(), 3);
+
+    // Applied and recorded: everything reads back unchanged.
+    let mut l = Ledger::default();
+    for s in &first {
+        record(&mut l, s);
+    }
+    assert_eq!(l.buckets, ["noisypigeon-site"]);
+    let again = plan(&inst, &seen(true, true, Some(true), Some("np")), &l);
+    assert_eq!(tags(&again), ["ok", "ok", "ok"]);
+    assert!(again.iter().all(|s| !s.changes()));
+
+    // Same names, not pigeon's: conflicts, never touched.
+    let theirs = plan(&inst, &seen(true, true, Some(false), Some("np")), &empty);
+    assert_eq!(tags(&theirs)[..2], ["conflict", "conflict"]);
+    assert!(theirs.iter().any(Step::stops));
+
+    // pigeon's Worker with an older module: an update, not a conflict.
+    let mut old = l.clone();
+    old.workers = vec![("noisypigeon".into(), "older".into())];
+    let upd = plan(&inst, &seen(true, true, Some(true), Some("np")), &old);
+    assert!(matches!(&upd[1], Step::UploadWorker { replaces: true, .. }));
+    assert_ne!(module_digest("noisypigeon-site", Some("eu")), "older");
+
+    // No workers.dev subdomain on the account: blocked, for the person.
+    let blocked = plan(&inst, &seen(false, false, None, None), &empty);
+    assert_eq!(tags(&blocked)[2], "blocked");
+
+    // The digest binds the steps and the account.
+    let d1 = digest(&inst, &"a".repeat(32), &first);
+    assert_ne!(d1, digest(&inst, &"a".repeat(32), &again));
+    assert_ne!(d1, digest(&inst, &"b".repeat(32), &first));
+    assert_eq!(d1, digest(&inst, &"a".repeat(32), &first));
+}

@@ -364,6 +364,13 @@ pub async fn decide(env: &Env, id: &str, approve: bool, person: &User) -> Result
             _ => format!("Denied: instance `{}` is unchanged.", r.subject),
         } }));
     }
+    if r.kind == ApprovalKind::LinkedPlan {
+        return Ok(json!({ "message": if approve {
+            format!("Approved: the plan for `{}` is applied once, by the agent that asked, if the account still gives the same plan.", r.subject)
+        } else {
+            format!("Denied: nothing changes in `{}`'s account.", r.subject)
+        } }));
+    }
     Ok(json!({ "message": if approve {
         format!("Approved: `{}` runs once when its caller calls it again, within 10 minutes.", r.subject)
     } else {
@@ -474,7 +481,18 @@ impl Capability for Approvals {
                     })
                 })
                 .collect();
-            Ok(json!({ "calls": calls, "drafts": drafts }))
+            let plans: Vec<Value> = open
+                .iter()
+                .filter(|r| r.state == State::Pending && r.kind == ApprovalKind::LinkedPlan)
+                .map(|r| {
+                    json!({
+                        "id": r.id, "instance": r.subject, "summary": r.summary,
+                        "created_ms": r.created_ms, "expires_ms": r.expires_ms,
+                        "digest": r.digest.chars().take(12).collect::<String>(),
+                    })
+                })
+                .collect();
+            Ok(json!({ "calls": calls, "drafts": drafts, "plans": plans }))
         })
     }
 }
