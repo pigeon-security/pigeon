@@ -209,7 +209,7 @@ Ids: `item_id` is the content's SHA-256 (hex) for blobs; `entity_id` is `e_` plu
 
   | Key | Indexed | Why |
   | --- | --- | --- |
-  | `item` | no (64-byte limit is exact for a hex SHA-256, but filtering by item is not needed) | the Iceberg row id to hydrate |
+  | `item` | no | the Iceberg row id to hydrate |
   | `chunk` | no | the chunk row |
   | `kind` | yes (string) | email, document, image… |
   | `doc_type` | yes (string) | invoice, receipt… |
