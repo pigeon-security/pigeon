@@ -632,6 +632,7 @@ dependencies = [
 name = "pigeon-core"
 version = "0.1.0"
 dependencies = [
+ "futures-util",
  "getrandom",
  "hmac",
  "miniz_oxide",

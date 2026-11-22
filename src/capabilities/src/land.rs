@@ -397,6 +397,9 @@ pub struct Hosting {
     pub worker: &'static str,
     pub capabilities: fn() -> Vec<Box<dyn Capability>>,
     pub sources: &'static [(&'static str, &'static str)],
+    /// The capability Workers bound to the hosting Worker, whose tools the Lander runs too
+    /// (such as CI's, once CI is its own Worker).
+    pub bindings: &'static [crate::remote::Binding],
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -1036,7 +1039,12 @@ impl Lander {
     async fn dispatch(&self, row: &Row, tool: &str, args: &Value) -> Result<Value> {
         let caller: Caller = serde_json::from_str(&row.caller)?;
         let account = crate::ci::scheduler::account(&self.env, &self.settings.parent).await?;
-        let capabilities = (self.hosting.capabilities)();
+        let capabilities = crate::split::all(
+            &self.env,
+            (self.hosting.capabilities)(),
+            self.hosting.bindings,
+        )
+        .await;
         let hosted = Hosted {
             worker: self.hosting.worker,
             capabilities: &capabilities,

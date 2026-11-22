@@ -596,8 +596,8 @@ pub struct CfProxy {
     /// The Worker it deploys, such as `pigeon-platform`.
     pub script: String,
     /// The other platform Workers it deploys (docs/plans/workers-split.md), such as
-    /// `pigeon-sites`: no queues and no containers of their own yet.
-    pub others: Vec<String>,
+    /// `pigeon-sites`, each with its queues and container classes (from ci/workers.toml).
+    pub others: Vec<Other>,
     /// The queues the Worker produces to, which a deploy looks up by name.
     pub queues: Vec<String>,
     /// The Worker's container classes, such as `CiRunner`: their Durable Object namespaces
@@ -606,6 +606,14 @@ pub struct CfProxy {
     /// The repository landings deploy from, as `namespace/name`: a deploy job's token is taken
     /// only when its grant is for this repository.
     pub land_repo: String,
+}
+
+/// Another platform Worker the proxy deploys, and its deploy's scope.
+#[derive(Clone, Debug, Default)]
+pub struct Other {
+    pub script: String,
+    pub queues: Vec<String>,
+    pub containers: Vec<String>,
 }
 
 /// The bearer token `req` carries, if any.
@@ -760,7 +768,8 @@ impl CfProxy {
         // The Worker the call is for: the one its path names, or this one. A landing's deploy
         // job deploys only the Worker its grant names; a proxy credential, any platform Worker.
         let target = target_script(url.path()).unwrap_or(&self.script);
-        let known = target == self.script || self.others.iter().any(|o| o == target);
+        let other = self.others.iter().find(|o| o.script == target);
+        let known = target == self.script || other.is_some();
         let granted = caller
             .as_ref()
             .and_then(|c| c.script.as_deref())
@@ -771,25 +780,29 @@ impl CfProxy {
                 &format!("pigeon's proxy does not deploy Worker {target} for this caller"),
             );
         }
-        // An account-wide call (queues, container applications) during another Worker's deploy
-        // is scoped to that Worker: it has no queues or containers of its own.
-        let own = caller
+        // An account-wide call (queues, container applications) is scoped to the Worker being
+        // deployed: the one a deploy job's grant names, or the one the path names.
+        let deploying = caller
             .as_ref()
-            .and_then(|c| c.script.as_deref())
-            .is_none_or(|s| s == self.script);
-        let core = target == self.script && own;
-        // Container application calls name this Worker's container namespaces, so they are
+            .and_then(|c| c.script.clone())
+            .unwrap_or_else(|| target.to_string());
+        let (scope_script, queues_owned, classes): (&str, Vec<String>, Vec<String>) =
+            if deploying == self.script {
+                (&self.script, self.queues.clone(), self.containers.clone())
+            } else {
+                match self.others.iter().find(|o| o.script == deploying) {
+                    Some(o) => (&o.script, o.queues.clone(), o.containers.clone()),
+                    None => (&self.script, Vec::new(), Vec::new()),
+                }
+            };
+        // Container application calls name the Worker's container namespaces, so they are
         // looked up first; no other call needs them.
-        let namespaces = if core && url.path().contains("/containers/applications") {
-            container_namespaces(cx.account, &self.script, &self.containers).await?
+        let namespaces = if !classes.is_empty() && url.path().contains("/containers/applications") {
+            container_namespaces(cx.account, scope_script, &classes).await?
         } else {
             Vec::new()
         };
-        let no_queues: Vec<String> = Vec::new();
-        let queues: Vec<&str> = if core { &self.queues } else { &no_queues }
-            .iter()
-            .map(String::as_str)
-            .collect();
+        let queues: Vec<&str> = queues_owned.iter().map(String::as_str).collect();
         let namespaces: Vec<&str> = namespaces.iter().map(String::as_str).collect();
         let scope = Scope {
             account: &cx.account.id,

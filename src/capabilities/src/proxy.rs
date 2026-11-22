@@ -10,7 +10,7 @@
 
 use pigeon_core::mcp::Tool;
 use pigeon_core::oauth::{hash, token};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{Value, json};
 use worker::{Env, Error, Method, Request, Response, Result, console_log};
 
@@ -20,8 +20,7 @@ use crate::passkeys::Passkeys;
 use crate::users::{User, directory};
 use crate::{Call, Capability, Context, Serve, unknown};
 
-/// How many characters of a credential's hash make its id.
-pub const ID_LEN: usize = 12;
+pub use pigeon_core::proxy_caller::ID_LEN;
 /// What every proxy credential starts with.
 pub const PREFIX: &str = "pgn_px_";
 /// A credential's lifetime unless asked otherwise, in days, and at most.
@@ -105,19 +104,7 @@ pub fn id(raw: &str) -> std::result::Result<&str, String> {
     }
 }
 
-/// Who holds the proxy credential a request carries.
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct ProxyCaller {
-    /// The credential's id.
-    pub id: String,
-    pub label: String,
-    /// The person who issued it.
-    pub person: String,
-    /// The one Worker script it may deploy, when it is a landing's deploy job; `None` for a
-    /// proxy credential, which may deploy any platform Worker.
-    #[serde(default)]
-    pub script: Option<String>,
-}
+pub use pigeon_core::proxy_caller::ProxyCaller;
 
 /// What came of a proxied request.
 #[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]

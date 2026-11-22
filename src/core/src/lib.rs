@@ -16,18 +16,22 @@ pub mod crypto;
 pub mod custom_domain;
 pub mod design;
 pub mod durable;
+pub mod expiry;
 pub mod git;
 pub mod github_app;
 pub mod gitobj;
 pub mod identity;
+pub mod job_token;
 pub mod lanes;
 pub mod mcp;
 pub mod mcp_portal;
 pub mod merge3;
+pub mod notify;
 pub mod oauth;
 pub mod oidc;
 pub mod pack;
 pub mod policy;
+pub mod proxy_caller;
 pub mod queues;
 pub mod r2;
 pub mod rebase;
@@ -54,4 +58,20 @@ pub struct Account {
     /// it is for every call instead of a token minted from `parent`, which is then empty. Never
     /// printed: `Account` has no `Debug`.
     pub bearer: Option<String>,
+}
+
+/// The account `env` acts on, with the parent token read from Secrets Store binding `parent` and
+/// the vars `CF_ACCOUNT_ID` and `CF_SECRETS_STORE_ID`: for a Worker that holds the parent token.
+pub async fn account_from_env(env: &worker::Env, parent: &str) -> worker::Result<Account> {
+    let token = secrets_store::read(&env.secret_store(parent)?)
+        .await?
+        .ok_or_else(|| {
+            worker::Error::RustError(format!("`{parent}` is not set in the Secrets Store"))
+        })?;
+    Ok(Account {
+        id: env.var("CF_ACCOUNT_ID")?.to_string(),
+        parent: token,
+        secrets_store: env.var("CF_SECRETS_STORE_ID")?.to_string(),
+        bearer: None,
+    })
 }

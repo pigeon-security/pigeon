@@ -2,7 +2,7 @@
 //! for one job, until the job's deadline, and nothing else. It is shown only to that runner and
 //! kept only as its hash, beside its grant, in the scheduler; it is dropped as the job ends.
 
-use pigeon_core::oauth::{hash, token};
+use crate::oauth::{hash, token};
 use serde::{Deserialize, Serialize};
 
 /// What every job token starts with.

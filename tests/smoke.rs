@@ -713,6 +713,28 @@ fn land_rebases_disjoint_branches_and_lanes() {
     assert!(!map.overlap(&["docs/a.md"], &["src/core/src/git.rs"]).retest);
     assert_eq!(map.deploy_order(&core).len(), 1);
     assert_eq!(map.scripts(), ["pigeon-platform", "pigeon-sites"]);
+    assert!(map.worker("sites").unwrap().queues.is_empty());
+    // A Worker's deploy scope: its queues and container classes, from the map.
+    let scoped = lanes::parse(&format!(
+        "{}\n[[worker]]\nname = \"ci-gateway\"\nscript = \"pigeon-ci-gateway\"\ndir = \"src/ci-gateway\"\npaths = [\"src/ci-gateway/*\"]\ntest_job = \"test\"\ndeploy_job = \"deploy-ci-gateway\"\nqueues = [\"pigeon-ci-events\"]\ncontainers = [\"CiRunner\"]\n",
+        include_str!("../ci/workers.toml")
+    ))
+    .unwrap();
+    let ci = scoped.worker("ci-gateway").unwrap();
+    assert_eq!(ci.queues, ["pigeon-ci-events"]);
+    assert_eq!(ci.containers, ["CiRunner"]);
+    // What a capability Worker may ask core to mint: a fixed table of purposes, nothing else.
+    use pigeon_capabilities::split::purpose_permissions;
+    assert!(
+        purpose_permissions("ai_gateway")
+            .unwrap()
+            .contains(&"AI Gateway Run")
+    );
+    assert_eq!(
+        purpose_permissions("artifacts"),
+        Some(&["Artifacts Read", "Artifacts Write"][..])
+    );
+    assert_eq!(purpose_permissions("Workers Scripts Write"), None);
     // Each platform Worker deploys alone for its own paths; a shared change deploys core first.
     let names = |a: &lanes::Affected| -> Vec<String> {
         map.deploy_order(a).iter().map(|w| w.name.clone()).collect()

@@ -19,7 +19,8 @@ pub mod land;
 pub mod linked;
 pub mod mirror;
 pub mod models;
-pub mod notify;
+/// Signed notifications, in pigeon-core so the capability Workers share them.
+pub use pigeon_core::notify;
 pub mod oauth;
 pub mod passkeys;
 pub mod policy;

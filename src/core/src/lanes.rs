@@ -45,6 +45,12 @@ pub struct Worker {
     /// The steps that run once this Worker has deployed.
     #[serde(default)]
     pub after: Vec<After>,
+    /// The queues it produces to, which its deploy looks up by name (the deploy proxy's scope).
+    #[serde(default)]
+    pub queues: Vec<String>,
+    /// Its container classes, whose container applications its deploy may change.
+    #[serde(default)]
+    pub containers: Vec<String>,
 }
 
 /// A step that runs once a Worker has deployed.

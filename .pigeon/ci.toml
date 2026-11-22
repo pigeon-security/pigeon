@@ -61,3 +61,36 @@ token = true
 cpu = 4
 memory_gb = 12
 disk_gb = 20
+
+# Deploys the pigeon-model-gateway Worker (src/model-gateway) from a landed commit, as `deploy` deploys core.
+[jobs.deploy-model-gateway]
+run = "ci/deploy/deploy-model-gateway.sh"
+timeout_min = 60
+token = true
+
+[jobs.deploy-model-gateway.needs]
+cpu = 4
+memory_gb = 12
+disk_gb = 20
+
+# Deploys the pigeon-ci-gateway Worker (src/ci-gateway) from a landed commit, as `deploy` deploys core.
+[jobs.deploy-ci-gateway]
+run = "ci/deploy/deploy-ci-gateway.sh"
+timeout_min = 60
+token = true
+
+[jobs.deploy-ci-gateway.needs]
+cpu = 4
+memory_gb = 12
+disk_gb = 20
+
+# Deploys the pigeon-proxy Worker (src/proxy) from a landed commit, as `deploy` deploys core.
+[jobs.deploy-proxy]
+run = "ci/deploy/deploy-proxy.sh"
+timeout_min = 60
+token = true
+
+[jobs.deploy-proxy.needs]
+cpu = 4
+memory_gb = 12
+disk_gb = 20

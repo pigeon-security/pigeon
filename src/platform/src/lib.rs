@@ -60,6 +60,7 @@ impl worker::DurableObject for Lander {
             worker: settings::WORKER,
             capabilities: settings::capabilities,
             sources: SOURCES,
+            bindings: settings::BINDINGS,
         };
         let inner = pigeon_capabilities::land::Lander::new(state, env, settings::land(), hosting)
             .expect("the Lander's migrations apply");

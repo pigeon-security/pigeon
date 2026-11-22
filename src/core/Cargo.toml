@@ -18,4 +18,5 @@ hmac = "0.12"
 rsa = { version = "0.9", default-features = false, features = ["std"] }
 sha1 = { version = "0.10", default-features = false }
 toml = { version = "0.8", default-features = false, features = ["parse"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 

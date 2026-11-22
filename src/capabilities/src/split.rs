@@ -172,8 +172,65 @@ async fn credential(cx: &Context<'_>, r: &CredentialRequest) -> Result<Value> {
                 expires_at: now_ms() + LINKED_USE_MS,
             })?)
         }
+        "scoped" => scoped(cx, &r.scopes).await,
         other => Err(bad(&format!("no credential of kind `{other}`"))),
     }
+}
+
+/// How long a scoped token minted for a capability Worker lives, in seconds.
+const SCOPED_TTL_SECS: u64 = 900;
+
+/// The permissions each purpose a capability Worker may ask for brings: a fixed table, so a
+/// capability Worker never names a permission itself (docs/plans/workers-split.md).
+pub fn purpose_permissions(purpose: &str) -> Option<&'static [&'static str]> {
+    Some(match purpose {
+        // Model calls, usage and logs, and the gateway's setup.
+        "ai_gateway" => &[
+            "AI Gateway Read",
+            "AI Gateway Run",
+            "AI Gateway Write",
+            "Secrets Store Write",
+        ],
+        // Git tokens for the source repository: reading a job's config, pushing notes.
+        "artifacts" => &["Artifacts Read", "Artifacts Write"],
+        // A capability's own secrets, set on the secrets page.
+        "secrets_store" => &["Secrets Store Write"],
+        // The MCP server portal, synced after a setup.
+        "mcp_portal" => &["MCP Portals Write"],
+        _ => return None,
+    })
+}
+
+/// A token minted from the parent token for `purposes`, living [`SCOPED_TTL_SECS`]: the
+/// capability Worker uses it as an `Account`'s bearer, and it expires on its own.
+async fn scoped(cx: &Context<'_>, purposes: &[String]) -> Result<Value> {
+    if purposes.is_empty() {
+        return Err(bad("a scoped credential names its purposes"));
+    }
+    let mut permissions: Vec<&str> = Vec::new();
+    for p in purposes {
+        let more =
+            purpose_permissions(p).ok_or_else(|| bad(&format!("no credential purpose `{p}`")))?;
+        for m in more {
+            if !permissions.contains(m) {
+                permissions.push(m);
+            }
+        }
+    }
+    let request = pigeon_core::tokens::MintRequest {
+        purpose: format!("worker-{}", purposes.join("-")),
+        policies: vec![pigeon_core::tokens::Policy::new(
+            pigeon_core::tokens::Scope::Account,
+            &permissions,
+        )],
+        ttl_secs: SCOPED_TTL_SECS,
+    };
+    let minted = pigeon_core::tokens::mint(&cx.account.parent, &cx.account.id, &request).await?;
+    Ok(serde_json::to_value(Credential {
+        token: minted.value,
+        account_id: cx.account.id.clone(),
+        expires_at: now_ms() + (SCOPED_TTL_SECS as i64) * 1000,
+    })?)
 }
 
 /// `workers_setup` and `manifest_refresh`.

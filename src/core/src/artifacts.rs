@@ -462,3 +462,29 @@ pub fn events_source(namespace: &str, name: &str) -> Vec<Value> {
         json!({ "type": "artifacts.repo", "namespace": namespace, "repoName": name }),
     ]
 }
+
+/// The file at `path` in `commit` of `namespace/name`, read with a git token minted for it and
+/// revoked after: the commit alone, one commit deep. Shared by core and the CI gateway.
+pub async fn read_file(
+    account: &Account,
+    namespace: &str,
+    repo: &str,
+    commit: &str,
+    path: &str,
+) -> Result<Option<Vec<u8>>> {
+    let (found, token) = session(account, namespace, repo, Access::Read, 900).await?;
+    let remote = crate::git::Remote {
+        url: found.remote.trim_end_matches('/').to_string(),
+        authorization: format!("Bearer {}", token.value),
+    };
+    let read = crate::git::read_file(&remote, commit, path).await;
+    let revoked = match &token.id {
+        Some(id) => revoke(account, namespace, repo, id).await,
+        None => Err(Error::RustError(
+            "a git token came back without an id".into(),
+        )),
+    };
+    let file = read?;
+    revoked?;
+    Ok(file)
+}

@@ -25,7 +25,8 @@ pub mod output;
 pub mod route;
 pub mod scheduler;
 pub mod state;
-pub mod token;
+/// CI job tokens, in pigeon-core so the proxies and capability Workers share them.
+pub use pigeon_core::job_token as token;
 
 use std::future::Future;
 use std::pin::Pin;

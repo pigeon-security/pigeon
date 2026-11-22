@@ -5,7 +5,7 @@
 //! a key of the caller's own, handed to them once. A post never carries a secret or a model's
 //! answer; a failed one is the sender's to retry.
 
-use pigeon_core::sign::{equal, hex, hmac_sha256};
+use crate::sign::{equal, hex, hmac_sha256};
 use worker::js_sys::{Date, Uint8Array};
 use worker::{Fetch, Headers, Method, Request, RequestInit, Result};
 

@@ -914,22 +914,7 @@ pub async fn read_file(
     commit: &str,
     path: &str,
 ) -> Result<Option<Vec<u8>>> {
-    let (found, token) =
-        artifacts::session(account, namespace, repo, Access::Read, TOKEN_TTL).await?;
-    let remote = Remote {
-        url: found.remote.trim_end_matches('/').to_string(),
-        authorization: format!("Bearer {}", token.value),
-    };
-    let read = git::read_file(&remote, commit, path).await;
-    let revoked = match &token.id {
-        Some(id) => artifacts::revoke(account, namespace, repo, id).await,
-        None => Err(Error::RustError(
-            "a git token came back without an id".into(),
-        )),
-    };
-    let file = read?;
-    revoked?;
-    Ok(file)
+    artifacts::read_file(account, namespace, repo, commit, path).await
 }
 
 /// Whether `new` moves a branch at `old` forward, from `pack`: the commits `new` reaches that

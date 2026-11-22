@@ -205,10 +205,14 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
             script: WORKER.into(),
             // The other platform Workers, from the map built into this Worker.
             others: map()
-                .scripts()
+                .workers
                 .into_iter()
-                .filter(|s| *s != WORKER)
-                .map(str::to_string)
+                .filter(|w| w.script != WORKER)
+                .map(|w| pigeon_capabilities::cf_proxy::Other {
+                    script: w.script,
+                    queues: w.queues,
+                    containers: w.containers,
+                })
                 .collect(),
             // The queues this Worker produces to and its container classes, as wrangler.toml
             // declares them.

@@ -508,6 +508,28 @@ over their in-flight work.
 
 - 2026-11-22: phase 1 (1a and 1b) landed together, as landing `xKIrTa8WmsUYZ02v` (main at
   `520e778`).
+- 2026-11-22: the person asked for the remaining Workers in parallel. T0, the shared prep, was
+  built on `claude/split-prep`, to land alone before the tracks.
+  - Helpers moved to `pigeon-core` (old paths re-export them): `notify`, `job_token` (CI job
+    tokens), `expiry::{Expiry, from_field, parse_time}`, `account_from_env`,
+    `proxy_caller::{ProxyCaller, ID_LEN}` and `artifacts::read_file`.
+  - Credentials: kind `scoped` mints a 15-minute token for fixed purposes (`ai_gateway`,
+    `artifacts`, `secrets_store`, `mcp_portal`); a capability Worker never names a
+    permission.
+  - The map takes each Worker's deploy scope (`queues`, `containers`). The deploy proxy scopes
+    account-wide calls to the Worker being deployed.
+  - The Lander runs tools on capability Workers too.
+  - The `deploy-model-gateway`, `deploy-ci-gateway` and `deploy-proxy` jobs and scripts are
+    added. Each track adds its own map entry with its crate: a shared change deploys every
+    Worker in the map, so an entry before its crate exists would fail every deploy.
+  - Read-only mapping of models, ci and proxy found:
+    - every track needs these helpers;
+    - ci and the proxy need parent-token power (git tokens, the notes push, every proxied
+      request): scoped credentials for ci; the proxy's choice is with the person;
+    - the Buildkite hook path is `/ci/hooks/buildkite`.
+- 2026-11-22: phase 2b deployed `pigeon-sites` (its first deploy went through the deploy proxy).
+  The first try was cancelled and landed again: the old Lander had checked it before the map
+  listed Workers, so it would have deployed core alone.
 - 2026-11-22: phase 2a built on `claude/lanes-deploy`.
   - The map lists `sites`.
   - The Lander deploys each affected Worker in turn with its own job, and runs that Worker's

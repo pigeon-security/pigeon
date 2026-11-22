@@ -10,11 +10,11 @@
 //! object's single thread makes each change atomic; a job being dispatched is claimed first, so
 //! the alarm and a submit never dispatch it twice.
 
+use pigeon_core::Account;
 use pigeon_core::artifacts::{self, Access};
 use pigeon_core::durable::{self, Db, opt};
 use pigeon_core::git::{self, Remote, Update, ZERO};
 use pigeon_core::gitobj;
-use pigeon_core::{Account, secrets_store};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use worker::{
@@ -247,15 +247,7 @@ pub fn deadline(at_ms: i64, timeout_min: u32) -> i64 {
 
 /// The account a git token is minted on, for the notes push and for reading `ci.toml`.
 pub(crate) async fn account(env: &Env, parent: &str) -> Result<Account> {
-    let parent_token = secrets_store::read(&env.secret_store(parent)?)
-        .await?
-        .ok_or_else(|| bad(&format!("`{parent}` is not set in the Secrets Store")))?;
-    Ok(Account {
-        id: env.var("CF_ACCOUNT_ID")?.to_string(),
-        parent: parent_token,
-        secrets_store: env.var("CF_SECRETS_STORE_ID")?.to_string(),
-        bearer: None,
-    })
+    pigeon_core::account_from_env(env, parent).await
 }
 
 /// The scheduler's logic; the hosting Worker's Durable Object class wraps it.
