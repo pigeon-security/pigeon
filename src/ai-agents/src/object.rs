@@ -243,6 +243,10 @@ impl AiAgentRuns {
             // ---- the index ----
             "create" => self.create(a).await,
             "list" => self.list(a),
+            "section" => Ok(json!({
+                "paused": self.flag("paused")?,
+                "runs": self.section_rows(&s("reader"))?,
+            })),
             "get" => self.get(&s("run"), &s("reader")),
             // For a run object, about itself: no reader check.
             "get_any" => Ok(self
@@ -251,11 +255,41 @@ impl AiAgentRuns {
                 .unwrap_or(Value::Null)),
             "update" => self.update(a),
             "slot" => self.slot(&s("run")),
+            "inbox" => self.inbox(&s("reader"), a["since"].as_i64().unwrap_or(0)),
+            "relay_answer" => {
+                let id = s("run");
+                self.get(&id, &s("reader"))?;
+                call(
+                    &self.env,
+                    &format!("run:{id}"),
+                    "answer",
+                    &json!({ "answer": a["answer"] }),
+                )
+                .await
+            }
+            "report" => self.report(a),
             "stop" => self.stop(a).await,
             "pause" => self.set_flag("paused", a["paused"].as_bool().unwrap_or(true)),
             "paused" => Ok(json!(self.flag("paused")?)),
             // ---- a run object ----
             "begin" => self.begin(a).await,
+            "answer" => {
+                let row = self.run_row()?.ok_or_else(|| bad("no run here"))?;
+                let waiting: Option<Wait> = row
+                    .waiting
+                    .as_deref()
+                    .and_then(|w| serde_json::from_str(w).ok());
+                let Some(Wait::Answer { call: call_id, .. }) = waiting else {
+                    return Err(bad("the run is not waiting for an answer"));
+                };
+                let text = s("answer");
+                if text.trim().is_empty() {
+                    return Err(bad("`answer` is required"));
+                }
+                self.answered(&row, &call_id, &format!("The person answered: {text}"))
+                    .await?;
+                Ok(json!({ "answered": true }))
+            }
             "halt" => {
                 self.db.exec("UPDATE run SET waiting = NULL", vec![])?;
                 self.state.storage().set_alarm(0).await?;
@@ -340,6 +374,71 @@ impl AiAgentRuns {
             call(&self.env, &format!("run:{id}"), "begin", a).await?;
         }
         Ok(self.row(id)?.map(|r| r.public()).unwrap_or(Value::Null))
+    }
+
+    /// What waits for the person, and what ended since `since` (ms): open questions and passkey
+    /// waits, and finished runs with their reports, for the parent session to relay.
+    fn inbox(&self, reader: &str, since: i64) -> Result<Value> {
+        let waiting: Vec<Row> = self.db.rows(
+            "SELECT * FROM runs WHERE state = 'waiting' AND waiting IS NOT NULL AND (by_id = ? OR for_id = ?) ORDER BY created_at",
+            vec![reader.into(), reader.into()],
+        )?;
+        let ended: Vec<Row> = self.db.rows(
+            "SELECT * FROM runs WHERE ended_at IS NOT NULL AND ended_at > ? AND (by_id = ? OR for_id = ?) ORDER BY ended_at LIMIT 50",
+            vec![since.into(), reader.into(), reader.into()],
+        )?;
+        let cursor = ended
+            .iter()
+            .filter_map(|r| r.ended_at)
+            .max()
+            .unwrap_or(since);
+        Ok(json!({
+            "waiting": waiting.iter().map(Row::public).collect::<Vec<_>>(),
+            "ended": ended.iter().map(Row::public).collect::<Vec<_>>(),
+            "next_since": cursor,
+        }))
+    }
+
+    /// A Claude Code session registered as a run reports how it ended.
+    fn report(&self, a: &Value) -> Result<Value> {
+        let id = a["run"].as_str().unwrap_or_default();
+        let reader = a["reader"].as_str().unwrap_or_default();
+        let row = self
+            .row(id)?
+            .filter(|r| Self::may_read(r, reader))
+            .ok_or_else(|| bad(format!("no run {id}, or not yours")))?;
+        if row.runtime != "claude_code" {
+            return Err(bad(
+                "a gateway run reports by itself; ai_agents_report is for Claude Code sessions",
+            ));
+        }
+        let state = match a["state"].as_str() {
+            Some(s @ ("running" | "done" | "failed")) => s,
+            _ => return Err(bad("`state` must be running, done or failed")),
+        };
+        let ended = state != "running";
+        self.db.exec(
+            "UPDATE runs SET state = ?, report = COALESCE(?, report), branch = COALESCE(?, branch), step = COALESCE(?, step), ended_at = CASE WHEN ? THEN ? ELSE ended_at END WHERE id = ?",
+            vec![
+                state.into(),
+                opt(a["report"].as_str()),
+                opt(a["branch"].as_str()),
+                opt(a["step"].as_str()),
+                i64::from(ended).into(),
+                now().into(),
+                id.into(),
+            ],
+        )?;
+        Ok(self.row(id)?.map(|r| r.public()).unwrap_or(Value::Null))
+    }
+
+    /// The runs for the console's AI Agents section: live ones, then the last ended.
+    pub fn section_rows(&self, reader: &str) -> Result<Vec<Value>> {
+        let rows: Vec<Row> = self.db.rows(
+            "SELECT * FROM runs WHERE by_id = ? OR for_id = ? ORDER BY CASE WHEN ended_at IS NULL THEN 0 ELSE 1 END, created_at DESC LIMIT 30",
+            vec![reader.into(), reader.into()],
+        )?;
+        Ok(rows.iter().map(Row::public).collect())
     }
 
     /// Whether `reader` (a user id) may see or act on a run: the caller who started it, or the
@@ -651,6 +750,19 @@ impl AiAgentRuns {
                         storage.set_alarm(after_ms).await?;
                     }
                     Ok(())
+                }
+                Some(Wait::Answer {
+                    call: call_id,
+                    since,
+                    ..
+                }) if now() - since >= run::ANSWER_PATIENCE_MS => {
+                    self.answered(
+                        &row,
+                        call_id,
+                        "no answer came in 24 hours: choose the conventional option, say so in \
+                         your report, and go on",
+                    )
+                    .await
                 }
                 // The provider's wait is over: back to work, and the next turn tries again.
                 Some(Wait::Provider { since }) if now() - since < run::PROVIDER_PATIENCE_MS => {
@@ -1116,6 +1228,34 @@ impl AiAgentRuns {
                     }
                 }
             }
+            Some(Kind::Agent) if c.name == "ask_person" => {
+                // The run waits for the person's answer, which comes back through `answer`.
+                let options: Vec<String> = input["options"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|o| o.as_str().map(String::from))
+                    .collect();
+                let wait = Wait::Answer {
+                    call: c.id.clone(),
+                    question: input["question"].as_str().unwrap_or_default().to_string(),
+                    options,
+                    since: now(),
+                };
+                self.set(
+                    "state = 'waiting', waiting = ?",
+                    vec![serde_json::to_string(&wait)?.into()],
+                )?;
+                let mut r = row.clone();
+                r.state = "waiting".into();
+                self.tell(
+                    &r,
+                    "waiting for the person's answer",
+                    json!({ "waiting": wait }),
+                )
+                .await?;
+                return storage.set_alarm(run::CHECK_EVERY_MS).await;
+            }
             Some(Kind::Agent) => self.agent_tool(row, &c.name, &input),
             None => Err(format!("`{}` is not one of this run's tools", c.name)),
         };
@@ -1148,13 +1288,21 @@ impl AiAgentRuns {
                 .map_err(|e| e.to_string())?;
                 Ok("reported; the run ends".into())
             }
-            "ask_person" => Err(
-                "asking the person is not available to runs yet (phase 3): choose the \
-                 conventional option, say so in your report, and go on"
-                    .into(),
-            ),
             other => Err(format!("`{other}` is not available to runs yet")),
         }
+    }
+
+    /// Answers the `ask_person` call `call_id` with `text` and goes back to work.
+    async fn answered(&self, row: &RunRow, call_id: &str, text: &str) -> Result<()> {
+        if let Some(c) = self.calls()?.iter().find(|c| c.id == call_id) {
+            self.finish_call(c.n, text, false)?;
+        }
+        self.set("state = 'running', waiting = NULL", vec![])?;
+        let mut r = row.clone();
+        r.state = "running".into();
+        self.tell(&r, "answered; acting", json!({ "waiting": null }))
+            .await?;
+        self.state.storage().set_alarm(0).await
     }
 
     /// Looks at the approval a call waits on; once it is decided, the call runs or fails.

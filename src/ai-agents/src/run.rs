@@ -108,6 +108,14 @@ pub enum Wait {
     Answer {
         /// The tool call that asked.
         call: String,
+        /// The question, as the person sees it.
+        question: String,
+        /// The answers offered, when the choice is a short list.
+        #[serde(default)]
+        options: Vec<String>,
+        /// When it was asked (ms).
+        #[serde(default)]
+        since: i64,
     },
     /// Its executors, which a planner waits on with `executor_status`.
     Executors,
@@ -218,6 +226,8 @@ pub const MAX_NUDGES: u32 = 2;
 pub const CHECK_EVERY_MS: i64 = 15_000;
 /// How often a planner looks at its executors, in ms.
 pub const EXECUTORS_EVERY_MS: i64 = 30_000;
+/// How long a run waits for the person's answer before it goes on without one, in ms.
+pub const ANSWER_PATIENCE_MS: i64 = 24 * 3_600_000;
 /// How long a run waits on a failing provider before it fails, in ms.
 pub const PROVIDER_PATIENCE_MS: i64 = 60 * 60_000;
 /// How often a run tries a failing provider again, in ms.

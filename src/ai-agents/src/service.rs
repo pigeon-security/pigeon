@@ -4,8 +4,8 @@
 //! so every model turn and pigeon call the run makes is theirs, through the same gate.
 
 use pigeon_contract::{
-    Answer, CONTRACT, CallRequest, CapabilityManifest, FailureKind, Manifest, Service, Signed,
-    ToolSpec,
+    Answer, CONTRACT, CallRequest, CapabilityManifest, FailureKind, Manifest, SectionRequest,
+    SectionSpec, Service, Signed, ToolSpec,
 };
 use serde_json::{Value, json};
 use worker::Env;
@@ -20,13 +20,20 @@ pub const NAME: &str = "ai-agents";
 pub const WORKER: &str = "pigeon-ai-agents";
 
 /// Every tool the capability offers.
-pub const TOOLS: [&str; 5] = [
+pub const TOOLS: [&str; 9] = [
     "ai_agents_start",
     "ai_agents_status",
     "ai_agents_stop",
     "ai_agents_pause",
     "ai_agents_resume",
+    "ai_agents_inbox",
+    "ai_agents_answer",
+    "ai_agents_register",
+    "ai_agents_report",
 ];
+
+/// The console section's id; it sits on the Instances tab, with what else pigeon runs.
+pub const SECTION: &str = "ai-agents";
 
 /// The agents capability.
 pub struct Agents;
@@ -169,6 +176,73 @@ impl Agents {
             "ai_agents_resume" => {
                 r(object::call(env, INDEX, "pause", &json!({ "paused": false })).await)
             }
+            "ai_agents_inbox" => r(object::call(
+                env,
+                INDEX,
+                "inbox",
+                &json!({ "reader": reader, "since": a["since"].as_i64().unwrap_or(0) }),
+            )
+            .await),
+            "ai_agents_answer" => {
+                let (Some(run), Some(answer)) = (a["run"].as_str(), a["answer"].as_str()) else {
+                    return Err("give `run` and `answer`".into());
+                };
+                r(object::call(
+                    env,
+                    INDEX,
+                    "relay_answer",
+                    &json!({ "run": run, "answer": answer, "reader": reader }),
+                )
+                .await)
+            }
+            "ai_agents_register" => {
+                let session = a["session_id"].as_str().unwrap_or_default();
+                if !session.starts_with("session_") {
+                    return Err("`session_id` must be a Claude Code session's id".into());
+                }
+                let role = match a["role"].as_str().unwrap_or("executor") {
+                    r @ ("planner" | "executor" | "mechanical") => r,
+                    other => {
+                        return Err(format!("`role` must be planner or executor, not `{other}`"));
+                    }
+                };
+                let brief = a["brief"].as_str().unwrap_or_default();
+                if brief.trim().is_empty() {
+                    return Err("`brief` is required".into());
+                }
+                let id = run_id().map_err(|e| e.to_string())?;
+                r(object::call(
+                    env,
+                    INDEX,
+                    "create",
+                    &json!({
+                        "run": id,
+                        "role": role,
+                        "runtime": "claude_code",
+                        "session_id": session,
+                        "parent_run": a["parent_run"],
+                        "caller": caller.caller,
+                        "brief": brief,
+                        "branch": a["branch"],
+                        "budget": Value::Null,
+                    }),
+                )
+                .await)
+            }
+            "ai_agents_report" => r(object::call(
+                env,
+                INDEX,
+                "report",
+                &json!({
+                    "run": a["run"],
+                    "state": a["state"],
+                    "report": a["report"],
+                    "branch": a["branch"],
+                    "step": a["step"],
+                    "reader": reader,
+                }),
+            )
+            .await),
             other => Err(format!("no tool `{other}`")),
         }
     }
@@ -242,11 +316,98 @@ impl Service for Agents {
                         "Resume runs after ai_agents_pause.",
                         json!({ "type": "object", "properties": {} }),
                     ),
+                    tool(
+                        "ai_agents_inbox",
+                        "What waits for the person (runs' questions and passkey waits) and \
+                         the runs that ended since `since` (ms), with their reports. Read it \
+                         when the person writes and after starting a run; relay questions \
+                         and reports to them; pass `next_since` next time.",
+                        json!({
+                            "type": "object",
+                            "properties": { "since": { "type": "integer" } }
+                        }),
+                    ),
+                    tool(
+                        "ai_agents_answer",
+                        "Give a run the person's answer to the question it asked; it goes on.",
+                        json!({
+                            "type": "object",
+                            "properties": {
+                                "run": { "type": "string" },
+                                "answer": { "type": "string" }
+                            },
+                            "required": ["run", "answer"]
+                        }),
+                    ),
+                    tool(
+                        "ai_agents_register",
+                        "Record a Claude Code session started for a task (when the person \
+                         asked for the work in the Claude chat) as a run, so it is listed and \
+                         reports like a gateway run. Answers the run's id; tell the session \
+                         to call ai_agents_report with it at its end.",
+                        json!({
+                            "type": "object",
+                            "properties": {
+                                "session_id": { "type": "string" },
+                                "role": { "type": "string", "enum": ["planner", "executor", "mechanical"] },
+                                "brief": { "type": "string" },
+                                "branch": { "type": "string" },
+                                "parent_run": { "type": "string" }
+                            },
+                            "required": ["session_id", "brief"]
+                        }),
+                    ),
+                    tool(
+                        "ai_agents_report",
+                        "From a Claude Code session registered with ai_agents_register: where \
+                         it is (`running`, with a `step`) or how it ended (`done` or \
+                         `failed`, with a `report`: what changed, the branch and its tip, \
+                         CI, any landing).",
+                        json!({
+                            "type": "object",
+                            "properties": {
+                                "run": { "type": "string" },
+                                "state": { "type": "string", "enum": ["running", "done", "failed"] },
+                                "report": { "type": "string" },
+                                "branch": { "type": "string" },
+                                "step": { "type": "string" }
+                            },
+                            "required": ["run", "state"]
+                        }),
+                    ),
                 ],
+                sections: vec![SectionSpec {
+                    tab: "instances".into(),
+                    id: SECTION.into(),
+                    title: "AI Agents".into(),
+                    description: "Planner and executor runs, through the model gateway or in \
+                                  your Claude chat, and what they wait for from you."
+                        .into(),
+                    order: 50,
+                    cost: None,
+                }],
                 footprint: json!({ "durable_objects": ["AiAgentRuns", "Sandbox"] }),
                 ..CapabilityManifest::default()
             }],
         }
+    }
+
+    fn section<'a>(
+        &'a self,
+        env: &'a Env,
+        caller: &'a Signed,
+        req: SectionRequest,
+    ) -> pigeon_contract::serve::Answering<'a> {
+        Box::pin(async move {
+            if req.id != SECTION {
+                return Answer::error(FailureKind::BadRequest, format!("no section `{}`", req.id));
+            }
+            let reader = reader(caller);
+            match object::call(env, INDEX, "section", &json!({ "reader": reader })).await {
+                Ok(data) => Answer::Ok(json!({ "html": crate::page::section(&data) })),
+                Err(e) => Answer::error(FailureKind::Failed, e.to_string()),
+            }
+        })
     }
 
     fn call<'a>(

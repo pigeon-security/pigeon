@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod budget;
 pub mod object;
+pub mod page;
 pub mod prompts;
 pub mod run;
 pub mod sandbox;

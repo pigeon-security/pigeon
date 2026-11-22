@@ -2482,6 +2482,39 @@ fn ai_agents_loop_budgets_tools_and_turns() {
             <= 120
     );
 
+    // The capability: its manifest offers exactly its tools, and its section on Instances.
+    use pigeon_contract::Service;
+    let manifest = service::Agents.manifest();
+    let offered: Vec<&str> = manifest.capabilities[0]
+        .tools
+        .iter()
+        .map(|t| t.name.as_str())
+        .collect();
+    assert_eq!(offered, service::TOOLS);
+    assert_eq!(manifest.capabilities[0].sections[0].tab, "instances");
+    assert_eq!(manifest.worker, "pigeon-ai-agents");
+    // The section: what waits for the person first, every value escaped.
+    use pigeon_ai_agents::page;
+    let html = page::section(&json!({
+        "paused": false,
+        "runs": [
+            { "run": "r1", "role": "executor", "runtime": "gateway", "state": "waiting",
+              "waiting": { "for": "answer", "call": "t1", "question": "Use <b>A</b> or B?", "options": ["A", "B"] },
+              "step": "waiting for the person's answer", "spent": { "cost": "$0.42", "turns": 7 },
+              "branch": "claude/ai-agent-r1", "brief": "fix <script>alert(1)</script>" },
+            { "run": "r2", "role": "planner", "runtime": "claude_code", "state": "done",
+              "report": "landed", "spent": { "cost": "$0", "turns": 0 }, "brief": "plan x" }
+        ]
+    }));
+    assert!(html.contains("Waiting for you") && html.contains("Use &lt;b&gt;A&lt;/b&gt; or B?"));
+    assert!(!html.contains("<script>") && html.contains("&lt;script&gt;"));
+    assert!(html.contains("Claude chat") && html.contains("$0.42 · 7 turns"));
+    assert!(page::section(&json!({ "paused": true, "runs": [] })).contains("paused"));
+    // A run waiting for an answer keeps its question, as the inbox and the section show it.
+    let w: Wait =
+        serde_json::from_value(json!({ "for": "answer", "call": "t1", "question": "q" })).unwrap();
+    assert!(matches!(w, Wait::Answer { ref question, since: 0, .. } if question == "q"));
+
     // Falling back to another model drops thinking it cannot read.
     let thought = [
         json!({ "role": "assistant", "content": [{ "type": "thinking", "thinking": "t", "signature": "s" }] }),
