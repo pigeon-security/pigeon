@@ -41,6 +41,6 @@ output) and pin it in `src/ai-agents-worker/wrangler.toml`:
     image = "registry.cloudflare.com/4f94676cb2cbe46fd985b089ca97ea27/pigeon-ai-agent-sandbox@sha256:<digest>"
 
 Land that pin together with the Worker side (the `fetch` agent tool, on
-`claude/sandboxd-v2-worker`), which needs v2: v1 answers 404 to `fetch`.
+`claude/sandboxd-v2-pin`), which needs v2: v1 answers 404 to `fetch`.
 After it is deployed, a follow-up drops the Worker's v1 workarounds: `RUN_PATH`,
 `PREPARE_SETUP` and `PREPARE_TEARDOWN` in `src/ai-agents/src/sandbox.rs` (harmless with v2).
