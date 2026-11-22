@@ -1,10 +1,9 @@
 # Workers split: capabilities as their own Workers, landing in lanes
 
-Status: **phases 1 and 2 landed (`pigeon-sites` live and bound); T0 landed; phase 3 code (model
-gateway), phase 4 step 1 (CI gateway) and phase 6 code (proxy) landing in parallel; phase 5
-(deploy lanes per Worker, with failed deploys attributed by rollback and bisect) built,
-landing when the queue is quiet; no Durable Object moved
-yet** (2026-11-22).
+Status: **phases 1, 2, 5 and 6 landed and live (all five Workers bound, the proxy cut over,
+deploy lanes with attribution); phase 3 done: `ModelJobs` transferred to
+`pigeon-model-gateway` after a rehearsal and a drain; phase 4's `CiScheduler` transfer next**
+(2026-11-22).
 
 ## Goal
 
@@ -588,6 +587,56 @@ over their in-flight work.
    way is a gate change (delegate).
 
 ## Log
+
+- 2026-11-22: phase 3 done: `ModelJobs` moved to pigeon-model-gateway.
+  - First, the job objects needed a token the gateway may hold. They streamed with the parent
+    token. Now `runner::Settings.token` is `Token::Parent` (core, unchanged) or
+    `Token::Scoped`: a per-job `ai_gateway` token from core's `credential` op, asked as the
+    Worker itself (`worker:pigeon-model-gateway`), as pigeon-proxy does
+    (`q9ZLdib17L0q0su3`).
+  - Drain: the only user of model jobs, the AI agents planner, had none queued or running and
+    held new ones for the window.
+  - The transfer (`8M7sAuFZ1mejusXZ`, main `fdeecae`): the gateway exports the class, binds
+    `MODEL_JOBS` locally, and its first migration is `transferred_classes` from
+    pigeon-platform. It went green on its first try.
+    - Core's binding is unchanged (no `script_name`) and reaches the class there, as the
+      rehearsal showed. Core keeps its v4 migration and still exports the class.
+    - The lockfile entry made the landing shared, so core deployed first, unchanged.
+  - Live: `models_submit` → `models_result` succeeded (`hWTz-yJJhi90biTSlsvTPU`).
+  - Left for later landings: core's binding gains `script_name = "pigeon-model-gateway"` and
+    stops exporting the class; `src/models` moves from `shared` to the gateway's lane.
+- 2026-11-22: the DO transfer rehearsal (T17) passed. Steps:
+  - pigeon-dotest-a was deployed and seeded.
+  - R2 added dotest-b's crate and map entry without deploying it.
+  - R3, touching only `src/dotest-b`, deployed it, and that first deploy was the transfer.
+  - On both URLs afterwards: `id` and `id_from_name` unchanged (`4cc57434…`), the three rows
+    with their original `at`, the alarm still pending a day ahead with `alarm_fired` 0 ten
+    minutes later, and `host` pigeon-dotest-b.
+  - a's binding without `script_name` already reached the class in b.
+  - R4 named b explicitly. a redeployed with its old v1 migration after the transfer.
+  - The rehearsal Workers answer on workers.dev; this session's environment allows their two
+    hostnames. Removing them is by hand (dashboard), with their map entries in a later
+    landing.
+- 2026-11-22: what the first lane incidents taught.
+  - Incidents 1–3: every core deploy from main failed while the stand-in lacked the
+    `PUT …/schedules` route that the new cron trigger needs. Each time, core rolled back to
+    `592704d` and the landings ended "not bisected". A non-core lane holds a landing that
+    also affects core until core covers it, so sites, the gateways and the proxy waited.
+    Once the fix landed (`e_GFBZAzgT1ZDO-4`), core and every lane deployed it.
+  - Incident 4: pigeon-dotest-a's first real deploy uploaded, then Cloudflare answered
+    wrangler's lookup with 10007 "This Worker does not exist", a read just after the script
+    was created. D blamed the only landing it carried, the stand-in fix, which was innocent.
+    `deploy.sh` now deploys once more 30 s later when the upload went through and the answer
+    was 10007 (`yqI-aw_Ljy7vxMO8`). The incident needs nothing from the person: only open
+    incidents hold a lane.
+  - Open items:
+    - The deploy step looks Workers up in the map compiled into the running core, and
+      lanes come from main's map. A newly mapped Worker can deploy only after core has
+      deployed a build that lists it. Resolve from main's map, falling back to the compiled
+      one.
+    - D cannot tell a first-deploy environment failure from a code fault.
+    - Per-Worker caller keys.
+    - Skip the rollback when the failed job never uploaded.
 
 - 2026-11-22: live checks after the binds and the cutover.
   - The person had the parent run the proxy cutover. Through pigeon-proxy, `git ls-remote`
