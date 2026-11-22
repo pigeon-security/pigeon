@@ -111,6 +111,16 @@ if deploy 1; then
     check
     exit
 fi
+# A Worker's first deploy: right after the upload creates the script, Cloudflare can still answer
+# wrangler's next lookup of it with "This Worker does not exist" (10007). The upload went
+# through, so deploying once more, a little later, finishes the job.
+if grep -q "^Uploaded " "$log" && grep -q "code: 10007" "$log"; then
+    echo "Cloudflare did not yet know the Worker its upload just created; deploying again" >&2
+    sleep 30
+    deploy 2
+    check
+    exit
+fi
 if ! grep -q "pigeon's proxy does not allow" "$log"; then
     echo "the deploy failed; see above" >&2
     exit 1
