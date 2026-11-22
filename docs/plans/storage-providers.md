@@ -1,9 +1,10 @@
 # Object storage providers: Scaleway, DigitalOcean and Backblaze B2 through the portal
 
 Status: **phase 1 built on a branch, off by default** (22 November 2026). The account registry
-and the read-only tool surface (`storage`) are on `claude/ai-agent-q7VjHJXE6Mv0`, with no account
-declared, so the tools only say how to set one up. No credentials exist yet. Phase 2 starts when
-the person has made the first key (Follow-ups for the person, below).
+and the read-only tool surface (`storage`) are on `claude/ai-agent-q7VjHJXE6Mv0` (`2dabc75`, CI
+`test` passed), with no account declared, so the tools only say how to set one up. No
+credentials exist yet. Phase 2 starts when the person has made the first key (Follow-ups for
+the person, below).
 
 The person's words: "Add support for Scaleway MCP, Digital Ocean MCP and Backblaze MCP, going
 through the Cloudflare MCP Portal. We should support multiple accounts (i.e. 2x Scaleway or DO
@@ -380,7 +381,14 @@ a time; DigitalOcean first is the safest, as it is read-only.
 - 2026-11-22, overnight run (planner `claude/ai-agent-6xFkoSnmSyJU`):
   - Researched the three providers' MCP servers from the sandbox (Sources). None fits object
     reading behind the portal; designed the `storage` capability over S3 instead.
-  - Phase 1 built by an executor on `claude/ai-agent-q7VjHJXE6Mv0`, off by default
-    (`storage_accounts()` empty), with the smoke scenario
-    `storage_reads_s3_compatible_accounts`. Not landed: the person's reviewer lands it.
+  - Phase 1 built by an executor on `claude/ai-agent-q7VjHJXE6Mv0` (`2dabc75`; CI `test` job
+    `ZpJ3YuBi16HVJS9wziiWL2` passed, 31 scenarios), off by default (`storage_accounts()`
+    empty), with the smoke scenario `storage_reads_s3_compatible_accounts`. Both AWS SigV4
+    examples matched as published. Not landed: the person's reviewer lands it.
+  - That branch also adds a short `docs/plans/storage-providers.md` of its own, which conflicts
+    with this file. Two follow-up executors meant to delete it and review the code against a
+    checklist could not start: their sandboxes failed at `git clone` ("destination path
+    '/work' already exists"). The planner's sandbox cannot fetch other branches (the git proxy
+    answers 403). So the code was reviewed only from the executor's report, not line by line,
+    and the duplicate file is still there. When landing, keep this version of the file.
   - Nothing in `ci/`, `.pigeon/`, `.claude/`, `ci/workers.toml` or any `wrangler.toml` changed.
