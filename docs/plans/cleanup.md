@@ -1,6 +1,7 @@
 # Clean-up: faster, safer iteration after the split
 
-Status: **planned; items 1 and 2 built on branches, item 9 (docs) on this branch** (2026-11-22).
+Status: **planned; items 1 and 2 built on branches (CI green), item 9 (docs) on this branch**
+(2026-11-22).
 Nothing landed: the person's reviewer lands. Planner run `XE8RUxKJDU6J`, branch
 `claude/ai-agent-XE8RUxKJDU6J`.
 
@@ -187,8 +188,8 @@ day), L (more). "Tonight" means built on a branch tonight.
   `cargo check -p pigeon-platform`, checks it again with rustc rather than clippy-driver, so
   the workspace crates are checked a second time.
 - **Evidence.** `ci/runner/test.sh`, last step; `Cargo.toml` `members`; `.cargo/config.toml`.
-- **Fix.** Follow-up 2. It saves the time of a second check of the workspace crates, probably
-  20 to 40 s of the 101 s job. Measure it before and after.
+- **Fix.** Follow-up 2. Measured tonight in the `test` jobs of B1 and B2: the step takes 7.6 to
+  9.1 s of a 93 to 123 s job. Small, but it is free, and every gate run pays it.
 
 ### 8. Clearer incident text for a Worker's first deploy
 
@@ -246,7 +247,7 @@ class cannot be transferred), and it is not clean-up. It is listed so the rankin
 
 ### Looked at, nothing to do
 
-- The smoke suite: 26-odd scenarios in 11 to 24 s, well under 60 s.
+- The smoke suite: 30 to 31 scenarios in 6 to 19 s in tonight's CI runs, well under 60 s.
 - The six `deploy-<worker>.sh` scripts are five-line wrappers over `deploy.sh`, not duplicates.
 - `expect` in the DO constructors (`src/platform/src/lib.rs`): workers-rs's `DurableObject::new`
   cannot return an error, so a failed migration can only panic there. Leave as is.
@@ -272,9 +273,9 @@ class cannot be transferred), and it is not clean-up. It is listed so the rankin
 
 | Branch | What | Kind | Commit | CI `test` |
 | --- | --- | --- | --- | --- |
-| `claude/ai-agent-XE8RUxKJDU6J` | this plan, README statuses | docs only | see Log | see Log |
-| B1 `claude/ai-agent-Fuzcl9MugNWk` | item 2: `split::merge`, `op_needs_bound`, `for_op`; smoke scenario | code (core) | see Log | see Log |
-| B2 `claude/ai-agent-M933ZUIdJ1YQ` | item 1: covered incidents, unmapped ones hidden | code (core: the Lander) | see Log | see Log |
+| `claude/ai-agent-XE8RUxKJDU6J` | this plan, README statuses | docs only | the tip after `05081e9` | none needed (docs only; the Lander runs no job for docs) |
+| B1 `claude/ai-agent-Fuzcl9MugNWk` | item 2: `split::merge`, `op_needs_bound`, `for_op`; smoke scenario | code (core) | `7607f74` | `c_mYd-9V5In7HKYLy1HLi0` succeeded (31 scenarios, 6 s) |
+| B2 `claude/ai-agent-M933ZUIdJ1YQ` | item 1: covered incidents, unmapped ones hidden | code (core: the Lander) | `991e147` | `siR-QoAyITQcpitDKrRGdL` succeeded (30 scenarios, 19 s) |
 
 B1 and B2 both touch `tests/smoke.rs` and core's lane. The Lander rebases only branches that
 change different paths, so whichever lands second must first be rebased onto main by hand
@@ -353,3 +354,12 @@ alone (plus whatever the map adds for `src/capabilities`).
     it fails on `max_instances` as the deploy did. `wrangler types` on a config that still has
     `[build]` starts the release build, so the strip is needed.
   - Executors: B1 (`Fuzcl9MugNWk`) and B2 (`M933ZUIdJ1YQ`), one concern each.
+- 2026-11-22: both built, gate green locally and in CI (see Branches).
+  - B2 (`991e147`, $0.11): as designed. An incident whose old summary is null gets a summary
+    that starts "; covered by …"; every incident gets a summary when it opens, so this should
+    not happen.
+  - B1 (`7607f74`, $0.17): as designed, with one departure. The clash line's `console_error!`
+    in `split::merge` is compiled for wasm32 only: natively the macro aborts the process, so
+    `merge` could not run in the smoke suite. On WASM nothing changes.
+  - This run's git grant pushes its own branch but cannot fetch, so the executors' diffs were
+    reviewed from their reports and CI, not line by line. The reviewer should read both diffs.
