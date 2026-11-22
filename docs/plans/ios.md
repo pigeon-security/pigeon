@@ -728,3 +728,9 @@ a passkey. Enter every key and id on the console's secrets page once the slot ex
   `/app/oauth*` only, beside `webcredentials`. A cancelled sign-in now shows iOS's error domain
   and code like every other failure, and the app logs the full error.
   The association file also answered HEAD with 404 (only GET was routed); it now answers both.
+- 2026-11-22 (23:10): phase 5 sign-in verified on a device with build 39, after deleting and
+  reinstalling it from TestFlight. Build 39's entitlement names `webcredentials` only, so that
+  is enough for the `https` callback; the `applinks` entitlement on main waits for the next
+  release. HEAD on the association file was a real fault (404; only GET was routed). Apple's
+  CDN (`app-site-association.cdn-apple.com/a/v1/platform.pigeon.dev`) still answered
+  "Not Found" around 22:48, yet iOS associated the domain after the reinstall. Build 40 is held.
