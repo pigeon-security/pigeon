@@ -485,7 +485,7 @@ impl Instances {
             "approval": made["record"]["id"],
             "waits_until_ms": made["record"]["expires_ms"],
             "note": "Nothing changes until the person approves this plan on the console's \
-                     Approvals tab; then instance_apply with this approval applies it once.",
+                     Approvals tab; then instance_apply {plan: <this approval>} applies it once.",
         }))
     }
 
@@ -495,7 +495,8 @@ impl Instances {
         let caller = cx
             .caller
             .ok_or_else(|| bad("applying needs a known caller"))?;
-        let approval_id = arg(args, "approval")?;
+        // Not "approval": the passkey gate takes that argument for itself.
+        let approval_id = arg(args, "plan")?;
         let got = directory(cx.env, "approval.get", json!({ "id": approval_id })).await?;
         let id = got["subject"]
             .as_str()
@@ -602,8 +603,8 @@ impl Capability for Instances {
                               deletes anything, and never touches what pigeon did not make.",
                 input_schema: json!({
                     "type": "object",
-                    "properties": { "approval": { "type": "string" } },
-                    "required": ["approval"]
+                    "properties": { "plan": { "type": "string", "description": "The plan's approval id, from instance_plan." } },
+                    "required": ["plan"]
                 }),
             },
             Tool {
