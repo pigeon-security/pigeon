@@ -1982,7 +1982,7 @@ fn ai_agents_loop_budgets_tools_and_turns() {
     );
     assert_eq!(
         run::next(&View {
-            waiting: Some(&Wait::Executors),
+            waiting: Some(&Wait::Executors { since: 0 }),
             ..view(State::Waiting)
         }),
         Action::Check {
@@ -2405,11 +2405,9 @@ fn ai_agents_loop_budgets_tools_and_turns() {
         (role, brief.as_str(), base.as_str(), b.turns),
         (Role::Executor, "fix it", "main", 60)
     );
-    assert!(
-        service::start_args(&json!({ "brief": "x", "role": "planner" }))
-            .unwrap_err()
-            .contains("phase 4")
-    );
+    let (role, _, _, b) = service::start_args(&json!({ "brief": "x", "role": "planner" })).unwrap();
+    assert_eq!((role, b.executors), (Role::Planner, 12));
+    assert!(service::start_args(&json!({ "brief": "x", "role": "boss" })).is_err());
     assert!(
         service::start_args(&json!({}))
             .unwrap_err()
@@ -2524,6 +2522,25 @@ fn ai_agents_loop_budgets_tools_and_turns() {
     let w: Wait =
         serde_json::from_value(json!({ "for": "answer", "call": "t1", "question": "q" })).unwrap();
     assert!(matches!(w, Wait::Answer { ref question, since: 0, .. } if question == "q"));
+
+    // A planner's executors: how many are live, which ended since its wait began, in words.
+    let children = json!([
+        { "run": "c1", "state": "done", "branch": "claude/ai-agent-c1", "report": "added x", "ended_at": 200 },
+        { "run": "c2", "state": "running", "branch": "claude/ai-agent-c2", "ended_at": null },
+        { "run": "c3", "state": "failed", "branch": "claude/ai-agent-c3", "report": "old", "ended_at": 50 }
+    ]);
+    assert_eq!(object::live_children(&children), 1);
+    assert!(object::ended_since(&children, 100) && !object::ended_since(&children, 200));
+    let summary = object::children_summary(&children, 100);
+    assert!(
+        summary.contains("c1 done on `claude/ai-agent-c1`: added x") && !summary.contains("c3")
+    );
+    assert!(summary.ends_with("1 executor(s) still running; executor_result has each report"));
+    assert_eq!(
+        tools::kind(Role::Planner, "wait_executors"),
+        Some(Kind::Agent)
+    );
+    assert_eq!(tools::kind(Role::Executor, "wait_executors"), None);
 
     // Falling back to another model drops thinking it cannot read.
     let thought = [

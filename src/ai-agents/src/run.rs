@@ -117,8 +117,12 @@ pub enum Wait {
         #[serde(default)]
         since: i64,
     },
-    /// Its executors, which a planner waits on with `executor_status`.
-    Executors,
+    /// Its executors: a planner's `wait_executors`, until one ends (ms since it began).
+    Executors {
+        /// When the wait began.
+        #[serde(default)]
+        since: i64,
+    },
     /// The model provider or the gateway, failing since `since` (ms).
     Provider {
         /// When the failures began.
@@ -270,7 +274,7 @@ pub fn next(v: &View) -> Action {
         State::Queued | State::Preparing => return Action::Prepare,
         State::Waiting => {
             return match v.waiting {
-                Some(Wait::Executors) => Action::Check {
+                Some(Wait::Executors { .. }) => Action::Check {
                     after_ms: EXECUTORS_EVERY_MS,
                 },
                 Some(Wait::Provider { .. }) => Action::Check {

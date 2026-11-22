@@ -303,6 +303,26 @@ impl AiAgentRuns {
                 )?;
                 Ok(Value::Null)
             }
+            "children" => {
+                let rows: Vec<Row> = self.db.rows(
+                    "SELECT * FROM runs WHERE parent_run = ? ORDER BY created_at",
+                    vec![s("run").into()],
+                )?;
+                Ok(json!(rows.iter().map(Row::public).collect::<Vec<_>>()))
+            }
+            "stop_child" => {
+                let id = s("run");
+                let row = self
+                    .row(&id)?
+                    .filter(|r| r.parent_run.as_deref() == Some(s("parent").as_str()))
+                    .ok_or_else(|| bad(format!("no executor {id} of yours")))?;
+                self.db.exec(
+                    "UPDATE runs SET stop_asked = 1 WHERE id = ?",
+                    vec![row.id.as_str().into()],
+                )?;
+                call(&self.env, &format!("run:{id}"), "halt", &json!({})).await?;
+                Ok(json!({ "stopping": [id] }))
+            }
             "stop" => self.stop(a).await,
             "pause" => self.set_flag("paused", a["paused"].as_bool().unwrap_or(true)),
             "paused" => Ok(json!(self.flag("paused")?)),
@@ -819,6 +839,26 @@ impl AiAgentRuns {
                     self.answered(&row, call_id, &run::unanswered(question))
                         .await
                 }
+                Some(Wait::Executors { since }) => {
+                    let children =
+                        call(&self.env, INDEX, "children", &json!({ "run": row.id })).await?;
+                    if ended_since(&children, *since) || live_children(&children) == 0 {
+                        let summary = children_summary(&children, *since);
+                        let waiting_call = self
+                            .calls()?
+                            .into_iter()
+                            .find(|c| c.name == "wait_executors" && c.done == 0);
+                        match waiting_call {
+                            Some(c) => self.answered(&row, &c.id, &summary).await,
+                            None => {
+                                self.set("state = 'running', waiting = NULL", vec![])?;
+                                storage.set_alarm(0).await
+                            }
+                        }
+                    } else {
+                        storage.set_alarm(after_ms).await
+                    }
+                }
                 // The provider's wait is over: back to work, and the next turn tries again.
                 Some(Wait::Provider { since }) if now() - since < run::PROVIDER_PATIENCE_MS => {
                     self.set("state = 'running', waiting = NULL", vec![])?;
@@ -1311,6 +1351,32 @@ impl AiAgentRuns {
                 .await?;
                 return storage.set_alarm(run::CHECK_EVERY_MS).await;
             }
+            Some(Kind::Agent) if c.name == "wait_executors" => {
+                let children =
+                    call(&self.env, INDEX, "children", &json!({ "run": row.id })).await?;
+                let live = live_children(&children);
+                if live == 0 {
+                    Ok(children_summary(&children, 0))
+                } else {
+                    let wait = Wait::Executors { since: now() };
+                    self.set(
+                        "state = 'waiting', waiting = ?",
+                        vec![serde_json::to_string(&wait)?.into()],
+                    )?;
+                    let mut r = row.clone();
+                    r.state = "waiting".into();
+                    self.tell(
+                        &r,
+                        &format!("waiting for {live} executor(s)"),
+                        json!({ "waiting": wait }),
+                    )
+                    .await?;
+                    return storage.set_alarm(run::EXECUTORS_EVERY_MS).await;
+                }
+            }
+            Some(Kind::Agent) if c.name != "report" => {
+                self.planner_tool(row, &c.name, &input, budget, spent).await
+            }
             Some(Kind::Agent) => self.agent_tool(row, &c.name, &input),
             None => Err(format!("`{}` is not one of this run's tools", c.name)),
         };
@@ -1319,6 +1385,120 @@ impl AiAgentRuns {
             Err(why) => self.finish_call(c.n, &why, true)?,
         }
         storage.set_alarm(0).await
+    }
+
+    /// A planner's tools over its executors.
+    async fn planner_tool(
+        &self,
+        row: &RunRow,
+        name: &str,
+        input: &Value,
+        budget: &Budget,
+        spent: &Spent,
+    ) -> std::result::Result<String, String> {
+        let e = |e: Error| e.to_string();
+        let child_id = input["run"].as_str().unwrap_or_default();
+        let mine = async |id: &str| -> std::result::Result<Value, String> {
+            let child = call(&self.env, INDEX, "get_any", &json!({ "run": id }))
+                .await
+                .map_err(e)?;
+            if child["parent_run"].as_str() == Some(row.id.as_str()) {
+                Ok(child)
+            } else {
+                Err(format!("{id} is not one of your executors"))
+            }
+        };
+        match name {
+            "spawn_executor" => {
+                let role = if input["kind"] == "mechanical" {
+                    Role::Mechanical
+                } else {
+                    Role::Executor
+                };
+                let child_budget = Budget::asked(role, &input["budget"])?;
+                let left = Spent::left(budget, spent, row.started_at, now());
+                child_budget.within(&left)?;
+                budget::check(
+                    budget,
+                    spent,
+                    row.started_at,
+                    now(),
+                    Next::Spawn {
+                        cost_micros: child_budget.cost_micros,
+                    },
+                )
+                .map_err(|over| over.why(budget))?;
+                let id = crate::service::run_id().map_err(e)?;
+                let mut caller: Value = serde_json::from_str(&row.caller).unwrap_or(Value::Null);
+                caller["run"] = json!(id);
+                let branch = crate::service::branch(&id);
+                let base = input["base"].as_str().unwrap_or("main");
+                call(
+                    &self.env,
+                    INDEX,
+                    "create",
+                    &json!({
+                        "run": id,
+                        "role": role.name(),
+                        "runtime": "gateway",
+                        "parent_run": row.id,
+                        "caller": caller,
+                        "brief": input["brief"],
+                        "base": base,
+                        "branch": branch,
+                        "budget": child_budget,
+                    }),
+                )
+                .await
+                .map_err(e)?;
+                // The child's budget is set aside from the planner's at once.
+                let mut s = *spent;
+                s.executors += 1;
+                s.cost_micros = s.cost_micros.saturating_add(child_budget.cost_micros);
+                self.set(
+                    "spent = ?",
+                    vec![serde_json::to_string(&s).map_err(|x| x.to_string())?.into()],
+                )
+                .map_err(e)?;
+                Ok(format!(
+                    "started executor {id} on branch `{branch}` from `{base}`, with a budget of \
+                     {} and {} turns; wait_executors waits for it",
+                    budget::money(child_budget.cost_micros),
+                    child_budget.turns
+                ))
+            }
+            "executor_status" => Ok(mine(child_id).await?.to_string()),
+            "executor_result" => {
+                let child = mine(child_id).await?;
+                if child["ended_at"].is_null() {
+                    return Err(format!(
+                        "{child_id} is {} and has not ended; wait_executors waits for it",
+                        child["state"].as_str().unwrap_or("live")
+                    ));
+                }
+                Ok(json!({
+                    "run": child_id,
+                    "state": child["state"],
+                    "branch": child["branch"],
+                    "report": child["report"],
+                    "spent": child["spent"],
+                })
+                .to_string())
+            }
+            "executor_stop" => {
+                mine(child_id).await?;
+                call(
+                    &self.env,
+                    INDEX,
+                    "stop_child",
+                    &json!({ "run": child_id, "parent": row.id }),
+                )
+                .await
+                .map(|v| v.to_string())
+                .map_err(e)
+            }
+            other => Err(format!("`{other}` is not a planner tool")),
+        }
     }
 
     /// The tools the run handles itself.
@@ -1450,4 +1630,53 @@ pub async fn grant(env: &Env, caller: &Value, start: &Value) -> Result<String> {
             .ok_or_else(|| bad("core answered no grant")),
         Answer::Error(f) => Err(bad(f.message)),
     }
+}
+
+/// How many of `children` (the index's rows) are still live.
+pub fn live_children(children: &Value) -> usize {
+    children
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|c| c["ended_at"].is_null())
+        .count()
+}
+
+/// Whether any of `children` ended after `since` (ms).
+pub fn ended_since(children: &Value, since: i64) -> bool {
+    children
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|c| c["ended_at"].as_i64().is_some_and(|t| t > since))
+}
+
+/// What a planner reads when its wait ends: each executor that ended since `since`, with its
+/// state and the start of its report, then how many are still live.
+pub fn children_summary(children: &Value, since: i64) -> String {
+    let mut lines = Vec::new();
+    for c in children.as_array().into_iter().flatten() {
+        if c["ended_at"].as_i64().is_some_and(|t| t > since) {
+            let report: String = c["report"]
+                .as_str()
+                .unwrap_or_default()
+                .chars()
+                .take(600)
+                .collect();
+            lines.push(format!(
+                "- {} {} on `{}`: {report}",
+                c["run"].as_str().unwrap_or("?"),
+                c["state"].as_str().unwrap_or("?"),
+                c["branch"].as_str().unwrap_or("?"),
+            ));
+        }
+    }
+    let live = live_children(children);
+    if lines.is_empty() {
+        lines.push("no executor has ended since you last waited".into());
+    }
+    lines.push(format!(
+        "{live} executor(s) still running; executor_result has each report"
+    ));
+    lines.join("\n")
 }

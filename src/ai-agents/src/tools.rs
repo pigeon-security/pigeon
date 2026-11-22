@@ -57,11 +57,12 @@ const SANDBOX: [&str; 7] = [
 const AGENT_COMMON: [&str; 2] = ["ask_person", "report"];
 
 /// Agent tools only a planner is offered.
-const AGENT_PLANNER: [&str; 4] = [
+const AGENT_PLANNER: [&str; 5] = [
     "spawn_executor",
     "executor_status",
     "executor_result",
     "executor_stop",
+    "wait_executors",
 ];
 
 /// Largest `write_file` content, in bytes (1 MiB).
@@ -265,6 +266,7 @@ fn agent_definitions(role: Role) -> Vec<Value> {
                 "properties": {
                     "brief": {"type": "string", "description": "A complete task description for the executor."},
                     "kind": {"type": "string", "enum": ["code", "mechanical"], "default": "code", "description": "`code` for ordinary work, `mechanical` for simple repetitive edits."},
+                    "base": {"type": "string", "description": "The branch or commit it starts from; main by default. Name another executor's branch to build on its work."},
                     "budget": {
                         "type": "object",
                         "description": "Limits for the executor. Leave out a field to use its default.",
@@ -300,6 +302,13 @@ fn agent_definitions(role: Role) -> Vec<Value> {
             "executor_stop",
             "Stops an executor run that is still going.",
             run_schema,
+        ));
+        out.push(tool(
+            "wait_executors",
+            "Waits, without spending turns, until one of your executors ends (or all have \
+             ended); answers which ended and how. Use it instead of asking executor_status \
+             again and again.",
+            json!({ "type": "object", "properties": {} }),
         ));
     }
     out

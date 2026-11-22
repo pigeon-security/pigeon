@@ -47,7 +47,7 @@ fn reader(caller: &Signed) -> String {
 }
 
 /// A run's id: 16 URL-safe characters.
-fn run_id() -> worker::Result<String> {
+pub fn run_id() -> worker::Result<String> {
     Ok(pigeon_core::webauthn::random()?
         .chars()
         .filter(|c| c.is_ascii_alphanumeric())
@@ -60,14 +60,10 @@ pub fn start_args(args: &Value) -> Result<(Role, String, String, Budget), String
     let role = match args["role"].as_str().unwrap_or("executor") {
         "executor" => Role::Executor,
         "mechanical" => Role::Mechanical,
-        "planner" => {
-            return Err(
-                "planner runs come in phase 4 (docs/plans/ai-agents.md); start an executor".into(),
-            );
-        }
+        "planner" => Role::Planner,
         other => {
             return Err(format!(
-                "`role` must be `executor` or `mechanical`, not `{other}`"
+                "`role` must be `planner`, `executor` or `mechanical`, not `{other}`"
             ));
         }
     };
@@ -264,15 +260,18 @@ impl Service for Agents {
                 tools: vec![
                     tool(
                         "ai_agents_start",
-                        "Start an AI agent run inside pigeon (docs/plans/ai-agents.md): an executor \
-                         that builds `brief` in its own sandbox through the model gateway, \
-                         pushes `claude/ai-agent-{run}` and runs CI, acting as you through \
-                         pigeon's gate. It never lands. Answers the run at once; follow it \
-                         with ai_agents_status. Budgets: $5, 60 turns, 90 min by default.",
+                        "Start an AI agent run inside pigeon (docs/plans/ai-agents.md), acting as you \
+                         through pigeon's gate, with models through the model gateway. An \
+                         executor builds `brief` in its own sandbox, pushes \
+                         `claude/ai-agent-{run}` and runs CI; it never lands. A planner plans the \
+                         work, spawns executors, reviews their branches and lands phase by \
+                         phase. Answers the run at once; follow it with ai_agents_inbox and \
+                         ai_agents_status. Budgets by default: executor $5, 60 turns, 90 min; \
+                         planner $25, 200 turns, 8 h, 12 executors.",
                         json!({
                             "type": "object",
                             "properties": {
-                                "role": { "type": "string", "enum": ["executor", "mechanical"], "description": "`executor` (Sonnet) by default; `mechanical` (Haiku) for moves, renames and docs." },
+                                "role": { "type": "string", "enum": ["planner", "executor", "mechanical"], "description": "`executor` (Sonnet) by default; `mechanical` (Haiku) for moves, renames and docs; `planner` (Opus) to plan a piece of work, spawn executors, review their branches, run CI and land phase by phase." },
                                 "brief": { "type": "string", "description": "What to build, standing alone: the run sees nothing else." },
                                 "base": { "type": "string", "description": "The branch or commit to start from; main by default." },
                                 "budget": { "type": "object", "description": "Any of turns, cost_usd, wall_min, sandbox_min; each at most its hard cap." }

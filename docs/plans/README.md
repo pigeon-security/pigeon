@@ -32,4 +32,18 @@ When a plan's status changes, change it in both places: the plan's first lines a
 
 The person's policy, `.pigeon/policy.toml`, says what agents acting for them may do. Call `policy_check` (Pigeon MCP) before acting (a push, a landing, messaging or starting a session, a change to the gate) and again after any refusal. Act on `allow` as the person's standing instruction. On `deny`, stop and tell the person the rule and its reason. Never propose new rules or loosen one: only the person changes the policy, and a change to it lands only with their passkey. Tests live in `tests/smoke.rs` alone; `.claude/settings.json` is generated from the policy, never edited by hand.
 
+**Where work runs** (`docs/plans/ai-agents.md`):
+- **By default, work runs inside pigeon**, through its model gateway: `ai_agents_start {role, brief}`.
+  - Use a `planner` for a piece of work: it plans, spawns executors, reviews their branches and
+    lands phase by phase.
+  - Use an `executor` for one well-specified change: it pushes its branch and runs CI, and never
+    lands.
+- **When the person asks for the Claude chat** ("do it in the Claude chat", "in a Claude Code
+  session", "in chat"), start a Claude Code session instead with `create_session`. Then:
+  - record it with `ai_agents_register`;
+  - ask it to call `ai_agents_report` with its run's id as it goes and at its end.
+- **Read `ai_agents_inbox`** whenever the person writes, and after starting a run. Relay a run's
+  questions and reports. Answer a question with `ai_agents_answer`.
+- **Stop** one run with `ai_agents_stop`, or every run with `ai_agents_pause`.
+
 The first change taken into main by `land` (rather than merged by hand) was a one-line docs commit on `claude/land-check-2`.
