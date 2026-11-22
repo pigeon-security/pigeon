@@ -5,6 +5,8 @@
 //! token: it asks core for a scoped credential for the call in hand over its `PLATFORM`
 //! binding. The scheduler and the runners are still core's Durable Objects, reached by binding.
 //! Built for `wasm32-unknown-unknown` only.
+//!
+//! It deploys on its own: a landing that changes only this crate deploys only this Worker.
 
 #[cfg(not(target_arch = "wasm32"))]
 compile_error!(

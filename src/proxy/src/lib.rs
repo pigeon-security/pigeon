@@ -9,6 +9,8 @@
 //! credential (`verify`, kept a minute, keyed by the credential's hash), a CI job token's grant
 //! (`grant`) and the caller a landing's deploy job stands for (`deploy_grant`), these two asked
 //! on every request. Built for `wasm32-unknown-unknown` only.
+//!
+//! It deploys on its own: a landing that changes only this crate deploys only this Worker.
 
 #[cfg(not(target_arch = "wasm32"))]
 compile_error!("pigeon-proxy builds for wasm32 only: cargo build --target wasm32-unknown-unknown");

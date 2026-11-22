@@ -6,6 +6,8 @@
 //! through [`pigeon_contract::serve`], which checks the caller core signed. It holds no parent
 //! token: each Cloudflare call acts on a short-lived token core mints for the call in hand,
 //! asked over its `PLATFORM` binding. Built for `wasm32-unknown-unknown` only.
+//!
+//! It deploys on its own: a landing that changes only this crate deploys only this Worker.
 
 #[cfg(not(target_arch = "wasm32"))]
 compile_error!(
