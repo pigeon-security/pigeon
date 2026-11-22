@@ -1,9 +1,9 @@
 # Workers split: capabilities as their own Workers, landing in lanes
 
-Status: **phases 1, 2, 5 and 6 landed and live (all five Workers bound, the proxy cut over,
-deploy lanes with attribution); phase 3 done: `ModelJobs` transferred to
-`pigeon-model-gateway` after a rehearsal and a drain; phase 4's `CiScheduler` transfer next**
-(2026-11-22).
+Status: **complete** (2026-11-22). All five Workers are live and bound, the proxy is cut over,
+and deploy lanes run with attribution (phase 5). Both Durable Object transfers are done:
+`ModelJobs` to `pigeon-model-gateway` and `CiScheduler` to `pigeon-ci-gateway`. Later work is
+listed in the Log's open items: the CI runners' move, then cleanup.
 
 ## Goal
 
@@ -588,6 +588,42 @@ over their in-flight work.
 
 ## Log
 
+- 2026-11-22: phase 4's transfer done; the split is complete.
+  - B2-prep (`a9c23d0`): with `Accounts::Scoped` and no one calling, CI asks core as the
+    Worker itself (`worker:pigeon-ci-gateway`, key from its own `CALLER_KEY`), so the
+    scheduler's alarm work (notes pushes, connector setup) can run in the gateway.
+  - B2 (`zZpvzqNsgF9yWeqK`, `f604143`), with the queue held: the gateway exports
+    `CiScheduler`, binds it locally, and its v1 migration transfers it from pigeon-platform.
+    `CI_RUNNER` keeps `script_name = "pigeon-platform"`. The landing's own deploy job ran in one
+    of core's runners across the transfer and was reported `succeeded` by the moved scheduler.
+  - B2c (`SvlTnf_GTaVlvOE1`, `233052e`): core's `CI_SCHEDULER` names pigeon-ci-gateway. Its test
+    and deploy jobs ran through the moved scheduler, and `ci_pool` answers from it.
+  - Incident 5, a correction to the entry below: once a class has moved, the source Worker can no
+    longer upload a local binding to it ("Cannot create binding for class … not currently
+    configured to implement Durable Objects", 10061).
+    - Core's running build, uploaded before the ModelJobs transfer, kept serving and reaching
+      the class. But the next core deploy (B2-prep) and D's rollback were both refused, and
+      the incident went `stuck`, as designed, with core still serving `fdeecae`.
+    - Fixed forward by `MODEL_JOBS` naming the gateway (`gw_W9c5Boz17m8SX`, `8a12749`).
+    - The rehearsal missed it because R4 rebound a's binding before a was ever redeployed.
+    - Rule: the source's binding gains `script_name` in the landing right after the transfer,
+      before any other deploy of the source. B2c did this.
+    - B2-prep's non-core lanes were not deployed (its landing ended `deploy_failed`). They
+      catch up on the next shared landing; only pigeon-ci-gateway uses the change, and it
+      has it.
+  - Open items, added to those below:
+    - **CI runners.** `CiRunner` (the job containers) is still core's. A container class
+      cannot be transferred, and the deploy job that switches the runner binding runs in one
+      of the old runners. Handover:
+      1. The gateway gets a new runner class with its own container config.
+      2. The scheduler dispatches new attempts to it, while a job row records which binding
+         its runner is on.
+      3. Old attempts finish on core's runners.
+      4. Then core's class is deleted (`deleted_classes`).
+    - **Cleanup.** Core stops exporting `ModelJobs` and `CiScheduler`. `src/models` and
+      `src/ci` move from shared into their gateways' lanes. The rehearsal Workers are removed
+      (dashboard), along with their map entries and crates.
+
 - 2026-11-22: phase 3 done: `ModelJobs` moved to pigeon-model-gateway.
   - First, the job objects needed a token the gateway may hold. They streamed with the parent
     token. Now `runner::Settings.token` is `Token::Parent` (core, unchanged) or
@@ -599,8 +635,8 @@ over their in-flight work.
   - The transfer (`8M7sAuFZ1mejusXZ`, main `fdeecae`): the gateway exports the class, binds
     `MODEL_JOBS` locally, and its first migration is `transferred_classes` from
     pigeon-platform. It went green on its first try.
-    - Core's binding is unchanged (no `script_name`) and reaches the class there, as the
-      rehearsal showed. Core keeps its v4 migration and still exports the class.
+    - Core's binding, unchanged, reached the class at runtime, but could not be uploaded
+      again (incident 5, above). Core keeps its v4 migration and still exports the class.
     - The lockfile entry made the landing shared, so core deployed first, unchanged.
   - Live: `models_submit` → `models_result` succeeded (`hWTz-yJJhi90biTSlsvTPU`).
   - Left for later landings: core's binding gains `script_name = "pigeon-model-gateway"` and
