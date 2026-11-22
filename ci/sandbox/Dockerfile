@@ -2,8 +2,8 @@
 # a sandbox passes in CI, plus pigeon-sandboxd, the exec server an AI agent run's tools reach. Build
 # it from the repository's root:
 #
-#   docker build --platform linux/amd64 -f ci/sandbox/Dockerfile -t pigeon-ai-agent-sandbox:v1 .
-#   cd src/platform && npm ci && npx wrangler containers push pigeon-ai-agent-sandbox:v1
+#   docker build --platform linux/amd64 -f ci/sandbox/Dockerfile -t pigeon-ai-agent-sandbox:v2 .
+#   cd src/platform && npm ci && npx wrangler containers push pigeon-ai-agent-sandbox:v2
 #
 # then the pushed digest is pinned in src/ai-agents-worker/wrangler.toml under
 # [containers.images.sandbox]. When the registry's base image cannot be pulled, build the CI base

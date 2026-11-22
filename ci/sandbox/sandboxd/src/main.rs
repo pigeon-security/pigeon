@@ -12,6 +12,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -50,8 +51,9 @@ const CAPTURE_CAP: usize = 8 * 1024 * 1024;
 /// Directory that holds command logs.
 const OUT_DIR: &str = "/tmp/out";
 /// Names of all operations.
-const OPS: [&str; 9] = [
+const OPS: [&str; 10] = [
     "prepare",
+    "fetch",
     "read",
     "write",
     "edit",
@@ -65,6 +67,9 @@ const OPS: [&str; 9] = [
 const SKIP_DIRS: [&str; 3] = [".git", "target", "node_modules"];
 /// Counter for command log file names.
 static LOG_COUNTER: AtomicU64 = AtomicU64::new(1);
+/// The repository URL `prepare` was given. Every git command that carries the credential names
+/// this URL itself, never a remote from the checkout's config, which the run can change.
+static REPO_URL: Mutex<Option<String>> = Mutex::new(None);
 
 /// Settings read once from the environment at start-up.
 struct Config {
@@ -441,6 +446,7 @@ fn dispatch(cfg: &Config, name: &str, o: &JsonObject) -> Reply {
         "list" => op_list(cfg, o),
         "grep" => op_grep(cfg, o),
         "exec" => op_exec(cfg, o),
+        "fetch" => op_fetch(cfg, o),
         "commit_push" => op_commit_push(cfg, o),
         "diff" => op_diff(cfg),
         _ => Err(not_found()),
@@ -765,7 +771,9 @@ fn redact(cfg: &Config, s: String) -> String {
 }
 
 /// Builds a git command with a clean environment. Secrets are removed. The git token is added
-/// only when `auth` is true.
+/// only when `auth` is true, and then only for the prepared repository's URL, with hooks off and
+/// TLS verified: the run can write the checkout's `.git` (hooks, remotes, `http.*` settings),
+/// so a command that carries the token must not take any of those from it.
 fn git_command(cfg: &Config, dir: Option<&Path>, args: &[&str], auth: bool) -> Command {
     let mut c = Command::new("git");
     c.args(args);
@@ -776,17 +784,54 @@ fn git_command(cfg: &Config, dir: Option<&Path>, args: &[&str], auth: bool) -> C
     c.env_remove("PIGEON_GIT_AUTH");
     c.env("GIT_TERMINAL_PROMPT", "0");
     c.env("GIT_ALLOW_PROTOCOL", allowed_protocols());
-    match (auth, &cfg.git_auth) {
-        (true, Some(v)) => {
-            c.env("GIT_CONFIG_COUNT", "1");
-            c.env("GIT_CONFIG_KEY_0", "http.extraHeader");
+    let repo = repo_url();
+    match (auth, &cfg.git_auth, repo) {
+        (true, Some(v), Some(url)) => {
+            c.env("GIT_CONFIG_GLOBAL", "/dev/null");
+            c.env("GIT_CONFIG_NOSYSTEM", "1");
+            c.env("GIT_CONFIG_COUNT", "4");
+            c.env("GIT_CONFIG_KEY_0", format!("http.{url}.extraHeader"));
             c.env("GIT_CONFIG_VALUE_0", format!("Authorization: Bearer {v}"));
+            c.env("GIT_CONFIG_KEY_1", "core.hooksPath");
+            c.env("GIT_CONFIG_VALUE_1", "/dev/null");
+            c.env("GIT_CONFIG_KEY_2", "http.sslVerify");
+            c.env("GIT_CONFIG_VALUE_2", "true");
+            c.env("GIT_CONFIG_KEY_3", "credential.helper");
+            c.env("GIT_CONFIG_VALUE_3", "");
         }
         _ => {
             c.env_remove("GIT_CONFIG_COUNT");
         }
     }
     c
+}
+
+/// The repository URL `prepare` was given, if it ran.
+fn repo_url() -> Option<String> {
+    REPO_URL.lock().ok().and_then(|g| g.clone())
+}
+
+/// Removes everything inside `root`, not `root` itself.
+fn empty_root(root: &Path) -> Result<(), ApiError> {
+    let entries = match fs::read_dir(root) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(fail(format!("cannot read root: {e}"))),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|e| fail(format!("cannot read root: {e}")))?;
+        let path = entry.path();
+        let kind = entry
+            .file_type()
+            .map_err(|e| fail(format!("cannot read root: {e}")))?;
+        let gone = if kind.is_dir() {
+            fs::remove_dir_all(&path)
+        } else {
+            fs::remove_file(&path)
+        };
+        gone.map_err(|e| fail(format!("cannot empty root: {e}")))?;
+    }
+    Ok(())
 }
 
 /// The transports git may use: http and https only, so `ext::` and the like never run. A local
@@ -807,12 +852,50 @@ fn run_git(
     args: &[&str],
     auth: bool,
 ) -> Result<Captured, ApiError> {
+    if auth && let Some(d) = dir {
+        check_config_clean(cfg, d)?;
+    }
     let cap = run_capture(git_command(cfg, dir, args, auth), GIT_TIMEOUT).map_err(fail)?;
     if cap.timed_out {
         let name = args.first().copied().unwrap_or("?");
         return Err(fail(format!("git {name} timed out")));
     }
     Ok(cap)
+}
+
+/// Config keys (lowercased prefixes) that could send a command's traffic, and so the
+/// credential, somewhere else, or run a program inside it. The run can write the checkout's
+/// config; a command that carries the credential refuses to run while one of these is set there.
+const UNSAFE_CONFIG: [&str; 10] = [
+    "http.",
+    "url.",
+    "include.",
+    "includeif.",
+    "credential",
+    "core.hookspath",
+    "core.fsmonitor",
+    "core.sshcommand",
+    "core.gitproxy",
+    "core.askpass",
+];
+
+/// Refuses when the checkout's config (all the config an authenticated command reads besides
+/// sandboxd's own) sets one of [`UNSAFE_CONFIG`].
+fn check_config_clean(cfg: &Config, dir: &Path) -> Result<(), ApiError> {
+    let mut c = git_command(cfg, Some(dir), &["config", "--list", "--name-only"], false);
+    c.env("GIT_CONFIG_GLOBAL", "/dev/null");
+    c.env("GIT_CONFIG_NOSYSTEM", "1");
+    let cap = run_capture(c, GIT_TIMEOUT).map_err(fail)?;
+    let names = String::from_utf8_lossy(&cap.stdout).to_lowercase();
+    if let Some(key) = names
+        .lines()
+        .find(|k| UNSAFE_CONFIG.iter().any(|p| k.starts_with(p)))
+    {
+        return Err(bad(format!(
+            "the checkout's git config sets `{key}`; remove it (git config --unset) and try again"
+        )));
+    }
+    Ok(())
 }
 
 /// Runs git and demands exit code 0. Otherwise answers 500 with the stderr tail.
@@ -915,7 +998,8 @@ fn check_ident(label: &str, v: &str) -> Result<(), ApiError> {
 
 // ------------------------------------------------------------------- ops ----
 
-/// `prepare`: clone the repo and set up the run's branch, once.
+/// `prepare`: clone the repo and set up the run's branch, once. A try that fails leaves `root`
+/// empty, so the next try is a fresh clone and fails, if it does, for its own reason.
 fn op_prepare(cfg: &Config, o: &JsonObject) -> Reply {
     let repo_url = req_str(o, "repo_url")?;
     let base = req_str(o, "base")?;
@@ -927,32 +1011,32 @@ fn op_prepare(cfg: &Config, o: &JsonObject) -> Reply {
     let start = start_point(base)?;
     check_ident("name", name)?;
     check_ident("email", email)?;
+    if let Ok(mut g) = REPO_URL.lock() {
+        *g = Some(repo_url.to_string());
+    }
     let root = cfg.root.as_path();
     if root.join(".git").exists() {
         let head = git_head(cfg, root)?;
         return Ok(json!({ "ready": true, "head": head }));
     }
+    // Whatever is here is not a checkout: an earlier try's leftovers.
+    empty_root(root)?;
     fs::create_dir_all(root).map_err(|e| fail(format!("cannot create root: {e}")))?;
     let root_str = root
         .to_str()
         .ok_or_else(|| fail("root path is not UTF-8"))?;
-    git_ok(
+    // A full clone: a partial one would fetch missing blobs later, without the credential.
+    let result = git_ok(
         cfg,
         None,
-        &[
-            "clone",
-            "--no-tags",
-            "--filter=blob:none",
-            "--",
-            repo_url,
-            root_str,
-        ],
+        &["clone", "--no-tags", "--", repo_url, root_str],
         true,
-    )?;
-    let result = finish_prepare(cfg, root, branch, &start, name, email);
+    )
+    .and_then(|_| finish_prepare(cfg, root, repo_url, branch, &start, name, email));
     if result.is_err() {
-        // Do not leave a half-prepared checkout that later looks ready.
-        let _ = fs::remove_dir_all(root.join(".git"));
+        // Do not leave a half-prepared checkout that later looks ready, nor files that make the
+        // next clone fail.
+        let _ = empty_root(root);
     }
     result
 }
@@ -961,6 +1045,7 @@ fn op_prepare(cfg: &Config, o: &JsonObject) -> Reply {
 fn finish_prepare(
     cfg: &Config,
     root: &Path,
+    repo_url: &str,
     branch: &str,
     start: &str,
     name: &str,
@@ -978,12 +1063,12 @@ fn finish_prepare(
     let ls = run_git(
         cfg,
         Some(root),
-        &["ls-remote", "--exit-code", "--heads", "origin", &remote_ref],
+        &["ls-remote", "--exit-code", "--heads", repo_url, &remote_ref],
         true,
     )?;
     match ls.code {
         Some(0) => {
-            git_ok(cfg, Some(root), &["fetch", "origin", branch], true)?;
+            git_ok(cfg, Some(root), &["fetch", repo_url, &remote_ref], true)?;
             git_ok(cfg, Some(root), &["reset", "--hard", "FETCH_HEAD"], false)?;
         }
         Some(2) => {}
@@ -994,6 +1079,37 @@ fn finish_prepare(
     }
     let head = git_head(cfg, root)?;
     Ok(json!({ "ready": true, "head": head }))
+}
+
+/// `fetch`: fetch one branch (or a full commit id) of the repository into the checkout, with the
+/// credential, which the run's own commands never get. A branch lands at `origin/<name>`.
+fn op_fetch(cfg: &Config, o: &JsonObject) -> Reply {
+    let name = req_str(o, "ref")?;
+    let root = cfg.root.as_path();
+    if !root.join(".git").exists() {
+        return Err(bad("sandbox is not prepared; call prepare first"));
+    }
+    let url = repo_url().ok_or_else(|| bad("sandbox is not prepared; call prepare first"))?;
+    let is_commit = name.len() == 40 && name.bytes().all(|b| b.is_ascii_hexdigit());
+    let spec = if is_commit {
+        name.to_string()
+    } else {
+        check_ref_chars(name, "ref")?;
+        let short = name.strip_prefix("refs/heads/").unwrap_or(name);
+        format!("+refs/heads/{short}:refs/remotes/origin/{short}")
+    };
+    git_ok(cfg, Some(root), &["fetch", "--no-tags", &url, &spec], true)?;
+    let cap = git_ok(cfg, Some(root), &["rev-parse", "FETCH_HEAD"], false)?;
+    let commit = String::from_utf8_lossy(&cap.stdout).trim().to_string();
+    let at = if is_commit {
+        "FETCH_HEAD".to_string()
+    } else {
+        format!(
+            "origin/{}",
+            name.strip_prefix("refs/heads/").unwrap_or(name)
+        )
+    };
+    Ok(json!({ "commit": commit, "at": at }))
 }
 
 /// `read`: return numbered lines of a file.
@@ -1229,7 +1345,8 @@ fn log_tail(path: &Path, size: u64) -> String {
     lossy_trim_start(&bytes, start > 0)
 }
 
-/// `exec`: run a command with `bash -lc` and log its output to a file.
+/// `exec`: run a command with `bash -c` (not a login shell: Debian's /etc/profile would reset
+/// PATH and drop the image's cargo and node) and log its output to a file.
 fn op_exec(cfg: &Config, o: &JsonObject) -> Reply {
     let cmd = req_str(o, "cmd")?;
     if cmd.is_empty() || cmd.contains('\0') {
@@ -1249,7 +1366,7 @@ fn op_exec(cfg: &Config, o: &JsonObject) -> Reply {
     };
     let mut command = Command::new("bash");
     command
-        .arg("-lc")
+        .arg("-c")
         .arg(&script)
         .current_dir(&root)
         .stdin(Stdio::null())
@@ -1325,7 +1442,8 @@ fn op_commit_push(cfg: &Config, o: &JsonObject) -> Reply {
     }
     git_ok(cfg, Some(root), &["commit", "-q", "-m", message], false)?;
     let target = format!("HEAD:refs/heads/{branch}");
-    let push = run_git(cfg, Some(root), &["push", "origin", &target], true)?;
+    let url = repo_url().ok_or_else(|| bad("sandbox is not prepared; call prepare first"))?;
+    let push = run_git(cfg, Some(root), &["push", &url, &target], true)?;
     if push.code != Some(0) {
         let tail = redact(cfg, tail_lossy(&push.stderr, 2048));
         return Err(fail(format!("git push failed: {tail}")));
