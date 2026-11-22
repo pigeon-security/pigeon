@@ -492,6 +492,68 @@ fn crypto_key() -> Result<String> {
     pigeon_core::webauthn::random()
 }
 
+impl Linked {
+    /// `linked_check`: refreshes the link's access token when due (or when asked), then makes
+    /// only GET calls with it: the account, and each zone the instance's record names. Answers
+    /// what Cloudflare said, never a token.
+    async fn check(&self, cx: &Context<'_>, args: &Value) -> Result<Value> {
+        let id = arg(args, "instance")?;
+        let instance = instances::one(cx.env, id)
+            .await?
+            .ok_or_else(|| bad(&format!("there is no instance {id}")))?;
+        if args["refresh"].as_bool() == Some(true) {
+            force_refresh_due(cx.env, id).await?;
+        }
+        let before = link(cx.env, id).await?.and_then(|l| l.refreshed_ms);
+        let account = account_for(cx.env, &self.host, id).await?;
+        let after = link(cx.env, id).await?;
+        let token = account
+            .bearer
+            .as_deref()
+            .ok_or_else(|| bad("the linked account has no access token"))?;
+        let acct = call(
+            token,
+            Method::Get,
+            &format!("/accounts/{}", account.id),
+            None,
+        )
+        .await?;
+        let mut zones = Vec::new();
+        for z in &instance.zones {
+            let path = format!("/zones?account.id={}&name={z}", account.id);
+            let found = call(token, Method::Get, &path, None).await?;
+            let first = found.as_array().and_then(|a| a.first()).cloned();
+            zones.push(match first {
+                Some(zone) => json!({
+                    "name": z, "id": zone["id"], "status": zone["status"],
+                    "name_servers": zone["name_servers"],
+                }),
+                None => json!({ "name": z, "found": false }),
+            });
+        }
+        Ok(json!({
+            "instance": id,
+            "account": { "id": acct["id"], "name": acct["name"] },
+            "zones": zones,
+            "refreshed": after.as_ref().and_then(|l| l.refreshed_ms) != before,
+            "access_expires_ms": after.as_ref().map(|l| l.expires_at_ms),
+        }))
+    }
+}
+
+/// Marks a link's access token as expired, so the next [`account_for`] refreshes it.
+async fn force_refresh_due(env: &Env, instance: &str) -> Result<()> {
+    let mut l = link(env, instance)
+        .await?
+        .ok_or_else(|| bad(&format!("instance {instance} is not linked")))?;
+    let k = sealing_key(env).await?;
+    let opened = crypto::open(&k, &l.sealed, instance.as_bytes()).await?;
+    let mut tokens: Tokens = serde_json::from_slice(&opened)?;
+    tokens.expires_at_ms = 0.0;
+    l.sealed = crypto::seal(&k, &serde_json::to_vec(&tokens)?, instance.as_bytes()).await?;
+    keep(env, &key(instance), &serde_json::to_string(&l)?, KEPT_MS).await
+}
+
 impl Capability for Linked {
     fn name(&self) -> &'static str {
         "linked"
@@ -505,6 +567,20 @@ impl Capability for Linked {
                  can link another Cloudflare account from the console. Keeps the client secret \
                  and the sealing key in the Secrets Store; safe to run twice.",
             ),
+            Tool {
+                name: "linked_check",
+                description: "Check one instance's link against Cloudflare, read-only: refresh \
+                              its access token if it is due (or now, with `refresh`), then read \
+                              the linked account and the instance's zones with it. Never a token.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "instance": { "type": "string", "description": "The instance's id, such as `noisypigeon`." },
+                        "refresh": { "type": "boolean", "description": "Refresh the access token now, even if it is not due." }
+                    },
+                    "required": ["instance"]
+                }),
+            },
             Tool::bare(
                 "linked_status",
                 "Each instance's link: the account, who linked it, when the access token \
@@ -513,10 +589,11 @@ impl Capability for Linked {
         ]
     }
 
-    fn call<'a>(&'a self, cx: &'a Context<'a>, tool: &'a str, _args: &'a Value) -> Call<'a> {
+    fn call<'a>(&'a self, cx: &'a Context<'a>, tool: &'a str, args: &'a Value) -> Call<'a> {
         Box::pin(async move {
             match tool {
                 "linked_setup" => self.setup(cx).await,
+                "linked_check" => self.check(cx, args).await,
                 "linked_status" => {
                     let mut out = serde_json::Map::new();
                     for i in instances::all(cx.env).await? {
