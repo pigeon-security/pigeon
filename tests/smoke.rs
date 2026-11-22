@@ -2162,7 +2162,15 @@ fn proxy_worker_caches_and_core_ops() {
     assert_eq!(cf.queues, ["pigeon-ci-events"]);
     assert_eq!(cf.containers, ["CiRunner"]);
     let others: Vec<&str> = cf.others.iter().map(|o| o.script.as_str()).collect();
-    assert_eq!(others, ["pigeon-sites", "pigeon-proxy"]);
+    assert_eq!(
+        others,
+        [
+            "pigeon-sites",
+            "pigeon-model-gateway",
+            "pigeon-ci-gateway",
+            "pigeon-proxy"
+        ]
+    );
     let broken = pigeon_proxies::cf_proxy::CfProxy::platform("h", "s", "not toml [", "nope", "r");
     assert!(broken.others.is_empty() && broken.queues.is_empty());
 
