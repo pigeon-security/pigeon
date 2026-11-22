@@ -98,7 +98,7 @@ your passkey. Writes (phase 3) need the write tools added to your policy's passk
 
 ### #3 iOS ([ios.md](ios.md), Follow-ups)
 
-Apple Developer team; confirm the bundle id `dev.pigeon.platform`; an App Store Connect API key;
+Apple Developer team; the bundle id is now `dev.pigeon.app`, taking over the old app (ios.md §6); an App Store Connect API key;
 the app record and TestFlight; an APNs key (phase 6); a macOS Buildkite agent; the `ios-check`
 and `ios-archive` jobs in `.pigeon/ci.toml`; whether Swift tests may exist outside
 `tests/smoke.rs`; open the skeleton in Xcode and fix what does not compile.

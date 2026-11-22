@@ -10,7 +10,7 @@ struct TokenPair: Codable, Equatable {
 
 /// What the keychain holds for this app: the client id and the token pair.
 enum Keychain {
-    private static let service = "dev.pigeon.platform"
+    private static let service = "dev.pigeon.app"
 
     /// The keys this app uses.
     enum Key {

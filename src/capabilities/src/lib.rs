@@ -3,6 +3,7 @@
 //! tools and how to call one, the events it acts on, and its footprint (the hostnames, Workers
 //! and resources it brings), which the architecture page draws.
 
+pub mod apple;
 pub mod approvals;
 pub mod architecture;
 pub mod cf_proxy;

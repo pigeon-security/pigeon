@@ -35,5 +35,6 @@ Add `-- --check` to only test for drift. Commit the result.
 ## Sign-in is not complete yet
 
 Sign-in on a device needs the platform to serve `/.well-known/apple-app-site-association` for the
-app's team and bundle id (`dev.pigeon.platform`). That is not built yet (see docs/plans/ios.md).
+app's team and bundle id (`dev.pigeon.app`, which takes over the old app's App Store Connect
+record). That is not built yet (see docs/plans/ios.md).
 Until then, sign-in cannot complete on a device.

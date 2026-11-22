@@ -3025,6 +3025,82 @@ fn expiry_readings() {
     assert!(matches!(github_expiry(502, None), Expiry::Unknown { .. }));
 }
 
+// ---- apple ----
+
+/// App Store Connect (docs/plans/ios.md, phase 1): the ids' forms, the token's header and claims,
+/// a .p8 told from other PEM, and the four slots the console shows.
+#[test]
+fn apple_ids_token_and_slots() {
+    use pigeon_capabilities::Capability;
+    use pigeon_capabilities::apple::{self, Apple};
+    use pigeon_core::apple as asc;
+
+    assert!(asc::is_apple_id("A1B2C3D4E5"));
+    for bad in ["a1b2c3d4e5", "A1B2C3D4E", "A1B2C3D4E56", "A1B2C3D4E-"] {
+        assert!(!asc::is_apple_id(bad), "{bad}");
+    }
+    assert!(asc::is_issuer_id("57246542-96fe-1a63-e053-0824d011072a"));
+    for bad in [
+        "57246542-96fe-1a63-e053",
+        "57246542x96fe-1a63-e053-0824d011072a",
+        "not-a-uuid-at-all-x",
+    ] {
+        assert!(!asc::is_issuer_id(bad), "{bad}");
+    }
+
+    // The token: ES256 with the key id, ten minutes, App Store Connect's audience.
+    let input = asc::jwt_signing_input("A1B2C3D4E5", "57246542-96fe-1a63-e053-0824d011072a", 1_000);
+    let (h, c) = input.split_once('.').unwrap();
+    let header: Value =
+        serde_json::from_slice(&pigeon_core::webauthn::unb64url(h).unwrap()).unwrap();
+    let claims: Value =
+        serde_json::from_slice(&pigeon_core::webauthn::unb64url(c).unwrap()).unwrap();
+    assert_eq!(
+        header,
+        json!({ "alg": "ES256", "kid": "A1B2C3D4E5", "typ": "JWT" })
+    );
+    assert_eq!(
+        claims,
+        json!({ "iss": "57246542-96fe-1a63-e053-0824d011072a", "iat": 1_000, "exp": 1_600, "aud": "appstoreconnect-v1" })
+    );
+
+    // Only a PKCS#8 PEM of a .p8's size is taken; a certificate, an RSA key or text is not.
+    assert!(asc::p8_der("-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----").is_none());
+    assert!(
+        asc::p8_der("-----BEGIN RSA PRIVATE KEY-----\nMIIB\n-----END RSA PRIVATE KEY-----")
+            .is_none()
+    );
+    assert!(asc::p8_der("-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----").is_none());
+    assert!(asc::p8_der("hello").is_none());
+
+    // An error from Apple names its status and code, never more than 200 characters.
+    let e = asc::api_error(
+        401,
+        r#"{"errors":[{"status":"401","code":"NOT_AUTHORIZED","title":"Authentication credentials are missing or invalid."}]}"#,
+    );
+    assert_eq!(
+        e,
+        "App Store Connect 401 NOT_AUTHORIZED: Authentication credentials are missing or invalid."
+    );
+    assert_eq!(asc::api_error(500, "<html>"), "App Store Connect 500");
+
+    // The console's slots: the four the person fills, in order, all for Workers.
+    let slots: Vec<String> = Apple.secrets().into_iter().map(|s| s.name).collect();
+    assert_eq!(slots, apple::SLOTS.map(String::from).to_vec());
+    assert_eq!(
+        slots,
+        [
+            "APPLE_TEAM_ID",
+            "APPLE_ASC_ISSUER_ID",
+            "APPLE_ASC_KEY_ID",
+            "APPLE_ASC_KEY"
+        ]
+    );
+    let tools: Vec<&str> = Apple.tools().iter().map(|t| t.name).collect();
+    assert_eq!(tools, ["apple_status"]);
+    assert_eq!(asc::BUNDLE_ID, "dev.pigeon.app");
+}
+
 // ---- storage ----
 
 #[test]

@@ -20,8 +20,8 @@ targets:
         # Swift 5 mode: AuthenticationServices' delegates are not annotated for Swift 6 isolation.
         SWIFT_VERSION: "5.0"
         PRODUCT_NAME: Pigeon
-        PRODUCT_BUNDLE_IDENTIFIER: dev.pigeon.platform
-        MARKETING_VERSION: "0.1.0"
+        PRODUCT_BUNDLE_IDENTIFIER: dev.pigeon.app
+        MARKETING_VERSION: "0.2.0"
         CURRENT_PROJECT_VERSION: "1"
         TARGETED_DEVICE_FAMILY: "1,2"
         GENERATE_INFOPLIST_FILE: YES

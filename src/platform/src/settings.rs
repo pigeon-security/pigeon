@@ -2,6 +2,7 @@
 //! takes its settings from here.
 
 use pigeon_capabilities::Capability;
+use pigeon_capabilities::apple::Apple;
 use pigeon_capabilities::approvals::Approvals;
 use pigeon_capabilities::architecture::{Architecture, Wrangler};
 use pigeon_capabilities::cf_proxy::CfProxy;
@@ -202,6 +203,9 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
             token_binding: "GITHUB_MIRROR_TOKEN".into(),
             tool: "source_mirror",
         }),
+        // App Store Connect (docs/plans/ios.md, phase 1): slots and a read-only status; off
+        // until the person sets the slots and their bindings land.
+        Box::new(Apple),
         // Read-only object storage; with no accounts declared its tools only explain setup.
         Box::new(Storage {
             accounts: storage_accounts(),
