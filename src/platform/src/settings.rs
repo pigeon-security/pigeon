@@ -339,7 +339,7 @@ pub fn land() -> land::Settings {
 pub fn model_jobs() -> pigeon_models::runner::Settings {
     pigeon_models::runner::Settings {
         gateway: "pigeon".into(),
-        parent: PARENT_TOKEN.into(),
+        token: pigeon_models::runner::Token::Parent(PARENT_TOKEN.into()),
     }
 }
 

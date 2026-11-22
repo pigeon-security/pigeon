@@ -847,6 +847,13 @@ async fn caller_key(env: &Env) -> Result<String> {
 
 /// An account acting with a token core minted for `purposes`, asked as `caller`.
 pub async fn credential(env: &Env, caller: &Signed, purposes: &[&str]) -> Result<Account> {
+    credential_as(env, &caller.caller, purposes).await
+}
+
+/// An account acting with a token core minted for `purposes`, asked as `caller` (a caller as
+/// core serializes it: a person, or this Worker as a service when no one is calling, such as a
+/// job object's alarm).
+pub async fn credential_as(env: &Env, caller: &Value, purposes: &[&str]) -> Result<Account> {
     let platform = env.service(PLATFORM)?;
     let key = caller_key(env).await?;
     let nonce = random()?;
@@ -860,7 +867,7 @@ pub async fn credential(env: &Env, caller: &Signed, purposes: &[&str]) -> Result
         "https://core",
         "credential",
         &serde_json::to_value(&request)?,
-        Some((key.as_bytes(), &caller.caller)),
+        Some((key.as_bytes(), caller)),
         &nonce,
     )
     .await?;

@@ -38,8 +38,19 @@ const MIGRATIONS: [&str; 2] = [
 pub struct Settings {
     /// The AI gateway's ID.
     pub gateway: String,
-    /// The Secrets Store binding of the parent token.
-    pub parent: String,
+    /// Where a job's Cloudflare token comes from.
+    pub token: Token,
+}
+
+/// Where the objects get the token a job's model call acts with.
+pub enum Token {
+    /// From the parent token, by its Secrets Store binding: core (pigeon-platform), which holds
+    /// it.
+    Parent(String),
+    /// A short-lived `ai_gateway` token core mints for each job (`credential`, kind `scoped`),
+    /// asked over the `PLATFORM` binding as this caller: a Worker that holds no parent token
+    /// (pigeon-model-gateway), signing as itself.
+    Scoped(Value),
 }
 
 /// A request as a job carries it, from submission until it has run.
@@ -558,7 +569,11 @@ impl ModelJobs {
     /// Streams `ask` until it ends, fails or runs out of time; the `finish` report.
     async fn stream(&self, id: &str, ask: &Ask) -> Value {
         let deadline = now() + ask.timeout_ms;
-        let account = match pigeon_core::account_from_env(&self.env, &self.settings.parent).await {
+        let account = match &self.settings.token {
+            Token::Parent(binding) => pigeon_core::account_from_env(&self.env, binding).await,
+            Token::Scoped(caller) => super::credential_as(&self.env, caller, &["ai_gateway"]).await,
+        };
+        let account = match account {
             Ok(a) => a,
             Err(e) => return json!({ "id": id, "state": "failed", "error": e.to_string() }),
         };
