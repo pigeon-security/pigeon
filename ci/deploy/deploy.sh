@@ -16,7 +16,26 @@
 # refused call before the upload cannot be fixed that way, and is reported.
 #
 # Once deployed, it checks the apex serves this commit's architecture page (see `published`).
+#
+# Exit codes, which the Lander reads:
+#   0  deployed.
+#   3  stopped before the first real `wrangler deploy` began (the token, URL and grant checks, the
+#      allowlist check, node, reading wrangler.toml). Nothing on Cloudflare changed.
+#   1  any failure once the real deploy has started, even a refusal before the upload. Wrangler's
+#      own 3 is mapped to 1 too, so 3 never means anything else.
 set -eu
+# The one place the code is decided: before the start every failure is 3, after it never 3.
+started=0
+log=
+finish() {
+    rc=$?
+    [ -z "$log" ] || rm -f "$log"
+    if [ "$rc" -ne 0 ]; then
+        if [ "$started" = 0 ]; then rc=3; elif [ "$rc" = 3 ]; then rc=1; fi
+    fi
+    exit "$rc"
+}
+trap finish EXIT
 root=$(cd "$(dirname "$0")/../.." && pwd)
 
 [ -n "${PIGEON_JOB_TOKEN:-}" ] || {
@@ -65,10 +84,10 @@ dir=$root/${PIGEON_WORKER_DIR:-src/platform}
 account=$(sed -n 's/^account_id = "\(.*\)"$/\1/p' "$dir/wrangler.toml" | head -n 1)
 cd "$dir"
 log=$(mktemp)
-trap 'rm -f "$log"' EXIT
 
 deploy() {
     printf '\n== wrangler deploy through %s (attempt %s)\n' "$proxy" "$1"
+    started=1
     rc=0
     CLOUDFLARE_API_BASE_URL=$proxy/cf/client/v4 CLOUDFLARE_ACCOUNT_ID=$account \
         CLOUDFLARE_API_TOKEN=$PIGEON_JOB_TOKEN WRANGLER_SEND_METRICS=false \
