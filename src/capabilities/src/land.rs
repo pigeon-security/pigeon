@@ -1105,7 +1105,7 @@ impl Lander {
                 d.commit_sha,
                 match &last_good {
                     Some(g) => format!("rolling back to {}", g.commit),
-                    None => "no earlier good build to roll back to".to_string(),
+                    None => lanes::first_deploy_text(&d.worker),
                 },
                 included.len()
             )

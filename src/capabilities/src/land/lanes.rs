@@ -316,9 +316,34 @@ pub struct Verdict {
     pub summary: String,
 }
 
+/// The incident text for a Worker whose first deploy failed: nothing was running, so there is
+/// nothing to roll back. The one place this wording lives.
+pub fn first_deploy_text(worker: &str) -> String {
+    format!("first deploy of {worker} failed; nothing was running and nothing is rolled back")
+}
+
+/// The incident text for a Worker that had a good build but could not be returned to it.
+/// The one place this wording lives.
+pub fn failing_build_text(worker: &str) -> String {
+    format!("{worker} may still be on a failing build: a person must look")
+}
+
+/// Which text says a Worker is left on no good build: the first-deploy one when it never had
+/// a good build (`ever_good` is false), else the failing-build one.
+pub fn not_on_good_text(worker: &str, ever_good: bool) -> String {
+    if ever_good {
+        failing_build_text(worker)
+    } else {
+        first_deploy_text(worker)
+    }
+}
+
 /// The verdict once `included[..idx]` passed, with the cause `guilty` (its index and why) if
 /// one was found, the Worker left `on` a good build or not, and `why` the cause was not found.
+/// `ever_good` is whether the Worker had any good build, before the incident or during it.
+#[allow(clippy::too_many_arguments)]
 fn verdict(
+    ever_good: bool,
     worker: &str,
     included: &[Included],
     idx: usize,
@@ -333,7 +358,7 @@ fn verdict(
         .collect();
     let left = match &on {
         Some(g) => format!("{worker} is on the good build {}", g.commit),
-        None => format!("{worker} may still be on a failing build: a person must look"),
+        None => not_on_good_text(worker, ever_good),
     };
     let (cause, failed, summary) = match guilty {
         Some((g, reason)) => {
@@ -408,7 +433,16 @@ pub fn bisect(
                 Some(g) => {
                     if used >= budget {
                         let why = "the incident used its redeploys";
-                        return verdict(worker, included, idx, guilty, None, used, why);
+                        return verdict(
+                            good.is_some(),
+                            worker,
+                            included,
+                            idx,
+                            guilty,
+                            None,
+                            used,
+                            why,
+                        );
                     }
                     match outcomes.next() {
                         None => {
@@ -429,7 +463,16 @@ pub fn bisect(
                         Some(Tried::Failed) => {}
                         Some(Tried::Error) => {
                             let why = "a redeploy could not be run";
-                            return verdict(worker, included, idx, guilty, None, used + 1, why);
+                            return verdict(
+                                good.is_some(),
+                                worker,
+                                included,
+                                idx,
+                                guilty,
+                                None,
+                                used + 1,
+                                why,
+                            );
                         }
                     }
                     used += 1;
@@ -437,18 +480,37 @@ pub fn bisect(
                 }
                 None if guilty.is_some() => {
                     let why = format!("there is no earlier good build of {worker}");
-                    return verdict(worker, included, idx, guilty, None, used, &why);
+                    return verdict(
+                        good.is_some(),
+                        worker,
+                        included,
+                        idx,
+                        guilty,
+                        None,
+                        used,
+                        &why,
+                    );
                 }
                 // No good build to go back to: bisect from the failing one.
                 None => {}
             }
         }
         if guilty.is_some() {
-            return verdict(worker, included, idx, guilty, good, used, "");
+            return verdict(
+                good.is_some(),
+                worker,
+                included,
+                idx,
+                guilty,
+                good,
+                used,
+                "",
+            );
         }
         let on = good.clone().filter(|_| on_good);
         if k == 0 {
             return verdict(
+                good.is_some(),
                 worker,
                 included,
                 0,
@@ -472,7 +534,7 @@ pub fn bisect(
         let need = if good.is_some() { 2 } else { 1 };
         if used + need > budget {
             let why = "the incident used its redeploys";
-            return verdict(worker, included, idx, None, on, used, why);
+            return verdict(good.is_some(), worker, included, idx, None, on, used, why);
         }
         let step = &included[idx];
         match outcomes.next() {
@@ -502,7 +564,16 @@ pub fn bisect(
             }
             Some(Tried::Error) => {
                 let why = "a bisect deploy could not be run";
-                return verdict(worker, included, idx, None, None, used + 1, why);
+                return verdict(
+                    good.is_some(),
+                    worker,
+                    included,
+                    idx,
+                    None,
+                    None,
+                    used + 1,
+                    why,
+                );
             }
         }
         used += 1;

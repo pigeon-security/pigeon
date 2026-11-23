@@ -521,6 +521,36 @@ fn land_from_check_to_landed() {
 }
 
 #[test]
+fn core_land_first_deploy_incident_text() {
+    use pigeon_capabilities::land::lanes::{self, Included, Next};
+    let first = "first deploy of sites failed; nothing was running and nothing is rolled back";
+    let failing = "sites may still be on a failing build: a person must look";
+    assert_eq!(lanes::not_on_good_text("sites", false), first);
+    assert_eq!(lanes::not_on_good_text("sites", true), failing);
+    assert_eq!(lanes::first_deploy_text("sites"), first);
+    let one = [Included {
+        id: "L5".into(),
+        merged_at: 5,
+        commit: "c5".into(),
+    }];
+    // No good build ever: the verdict carries the first-deploy text.
+    let Next::Done(v) = lanes::bisect("sites", None, &one, &[], 4) else {
+        panic!("a lone landing is the cause at once");
+    };
+    assert!(v.summary.contains(first), "{}", v.summary);
+    assert!(!v.summary.contains("failing build"));
+    // A good build that could not be returned to keeps the old text.
+    let g = lanes::Good {
+        commit: "c3".into(),
+        covers: 3,
+    };
+    let Next::Done(v) = lanes::bisect("sites", Some(&g), &one, &[lanes::Tried::Error], 4) else {
+        panic!("an unrunnable rollback ends the incident");
+    };
+    assert!(v.summary.contains(failing), "{}", v.summary);
+}
+
+#[test]
 fn land_deploys_in_lanes_per_worker() {
     use pigeon_capabilities::land::lanes::{self, Deploy, DeployState, Merged, Start};
     use pigeon_capabilities::land::state::{self, Seen, State};
