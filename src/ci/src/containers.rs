@@ -72,6 +72,17 @@ fn instance(class: &Class) -> Option<&'static str> {
     }
 }
 
+/// The sizes Containers offers: (size, vCPU, memory GB, disk GB). The one source of truth.
+const SIZES: [(Size, u32, u32, u32); 2] = [(Size::Small, 2, 8, 16), (Size::Medium, 4, 12, 20)];
+
+/// The (vCPU, memory GB, disk GB) of an offered class name such as `linux-amd64-small`, or
+/// None when Containers does not offer that class.
+pub fn class_resources(class_name: &str) -> Option<(u32, u32, u32)> {
+    SIZES.iter().find_map(|&(size, cpu, mem, disk)| {
+        (offered(size, cpu, mem, disk).class.name() == class_name).then_some((cpu, mem, disk))
+    })
+}
+
 fn offered(size: Size, cpu: u32, memory_gb: u32, disk_gb: u32) -> Offered {
     Offered {
         class: Class {
@@ -129,10 +140,10 @@ impl Connector for Containers {
     }
 
     fn offers(&self) -> Vec<Offered> {
-        vec![
-            offered(Size::Small, 2, 8, 16),
-            offered(Size::Medium, 4, 12, 20),
-        ]
+        SIZES
+            .iter()
+            .map(|&(size, cpu, mem, disk)| offered(size, cpu, mem, disk))
+            .collect()
     }
 
     fn takes_token(&self) -> bool {

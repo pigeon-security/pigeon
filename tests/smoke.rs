@@ -7558,6 +7558,57 @@ fn core_observability_monitors_plan() {
 }
 
 #[test]
+fn core_observability_spike_and_ci_price() {
+    use pigeon_capabilities::observability::*;
+    use serde_json::json;
+    use std::collections::BTreeMap;
+
+    let hour = 1_795_428_000_000_i64; // 2026-11-23T10:00:00Z
+    let row = |script: &str, at: &str, requests: f64, errors: f64| {
+        json!({ "sum": { "requests": requests, "errors": errors },
+                "dimensions": { "scriptName": script, "status": "success", "datetimeHour": at } })
+    };
+    let answer = json!({ "data": { "viewer": { "accounts": [{ "workersInvocationsAdaptive": [
+        row("core", "2026-11-23T10:00:00Z", 30.0, 1.0),
+        row("core", "2026-11-23T10:00:00Z", 10.0, 4.0),
+        row("core", "2026-11-23T11:00:00Z", 50.0, 10.0),
+        row("core", "not a date", 99.0, 99.0),
+        row("other", "2026-11-23T09:00:00Z", 5.0, 0.0),
+    ] }] } } });
+    let hourly = fold_hourly(&answer);
+    assert_eq!(hourly["core"].len(), 2);
+    assert_eq!(hourly["core"][&hour], (40.0, 5.0));
+    assert_eq!(hourly["core"][&(hour + 3_600_000)], (50.0, 10.0));
+    assert!(hourly["other"].contains_key(&(hour - 3_600_000)));
+
+    let deploy = |id: i64, state: &str, at: i64| json!({ "id": id, "landing": "l1", "commit": "abc", "state": state, "finished_at": at });
+    // 90 requests and 15 errors after: 16.7% against a 5% window rate is a spike.
+    let deploys = [
+        deploy(1, "succeeded", hour + 600_000),
+        deploy(2, "failed", hour + 600_000),
+        deploy(3, "succeeded", hour + 7_200_000 * 5),
+    ];
+    let flagged = spike_after_deploy(&hourly["core"], &deploys, 0.05);
+    assert_eq!(flagged.len(), 1, "{flagged:?}");
+    assert_eq!(flagged[0]["deploy"], 1);
+    assert_eq!(flagged[0]["requests_after"], 90.0);
+    assert_eq!(flagged[0]["errors_after"], 15.0);
+    // Below thresholds: the same deploy at a window rate of 10% is not flagged.
+    assert!(spike_after_deploy(&hourly["core"], &deploys, 0.10).is_empty());
+
+    // CI price: a small class is priced, an unknown one is listed as unpriced.
+    let seconds = BTreeMap::from([
+        ("linux-amd64-small".to_string(), 100.0),
+        ("mystery".to_string(), 50.0),
+    ]);
+    let (total, by_class, unpriced) = ci_price(&seconds);
+    let want = 100.0 * (2.0 * 0.000020 + 8.0 * 0.0000025 + 16.0 * 0.00000007);
+    assert!((total - want).abs() < 1e-12, "{total} vs {want}");
+    assert_eq!(by_class.len(), 1);
+    assert_eq!(unpriced, vec!["mystery".to_string()]);
+}
+
+#[test]
 fn core_observability_summary_folds() {
     use pigeon_capabilities::observability::*;
     use serde_json::json;
@@ -7686,4 +7737,31 @@ fn core_observability_summary_folds() {
     assert_eq!(listed, 4);
     assert_eq!(seconds.len(), 1);
     assert_eq!(seconds["linux-amd64-small"], 60.0);
+}
+
+/// The Platform section sits on the Cost tab, adds nothing to the overview total, keeps a
+/// ten-minute snapshot, and its script is on the page.
+#[test]
+fn core_console_platform_section() {
+    use pigeon_capabilities::Capability;
+    use pigeon_capabilities::console::{page, sections::Tab, snapshot};
+    use pigeon_capabilities::observability::Observability;
+    use pigeon_core::lanes::Map;
+
+    let o = Observability {
+        map: Map {
+            docs: vec![],
+            shared: vec![],
+            checks: vec![],
+            core_first: None,
+            workers: vec![],
+        },
+    };
+    let s = o.sections();
+    assert_eq!(s.len(), 1);
+    assert_eq!(s[0].id, "platform");
+    assert!(s[0].tab == Tab::Cost);
+    assert!(s[0].cost.is_none());
+    assert_eq!(snapshot::fresh_ms("platform"), Some(600_000));
+    assert!(page::SCRIPTS.contains(&"/console/platform.js"));
 }

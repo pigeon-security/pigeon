@@ -41,6 +41,7 @@ const SIGN_IN: &str = "console:sign-in";
 const APP: &str = include_str!("console/app.js");
 const CHART: &str = include_str!("console/chart.js");
 const KEYS: &str = include_str!("console/keys.js");
+const PLATFORM: &str = include_str!("console/platform.js");
 const USERS: &str = include_str!("console/users.js");
 const APPROVALS: &str = include_str!("console/approvals.js");
 const INSTANCES: &str = include_str!("console/instances.js");
@@ -300,6 +301,7 @@ impl Console {
                 }
                 "/console/app.js" => page::asset(APP, "text/javascript; charset=utf-8"),
                 "/console/chart.js" => page::asset(CHART, "text/javascript; charset=utf-8"),
+                "/console/platform.js" => page::asset(PLATFORM, "text/javascript; charset=utf-8"),
                 "/console/keys.js" => page::asset(KEYS, "text/javascript; charset=utf-8"),
                 "/console/users.js" => page::asset(USERS, "text/javascript; charset=utf-8"),
                 "/console/approvals.js" => page::asset(APPROVALS, "text/javascript; charset=utf-8"),

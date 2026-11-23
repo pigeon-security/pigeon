@@ -23,6 +23,7 @@ pub fn fresh_ms(id: &str) -> Option<i64> {
     match id {
         "credentials" => Some(5 * 60_000),
         "cost" => Some(10 * 60_000),
+        "platform" => Some(10 * 60_000),
         _ => None,
     }
 }

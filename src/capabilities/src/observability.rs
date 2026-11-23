@@ -12,6 +12,8 @@ use serde_json::{Value, json};
 use worker::js_sys::Date;
 use worker::{Error, Fetch, Headers, Method, Request, RequestInit, Result};
 
+use crate::console::sections::{Section, Tab};
+use crate::users::User;
 use crate::{Call, Capability, Context};
 
 /// The metrics permission: GraphQL `workersInvocationsAdaptive`.
@@ -42,7 +44,7 @@ pub fn graphql_query(account: &str, from: &str, to: &str) -> Value {
         {accountTag: $tag}) { workersInvocationsAdaptive(limit: 10000, filter: \
         {datetime_geq: $from, datetime_leq: $to}) { sum { requests errors subrequests } \
         quantiles { cpuTimeP50 cpuTimeP99 wallTimeP50 wallTimeP99 } \
-        dimensions { scriptName status } } } } }";
+        dimensions { scriptName status datetimeHour } } } } }";
     json!({ "query": query, "variables": { "tag": account, "from": from, "to": to } })
 }
 
@@ -116,6 +118,124 @@ pub fn fold_invocations(answer: &Value) -> BTreeMap<String, Script> {
         s.wall_p50_weighted += n(&q["wallTimeP50"]) * requests;
         s.cpu_p99_us = s.cpu_p99_us.max(n(&q["cpuTimeP99"]));
         s.wall_p99_us = s.wall_p99_us.max(n(&q["wallTimeP99"]));
+    }
+    out
+}
+
+/// The fewest requests in the two hours after a deploy for a spike to be judged.
+const SPIKE_MIN_REQUESTS: f64 = 20.0;
+/// The fewest errors in the two hours after a deploy that can count as a spike.
+const SPIKE_MIN_ERRORS: f64 = 3.0;
+/// How many times the window's error rate the rate after a deploy must exceed.
+const SPIKE_FACTOR: f64 = 2.0;
+/// One hour in milliseconds.
+const HOUR_MS: i64 = 3_600_000;
+
+/// Milliseconds since the epoch for exactly `YYYY-MM-DDTHH:MM:SSZ`, or None for any other text.
+fn parse_utc(text: &str) -> Option<i64> {
+    let b = text.as_bytes();
+    if b.len() != 20
+        || b[4] != b'-'
+        || b[7] != b'-'
+        || b[10] != b'T'
+        || b[13] != b':'
+        || b[16] != b':'
+        || b[19] != b'Z'
+    {
+        return None;
+    }
+    let num = |a: usize, z: usize| -> Option<i64> {
+        let part = text.get(a..z)?;
+        if part.bytes().all(|c| c.is_ascii_digit()) {
+            part.parse().ok()
+        } else {
+            None
+        }
+    };
+    let (y, m, d) = (num(0, 4)?, num(5, 7)?, num(8, 10)?);
+    let (h, mi, s) = (num(11, 13)?, num(14, 16)?, num(17, 19)?);
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) || h > 23 || mi > 59 || s > 60 {
+        return None;
+    }
+    // Days from civil.
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some(((days * 24 + h) * 60 + mi) * 60_000 + s * 1000)
+}
+
+/// Per script, per hour start (ms, UTC): (requests, errors). Rows without a readable
+/// `datetimeHour` are skipped.
+pub fn fold_hourly(answer: &Value) -> BTreeMap<String, BTreeMap<i64, (f64, f64)>> {
+    let rows = answer["data"]["viewer"]["accounts"][0]["workersInvocationsAdaptive"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let mut out: BTreeMap<String, BTreeMap<i64, (f64, f64)>> = BTreeMap::new();
+    for row in &rows {
+        let (Some(name), Some(hour)) = (
+            row["dimensions"]["scriptName"].as_str(),
+            row["dimensions"]["datetimeHour"]
+                .as_str()
+                .and_then(parse_utc),
+        ) else {
+            continue;
+        };
+        let e = out
+            .entry(name.to_string())
+            .or_default()
+            .entry(hour)
+            .or_default();
+        e.0 += row["sum"]["requests"].as_f64().unwrap_or(0.0);
+        e.1 += row["sum"]["errors"].as_f64().unwrap_or(0.0);
+    }
+    out
+}
+
+/// Deploys that succeeded and were followed by an error spike: in the hour bucket holding
+/// `finished_at` plus the next one, at least 20 requests, at least 3 errors and an error rate
+/// above twice `window_rate`.
+pub fn spike_after_deploy(
+    hourly: &BTreeMap<i64, (f64, f64)>,
+    deploys: &[Value],
+    window_rate: f64,
+) -> Vec<Value> {
+    let ok = crate::land::lanes::DeployState::Succeeded.name();
+    let mut out = Vec::new();
+    for d in deploys {
+        let Some(finished) = d["finished_at"].as_i64() else {
+            continue;
+        };
+        if d["state"] != ok {
+            continue;
+        }
+        let start = finished.div_euclid(HOUR_MS) * HOUR_MS;
+        let (mut requests, mut errors) = (0.0, 0.0);
+        for key in [start, start + HOUR_MS] {
+            if let Some((r, e)) = hourly.get(&key) {
+                requests += r;
+                errors += e;
+            }
+        }
+        let rate = if requests > 0.0 {
+            errors / requests
+        } else {
+            0.0
+        };
+        if requests >= SPIKE_MIN_REQUESTS
+            && errors >= SPIKE_MIN_ERRORS
+            && rate > SPIKE_FACTOR * window_rate
+        {
+            out.push(json!({
+                "deploy": d["id"], "landing": d["landing"], "commit": d["commit"],
+                "finished_at": finished, "requests_after": requests,
+                "errors_after": errors, "rate_after": rate, "window_rate": window_rate,
+            }));
+        }
     }
     out
 }
@@ -392,6 +512,35 @@ pub struct Observability {
 impl Capability for Observability {
     fn name(&self) -> &'static str {
         "observability"
+    }
+
+    fn sections(&self) -> Vec<Section> {
+        vec![Section {
+            tab: Tab::Cost,
+            id: "platform",
+            title: "Platform",
+            description: "Cloudflare metrics, logs and billable usage for pigeon's Workers; \
+                          estimated and billed cost kept apart.",
+            order: 2,
+            // Its Models line is already the Models section's cost, and its window is at most
+            // 7 days, so adding it to the overview total would double count and mix windows.
+            cost: None,
+        }]
+    }
+
+    /// The same answer as `observability_summary`, over the last `days` days (at most 168
+    /// hours), for the console's Platform section.
+    fn section_data<'a>(
+        &'a self,
+        cx: &'a Context<'a>,
+        _id: &'a str,
+        _person: &'a User,
+        query: &'a Value,
+    ) -> Call<'a> {
+        Box::pin(async move {
+            let days = query["days"].as_u64().unwrap_or(7).clamp(1, 30);
+            summary(self, cx, (days * 24).min(168)).await
+        })
     }
 
     fn tools(&self) -> Vec<Tool> {
@@ -848,6 +997,33 @@ pub fn fold_ci_jobs(
     Ok((out, jobs.len()))
 }
 
+/// Containers list price in dollars per vCPU-second.
+const CONTAINERS_PER_VCPU_SECOND: f64 = 0.000020;
+/// Containers list price in dollars per GiB-second of memory.
+const CONTAINERS_PER_GIB_SECOND: f64 = 0.0000025;
+/// Containers list price in dollars per GB-second of disk.
+const CONTAINERS_PER_DISK_GB_SECOND: f64 = 0.00000007;
+
+/// List price in dollars of Containers time: seconds per class, priced on each class's
+/// provisioned size. Returns the total, dollars per class, and the classes with no known size.
+pub fn ci_price(seconds: &BTreeMap<String, f64>) -> (f64, BTreeMap<String, f64>, Vec<String>) {
+    let (mut total, mut by_class, mut unpriced) = (0.0, BTreeMap::new(), Vec::new());
+    for (class, secs) in seconds {
+        match pigeon_ci::containers::class_resources(class) {
+            Some((cpu, mem, disk)) => {
+                let usd = secs
+                    * (f64::from(cpu) * CONTAINERS_PER_VCPU_SECOND
+                        + f64::from(mem) * CONTAINERS_PER_GIB_SECOND
+                        + f64::from(disk) * CONTAINERS_PER_DISK_GB_SECOND);
+                total += usd;
+                by_class.insert(class.clone(), usd);
+            }
+            None => unpriced.push(class.clone()),
+        }
+    }
+    (total, by_class, unpriced)
+}
+
 /// Opens a token for one source, living five minutes.
 async fn open<'a>(cx: &Context<'a>, permission: &str) -> Result<Scoped<'a>> {
     Scoped::open_for(
@@ -948,9 +1124,15 @@ async fn summary(this: &Observability, cx: &Context<'_>, hours: u64) -> Result<V
         )
         .await;
 
+    let mut hourly = BTreeMap::new();
+    let mut metrics_ok = true;
     let metrics = match metrics_v {
-        Ok(v) => fold_invocations(&v),
+        Ok(v) => {
+            hourly = fold_hourly(&v);
+            fold_invocations(&v)
+        }
         Err(why) => {
+            metrics_ok = false;
             unavailable.push(missing("metrics", &why));
             BTreeMap::new()
         }
@@ -1006,12 +1188,19 @@ async fn summary(this: &Observability, cx: &Context<'_>, hours: u64) -> Result<V
         } else {
             entry["top_errors"] = json!(errors.get(&w.script).cloned().unwrap_or_default());
         }
-        entry["deploys"] = json!(
-            deploys
-                .iter()
-                .filter(|d| d["worker"] == w.name.as_str() || d["worker"] == w.script.as_str())
-                .collect::<Vec<_>>()
-        );
+        let mine: Vec<Value> = deploys
+            .iter()
+            .filter(|d| d["worker"] == w.name.as_str() || d["worker"] == w.script.as_str())
+            .cloned()
+            .collect();
+        entry["spike_after_deploy"] = if metrics_ok {
+            let none = BTreeMap::new();
+            let hours = hourly.get(&w.script).unwrap_or(&none);
+            json!(spike_after_deploy(hours, &mine, s.error_rate()))
+        } else {
+            Value::Null
+        };
+        entry["deploys"] = json!(mine);
         workers.push(entry);
     }
 
@@ -1067,21 +1256,23 @@ async fn summary(this: &Observability, cx: &Context<'_>, hours: u64) -> Result<V
         Err(e) => unavailable.push(missing("AI agent run spend", &hide(e))),
     }
 
-    // CI Containers time: seconds only, since the class sizes are not readable from a pure
-    // function in the CI crate (they sit inside the connector's method).
+    // CI Containers time, priced at list on each class's provisioned size.
     match ci_v {
         Ok(v) => match fold_ci_jobs(&v, from as i64, to as i64) {
-            Ok((seconds, listed)) => cost.push(line(
-                "CI Containers",
-                "estimated",
-                if listed >= 200 {
-                    "CI scheduler; 200 jobs came back, so older jobs in the window are missing. Seconds only: class sizes are not readable as a pure function, so no price is given"
-                } else {
-                    "CI scheduler. Seconds only: class sizes are not readable as a pure function, so no price is given"
-                },
-                None,
-                json!({ "seconds_by_class": seconds, "jobs_listed": listed, "truncated": listed >= 200 }),
-            )),
+            Ok((seconds, listed)) => {
+                let (usd, usd_by_class, unpriced) = ci_price(&seconds);
+                cost.push(line(
+                    "CI Containers",
+                    "estimated",
+                    if listed >= 200 {
+                        "CI scheduler; 200 jobs came back, so older jobs in the window are missing. List price on the provisioned instance size, before included usage, so an upper bound"
+                    } else {
+                        "CI scheduler. List price on the provisioned instance size, before included usage, so an upper bound"
+                    },
+                    Some(usd),
+                    json!({ "seconds_by_class": seconds, "usd_by_class": usd_by_class, "unpriced": unpriced, "jobs_listed": listed, "truncated": listed >= 200 }),
+                ));
+            }
             Err(why) => unavailable.push(missing("CI Containers time", &why)),
         },
         Err(e) => unavailable.push(missing("CI Containers time", &hide(e))),
