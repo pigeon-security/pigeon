@@ -17,6 +17,12 @@ pub const PERMISSIONS: [&str; 3] = [
     "Access: Organizations, Identity Providers, and Groups Read",
 ];
 
+/// The permission to list and read Access applications and policies.
+pub const APPS_READ_PERMISSION: &str = "Access: Apps and Policies Read";
+
+/// The permission to change Access applications and policies.
+pub const APPS_WRITE_PERMISSION: &str = "Access: Apps and Policies Write";
+
 /// How long a service token lives.
 const SERVICE_TOKEN_DURATION: &str = "8760h";
 
@@ -72,6 +78,19 @@ impl<'a> Session<'a> {
     pub async fn open(account: &'a Account) -> Result<Self> {
         let policies = vec![Policy::new(Scope::Account, &PERMISSIONS)];
         let token = Scoped::open(account, "access", policies).await?;
+        Ok(Self { account, token })
+    }
+
+    /// Mints a token holding only [`APPS_READ_PERMISSION`], or only [`APPS_WRITE_PERMISSION`]
+    /// when `write` is true. For the portal redirect tool.
+    pub async fn open_apps(account: &'a Account, write: bool) -> Result<Self> {
+        let permission = if write {
+            APPS_WRITE_PERMISSION
+        } else {
+            APPS_READ_PERMISSION
+        };
+        let policies = vec![Policy::new(Scope::Account, &[permission])];
+        let token = Scoped::open(account, "access-apps", policies).await?;
         Ok(Self { account, token })
     }
 

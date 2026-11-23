@@ -1575,6 +1575,13 @@ fn land_portal_oauth_redirects_change_one_uri() {
 }
 
 #[test]
+fn core_access_apps_permissions_are_exact() {
+    use pigeon_core::access::{APPS_READ_PERMISSION, APPS_WRITE_PERMISSION};
+    assert_eq!(APPS_READ_PERMISSION, "Access: Apps and Policies Read");
+    assert_eq!(APPS_WRITE_PERMISSION, "Access: Apps and Policies Write");
+}
+
+#[test]
 fn core_land_compact_rows_and_events() {
     use pigeon_capabilities::land::digest::{self, Detail};
     use pigeon_capabilities::land::state::State;

@@ -265,7 +265,7 @@ fn payload(app_id: &str, action: &str, uri: &str, planned: &Planned) -> Value {
 
 /// Reads the portal application through a session that is always finished.
 async fn read_app(cx: &Context<'_>, host: &str) -> Result<Value> {
-    let session = Session::open(cx.account).await?;
+    let session = Session::open_apps(cx.account, false).await?;
     let result = session.portal_app(host).await;
     session.finish(result).await
 }
@@ -345,7 +345,7 @@ pub async fn apply(cx: &Context<'_>, host: &str, args: &Value) -> Result<Value> 
     }
     let action = got["payload"]["action"].as_str().unwrap_or_default();
     let uri = check_uri(got["payload"]["uri"].as_str().unwrap_or_default()).map_err(bad)?;
-    let session = Session::open(cx.account).await?;
+    let session = Session::open_apps(cx.account, true).await?;
     let result = apply_with(cx, &session, host, caller, approval_id, action, &uri).await;
     session.finish(result).await
 }
