@@ -7,6 +7,7 @@ struct Waiting: Identifiable {
         case call = "Tool call"
         case draft = "Instance draft"
         case plan = "Linked plan"
+        case other = "Other"
         case landing = "Landing"
 
         /// The console write that approves it.
@@ -45,6 +46,8 @@ final class ApprovalsModel {
                 let plans = dict["plans"] as? [[String: Any]],
                 let landings = dict["landings"] as? [[String: Any]]
             else { throw PlatformError.badResponse("approvals_list shape") }
+            // An older server sends no `other`; that is an empty list.
+            let other = dict["other"] as? [[String: Any]] ?? []
             var found: [Waiting] = []
             var skipped = 0
             for c in calls {
@@ -72,6 +75,25 @@ final class ApprovalsModel {
                                 "Digest \(jsonText(d["digest"]))",
                             ]))
                 }
+            }
+            for o in other {
+                guard let id = o["id"] as? String else { skipped += 1; continue }
+                let summary = o["summary"]
+                let plan = ((summary as? [String: Any])?["plan"] as? [Any] ?? []).map {
+                    jsonText($0)
+                }
+                var lines = plan
+                if let summary, !(summary is NSNull) { lines.append(jsonText(summary)) }
+                lines += [
+                    "Asked \(whenText(o["created_ms"] as? Double))",
+                    "Expires \(whenText(o["expires_ms"] as? Double))",
+                    "Digest \(jsonText(o["digest"]))",
+                ]
+                found.append(
+                    Waiting(
+                        id: id, kind: .other,
+                        title: "\(o["kind"] as? String ?? "other"): \(o["title"] as? String ?? id)",
+                        lines: lines))
             }
             for l in landings {
                 guard let id = l["id"] as? String else { skipped += 1; continue }

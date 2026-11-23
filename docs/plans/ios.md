@@ -688,6 +688,8 @@ executors through it. Each item: state, next step, who it waits on.
 4. **Phase 7, the app's screens 1:1 with the console: built** (2026-11-23, this plan's branch,
    Log). `test` and `ios-check` pass. Next: review and land, then build 40 from main's head
    after it lands, and try a native approval on a device. Waits on: the parent.
+4a. **`other` approvals in the app: built** (2026-11-24, Log). Next: review and land; the next
+   real iOS release carries it (with item 1's changes). Waits on: the parent.
 5. ~~`ios-release` checks main's head on every step~~: done (`bbbdb96`, Log 2026-11-22 late).
 6. **Apple's AASA CDN** still answered "Not Found" for `platform.pigeon.dev` at about 22:48 UTC,
    while a reinstall worked. If a fresh install ever fails sign-in, check
@@ -837,6 +839,11 @@ executors through it. Each item: state, next step, who it waits on.
     the console's drawings; Secrets shows `secrets_list` without expiry; landings have no deny
     (the console has none); the audit line does not yet say a decision came from the app. The
     native passkey flow has not run on a device.
+- 2026-11-24: the Approvals tab shows `other` approvals (such as a monitors plan), after plans
+  and before landings, as the console does. Title `kind: title`, then the `summary.plan` lines,
+  the summary as JSON, Asked, Expires and Digest; Approve and Deny use `approval-approve` and
+  `approval-deny` with the same passkey flow. A server without `other` still loads. Only
+  `ApprovalsView.swift` changed. It reaches devices with the next real iOS release.
 - 2026-11-23: phase 6 prepared, off (branch `claude/ai-agent-8CKCZze7DmKV`; not landed):
   `pigeon_core::apns`, the `APNS_KEY`/`APNS_KEY_ID` slots without bindings, `apns_devices` and
   its ops, `apns_register`/`apns_unregister`/`apns_status`/`apns_send` (sends nothing until
