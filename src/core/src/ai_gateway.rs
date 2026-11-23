@@ -546,36 +546,55 @@ async fn logs_with(
     max: usize,
 ) -> Result<Vec<Log>> {
     const PER_PAGE: usize = 50;
+    // Fetched together: 10 rounds for 5,000 logs, not 100 calls in a row.
+    const BATCH: usize = 10;
     let base = format!(
         "/accounts/{}/ai-gateway/gateways/{gateway}/logs",
         account.id
     );
-    let mut out = Vec::new();
-    for page in 1..=max.div_ceil(PER_PAGE) {
+    let pages = max.div_ceil(PER_PAGE);
+    let fetch = |page: usize| {
         let path = format!(
             "{base}?per_page={PER_PAGE}&page={page}&order_by=created_at&order_by_direction=desc"
         );
-        // The first page is the minted token's first call, which may come before it is active.
-        let answer = if page == 1 {
-            call_fresh(token, Method::Get, &path, None).await?
-        } else {
-            call(token, Method::Get, &path, None).await?
-        };
-        let got: Vec<Log> = serde_json::from_value(answer)?;
-        let last_page = got.len() < PER_PAGE;
-        for log in got {
-            if Date::parse(&log.created_at) < since_ms {
-                return Ok(out);
-            }
-            if filter.keeps(&log) {
-                out.push(log);
-            }
-            if out.len() >= max {
-                return Ok(out);
-            }
+        async move {
+            let answer = call(token, Method::Get, &path, None).await?;
+            serde_json::from_value::<Vec<Log>>(answer).map_err(worker::Error::from)
         }
-        if last_page {
-            break;
+    };
+    let mut out = Vec::new();
+    let mut next = 1;
+    while next <= pages {
+        // The first page goes alone and fresh: it is the minted token's first call, which may come
+        // before it is active.
+        let batch: Vec<Result<Vec<Log>>> = if next == 1 {
+            let path = format!(
+                "{base}?per_page={PER_PAGE}&page=1&order_by=created_at&order_by_direction=desc"
+            );
+            let answer = call_fresh(token, Method::Get, &path, None).await?;
+            vec![serde_json::from_value(answer).map_err(worker::Error::from)]
+        } else {
+            let end = (next + BATCH - 1).min(pages);
+            futures_util::future::join_all((next..=end).map(&fetch)).await
+        };
+        next += batch.len();
+        for got in batch {
+            let got = got?;
+            let last_page = got.len() < PER_PAGE;
+            for log in got {
+                if Date::parse(&log.created_at) < since_ms {
+                    return Ok(out);
+                }
+                if filter.keeps(&log) {
+                    out.push(log);
+                }
+                if out.len() >= max {
+                    return Ok(out);
+                }
+            }
+            if last_page {
+                return Ok(out);
+            }
         }
     }
     Ok(out)

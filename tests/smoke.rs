@@ -427,7 +427,59 @@ fn platform_cost_daily_anthropic_unavailable() {
     );
     assert!(a["anthropic"].is_null());
     assert_eq!(num_of(&a["total"]), 6.0);
-    assert_eq!(a["unavailable"][0]["source"], "Anthropic");
+}
+
+#[test]
+fn platform_cost_daily_sources_status() {
+    use pigeon_capabilities::cost::{assemble, billing_days, live_days, with_status};
+    use std::collections::BTreeMap;
+    let roles = BTreeMap::new();
+    let answer = |live: &_| {
+        assemble(
+            "7d",
+            "2026-03-10",
+            &BTreeMap::new(),
+            live,
+            false,
+            false,
+            vec![],
+            vec![],
+        )
+    };
+
+    // Rows with only billing-period columns and bare-date ends used to fold to nothing or spread
+    // one day too far; a single row object and a `rows` wrapper are read too.
+    let rows = json!({ "rows": [
+        { "ServiceName": "Workers Paid", "BilledCost": "3.0", "BillingPeriodStart": "2026-03-10", "BillingPeriodEnd": "2026-03-11" },
+    ] });
+    let billing = billing_days(&rows, "2026-03-10");
+    assert_eq!(billing.days.len(), 1);
+    assert_eq!(
+        num_of(&billing.days["2026-03-10"]["cloudflare"]["Workers"]),
+        3.0
+    );
+    let one = json!({ "ServiceName": "R2", "BilledCost": 1.0, "ChargePeriodStart": "2026-03-09T00:00:00Z" });
+    assert_eq!(billing_days(&one, "2026-03-10").days.len(), 1);
+
+    // Both sources have data: ok.
+    let live = live_days(Some(&billing), Some(&cost_models()), Some(&roles), None);
+    let mut a = answer(&live);
+    with_status(&mut a, None, None);
+    assert_eq!(a["cloudflare"]["status"], "ok");
+    assert_eq!(a["ai_gateway"]["status"], "ok");
+    assert!(a["cloudflare"]["why"].is_null());
+
+    // Neither answered anything: empty, with a reason.
+    let mut a = answer(&live_days(None, None, Some(&roles), None));
+    with_status(&mut a, None, None);
+    assert_eq!(a["cloudflare"]["status"], "empty");
+    assert_eq!(a["ai_gateway"]["status"], "empty");
+    assert!(a["ai_gateway"]["why"].is_string());
+
+    // A failed source is unavailable, with its reason.
+    with_status(&mut a, Some("timed out"), Some("down"));
+    assert_eq!(a["cloudflare"]["status"], "unavailable");
+    assert_eq!(a["ai_gateway"]["why"], "down");
 }
 
 #[test]

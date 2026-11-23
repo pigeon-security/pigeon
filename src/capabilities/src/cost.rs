@@ -66,16 +66,47 @@ pub struct Billing {
     pub days: BTreeMap<String, Value>,
 }
 
+/// The rows of a billable usage answer: a list, a list under `data`, `rows` or `result`, or one
+/// row on its own.
+fn billing_rows(result: &Value) -> Vec<Value> {
+    for v in [result, &result["data"], &result["rows"], &result["result"]] {
+        if let Some(a) = v.as_array() {
+            return a.clone();
+        }
+    }
+    if result["ServiceName"].is_string() {
+        return vec![result.clone()];
+    }
+    Vec::new()
+}
+
+/// Per-source status for the answer: adds `status` (`ok`, `empty` or `unavailable`) and, when
+/// not `ok`, `why` (a short sentence) to `cloudflare` and `ai_gateway`. `cf_why` and `ai_why` are
+/// the reasons a source failed, none when it answered. Pure.
+pub fn with_status(answer: &mut Value, cf_why: Option<&str>, ai_why: Option<&str>) {
+    for (key, why) in [("cloudflare", cf_why), ("ai_gateway", ai_why)] {
+        let empty = num(&answer[key]["total"]) == 0.0;
+        let (status, text) = match (why, empty) {
+            (Some(w), _) => ("unavailable", Some(w.to_string())),
+            (None, true) => (
+                "empty",
+                Some("the source answered with no cost for this range".to_string()),
+            ),
+            (None, false) => ("ok", None),
+        };
+        answer[key]["status"] = json!(status);
+        if let Some(t) = text {
+            answer[key]["why"] = json!(t);
+        }
+    }
+}
+
 /// Billable usage rows folded into days up to `today`. Only `ServiceName`, `BilledCost` and the
 /// charge period are read, so the billing account's name and id never get this far. A row of one
 /// UTC day goes on that day; a longer one is spread evenly over its days up to today and marked
 /// `period`. A row with no readable start is skipped.
 pub fn billing_days(result: &Value, today: &str) -> Billing {
-    let rows = result
-        .as_array()
-        .or_else(|| result["data"].as_array())
-        .cloned()
-        .unwrap_or_default();
+    let rows = billing_rows(result);
     type Cell = (f64, bool);
     let mut by: BTreeMap<String, BTreeMap<&'static str, Cell>> = BTreeMap::new();
     for row in &rows {
@@ -83,15 +114,22 @@ pub fn billing_days(result: &Value, today: &str) -> Billing {
             continue;
         };
         let usd = num(&row["BilledCost"]);
-        let Some(start) = row["ChargePeriodStart"].as_str().and_then(day_of) else {
+        // The charge period, else the billing period (both are FOCUS columns).
+        let pick = |a: &str, b: &str| {
+            row[a]
+                .as_str()
+                .filter(|s| day_of(s).is_some())
+                .or_else(|| row[b].as_str())
+        };
+        let Some(start) = pick("ChargePeriodStart", "BillingPeriodStart").and_then(day_of) else {
             continue;
         };
-        let end = row["ChargePeriodEnd"].as_str();
+        let end = pick("ChargePeriodEnd", "BillingPeriodEnd");
         let end_day = end.and_then(day_of).unwrap_or(start);
-        // An end at midnight is exclusive: the period stops the day before.
-        let at_midnight = end
-            .and_then(|e| e.get(11..))
-            .is_some_and(|t| t.starts_with("00:00:00"));
+        // An end at midnight (or a bare date) is exclusive: the period stops the day before.
+        let at_midnight = end.is_some_and(|e| {
+            e.len() == 10 || e.get(11..).is_some_and(|t| t.starts_with("00:00:00"))
+        });
         let last = if end_day > start && at_midnight {
             days_ending(end_day, 2).into_iter().next()
         } else {
@@ -694,18 +732,23 @@ pub async fn cost_daily(cx: &Context<'_>, args: &Value) -> Result<Value> {
     .await;
 
     let mut unavailable = Vec::new();
+    let (mut cf_why, mut ai_why): (Option<String>, Option<String>) = (None, None);
     let hide = |e: Error| e.to_string().replace(id, "{account}");
     let billing = match billing_v {
         Ok(v) => Some(billing_days(&v, &today)),
         Err(why) => {
+            let why = why.replace(id, "{account}");
             unavailable.push(missing("billable usage", &why));
+            cf_why = Some(format!("Cloudflare billing failed: {why}"));
             None
         }
     };
     let models = match models_v {
         Ok(v) => Some(v),
         Err(e) => {
-            unavailable.push(missing("AI Gateway", &hide(e)));
+            let why = hide(e);
+            unavailable.push(missing("AI Gateway", &why));
+            ai_why = Some(format!("the AI Gateway logs failed: {why}"));
             None
         }
     };
@@ -775,7 +818,7 @@ pub async fn cost_daily(cx: &Context<'_>, args: &Value) -> Result<Value> {
         worker::console_error!("cost_daily: storing the rollups: {e}");
         unavailable.push(missing("rollup store", &hide(e)));
     }
-    Ok(assemble(
+    let mut answer = assemble(
         range,
         &today,
         &stored,
@@ -784,5 +827,7 @@ pub async fn cost_daily(cx: &Context<'_>, args: &Value) -> Result<Value> {
         anthropic.is_none(),
         Vec::new(),
         unavailable,
-    ))
+    );
+    with_status(&mut answer, cf_why.as_deref(), ai_why.as_deref());
+    Ok(answer)
 }
