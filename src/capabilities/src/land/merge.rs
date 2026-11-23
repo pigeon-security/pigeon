@@ -98,8 +98,11 @@ pub struct Seen {
     pub changed: BTreeMap<String, Change>,
     pub main_moved: BTreeMap<String, Change>,
     pub objects: Objects,
-    /// The map, as main has it.
+    /// The map, as main has it plus the Workers the commit adds
+    /// ([`super::lanes::with_added_workers`]).
     pub map: Map,
+    /// The names of the Workers the commit adds to the map: such a landing is proxy-first.
+    pub added_workers: Vec<String>,
     /// The commit changed `Cargo.lock` only in the workspace's own crates' entries
     /// ([`lanes::lock_members_only`]), so the lockfile picks no lane by itself.
     pub lock_members_only: bool,
@@ -186,7 +189,19 @@ pub async fn see(
     }
     let changed = rebase::changes(&objects, &base, commit).map_err(bad)?;
     let main_moved = rebase::changes(&objects, &base, &main).map_err(bad)?;
-    let map = map_at(&objects, &main);
+    let main_map = map_at(&objects, &main);
+    // The branch's own map counts only for the Workers it adds.
+    let (map, added_workers) = if changed.contains_key(MAP_PATH) {
+        let text = git::read_file(remote, commit, MAP_PATH)
+            .await?
+            .and_then(|b| String::from_utf8(b).ok());
+        match text.map(|t| lanes::parse(&t)) {
+            Some(Ok(branch)) => super::lanes::with_added_workers(&main_map, &branch),
+            _ => (main_map, Vec::new()),
+        }
+    } else {
+        (main_map, Vec::new())
+    };
     let lock_members_only = if changed.contains_key(lanes::LOCK) {
         let text = |b: Option<Vec<u8>>| b.and_then(|b| String::from_utf8(b).ok());
         let before = text(git::read_file(remote, &base, lanes::LOCK).await?);
@@ -202,6 +217,7 @@ pub async fn see(
         main_moved,
         objects,
         map,
+        added_workers,
         lock_members_only,
     }))
 }

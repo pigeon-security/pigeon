@@ -2235,7 +2235,8 @@ impl Lander {
         let docs_only = affected.docs_only;
         let workers = serde_json::to_string(&affected.workers)?;
         let order_bits = (i64::from(affected.ordered) * lanes::ORDER_CORE_FIRST)
-            | (i64::from(lanes::changes_proxy_first(&changed)) * lanes::ORDER_PROXY_FIRST);
+            | (i64::from(lanes::changes_proxy_first(&changed) || !seen.added_workers.is_empty())
+                * lanes::ORDER_PROXY_FIRST);
         let on = if seen.forward() {
             format!("a fast-forward of main at {}", seen.main)
         } else {

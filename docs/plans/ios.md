@@ -356,6 +356,30 @@ and the route do not change.
   PLATFORM). Core signs and sends. Until core's setting `apns_route = false` is flipped, the
   route answers 404 saying APNs is not set up.
 
+**As built (phase 6b, not landed; Log 2026-11-23).**
+- Core binds `APNS_KEY_ID` and `APNS_KEY` (`APPLE_TEAM_ID` was already bound). No other Worker
+  binds them.
+- The provider token is signed with `pigeon_core::apple::sign_es256` (split out of `sign_jwt`)
+  and cached in the Directory setting `apns:provider-token` for 55 minutes, with its key id and
+  team. It is reused under 50 minutes and re-signed when the key id or team changes.
+- `apns_send` sends to every device of `person`, or of the person the caller acts for. The
+  answer holds row ids and outcomes, never a token. Departures from the table above:
+  - A 400 `BadDeviceToken` drops the row at once. The app registers again on every launch, so
+    a token sent to the wrong environment comes back corrected.
+  - A 500 or 503 is retried twice inline (300 and 600 ms), not through the platform's queue.
+  - The rate limit counts calls in the Directory setting `apns:sends:{app}:{person}`. Two
+    calls at the same moment can both pass.
+  - Any caller the policy lets call `apns_send` (rule `tools-run`) may name any person.
+- The app asks to allow notifications once signed in, registers with APNs, and calls
+  `apns_register` with the environment from its embedded profile (Debug: development, Release:
+  production). It carries `aps-environment` (development in the project; `ios/ci/release.sh`
+  sets production before signing).
+- `/apple/release/identity` now makes sure the profile it hands out carries Push. It adds
+  `PUSH_NOTIFICATIONS` to the bundle id if missing. If the held profile lacks
+  `aps-environment` or Apple says it is not ACTIVE, it makes a new App Store profile for the same
+  certificate. It deletes and changes nothing.
+- An approval waiting for a passkey can push to the approver (`push::NOTIFY_APPROVALS`, off).
+
 ### 4. Buildkite: the iOS pipelines
 
 The generator is built tonight, off, as `pigeon_ci::buildkite::ios`. Phase 3 wires it in.
@@ -661,7 +685,8 @@ a passkey. Enter every key and id on the console's secrets page once the slot ex
   which agrees with sealing the distribution key outside the Store.
 - ~~Buildkite hosted macOS~~: settled 2026-11-22 (Log). The org's plan has it; the shapes are
   `MACOS_ARM64_M4_6X28` and `MACOS_ARM64_M4_12X56`.
-- HTTP/2 from a Worker to APNs (§3): phase 6 proves it first.
+- ~~HTTP/2 from a Worker to APNs (§3)~~: settled 2026-11-23. `apns_status {probe: true}` from
+  the live Worker got 403 `MissingProviderToken` with an `apns-id`.
 - ~~Whether the HTTPS callback needs `webcredentials` or `applinks`~~: settled 2026-11-22 (Log):
   `webcredentials` alone works on a device; the file serves both.
 
@@ -680,11 +705,14 @@ executors through it. Each item: state, next step, who it waits on.
    pigeon's identity in use, revoke the old distribution certificate and delete the old
    "Pigeon App Store" profile in Apple's portal (Follow-up 2). Agents do not touch either.
    Waits on: the person.
-3. **Phase 6, APNs: prepared, off** (2026-11-23, branch `claude/ai-agent-8CKCZze7DmKV`, Log).
-   Next: land it; call `apns_status {probe: true}` once deployed to learn whether a Worker's
-   fetch reaches APNs over HTTP/2; the person creates the APNs key and sets `APNS_KEY` /
-   `APNS_KEY_ID` (follow-up 5); then phase 6b lands the bindings and the sender. Waits on: the
-   parent's review and landing, then the person for the key.
+3. **Phase 6b, APNs sending: built, not landed** (2026-11-23, Log). Phase 6 prep landed, the
+   probe proved HTTP/2, and the person set `APNS_KEY`/`APNS_KEY_ID`. Four branches wait:
+   server send `claude/ai-agent-KqnZJfJ4F3M8`, release profile with Push
+   `claude/ai-agent-vK51ZyceCozW`, app `claude/ai-agent-CE2R8u2ReI9Q`, approval push (off)
+   `claude/ai-agent-SDMPXNjdHaNG` (on top of the server branch). Next: land the server and
+   release-profile branches (core), then the app; then a release (`ios-release`), then
+   `apns_send` to the person's device. Waits on: the parent's review and landing, then the
+   person deciding when to release.
 4. **Phase 7, the app's screens 1:1 with the console: built** (2026-11-23, this plan's branch,
    Log). `test` and `ios-check` pass. Next: review and land, then build 40 from main's head
    after it lands, and try a native approval on a device. Waits on: the parent.
@@ -850,3 +878,28 @@ executors through it. Each item: state, next step, who it waits on.
   phase 6b), and `apns_status {probe: true}`. From the planner's sandbox, curl reached
   `api.sandbox.push.apple.com` over HTTP/2 (403 `MissingProviderToken` with an `apns-id`); a
   Worker's fetch is proven only by the probe once deployed. Its §3 note says what it built.
+- 2026-11-23: phase 6b built (planner run `claude/ai-agent-OUTWKw4TPe4V`; nothing landed). The
+  live probe answered 403 `MissingProviderToken` with an `apns-id`, so a Worker's fetch speaks
+  HTTP/2 to APNs. `APNS_KEY` and `APNS_KEY_ID` are set and sign. One concern per branch, each
+  from main unless noted, each with CI `test` passing:
+  - Server send, `claude/ai-agent-KqnZJfJ4F3M8` (`b93babe740266e0466536c8aacbba4224839fc6d`):
+    core binds `APNS_KEY_ID` and `APNS_KEY`, signs and caches the provider token, and
+    `apns_send` sends (§3, "As built (phase 6b)"). It touches `src/core/`, so it is a shared
+    landing and every Worker redeploys; only core gains bindings. Smoke
+    `apple_apns_send_token_and_actions`.
+  - Release profile with Push, `claude/ai-agent-vK51ZyceCozW`
+    (`8ae095bf22d0111d82495328b03638771973bce2`): `/apple/release/identity` adds
+    `PUSH_NOTIFICATIONS` if missing and makes a new App Store profile for the same certificate
+    when the held one lacks `aps-environment` or is not ACTIVE; `apple_status` shows
+    `profile.push`. Smoke `apple_release_profile_has_push`.
+  - App, `claude/ai-agent-CE2R8u2ReI9Q` (`8db0b520001372fd13e02b03cc436078b6198638`): the
+    `aps-environment` entitlement, permission, registration and `apns_register`/
+    `apns_unregister`; `release.sh` sets production. `ios-check` passes on the hosted Mac.
+  - Approval push, `claude/ai-agent-SDMPXNjdHaNG` (`a0ae17dd8462c4f1d9337d0cf524a15a48c9d9ea`,
+    on the server branch): `push::NOTIFY_APPROVALS = false`; when true, a new approval sends
+    the approver "Approval waiting" with collapse id `approval:{id}`. Smoke
+    `platform_approval_push_off_by_default`.
+  - The four merge cleanly; the merged tree's `apple_` scenarios pass.
+  - Order: the server and release-profile branches (core) before an `ios-release` of the app
+    branch, so the export finds a profile with Push. Not run: `ios-release`, and a real push.
+- 2026-11-23: build 40 released from `36932f1` with `aps-environment` production; Apple VALID.

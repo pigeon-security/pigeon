@@ -2078,6 +2078,91 @@ fn deploy_proxy_allowlist() {
     assert_eq!(grant_answer("GET", true, false).0, 403);
 }
 
+/// A landing that adds a Worker's entry classifies its paths to that Worker, never moves an
+/// existing entry, is proxy-first, and deploys core, then the proxy, then the new Worker.
+#[test]
+fn core_land_adds_a_worker_in_one_landing() {
+    use pigeon_capabilities::land::lanes::{self, Deploy, DeployState, Merged};
+    let map = |extra: &str, core_paths: &str, proxy: bool| {
+        let proxy = if proxy {
+            "[[worker]]\nname = \"proxy\"\nscript = \"pigeon-proxy\"\ndir = \"src/proxy\"\n\
+             paths = [\"src/proxy/*\", \"ci/workers.toml\"]\ntest_job = \"test\"\n\
+             deploy_job = \"deploy-proxy\"\n"
+        } else {
+            ""
+        };
+        pigeon_core::lanes::parse(&format!(
+            "version = 1\n[docs]\npaths = [\"docs/*\"]\n[shared]\npaths = [\"Cargo.toml\"]\n\
+             [checks]\npaths = [\".pigeon/ci.toml\"]\n[[worker]]\nname = \"core\"\n\
+             script = \"pigeon-platform\"\ndir = \"src/platform\"\npaths = [{core_paths}]\n\
+             test_job = \"test\"\ndeploy_job = \"deploy\"\n{proxy}{extra}"
+        ))
+        .unwrap()
+    };
+    let new = "[[worker]]\nname = \"fresh\"\nscript = \"pigeon-fresh\"\ndir = \"src/fresh\"\n\
+               paths = [\"src/fresh/*\"]\ntest_job = \"test\"\ndeploy_job = \"deploy-fresh\"\n";
+    let core = "\"src/platform/*\", \"ci/workers.toml\"";
+    let main = map("", core, true);
+    // Main's map alone counts the new crate as shared.
+    assert!(main.classify(&["src/fresh/lib.rs"]).shared);
+    // An added entry classifies its paths to the new Worker.
+    let (both, added) = lanes::with_added_workers(&main, &map(new, core, true));
+    assert_eq!(added, vec!["fresh".to_string()]);
+    let a = both.classify(&["src/fresh/lib.rs", "ci/workers.toml"]);
+    assert!(!a.shared && a.ordered);
+    assert!(a.workers.contains("fresh") && a.workers.contains("core"));
+    assert!(a.workers.contains("proxy"));
+    // A changed existing entry is ignored: core keeps its paths, and nothing is added.
+    let changed = map(
+        "",
+        "\"src/platform/*\", \"ci/workers.toml\", \"src/fresh/*\"",
+        true,
+    );
+    let (same, added) = lanes::with_added_workers(&main, &changed);
+    assert!(added.is_empty());
+    assert_eq!(same, main);
+    assert!(same.classify(&["src/fresh/lib.rs"]).shared);
+    // A removed entry does not drop main's.
+    let (kept, added) = lanes::with_added_workers(&main, &map("", core, false));
+    assert!(added.is_empty());
+    assert!(kept.worker("proxy").is_some());
+    // The landing is proxy-first, and the order is core, proxy, then the new Worker.
+    let l = Merged {
+        id: "L1".into(),
+        merged_at: 1,
+        commit: "c1".into(),
+        workers: a.workers.iter().cloned().collect(),
+        ordered: a.ordered,
+        proxy_first: !added_for(&both, &main).is_empty(),
+    };
+    assert!(l.proxy_first);
+    let ok = |w: &str| Deploy {
+        worker: w.into(),
+        covers: 1,
+        state: DeployState::Succeeded,
+        incident: false,
+    };
+    let names = |deploys: &[Deploy]| -> Vec<String> {
+        lanes::starts("core", std::slice::from_ref(&l), deploys, &[])
+            .into_iter()
+            .map(|s| s.worker)
+            .collect()
+    };
+    assert_eq!(names(&[]), ["core"]);
+    assert_eq!(names(&[ok("core")]), ["proxy"]);
+    assert_eq!(names(&[ok("core"), ok("proxy")]), ["fresh"]);
+    assert!(names(&[ok("core"), ok("proxy"), ok("fresh")]).is_empty());
+
+    /// The Workers `with` has that `main` lacks.
+    fn added_for(with: &pigeon_core::lanes::Map, main: &pigeon_core::lanes::Map) -> Vec<String> {
+        with.workers
+            .iter()
+            .filter(|w| main.worker(&w.name).is_none())
+            .map(|w| w.name.clone())
+            .collect()
+    }
+}
+
 // ---- observability ----
 
 /// Every Worker in the map keeps Cloudflare Observability on with the plan's settings
@@ -6606,6 +6691,24 @@ fn core_audit_lines_name_the_run() {
     let signed = pigeon_ai_agents::object::chosen_caller(&starter, None, "r1");
     let c: Caller = serde_json::from_value(signed).unwrap();
     assert_eq!(c.run.as_deref(), Some("r1"));
+}
+
+/// Approval push is off by default, and its alert carries the link and collapse id.
+#[test]
+fn platform_approval_push_off_by_default() {
+    use pigeon_capabilities::apple::push::{NOTIFY_APPROVALS, alert_parts};
+
+    const { assert!(!NOTIFY_APPROVALS) };
+    let (payload, headers) = alert_parts(
+        "Approval waiting",
+        "`tool` from svc waits for your passkey.",
+        "pigeon://approvals",
+        "approval:abc",
+    )
+    .unwrap();
+    let v: Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(v["link"], "pigeon://approvals");
+    assert!(headers.contains(&("apns-collapse-id", "approval:abc".to_string())));
 }
 
 // ---- Buildkite setup ----

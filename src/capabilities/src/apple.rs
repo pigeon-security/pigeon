@@ -967,6 +967,42 @@ pub mod push {
             && secret(env, TEAM_ID).await.is_some()
     }
 
+    /// When true, a new approval that waits for a person's passkey sends that person an alert
+    /// push. Off until the person decides to turn it on (a one-line change).
+    pub const NOTIFY_APPROVALS: bool = false;
+
+    /// The payload and headers of one alert push for the "pigeon" app, with a link in its data.
+    pub fn alert_parts(
+        title: &str,
+        body: &str,
+        link: &str,
+        collapse_id: &str,
+    ) -> Result<(String, Vec<(&'static str, String)>)> {
+        let data = json!({ "link": link });
+        let payload = apns::payload(apns::PushType::Alert, Some((title, body)), Some(&data))
+            .map_err(|e| bad(&e))?;
+        let headers = apns::headers("pigeon", apns::PushType::Alert, Some(collapse_id))
+            .map_err(|e| bad(&e))?;
+        Ok((payload, headers))
+    }
+
+    /// Sends an alert push to `person`'s devices for the "pigeon" app. When push is not set up
+    /// it answers `{ "sent": 0, "configured": false }`. Answers carry no device token.
+    pub async fn notify(
+        env: &Env,
+        person: &str,
+        title: &str,
+        body: &str,
+        link: &str,
+        collapse_id: &str,
+    ) -> Result<Value> {
+        if !configured(env).await {
+            return Ok(json!({ "sent": 0, "configured": false }));
+        }
+        let (payload, headers) = alert_parts(title, body, link, collapse_id)?;
+        send(env, "pigeon", person, &payload, &headers).await
+    }
+
     fn declared(args: &Value) -> Result<&str> {
         let app = arg(args, "app")?;
         apns::bundle_id(app).ok_or_else(|| bad("that app is not declared"))?;

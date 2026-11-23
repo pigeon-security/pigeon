@@ -225,6 +225,23 @@ async fn ask(
             caller.run.as_deref(),
         )
         .await?;
+        if crate::apple::push::NOTIFY_APPROVALS
+            && let Some(person) = &caller.acting_for
+        {
+            let body = format!("`{tool}` from {} waits for your passkey.", caller.user.name);
+            let sent = crate::apple::push::notify(
+                env,
+                &person.id,
+                "Approval waiting",
+                &body,
+                "pigeon://approvals",
+                &format!("approval:{}", r.id),
+            )
+            .await;
+            if let Err(e) = sent {
+                worker::console_log!("approvals: push for approval {} failed: {e}", r.id);
+            }
+        }
     }
     Err(Error::RustError(format!(
         "`{tool}` needs the person's passkey for this call: approval `{id}` waits on the \

@@ -56,6 +56,34 @@ pub fn changes_proxy_first(changed: &[&str]) -> bool {
     changed.iter().any(|p| PROXY_FIRST_PATHS.contains(p))
 }
 
+/// The map a check classifies by: `main`'s map plus the `[[worker]]` entries `branch` ADDS, and
+/// the names of those entries. An entry whose name is already in main's map is ignored from the
+/// branch, so a branch never moves an existing path's lane; so is one that reuses a script main
+/// already has. An entry the branch removes stays, as main has it. This is safe because
+/// `ci/workers.toml` is guarded: adding an entry needs the person's gate approval.
+///
+/// Such a landing is proxy-first (the proxy builds its scope from the map compiled into it), then
+/// the new Worker's first deploy reads the map at its commit ([`resolve_entry`]). Binding the new
+/// Worker in core (`[[services]]`) stays a later landing: a binding's target must exist first.
+pub fn with_added_workers(
+    main: &pigeon_core::lanes::Map,
+    branch: &pigeon_core::lanes::Map,
+) -> (pigeon_core::lanes::Map, Vec<String>) {
+    let mut map = main.clone();
+    let mut added = Vec::new();
+    for w in &branch.workers {
+        let known = map
+            .workers
+            .iter()
+            .any(|m| m.name == w.name || m.script == w.script);
+        if !known {
+            added.push(w.name.clone());
+            map.workers.push(w.clone());
+        }
+    }
+    (map, added)
+}
+
 /// How a lane's deploy stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeployState {
