@@ -1,6 +1,6 @@
 # Model providers, Part 3: models paid with Cloudflare credits
 
-Status: **Planned** (2026-11-25). Planner run `WyHqF50UlP01`. Follows [model-providers.md](model-providers.md) (Parts 1 and 2).
+Status: **Phase 1 landed** (2026-11-25, `934a532`). Phases 2 and 3 are not built: the sandbox time ran out. Phase 4 waits for the person's key (Open item 1). Planner run `WyHqF50UlP01`. Follows [model-providers.md](model-providers.md) (Parts 1 and 2).
 
 ## Goal
 
@@ -321,3 +321,29 @@ trivial rebase.
   (`cf-openai/…` through `pigeon`), the OpenAI key slot retired, `openai/…` refused. If the
   person wants BYOK OpenAI later, it is a gateway `pigeon-openai`, built the way
   `pigeon-anthropic` is.
+- 2026-11-25: phase 1 built by executor `Os2NbqLYAAvr` (CI `test` green, job
+  `pkmQI1dPVzg34T3x5JASnY`) and landed as `934a532` (landing `RbM8IQWXmPw_v8JW`). Step A of
+  decision 3 is now live:
+  - both gateways are declared; the `anthropic` provider is still on `pigeon`;
+  - the slot `pigeon-anthropic_anthropic_default` is declared (staged); `pigeon_openai_default`
+    is not;
+  - `cf-anthropic` and `cf-openai` exist in the model gateway, and the credits guard stops them
+    while `pigeon` holds a key.
+
+  Choices the executor made: `models_setup` now answers `{gateways: [{kind, gateway}],
+  providers}`. `src/capabilities/src/models.rs` lists every gateway in the footprint. A job's
+  cache-token rows stay keyed by the provider slug.
+- 2026-11-25: the sandbox-time question got no answer. Assumed: no extension. The run had 30
+  sandbox minutes for itself and its executors. Phase 2 (`55NtNZ02oPRu`) and phase 3
+  (`FiCE7Jo8QHGw`) were given 8 minutes each, and both ran out before compiling anything.
+  - Phase 2's branch `claude/ai-agent-55NtNZ02oPRu` (tip `2af7558`) holds the uncompiled
+    ai-agents changes. Its report lists what is left: route in `ai_agents_status`, prompts.rs,
+    the smoke assertions that use `openai/…`, and the new scenario.
+  - Phase 3 has no code. Its executor confirmed that the Anthropic reconciliation already reads
+    only `by_provider_model["anthropic"]`.
+- **Until phase 2 lands**, an `openai/…` choice fails at `models_submit` ("no provider
+  `openai`"), and `cf-…` choices are refused by ai-agents. Defaults (Anthropic BYOK) are not
+  affected.
+- **Next run:** finish phase 2 from its branch (start with `cargo check -p pigeon-ai-agents`).
+  Build phase 3 from its brief in this plan. Then phase 4 after Open item 1, and phase 5 after
+  Open items 2 and 3. Give it at least 60 sandbox minutes.
