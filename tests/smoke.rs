@@ -1371,6 +1371,31 @@ fn blob_id(dir: &Path) -> String {
 }
 
 #[test]
+fn core_land_deletes_test_refs() {
+    use pigeon_capabilities::land::merge::{test_ref, test_ref_id};
+
+    assert_eq!(test_ref_id("refs/heads/claude/land/abc123"), Some("abc123"));
+    assert_eq!(
+        test_ref_id(&test_ref("0123456789abcdef")),
+        Some("0123456789abcdef")
+    );
+    for refused in [
+        "refs/heads/main",
+        "refs/heads/claude/ai-agent-x",
+        "refs/heads/claude/land",
+        "refs/heads/claude/land/",
+        "refs/tags/claude/land/abc",
+        "claude/land/abc",
+        "refs/heads/claude/land/abc/def",
+        "refs/heads/claude/land/../main",
+        "refs/heads/claude/lander/abc",
+        "refs/notes/land",
+    ] {
+        assert_eq!(test_ref_id(refused), None, "{refused}");
+    }
+}
+
+#[test]
 fn land_commit_attribution() {
     use pigeon_core::gitobj::{self, Object};
     use pigeon_core::{attribution, pack, rebase};

@@ -379,3 +379,32 @@ pub async fn tip(session: &Session<'_>, name: &str) -> Result<Option<String>> {
 pub fn test_ref(landing: &str) -> String {
     format!("refs/heads/claude/land/{landing}")
 }
+
+/// The landing id in `name` when `name` is exactly `refs/heads/claude/land/<id>`, else `None`.
+/// The id is letters, digits, `-` and `_`: no slash, no dots, nothing else.
+pub fn test_ref_id(name: &str) -> Option<&str> {
+    let id = name.strip_prefix("refs/heads/claude/land/")?;
+    let ok = !id.is_empty()
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    ok.then_some(id)
+}
+
+/// Every test ref the remote holds, as `(name, tip)`, by name.
+pub async fn test_refs(session: &Session<'_>) -> Result<Vec<(String, String)>> {
+    let refs = git::refs(&session.remote, "git-upload-pack").await?.refs;
+    Ok(refs
+        .into_iter()
+        .filter(|(name, _)| test_ref_id(name).is_some())
+        .collect())
+}
+
+/// Deletes the test ref `name`, now at `tip`, by moving it to the all-zero id: `Ok(true)` when
+/// the remote took it. Refuses, with an error, any ref that is not a test ref.
+pub async fn delete_test_ref(session: &Session<'_>, name: &str, tip: &str) -> Result<bool> {
+    if test_ref_id(name).is_none() {
+        return Err(bad(format!("{name} is not a test ref; not deleting it")));
+    }
+    push(session, name, Some(tip), ZERO, &[]).await
+}

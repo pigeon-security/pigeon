@@ -50,6 +50,10 @@ pub const NOTES_REF: &str = "refs/notes/land";
 const STEP_TRIES: i64 = 5;
 /// How many times a note push is tried.
 const NOTE_TRIES: i64 = 10;
+/// How many test refs one alarm deletes at most.
+const TEST_REF_BATCH: usize = 5;
+/// How many refused deletes of one test ref before it is left alone.
+const TEST_REF_TRIES: i64 = 3;
 /// The CI scheduler, whose job states the Lander follows.
 const CI_BINDING: &str = "CI_SCHEDULER";
 const CI_OBJECT: &str = "scheduler";
@@ -678,7 +682,7 @@ impl Lander {
 
     /// The alarm: each live landing's next step, oldest first; then the merge lock goes to
     /// whoever waits for it; then the deploy lanes, one per Worker; then notes still to push,
-    /// and the next alarm.
+    /// then a few test refs to delete, and the next alarm.
     pub async fn alarm(&self) -> Result<Response> {
         for row in self.all_live()? {
             self.step_logged(row).await?;
@@ -689,6 +693,9 @@ impl Lander {
         self.lanes().await?;
         if let Err(e) = self.push_notes().await {
             console_error!("land: pushing notes: {e}");
+        }
+        if let Err(e) = self.delete_test_refs().await {
+            console_error!("land: deleting test refs: {e}");
         }
         self.reschedule().await?;
         Response::ok("ok")
@@ -2337,6 +2344,100 @@ impl Lander {
         pushed
     }
 
+    /// Whether test refs may still need deleting: the one-time sweep is not done, or a landing
+    /// has ended since the last clean pass. The `settings` row `test_refs_swept` is the marker;
+    /// its value is when the last clean pass began.
+    fn test_refs_pending(&self) -> Result<bool> {
+        #[derive(Deserialize)]
+        struct V {
+            value: String,
+        }
+        let v: Option<V> = self.db.row(
+            "SELECT value FROM settings WHERE key = 'test_refs_swept'",
+            vec![],
+        )?;
+        let Some(v) = v else {
+            return Ok(true);
+        };
+        let since = v.value.parse::<i64>().unwrap_or(0);
+        let ended: Option<Value> = self.db.row(
+            "SELECT id FROM landings WHERE finished_at >= ? LIMIT 1",
+            vec![since.into()],
+        )?;
+        Ok(ended.is_some())
+    }
+
+    /// Deletes the test refs of landings that are not live, at most `TEST_REF_BATCH` per call.
+    /// Best-effort: a refused delete is counted in `settings` and given up on after
+    /// `TEST_REF_TRIES`. Once nothing is left, records the sweep as done.
+    async fn delete_test_refs(&self) -> Result<()> {
+        if !self.test_refs_pending()? {
+            return Ok(());
+        }
+        let started = now();
+        #[derive(Deserialize)]
+        struct Id {
+            id: String,
+        }
+        let live: Vec<Id> = self
+            .db
+            .rows("SELECT id FROM landings WHERE finished_at IS NULL", vec![])?;
+        let s = &self.settings;
+        let account = pigeon_core::account_from_env(&self.env, &s.parent).await?;
+        let session = merge::Session::open(&account, &s.namespace, &s.repo, Access::Write).await?;
+        let found = async {
+            let mut left = 0;
+            let mut tried = 0;
+            for (name, tip) in merge::test_refs(&session).await? {
+                let id = merge::test_ref_id(&name).unwrap_or_default().to_string();
+                if live.iter().any(|l| l.id == id) {
+                    continue;
+                }
+                let key = format!("test_ref_fail:{id}");
+                #[derive(Deserialize)]
+                struct V {
+                    value: String,
+                }
+                let fails: Option<V> = self
+                    .db
+                    .row("SELECT value FROM settings WHERE key = ?", vec![key.as_str().into()])?;
+                let fails = fails.and_then(|v| v.value.parse::<i64>().ok()).unwrap_or(0);
+                if fails >= TEST_REF_TRIES {
+                    continue;
+                }
+                if tried >= TEST_REF_BATCH {
+                    left += 1;
+                    continue;
+                }
+                tried += 1;
+                let deleted = merge::delete_test_ref(&session, &name, &tip).await;
+                if !matches!(deleted, Ok(true)) {
+                    match &deleted {
+                        Ok(_) => console_error!("land: the remote kept {name}"),
+                        Err(e) => console_error!("land: deleting {name}: {e}"),
+                    }
+                    self.db.exec(
+                        "INSERT INTO settings (key, value, by_name, at) VALUES (?, '1', 'lander', ?) ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1, at = excluded.at",
+                        vec![key.as_str().into(), now().into()],
+                    )?;
+                    if fails + 1 < TEST_REF_TRIES {
+                        left += 1;
+                    }
+                }
+            }
+            Ok::<i64, worker::Error>(left)
+        }
+        .await;
+        session.close().await;
+        if found? == 0 {
+            self.db.exec(
+                "INSERT INTO settings (key, value, by_name, at) VALUES ('test_refs_swept', ?, 'lander', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, at = excluded.at",
+                vec![started.to_string().into(), now().into()],
+            )?;
+        }
+        Ok(())
+    }
+
     async fn reschedule(&self) -> Result<()> {
         // A deploy runs on after every landing it carried has ended (another lane failed).
         let running: Option<Value> = self.db.row(
@@ -2351,7 +2452,7 @@ impl Lander {
             vec![],
         )?;
         let storage = self.state.storage();
-        if live || notes.is_some() {
+        if live || notes.is_some() || self.test_refs_pending().unwrap_or(false) {
             let at = now() + state::POLL_MS;
             let current = storage.get_alarm().await?;
             if current.is_none_or(|c| c > at) {
