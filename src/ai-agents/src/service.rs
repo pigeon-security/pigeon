@@ -438,8 +438,8 @@ impl Service for Agents {
                         json!({
                             "type": "object",
                             "properties": {
-                                "role": { "type": "string", "enum": ["planner", "executor", "mechanical"], "description": "`executor` by default; `mechanical` for moves, renames and docs; `planner` to plan a piece of work, spawn executors, review their branches, run CI and land phase by phase. Models by default (see ai_agents_models, which can store others): planner Claude Opus, executor Claude Sonnet, mechanical Claude Haiku. To choose, give `model` (`provider/model`, a `claude-…` name, or `anthropic` or `openai` for that provider's model for the role), and for a planner `models` for its executors. E.g. a planner on OpenAI with executors on Claude: {role: \"planner\", model: \"openai\", models: {executor: \"anthropic\"}}." },
-                                "model": { "type": "string", "description": "This run's model: `provider/model` (openai/gpt-6.2-sol), a `claude-…` name, or `anthropic` or `openai`. Else the stored default for its role." },
+                                "role": { "type": "string", "enum": ["planner", "executor", "mechanical"], "description": "`executor` by default; `mechanical` for moves, renames and docs; `planner` to plan a piece of work, spawn executors, review their branches, run CI and land phase by phase. Models by default (see ai_agents_models, which can store others): planner Claude Opus, executor Claude Sonnet, mechanical Claude Haiku. To choose, give `model` (`provider/model`, a `claude-…` name, or `anthropic` (your key), `cf-anthropic` or `cf-openai` (Cloudflare credits) for that provider's model for the role), and for a planner `models` for its executors. E.g. a planner on OpenAI with executors on Claude: {role: \"planner\", model: \"cf-openai\", models: {executor: \"anthropic\"}}." },
+                                "model": { "type": "string", "description": "This run's model: `provider/model` (cf-openai/gpt-6.2-sol), a `claude-…` name, or `anthropic`, `cf-anthropic` or `cf-openai`. Else the stored default for its role." },
                                 "models": { "type": "object", "description": "Planners only: what its executors use unless a spawn says otherwise.", "properties": { "executor": { "type": "string" }, "mechanical": { "type": "string" } } },
                                 "brief": { "type": "string", "description": "What to build, standing alone: the run sees nothing else." },
                                 "name": { "type": "string", "minLength": 1, "maxLength": 60, "description": "A short name for the run, one line, 1 to 60 characters. Else it is made from the brief." },
@@ -631,7 +631,7 @@ impl Service for Agents {
                         "Show the models runs use, and set them. Each default (planner, executor, \
                          mechanical, summary for compaction) is marked `stored` or `built_in`; the \
                          known tiers of each provider are listed. With `set`, the entries given are \
-                         checked and stored. A choice is `provider/model` (openai/gpt-6.2-sol), a \
+                         checked and stored. A choice is `provider/model` (cf-openai/gpt-6.2-sol), a \
                          bare `claude-…` name (Anthropic), or a bare provider name for its model \
                          in the slot's tier. A run can override its default with `model` in \
                          ai_agents_start.",
@@ -640,7 +640,7 @@ impl Service for Agents {
                             "properties": {
                                 "set": {
                                     "type": "object",
-                                    "description": "Defaults to store, e.g. {executor: \"openai\", summary: \"anthropic/claude-haiku-5-5\"}.",
+                                    "description": "Defaults to store, e.g. {executor: \"cf-openai\", summary: \"anthropic/claude-haiku-5-5\"}.",
                                     "properties": {
                                         "planner": { "type": "string" },
                                         "executor": { "type": "string" },

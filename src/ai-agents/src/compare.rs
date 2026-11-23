@@ -101,6 +101,7 @@ pub fn groups(rows: &[Value], role: Option<Role>) -> Vec<Value> {
             json!({
                 "role": g.role,
                 "model": g.model,
+                "route": crate::models::route(g.model.split('/').next().unwrap_or_default()),
                 "runs": g.runs,
                 "done": g.states[0],
                 "failed": g.states[1],

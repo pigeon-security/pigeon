@@ -635,6 +635,14 @@ impl AiAgentRuns {
 
     /// The stored model defaults (`models.defaults` in `flags`); none stored reads as empty.
     fn defaults(&self) -> Result<Defaults> {
+        Ok(self
+            .defaults_json()?
+            .map(|v| Defaults::from_json(&v))
+            .unwrap_or_default())
+    }
+
+    /// The stored defaults as raw JSON, if any are stored and readable.
+    fn defaults_json(&self) -> Result<Option<Value>> {
         #[derive(Deserialize)]
         struct F {
             v: String,
@@ -642,13 +650,12 @@ impl AiAgentRuns {
         let f: Option<F> = self
             .db
             .row("SELECT v FROM flags WHERE k = 'models.defaults'", vec![])?;
-        Ok(f.and_then(|f| serde_json::from_str::<Value>(&f.v).ok())
-            .map(|v| Defaults::from_json(&v))
-            .unwrap_or_default())
+        Ok(f.and_then(|f| serde_json::from_str::<Value>(&f.v).ok()))
     }
 
     /// `ai_agents_models`: stores the entries of `set` (already checked), answers the defaults.
     fn models_op(&self, a: &Value) -> Result<Value> {
+        let notes = models::ignored_notes(&self.defaults_json()?.unwrap_or(Value::Null));
         let mut d = self.defaults()?;
         if let Some(set) = a["set"].as_object().filter(|s| !s.is_empty()) {
             for (slot, c) in models::check_set(&Value::Object(set.clone())).map_err(bad)? {
@@ -659,7 +666,7 @@ impl AiAgentRuns {
                 vec![d.to_json().to_string().into()],
             )?;
         }
-        Ok(models::defaults_answer(&d))
+        Ok(models::defaults_answer(&d, &notes))
     }
 
     /// `ai_agents_compare`: the person's ended runs of the last `days`, by role and model.

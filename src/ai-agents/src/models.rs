@@ -6,7 +6,19 @@ use serde_json::{Map, Value, json};
 use crate::Role;
 
 /// The providers a run may use.
-pub const PROVIDERS: [&str; 2] = ["anthropic", "openai"];
+pub const PROVIDERS: [&str; 3] = ["anthropic", "cf-anthropic", "cf-openai"];
+
+/// Who pays for a provider: `byok` (the person's own key) or `credits` (Cloudflare credits).
+pub fn route(provider: &str) -> &'static str {
+    if provider.starts_with("cf-") {
+        "credits"
+    } else {
+        "byok"
+    }
+}
+
+/// The text shown when a choice names OpenAI without Cloudflare credits.
+const OPENAI_REFUSED: &str = "OpenAI is paid with Cloudflare credits: use cf-openai/… (docs/plans/model-providers-cloudflare.md)";
 
 /// The longest model id, in characters.
 pub const MAX_MODEL_LEN: usize = 100;
@@ -76,18 +88,18 @@ impl Slot {
 /// The model `provider` offers in `tier`, if it is a known provider.
 pub fn tier_model(provider: &str, tier: Tier) -> Option<&'static str> {
     match (provider, tier) {
-        ("anthropic", Tier::Top) => Some("claude-opus-5-5"),
-        ("anthropic", Tier::Middle) => Some("claude-sonnet-5-5"),
-        ("anthropic", Tier::Small) => Some("claude-haiku-5-5"),
-        ("openai", Tier::Top) => Some("gpt-6.2-astra"),
-        ("openai", Tier::Middle) => Some("gpt-6.2-sol"),
-        ("openai", Tier::Small) => Some("gpt-6.1-terra"),
+        ("anthropic" | "cf-anthropic", Tier::Top) => Some("claude-opus-5-5"),
+        ("anthropic" | "cf-anthropic", Tier::Middle) => Some("claude-sonnet-5-5"),
+        ("anthropic" | "cf-anthropic", Tier::Small) => Some("claude-haiku-5-5"),
+        ("cf-openai", Tier::Top) => Some("gpt-6.2-astra"),
+        ("cf-openai", Tier::Middle) => Some("gpt-6.2-sol"),
+        ("cf-openai", Tier::Small) => Some("gpt-6.1-terra"),
         _ => None,
     }
 }
 
 /// Models that are known but sit in no tier.
-const EXTRA_KNOWN: [(&str, &str); 1] = [("openai", "gpt-6-luna")];
+const EXTRA_KNOWN: [(&str, &str); 1] = [("cf-openai", "gpt-6-luna")];
 
 /// Whether `model` is one this code knows for `provider` (a tier model or a listed extra).
 pub fn known(provider: &str, model: &str) -> bool {
@@ -100,7 +112,7 @@ pub fn known(provider: &str, model: &str) -> bool {
 /// One model of one provider.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Choice {
-    /// The provider: `anthropic` or `openai`.
+    /// The provider: `anthropic`, `cf-anthropic` or `cf-openai`.
     pub provider: String,
     /// The model id the provider knows.
     pub model: String,
@@ -132,13 +144,30 @@ impl Choice {
     /// or a bare provider name (that provider's model for the slot's tier).
     pub fn parse(text: &str, slot: Slot) -> Result<Choice, String> {
         let text = text.trim();
+        if text == "openai" {
+            return Err(OPENAI_REFUSED.into());
+        }
+        if text == "workers-ai" {
+            return Err("Workers AI models are not available yet".into());
+        }
         if let Some((provider, model)) = text.split_once('/') {
+            if provider == "openai" {
+                return Err(OPENAI_REFUSED.into());
+            }
+            if provider == "workers-ai" {
+                return Err("Workers AI models are not available yet".into());
+            }
             if !PROVIDERS.contains(&provider) {
                 return Err(format!(
-                    "unknown provider `{provider}`: use `anthropic` or `openai`"
+                    "unknown provider `{provider}`: use `anthropic`, `cf-anthropic` or `cf-openai`"
                 ));
             }
             check_model(model)?;
+            if provider != "cf-openai" && !model.starts_with("claude-") {
+                return Err(format!(
+                    "`{model}` is not a Claude model: `{provider}` models start with `claude-`"
+                ));
+            }
             return Ok(Choice {
                 provider: provider.into(),
                 model: model.into(),
@@ -158,8 +187,8 @@ impl Choice {
             });
         }
         Err(format!(
-            "`{text}` is not a model choice: use `provider/model` (e.g. openai/gpt-6.2-sol), \
-             a `claude-…` name, or `anthropic` or `openai`"
+            "`{text}` is not a model choice: use `provider/model` (e.g. cf-openai/gpt-6.2-sol), \
+             a `claude-…` name, or `anthropic`, `cf-anthropic` or `cf-openai`"
         ))
     }
 
@@ -288,7 +317,7 @@ impl Defaults {
 /// Checks the `set` argument of `ai_agents_models`: an object whose keys are slots, each a choice.
 pub fn check_set(set: &Value) -> Result<Vec<(Slot, Choice)>, String> {
     let Some(obj) = set.as_object() else {
-        return Err("`set` must be an object like {executor: \"openai/gpt-6.2-sol\"}".into());
+        return Err("`set` must be an object like {executor: \"cf-openai/gpt-6.2-sol\"}".into());
     };
     let mut out = Vec::new();
     for (k, v) in obj {
@@ -306,16 +335,36 @@ pub fn check_set(set: &Value) -> Result<Vec<(Slot, Choice)>, String> {
     Ok(out)
 }
 
-/// What `ai_agents_models` answers: the effective defaults (each `stored` or `built_in`), the
-/// known tiers per provider, and an example call.
-pub fn defaults_answer(d: &Defaults) -> Value {
+/// Notes for stored default entries that cannot be read (such as an old `openai/…`): the built-in
+/// default applies to that slot instead.
+pub fn ignored_notes(raw: &Value) -> Vec<String> {
+    SLOTS
+        .iter()
+        .filter_map(|slot| {
+            let text = raw[slot.name()].as_str()?;
+            Choice::stored(text).is_none().then(|| {
+                format!(
+                    "stored {} default `{text}` is ignored; the built-in default {} applies",
+                    slot.name(),
+                    builtin(*slot).text()
+                )
+            })
+        })
+        .collect()
+}
+
+/// What `ai_agents_models` answers: the effective defaults (each `stored` or `built_in`, with its
+/// `route`), the known tiers per provider, notes on ignored entries, and an example call.
+pub fn defaults_answer(d: &Defaults, notes: &[String]) -> Value {
     let mut eff = Map::new();
     for slot in SLOTS {
         let stored = d.stored_for(slot).is_some();
+        let choice = d.effective(slot);
         eff.insert(
             slot.name().into(),
             json!({
-                "model": d.effective(slot).text(),
+                "model": choice.text(),
+                "route": route(&choice.provider),
                 "source": if stored { "stored" } else { "built_in" },
             }),
         );
@@ -341,12 +390,14 @@ pub fn defaults_answer(d: &Defaults) -> Value {
     json!({
         "defaults": eff,
         "tiers": tiers,
+        "notes": notes,
         "example": {
             "tool": "ai_agents_models",
-            "args": { "set": { "executor": "openai/gpt-6.2-sol", "summary": "openai" } },
+            "args": { "set": { "executor": "cf-openai/gpt-6.2-sol", "summary": "cf-openai" } },
         },
         "note": "a bare provider name means its model for the slot's tier; planner is top, \
-                 executor middle, mechanical and summary small",
+                 executor middle, mechanical and summary small. `route` says who pays: `byok` is \
+                 your own key, `credits` is Cloudflare credits",
     })
 }
 
@@ -444,7 +495,7 @@ pub fn start_models(role: Role, args: &Value) -> Result<(Option<Choice>, ChildMo
         Value::String(s) => {
             Some(Choice::parse(s, Slot::of(role)).map_err(|e| format!("`model`: {e}"))?)
         }
-        _ => return Err("`model` must be a string like openai/gpt-6.2-sol".into()),
+        _ => return Err("`model` must be a string like cf-openai/gpt-6.2-sol".into()),
     };
     let children = match &args["models"] {
         Value::Null => ChildModels::default(),
@@ -461,6 +512,6 @@ pub fn spawn_model(role: Role, input: &Value) -> Result<Option<Choice>, String> 
         Value::String(s) => Choice::parse(s, Slot::of(role))
             .map(Some)
             .map_err(|e| format!("`model`: {e}")),
-        _ => Err("`model` must be a string like openai/gpt-6.2-sol".into()),
+        _ => Err("`model` must be a string like cf-openai/gpt-6.2-sol".into()),
     }
 }
