@@ -6231,6 +6231,8 @@ fn site_on_the_apex() {
     let site = Site {
         zone: "pigeon.dev".into(),
         worker: "pigeon-platform".into(),
+        also: vec!["pigeon-sites".into()],
+        bindings: vec![("pigeon-sites".into(), "SITES".into())],
     };
     let fp = site.footprint();
     assert_eq!(fp.hostnames.len(), 1, "one hostname");
@@ -6241,6 +6243,12 @@ fn site_on_the_apex() {
     assert!(fp.workers.is_empty(), "no Worker of its own");
     let tools: Vec<String> = site.tools().iter().map(|t| t.name.to_string()).collect();
     assert_eq!(tools, ["site_publish"], "site_publish only");
+    let schema = &site.tools()[0].input_schema;
+    assert_eq!(
+        schema["properties"]["worker"]["enum"],
+        json!(["pigeon-platform", "pigeon-sites"]),
+        "the apex may move to the sites Worker"
+    );
 }
 
 #[test]
@@ -8494,7 +8502,7 @@ fn core_changelog_from_history() {
 #[test]
 fn core_architecture_draws_every_worker_in_the_map() {
     use pigeon_capabilities::architecture::{
-        Architecture, Source, Wrangler, built, describe, render,
+        Architecture, Source, Wrangler, built, describe, public, render,
     };
     use pigeon_capabilities::public_host::{PublicHost, Retire};
     use pigeon_capabilities::remote::{Binding, Remote};
@@ -8590,7 +8598,11 @@ fn core_architecture_draws_every_worker_in_the_map() {
                 "name": "ci",
                 "tools": [tool("ci_status")],
                 "footprint": { "queues": ["pigeon-ci-events"], "externals": [
-                    { "name": "Buildkite", "kind": "CI connector", "detail": "cluster pigeon" }
+                    { "name": "Buildkite", "kind": "CI connector", "detail": "secret-detail" }
+                ], "hostnames": [
+                    { "host": "fake.pigeon.dev", "worker": "pigeon-ci-gateway", "by": "ci",
+                      "access": ["fake-token"] },
+                    { "host": "elsewhere.example.net", "worker": "pigeon-ci-gateway", "by": "ci" }
                 ] }
             }),
         ),
@@ -8805,6 +8817,16 @@ fn core_architecture_draws_every_worker_in_the_map() {
         .collect();
     assert_eq!(externals, ["AI Gateway", "Buildkite"]);
     assert!(drawing.contains("Buildkite"));
+    // The drawing names every link's binding and every external, in both views.
+    let public_drawing = render(&public(&described));
+    for view in [&drawing, &public_drawing] {
+        for binding in ["SITES", "MODELS", "CI", "AI_AGENTS", "PLATFORM"] {
+            assert!(view.contains(binding), "{binding} labels an arrow");
+        }
+        for name in &externals {
+            assert!(view.contains(name), "{name} is drawn");
+        }
+    }
 
     // Nothing secret or personal: not the account, the Secrets Store, or the App's client id.
     let core =
@@ -8821,6 +8843,56 @@ fn core_architecture_draws_every_worker_in_the_map() {
             "{var} is not drawn"
         );
     }
+
+    // The public view: nothing from any Worker's [vars], the account or the Secrets Store, no
+    // email address, and none of the Access token names or external details.
+    let shown = public(&described);
+    let shown_text = format!(
+        "{}{}",
+        serde_json::to_string(&shown).unwrap(),
+        render(&shown)
+    );
+    let mut secret: Vec<String> = vec!["fake-token".into(), "secret-detail".into()];
+    for w in &map.workers {
+        let toml = std::fs::read_to_string(root.join(&w.dir).join("wrangler.toml")).unwrap();
+        secret.extend(Wrangler::read(&toml).vars.values().cloned());
+        for line in toml.lines() {
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            if matches!(key.trim(), "account_id" | "store_id") {
+                secret.push(value.trim().trim_matches('"').to_string());
+            }
+        }
+    }
+    // The zone and its hostnames are vars too, and are public by design: the drawing is of them.
+    let zone = shown.resources.zone.clone().unwrap();
+    for value in secret
+        .iter()
+        .filter(|v| !v.is_empty() && **v != zone && !v.ends_with(&format!(".{zone}")))
+    {
+        assert!(
+            !shown_text.contains(value.as_str()),
+            "{value} is not public"
+        );
+    }
+    for (at, _) in shown_text.match_indices('@') {
+        let before = shown_text[..at].chars().next_back().unwrap_or(' ');
+        let after: String = shown_text[at + 1..]
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '.' || *c == '-')
+            .collect();
+        assert!(
+            !(before.is_alphanumeric() && after.contains('.')),
+            "an email shape near {after}"
+        );
+    }
+    let hosts: Vec<&str> = shown.hostnames.iter().map(|h| h.host.as_str()).collect();
+    assert!(hosts.contains(&"fake.pigeon.dev"), "{hosts:?}");
+    assert!(!hosts.contains(&"elsewhere.example.net"), "off the zone");
+    assert!(shown.hostnames.iter().any(|h| h.behind_access));
+    assert!(text.contains("secret-detail") && text.contains("fake-token"));
+    assert!(shown.resources.repos.is_empty() && shown.resources.mirrors.is_empty());
 
     // Without the map, the hosting Worker is still drawn, alone.
     let alone: Vec<Source> = sources

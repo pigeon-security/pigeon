@@ -53,19 +53,39 @@ impl Capability for Architecture {
     }
 
     fn tools(&self) -> Vec<Tool> {
-        vec![Tool::bare(
-            "architecture_describe",
-            "The platform's architecture as data: building blocks, capabilities, Workers, \
-             hostnames and resources, read from the sources this Worker was built with.",
-        )]
+        vec![Tool {
+            name: "architecture_describe",
+            description: "The platform's architecture as data: building blocks, capabilities, \
+                          Workers, hostnames and resources, read from the sources this Worker \
+                          was built with. With public true, only the public view and its \
+                          drawing.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "public": {
+                        "type": "boolean",
+                        "description": "Answer the public view: commit, digest, model, drawing."
+                    }
+                }
+            }),
+        }]
     }
 
-    fn call<'a>(&'a self, cx: &'a Context<'a>, tool: &'a str, _args: &'a Value) -> Call<'a> {
+    fn call<'a>(&'a self, cx: &'a Context<'a>, tool: &'a str, args: &'a Value) -> Call<'a> {
         Box::pin(async move {
             if tool != "architecture_describe" {
                 return Err(unknown(tool));
             }
-            Ok(built(cx.hosted).model.clone())
+            let built = built(cx.hosted);
+            if args.get("public").and_then(Value::as_bool) == Some(true) {
+                return Ok(serde_json::json!({
+                    "commit": built.public_model["commit"],
+                    "digest": built.digest,
+                    "model": built.public_model,
+                    "drawing": built.public_drawing,
+                }));
+            }
+            Ok(built.model.clone())
         })
     }
 }
@@ -80,6 +100,11 @@ pub struct Built {
     pub html: String,
     /// The whole page, as the site serves it.
     pub page: String,
+    /// The public view of the model: what the apex serves and `architecture_describe` answers
+    /// to `public: true`.
+    pub public_model: Value,
+    /// The drawing of the public view.
+    pub public_drawing: String,
     pub digest: String,
     /// The commit it was built from, cut to 12 characters; empty for a local build.
     pub commit: String,
@@ -103,12 +128,15 @@ pub fn built(hosted: &Hosted) -> &'static Built {
         .map(|(path, text)| Source { path, text })
         .collect();
     let model = describe(&sources, hosted);
+    let shown = public(&model);
     // Leaked: a build is kept for the rest of the isolate, and a new one is made only when the
     // capabilities change.
     let built: &'static Built = Box::leak(Box::new(Built {
         model: to_value(&model),
         html: render(&model),
         page: page(&model),
+        public_model: to_value(&shown),
+        public_drawing: render(&shown),
         digest: model.digest.clone(),
         commit: model.commit.chars().take(12).collect(),
     }));
@@ -139,7 +167,7 @@ pub struct Source<'a> {
 }
 
 /// The platform, as its code and capabilities describe it.
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct Model {
     /// The capabilities, then the building blocks.
     pub parts: Vec<Part>,
@@ -159,7 +187,7 @@ pub struct Model {
 }
 
 /// A capability or a building block.
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct Part {
     pub name: String,
     /// A capability, rather than a building block.
@@ -175,7 +203,7 @@ pub struct Part {
 }
 
 /// A Worker of the platform.
-#[derive(Serialize, Default)]
+#[derive(Serialize, Default, Clone)]
 pub struct Worker {
     /// Its script name, such as `pigeon-sites`.
     pub name: String,
@@ -212,7 +240,7 @@ pub struct Worker {
 }
 
 /// A Durable Object binding of a Worker.
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct WorkerObject {
     pub binding: String,
     pub class: String,
@@ -221,7 +249,7 @@ pub struct WorkerObject {
 }
 
 /// A queue a Worker produces to or consumes.
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct QueueUse {
     pub queue: String,
     /// `produces` or `consumes`.
@@ -229,7 +257,7 @@ pub struct QueueUse {
 }
 
 /// One Worker reaching another.
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct Link {
     pub from: String,
     pub to: String,
@@ -240,7 +268,7 @@ pub struct Link {
 }
 
 /// A service outside the platform's Workers.
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct Dependency {
     pub name: String,
     pub kind: String,
@@ -249,7 +277,7 @@ pub struct Dependency {
     pub by: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct Hostname {
     pub host: String,
     pub worker: String,
@@ -257,11 +285,14 @@ pub struct Hostname {
     pub by: String,
     /// The service tokens Access admits; empty when public.
     pub access: Vec<String>,
+    /// Set only in the public view, where `access` is cleared: the host is behind Access.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub behind_access: bool,
     /// Paths on it Access lets everyone through.
     pub public_paths: Vec<String>,
 }
 
-#[derive(Serialize, Default)]
+#[derive(Serialize, Default, Clone)]
 pub struct Resources {
     pub zone: Option<String>,
     pub secrets: Vec<String>,
@@ -278,6 +309,99 @@ pub struct Resources {
     pub permissions: Vec<String>,
     /// Bindings and queues wrangler.toml declares that no code names: drift to remove.
     pub unused: Vec<String>,
+}
+
+/// The part of the model fit for the public apex. It is an allow-list: each field is copied by
+/// name, so a field added to the model later stays out until it is added here. It holds no
+/// Access token names, permissions, repositories, mirrors, source paths or external details.
+pub fn public(m: &Model) -> Model {
+    let zone = m.resources.zone.clone();
+    let on_zone = |host: &str| {
+        zone.as_deref().is_some_and(|z| {
+            host.eq_ignore_ascii_case(z)
+                || host
+                    .to_ascii_lowercase()
+                    .ends_with(&format!(".{}", z.to_ascii_lowercase()))
+        })
+    };
+    Model {
+        parts: m
+            .parts
+            .iter()
+            .map(|p| Part {
+                name: p.name.clone(),
+                capability: p.capability,
+                summary: p.summary.clone(),
+                interface: p.interface.clone(),
+                calls: p.calls.clone(),
+                permissions: Vec::new(),
+                bindings: Vec::new(),
+            })
+            .collect(),
+        workers: m
+            .workers
+            .iter()
+            .map(|w| Worker {
+                name: w.name.clone(),
+                lane: w.lane.clone(),
+                deploy_job: w.deploy_job.clone(),
+                after: w.after.clone(),
+                source: String::new(),
+                workers_dev: w.workers_dev,
+                routes: w.routes.clone(),
+                tools: w.tools.clone(),
+                handlers: w.handlers.clone(),
+                secrets: w.secrets.clone(),
+                crons: w.crons.clone(),
+                services: w.services.clone(),
+                objects: w.objects.clone(),
+                containers: w.containers.clone(),
+                queues: w.queues.clone(),
+                merged_into: w.merged_into.clone(),
+                uses: w.uses.clone(),
+                published_by: w.published_by.clone(),
+            })
+            .collect(),
+        hostnames: m
+            .hostnames
+            .iter()
+            .filter(|h| on_zone(&h.host))
+            .map(|h| Hostname {
+                host: h.host.clone(),
+                worker: h.worker.clone(),
+                by: h.by.clone(),
+                access: Vec::new(),
+                behind_access: h.behind_access || !h.access.is_empty(),
+                public_paths: h.public_paths.clone(),
+            })
+            .collect(),
+        links: m.links.clone(),
+        externals: m
+            .externals
+            .iter()
+            .map(|e| Dependency {
+                name: e.name.clone(),
+                kind: e.kind.clone(),
+                detail: String::new(),
+                by: e.by.clone(),
+            })
+            .collect(),
+        resources: Resources {
+            zone: m.resources.zone.clone(),
+            secrets: m.resources.secrets.clone(),
+            queues: m.resources.queues.clone(),
+            repos: Vec::new(),
+            mirrors: Vec::new(),
+            objects: m.resources.objects.clone(),
+            containers: m.resources.containers.clone(),
+            gateways: m.resources.gateways.clone(),
+            permissions: Vec::new(),
+            unused: Vec::new(),
+        },
+        files: m.files,
+        digest: m.digest.clone(),
+        commit: m.commit.clone(),
+    }
 }
 
 /// The model of `sources` and the capabilities `hosted` hosts.
@@ -473,6 +597,7 @@ pub fn describe(sources: &[Source], hosted: &Hosted) -> Model {
                 },
                 by: h.by.clone(),
                 access: h.access.clone(),
+                behind_access: false,
                 public_paths: h.public_paths.clone(),
             });
         }
@@ -621,10 +746,15 @@ fn after_name(step: pigeon_core::lanes::After) -> &'static str {
 
 /// The architecture page of `model`.
 pub fn page(model: &Model) -> String {
+    page_around(&render(model))
+}
+
+/// The architecture page around a drawing already rendered, such as the public one.
+pub fn page_around(drawing: &str) -> String {
     Page {
         title: "pigeon architecture",
         description: "pigeon's architecture, read from its own source.",
-        body: &render(model),
+        body: drawing,
     }
     .render()
 }
@@ -1293,17 +1423,6 @@ impl Svg {
         w
     }
 
-    /// Pills in a row from `x`, as many as fit before `right`.
-    fn chips(&mut self, x: f64, y: f64, right: f64, items: &[String], accent: bool) {
-        let mut at = x;
-        for item in items {
-            if at + chip_width(item) > right {
-                break;
-            }
-            at += self.chip(at, y, item, accent) + 8.0;
-        }
-    }
-
     /// A link along `d`, with an arrowhead unless `bare`.
     fn link(&mut self, d: &str, dashed: bool, bare: bool) {
         let class = if dashed { "dg-link dashed" } else { "dg-link" };
@@ -1334,68 +1453,134 @@ fn chip_width(s: &str) -> f64 {
     s.chars().count() as f64 * 6.9 + 20.0
 }
 
-/// One column: a hostname and the Worker that serves it, or a Worker that serves none.
-struct Column<'a> {
-    host: Option<&'a Hostname>,
-    worker: Option<&'a Worker>,
-}
-
-fn columns(m: &Model) -> Vec<Column<'_>> {
-    let mut out: Vec<Column> = Vec::new();
-    for (wi, w) in m.workers.iter().enumerate() {
-        let first = m.workers.iter().position(|x| x.name == w.name) == Some(wi);
-        let before = out.len();
-        if first {
-            for h in m.hostnames.iter().filter(|h| h.worker == w.name) {
-                out.push(Column {
-                    host: Some(h),
-                    worker: Some(w),
-                });
-            }
-        }
-        if out.len() == before {
-            out.push(Column {
-                host: None,
-                worker: Some(w),
-            });
-        }
-    }
-    for h in &m.hostnames {
-        if !m.workers.iter().any(|w| w.name == h.worker) {
-            out.push(Column {
-                host: Some(h),
-                worker: None,
-            });
-        }
-    }
-    out
-}
-
-/// Runs of adjacent columns with the same Worker: (first, last) indices, inclusive.
-fn spans(cols: &[Column]) -> Vec<(usize, usize)> {
-    let mut out: Vec<(usize, usize)> = Vec::new();
-    for (i, c) in cols.iter().enumerate() {
-        let joined = match (out.last(), c.worker) {
-            (Some(&(_, end)), Some(w)) => cols[end].worker.is_some_and(|p| p.name == w.name),
-            _ => false,
-        };
-        if joined {
-            if let Some(last) = out.last_mut() {
-                last.1 = i;
-            }
-        } else {
-            out.push((i, i));
-        }
-    }
-    out
-}
-
 /// The capabilities that only shape pages, and so reach no account resource.
 const PAGE_ONLY: [&str; 3] = ["design", "architecture", "mcp"];
 
+/// Whether Access guards the hostname, by its token names or, in the public view, its flag.
+fn gated(h: &Hostname) -> bool {
+    h.behind_access || !h.access.is_empty()
+}
+
+/// The Worker that hosts core; it is drawn alone on the first row of the Workers layer.
+const CORE: &str = "pigeon-platform";
+/// How many Workers share a row under core.
+const PER_ROW: usize = 3;
+/// The height of a Worker card.
+const CARD_H: f64 = 220.0;
+/// The gap between Worker cards in a row.
+const CARD_GAP: f64 = 24.0;
+
+impl Svg {
+    /// A link along `d` with an arrowhead at either end.
+    fn route(&mut self, d: &str, dashed: bool, start: bool, end: bool) {
+        let class = if dashed { "dg-link dashed" } else { "dg-link" };
+        let start = if start {
+            r#" marker-start="url(#ah)""#
+        } else {
+            ""
+        };
+        let end = if end { r#" marker-end="url(#ah)""# } else { "" };
+        self.push(format!(r#"<path class="{class}" d="{d}"{start}{end}/>"#));
+    }
+
+    /// Pills in a row from `x`, as many as fit before `right`, then a "+N" pill for the rest.
+    fn chips_more(&mut self, x: f64, y: f64, right: f64, items: &[String], accent: bool) {
+        let mut at = x;
+        for (i, item) in items.iter().enumerate() {
+            let left = items.len() - i;
+            let more = format!("+{left}");
+            let after = if left > 1 {
+                8.0 + chip_width(&more)
+            } else {
+                0.0
+            };
+            if at + chip_width(item) + after > right {
+                self.chip(at, y, &more, false);
+                return;
+            }
+            at += self.chip(at, y, item, accent) + 8.0;
+        }
+    }
+
+    /// One row of a Worker card: a small label, then pills.
+    fn row(&mut self, x: f64, y: f64, right: f64, label: &str, items: &[String]) {
+        if items.is_empty() {
+            return;
+        }
+        self.text(x, y + 16.0, "dg-lbl", label, "start");
+        self.chips_more(x + 92.0, y, right, items, false);
+    }
+}
+
+/// The binding names of the links from `from` to `to` of one kind.
+fn via(m: &Model, from: &str, to: &str, kind: &str) -> Vec<String> {
+    m.links
+        .iter()
+        .filter(|l| l.from == from && l.to == to && l.kind == kind)
+        .map(|l| l.via.clone())
+        .collect()
+}
+
+/// A Worker's card at (`x`, `y`), `w` wide.
+fn worker_card(s: &mut Svg, wk: &Worker, x: f64, y: f64, w: f64) {
+    let right = x + w - 16.0;
+    s.card(x, y, w, CARD_H, "dg-worker");
+    s.text(
+        x + 16.0,
+        y + 30.0,
+        "dg-t dg-big dg-wname",
+        &fit(&wk.name, w - 32.0, 11.0),
+        "start",
+    );
+    let lane = match (&wk.lane, &wk.deploy_job) {
+        (Some(l), Some(j)) => format!("{l} · {j}"),
+        (Some(l), None) => l.clone(),
+        (None, Some(j)) => j.clone(),
+        (None, None) => "not in the map".to_string(),
+    };
+    s.text(
+        x + 16.0,
+        y + 50.0,
+        "dg-s",
+        &fit(&lane, w - 32.0, 6.4),
+        "start",
+    );
+    let mut flags: Vec<String> = wk.handlers.clone();
+    if let Some(by) = &wk.published_by {
+        flags.push(format!("published by {by}"));
+    }
+    s.chips_more(x + 16.0, y + 62.0, right, &flags, false);
+    let tools = if wk.tools.is_empty() {
+        "no MCP tools".to_string()
+    } else {
+        format!("{} MCP tools", wk.tools.len())
+    };
+    s.text(
+        x + 16.0,
+        y + 112.0,
+        "dg-t",
+        &fit(
+            &format!("{tools} · {} routes", wk.routes.len()),
+            w - 32.0,
+            8.2,
+        ),
+        "start",
+    );
+    // The classes it hosts: the ones it owns, not the ones it only reaches.
+    let hosted: Vec<String> = wk
+        .objects
+        .iter()
+        .filter(|o| o.owner == wk.name)
+        .map(|o| o.class.clone())
+        .collect();
+    s.row(x + 16.0, y + 124.0, right, "OBJECTS", &hosted);
+    s.row(x + 16.0, y + 154.0, right, "CONTAINERS", &wk.containers);
+    s.row(x + 16.0, y + 184.0, right, "SECRETS", &wk.secrets);
+}
+
 fn diagram(m: &Model) -> String {
-    let cols = columns(m);
-    let n = cols.len().max(1) as f64;
+    let hosts = &m.hostnames;
+    let n = hosts.len().max(1) as f64;
     let col_w = (W - 2.0 * M - (n - 1.0) * GAP) / n;
     let col_x = |i: usize| M + i as f64 * (col_w + GAP);
     let mut s = Svg(Vec::new());
@@ -1404,12 +1589,16 @@ fn diagram(m: &Model) -> String {
     let y1 = 40.0;
     s.text(M, 26.0, "dg-e", "LAYER 1 · CLIENTS", "start");
     let group_h = 190.0;
-    for (i, c) in cols.iter().enumerate() {
-        let Some(h) = c.host else { continue };
+    for (i, h) in hosts.iter().enumerate() {
         let x = col_x(i);
         s.card(x, y1, col_w, group_h, "dg-group");
-        let (title, inner): (&str, Vec<(String, String)>) = if h.access.is_empty() {
+        let (title, inner): (&str, Vec<(String, String)>) = if !gated(h) {
             ("Visitors", vec![("Browser".into(), "anyone".into())])
+        } else if h.access.is_empty() {
+            (
+                "Access callers",
+                vec![("Access caller".into(), "service token".into())],
+            )
         } else {
             (
                 "Access callers",
@@ -1425,18 +1614,29 @@ fn diagram(m: &Model) -> String {
         for (j, (name, kind)) in inner.iter().enumerate() {
             let ix = x + 16.0 + j as f64 * (iw + 12.0);
             s.card(ix, y1 + 50.0, iw, 90.0, "");
-            s.text(ix + 16.0, y1 + 78.0, "dg-t", name, "start");
-            s.chip(ix + 16.0, y1 + 94.0, kind, false);
+            s.text(
+                ix + 16.0,
+                y1 + 78.0,
+                "dg-t",
+                &fit(name, iw - 24.0, 8.2),
+                "start",
+            );
+            s.chip(ix + 16.0, y1 + 94.0, &fit(kind, iw - 44.0, 6.9), false);
         }
-        let via = if h.access.is_empty() {
-            format!("{} · in public", h.host)
-        } else {
+        let tag = if gated(h) {
             format!("{} · Access service token", h.host)
+        } else {
+            format!("{} · in public", h.host)
         };
-        s.chip(x + 16.0, y1 + 152.0, &via, false);
+        s.chip(
+            x + 16.0,
+            y1 + 152.0,
+            &fit(&tag, col_w - 32.0 - 20.0, 6.9),
+            false,
+        );
     }
 
-    // The Cloudflare region holds layers 2 to 4; its rectangle is drawn once its height is known.
+    // The Cloudflare region holds layers 2 to 5; its rectangle is drawn once its height is known.
     let zone_top = y1 + group_h + 48.0;
     let zone_at = s.0.len();
     s.text(
@@ -1447,12 +1647,12 @@ fn diagram(m: &Model) -> String {
         "start",
     );
 
-    // Layer 2: hostnames, each a Zero Trust application or public.
+    // Layer 2: hostnames, each a Zero Trust application or public, and the Worker serving it.
     let y2 = zone_top + 64.0;
     s.text(M + 4.0, y2 - 12.0, "dg-e", "LAYER 2 · ZERO TRUST", "start");
     let host_h = 76.0;
-    for (i, c) in cols.iter().enumerate() {
-        let Some(h) = c.host else { continue };
+    let y3 = y2 + host_h + 64.0;
+    for (i, h) in hosts.iter().enumerate() {
         let x = col_x(i);
         let cx = x + col_w / 2.0;
         s.link(
@@ -1461,8 +1661,13 @@ fn diagram(m: &Model) -> String {
             false,
         );
         s.label(cx + 10.0, y1 + group_h + 26.0, "HTTPS");
-        let class = if h.access.is_empty() { "" } else { "dg-access" };
-        s.card(x, y2, col_w, host_h, class);
+        s.card(
+            x,
+            y2,
+            col_w,
+            host_h,
+            if gated(h) { "dg-access" } else { "" },
+        );
         s.text(
             x + 16.0,
             y2 + 32.0,
@@ -1470,17 +1675,19 @@ fn diagram(m: &Model) -> String {
             &fit(&h.host, col_w - 32.0, 11.0),
             "start",
         );
-        let sub = if h.access.is_empty() {
-            "public · no Access".to_string()
+        let sub = if !gated(h) {
+            "public".to_string()
+        } else if h.access.is_empty() {
+            "behind Access".to_string()
         } else {
-            format!("Zero Trust application · admits {}", h.access.join(", "))
+            format!("Zero Trust · admits {}", h.access.join(", "))
         };
         let sub = if h.public_paths.is_empty() {
             sub
         } else {
             format!("{sub} · public: {}", h.public_paths.join(", "))
         };
-        let sub = format!("{sub} · by {}", h.by);
+        let sub = format!("{sub} · served by {}", h.worker);
         s.text(
             x + 16.0,
             y2 + 56.0,
@@ -1488,56 +1695,175 @@ fn diagram(m: &Model) -> String {
             &fit(&sub, col_w - 32.0, 6.4),
             "start",
         );
+        if h.worker == CORE {
+            s.link(
+                &format!("M{cx:.0} {:.0}V{y3:.0}", y2 + host_h),
+                false,
+                false,
+            );
+            s.label(cx + 10.0, y2 + host_h + 30.0, "serves");
+        }
     }
 
-    // Layer 3: the Worker under each hostname.
-    let y3 = y2 + host_h + 64.0;
+    // Layer 3: core on its own row, then every other Worker in map order, three to a row.
     s.text(M + 4.0, y3 - 12.0, "dg-e", "LAYER 3 · WORKERS", "start");
-    let worker_h = 164.0;
-    for (a, b) in spans(&cols) {
-        let Some(w) = cols[a].worker else { continue };
-        let x = col_x(a);
-        let ww = col_x(b) + col_w - x;
-        for (i, c) in cols.iter().enumerate().take(b + 1).skip(a) {
-            if c.host.is_some() {
-                let cx = col_x(i) + col_w / 2.0;
-                s.link(
-                    &format!("M{cx:.0} {:.0}V{y3:.0}", y2 + host_h),
-                    false,
-                    false,
-                );
-                s.label(cx + 10.0, y2 + host_h + 30.0, "serves");
-            }
-        }
-        s.card(x, y3, ww, worker_h, "dg-worker");
+    let core_i = m
+        .workers
+        .iter()
+        .position(|w| w.name == CORE)
+        .or(if m.workers.is_empty() { None } else { Some(0) });
+    let others: Vec<&Worker> = m
+        .workers
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| Some(*i) != core_i)
+        .map(|(_, w)| w)
+        .collect();
+    let core = core_i.map(|i| &m.workers[i]);
+    if let Some(c) = core {
+        worker_card(&mut s, c, M, y3, W - 2.0 * M);
+    }
+    let core_name = core.map_or("", |c| c.name.as_str());
+    let core_bottom = y3 + CARD_H;
+    let cw = (W - 2.0 * M - 2.0 * CARD_GAP) / PER_ROW as f64;
+    let row0 = core_bottom + 76.0;
+    let row_y = |r: usize| row0 + r as f64 * (CARD_H + 56.0);
+    let pos = |i: usize| {
+        (
+            M + (i % PER_ROW) as f64 * (cw + CARD_GAP),
+            row_y(i / PER_ROW),
+        )
+    };
+    for (i, w) in others.iter().enumerate() {
+        let (x, y) = pos(i);
+        worker_card(&mut s, w, x, y, cw);
+    }
+    let rows = others.len().div_ceil(PER_ROW);
+    let workers_bottom = if rows == 0 {
+        core_bottom
+    } else {
+        row_y(rows - 1) + CARD_H
+    };
+
+    // Layer 4: the binding arrows, labelled with the binding name. A pair of Workers shares one
+    // route per kind: solid for service bindings, dashed for Durable Objects used across Workers.
+    if !others.is_empty() {
         s.text(
-            x + 16.0,
-            y3 + 32.0,
-            "dg-t dg-big dg-wname",
-            &w.name,
+            M + 4.0,
+            core_bottom + 14.0,
+            "dg-e",
+            "LAYER 4 · BINDINGS",
             "start",
         );
-        let mut flags: Vec<String> = w.handlers.clone();
-        flags.push(match (&w.published_by, w.workers_dev) {
-            (Some(by), _) => format!("published by {by}"),
-            (None, true) => "workers.dev on".into(),
-            (None, false) => "workers.dev off".into(),
-        });
-        s.chips(x + 16.0, y3 + 46.0, x + ww - 16.0, &flags, false);
-        s.stack(x + 16.0, y3 + 84.0, ww - 32.0, 62.0);
-        let routes = format!("{} routes", w.routes.len());
-        s.text(x + 32.0, y3 + 108.0, "dg-t", &routes, "start");
-        let tools = if w.tools.is_empty() {
-            "no MCP tools".to_string()
-        } else if let Some(core) = &w.merged_into {
-            format!("{} MCP tools, merged into {core}'s /mcp", w.tools.len())
-        } else {
-            format!("{} MCP tools on POST /mcp", w.tools.len())
-        };
-        s.text(x + 32.0, y3 + 128.0, "dg-s", &tools, "start");
+    }
+    let mut channel_lines = [0usize; PER_ROW];
+    for (i, w) in others.iter().enumerate() {
+        let (x, y) = pos(i);
+        let (r, c) = (i / PER_ROW, i % PER_ROW);
+        let kinds = [("service binding", false), ("Durable Object", true)];
+        let routes: Vec<(bool, Vec<String>, Vec<String>)> = kinds
+            .iter()
+            .map(|(kind, dashed)| {
+                (
+                    *dashed,
+                    via(m, core_name, &w.name, kind),
+                    via(m, &w.name, core_name, kind),
+                )
+            })
+            .filter(|(_, fwd, back)| !fwd.is_empty() || !back.is_empty())
+            .collect();
+        let both = routes.len() > 1;
+        for (dashed, fwd, back) in routes {
+            // A service route has one label, such as "SITES ⇄ PLATFORM"; an object route one
+            // line for each binding.
+            let lines: Vec<String> = if dashed {
+                fwd.iter().chain(&back).cloned().collect()
+            } else if fwd.is_empty() || back.is_empty() {
+                vec![
+                    fwd.iter()
+                        .chain(&back)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                ]
+            } else {
+                vec![format!("{} ⇄ {}", fwd.join(", "), back.join(", "))]
+            };
+            let off = match (both, dashed) {
+                (false, _) => 0.0,
+                (true, false) => -6.0,
+                (true, true) => 6.0,
+            };
+            if r == 0 {
+                let px = x + cw / 2.0 + off;
+                s.route(
+                    &format!("M{px:.0} {core_bottom:.0}V{y:.0}"),
+                    dashed,
+                    !back.is_empty(),
+                    !fwd.is_empty(),
+                );
+                for (k, line) in lines.iter().enumerate() {
+                    let ly = core_bottom + 34.0 + 14.0 * k as f64;
+                    let shown = fit(line, cw / 2.0 - 16.0, 6.4);
+                    if dashed {
+                        s.text(px + 8.0, ly, "dg-lbl", &shown, "start");
+                    } else {
+                        s.text(px - 8.0, ly, "dg-lbl", &shown, "end");
+                    }
+                }
+            } else {
+                // Down the gap beside the column, then into the card's side.
+                let gap = c.min(PER_ROW - 2);
+                let gx = M + (gap + 1) as f64 * cw + gap as f64 * CARD_GAP + CARD_GAP / 2.0;
+                let px = gx + off * 0.6;
+                let edge = if c <= gap { x + cw } else { x };
+                let my = y + CARD_H / 2.0;
+                s.route(
+                    &format!("M{px:.0} {core_bottom:.0}V{my:.0}H{edge:.0}"),
+                    dashed,
+                    !back.is_empty(),
+                    !fwd.is_empty(),
+                );
+                for line in &lines {
+                    let ly = row_y(0) + CARD_H + 18.0 + 14.0 * channel_lines[gap] as f64;
+                    channel_lines[gap] += 1;
+                    s.text(
+                        px + 10.0,
+                        ly,
+                        "dg-lbl",
+                        &fit(line, W - M - px - 10.0, 6.4),
+                        "start",
+                    );
+                }
+            }
+        }
+    }
+    // Links between two Workers that are not core: a plain line, labelled at its middle.
+    for l in m
+        .links
+        .iter()
+        .filter(|l| l.from != core_name && l.to != core_name)
+    {
+        let a = others.iter().position(|w| w.name == l.from);
+        let b = others.iter().position(|w| w.name == l.to);
+        if let (Some(a), Some(b)) = (a, b) {
+            let ((ax, ay), (bx, by)) = (pos(a), pos(b));
+            let (fx, fy, tx, ty) = (ax + cw / 2.0, ay + CARD_H, bx + cw / 2.0, by);
+            s.route(
+                &format!("M{fx:.0} {fy:.0}L{tx:.0} {ty:.0}"),
+                l.kind != "service binding",
+                false,
+                true,
+            );
+            s.label(
+                (fx + tx) / 2.0 + 8.0,
+                (fy + ty) / 2.0,
+                &fit(&l.via, 200.0, 6.4),
+            );
+        }
     }
 
-    // Layer 4: the account resources, shared on one bus by the Workers that reach them.
+    // Layer 5: the account resources, shared on one bus by the Workers that reach them.
     let r = &m.resources;
     let mut cards: Vec<(&str, String, &str)> = Vec::new();
     if !r.secrets.is_empty() {
@@ -1583,33 +1909,43 @@ fn diagram(m: &Model) -> String {
     for repo in &r.repos {
         cards.push(("Artifacts", repo.clone(), "dg-cf"));
     }
-    let consumers: Vec<&str> = m
-        .workers
-        .iter()
-        .filter(|w| w.handlers.iter().any(|h| h == "queue"))
-        .map(|w| w.name.as_str())
-        .collect();
     if !r.queues.is_empty() {
         cards.push(("Queue", r.queues.join(", "), "dg-cf"));
     }
     if !r.gateways.is_empty() {
         cards.push(("AI Gateway", r.gateways.join(", "), "dg-cf"));
     }
-    let bus_y = y3 + worker_h + 36.0;
+    let bus_y = workers_bottom + 36.0;
     let y4 = bus_y + 62.0;
     let k = cards.len().max(1) as f64;
     let rgap = 20.0;
     let rw = (W - 2.0 * M - (k - 1.0) * rgap) / k;
     let rx = |j: usize| M + j as f64 * (rw + rgap);
-    let users: Vec<f64> = cols
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| {
-            c.worker
-                .is_some_and(|w| w.uses.iter().any(|u| !PAGE_ONLY.contains(&u.as_str())))
-        })
-        .map(|(i, _)| col_x(i) + col_w / 2.0)
-        .collect();
+    let reaches = |w: &Worker| w.uses.iter().any(|u| !PAGE_ONLY.contains(&u.as_str()));
+    // Where each Worker reaches the bus from: the last row's cards from below, and core, when
+    // it is not on the last row, down the margin.
+    let mut users: Vec<f64> = Vec::new();
+    if others.is_empty() {
+        if core.is_some_and(reaches) {
+            users.push(W / 2.0);
+        }
+    } else {
+        let last = rows - 1;
+        for (i, w) in others.iter().enumerate() {
+            if i / PER_ROW == last && reaches(w) {
+                users.push(pos(i).0 + cw / 2.0);
+            }
+        }
+        if core.is_some_and(reaches) {
+            let tx = M - 10.0;
+            s.link(
+                &format!("M{M:.0} {:.0}H{tx:.0}V{bus_y:.0}", y3 + CARD_H / 2.0 + 30.0),
+                false,
+                true,
+            );
+            users.push(tx);
+        }
+    }
     if !cards.is_empty() && !users.is_empty() {
         let centers: Vec<f64> = (0..cards.len()).map(|j| rx(j) + rw / 2.0).collect();
         let left = users
@@ -1622,9 +1958,9 @@ fn diagram(m: &Model) -> String {
             .chain(&centers)
             .cloned()
             .fold(f64::MIN, f64::max);
-        for u in &users {
+        for u in users.iter().filter(|u| **u > M) {
             s.link(
-                &format!("M{u:.0} {:.0}V{bus_y:.0}", y3 + worker_h),
+                &format!("M{u:.0} {workers_bottom:.0}V{bus_y:.0}"),
                 false,
                 true,
             );
@@ -1645,7 +1981,7 @@ fn diagram(m: &Model) -> String {
         M + 4.0,
         bus_y - 14.0,
         "dg-e",
-        "LAYER 4 · ACCOUNT RESOURCES",
+        "LAYER 5 · ACCOUNT RESOURCES",
         "start",
     );
     let res_h = 64.0;
@@ -1670,22 +2006,6 @@ fn diagram(m: &Model) -> String {
         if *title == "Artifacts" {
             artifacts_x = Some(x);
         }
-        if *title == "Queue" {
-            let qx = x + rw / 2.0 + 28.0;
-            for (i, c) in cols.iter().enumerate() {
-                let consumes = c
-                    .worker
-                    .is_some_and(|w| consumers.contains(&w.name.as_str()));
-                if consumes && qx > col_x(i) && qx < col_x(i) + col_w {
-                    s.link(
-                        &format!("M{qx:.0} {y4:.0}V{:.0}", y3 + worker_h + 2.0),
-                        true,
-                        false,
-                    );
-                    s.label(qx + 8.0, bus_y + 24.0, "consumes");
-                }
-            }
-        }
         if *title == "Queue" && j > 0 && cards[j - 1].0 == "Artifacts" {
             let y = y4 + res_h / 2.0;
             s.link(
@@ -1707,7 +2027,7 @@ fn diagram(m: &Model) -> String {
     );
 
     // Outside Cloudflare: each mirror's read-only copy, fed from Artifacts.
-    let mut height = zone_bottom + 24.0;
+    let mut bottom = zone_bottom;
     if let (Some(ax), false) = (artifacts_x, r.mirrors.is_empty()) {
         let vy = zone_bottom + 56.0;
         let vw = 300.0_f64.min(W - 2.0 * M);
@@ -1760,11 +2080,41 @@ fn diagram(m: &Model) -> String {
             s.text(x + 32.0, vy + 134.0, "dg-t", "read-only copy", "start");
             s.text(x + 32.0, vy + 152.0, "dg-m", path, "start");
         }
-        height = vy + 178.0 + 24.0;
+        bottom = vy + 178.0;
     }
 
+    // Layer 6: the external services, outside the Cloudflare region, four to a row.
+    if !m.externals.is_empty() {
+        let top = bottom + 40.0;
+        s.text(M, top, "dg-e", "LAYER 6 · EXTERNAL SERVICES", "start");
+        let per = 4usize;
+        let ew = (W - 2.0 * M - (per - 1) as f64 * 20.0) / per as f64;
+        let eh = 72.0;
+        for (i, e) in m.externals.iter().enumerate() {
+            let x = M + (i % per) as f64 * (ew + 20.0);
+            let y = top + 14.0 + (i / per) as f64 * (eh + 20.0);
+            s.card(x, y, ew, eh, "dg-vendor");
+            s.text(
+                x + 16.0,
+                y + 28.0,
+                "dg-t dg-vname",
+                &fit(&e.name, ew - 32.0, 8.2),
+                "start",
+            );
+            s.text(
+                x + 16.0,
+                y + 50.0,
+                "dg-s",
+                &fit(&e.kind, ew - 32.0, 6.4),
+                "start",
+            );
+        }
+        bottom = top + 14.0 + m.externals.len().div_ceil(per) as f64 * (eh + 20.0) - 20.0;
+    }
+    let height = bottom + 24.0;
+
     format!(
-        r#"<div class="dg-canvas"><svg class="diagram" viewBox="0 0 {W:.0} {height:.0}" role="img" aria-label="pigeon's architecture, from clients through hostnames and Workers to account resources and mirrors"><defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path class="dg-head" d="M0 0L10 5L0 10z"/></marker></defs>{}</svg></div>"#,
+        r#"<div class="dg-canvas"><svg class="diagram" viewBox="0 0 {W:.0} {height:.0}" role="img" aria-label="pigeon's architecture, from clients through hostnames, Workers and their bindings to account resources and external services"><defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path class="dg-head" d="M0 0L10 5L0 10z"/></marker></defs>{}</svg></div>"#,
         s.0.concat()
     )
 }
@@ -1869,7 +2219,7 @@ pub fn render(m: &Model) -> String {
                 ("Queues", &queues),
                 ("Cron Triggers", &w.crons),
                 ("Secrets Store bindings", &w.secrets),
-                ("Read from", &vec![w.source.clone()]),
+                ("Read from", &(!w.source.is_empty()).then(|| w.source.clone()).into_iter().collect()),
             ] {
                 if !items.is_empty() {
                     body.push_str(&format!(
@@ -1909,11 +2259,15 @@ pub fn render(m: &Model) -> String {
         .externals
         .iter()
         .map(|e| {
+            let detail = if e.detail.is_empty() {
+                String::new()
+            } else {
+                format!(": {}", escape(&e.detail))
+            };
             format!(
-                r#"<article class="card kind-api"><div class="card-h"><span class="dot"></span><h3>{}</h3></div><p>{}: {} (by {})</p></article>"#,
+                r#"<article class="card kind-api"><div class="card-h"><span class="dot"></span><h3>{}</h3></div><p>{}{detail} (by {})</p></article>"#,
                 escape(&e.name),
                 escape(&e.kind),
-                escape(&e.detail),
                 escape(&e.by)
             )
         })

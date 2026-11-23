@@ -125,6 +125,8 @@ pub fn site() -> Site {
     Site {
         zone: ZONE.into(),
         worker: WORKER.into(),
+        also: vec!["pigeon-sites".into()],
+        bindings: vec![("pigeon-sites".into(), "SITES".into())],
     }
 }
 
