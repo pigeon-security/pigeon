@@ -552,7 +552,8 @@ impl Capability for Observability {
                               existing `pigeon: ...` ones whose filters, enabled flag or \
                               delivery differ (updated; delivery is never removed). With \
                               `email`, every policy gets email delivery to that address. Never \
-                              deletes; only `pigeon: ...` policies. Asks the person's \
+                              deletes; only `pigeon: ...` policies. With `billing`, also \
+                              billing usage watches per product and limit. Asks the person's \
                               approval when something changes. With `check`, only reads: \
                               the shape of Cloudflare's alert types and policies, field names \
                               and counts, and asks nothing.",
@@ -561,7 +562,8 @@ impl Capability for Observability {
                     "properties": {
                         "check": { "type": "boolean", "description": "Read-only shape check; no approval is asked." },
                         "email": { "type": "string", "description": "One address to deliver every `pigeon: ...` policy to by email. Only what the person gives; it is shown once in the plan the person approves." },
-                        "filters": { "type": "object", "description": "Filters for a policy, as {\"<alert type>\": {\"<key>\": [\"value\", ...]}}. Needed for a key Cloudflare requires and lists no IDs for; when it lists IDs, values must be among them." }
+                        "filters": { "type": "object", "description": "Filters for a policy, as {\"<alert type>\": {\"<key>\": [\"value\", ...]}}. Needed for a key Cloudflare requires and lists no IDs for; when it lists IDs, values must be among them." },
+                        "billing": { "type": "object", "description": "Billing usage watches, as {\"<product ID>\": \"<limit>\"}, such as {\"worker_requests\": \"100\"}; one `pigeon: billing <product>` policy each (billing_usage_alert). The limit is in Cloudflare's unit for the product. Without it no billing watch is planned. Run `check` to see the product IDs Cloudflare lists." }
                     }
                 }),
             },
@@ -616,8 +618,8 @@ const MONITOR_PREFIX: &str = "pigeon: ";
 const MONITORS_KIND: &str = "observability_monitors";
 /// How long a monitors plan waits for the person, like a linked plan: 30 minutes.
 const MONITORS_PENDING_MS: i64 = 30 * 60 * 1000;
-/// The alert types pigeon wants. The billing usage watches are left out until their product
-/// and filter names are checked against the live API (docs/plans/observability.md).
+/// The alert types pigeon plans without arguments. Billing usage watches are planned only when
+/// the person passes `billing` (see `validate_billing`).
 const WANTED_TYPES: [&str; 2] = [
     "workers_observability_alert",
     "workers_observability_real_time_issue",
@@ -870,6 +872,136 @@ pub fn validate_filters(
     Ok(out)
 }
 
+/// The alert type of a billing usage watch. It is not in `WANTED_TYPES`: it is planned only when
+/// the person passes `billing`.
+const BILLING_TYPE: &str = "billing_usage_alert";
+/// The most products one `billing` argument may name.
+const MAX_BILLING_PRODUCTS: usize = 10;
+
+/// Checks the person's `billing` argument (`product ID -> limit string`) against what `available`
+/// lists for `billing_usage_alert`. Null is no billing watches. Otherwise the type must be
+/// offered, at most 10 products, each product matches `^[a-z0-9_]{1,64}$` and, when the API lists
+/// IDs for `product`, is one of them; each limit is a plain non-negative decimal string of at most
+/// 20 characters and, when the API lists IDs for `limit`, one of them. Returns `product -> limit`
+/// or the first problem in plain words.
+///
+/// Sources: Cloudflare's OpenAPI schema `aaa_filters` (github.com/cloudflare/api-schemas): `product`
+/// and `limit` are "Used for configuring billing_usage_alert", arrays of strings. The Terraform
+/// provider's acceptance test (github.com/cloudflare/terraform-provider-cloudflare,
+/// `internal/services/notification_policy/resource_test.go` and
+/// `migration/v500/testdata/v5_billing_filters.tf`) creates such a policy with
+/// `filters = { product = ["worker_requests"], limit = ["100"] }`, the only primary-source product
+/// value. The unit of `limit` is Cloudflare's for the product and is not documented ("Thresholds
+/// depend on the product chosen", developers.cloudflare.com/notifications/notification-available/).
+pub fn validate_billing(
+    available: &Value,
+    billing: &Value,
+) -> std::result::Result<BTreeMap<String, String>, String> {
+    let mut out = BTreeMap::new();
+    if billing.is_null() {
+        return Ok(out);
+    }
+    let map = billing
+        .as_object()
+        .ok_or("`billing` must be an object: product ID -> limit string")?;
+    let options = filter_options(available);
+    let listed = options.get(BILLING_TYPE).ok_or_else(|| {
+        format!("`{BILLING_TYPE}` is not in the account's available alerts, so `billing` cannot be planned")
+    })?;
+    if map.len() > MAX_BILLING_PRODUCTS {
+        return Err(format!(
+            "`billing` names {} products; at most {MAX_BILLING_PRODUCTS}",
+            map.len()
+        ));
+    }
+    let ids_of = |key: &str| -> Vec<String> {
+        listed
+            .iter()
+            .find(|o| o.key == key)
+            .map(|o| o.ids.clone())
+            .unwrap_or_default()
+    };
+    let products = ids_of("product");
+    let limits = ids_of("limit");
+    for (product, limit) in map {
+        let shaped = !product.is_empty()
+            && product.len() <= 64
+            && product
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
+        if !shaped {
+            return Err(format!(
+                "billing product `{product}` must match ^[a-z0-9_]{{1,64}}$"
+            ));
+        }
+        if !products.is_empty() && !products.contains(product) {
+            return Err(format!(
+                "`{product}` is not a listed billing product; allowed: [{}]",
+                products.join(", ")
+            ));
+        }
+        let limit = limit
+            .as_str()
+            .ok_or_else(|| format!("the limit of billing product `{product}` must be a string"))?;
+        let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+        let plain = limit.len() <= 20
+            && match limit.split_once('.') {
+                Some((a, b)) => digits(a) && digits(b),
+                None => digits(limit),
+            };
+        if !plain {
+            return Err(format!(
+                "the limit `{limit}` of billing product `{product}` must be a plain non-negative \
+                 number such as 100, at most 20 characters"
+            ));
+        }
+        if !limits.is_empty() && !limits.iter().any(|i| i == limit) {
+            return Err(format!(
+                "`{limit}` is not a listed billing limit; allowed: [{}]",
+                limits.join(", ")
+            ));
+        }
+        out.insert(product.clone(), limit.to_string());
+    }
+    Ok(out)
+}
+
+/// The wanted policies of the checked `billing` map, one per product, as
+/// `{name: "pigeon: billing <product>", alert_type, filters: {product: [p], limit: [l]},
+/// enabled: true}`. Empty without `billing`.
+pub fn billing_policies(billing: &BTreeMap<String, String>) -> Vec<Value> {
+    billing
+        .iter()
+        .map(|(p, l)| {
+            json!({
+                "name": format!("{MONITOR_PREFIX}billing {p}"),
+                "alert_type": BILLING_TYPE,
+                "filters": { "product": [p], "limit": [l] },
+                "enabled": true,
+            })
+        })
+        .collect()
+}
+
+/// A note for the plan when `billing` is given and the API lists no `product` IDs: the product
+/// values then come from the Terraform provider's test, not from this account.
+pub fn billing_notes(available: &Value, billing: &BTreeMap<String, String>) -> Vec<String> {
+    if billing.is_empty() {
+        return Vec::new();
+    }
+    let listed = filter_options(available)
+        .get(BILLING_TYPE)
+        .is_some_and(|l| l.iter().any(|o| o.key == "product" && !o.ids.is_empty()));
+    if listed {
+        return Vec::new();
+    }
+    vec![
+        "note: Cloudflare listed no billing product IDs for this account; the product value is \
+         not confirmed here (`worker_requests` is the one in the Terraform provider's test)"
+            .to_string(),
+    ]
+}
+
 /// The wanted alert types that `available` does not offer.
 pub fn absent_types(available: &Value) -> Vec<String> {
     let have = available_types(available);
@@ -1058,6 +1190,15 @@ pub fn policy_body(p: &Value) -> Value {
 /// Issues automation (`/workers/observability/issues/automations`) that names it.
 pub fn plan_line(p: &Value) -> String {
     let kind = p["alert_type"].as_str().unwrap_or("");
+    if kind == BILLING_TYPE {
+        let first = |k: &str| p["filters"][k][0].as_str().unwrap_or("?").to_string();
+        return format!(
+            "create `{}` ({kind}; fires when {} usage passes {}, in Cloudflare's unit for this product)",
+            p["name"].as_str().unwrap_or(""),
+            first("product"),
+            first("limit")
+        );
+    }
     let fires = match kind {
         "workers_observability_alert" => {
             "fires when a Workers Observability Monitor (made in the dashboard) changes state"
@@ -1434,6 +1575,7 @@ async fn monitors_planned(
     cx: &Context<'_>,
     filters: &Value,
     email: Option<&str>,
+    billing: &Value,
 ) -> Result<Planned> {
     let (available, existing) = read_alerts(cx).await?;
     if available_types(&available).is_empty() {
@@ -1453,15 +1595,30 @@ async fn monitors_planned(
     let explicit = validate_filters(&available, filters).map_err(Error::RustError)?;
     let scripts: Vec<String> = this.map.workers.iter().map(|w| w.script.clone()).collect();
     // Every policy pigeon wants, existing or not, is what existing ones are compared against.
-    let wanted = with_email(
-        plan_monitors_with(&available, &json!([]), &scripts, &explicit).policies,
-        email,
+    let billing = validate_billing(&available, billing).map_err(Error::RustError)?;
+    let mut wanted = plan_monitors_with(&available, &json!([]), &scripts, &explicit).policies;
+    let mut plan = plan_monitors_with(&available, &existing, &scripts, &explicit);
+    // Billing watches are wanted only when `billing` names them.
+    let wanted_billing = billing_policies(&billing);
+    let have: Vec<&str> = existing
+        .as_array()
+        .map(|a| a.iter().filter_map(|p| p["name"].as_str()).collect())
+        .unwrap_or_default();
+    plan.policies.extend(
+        wanted_billing
+            .iter()
+            .filter(|p| !p["name"].as_str().is_some_and(|n| have.contains(&n)))
+            .cloned(),
     );
-    let plan = plan_monitors_with(&available, &existing, &scripts, &explicit);
+    wanted.extend(wanted_billing);
+    let mut notes = monitor_left_alone(&wanted, &existing);
+    notes.extend(billing_notes(&available, &billing));
+    // Email delivery goes on every wanted policy, billing watches included.
+    let wanted = with_email(wanted, email);
     Ok(Planned {
         creates: with_email(plan.policies, email),
         updates: plan_monitor_updates(&wanted, &existing),
-        notes: monitor_left_alone(&wanted, &existing),
+        notes,
         needs_filters: plan.needs_filters,
         skipped: absent_types(&available),
     })
@@ -1475,13 +1632,10 @@ fn monitors_payload(
     updates: &[Value],
     filters: &Value,
     email: Option<&str>,
+    billing: &Value,
 ) -> Value {
-    let filters = if filters.is_null() {
-        json!({})
-    } else {
-        filters.clone()
-    };
-    let mut inputs = json!({ "filters": filters });
+    let or_empty = |v: &Value| if v.is_null() { json!({}) } else { v.clone() };
+    let mut inputs = json!({ "filters": or_empty(filters), "billing": or_empty(billing) });
     if let Some(address) = email {
         inputs["email"] = json!(address);
     }
@@ -1507,13 +1661,14 @@ async fn monitors_plan(this: &Observability, cx: &Context<'_>, args: &Value) -> 
         }
     };
     let email = email.as_deref();
+    let billing = &args["billing"];
     let Planned {
         creates: planned,
         updates,
         notes,
         needs_filters: needs,
         skipped,
-    } = monitors_planned(this, cx, filters, email).await?;
+    } = monitors_planned(this, cx, filters, email, billing).await?;
     let skipped_note: Vec<String> = skipped
         .iter()
         .map(|t| format!("skipped: `{t}` is not in the account's available alerts"))
@@ -1535,7 +1690,7 @@ async fn monitors_plan(this: &Observability, cx: &Context<'_>, args: &Value) -> 
     lines.extend(planned.iter().map(plan_line));
     lines.extend(updates.iter().map(update_line));
     lines.extend(notes);
-    let payload = monitors_payload(&planned, &updates, filters, email);
+    let payload = monitors_payload(&planned, &updates, filters, email, billing);
     let kind = pigeon_core::approval::Kind::Other(MONITORS_KIND.into());
     let digest = pigeon_core::approval::payload_digest(&kind, "monitors", &payload);
     let made = crate::users::directory(
@@ -1589,16 +1744,17 @@ async fn monitors_apply(this: &Observability, cx: &Context<'_>, args: &Value) ->
         None => None,
     };
     let email = email.as_deref();
+    let billing = got["payload"]["inputs"]["billing"].clone();
     let Planned {
         creates: planned,
         updates,
         ..
-    } = monitors_planned(this, cx, &filters, email).await?;
+    } = monitors_planned(this, cx, &filters, email, &billing).await?;
     let kind = pigeon_core::approval::Kind::Other(MONITORS_KIND.into());
     let digest = pigeon_core::approval::payload_digest(
         &kind,
         "monitors",
-        &monitors_payload(&planned, &updates, &filters, email),
+        &monitors_payload(&planned, &updates, &filters, email, &billing),
     );
     let taken = crate::users::directory(
         cx.env,

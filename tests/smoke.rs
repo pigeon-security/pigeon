@@ -8886,3 +8886,111 @@ fn core_console_platform_section() {
     assert_eq!(snapshot::fresh_ms("platform"), Some(600_000));
     assert!(page::SCRIPTS.contains(&"/console/platform.js"));
 }
+
+#[test]
+fn core_observability_monitors_billing() {
+    use pigeon_capabilities::observability::{
+        billing_notes, billing_policies, plan_line, plan_monitor_updates, plan_monitors_with,
+        update_line, validate_billing,
+    };
+    use serde_json::json;
+    use std::collections::BTreeMap;
+
+    let scripts = vec!["core".to_string()];
+    let listed = json!({ "Billing": [
+        { "type": "billing_usage_alert", "filter_options": [
+            { "Key": "product", "Range": "1-n", "ComparisonOperator": "==",
+              "AvailableValues": [{ "ID": "worker_requests", "Description": "r" }, { "ID": "r2_storage", "Description": "s" }] },
+            { "Key": "limit", "Range": "1-1", "ComparisonOperator": "==", "AvailableValues": null }] },
+        { "type": "workers_observability_real_time_issue", "filter_options": [] },
+    ] });
+    let unlisted = json!({ "Billing": [
+        { "type": "billing_usage_alert", "filter_options": [
+            { "Key": "product", "AvailableValues": null }, { "Key": "limit", "AvailableValues": null }] },
+    ] });
+    let absent = json!({ "Workers": [
+        { "type": "workers_observability_real_time_issue", "filter_options": [] }] });
+    let existing = json!([{ "id": "b1", "name": "pigeon: billing worker_requests",
+        "alert_type": "billing_usage_alert", "enabled": true,
+        "filters": { "product": ["worker_requests"], "limit": ["50"] }, "mechanisms": {} }]);
+
+    // No `billing`: nothing billing-related is planned or updated, even for an existing policy.
+    let none = validate_billing(&listed, &json!(null)).unwrap();
+    assert!(none.is_empty() && billing_policies(&none).is_empty());
+    let plan = plan_monitors_with(&listed, &json!([]), &scripts, &BTreeMap::new());
+    assert!(
+        plan.policies
+            .iter()
+            .all(|p| p["alert_type"] != "billing_usage_alert")
+    );
+    assert!(plan_monitor_updates(&plan.policies, &existing).is_empty());
+    assert!(billing_notes(&listed, &none).is_empty());
+
+    // Valid `billing`: one policy per product with product and limit filters.
+    let ok = validate_billing(
+        &listed,
+        &json!({ "worker_requests": "100", "r2_storage": "2.5" }),
+    )
+    .unwrap();
+    let wanted = billing_policies(&ok);
+    assert_eq!(wanted.len(), 2);
+    let w = wanted
+        .iter()
+        .find(|p| p["name"] == "pigeon: billing worker_requests")
+        .unwrap();
+    assert_eq!(w["alert_type"], "billing_usage_alert");
+    assert_eq!(
+        w["filters"],
+        json!({ "product": ["worker_requests"], "limit": ["100"] })
+    );
+    assert_eq!(w["enabled"], true);
+    let line = plan_line(w);
+    assert!(line.contains("worker_requests usage passes 100"), "{line}");
+    assert!(billing_notes(&listed, &ok).is_empty());
+
+    // A product not listed: the error names the allowed IDs.
+    let err = validate_billing(&listed, &json!({ "nope": "1" })).unwrap_err();
+    assert!(
+        err.contains("worker_requests") && err.contains("r2_storage"),
+        "{err}"
+    );
+
+    // Bad limits and bad product shapes are errors.
+    for bad in ["-1", "1e3", "", "abc", "1.", "123456789012345678901"] {
+        assert!(
+            validate_billing(&listed, &json!({ "worker_requests": bad })).is_err(),
+            "{bad}"
+        );
+    }
+    assert!(validate_billing(&listed, &json!({ "worker_requests": 100 })).is_err());
+    assert!(validate_billing(&unlisted, &json!({ "Bad-Name": "1" })).is_err());
+    let many: serde_json::Map<String, serde_json::Value> =
+        (0..11).map(|i| (format!("p{i}"), json!("1"))).collect();
+    assert!(validate_billing(&unlisted, &json!(many)).is_err());
+
+    // No listed IDs: any well-formed product passes, with a note.
+    let free = validate_billing(&unlisted, &json!({ "worker_requests": "100" })).unwrap();
+    assert_eq!(billing_notes(&unlisted, &free).len(), 1);
+
+    // An existing policy with another limit: one update with a filters diff, no create.
+    let wanted =
+        billing_policies(&validate_billing(&listed, &json!({ "worker_requests": "100" })).unwrap());
+    let updates = plan_monitor_updates(&wanted, &existing);
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0]["id"], "b1");
+    assert_eq!(
+        updates[0]["changes"]["filters"]["to"],
+        json!({ "product": ["worker_requests"], "limit": ["100"] })
+    );
+    assert!(update_line(&updates[0]).contains("pigeon: billing worker_requests"));
+    // Same limit: nothing to do.
+    let same =
+        billing_policies(&validate_billing(&listed, &json!({ "worker_requests": "50" })).unwrap());
+    assert!(plan_monitor_updates(&same, &existing).is_empty());
+
+    // The billing type absent from the account, with `billing` given: an error.
+    let err = validate_billing(&absent, &json!({ "worker_requests": "100" })).unwrap_err();
+    assert!(err.contains("billing_usage_alert"), "{err}");
+    // Absent without `billing` is no error.
+    assert!(validate_billing(&absent, &json!(null)).unwrap().is_empty());
+}

@@ -212,11 +212,12 @@ pigeon cannot create them by API; the platform notification policies can be. Sli
   policies (`Notifications Read`), and plans the missing ones, by name `pigeon: ...`:
   - `workers_observability_alert` and `workers_observability_real_time_issue` for pigeon's
     scripts, when the available alerts allow it;
-  - `billing_usage_alert` for Workers, Containers and Cloudflare Observability ingestion at
-    thresholds in the plan (twice the expected month);
   - delivery by email to the one address given as `email` in the call (never read from the
     directory or stored; shown in one plan line on the approval, and kept in the approval
-    payload so apply can re-plan). Without `email`, no delivery is set.
+    payload so apply can re-plan). Without `email`, no delivery is set; it applies to billing policies too.
+  - `billing_usage_alert` only when the plan call passes `billing` (`{product ID: limit}`), one
+    `pigeon: billing <product>` policy per product with filters `product` and `limit`; without
+    `billing` none is planned or updated (see the 2026-11-24 Log entry).
   Like `instance_plan`, a plan with changes asks the person's approval on the console.
 - `observability_monitors_apply {plan}`: once approved, creates the planned policies and updates
   existing `pigeon: ...` ones that differ (`Notifications Write`), touching only policies named
@@ -375,8 +376,10 @@ Open items:
   responses); the one Artifacts 401 and the old changelog R2 403 are past.
 4. **Built (2026-11-24).** `models_usage` (pigeon-models) to count `cache_read_input_tokens` and
    `cache_creation_input_tokens`, and to price them, if the gateway's logs carry them.
-5. A `pigeon: ` billing usage watch, now that the live check gives `product` and `limit`: the
-   product names are still to be read from Cloudflare.
+5. **Built (2026-11-24).** A `pigeon: ` billing usage watch through the `billing` argument. The
+   person reads the product IDs from `observability_monitors_plan {check: true}`
+   (`filter_options.billing_usage_alert.product.ids`) and picks the limits. When Cloudflare lists
+   no IDs the plan says so, and `worker_requests` is the only value with a primary source.
 6. Rerun `observability_monitors_plan {check: true}` and read `filter_options`: the IDs and
    Range of `status` for `workers_observability_alert`. Then plan again; pass `filters` if the
    plan lists `needs_filters`. Whether Cloudflare accepts the all-IDs `status` filter is
@@ -462,3 +465,22 @@ Open items:
   and in the payload. Create and update lines, notes, `needs_filters`, the apply answer and
   errors never hold it; `failed.why` has it replaced by `{email}`. Smoke:
   `core_observability_monitors_email`. Not run live.
+- 2026-11-24: billing usage watches. `observability_monitors_plan` takes `billing` (product ID ->
+  limit string). `validate_billing` checks that `billing_usage_alert` is offered, at most 10
+  products, product `^[a-z0-9_]{1,64}$` and among the listed IDs when there are any, limit a plain
+  non-negative decimal of at most 20 characters and among the listed IDs when there are any. Each
+  product is a wanted policy `pigeon: billing <product>` with `filters {product: [p], limit:
+  [l]}`: missing ones are created, existing ones go through the update path (a new limit is an
+  update with a diff). The `billing` input is in the approval payload next to `filters`; apply
+  re-plans from it and the digest must match. Without `billing` nothing billing-related is
+  planned and existing `pigeon: billing ...` policies are not touched. `WANTED_TYPES` still means
+  "planned without arguments". Sources: Cloudflare OpenAPI `aaa_filters`
+  (github.com/cloudflare/api-schemas): `product` and `limit` are "Used for configuring
+  billing_usage_alert", arrays of strings. The Terraform provider
+  (github.com/cloudflare/terraform-provider-cloudflare,
+  `internal/services/notification_policy/resource_test.go`,
+  `migration/v500/testdata/v5_billing_filters.tf`) creates one with `product =
+  ["worker_requests"]`, `limit = ["100"]` in its acceptance test against the live API. The unit
+  of `limit` is Cloudflare's per product and not documented
+  (developers.cloudflare.com/notifications/notification-available/: "Thresholds depend on the
+  product chosen"). Not run live: the first billing apply shows whether Cloudflare accepts a limit.
