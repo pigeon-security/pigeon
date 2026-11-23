@@ -1,7 +1,8 @@
 //! The AI Gateway's cost per UTC day and per model family, for the console's chart. It sums the
 //! gateway logs' costs over a window of days. Pure: no I/O.
 
-use pigeon_core::ai_gateway::{Log, canonical_model};
+use crate::{Route, route_of};
+use pigeon_core::ai_gateway::{GatewayKind, Log, canonical_model};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
@@ -18,9 +19,9 @@ pub fn family(model: &str) -> &'static str {
         .unwrap_or("Other")
 }
 
-/// The family of a log: `OpenAI` when its provider is `openai`, else [`family`] of its model.
+/// The family of a log: `OpenAI` when its provider is `openai` or `cf-openai`, else [`family`] of its model.
 pub fn family_of(provider: &str, model: &str) -> &'static str {
-    if provider == "openai" {
+    if provider == "openai" || provider == "cf-openai" {
         "OpenAI"
     } else {
         family(model)
@@ -193,6 +194,10 @@ pub struct ByRun {
     pub by_provider: BTreeMap<String, BTreeMap<String, f64>>,
     /// Per provider, per canonical model, per day: cost, tokens and requests.
     pub by_provider_model: BTreeMap<String, BTreeMap<String, BTreeMap<String, ModelDay>>>,
+    /// Cost per route (`byok` and `credits`, both always present), per day.
+    pub by_route: BTreeMap<String, BTreeMap<String, f64>>,
+    /// What each gateway gave: its log count, and whether it was cut off.
+    pub gateways: BTreeMap<String, GatewayInfo>,
 }
 
 /// One model's use on one day, from the gateway's logs.
@@ -215,59 +220,65 @@ fn run_of(log: &Log) -> Option<&str> {
     (!run.is_empty()).then_some(run)
 }
 
-/// `logs` summed by day, family and run over the `n` days ending `today`. A log outside the
-/// window, or with no cost, adds nothing. Sums are rounded to a millionth.
+/// One gateway's logs, as `daily_by_gateways` reads them.
+pub struct GatewayLogs {
+    /// The gateway's ID.
+    pub id: String,
+    /// Whether it bills stored keys or credits.
+    pub kind: GatewayKind,
+    /// Its logs.
+    pub logs: Vec<Log>,
+    /// Whether there were more logs than were read.
+    pub truncated: bool,
+}
+
+/// How many logs one gateway gave, and whether more were left unread.
+#[derive(Serialize, Debug, PartialEq, Default)]
+pub struct GatewayInfo {
+    /// The logs read.
+    pub logs: usize,
+    /// Whether the read stopped at its limit.
+    pub truncated: bool,
+}
+
+/// `logs` of one BYOK gateway, as [`daily_by_gateways`] sums them.
 pub fn daily_by_run(logs: &[Log], today: &str, n: usize) -> ByRun {
+    let one = GatewayLogs {
+        id: String::new(),
+        kind: GatewayKind::Byok,
+        logs: logs.to_vec(),
+        truncated: false,
+    };
+    daily_by_gateways(&[one], today, n, "")
+}
+
+/// Every gateway's logs summed by day, family, run, provider name and route over the `n` days
+/// ending `today`. A log outside the window, or with no cost, adds nothing. Sums are rounded to
+/// a millionth. Each log is named and routed by [`route_of`].
+pub fn daily_by_gateways(
+    gateways: &[GatewayLogs],
+    today: &str,
+    n: usize,
+    credits_since: &str,
+) -> ByRun {
     let days = days_ending(today, n);
     let mut out = ByRun {
         days,
         ..ByRun::default()
     };
-    for log in logs {
-        let Some(day) = day_of(&log.created_at).filter(|d| out.days.iter().any(|x| x == d)) else {
-            continue;
-        };
-        let day = day.to_string();
-        let provider = if log.provider.is_empty() {
-            "other".to_string()
-        } else {
-            log.provider.clone()
-        };
-        let cost = log.cost.filter(|c| c.is_finite());
-        let m = out
-            .by_provider_model
-            .entry(provider.clone())
-            .or_default()
-            .entry(canonical_model(&log.model))
-            .or_default()
-            .entry(day.clone())
-            .or_default();
-        m.cost_usd += cost.unwrap_or(0.0);
-        m.tokens_in += log.tokens_in.unwrap_or(0);
-        m.tokens_out += log.tokens_out.unwrap_or(0);
-        m.requests += 1;
-        let Some(cost) = cost else {
-            continue;
-        };
-        *out.by_provider
-            .entry(provider)
-            .or_default()
-            .entry(day.clone())
-            .or_default() += cost;
-        *out.by_family
-            .entry(family_of(&log.provider, &log.model).to_string())
-            .or_default()
-            .entry(day.clone())
-            .or_default() += cost;
-        match run_of(log) {
-            Some(run) => {
-                *out.by_run
-                    .entry(run.to_string())
-                    .or_default()
-                    .entry(day)
-                    .or_default() += cost
-            }
-            None => *out.unattributed.entry(day).or_default() += cost,
+    for r in [Route::Byok, Route::Credits] {
+        out.by_route.entry(r.name().to_string()).or_default();
+    }
+    for g in gateways {
+        out.gateways.insert(
+            g.id.clone(),
+            GatewayInfo {
+                logs: g.logs.len(),
+                truncated: g.truncated,
+            },
+        );
+        for log in &g.logs {
+            add(&mut out, log, g.kind, credits_since);
         }
     }
     for m in out
@@ -275,6 +286,7 @@ pub fn daily_by_run(logs: &[Log], today: &str, n: usize) -> ByRun {
         .values_mut()
         .chain(out.by_run.values_mut())
         .chain(out.by_provider.values_mut())
+        .chain(out.by_route.values_mut())
     {
         m.values_mut().for_each(|v| *v = round6(*v));
     }
@@ -288,4 +300,59 @@ pub fn daily_by_run(logs: &[Log], today: &str, n: usize) -> ByRun {
         d.cost_usd = round6(d.cost_usd);
     }
     out
+}
+
+/// Adds one log to `out`, when it falls in the window.
+fn add(out: &mut ByRun, log: &Log, kind: GatewayKind, credits_since: &str) {
+    let Some(day) = day_of(&log.created_at).filter(|d| out.days.iter().any(|x| x == d)) else {
+        return;
+    };
+    let day = day.to_string();
+    let base = if log.provider.is_empty() {
+        "other"
+    } else {
+        &log.provider
+    };
+    let (provider, route) = route_of(kind, base, &log.created_at, credits_since);
+    let cost = log.cost.filter(|c| c.is_finite());
+    let m = out
+        .by_provider_model
+        .entry(provider.clone())
+        .or_default()
+        .entry(canonical_model(&log.model))
+        .or_default()
+        .entry(day.clone())
+        .or_default();
+    m.cost_usd += cost.unwrap_or(0.0);
+    m.tokens_in += log.tokens_in.unwrap_or(0);
+    m.tokens_out += log.tokens_out.unwrap_or(0);
+    m.requests += 1;
+    let Some(cost) = cost else {
+        return;
+    };
+    *out.by_route
+        .entry(route.name().to_string())
+        .or_default()
+        .entry(day.clone())
+        .or_default() += cost;
+    *out.by_family
+        .entry(family_of(&provider, &log.model).to_string())
+        .or_default()
+        .entry(day.clone())
+        .or_default() += cost;
+    *out.by_provider
+        .entry(provider)
+        .or_default()
+        .entry(day.clone())
+        .or_default() += cost;
+    match run_of(log) {
+        Some(run) => {
+            *out.by_run
+                .entry(run.to_string())
+                .or_default()
+                .entry(day)
+                .or_default() += cost
+        }
+        None => *out.unattributed.entry(day).or_default() += cost,
+    }
 }

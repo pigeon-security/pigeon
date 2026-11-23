@@ -107,12 +107,12 @@ impl Capability for Models {
 
     fn footprint(&self) -> Footprint {
         Footprint {
-            gateways: vec![self.gateway.clone()],
-            externals: vec![External::new(
-                "AI Gateway",
-                "model gateway",
-                format!("gateway {}", self.gateway),
-            )],
+            gateways: self.gateways.iter().map(|g| g.id.clone()).collect(),
+            externals: self
+                .gateways
+                .iter()
+                .map(|g| External::new("AI Gateway", "model gateway", format!("gateway {}", g.id)))
+                .collect(),
             ..Footprint::default()
         }
     }

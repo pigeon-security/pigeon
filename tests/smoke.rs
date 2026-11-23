@@ -799,19 +799,21 @@ fn models_openai_prices() {
 
 #[test]
 fn models_openai_provider_declared_with_secret() {
-    use pigeon_models::{Billing, Dialect, Models, Provider};
+    use pigeon_models::{Billing, Dialect, Gateway, Models, Provider, Route};
     // The declaration is in the wasm-only Worker crate: read it as text, then build the same.
     let src = include_str!("../src/model-gateway/src/lib.rs");
     for needle in [
         "slug: \"openai\"",
         "dialect: Dialect::OpenAi",
         "default_model: \"gpt-6.2-sol\"",
-        "An OpenAI API key, from the OpenAI platform's API keys page.",
     ] {
         assert!(src.contains(needle), "{needle}");
     }
     assert!(src.find("slug: \"anthropic\"") < src.find("slug: \"openai\""));
-    let provider = |slug, dialect, billing| Provider {
+    let provider = |name, slug, route, dialect, billing| Provider {
+        name,
+        gateway: "pigeon",
+        route,
         slug,
         alias: "default",
         dialect,
@@ -820,35 +822,40 @@ fn models_openai_provider_declared_with_secret() {
         billing,
     };
     let models = Models {
-        gateway: "pigeon".into(),
+        gateways: vec![Gateway {
+            id: "pigeon".into(),
+            kind: pigeon_core::ai_gateway::GatewayKind::Credits,
+        }],
         providers: vec![
             provider(
                 "anthropic",
+                "anthropic",
+                Route::Byok,
                 Dialect::Anthropic,
                 Some(Billing::AnthropicAdmin),
             ),
-            provider("openai", Dialect::OpenAi, None),
+            provider("cf-openai", "openai", Route::Credits, Dialect::OpenAi, None),
         ],
+        staged: Vec::new(),
+        credits_since: "9999-12-31T00:00:00Z".into(),
         secrets_page: "https://x/secrets".into(),
         host: "h".into(),
         proxy_host: "p".into(),
     };
+    // Only the BYOK provider has a key slot: credits need none.
     let slots = models.secrets();
-    let open = slots
-        .iter()
-        .find(|s| s.name == "pigeon_openai_default")
-        .unwrap();
+    assert!(!slots.iter().any(|s| s.name == "pigeon_openai_default"));
+    assert_eq!(slots[0].name, "pigeon_anthropic_default");
     assert_eq!(
-        open.scopes,
+        slots[0].scopes,
         vec![pigeon_core::ai_gateway::SECRET_SCOPE.to_string()]
     );
-    assert_eq!(slots[0].name, "pigeon_anthropic_default");
     let tools = models.tools();
     for name in ["models_run", "models_submit"] {
         let t = tools.iter().find(|t| t.name == name).unwrap();
         assert_eq!(
             t.input_schema["properties"]["provider"]["enum"],
-            json!(["anthropic", "openai"])
+            json!(["anthropic", "cf-openai"])
         );
     }
 }
@@ -1253,4 +1260,205 @@ fn ai_agents_run_names_and_structured_questions() {
     assert_eq!(old["options"], json!([]));
     assert_eq!(old["instead"], json!([]));
     assert!(old["chose"].is_null() && old["headline"].is_null() && old["conventional"].is_null());
+}
+
+/// The model gateway's two gateways: specs, drift, the credits guard, routes, names and the daily
+/// answer over both gateways' logs (docs/plans/model-providers-cloudflare.md, phase 1).
+#[test]
+fn models_two_gateways_specs_guard_routes_and_daily() {
+    use pigeon_core::ai_gateway::{
+        GatewayKind, ProviderConfig, credits_guard, drift, spec, stored_key_drift,
+    };
+    use pigeon_models::daily::{GatewayLogs, daily_by_gateways, family_of};
+    use pigeon_models::{Billing, Dialect, Gateway, Models, Provider, Route, route_of};
+
+    // The spec of each kind.
+    let byok = spec("g", "store", GatewayKind::Byok);
+    assert_eq!(byok["byok_only"], true);
+    assert_eq!(byok["store_id"], "store");
+    let credits = spec("g", "store", GatewayKind::Credits);
+    assert_eq!(credits["byok_only"], false);
+    assert_eq!(credits["authentication"], true);
+    assert_eq!(credits["zdr"], true);
+    assert!(credits.get("store_id").is_none());
+    assert_eq!(credits["spend_limits"]["enabled"], true);
+    assert_eq!(credits["spend_limits"]["rules"][0]["limit"], 20);
+    assert_eq!(credits["spend_limits"]["rules"][0]["window"], 86400);
+
+    // Drift: none for a gateway as wanted; lines for one that is not.
+    assert!(drift(&credits, &credits, GatewayKind::Credits).is_empty());
+    assert!(drift(&byok, &byok, GatewayKind::Byok).is_empty());
+    let found = json!({ "authentication": true, "byok_only": true, "collect_logs": true,
+        "zdr": true, "spend_limits": { "enabled": true, "rules": [] } });
+    let lines = drift(&credits, &found, GatewayKind::Credits);
+    assert!(lines.iter().any(|l| l.starts_with("byok_only")));
+    assert!(lines.iter().any(|l| l.starts_with("spend_limits")));
+
+    // Stored keys.
+    let config = |slug: &str| ProviderConfig {
+        id: "i".into(),
+        provider_slug: slug.into(),
+        alias: "default".into(),
+        default_config: true,
+        secret_id: None,
+        secret_preview: None,
+        last_used_at: None,
+        modified_at: None,
+    };
+    assert_eq!(
+        stored_key_drift(GatewayKind::Credits, &[config("anthropic")], &[]),
+        vec![
+            "holds a stored key for anthropic: credits requests for it would bill that key instead"
+        ]
+    );
+    assert!(stored_key_drift(GatewayKind::Credits, &[], &["anthropic"]).is_empty());
+    assert_eq!(
+        stored_key_drift(GatewayKind::Byok, &[], &["anthropic"]).len(),
+        1
+    );
+    assert!(stored_key_drift(GatewayKind::Byok, &[config("anthropic")], &["anthropic"]).is_empty());
+
+    // The credits guard.
+    let open = json!({ "byok_only": false });
+    assert!(credits_guard(&open, &[], "anthropic").is_ok());
+    assert!(
+        credits_guard(&json!({ "byok_only": true }), &[], "anthropic")
+            .unwrap_err()
+            .contains("Open item 2")
+    );
+    assert!(
+        credits_guard(&open, &[config("anthropic")], "anthropic")
+            .unwrap_err()
+            .contains("stored anthropic key")
+    );
+    assert!(credits_guard(&open, &[config("anthropic")], "openai").is_ok());
+
+    // Routes.
+    let since = "2026-06-01T00:00:00Z";
+    let before = "2026-05-31T23:59:59Z";
+    assert_eq!(
+        route_of(GatewayKind::Credits, "anthropic", before, since),
+        ("anthropic".to_string(), Route::Byok)
+    );
+    assert_eq!(
+        route_of(GatewayKind::Credits, "openai", since, since),
+        ("cf-openai".to_string(), Route::Credits)
+    );
+    assert_eq!(
+        route_of(GatewayKind::Byok, "anthropic", since, since),
+        ("anthropic".to_string(), Route::Byok)
+    );
+    assert_eq!(family_of("cf-openai", "gpt-6.2-sol"), "OpenAI");
+    assert_eq!(family_of("cf-anthropic", "claude-opus-5-5"), "Opus");
+
+    // Selection by name, and the key slots.
+    let provider = |name, gateway, route, slug, dialect, billing| Provider {
+        name,
+        gateway,
+        route,
+        slug,
+        alias: "default",
+        dialect,
+        default_model: "m",
+        key_help: "help",
+        billing,
+    };
+    let models = Models {
+        gateways: vec![
+            Gateway {
+                id: "pigeon".into(),
+                kind: GatewayKind::Credits,
+            },
+            Gateway {
+                id: "pigeon-anthropic".into(),
+                kind: GatewayKind::Byok,
+            },
+        ],
+        providers: vec![
+            provider(
+                "anthropic",
+                "pigeon",
+                Route::Byok,
+                "anthropic",
+                Dialect::Anthropic,
+                Some(Billing::AnthropicAdmin),
+            ),
+            provider(
+                "cf-anthropic",
+                "pigeon",
+                Route::Credits,
+                "anthropic",
+                Dialect::Anthropic,
+                None,
+            ),
+            provider(
+                "cf-openai",
+                "pigeon",
+                Route::Credits,
+                "openai",
+                Dialect::OpenAi,
+                None,
+            ),
+        ],
+        staged: vec![("pigeon-anthropic", "anthropic", "default")],
+        credits_since: since.into(),
+        secrets_page: "https://x/secrets".into(),
+        host: "h".into(),
+        proxy_host: "p".into(),
+    };
+    let names: Vec<String> = models.secrets().into_iter().map(|s| s.name).collect();
+    assert_eq!(
+        &names[..2],
+        [
+            "pigeon_anthropic_default",
+            "pigeon-anthropic_anthropic_default"
+        ]
+    );
+    assert!(!names.iter().any(|n| n.contains("openai")));
+    let tools = models.tools();
+    let run = tools.iter().find(|t| t.name == "models_run").unwrap();
+    assert_eq!(
+        run.input_schema["properties"]["provider"]["enum"],
+        json!(["anthropic", "cf-anthropic", "cf-openai"])
+    );
+
+    // Daily over two gateways.
+    let log = |at: &str, provider: &str, model: &str, cost: f64| -> pigeon_core::ai_gateway::Log {
+        serde_json::from_value(json!({
+            "created_at": at, "provider": provider, "model": model, "cost": cost,
+        }))
+        .unwrap_or_default()
+    };
+    let gateways = vec![
+        GatewayLogs {
+            id: "pigeon-anthropic".into(),
+            kind: GatewayKind::Byok,
+            logs: vec![log(
+                "2026-06-02T01:00:00Z",
+                "anthropic",
+                "claude-opus-5-5",
+                1.0,
+            )],
+            truncated: false,
+        },
+        GatewayLogs {
+            id: "pigeon".into(),
+            kind: GatewayKind::Credits,
+            logs: vec![
+                log("2026-05-31T01:00:00Z", "anthropic", "claude-opus-5-5", 0.5),
+                log("2026-06-02T02:00:00Z", "openai", "gpt-6.2-sol", 0.25),
+            ],
+            truncated: true,
+        },
+    ];
+    let out = daily_by_gateways(&gateways, "2026-06-02", 4, since);
+    assert_eq!(out.by_route["byok"]["2026-06-02"], 1.0);
+    assert_eq!(out.by_route["byok"]["2026-05-31"], 0.5);
+    assert_eq!(out.by_route["credits"]["2026-06-02"], 0.25);
+    assert_eq!(out.by_provider["cf-openai"]["2026-06-02"], 0.25);
+    assert_eq!(out.by_provider["anthropic"]["2026-06-02"], 1.0);
+    assert_eq!(out.by_family["OpenAI"]["2026-06-02"], 0.25);
+    assert!(!out.gateways["pigeon-anthropic"].truncated);
+    assert!(out.gateways["pigeon"].truncated);
+    assert_eq!(out.gateways["pigeon"].logs, 2);
 }

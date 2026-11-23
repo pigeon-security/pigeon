@@ -83,6 +83,12 @@ pub struct Ask {
     pub body: Value,
     /// How long it may run, in milliseconds.
     pub timeout_ms: i64,
+    /// The gateway it goes through; a job stored without one uses [`Settings::gateway`].
+    #[serde(default)]
+    pub gateway: Option<String>,
+    /// Whether Cloudflare credits pay for it: its gateway is checked first.
+    #[serde(default)]
+    pub credits: bool,
 }
 
 /// A job as submitted.
@@ -805,6 +811,12 @@ impl ModelJobs {
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
+        let gateway = ask.gateway.as_deref().unwrap_or(&self.settings.gateway);
+        if ask.credits
+            && let Err(e) = super::guard_credits(&account, gateway, &ask.provider).await
+        {
+            return json!({ "id": id, "state": "failed", "error": e.to_string() });
+        }
         let mut reading = Reading::default();
         let mut timed_out = false;
         let mut cancelled = false;
@@ -857,7 +869,7 @@ impl ModelJobs {
             };
             let streamed = ai_gateway::stream(
                 &account,
-                &self.settings.gateway,
+                gateway,
                 &ask.provider,
                 &ask.path,
                 &headers,
@@ -916,9 +928,18 @@ impl ModelJobs {
             Err(e) => (State::Failed, Some(e.to_string())),
             Ok(Streamed::Refused(ran, _)) => {
                 let shown: String = ran.body.to_string().chars().take(500).collect();
+                let plain = ask
+                    .credits
+                    .then(|| {
+                        ai_gateway::error_code(&ran.body)
+                            .and_then(|c| ai_gateway::credits_error(ran.status, c))
+                    })
+                    .flatten();
                 (
                     State::Failed,
-                    Some(format!("{} answered {}: {shown}", ask.provider, ran.status)),
+                    Some(plain.unwrap_or_else(|| {
+                        format!("{} answered {}: {shown}", ask.provider, ran.status)
+                    })),
                 )
             }
             Ok(Streamed::Read((), _)) if timed_out => (

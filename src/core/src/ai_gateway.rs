@@ -89,19 +89,51 @@ pub fn secret_name(gateway: &str, provider: &str, alias: &str) -> String {
     format!("{gateway}_{provider}_{alias}")
 }
 
-/// A gateway as pigeon wants it: authenticated, keys only from its own store, logs kept.
-pub fn spec(id: &str, store_id: &str) -> Value {
-    json!({
-        "id": id,
-        "cache_ttl": 0,
-        "cache_invalidate_on_update": false,
-        "collect_logs": true,
-        "rate_limiting_interval": 0,
-        "rate_limiting_limit": 0,
-        "authentication": true,
-        "byok_only": true,
-        "store_id": store_id,
-    })
+/// Which credentials a gateway's requests bill.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GatewayKind {
+    /// Provider keys stored on the gateway (bring your own keys); nothing else is accepted.
+    Byok,
+    /// Cloudflare AI Gateway Unified Billing: Cloudflare credits pay for the requests.
+    Credits,
+}
+
+/// A gateway as pigeon wants it, by `kind`. Both are authenticated and keep logs.
+pub fn spec(id: &str, store_id: &str, kind: GatewayKind) -> Value {
+    match kind {
+        GatewayKind::Byok => json!({
+            "id": id,
+            "cache_ttl": 0,
+            "cache_invalidate_on_update": false,
+            "collect_logs": true,
+            "rate_limiting_interval": 0,
+            "rate_limiting_limit": 0,
+            "authentication": true,
+            "byok_only": true,
+            "store_id": store_id,
+        }),
+        GatewayKind::Credits => json!({
+            "id": id,
+            "cache_ttl": 0,
+            "cache_invalidate_on_update": false,
+            "collect_logs": true,
+            "rate_limiting_interval": 0,
+            "rate_limiting_limit": 0,
+            "authentication": true,
+            "byok_only": false,
+            "zdr": true,
+            // `window` is assumed to be in seconds (86400 = one day); the docs do not say.
+            "spend_limits": {
+                "enabled": true,
+                "rules": [{
+                    "limit": 20,
+                    "limitType": "cost",
+                    "window": 86400,
+                    "technique": "fixed",
+                }],
+            },
+        }),
+    }
 }
 
 /// What [`ensure`] found or did.
@@ -115,21 +147,26 @@ pub struct Ensured {
 
 /// Has gateway `id` exist, using the account's Secrets Store; idempotent. One that exists is
 /// left as it is, and where it differs from [`spec`] is reported.
-pub async fn ensure(account: &Account, id: &str) -> Result<Ensured> {
+pub async fn ensure(account: &Account, id: &str, kind: GatewayKind) -> Result<Ensured> {
     let token = Scoped::open(
         account,
         "ai-gateway",
         vec![Policy::new(Scope::Account, &WRITE_PERMISSIONS)],
     )
     .await?;
-    let ensured = ensure_with(token.value(), account, id).await;
+    let ensured = ensure_with(token.value(), account, id, kind).await;
     token.finish(ensured).await
 }
 
-async fn ensure_with(token: &str, account: &Account, id: &str) -> Result<Ensured> {
+async fn ensure_with(
+    token: &str,
+    account: &Account,
+    id: &str,
+    kind: GatewayKind,
+) -> Result<Ensured> {
     let base = format!("/accounts/{}/ai-gateway/gateways", account.id);
     let listed = call(token, Method::Get, &format!("{base}?per_page=50"), None).await?;
-    let want = spec(id, &account.secrets_store);
+    let want = spec(id, &account.secrets_store, kind);
     match rows(&listed)
         .into_iter()
         .find(|g| g["id"].as_str() == Some(id))
@@ -137,7 +174,7 @@ async fn ensure_with(token: &str, account: &Account, id: &str) -> Result<Ensured
         Some(found) => Ok(Ensured {
             id: id.into(),
             created: false,
-            drift: drift(&want, &found),
+            drift: drift(&want, &found, kind),
         }),
         None => {
             call(token, Method::Post, &base, Some(&want)).await?;
@@ -150,13 +187,99 @@ async fn ensure_with(token: &str, account: &Account, id: &str) -> Result<Ensured
     }
 }
 
-/// The settings in `want` that `found` holds otherwise.
-fn drift(want: &Value, found: &Value) -> Vec<String> {
-    ["authentication", "byok_only", "collect_logs", "store_id"]
+/// The settings in `want` that `found` holds otherwise, for a gateway of `kind`.
+pub fn drift(want: &Value, found: &Value, kind: GatewayKind) -> Vec<String> {
+    let mut keys = vec!["authentication", "byok_only", "collect_logs"];
+    keys.push(match kind {
+        GatewayKind::Byok => "store_id",
+        GatewayKind::Credits => "zdr",
+    });
+    let mut out: Vec<String> = keys
         .iter()
         .filter(|k| want[**k] != found[**k])
         .map(|k| format!("{k} is {}, not {}", found[*k], want[*k]))
-        .collect()
+        .collect();
+    if kind == GatewayKind::Credits {
+        let limits = &found["spend_limits"];
+        let on = limits["enabled"].as_bool() == Some(true)
+            && limits["rules"].as_array().is_some_and(|r| !r.is_empty());
+        if !on {
+            out.push("spend_limits is not enabled with at least one rule".into());
+        }
+    }
+    out
+}
+
+/// Drift in the keys a gateway of `kind` holds. A credits gateway must hold none: one stored for
+/// a provider would be billed instead of credits. A BYOK gateway must hold one for each of
+/// `declared_slugs`. Pure.
+pub fn stored_key_drift(
+    kind: GatewayKind,
+    configs: &[ProviderConfig],
+    declared_slugs: &[&str],
+) -> Vec<String> {
+    match kind {
+        GatewayKind::Credits => configs
+            .iter()
+            .map(|c| {
+                format!(
+                    "holds a stored key for {}: credits requests for it would bill that key instead",
+                    c.provider_slug
+                )
+            })
+            .collect(),
+        GatewayKind::Byok => declared_slugs
+            .iter()
+            .filter(|s| !configs.iter().any(|c| c.provider_slug == **s))
+            .map(|s| format!("holds no stored key for {s}"))
+            .collect(),
+    }
+}
+
+/// Whether a credits request to `slug` may go ahead, given the gateway as the API reads it and
+/// its stored keys. It refuses while the gateway needs provider keys, or holds one for `slug`.
+/// Pure.
+pub fn credits_guard(
+    gateway: &Value,
+    configs: &[ProviderConfig],
+    slug: &str,
+) -> std::result::Result<(), String> {
+    if gateway["byok_only"].as_bool() == Some(true) {
+        return Err("the credits gateway `pigeon` still requires provider keys: see Open item 2 of docs/plans/model-providers-cloudflare.md".into());
+    }
+    if configs.iter().any(|c| c.provider_slug == slug) {
+        return Err(format!(
+            "the credits gateway `pigeon` still holds a stored {slug} key, which would be billed instead of credits"
+        ));
+    }
+    Ok(())
+}
+
+/// A plain message for a credits error `status` and `code`, or `None` for any other.
+pub fn credits_error(status: u16, code: u64) -> Option<String> {
+    Some(
+        match (status, code) {
+            (403, 2049) => "Cloudflare credits cannot be used (403, code 2049): Unified Billing is not possible on this account or gateway",
+            (402, 2052) => "Cloudflare credits are too low (402, code 2052): buy credits on the AI Gateway page",
+            (429, 2018) => "the credits gateway is rate limited (429, code 2018): try again shortly",
+            (503, 7005) => "Cloudflare credits are unavailable for now (503, code 7005): try again shortly",
+            _ => return None,
+        }
+        .into(),
+    )
+}
+
+/// Reads gateway `gateway`'s settings, as the API answers them.
+pub async fn gateway_settings(account: &Account, gateway: &str) -> Result<Value> {
+    let token = Scoped::open(
+        account,
+        "ai-gateway",
+        vec![Policy::new(Scope::Account, &READ_PERMISSIONS)],
+    )
+    .await?;
+    let path = format!("/accounts/{}/ai-gateway/gateways/{gateway}", account.id);
+    let got = call(token.value(), Method::Get, &path, None).await;
+    token.finish(got).await
 }
 
 /// A provider's key on a gateway, as listed: never the key, only its preview.
@@ -811,4 +934,16 @@ pub fn summarize(logs: &[Log], by: &[Dimension]) -> Vec<Usage> {
 
 fn rows(v: &Value) -> Vec<Value> {
     v.as_array().cloned().unwrap_or_default()
+}
+
+/// The gateway error code in a refusal's `body`: the object itself, or the first of a list in the
+/// body, in `errors` or in `error`.
+pub fn error_code(body: &Value) -> Option<u64> {
+    let first = |v: &Value| match v {
+        Value::Array(a) => a.iter().find_map(|e| e["code"].as_u64()),
+        other => other["code"].as_u64(),
+    };
+    first(body)
+        .or_else(|| first(&body["errors"]))
+        .or_else(|| first(&body["error"]))
 }

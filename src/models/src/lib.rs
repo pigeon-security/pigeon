@@ -26,7 +26,7 @@ use pigeon_contract::{
     ToolSpec,
 };
 use pigeon_core::Account;
-use pigeon_core::ai_gateway::{self, Dimension, Filter, SECRET_SCOPE, tag};
+use pigeon_core::ai_gateway::{self, Dimension, Filter, GatewayKind, SECRET_SCOPE, tag};
 use pigeon_core::expiry::Expiry;
 use pigeon_core::mcp::Tool;
 use pigeon_core::secrets_store::{self, Writer};
@@ -136,12 +136,18 @@ fn to_value<T: Serialize>(v: T) -> Value {
 /// The most logs the console's chart reads for one window, so a busy gateway cannot run it long.
 const CHART_LOGS: usize = 5_000;
 
-/// Model providers behind one gateway.
+/// Model providers behind one or more gateways.
 pub struct Models {
-    /// The gateway's ID, such as `pigeon`.
-    pub gateway: String,
+    /// The gateways, each with its kind. The first is the default for a job stored without one.
+    pub gateways: Vec<Gateway>,
     /// The providers, the first the default.
     pub providers: Vec<Provider>,
+    /// Extra key slots, as (gateway, slug, alias): declared and handed to their gateway by setup
+    /// and when set, though no provider routes there yet.
+    pub staged: Vec<(&'static str, &'static str, &'static str)>,
+    /// When requests on a credits gateway start to be credits (RFC 3339); its earlier logs were
+    /// paid with stored keys.
+    pub credits_since: String,
     /// Where a person sets a key, such as `https://platform.pigeon.dev/secrets`.
     pub secrets_page: String,
     /// The platform's hostname, which a job's notify may not point at.
@@ -150,9 +156,59 @@ pub struct Models {
     pub proxy_host: String,
 }
 
+/// An AI gateway pigeon uses, and who pays for what goes through it.
+#[derive(Clone, Debug)]
+pub struct Gateway {
+    /// The gateway's ID, such as `pigeon`.
+    pub id: String,
+    /// Whether it bills stored keys or Cloudflare credits.
+    pub kind: GatewayKind,
+}
+
+/// Who pays for a provider's requests.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum Route {
+    /// A key stored on the gateway, the person's own.
+    Byok,
+    /// Cloudflare credits (Unified Billing).
+    Credits,
+}
+
+impl Route {
+    /// The route's name in answers: `byok` or `credits`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Route::Byok => "byok",
+            Route::Credits => "credits",
+        }
+    }
+}
+
+/// How a log is labelled: the provider name and route it counts under. A log of a BYOK gateway,
+/// or of a credits gateway before `credits_since` (RFC 3339, compared as text), is the log's
+/// provider by key; a credits log from then on is `cf-{provider}` by credits. Pure.
+pub fn route_of(
+    kind: GatewayKind,
+    log_provider: &str,
+    created_at: &str,
+    credits_since: &str,
+) -> (String, Route) {
+    if kind == GatewayKind::Credits && created_at >= credits_since {
+        (format!("cf-{log_provider}"), Route::Credits)
+    } else {
+        (log_provider.to_string(), Route::Byok)
+    }
+}
+
 /// A provider as the gateway knows it.
 pub struct Provider {
-    /// The gateway's name for it, such as `anthropic`.
+    /// What callers select it by and choices list, such as `cf-anthropic`.
+    pub name: &'static str,
+    /// The gateway it goes through, by ID.
+    pub gateway: &'static str,
+    /// Who pays: a stored key, or credits.
+    pub route: Route,
+    /// The gateway's name for it (its path), such as `anthropic`.
     pub slug: &'static str,
     /// Which of its keys, such as `default`.
     pub alias: &'static str,
@@ -484,13 +540,94 @@ fn dimensions(args: &Value) -> Result<Vec<Dimension>> {
     Ok(out)
 }
 
+/// A key slot: a stored key a gateway uses for a provider, under an alias.
+struct Slot {
+    gateway: &'static str,
+    slug: &'static str,
+    alias: &'static str,
+    /// Where to get the key.
+    help: &'static str,
+    /// How the provider is spoken to, for checking a key.
+    dialect: Dialect,
+}
+
+/// How long a credits gateway's reading is kept in one isolate.
+const GUARD_TTL_MS: f64 = 300_000.0;
+
+type Guarded = (f64, Value, Vec<ai_gateway::ProviderConfig>);
+
+thread_local! {
+    static GUARDED: std::cell::RefCell<std::collections::HashMap<String, Guarded>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Refuses a credits request to `slug` on `gateway` unless the gateway would really bill credits:
+/// see [`ai_gateway::credits_guard`]. The gateway and its keys are read at most every 5 minutes
+/// per isolate.
+pub async fn guard_credits(account: &Account, gateway: &str, slug: &str) -> Result<()> {
+    let fresh = GUARDED.with(|g| {
+        g.borrow()
+            .get(gateway)
+            .filter(|(at, ..)| Date::now() - at < GUARD_TTL_MS)
+            .cloned()
+    });
+    let (_, settings, configs) = match fresh {
+        Some(g) => g,
+        None => {
+            let settings = ai_gateway::gateway_settings(account, gateway).await?;
+            let configs = ai_gateway::provider_configs(account, gateway).await?;
+            let read = (Date::now(), settings, configs);
+            GUARDED.with(|g| g.borrow_mut().insert(gateway.to_string(), read.clone()));
+            read
+        }
+    };
+    ai_gateway::credits_guard(&settings, &configs, slug).map_err(|e| bad(&e))
+}
+
 impl Models {
-    fn secret(&self, p: &Provider) -> String {
-        ai_gateway::secret_name(&self.gateway, p.slug, p.alias)
+    /// The key slots: every BYOK provider's, then the staged ones.
+    fn slots(&self) -> Vec<Slot> {
+        let mut out: Vec<Slot> = self
+            .providers
+            .iter()
+            .filter(|p| p.route == Route::Byok)
+            .map(|p| Slot {
+                gateway: p.gateway,
+                slug: p.slug,
+                alias: p.alias,
+                help: p.key_help,
+                dialect: p.dialect,
+            })
+            .collect();
+        for (gateway, slug, alias) in &self.staged {
+            if let Some(p) = self.providers.iter().find(|p| p.slug == *slug) {
+                out.push(Slot {
+                    gateway,
+                    slug,
+                    alias,
+                    help: p.key_help,
+                    dialect: p.dialect,
+                });
+            }
+        }
+        out
     }
 
-    fn provider(&self, slug: Option<&str>) -> Result<&Provider> {
-        match slug {
+    fn secret(&self, s: &Slot) -> String {
+        ai_gateway::secret_name(s.gateway, s.slug, s.alias)
+    }
+
+    /// The gateway `id`'s kind; Byok when it is not declared.
+    fn kind_of(&self, id: &str) -> GatewayKind {
+        self.gateways
+            .iter()
+            .find(|g| g.id == id)
+            .map_or(GatewayKind::Byok, |g| g.kind)
+    }
+
+    /// The provider called `name`; the first when none is named.
+    fn provider(&self, name: Option<&str>) -> Result<&Provider> {
+        match name {
             None => self
                 .providers
                 .first()
@@ -498,39 +635,59 @@ impl Models {
             Some(s) => self
                 .providers
                 .iter()
-                .find(|p| p.slug == s)
+                .find(|p| p.name == s)
                 .ok_or_else(|| bad(&format!("no provider `{s}`"))),
         }
     }
 
-    /// The gateway, and every provider's key handed to it where the key is set.
+    /// Every gateway, and every key slot's key handed to its gateway where the key is set.
     async fn setup(&self, account: &Account) -> Result<Value> {
-        let gateway = ai_gateway::ensure(account, &self.gateway).await?;
+        let mut ensured = Vec::new();
+        for g in &self.gateways {
+            ensured.push(ai_gateway::ensure(account, &g.id, g.kind).await?);
+        }
         let writer = Writer::open(account).await?;
         let stored = writer.list().await;
         let stored = writer.finish(stored).await?;
         let mut providers = Vec::new();
-        for p in &self.providers {
-            let name = self.secret(p);
+        for p in self.slots() {
+            let name = self.secret(&p);
             let state = match stored.iter().find(|s| s.name == name) {
                 Some(s) => {
                     let added =
-                        ai_gateway::ensure_provider(account, &self.gateway, p.slug, p.alias, &s.id)
+                        ai_gateway::ensure_provider(account, p.gateway, p.slug, p.alias, &s.id)
                             .await?;
-                    json!({ "provider": p.slug, "alias": p.alias, "key": "set", "added_to_gateway": added })
+                    json!({ "gateway": p.gateway, "provider": p.slug, "alias": p.alias, "key": "set", "added_to_gateway": added })
                 }
                 None => json!({
-                    "provider": p.slug, "alias": p.alias, "key": "missing",
+                    "gateway": p.gateway, "provider": p.slug, "alias": p.alias, "key": "missing",
                     "set_it_at": format!("{}#{name}", self.secrets_page),
                 }),
             };
             providers.push(state);
         }
-        Ok(json!({ "gateway": gateway, "providers": providers }))
+        // The keys each gateway holds are read after the new ones were handed over.
+        let mut gateways = Vec::new();
+        for (g, mut e) in self.gateways.iter().zip(ensured) {
+            let configs = ai_gateway::provider_configs(account, &g.id).await?;
+            let declared: Vec<&str> = self
+                .slots()
+                .iter()
+                .filter(|s| s.gateway == g.id)
+                .map(|s| s.slug)
+                .collect();
+            e.drift
+                .extend(ai_gateway::stored_key_drift(g.kind, &configs, &declared));
+            gateways.push(json!({ "kind": g.kind, "gateway": e }));
+        }
+        Ok(json!({ "gateways": gateways, "providers": providers }))
     }
 
     async fn run(&self, account: &Account, caller: &Value, args: &Value) -> Result<Value> {
         let p = self.provider(args["provider"].as_str())?;
+        if p.route == Route::Credits {
+            guard_credits(account, p.gateway, p.slug).await?;
+        }
         let raw = args.get("raw").filter(|r| r.is_object());
         let body = match raw {
             Some(r) => r.clone(),
@@ -540,7 +697,7 @@ impl Models {
         let tags: Vec<(&str, &str)> = tags.iter().map(|(k, v)| (*k, v.as_str())).collect();
         let ran = ai_gateway::run(
             account,
-            &self.gateway,
+            p.gateway,
             p.slug,
             p.dialect.path(),
             p.dialect.headers(),
@@ -549,17 +706,69 @@ impl Models {
         )
         .await?;
         if !(200..300).contains(&ran.status) {
+            if p.route == Route::Credits
+                && let Some(plain) = ai_gateway::error_code(&ran.body)
+                    .and_then(|c| ai_gateway::credits_error(ran.status, c))
+            {
+                return Err(bad(&plain));
+            }
             return Err(bad(&format!(
                 "{} answered {}: {}",
-                p.slug, ran.status, ran.body
+                p.name, ran.status, ran.body
             )));
         }
         if raw.is_some() {
             return Ok(ran.body);
         }
         let mut reply = to_value(p.dialect.reply(&ran.body)?);
-        reply["provider"] = json!(p.slug);
+        reply["provider"] = json!(p.name);
         Ok(reply)
+    }
+
+    /// Every declared gateway's logs since `since_ms`, each with its kind and whether the read
+    /// stopped at `max`; Byok gateways first.
+    async fn gateway_logs(
+        &self,
+        account: &Account,
+        since_ms: f64,
+        filter: &Filter,
+        max: usize,
+    ) -> Result<Vec<daily::GatewayLogs>> {
+        let mut order: Vec<&Gateway> = self.gateways.iter().collect();
+        order.sort_by_key(|g| g.kind == GatewayKind::Credits);
+        let mut out = Vec::new();
+        for g in order {
+            let logs = ai_gateway::logs(account, &g.id, since_ms, filter, max).await?;
+            out.push(daily::GatewayLogs {
+                id: g.id.clone(),
+                kind: g.kind,
+                truncated: logs.len() >= max,
+                logs,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Every gateway's logs in one list, each log's provider replaced by its [`route_of`] name,
+    /// newest first.
+    async fn labelled_logs(
+        &self,
+        account: &Account,
+        since_ms: f64,
+        filter: &Filter,
+        max: usize,
+    ) -> Result<Vec<ai_gateway::Log>> {
+        let mut all = Vec::new();
+        for g in self.gateway_logs(account, since_ms, filter, max).await? {
+            for mut log in g.logs {
+                log.provider =
+                    route_of(g.kind, &log.provider, &log.created_at, &self.credits_since).0;
+                all.push(log);
+            }
+        }
+        all.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        all.truncate(max);
+        Ok(all)
     }
 
     /// The gateway's latest log entries: what each request was, never what it said.
@@ -570,7 +779,9 @@ impl Models {
             .clamp(0.1, 24.0 * 31.0);
         let limit = log_limit(args);
         let since = Date::now() - hours * 3_600_000.0;
-        let logs = ai_gateway::logs(account, &self.gateway, since, &filter(args), limit).await?;
+        let logs = self
+            .labelled_logs(account, since, &filter(args), limit)
+            .await?;
         Ok(json!({
             "since": String::from(Date::new(&since.into()).to_iso_string()),
             "entries": logs.len(),
@@ -653,6 +864,8 @@ impl Models {
                 tags,
                 body,
                 timeout_ms,
+                gateway: Some(p.gateway.to_string()),
+                credits: p.route == Route::Credits,
             },
         };
         let mut out =
@@ -677,11 +890,33 @@ impl Models {
         .await
     }
 
-    /// `models_cost`: the gateway's own cost of each request, by its log id.
+    /// `models_cost`: the gateway's own cost of each request, by its log id, looked up on every
+    /// declared gateway (Byok first); the first that has a log answers for it.
     async fn cost(&self, account: &Account, args: &Value) -> Result<Value> {
         let ids = log_ids(args)?;
-        let lookups = ai_gateway::log_costs(account, &self.gateway, &ids).await?;
-        Ok(ai_gateway::cost_answer(&ids, &lookups))
+        let mut order: Vec<&Gateway> = self.gateways.iter().collect();
+        order.sort_by_key(|g| g.kind == GatewayKind::Credits);
+        let mut merged: Vec<ai_gateway::LogLookup> =
+            vec![ai_gateway::LogLookup::NotFound; ids.len()];
+        for g in order {
+            let missing: Vec<usize> = (0..ids.len())
+                .filter(|i| !matches!(merged[*i], ai_gateway::LogLookup::Found(_)))
+                .collect();
+            if missing.is_empty() {
+                break;
+            }
+            let wanted: Vec<String> = missing.iter().map(|i| ids[*i].clone()).collect();
+            let looked = ai_gateway::log_costs(account, &g.id, &wanted).await?;
+            for (i, l) in missing.into_iter().zip(looked) {
+                // A failure is kept only where no gateway has found the log.
+                if matches!(l, ai_gateway::LogLookup::Found(_))
+                    || !matches!(l, ai_gateway::LogLookup::NotFound)
+                {
+                    merged[i] = l;
+                }
+            }
+        }
+        Ok(ai_gateway::cost_answer(&ids, &merged))
     }
 
     /// `models_usage`: the gateway's logs and the model gateway's cache tokens, added up.
@@ -694,7 +929,7 @@ impl Models {
         let filter = filter(args);
         let since = Date::now() - hours * 3_600_000.0;
         let prefix = args["task_prefix"].as_str().filter(|p| !p.is_empty());
-        let mut logs = ai_gateway::logs(account, &self.gateway, since, &filter, 2_000).await?;
+        let mut logs = self.labelled_logs(account, since, &filter, 2_000).await?;
         if let Some(prefix) = prefix {
             logs.retain(|l| {
                 l.metadata
@@ -746,23 +981,24 @@ impl Models {
 }
 
 impl Models {
-    /// `models_daily`: the gateway's cost per UTC day over the last `days` days (1 to 31), by
-    /// model family and by AI agent run.
+    /// `models_daily`: every gateway's cost per UTC day over the last `days` days (1 to 31), by
+    /// model family, provider name, route and AI agent run.
     async fn daily_by_run(&self, account: &Account, args: &Value) -> Result<Value> {
         let days = args["days"].as_u64().unwrap_or(7).clamp(1, 31) as usize;
         let now = Date::new_0();
         let today = String::from(now.to_iso_string());
         let since = now.get_time() - (days as f64) * 86_400_000.0;
-        let logs = ai_gateway::logs(
-            account,
-            &self.gateway,
-            since,
-            &Filter::default(),
-            CHART_LOGS,
-        )
-        .await?;
-        let mut answer = to_value(daily::daily_by_run(&logs, &today, days));
-        answer["truncated"] = json!(logs.len() >= CHART_LOGS);
+        let gateways = self
+            .gateway_logs(account, since, &Filter::default(), CHART_LOGS)
+            .await?;
+        let truncated = gateways.iter().any(|g| g.truncated);
+        let mut answer = to_value(daily::daily_by_gateways(
+            &gateways,
+            &today,
+            days,
+            &self.credits_since,
+        ));
+        answer["truncated"] = json!(truncated);
         Ok(answer)
     }
 }
@@ -836,7 +1072,7 @@ impl Models {
                 .ok_or_else(|| bad("no provider has a billing source"))?,
         };
         if p.billing != Some(Billing::AnthropicAdmin) {
-            return Err(bad(&format!("`{}` has no billing source", p.slug)));
+            return Err(bad(&format!("`{}` has no billing source", p.name)));
         }
         let n = args["days"].as_u64().unwrap_or(7).clamp(1, 31) as usize;
         let key = admin_key(env).await?;
@@ -928,7 +1164,7 @@ impl Models {
 
     /// The MCP tools the capability offers.
     pub fn tools(&self) -> Vec<Tool> {
-        let slugs: Vec<&str> = self.providers.iter().map(|p| p.slug).collect();
+        let slugs: Vec<&str> = self.providers.iter().map(|p| p.name).collect();
         vec![
             Tool::bare(
                 "models_setup",
@@ -1133,13 +1369,13 @@ impl Models {
     /// The secrets the capability needs set: each provider's key, readable by the AI gateway.
     pub fn secrets(&self) -> Vec<SlotSpec> {
         let mut out: Vec<SlotSpec> = self
-            .providers
+            .slots()
             .iter()
             .map(|p| SlotSpec {
                 name: self.secret(p),
                 purpose: format!(
                     "The {} key the AI gateway `{}` uses for alias `{}`. {}",
-                    p.slug, self.gateway, p.alias, p.key_help
+                    p.slug, p.gateway, p.alias, p.help
                 ),
                 scopes: vec![SECRET_SCOPE.to_string()],
             })
@@ -1185,8 +1421,8 @@ impl Models {
             }],
             routes: Vec::new(),
             footprint: json!({
-                "gateways": [self.gateway],
-                "externals": [{ "name": "AI Gateway", "kind": "model gateway", "detail": format!("gateway {}", self.gateway) }],
+                "gateways": self.gateways.iter().map(|g| g.id.clone()).collect::<Vec<_>>(),
+                "externals": self.gateways.iter().map(|g| json!({ "name": "AI Gateway", "kind": "model gateway", "detail": format!("gateway {}", g.id) })).collect::<Vec<_>>(),
             }),
             secrets: self.secrets(),
             wants: Vec::new(),
@@ -1208,7 +1444,12 @@ impl Models {
         Ok(match tool {
             "models_setup" => self.setup(account()?).await?,
             "models_providers" => {
-                to_value(ai_gateway::provider_configs(account()?, &self.gateway).await?)
+                let mut out = serde_json::Map::new();
+                for g in &self.gateways {
+                    let configs = ai_gateway::provider_configs(account()?, &g.id).await?;
+                    out.insert(g.id.clone(), to_value(configs));
+                }
+                Value::Object(out)
             }
             "models_run" => self.run(account()?, caller, args).await?,
             "models_usage" => self.usage(env, account()?, args).await?,
@@ -1232,24 +1473,21 @@ impl Models {
         let today = String::from(now.to_iso_string());
         // Reaching back past the start of the window's first UTC day; daily() trims.
         let since = now.get_time() - (days as f64) * 86_400_000.0;
-        let logs = ai_gateway::logs(
-            account,
-            &self.gateway,
-            since,
-            &Filter::default(),
-            CHART_LOGS,
-        )
-        .await?;
+        let gateways = self
+            .gateway_logs(account, since, &Filter::default(), CHART_LOGS)
+            .await?;
+        let truncated = gateways.iter().any(|g| g.truncated);
+        let logs: Vec<ai_gateway::Log> = gateways.into_iter().flat_map(|g| g.logs).collect();
         let mut answer = to_value(daily::daily(&logs, &today, days));
-        answer["truncated"] = json!(logs.len() >= CHART_LOGS);
+        answer["truncated"] = json!(truncated);
         Ok(answer)
     }
 
-    /// The provider whose key is secret `name`.
-    fn keyed(&self, name: &str) -> Result<&Provider> {
-        self.providers
-            .iter()
-            .find(|p| self.secret(p) == name)
+    /// The key slot for secret `name`.
+    fn keyed(&self, name: &str) -> Result<Slot> {
+        self.slots()
+            .into_iter()
+            .find(|s| self.secret(s) == name)
             .ok_or_else(|| bad("no provider uses this secret"))
     }
 
@@ -1308,16 +1546,12 @@ impl Models {
             return Ok(ADMIN_SET_NOTE.into());
         }
         let p = self.keyed(name)?;
-        ai_gateway::ensure(account, &self.gateway).await?;
-        let added =
-            ai_gateway::ensure_provider(account, &self.gateway, p.slug, p.alias, id).await?;
+        ai_gateway::ensure(account, p.gateway, self.kind_of(p.gateway)).await?;
+        let added = ai_gateway::ensure_provider(account, p.gateway, p.slug, p.alias, id).await?;
         Ok(if added {
-            format!("the gateway `{}` now uses it for {}", self.gateway, p.slug)
+            format!("the gateway `{}` now uses it for {}", p.gateway, p.slug)
         } else {
-            format!(
-                "the gateway `{}` already used it for {}",
-                self.gateway, p.slug
-            )
+            format!("the gateway `{}` already used it for {}", p.gateway, p.slug)
         })
     }
 }

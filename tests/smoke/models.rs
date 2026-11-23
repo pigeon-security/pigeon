@@ -8,6 +8,9 @@ fn models_request() {
     use pigeon_models::stream::Reading;
     use pigeon_models::{Dialect, Provider, ask};
     let provider = Provider {
+        name: "anthropic",
+        gateway: "pigeon",
+        route: pigeon_models::Route::Byok,
         slug: "anthropic",
         alias: "default",
         dialect: Dialect::Anthropic,
