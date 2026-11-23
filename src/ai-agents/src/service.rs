@@ -201,21 +201,34 @@ impl Agents {
                 )
                 .await)
             }
-            "ai_agents_status" => match a["run"].as_str() {
-                Some(run) => {
-                    r(
-                        object::call(env, INDEX, "get", &json!({ "run": run, "reader": reader }))
-                            .await,
+            "ai_agents_status" => {
+                let opts = shape_args(a)?;
+                match a["run"].as_str() {
+                    Some(run) => r(object::call(
+                        env,
+                        INDEX,
+                        "get",
+                        &json!({ "run": run, "reader": reader }),
                     )
+                    .await)
+                    .map(|v| shape(&v, &opts)),
+                    None => {
+                        let mut v = r(object::call(
+                            env,
+                            INDEX,
+                            "list",
+                            &json!({
+                                "reader": reader,
+                                "limit": a["limit"],
+                                "live": a["live"].as_bool().unwrap_or(false),
+                            }),
+                        )
+                        .await)?;
+                        shape_list(&mut v, "runs", &opts);
+                        Ok(v)
+                    }
                 }
-                None => r(object::call(
-                    env,
-                    INDEX,
-                    "list",
-                    &json!({ "reader": reader, "limit": a["limit"] }),
-                )
-                .await),
-            },
+            }
             "ai_agents_stop" => {
                 if a["run"].is_null() && a["all"] != true {
                     return Err("give `run`, or `all: true` to stop every live run of yours".into());
@@ -234,13 +247,19 @@ impl Agents {
                 r(object::call(env, INDEX, "pause", &json!({ "paused": on })).await)
                     .map(|_| pause_answer(on))
             }
-            "ai_agents_inbox" => r(object::call(
-                env,
-                INDEX,
-                "inbox",
-                &json!({ "reader": reader, "since": a["since"].as_i64().unwrap_or(0) }),
-            )
-            .await),
+            "ai_agents_inbox" => {
+                let opts = shape_args(a)?;
+                let mut v = r(object::call(
+                    env,
+                    INDEX,
+                    "inbox",
+                    &json!({ "reader": reader, "since": a["since"].as_i64().unwrap_or(0) }),
+                )
+                .await)?;
+                shape_list(&mut v, "waiting", &opts);
+                shape_list(&mut v, "ended", &opts);
+                Ok(v)
+            }
             "ai_agents_answer" => {
                 let (Some(run), Some(answer)) = (a["run"].as_str(), a["answer"].as_str()) else {
                     return Err("give `run` and `answer`".into());
@@ -266,6 +285,13 @@ impl Agents {
             "ai_agents_note" => {
                 let run = a["run"].as_str().ok_or("give `run`")?;
                 let text = note(a)?;
+                let text = if a["event"].as_bool().unwrap_or(false) {
+                    format!("{}{text}", crate::transcript::EVENT_MARKER)
+                } else if text.starts_with(crate::transcript::EVENT_MARKER) {
+                    return Err("`text` must not start with a control character".into());
+                } else {
+                    text
+                };
                 r(object::call(
                     env,
                     INDEX,
@@ -409,12 +435,18 @@ impl Service for Agents {
                         "ai_agents_status",
                         "One run (with `run`): its state, current step, what it waits for, its \
                          spending against its budget, its branch and its report. Without \
-                         `run`, your recent runs and whether runs are paused.",
+                         `run`, your recent runs and whether runs are paused. Size options: \
+                         `brief` false or \"line\", `report` \"short\" or false, `fields` (keys \
+                         to keep; `run` always stays).",
                         json!({
                             "type": "object",
                             "properties": {
                                 "run": { "type": "string" },
-                                "limit": { "type": "integer", "description": "20 by default, 100 at most." }
+                                "limit": { "type": "integer", "description": "20 by default, 100 at most." },
+                                "live": { "type": "boolean", "description": "List only runs that have not ended." },
+                                "brief": { "description": "true (default), false, or \"line\" (first line, 100 characters)." },
+                                "report": { "description": "\"full\" (default), \"short\" (first line, 200 characters) or false." },
+                                "fields": { "type": "array", "items": { "type": "string" }, "description": "Top-level keys to keep." }
                             }
                         }),
                     ),
@@ -448,10 +480,16 @@ impl Service for Agents {
                         "What waits for the person (runs' questions and passkey waits) and \
                          the runs that ended since `since` (ms), with their reports. Read it \
                          when the person writes and after starting a run; relay questions \
-                         and reports to them; pass `next_since` next time.",
+                         and reports to them; pass `next_since` next time. Takes the size \
+                         options of ai_agents_status (`brief`, `report`, `fields`).",
                         json!({
                             "type": "object",
-                            "properties": { "since": { "type": "integer" } }
+                            "properties": {
+                                "since": { "type": "integer" },
+                                "brief": { "description": "true (default), false, or \"line\"." },
+                                "report": { "description": "\"full\" (default), \"short\" or false." },
+                                "fields": { "type": "array", "items": { "type": "string" } }
+                            }
                         }),
                     ),
                     tool(
@@ -490,12 +528,14 @@ impl Service for Agents {
                         "Send a live run a short note from the person (at most 4000 bytes). It \
                          goes into the run's next turn as a message of its own, kept in its \
                          transcript; it does not answer a pending question (ai_agents_answer \
-                         does).",
+                         does). With `event: true` it reads as an event from pigeon, not the \
+                         person.",
                         json!({
                             "type": "object",
                             "properties": {
                                 "run": { "type": "string" },
-                                "text": { "type": "string" }
+                                "text": { "type": "string" },
+                                "event": { "type": "boolean", "description": "Deliver as an event from pigeon." }
                             },
                             "required": ["run", "text"]
                         }),
@@ -659,4 +699,137 @@ pub fn note(a: &Value) -> Result<String, String> {
         ));
     }
     Ok(text.to_string())
+}
+
+/// How `ai_agents_status` and `ai_agents_inbox` show a run's brief.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BriefShape {
+    /// As stored (up to 300 characters).
+    Full,
+    /// Left out.
+    Drop,
+    /// Its first line, at most 100 characters.
+    Line,
+}
+
+/// How `ai_agents_status` and `ai_agents_inbox` show a run's report.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReportShape {
+    /// As stored.
+    Full,
+    /// Its first line, at most 200 characters.
+    Short,
+    /// Left out.
+    Drop,
+}
+
+/// The size options of `ai_agents_status` and `ai_agents_inbox`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Shape {
+    /// What to show of the brief.
+    pub brief: BriefShape,
+    /// What to show of the report.
+    pub report: ReportShape,
+    /// The top-level keys to keep (`run` is always kept); all when `None`.
+    pub fields: Option<Vec<String>>,
+}
+
+impl Default for Shape {
+    fn default() -> Self {
+        Shape {
+            brief: BriefShape::Full,
+            report: ReportShape::Full,
+            fields: None,
+        }
+    }
+}
+
+/// Reads the size options `brief`, `report` and `fields` from a call's arguments.
+pub fn shape_args(a: &Value) -> Result<Shape, String> {
+    let brief = match &a["brief"] {
+        Value::Null | Value::Bool(true) => BriefShape::Full,
+        Value::Bool(false) => BriefShape::Drop,
+        Value::String(s) if s == "line" => BriefShape::Line,
+        _ => return Err("`brief` must be true, false or \"line\"".into()),
+    };
+    let report = match &a["report"] {
+        Value::Null => ReportShape::Full,
+        Value::Bool(false) => ReportShape::Drop,
+        Value::String(s) if s == "full" => ReportShape::Full,
+        Value::String(s) if s == "short" => ReportShape::Short,
+        _ => return Err("`report` must be \"full\", \"short\" or false".into()),
+    };
+    let fields = match &a["fields"] {
+        Value::Null => None,
+        Value::Array(items) => {
+            let mut keys = Vec::new();
+            for item in items {
+                keys.push(
+                    item.as_str()
+                        .ok_or("`fields` must be an array of strings")?
+                        .to_string(),
+                );
+            }
+            Some(keys)
+        }
+        _ => return Err("`fields` must be an array of strings".into()),
+    };
+    Ok(Shape {
+        brief,
+        report,
+        fields,
+    })
+}
+
+/// The first line of `text`, cut to at most `max` characters.
+fn first_line(text: &str, max: usize) -> String {
+    text.lines()
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .take(max)
+        .collect()
+}
+
+/// Shapes one run's status by `opts`: the brief and report as asked, then only the wanted keys.
+pub fn shape(run: &Value, opts: &Shape) -> Value {
+    let Some(obj) = run.as_object() else {
+        return run.clone();
+    };
+    let mut out = obj.clone();
+    match opts.brief {
+        BriefShape::Full => {}
+        BriefShape::Drop => {
+            out.remove("brief");
+        }
+        BriefShape::Line => {
+            if let Some(b) = obj.get("brief").and_then(Value::as_str) {
+                out.insert("brief".into(), json!(first_line(b, 100)));
+            }
+        }
+    }
+    match opts.report {
+        ReportShape::Full => {}
+        ReportShape::Drop => {
+            out.remove("report");
+        }
+        ReportShape::Short => {
+            if let Some(r) = obj.get("report").and_then(Value::as_str) {
+                out.insert("report".into(), json!(first_line(r, 200)));
+            }
+        }
+    }
+    if let Some(keys) = &opts.fields {
+        out.retain(|k, _| k == "run" || keys.iter().any(|f| f == k));
+    }
+    Value::Object(out)
+}
+
+/// Shapes the runs listed under `key` in an answer (`runs`, `waiting`, `ended`).
+fn shape_list(answer: &mut Value, key: &str, opts: &Shape) {
+    if let Some(list) = answer[key].as_array_mut() {
+        for run in list.iter_mut() {
+            *run = shape(run, opts);
+        }
+    }
 }

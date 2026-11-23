@@ -1689,3 +1689,128 @@ fn ai_agents_commit_push_pushes_local_commits_with_lease() {
         "pushed c0ffee"
     );
 }
+
+#[test]
+fn ai_agents_status_shape_options() {
+    use pigeon_ai_agents::service::{BriefShape, ReportShape, Shape, shape, shape_args};
+    assert_eq!(shape_args(&json!({})).unwrap(), Shape::default());
+    let s =
+        shape_args(&json!({ "brief": "line", "report": "short", "fields": ["state"] })).unwrap();
+    assert_eq!(s.brief, BriefShape::Line);
+    assert_eq!(s.report, ReportShape::Short);
+    assert_eq!(s.fields, Some(vec!["state".to_string()]));
+    assert_eq!(
+        shape_args(&json!({ "brief": false })).unwrap().brief,
+        BriefShape::Drop
+    );
+    assert_eq!(
+        shape_args(&json!({ "report": false })).unwrap().report,
+        ReportShape::Drop
+    );
+    assert!(shape_args(&json!({ "brief": "x" })).is_err());
+    assert!(shape_args(&json!({ "report": true })).is_err());
+    assert!(shape_args(&json!({ "fields": "run" })).is_err());
+    assert!(shape_args(&json!({ "fields": [1] })).is_err());
+
+    let long = "a".repeat(500);
+    let run = json!({
+        "run": "r1", "state": "done", "step": "x",
+        "brief": format!("{long}\nsecond"), "report": format!("{long}\nmore"),
+    });
+    assert_eq!(shape(&run, &Shape::default()), run);
+    let line = shape(
+        &run,
+        &shape_args(&json!({ "brief": "line", "report": "short" })).unwrap(),
+    );
+    assert_eq!(line["brief"].as_str().unwrap().len(), 100);
+    assert_eq!(line["report"].as_str().unwrap().len(), 200);
+    let dropped = shape(
+        &run,
+        &shape_args(&json!({ "brief": false, "report": false })).unwrap(),
+    );
+    assert!(dropped.get("brief").is_none() && dropped.get("report").is_none());
+    assert_eq!(dropped["state"], "done");
+    let kept = shape(
+        &run,
+        &shape_args(&json!({ "fields": ["state", "nope"] })).unwrap(),
+    );
+    assert_eq!(kept, json!({ "run": "r1", "state": "done" }));
+}
+
+#[test]
+fn ai_agents_event_notes_and_wait_events() {
+    use pigeon_ai_agents::Role;
+    use pigeon_ai_agents::run::{self, Action, State, View, Wait};
+    use pigeon_ai_agents::tools::{self, Kind};
+    use pigeon_ai_agents::transcript;
+
+    // The marker round-trips through with_notes as an event, and a plain note stays a note.
+    let event = format!("{}landing l1 merged", transcript::EVENT_MARKER);
+    let (m, _) = transcript::with_notes(None, &[event, "hello".to_string()]);
+    let first = m["content"][0]["text"].as_str().unwrap();
+    assert_eq!(first, transcript::event_text("landing l1 merged"));
+    assert!(first.starts_with("An event from pigeon (not the person)"));
+    assert!(
+        m["content"][1]["text"]
+            .as_str()
+            .unwrap()
+            .contains("A note from the person")
+    );
+
+    // run::next checks Wait::Events as often as Wait::Executors.
+    let wait = Wait::Events { since: 1, until: 2 };
+    let view = View {
+        state: State::Waiting,
+        stop_asked: false,
+        paused: false,
+        job: None,
+        calls: &[],
+        turns: 1,
+        stop_reason: None,
+        reported: None,
+        nudges: 0,
+        user_last: false,
+        last_turn: false,
+        waiting: Some(&wait),
+    };
+    assert_eq!(
+        run::next(&view),
+        Action::Check {
+            after_ms: run::EXECUTORS_EVERY_MS
+        }
+    );
+    let s = serde_json::to_value(&wait).unwrap();
+    assert_eq!(s, json!({ "for": "events", "since": 1, "until": 2 }));
+    assert_eq!(serde_json::from_value::<Wait>(s).unwrap(), wait);
+    assert_eq!(
+        serde_json::from_value::<Wait>(json!({ "for": "events" })).unwrap(),
+        Wait::Events { since: 0, until: 0 }
+    );
+
+    // Who is offered what.
+    assert_eq!(tools::kind(Role::Planner, "wait_events"), Some(Kind::Agent));
+    assert_eq!(tools::kind(Role::Executor, "wait_events"), None);
+    for t in ["land_list", "land_watch", "work_status"] {
+        assert_eq!(tools::kind(Role::Planner, t), Some(Kind::Pigeon), "{t}");
+    }
+    assert_eq!(
+        tools::kind(Role::Executor, "work_status"),
+        Some(Kind::Pigeon)
+    );
+    assert_eq!(
+        tools::kind(Role::Mechanical, "land_list"),
+        Some(Kind::Pigeon)
+    );
+    assert_eq!(tools::kind(Role::Executor, "land_watch"), None);
+    assert!(tools::idempotent("work_status") && tools::idempotent("land_list"));
+    assert!(!tools::idempotent("land_watch"));
+
+    // `minutes` is 1 to 120.
+    let ok = |v: serde_json::Value| tools::check(Role::Planner, "wait_events", &v);
+    assert!(ok(json!({})).is_ok());
+    assert!(ok(json!({ "minutes": 1 })).is_ok());
+    assert!(ok(json!({ "minutes": 120 })).is_ok());
+    assert!(ok(json!({ "minutes": 0 })).is_err());
+    assert!(ok(json!({ "minutes": 121 })).is_err());
+    assert!(ok(json!({ "minutes": "5" })).is_err());
+}

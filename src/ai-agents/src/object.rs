@@ -509,6 +509,13 @@ impl AiAgentRuns {
                     .unwrap_or_default();
                 notes.push(s("text"));
                 self.set("notes = ?", vec![json!(notes).to_string().into()])?;
+                let waiting: Option<Wait> = row
+                    .waiting
+                    .as_deref()
+                    .and_then(|w| serde_json::from_str(w).ok());
+                if matches!(waiting, Some(Wait::Executors { .. } | Wait::Events { .. })) {
+                    self.state.storage().set_alarm(0).await?;
+                }
                 Ok(json!({ "queued": notes.len() }))
             }
             "halt" => {
@@ -734,8 +741,13 @@ impl AiAgentRuns {
     fn list(&self, a: &Value) -> Result<Value> {
         let reader = a["reader"].as_str().unwrap_or_default();
         let limit = a["limit"].as_i64().unwrap_or(20).clamp(1, 100);
+        let live = a["live"].as_bool().unwrap_or(false);
         let rows: Vec<Row> = self.db.rows(
-            "SELECT * FROM runs WHERE by_id = ? OR for_id = ? ORDER BY created_at DESC LIMIT ?",
+            if live {
+                "SELECT * FROM runs WHERE (by_id = ? OR for_id = ?) AND ended_at IS NULL ORDER BY created_at DESC LIMIT ?"
+            } else {
+                "SELECT * FROM runs WHERE by_id = ? OR for_id = ? ORDER BY created_at DESC LIMIT ?"
+            },
             vec![reader.into(), reader.into(), limit.into()],
         )?;
         Ok(json!({
@@ -1044,6 +1056,32 @@ impl AiAgentRuns {
         Ok(())
     }
 
+    /// Whether notes or events wait in the run's queue, read fresh.
+    fn notes_queued(&self) -> Result<bool> {
+        Ok(self.run_row()?.is_some_and(|r| {
+            r.notes
+                .as_deref()
+                .and_then(|n| serde_json::from_str::<Vec<String>>(n).ok())
+                .is_some_and(|n| !n.is_empty())
+        }))
+    }
+
+    /// Ends a wait: answers the waiting call `name` with `summary`, or, with no such call,
+    /// puts the run back to work.
+    async fn finish_wait(&self, name: &str, row: &RunRow, summary: &str) -> Result<()> {
+        let waiting_call = self
+            .calls()?
+            .into_iter()
+            .find(|c| c.name == name && c.done == 0);
+        match waiting_call {
+            Some(c) => self.answered(row, &c.id, summary).await,
+            None => {
+                self.set("state = 'running', waiting = NULL", vec![])?;
+                self.state.storage().set_alarm(0).await
+            }
+        }
+    }
+
     /// Puts the notes queued by `ai_agents_note` in the transcript, before a turn.
     fn take_notes(&self) -> Result<()> {
         // Read now, not from the step's row: a note may have come in since.
@@ -1256,19 +1294,33 @@ impl AiAgentRuns {
                     let children =
                         call(&self.env, INDEX, "children", &json!({ "run": row.id })).await?;
                     self.refresh_executors(&row, &spent, &children).await?;
-                    if ended_since(&children, *since) || live_children(&children) == 0 {
-                        let summary = children_summary(&children, *since);
-                        let waiting_call = self
-                            .calls()?
-                            .into_iter()
-                            .find(|c| c.name == "wait_executors" && c.done == 0);
-                        match waiting_call {
-                            Some(c) => self.answered(&row, &c.id, &summary).await,
-                            None => {
-                                self.set("state = 'running', waiting = NULL", vec![])?;
-                                storage.set_alarm(0).await
-                            }
+                    let noted = self.notes_queued()?;
+                    if ended_since(&children, *since) || live_children(&children) == 0 || noted {
+                        let mut summary = children_summary(&children, *since);
+                        if noted {
+                            summary.push_str("\na note or event arrived; it follows");
                         }
+                        self.finish_wait("wait_executors", &row, &summary).await
+                    } else {
+                        storage.set_alarm(after_ms).await
+                    }
+                }
+                Some(Wait::Events { since, until }) => {
+                    let children =
+                        call(&self.env, INDEX, "children", &json!({ "run": row.id })).await?;
+                    self.refresh_executors(&row, &spent, &children).await?;
+                    let noted = self.notes_queued()?;
+                    let ended = ended_since(&children, *since);
+                    if ended || noted || now() >= *until {
+                        let why = if noted {
+                            "a note or event arrived; it follows"
+                        } else if ended {
+                            "an executor ended"
+                        } else {
+                            "the time ran out"
+                        };
+                        let summary = format!("{why}\n{}", children_summary(&children, *since));
+                        self.finish_wait("wait_events", &row, &summary).await
                     } else {
                         storage.set_alarm(after_ms).await
                     }
@@ -2080,6 +2132,27 @@ impl AiAgentRuns {
                     .await?;
                     return storage.set_alarm(run::EXECUTORS_EVERY_MS).await;
                 }
+            }
+            Some(Kind::Agent) if c.name == "wait_events" => {
+                let minutes = input["minutes"].as_i64().unwrap_or(30).clamp(1, 120);
+                let started = now();
+                let wait = Wait::Events {
+                    since: started,
+                    until: started + minutes * 60_000,
+                };
+                self.set(
+                    "state = 'waiting', waiting = ?",
+                    vec![serde_json::to_string(&wait)?.into()],
+                )?;
+                let mut r = row.clone();
+                r.state = "waiting".into();
+                self.tell(
+                    &r,
+                    &format!("waiting for events, up to {minutes} min"),
+                    json!({ "waiting": wait }),
+                )
+                .await?;
+                return storage.set_alarm(run::EXECUTORS_EVERY_MS).await;
             }
             Some(Kind::Agent) if c.name != "report" => {
                 self.planner_tool(row, &c.name, &input, budget, spent).await

@@ -1574,6 +1574,167 @@ fn land_portal_oauth_redirects_change_one_uri() {
     assert!(differences(&app, &same).is_empty());
 }
 
+#[test]
+fn core_land_compact_rows_and_events() {
+    use pigeon_capabilities::land::digest::{self, Detail};
+    use pigeon_capabilities::land::state::State;
+    use pigeon_capabilities::land::watch;
+
+    let row = json!({
+        "id": "1a2b3c4d5e6f7a8b", "branch": "refs/heads/claude/ai-agent-x",
+        "commit": "abc123def4567890abc123def4567890abc12345", "state": "merged",
+        "workers": ["core"], "updated_at": 5,
+        "detail": format!("first line\nsecond line {}", "x".repeat(400)),
+    });
+    let c = digest::compact(&row, true);
+    assert_eq!(c["branch"], "claude/ai-agent-x");
+    assert_eq!(c["commit"], "abc123def456");
+    assert_eq!(c["incident"], true);
+    let detail = c["detail"].as_str().unwrap();
+    assert_eq!(detail, "first line");
+    let long = digest::compact(&json!({ "detail": "y".repeat(500) }), false);
+    assert_eq!(long["detail"].as_str().unwrap().chars().count(), 160);
+
+    let full = json!({
+        "id": "a", "branch": "refs/heads/b", "state": "landed",
+        "steps": [
+            { "at": 1, "state": "checking", "detail": "one" },
+            { "at": 2, "state": "landed", "detail": "z".repeat(500) },
+        ],
+        "incidents": [{ "id": 3, "worker": "core", "state": "open", "summary": "long" }],
+        "queue": [],
+    });
+    let s = digest::compact_status(&full);
+    assert_eq!(s["last_step"]["state"], "landed");
+    assert_eq!(s["last_step"]["detail"].as_str().unwrap().len(), 200);
+    assert_eq!(
+        s["incidents"][0],
+        json!({ "id": 3, "worker": "core", "state": "open" })
+    );
+    assert_eq!(s["incident"], true);
+
+    let t = watch::event_text(
+        "1a2b3c4d5e6f7a8b",
+        "refs/heads/claude/ai-agent-x",
+        "abc123def456",
+        "merged",
+        "main moved",
+    );
+    assert!(t.contains("is now merged: main moved"));
+    assert!(t.contains("land_status"));
+    let big = watch::event_text("i", "b", "c", "error", &"é".repeat(2000));
+    assert!(big.len() <= watch::EVENT_BYTES);
+    assert!(watch::notable(State::Landed));
+    assert!(watch::notable(State::AwaitingApproval));
+    assert!(watch::notable(State::TestFailed));
+    assert!(!watch::notable(State::Testing));
+    assert!(watch::run_gone("x is not a live gateway run"));
+    assert!(!watch::drop_event("timeout", 0));
+    assert!(watch::drop_event("timeout", 4));
+
+    assert!(digest::state_filter(None).unwrap().is_none());
+    let live = digest::state_filter(Some("live")).unwrap().unwrap();
+    assert!(live.contains(&State::Merged) && !live.contains(&State::Landed));
+    let ended = digest::state_filter(Some("ended")).unwrap().unwrap();
+    assert!(ended.contains(&State::Landed) && !ended.contains(&State::Testing));
+    assert_eq!(
+        digest::state_filter(Some("testing")).unwrap(),
+        Some(vec![State::Testing])
+    );
+    assert!(digest::state_filter(Some("nope")).is_err());
+
+    assert_eq!(
+        digest::parse_detail("run:abc").unwrap(),
+        Detail::Run("abc".into())
+    );
+    assert_eq!(
+        digest::parse_detail("landing:9").unwrap(),
+        Detail::Landing("9".into())
+    );
+    assert!(digest::parse_detail("other:1").is_err());
+    assert!(digest::parse_detail("run:").is_err());
+    assert!(digest::parse_detail("run").is_err());
+}
+
+#[test]
+fn core_land_work_status_digest() {
+    use pigeon_capabilities::land::digest::{self, DIGEST_BYTES, Sources};
+
+    let run = |i: usize, ended: bool| {
+        json!({
+            "run": format!("run{i:029}"), "role": "planner", "parent_run": "parent00000000000000000000000000",
+            "brief": format!("TITLE line {i}\nSECRETBRIEF {}", "b".repeat(400)),
+            "report": "SECRETREPORT", "state": "running",
+            "step": "s".repeat(300),
+            "waiting": { "for": if i == 0 { "approval" } else { "executors" } },
+            "spent": { "turns": 3, "cost_usd": 0.123456, "gateway_cost": "$0.1", "cost_source": "gateway", "total_cost": "$0.5" },
+            "budget": { "turns": 40, "budget_cost_usd": 5.0 },
+            "ended_at": if ended { json!(10) } else { Value::Null },
+        })
+    };
+    let runs: Vec<Value> = (0..30).map(|i| run(i, false)).collect();
+    let sources = Sources {
+        runs: Ok(json!({ "runs": runs })),
+        landings: Ok((json!([{ "id": "l1", "state": "testing" }]), json!([]))),
+        approvals: Ok(
+            json!({ "calls": [1], "drafts": [], "plans": [], "other": [], "landings": [1, 2] }),
+        ),
+        inbox: Ok(json!({ "waiting": [
+            { "run": "r1", "waiting": { "for": "answer", "question": "q".repeat(500) } },
+            { "run": "r2", "waiting": { "for": "approval" } },
+        ] })),
+        release: Ok(
+            json!({ "releases": [{ "job": "j", "build_number": "7", "version": "1.0", "state": "complete", "apple_processing": "VALID", "commit": "c".repeat(40) }] }),
+        ),
+    };
+    let d = digest::build(&sources, None);
+    let text = d.to_string();
+    assert!(text.len() < DIGEST_BYTES, "{} bytes", text.len());
+    assert!(!text.contains("SECRETBRIEF") && !text.contains("SECRETREPORT"));
+    assert_eq!(d["runs"][0]["waiting_on_person"], true);
+    assert_eq!(d["runs"][1]["waiting_on_person"], false);
+    assert_eq!(d["runs"][0]["spent_usd"], 0.1235);
+    assert_eq!(d["runs"][0]["gateway_usd"], 0.1);
+    assert_eq!(d["runs"][0]["total_usd"], 0.5);
+    assert_eq!(d["runs"][0]["budget_usd"], 5.0);
+    assert_eq!(d["runs"][0]["turns"], "3/40");
+    assert_eq!(d["runs"][0]["title"], "TITLE line 0");
+    assert_eq!(d["waiting_on_person"]["approvals"]["landings"], 2);
+    assert_eq!(d["waiting_on_person"]["passkey_waits"], 1);
+    assert_eq!(
+        d["waiting_on_person"]["questions"][0]["question"]
+            .as_str()
+            .unwrap()
+            .len(),
+        200
+    );
+    assert_eq!(d["ios_release"]["commit"].as_str().unwrap().len(), 12);
+    assert_eq!(d["landings"]["queue"][0]["id"], "l1");
+    assert_eq!(d["unavailable"], json!([]));
+
+    // Ended runs show only after `since`, marked ended; a failing source is named.
+    let sources = Sources {
+        runs: Ok(json!({ "runs": [run(1, true), run(2, false)] })),
+        landings: Err("no answer".into()),
+        approvals: Err("needs a person".into()),
+        inbox: Ok(json!({ "waiting": [] })),
+        release: Ok(json!({ "releases": [] })),
+    };
+    let none = digest::build(&sources, None);
+    assert_eq!(none["runs"].as_array().unwrap().len(), 1);
+    let some = digest::build(&sources, Some(5));
+    assert_eq!(some["runs"].as_array().unwrap().len(), 2);
+    assert_eq!(some["runs"][1]["ended"], true);
+    assert_eq!(some["ios_release"], Value::Null);
+    let names: Vec<&str> = some["unavailable"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|u| u["source"].as_str())
+        .collect();
+    assert_eq!(names, ["landings", "approvals"]);
+}
+
 // ---- ingest: metrics, decisions, zip edges ----
 
 #[test]

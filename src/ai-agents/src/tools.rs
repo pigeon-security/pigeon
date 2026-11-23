@@ -18,16 +18,18 @@ pub enum Kind {
 }
 
 /// Pigeon tools an executor (or mechanical run) may call.
-pub const EXECUTOR_PIGEON: [&str; 5] = [
+pub const EXECUTOR_PIGEON: [&str; 7] = [
     "policy_check",
     "ci_submit",
     "ci_status",
     "ci_commit",
     "land_status",
+    "work_status",
+    "land_list",
 ];
 
 /// Pigeon tools a planner may call. Executors never land: the person's rule.
-pub const PLANNER_PIGEON: [&str; 9] = [
+pub const PLANNER_PIGEON: [&str; 12] = [
     "policy_check",
     "ci_submit",
     "ci_status",
@@ -37,6 +39,9 @@ pub const PLANNER_PIGEON: [&str; 9] = [
     "land_cancel",
     "models_usage",
     "architecture_describe",
+    "land_list",
+    "land_watch",
+    "work_status",
 ];
 
 /// Files that only the person may change.
@@ -58,12 +63,13 @@ const SANDBOX: [&str; 8] = [
 const AGENT_COMMON: [&str; 2] = ["ask_person", "report"];
 
 /// Agent tools only a planner is offered.
-const AGENT_PLANNER: [&str; 5] = [
+const AGENT_PLANNER: [&str; 6] = [
     "spawn_executor",
     "executor_status",
     "executor_result",
     "executor_stop",
     "wait_executors",
+    "wait_events",
 ];
 
 /// Largest `write_file` content, in bytes (1 MiB).
@@ -118,6 +124,8 @@ pub fn idempotent(name: &str) -> bool {
             | "ci_status"
             | "ci_commit"
             | "land_status"
+            | "land_list"
+            | "work_status"
             | "models_usage"
             | "architecture_describe"
             | "executor_status"
@@ -323,6 +331,19 @@ fn agent_definitions(role: Role) -> Vec<Value> {
              ended); answers which ended and how. Use it instead of asking executor_status \
              again and again.",
             json!({ "type": "object", "properties": {} }),
+        ));
+        out.push(tool(
+            "wait_events",
+            "Waits, without spending turns, until one of your executors ends, a note or \
+             event arrives, or the minutes pass; answers which, with your executors' \
+             state. Use it after `land` instead of polling land_status; landing state \
+             changes arrive as events.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "minutes": {"type": "integer", "minimum": 1, "maximum": 120, "description": "How long to wait at most; 30 by default."}
+                }
+            }),
         ));
     }
     out
@@ -590,6 +611,10 @@ pub fn check(role: Role, name: &str, input: &Value) -> Result<(), String> {
         }
         "executor_status" | "executor_result" | "executor_stop" => {
             need_text(obj, "run", usize::MAX)?;
+            Ok(())
+        }
+        "wait_events" => {
+            get_int(obj, "minutes", 1, 120)?;
             Ok(())
         }
         _ => Ok(()),

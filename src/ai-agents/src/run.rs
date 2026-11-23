@@ -123,6 +123,15 @@ pub enum Wait {
         #[serde(default)]
         since: i64,
     },
+    /// A planner's `wait_events`: until an executor ends, a note or event arrives, or `until`.
+    Events {
+        /// When the wait began (ms).
+        #[serde(default)]
+        since: i64,
+        /// When the wait runs out (ms).
+        #[serde(default)]
+        until: i64,
+    },
     /// The model provider or the gateway, failing since `since` (ms).
     Provider {
         /// When the failures began.
@@ -276,7 +285,7 @@ pub fn next(v: &View) -> Action {
         State::Queued | State::Preparing => return Action::Prepare,
         State::Waiting => {
             return match v.waiting {
-                Some(Wait::Executors { .. }) => Action::Check {
+                Some(Wait::Executors { .. } | Wait::Events { .. }) => Action::Check {
                     after_ms: EXECUTORS_EVERY_MS,
                 },
                 Some(Wait::Provider { .. }) => Action::Check {

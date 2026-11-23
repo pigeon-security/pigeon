@@ -157,8 +157,45 @@ pub fn pigeon_tools() -> Vec<(String, String, Value)> {
         ),
         t(
             "land_status",
-            "The landing queue: every live landing and the last ones.",
-            json!({ "type": "object", "properties": {} }),
+            "The landing queue: every live landing and the last ones. With `id`, one \
+             landing; `compact: true` answers a short summary.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" },
+                    "compact": { "type": "boolean", "description": "true answers a short summary." }
+                }
+            }),
+        ),
+        t(
+            "land_list",
+            "Recent landings as compact rows; state: a state, `live` or `ended`.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "limit": { "type": "integer" },
+                    "state": { "type": "string" }
+                }
+            }),
+        ),
+        t(
+            "land_watch",
+            "Deliver this landing's state changes to you as events; landings you submit with \
+             `land` are watched already.",
+            id.clone(),
+        ),
+        t(
+            "work_status",
+            "A compact digest: live runs with spend vs budget, the landing queue and last \
+             landings, what waits on the person, the latest iOS release; `detail` \
+             `run:<id>` or `landing:<id>` expands one item.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "since": { "type": "integer", "description": "Milliseconds." },
+                    "detail": { "type": "string" }
+                }
+            }),
         ),
         t(
             "land",

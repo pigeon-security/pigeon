@@ -13,9 +13,11 @@
 //! `/cf/` only while its deploy is running, only for its commit and its Worker's script
 //! ([`deploy_caller`]). Who may land: a person, or an agent linked to one.
 
+pub mod digest;
 pub mod lanes;
 pub mod merge;
 pub mod state;
+pub mod watch;
 
 use pigeon_core::artifacts::{self, Access};
 use pigeon_core::attribution;
@@ -66,6 +68,23 @@ fn now() -> i64 {
 
 fn bad(why: &str) -> Error {
     Error::RustError(why.to_string())
+}
+
+/// How long one source of `work_status` may take, in milliseconds.
+const SOURCE_LIMIT_MS: u64 = 20_000;
+
+/// `work`, or an error once [`SOURCE_LIMIT_MS`] has passed.
+async fn within<T>(work: impl std::future::Future<Output = Result<T>>) -> Result<T> {
+    let limit = worker::Delay::from(std::time::Duration::from_millis(SOURCE_LIMIT_MS));
+    futures_util::pin_mut!(work);
+    futures_util::pin_mut!(limit);
+    match futures_util::future::select(work, limit).await {
+        futures_util::future::Either::Left((v, _)) => v,
+        futures_util::future::Either::Right(_) => Err(bad(&format!(
+            "no answer within {} s",
+            SOURCE_LIMIT_MS / 1000
+        ))),
+    }
 }
 
 fn opt_i(v: Option<i64>) -> SqlStorageValue {
@@ -238,11 +257,78 @@ impl Land {
             "create",
             json!({
                 "id": id, "branch": branch, "commit": commit,
-                "caller": caller, "by": by,
+                "caller": caller, "by": by, "run": caller.run,
             }),
         )
         .await?;
         lander(cx.env, "status", json!({ "id": id })).await
+    }
+
+    /// `land_watch`: tells the calling run about a landing's next changes.
+    async fn watch(&self, cx: &Context<'_>, args: &Value) -> Result<Value> {
+        let caller = cx.caller.ok_or_else(|| bad("no caller"))?;
+        let Some(run) = caller.run.as_deref() else {
+            return Err(bad(
+                "land_watch is for AI agent runs: it tells the calling run about the landing",
+            ));
+        };
+        let id = arg(args, "id")?;
+        lander(
+            cx.env,
+            "watch",
+            json!({ "id": id, "run": run, "caller": caller }),
+        )
+        .await
+    }
+
+    /// `work_status`: the compact digest, or one run or landing in full.
+    async fn work_status(&self, cx: &Context<'_>, args: &Value) -> Result<Value> {
+        if let Some(detail) = args["detail"].as_str().filter(|d| !d.is_empty()) {
+            return match digest::parse_detail(detail).map_err(|e| bad(&e))? {
+                digest::Detail::Run(run) => {
+                    crate::dispatch(cx, "ai_agents_status", &json!({ "run": run })).await
+                }
+                digest::Detail::Landing(id) => lander(cx.env, "status", json!({ "id": id })).await,
+            };
+        }
+        let since = args["since"].as_i64();
+        // Trimmed at the source: the digest shows a title line and never a report.
+        let (runs_args, inbox_args) = (
+            json!({ "limit": 100, "brief": "line", "report": false }),
+            json!({ "since": 0, "brief": false, "report": false }),
+        );
+        let none = json!({});
+        let landings_work = async {
+            let live = lander(
+                cx.env,
+                "list",
+                json!({ "limit": 50, "state": "live", "compact": true }),
+            );
+            let recent = lander(
+                cx.env,
+                "list",
+                json!({ "limit": if since.is_some() { 50 } else { 8 }, "compact": true }),
+            );
+            let (live, recent) = futures_util::future::join(live, recent).await;
+            Ok((live?, recent?))
+        };
+        let (runs, landings, approvals, inbox, release) = futures_util::future::join5(
+            within(crate::dispatch(cx, "ai_agents_status", &runs_args)),
+            within(landings_work),
+            within(crate::dispatch(cx, "approvals_list", &none)),
+            within(crate::dispatch(cx, "ai_agents_inbox", &inbox_args)),
+            within(crate::dispatch(cx, "ios_releases", &none)),
+        )
+        .await;
+        let why = |r: Result<Value>| r.map_err(|e| e.to_string());
+        let sources = digest::Sources {
+            runs: why(runs),
+            landings: landings.map_err(|e| e.to_string()),
+            approvals: why(approvals),
+            inbox: why(inbox),
+            release: why(release),
+        };
+        Ok(digest::build(&sources, since))
     }
 
     async fn cancel(&self, cx: &Context<'_>, args: &Value) -> Result<Value> {
@@ -317,10 +403,56 @@ impl Capability for Land {
                               testing, awaiting_approval, merging, deploying, landed, or how \
                               it stopped: refused, test_failed, …), each step with its time \
                               and detail, its CI jobs, its approval, and whether its note is \
-                              on the commit.",
+                              on the commit. With `compact: true` a few KB only: the landing \
+                              row, its last step, its incidents and the queue.",
                 input_schema: json!({
                     "type": "object",
-                    "properties": { "id": { "type": "string" } }
+                    "properties": {
+                        "id": { "type": "string" },
+                        "compact": { "type": "boolean", "description": "A short summary instead of the full answer. Default false." }
+                    }
+                }),
+            },
+            Tool {
+                name: "land_list",
+                description: "Recent landings, newest first, as compact rows (id, branch, \
+                              commit, state, workers, incident, detail, updated_at). Call \
+                              land_status with an id for more.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "limit": { "type": "integer", "minimum": 1, "maximum": 50, "description": "Default 10." },
+                        "state": { "type": "string", "description": "A state name, `live` or `ended`." }
+                    }
+                }),
+            },
+            Tool {
+                name: "land_watch",
+                description: "For AI agent runs: tell the calling run, as a note, when this \
+                              landing awaits approval, merges, lands or ends, or an incident \
+                              includes it. Answers the compact landing row. `land` already \
+                              does this for the landing it starts.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": { "id": { "type": "string" } },
+                    "required": ["id"]
+                }),
+            },
+            Tool {
+                name: "work_status",
+                description: "One compact digest (under about 8 KB) of the work in flight: \
+                              live runs with cost and what they wait for, the landing queue \
+                              and recent landings, what waits for the person, and the latest \
+                              iOS release. A source that fails is listed under `unavailable`. \
+                              `since` (ms) also shows runs ended and landings updated after \
+                              it. `detail` is `run:<id>` or `landing:<id>` for that one item \
+                              in full.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "since": { "type": "integer", "description": "Milliseconds since the epoch." },
+                        "detail": { "type": "string", "description": "`run:<id>` or `landing:<id>`." }
+                    }
                 }),
             },
             Tool {
@@ -378,8 +510,27 @@ impl Capability for Land {
             match tool {
                 "land" => self.land(cx, args).await,
                 "land_status" => {
-                    lander(cx.env, "status", json!({ "id": args["id"].as_str() })).await
+                    lander(
+                        cx.env,
+                        "status",
+                        json!({ "id": args["id"].as_str(), "compact": args["compact"] == true }),
+                    )
+                    .await
                 }
+                "land_list" => {
+                    digest::state_filter(args["state"].as_str()).map_err(|e| bad(&e))?;
+                    lander(
+                        cx.env,
+                        "list",
+                        json!({
+                            "limit": args["limit"].as_i64().unwrap_or(10).clamp(1, 50),
+                            "state": args["state"].as_str(), "compact": true,
+                        }),
+                    )
+                    .await
+                }
+                "land_watch" => self.watch(cx, args).await,
+                "work_status" => self.work_status(cx, args).await,
                 "land_cancel" => self.cancel(cx, args).await,
                 "portal_sync" => {
                     let mut out = serde_json::Map::new();
@@ -449,7 +600,7 @@ impl Capability for Land {
 // ---- the Lander ----
 
 /// The Lander's schema, one statement per migration, applied in order and never edited.
-const MIGRATIONS: [&str; 18] = [
+const MIGRATIONS: [&str; 20] = [
     "CREATE TABLE landings (id TEXT PRIMARY KEY, branch TEXT NOT NULL, commit_sha TEXT NOT NULL, main_at TEXT NOT NULL, caller TEXT NOT NULL, by_name TEXT NOT NULL, state TEXT NOT NULL, approval_reason TEXT, approved_by TEXT, awaiting_since INTEGER, test_job TEXT, deploy_job TEXT, tries INTEGER NOT NULL DEFAULT 0, detail TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, finished_at INTEGER, note_pushed INTEGER NOT NULL DEFAULT 0, note_tries INTEGER NOT NULL DEFAULT 0)",
     "CREATE TABLE events (landing TEXT NOT NULL, at INTEGER NOT NULL, state TEXT NOT NULL, detail TEXT)",
     "CREATE TABLE notes (commit_sha TEXT PRIMARY KEY, text TEXT NOT NULL)",
@@ -486,6 +637,9 @@ const MIGRATIONS: [&str; 18] = [
     "ALTER TABLE landings ADD COLUMN ordered INTEGER NOT NULL DEFAULT 1",
     // The Worker's script a deploy resolved from the map at its commit; the deploy grant answers it.
     "ALTER TABLE deploys ADD COLUMN script TEXT",
+    // AI agent runs that watch a landing, and the events still to tell them (`watch`).
+    "CREATE TABLE watchers (landing TEXT, run TEXT, caller TEXT, PRIMARY KEY (landing, run))",
+    "CREATE TABLE run_events (id INTEGER PRIMARY KEY AUTOINCREMENT, run TEXT, caller TEXT, text TEXT, tries INTEGER NOT NULL DEFAULT 0, at INTEGER)",
 ];
 
 /// What the Lander needs from the hosting Worker, beside the settings: the capabilities it
@@ -756,6 +910,9 @@ impl Lander {
         if let Err(e) = self.push_notes().await {
             console_error!("land: pushing notes: {e}");
         }
+        if let Err(e) = self.deliver_events().await {
+            console_error!("land: telling runs: {e}");
+        }
         if let Err(e) = self.delete_test_refs().await {
             console_error!("land: deleting test refs: {e}");
         }
@@ -792,6 +949,9 @@ impl Lander {
                     ],
                 )?;
                 self.event(s("id"), State::Checking, Some("checking the branch"))?;
+                if let Some(run) = a["run"].as_str() {
+                    self.watch(s("id"), run, &a["caller"].to_string())?;
+                }
                 // The checks start at once, in the alarm.
                 self.state.storage().set_alarm(0).await?;
                 Ok(Value::Null)
@@ -825,6 +985,11 @@ impl Lander {
                 Ok(json!(
                     rows.iter().map(DeployRow::public).collect::<Vec<_>>()
                 ))
+            }
+            "watch" => {
+                let row = self.row(s("id"))?.ok_or_else(|| bad("no such landing"))?;
+                self.watch(&row.id, s("run"), &a["caller"].to_string())?;
+                Ok(digest::compact(&row.public(), self.has_incident(&row.id)?))
             }
             "status" => {
                 let row = match a["id"].as_str() {
@@ -880,14 +1045,39 @@ impl Lander {
                         .map(|r| json!({ "id": r.id, "branch": r.branch, "state": r.state }))
                         .collect::<Vec<_>>()
                 );
+                if a["compact"] == true {
+                    return Ok(digest::compact_status(&out));
+                }
                 Ok(out)
             }
             "list" => {
                 let limit = a["limit"].as_i64().unwrap_or(10).clamp(1, 50);
-                let rows: Vec<Row> = self.db.rows(
-                    "SELECT * FROM landings ORDER BY created_at DESC LIMIT ?",
-                    vec![limit.into()],
-                )?;
+                let states = digest::state_filter(a["state"].as_str()).map_err(|e| bad(&e))?;
+                let rows: Vec<Row> = match states {
+                    // The state names are fixed words, so they are written into the query.
+                    Some(states) => {
+                        let names: Vec<String> =
+                            states.iter().map(|s| format!("'{}'", s.name())).collect();
+                        self.db.rows(
+                            &format!(
+                                "SELECT * FROM landings WHERE state IN ({}) ORDER BY created_at DESC LIMIT ?",
+                                names.join(", ")
+                            ),
+                            vec![limit.into()],
+                        )?
+                    }
+                    None => self.db.rows(
+                        "SELECT * FROM landings ORDER BY created_at DESC LIMIT ?",
+                        vec![limit.into()],
+                    )?,
+                };
+                if a["compact"] == true {
+                    let mut out = Vec::new();
+                    for r in &rows {
+                        out.push(digest::compact(&r.public(), self.has_incident(&r.id)?));
+                    }
+                    return Ok(json!(out));
+                }
                 Ok(json!(rows.iter().map(Row::public).collect::<Vec<_>>()))
             }
             "cancel" => {
@@ -1257,6 +1447,7 @@ impl Lander {
             vec![inc.id.into(), d.id.into()],
         )?;
         for l in &included {
+            self.notify(&l.id, &watch::incident_text(&l.id, &d.worker, &summary))?;
             if let Some(r) = self.row(&l.id)?
                 && !r.state().terminal()
             {
@@ -1988,6 +2179,17 @@ impl Lander {
             ],
         )?;
         self.event(&row.id, to, detail)?;
+        if watch::notable(to) {
+            let commit: String = row.commit_sha.chars().take(12).collect();
+            let text = watch::event_text(
+                &row.id,
+                &row.branch,
+                &commit,
+                to.name(),
+                detail.unwrap_or_default(),
+            );
+            self.notify(&row.id, &text)?;
+        }
         if to.terminal() && row.main_at.is_empty() {
             // It never passed its checks: nothing to note, its commit may be no commit at all.
             self.db.exec(
@@ -2182,7 +2384,12 @@ impl Lander {
 
     /// Runs `tool` as the landing's caller, through the same dispatch as `/mcp`.
     async fn dispatch(&self, row: &Row, tool: &str, args: &Value) -> Result<Value> {
-        let caller: Caller = serde_json::from_str(&row.caller)?;
+        self.dispatch_as(&row.caller, tool, args).await
+    }
+
+    /// Runs `tool` as the caller kept as JSON in `caller_json`, through the same dispatch as `/mcp`.
+    async fn dispatch_as(&self, caller_json: &str, tool: &str, args: &Value) -> Result<Value> {
+        let caller: Caller = serde_json::from_str(caller_json)?;
         let account = pigeon_core::account_from_env(&self.env, &self.settings.parent).await?;
         let capabilities = crate::split::all(
             &self.env,
@@ -2710,6 +2917,83 @@ impl Lander {
         Ok(())
     }
 
+    /// Makes run `run` (with its `caller` JSON) a watcher of landing `landing`.
+    fn watch(&self, landing: &str, run: &str, caller: &str) -> Result<()> {
+        self.db.exec(
+            "INSERT OR REPLACE INTO watchers (landing, run, caller) VALUES (?, ?, ?)",
+            vec![landing.into(), run.into(), caller.into()],
+        )
+    }
+
+    /// Whether an incident included landing `id`.
+    fn has_incident(&self, id: &str) -> Result<bool> {
+        let like = format!("%\"{id}\"%");
+        let found: Option<Value> = self.db.row(
+            "SELECT id FROM incidents WHERE included LIKE ? LIMIT 1",
+            vec![like.as_str().into()],
+        )?;
+        Ok(found.is_some())
+    }
+
+    /// Queues `text` for each run that watches landing `landing`.
+    fn notify(&self, landing: &str, text: &str) -> Result<()> {
+        #[derive(Deserialize)]
+        struct W {
+            run: String,
+            caller: String,
+        }
+        let watchers: Vec<W> = self.db.rows(
+            "SELECT run, caller FROM watchers WHERE landing = ?",
+            vec![landing.into()],
+        )?;
+        for w in watchers {
+            self.db.exec(
+                "INSERT INTO run_events (run, caller, text, tries, at) VALUES (?, ?, ?, 0, ?)",
+                vec![w.run.into(), w.caller.into(), text.into(), now().into()],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Tells runs the events queued for them, oldest first, a few per alarm: a note to the run as
+    /// the caller that watched. A run that is gone, or an event tried too often, is dropped.
+    async fn deliver_events(&self) -> Result<()> {
+        #[derive(Deserialize)]
+        struct Ev {
+            id: i64,
+            run: String,
+            caller: String,
+            text: String,
+            tries: i64,
+        }
+        let events: Vec<Ev> = self.db.rows(
+            "SELECT id, run, caller, text, tries FROM run_events ORDER BY id LIMIT ?",
+            vec![watch::EVENT_BATCH.into()],
+        )?;
+        for ev in events {
+            let args = json!({ "run": ev.run, "text": ev.text, "event": true });
+            match self.dispatch_as(&ev.caller, "ai_agents_note", &args).await {
+                Ok(_) => self
+                    .db
+                    .exec("DELETE FROM run_events WHERE id = ?", vec![ev.id.into()])?,
+                Err(e) => {
+                    let why = e.to_string();
+                    if watch::drop_event(&why, ev.tries) {
+                        self.db
+                            .exec("DELETE FROM run_events WHERE id = ?", vec![ev.id.into()])?;
+                    } else {
+                        self.db.exec(
+                            "UPDATE run_events SET tries = tries + 1 WHERE id = ?",
+                            vec![ev.id.into()],
+                        )?;
+                    }
+                    console_error!("land: telling run {}: {why}", ev.run);
+                }
+            }
+        }
+        Ok(())
+    }
+
     async fn reschedule(&self) -> Result<()> {
         // A deploy runs on after every landing it carried has ended (another lane failed).
         let running: Option<Value> = self.db.row(
@@ -2723,8 +3007,10 @@ impl Lander {
             ),
             vec![],
         )?;
+        let events: Option<Value> = self.db.row("SELECT id FROM run_events LIMIT 1", vec![])?;
         let storage = self.state.storage();
-        if live || notes.is_some() || self.test_refs_pending().unwrap_or(false) {
+        if live || notes.is_some() || events.is_some() || self.test_refs_pending().unwrap_or(false)
+        {
             let at = now() + state::POLL_MS;
             let current = storage.get_alarm().await?;
             if current.is_none_or(|c| c > at) {

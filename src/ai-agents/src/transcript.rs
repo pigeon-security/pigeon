@@ -466,12 +466,24 @@ pub fn repair_transcript(messages: &[Value]) -> Vec<Value> {
 /// The longest note `ai_agents_note` takes, in bytes.
 pub const MAX_NOTE_BYTES: usize = 4000;
 
-/// How a note reads in the run's transcript.
+/// The marker that starts a stored note which is an event from pigeon, not the person's note.
+pub const EVENT_MARKER: &str = "\u{1}event\u{1}";
+
+/// How an event from pigeon reads in the run's transcript.
+pub fn event_text(text: &str) -> String {
+    format!("An event from pigeon (not the person), delivered while you work:\n\n{text}")
+}
+
+/// How a stored note reads in the transcript: as an event when it has the marker, else as a
+/// note from the person.
 pub fn note_text(text: &str) -> String {
-    format!(
-        "A note from the person, sent while you work (ai_agents_note). Take it into account \
-         from now on; it does not answer a pending question:\n\n{text}"
-    )
+    match text.strip_prefix(EVENT_MARKER) {
+        Some(event) => event_text(event),
+        None => format!(
+            "A note from the person, sent while you work (ai_agents_note). Take it into account \
+             from now on; it does not answer a pending question:\n\n{text}"
+        ),
+    }
 }
 
 /// Where queued notes go before a turn, given the transcript's last message: into it when it
