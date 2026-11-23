@@ -69,9 +69,17 @@ impl Capability for Models {
         Models::secrets(self)
             .into_iter()
             .map(|s| Slot {
+                scopes: if s
+                    .scopes
+                    .iter()
+                    .any(|x| x == pigeon_core::secrets_store::WORKERS)
+                {
+                    &[pigeon_core::secrets_store::WORKERS]
+                } else {
+                    &[SECRET_SCOPE]
+                },
                 name: s.name,
                 purpose: s.purpose,
-                scopes: &[SECRET_SCOPE],
             })
             .collect()
     }
@@ -84,8 +92,8 @@ impl Capability for Models {
         })
     }
 
-    fn secret_expiry<'a>(&'a self, _cx: &'a Context<'a>, _name: &'a str) -> Expiring<'a> {
-        Box::pin(async { Ok(Models::secret_expiry(self)) })
+    fn secret_expiry<'a>(&'a self, cx: &'a Context<'a>, name: &'a str) -> Expiring<'a> {
+        Box::pin(async move { Ok(Models::secret_expiry(self, cx.env, name).await) })
     }
 
     /// A key just set: the gateway is set up and given it.

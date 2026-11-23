@@ -13,6 +13,7 @@ fn models_request() {
         dialect: Dialect::Anthropic,
         default_model: "claude-haiku-5-5",
         key_help: "",
+        billing: None,
     };
     // The request, in the common shape and then as the provider takes it.
     let a = ask(

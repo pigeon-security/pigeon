@@ -715,14 +715,14 @@ fn platform_cost_daily_buckets() {
     // Roles: a planner, an executor, and a run the list does not know falls to other.
     let roles = roles_of(&json!({ "runs": [
         { "run": "r1", "role": "planner" }, { "run": "r2", "role": "executor" } ] }));
-    let live = live_days(None, Some(&models), Some(&roles));
+    let live = live_days(None, Some(&models), Some(&roles), None);
     assert!(near(&live["2026-03-10"]["roles"]["planner"], 1.0));
     assert!(near(&live["2026-03-10"]["roles"]["executor"], 0.5));
     assert!(near(&live["2026-03-09"]["roles"]["other"], 0.25));
     let none = BTreeMap::new();
-    let live_other = live_days(None, Some(&models), Some(&none));
+    let live_other = live_days(None, Some(&models), Some(&none), None);
     assert!(near(&live_other["2026-03-10"]["roles"]["other"], 1.5));
-    assert!(live_days(None, Some(&models), None)["2026-03-10"]["roles"].is_null());
+    assert!(live_days(None, Some(&models), None, None)["2026-03-10"]["roles"].is_null());
 
     // Billing: day rows on their day, a period row spread up to today, the account name dropped.
     let rows = json!([
@@ -743,7 +743,7 @@ fn platform_cost_daily_buckets() {
     assert!(!billing.days.contains_key("2026-03-11"));
 
     // Assemble 7d: order, Other lines, totals, notes, granularity.
-    let live = live_days(Some(&billing), Some(&models), Some(&roles));
+    let live = live_days(Some(&billing), Some(&models), Some(&roles), None);
     let stored: BTreeMap<String, Value> = BTreeMap::from([
         (
             "2026-02".to_string(),
@@ -757,7 +757,7 @@ fn platform_cost_daily_buckets() {
             "models": { "Opus": 5.0 }, "roles": { "planner": 5.0 } } }),
         ),
     ]);
-    let week = assemble("7d", today, &stored, &live, false, vec![], vec![]);
+    let week = assemble("7d", today, &stored, &live, false, false, vec![], vec![]);
     assert_eq!(week["days"].as_array().map(Vec::len), Some(7));
     assert_eq!(week["days"][0], "2026-03-04");
     assert_eq!(week["stored_from"], "2026-02-27");
@@ -782,7 +782,7 @@ fn platform_cost_daily_buckets() {
     );
     assert_eq!(
         names(&week["ai_gateway"]["by_model"]),
-        ["Opus", "Sonnet", "Haiku", "Other"]
+        ["Opus", "Sonnet", "Haiku", "OpenAI", "Other"]
     );
     assert_eq!(
         names(&week["ai_gateway"]["by_role"]),
@@ -790,7 +790,7 @@ fn platform_cost_daily_buckets() {
     );
 
     // A truncated listing never overwrites the stored gateway values; Cloudflare's still land.
-    let cut = assemble("7d", today, &stored, &live, true, vec![], vec![]);
+    let cut = assemble("7d", today, &stored, &live, true, false, vec![], vec![]);
     assert!(near(
         &cut["ai_gateway"]["by_model"][0]["by_day"]["2026-03-09"],
         5.0
@@ -805,7 +805,7 @@ fn platform_cost_daily_buckets() {
     assert!(!closed["2026-03"].contains_key(today));
 
     // All: from the first stored day to today.
-    let all = assemble("all", today, &stored, &live, false, vec![], vec![]);
+    let all = assemble("all", today, &stored, &live, false, false, vec![], vec![]);
     assert_eq!(all["days"].as_array().map(Vec::len), Some(12));
     assert_eq!(all["days"][0], "2026-02-27");
     assert!(near(
@@ -824,13 +824,14 @@ fn platform_cost_daily_buckets() {
         &BTreeMap::new(),
         &BTreeMap::new(),
         false,
+        false,
         vec![],
         vec![],
     );
     assert_eq!(empty["days"].as_array().map(Vec::len), Some(7));
     assert_eq!(empty["stored_from"], Value::Null);
     assert_eq!(empty["total"], 0.0);
-    let one = assemble("today", today, &stored, &live, false, vec![], vec![]);
+    let one = assemble("today", today, &stored, &live, false, false, vec![], vec![]);
     assert_eq!(one["days"], json!([today]));
     assert!(near(&one["ai_gateway"]["total"], 1.5));
 }

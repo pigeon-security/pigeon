@@ -36,6 +36,7 @@ use serde_json::{Value, json};
 use worker::js_sys::Date;
 use worker::{Env, Error, Fetch, Headers, Method, Request, RequestInit, Result};
 
+pub mod billing;
 pub mod cache;
 pub mod daily;
 pub mod jobs;
@@ -58,7 +59,7 @@ pub fn versions() -> Vec<pigeon_core::versions::Component> {
 pub const WORKER: &str = "pigeon-model-gateway";
 
 /// Every tool the capability offers.
-pub const TOOLS: [&str; 11] = [
+pub const TOOLS: [&str; 12] = [
     "models_setup",
     "models_providers",
     "models_run",
@@ -70,6 +71,7 @@ pub const TOOLS: [&str; 11] = [
     "models_usage",
     "models_cost",
     "models_daily",
+    "models_billing",
 ];
 
 /// The Secrets Store binding of the key core signs callers with.
@@ -91,7 +93,8 @@ pub fn unknown(tool: &str) -> Error {
 pub fn purposes(tool: &str) -> Option<&'static [&'static str]> {
     match tool {
         "models_setup" => Some(&["ai_gateway", "secrets_store"]),
-        "models_submit" | "models_status" | "models_result" | "models_cancel" => None,
+        "models_submit" | "models_status" | "models_result" | "models_cancel"
+        | "models_billing" => None,
         _ => Some(&["ai_gateway"]),
     }
 }
@@ -158,6 +161,15 @@ pub struct Provider {
     pub default_model: &'static str,
     /// Where to get a key, for the secrets page.
     pub key_help: &'static str,
+    /// Where the provider's own billed usage is read, when it can be.
+    pub billing: Option<Billing>,
+}
+
+/// Where a provider's own billed usage is read. OpenAI's usage API could be a later variant.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Billing {
+    /// Anthropic's Admin API usage and cost reports, read with an admin key.
+    AnthropicAdmin,
 }
 
 /// How a provider's requests and answers are shaped.
@@ -675,6 +687,148 @@ impl Models {
     }
 }
 
+/// What the admin key's `Set` answers: nothing is handed to the AI gateway.
+const ADMIN_SET_NOTE: &str = "the model gateway reads the key through its binding";
+
+/// The admin key, from its Secrets Store binding. The error names the Access tab and never a
+/// value.
+async fn admin_key(env: &Env) -> Result<String> {
+    let missing = || {
+        bad(
+            "ANTHROPIC_ADMIN_KEY is not set: set it on the console's Access tab (Secrets and credentials)",
+        )
+    };
+    let store = env
+        .secret_store(billing::ADMIN_KEY)
+        .map_err(|_| missing())?;
+    secrets_store::read(&store)
+        .await
+        .ok()
+        .flatten()
+        .filter(|k| !k.is_empty())
+        .ok_or_else(missing)
+}
+
+/// One GET of the Admin API with `key`: the status and the body (null when it is not JSON).
+async fn admin_get(url: &str, key: &str) -> Result<(u16, Value)> {
+    let headers = Headers::new();
+    headers.set("x-api-key", key)?;
+    headers.set("anthropic-version", "2023-06-01")?;
+    let mut init = RequestInit::new();
+    init.with_method(Method::Get).with_headers(headers);
+    let mut r = Fetch::Request(Request::new_with_init(url, &init)?)
+        .send()
+        .await?;
+    let status = r.status_code();
+    let text = r.text().await?;
+    Ok((status, serde_json::from_str(&text).unwrap_or(Value::Null)))
+}
+
+/// A short reason from a failed report's answer; never the key.
+fn why_failed(status: u16, body: &Value) -> String {
+    let msg = body["error"]["message"].as_str().unwrap_or_default();
+    let shown: String = msg.chars().take(200).collect();
+    format!("Anthropic answered {status}: {shown}")
+}
+
+/// The status of a one-row usage report read, from yesterday to now.
+async fn admin_probe(key: &str) -> Result<u16> {
+    let now = String::from(Date::new_0().to_iso_string());
+    let today = now.get(..10).unwrap_or_default();
+    let from = daily::days_ending(today, 2)
+        .into_iter()
+        .next()
+        .unwrap_or_default();
+    let url = billing::usage_url(&format!("{from}T00:00:00Z"), &now, 1, None);
+    Ok(admin_get(&url, key).await?.0)
+}
+
+impl Models {
+    /// `models_billing`: a provider's own billed usage per UTC day. A report that fails goes to
+    /// `unavailable` and the other still answers.
+    async fn billing(&self, env: &Env, args: &Value) -> Result<Value> {
+        let p = match args["provider"].as_str() {
+            Some(s) => self.provider(Some(s))?,
+            None => self
+                .providers
+                .iter()
+                .find(|p| p.billing.is_some())
+                .ok_or_else(|| bad("no provider has a billing source"))?,
+        };
+        if p.billing != Some(Billing::AnthropicAdmin) {
+            return Err(bad(&format!("`{}` has no billing source", p.slug)));
+        }
+        let n = args["days"].as_u64().unwrap_or(7).clamp(1, 31) as usize;
+        let key = admin_key(env).await?;
+        let now = String::from(Date::new_0().to_iso_string());
+        let today = now.get(..10).unwrap_or_default();
+        let days = daily::days_ending(today, n);
+        let start = format!("{}T00:00:00Z", days.first().map_or(today, String::as_str));
+        let mut by_day = std::collections::BTreeMap::new();
+        let mut unavailable = Vec::new();
+        for report in ["usage_report", "cost_report"] {
+            let mut page: Option<String> = None;
+            let mut seen = std::collections::BTreeMap::new();
+            let failed = 'pages: {
+                for _ in 0..billing::MAX_PAGES {
+                    let url = if report == "usage_report" {
+                        billing::usage_url(&start, &now, billing::USAGE_LIMIT, page.as_deref())
+                    } else {
+                        billing::cost_url(&start, &now, page.as_deref())
+                    };
+                    let (status, body) = match admin_get(&url, &key).await {
+                        Ok(r) => r,
+                        Err(e) => break 'pages Some(e.to_string().replace(&key, "…")),
+                    };
+                    if status != 200 {
+                        break 'pages Some(why_failed(status, &body));
+                    }
+                    let more = if report == "usage_report" {
+                        billing::add_usage(&mut seen, &body)
+                    } else {
+                        billing::add_cost(&mut seen, &body)
+                    };
+                    match (more.has_more, more.next_page) {
+                        (true, Some(next)) => page = Some(next),
+                        _ => break 'pages None,
+                    }
+                }
+                None
+            };
+            match failed {
+                // A failed report leaves out what it read: half a report is wrong.
+                Some(why) => unavailable.push(json!({ "source": report, "why": why })),
+                None => merge_report(&mut by_day, seen, report),
+            }
+        }
+        Ok(billing::answer(&days, &by_day, &unavailable))
+    }
+}
+
+/// Folds one report's days into `all`: usage gives tokens, cost gives dollars.
+fn merge_report(
+    all: &mut std::collections::BTreeMap<String, billing::Day>,
+    seen: std::collections::BTreeMap<String, billing::Day>,
+    report: &str,
+) {
+    for (day, d) in seen {
+        let into = all.entry(day).or_default();
+        if report == "usage_report" {
+            into.tokens = d.tokens;
+        } else {
+            into.cost_usd = d.cost_usd;
+        }
+        for (m, e) in d.by_model {
+            let slot = into.by_model.entry(m).or_default();
+            if report == "usage_report" {
+                slot.tokens = e.tokens;
+            } else {
+                slot.cost_usd = e.cost_usd;
+            }
+        }
+    }
+}
+
 /// The tab the cost section sits on, as its path names it.
 pub const SECTION_TAB: &str = "cost";
 /// The cost section's title.
@@ -849,6 +1003,20 @@ impl Models {
                 }),
             },
             Tool {
+                name: "models_billing",
+                description: "Read-only. A provider's own billed usage per UTC day over the last \
+                              `days` days, from its billing API (Anthropic's Admin API usage and \
+                              cost reports): cost and tokens per day and per model. Days with no \
+                              data are left out. Needs the ANTHROPIC_ADMIN_KEY secret.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "provider": { "type": "string", "enum": slugs, "description": "The first provider with billing when omitted." },
+                        "days": { "type": "integer", "description": "1 to 31; 7 by default." }
+                    }
+                }),
+            },
+            Tool {
                 name: "models_usage",
                 description: "What the AI gateway's requests used over a window, from its \
                               logs: requests, failures, tokens in and out, and cost, in all and \
@@ -884,7 +1052,8 @@ impl Models {
 
     /// The secrets the capability needs set: each provider's key, readable by the AI gateway.
     pub fn secrets(&self) -> Vec<SlotSpec> {
-        self.providers
+        let mut out: Vec<SlotSpec> = self
+            .providers
             .iter()
             .map(|p| SlotSpec {
                 name: self.secret(p),
@@ -894,7 +1063,22 @@ impl Models {
                 ),
                 scopes: vec![SECRET_SCOPE.to_string()],
             })
-            .collect()
+            .collect();
+        if self
+            .providers
+            .iter()
+            .any(|p| p.billing == Some(Billing::AnthropicAdmin))
+        {
+            out.push(SlotSpec {
+                name: billing::ADMIN_KEY.into(),
+                purpose: "An Anthropic Admin API key (sk-ant-admin…, made by an organization \
+                          admin in the Claude Console), used to read Anthropic's usage and cost \
+                          reports."
+                    .into(),
+                scopes: vec![secrets_store::WORKERS.to_string()],
+            });
+        }
+        out
     }
 
     /// The capability as a manifest entry: its tools, its cost section, its secrets and its
@@ -950,6 +1134,7 @@ impl Models {
             "models_usage" => self.usage(env, account()?, args).await?,
             "models_cost" => self.cost(account()?, args).await?,
             "models_daily" => self.daily_by_run(account()?, args).await?,
+            "models_billing" => self.billing(env, args).await?,
             "models_logs" => self.recent(account()?, args).await?,
             "models_submit" => self.submit(env, caller, args).await?,
             "models_status" => self.job(env, caller, "status", args).await?,
@@ -990,20 +1175,58 @@ impl Models {
 
     /// Checks `value` as secret `name` with its provider, before it is written.
     pub async fn check_secret(&self, name: &str, value: &str) -> Result<String> {
+        if name == billing::ADMIN_KEY {
+            if !value.starts_with("sk-ant-admin") {
+                return Err(bad("an Anthropic Admin API key starts with `sk-ant-admin`"));
+            }
+            return match admin_probe(value).await? {
+                200 => Ok("Anthropic accepts the admin key".into()),
+                s => Err(bad(&format!("Anthropic refused the admin key: {s}"))),
+            };
+        }
         self.keyed(name)?.dialect.check(value).await
     }
 
-    /// A provider's API key: Anthropic's API, like the others', answers no expiry, and the
-    /// key is readable only by the AI gateway, so there is nothing to ask.
-    pub fn secret_expiry(&self) -> Expiry {
-        Expiry::Unknown {
-            why: "the provider's API reports no key expiry".into(),
+    /// A key's expiry. A provider's API key: Anthropic's API, like the others', answers no
+    /// expiry, and the key is readable only by the AI gateway, so there is nothing to ask. The
+    /// admin key is read through the binding and tried on a one-row report.
+    pub async fn secret_expiry(&self, env: &Env, name: &str) -> Expiry {
+        if name != billing::ADMIN_KEY {
+            return Expiry::Unknown {
+                why: "the provider's API reports no key expiry".into(),
+            };
+        }
+        let key = match admin_key(env).await {
+            Ok(k) => k,
+            Err(e) => {
+                return Expiry::Unknown {
+                    why: format!("not bound yet: {e}"),
+                };
+            }
+        };
+        match admin_probe(&key).await {
+            Ok(401 | 403) => Expiry::Refused {
+                why: "Anthropic refuses the admin key (401/403): it has expired or been revoked"
+                    .into(),
+            },
+            Ok(200) => Expiry::Unknown {
+                why: "Anthropic reports no expiry for admin keys; the key works".into(),
+            },
+            Ok(s) => Expiry::Unknown {
+                why: format!("the check failed: Anthropic answered {s}"),
+            },
+            Err(e) => Expiry::Unknown {
+                why: format!("the check failed: {e}"),
+            },
         }
     }
 
     /// A key just set as secret `name` (Secrets Store id `id`): the gateway is set up and given
     /// it.
     pub async fn secret_set(&self, account: &Account, name: &str, id: &str) -> Result<String> {
+        if name == billing::ADMIN_KEY {
+            return Ok(ADMIN_SET_NOTE.into());
+        }
         let p = self.keyed(name)?;
         ai_gateway::ensure(account, &self.gateway).await?;
         let added =
@@ -1127,7 +1350,12 @@ impl ModelGateway {
                         .map(Value::String),
                 )
             }
-            SecretOp::Expiry => Answer::Ok(to_value(self.models.secret_expiry())),
+            SecretOp::Expiry => {
+                Answer::Ok(to_value(self.models.secret_expiry(env, &req.name).await))
+            }
+            SecretOp::Set if req.name == billing::ADMIN_KEY => {
+                Answer::Ok(Value::String(ADMIN_SET_NOTE.into()))
+            }
             SecretOp::Set => {
                 let id = req.id.as_deref().unwrap_or_default();
                 match credential(env, caller, &["ai_gateway"]).await {

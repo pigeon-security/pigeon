@@ -1,8 +1,10 @@
 import SwiftUI
 import UIKit
 
-// The Cost tab, from the confirmed mockup (docs/plans/ios-app-next.md). A range control, then a 2×2
-// grid of equal squares: the total, a details box, a Cloudflare chart and an AI Gateway chart.
+// The Cost tab, from the confirmed mockup (docs/plans/ios-app-next.md). A range control, then a grid
+// of equal squares: the total and a details box, a Cloudflare chart and an AI Gateway chart, and
+// an Anthropic card with what Anthropic itself billed (docs/plans/model-providers.md). The total
+// counts Anthropic's billed amount in place of the gateway's Anthropic estimate.
 // Everything here is private except the screen itself.
 
 /// The time ranges the person can choose; the raw value is what `cost_daily` takes.
@@ -27,9 +29,16 @@ private enum CostRange: String, CaseIterable, Identifiable {
 private enum CostSource {
     case cloudflare
     case aiGateway
+    case anthropic
 
     /// The source's name as shown.
-    var title: String { self == .cloudflare ? "Cloudflare" : "AI Gateway" }
+    var title: String {
+        switch self {
+        case .cloudflare: return "Cloudflare"
+        case .aiGateway: return "AI Gateway"
+        case .anthropic: return "Anthropic"
+        }
+    }
 }
 
 /// One line or model: a name, a total and its amount for each day.
@@ -53,6 +62,18 @@ private struct CostData {
     var models: [CostSeries] = []
     var unavailable = false
     var storedFrom: String?
+    /// Whether Anthropic's own report answered (`anthropic` is not null).
+    var anthropicConnected = false
+    /// What Anthropic billed over the range.
+    var anthropicTotal = 0.0
+    /// Anthropic's billed cost by model family.
+    var anthropicModels: [CostSeries] = []
+    /// What the gateway recorded for Anthropic requests over the range.
+    var gatewayAnthropic = 0.0
+    /// Anthropic's figure less the gateway's.
+    var anthropicDifference = 0.0
+    /// Whether any day of the range does not match (beyond a day Anthropic has not reported).
+    var reconciliationWarns = false
 
     /// Reads a decoded JSON answer. Missing or odd fields become empty or zero.
     init(json: Any) {
@@ -66,9 +87,39 @@ private struct CostData {
             cloudflare["lines"], order: ["CI Containers", "Workers", "D1", "R2", "Other"])
         let gateway = root["ai_gateway"] as? [String: Any] ?? [:]
         aiTotal = Self.number(gateway["total"])
-        models = Self.series(gateway["by_model"], order: ["Opus", "Sonnet", "Haiku", "Other"])
-        unavailable = !(root["unavailable"] as? [Any] ?? []).isEmpty
+        models = Self.series(
+            gateway["by_model"], order: ["Opus", "Sonnet", "Haiku", "OpenAI", "Other"])
+        // Anthropic not connected is shown on its own card, not as billing unavailable.
+        unavailable = (root["unavailable"] as? [Any] ?? []).contains { entry in
+            ((entry as? [String: Any])?["source"] as? String) != "Anthropic"
+        }
         storedFrom = root["stored_from"] as? String
+        if let anthropic = root["anthropic"] as? [String: Any] {
+            anthropicConnected = true
+            anthropicTotal = Self.number(anthropic["total"])
+            anthropicModels = Self.series(
+                anthropic["by_model"], order: ["Opus", "Sonnet", "Haiku", "Other"],
+                label: Self.family)
+            let reconciliation = anthropic["reconciliation"] as? [String: Any] ?? [:]
+            gatewayAnthropic = Self.number(reconciliation["gateway_usd"])
+            anthropicDifference = Self.number(reconciliation["difference_usd"])
+            let quiet: Set<String> = ["match", "anthropic_pending"]
+            reconciliationWarns = (reconciliation["days"] as? [Any] ?? []).contains { day in
+                guard let status = (day as? [String: Any])?["status"] as? String else {
+                    return false
+                }
+                return !quiet.contains(status)
+            }
+        }
+    }
+
+    /// A model id's short name: Opus, Sonnet or Haiku when the id holds it, else the id.
+    static func family(_ model: String) -> String {
+        let id = model.lowercased()
+        for name in ["Opus", "Sonnet", "Haiku"] where id.contains(name.lowercased()) {
+            return name
+        }
+        return model
     }
 
     /// A number that may arrive as an Int or a Double; anything else is 0.
@@ -76,18 +127,35 @@ private struct CostData {
         (value as? NSNumber)?.doubleValue ?? 0
     }
 
-    /// Reads a list of series and puts them in `order`; unknown names go last, in given order.
-    private static func series(_ value: Any?, order: [String]) -> [CostSeries] {
+    /// Reads a list of series, names them by `label` (rows with the same label are added
+    /// together) and puts them in `order`; unknown names go last, in given order.
+    private static func series(
+        _ value: Any?, order: [String], label: (String) -> String = { $0 }
+    ) -> [CostSeries] {
         let rows = (value as? [Any] ?? []).compactMap { $0 as? [String: Any] }
-        let list = rows.map { row -> CostSeries in
+        var list: [CostSeries] = []
+        for row in rows {
+            let name = label(row["name"] as? String ?? "Other")
             var byDay: [String: Double] = [:]
             for (day, amount) in row["by_day"] as? [String: Any] ?? [:] {
                 byDay[day] = number(amount)
             }
-            return CostSeries(
-                name: row["name"] as? String ?? "Other", total: number(row["total"]),
+            let next = CostSeries(
+                name: name, total: number(row["total"]),
                 byDay: byDay, perPeriod: (row["granularity"] as? String) == "period",
                 requests: (row["requests"] as? NSNumber)?.doubleValue)
+            if let i = list.firstIndex(where: { $0.name == name }) {
+                let old = list[i]
+                let requests: Double? =
+                    old.requests == nil && next.requests == nil
+                    ? nil : (old.requests ?? 0) + (next.requests ?? 0)
+                list[i] = CostSeries(
+                    name: name, total: old.total + next.total,
+                    byDay: old.byDay.merging(next.byDay, uniquingKeysWith: +),
+                    perPeriod: old.perPeriod || next.perPeriod, requests: requests)
+            } else {
+                list.append(next)
+            }
         }
         func rank(_ s: CostSeries) -> Int { order.firstIndex(of: s.name) ?? order.count }
         return list.enumerated()
@@ -223,7 +291,7 @@ private struct Details {
     }
 }
 
-/// The Cost tab: the range control, then the 2×2 grid.
+/// The Cost tab: the range control, then the grid of squares.
 struct CostScreen: View {
     let session: Session
 
@@ -253,6 +321,10 @@ struct CostScreen: View {
                 HStack(spacing: gap) {
                     chartCard(.cloudflare).frame(width: side, height: side)
                     chartCard(.aiGateway).frame(width: side, height: side)
+                }
+                HStack(spacing: gap) {
+                    anthropicCard.frame(width: side, height: side)
+                    Spacer(minLength: 0)
                 }
             }
             .padding(.top, 2)
@@ -303,8 +375,16 @@ struct CostScreen: View {
         costBars(data?.models ?? [], days: data?.days ?? [], range: range)
     }
 
+    private var anthropicBars: [CostBar] {
+        costBars(data?.anthropicModels ?? [], days: data?.days ?? [], range: range)
+    }
+
     private func bars(_ source: CostSource) -> [CostBar] {
-        source == .cloudflare ? cloudflareBars : gatewayBars
+        switch source {
+        case .cloudflare: return cloudflareBars
+        case .aiGateway: return gatewayBars
+        case .anthropic: return anthropicBars
+        }
     }
 
     /// The selected bar and its source, if the selection still points at a bar.
@@ -361,17 +441,33 @@ struct CostScreen: View {
         return "\(name) · \(CostText.money(data?.total ?? 0))"
     }
 
+    /// The total by source, adding up to the total. With Anthropic connected, the gateway's
+    /// Anthropic part leaves the gateway's row, and Anthropic's row is what the total counts for
+    /// Anthropic (its billed amount, the gateway's estimate on days it has not reported yet).
+    private var sourceRows: [DetailRow] {
+        var rows = [
+            DetailRow(
+                name: "Cloudflare", amount: data?.cloudflareTotal ?? 0,
+                colour: ChartColour.workers)
+        ]
+        if let d = data, d.anthropicConnected {
+            let others = max(d.aiTotal - d.gatewayAnthropic, 0)
+            rows.append(DetailRow(name: "Other models", amount: others, colour: Tokens.accent))
+            rows.append(
+                DetailRow(
+                    name: "Anthropic", amount: max(d.total - d.cloudflareTotal - others, 0),
+                    colour: ChartColour.opus))
+        } else {
+            rows.append(
+                DetailRow(name: "AI Gateway", amount: data?.aiTotal ?? 0, colour: Tokens.accent))
+        }
+        return rows.sorted { $0.amount > $1.amount }
+    }
+
     /// What the details box shows now.
     private var details: Details {
         guard let (source, bar) = selectedBar else {
-            let rows = [
-                DetailRow(
-                    name: "Cloudflare", amount: data?.cloudflareTotal ?? 0,
-                    colour: ChartColour.workers),
-                DetailRow(
-                    name: "AI Gateway", amount: data?.aiTotal ?? 0, colour: Tokens.accent),
-            ].sorted { $0.amount > $1.amount }
-            return Details(source: "By source", head: rangeHead, rows: rows)
+            return Details(source: "By source", head: rangeHead, rows: sourceRows)
         }
         let items = bar.parts.filter { $0.value > 0 }.sorted { $0.value > $1.value }
         if range == .today {
@@ -405,10 +501,17 @@ struct CostScreen: View {
         let total = data?.total ?? 0
         let share = total > 0 ? Int((amount / total * 100).rounded()) : 0
         out.notes.append("\(share)% of today")
-        let list = source == .cloudflare ? data?.lines : data?.models
+        let list: [CostSeries]?
+        switch source {
+        case .cloudflare: list = data?.lines
+        case .aiGateway: list = data?.models
+        case .anthropic: list = data?.anthropicModels
+        }
         let series = list?.first { $0.name == name }
         if source == .cloudflare {
             out.notes.append(series?.perPeriod == true ? "Billed" : "Estimated")
+        } else if source == .anthropic {
+            out.notes.append("Billed by Anthropic")
         } else if let n = series?.requests {
             out.notes.append("\(Int(n)) requests")
         } else {
@@ -477,6 +580,59 @@ struct CostScreen: View {
         .padding(EdgeInsets(top: 10, leading: 10, bottom: 8, trailing: 10))
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .block()
+    }
+
+    /// The Anthropic card: what Anthropic itself billed, by model, and how far the gateway's
+    /// figure for the same days is from it. Not connected until ANTHROPIC_ADMIN_KEY is set.
+    private var anthropicCard: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(CostSource.anthropic.title).font(AppFont.label).foregroundStyle(Tokens.muted)
+                .lineLimit(1).minimumScaleFactor(0.7)
+            if data?.anthropicConnected == true {
+                HStack(alignment: .firstTextBaseline, spacing: 4) {
+                    Text(CostText.money(data?.anthropicTotal ?? 0))
+                        .font(AppFont.sourceTotal).tracking(-0.3).monospacedDigit()
+                        .foregroundStyle(Tokens.ink)
+                        .lineLimit(1).minimumScaleFactor(0.5)
+                    Spacer(minLength: 2)
+                    Text(differenceText).font(AppFont.chart).monospacedDigit()
+                        .foregroundStyle(
+                            data?.reconciliationWarns == true ? Tokens.warn : Tokens.muted)
+                        .lineLimit(1).minimumScaleFactor(0.6)
+                }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(reconciliationText)
+                chart(.anthropic)
+            } else {
+                Text("Not connected").font(AppFont.meta).foregroundStyle(Tokens.ink)
+                Text("Set ANTHROPIC_ADMIN_KEY on the console's Access tab.")
+                    .font(AppFont.chart).foregroundStyle(Tokens.muted)
+                    .lineLimit(4)
+                Spacer(minLength: 0)
+            }
+        }
+        .padding(EdgeInsets(top: 10, leading: 10, bottom: 8, trailing: 10))
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .block()
+    }
+
+    /// The difference beside the total: "±$Y vs gateway", marked when a day does not match.
+    private var differenceText: String {
+        let difference = data?.anthropicDifference ?? 0
+        let sign = difference < 0 ? "−" : "+"
+        let mark = data?.reconciliationWarns == true ? "⚠ " : ""
+        return "\(mark)\(sign)\(CostText.money(abs(difference))) vs gateway"
+    }
+
+    /// For VoiceOver: Anthropic's total, the gateway's figure and the difference.
+    private var reconciliationText: String {
+        let difference = data?.anthropicDifference ?? 0
+        let sign = difference < 0 ? "minus " : "plus "
+        let warn = data?.reconciliationWarns == true ? ", some days do not match" : ""
+        let billed = CostText.money(data?.anthropicTotal ?? 0)
+        let gateway = CostText.money(data?.gatewayAnthropic ?? 0)
+        return "Anthropic billed \(billed), the gateway recorded \(gateway), difference \(sign)"
+            + "\(CostText.money(abs(difference)))\(warn)"
     }
 
     /// The space between bars: 6 for today, 5 for 7 days, 1 for All.

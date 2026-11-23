@@ -17,7 +17,7 @@ use crate::{Context, dispatch};
 /// The Cloudflare lines that are always answered, in order. `Other` follows when it cost something.
 const LINES: [&str; 4] = ["CI Containers", "Workers", "D1", "R2"];
 /// The model families that are always answered, in order. `Other` follows when it cost something.
-const MODELS: [&str; 3] = ["Opus", "Sonnet", "Haiku"];
+const MODELS: [&str; 4] = ["Opus", "Sonnet", "Haiku", "OpenAI"];
 /// The roles that are always answered, in order. `other` follows when it cost something.
 const ROLES: [&str; 2] = ["planner", "executor"];
 /// The most days one answer spans, so a bad stored day cannot make the answer huge.
@@ -167,6 +167,7 @@ pub fn live_days(
     billing: Option<&Billing>,
     models: Option<&Value>,
     roles: Option<&BTreeMap<String, String>>,
+    anthropic: Option<&Value>,
 ) -> BTreeMap<String, Value> {
     let mut out: BTreeMap<String, Value> = BTreeMap::new();
     if let Some(b) = billing {
@@ -174,9 +175,38 @@ pub fn live_days(
             out.insert(day.clone(), merge_day(&Value::Null, rec, false));
         }
     }
-    let Some(models) = models else {
-        return out;
-    };
+    if let Some(models) = models {
+        gateway_days(&mut out, models, roles);
+    }
+    // Anthropic's own figures, on the days it has them.
+    for (day, d) in anthropic
+        .and_then(|a| a["by_day"].as_object())
+        .into_iter()
+        .flatten()
+    {
+        let by_model: Map<String, Value> = d["by_model"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .map(|(m, e)| (m.clone(), json!(num(&e["cost_usd"]))))
+            .collect();
+        let rec = json!({ "anthropic": {
+            "cost_usd": num(&d["cost_usd"]),
+            "tokens": d["tokens"],
+            "by_model": by_model,
+        }});
+        let old = out.get(day).cloned().unwrap_or(Value::Null);
+        out.insert(day.clone(), merge_day(&old, &rec, false));
+    }
+    out
+}
+
+/// Lays the gateway's per-day records from `models` (the `models_daily` answer) over `out`.
+fn gateway_days(
+    out: &mut BTreeMap<String, Value>,
+    models: &Value,
+    roles: Option<&BTreeMap<String, String>>,
+) {
     let days: Vec<String> = models["days"]
         .as_array()
         .map(|d| {
@@ -212,6 +242,33 @@ pub fn live_days(
         }
         let mut rec = Map::new();
         rec.insert("models".into(), Value::Object(families));
+        let mut providers = Map::new();
+        for (name, by_day) in models["by_provider"].as_object().into_iter().flatten() {
+            let usd = num(&by_day[&day]);
+            if usd != 0.0 {
+                providers.insert(name.clone(), json!(usd));
+            }
+        }
+        rec.insert("gateway_providers".into(), Value::Object(providers));
+        let mut anth = Map::new();
+        for (model, by_day) in models["by_provider_model"]["anthropic"]
+            .as_object()
+            .into_iter()
+            .flatten()
+        {
+            let d = &by_day[&day];
+            if d.is_object() {
+                anth.insert(
+                    model.clone(),
+                    json!({
+                        "cost_usd": num(&d["cost_usd"]),
+                        "tokens_in": num(&d["tokens_in"]),
+                        "tokens_out": num(&d["tokens_out"]),
+                    }),
+                );
+            }
+        }
+        rec.insert("gateway_anthropic".into(), Value::Object(anth));
         if roles.is_some() {
             let r: Map<String, Value> = by_role
                 .into_iter()
@@ -223,15 +280,18 @@ pub fn live_days(
         let old = out.get(&day).cloned().unwrap_or(Value::Null);
         out.insert(day, merge_day(&old, &Value::Object(rec), false));
     }
-    out
 }
 
 /// A stored or live day `old` with the keys of `new` laid over it. The gateway's keys (`models`,
-/// `roles`) of `old` stay when `truncated` says `new` came from a cut-short log listing.
+/// `roles`, `gateway_providers`, `gateway_anthropic`) of `old` stay when `truncated` says `new`
+/// came from a cut-short log listing. Anthropic's own `anthropic` always overwrites.
 pub fn merge_day(old: &Value, new: &Value, truncated: bool) -> Value {
     let mut out = old.as_object().cloned().unwrap_or_default();
     for (key, value) in new.as_object().into_iter().flatten() {
-        let gateway = key == "models" || key == "roles";
+        let gateway = matches!(
+            key.as_str(),
+            "models" | "roles" | "gateway_providers" | "gateway_anthropic"
+        );
         if gateway && truncated && out.contains_key(key) {
             continue;
         }
@@ -345,12 +405,14 @@ fn entries(
 /// The answer for `range` (`today`, `7d` or `all`; anything else is `7d`) on `today`: the
 /// `stored` months (month to `{day: record}`) with the `live` days laid over them, the live
 /// ones winning (see [`merge_day`] for a `truncated` listing). Pure.
+#[allow(clippy::too_many_arguments)]
 pub fn assemble(
     range: &str,
     today: &str,
     stored: &BTreeMap<String, Value>,
     live: &BTreeMap<String, Value>,
     truncated: bool,
+    anthropic_unavailable: bool,
     mut notes: Vec<String>,
     unavailable: Vec<Value>,
 ) -> Value {
@@ -416,12 +478,104 @@ pub fn assemble(
     let (by_model, ai_total) = entries(&MODELS, "Other", &models);
     let roles = series(&days, &merged, "roles", &ROLES, "other");
     let (by_role, _) = entries(&ROLES, "other", &roles);
+
+    // Gateway cost per provider, by the answer's names.
+    let mut providers: BTreeMap<String, BTreeMap<String, f64>> = BTreeMap::new();
+    let mut gateway_anthropic: BTreeMap<String, f64> = BTreeMap::new();
+    for day in &days {
+        let rec = merged.get(day);
+        for (slug, usd) in rec
+            .and_then(|r| r["gateway_providers"].as_object())
+            .into_iter()
+            .flatten()
+        {
+            let name = match slug.as_str() {
+                "anthropic" => "Anthropic",
+                "openai" => "OpenAI",
+                _ => "Other",
+            };
+            *providers
+                .entry(name.to_string())
+                .or_default()
+                .entry(day.clone())
+                .or_default() += num(usd);
+            if slug == "anthropic" {
+                *gateway_anthropic.entry(day.clone()).or_default() += num(usd);
+            }
+        }
+    }
+    let (by_provider, _) = entries(&["Anthropic", "OpenAI"], "Other", &providers);
+
+    // Anthropic's own figures replace the gateway's Anthropic cost on the days it reported.
+    let mut a_days = serde_json::Map::new();
+    let mut a_models: BTreeMap<String, BTreeMap<String, f64>> = BTreeMap::new();
+    let mut gateway_models = Map::new();
+    let mut swap = 0.0;
+    for day in &days {
+        let Some(rec) = merged.get(day) else { continue };
+        for (model, e) in rec["gateway_anthropic"].as_object().into_iter().flatten() {
+            let slot = gateway_models
+                .entry(model.clone())
+                .or_insert_with(|| json!({}));
+            slot[day.as_str()] = json!({
+                "cost_usd": num(&e["cost_usd"]),
+                "tokens_in": num(&e["tokens_in"]),
+                "tokens_out": num(&e["tokens_out"]),
+                "requests": 1,
+            });
+        }
+        let a = &rec["anthropic"];
+        if !a.is_object() {
+            continue;
+        }
+        swap += num(&a["cost_usd"]) - gateway_anthropic.get(day).copied().unwrap_or(0.0);
+        a_days.insert(
+            day.clone(),
+            json!({ "cost_usd": num(&a["cost_usd"]), "tokens": a["tokens"] }),
+        );
+        for (m, usd) in a["by_model"].as_object().into_iter().flatten() {
+            *a_models
+                .entry(m.clone())
+                .or_default()
+                .entry(day.clone())
+                .or_default() += num(usd);
+        }
+    }
+    let anthropic = if a_days.is_empty() && anthropic_unavailable {
+        Value::Null
+    } else {
+        let mut names: Vec<Value> = Vec::new();
+        for (model, by_day) in &a_models {
+            names.push(entry(model, Some(by_day)).0);
+        }
+        let a_total_all: f64 = a_days.values().map(|d| num(&d["cost_usd"])).sum();
+        let known = json!({ "by_day": a_days });
+        let recon = pigeon_models::billing::reconcile(
+            &Value::Object(gateway_models),
+            truncated,
+            &known,
+            &days,
+            today,
+        );
+        for n in recon["notes"].as_array().into_iter().flatten() {
+            if let Some(n) = n.as_str() {
+                notes.push(n.to_string());
+            }
+        }
+        json!({
+            "total": round6(a_total_all),
+            "by_model": names,
+            "reconciliation": recon,
+            "source": "Anthropic Admin API",
+        })
+    };
     json!({
         "range": match range { "today" | "all" => range, _ => "7d" },
         "days": days,
-        "total": round6(cf_total + ai_total),
+        "total": round6(cf_total + ai_total + swap),
         "cloudflare": { "total": cf_total, "lines": lines },
-        "ai_gateway": { "total": ai_total, "by_model": by_model, "by_role": by_role },
+        "ai_gateway": { "total": ai_total, "by_model": by_model, "by_role": by_role, "by_provider": by_provider },
+        "anthropic": anthropic,
         "notes": notes,
         "unavailable": unavailable,
         "truncated": truncated,
@@ -526,10 +680,18 @@ pub async fn cost_daily(cx: &Context<'_>, args: &Value) -> Result<Value> {
     let models_args = json!({ "days": window });
     let agents_args = json!({ "limit": 100 });
     let models_work = within(dispatch(cx, "models_daily", &models_args));
+    let anthropic_args = json!({ "provider": "anthropic", "days": window });
+    let anthropic_work = within(dispatch(cx, "models_billing", &anthropic_args));
     let agents_work = within(dispatch(cx, "ai_agents_status", &agents_args));
     let index_work = within(read_index(cx));
-    let (billing_v, models_v, agents_v, index_v) =
-        futures_util::future::join4(billing_work, models_work, agents_work, index_work).await;
+    let (billing_v, models_v, agents_v, index_v, anthropic_v) = futures_util::future::join5(
+        billing_work,
+        models_work,
+        agents_work,
+        index_work,
+        anthropic_work,
+    )
+    .await;
 
     let mut unavailable = Vec::new();
     let hide = |e: Error| e.to_string().replace(id, "{account}");
@@ -554,8 +716,31 @@ pub async fn cost_daily(cx: &Context<'_>, args: &Value) -> Result<Value> {
             None
         }
     };
+    let anthropic = match anthropic_v {
+        Ok(v) => match v["unavailable"]
+            .as_array()
+            .and_then(|u| u.iter().find(|x| x["source"] == "cost_report"))
+        {
+            // Without the cost report there is no billed figure to put in place of the gateway's.
+            Some(x) => {
+                let why = x["why"].as_str().unwrap_or("the cost report failed");
+                unavailable.push(missing("Anthropic", why));
+                None
+            }
+            None => Some(v),
+        },
+        Err(e) => {
+            unavailable.push(missing("Anthropic", &hide(e)));
+            None
+        }
+    };
     let truncated = models.as_ref().is_some_and(|m| m["truncated"] == true);
-    let live = live_days(billing.as_ref(), models.as_ref(), roles.as_ref());
+    let live = live_days(
+        billing.as_ref(),
+        models.as_ref(),
+        roles.as_ref(),
+        anthropic.as_ref(),
+    );
 
     // Which months to read: all of them for `all`; else the first, the window's and today's.
     let index = match index_v {
@@ -596,6 +781,7 @@ pub async fn cost_daily(cx: &Context<'_>, args: &Value) -> Result<Value> {
         &stored,
         &live,
         truncated,
+        anthropic.is_none(),
         Vec::new(),
         unavailable,
     ))

@@ -149,7 +149,7 @@ enum ChartColour {
     static let workers = pair(light: 0x008C82, dark: 0x00A396)
     /// D1.
     static let d1 = pair(light: 0x9C7C00, dark: 0xB39020)
-    /// R2.
+    /// R2; also OpenAI in the AI Gateway chart, which has no R2.
     static let r2 = pair(light: 0xA64D87, dark: 0xC86BA6)
     /// Opus.
     static let opus = pair(light: 0xD97757, dark: 0xCF7050)
@@ -165,7 +165,7 @@ enum ChartColour {
         case "CI Containers": return ciContainers
         case "Workers": return workers
         case "D1": return d1
-        case "R2": return r2
+        case "R2", "OpenAI": return r2
         case "Opus": return opus
         case "Sonnet": return sonnet
         case "Haiku": return haiku

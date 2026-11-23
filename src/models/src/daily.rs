@@ -18,6 +18,15 @@ pub fn family(model: &str) -> &'static str {
         .unwrap_or("Other")
 }
 
+/// The family of a log: `OpenAI` when its provider is `openai`, else [`family`] of its model.
+pub fn family_of(provider: &str, model: &str) -> &'static str {
+    if provider == "openai" {
+        "OpenAI"
+    } else {
+        family(model)
+    }
+}
+
 /// The UTC day (`YYYY-MM-DD`) of an RFC 3339 time: its first ten characters, when they are a
 /// valid date (digits, dashes in place, month 1–12, day 1–31); none otherwise.
 pub fn day_of(time: &str) -> Option<&str> {
@@ -180,6 +189,23 @@ pub struct ByRun {
     pub by_run: BTreeMap<String, BTreeMap<String, f64>>,
     /// Cost per day of logs with no run id in their `task`.
     pub unattributed: BTreeMap<String, f64>,
+    /// Cost per provider (`other` when a log names none), per day.
+    pub by_provider: BTreeMap<String, BTreeMap<String, f64>>,
+    /// Per provider, per canonical model, per day: cost, tokens and requests.
+    pub by_provider_model: BTreeMap<String, BTreeMap<String, BTreeMap<String, ModelDay>>>,
+}
+
+/// One model's use on one day, from the gateway's logs.
+#[derive(Serialize, Debug, PartialEq, Default)]
+pub struct ModelDay {
+    /// Cost in US dollars.
+    pub cost_usd: f64,
+    /// Tokens read.
+    pub tokens_in: u64,
+    /// Tokens written.
+    pub tokens_out: u64,
+    /// How many requests.
+    pub requests: u64,
 }
 
 /// The run id in a log's `task` tag: the part after `ai-agent/` up to the next slash.
@@ -198,15 +224,38 @@ pub fn daily_by_run(logs: &[Log], today: &str, n: usize) -> ByRun {
         ..ByRun::default()
     };
     for log in logs {
-        let Some(cost) = log.cost.filter(|c| c.is_finite()) else {
-            continue;
-        };
         let Some(day) = day_of(&log.created_at).filter(|d| out.days.iter().any(|x| x == d)) else {
             continue;
         };
         let day = day.to_string();
+        let provider = if log.provider.is_empty() {
+            "other".to_string()
+        } else {
+            log.provider.clone()
+        };
+        let cost = log.cost.filter(|c| c.is_finite());
+        let m = out
+            .by_provider_model
+            .entry(provider.clone())
+            .or_default()
+            .entry(canonical_model(&log.model))
+            .or_default()
+            .entry(day.clone())
+            .or_default();
+        m.cost_usd += cost.unwrap_or(0.0);
+        m.tokens_in += log.tokens_in.unwrap_or(0);
+        m.tokens_out += log.tokens_out.unwrap_or(0);
+        m.requests += 1;
+        let Some(cost) = cost else {
+            continue;
+        };
+        *out.by_provider
+            .entry(provider)
+            .or_default()
+            .entry(day.clone())
+            .or_default() += cost;
         *out.by_family
-            .entry(family(&log.model).to_string())
+            .entry(family_of(&log.provider, &log.model).to_string())
             .or_default()
             .entry(day.clone())
             .or_default() += cost;
@@ -221,9 +270,22 @@ pub fn daily_by_run(logs: &[Log], today: &str, n: usize) -> ByRun {
             None => *out.unattributed.entry(day).or_default() += cost,
         }
     }
-    for m in out.by_family.values_mut().chain(out.by_run.values_mut()) {
+    for m in out
+        .by_family
+        .values_mut()
+        .chain(out.by_run.values_mut())
+        .chain(out.by_provider.values_mut())
+    {
         m.values_mut().for_each(|v| *v = round6(*v));
     }
     out.unattributed.values_mut().for_each(|v| *v = round6(*v));
+    for d in out
+        .by_provider_model
+        .values_mut()
+        .flat_map(|m| m.values_mut())
+        .flat_map(|d| d.values_mut())
+    {
+        d.cost_usd = round6(d.cost_usd);
+    }
     out
 }

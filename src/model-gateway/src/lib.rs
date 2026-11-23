@@ -18,7 +18,7 @@ compile_error!(
 use pigeon_contract::{Answer, FailureKind};
 use pigeon_core::secrets_store;
 use pigeon_models::runner::{self, Token};
-use pigeon_models::{Dialect, ModelGateway, Models, Provider};
+use pigeon_models::{Billing, Dialect, ModelGateway, Models, Provider};
 use serde_json::json;
 use worker::{Context, Env, Request, Response, Result, event};
 // The `durable_object` macro's expansion names `wasm_bindgen` at the crate root.
@@ -47,6 +47,7 @@ fn gateway() -> ModelGateway {
                 dialect: Dialect::Anthropic,
                 default_model: "claude-haiku-5-5",
                 key_help: "A Claude Platform API key, from the Claude Console's API keys page.",
+                billing: Some(Billing::AnthropicAdmin),
             }],
             secrets_page: format!("https://{HOST}/access#credentials"),
             host: HOST.into(),
