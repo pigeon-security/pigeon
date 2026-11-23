@@ -332,6 +332,37 @@ impl Capability for Land {
                  server's state afterwards (`ready`, `waiting`, `stale` or `error`), or why it \
                  could not be synced.",
             ),
+            Tool {
+                name: "portal_oauth_redirects",
+                description: "List, add or remove ONE exact OAuth redirect URI on the MCP \
+                              Server Portal's own Access application. One exact `https://` \
+                              URI, never a wildcard. `list` is read-only. `add` and `remove` \
+                              plan the change and create an approval; nothing changes until \
+                              the person approves it, then portal_oauth_redirects_apply runs \
+                              it. The Access policy, dynamic client registration, PKCE and \
+                              grants are not changed, and no other application is touched.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["list", "add", "remove"] },
+                        "uri": { "type": "string", "description": "One exact https:// redirect URI, no wildcard." }
+                    },
+                    "required": ["action"]
+                }),
+            },
+            Tool {
+                name: "portal_oauth_redirects_apply",
+                description: "Apply an approved portal_oauth_redirects plan: re-reads the \
+                              portal's Access application, changes only its one exact \
+                              redirect URI, and answers the list and any other field that \
+                              differs afterwards. The Access policy, DCR, PKCE and grants are \
+                              not changed; only the portal's own application is touched.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": { "plan": { "type": "string", "description": "The approval id." } },
+                    "required": ["plan"]
+                }),
+            },
         ]
     }
 
@@ -353,6 +384,12 @@ impl Capability for Land {
                         out.insert(server.clone(), v);
                     }
                     Ok(Value::Object(out))
+                }
+                "portal_oauth_redirects" => {
+                    crate::portal_oauth::redirects(cx, &self.settings.portal_host, args).await
+                }
+                "portal_oauth_redirects_apply" => {
+                    crate::portal_oauth::apply(cx, &self.settings.portal_host, args).await
                 }
                 other => Err(unknown(other)),
             }

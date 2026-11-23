@@ -290,6 +290,31 @@ impl<'a> Session<'a> {
             .map(|a| a.aud))
     }
 
+    /// The one MCP Server Portal application (type `mcp_portal`) on `domain`, as Cloudflare
+    /// holds it. It is an error when there are none or several.
+    pub async fn portal_app(&self, domain: &str) -> Result<Value> {
+        let found: Vec<Listed> = self
+            .list("apps")
+            .await?
+            .into_iter()
+            .filter(|a| a.domain == domain && a.kind == "mcp_portal")
+            .collect();
+        let [app] = found.as_slice() else {
+            return Err(Error::RustError(format!(
+                "expected one mcp_portal application on {domain}, found {}",
+                found.len()
+            )));
+        };
+        let path = format!("{}/{}", self.path("apps"), app.id);
+        call(self.token.value(), Method::Get, &path, None).await
+    }
+
+    /// Replaces application `id` with `body` (Access has no PATCH): the application as saved.
+    pub async fn put_app(&self, id: &str, body: &Value) -> Result<Value> {
+        let path = format!("{}/{id}", self.path("apps"));
+        call(self.token.value(), Method::Put, &path, Some(body)).await
+    }
+
     /// The team domain Access signs as, such as `team.cloudflareaccess.com`.
     pub async fn team_domain(&self) -> Result<String> {
         let v = call(

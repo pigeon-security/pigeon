@@ -8894,6 +8894,56 @@ fn core_architecture_draws_every_worker_in_the_map() {
     assert!(text.contains("secret-detail") && text.contains("fake-token"));
     assert!(shown.resources.repos.is_empty() && shown.resources.mirrors.is_empty());
 
+    // The public view: nothing from any Worker's [vars], the account or the Secrets Store, no
+    // email address, and none of the Access token names or external details.
+    let shown = public(&described);
+    let shown_text = format!(
+        "{}{}",
+        serde_json::to_string(&shown).unwrap(),
+        render(&shown)
+    );
+    let mut secret: Vec<String> = vec!["fake-token".into(), "secret-detail".into()];
+    for w in &map.workers {
+        let toml = std::fs::read_to_string(root.join(&w.dir).join("wrangler.toml")).unwrap();
+        secret.extend(Wrangler::read(&toml).vars.values().cloned());
+        for line in toml.lines() {
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            if matches!(key.trim(), "account_id" | "store_id") {
+                secret.push(value.trim().trim_matches('"').to_string());
+            }
+        }
+    }
+    // The zone and its hostnames are vars too, and are public by design: the drawing is of them.
+    let zone = shown.resources.zone.clone().unwrap();
+    for value in secret
+        .iter()
+        .filter(|v| !v.is_empty() && **v != zone && !v.ends_with(&format!(".{zone}")))
+    {
+        assert!(
+            !shown_text.contains(value.as_str()),
+            "{value} is not public"
+        );
+    }
+    for (at, _) in shown_text.match_indices('@') {
+        let before = shown_text[..at].chars().next_back().unwrap_or(' ');
+        let after: String = shown_text[at + 1..]
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '.' || *c == '-')
+            .collect();
+        assert!(
+            !(before.is_alphanumeric() && after.contains('.')),
+            "an email shape near {after}"
+        );
+    }
+    let hosts: Vec<&str> = shown.hostnames.iter().map(|h| h.host.as_str()).collect();
+    assert!(hosts.contains(&"fake.pigeon.dev"), "{hosts:?}");
+    assert!(!hosts.contains(&"elsewhere.example.net"), "off the zone");
+    assert!(shown.hostnames.iter().any(|h| h.behind_access));
+    assert!(text.contains("secret-detail") && text.contains("fake-token"));
+    assert!(shown.resources.repos.is_empty() && shown.resources.mirrors.is_empty());
+
     // Without the map, the hosting Worker is still drawn, alone.
     let alone: Vec<Source> = sources
         .iter()
@@ -9628,4 +9678,107 @@ fn core_observability_monitors_billing() {
     assert!(err.contains("billing_usage_alert"), "{err}");
     // Absent without `billing` is no error.
     assert!(validate_billing(&absent, &json!(null)).unwrap().is_empty());
+}
+
+#[test]
+fn land_portal_oauth_redirects_change_one_uri() {
+    use pigeon_capabilities::portal_oauth::{check_uri, differences, plan, summary};
+
+    let app = json!({
+        "id": "app-1", "aud": "aud-1", "name": "portal", "type": "mcp_portal",
+        "domain": "mcp.example.test",
+        "created_at": "2025-01-01T00:00:00Z", "updated_at": "2025-01-02T00:00:00Z",
+        "allowed_idps": ["idp-1"],
+        "policies": [
+            { "id": "pol-a", "name": "people", "precedence": 1, "reusable": true,
+              "include": [{ "email": { "email": "owner@example.com" } }] },
+            { "id": "pol-b", "name": "bots", "precedence": 2, "reusable": true }
+        ],
+        "oauth_configuration": {
+            "enabled": true,
+            "dynamic_client_registration": {
+                "enabled": true, "allow_any_on_localhost": true,
+                "allow_any_on_loopback": true,
+                "allowed_uris": ["https://a.example.test/cb"]
+            },
+            "grant": { "access_token_lifetime": "1h", "session_duration": "24h" }
+        }
+    });
+    let new = "https://b.example.test/cb";
+    let planned = plan(&app, "add", new).unwrap();
+    let body = planned.body.unwrap();
+    assert_eq!(
+        planned.after,
+        vec!["https://a.example.test/cb".to_string(), new.to_string()]
+    );
+    for k in ["id", "aud", "created_at", "updated_at"] {
+        assert!(body.get(k).is_none(), "{k} is dropped");
+    }
+    assert_eq!(
+        body["policies"],
+        json!([{ "id": "pol-a", "precedence": 1 }, { "id": "pol-b", "precedence": 2 }])
+    );
+    // Only allowed_uris differs from the read app.
+    let mut expect = app.clone();
+    for k in ["id", "aud", "created_at", "updated_at"] {
+        expect.as_object_mut().unwrap().remove(k);
+    }
+    expect["policies"] = body["policies"].clone();
+    expect["oauth_configuration"]["dynamic_client_registration"]["allowed_uris"] =
+        body["oauth_configuration"]["dynamic_client_registration"]["allowed_uris"].clone();
+    assert_eq!(body, expect);
+
+    assert!(
+        plan(&app, "add", "https://a.example.test/cb")
+            .unwrap()
+            .body
+            .is_none()
+    );
+    assert!(plan(&app, "remove", new).unwrap().body.is_none());
+    let removed = plan(&app, "remove", "https://a.example.test/cb").unwrap();
+    assert!(removed.after.is_empty() && removed.body.is_some());
+
+    assert!(check_uri(new).is_ok());
+    for bad in [
+        "https://x/*",
+        "http://localhost/cb",
+        "https%3A%2F%2Fx.example.test%2Fcb",
+        "https://x.example.test/cb#frag",
+    ] {
+        assert!(check_uri(bad).is_err(), "{bad}");
+    }
+
+    assert!(!summary(&app).to_string().contains("owner@example.com"));
+
+    let mut not_reusable = app.clone();
+    not_reusable["policies"][1]["reusable"] = json!(false);
+    assert!(plan(&not_reusable, "add", new).is_err());
+    let mut dcr_off = app.clone();
+    dcr_off["oauth_configuration"]["dynamic_client_registration"]["enabled"] = json!(false);
+    assert!(plan(&dcr_off, "add", new).is_err());
+    let mut oauth_off = app.clone();
+    oauth_off["oauth_configuration"]["enabled"] = json!(false);
+    assert!(plan(&oauth_off, "add", new).is_err());
+    // Cloudflare reads an omitted `enabled` as true.
+    let mut oauth_implicit = app.clone();
+    oauth_implicit["oauth_configuration"]
+        .as_object_mut()
+        .unwrap()
+        .remove("enabled");
+    assert!(plan(&oauth_implicit, "add", new).unwrap().body.is_some());
+
+    let mut moved = app.clone();
+    moved["oauth_configuration"]["dynamic_client_registration"]["allow_any_on_localhost"] =
+        json!(false);
+    assert_eq!(
+        differences(&app, &moved),
+        vec!["oauth_configuration.dynamic_client_registration.allow_any_on_localhost"]
+    );
+    let mut reordered = app.clone();
+    reordered["policies"].as_array_mut().unwrap().reverse();
+    assert_eq!(differences(&app, &reordered), vec!["policies"]);
+    let mut same = app.clone();
+    same["updated_at"] = json!("later");
+    same["oauth_configuration"]["dynamic_client_registration"]["allowed_uris"] = json!([new]);
+    assert!(differences(&app, &same).is_empty());
 }

@@ -27,6 +27,7 @@ pub mod oauth;
 pub mod observability;
 pub mod passkeys;
 pub mod policy;
+pub mod portal_oauth;
 pub mod protected_host;
 pub mod proxy;
 pub mod public_host;
