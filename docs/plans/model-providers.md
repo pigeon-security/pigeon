@@ -1,7 +1,6 @@
 # Model providers: Anthropic's own cost, OpenAI through the gateway, models chosen per run
 
-Status: **planned** (2026-11-24). Planner run `vvPiX6NZeIW4`. Phases and branches are listed
-below; the Log says what landed.
+Status: **Part 1 deployed; Part 2 landing** (2026-11-24). Planner run `vvPiX6NZeIW4`. Phase 1b (the ANTHROPIC_ADMIN_KEY binding) waits for the person to set the key.
 
 ## Goal
 
@@ -270,6 +269,14 @@ so. Anthropic usage outside the gateway is included in the total: it is money th
 Phases 1 and 5 run together (disjoint crates). Phase 2 and 4 build on phase 1's branch; phase 3
 builds on phase 2's answer shape. The landing order is 1, 5, 2, 3, 4, then 1b when the key is set.
 
+## How to use it
+
+- Choose models per run: `ai_agents_start {role: "planner", brief, model: "openai", models: {executor: "anthropic"}}`. This is a planner on OpenAI's top tier (gpt-6.2-astra) whose executors use Claude Sonnet. A model can also be named in full: `openai/gpt-6.2-sol`, `anthropic/claude-opus-5-5`, or a bare `claude-…` name. A planner's `spawn_executor` takes `model` too.
+- See or change the defaults: `ai_agents_models`, and `ai_agents_models {set: {executor: "openai/gpt-6.2-sol"}}`. Built in: planner Opus, executor Sonnet, mechanical Haiku, and summaries Haiku.
+- Compare models: `ai_agents_compare {days: 30}`, ended runs by role and model, with their outcomes, cost, turns and minutes. `ai_agents_status` shows each run's model.
+- Cost: `cost_daily` gives the gateway's cost `by_provider` (Anthropic, OpenAI). Its `anthropic` section is what Anthropic billed, reconciled with the gateway. `models_billing` is Anthropic's own report.
+- OpenAI needs the key `pigeon_openai_default` set on the Access tab. Until then, an OpenAI turn fails and the run says so.
+
 ## Open items (for the person)
 
 1. **Anthropic Admin key.** Make an Admin API key in the Claude Console (Settings, Admin keys;
@@ -316,3 +323,5 @@ estimate. Org-wide Anthropic spend counts in the total (confirmed).
   CostScreen. The difference from the gateway sits beside Anthropic's total, because the plot's
   fixed height leaves no room for a line under it. The rebased branch keeps its old tip as an
   `ours` merge parent, because the push of the rewritten branch was refused.
+- 2026-11-24: Part 1 landed as one linear commit (claude/ai-agent-qX99nrI8eQRn, the tree of the planner's tested tip), because the planner's sandbox could not force-push its rebased branch.
+- 2026-11-24: phases 4 (jX4T2h1nihxH) and 5 (G2YZBsyBTIkW) put together on one branch for one landing. Phase 4 also changed canonical_model to keep the dots of non-Claude names (gpt-6.2-sol) and added price_at for OpenAI's long-context price. Phase 5 stores defaults in the index's flags (models.defaults) and adds runs.child_models so status shows a planner's models.

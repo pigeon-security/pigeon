@@ -799,6 +799,8 @@ fn models_openai_provider_declared_with_secret() {
             json!(["anthropic", "openai"])
         );
     }
+}
+
 // ---- AI agents: model choice per run (docs/plans/model-providers.md, phase 5) ----
 
 /// A choice is read from `provider/model`, a bare `claude-…` name or a bare provider; bad ones
