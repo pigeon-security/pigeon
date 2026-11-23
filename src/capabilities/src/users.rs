@@ -83,7 +83,7 @@ fn bad(why: &str) -> Error {
 // ---- the Directory ----
 
 /// The Directory's schema, one statement per migration, applied in order and never edited.
-const MIGRATIONS: [&str; 18] = [
+const MIGRATIONS: [&str; 19] = [
     "CREATE TABLE users (id TEXT PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL, created_at INTEGER NOT NULL)",
     "CREATE TABLE service_ids (access_client_id TEXT PRIMARY KEY, user_id TEXT NOT NULL)",
     "CREATE TABLE passkeys (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, point TEXT NOT NULL, sign_count INTEGER NOT NULL, name TEXT NOT NULL, created_at INTEGER NOT NULL, last_used_at INTEGER)",
@@ -105,6 +105,8 @@ const MIGRATIONS: [&str; 18] = [
     "CREATE TABLE approvals (id TEXT PRIMARY KEY, caller_id TEXT NOT NULL, digest TEXT NOT NULL, state TEXT NOT NULL, expires_ms INTEGER NOT NULL, record TEXT NOT NULL)",
     // AI agent runs' git grants (`run_grant`): the branch prefix they may push.
     "ALTER TABLE oauth_tokens ADD COLUMN scope TEXT",
+    // iOS push registrations (docs/plans/ios.md, phase 6): one device token per app and client.
+    "CREATE TABLE apns_devices (id TEXT PRIMARY KEY, app TEXT NOT NULL, person_id TEXT NOT NULL, service_user_id TEXT NOT NULL, token TEXT NOT NULL, environment TEXT NOT NULL, created_at INTEGER NOT NULL, last_ok_at INTEGER, last_error TEXT, UNIQUE(app, token))",
 ];
 
 /// A day, in milliseconds: how long an ended approval is kept.
@@ -440,7 +442,59 @@ impl Directory {
                     "DELETE FROM links WHERE service_user_id = ?",
                     vec![s("id").into()],
                 )?;
+                self.db.exec(
+                    "DELETE FROM apns_devices WHERE service_user_id = ?",
+                    vec![s("id").into()],
+                )?;
                 json!({ "name": app.name })
+            }
+            // One row per (app, client); a token that moves to another client moves its row.
+            "apns.register" => {
+                let id = format!("{}:{}", s("app"), s("service_user_id"));
+                self.db.exec(
+                    "DELETE FROM apns_devices WHERE app = ? AND (service_user_id = ? OR token = ?)",
+                    vec![
+                        s("app").into(),
+                        s("service_user_id").into(),
+                        s("token").into(),
+                    ],
+                )?;
+                self.db.exec(
+                    "INSERT INTO apns_devices (id, app, person_id, service_user_id, token, environment, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    vec![
+                        id.into(),
+                        s("app").into(),
+                        s("person_id").into(),
+                        s("service_user_id").into(),
+                        s("token").into(),
+                        s("environment").into(),
+                        t.into(),
+                    ],
+                )?;
+                json!({ "ok": true })
+            }
+            "apns.unregister" => {
+                self.db.exec(
+                    "DELETE FROM apns_devices WHERE app = ? AND service_user_id = ?",
+                    vec![s("app").into(), s("service_user_id").into()],
+                )?;
+                json!({ "ok": true })
+            }
+            // The rows of an app, for one person when `person_id` is given. Holds tokens: only
+            // the Worker reads this, and no tool answers it as is.
+            "apns.devices" => {
+                let rows: Vec<Value> = if s("person_id").is_empty() {
+                    self.db.rows(
+                        "SELECT id, app, person_id, service_user_id, token, environment, created_at, last_ok_at, last_error FROM apns_devices WHERE app = ? ORDER BY created_at",
+                        vec![s("app").into()],
+                    )?
+                } else {
+                    self.db.rows(
+                        "SELECT id, app, person_id, service_user_id, token, environment, created_at, last_ok_at, last_error FROM apns_devices WHERE app = ? AND person_id = ? ORDER BY created_at",
+                        vec![s("app").into(), s("person_id").into()],
+                    )?
+                };
+                json!(rows)
             }
             "session.remove" => {
                 self.db.exec(

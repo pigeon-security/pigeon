@@ -56,7 +56,24 @@ const KEPT_MS: i64 = 100 * 365 * 24 * 3_600_000;
 const RENEW_WITHIN_MS: i64 = 30 * 24 * 3_600_000;
 
 /// The slots, in the order the person fills them.
-pub const SLOTS: [&str; 4] = [TEAM_ID, ASC_ISSUER_ID, ASC_KEY_ID, ASC_KEY];
+pub const SLOTS: [&str; 6] = [
+    TEAM_ID,
+    ASC_ISSUER_ID,
+    ASC_KEY_ID,
+    ASC_KEY,
+    APNS_KEY_ID,
+    APNS_KEY,
+];
+
+/// The APNs provider key (`.p8`), for push notifications.
+pub const APNS_KEY: &str = "APNS_KEY";
+/// The APNs provider key's id.
+pub const APNS_KEY_ID: &str = "APNS_KEY_ID";
+
+/// What to do while push is off.
+pub const APNS_SETUP: &str = "Push is not set up. On the console's secrets page, set \
+APPLE_TEAM_ID, APNS_KEY_ID and APNS_KEY (an APNs key from developer.apple.com, Keys; \
+docs/plans/ios.md, follow-up 5). Nothing is sent until all three are readable.";
 
 /// What to do while the capability is off.
 pub const SETUP: &str = "Apple is not set up. On the console's secrets page, set APPLE_TEAM_ID, \
@@ -356,6 +373,28 @@ pub async fn check(env: &Env, name: &str, value: &str) -> Result<String> {
                     Ok("a P-256 key that signs; Apple checks it once the ids are readable".into())
                 }
             }
+        }
+        APNS_KEY_ID => {
+            if !apple::is_apple_id(v) {
+                return Err(bad(
+                    "an APNs key id is 10 characters of A-Z and 0-9 (Keys, beside the key)",
+                ));
+            }
+            Ok("a key id in the right form".into())
+        }
+        APNS_KEY => {
+            let der = apple::p8_der(v).ok_or_else(|| {
+                bad("paste the whole .p8 file, from -----BEGIN PRIVATE KEY----- to -----END PRIVATE KEY-----")
+            })?;
+            let now = worker::Date::now().as_millis() / 1000;
+            apple::sign_jwt(
+                &der,
+                "AAAAAAAAAA",
+                "00000000-0000-0000-0000-000000000000",
+                now,
+            )
+            .await?;
+            Ok("a P-256 key that signs; APNs checks it on the first send".into())
         }
         _ => Err(bad(&format!("apple has no secret `{name}`"))),
     }
@@ -730,7 +769,7 @@ impl Capability for Apple {
     }
 
     fn tools(&self) -> Vec<Tool> {
-        vec![
+        let mut tools = vec![
             release::tool(),
             Tool {
                 name: "apple_status",
@@ -741,14 +780,17 @@ impl Capability for Apple {
                           keys or profile bytes). With the slots unset it says how to set them.",
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
-        ]
+        ];
+        tools.extend(push::tools());
+        tools
     }
 
-    fn call<'a>(&'a self, cx: &'a Context<'a>, tool: &'a str, _args: &'a Value) -> Call<'a> {
+    fn call<'a>(&'a self, cx: &'a Context<'a>, tool: &'a str, args: &'a Value) -> Call<'a> {
         Box::pin(async move {
             match tool {
                 "apple_status" => status(cx.env).await,
                 "ios_releases" => release::list(cx.env).await,
+                t if t.starts_with("apns_") => push::call(cx, t, args).await,
                 other => Err(crate::unknown(other)),
             }
         })
@@ -782,6 +824,17 @@ impl Capability for Apple {
                  Manager), then delete the download. Apple lets you download it once. pigeon \
                  checks it signs before keeping it.",
             ),
+            slot(
+                APNS_KEY_ID,
+                "The APNs key's id: 10 characters, on developer.apple.com under Keys, beside the \
+                 key (docs/plans/ios.md, follow-up 5).",
+            ),
+            slot(
+                APNS_KEY,
+                "The APNs key itself: paste the whole .p8 file (a key with Apple Push \
+                 Notifications service enabled), then delete the download. pigeon checks it \
+                 signs before keeping it.",
+            ),
         ]
     }
 
@@ -811,6 +864,195 @@ impl Capability for Apple {
 
     fn fetch<'a>(&'a self, cx: &'a Context<'a>, req: Request) -> Serve<'a> {
         Box::pin(self.serve(cx, req))
+    }
+}
+
+/// Push notifications (docs/plans/ios.md, phase 6): device registration, status and send. All of
+/// it is off until `APNS_KEY`, `APNS_KEY_ID` and `APPLE_TEAM_ID` are readable. No answer, log or
+/// audit line holds a device token.
+pub mod push {
+    use super::*;
+    use crate::arg;
+    use pigeon_core::apns;
+    use worker::{Fetch, RequestInit};
+
+    /// The push tools.
+    pub fn tools() -> Vec<Tool> {
+        vec![
+            Tool {
+                name: "apns_register",
+                description: "Register this device for push: the caller must be a service user \
+                              acting for a person. Replaces the caller's earlier token for the app.",
+                input_schema: json!({ "type": "object", "required": ["app", "token", "environment"],
+                    "properties": {
+                        "app": { "type": "string" },
+                        "token": { "type": "string" },
+                        "environment": { "type": "string", "enum": ["development", "production"] },
+                    } }),
+            },
+            Tool {
+                name: "apns_unregister",
+                description: "Remove the caller's push registration for an app.",
+                input_schema: json!({ "type": "object", "required": ["app"],
+                    "properties": { "app": { "type": "string" } } }),
+            },
+            Tool {
+                name: "apns_status",
+                description: "Read-only: whether push is set up, what to set and where, and how \
+                              many devices are registered per environment (never a token). With \
+                              probe true it sends an unsigned request to APNs' sandbox and \
+                              answers the HTTP status, apns-id and reason, to show the Worker's \
+                              fetch speaks HTTP/2 there. It needs no key.",
+                input_schema: json!({ "type": "object", "properties": {
+                    "app": { "type": "string" }, "probe": { "type": "boolean" } } }),
+            },
+            Tool {
+                name: "apns_send",
+                description: "Send a push to a person's devices for an app. Sends nothing, and \
+                              says what to set, while the APNs key is not readable.",
+                input_schema: json!({ "type": "object", "required": ["app", "alert"],
+                    "properties": {
+                        "app": { "type": "string" },
+                        "person": { "type": "string" },
+                        "alert": { "type": "object", "required": ["title", "body"],
+                            "properties": { "title": { "type": "string" },
+                                            "body": { "type": "string" } } },
+                        "data": { "type": "object" },
+                        "push_type": { "type": "string", "enum": ["alert", "background"] },
+                        "collapse_id": { "type": "string" },
+                    } }),
+            },
+        ]
+    }
+
+    /// True when the three secrets a send needs can be read.
+    async fn configured(env: &Env) -> bool {
+        secret(env, APNS_KEY).await.is_some()
+            && secret(env, APNS_KEY_ID).await.is_some()
+            && secret(env, TEAM_ID).await.is_some()
+    }
+
+    fn declared(args: &Value) -> Result<&str> {
+        let app = arg(args, "app")?;
+        apns::bundle_id(app).ok_or_else(|| bad("that app is not declared"))?;
+        Ok(app)
+    }
+
+    /// Runs push tool `tool`.
+    pub async fn call(cx: &Context<'_>, tool: &str, args: &Value) -> Result<Value> {
+        let env = cx.env;
+        match tool {
+            "apns_register" => {
+                let app = declared(args)?;
+                let token = arg(args, "token")?.trim().to_lowercase();
+                let environment = arg(args, "environment")?;
+                let caller = cx
+                    .caller
+                    .filter(|c| c.user.kind == "service")
+                    .ok_or_else(|| bad("only a service user can register a device"))?;
+                let person = caller
+                    .acting_for
+                    .as_ref()
+                    .filter(|p| p.kind == "standard")
+                    .ok_or_else(|| bad("this client is not linked to a person"))?;
+                if !apns::is_environment(environment) {
+                    return Err(bad("environment is development or production"));
+                }
+                if !apns::is_device_token(&token) {
+                    return Err(bad("that is not a device token"));
+                }
+                directory(
+                    env,
+                    "apns.register",
+                    json!({ "app": app, "person_id": person.id, "service_user_id": caller.user.id,
+                        "token": token, "environment": environment }),
+                )
+                .await?;
+                Ok(json!({ "registered": true, "app": app, "environment": environment }))
+            }
+            "apns_unregister" => {
+                let app = declared(args)?;
+                let caller = cx
+                    .caller
+                    .filter(|c| c.user.kind == "service")
+                    .ok_or_else(|| bad("only a service user can unregister a device"))?;
+                directory(
+                    env,
+                    "apns.unregister",
+                    json!({ "app": app, "service_user_id": caller.user.id }),
+                )
+                .await?;
+                Ok(json!({ "registered": false, "app": app }))
+            }
+            "apns_status" => status(env, args).await,
+            "apns_send" => {
+                if !configured(env).await {
+                    return Ok(json!({ "sent": 0, "configured": false, "next": APNS_SETUP }));
+                }
+                let app = declared(args)?;
+                let push_type =
+                    apns::PushType::parse(args["push_type"].as_str().unwrap_or("alert"))
+                        .ok_or_else(|| bad("push_type is alert or background"))?;
+                let title = args["alert"]["title"].as_str().unwrap_or_default();
+                let body = args["alert"]["body"].as_str().unwrap_or_default();
+                apns::payload(push_type, Some((title, body)), args.get("data"))
+                    .map_err(|e| bad(&e))?;
+                apns::headers(app, push_type, args["collapse_id"].as_str()).map_err(|e| bad(&e))?;
+                Err(bad(
+                    "the key is set, but sending lands with the bindings (phase 6b)",
+                ))
+            }
+            other => Err(crate::unknown(other)),
+        }
+    }
+
+    /// `apns_status`: setup state, counts per environment, and the optional HTTP/2 probe.
+    async fn status(env: &Env, args: &Value) -> Result<Value> {
+        let app = args["app"].as_str().unwrap_or("pigeon");
+        apns::bundle_id(app).ok_or_else(|| bad("that app is not declared"))?;
+        let ready = configured(env).await;
+        let rows = directory(env, "apns.devices", json!({ "app": app })).await?;
+        let count = |e: &str| {
+            rows.as_array()
+                .map_or(0, |r| r.iter().filter(|d| d["environment"] == e).count())
+        };
+        let mut out = json!({
+            "app": app,
+            "configured": ready,
+            "devices": { "development": count("development"), "production": count("production") },
+        });
+        if !ready {
+            out["next"] = json!(APNS_SETUP);
+        }
+        if args["probe"].as_bool().unwrap_or(false) {
+            out["probe"] = probe().await;
+        }
+        Ok(out)
+    }
+
+    /// An unsigned POST to APNs' sandbox. A 403 MissingProviderToken or 400 BadDeviceToken with
+    /// an apns-id means the Worker's fetch speaks HTTP/2 to APNs.
+    async fn probe() -> Value {
+        let url = format!(
+            "https://api.sandbox.push.apple.com/3/device/{}",
+            "0".repeat(64)
+        );
+        let go = async {
+            let mut init = RequestInit::new();
+            init.with_method(Method::Post);
+            init.with_body(Some("{}".into()));
+            let request = Request::new_with_init(&url, &init)?;
+            let mut res = Fetch::Request(request).send().await?;
+            let status = res.status_code();
+            let id = res.headers().get("apns-id")?;
+            let text = res.text().await.unwrap_or_default();
+            let reason = serde_json::from_str::<Value>(&text)
+                .ok()
+                .and_then(|v| v["reason"].as_str().map(String::from));
+            Ok::<Value, Error>(json!({ "status": status, "apns_id": id, "reason": reason }))
+        };
+        go.await
+            .unwrap_or_else(|e| json!({ "error": e.to_string() }))
     }
 }
 

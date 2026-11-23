@@ -3592,11 +3592,23 @@ fn apple_ids_token_and_slots() {
             "APPLE_TEAM_ID",
             "APPLE_ASC_ISSUER_ID",
             "APPLE_ASC_KEY_ID",
-            "APPLE_ASC_KEY"
+            "APPLE_ASC_KEY",
+            "APNS_KEY_ID",
+            "APNS_KEY"
         ]
     );
     let tools: Vec<&str> = apple_cap.tools().iter().map(|t| t.name).collect();
-    assert_eq!(tools, ["ios_releases", "apple_status"]);
+    assert_eq!(
+        tools,
+        [
+            "ios_releases",
+            "apple_status",
+            "apns_register",
+            "apns_unregister",
+            "apns_status",
+            "apns_send"
+        ]
+    );
     assert_eq!(apple_cap.routes(), ["/apple/", "/app/oauth"]);
     // Phase 5: the AASA names only dev.pigeon.app under the team, for passkeys and for the
     // /app/oauth callback only, and nothing for a bad team id;
@@ -3890,6 +3902,61 @@ fn apple_release_admits_by_record() {
     let edge = rec("j1", "A", "signing", now - EXPIRY);
     assert!(admit("upload", "j1", "A", None, Some(&edge), now).is_ok());
     assert!(admit("other", "j1", "A", Some("A"), Some(&started), now).is_err());
+}
+
+/// APNs, the pure parts (docs/plans/ios.md, §3): signing input, hosts, payload limit, error
+/// table, token form and the rate limit.
+#[test]
+fn apple_apns_payload_errors_and_registry() {
+    use pigeon_core::apns::{self, Action, Limited, PushType};
+
+    let input = apns::signing_input("ABC1234567", "TEAM123456", 1000);
+    assert_eq!(input.split('.').count(), 2);
+    assert!(apns::token_fresh(0, 49 * 60));
+    assert!(!apns::token_fresh(0, 50 * 60));
+    assert!(!apns::may_refresh(0, 19 * 60));
+    assert!(apns::may_refresh(0, 20 * 60));
+
+    assert_eq!(
+        apns::host("development"),
+        Some("api.sandbox.push.apple.com")
+    );
+    assert_eq!(apns::host("production"), Some("api.push.apple.com"));
+    assert_eq!(apns::host("x"), None);
+    assert!(apns::is_device_token(&"ab".repeat(32)));
+    assert!(!apns::is_device_token("zz"));
+    assert!(!apns::is_device_token(&"g".repeat(64)));
+
+    let p = apns::payload(PushType::Alert, Some(("t", "b")), None).unwrap();
+    assert!(p.contains("\"alert\""));
+    let bg = apns::payload(PushType::Background, None, None).unwrap();
+    assert!(bg.contains("\"content-available\":1"));
+    let big = json!({ "k": "x".repeat(5000) });
+    assert!(apns::payload(PushType::Alert, Some(("t", "b")), Some(&big)).is_err());
+    let nested = json!({ "k": { "a": "b" } });
+    assert!(apns::payload(PushType::Alert, Some(("t", "b")), Some(&nested)).is_err());
+
+    let h = apns::headers("pigeon", PushType::Background, Some("c")).unwrap();
+    assert!(h.contains(&("apns-topic", "dev.pigeon.app".to_string())));
+    assert!(h.contains(&("apns-priority", "5".to_string())));
+    assert!(apns::headers("other", PushType::Alert, None).is_err());
+
+    assert_eq!(apns::action(200, ""), Action::Ok);
+    assert_eq!(apns::action(400, "BadDeviceToken"), Action::MarkDevice);
+    assert_eq!(apns::action(400, "BadTopic"), Action::StopReport);
+    assert_eq!(
+        apns::action(403, "ExpiredProviderToken"),
+        Action::RefreshToken
+    );
+    assert_eq!(apns::action(410, "Unregistered"), Action::DeleteIfNewer);
+    assert_eq!(apns::action(429, "TooManyRequests"), Action::BackOff);
+    assert_eq!(apns::action(503, "ServiceUnavailable"), Action::Retry);
+
+    let burst: Vec<u64> = vec![1000; 30];
+    assert_eq!(apns::rate_limit(&burst, 1010), Err(Limited::Minute));
+    assert_eq!(apns::rate_limit(&burst, 1100), Ok(()));
+    let day: Vec<u64> = (0..500).map(|i| i * 100).collect();
+    assert_eq!(apns::rate_limit(&day, 50_000), Err(Limited::Day));
 }
 
 // ---- storage ----

@@ -4,6 +4,7 @@
 
 pub mod access;
 pub mod ai_gateway;
+pub mod apns;
 pub mod apple;
 pub mod approval;
 pub mod artifacts;

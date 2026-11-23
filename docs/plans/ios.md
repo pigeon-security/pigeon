@@ -331,6 +331,31 @@ proves it first with one push to a development device. If it fails, the sender m
 container (the CI base image's curl speaks HTTP/2), started by the same Durable Object. The tool
 and the route do not change.
 
+**As built (phase 6 prep, not landed).**
+- `pigeon_core::apns` holds the pure parts: the provider token's signing input, the 50 and 20
+  minute cache rule, the host per environment, the device-token form, the payload builder with
+  the 4096-byte check, the request headers, the error table as `action(status, reason)`, and the
+  rate-limit count. The smoke scenario `apple_apns_payload_errors_and_registry` covers them.
+- Built on the capability side, all off until the key is set: slots `APNS_KEY` (checked as a
+  .p8 that signs an ES256 token) and `APNS_KEY_ID` on the `apple` capability; the Directory table
+  `apns_devices` (one row per app and client) with ops `apns.register`, `apns.unregister`,
+  `apns.devices`, and `app.disconnect` deleting the client's rows; tools `apns_register`,
+  `apns_unregister`, `apns_status` and `apns_send`. `apns_send` sends nothing and says what to
+  set while `APNS_KEY`, `APNS_KEY_ID` and `APPLE_TEAM_ID` cannot be read. Tokens are never
+  answered, logged or audited. The signing and sending itself lands with phase 6b.
+- No wrangler binding is added now: a binding to a missing Secrets Store secret fails the
+  deploy (Log, phases 1a and 1b). The bindings land as phase 6b.
+- HTTP/2 spike: from the sandbox, `curl --http2` to the sandbox host with no token answered
+  `HTTP/2 403`, an `apns-id`, and `{"reason":"MissingProviderToken"}`. `apns_status` with
+  `probe: true` now does the same from the Worker's `fetch` and answers the status, `apns-id`
+  and reason; a 403 or 400 with an `apns-id` means the Worker speaks HTTP/2 to APNs. The
+  result is still to read once deployed.
+- Design for the route, a departure from the text above: the proxy Worker stays key-free and
+  token-free. `POST /apns/{app}/send` only authenticates the proxy credential or a job token
+  whose grant names `apns`, then forwards to core's single sender (an `apns.send` op over
+  PLATFORM). Core signs and sends. Until core's setting `apns_route = false` is flipped, the
+  route answers 404 saying APNs is not set up.
+
 ### 4. Buildkite: the iOS pipelines
 
 The generator is built tonight, off, as `pigeon_ci::buildkite::ios`. Phase 3 wires it in.
@@ -598,10 +623,13 @@ a passkey. Enter every key and id on the console's secrets page once the slot ex
    Connect that the internal TestFlight group still has automatic distribution and that you
    are in it.
 5. **APNs key** (phase 6).
-   1. developer.apple.com → Certificates, Identifiers & Profiles → Keys → "+".
-   2. Enable Apple Push Notifications service (APNs), for Sandbox & Production.
-   3. Download the `.p8`.
-   4. Set `APNS_KEY` and `APNS_KEY_ID` on the secrets page.
+   1. developer.apple.com → Certificates, Identifiers & Profiles → Keys → "+". Name it.
+   2. Enable Apple Push Notifications service (APNs). Environment: Sandbox & Production. Key
+      restriction: team scoped.
+   3. Download the `.p8`. Apple lets you download it once. Note the Key ID.
+   4. Once the phase 6 prep branch has landed, on platform.pigeon.dev's console secrets page
+      set `APNS_KEY` (the file's text) and `APNS_KEY_ID`. pigeon checks each before keeping it.
+   5. Delete the downloaded file. The bindings then land as phase 6b.
 6. **A macOS Buildkite agent** (phase 3). Do one of these:
    - **(a)** Confirm the Buildkite organization's plan includes hosted macOS agents. pigeon then
      creates the queues `pigeon-macos` and `pigeon-macos-sign` itself.
