@@ -540,6 +540,7 @@ pub fn listing(open: &[Record]) -> Value {
             json!({
                 "id": r.id, "tool": r.subject, "args": r.summary["args"],
                 "caller": r.summary["caller"], "acting_for": r.summary["acting_for"],
+                "run": r.summary["run"],
                 "created_ms": r.created_ms, "expires_ms": r.expires_ms,
                 "digest": short(r),
             })

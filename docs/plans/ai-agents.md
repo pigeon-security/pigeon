@@ -769,3 +769,7 @@ executors through it. Each item: state, next step, who it waits on.
     letters and digits are kept (`run_label`).
   - The Directory's kept decisions are unchanged, so there is no migration.
   - The smoke scenario is `core_audit_lines_name_the_run`.
+- 2026-11-23: **The run id shows on the approval card.**
+  - `listing` adds `run` to each call (null when absent). The card shows an "AI agent run" row when it is a non-empty string.
+  - It reads `summary.run`, so it shows once `claude/ai-agent-04O5pJP1q2fz` lands (the run in core's audit lines, MXgiXQgySZx77QbT). Until then the row is hidden.
+  - The smoke scenario is `platform_approvals_list_shows_run`.

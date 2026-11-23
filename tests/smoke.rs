@@ -6293,6 +6293,32 @@ fn platform_approvals_list_and_bearer_writes() {
 }
 
 #[test]
+fn platform_approvals_list_shows_run() {
+    use pigeon_capabilities::approvals::listing;
+    use pigeon_core::approval::{self, Kind};
+
+    let make = |id: &str, summary: Value| {
+        approval::new(
+            id.into(),
+            Kind::ToolCall,
+            "deploy_token".into(),
+            "0123456789abcdef0123".into(),
+            summary,
+            Value::Null,
+            "svc".into(),
+            None,
+            1_000,
+        )
+    };
+    let out = listing(&[
+        make("r1", json!({ "caller": "svc", "run": "MXgiXQgySZx77QbT" })),
+        make("r2", json!({ "caller": "svc" })),
+    ]);
+    assert_eq!(out["calls"][0]["run"], "MXgiXQgySZx77QbT");
+    assert!(out["calls"][1]["run"].is_null());
+}
+
+#[test]
 fn platform_approvals_list_shows_other_kinds() {
     use pigeon_capabilities::approvals::listing;
     use pigeon_core::approval::{self, Kind, State};

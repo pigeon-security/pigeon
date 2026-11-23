@@ -75,6 +75,7 @@
       ["Asked", when(c.created_ms)],
       ["Call digest", c.digest],
     ];
+    if (typeof c.run === "string" && c.run) rows.splice(1, 0, ["AI agent run", c.run]);
     return el("article", { class: "card", style: "gap:10px" },
       el("div", { class: "card-h" }, el("h3", { text: `Run ${c.tool}` }),
         el("span", { class: "pill warn", text: until(c.expires_ms) })),
