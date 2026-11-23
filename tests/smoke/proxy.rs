@@ -230,6 +230,11 @@ fn core_dispatch_reaches_bound_workers_tools() {
 }
 
 #[test]
+fn deploy_proxy_body_max_fits_core() {
+    const { assert!(pigeon_proxies::cf_proxy::BODY_MAX >= 48 * 1024 * 1024) };
+}
+
+#[test]
 fn deploy_proxy_allowlist() {
     use pigeon_capabilities::cf_proxy::{
         ALLOWED, GRANT_PATH, PREFIX, Scope, allowed, body_ok, grant_answer, unlisted,
