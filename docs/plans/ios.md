@@ -905,3 +905,4 @@ executors through it. Each item: state, next step, who it waits on.
 - 2026-11-23: build 40 released from `36932f1` with `aps-environment` production; Apple VALID.
 - 2026-11-24: the person turned approval push on: `push::NOTIFY_APPROVALS = true`. A new approval with an approver sends "Approval waiting"; the send is best effort and `ask` returns the same either way. Smoke `platform_approval_push_on` (was `..._off_by_default`).
 - 2026-11-24: the next app iteration (the confirmed mockup) is planned in [ios-app-next.md](ios-app-next.md).
+- 2026-11-23: the Sessions iteration (three tabs, Needs you, Cost fix) is planned in [ios-app-sessions.md](ios-app-sessions.md).
