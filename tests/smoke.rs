@@ -7834,6 +7834,31 @@ fn core_observability_monitors_plan() {
         json!(["pigeon: Workers errors"])
     );
     assert_eq!(report["policies"]["mechanisms_fields"], json!(["email"]));
+
+    // Live shape (2026-11-23): `status` is the only filter key of the errors alert, and the
+    // real-time type has none. The errors policy must carry `status`; values come from the API.
+    let live = json!({ "Workers": [
+        { "type": "workers_observability_alert", "filter_options": [
+            { "Key": "status", "AvailableValues": [{ "Value": "success" }, { "Value": "error" }] }] },
+        { "type": "workers_observability_real_time_issue", "filter_options": [] },
+    ] });
+    let planned = plan_monitors(&live, &none, &scripts);
+    assert_eq!(planned.len(), 2);
+    assert_eq!(planned[0]["filters"], json!({ "status": ["error"] }));
+    assert_eq!(planned[1]["filters"], json!({}));
+    // With no values listed, the documented value is used.
+    let bare = json!({ "Workers": [
+        { "type": "workers_observability_alert", "filter_options": [{ "Key": "status" }] } ] });
+    assert_eq!(
+        plan_monitors(&bare, &none, &scripts)[0]["filters"],
+        json!({ "status": ["error"] })
+    );
+    // The check report shows option values, not just keys.
+    assert_eq!(
+        shape_report(&live, &none)["available_alerts"]["filter_values"]["workers_observability_alert"]
+            ["status"],
+        json!(["success", "error"])
+    );
     assert!(
         !report.to_string().contains("\"x\""),
         "a filter value leaked: {report}"

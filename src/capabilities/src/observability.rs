@@ -645,6 +645,73 @@ pub fn available_types(available: &Value) -> BTreeMap<String, Vec<String>> {
     out
 }
 
+/// The values `available` lists for each filter option, as `type -> key -> values`. Cloudflare
+/// gives them as `AvailableValues` (objects with `Value` or `Name`, or plain strings); a key with
+/// no list has an empty vector.
+pub fn available_filter_values(
+    available: &Value,
+) -> BTreeMap<String, BTreeMap<String, Vec<String>>> {
+    let mut out = BTreeMap::new();
+    let groups: Vec<&Value> = match available {
+        Value::Object(m) => m.values().collect(),
+        Value::Array(a) => a.iter().collect(),
+        _ => Vec::new(),
+    };
+    for entry in groups.into_iter().flat_map(|g| match g {
+        Value::Array(a) => a.iter().collect::<Vec<_>>(),
+        other => vec![other],
+    }) {
+        let Some(kind) = entry["type"].as_str() else {
+            continue;
+        };
+        let mut keys = BTreeMap::new();
+        for f in entry["filter_options"].as_array().into_iter().flatten() {
+            let Some(key) = f["Key"].as_str().or_else(|| f["key"].as_str()) else {
+                continue;
+            };
+            let list = f["AvailableValues"]
+                .as_array()
+                .or_else(|| f["available_values"].as_array());
+            let values = list
+                .into_iter()
+                .flatten()
+                .filter_map(|v| {
+                    v.as_str()
+                        .or_else(|| v["Value"].as_str())
+                        .or_else(|| v["value"].as_str())
+                        .or_else(|| v["Name"].as_str())
+                        .or_else(|| v["name"].as_str())
+                })
+                .map(str::to_string)
+                .collect();
+            keys.insert(key.to_string(), values);
+        }
+        out.insert(kind.to_string(), keys);
+    }
+    out
+}
+
+/// Cloudflare's documented `status` value for Workers Observability alerts, used when the API
+/// lists no values for the filter. Not confirmed live: the check report shows what the API gives.
+const DEFAULT_ERROR_STATUS: &str = "error";
+
+/// The `status` values that mean errors or failures, from the API's list when it has one.
+fn error_statuses(listed: &[String]) -> Vec<String> {
+    let picked: Vec<String> = listed
+        .iter()
+        .filter(|v| {
+            let l = v.to_lowercase();
+            ["error", "fail", "exception"].iter().any(|w| l.contains(w))
+        })
+        .cloned()
+        .collect();
+    if picked.is_empty() {
+        vec![DEFAULT_ERROR_STATUS.to_string()]
+    } else {
+        picked
+    }
+}
+
 /// The wanted alert types that `available` does not offer.
 pub fn absent_types(available: &Value) -> Vec<String> {
     let have = available_types(available);
@@ -660,6 +727,7 @@ pub fn absent_types(available: &Value) -> Vec<String> {
 /// the type has a script filter. Each item is `{name, alert_type, filters, enabled}`.
 pub fn plan_monitors(available: &Value, existing: &Value, scripts: &[String]) -> Vec<Value> {
     let have = available_types(available);
+    let values = available_filter_values(available);
     let names: Vec<&str> = existing
         .as_array()
         .map(|a| a.iter().filter_map(|p| p["name"].as_str()).collect())
@@ -678,8 +746,18 @@ pub fn plan_monitors(available: &Value, existing: &Value, scripts: &[String]) ->
         let key = keys
             .iter()
             .find(|k| matches!(k.as_str(), "services" | "worker_name" | "script_name"));
+        // Cloudflare refuses a policy without the filters it lists (error 17103), so a
+        // `status` filter is always filled. A type with no filter keys gets an explicit `{}`.
         let filters = match key {
             Some(k) => json!({ k.as_str(): scripts }),
+            None if keys.iter().any(|k| k == "status") => {
+                let listed = values
+                    .get(kind)
+                    .and_then(|m| m.get("status"))
+                    .cloned()
+                    .unwrap_or_default();
+                json!({ "status": error_statuses(&listed) })
+            }
             None => json!({}),
         };
         wanted
@@ -723,6 +801,11 @@ pub fn shape_report(available: &Value, existing: &Value) -> Value {
         .iter()
         .filter(|(t, _)| t.starts_with("workers_observability") || t.starts_with("billing"))
         .collect();
+    let values: BTreeMap<String, BTreeMap<String, Vec<String>>> =
+        available_filter_values(available)
+            .into_iter()
+            .filter(|(t, _)| t.starts_with("workers_observability") || t.starts_with("billing"))
+            .collect();
     let policies = existing.as_array().cloned().unwrap_or_default();
     let keys = |v: &Value| -> Vec<String> {
         v.as_object()
@@ -737,6 +820,7 @@ pub fn shape_report(available: &Value, existing: &Value) -> Value {
             "types_recognised": types.len(),
             "wanted_absent": WANTED_TYPES.iter().filter(|t| !types.contains_key(**t)).collect::<Vec<_>>(),
             "filter_keys": watched,
+            "filter_values": values,
         },
         "policies": {
             "is_list": existing.is_array(),

@@ -371,3 +371,14 @@ Open items:
    `cache_creation_input_tokens`, and to price them, if the gateway's logs carry them.
 5. A `pigeon: ` billing usage watch, now that the live check gives `product` and `limit`: the
    product names are still to be read from Cloudflare.
+
+- 2026-11-24: fix to `observability_monitors_apply`: creating `pigeon: Workers errors` failed
+  live with Cloudflare 400 code 17103 "Filters selection must be provided". The live
+  `available_alerts` check gave `filter_keys` workers_observability_alert=[status],
+  workers_observability_real_time_issue=[]. `plan_monitors` now sends
+  `{"status": [...]}` for the errors alert: the values of `status` the API lists
+  (`AvailableValues`) that contain error, fail or exception, else the documented `error`. The
+  real-time issue policy keeps an explicit `{}`; not yet confirmed live, so if apply refuses it
+  too, drop it from the plan. `observability_monitors_plan {check:true}` now also reports
+  `filter_values` (the listed values per filter key) so the next mismatch is visible. Open:
+  read `filter_values` from the check and confirm `error` is a listed value.
