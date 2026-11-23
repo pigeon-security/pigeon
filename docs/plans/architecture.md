@@ -150,6 +150,7 @@ I check each result, apply it, and run fmt, clippy and the smoke suite myself.
   own crate alone, and the scenario loads every crate as core's build.rs embeds them. Phases 6
   to 8 are still to do; instance hostnames (noisypigeon.com, noisypigeon.pigeon.dev) wait for
   phase 8, as they are attached at run time, not declared.
+- 2026-11-23: phase 6 (the drawing) and a public view for pigeon.dev planned in sites.md.
 
 ## After the split (2026-11-22)
 
