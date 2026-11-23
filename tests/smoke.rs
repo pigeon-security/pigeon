@@ -1703,6 +1703,41 @@ fn contract_signed_callers_and_skew() {
     assert!(!wants(&json!("push"), &event));
 }
 
+#[test]
+fn core_contract_per_worker_caller_keys() {
+    use pigeon_capabilities::split::{verify_caller, worker_key_name};
+    use pigeon_contract::{Refused, sign};
+
+    let (shared, sites, ci) = (&b"shared"[..], &b"sites key"[..], &b"ci key"[..]);
+    let (body, now) = (&b"{}"[..], 1_800_000_000_000);
+    let by = |key: &[u8]| sign(key, &json!(null), "dispatch", body, now, "n");
+    let check = |own: Option<&[u8]>, header: &str, at: i64| {
+        verify_caller(own, shared, Some(header), "dispatch", body, at)
+    };
+    // The Worker's own key, and the shared key as before.
+    assert!(check(Some(sites), &by(sites), now).is_ok());
+    assert!(check(Some(sites), &by(shared), now).is_ok());
+    assert!(check(None, &by(shared), now).is_ok());
+    // Another Worker's key, or a wrong one, is refused.
+    assert_eq!(check(Some(sites), &by(ci), now), Err(Refused::BadSignature));
+    assert_eq!(check(None, &by(ci), now), Err(Refused::BadSignature));
+    assert_eq!(
+        check(Some(sites), &by(b"wrong"), now),
+        Err(Refused::BadSignature)
+    );
+    // The skew checks still apply to the per-Worker key.
+    assert_eq!(
+        check(Some(sites), &by(sites), now + 61_000),
+        Err(Refused::Expired)
+    );
+    assert_eq!(
+        check(Some(sites), &by(sites), now - 6_000),
+        Err(Refused::FromTheFuture)
+    );
+    assert_eq!(worker_key_name("sites"), Some("CALLER_KEY_SITES"));
+    assert_eq!(worker_key_name("root"), None);
+}
+
 /// Core's `dispatch` must see the bound Workers' tools (`models_submit` is the model gateway's),
 /// while a clashing remote tool is left out and the other ops use core's own capabilities.
 #[test]

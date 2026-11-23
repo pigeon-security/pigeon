@@ -116,6 +116,61 @@ pub async fn caller_key(env: &Env) -> Result<Vec<u8>> {
     Ok(key.into_bytes())
 }
 
+/// The header a capability Worker may send to say which Worker it is, so core checks its
+/// signature with that Worker's own key. The claim proves nothing alone: only a signature made
+/// with that Worker's key passes. No Worker sends it yet (docs/plans/caller-keys.md, step 2).
+pub const WORKER_HEADER: &str = "X-Pigeon-Worker";
+
+/// The capability Workers that may get a key of their own, by the name they claim in
+/// [`WORKER_HEADER`], with the Secrets Store name of that key.
+pub const WORKER_KEYS: [(&str, &str); 5] = [
+    ("ci", "CALLER_KEY_CI"),
+    ("models", "CALLER_KEY_MODELS"),
+    ("sites", "CALLER_KEY_SITES"),
+    ("proxy", "CALLER_KEY_PROXY"),
+    ("ai-agents", "CALLER_KEY_AI_AGENTS"),
+];
+
+/// The Secrets Store name of `worker`'s own caller key; `None` for a name that is not a known
+/// capability Worker.
+pub fn worker_key_name(worker: &str) -> Option<&'static str> {
+    WORKER_KEYS
+        .iter()
+        .find(|(w, _)| *w == worker)
+        .map(|(_, k)| *k)
+}
+
+/// `worker`'s own caller key from the Secrets Store, when core binds it and it is set; `None`
+/// otherwise, so the shared key is used. Core binds none yet.
+async fn worker_key(env: &Env, worker: &str) -> Option<Vec<u8>> {
+    let name = worker_key_name(worker)?;
+    let binding = env.secret_store(name).ok()?;
+    let key = secrets_store::read(&binding).await.ok()??;
+    Some(key.into_bytes())
+}
+
+/// The caller in `header`, checked with the calling Worker's own key when there is one, else
+/// with the shared key. A signature made with the shared key still passes; one made with
+/// another Worker's key, or a wrong key, does not. The skew checks are
+/// [`pigeon_contract::verify`]'s, and each check compares in constant time.
+pub fn verify_caller(
+    own: Option<&[u8]>,
+    shared: &[u8],
+    header: Option<&str>,
+    op: &str,
+    body: &[u8],
+    now_ms: i64,
+) -> std::result::Result<pigeon_contract::Signed, pigeon_contract::Refused> {
+    if let Some(own) = own {
+        match pigeon_contract::verify(own, header, op, body, now_ms) {
+            Err(pigeon_contract::Refused::BadSignature) => {}
+            // Good signature (or a header that cannot be read at all): that is the answer.
+            done => return done,
+        }
+    }
+    pigeon_contract::verify(shared, header, op, body, now_ms)
+}
+
 /// Serves one op a capability Worker asks core: `credential` or `dispatch`, with the caller
 /// core signed for it; or one of the proxy Worker's checks, signed for no caller. Every answer
 /// is JSON, as [`pigeon_contract::serve`] answers.
@@ -133,7 +188,18 @@ pub async fn serve(mut req: Request, cx: &Context<'_>) -> Result<Response> {
     let header = req.headers().get(pigeon_contract::HEADER)?;
     let body = req.bytes().await?;
     let key = caller_key(cx.env).await?;
-    let signed = match pigeon_contract::verify(&key, header.as_deref(), &op, &body, now_ms()) {
+    let own = match req.headers().get(WORKER_HEADER)? {
+        Some(w) => worker_key(cx.env, &w).await,
+        None => None,
+    };
+    let signed = match verify_caller(
+        own.as_deref(),
+        &key,
+        header.as_deref(),
+        &op,
+        &body,
+        now_ms(),
+    ) {
         Ok(s) => s,
         Err(why) => {
             return reply(
