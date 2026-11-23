@@ -288,6 +288,7 @@ fn agent_definitions(role: Role) -> Vec<Value> {
                 "properties": {
                     "brief": {"type": "string", "description": "A complete task description for the executor."},
                     "kind": {"type": "string", "enum": ["code", "mechanical"], "default": "code", "description": "`code` for ordinary work, `mechanical` for simple repetitive edits."},
+                    "model": {"type": "string", "description": "The executor's model: `provider/model` (openai/gpt-6.2-sol), a `claude-…` name, or `anthropic` or `openai` for that provider's model for its kind. Leave out to use what you were started with for executors, else the stored default."},
                     "base": {"type": "string", "description": "The branch or commit it starts from; main by default. Name another executor's branch to build on its work."},
                     "budget": {
                         "type": "object",
@@ -601,6 +602,12 @@ pub fn check(role: Role, name: &str, input: &Value) -> Result<(), String> {
                     "`kind` is `{k}` but must be `code` or `mechanical`; pick one"
                 ));
             }
+            let kind = if get_str(obj, "kind")? == Some("mechanical") {
+                Role::Mechanical
+            } else {
+                Role::Executor
+            };
+            crate::models::spawn_model(kind, input)?;
             match obj.get("budget") {
                 None | Some(Value::Object(_)) => Ok(()),
                 Some(_) => Err(

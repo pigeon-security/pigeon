@@ -17,10 +17,11 @@ use serde_json::{Value, json};
 use worker::{Env, Error, Request, Response, Result, SqlStorageValue, State as ObjectState};
 
 use crate::budget::{self, Budget, Next, Over, Spent};
+use crate::models::{self, ChildModels, Choice, Defaults, Slot};
 use crate::run::{self, Action, Call, Job, Recovery, State, View, Wait};
 use crate::tools::{self, Kind};
 use crate::transcript::{self, Spec};
-use crate::{Role, estimate, prompts, sandbox};
+use crate::{Role, compare, estimate, prompts, sandbox};
 
 /// The class's binding.
 pub const BINDING: &str = "AI_AGENT_RUNS";
@@ -44,7 +45,7 @@ pub const MAX_QUEUED: u32 = 20;
 
 /// Each object's schema, one statement per migration, applied in order and never edited. The
 /// index uses `runs` and `flags`; a run object uses `run`, `messages` and `calls`.
-const MIGRATIONS: [&str; 13] = [
+const MIGRATIONS: [&str; 17] = [
     "CREATE TABLE runs (id TEXT PRIMARY KEY, role TEXT NOT NULL, runtime TEXT NOT NULL, state TEXT NOT NULL, parent_run TEXT, session_id TEXT, caller TEXT NOT NULL, by_id TEXT, for_id TEXT, brief TEXT NOT NULL, base TEXT, branch TEXT, budget TEXT NOT NULL, spent TEXT NOT NULL, step TEXT, waiting TEXT, report TEXT, created_at INTEGER NOT NULL, started_at INTEGER, ended_at INTEGER, stop_asked INTEGER NOT NULL DEFAULT 0)",
     "CREATE TABLE flags (k TEXT PRIMARY KEY, v TEXT NOT NULL)",
     "CREATE TABLE run (id TEXT PRIMARY KEY, role TEXT NOT NULL, caller TEXT NOT NULL, brief TEXT NOT NULL, base TEXT NOT NULL, branch TEXT NOT NULL, budget TEXT NOT NULL, spent TEXT NOT NULL, state TEXT NOT NULL, started_at INTEGER NOT NULL, model_index INTEGER NOT NULL DEFAULT 0, fallback_left INTEGER NOT NULL DEFAULT 0, failures INTEGER NOT NULL DEFAULT 0, job_id TEXT, job_kind TEXT, job_state TEXT, job_at INTEGER, job_error TEXT, last_usage TEXT, stop_reason TEXT, reported TEXT, report TEXT, nudges INTEGER NOT NULL DEFAULT 0, waiting TEXT, prepare_tries INTEGER NOT NULL DEFAULT 0)",
@@ -63,6 +64,11 @@ const MIGRATIONS: [&str; 13] = [
     "ALTER TABLE run ADD COLUMN reconcile_tries INTEGER NOT NULL DEFAULT 0",
     // The cost estimate shown when the run started (JSON).
     "ALTER TABLE runs ADD COLUMN estimate TEXT",
+    // The model a run uses (`provider/model`), and what a planner's executors use (JSON).
+    "ALTER TABLE run ADD COLUMN model TEXT",
+    "ALTER TABLE run ADD COLUMN child_models TEXT",
+    "ALTER TABLE runs ADD COLUMN model TEXT",
+    "ALTER TABLE runs ADD COLUMN child_models TEXT",
 ];
 
 fn now() -> i64 {
@@ -151,6 +157,8 @@ struct Row {
     assumed: Option<String>,
     extended: Option<String>,
     estimate: Option<String>,
+    model: Option<String>,
+    child_models: Option<String>,
 }
 
 /// A short title for a run, from its brief's first non-empty line: leading `#`s, `Brief:` or
@@ -264,6 +272,8 @@ impl Row {
             "assumed": parsed(&self.assumed),
             "extended": parsed(&self.extended),
             "estimate": parsed(&self.estimate),
+            "model": self.model,
+            "models": parsed(&self.child_models),
         })
     }
 }
@@ -316,6 +326,8 @@ struct RunRow {
     last_turn: i64,
     last_reconcile_at: i64,
     reconcile_tries: i64,
+    model: Option<String>,
+    child_models: Option<String>,
 }
 
 /// One stored tool call.
@@ -369,6 +381,8 @@ impl AiAgentRuns {
             "create" => self.create(a).await,
             "list" => self.list(a),
             "estimate" => self.estimate(a),
+            "models" => self.models_op(a),
+            "compare" => self.compare(a),
             "section" => Ok(json!({
                 "paused": self.flag("paused")?,
                 "runs": self.section_rows(&s("reader"))?,
@@ -548,6 +562,64 @@ impl AiAgentRuns {
         Ok(json!({ k: on }))
     }
 
+    /// The stored model defaults (`models.defaults` in `flags`); none stored reads as empty.
+    fn defaults(&self) -> Result<Defaults> {
+        #[derive(Deserialize)]
+        struct F {
+            v: String,
+        }
+        let f: Option<F> = self
+            .db
+            .row("SELECT v FROM flags WHERE k = 'models.defaults'", vec![])?;
+        Ok(f.and_then(|f| serde_json::from_str::<Value>(&f.v).ok())
+            .map(|v| Defaults::from_json(&v))
+            .unwrap_or_default())
+    }
+
+    /// `ai_agents_models`: stores the entries of `set` (already checked), answers the defaults.
+    fn models_op(&self, a: &Value) -> Result<Value> {
+        let mut d = self.defaults()?;
+        if let Some(set) = a["set"].as_object().filter(|s| !s.is_empty()) {
+            for (slot, c) in models::check_set(&Value::Object(set.clone())).map_err(bad)? {
+                d.put(slot, c);
+            }
+            self.db.exec(
+                "INSERT INTO flags (k, v) VALUES ('models.defaults', ?) ON CONFLICT (k) DO UPDATE SET v = excluded.v",
+                vec![d.to_json().to_string().into()],
+            )?;
+        }
+        Ok(models::defaults_answer(&d))
+    }
+
+    /// `ai_agents_compare`: the person's ended runs of the last `days`, by role and model.
+    fn compare(&self, a: &Value) -> Result<Value> {
+        let days = a["days"].as_i64().unwrap_or(30).clamp(1, 365);
+        let reader = a["reader"].as_str().unwrap_or_default();
+        let role = compare::role_arg(&a["role"]).map_err(bad)?;
+        let since = now() - days * 86_400_000;
+        let rows: Vec<Row> = self.db.rows(
+            "SELECT * FROM runs WHERE ended_at IS NOT NULL AND ended_at >= ? AND state IN ('done', 'failed', 'over_budget', 'stopped') AND (by_id = ? OR for_id = ?) LIMIT 5000",
+            vec![since.into(), reader.into(), reader.into()],
+        )?;
+        let values: Vec<Value> = rows
+            .iter()
+            .map(|r| {
+                json!({
+                    "role": r.role,
+                    "model": r.model,
+                    "state": r.state,
+                    "spent": serde_json::from_str::<Value>(&r.spent).unwrap_or(Value::Null),
+                    "created_at": r.created_at,
+                    "started_at": r.started_at,
+                    "ended_at": r.ended_at,
+                })
+            })
+            .collect();
+        Ok(
+            json!({ "days": days, "role": role.map(Role::name), "groups": compare::groups(&values, role) }),
+        )
+    }
+
     fn row(&self, id: &str) -> Result<Option<Row>> {
         self.db
             .row("SELECT * FROM runs WHERE id = ?", vec![id.into()])
@@ -617,8 +689,21 @@ impl AiAgentRuns {
         let t = now();
         let id = a["run"].as_str().ok_or_else(|| bad("`run` is required"))?;
         let runtime = a["runtime"].as_str().unwrap_or("gateway");
+        // The model the run will use, merged in order; only a gateway run has one.
+        let role: Role = serde_json::from_value(a["role"].clone()).unwrap_or(Role::Executor);
+        let child_models = ChildModels::from_json(&a["child_models"]);
+        let model = if runtime == "gateway" {
+            let own = a["model"]
+                .as_str()
+                .and_then(|m| Choice::parse(m, Slot::of(role)).ok());
+            let parent = ChildModels::from_json(&a["parent_models"]);
+            Some(models::merge(role, own.as_ref(), Some(&parent), &self.defaults()?).text())
+        } else {
+            None
+        };
+        let child_json = (!child_models.is_empty()).then(|| child_models.to_json().to_string());
         self.db.exec(
-            "INSERT INTO runs (id, role, runtime, state, parent_run, session_id, caller, by_id, for_id, brief, base, branch, budget, spent, created_at, estimate) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO runs (id, role, runtime, state, parent_run, session_id, caller, by_id, for_id, brief, base, branch, budget, spent, created_at, estimate, model, child_models) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             vec![
                 id.into(),
                 a["role"].as_str().unwrap_or("executor").into(),
@@ -640,10 +725,15 @@ impl AiAgentRuns {
                 } else {
                     SqlStorageValue::Null
                 },
+                opt(model.as_deref()),
+                opt(child_json.as_deref()),
             ],
         )?;
         if runtime == "gateway" {
-            call(&self.env, &format!("run:{id}"), "begin", a).await?;
+            let mut begin = a.clone();
+            begin["model"] = json!(model);
+            begin["child_models"] = json!(child_json);
+            call(&self.env, &format!("run:{id}"), "begin", &begin).await?;
         }
         Ok(self.row(id)?.map(|r| r.public()).unwrap_or(Value::Null))
     }
@@ -935,7 +1025,7 @@ impl AiAgentRuns {
         }
         let id = a["run"].as_str().ok_or_else(|| bad("`run` is required"))?;
         self.db.exec(
-            "INSERT INTO run (id, role, caller, brief, base, branch, budget, spent, state, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)",
+            "INSERT INTO run (id, role, caller, brief, base, branch, budget, spent, state, started_at, model, child_models) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)",
             vec![
                 id.into(),
                 a["role"].as_str().unwrap_or("executor").into(),
@@ -950,6 +1040,8 @@ impl AiAgentRuns {
                 })?
                 .into(),
                 now().into(),
+                opt(a["model"].as_str()),
+                opt(a["child_models"].as_str()),
             ],
         )?;
         self.push_message(&json!({ "role": "user", "content": prompts::first_message(a) }))?;
@@ -1480,9 +1572,10 @@ impl AiAgentRuns {
             self.db.exec("DELETE FROM calls", vec![])?;
         }
         self.take_notes()?;
-        let models = role.models();
-        let index = (row.model_index.max(0) as usize).min(models.len() - 1);
-        let model = models[index];
+        let chain = models::chain_of(row.model.as_deref(), role);
+        let index = (row.model_index.max(0) as usize).min(chain.len() - 1);
+        let choice = &chain[index];
+        let model = choice.model.as_str();
         let usage: Value = row
             .last_usage
             .as_deref()
@@ -1509,17 +1602,32 @@ impl AiAgentRuns {
         }
         // Never replay an assistant message that ends in thinking.
         let mut messages = transcript::repair_transcript(&self.messages()?);
-        if index > 0 {
+        if choice != &chain[0] {
             messages = transcript::strip_thinking(&messages);
         }
         let caller: Value = serde_json::from_str(&row.caller).unwrap_or(Value::Null);
         // A long context is summarised first, on a cheap model. Never on the last turn.
+        let mut summary_model = models::builtin(Slot::Summary);
+        let summarising = !last && transcript::needs_compaction(&usage);
+        if summarising {
+            match call(&self.env, INDEX, "models", &json!({})).await {
+                Ok(v) => {
+                    if let Some(c) = v["defaults"]["summary"]["model"]
+                        .as_str()
+                        .and_then(Choice::stored)
+                    {
+                        summary_model = c;
+                    }
+                }
+                Err(e) => worker::console_error!("agents: reading the summary model: {e}"),
+            }
+        }
         let (request, kind) = match (
             !last && transcript::needs_compaction(&usage),
             transcript::cut_point(&messages, 20),
         ) {
             (true, Some(at)) => (
-                transcript::summary_request("claude-haiku-5-5", &messages[..at]),
+                transcript::summary_request(&summary_model.model, &messages[..at]),
                 "summary",
             ),
             _ => {
@@ -1557,6 +1665,7 @@ impl AiAgentRuns {
             "models_submit",
             &json!({
                 "request": request,
+                "provider": if kind == "summary" { summary_model.provider.as_str() } else { choice.provider.as_str() },
                 "lane": "ai-agents",
                 "timeout_min": 14,
                 "task": crate::task(&row.id, role, spent.turns + 1),
@@ -1919,12 +2028,13 @@ impl AiAgentRuns {
     async fn retry(&self, row: &RunRow, role: Role) -> Result<()> {
         let row = &self.note_failed_turn(row).await;
         let failures = (row.failures + 1) as u32;
+        let chain = models::chain_of(row.model.as_deref(), role);
         let recovery = run::on_failure(
             row.job_state.as_deref().unwrap_or("failed"),
             row.job_error.as_deref().unwrap_or(""),
             failures,
             row.model_index.max(0) as usize,
-            role.models(),
+            &chain.iter().map(|c| c.model.as_str()).collect::<Vec<_>>(),
         );
         let clear = "job_id = NULL, job_kind = NULL, job_state = NULL";
         let storage = self.state.storage();
@@ -2224,6 +2334,11 @@ impl AiAgentRuns {
                 let caller = run_caller(&self.env, &planner_caller, role, &id).await;
                 let branch = crate::service::branch(&id);
                 let base = input["base"].as_str().unwrap_or("main");
+                let parent_models: Value = row
+                    .child_models
+                    .as_deref()
+                    .and_then(|m| serde_json::from_str(m).ok())
+                    .unwrap_or(Value::Null);
                 call(
                     &self.env,
                     INDEX,
@@ -2238,6 +2353,8 @@ impl AiAgentRuns {
                         "base": base,
                         "branch": branch,
                         "budget": child_budget,
+                        "model": input["model"],
+                        "parent_models": parent_models,
                     }),
                 )
                 .await

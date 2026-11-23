@@ -11,6 +11,8 @@
 //! - [`tools`]: the tools each role is offered, and each call's checks.
 //! - [`prompts`]: what a run is told.
 //! - [`estimate`]: a run's cost, estimated from similar past runs.
+//! - [`models`]: which model a run uses (a choice per run, stored defaults, fallback chains).
+//! - [`compare`]: ended runs grouped by role and model.
 //!
 //! The Worker side carries out what [`run::next`] decides:
 //!
@@ -22,7 +24,9 @@
 use serde::{Deserialize, Serialize};
 
 pub mod budget;
+pub mod compare;
 pub mod estimate;
+pub mod models;
 pub mod object;
 pub mod page;
 pub mod prompts;
@@ -62,8 +66,8 @@ impl Role {
         }
     }
 
-    /// The models a run of this role uses, first choice first; a turn falls back along the
-    /// list when its model keeps failing.
+    /// The built-in Anthropic models of this role, first choice first. A run's own chain comes
+    /// from [`models::chain_of`]; this is what it equals when no model was chosen.
     pub fn models(self) -> &'static [&'static str] {
         match self {
             Role::Planner => &["claude-opus-5-5", "claude-sonnet-5-5"],

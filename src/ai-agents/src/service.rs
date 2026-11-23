@@ -20,7 +20,7 @@ pub const NAME: &str = "ai-agents";
 pub const WORKER: &str = "pigeon-ai-agents";
 
 /// Every tool the capability offers.
-pub const TOOLS: [&str; 14] = [
+pub const TOOLS: [&str; 16] = [
     "ai_agents_start",
     "ai_agents_estimate",
     "ai_agents_status",
@@ -35,6 +35,8 @@ pub const TOOLS: [&str; 14] = [
     "ai_agents_report",
     "ai_agents_handoff",
     "ai_agents_setup",
+    "ai_agents_models",
+    "ai_agents_compare",
 ];
 
 /// The console section's id; it sits on the Instances tab, with what else pigeon runs.
@@ -128,6 +130,7 @@ impl Agents {
             return Err("a run needs a caller to act as".into());
         }
         let (role, brief, base, budget) = start_args(args)?;
+        let (model, child_models) = crate::models::start_models(role, args)?;
         let id = run_id().map_err(|e| e.to_string())?;
         // The run acts as its role's service user, linked to the person; as its starter until
         // that link is made. Marked with the run's id for the audit either way.
@@ -167,6 +170,8 @@ impl Agents {
                 "branch": branch(&id),
                 "budget": budget,
                 "estimate": estimate,
+                "model": model.map(|c| c.text()),
+                "child_models": if child_models.is_empty() { Value::Null } else { child_models.to_json() },
             }),
         )
         .await
@@ -378,6 +383,26 @@ impl Agents {
                 }),
             )
             .await),
+            "ai_agents_models" => {
+                let mut set = serde_json::Map::new();
+                if !a["set"].is_null() {
+                    for (slot, c) in crate::models::check_set(&a["set"])? {
+                        set.insert(slot.name().into(), json!(c.text()));
+                    }
+                }
+                r(object::call(env, INDEX, "models", &json!({ "set": set })).await)
+            }
+            "ai_agents_compare" => {
+                let days = crate::compare::days_arg(&a["days"])?;
+                let role = crate::compare::role_arg(&a["role"])?;
+                r(object::call(
+                    env,
+                    INDEX,
+                    "compare",
+                    &json!({ "days": days, "role": role.map(Role::name), "reader": reader }),
+                )
+                .await)
+            }
             other => Err(format!("no tool `{other}`")),
         }
     }
@@ -411,7 +436,9 @@ impl Service for Agents {
                         json!({
                             "type": "object",
                             "properties": {
-                                "role": { "type": "string", "enum": ["planner", "executor", "mechanical"], "description": "`executor` (Sonnet) by default; `mechanical` (Haiku) for moves, renames and docs; `planner` (Opus) to plan a piece of work, spawn executors, review their branches, run CI and land phase by phase." },
+                                "role": { "type": "string", "enum": ["planner", "executor", "mechanical"], "description": "`executor` by default; `mechanical` for moves, renames and docs; `planner` to plan a piece of work, spawn executors, review their branches, run CI and land phase by phase. Models by default (see ai_agents_models, which can store others): planner Claude Opus, executor Claude Sonnet, mechanical Claude Haiku. To choose, give `model` (`provider/model`, a `claude-…` name, or `anthropic` or `openai` for that provider's model for the role), and for a planner `models` for its executors. E.g. a planner on OpenAI with executors on Claude: {role: \"planner\", model: \"openai\", models: {executor: \"anthropic\"}}." },
+                                "model": { "type": "string", "description": "This run's model: `provider/model` (openai/gpt-6.2-sol), a `claude-…` name, or `anthropic` or `openai`. Else the stored default for its role." },
+                                "models": { "type": "object", "description": "Planners only: what its executors use unless a spawn says otherwise.", "properties": { "executor": { "type": "string" }, "mechanical": { "type": "string" } } },
                                 "brief": { "type": "string", "description": "What to build, standing alone: the run sees nothing else." },
                                 "base": { "type": "string", "description": "The branch or commit to start from; main by default." },
                                 "budget": { "type": "object", "description": "Any of turns, cost_usd, wall_min, sandbox_min; each at most its hard cap." }
@@ -595,6 +622,45 @@ impl Service for Agents {
                          person; for each that is not, a link to approve with their passkey. \
                          Runs act as these delegates once linked.",
                         json!({ "type": "object", "properties": {} }),
+                    ),
+                    tool(
+                        "ai_agents_models",
+                        "Show the models runs use, and set them. Each default (planner, executor, \
+                         mechanical, summary for compaction) is marked `stored` or `built_in`; the \
+                         known tiers of each provider are listed. With `set`, the entries given are \
+                         checked and stored. A choice is `provider/model` (openai/gpt-6.2-sol), a \
+                         bare `claude-…` name (Anthropic), or a bare provider name for its model \
+                         in the slot's tier. A run can override its default with `model` in \
+                         ai_agents_start.",
+                        json!({
+                            "type": "object",
+                            "properties": {
+                                "set": {
+                                    "type": "object",
+                                    "description": "Defaults to store, e.g. {executor: \"openai\", summary: \"anthropic/claude-haiku-5-5\"}.",
+                                    "properties": {
+                                        "planner": { "type": "string" },
+                                        "executor": { "type": "string" },
+                                        "mechanical": { "type": "string" },
+                                        "summary": { "type": "string" }
+                                    }
+                                }
+                            }
+                        }),
+                    ),
+                    tool(
+                        "ai_agents_compare",
+                        "Compare ended runs (done, failed, over_budget, stopped) by role and model \
+                         over the last `days`: runs, how each ended, cost in dollars (total, \
+                         median, high = 90th percentile), median turns and median minutes. A run \
+                         with no stored model counts as its role's built-in default.",
+                        json!({
+                            "type": "object",
+                            "properties": {
+                                "days": { "type": "integer", "description": "30 by default, 1 to 365." },
+                                "role": { "type": "string", "enum": ["planner", "executor", "mechanical"] }
+                            }
+                        }),
                     ),
                 ],
                 sections: vec![SectionSpec {

@@ -36,7 +36,7 @@ pub fn effort(role: Role) -> Option<&'static str> {
     }
 }
 
-/// Tells whether the model supports adaptive thinking.
+/// Tells whether the model supports adaptive thinking: true only for Claude models that do.
 pub fn thinks(model: &str) -> bool {
     model.starts_with("claude-opus-")
         || model.starts_with("claude-sonnet-")
@@ -72,11 +72,16 @@ pub fn request(spec: &Spec, messages: &[Value]) -> Value {
 
     body.insert("cache_control".to_string(), json!({"type": "ephemeral"}));
 
-    if thinks(spec.model) {
+    // Only Claude models think; the gateway maps `output_config.effort` to OpenAI's
+    // `reasoning_effort`, so every model but a Claude without thinking carries it.
+    let thinking = thinks(spec.model);
+    if thinking {
         body.insert("thinking".to_string(), json!({"type": "adaptive"}));
-        if let Some(e) = effort(spec.role) {
-            body.insert("output_config".to_string(), json!({"effort": e}));
-        }
+    }
+    if (thinking || !spec.model.starts_with("claude-"))
+        && let Some(e) = effort(spec.role)
+    {
+        body.insert("output_config".to_string(), json!({"effort": e}));
     }
 
     Value::Object(body)

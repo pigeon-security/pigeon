@@ -799,4 +799,313 @@ fn models_openai_provider_declared_with_secret() {
             json!(["anthropic", "openai"])
         );
     }
+// ---- AI agents: model choice per run (docs/plans/model-providers.md, phase 5) ----
+
+/// A choice is read from `provider/model`, a bare `claude-…` name or a bare provider; bad ones
+/// are refused with words; tiers and the built-in defaults are today's.
+#[test]
+fn ai_agents_models_choice_tiers_and_shorthand() {
+    use pigeon_ai_agents::models::{Choice, Slot, Tier, builtin, tier_model};
+    let c = |t: &str, s: Slot| Choice::parse(t, s);
+    let ok = |p: &str, m: &str| Choice {
+        provider: p.into(),
+        model: m.into(),
+    };
+    assert_eq!(
+        c("openai/gpt-6.2-sol", Slot::Executor),
+        Ok(ok("openai", "gpt-6.2-sol"))
+    );
+    assert_eq!(
+        c("anthropic/claude-opus-5-5", Slot::Planner),
+        Ok(ok("anthropic", "claude-opus-5-5"))
+    );
+    assert_eq!(
+        c("claude-haiku-5-5", Slot::Planner),
+        Ok(ok("anthropic", "claude-haiku-5-5"))
+    );
+    assert_eq!(
+        c("openai", Slot::Planner),
+        Ok(ok("openai", "gpt-6.2-astra"))
+    );
+    assert_eq!(c("openai", Slot::Executor), Ok(ok("openai", "gpt-6.2-sol")));
+    assert_eq!(
+        c("openai", Slot::Mechanical),
+        Ok(ok("openai", "gpt-6.1-terra"))
+    );
+    assert_eq!(
+        c("openai", Slot::Summary),
+        Ok(ok("openai", "gpt-6.1-terra"))
+    );
+    assert_eq!(
+        c("anthropic", Slot::Mechanical),
+        Ok(ok("anthropic", "claude-haiku-5-5"))
+    );
+    assert_eq!(
+        c("openai/gpt-6-luna", Slot::Mechanical),
+        Ok(ok("openai", "gpt-6-luna"))
+    );
+    assert!(
+        c("gemini/x", Slot::Executor)
+            .unwrap_err()
+            .contains("unknown provider")
+    );
+    assert!(c("gpt-6.2-sol", Slot::Executor).is_err());
+    assert!(c("openai/", Slot::Executor).is_err());
+    assert!(c("openai/gpt 6", Slot::Executor).is_err());
+    assert!(c(&format!("openai/{}", "a".repeat(101)), Slot::Executor).is_err());
+    assert!(c(&format!("openai/{}", "a".repeat(100)), Slot::Executor).is_ok());
+    assert_eq!(
+        c("openai/ft:gpt_6.2-sol", Slot::Executor).unwrap().model,
+        "ft:gpt_6.2-sol"
+    );
+    assert_eq!(tier_model("openai", Tier::Top), Some("gpt-6.2-astra"));
+    assert_eq!(tier_model("mistral", Tier::Top), None);
+    assert_eq!(builtin(Slot::Planner).text(), "anthropic/claude-opus-5-5");
+    assert_eq!(
+        builtin(Slot::Executor).text(),
+        "anthropic/claude-sonnet-5-5"
+    );
+    assert_eq!(
+        builtin(Slot::Mechanical).text(),
+        "anthropic/claude-haiku-5-5"
+    );
+    assert_eq!(builtin(Slot::Summary).text(), "anthropic/claude-haiku-5-5");
+}
+
+/// The fallback chain stays in the provider and mirrors `Role::models()` for Anthropic.
+#[test]
+fn ai_agents_models_fallback_chains() {
+    use pigeon_ai_agents::Role;
+    use pigeon_ai_agents::models::{Choice, Slot, chain, chain_of};
+    let ids = |v: Vec<Choice>| v.iter().map(Choice::text).collect::<Vec<_>>();
+    for role in [Role::Planner, Role::Executor, Role::Mechanical] {
+        let from_models: Vec<String> = role
+            .models()
+            .iter()
+            .map(|m| format!("anthropic/{m}"))
+            .collect();
+        assert_eq!(ids(chain_of(None, role)), from_models);
+    }
+    let p = |t: &str, s| Choice::parse(t, s).unwrap();
+    assert_eq!(
+        ids(chain(&p("openai", Slot::Planner), Role::Planner)),
+        ["openai/gpt-6.2-astra", "openai/gpt-6.2-sol"]
+    );
+    assert_eq!(
+        ids(chain(&p("openai", Slot::Executor), Role::Executor)),
+        ["openai/gpt-6.2-sol", "openai/gpt-6.2-astra"]
+    );
+    assert_eq!(
+        ids(chain(&p("openai", Slot::Mechanical), Role::Mechanical)),
+        ["openai/gpt-6.1-terra", "openai/gpt-6.2-sol"]
+    );
+    // An unknown model has no fallback; a model that is its own fallback has none to add.
+    assert_eq!(
+        ids(chain(&p("openai/gpt-9", Slot::Executor), Role::Executor)),
+        ["openai/gpt-9"]
+    );
+    assert_eq!(
+        ids(chain(
+            &p("anthropic/claude-x-1", Slot::Executor),
+            Role::Executor
+        )),
+        ["anthropic/claude-x-1"]
+    );
+    assert_eq!(
+        ids(chain(
+            &p("openai/gpt-6.2-astra", Slot::Executor),
+            Role::Executor
+        )),
+        ["openai/gpt-6.2-astra"]
+    );
+    // A stored model that cannot be read behaves as no model.
+    assert_eq!(
+        ids(chain_of(Some("nonsense"), Role::Executor)),
+        ids(chain_of(None, Role::Executor))
+    );
+}
+
+/// The merge order, the stored defaults and the answer of `ai_agents_models`.
+#[test]
+fn ai_agents_models_merge_and_stored_defaults() {
+    use pigeon_ai_agents::Role;
+    use pigeon_ai_agents::models::{
+        ChildModels, Choice, Defaults, Slot, check_set, defaults_answer, merge,
+    };
+    let p = |t: &str, s| Choice::parse(t, s).unwrap();
+    let mut d = Defaults::default();
+    // Built in, then stored, then the planner's, then the run's own.
+    assert_eq!(
+        merge(Role::Executor, None, None, &d).text(),
+        "anthropic/claude-sonnet-5-5"
+    );
+    d.put(Slot::Executor, p("openai/gpt-6.2-sol", Slot::Executor));
+    assert_eq!(
+        merge(Role::Executor, None, None, &d).text(),
+        "openai/gpt-6.2-sol"
+    );
+    let kids =
+        ChildModels::parse(&json!({ "executor": "anthropic", "mechanical": "openai" })).unwrap();
+    assert_eq!(
+        merge(Role::Executor, None, Some(&kids), &d).text(),
+        "anthropic/claude-sonnet-5-5"
+    );
+    assert_eq!(
+        merge(Role::Mechanical, None, Some(&kids), &d).text(),
+        "openai/gpt-6.1-terra"
+    );
+    let own = p("openai/gpt-6-luna", Slot::Executor);
+    assert_eq!(
+        merge(Role::Executor, Some(&own), Some(&kids), &d).text(),
+        "openai/gpt-6-luna"
+    );
+    // A planner ignores `models`.
+    assert_eq!(
+        merge(Role::Planner, None, Some(&kids), &d).text(),
+        "anthropic/claude-opus-5-5"
+    );
+
+    // What is set is checked.
+    let set = check_set(&json!({ "summary": "openai", "planner": "claude-opus-5-5" })).unwrap();
+    assert_eq!(set.len(), 2);
+    assert!(check_set(&json!({ "boss": "openai" })).is_err());
+    assert!(check_set(&json!({ "executor": "nope/x" })).is_err());
+    assert!(check_set(&json!({ "executor": 3 })).is_err());
+    assert!(check_set(&json!("openai")).is_err());
+
+    // Stored as JSON and read back; the answer marks each default.
+    assert_eq!(Defaults::from_json(&d.to_json()), d);
+    let a = defaults_answer(&d);
+    assert_eq!(
+        a["defaults"]["executor"],
+        json!({ "model": "openai/gpt-6.2-sol", "source": "stored" })
+    );
+    assert_eq!(a["defaults"]["planner"]["source"], "built_in");
+    assert_eq!(
+        a["defaults"]["summary"]["model"],
+        "anthropic/claude-haiku-5-5"
+    );
+    assert_eq!(a["tiers"]["openai"]["middle"], "gpt-6.2-sol");
+    assert_eq!(a["tiers"]["anthropic"]["small"], "claude-haiku-5-5");
+    assert_eq!(a["tiers"]["openai"]["other"], json!(["gpt-6-luna"]));
+    assert!(a["example"]["args"]["set"].is_object());
+}
+
+/// `ai_agents_start` and `spawn_executor` check their model arguments; the request carries
+/// thinking only for Claude, effort for every model that takes it; the tools are offered.
+#[test]
+fn ai_agents_models_start_spawn_and_request() {
+    use pigeon_ai_agents::models::{spawn_model, start_models};
+    use pigeon_ai_agents::transcript::{self, Spec};
+    use pigeon_ai_agents::{Role, service, tools};
+    // The old shape of start_args still works.
+    assert!(service::start_args(&json!({ "brief": "x", "model": "openai" })).is_ok());
+    let (own, kids) = start_models(
+        Role::Planner,
+        &json!({ "model": "openai", "models": { "executor": "anthropic" } }),
+    )
+    .unwrap();
+    assert_eq!(own.unwrap().text(), "openai/gpt-6.2-astra");
+    assert_eq!(kids.executor.unwrap().text(), "anthropic/claude-sonnet-5-5");
+    let (own, kids) = start_models(Role::Executor, &json!({ "brief": "x" })).unwrap();
+    assert!(own.is_none() && kids.is_empty());
+    assert!(
+        start_models(
+            Role::Executor,
+            &json!({ "models": { "executor": "openai" } })
+        )
+        .is_err()
+    );
+    assert!(start_models(Role::Planner, &json!({ "models": { "planner": "openai" } })).is_err());
+    assert!(start_models(Role::Planner, &json!({ "model": "bogus/x" })).is_err());
+    assert!(start_models(Role::Planner, &json!({ "model": 4 })).is_err());
+
+    // spawn_executor.
+    let spawn = |v: serde_json::Value| tools::check(Role::Planner, "spawn_executor", &v);
+    assert!(spawn(json!({ "brief": "b", "model": "openai/gpt-6.2-sol" })).is_ok());
+    assert!(spawn(json!({ "brief": "b", "model": "openai/bad model" })).is_err());
+    assert!(spawn(json!({ "brief": "b", "model": 3 })).is_err());
+    assert_eq!(
+        spawn_model(Role::Mechanical, &json!({ "model": "openai" }))
+            .unwrap()
+            .unwrap()
+            .model,
+        "gpt-6.1-terra"
+    );
+    assert!(spawn_model(Role::Executor, &json!({})).unwrap().is_none());
+
+    // The request: Claude thinks; OpenAI carries effort only.
+    let defs = tools::definitions(Role::Planner, &[]);
+    let body = |model: &str| {
+        let spec = Spec {
+            role: Role::Planner,
+            model,
+            system: "s",
+            tools: &defs,
+        };
+        transcript::request(&spec, &[json!({ "role": "user", "content": "hi" })])
+    };
+    let claude = body("claude-opus-5-5");
+    assert_eq!(claude["thinking"]["type"], "adaptive");
+    assert_eq!(claude["output_config"]["effort"], "high");
+    let gpt = body("gpt-6.2-astra");
+    assert_eq!(gpt["model"], "gpt-6.2-astra");
+    assert!(gpt.get("thinking").is_none());
+    assert_eq!(gpt["output_config"]["effort"], "high");
+    assert!(!transcript::thinks("gpt-6.2-astra") && transcript::thinks("claude-sonnet-5-5"));
+    assert!(body("claude-haiku-5-5").get("output_config").is_none());
+    assert!(service::TOOLS.contains(&"ai_agents_models"));
+    assert!(service::TOOLS.contains(&"ai_agents_compare"));
+}
+
+/// `ai_agents_compare` groups ended runs by role and model, with percentiles by nearest rank.
+#[test]
+fn ai_agents_models_compare_grouping() {
+    use pigeon_ai_agents::Role;
+    use pigeon_ai_agents::compare::{days_arg, groups, percentile, role_arg};
+    let run = |role: &str, model: Option<&str>, state: &str, micros: u64, turns: u64, min: i64| {
+        json!({
+            "role": role, "model": model, "state": state,
+            "spent": { "cost_micros": micros, "turns": turns },
+            "created_at": 0, "started_at": 0, "ended_at": min * 60_000,
+        })
+    };
+    let sonnet = Some("anthropic/claude-sonnet-5-5");
+    let sol = Some("openai/gpt-6.2-sol");
+    let rows = vec![
+        run("executor", None, "done", 1_000_000, 10, 5),
+        run("executor", sonnet, "failed", 3_000_000, 30, 15),
+        run("executor", sonnet, "stopped", 2_000_000, 20, 10),
+        run("executor", sol, "done", 500_000, 5, 2),
+        run("executor", sol, "over_budget", 1_500_000, 8, 4),
+        run("mechanical", None, "done", 100_000, 3, 1),
+        run("executor", sol, "running", 9, 9, 9),
+    ];
+    let all = groups(&rows, None);
+    assert_eq!(all.len(), 3);
+    // Sorted by role, then model; a run with no model is its role's built-in default.
+    assert_eq!(all[0]["model"], "anthropic/claude-sonnet-5-5");
+    assert_eq!(all[0]["runs"], 3);
+    assert_eq!(all[0]["done"], 1);
+    assert_eq!(all[0]["failed"], 1);
+    assert_eq!(all[0]["stopped"], 1);
+    assert_eq!(all[0]["cost_usd"]["total"], 6.0);
+    assert_eq!(all[0]["cost_usd"]["median"], 2.0);
+    assert_eq!(all[0]["cost_usd"]["high"], 3.0);
+    assert_eq!(all[0]["turns"]["median"], 20.0);
+    assert_eq!(all[0]["minutes"]["median"], 10.0);
+    assert_eq!(all[1]["model"], "openai/gpt-6.2-sol");
+    assert_eq!(all[1]["runs"], 2);
+    assert_eq!(all[1]["over_budget"], 1);
+    assert_eq!(all[2]["role"], "mechanical");
+    assert_eq!(all[2]["model"], "anthropic/claude-haiku-5-5");
+    assert_eq!(groups(&rows, Some(Role::Executor)).len(), 2);
+    assert!(groups(&[], None).is_empty());
+    assert_eq!(percentile(&[4.0, 1.0, 3.0, 2.0], 50.0), 2.0);
+    assert_eq!(percentile(&[], 90.0), 0.0);
+    assert_eq!(days_arg(&json!(null)), Ok(30));
+    assert!(days_arg(&json!(0)).is_err() && days_arg(&json!(366)).is_err());
+    assert_eq!(days_arg(&json!(365)), Ok(365));
+    assert_eq!(role_arg(&json!(null)), Ok(None));
+    assert!(role_arg(&json!("boss")).is_err());
 }
