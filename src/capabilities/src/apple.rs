@@ -968,8 +968,8 @@ pub mod push {
     }
 
     /// When true, a new approval that waits for a person's passkey sends that person an alert
-    /// push. Off until the person decides to turn it on (a one-line change).
-    pub const NOTIFY_APPROVALS: bool = false;
+    /// push. On since the person asked for it.
+    pub const NOTIFY_APPROVALS: bool = true;
 
     /// The payload and headers of one alert push for the "pigeon" app, with a link in its data.
     pub fn alert_parts(

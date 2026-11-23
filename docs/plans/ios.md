@@ -903,3 +903,4 @@ executors through it. Each item: state, next step, who it waits on.
   - Order: the server and release-profile branches (core) before an `ios-release` of the app
     branch, so the export finds a profile with Push. Not run: `ios-release`, and a real push.
 - 2026-11-23: build 40 released from `36932f1` with `aps-environment` production; Apple VALID.
+- 2026-11-24: the person turned approval push on: `push::NOTIFY_APPROVALS = true`. A new approval with an approver sends "Approval waiting"; the send is best effort and `ask` returns the same either way. Smoke `platform_approval_push_on` (was `..._off_by_default`).

@@ -6693,12 +6693,12 @@ fn core_audit_lines_name_the_run() {
     assert_eq!(c.run.as_deref(), Some("r1"));
 }
 
-/// Approval push is off by default, and its alert carries the link and collapse id.
+/// Approval push is on, and its alert carries the link and collapse id.
 #[test]
-fn platform_approval_push_off_by_default() {
+fn platform_approval_push_on() {
     use pigeon_capabilities::apple::push::{NOTIFY_APPROVALS, alert_parts};
 
-    const { assert!(!NOTIFY_APPROVALS) };
+    const { assert!(NOTIFY_APPROVALS) };
     let (payload, headers) = alert_parts(
         "Approval waiting",
         "`tool` from svc waits for your passkey.",
