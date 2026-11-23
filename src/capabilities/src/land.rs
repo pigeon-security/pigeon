@@ -542,6 +542,20 @@ impl Row {
     }
 }
 
+/// A CI deploy job that has ended, as the Lander keeps it.
+struct JobEnd {
+    /// Whether it succeeded.
+    passed: bool,
+    /// One line saying how it ended.
+    detail: String,
+    /// Its exit code, kept only for state `failed`.
+    exit_code: Option<i64>,
+    /// The job's state: `succeeded`, `failed`, `cancelled`, `timed_out` or `error`.
+    state: String,
+    /// The last 2000 characters of its output.
+    tail: String,
+}
+
 /// One deploy in a Worker's lane.
 #[derive(Deserialize, Debug, Clone)]
 struct DeployRow {
@@ -802,7 +816,7 @@ impl Lander {
                 // The latest incidents still open, that could not isolate their cause, or that
                 // may have left a Worker on a failing build: for the person.
                 let open: Vec<IncidentRow> = self.db.rows(
-                    "SELECT * FROM incidents WHERE state IN ('open', 'unisolated', 'stuck') ORDER BY id DESC LIMIT 10",
+                    "SELECT * FROM incidents WHERE state IN ('open', 'unisolated', 'stuck', 'environment') ORDER BY id DESC LIMIT 10",
                     vec![],
                 )?;
                 // An incident of a Worker the map no longer has needs no action.
@@ -1203,7 +1217,7 @@ impl Lander {
     /// Worker covers ([`lanes::incident_covered`]); the state becomes [`lanes::COVERED`].
     fn close_covered(&self) -> Result<()> {
         let open: Vec<IncidentRow> = self.db.rows(
-            "SELECT * FROM incidents WHERE state IN ('unisolated', 'stuck') ORDER BY id",
+            "SELECT * FROM incidents WHERE state IN ('unisolated', 'stuck', 'environment') ORDER BY id",
             vec![],
         )?;
         for inc in open {
@@ -1262,6 +1276,38 @@ impl Lander {
                 vec![inc.id.into(), inc.failed_deploy.into()],
             )?;
             if mine.iter().any(|d| d.state == "running") {
+                continue;
+            }
+            // A redeploy that failed for the environment ends the incident: no bisect, and no
+            // landing is to blame.
+            if let Some(env) = mine.iter().find(|d| {
+                d.state == "error"
+                    && d.detail
+                        .as_deref()
+                        .is_some_and(lanes::is_environment_detail)
+            }) {
+                let why = env.detail.clone().unwrap_or_default();
+                let t = now();
+                self.db.exec(
+                    "UPDATE incidents SET state = ?, summary = ?, redeploys = ?, updated_at = ?, finished_at = ? WHERE id = ? AND state = 'open'",
+                    vec![
+                        lanes::ENVIRONMENT.into(),
+                        format!(
+                            "{}'s deploy failed; a redeploy then failed for the environment, so no bisect; the Worker may still be on a failing build: {why}",
+                            inc.worker
+                        )
+                        .into(),
+                        (mine.len() as i64).into(),
+                        t.into(),
+                        t.into(),
+                        inc.id.into(),
+                    ],
+                )?;
+                for l in inc.included() {
+                    if let Some(r) = self.row(&l.id)? {
+                        self.apply(&r, &Seen::Failed, Some(&why))?;
+                    }
+                }
                 continue;
             }
             let tried: Vec<lanes::Tried> = mine
@@ -1437,10 +1483,26 @@ impl Lander {
                     seen,
                     "a deploy that carried it failed (see its deploys)".to_string(),
                 ),
-                _ => (
-                    seen,
-                    "a deploy that carried it could not be run (see its deploys)".to_string(),
-                ),
+                _ => {
+                    // An environment failure that ended a deploy says so for the landing.
+                    let mut why =
+                        "a deploy that carried it could not be run (see its deploys)".to_string();
+                    for w in &m.workers {
+                        let found: Vec<DeployRow> = self.db.rows(
+                            "SELECT * FROM deploys WHERE worker = ? AND state = 'error' AND incident IS NULL AND covers >= ? ORDER BY id DESC",
+                            vec![w.as_str().into(), m.merged_at.into()],
+                        )?;
+                        if let Some(d) = found.iter().find(|d| {
+                            d.detail
+                                .as_deref()
+                                .is_some_and(lanes::is_environment_detail)
+                        }) {
+                            why = d.detail.clone().unwrap_or(why);
+                            break;
+                        }
+                    }
+                    (seen, why)
+                }
             };
             self.apply(row, &seen, Some(&detail))?;
         }
@@ -1661,8 +1723,17 @@ impl Lander {
                 "UPDATE deploys SET job = ?, tries = 0, detail = ?, updated_at = ? WHERE id = ? AND state = 'running' AND job IS NULL",
                 vec![
                     job.into(),
-                    format!("deploying {} at {}: job {job} submitted", worker.script, d.commit_sha)
-                        .into(),
+                    format!(
+                        "deploying {} at {}: job {job} submitted{}",
+                        worker.script,
+                        d.commit_sha,
+                        if d.detail.as_deref().is_some_and(|x| x.contains(lanes::ENV_RETRY)) {
+                            format!(" {}", lanes::ENV_RETRY)
+                        } else {
+                            String::new()
+                        }
+                    )
+                    .into(),
                     now().into(),
                     d.id.into(),
                 ],
@@ -1696,10 +1767,41 @@ impl Lander {
             }
             return Ok(());
         };
-        let Some((passed, detail, exit_code)) = self.job_ended_code(job).await? else {
+        let Some(end) = self.job_ended_code(job).await? else {
             return Ok(());
         };
-        let mut detail = format!("{}: {detail}", worker.script);
+        let (passed, exit_code) = (end.passed, end.exit_code);
+        // A failure of the environment blames no landing: a lane deploy is deployed once more,
+        // anything else ends in error.
+        if !passed && let Some(why) = lanes::environment_fault(&end.state, end.exit_code, &end.tail)
+        {
+            let retried = d
+                .detail
+                .as_deref()
+                .is_some_and(|x| x.contains(lanes::ENV_RETRY));
+            let in_incident = d.incident.is_some() || d.purpose() != lanes::Purpose::Lane;
+            match lanes::environment_step(retried, in_incident, &why) {
+                lanes::EnvStep::Redeploy => self.db.exec(
+                    "UPDATE deploys SET job = NULL, tries = 0, detail = ?, updated_at = ? WHERE id = ? AND state = 'running'",
+                    vec![
+                        format!(
+                            "{}: environment fault ({why}); deploying once more at {} {}",
+                            worker.script,
+                            d.commit_sha,
+                            lanes::ENV_RETRY
+                        )
+                        .into(),
+                        now().into(),
+                        d.id.into(),
+                    ],
+                )?,
+                lanes::EnvStep::Error(detail) => {
+                    self.end_deploy(&d, lanes::DeployState::Error, &detail)?
+                }
+            }
+            return Ok(());
+        }
+        let mut detail = format!("{}: {}", worker.script, end.detail);
         if let Some(c) = exit_code {
             detail.push_str(&format!(" (exit code {c})"));
         }
@@ -1949,13 +2051,13 @@ impl Lander {
         Ok(self
             .job_ended_code(job)
             .await?
-            .map(|(passed, detail, _)| (passed, detail)))
+            .map(|e| (e.passed, e.detail)))
     }
 
     /// [`Self::job_ended`], with the job's exit code too (kept in memory, then written into the
     /// deploy's detail as `(exit code N)`). The exit code is returned only when the job's state
     /// is exactly `failed`; for `timed_out`, `cancelled` and `error` it is `None`.
-    async fn job_ended_code(&self, job: &str) -> Result<Option<(bool, String, Option<i64>)>> {
+    async fn job_ended_code(&self, job: &str) -> Result<Option<JobEnd>> {
         let status = durable::call(
             &self.env,
             CI_BINDING,
@@ -1981,7 +2083,18 @@ impl Lander {
         } else {
             None
         };
-        Ok(Some((state == "succeeded", detail, exit_code)))
+        let tail: String = {
+            let out = status["output"].as_str().unwrap_or_default();
+            let skip = out.chars().count().saturating_sub(2000);
+            out.chars().skip(skip).collect()
+        };
+        Ok(Some(JobEnd {
+            passed: state == "succeeded",
+            detail,
+            exit_code,
+            state,
+            tail,
+        }))
     }
 
     /// Runs `tool` as the landing's caller, through the same dispatch as `/mcp`.

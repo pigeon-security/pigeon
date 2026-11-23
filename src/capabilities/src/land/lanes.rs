@@ -622,7 +622,92 @@ pub fn bisect_from(
 /// The state of an incident that a later green lane deploy of its Worker covers.
 pub const COVERED: &str = "covered";
 
-/// Whether a later green deploy makes an incident moot. True only for an `unisolated` or
+/// The state of an incident that ended because a redeploy failed for the environment: no
+/// bisect was made, and no landing is to blame.
+pub const ENVIRONMENT: &str = "environment";
+
+/// Marks a lane deploy's detail once it was deployed again after an environment failure.
+pub const ENV_RETRY: &str = "(environment retry)";
+
+/// Whether a deploy's detail records an environment failure ([`environment_detail`]).
+pub fn is_environment_detail(detail: &str) -> bool {
+    detail.starts_with("environment: ")
+}
+
+/// The detail a deploy and its landings get when it failed for the environment, why `why`.
+pub fn environment_detail(why: &str) -> String {
+    format!("environment: {why}; not this landing's fault; land again")
+}
+
+/// Whether the 3 digits at `at` in `s` are a 5xx status and end there.
+fn is_5xx_at(s: &str, at: usize) -> bool {
+    let b = s.as_bytes();
+    b.len() >= at + 3
+        && b[at] == b'5'
+        && b[at + 1].is_ascii_digit()
+        && b[at + 2].is_ascii_digit()
+        && !b.get(at + 3).is_some_and(u8::is_ascii_digit)
+}
+
+/// Whether a job failed for the environment, not for the code: the reason, short, if so.
+/// Job state `error` (the runner was lost) and `cancelled` are the environment. A `failed`
+/// job is when its output `tail` names a known platform fault: Cloudflare `code: 10007`, a
+/// Cloudflare 5xx status, or the deploy proxy being unreachable. Anything else, `timed_out`
+/// included, is a code fault (`None`). The exit code is not used yet.
+pub fn environment_fault(state: &str, _exit_code: Option<i64>, tail: &str) -> Option<String> {
+    match state {
+        "error" => return Some("the runner was lost".to_string()),
+        "cancelled" => return Some("the job was cancelled".to_string()),
+        "failed" => {}
+        _ => return None,
+    }
+    let low = tail.to_ascii_lowercase();
+    if low.contains("code: 10007") {
+        return Some("Cloudflare error code 10007".to_string());
+    }
+    if low.contains("the proxy could not be reached") {
+        return Some("the deploy proxy could not be reached".to_string());
+    }
+    for key in [
+        "http ",
+        "status ",
+        "status: ",
+        "status code ",
+        "status code: ",
+    ] {
+        let mut from = 0;
+        while let Some(i) = low[from..].find(key) {
+            let at = from + i + key.len();
+            if is_5xx_at(&low, at) {
+                return Some(format!("Cloudflare answered {}", &low[at..at + 3]));
+            }
+            from = at;
+        }
+    }
+    None
+}
+
+/// What to do with a deploy that failed for the environment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EnvStep {
+    /// Deploy once more at the same commit with the same landings.
+    Redeploy,
+    /// End the deploy `error` with this detail; no landing is blamed.
+    Error(String),
+}
+
+/// The step for an environment failure: a lane deploy not yet deployed again
+/// (`retried` false, not part of an incident) is deployed once more; any other ends in error.
+pub fn environment_step(retried: bool, in_incident: bool, why: &str) -> EnvStep {
+    if retried || in_incident {
+        EnvStep::Error(environment_detail(why))
+    } else {
+        EnvStep::Redeploy
+    }
+}
+
+/// Whether a later green deploy makes an incident moot. True only for an `unisolated`,
+/// `environment` or
 /// `stuck` incident whose failed deploy (`failed_deploy`, carrying up to `failed_covers`) is
 /// followed by a later deploy (`green_deploy`) that covers at least as much. The caller passes
 /// only a succeeded lane deploy of the same Worker.
@@ -633,7 +718,7 @@ pub fn incident_covered(
     green_deploy: i64,
     green_covers: i64,
 ) -> bool {
-    matches!(state, "unisolated" | "stuck")
+    matches!(state, "unisolated" | "stuck" | ENVIRONMENT)
         && green_deploy > failed_deploy
         && green_covers >= failed_covers
 }

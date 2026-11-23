@@ -1596,6 +1596,52 @@ fn land_commit_attribution() {
 }
 
 #[test]
+fn core_land_environment_failures_blame_no_landing() {
+    use pigeon_capabilities::land::lanes::{
+        self, EnvStep, environment_detail, environment_fault, environment_step,
+    };
+    // The runner lost, or the job cancelled: the environment, whatever the output.
+    assert!(environment_fault("error", None, "").is_some());
+    assert!(environment_fault("cancelled", None, "").is_some());
+    // A failed job naming a known platform fault.
+    let why = environment_fault("failed", Some(1), "x\nA request failed [code: 10007]\n");
+    assert!(why.unwrap().contains("10007"));
+    let why = environment_fault("failed", Some(1), "Cloudflare API returned HTTP 503\n");
+    assert!(why.unwrap().contains("503"));
+    assert!(environment_fault("failed", Some(1), "status: 502 Bad Gateway").is_some());
+    assert!(environment_fault("failed", Some(1), "the proxy could not be reached").is_some());
+    // Anything else is a code fault.
+    assert_eq!(environment_fault("timed_out", None, "code: 10007"), None);
+    assert_eq!(
+        environment_fault("failed", Some(1), "error[E0308]: mismatched"),
+        None
+    );
+    assert_eq!(environment_fault("failed", Some(1), ""), None);
+    assert_eq!(
+        environment_fault("failed", Some(1), "HTTP 5000 lines"),
+        None
+    );
+    assert_eq!(environment_fault("failed", Some(1), "HTTP 404"), None);
+    assert_eq!(environment_fault("succeeded", None, "code: 10007"), None);
+
+    // A lane deploy is deployed once more; then, or in an incident, it ends in error.
+    assert_eq!(environment_step(false, false, "w"), EnvStep::Redeploy);
+    let end = EnvStep::Error(environment_detail("w"));
+    assert_eq!(environment_step(true, false, "w"), end);
+    assert_eq!(environment_step(false, true, "w"), end);
+    assert_eq!(
+        environment_detail("w"),
+        "environment: w; not this landing's fault; land again"
+    );
+    assert!(lanes::is_environment_detail(&environment_detail("w")));
+    assert!(!lanes::is_environment_detail("sites: CI job j: failed"));
+
+    // Its incident is closed like an unisolated one.
+    assert!(lanes::incident_covered(lanes::ENVIRONMENT, 5, 3, 9, 4));
+    assert!(!lanes::incident_covered("isolated", 5, 3, 9, 4));
+}
+
+#[test]
 fn contract_signed_callers_and_skew() {
     use pigeon_contract::{
         Answer, CONTRACT, FailureKind, Manifest, Refused, accepts, sign, verify, wants,
