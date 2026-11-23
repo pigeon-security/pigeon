@@ -27,6 +27,7 @@ use pigeon_capabilities::public_host::{PublicHost, Retire};
 use pigeon_capabilities::remote::Binding;
 use pigeon_capabilities::secrets::Secrets;
 use pigeon_capabilities::site::Site;
+use pigeon_capabilities::site_passkeys::SitePasskeys;
 use pigeon_capabilities::source::Source;
 use pigeon_capabilities::split::Split;
 use pigeon_capabilities::storage::{self, Storage};
@@ -321,6 +322,8 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
                 site_name: "pigeon".into(),
             },
         }),
+        // Passkeys for the sites pigeon-sites serves: its calls only.
+        Box::new(SitePasskeys { zone: ZONE.into() }),
         // The console: one page at the root, signed in to once with a passkey.
         Box::new(Console {
             host: HOST.into(),

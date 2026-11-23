@@ -325,8 +325,13 @@ impl Directory {
             }
             "users.get" => to_value(self.user(s("id"))?),
             "users.create" => {
-                if !matches!(s("kind"), "standard" | "service") {
-                    return Err(bad("a user is standard or service"));
+                let site_host = s("kind")
+                    .strip_prefix("site:")
+                    .is_some_and(crate::instances::record::dns_name);
+                if !site_host && !matches!(s("kind"), "standard" | "service") {
+                    return Err(bad(
+                        "a user is standard, service, or site:{host} for a valid hostname",
+                    ));
                 }
                 to_value(self.create(s("kind"), s("name"))?)
             }
@@ -1237,22 +1242,28 @@ pub struct Users {
 }
 
 impl Users {
-    fn enrol_url(&self, code: &str) -> String {
-        format!("https://{}/auth/enrol?code={code}", self.host)
+    /// The enrolment link: on `site` when given (so the passkey is made for that host), else
+    /// on the platform's own host.
+    fn enrol_url(&self, code: &str, site: Option<&str>) -> String {
+        match site {
+            Some(site) => format!("https://{site}/_pigeon/enrol?code={code}"),
+            None => format!("https://{}/auth/enrol?code={code}", self.host),
+        }
     }
 
-    async fn standard_with_link(&self, env: &Env, name: &str) -> Result<Value> {
-        let user = directory(
-            env,
-            "users.create",
-            json!({ "kind": "standard", "name": name }),
-        )
-        .await?;
+    /// Creates a user, a standard one or a site user when `site` is given, and answers them
+    /// with a single-use enrolment link.
+    async fn standard_with_link(&self, env: &Env, name: &str, site: Option<&str>) -> Result<Value> {
+        let kind = match site {
+            Some(host) => format!("site:{host}"),
+            None => "standard".to_string(),
+        };
+        let user = directory(env, "users.create", json!({ "kind": kind, "name": name })).await?;
         let id = user["id"].as_str().unwrap_or_default();
         let code = directory(env, "enrol.create", json!({ "user_id": id })).await?;
         Ok(json!({
             "user": user,
-            "enrol": self.enrol_url(code.as_str().unwrap_or_default()),
+            "enrol": self.enrol_url(code.as_str().unwrap_or_default(), site),
             "expires_in_minutes": ENROL_TTL_MS / 60_000,
         }))
     }
@@ -1275,23 +1286,39 @@ impl Users {
                 if n.as_i64().unwrap_or(0) > 0 {
                     return Err(bad("a standard user exists; invite with users_invite"));
                 }
-                self.standard_with_link(env, arg(args, "name")?).await?
+                self.standard_with_link(env, arg(args, "name")?, None)
+                    .await?
             }
-            "users_invite" => self.standard_with_link(env, arg(args, "name")?).await?,
+            "users_invite" => {
+                let site = args["site"].as_str();
+                self.standard_with_link(env, arg(args, "name")?, site)
+                    .await?
+            }
             "users_enrol" => {
+                let site = args["site"].as_str();
                 let user: Option<User> = parse(
                     directory(env, "users.get", json!({ "id": arg(args, "user_id")? })).await?,
                 )?;
                 let user = user
-                    .filter(|u| u.kind == "standard")
-                    .ok_or_else(|| bad("no such standard user"))?;
+                    .filter(|u| {
+                        u.kind == "standard"
+                            || site.is_some_and(|host| u.kind == format!("site:{host}"))
+                    })
+                    .ok_or_else(|| bad("no such standard user, or user of that site"))?;
                 let code = directory(env, "enrol.create", json!({ "user_id": user.id })).await?;
-                json!({ "user": user, "enrol": self.enrol_url(code.as_str().unwrap_or_default()) })
+                json!({ "user": user, "enrol": self.enrol_url(code.as_str().unwrap_or_default(), site) })
             }
             "users_link" => {
                 let me = service()?;
                 let standard = match args["standard_user_id"].as_str() {
-                    Some(id) => id.to_string(),
+                    Some(id) => {
+                        let person: Option<User> =
+                            parse(directory(env, "users.get", json!({ "id": id })).await?)?;
+                        person
+                            .filter(|u| u.kind == "standard")
+                            .ok_or_else(|| bad("no such standard user"))?
+                            .id
+                    }
                     None => {
                         let all: Vec<User> =
                             parse(directory(env, "users.list", json!({})).await?["users"].clone())?;
@@ -1434,19 +1461,27 @@ impl Capability for Users {
                 "name",
                 true,
             ),
-            one(
-                "users_invite",
-                "Create a standard user and answer a single-use link where they register a \
-                 passkey.",
-                "name",
-                true,
-            ),
-            one(
-                "users_enrol",
-                "Answer a single-use link where a standard user registers another passkey.",
-                "user_id",
-                true,
-            ),
+            Tool {
+                name: "users_invite",
+                description: "Create a standard user and answer a single-use link where they \
+                 register a passkey. With `site` (a host such as notes.pigeon.dev), create a \
+                 site user for that host instead, with a link on that host.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": { "name": { "type": "string" }, "site": { "type": "string" } },
+                    "required": ["name"]
+                }),
+            },
+            Tool {
+                name: "users_enrol",
+                description: "Answer a single-use link where a standard user registers another \
+                 passkey. With `site`, the link is on that host, for a site user of it.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": { "user_id": { "type": "string" }, "site": { "type": "string" } },
+                    "required": ["user_id"]
+                }),
+            },
             one(
                 "users_link",
                 "Ask for the calling service user to act for a standard user (the only one, \

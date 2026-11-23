@@ -1,6 +1,9 @@
 # Sites: passkey sign-in for a site, and pigeon.dev on pigeon-sites
 
 Status: planned 2026-11-23 (overnight). Branches below; nothing landed yet.
+Status: B2 landed (`Z1YCPDSwx_kjMf2P`, deployed). A and B1 are built and green, but not
+landed: since B2, the Lander refuses every branch ("the pack is malformed: it inflates too
+large"; see the Log). The apex is still served by core.
 
 Two features of `pigeon-sites` (`src/sites`):
 
@@ -217,3 +220,27 @@ this. The instances layer is never on the public page.
 ## Log
 
 - 2026-11-23: plan written from main at `dc5814e`.
+- 2026-11-23: B2 landed (`Z1YCPDSwx_kjMf2P`): pigeon-sites serves the apex pages; not routed yet.
+- 2026-11-23: A built (executor `LHt0zblBkApy`): `pigeon_core::site_auth`, core `site_passkey`, `users_invite`/`users_enrol` `site`, record `auth`/`allow`, the pigeon-sites gate, the four `sites_auth_*` scenarios. Off by default.
+- 2026-11-23: B1 built (executor `ZjHyQmvJEIUQ`, `claude/ai-agent-ZjHyQmvJEIUQ` at `fb6c57b`,
+  CI green): `architecture::public`, the phase-6 drawing, `site_publish {worker}` with its
+  pre-flight. Not landed.
+- 2026-11-23: landing blocked for every branch. The Lander's merge-base fetch asks for
+  `tree:0`, but Artifacts does not advertise `filter`, so the history pack carries every blob.
+  Main's history within 500 commits is now about 47 MiB raw. `pack::objects` caps the inflated
+  total at 48 MiB, counting deltas too. A pack of main's last 500 commits fails locally with the
+  same error; 200 commits pass. A fix, a history parse that keeps only commits, is on an executor
+  branch for the person. It cannot land through the Lander it fixes.
+
+### Morning, in order
+
+1. Unblock the Lander: deploy the history-pack fix outside the Lander (the person's call).
+2. Land A (`claude/ai-agent-qzDCSNDiYgfW`), then B1 (`claude/ai-agent-ZjHyQmvJEIUQ`), one at a
+   time.
+3. The move: `site_publish {"worker": "pigeon-sites"}`. It checks pigeon-sites' three pages
+   first and refuses if any fails. To move back: `site_publish {"worker": "pigeon-platform"}`.
+4. B3: `settings::site()` should show pigeon.dev on `pigeon-sites` in the footprint. Add a
+   `serving` field to `Site` for the footprint; `worker` stays this Worker, the rollback target
+   with no pre-flight.
+5. Before any real site sets `auth`, make its instance Worker's workers.dev address private
+   (Known limit, part A).

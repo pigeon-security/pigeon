@@ -353,7 +353,11 @@ pub fn instances_section() -> Section {
 async fn subdomains(env: &Env, zone: &str) -> Result<Value> {
     let mut out = Vec::new();
     for i in all(env).await? {
-        for t in i.sites.iter().flat_map(|s| s.targets.iter()) {
+        for (site, t) in i
+            .sites
+            .iter()
+            .flat_map(|s| s.targets.iter().map(move |t| (s, t)))
+        {
             let record::Target::Subdomain { label } = t else {
                 continue;
             };
@@ -362,7 +366,12 @@ async fn subdomains(env: &Env, zone: &str) -> Result<Value> {
             if let Value::String(upstream) =
                 directory(env, "setting.get", json!({ "key": key })).await?
             {
-                out.push(json!({ "host": host, "instance": i.id, "upstream": upstream }));
+                let mut entry = json!({ "host": host, "instance": i.id, "upstream": upstream });
+                if let Some(auth) = &site.auth {
+                    entry["auth"] = json!(auth);
+                    entry["allow"] = json!(site.allow);
+                }
+                out.push(entry);
             }
         }
     }

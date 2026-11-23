@@ -104,6 +104,13 @@ pub struct SiteRecord {
     /// Where the site is published.
     #[serde(default)]
     pub targets: Vec<Target>,
+    /// How visitors sign in: absent (public) or "passkey". Only a site on platform subdomains
+    /// may set it, as only pigeon-sites can gate those.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<String>,
+    /// Who may sign in when `auth` is set: user ids, or "site" for every site user of the host.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow: Vec<String>,
 }
 
 /// A place where a site is published.
@@ -491,6 +498,31 @@ fn check_target(
     }
 }
 
+/// Reports problems with a site's sign-in settings.
+fn check_auth(path: &str, site: &SiteRecord, problems: &mut Vec<String>) {
+    let Some(auth) = &site.auth else {
+        return;
+    };
+    if auth != "passkey" {
+        problems.push(format!("The {path}.auth \"{auth}\" must be \"passkey\"."));
+        return;
+    }
+    if site.allow.is_empty() {
+        problems.push(format!(
+            "The {path}.allow must list a user id or \"site\" when auth is \"passkey\"."
+        ));
+    }
+    if site
+        .targets
+        .iter()
+        .any(|t| !matches!(t, Target::Subdomain { .. }))
+    {
+        problems.push(format!(
+            "The {path}.auth needs every target to be a platform subdomain; only pigeon-sites can gate those."
+        ));
+    }
+}
+
 fn check_sites(
     instance: &Instance,
     others: &[Instance],
@@ -529,6 +561,7 @@ fn check_sites(
                 "The {p}.build \"{b}\" must be a relative path of 1 to 200 letters, digits, dots, underscores, dashes and slashes, with no empty or \"..\" parts."
             ));
         }
+        check_auth(&p, site, problems);
         let mut previews = 0usize;
         for (j, target) in site.targets.iter().enumerate() {
             if matches!(target, Target::Preview) {

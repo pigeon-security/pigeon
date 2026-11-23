@@ -34,6 +34,7 @@ pub mod public_host;
 pub mod remote;
 pub mod secrets;
 pub mod site;
+pub mod site_passkeys;
 pub mod source;
 pub mod split;
 pub mod storage;

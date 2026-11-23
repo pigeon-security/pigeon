@@ -8513,6 +8513,303 @@ fn blog_template_versions_selected_by_pin() {
     assert_eq!(blog.changelog[0].summary, pigeon_core::versions::BEGAN);
 }
 
+/// A record with one site on the platform subdomain `notes`, for the sign-in scenarios.
+fn sites_auth_record() -> pigeon_capabilities::instances::record::Instance {
+    use pigeon_capabilities::instances::record::{Instance, Target};
+    let mut notes: Instance = serde_json::from_value(pigeon_capabilities::instances::template())
+        .expect("the template is a record");
+    notes.id = "notes".into();
+    notes.title = "notes".into();
+    notes.worker = Some("notes".into());
+    notes.zones.clear();
+    notes.sites[0].bucket = "notes-site".into();
+    notes.sites[0].build = None;
+    notes.sites[0].targets = vec![Target::Subdomain {
+        label: "notes".into(),
+    }];
+    notes
+}
+
+/// A site that does not opt in behaves as before: its record has no `auth` or `allow`, its host
+/// entry has none, and the gate passes everything, `/_pigeon/` paths and POSTs included.
+#[test]
+fn sites_auth_off_by_default() {
+    use pigeon_core::site_auth::{Gate, config_of, gate};
+
+    let notes = sites_auth_record();
+    let text = serde_json::to_value(&notes).unwrap();
+    assert!(text["sites"][0].get("auth").is_none() && text["sites"][0].get("allow").is_none());
+    assert_eq!(
+        serde_json::from_value::<pigeon_capabilities::instances::record::Instance>(text).unwrap(),
+        notes
+    );
+    let entry = json!({ "host": "notes.pigeon.dev", "instance": "notes", "upstream": "https://x.workers.dev" });
+    assert!(config_of(&entry).is_none());
+    let other = json!({ "host": "notes.pigeon.dev", "auth": "password", "allow": ["usr_fake1"] });
+    assert!(config_of(&other).is_none());
+    for (method, path) in [
+        ("GET", "/"),
+        ("GET", "/_pigeon/sign-in"),
+        ("GET", "/_pigeon/passkey.js"),
+        ("POST", "/_pigeon/sign-in/finish"),
+        ("POST", "/anything"),
+    ] {
+        assert_eq!(
+            gate(None, method, path, false),
+            Gate::Pass,
+            "{method} {path}"
+        );
+    }
+}
+
+/// On a gated host every path needs a session, assets included; the reserved paths are
+/// reachable; a sign-in's `next` stays on the host; and the record's rules hold.
+#[test]
+fn sites_auth_gates_every_path() {
+    use pigeon_capabilities::instances::record::{Rules, Target, validate};
+    use pigeon_core::site_auth::{Config, Gate, Reserved, config_of, gate, safe_next};
+
+    let entry = json!({
+        "host": "notes.pigeon.dev", "upstream": "https://x.workers.dev",
+        "auth": "passkey", "allow": ["usr_fake1", "site"],
+    });
+    let config = config_of(&entry).expect("a gated host");
+    assert_eq!(
+        config,
+        Config {
+            allow: vec!["usr_fake1".into(), "site".into()]
+        }
+    );
+    for path in [
+        "/",
+        "/post/a",
+        "/assets/x.css",
+        "/favicon.ico",
+        "/_pigeon/other",
+    ] {
+        assert_eq!(
+            gate(Some(&config), "GET", path, false),
+            Gate::SignIn,
+            "{path}"
+        );
+        assert_eq!(
+            gate(Some(&config), "HEAD", path, false),
+            Gate::SignIn,
+            "{path}"
+        );
+        assert_eq!(
+            gate(Some(&config), "POST", path, false),
+            Gate::Unauthorized,
+            "{path}"
+        );
+        assert_eq!(gate(Some(&config), "GET", path, true), Gate::Pass, "{path}");
+    }
+    for (method, path, which) in [
+        ("GET", "/_pigeon/passkey.js", Reserved::Script),
+        ("GET", "/_pigeon/sign-in", Reserved::SignInPage),
+        ("POST", "/_pigeon/sign-in/begin", Reserved::SignInBegin),
+        ("POST", "/_pigeon/sign-in/finish", Reserved::SignInFinish),
+        ("GET", "/_pigeon/enrol", Reserved::EnrolPage),
+        ("POST", "/_pigeon/enrol/begin", Reserved::EnrolBegin),
+        ("POST", "/_pigeon/enrol/finish", Reserved::EnrolFinish),
+        ("POST", "/_pigeon/sign-out", Reserved::SignOut),
+    ] {
+        assert_eq!(
+            gate(Some(&config), method, path, false),
+            Gate::Reserved(which),
+            "{method} {path}"
+        );
+    }
+    // `next` is a path on this host or "/".
+    assert_eq!(safe_next("/post/a?x=1"), "/post/a?x=1");
+    for bad in [
+        "//evil.example",
+        "/\\evil.example",
+        "https://evil.example/",
+        "evil.example",
+        "",
+        "/a\r\nSet-Cookie: x=1",
+    ] {
+        assert_eq!(safe_next(bad), "/", "{bad:?}");
+    }
+
+    // The record: only "passkey", a non-empty allow list, and only platform subdomains.
+    let platform: pigeon_capabilities::instances::record::Instance =
+        serde_json::from_value(json!({
+            "id": "pigeon-security/platform", "title": "pigeon",
+            "account": { "kind": "home" }, "zones": ["pigeon.dev"],
+            "repo": { "kind": "artifacts", "namespace": "pigeon-security", "repo": "pigeon" }
+        }))
+        .unwrap();
+    let reserved = pigeon_capabilities::instances::record::reserved_labels(
+        &["platform.pigeon.dev".into(), "pigeon.dev".into()],
+        "pigeon.dev",
+    );
+    let workers = vec!["pigeon-platform".to_string()];
+    let rules = Rules {
+        platform_zone: "pigeon.dev",
+        reserved_labels: &reserved,
+        reserved_workers: &workers,
+    };
+    let check = |notes: &pigeon_capabilities::instances::record::Instance| {
+        validate(notes, std::slice::from_ref(&platform), &rules)
+    };
+    let mut notes = sites_auth_record();
+    assert_eq!(check(&notes), Vec::<String>::new());
+    notes.sites[0].auth = Some("passkey".into());
+    assert!(
+        check(&notes).iter().any(|p| p.contains("allow")),
+        "{:?}",
+        check(&notes)
+    );
+    notes.sites[0].allow = vec!["usr_fake1".into()];
+    assert_eq!(check(&notes), Vec::<String>::new());
+    let text = serde_json::to_value(&notes).unwrap();
+    assert_eq!(text["sites"][0]["auth"], "passkey");
+    assert_eq!(text["sites"][0]["allow"], json!(["usr_fake1"]));
+    notes.sites[0].auth = Some("password".into());
+    assert!(
+        check(&notes)
+            .iter()
+            .any(|p| p.contains("must be \"passkey\""))
+    );
+    notes.sites[0].auth = Some("passkey".into());
+    notes.sites[0].targets.push(Target::Preview);
+    assert!(
+        check(&notes)
+            .iter()
+            .any(|p| p.contains("platform subdomain"))
+    );
+}
+
+/// A session ends at its expiry, and not before.
+#[test]
+fn sites_auth_session_expires() {
+    use pigeon_core::site_auth::{
+        COOKIE, SESSION_MS, clear_cookie, cookie_value, issue, session_key, set_cookie, verify,
+    };
+
+    let key = session_key(b"fake caller key", "notes.pigeon.dev");
+    let now = 1_000_000;
+    let value = issue(&key, "notes.pigeon.dev", "usr_fake1", now);
+    let session = verify(&key, "notes.pigeon.dev", &value, now + 1).expect("a fresh session");
+    assert_eq!(session.user_id, "usr_fake1");
+    assert_eq!(session.expires_ms, now + SESSION_MS);
+    assert!(verify(&key, "notes.pigeon.dev", &value, now + SESSION_MS - 1).is_some());
+    assert!(verify(&key, "notes.pigeon.dev", &value, now + SESSION_MS).is_none());
+    assert!(verify(&key, "notes.pigeon.dev", &value, now + SESSION_MS + 1).is_none());
+    assert_eq!(SESSION_MS, 12 * 3_600_000);
+
+    // The cookie: found among others, host-only, and cleared with Max-Age=0.
+    let header = format!("a=1; {COOKIE}={value}; b=2");
+    assert_eq!(cookie_value(Some(&header)), Some(value.as_str()));
+    assert_eq!(cookie_value(Some("a=1")), None);
+    assert_eq!(cookie_value(None), None);
+    let set = set_cookie(&value);
+    for part in [
+        "HttpOnly",
+        "Secure",
+        "SameSite=Lax",
+        "Path=/",
+        "Max-Age=43200",
+    ] {
+        assert!(set.contains(part), "{part}: {set}");
+    }
+    assert!(!set.contains("Domain") && set.starts_with("__Host-pigeon-site="));
+    assert!(clear_cookie().contains("Max-Age=0"));
+}
+
+/// A session belongs to one host: a cookie of a.pigeon.dev fails on b.pigeon.dev, a site user of
+/// a is not let in on b, a service user never, and a changed cookie fails.
+#[test]
+fn sites_auth_session_is_host_scoped() {
+    use pigeon_core::site_auth::{
+        Config, allowed, issue, session_key, split_subject, subject, verify,
+    };
+
+    let caller = b"fake caller key";
+    let (key_a, key_b) = (
+        session_key(caller, "a.pigeon.dev"),
+        session_key(caller, "b.pigeon.dev"),
+    );
+    assert_ne!(key_a, key_b);
+    let now = 5_000;
+    let value = issue(
+        &key_a,
+        "a.pigeon.dev",
+        &subject("site:a.pigeon.dev", "usr_fake1"),
+        now,
+    );
+    let session = verify(&key_a, "a.pigeon.dev", &value, now).expect("valid on a");
+    assert_eq!(
+        split_subject(&session.user_id),
+        Some(("site:a.pigeon.dev", "usr_fake1"))
+    );
+    assert!(verify(&key_b, "b.pigeon.dev", &value, now).is_none());
+    assert!(
+        verify(&key_a, "b.pigeon.dev", &value, now).is_none(),
+        "even with a's key"
+    );
+
+    // A changed cookie: another user, a longer expiry, or another signature.
+    let parts: Vec<&str> = value.split('.').collect();
+    let other_user = issue(&key_a, "a.pigeon.dev", "usr_fake2", now);
+    let forged = format!(
+        "{}.{}.{}.{}",
+        other_user.split('.').next().unwrap(),
+        parts[1],
+        parts[2],
+        parts[3]
+    );
+    assert!(verify(&key_a, "a.pigeon.dev", &forged, now).is_none());
+    let longer = format!("{}.{}.{}9.{}", parts[0], parts[1], parts[2], parts[3]);
+    assert!(verify(&key_a, "a.pigeon.dev", &longer, now).is_none());
+    let last = if value.ends_with('0') { '1' } else { '0' };
+    let flipped = format!("{}{last}", &value[..value.len() - 1]);
+    assert!(verify(&key_a, "a.pigeon.dev", &flipped, now).is_none());
+    for junk in ["", "a.b.c", "x.y.z.w", &format!("{value}.extra")] {
+        assert!(
+            verify(&key_a, "a.pigeon.dev", junk, now).is_none(),
+            "{junk:?}"
+        );
+    }
+
+    // Who is allowed: a listed standard user anywhere; "site" only the host's own site users.
+    let listed = Config {
+        allow: vec!["usr_fake1".into(), "site".into()],
+    };
+    assert!(allowed(&listed, "a.pigeon.dev", "usr_fake1", "standard"));
+    assert!(allowed(
+        &listed,
+        "a.pigeon.dev",
+        "usr_fake1",
+        "site:a.pigeon.dev"
+    ));
+    assert!(allowed(
+        &listed,
+        "a.pigeon.dev",
+        "usr_fake9",
+        "site:a.pigeon.dev"
+    ));
+    assert!(!allowed(
+        &listed,
+        "b.pigeon.dev",
+        "usr_fake9",
+        "site:a.pigeon.dev"
+    ));
+    assert!(!allowed(
+        &listed,
+        "b.pigeon.dev",
+        "usr_fake1",
+        "site:a.pigeon.dev"
+    ));
+    assert!(!allowed(&listed, "a.pigeon.dev", "usr_fake9", "standard"));
+    assert!(!allowed(&listed, "a.pigeon.dev", "usr_fake1", "service"));
+    assert!(!allowed(&listed, "a.pigeon.dev", "usr_fake9", "service"));
+    let none = Config { allow: Vec::new() };
+    assert!(!allowed(&none, "a.pigeon.dev", "usr_fake1", "standard"));
+}
+
 /// The sites deploy's pure parts: a repository tarball as GitHub serves one (a top folder, gzip)
 /// read into its files, sorted into what the renderer reads, with the commit's year.
 #[test]

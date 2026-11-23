@@ -12,6 +12,9 @@ use worker::{Error, Result};
 /// COSE's ES256: ECDSA on P-256 with SHA-256.
 pub const ES256: i64 = -7;
 
+/// The browser's side of the ceremonies, shared by the console's pages and by gated sites.
+pub const BROWSER_SCRIPT: &str = include_str!("webauthn/passkey.js");
+
 /// How long a challenge may be answered, in milliseconds.
 pub const CHALLENGE_TTL_MS: i64 = 5 * 60 * 1000;
 

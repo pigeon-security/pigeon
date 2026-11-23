@@ -46,6 +46,7 @@ pub mod registry;
 pub mod s3;
 pub mod secrets_store;
 pub mod sign;
+pub mod site_auth;
 pub mod tarball;
 pub mod tokens;
 pub mod versions;

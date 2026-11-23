@@ -23,7 +23,7 @@ pub struct Passkeys {
 const CSP: &str = "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 /// The pages' script: it runs the browser's side of each ceremony.
-const SCRIPT: &str = include_str!("passkeys/passkey.js");
+const SCRIPT: &str = webauthn::BROWSER_SCRIPT;
 
 /// A ceremony a page's button runs: it posts `{field: value}` to `{base}/begin`, asks the
 /// browser to `create` or `get` a passkey, and posts the answer to `{base}/finish`, which
@@ -38,6 +38,17 @@ pub struct Action<'a> {
 
 fn bad(why: &str) -> Error {
     Error::RustError(why.to_string())
+}
+
+/// Refuses an enrolment code whose user is not a standard user: a site user registers a
+/// passkey on its site's host, never here.
+async fn standard_code(cx: &Context<'_>, body: &Value) -> Result<()> {
+    let user = directory(cx.env, "enrol.peek", json!({ "code": arg(body, "code")? })).await?;
+    if user["kind"] == "standard" {
+        Ok(())
+    } else {
+        Err(bad("this link is for a site, not for the platform"))
+    }
 }
 
 impl Passkeys {
@@ -63,6 +74,11 @@ impl Passkeys {
             (Method::Get, "/auth/enrol") => {
                 let code = query("code");
                 let page = match directory(cx.env, "enrol.peek", json!({ "code": code })).await {
+                    Ok(user) if user["kind"] != "standard" => self.page(
+                        "Link not usable",
+                        "This link is for a site, not for the platform.",
+                        None,
+                    ),
                     Ok(user) => self.page(
                         "Register a passkey",
                         &format!(
@@ -107,8 +123,13 @@ impl Passkeys {
             (Method::Post, path) => {
                 let body: Value = req.json().await.unwrap_or(Value::Null);
                 let answer = match path {
-                    "/auth/enrol/begin" => self.enrol_begin(cx, &body).await,
-                    "/auth/enrol/finish" => self.enrol_finish(cx, &body).await,
+                    "/auth/enrol/begin" | "/auth/enrol/finish" => {
+                        match standard_code(cx, &body).await {
+                            Ok(()) if path.ends_with("begin") => self.enrol_begin(cx, &body).await,
+                            Ok(()) => self.enrol_finish(cx, &body).await,
+                            Err(e) => Err(e),
+                        }
+                    }
                     "/auth/link/begin" => self.link_begin(cx, &body).await,
                     "/auth/link/finish" => self.link_finish(cx, &body).await,
                     _ => return Response::error("not found", 404),
@@ -126,7 +147,7 @@ impl Passkeys {
     }
 
     /// Starts registering a passkey for the enrolment code's user.
-    async fn enrol_begin(&self, cx: &Context<'_>, body: &Value) -> Result<Value> {
+    pub(crate) async fn enrol_begin(&self, cx: &Context<'_>, body: &Value) -> Result<Value> {
         let code = arg(body, "code")?;
         let user: User = serde_json::from_value(
             directory(cx.env, "enrol.peek", json!({ "code": code })).await?,
@@ -148,7 +169,7 @@ impl Passkeys {
     }
 
     /// Checks the new passkey and keeps it for the enrolment code's user; the code is used up.
-    async fn enrol_finish(&self, cx: &Context<'_>, body: &Value) -> Result<Value> {
+    pub(crate) async fn enrol_finish(&self, cx: &Context<'_>, body: &Value) -> Result<Value> {
         let code = arg(body, "code")?;
         let challenge = directory(
             cx.env,
