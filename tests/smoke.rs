@@ -8644,6 +8644,92 @@ fn core_observability_monitors_updates() {
 }
 
 #[test]
+fn core_observability_monitors_email() {
+    use pigeon_capabilities::observability::{
+        email_line, email_mechanisms, plan_line, plan_monitor_updates, policy_body, update_line,
+        validate_email, with_email,
+    };
+    use serde_json::json;
+
+    // Validation: a normal address passes (trimmed); bad ones fail without being echoed.
+    assert_eq!(
+        validate_email("  me@example.com ").as_deref(),
+        Ok("me@example.com")
+    );
+    let bad = [
+        "no-at.example.com",
+        "two@@example.com",
+        "a@b@example.com",
+        "@example.com",
+        "me@localhost",
+        "me @example.com",
+        "me@exa,mple.com",
+        "me@exa;mple.com",
+        "me@exam\u{7}ple.com",
+        "a@",
+        "",
+        &format!("{}@example.com", "x".repeat(250)),
+    ];
+    for input in bad {
+        let err = validate_email(input).expect_err(input);
+        assert!(err.starts_with("`email` is not a valid address: "), "{err}");
+        if input.len() > 2 {
+            assert!(!err.contains(input), "the input was echoed: {err}");
+        }
+    }
+
+    let mail = "new@example.com";
+    let other = "old@example.com";
+    assert_eq!(
+        email_mechanisms(Some(mail)),
+        json!({ "email": [{ "id": mail }] })
+    );
+    assert_eq!(email_mechanisms(None), json!({}));
+
+    // Planned creates carry the mechanism and the body posts it.
+    let plain = vec![
+        json!({ "name": "pigeon: Workers errors", "alert_type": "workers_observability_alert",
+            "filters": { "status": ["error"] }, "enabled": true }),
+        json!({ "name": "pigeon: Workers real-time issues",
+            "alert_type": "workers_observability_real_time_issue",
+            "filters": {}, "enabled": true }),
+    ];
+    assert_eq!(policy_body(&plain[0])["mechanisms"], json!({}));
+    assert_eq!(with_email(plain.clone(), None), plain);
+    let wanted = with_email(plain, Some(mail));
+    for p in &wanted {
+        assert_eq!(p["mechanisms"], json!({ "email": [{ "id": mail }] }));
+        assert_eq!(policy_body(p)["mechanisms"], p["mechanisms"]);
+    }
+
+    // An existing policy: missing the address -> update keeping the other email; holding it -> none.
+    let existing = |ids: &[&str], id: &str| {
+        let list: Vec<Value> = ids.iter().map(|i| json!({ "id": i })).collect();
+        json!([{ "id": id, "name": "pigeon: Workers errors",
+            "alert_type": "workers_observability_alert", "enabled": true,
+            "filters": { "status": ["error"] }, "mechanisms": { "email": list } }])
+    };
+    let up = plan_monitor_updates(&wanted, &existing(&[other], "p1"));
+    assert_eq!(up.len(), 1);
+    let ids: Vec<&str> = up[0]["body"]["mechanisms"]["email"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|m| m["id"].as_str())
+        .collect();
+    assert_eq!(ids, vec![other, mail]);
+    assert!(plan_monitor_updates(&wanted, &existing(&[other, mail], "p1")).is_empty());
+
+    // The address is in exactly one plan line and in no create or update line.
+    let mut lines = vec![email_line(mail)];
+    lines.extend(wanted.iter().map(plan_line));
+    lines.extend(up.iter().map(update_line));
+    assert_eq!(lines.iter().filter(|l| l.contains(mail)).count(), 1);
+    assert!(lines[0].contains(mail));
+    assert!(!up.iter().any(|u| update_line(u).contains(other)));
+}
+
+#[test]
 fn core_observability_summary_folds() {
     use pigeon_capabilities::observability::*;
     use serde_json::json;

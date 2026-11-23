@@ -214,8 +214,9 @@ pigeon cannot create them by API; the platform notification policies can be. Sli
     scripts, when the available alerts allow it;
   - `billing_usage_alert` for Workers, Containers and Cloudflare Observability ingestion at
     thresholds in the plan (twice the expected month);
-  - delivery by email to the signed-in person's address (shown to them on the approval, not in
-    tool output).
+  - delivery by email to the one address given as `email` in the call (never read from the
+    directory or stored; shown in one plan line on the approval, and kept in the approval
+    payload so apply can re-plan). Without `email`, no delivery is set.
   Like `instance_plan`, a plan with changes asks the person's approval on the console.
 - `observability_monitors_apply {plan}`: once approved, creates the planned policies and updates
   existing `pigeon: ...` ones that differ (`Notifications Write`), touching only policies named
@@ -242,8 +243,9 @@ until the person approves a plan.
 
 - (a), (b) and (c) are landed. Approve the part-3 landings (core only).
 - Apply the monitors plan on the console only after the live shape check (Log, open item 1).
-- In the dashboard, create the Monitors listed above, and add email delivery to the
-  `pigeon: ...` notification policies that (c) creates (pigeon holds no person's email).
+- In the dashboard, create the Monitors listed above. Email delivery on the `pigeon: ...`
+  policies no longer needs the dashboard: give your address as `email` when planning, and it
+  shows once in the plan you approve. Without `email`, add delivery in the dashboard.
 - Optional: a Workers spending limit (an account setting).
 - Optional: if the parent token cannot grant `Account Analytics Read`, `Workers Observability
   Write`, `Billing Read`, `Notifications Read` or `Notifications Write`, the tool lists that
@@ -382,6 +384,9 @@ Open items:
 7. `workers_observability_real_time_issue` fires only through a Workers Issues automation
    (`/workers/observability/issues/automations`) that names the policy. Not built. Until then
    the policy never fires; the person may decline it.
+9. Email delivery is built (entry below) but not run live: whether Cloudflare accepts the
+   `email` mechanism as posted, and on the full-body PUT, is unproved until the first apply with
+   `email`. Billing watches (open item 5) will need the same address when built.
 8. Update is built (2026-11-24 entry below) but not run live: the policies list may lack
    `filters` (the plan then reads each `pigeon: ...` policy by id), and whether Cloudflare takes
    the full-body PUT with `mechanisms` as read is unproved until the first apply that updates.
@@ -442,3 +447,18 @@ Open items:
   schema and its own MCP server) and stops at the first refusal; the answer has `created`,
   `updated` and `failed`. `read_alerts` reads a `pigeon: ...` policy by id when its list entry has
   no `filters`. Smoke: `core_observability_monitors_updates`. Not run live.
+- 2026-11-24: email delivery on the `pigeon: ...` policies. `observability_monitors_plan` takes an
+  optional `email`: one address the person (or the agent for them) gives in the call. Pigeon
+  reads no address from the directory or any personal data and stores none. `validate_email`
+  (pure) trims, then wants 3 to 254 characters, one `@`, a local part, a dotted domain, and no
+  whitespace, control characters, commas or semicolons; its error never repeats the input. With
+  an address, every wanted policy carries `mechanisms: {"email": [{"id": "<address>"}]}` (source:
+  Cloudflare OpenAPI `aaa_mechanisms`, "IDs for email type will be the email address"), so
+  creates post it (`policy_body`) and existing `pigeon: ...` policies without it get an update
+  through the same union (delivery is only added). Without `email` nothing changes. The address
+  goes in the approval payload's `inputs.email` next to `filters`; apply reads it back,
+  re-plans, and the digest must match. Privacy: the address shows in one plan line ("deliver by
+  email to <address> (every policy in this plan)", in the plan answer and the approval summary)
+  and in the payload. Create and update lines, notes, `needs_filters`, the apply answer and
+  errors never hold it; `failed.why` has it replaced by `{email}`. Smoke:
+  `core_observability_monitors_email`. Not run live.

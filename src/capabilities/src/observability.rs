@@ -550,7 +550,8 @@ impl Capability for Observability {
                 description: "Dry run of the notification policies pigeon wants (Workers \
                               observability alerts): those the account lacks (created) and \
                               existing `pigeon: ...` ones whose filters, enabled flag or \
-                              delivery differ (updated; delivery is never removed). Never \
+                              delivery differ (updated; delivery is never removed). With \
+                              `email`, every policy gets email delivery to that address. Never \
                               deletes; only `pigeon: ...` policies. Asks the person's \
                               approval when something changes. With `check`, only reads: \
                               the shape of Cloudflare's alert types and policies, field names \
@@ -559,6 +560,7 @@ impl Capability for Observability {
                     "type": "object",
                     "properties": {
                         "check": { "type": "boolean", "description": "Read-only shape check; no approval is asked." },
+                        "email": { "type": "string", "description": "One address to deliver every `pigeon: ...` policy to by email. Only what the person gives; it is shown once in the plan the person approves." },
                         "filters": { "type": "object", "description": "Filters for a policy, as {\"<alert type>\": {\"<key>\": [\"value\", ...]}}. Needed for a key Cloudflare requires and lists no IDs for; when it lists IDs, values must be among them." }
                     }
                 }),
@@ -960,13 +962,82 @@ pub fn plan_monitors_with(
     plan
 }
 
+/// Checks the one delivery address the person gives and returns it trimmed. It must be 3 to 254
+/// characters with exactly one `@`, a non-empty local part, a domain with a dot, and no
+/// whitespace, control characters, commas or semicolons. The error never repeats the input.
+pub fn validate_email(input: &str) -> Result<String, String> {
+    let bad = |why: &str| Err(format!("`email` is not a valid address: {why}"));
+    let email = input.trim();
+    if email.len() < 3 || email.len() > 254 {
+        return bad("it must be 3 to 254 characters");
+    }
+    if email
+        .chars()
+        .any(|c| c.is_whitespace() || c.is_control() || c == ',' || c == ';')
+    {
+        return bad("it holds a space, control character, comma or semicolon");
+    }
+    if email.matches('@').count() != 1 {
+        return bad("it must hold exactly one `@`");
+    }
+    let (local, domain) = email.split_once('@').unwrap_or_default();
+    if local.is_empty() {
+        return bad("the part before `@` is empty");
+    }
+    if !domain.contains('.') {
+        return bad("the domain needs a dot");
+    }
+    Ok(email.to_string())
+}
+
+/// The `mechanisms` object for one delivery address, `{"email": [{"id": "<address>"}]}`, or `{}`
+/// with none. Source: Cloudflare's OpenAPI schema `aaa_mechanisms` (github.com/cloudflare/
+/// api-schemas, openapi.json): "IDs for email type will be the email address", with the example
+/// `{"email":[{"id":"test@example.com"}]}`.
+pub fn email_mechanisms(email: Option<&str>) -> Value {
+    match email {
+        Some(address) => json!({ "email": [{ "id": address }] }),
+        None => json!({}),
+    }
+}
+
+/// Sets the email `mechanisms` on every planned policy. With no address the items are unchanged.
+pub fn with_email(policies: Vec<Value>, email: Option<&str>) -> Vec<Value> {
+    let Some(address) = email else {
+        return policies;
+    };
+    policies
+        .into_iter()
+        .map(|mut p| {
+            p["mechanisms"] = email_mechanisms(Some(address));
+            p
+        })
+        .collect()
+}
+
+/// The one plan line that names the delivery address. No other line may hold it.
+pub fn email_line(email: &str) -> String {
+    format!("deliver by email to {email} (every policy in this plan)")
+}
+
+/// Hides the account id and the delivery address in Cloudflare's error text.
+fn scrub(text: &str, account: &str, email: Option<&str>) -> String {
+    let text = text.replace(account, "{account}");
+    match email {
+        Some(address) => text.replace(address, "{email}"),
+        None => text,
+    }
+}
+
 /// The JSON body posted to create a planned policy. `filters` is left out when empty, as
 /// Cloudflare's MCP server does for `workers_observability_real_time_issue`
-/// (github.com/cloudflare/mcp, `src/events/service.ts`), rather than sent as `{}`.
+/// (github.com/cloudflare/mcp, `src/events/service.ts`), rather than sent as `{}`. `mechanisms` is
+/// the planned item's own (see [`email_mechanisms`]), `{}` when it has none.
 pub fn policy_body(p: &Value) -> Value {
     let mut body = json!({
         "name": p["name"], "alert_type": p["alert_type"],
-        "enabled": p["enabled"], "mechanisms": {},
+        "enabled": p["enabled"],
+        "mechanisms": if p["mechanisms"].is_object() { p["mechanisms"].clone() } else { json!({}) },
     });
     let filled = match &p["filters"] {
         Value::Object(f) => !f.is_empty(),
@@ -1362,6 +1433,7 @@ async fn monitors_planned(
     this: &Observability,
     cx: &Context<'_>,
     filters: &Value,
+    email: Option<&str>,
 ) -> Result<Planned> {
     let (available, existing) = read_alerts(cx).await?;
     if available_types(&available).is_empty() {
@@ -1381,10 +1453,13 @@ async fn monitors_planned(
     let explicit = validate_filters(&available, filters).map_err(Error::RustError)?;
     let scripts: Vec<String> = this.map.workers.iter().map(|w| w.script.clone()).collect();
     // Every policy pigeon wants, existing or not, is what existing ones are compared against.
-    let wanted = plan_monitors_with(&available, &json!([]), &scripts, &explicit).policies;
+    let wanted = with_email(
+        plan_monitors_with(&available, &json!([]), &scripts, &explicit).policies,
+        email,
+    );
     let plan = plan_monitors_with(&available, &existing, &scripts, &explicit);
     Ok(Planned {
-        creates: plan.policies,
+        creates: with_email(plan.policies, email),
         updates: plan_monitor_updates(&wanted, &existing),
         notes: monitor_left_alone(&wanted, &existing),
         needs_filters: plan.needs_filters,
@@ -1393,14 +1468,24 @@ async fn monitors_planned(
 }
 
 /// The approval payload of a monitors plan: the policies to create, the updates, and the
-/// person's inputs. Apply re-plans from the inputs and the digest of this value must match.
-fn monitors_payload(planned: &[Value], updates: &[Value], filters: &Value) -> Value {
+/// person's inputs (the delivery address too, when given). Apply re-plans from the inputs and the
+/// digest of this value must match.
+fn monitors_payload(
+    planned: &[Value],
+    updates: &[Value],
+    filters: &Value,
+    email: Option<&str>,
+) -> Value {
     let filters = if filters.is_null() {
         json!({})
     } else {
         filters.clone()
     };
-    json!({ "policies": planned, "updates": updates, "inputs": { "filters": filters } })
+    let mut inputs = json!({ "filters": filters });
+    if let Some(address) = email {
+        inputs["email"] = json!(address);
+    }
+    json!({ "policies": planned, "updates": updates, "inputs": inputs })
 }
 
 /// `observability_monitors_plan`: the dry run, and an approval when something is missing.
@@ -1412,13 +1497,23 @@ async fn monitors_plan(this: &Observability, cx: &Context<'_>, args: &Value) -> 
         Error::RustError("the caller acts for no person who could approve this".into())
     })?;
     let filters = &args["filters"];
+    let email = match &args["email"] {
+        Value::Null => None,
+        Value::String(s) => Some(validate_email(s).map_err(Error::RustError)?),
+        _ => {
+            return Err(Error::RustError(
+                "`email` is not a valid address: it must be a string".into(),
+            ));
+        }
+    };
+    let email = email.as_deref();
     let Planned {
         creates: planned,
         updates,
         notes,
         needs_filters: needs,
         skipped,
-    } = monitors_planned(this, cx, filters).await?;
+    } = monitors_planned(this, cx, filters, email).await?;
     let skipped_note: Vec<String> = skipped
         .iter()
         .map(|t| format!("skipped: `{t}` is not in the account's available alerts"))
@@ -1436,10 +1531,11 @@ async fn monitors_plan(this: &Observability, cx: &Context<'_>, args: &Value) -> 
             } }),
         );
     }
-    let mut lines: Vec<String> = planned.iter().map(plan_line).collect();
+    let mut lines: Vec<String> = email.map(email_line).into_iter().collect();
+    lines.extend(planned.iter().map(plan_line));
     lines.extend(updates.iter().map(update_line));
     lines.extend(notes);
-    let payload = monitors_payload(&planned, &updates, filters);
+    let payload = monitors_payload(&planned, &updates, filters, email);
     let kind = pigeon_core::approval::Kind::Other(MONITORS_KIND.into());
     let digest = pigeon_core::approval::payload_digest(&kind, "monitors", &payload);
     let made = crate::users::directory(
@@ -1467,8 +1563,8 @@ async fn monitors_plan(this: &Observability, cx: &Context<'_>, args: &Value) -> 
         "note": "Nothing is created or changed until the person approves this plan on the \
                  console's Approvals tab; then observability_monitors_apply {plan: <this \
                  approval>} creates and updates the policies once. Updates keep every existing \
-                 delivery. Delivery is not set on new policies: the person adds it in the \
-                 dashboard.",
+                 delivery. Delivery by email is set on every policy only when `email` is \
+                 given; otherwise the person adds it in the dashboard.",
     }))
 }
 
@@ -1488,16 +1584,21 @@ async fn monitors_apply(this: &Observability, cx: &Context<'_>, args: &Value) ->
     // The person's inputs come back from the approval record's payload, so the re-plan is the
     // one that was approved; the digest must still match.
     let filters = got["payload"]["inputs"]["filters"].clone();
+    let email = match got["payload"]["inputs"]["email"].as_str() {
+        Some(s) => Some(validate_email(s).map_err(Error::RustError)?),
+        None => None,
+    };
+    let email = email.as_deref();
     let Planned {
         creates: planned,
         updates,
         ..
-    } = monitors_planned(this, cx, &filters).await?;
+    } = monitors_planned(this, cx, &filters, email).await?;
     let kind = pigeon_core::approval::Kind::Other(MONITORS_KIND.into());
     let digest = pigeon_core::approval::payload_digest(
         &kind,
         "monitors",
-        &monitors_payload(&planned, &updates, &filters),
+        &monitors_payload(&planned, &updates, &filters, email),
     );
     let taken = crate::users::directory(
         cx.env,
@@ -1532,7 +1633,7 @@ async fn monitors_apply(this: &Observability, cx: &Context<'_>, args: &Value) ->
                 .as_str()
                 .is_some_and(|n| n.starts_with(MONITOR_PREFIX))
         }) {
-            // The directory's user record has no email, so no delivery is set here.
+            // The body carries email delivery only when the person gave an address.
             let body = policy_body(p);
             match pigeon_core::cloudflare::call_fresh(
                 token.value(),
@@ -1547,7 +1648,7 @@ async fn monitors_apply(this: &Observability, cx: &Context<'_>, args: &Value) ->
                     // Cloudflare's own text, code and message, with only the account id hidden.
                     failed = json!({
                         "name": p["name"],
-                        "why": e.to_string().replace(cx.account.id.as_str(), "{account}"),
+                        "why": scrub(&e.to_string(), cx.account.id.as_str(), email),
                     });
                     break;
                 }
@@ -1574,7 +1675,7 @@ async fn monitors_apply(this: &Observability, cx: &Context<'_>, args: &Value) ->
                     Err(e) => {
                         failed = json!({
                             "name": u["name"],
-                            "why": e.to_string().replace(cx.account.id.as_str(), "{account}"),
+                            "why": scrub(&e.to_string(), cx.account.id.as_str(), email),
                         });
                         break;
                     }
@@ -1585,12 +1686,19 @@ async fn monitors_apply(this: &Observability, cx: &Context<'_>, args: &Value) ->
     }
     .await;
     let (created, updated, failed) = token.finish(work).await?;
-    let note = if failed.is_null() {
-        "No delivery is set on new policies: the person adds email in the dashboard (Alerts > Notifications). Updates kept every existing delivery."
+    let delivery = if email.is_some() {
+        "Email delivery was set as approved."
     } else {
-        "Stopped at `failed`; the policies in `created` and `updated` are done. This approval is \
-         spent: plan again for the rest (created ones are not planned again). No delivery is set \
-         on new policies: the person adds email in the dashboard (Alerts > Notifications)."
+        "No delivery was set: the person adds email in the dashboard (Alerts > Notifications), or plans again with `email`."
+    };
+    let note = if failed.is_null() {
+        format!("{delivery} Updates kept every existing delivery.")
+    } else {
+        format!(
+            "Stopped at `failed`; the policies in `created` and `updated` are done. This \
+             approval is spent: plan again for the rest (created ones are not planned again). \
+             {delivery}"
+        )
     };
     Ok(json!({ "created": created, "updated": updated, "failed": failed, "note": note }))
 }
