@@ -1,6 +1,6 @@
 # Model providers: Anthropic's own cost, OpenAI through the gateway, models chosen per run
 
-Status: **Part 1 deployed; Part 2 landing** (2026-11-24). Planner run `vvPiX6NZeIW4`. Phase 1b (the ANTHROPIC_ADMIN_KEY binding) waits for the person to set the key.
+Status: **Part 1 deployed; Part 2 landing** (2026-11-24). Part 3 (models paid with Cloudflare credits) is [model-providers-cloudflare.md](model-providers-cloudflare.md). Planner run `vvPiX6NZeIW4`. Phase 1b (the ANTHROPIC_ADMIN_KEY binding) waits for the person to set the key.
 
 ## Goal
 
