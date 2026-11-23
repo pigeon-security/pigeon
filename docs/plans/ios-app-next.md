@@ -200,3 +200,5 @@ the app; each app branch reads new fields as optional.
 ## Log
 
 - 2026-11-24: plan written.
+- 2026-11-24: phase 3 app built (executor `claude/ai-agent-gxYEtGtfkQSo`): tab bar and switcher, Approvals, Status, Instances, Home, Settings, Users; Architecture, Access and Passkeys screens removed.
+- 2026-11-24: Cost screen built (`ios/Pigeon/Views/CostScreen.swift`): 2×2 grid, details box, two stacked bar charts from `cost_daily`.

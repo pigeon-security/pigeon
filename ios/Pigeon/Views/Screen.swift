@@ -35,7 +35,7 @@ struct ErrorBanner: View {
     var body: some View {
         Text(text)
             .textSelection(.enabled)
-            .font(.token(Tokens.typeSmall))
+            .font(AppFont.meta)
             .foregroundStyle(Tokens.warn)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(Tokens.spaceGap)
