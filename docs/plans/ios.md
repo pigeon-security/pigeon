@@ -1,8 +1,9 @@
 # iOS: code signing, APNs through the proxy, Buildkite pipelines, and the app
 
 Status: **phases 0 to 5 landed and live** (2026-11-22). TestFlight builds 38 and 39 are VALID;
-sign-in works on a device with build 39. Build 40 is held. Phases 6 (APNs) and 7 (screens) are
-not started. Open items are listed before the Log.
+sign-in works on a device with build 39. Build 40 is held. Phase 7 (screens) is built on a
+branch, not landed; phase 6 (APNs) is prepared on another branch, off. Open items are listed
+before the Log.
 
 The person's words: "Design a capability to do iOS code signing from the Apple side of things.
 Design a capability to do APNS notifications through the proxy. Extend the Buildkite capability
@@ -651,16 +652,15 @@ executors through it. Each item: state, next step, who it waits on.
    pigeon's identity in use, revoke the old distribution certificate and delete the old
    "Pigeon App Store" profile in Apple's portal (Follow-up 2). Agents do not touch either.
    Waits on: the person.
-3. **Phase 6, APNs.** Not started. Needs follow-up 5 (the APNs key in `APNS_KEY` /
-   `APNS_KEY_ID`). First step: prove HTTP/2 from a Worker to APNs (Open points). Waits on: the
-   person for the key, then an AI Gateway planner.
-4. **Phase 7, the app's screens 1:1 with the console** (§5), `approvals_list`, native passkey
-   writes. Not started; needs nothing from the person. Waits on: an AI Gateway planner.
-5. **`ios-release` checks main's head on every step** (`start`, `identity`, `upload`). A landing
-   that moves main during the 10–15 minute build fails the release (it happened twice).
-   Proposal: check main's head at `start` only, and bind later steps to the release's commit.
-   Code in `src/capabilities/src/apple.rs` (`release::caller`). Waits on: an executor, and the
-   person's yes since it narrows a check.
+3. **Phase 6, APNs: prepared, off** (2026-11-23, branch `claude/ai-agent-8CKCZze7DmKV`, Log).
+   Next: land it; call `apns_status {probe: true}` once deployed to learn whether a Worker's
+   fetch reaches APNs over HTTP/2; the person creates the APNs key and sets `APNS_KEY` /
+   `APNS_KEY_ID` (follow-up 5); then phase 6b lands the bindings and the sender. Waits on: the
+   parent's review and landing, then the person for the key.
+4. **Phase 7, the app's screens 1:1 with the console: built** (2026-11-23, this plan's branch,
+   Log). `test` and `ios-check` pass. Next: review and land, then build 40 from main's head
+   after it lands, and try a native approval on a device. Waits on: the parent.
+5. ~~`ios-release` checks main's head on every step~~: done (`bbbdb96`, Log 2026-11-22 late).
 6. **Apple's AASA CDN** still answered "Not Found" for `platform.pigeon.dev` at about 22:48 UTC,
    while a reinstall worked. If a fresh install ever fails sign-in, check
    `https://app-site-association.cdn-apple.com/a/v1/platform.pigeon.dev` first (agents' proxy
@@ -792,3 +792,26 @@ executors through it. Each item: state, next step, who it waits on.
   head (start only) and the job's own record; smoke `apple_release_admits_by_record` walks main
   moving mid-release, a job never at main's head, and a second job reaching for another's
   release. Nothing else changed: the job script, one release at a time, the 2-hour expiry.
+- 2026-11-23: phase 7 built (planner run, branch `claude/ai-agent-84a0gooufW7o`; not landed).
+  - Server: MCP tool `approvals_list` answers `{calls, drafts, plans, landings}`, what the
+    console's Approvals tab shows the person, to a person or a caller acting for one.
+    `approvals::listing` builds the first three for both the tool and the tab. The console's
+    `/console/write/{approval-approve,approval-deny,land-approve}/{begin,finish}` also take
+    `Authorization: Bearer` (an OAuth token acting for a person), with the same purpose and the
+    person's own passkey; other writes answer 403 to a bearer. The Origin check is skipped only
+    for a bearer, which is not ambient. No policy rule changed. Smoke
+    `platform_approvals_list_and_bearer_writes`.
+  - App: tabs Approvals (badge), Architecture, Access (Passkeys, People, Delegation, Secrets)
+    and Cost; native approval with `ASAuthorization` (platform and security-key providers,
+    user verification required); each screen keeps its last error at the top until that same
+    load or action succeeds. `ios-check` passes on the hosted Mac.
+  - Departures: Architecture, Delegation's apps and Cost show the tools' fields as cards, not
+    the console's drawings; Secrets shows `secrets_list` without expiry; landings have no deny
+    (the console has none); the audit line does not yet say a decision came from the app. The
+    native passkey flow has not run on a device.
+- 2026-11-23: phase 6 prepared, off (branch `claude/ai-agent-8CKCZze7DmKV`; not landed):
+  `pigeon_core::apns`, the `APNS_KEY`/`APNS_KEY_ID` slots without bindings, `apns_devices` and
+  its ops, `apns_register`/`apns_unregister`/`apns_status`/`apns_send` (sends nothing until
+  phase 6b), and `apns_status {probe: true}`. From the planner's sandbox, curl reached
+  `api.sandbox.push.apple.com` over HTTP/2 (403 `MissingProviderToken` with an `apns-id`); a
+  Worker's fetch is proven only by the probe once deployed. Its §3 note says what it built.
