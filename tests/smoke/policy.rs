@@ -653,6 +653,372 @@ fn platform_approvals_list_shows_run() {
     assert!(out["calls"][1]["run"].is_null());
 }
 
+/// Area: source / break-glass. `branch_patch`'s pure part (`pigeon_core::patch`): a unified diff
+/// of modified, added, deleted, mode-changed and no-trailing-newline files that `git apply`
+/// takes byte for byte, the files it leaves out and why, the sorted whole patch and its bound.
+#[test]
+fn platform_branch_patch() {
+    use pigeon_core::patch::{self, File, PATCH_MAX, Side, assemble, branch_ref, file_diff};
+
+    let id = |dir: &Path, text: &str| {
+        String::from_utf8(git(dir, &["hash-object", "--stdin"], Some(text)))
+            .unwrap()
+            .trim()
+            .to_string()
+    };
+    let lines = |n: usize, tweak: &dyn Fn(usize) -> Option<String>| {
+        (1..=n)
+            .filter_map(|i| {
+                tweak(i)
+                    .or(Some(format!("line {i}")))
+                    .filter(|l| !l.is_empty())
+            })
+            .map(|l| format!("{l}\n"))
+            .collect::<String>()
+    };
+
+    // The old and the new tree.
+    let a_old = lines(30, &|_| None);
+    let a_new = lines(30, &|i| match i {
+        2 => Some("line two, changed".into()),
+        15 => Some(String::new()),
+        25 => Some("line 25\nline 25b".into()),
+        _ => None,
+    });
+    let b_old = "gone\nfor good\n".to_string();
+    let c_old = "#!/bin/sh\necho hi\n".to_string();
+    let n_old = "one\ntwo".to_string();
+    let n_new = "one\ntwo\nthree".to_string();
+    let d_new = "brand\nnew\n".to_string();
+    let dir = repo("branch-patch");
+    for (name, body) in [
+        ("a.txt", &a_old),
+        ("b.txt", &b_old),
+        ("c.sh", &c_old),
+        ("n.txt", &n_old),
+    ] {
+        std::fs::write(dir.join(name), body).unwrap();
+    }
+    git(&dir, &["add", "-A"], None);
+    git(&dir, &["commit", "-q", "-m", "old"], None);
+
+    let (ia_old, ia_new) = (id(&dir, &a_old), id(&dir, &a_new));
+    let ib = id(&dir, &b_old);
+    let ic = id(&dir, &c_old);
+    let (in_old, in_new) = (id(&dir, &n_old), id(&dir, &n_new));
+    let id_d = id(&dir, &d_new);
+    let files = [
+        File {
+            path: "a.txt",
+            old: Some(Side {
+                mode: "100644",
+                id: &ia_old,
+                data: a_old.as_bytes(),
+            }),
+            new: Some(Side {
+                mode: "100644",
+                id: &ia_new,
+                data: a_new.as_bytes(),
+            }),
+        },
+        File {
+            path: "b.txt",
+            old: Some(Side {
+                mode: "100644",
+                id: &ib,
+                data: b_old.as_bytes(),
+            }),
+            new: None,
+        },
+        File {
+            path: "c.sh",
+            old: Some(Side {
+                mode: "100644",
+                id: &ic,
+                data: c_old.as_bytes(),
+            }),
+            new: Some(Side {
+                mode: "100755",
+                id: &ic,
+                data: c_old.as_bytes(),
+            }),
+        },
+        File {
+            path: "d dir/d.txt",
+            old: None,
+            new: Some(Side {
+                mode: "100644",
+                id: &id_d,
+                data: d_new.as_bytes(),
+            }),
+        },
+        File {
+            path: "n.txt",
+            old: Some(Side {
+                mode: "100644",
+                id: &in_old,
+                data: n_old.as_bytes(),
+            }),
+            new: Some(Side {
+                mode: "100644",
+                id: &in_new,
+                data: n_new.as_bytes(),
+            }),
+        },
+    ];
+    let one = |i: usize| file_diff(&files[i]).unwrap();
+    let modified = one(0);
+    assert!(modified.starts_with("diff --git a/a.txt b/a.txt\nindex "));
+    assert!(modified.contains(&format!("index {ia_old}..{ia_new} 100644\n")));
+    assert!(modified.contains("--- a/a.txt\n+++ b/a.txt\n@@ -"));
+    assert_eq!(modified.matches("\n@@ -").count(), 3, "{modified}");
+    let deleted = one(1);
+    assert!(deleted.contains("deleted file mode 100644\n"));
+    assert!(deleted.contains("--- a/b.txt\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-gone\n-for good\n"));
+    let moded = one(2);
+    assert!(moded.contains("old mode 100644\nnew mode 100755\n"));
+    assert!(!moded.contains("---"), "{moded}");
+    let added = one(3);
+    assert!(added.contains("new file mode 100644\n"));
+    assert!(added.contains("--- /dev/null\n+++ b/d dir/d.txt\t\n@@ -0,0 +1,2 @@\n+brand\n+new\n"));
+    let no_newline = one(4);
+    assert!(no_newline.contains("-two\n\\ No newline at end of file\n+two\n+three\n\\ No newline"));
+
+    // Round trip: `git apply` on the old tree gives the new tree.
+    let built = assemble(&files).unwrap();
+    assert_eq!(built.files, 5);
+    assert!(built.skipped.is_empty());
+    let (at_a, at_b, at_n) = (
+        built.patch.find("a/a.txt").unwrap(),
+        built.patch.find("a/b.txt").unwrap(),
+        built.patch.find("a/n.txt").unwrap(),
+    );
+    assert!(at_a < at_b && at_b < at_n, "paths are sorted");
+    std::fs::write(dir.join("branch.patch"), &built.patch).unwrap();
+    git(&dir, &["apply", "branch.patch"], None);
+    assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), a_new);
+    assert_eq!(std::fs::read_to_string(dir.join("n.txt")).unwrap(), n_new);
+    assert_eq!(
+        std::fs::read_to_string(dir.join("d dir/d.txt")).unwrap(),
+        d_new
+    );
+    assert!(!dir.join("b.txt").exists());
+    assert_eq!(std::fs::read_to_string(dir.join("c.sh")).unwrap(), c_old);
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(dir.join("c.sh"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o111, 0o111);
+    }
+
+    // What is left out, and why.
+    let skip = |path: &'static str,
+                old: Option<(&'static str, &'static [u8])>,
+                new: Option<(&'static str, &'static [u8])>| {
+        let side = |s: (&'static str, &'static [u8])| Side {
+            mode: s.0,
+            id: "",
+            data: s.1,
+        };
+        file_diff(&File {
+            path,
+            old: old.map(side),
+            new: new.map(side),
+        })
+        .unwrap_err()
+    };
+    let text = ("100644", &b"x\n"[..]);
+    assert!(skip("img.png", None, Some(("100644", b"a\0b"))).contains("binary"));
+    assert!(skip("latin.txt", None, Some(("100644", b"\xff\xfe\n"))).contains("binary"));
+    assert!(skip("sub", None, Some(("160000", b""))).contains("submodule"));
+    assert!(skip("link", Some(text), Some(("120000", b"a"))).contains("symlink"));
+    for path in [
+        ".env",
+        "app/.env.local",
+        ".dev.vars",
+        "w/.dev.vars.prod",
+        "k.pem",
+        "a/b.KEY",
+        "c.p12",
+        "c.pfx",
+        "id_rsa",
+        "id_rsa.pub",
+        "id_ed25519",
+    ] {
+        assert!(skip(path, None, Some(text)).contains("secret"), "{path}");
+    }
+    assert!(
+        file_diff(&File {
+            path: "src/env.rs",
+            old: None,
+            new: Some(Side {
+                mode: "100644",
+                id: "",
+                data: b"x\n"
+            })
+        })
+        .is_ok()
+    );
+    assert!(
+        skip(
+            "notes.txt",
+            None,
+            Some(("100644", b"a\n-----BEGIN RSA PRIVATE KEY-----\nabc\n"))
+        )
+        .contains("private key")
+    );
+    let big = vec![b'a'; patch::FILE_MAX + 1];
+    let big = &*Box::leak(big.into_boxed_slice());
+    assert!(skip("big.txt", None, Some(("100644", big))).contains("over"));
+    let mixed = assemble(&[
+        File {
+            path: "z.txt",
+            old: None,
+            new: Some(Side {
+                mode: "100644",
+                id: "",
+                data: b"z\n",
+            }),
+        },
+        File {
+            path: "a.pem",
+            old: None,
+            new: Some(Side {
+                mode: "100644",
+                id: "",
+                data: b"x\n",
+            }),
+        },
+        File {
+            path: "m.bin",
+            old: None,
+            new: Some(Side {
+                mode: "100644",
+                id: "",
+                data: b"\0",
+            }),
+        },
+    ])
+    .unwrap();
+    assert_eq!(mixed.files, 1);
+    let paths: Vec<&str> = mixed.skipped.iter().map(|s| s.path.as_str()).collect();
+    assert_eq!(paths, ["a.pem", "m.bin"]);
+
+    // The whole patch has a bound, and is never cut short.
+    let chunk: String = (0..25_000).map(|i| format!("l{i:06}\n")).collect();
+    assert!(chunk.len() < patch::FILE_MAX);
+    let names: Vec<String> = (0..5).map(|i| format!("big{i}.txt")).collect();
+    let many: Vec<File> = names
+        .iter()
+        .map(|n| File {
+            path: n,
+            old: None,
+            new: Some(Side {
+                mode: "100644",
+                id: "",
+                data: chunk.as_bytes(),
+            }),
+        })
+        .collect();
+    let why = assemble(&many).unwrap_err();
+    assert!(
+        why.contains(&PATCH_MAX.to_string()) && why.contains("bytes"),
+        "{why}"
+    );
+    assert!(assemble(&many[..3]).is_ok());
+
+    // Branch names.
+    assert_eq!(branch_ref("claude/x").unwrap(), "refs/heads/claude/x");
+    assert_eq!(
+        branch_ref("refs/heads/claude/x").unwrap(),
+        "refs/heads/claude/x"
+    );
+    for bad in ["", "refs/heads/", "-x", "a..b", "a b", "a\tb", "a\nb"] {
+        assert!(branch_ref(bad).is_err(), "{bad:?}");
+    }
+}
+
+/// Area: approvals / deploys. The `deploy` preset of `deploy_token` is the deploy proxy's
+/// permission table plus Account Settings Read, holds what a direct core deploy needed live, and
+/// shows on the approval card.
+#[test]
+fn platform_deploy_token_preset() {
+    use pigeon_capabilities::approvals::listing;
+    use pigeon_capabilities::deploys::{PERMISSIONS, grants, preset};
+    use pigeon_core::approval::{self, Kind};
+
+    let deploy = preset("deploy").unwrap();
+    let mut table: Vec<&str> = pigeon_proxies::cf_proxy::ALLOWED
+        .iter()
+        .flat_map(|a| a.permissions.iter().copied())
+        .chain(["Account Settings Read"])
+        .collect();
+    table.sort_unstable();
+    table.dedup();
+    let mut sorted = deploy.clone();
+    sorted.sort_unstable();
+    assert_eq!(sorted, table, "the preset is the proxy's table");
+    let mut scoped: Vec<&str> = pigeon_capabilities::split::purpose_permissions("cf_deploy")
+        .unwrap()
+        .iter()
+        .copied()
+        .chain(["Account Settings Read"])
+        .collect();
+    scoped.sort_unstable();
+    assert_eq!(
+        sorted, scoped,
+        "the preset is what the proxy Worker's cf_deploy holds"
+    );
+    // What a direct core deploy held when it worked (2026-11-23).
+    for p in PERMISSIONS
+        .iter()
+        .chain(&["Workers Containers Write", "Queues Read"])
+    {
+        assert!(deploy.contains(p), "{p}");
+    }
+    assert!(preset("core-deploy").is_none());
+
+    let (p, ttl) = grants(&json!({})).unwrap();
+    assert_eq!((p, ttl), (PERMISSIONS.map(String::from).to_vec(), 1_800));
+    let (p, ttl) = grants(&json!({ "preset": "deploy", "ttl": 9_999 })).unwrap();
+    assert_eq!(p.len(), deploy.len());
+    assert_eq!(ttl, 3_600);
+    let (p, _) = grants(&json!({ "permissions": ["Workers Scripts Read"] })).unwrap();
+    assert_eq!(p, vec!["Workers Scripts Read".to_string()]);
+    let both = grants(&json!({ "preset": "deploy", "permissions": ["Workers Scripts Read"] }));
+    assert!(both.unwrap_err().contains("not both"));
+    let unknown = grants(&json!({ "preset": "everything" })).unwrap_err();
+    assert!(unknown.contains("no preset `everything`") && unknown.contains("deploy"));
+
+    let card = approval::new(
+        "g1".into(),
+        Kind::ToolCall,
+        "deploy_token".into(),
+        "0123456789abcdef0123".into(),
+        json!({
+            "args": { "preset": "deploy", "ttl": 900 },
+            "caller": "svc",
+            "grants": { "permissions": deploy, "ttl_secs": 900 },
+        }),
+        Value::Null,
+        "svc".into(),
+        None,
+        1_000,
+    );
+    let out = listing(&[card]);
+    assert_eq!(out["calls"][0]["grants"]["ttl_secs"], 900);
+    assert_eq!(
+        out["calls"][0]["grants"]["permissions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        deploy.len()
+    );
+    assert_eq!(out["calls"][0]["args"]["preset"], "deploy");
+}
+
 #[test]
 fn platform_approvals_list_shows_other_kinds() {
     use pigeon_capabilities::approvals::listing;

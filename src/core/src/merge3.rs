@@ -604,3 +604,23 @@ fn intern<'a>(
     }
     Ok(out)
 }
+
+/// Maps each line of `base` to the index of its partner in `other` in a minimal edit script,
+/// if it has one; `None` when the pair is too large to diff. Used by the patch builder.
+pub(crate) fn matching(base: &[&str], other: &[&str]) -> Option<Vec<Option<usize>>> {
+    let mut ids = HashMap::new();
+    let mut blank = Vec::new();
+    let a = intern(base, &mut ids, &mut blank).ok()?;
+    let b = intern(other, &mut ids, &mut blank).ok()?;
+    let (deleted, added) = diff(&a, &b).ok()?;
+    let mut kept_other = added
+        .iter()
+        .enumerate()
+        .filter(|(_, inserted)| !**inserted)
+        .map(|(j, _)| j);
+    let mut map = Vec::with_capacity(base.len());
+    for gone in &deleted {
+        map.push(if *gone { None } else { kept_other.next() });
+    }
+    Some(map)
+}

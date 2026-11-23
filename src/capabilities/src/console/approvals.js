@@ -76,6 +76,12 @@
       ["Call digest", c.digest],
     ];
     if (typeof c.run === "string" && c.run) rows.splice(1, 0, ["AI agent run", c.run]);
+    // A deploy token's card names what the token would hold, whatever the arguments said.
+    const g = c.grants;
+    if (g && Array.isArray(g.permissions)) {
+      rows.splice(rows.length - 1, 0, ["Token permissions", g.permissions.join(", ")],
+        ["Token lifetime", `${g.ttl_secs} s`]);
+    }
     return el("article", { class: "card", style: "gap:10px" },
       el("div", { class: "card-h" }, el("h3", { text: `Run ${c.tool}` }),
         el("span", { class: "pill warn", text: until(c.expires_ms) })),

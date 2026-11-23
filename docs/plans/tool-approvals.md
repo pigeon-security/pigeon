@@ -7,7 +7,7 @@ tools are the ones listed as candidates to switch off at the MCP portal:
 
 | Tool | Capability | What it does | Arguments |
 | --- | --- | --- | --- |
-| `deploy_token` | `deploys` | Mints a Cloudflare API token (break-glass deploy) | `ttl`, `permissions` |
+| `deploy_token` | `deploys` | Mints a Cloudflare API token (break-glass deploy) | `ttl`, `preset` or `permissions` |
 | `source_token` | `source` | Mints a git token for the source repository | `access`, `ttl` |
 | `setup_platform` | `public_host` | Sets up `platform.pigeon.dev`: DNS, route, Access state | none |
 | `users_remove` | `users` | Removes a user and all that is theirs | `id` |
@@ -216,12 +216,38 @@ approval.
 The allowed path does no I/O for the check (the policy is parsed once per isolate), so the
 gate adds no new way for `land` and the other tools to fail.
 
+The steps that worked on 23 November are in "Break-glass: deploying directly" in
+`docs/proxies.md`. In short:
+
+1. **Environment.** A personal environment, `pigeon break-glass`. It allows only
+   `api.cloudflare.com`, the package registries and the Pigeon MCP host. The Default environment
+   no longer allows `api.cloudflare.com`.
+2. **Session.** The person starts it, with the Pigeon connector on. A session started by another
+   session does not always get the connector.
+3. **Code.** The checkout is main, from the mirror. A branch that has not landed comes from
+   `branch_patch` as a patch against its merge base. Apply it with `git apply --3way`. No
+   Artifacts access is needed.
+4. **Authorise in the session.** `deploy_token` is not in `.claude/settings.json`, so Claude Code
+   asks in the session, and may refuse on its own until the person says in that session that
+   they authorise the call. This is separate from the passkey, and both are needed.
+5. **Preset.** Call `deploy_token {"preset": "deploy", "ttl": 1800}`, have the person approve
+   with the passkey, and call again with the approval id.
+   - The preset is every permission the deploy proxy's allowlist names (`cf_proxy::ALLOWED`),
+     plus Account Settings Read.
+   - The default set (Workers Scripts Write, Account Settings Read, Secrets Store Write) fails a
+     core deploy at "Container image preparation is not enabled" (403).
+   - The card shows the token's permissions and lifetime as rows, resolved from the preset. A call
+     naming an unknown preset, or a preset and permissions together, is refused before any
+     approval is made.
+6. **Deploy**, with the pinned wrangler, straight to `api.cloudflare.com`.
+7. **Revoke** with `revoke_api_token`, whether or not the deploy worked, then land the branch.
+
 **If the platform itself is down** (a bad deploy, the Worker or its Directory failing), there is
 no `deploy_token` to approve, with or without this plan. The fallback is the person's own
 wrangler, with their own Cloudflare login and nothing of pigeon's: on their machine,
 `npx wrangler login`, then from `src/platform` of a good commit `npx wrangler deploy` (or
-`npx wrangler rollback` to the last good version). Phase 3 adds this to "Break-glass: deploying
-directly" in `docs/proxies.md`, which today names only `deploy_token`.
+`npx wrangler rollback` to the last good version). "When the platform itself is down" in
+`docs/proxies.md` has the commands.
 
 ### 6. The MCP portal
 

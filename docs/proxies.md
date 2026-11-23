@@ -215,11 +215,33 @@ A change to the allowlist only takes effect once it is deployed, and the deploye
 
 ### Break-glass: deploying directly
 
-The pigeon environment no longer allows `api.cloudflare.com` or the Artifacts host, so the only deploys from it are through `/cf/`. When a change cannot deploy that way, such as a change to the deploy allowlist itself that the deployed proxy refuses before the upload, deploy once directly, from a session on the **Default** environment (which allows `api.cloudflare.com`) or from the person's own machine, with a `deploy_token`. Only a person should start this.
+The pigeon environment allows neither `api.cloudflare.com` nor the Artifacts host, so from it the only deploys go through `/cf/`. Some changes cannot deploy that way. An example is a change to the deploy allowlist itself that the deployed proxy refuses before the upload. Deploy such a change once directly, with a `deploy_token`, from a break-glass session or from the person's own machine. Only a person starts this. These steps worked on 23 November 2026.
 
-1. Check out the commit to deploy. It should be what main will be: a landed main from `https://github.com/pigeon-security/pigeon` (the mirror copies main), or the `claude/` branch that is landing next.
-2. Call the Pigeon MCP tool `deploy_token` with `{"ttl": 1800}`. Each call needs the person's passkey (rule `risky-tools-need-passkey`, `docs/plans/tool-approvals.md`): the first call answers an approval id and mints nothing. The person approves that call on the console's Approvals tab; then call `deploy_token` again with the same arguments and `"approval": "<id>"`. Note the token's `id`. Approving needs only the platform Worker, its Directory and the person's passkey, none of the land flow, CI or the proxies.
-3. From `src/platform`, with the token read from the prompt rather than written in the command:
+1. **The environment.** Use a personal Claude Code environment kept for this, named `pigeon break-glass`. Its network allows only:
+   - `api.cloudflare.com`
+   - the package registries that `npm ci` and the build need
+   - the Pigeon MCP host (`mcp.pigeon.dev`)
+
+   It holds no secrets. The **Default** environment no longer allows `api.cloudflare.com`, so it cannot deploy.
+2. **The session.** The person starts the session themselves, on that environment, with the Pigeon connector on. A session started by another session does not always get the connector. Check that `land_status` answers before going on.
+3. **The code.** The session's checkout is main, from the GitHub mirror (`https://github.com/pigeon-security/pigeon`). To deploy a branch that has not landed, call `branch_patch` with `{"branch": "<branch>"}`. It answers the branch as a patch against its merge base with main, as `patch`, along with `base`. It is read-only and needs neither Artifacts nor the git proxy. Write `patch` to a file, then:
+
+   ```
+   git cat-file -e <base>        # the checkout must have the base; if not, wait for the mirror
+   git apply --3way branch.patch
+   ```
+
+   Check the answer's `skipped` list. These are not in the patch: binary files, submodules, symlinks, secret-shaped files (such as `.env` or a private key) and files over 256 KiB. A patch over 1 MiB is refused, never cut short.
+4. **Authorise `deploy_token` in the session.** `deploy_token` is not in `.claude/settings.json`, so Claude Code asks in the session before calling it, and may refuse on its own. The person says in the session that they authorise this `deploy_token` call, and allows the prompt.
+5. **The token.** Call `deploy_token` with `{"preset": "deploy", "ttl": 1800}`.
+   - Each call needs the person's passkey (rule `risky-tools-need-passkey`, `docs/plans/tool-approvals.md`). The first call answers an approval id and mints nothing.
+   - The person checks the card on the console's Approvals tab. Its "Token permissions" row must list the preset's permissions, and "Token lifetime" must say 1800 s. Then they approve with the passkey.
+   - Call `deploy_token` again with the same arguments and `"approval": "<id>"`. Note the token's `id`.
+
+   Approving needs only the platform Worker, its Directory and the person's passkey: none of the land flow, CI or the proxies.
+
+   The `deploy` preset holds every permission the deploy proxy's allowlist names (the table above), plus Account Settings Read. It is derived from `ALLOWED` in `src/proxies/src/cf_proxy.rs`, so the two cannot drift. Without the preset, `deploy_token` mints Workers Scripts Write, Account Settings Read and Secrets Store Write. That is not enough for core: its deploy stops at "Container image preparation is not enabled" (403), for lack of Workers Containers Write, and it needs Queues Read too.
+6. **The deploy.** For core, run this from `src/platform`, reading the token from the prompt rather than writing it in the command. For another Worker, use its `dir` in `ci/workers.toml` and see its script in `ci/deploy/`.
 
    ```
    cd src/platform
@@ -231,10 +253,10 @@ The pigeon environment no longer allows `api.cloudflare.com` or the Artifacts ho
    ```
 
    This is the pinned wrangler, talking to `api.cloudflare.com` itself: no proxy and no allowlist.
-4. Call `revoke_api_token` with the `id` from step 2, whether or not the deploy worked.
-5. If the deployed commit is not on main yet, land its branch the usual way (`land`), so main and the deployed Worker agree. Once the fixed allowlist is live, that landing's deploy goes through `/cf/` again.
+7. **Revoke.** Call `revoke_api_token` with the `id` from step 5, whether or not the deploy worked. It needs no passkey. Then end the session.
+8. **Land.** If the deployed commit is not on main yet, land its branch the usual way (`land`), so main and the deployed Worker agree. Once the fixed allowlist is live, that landing's deploy goes through `/cf/` again.
 
-In a session, the token is in the transcript from step 2 on: keep the lifetime short, and revoke it at once. Never save a `deploy_token` anywhere.
+From step 5 on, the token is in the session's transcript. Keep its lifetime short and revoke it at once. Never save a `deploy_token` anywhere. On the person's own machine, steps 1, 2 and 4 do not apply, and a plain `git checkout` of the branch replaces step 3 where the machine can fetch it.
 
 ### When the platform itself is down
 

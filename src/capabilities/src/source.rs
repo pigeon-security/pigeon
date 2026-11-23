@@ -2,14 +2,52 @@
 //! remote when created), the queue its push events go to with the hosting Worker as consumer,
 //! and short-lived git tokens on demand.
 
+use std::collections::BTreeSet;
+
 use pigeon_core::artifacts::{self, Access};
 use pigeon_core::mcp::Tool;
-use pigeon_core::queues;
+use pigeon_core::pack::{self, Objects};
+use pigeon_core::{git, patch, queues, rebase};
 use serde::Serialize;
 use serde_json::{Value, json};
 use worker::{Error, Result};
 
+use crate::land::merge::{self, Session};
 use crate::{Call, Capability, Context, Footprint, arg, to_value, unknown};
+
+/// `error` with the remote's URL taken out: the answer must not show where the repository is.
+fn hide(error: Error, url: &str) -> Error {
+    let text = error.to_string();
+    if url.is_empty() {
+        return Error::RustError(text);
+    }
+    Error::RustError(text.replace(url, "<remote>"))
+}
+
+/// One side of a changed file for the patch; its bytes stay empty for a file the patch will
+/// skip by path or mode, whose blob was not fetched.
+fn side<'a>(
+    objects: &'a Objects,
+    change: Option<&'a (String, String)>,
+    skip: bool,
+) -> Result<Option<patch::Side<'a>>> {
+    let Some((mode, id)) = change else {
+        return Ok(None);
+    };
+    let data: &[u8] = if skip {
+        &[]
+    } else {
+        match objects.by_id.get(id) {
+            Some((3, data)) => data,
+            _ => {
+                return Err(Error::RustError(format!(
+                    "blob {id} was not in what the remote sent"
+                )));
+            }
+        }
+    };
+    Ok(Some(patch::Side { mode, id, data }))
+}
 
 /// The source repository and where its push events go.
 pub struct Source {
@@ -78,6 +116,104 @@ impl Source {
         })
     }
 
+    /// `branch` as a patch against its merge base with the default branch. The git session is
+    /// always closed, and the answer holds neither the token nor the remote's URL.
+    async fn branch_patch(&self, cx: &Context<'_>, args: &Value) -> Result<Value> {
+        let branch = patch::branch_ref(arg(args, "branch")?).map_err(Error::RustError)?;
+        let session = Session::open(cx.account, &self.namespace, &self.repo, Access::Read).await?;
+        let out = self
+            .patch_of(&session, &branch)
+            .await
+            .map_err(|e| hide(e, &session.remote.url));
+        session.close().await;
+        out
+    }
+
+    /// The work of [`Source::branch_patch`] inside an open session.
+    async fn patch_of(&self, session: &Session<'_>, branch: &str) -> Result<Value> {
+        let remote = &session.remote;
+        let short = branch.strip_prefix("refs/heads/").unwrap_or(branch);
+        let refs = git::refs(remote, "git-upload-pack").await?;
+        let Some(tip) = refs.refs.get(branch).cloned() else {
+            return Err(Error::RustError(format!("unknown branch `{short}`")));
+        };
+        let main_ref = format!("refs/heads/{}", self.default_branch);
+        let seen = match merge::see(session, &main_ref, &tip).await? {
+            Ok(seen) => seen,
+            Err(why) => return Err(Error::RustError(why)),
+        };
+        let merge::Seen {
+            main,
+            base,
+            changed,
+            mut objects,
+            ..
+        } = seen;
+        let base_side = rebase::changes(&objects, &tip, &base).map_err(Error::RustError)?;
+        let old_of = |path: &str| base_side.get(path).and_then(|c| c.as_ref());
+        let skips = |path: &str, new: Option<&(String, String)>| {
+            let old = old_of(path);
+            patch::precheck(
+                path,
+                old.map(|(m, _)| m.as_str()),
+                new.map(|(m, _)| m.as_str()),
+            )
+            .is_some()
+        };
+        // The blobs the patch needs and `see` did not bring.
+        let mut need = BTreeSet::new();
+        for (path, change) in &changed {
+            if skips(path, change.as_ref()) {
+                continue;
+            }
+            for (_, id) in [old_of(path), change.as_ref()].into_iter().flatten() {
+                if !objects.by_id.contains_key(id) {
+                    need.insert(id.clone());
+                }
+            }
+        }
+        if !need.is_empty() {
+            let by_id = refs
+                .caps
+                .iter()
+                .any(|c| c == "allow-reachable-sha1-in-want" || c == "allow-any-sha1-in-want");
+            // One request: the blobs by id when the remote allows it, else the tip and the base
+            // one commit deep.
+            let (wants, depth) = if by_id {
+                (need.into_iter().collect::<Vec<_>>(), None)
+            } else {
+                let mut wants = vec![tip.clone()];
+                if base != tip {
+                    wants.push(base.clone());
+                }
+                (wants, Some(1))
+            };
+            let got = git::fetch_with(remote, &refs.caps, &wants, &[], None, depth).await?;
+            let more = pack::objects(&got.pack).map_err(Error::RustError)?;
+            objects.by_id.extend(more.by_id);
+        }
+        let mut files = Vec::new();
+        for (path, change) in &changed {
+            let skip = skips(path, change.as_ref());
+            files.push(patch::File {
+                path,
+                old: side(&objects, old_of(path), skip)?,
+                new: side(&objects, change.as_ref(), skip)?,
+            });
+        }
+        let built = patch::assemble(&files).map_err(Error::RustError)?;
+        Ok(json!({
+            "branch": short,
+            "tip": tip,
+            "base": base,
+            "main": main,
+            "files": built.files,
+            "bytes": built.patch.len(),
+            "patch": built.patch,
+            "skipped": built.skipped,
+        }))
+    }
+
     async fn token(&self, cx: &Context<'_>, args: &Value) -> Result<Handed> {
         let access = match args["access"].as_str().unwrap_or("read") {
             "read" => Access::Read,
@@ -143,6 +279,24 @@ impl Capability for Source {
                     "required": ["id"]
                 }),
             },
+            Tool {
+                name: "branch_patch",
+                description: "Read-only. Answer a branch of the source repository as a unified \
+                              patch against its merge base with main, for break-glass sessions \
+                              that cannot reach Artifacts. Write `patch` to a file and run `git \
+                              apply --3way` on a checkout of main from the GitHub mirror; the \
+                              checkout needs the commit `base`. Answers branch, tip, base, main, \
+                              files, bytes, patch and `skipped`: binary files, submodules, \
+                              symlinks, secret-shaped files and files too large are not in the \
+                              patch and are listed there. A patch over 1 MiB is an error.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "branch": { "type": "string", "description": "The branch, with or without `refs/heads/`." }
+                    },
+                    "required": ["branch"]
+                }),
+            },
             Tool::bare(
                 "setup_source",
                 "Make sure the source repository, its push-event queue and subscription exist.",
@@ -162,6 +316,7 @@ impl Capability for Source {
                     artifacts::revoke(cx.account, &self.namespace, &self.repo, id).await?;
                     json!({ "revoked": id })
                 }
+                "branch_patch" => self.branch_patch(cx, args).await?,
                 "setup_source" => to_value(self.setup(cx).await?),
                 other => return Err(unknown(other)),
             })

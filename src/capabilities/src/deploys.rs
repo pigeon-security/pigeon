@@ -18,6 +18,61 @@ pub const PERMISSIONS: [&str; 3] = [
     "Secrets Store Write",
 ];
 
+/// The presets `deploy_token` takes as `{"preset": name}`. `deploy` holds every permission the
+/// deploy proxy's allowlist names ([`pigeon_proxies::cf_proxy::ALLOWED`]), so a direct
+/// `wrangler deploy` of any platform Worker, containers and queues included, needs nothing more;
+/// plus Account Settings Read from [`PERMISSIONS`], which a direct deploy held when it worked.
+pub const PRESETS: [&str; 1] = ["deploy"];
+
+/// The longest lifetime a deploy token may have, in seconds.
+const TTL_MAX: u64 = 3_600;
+
+/// The permissions of preset `name`, in the allowlist's order without repeats, then Account
+/// Settings Read; `None` for an unknown preset. Derived from the deploy proxy's table, so the
+/// two cannot drift.
+pub fn preset(name: &str) -> Option<Vec<&'static str>> {
+    if name != PRESETS[0] {
+        return None;
+    }
+    let mut out: Vec<&'static str> = Vec::new();
+    let table = pigeon_proxies::cf_proxy::ALLOWED
+        .iter()
+        .flat_map(|entry| entry.permissions.iter());
+    for p in table.chain(std::iter::once(&"Account Settings Read")) {
+        if !out.contains(p) {
+            out.push(p);
+        }
+    }
+    Some(out)
+}
+
+/// What a `deploy_token` call would mint: its permissions and lifetime in seconds. Refuses a
+/// call naming both a preset and permissions, or an unknown preset.
+pub fn grants(args: &Value) -> std::result::Result<(Vec<String>, u64), String> {
+    let ttl = args["ttl"].as_u64().unwrap_or(1_800).min(TTL_MAX);
+    let permissions = match (args["preset"].as_str(), args["permissions"].as_array()) {
+        (Some(_), Some(_)) => {
+            return Err("deploy_token takes a preset or permissions, not both".into());
+        }
+        (Some(name), None) => preset(name)
+            .ok_or_else(|| {
+                format!(
+                    "deploy_token has no preset `{name}`; presets: {}",
+                    PRESETS.join(", ")
+                )
+            })?
+            .into_iter()
+            .map(String::from)
+            .collect(),
+        (None, Some(a)) => a
+            .iter()
+            .filter_map(|p| p.as_str().map(String::from))
+            .collect(),
+        (None, None) => PERMISSIONS.map(String::from).to_vec(),
+    };
+    Ok((permissions, ttl))
+}
+
 /// Deploy tokens.
 pub struct Deploys;
 
@@ -31,19 +86,12 @@ struct ApiToken {
 }
 
 async fn mint(cx: &Context<'_>, args: &Value) -> Result<ApiToken> {
-    let permissions: Vec<String> = args["permissions"].as_array().map_or_else(
-        || PERMISSIONS.map(String::from).to_vec(),
-        |a| {
-            a.iter()
-                .filter_map(|p| p.as_str().map(String::from))
-                .collect()
-        },
-    );
+    let (permissions, ttl_secs) = grants(args).map_err(worker::Error::RustError)?;
     let names: Vec<&str> = permissions.iter().map(String::as_str).collect();
     let request = MintRequest {
         purpose: "deploy".into(),
         policies: vec![Policy::new(Scope::Account, &names)],
-        ttl_secs: args["ttl"].as_u64().unwrap_or(1_800).min(3_600),
+        ttl_secs,
     };
     let minted = tokens::mint(&cx.account.parent, &cx.account.id, &request).await?;
     Ok(ApiToken {
@@ -71,13 +119,21 @@ impl Capability for Deploys {
             Tool {
                 name: "deploy_token",
                 description: "Mint a short-lived Cloudflare API token for `wrangler deploy` of \
-                              this account's Workers: by default Workers Scripts Write, Account \
-                              Settings Read and Secrets Store Write. Pass it as \
-                              CLOUDFLARE_API_TOKEN, then revoke it with revoke_api_token.",
+                              this account's Workers. For a break-glass deploy pass \
+                              {\"preset\": \"deploy\"}: every permission the deploy proxy's \
+                              allowlist names, containers and queues included. Without a preset \
+                              or permissions: Workers Scripts Write, Account Settings Read and \
+                              Secrets Store Write. Pass it as CLOUDFLARE_API_TOKEN, then revoke \
+                              it with revoke_api_token.",
                 input_schema: json!({
                     "type": "object",
                     "properties": {
                         "ttl": { "type": "integer", "description": "Seconds; 1800 by default, 3600 at most." },
+                        "preset": {
+                            "type": "string",
+                            "enum": PRESETS,
+                            "description": "A named set of permissions, instead of `permissions`: `deploy` is what the deploy proxy's allowlist needs."
+                        },
                         "permissions": {
                             "type": "array",
                             "items": { "type": "string" },

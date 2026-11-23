@@ -65,10 +65,8 @@ const API: &str = "https://api.cloudflare.com/client/v4";
 /// How long a token minted for one call lives: the ceiling if its revoke is lost.
 const TOKEN_TTL: u64 = 300;
 
-/// How large a request body may be: a Worker upload (uncompressed multipart,
-/// the Worker's wasm included). 48 MiB is still well under the proxy Worker's
-/// 128 MB memory, since the body is buffered once.
-pub const BODY_MAX: usize = 48 * 1024 * 1024;
+/// How large a request body may be: a Worker upload, with room to spare.
+pub const BODY_MAX: usize = 16 * 1024 * 1024;
 
 /// How long to wait before each retry of a call refused with 401: a token minted moments
 /// before may not have reached the API yet.

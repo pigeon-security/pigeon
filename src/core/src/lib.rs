@@ -36,6 +36,7 @@ pub mod notify;
 pub mod oauth;
 pub mod oidc;
 pub mod pack;
+pub mod patch;
 pub mod policy;
 pub mod policy_file;
 pub mod proxy_caller;

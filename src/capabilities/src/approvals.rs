@@ -183,12 +183,22 @@ async fn ask(
     digest: String,
     a: Answer,
 ) -> Result<Gate> {
+    // A deploy token's card says what it would hold; a call that could never mint is refused
+    // before the person is asked.
+    let grants = if tool == "deploy_token" {
+        let (permissions, ttl_secs) = crate::deploys::grants(args)
+            .map_err(|why| Error::RustError(format!("`{tool}`: {why}")))?;
+        json!({ "permissions": permissions, "ttl_secs": ttl_secs })
+    } else {
+        Value::Null
+    };
     let mut summary = json!({
         "tool": tool,
         "args": args,
         "caller": caller.user.name,
         "acting_for": caller.acting_for.as_ref().map(|p| p.name.clone()),
         "rule": a.rule,
+        "grants": grants,
     });
     if let (Some(run), Some(o)) = (
         crate::policy::run_label(caller.run.as_deref()),
@@ -571,7 +581,7 @@ pub fn listing(open: &[Record]) -> Value {
             json!({
                 "id": r.id, "tool": r.subject, "args": r.summary["args"],
                 "caller": r.summary["caller"], "acting_for": r.summary["acting_for"],
-                "run": r.summary["run"],
+                "run": r.summary["run"], "grants": r.summary["grants"],
                 "created_ms": r.created_ms, "expires_ms": r.expires_ms,
                 "digest": short(r),
                 "plain": plain_call(&r.subject, &r.summary["args"], &r.summary["acting_for"]),
