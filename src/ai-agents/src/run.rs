@@ -116,6 +116,18 @@ pub enum Wait {
         /// When it was asked (ms).
         #[serde(default)]
         since: i64,
+        /// The question as one short sentence, when the run gave one.
+        #[serde(default)]
+        headline: Option<String>,
+        /// Labelled supporting facts: objects with `label`, `value` and maybe `mono`.
+        #[serde(default)]
+        facts: Vec<serde_json::Value>,
+        /// Index into `options` of the option taken if no answer comes in time.
+        #[serde(default)]
+        conventional: Option<usize>,
+        /// When the run goes on without an answer (ms): `since` plus the patience.
+        #[serde(default)]
+        answer_by: i64,
     },
     /// Its executors: a planner's `wait_executors`, until one ends (ms since it began).
     Executors {
@@ -245,13 +257,21 @@ pub const EXECUTORS_EVERY_MS: i64 = 30_000;
 /// minutes, the person's choice. What it then assumes goes in its report and the inbox.
 pub const ANSWER_PATIENCE_MS: i64 = 5 * 60_000;
 
-/// What the model reads when its question went unanswered for [`ANSWER_PATIENCE_MS`].
-pub fn unanswered(question: &str) -> String {
-    format!(
-        "No answer came within 5 minutes to: {question}\nChoose the conventional option and go \
-         on. Say in one line what you chose, and list it in your report under \"Assumed:\", so \
-         the person can see it and correct it."
-    )
+/// What the model reads when its question went unanswered for [`ANSWER_PATIENCE_MS`]. When the
+/// run named a `conventional` option, the text names it and tells the model to take it.
+pub fn unanswered(question: &str, conventional: Option<&str>) -> String {
+    match conventional {
+        Some(x) => format!(
+            "No answer came within 5 minutes to: {question}\nThe conventional option is: {x}. \
+             Take it and go on. Say in one line what you chose, and list it in your report \
+             under \"Assumed:\", so the person can see it and correct it."
+        ),
+        None => format!(
+            "No answer came within 5 minutes to: {question}\nChoose the conventional option and go \
+             on. Say in one line what you chose, and list it in your report under \"Assumed:\", so \
+             the person can see it and correct it."
+        ),
+    }
 }
 /// How long a run waits on a failing provider before it fails, in ms.
 pub const PROVIDER_PATIENCE_MS: i64 = 60 * 60_000;

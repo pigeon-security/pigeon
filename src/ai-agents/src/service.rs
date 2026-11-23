@@ -130,6 +130,7 @@ impl Agents {
             return Err("a run needs a caller to act as".into());
         }
         let (role, brief, base, budget) = start_args(args)?;
+        let name = crate::tools::check_run_name(args.get("name"))?;
         let (model, child_models) = crate::models::start_models(role, args)?;
         let id = run_id().map_err(|e| e.to_string())?;
         // The run acts as its role's service user, linked to the person; as its starter until
@@ -166,6 +167,7 @@ impl Agents {
                 "runtime": "gateway",
                 "caller": as_caller,
                 "brief": brief,
+                "name": name,
                 "base": base,
                 "branch": branch(&id),
                 "budget": budget,
@@ -440,6 +442,7 @@ impl Service for Agents {
                                 "model": { "type": "string", "description": "This run's model: `provider/model` (openai/gpt-6.2-sol), a `claude-…` name, or `anthropic` or `openai`. Else the stored default for its role." },
                                 "models": { "type": "object", "description": "Planners only: what its executors use unless a spawn says otherwise.", "properties": { "executor": { "type": "string" }, "mechanical": { "type": "string" } } },
                                 "brief": { "type": "string", "description": "What to build, standing alone: the run sees nothing else." },
+                                "name": { "type": "string", "minLength": 1, "maxLength": 60, "description": "A short name for the run, one line, 1 to 60 characters. Else it is made from the brief." },
                                 "base": { "type": "string", "description": "The branch or commit to start from; main by default." },
                                 "budget": { "type": "object", "description": "Any of turns, cost_usd, wall_min, sandbox_min; each at most its hard cap." }
                             },

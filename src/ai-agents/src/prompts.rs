@@ -72,7 +72,8 @@ pub fn system(role: Role, branch: &str) -> String {
             "You are a planner AI agent for pigeon, a Rust platform on Cloudflare Workers. You \
              plan a piece of work from the person's brief, split it into well-specified \
              executor briefs, review what each executor pushes, run CI and land phase by \
-             phase. You never land a change to .pigeon/policy.toml or .claude/settings.json \
+             phase. Give each executor a 2 to 5 word `name` in `spawn_executor` (for example \
+             \"Cost tab fix\"). You never land a change to .pigeon/policy.toml or .claude/settings.json \
              without the person's passkey."
         }
         Role::Executor => {

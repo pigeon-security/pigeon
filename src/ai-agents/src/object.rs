@@ -45,7 +45,7 @@ pub const MAX_QUEUED: u32 = 20;
 
 /// Each object's schema, one statement per migration, applied in order and never edited. The
 /// index uses `runs` and `flags`; a run object uses `run`, `messages` and `calls`.
-const MIGRATIONS: [&str; 17] = [
+const MIGRATIONS: [&str; 18] = [
     "CREATE TABLE runs (id TEXT PRIMARY KEY, role TEXT NOT NULL, runtime TEXT NOT NULL, state TEXT NOT NULL, parent_run TEXT, session_id TEXT, caller TEXT NOT NULL, by_id TEXT, for_id TEXT, brief TEXT NOT NULL, base TEXT, branch TEXT, budget TEXT NOT NULL, spent TEXT NOT NULL, step TEXT, waiting TEXT, report TEXT, created_at INTEGER NOT NULL, started_at INTEGER, ended_at INTEGER, stop_asked INTEGER NOT NULL DEFAULT 0)",
     "CREATE TABLE flags (k TEXT PRIMARY KEY, v TEXT NOT NULL)",
     "CREATE TABLE run (id TEXT PRIMARY KEY, role TEXT NOT NULL, caller TEXT NOT NULL, brief TEXT NOT NULL, base TEXT NOT NULL, branch TEXT NOT NULL, budget TEXT NOT NULL, spent TEXT NOT NULL, state TEXT NOT NULL, started_at INTEGER NOT NULL, model_index INTEGER NOT NULL DEFAULT 0, fallback_left INTEGER NOT NULL DEFAULT 0, failures INTEGER NOT NULL DEFAULT 0, job_id TEXT, job_kind TEXT, job_state TEXT, job_at INTEGER, job_error TEXT, last_usage TEXT, stop_reason TEXT, reported TEXT, report TEXT, nudges INTEGER NOT NULL DEFAULT 0, waiting TEXT, prepare_tries INTEGER NOT NULL DEFAULT 0)",
@@ -69,6 +69,8 @@ const MIGRATIONS: [&str; 17] = [
     "ALTER TABLE run ADD COLUMN child_models TEXT",
     "ALTER TABLE runs ADD COLUMN model TEXT",
     "ALTER TABLE runs ADD COLUMN child_models TEXT",
+    // A short human name for a run, as given at its start (null: derive it from the brief).
+    "ALTER TABLE runs ADD COLUMN name TEXT",
 ];
 
 fn now() -> i64 {
@@ -159,6 +161,7 @@ struct Row {
     estimate: Option<String>,
     model: Option<String>,
     child_models: Option<String>,
+    name: Option<String>,
 }
 
 /// A short title for a run, from its brief's first non-empty line: leading `#`s, `Brief:` or
@@ -194,6 +197,27 @@ pub fn run_title(brief: &str) -> String {
             .map_or(room.as_str(), |i| &room[..i])
     };
     format!("{}…", cut.trim_end())
+}
+
+/// A run's short name: `given` when it is set, else the title of `brief` cut to 40 characters
+/// on a word boundary with `…`.
+pub fn run_name(given: Option<&str>, brief: &str) -> String {
+    if let Some(g) = given.map(str::trim).filter(|g| !g.is_empty()) {
+        return g.to_string();
+    }
+    let title = run_title(brief);
+    if title.chars().count() <= 40 {
+        return title;
+    }
+    let room: String = title.chars().take(40).collect();
+    let next_is_space = title.chars().nth(40).is_some_and(char::is_whitespace);
+    let cut = if next_is_space {
+        room.as_str()
+    } else {
+        room.rfind(char::is_whitespace)
+            .map_or(room.as_str(), |i| &room[..i])
+    };
+    format!("{}…", cut.trim_end_matches(['…', '.', ' ']))
 }
 
 /// Milliseconds a run has taken: from `started_at` (or `created_at`) to `ended_at` (or `now`),
@@ -249,6 +273,8 @@ impl Row {
             "session_id": self.session_id,
             "brief": brief,
             "title": title,
+            "name": run_name(self.name.as_deref(), &self.brief),
+            "name_given": self.name.as_deref().is_some_and(|n| !n.trim().is_empty()),
             "elapsed_ms": elapsed,
             "base": self.base,
             "branch": self.branch,
@@ -287,12 +313,49 @@ fn assumed_since(rows: &[Row], since: i64) -> Vec<Value> {
                 .as_deref()
                 .and_then(|v| serde_json::from_str(v).ok())
                 .unwrap_or_default();
+            let name = run_name(r.name.as_deref(), &r.brief);
+            let title = run_title(&r.brief);
             list.into_iter()
                 .filter(|q| q["at"].as_i64().is_some_and(|t| t > since))
-                .map(|q| json!({ "run": r.id, "question": q["question"], "at": q["at"] }))
+                .map(|q| assumed_entry(&r.id, &name, &title, r.branch.as_deref(), &q))
                 .collect::<Vec<_>>()
         })
         .collect()
+}
+
+/// One unanswered-question entry as the inbox shows it, from its run's fields and the stored
+/// `entry`. Old entries (only `question` and `at`) answer null and empty arrays.
+pub fn assumed_entry(
+    run: &str,
+    name: &str,
+    title: &str,
+    branch: Option<&str>,
+    entry: &Value,
+) -> Value {
+    let options = entry["options"].as_array().cloned().unwrap_or_default();
+    let chose = entry["chose"].as_str();
+    let instead: Vec<Value> = match chose {
+        Some(c) => options
+            .iter()
+            .filter(|o| o.as_str() != Some(c))
+            .cloned()
+            .collect(),
+        None => vec![],
+    };
+    json!({
+        "run": run,
+        "name": name,
+        "title": title,
+        "branch": branch,
+        "question": entry["question"],
+        "headline": entry["headline"],
+        "facts": entry["facts"].as_array().cloned().unwrap_or_default(),
+        "options": options,
+        "conventional": entry["conventional"],
+        "chose": chose,
+        "instead": instead,
+        "at": entry["at"],
+    })
 }
 
 /// A run object's one row.
@@ -434,7 +497,15 @@ impl AiAgentRuns {
                     .as_deref()
                     .and_then(|v| serde_json::from_str(v).ok())
                     .unwrap_or_default();
-                list.push(json!({ "question": a["question"], "at": now() }));
+                list.push(json!({
+                    "question": a["question"],
+                    "headline": a["headline"],
+                    "facts": a["facts"],
+                    "options": a["options"],
+                    "conventional": a["conventional"],
+                    "chose": a["chose"],
+                    "at": now(),
+                }));
                 self.db.exec(
                     "UPDATE runs SET assumed = ? WHERE id = ?",
                     vec![Value::Array(list).to_string().into(), id.as_str().into()],
@@ -703,7 +774,7 @@ impl AiAgentRuns {
         };
         let child_json = (!child_models.is_empty()).then(|| child_models.to_json().to_string());
         self.db.exec(
-            "INSERT INTO runs (id, role, runtime, state, parent_run, session_id, caller, by_id, for_id, brief, base, branch, budget, spent, created_at, estimate, model, child_models) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO runs (id, role, runtime, state, parent_run, session_id, caller, by_id, for_id, brief, base, branch, budget, spent, created_at, estimate, model, child_models, name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             vec![
                 id.into(),
                 a["role"].as_str().unwrap_or("executor").into(),
@@ -727,6 +798,7 @@ impl AiAgentRuns {
                 },
                 opt(model.as_deref()),
                 opt(child_json.as_deref()),
+                opt(a["name"].as_str()),
             ],
         )?;
         if runtime == "gateway" {
@@ -1368,18 +1440,31 @@ impl AiAgentRuns {
                     call: call_id,
                     question,
                     since,
+                    options,
+                    headline,
+                    facts,
+                    conventional,
                     ..
                 }) if now() - since >= run::ANSWER_PATIENCE_MS => {
                     // The question goes in the inbox as assumed, so the person sees what the
                     // run went on without.
+                    let chose = conventional.and_then(|i| options.get(i).cloned());
                     call(
                         &self.env,
                         INDEX,
                         "assume",
-                        &json!({ "run": row.id, "question": question }),
+                        &json!({
+                            "run": row.id,
+                            "question": question,
+                            "headline": headline,
+                            "facts": facts,
+                            "options": options,
+                            "conventional": conventional,
+                            "chose": chose,
+                        }),
                     )
                     .await?;
-                    self.answered(&row, call_id, &run::unanswered(question))
+                    self.answered(&row, call_id, &run::unanswered(question, chose.as_deref()))
                         .await
                 }
                 Some(Wait::Executors { since }) => {
@@ -2200,11 +2285,16 @@ impl AiAgentRuns {
                     .flatten()
                     .filter_map(|o| o.as_str().map(String::from))
                     .collect();
+                let since = now();
                 let wait = Wait::Answer {
                     call: c.id.clone(),
                     question: input["question"].as_str().unwrap_or_default().to_string(),
                     options,
-                    since: now(),
+                    since,
+                    headline: input["headline"].as_str().map(String::from),
+                    facts: input["facts"].as_array().cloned().unwrap_or_default(),
+                    conventional: input["conventional"].as_u64().map(|n| n as usize),
+                    answer_by: since + run::ANSWER_PATIENCE_MS,
                 };
                 self.set(
                     "state = 'waiting', waiting = ?",
@@ -2350,6 +2440,7 @@ impl AiAgentRuns {
                         "parent_run": row.id,
                         "caller": caller,
                         "brief": input["brief"],
+                        "name": input["name"].as_str().map(str::trim),
                         "base": base,
                         "branch": branch,
                         "budget": child_budget,

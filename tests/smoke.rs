@@ -1111,3 +1111,94 @@ fn ai_agents_models_compare_grouping() {
     assert_eq!(role_arg(&json!(null)), Ok(None));
     assert!(role_arg(&json!("boss")).is_err());
 }
+
+// ---- ai agents: names and structured questions ----
+
+/// Run names, the structured `ask_person` input, old stored waits and the assumed entry shape.
+#[test]
+fn ai_agents_run_names_and_structured_questions() {
+    use pigeon_ai_agents::object::{assumed_entry, run_name};
+    use pigeon_ai_agents::run::Wait;
+    use pigeon_ai_agents::{Role, tools};
+
+    // Names: given wins, else the title, cut on a word boundary at 40 characters.
+    assert_eq!(
+        run_name(Some("  Cost tab fix "), "Brief: x"),
+        "Cost tab fix"
+    );
+    assert_eq!(run_name(None, "Brief: Fix the page\nmore"), "Fix the page");
+    assert_eq!(run_name(Some("  "), "Fix it"), "Fix it");
+    let long = run_name(None, &"word ".repeat(30));
+    assert!(long.ends_with('…') && long.chars().count() <= 41, "{long}");
+    assert!(long.trim_end_matches('…').ends_with("word"));
+    // A name that is wrong is refused with words.
+    let spawn = |n: Value| {
+        tools::check(
+            Role::Planner,
+            "spawn_executor",
+            &json!({ "brief": "b", "name": n }),
+        )
+    };
+    assert!(spawn(json!("Cost tab fix")).is_ok());
+    assert!(spawn(json!("")).is_err() && spawn(json!("a\nb")).is_err());
+    assert!(spawn(json!("x".repeat(61))).is_err() && spawn(json!(3)).is_err());
+    assert!(
+        tools::check_run_name(Some(&json!(" ok ")))
+            .unwrap()
+            .as_deref()
+            == Some("ok")
+    );
+
+    // ask_person validation.
+    let ask = |v: Value| tools::check(Role::Executor, "ask_person", &v);
+    let good = json!({
+        "question": "Which?", "headline": "Pick one", "options": ["A", "B"], "conventional": 1,
+        "facts": [{ "label": "Blocked", "value": "x", "mono": true }]
+    });
+    assert!(ask(good.clone()).is_ok());
+    assert!(ask(json!({ "question": "Which?" })).is_ok());
+    let mut bad = good.clone();
+    bad["conventional"] = json!(2);
+    assert!(ask(bad).unwrap_err().contains("conventional"));
+    assert!(ask(json!({ "question": "q", "conventional": 0 })).is_err());
+    let mut many = good;
+    many["facts"] = json!(
+        (0..7)
+            .map(|_| json!({ "label": "l", "value": "v" }))
+            .collect::<Vec<_>>()
+    );
+    assert!(ask(many).unwrap_err().contains("facts"));
+
+    // A wait stored before the new fields still reads.
+    let w: Wait =
+        serde_json::from_value(json!({ "for": "answer", "call": "t", "question": "q" })).unwrap();
+    assert!(matches!(
+        w,
+        Wait::Answer {
+            headline: None,
+            conventional: None,
+            answer_by: 0,
+            ..
+        }
+    ));
+
+    // The assumed entry: with a chosen option, and an old one.
+    let e = json!({ "question": "q", "headline": "h", "facts": [{ "label": "a", "value": "b" }],
+        "options": ["A", "B", "C"], "conventional": 1, "chose": "B", "at": 5 });
+    let v = assumed_entry("r1", "Name", "Title", Some("br"), &e);
+    assert_eq!(v["chose"], "B");
+    assert_eq!(v["instead"], json!(["A", "C"]));
+    assert_eq!(v["name"], "Name");
+    assert_eq!(v["branch"], "br");
+    let old = assumed_entry(
+        "r1",
+        "Name",
+        "Title",
+        None,
+        &json!({ "question": "q", "at": 3 }),
+    );
+    assert_eq!(old["facts"], json!([]));
+    assert_eq!(old["options"], json!([]));
+    assert_eq!(old["instead"], json!([]));
+    assert!(old["chose"].is_null() && old["headline"].is_null() && old["conventional"].is_null());
+}

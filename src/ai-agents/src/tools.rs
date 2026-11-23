@@ -250,11 +250,27 @@ fn agent_definitions(role: Role) -> Vec<Value> {
     let mut out = vec![
         tool(
             "ask_person",
-            "Asks the person a question and waits for the answer. Use it for choices that change what is built, not for things you can look up.",
+            "Asks the person a question and waits for the answer. Use it for choices that change what is built, not for things you can look up. Give a headline, facts and the conventional option when you can.",
             json!({
                 "type": "object",
                 "properties": {
                     "question": {"type": "string", "description": "The question to ask."},
+                    "headline": {"type": "string", "maxLength": 140, "description": "The question as ONE short sentence, one line."},
+                    "facts": {
+                        "type": "array",
+                        "maxItems": 6,
+                        "description": "Labelled supporting facts, such as Blocked, Against or Ready.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "label": {"type": "string", "maxLength": 24},
+                                "value": {"type": "string", "maxLength": 300},
+                                "mono": {"type": "boolean", "description": "True for commits and file names."}
+                            },
+                            "required": ["label", "value"]
+                        }
+                    },
+                    "conventional": {"type": "integer", "minimum": 0, "description": "0-based index into `options`: the option you take if no answer comes in 5 minutes."},
                     "options": {
                         "type": "array",
                         "items": {"type": "string"},
@@ -287,6 +303,7 @@ fn agent_definitions(role: Role) -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "brief": {"type": "string", "description": "A complete task description for the executor."},
+                    "name": {"type": "string", "minLength": 1, "maxLength": 60, "description": "A 2 to 5 word name for the executor, such as \"Cost tab fix\"."},
                     "kind": {"type": "string", "enum": ["code", "mechanical"], "default": "code", "description": "`code` for ordinary work, `mechanical` for simple repetitive edits."},
                     "model": {"type": "string", "description": "The executor's model: `provider/model` (openai/gpt-6.2-sol), a `claude-…` name, or `anthropic` or `openai` for that provider's model for its kind. Leave out to use what you were started with for executors, else the stored default."},
                     "base": {"type": "string", "description": "The branch or commit it starts from; main by default. Name another executor's branch to build on its work."},
@@ -393,6 +410,99 @@ fn need_text<'a>(obj: &'a Map<String, Value>, key: &str, max: usize) -> Result<&
         ));
     }
     Ok(s)
+}
+
+/// Checks an optional run `name`: a string of 1 to 60 characters on one line once trimmed.
+/// Answers the trimmed name, or `None` when it is absent or null.
+pub fn check_run_name(v: Option<&Value>) -> Result<Option<String>, String> {
+    let s = match v {
+        None | Some(Value::Null) => return Ok(None),
+        Some(Value::String(s)) => s.trim(),
+        Some(_) => return Err("`name` must be a string of 1 to 60 characters".to_string()),
+    };
+    let n = s.chars().count();
+    if n == 0 || n > 60 {
+        return Err(format!(
+            "`name` is {n} characters long but must be 1 to 60; give a short name or leave it out"
+        ));
+    }
+    if s.contains(['\n', '\r']) {
+        return Err("`name` must be one line; remove the line breaks".to_string());
+    }
+    Ok(Some(s.to_string()))
+}
+
+/// Checks the optional `headline`, `facts` and `conventional` of an `ask_person` input.
+fn check_structured_question(obj: &Map<String, Value>) -> Result<(), String> {
+    match obj.get("headline") {
+        None | Some(Value::Null) => {}
+        Some(Value::String(h)) => {
+            if h.chars().count() > 140 || h.contains(['\n', '\r']) {
+                return Err(
+                    "`headline` must be one line of at most 140 characters: the question as one short sentence"
+                        .to_string(),
+                );
+            }
+        }
+        Some(_) => return Err("`headline` must be a string".to_string()),
+    }
+    match obj.get("facts") {
+        None | Some(Value::Null) => {}
+        Some(Value::Array(items)) => {
+            if items.len() > 6 {
+                return Err(format!(
+                    "`facts` has {} items but may have at most 6; keep the most useful",
+                    items.len()
+                ));
+            }
+            for (i, f) in items.iter().enumerate() {
+                let Some(f) = f.as_object() else {
+                    return Err(format!(
+                        "`facts[{i}]` must be an object with `label` and `value`"
+                    ));
+                };
+                for (key, max) in [("label", 24usize), ("value", 300)] {
+                    match f.get(key) {
+                        Some(Value::String(s)) if !s.is_empty() && s.chars().count() <= max => {}
+                        _ => {
+                            return Err(format!(
+                                "`facts[{i}].{key}` must be a string of 1 to {max} characters"
+                            ));
+                        }
+                    }
+                }
+                if !matches!(f.get("mono"), None | Some(Value::Null | Value::Bool(_))) {
+                    return Err(format!("`facts[{i}].mono` must be true or false"));
+                }
+            }
+        }
+        Some(_) => return Err("`facts` must be an array of `{label, value}` objects".to_string()),
+    }
+    match obj.get("conventional") {
+        None | Some(Value::Null) => Ok(()),
+        Some(c) => {
+            let Some(i) = c.as_u64() else {
+                return Err(
+                    "`conventional` must be a whole number: an index into `options`".to_string(),
+                );
+            };
+            let n = obj
+                .get("options")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .ok_or_else(|| {
+                    "`conventional` needs `options`; add the list or leave `conventional` out"
+                        .to_string()
+                })?;
+            if i as usize >= n {
+                return Err(format!(
+                    "`conventional` is {i} but `options` has {n} items; use 0 to {}",
+                    n.saturating_sub(1)
+                ));
+            }
+            Ok(())
+        }
+    }
 }
 
 /// Reads an optional whole number in `min..=max`.
@@ -565,6 +675,7 @@ pub fn check(role: Role, name: &str, input: &Value) -> Result<(), String> {
         }
         "ask_person" => {
             need_text(obj, "question", usize::MAX)?;
+            check_structured_question(obj)?;
             match obj.get("options") {
                 None => Ok(()),
                 Some(Value::Array(items)) => {
@@ -594,6 +705,7 @@ pub fn check(role: Role, name: &str, input: &Value) -> Result<(), String> {
         }
         "spawn_executor" => {
             need_text(obj, "brief", usize::MAX)?;
+            check_run_name(obj.get("name"))?;
             if let Some(k) = get_str(obj, "kind")?
                 && k != "code"
                 && k != "mechanical"
