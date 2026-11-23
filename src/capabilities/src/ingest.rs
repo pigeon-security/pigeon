@@ -887,6 +887,13 @@ impl Capability for Ingest {
         "ingest"
     }
 
+    fn versions(&self) -> Vec<pigeon_core::versions::Component> {
+        vec![pigeon_core::versions::Component::began(
+            "ingest",
+            pigeon_core::versions::Kind::Capability,
+        )]
+    }
+
     fn tools(&self) -> Vec<Tool> {
         let instance =
             json!({ "type": "string", "description": "The instance, such as `willowgraysen`." });
