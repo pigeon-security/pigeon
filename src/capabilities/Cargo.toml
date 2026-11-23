@@ -34,7 +34,8 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 
 # The smoke suite, pigeon's only tests: one end-to-end scenario per path, through public
-# interfaces with stubbed externals. See ci/runner/test.sh.
+# interfaces with stubbed externals. The root declares one module
+# per area in tests/smoke/. See ci/runner/test.sh.
 [[test]]
 name = "smoke"
 path = "../../tests/smoke.rs"

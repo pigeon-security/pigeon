@@ -1,0 +1,936 @@
+//! The proxy Worker: contracts, dispatch, deploy allowlist, mirror, webhooks, OIDC and tokens.
+
+use super::*;
+
+#[test]
+fn contract_signed_callers_and_skew() {
+    use pigeon_contract::{
+        Answer, CONTRACT, FailureKind, Manifest, Refused, accepts, sign, verify, wants,
+    };
+
+    // Core signs who calls, for one op and one body; the capability Worker checks all three.
+    let key = b"caller key";
+    let who = json!({ "user": { "name": "willow", "kind": "standard" }, "acting_for": null });
+    let body = br#"{"tool":"instance_plan","args":{}}"#;
+    let now = 1_800_000_000_000;
+    let header = sign(key, &who, "call", body, now, "n1");
+    let signed = verify(key, Some(&header), "call", body, now + 1_000).unwrap();
+    assert_eq!(signed.caller, who);
+    assert_eq!(signed.exp - signed.iat, pigeon_contract::MAX_AGE_MS);
+    for (key2, header2, op, body2, at, why) in [
+        (&key[..], None, "call", &body[..], now, Refused::Missing),
+        (
+            &key[..],
+            Some("no-dot"),
+            "call",
+            &body[..],
+            now,
+            Refused::Malformed,
+        ),
+        (
+            &b"another key"[..],
+            Some(header.as_str()),
+            "call",
+            &body[..],
+            now,
+            Refused::BadSignature,
+        ),
+        (
+            &key[..],
+            Some(header.as_str()),
+            "section",
+            &body[..],
+            now,
+            Refused::BadSignature,
+        ),
+        (
+            &key[..],
+            Some(header.as_str()),
+            "call",
+            &b"{}"[..],
+            now,
+            Refused::BadSignature,
+        ),
+        (
+            &key[..],
+            Some(header.as_str()),
+            "call",
+            &body[..],
+            now + 61_000,
+            Refused::Expired,
+        ),
+        (
+            &key[..],
+            Some(header.as_str()),
+            "call",
+            &body[..],
+            now - 6_000,
+            Refused::FromTheFuture,
+        ),
+    ] {
+        assert_eq!(verify(key2, header2, op, body2, at), Err(why), "{why}");
+    }
+    // A signature that claims a longer life than a minute is refused, however it was made.
+    let forged = {
+        let (_, tag) = header.split_once('.').unwrap();
+        let long = json!({ "caller": who, "iat": now, "exp": now + 3_600_000, "nonce": "n" });
+        let first = pigeon_core::webauthn::b64url(long.to_string().as_bytes());
+        format!("{first}.{tag}")
+    };
+    assert!(verify(key, Some(&forged), "call", body, now).is_err());
+
+    // Skew: this version and the one before are spoken; fields are added, never required.
+    assert!(accepts(CONTRACT) && !accepts(CONTRACT + 1));
+    let old: Manifest = serde_json::from_value(json!({
+        "contract": CONTRACT, "worker": "pigeon-sites",
+        "capabilities": [{ "name": "instances", "tools": [{ "name": "instance_plan" }] }],
+        "added_later": true,
+    }))
+    .unwrap();
+    assert_eq!(old.capabilities[0].tools[0].name, "instance_plan");
+    assert!(old.capabilities[0].routes.is_empty() && old.commit.is_empty());
+    let newer: Answer = serde_json::from_value(
+        json!({ "error": { "message": "m", "kind": "some_kind_from_later" } }),
+    )
+    .unwrap();
+    assert!(matches!(newer, Answer::Error(f) if f.kind == FailureKind::Failed));
+    assert_eq!(
+        serde_json::to_value(Answer::error(FailureKind::UnknownOp, "x")).unwrap(),
+        json!({ "error": { "message": "x", "kind": "unknown_op" } })
+    );
+    assert_eq!(
+        serde_json::to_value(Answer::Ok(json!(1))).unwrap(),
+        json!({ "ok": 1 })
+    );
+
+    // Event patterns: every key the pattern names, equal.
+    let event = json!({ "type": "push", "repo": "pigeon", "ref": "main" });
+    assert!(wants(&json!({ "type": "push" }), &event));
+    assert!(!wants(&json!({ "type": "push", "repo": "other" }), &event));
+    assert!(!wants(&json!("push"), &event));
+}
+
+#[test]
+fn core_contract_per_worker_caller_keys() {
+    use pigeon_capabilities::split::{verify_caller, worker_key_name};
+    use pigeon_contract::{Refused, sign};
+
+    let (shared, sites, ci) = (&b"shared"[..], &b"sites key"[..], &b"ci key"[..]);
+    let (body, now) = (&b"{}"[..], 1_800_000_000_000);
+    let by = |key: &[u8]| sign(key, &json!(null), "dispatch", body, now, "n");
+    let check = |own: Option<&[u8]>, header: &str, at: i64| {
+        verify_caller(own, shared, Some(header), "dispatch", body, at)
+    };
+    // The Worker's own key, and the shared key as before.
+    assert!(check(Some(sites), &by(sites), now).is_ok());
+    assert!(check(Some(sites), &by(shared), now).is_ok());
+    assert!(check(None, &by(shared), now).is_ok());
+    // Another Worker's key, or a wrong one, is refused.
+    assert_eq!(check(Some(sites), &by(ci), now), Err(Refused::BadSignature));
+    assert_eq!(check(None, &by(ci), now), Err(Refused::BadSignature));
+    assert_eq!(
+        check(Some(sites), &by(b"wrong"), now),
+        Err(Refused::BadSignature)
+    );
+    // The skew checks still apply to the per-Worker key.
+    assert_eq!(
+        check(Some(sites), &by(sites), now + 61_000),
+        Err(Refused::Expired)
+    );
+    assert_eq!(
+        check(Some(sites), &by(sites), now - 6_000),
+        Err(Refused::FromTheFuture)
+    );
+    assert_eq!(worker_key_name("sites"), Some("CALLER_KEY_SITES"));
+    assert_eq!(worker_key_name("root"), None);
+    assert_eq!(
+        worker_key_name("model-gateway"),
+        Some("CALLER_KEY_MODEL_GATEWAY")
+    );
+    assert_eq!(worker_key_name("ci-gateway"), Some("CALLER_KEY_CI_GATEWAY"));
+    assert_eq!(worker_key_name("models"), None);
+}
+
+/// Core's `dispatch` must see the bound Workers' tools (`models_submit` is the model gateway's),
+/// while a clashing remote tool is left out and the other ops use core's own capabilities.
+#[test]
+fn core_dispatch_reaches_bound_workers_tools() {
+    use pigeon_capabilities::remote::{Binding, Remote};
+    use pigeon_capabilities::{Call, Capability, Context, owner, split};
+    use pigeon_contract::{CORE_OPS, CapabilityManifest};
+    use pigeon_core::mcp::Tool;
+
+    struct Fake;
+    impl Capability for Fake {
+        fn name(&self) -> &'static str {
+            "lander"
+        }
+        fn tools(&self) -> Vec<Tool> {
+            vec![
+                Tool::bare("land", "Land."),
+                Tool::bare("land_status", "Status."),
+            ]
+        }
+        fn call<'a>(&'a self, _cx: &'a Context<'a>, _tool: &'a str, _args: &'a Value) -> Call<'a> {
+            Box::pin(async { Ok(Value::Null) })
+        }
+    }
+    let manifest = |v: Value| -> CapabilityManifest { serde_json::from_value(v).unwrap() };
+    let models = Remote::new(
+        &Binding {
+            binding: "MODELS",
+            worker: "pigeon-model-gateway",
+        },
+        manifest(json!({
+            "name": "models",
+            "tools": [{
+                "name": "models_submit",
+                "description": "Submit a model request.",
+                "inputSchema": { "type": "object" }
+            }]
+        })),
+    );
+    let clash = Remote::new(
+        &Binding {
+            binding: "OTHER",
+            worker: "pigeon-other",
+        },
+        manifest(json!({
+            "name": "other",
+            "tools": [{ "name": "land", "description": "Shadows core.", "inputSchema": { "type": "object" } }]
+        })),
+    );
+
+    let local_only: Vec<Box<dyn Capability>> = vec![Box::new(Fake)];
+    assert!(owner(&local_only, "models_submit").is_none());
+    let merged = split::merge(
+        vec![Box::new(Fake)],
+        vec![Box::new(models), Box::new(clash)],
+    );
+    let names: Vec<&str> = merged.iter().map(|c| c.name()).collect();
+    assert_eq!(names, ["lander", "models"]);
+    let found = owner(&merged, "models_submit").expect("models_submit is reachable");
+    assert_eq!(found.name(), "models");
+    assert_eq!(owner(&merged, "land").unwrap().name(), "lander");
+
+    assert!(split::op_needs_bound("dispatch"));
+    for op in [
+        "credential",
+        "service_user",
+        "verify",
+        "grant",
+        "deploy_grant",
+        "nope",
+    ] {
+        assert!(!split::op_needs_bound(op), "{op}");
+    }
+    for op in CORE_OPS.iter().filter(|o| **o != "dispatch") {
+        assert!(!split::op_needs_bound(op), "{op}");
+    }
+}
+
+#[test]
+fn deploy_proxy_allowlist() {
+    use pigeon_capabilities::cf_proxy::{
+        ALLOWED, GRANT_PATH, PREFIX, Scope, allowed, body_ok, grant_answer, unlisted,
+    };
+    let (a, s) = ("4f94676cb2cbe46fd985b089ca97ea27", "pigeon-platform");
+    let scope = |account, script| Scope {
+        account,
+        script,
+        queues: &["pigeon-ci-events"],
+        namespaces: &["ns1"],
+    };
+    let build = |pattern: &str, account: &str, script: &str| {
+        format!(
+            "{PREFIX}{}",
+            pattern
+                .replace("{account}", account)
+                .replace("{script}", script)
+                .replace("{version}", "01234567-89ab-cdef-0123-456789abcdef")
+                .replace("{namespace}", "ns1")
+                .replace("{bucket}", "pigeon-changelog")
+        )
+    };
+    let query =
+        |q: &[&str]| (!q.is_empty()).then(|| q.join("&").replace("{queue}", "pigeon-ci-events"));
+    // An R2 bucket's own record may be read; not a name that is no bucket's, not its objects,
+    // and not by any other method.
+    let r2 = |method: &str, rest: &str| {
+        allowed(
+            method,
+            &format!("{PREFIX}/accounts/{a}/r2/buckets/{rest}"),
+            None,
+            &scope(a, s),
+        )
+        .is_ok()
+    };
+    assert!(r2("GET", "pigeon-changelog"));
+    assert!(!r2("GET", "Pigeon_Changelog"));
+    assert!(!r2("GET", "-x-"));
+    assert!(!r2("GET", "pigeon-changelog/objects/main/state.json"));
+    assert!(!r2("PUT", "pigeon-changelog"));
+    assert!(!r2("DELETE", "pigeon-changelog"));
+    // Every call wrangler's deploy makes is allowed, for this account and Worker only.
+    for e in &ALLOWED {
+        let path = build(e.path, a, s);
+        let q = query(e.query);
+        assert_eq!(allowed(e.method, &path, q.as_deref(), &scope(a, s)), Ok(e));
+        let other = build(e.path, "0000", s);
+        assert!(allowed(e.method, &other, q.as_deref(), &scope(a, s)).is_err());
+        for (m, p, q2) in [
+            ("DELETE", path.clone(), q.clone()),
+            (e.method, format!("{path}/extra"), q.clone()),
+            (e.method, format!("{path}/.."), q.clone()),
+            (e.method, path.replace(PREFIX, "/cf/client/v4x"), q.clone()),
+            (e.method, path.clone(), Some("foo=bar".to_string())),
+        ] {
+            assert!(
+                allowed(m, &p, q2.as_deref(), &scope(a, s)).is_err(),
+                "{m} {p}"
+            );
+        }
+    }
+    // Nothing else on the account: other Workers, tokens, DNS, R2.
+    for (m, p) in [
+        (
+            "GET",
+            format!("{PREFIX}/accounts/{a}/workers/scripts/other"),
+        ),
+        ("POST", format!("{PREFIX}/user/tokens")),
+        ("GET", format!("{PREFIX}/zones")),
+        ("PUT", format!("{PREFIX}/accounts/{a}/r2/buckets/x")),
+        ("GET", format!("{PREFIX}/accounts/{a}/secrets_store/stores")),
+    ] {
+        assert!(allowed(m, &p, None, &scope(a, s)).is_err(), "{m} {p}");
+    }
+    // A recorded deploy passes whole; a call off the list is named.
+    let recorded: Vec<String> = ALLOWED
+        .iter()
+        .map(|e| {
+            let q = query(e.query).map(|q| format!("?{q}")).unwrap_or_default();
+            let path = build(e.path, a, s);
+            format!("{} {}{q}", e.method, &path[PREFIX.len()..])
+        })
+        .collect();
+    let mut calls: Vec<&str> = recorded.iter().map(String::as_str).collect();
+    assert!(
+        unlisted(&calls, &scope(a, s)).is_empty(),
+        "{:?}",
+        unlisted(&calls, &scope(a, s))
+    );
+    let extra = format!("DELETE /accounts/{a}/workers/scripts/{s}");
+    calls.push(&extra);
+    assert_eq!(unlisted(&calls, &scope(a, s)).len(), 1);
+    // Bodies a rule checks: junk is refused.
+    for e in ALLOWED
+        .iter()
+        .filter(|e| !matches!(e.body, pigeon_capabilities::cf_proxy::BodyRule::Any))
+    {
+        assert!(
+            body_ok(e.body, b"not json", &scope(a, s)).is_err(),
+            "{}",
+            e.path
+        );
+    }
+    // /cf/grant: only a GET with the job token of a landing that is deploying its commit.
+    assert!(!GRANT_PATH.starts_with(PREFIX));
+    assert!(allowed("GET", GRANT_PATH, None, &scope(a, s)).is_err());
+    assert_eq!(grant_answer("GET", true, true).0, 200);
+    assert_eq!(grant_answer("POST", true, true).0, 405);
+    assert_eq!(grant_answer("GET", false, true).0, 403);
+    assert_eq!(grant_answer("GET", true, false).0, 403);
+}
+
+#[test]
+fn mirror_push() {
+    use pigeon_capabilities::mirror::{Source, is_github, plan, rejected};
+    use std::collections::BTreeMap;
+    let source = Source {
+        namespace: "pigeon-security".into(),
+        repo: "pigeon".into(),
+        branches: vec!["main".into()],
+    };
+    let refs = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(n, s)| (n.to_string(), s.to_string()))
+            .collect()
+    };
+    let (a, b, c) = ("a".repeat(40), "b".repeat(40), "c".repeat(40));
+    // The source (stubbed Artifacts) and the copy (stubbed GitHub).
+    let theirs = refs(&[
+        ("refs/heads/main", &b),
+        ("refs/heads/claude/x", &c),
+        ("refs/tags/v1", &a),
+        ("refs/tags/v2", &b),
+    ]);
+    let ours = refs(&[("refs/heads/main", &a), ("refs/tags/v1", &c)]);
+    let (report, updates) = plan(&source, &theirs, &ours);
+    let outcomes: Vec<(&str, &str)> = report
+        .iter()
+        .map(|r| (r.name.as_str(), r.outcome.as_str()))
+        .collect();
+    // Session branches are never mirrored; a tag is never moved.
+    assert_eq!(
+        outcomes,
+        [
+            ("refs/heads/main", "updated"),
+            ("refs/tags/v1", "diverged"),
+            ("refs/tags/v2", "created")
+        ]
+    );
+    let pushed: Vec<(&str, &str, &str)> = updates
+        .iter()
+        .map(|u| (u.name.as_str(), u.old.as_str(), u.new.as_str()))
+        .collect();
+    assert_eq!(
+        pushed,
+        [
+            ("refs/heads/main", a.as_str(), b.as_str()),
+            ("refs/tags/v2", pigeon_core::git::ZERO, b.as_str())
+        ]
+    );
+    // Current already: nothing to push.
+    let (_, none) = plan(
+        &source,
+        &refs(&[("refs/heads/main", &b)]),
+        &refs(&[("refs/heads/main", &b)]),
+    );
+    assert!(none.is_empty());
+    // The copy refuses one ref: it is reported, the rest stand.
+    let mut report = report;
+    rejected(
+        &mut report,
+        &[
+            "ok refs/tags/v2".to_string(),
+            "ng refs/heads/main non-fast-forward".to_string(),
+        ],
+    );
+    assert_eq!(report[0].outcome, "rejected: non-fast-forward");
+    assert_eq!(report[2].outcome, "created");
+    // Only a GitHub copy is asked for its token's expiry.
+    assert!(is_github("https://github.com/pigeon-security/pigeon.git"));
+    for url in [
+        "https://gitlab.com/a/b",
+        "https://github.com.evil.example/a",
+        "http://github.com/a/b",
+    ] {
+        assert!(!is_github(url), "{url}");
+    }
+}
+
+#[test]
+fn webhook_and_oidc() {
+    use pigeon_ci::buildkite::{ISSUER, audience, vouched};
+    use pigeon_core::buildkite_hook::{Event, read, verify};
+    use pigeon_core::oidc::{self, Expect};
+    use pigeon_core::webauthn::b64url;
+
+    // (1) A webhook delivery: only a fresh signature over this body with this token verifies.
+    let key = b"hook-secret";
+    let body = br#"{"event":"build.finished","build":{"number":7}}"#;
+    let now = 1_700_000_000_i64;
+    let good = webhook_and_oidc_header(key, body, now - 10);
+    assert!(verify(Some(good.as_str()), body, key, now, 300).is_ok());
+    assert!(verify(Some(good.as_str()), b"{}", key, now, 300).is_err());
+    assert!(verify(Some(good.as_str()), body, b"other-secret", now, 300).is_err());
+    let old = webhook_and_oidc_header(key, body, now - 301);
+    assert!(verify(Some(old.as_str()), body, key, now, 300).is_err());
+    let ahead = webhook_and_oidc_header(key, body, now + 301);
+    assert!(verify(Some(ahead.as_str()), body, key, now, 300).is_err());
+    assert_eq!(
+        verify(None, body, key, now, 300),
+        Err("no signature".to_string())
+    );
+    let non_hex = format!("timestamp={},signature=zz{}", now - 10, "0".repeat(62));
+    assert!(verify(Some(non_hex.as_str()), body, key, now, 300).is_err());
+    assert!(verify(Some(good.as_str()), body, b"", now, 300).is_err());
+    let (ts, sig) = good.split_once(",signature=").unwrap();
+    let upper = format!("{ts},signature={}", sig.to_uppercase());
+    assert!(verify(Some(upper.as_str()), body, key, now, 300).is_ok());
+    assert!(matches!(
+        read(Some("ping"), br#"{"zen":"hi"}"#),
+        Ok(Event::Ping)
+    ));
+
+    // (2) A runner's OIDC token: verified, then vouched for by the connector.
+    let aud = audience("platform.example");
+    let header = json!({ "alg": "RS256", "kid": "k1", "typ": "JWT" });
+    let claims = json!({
+        "iss": ISSUER, "aud": aud, "iat": 1_000, "exp": 1_300,
+        "organization_slug": "acme", "pipeline_slug": "pigeon", "build_number": 7,
+        "build_id": "0190f5a8-8f8e-7c3a-9b1e-2f3c4d5e6f70",
+        "job_id": "0190f5a8-9a9b-7c3a-9b1e-2f3c4d5e6f71",
+        "agent_id": "0190f5a8-aaaa-7c3a-9b1e-2f3c4d5e6f72"
+    });
+    let jwks = webhook_and_oidc_jwks();
+    let expect = Expect {
+        issuer: ISSUER,
+        audience: &aud,
+        now: 1_100,
+        leeway: 30,
+        max_lifetime: 600,
+    };
+    let token = webhook_and_oidc_sign(&header, &claims);
+    let got = oidc::verify(&token, &jwks, &expect).unwrap();
+    assert_eq!(got.get("build_number"), Some(&json!(7)));
+    let v = vouched(&got, "acme", "pigeon", false).unwrap();
+    assert_eq!(v.build_id, "0190f5a8-8f8e-7c3a-9b1e-2f3c4d5e6f70");
+    assert_eq!(v.build_number, 7);
+    assert_eq!(v.job_id, "0190f5a8-9a9b-7c3a-9b1e-2f3c4d5e6f71");
+    assert!(vouched(&got, "evil", "pigeon", false).is_err());
+    assert!(vouched(&got, "acme", "other", false).is_err());
+    let mut bad_id = got.clone();
+    bad_id.insert("build_id".into(), json!("not-a-uuid"));
+    assert!(vouched(&bad_id, "acme", "pigeon", false).is_err());
+    let mut zero = got.clone();
+    zero.insert("build_number".into(), json!(0));
+    assert!(vouched(&zero, "acme", "pigeon", false).is_err());
+
+    // Forged: another payload under the original signature, cut, or the wrong algorithm or key.
+    let mut forged_claims = claims.clone();
+    forged_claims["build_id"] = Value::from("0190f5a8-0000-7c3a-9b1e-2f3c4d5e6f99");
+    let parts: Vec<&str> = token.split('.').collect();
+    let forged = format!(
+        "{}.{}.{}",
+        parts[0],
+        b64url(forged_claims.to_string().as_bytes()),
+        parts[2]
+    );
+    assert_eq!(
+        oidc::verify(&forged, &jwks, &expect),
+        Err("the signature does not verify".to_string())
+    );
+    assert!(oidc::verify(&token[..token.len() - 10], &jwks, &expect).is_err());
+    for h in [
+        json!({ "alg": "none", "kid": "k1", "typ": "JWT" }),
+        json!({ "alg": "HS256", "kid": "k1", "typ": "JWT" }),
+        json!({ "alg": "RS256", "kid": "k2", "typ": "JWT" }),
+    ] {
+        assert!(oidc::verify(&webhook_and_oidc_sign(&h, &claims), &jwks, &expect).is_err());
+    }
+    let other_aud = audience("elsewhere.example");
+    assert!(
+        oidc::verify(
+            &token,
+            &jwks,
+            &Expect {
+                audience: &other_aud,
+                ..expect
+            }
+        )
+        .is_err()
+    );
+    assert!(
+        oidc::verify(
+            &token,
+            &jwks,
+            &Expect {
+                issuer: "https://evil.example",
+                ..expect
+            }
+        )
+        .is_err()
+    );
+    assert!(
+        oidc::verify(
+            &token,
+            &jwks,
+            &Expect {
+                now: 1_331,
+                ..expect
+            }
+        )
+        .is_err()
+    );
+}
+
+fn webhook_and_oidc_header(key: &[u8], body: &[u8], secs: i64) -> String {
+    use pigeon_core::sign::{hex, hmac_sha256};
+    let mut message = format!("{secs}.").into_bytes();
+    message.extend_from_slice(body);
+    format!(
+        "timestamp={secs},signature={}",
+        hex(&hmac_sha256(key, &message))
+    )
+}
+
+pub(super) fn webhook_and_oidc_key() -> &'static rsa::RsaPrivateKey {
+    use std::sync::OnceLock;
+    static KEY: OnceLock<rsa::RsaPrivateKey> = OnceLock::new();
+    KEY.get_or_init(|| rsa::RsaPrivateKey::new(&mut rand::thread_rng(), 2048).unwrap())
+}
+
+fn webhook_and_oidc_jwks() -> Value {
+    use pigeon_core::webauthn::b64url;
+    use rsa::traits::PublicKeyParts;
+    let public = webhook_and_oidc_key().to_public_key();
+    json!({ "keys": [{
+        "kty": "RSA", "kid": "k1", "alg": "RS256", "use": "sig",
+        "n": b64url(&public.n().to_bytes_be()), "e": b64url(&public.e().to_bytes_be())
+    }] })
+}
+
+fn webhook_and_oidc_sign(header: &Value, claims: &Value) -> String {
+    use pigeon_core::webauthn::b64url;
+    use rsa::pkcs1v15::SigningKey;
+    use rsa::signature::{SignatureEncoding, Signer};
+    use sha2::Sha256;
+    let signed = format!(
+        "{}.{}",
+        b64url(header.to_string().as_bytes()),
+        b64url(claims.to_string().as_bytes())
+    );
+    let sig = SigningKey::<Sha256>::new(webhook_and_oidc_key().clone()).sign(signed.as_bytes());
+    format!("{signed}.{}", b64url(&sig.to_bytes()))
+}
+
+#[test]
+fn proxy_and_job_tokens() {
+    use pigeon_capabilities::proxy::{self, Audit, DEFAULT_DAYS, Outcome, ProxyCaller};
+    use pigeon_ci::token::{self, Grant, PREFIX};
+
+    // A session's proxy credential reaches the proxies only; an access token only /mcp.
+    let paths = [
+        "/git/x",
+        "/cf/client/v4/x",
+        "/git",
+        "/gitx/",
+        "/cf",
+        "/cfx",
+        "/mcp",
+        "/mcp/",
+        "/tokens",
+        "/git/a%2Fb",
+        "/git/a%2fb",
+        "/git/a/../b",
+        "/git/./a",
+        "/cf/a\\b",
+        "/git/%2E%2E/x",
+    ];
+    for p in paths {
+        assert_eq!(
+            proxy::reaches("proxy", p),
+            p == "/git/x" || p == "/cf/client/v4/x",
+            "proxy {p}"
+        );
+        assert_eq!(proxy::reaches("access", p), p == "/mcp", "access {p}");
+        for k in ["refresh", "", "Proxy"] {
+            assert!(!proxy::reaches(k, p), "{k} {p}");
+        }
+    }
+    let (px, pl) = ("proxy.pigeon.dev", "platform.pigeon.dev");
+    for (h, p) in [
+        (px, "/git/ns/r.git/info/refs"),
+        (px, "/cf/client/v4/accounts"),
+        (px, "/health"),
+        ("PROXY.pigeon.dev", "/git/x"),
+        (pl, "/mcp"),
+        (pl, "/tokens"),
+    ] {
+        assert!(proxy::host_serves(h, px, p), "{h} {p}");
+    }
+    for (h, p) in [
+        (px, "/mcp"),
+        (px, "/tokens"),
+        (px, "/oauth/token"),
+        (px, "/"),
+        (pl, "/git/ns/r.git/info/refs"),
+        (pl, "/cf/client/v4/x"),
+    ] {
+        assert!(!proxy::host_serves(h, px, p), "{h} {p}");
+    }
+    // Issuing and revoking one are approved for that one credential.
+    assert_ne!(
+        proxy::issue_purpose("h1", 30),
+        proxy::issue_purpose("h2", 30)
+    );
+    assert_ne!(
+        proxy::issue_purpose("h1", 30),
+        proxy::issue_purpose("h1", 31)
+    );
+    assert_ne!(
+        proxy::revoke_purpose("aaaaaaaaaaaa"),
+        proxy::revoke_purpose("aaaaaaaaaaab")
+    );
+    for bad in [
+        String::new(),
+        "   ".into(),
+        "a".repeat(65),
+        "a\nb".into(),
+        "a\u{7}".into(),
+    ] {
+        assert!(proxy::label(&bad).is_err(), "label {bad:?}");
+    }
+    assert_eq!(proxy::label(" cloud env ").as_deref(), Ok("cloud env"));
+    assert!(proxy::label(&"é".repeat(64)).is_ok());
+    assert_eq!(proxy::days(&Value::Null), Ok(DEFAULT_DAYS));
+    assert_eq!(proxy::days(&json!(90)), Ok(90));
+    for bad in [json!(0), json!(91), json!(-1), json!(1.5), json!("30")] {
+        assert!(proxy::days(&bad).is_err(), "days {bad}");
+    }
+    assert_eq!(proxy::id("abcdefghij_-"), Ok("abcdefghij_-"));
+    for bad in [
+        "abcdefghijk",
+        "abcdefghijklm",
+        "abcdefghij+/",
+        "abcdefghij%2",
+    ] {
+        assert!(proxy::id(bad).is_err(), "id {bad}");
+    }
+    // The audit line drops the query and names the caller, never a secret.
+    let audit = Audit {
+        route: "git",
+        method: "GET",
+        path: "/git/x/info/refs?service=git-upload-pack",
+        outcome: Outcome::Forwarded,
+        status: Some(200),
+        why: None,
+    };
+    let anon: Value = serde_json::from_str(&proxy::audit_line(None, &audit)).unwrap();
+    assert_eq!(anon["path"], "/git/x/info/refs");
+    assert!(anon["caller"].is_null() && anon["token"].is_null());
+    assert_eq!(anon["outcome"], "forwarded");
+    let caller = ProxyCaller {
+        id: "abcdefghijkl".into(),
+        label: "env".into(),
+        person: "Ana".into(),
+        script: None,
+        branch_prefix: None,
+    };
+    let named: Value = serde_json::from_str(&proxy::audit_line(Some(&caller), &audit)).unwrap();
+    // Logs are kept: the credential's id, never its label or the person's name.
+    assert!(named.get("caller").is_none() && !named.to_string().contains("Ana"));
+    assert_eq!(named["token"], "abcdefghijkl");
+    assert_eq!(named["status"], 200);
+
+    // A CI job's token: its shape, then its grant, then where it reaches.
+    let a = token::lookup_hash(&format!("{PREFIX}{}", "A".repeat(43)));
+    assert!(a.is_some());
+    assert_ne!(
+        a,
+        token::lookup_hash(&format!("{PREFIX}{}", "B".repeat(43)))
+    );
+    for bad in [
+        format!("pgn_px_{}", "A".repeat(43)),
+        format!("{PREFIX}{}", "A".repeat(42)),
+        format!("{PREFIX}{}", "A".repeat(44)),
+        format!("{PREFIX}{}+", "A".repeat(42)),
+        String::new(),
+    ] {
+        assert!(token::lookup_hash(&bad).is_none(), "{bad}");
+    }
+    let c = "0123456789abcdef0123456789abcdef01234567";
+    let repo = "pigeon-security/pigeon";
+    let g = Grant {
+        job: "j1".into(),
+        repo: repo.into(),
+        commit: c.into(),
+        expires_at: 1000,
+    };
+    assert!(token::allows_job(&g, 999, "j1"));
+    assert!(!token::allows_job(&g, 1000, "j1") && !token::allows_job(&g, 0, "j2"));
+    assert!(token::allows_fetch(&g, 0, repo, c));
+    assert!(token::allows_fetch(&g, 0, repo, &c.to_uppercase()));
+    assert!(!token::allows_fetch(&g, 1000, repo, c));
+    assert!(!token::allows_fetch(&g, 0, "pigeon-security/other", c));
+    assert!(!token::allows_fetch(
+        &g,
+        0,
+        repo,
+        "1123456789abcdef0123456789abcdef01234567"
+    ));
+    assert!(!token::allows_fetch(&g, 0, repo, "main"));
+    for p in [
+        "/ci/runner/abc",
+        "/git/ns/r.git/info/refs",
+        "/git/ns/r.git/git-upload-pack",
+    ] {
+        assert!(token::reaches(p), "{p}");
+    }
+    let long = format!("/ci/runner/{}", "a".repeat(65));
+    for p in [
+        "/ci/runner/",
+        "/ci/runner/a/b",
+        "/ci/hooks/x",
+        "/ci/token",
+        "/git/ns/r.git/git-receive-pack",
+        "/git/ns/../r.git/info/refs",
+        "/git/ns/r.git/info/refs%2F",
+        "/git/ns/r.git/info/refs/",
+        "/git//r.git/info/refs",
+        "/git/ns/.git/info/refs",
+        "/git/ns/r/info/refs",
+        "/cf/x",
+        "/mcp",
+        "/tokens",
+        &long,
+    ] {
+        assert!(!token::reaches(p), "{p}");
+    }
+}
+
+/// The proxy Worker's per-isolate memory: a scoped credential reused until a minute before it
+/// expires; a verified proxy credential kept a minute, by its hash, never its value; and the
+/// deploy proxy it builds matching core's. Grants are never kept, so there is nothing to keep.
+#[test]
+fn proxy_worker_caches_and_core_ops() {
+    use pigeon_capabilities::split::purpose_permissions;
+    use pigeon_contract::{CALLERLESS_OPS, CORE_OPS, Credential};
+    use pigeon_proxies::cache::{
+        Credentials, RENEW_BEFORE_MS, VERIFIED_FOR_MS, VERIFIED_MAX, Verified,
+    };
+    use pigeon_proxies::{ProxyCaller, Purpose};
+
+    // Scoped credentials, one per purpose, renewed a minute before they expire.
+    let mut creds = Credentials::new();
+    assert!(creds.get(Purpose::Git, 0).is_none());
+    let minted = |token: &str, expires_at: i64| Credential {
+        token: token.into(),
+        account_id: "acct".into(),
+        expires_at,
+    };
+    creds.put(Purpose::Git, minted("git-1", 900_000));
+    assert_eq!(creds.get(Purpose::Git, 0).unwrap().token, "git-1");
+    assert_eq!(
+        creds
+            .get(Purpose::Git, 900_000 - RENEW_BEFORE_MS - 1)
+            .unwrap()
+            .token,
+        "git-1"
+    );
+    assert!(creds.get(Purpose::Git, 900_000 - RENEW_BEFORE_MS).is_none());
+    assert!(creds.get(Purpose::Deploy, 0).is_none(), "kept per purpose");
+    creds.put(Purpose::Git, minted("git-2", 2_000_000));
+    assert_eq!(creds.get(Purpose::Git, 1_000_000).unwrap().token, "git-2");
+    assert_eq!(Purpose::Git.scoped(), "artifacts");
+    assert_eq!(Purpose::Deploy.scoped(), "cf_deploy");
+
+    // Verified proxy credentials: kept a minute, by hash; an unknown one is never kept.
+    let holder = |id: &str| ProxyCaller {
+        id: id.into(),
+        label: "env".into(),
+        person: "Ana".into(),
+        script: None,
+        branch_prefix: None,
+    };
+    let (a, b) = (
+        format!("pgn_px_{}", "a".repeat(43)),
+        format!("pgn_px_{}", "b".repeat(43)),
+    );
+    let mut verified = Verified::new();
+    assert!(verified.get(&a, 0).is_none());
+    verified.put(&a, holder("aaaaaaaaaaaa"), 1_000);
+    assert_eq!(verified.get(&a, 1_000).unwrap().id, "aaaaaaaaaaaa");
+    assert_eq!(
+        verified.get(&a, 1_000 + VERIFIED_FOR_MS - 1).unwrap().id,
+        "aaaaaaaaaaaa"
+    );
+    assert!(
+        verified.get(&a, 1_000 + VERIFIED_FOR_MS).is_none(),
+        "revocation within a minute"
+    );
+    assert!(verified.get(&b, 1_000).is_none(), "keyed by the credential");
+    assert_ne!(Verified::key(&a), a, "never the credential itself");
+    assert_eq!(
+        Verified::key(&a),
+        pigeon_core::oauth::hash(&a),
+        "the Directory's hash"
+    );
+    assert!(!Verified::key(&a).contains("pgn_px_"));
+    // Expired ones go on the next put, and the cache stays bounded.
+    verified.put(&b, holder("bbbbbbbbbbbb"), 1_000 + VERIFIED_FOR_MS);
+    assert_eq!(verified.len(), 1);
+    for i in 0..VERIFIED_MAX + 10 {
+        verified.put(
+            &format!("pgn_px_{i:043}"),
+            holder("cccccccccccc"),
+            2_000_000 + i as i64,
+        );
+    }
+    assert_eq!(verified.len(), VERIFIED_MAX);
+    assert!(
+        verified
+            .get(&format!("pgn_px_{:043}", 0), 2_000_100)
+            .is_none(),
+        "oldest went first"
+    );
+    assert!(
+        verified
+            .get(&format!("pgn_px_{:043}", VERIFIED_MAX + 9), 2_000_100)
+            .is_some()
+    );
+
+    // The ops core answers the proxy Worker: only its checks go without a caller.
+    for op in CALLERLESS_OPS {
+        assert!(CORE_OPS.contains(&op), "{op}");
+    }
+    assert!(!CALLERLESS_OPS.contains(&"credential") && !CALLERLESS_OPS.contains(&"dispatch"));
+    // `cf_deploy` is exactly the union of what the deploy proxy's allowlist names.
+    let mut union: Vec<&str> = pigeon_proxies::cf_proxy::ALLOWED
+        .iter()
+        .flat_map(|e| e.permissions.iter().copied())
+        .collect();
+    union.sort_unstable();
+    union.dedup();
+    let mut deploy: Vec<&str> = purpose_permissions("cf_deploy").unwrap().to_vec();
+    deploy.sort_unstable();
+    assert_eq!(deploy, union);
+
+    // The proxy Worker's deploy proxy, from the files built into it, is core's.
+    let cf = pigeon_proxies::cf_proxy::CfProxy::platform(
+        "proxy.pigeon.dev",
+        "pigeon-platform",
+        include_str!("../../src/platform/wrangler.toml"),
+        include_str!("../../ci/workers.toml"),
+        "pigeon-security/pigeon",
+    );
+    let core = pigeon_capabilities::architecture::Wrangler::read(include_str!(
+        "../../src/platform/wrangler.toml"
+    ));
+    assert_eq!(cf.queues, core.producers);
+    assert_eq!(
+        cf.containers,
+        core.containers
+            .iter()
+            .map(|c| c.class.clone())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(cf.queues, ["pigeon-ci-events"]);
+    assert_eq!(cf.containers, ["CiRunner"]);
+    let others: Vec<&str> = cf.others.iter().map(|o| o.script.as_str()).collect();
+    assert_eq!(
+        others,
+        [
+            "pigeon-sites",
+            "pigeon-model-gateway",
+            "pigeon-ci-gateway",
+            "pigeon-proxy",
+            "pigeon-ai-agents"
+        ]
+    );
+    let broken = pigeon_proxies::cf_proxy::CfProxy::platform("h", "s", "not toml [", "nope", "r");
+    assert!(broken.others.is_empty() && broken.queues.is_empty());
+
+    // The cutover moves the proxy host in one call, `setup_proxy_host {worker}`, and back.
+    use pigeon_capabilities::Capability;
+    use pigeon_capabilities::public_host::{PublicHost, Retire};
+    let host = |also: Vec<String>| PublicHost {
+        zone: "pigeon.dev".into(),
+        host: "proxy.pigeon.dev".into(),
+        worker: "pigeon-platform".into(),
+        also,
+        retire: Retire::default(),
+        tool: "setup_proxy_host",
+    };
+    let tools = host(vec!["pigeon-proxy".into()]).tools();
+    assert_eq!(
+        tools[0].input_schema["properties"]["worker"]["enum"],
+        json!(["pigeon-platform", "pigeon-proxy"])
+    );
+    assert_eq!(
+        host(Vec::new()).tools()[0].input_schema["properties"],
+        json!({})
+    );
+}

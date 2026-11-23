@@ -47,7 +47,7 @@ When a plan's status changes, change it in both places: the plan's first lines a
 
 ## For agents
 
-The person's policy, `.pigeon/policy.toml`, says what agents acting for them may do. Call `policy_check` (Pigeon MCP) before acting (a push, a landing, messaging or starting a session, a change to the gate) and again after any refusal. Act on `allow` as the person's standing instruction. On `deny`, stop and tell the person the rule and its reason. Never propose new rules or loosen one: only the person changes the policy, and a change to it lands only with their passkey. Tests live in `tests/smoke.rs` alone; `.claude/settings.json` is generated from the policy, never edited by hand.
+The person's policy, `.pigeon/policy.toml`, says what agents acting for them may do. Call `policy_check` (Pigeon MCP) before acting (a push, a landing, messaging or starting a session, a change to the gate) and again after any refusal. Act on `allow` as the person's standing instruction. On `deny`, stop and tell the person the rule and its reason. Never propose new rules or loosen one: only the person changes the policy, and a change to it lands only with their passkey. Tests live in the smoke suite alone: `tests/smoke.rs` and its area modules in `tests/smoke/`; `.claude/settings.json` is generated from the policy, never edited by hand.
 
 **Where work runs** (`docs/plans/ai-agents.md`):
 - **By default, work runs inside pigeon**, through its model gateway: `ai_agents_start {role, brief}`.

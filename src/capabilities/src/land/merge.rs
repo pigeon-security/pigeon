@@ -1,7 +1,8 @@
 //! The Lander's git work: a branch's base on main and what each side changed since, and the
 //! branch rebased onto main by the Lander itself, so no agent force-pushes to make a landing
 //! fit. The rebase is on whole paths ([`pigeon_core::rebase`]): a path both sides changed is
-//! merged line by line only for the files in [`TEXT_MERGE`], and refused otherwise.
+//! merged with a 3-way text merge only for the files in [`TEXT_MERGE`] (and the smoke suite's
+//! split files), and refused otherwise.
 
 use std::collections::BTreeMap;
 
@@ -21,7 +22,7 @@ const HISTORY: u32 = 500;
 const TOKEN_TTL: u64 = 900;
 /// The map's path in the repository.
 pub const MAP_PATH: &str = "ci/workers.toml";
-/// The files both sides may change, merged line by line ([`merge3`]).
+/// The files both sides may change, merged with a 3-way text merge ([`merge3`]).
 pub const TEXT_MERGE: [&str; 5] = [
     lanes::SMOKE,
     "docs/plans/README.md",
@@ -30,6 +31,21 @@ pub const TEXT_MERGE: [&str; 5] = [
     "Cargo.toml",
     ".pigeon/ci.toml",
 ];
+/// Whether both sides' changes to `path` are merged as text: [`TEXT_MERGE`], or any file of the
+/// smoke suite ([`lanes::is_smoke`]).
+fn text_merged(path: &str) -> bool {
+    TEXT_MERGE.contains(&path) || lanes::is_smoke(path)
+}
+
+/// How `path` is merged: the smoke suite's area modules (under [`lanes::SMOKE_DIR`]) join two
+/// different insertions at one place ([`merge3::Options::union_insertions`]); since every
+/// scenario there is a whole function, two branches appending one each is not a real conflict.
+fn merge_options(path: &str) -> merge3::Options {
+    merge3::Options {
+        union_insertions: path.starts_with(lanes::SMOKE_DIR) && lanes::is_smoke(path),
+    }
+}
+
 /// The map when main has none, or one that does not parse: docs merge alone, and everything
 /// else is core's, so every other change is tested and deployed as today.
 const FALLBACK: &str = r#"
@@ -291,7 +307,7 @@ pub async fn rebase_onto_main(
             continue;
         }
         let same_mode = matches!((ours, theirs), (Some((a, _)), Some((b, _))) if a == b);
-        if !TEXT_MERGE.contains(&path.as_str()) || !same_mode {
+        if !text_merged(path) || !same_mode {
             refused.push(path.clone());
             continue;
         }
@@ -300,18 +316,22 @@ pub async fn rebase_onto_main(
         let ours_text = text(git::read_file(&session.remote, commit, path).await?);
         let theirs_text = text(pack::read_path(&seen.objects, &seen.main, path).map_err(bad)?);
         let joined = match (base, ours_text, theirs_text) {
-            (Some(b), Some(o), Some(t)) => merge3::merge(&b, &o, &t),
-            // Added on both sides: merge against an empty base, so only identical text joins.
-            (None, Some(o), Some(t)) => merge3::merge("", &o, &t),
+            (Some(b), Some(o), Some(t)) => {
+                Some(merge3::try_merge_with(&b, &o, &t, merge_options(path)))
+            }
+            // Added on both sides: merge against an empty base, so only identical text joins
+            // (or one side's file starts or ends with the other's).
+            (None, Some(o), Some(t)) => Some(merge3::try_merge("", &o, &t)),
             _ => None,
         };
         match (joined, ours) {
-            (Some(text), Some((mode, _))) => {
+            (Some(Ok(text)), Some((mode, _))) => {
                 let blob = Object::blob(text.as_bytes());
                 changes.insert(path.clone(), Some((mode.clone(), blob.id())));
                 new_blobs.push(blob);
                 merged.push(path.clone());
             }
+            (Some(Err(why)), _) => refused.push(format!("{path} ({why})")),
             _ => refused.push(path.clone()),
         }
     }

@@ -14,8 +14,16 @@ use std::collections::BTreeSet;
 
 use serde::Deserialize;
 
-/// The test-shared path. It belongs to no entry in the map.
+/// The smoke suite's root file. It belongs to no entry in the map.
 pub const SMOKE: &str = "tests/smoke.rs";
+
+/// The directory of the smoke suite's area modules.
+pub const SMOKE_DIR: &str = "tests/smoke/";
+
+/// True when the path is a file of the smoke suite: the root or an area module.
+pub fn is_smoke(path: &str) -> bool {
+    path == SMOKE || (path.starts_with(SMOKE_DIR) && path.ends_with(".rs"))
+}
 
 /// The name the one required core Worker must have.
 const CORE: &str = "core";
@@ -82,7 +90,7 @@ pub enum Owner<'a> {
     Docs,
     /// The path is shared by every Worker, or matched nothing.
     Shared,
-    /// The path is the test-shared path, [`SMOKE`].
+    /// The path is a file of the smoke suite.
     Smoke,
     /// The path runs the tests and deploys nothing.
     Checks,
@@ -97,7 +105,7 @@ pub struct Affected {
     pub docs_only: bool,
     /// True when some changed path is shared.
     pub shared: bool,
-    /// True when [`SMOKE`] is among the changed paths.
+    /// True when a file of the smoke suite is among the changed paths.
     pub smoke: bool,
     /// The names of the Workers to deploy.
     pub workers: BTreeSet<String>,
@@ -177,11 +185,11 @@ pub fn matches(pattern: &str, path: &str) -> bool {
 impl Map {
     /// Returns the entry that owns the path.
     ///
-    /// The order is [`SMOKE`] first, then docs, then shared, then checks; the first of those to
-    /// match wins. Otherwise the path belongs to every Worker whose patterns match it, and a path
-    /// nothing matches is shared.
+    /// The order is the smoke suite first, then docs, then shared, then checks; the
+    /// first of those to match wins. Otherwise the path belongs to every Worker whose patterns
+    /// match it, and a path nothing matches is shared.
     pub fn owner(&self, path: &str) -> Owner<'_> {
-        if path == SMOKE {
+        if is_smoke(path) {
             return Owner::Smoke;
         }
         if self.docs.iter().any(|p| matches(p, path)) {
@@ -212,8 +220,8 @@ impl Map {
 
     /// Classifies a set of changed paths.
     ///
-    /// A change to [`SMOKE`] or to a checks path runs the tests and deploys nothing by itself; it
-    /// never makes the change shared or docs-only. A shared path deploys every Worker.
+    /// A change to the smoke suite or to a checks path runs the tests and deploys nothing by
+    /// itself; it never makes the change shared or docs-only. A shared path deploys every Worker.
     pub fn classify(&self, changed: &[&str]) -> Affected {
         let mut docs_only = !changed.is_empty();
         let mut shared = false;
@@ -258,7 +266,7 @@ impl Map {
     /// Compares a branch's changes with what main changed since the same base.
     ///
     /// A retest is needed when the branch is not docs-only and main moved a shared path,
-    /// [`SMOKE`], or a path owned by a Worker the branch affects.
+    /// the smoke suite, or a path owned by a Worker the branch affects.
     pub fn overlap(&self, branch: &[&str], main_moved: &[&str]) -> Overlap {
         let on_branch: BTreeSet<&str> = branch.iter().copied().collect();
         let on_main: BTreeSet<&str> = main_moved.iter().copied().collect();
