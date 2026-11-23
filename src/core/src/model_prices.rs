@@ -6,6 +6,10 @@
 //! The table only serves a fast local estimate. The AI Gateway's per-request cost (its log's
 //! `cost`, which already includes cache reads and writes) is the truth. Pure: values in, values
 //! out.
+//!
+//! OpenAI's prices are from OpenAI's pricing page, as given by the person on 2026-11-24: input,
+//! cached input and output, and a dearer long-context price once a request's input passes 272,000
+//! tokens. OpenAI does not bill cache writes apart, so a write costs the input price.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -66,6 +70,37 @@ const FABLE: Price = Price {
     cache_write_1h: 16_000_000,
 };
 
+/// An OpenAI price: cache writes cost the input price, as OpenAI bills no cache write apart.
+const fn openai(input: u64, cache_read: u64, output: u64) -> Price {
+    Price {
+        input,
+        output,
+        cache_read,
+        cache_write_5m: input,
+        cache_write_1h: input,
+    }
+}
+
+/// The input tokens above which OpenAI bills a request at its long-context price.
+const LONG_CONTEXT: u64 = 272_000;
+
+/// The price of `gpt-6.2-astra`, short context.
+const ASTRA: Price = openai(8_000_000, 400_000, 40_000_000);
+/// The price of `gpt-6.2-astra`, long context.
+const ASTRA_LONG: Price = openai(16_000_000, 800_000, 60_000_000);
+/// The price of `gpt-6.2-sol`, short context.
+const SOL: Price = openai(2_000_000, 100_000, 10_000_000);
+/// The price of `gpt-6.2-sol`, long context.
+const SOL_LONG: Price = openai(4_000_000, 200_000, 15_000_000);
+/// The price of `gpt-6.1-terra`, short context.
+const TERRA: Price = openai(1_000_000, 50_000, 5_000_000);
+/// The price of `gpt-6.1-terra`, long context.
+const TERRA_LONG: Price = openai(2_000_000, 100_000, 7_500_000);
+/// The price of `gpt-6-luna`, short context.
+const LUNA: Price = openai(100_000, 10_000, 500_000);
+/// The price of `gpt-6-luna`, long context.
+const LUNA_LONG: Price = openai(200_000, 20_000, 750_000);
+
 /// True when `model` is `name` or is `name` followed by a dash and a suffix.
 fn is_model(model: &str, name: &str) -> bool {
     match model.strip_prefix(name) {
@@ -74,21 +109,43 @@ fn is_model(model: &str, name: &str) -> bool {
     }
 }
 
-/// Looks up the price for a model.
+/// A model's short price and, when it has one, its long-context price.
+fn lookup(model: &str) -> (Price, Option<Price>) {
+    let model = canonical_model(model);
+    if is_model(&model, "claude-opus-5-5") {
+        (OPUS, None)
+    } else if is_model(&model, "claude-sonnet-5-5") {
+        (SONNET, None)
+    } else if is_model(&model, "claude-haiku-5-5") {
+        (HAIKU, None)
+    } else if is_model(&model, "gpt-6.2-astra") {
+        (ASTRA, Some(ASTRA_LONG))
+    } else if is_model(&model, "gpt-6.2-sol") {
+        (SOL, Some(SOL_LONG))
+    } else if is_model(&model, "gpt-6.1-terra") {
+        (TERRA, Some(TERRA_LONG))
+    } else if is_model(&model, "gpt-6-luna") {
+        (LUNA, Some(LUNA_LONG))
+    } else {
+        (FABLE, None)
+    }
+}
+
+/// Looks up the price for a model, at short context.
 ///
 /// The name is read as [`canonical_model`] reads it, so `anthropic/claude-opus-5.5` matches. A
 /// dated name such as `claude-sonnet-5-5-20261101` matches by prefix. An unknown model gets the
 /// dearest price, so it is never under-counted.
 pub fn price(model: &str) -> Price {
-    let model = canonical_model(model);
-    if is_model(&model, "claude-opus-5-5") {
-        OPUS
-    } else if is_model(&model, "claude-sonnet-5-5") {
-        SONNET
-    } else if is_model(&model, "claude-haiku-5-5") {
-        HAIKU
-    } else {
-        FABLE
+    lookup(model).0
+}
+
+/// The price for a request of `model` whose input (fresh, cached and written) is `input` tokens:
+/// the long-context price when the model has one and `input` passes 272,000 tokens.
+pub fn price_at(model: &str, input: u64) -> Price {
+    match lookup(model) {
+        (_, Some(long)) if input > LONG_CONTEXT => long,
+        (short, _) => short,
     }
 }
 
@@ -108,8 +165,6 @@ fn round_up_micros(total: u128) -> u64 {
 /// If `cache_creation` gives a 5-minute and 1-hour split, it is used. Otherwise all
 /// cache-creation tokens are priced as 5-minute writes.
 pub fn cost_micros(model: &str, usage: &Value) -> u64 {
-    let p = price(model);
-
     let (write_5m, write_1h) = match usage.get("cache_creation") {
         Some(split) if split.is_object() => (
             tokens(split, "ephemeral_5m_input_tokens"),
@@ -117,7 +172,11 @@ pub fn cost_micros(model: &str, usage: &Value) -> u64 {
         ),
         _ => (tokens(usage, "cache_creation_input_tokens"), 0),
     };
-
+    let input = tokens(usage, "input_tokens")
+        .saturating_add(tokens(usage, "cache_read_input_tokens"))
+        .saturating_add(write_5m)
+        .saturating_add(write_1h);
+    let p = price_at(model, input);
     let parts: [(u64, u64); 5] = [
         (tokens(usage, "input_tokens"), p.input),
         (tokens(usage, "output_tokens"), p.output),
@@ -137,7 +196,7 @@ pub fn cost_micros(model: &str, usage: &Value) -> u64 {
 /// All input is priced as fresh input. Then `max_tokens` is priced as output. The result is
 /// rounded up.
 pub fn estimate_micros(model: &str, input_tokens: u64, max_tokens: u64) -> u64 {
-    let p = price(model);
+    let p = price_at(model, input_tokens);
     let total = (u128::from(input_tokens) * u128::from(p.input))
         .saturating_add(u128::from(max_tokens) * u128::from(p.output));
     round_up_micros(total)

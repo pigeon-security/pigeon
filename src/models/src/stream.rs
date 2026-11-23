@@ -40,6 +40,10 @@ pub struct Reading {
     pub error: Option<String>,
     /// Whether the provider said the answer is complete.
     pub done: bool,
+    /// Chat Completions: the block holding the text, once there is text.
+    text_at: Option<usize>,
+    /// Chat Completions: each tool call's own index, with the block it builds.
+    calls: Vec<(u64, usize)>,
 }
 
 /// The longest line kept while waiting for its end: an event larger than this is an error.
@@ -92,10 +96,16 @@ impl Reading {
 
     /// Reads one whole event's data.
     fn event(&mut self, dialect: Dialect, data: &str) {
+        if dialect == Dialect::OpenAi && data.trim() == "[DONE]" {
+            self.finish_calls();
+            self.done = true;
+            return;
+        }
         let Ok(v) = serde_json::from_str::<Value>(data) else {
             return;
         };
         match dialect {
+            Dialect::OpenAi => self.chunk(&v),
             Dialect::Anthropic => match v["type"].as_str() {
                 Some("message_start") => {
                     let m = &v["message"];
@@ -127,6 +137,127 @@ impl Reading {
                 }
                 _ => {}
             },
+        }
+    }
+
+    /// Reads one Chat Completions chunk.
+    fn chunk(&mut self, v: &Value) {
+        if v["error"].is_object() {
+            let e = &v["error"];
+            let kind = e["type"].as_str().or(e["code"].as_str()).unwrap_or("error");
+            self.error = Some(format!(
+                "{kind}: {}",
+                e["message"]
+                    .as_str()
+                    .unwrap_or("the provider failed mid-stream")
+            ));
+            return;
+        }
+        if let Some(model) = v["model"].as_str() {
+            self.model = model.into();
+        }
+        let choice = &v["choices"][0];
+        if let Some(t) = choice["delta"]["content"].as_str()
+            && !t.is_empty()
+        {
+            self.text.push_str(t);
+            let at = match self.text_at {
+                Some(at) => at,
+                None => {
+                    self.blocks.push(json!({"type": "text", "text": ""}));
+                    self.partial.push(String::new());
+                    let at = self.blocks.len() - 1;
+                    self.text_at = Some(at);
+                    at
+                }
+            };
+            if let Some(m) = self.blocks.get_mut(at).and_then(Value::as_object_mut) {
+                append(m, "text", t);
+            }
+        }
+        if let Some(calls) = choice["delta"]["tool_calls"].as_array() {
+            for (n, call) in calls.iter().enumerate() {
+                self.tool_call(n as u64, call);
+            }
+        }
+        if let Some(r) = choice["finish_reason"].as_str() {
+            self.stop_reason = Some(
+                match r {
+                    "stop" => "end_turn",
+                    "tool_calls" => "tool_use",
+                    "length" => "max_tokens",
+                    "content_filter" => "refusal",
+                    other => other,
+                }
+                .into(),
+            );
+            self.finish_calls();
+        }
+        let u = &v["usage"];
+        if u.is_object() {
+            let prompt = u["prompt_tokens"].as_u64();
+            let cached = u["prompt_tokens_details"]["cached_tokens"]
+                .as_u64()
+                .unwrap_or(0);
+            self.tokens_in = prompt.map(|p| p.saturating_sub(cached)).or(self.tokens_in);
+            self.cache_read = prompt.map(|_| cached).or(self.cache_read);
+            self.tokens_out = u["completion_tokens"].as_u64().or(self.tokens_out);
+            self.cache_write = Some(0);
+        }
+    }
+
+    /// Reads one entry of a chunk's `tool_calls`; `n` is its place when it names no index.
+    fn tool_call(&mut self, n: u64, call: &Value) {
+        let index = call["index"].as_u64().unwrap_or(n);
+        let at = match self.calls.iter().find(|(i, _)| *i == index) {
+            Some((_, at)) => *at,
+            None => {
+                if self.calls.len() as u64 > MAX_BLOCK {
+                    self.error = Some(format!("the stream named more than {MAX_BLOCK} tool calls"));
+                    return;
+                }
+                self.blocks
+                    .push(json!({"type": "tool_use", "id": "", "name": "", "input": {}}));
+                self.partial.push(String::new());
+                let at = self.blocks.len() - 1;
+                self.calls.push((index, at));
+                at
+            }
+        };
+        let f = &call["function"];
+        if let Some(m) = self.blocks.get_mut(at).and_then(Value::as_object_mut) {
+            if let Some(id) = call["id"].as_str() {
+                m.insert("id".into(), json!(id));
+            }
+            if let Some(name) = f["name"].as_str() {
+                append(m, "name", name);
+            }
+        }
+        if let (Some(a), Some(buf)) = (f["arguments"].as_str(), self.partial.get_mut(at)) {
+            buf.push_str(a);
+        }
+    }
+
+    /// Parses each tool call's joined arguments. Invalid JSON becomes `{}` and an error note.
+    fn finish_calls(&mut self) {
+        for (_, at) in self.calls.clone() {
+            let Some(raw) = self.partial.get_mut(at).map(std::mem::take) else {
+                continue;
+            };
+            if raw.trim().is_empty() {
+                continue;
+            }
+            let input = match serde_json::from_str::<Value>(&raw) {
+                Ok(v) if v.is_object() => v,
+                _ => {
+                    self.error
+                        .get_or_insert_with(|| format!("tool input for call {at} was not JSON"));
+                    json!({})
+                }
+            };
+            if let Some(m) = self.blocks.get_mut(at).and_then(Value::as_object_mut) {
+                m.insert("input".into(), input);
+            }
         }
     }
 

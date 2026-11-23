@@ -109,13 +109,22 @@ fn models_turns_blocks_and_lanes() {
         &req,
         &json!(["compact-2026-01-12", "compact-2026-01-12"]),
         "claude-haiku-5-5",
+        pigeon_models::Dialect::Anthropic,
     )
     .unwrap();
     assert_eq!(t.model, "claude-haiku-5-5");
     assert_eq!(t.body["stream"], true);
     assert_eq!(t.body["max_tokens"], turn::DEFAULT_MAX_TOKENS);
     assert_eq!(t.beta.as_deref(), Some("compact-2026-01-12"));
-    let refused = |r: Value, betas: Value| turn::turn(&r, &betas, "claude-haiku-5-5").unwrap_err();
+    let refused = |r: Value, betas: Value| {
+        turn::turn(
+            &r,
+            &betas,
+            "claude-haiku-5-5",
+            pigeon_models::Dialect::Anthropic,
+        )
+        .unwrap_err()
+    };
     assert!(
         refused(
             json!({ "messages": [{ "role": "user", "content": "x" }], "stream": false }),

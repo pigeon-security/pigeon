@@ -40,6 +40,7 @@ pub mod billing;
 pub mod cache;
 pub mod daily;
 pub mod jobs;
+pub mod openai;
 pub mod runner;
 pub mod stream;
 pub mod turn;
@@ -178,6 +179,9 @@ pub enum Billing {
 pub enum Dialect {
     /// The Claude Platform's Messages API.
     Anthropic,
+    /// OpenAI's Chat Completions API.
+    #[serde(rename = "openai")]
+    OpenAi,
 }
 
 /// A request in the common shape.
@@ -217,6 +221,7 @@ impl Dialect {
     pub fn path(self) -> &'static str {
         match self {
             Dialect::Anthropic => "v1/messages",
+            Dialect::OpenAi => "chat/completions",
         }
     }
 
@@ -224,6 +229,7 @@ impl Dialect {
     pub fn headers(self) -> &'static [(&'static str, &'static str)] {
         match self {
             Dialect::Anthropic => &[("anthropic-version", "2023-06-01")],
+            Dialect::OpenAi => &[],
         }
     }
 
@@ -240,6 +246,20 @@ impl Dialect {
                     b["system"] = json!(s);
                 }
                 b
+            }
+            Dialect::OpenAi => {
+                let mut messages = Vec::new();
+                if let Some(s) = &ask.system {
+                    messages.push(json!({ "role": "system", "content": s }));
+                }
+                if let Some(list) = ask.messages.as_array() {
+                    messages.extend(list.iter().cloned());
+                }
+                json!({
+                    "model": ask.model,
+                    "max_completion_tokens": ask.max_tokens,
+                    "messages": messages,
+                })
             }
         }
     }
@@ -263,6 +283,31 @@ impl Dialect {
                     stop_reason: v["stop_reason"].as_str().map(String::from),
                     tokens_in: v["usage"]["input_tokens"].as_u64(),
                     tokens_out: v["usage"]["output_tokens"].as_u64(),
+                })
+            }
+            Dialect::OpenAi => {
+                let choice = v["choices"]
+                    .get(0)
+                    .ok_or_else(|| bad(&format!("not a Chat Completions answer: {v}")))?;
+                let finish = choice["finish_reason"].as_str().map(|r| {
+                    match r {
+                        "stop" => "end_turn",
+                        "tool_calls" => "tool_use",
+                        "length" => "max_tokens",
+                        "content_filter" => "refusal",
+                        other => other,
+                    }
+                    .to_string()
+                });
+                Ok(Reply {
+                    model: v["model"].as_str().unwrap_or_default().into(),
+                    text: choice["message"]["content"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .into(),
+                    stop_reason: finish,
+                    tokens_in: v["usage"]["prompt_tokens"].as_u64(),
+                    tokens_out: v["usage"]["completion_tokens"].as_u64(),
                 })
             }
         }
@@ -293,7 +338,39 @@ impl Dialect {
                     )))
                 }
             }
+            Dialect::OpenAi => {
+                let headers = Headers::new();
+                headers.set("Authorization", &format!("Bearer {key}"))?;
+                let mut init = RequestInit::new();
+                init.with_method(Method::Get).with_headers(headers);
+                let url = "https://api.openai.com/v1/models";
+                let mut r = Fetch::Request(Request::new_with_init(url, &init)?)
+                    .send()
+                    .await?;
+                let status = r.status_code();
+                let text = r.text().await?;
+                if (200..300).contains(&status) {
+                    Ok("OpenAI accepts it".into())
+                } else {
+                    let text = if key.is_empty() {
+                        text
+                    } else {
+                        text.replace(key, "[key]")
+                    };
+                    let shown: String = text.chars().take(200).collect();
+                    Err(bad(&format!("OpenAI refused it: {status}: {shown}")))
+                }
+            }
         }
+    }
+}
+
+/// A checked Messages `body` in the shape `dialect` takes: unchanged for Anthropic, translated
+/// for OpenAI.
+fn translated(dialect: Dialect, body: Value) -> Result<Value> {
+    match dialect {
+        Dialect::Anthropic => Ok(body),
+        Dialect::OpenAi => openai::request(&body).map_err(|e| bad(&e)),
     }
 }
 
@@ -514,12 +591,12 @@ impl Models {
                 if !args["prompt"].is_null() || !args["messages"].is_null() {
                     return Err(bad("give `request`, or `prompt`/`messages`, not both"));
                 }
-                let t =
-                    turn::turn(request, &args["betas"], p.default_model).map_err(|e| bad(&e))?;
+                let t = turn::turn(request, &args["betas"], p.default_model, p.dialect)
+                    .map_err(|e| bad(&e))?;
                 if let Some(b) = t.beta {
                     headers.push(("anthropic-beta".into(), b));
                 }
-                (t.model, t.body)
+                (t.model, translated(p.dialect, t.body)?)
             }
             None => {
                 if !args["betas"].is_null() {
@@ -528,6 +605,9 @@ impl Models {
                 let asked = ask(args, p)?;
                 let mut body = p.dialect.body(&asked);
                 body["stream"] = json!(true);
+                if p.dialect == Dialect::OpenAi {
+                    body["stream_options"] = json!({ "include_usage": true });
+                }
                 (asked.model, body)
             }
         };
@@ -907,7 +987,7 @@ impl Models {
                         "task": { "type": "string", "description": "A short label, as for models_run." },
                         "timeout_min": { "type": "integer", "description": "1 to 14; 10 by default." },
                         "notify": { "type": "string", "description": "An https URL to POST to when the job ends." },
-                        "request": { "type": "object", "description": "Instead of prompt or messages: a whole Messages request (system blocks, tools, tool_choice, thinking, cache_control and the like), as an AI agent's turn sends it. The job streams it; models_result answers its content blocks and usage." },
+                        "request": { "type": "object", "description": "Instead of prompt or messages: a whole Messages request (system blocks, tools, tool_choice, thinking, cache_control and the like), as an AI agent's turn sends it, for any provider: an Anthropic Messages body, translated for OpenAI. The job streams it; models_result answers its content blocks and usage." },
                         "betas": { "type": "array", "items": { "type": "string", "enum": turn::BETAS }, "description": "With `request`: the provider betas it uses." },
                         "lane": { "type": "string", "enum": ["default", "ai-agents"], "description": "`ai-agents` for an AI agent's turn, which runs beside other jobs with its own cap; `default` otherwise." }
                     }

@@ -4,6 +4,8 @@
 
 use serde_json::{Value, json};
 
+use super::Dialect;
+
 /// The betas a turn may ask for, sent as `anthropic-beta`.
 pub const BETAS: [&str; 3] = [
     "compact-2026-01-12",
@@ -52,19 +54,25 @@ pub struct Turn {
 }
 
 /// Checks `request` (a Messages body) and `betas` (null, or an array of names), naming
-/// `default_model` when the request names none.
-pub fn turn(request: &Value, betas: &Value, default_model: &str) -> Result<Turn, String> {
+/// `default_model` when the request names none. The model is checked for the provider's
+/// `dialect`. The body stays a Messages body: translating it for OpenAI is the caller's step.
+pub fn turn(
+    request: &Value,
+    betas: &Value,
+    default_model: &str,
+    dialect: Dialect,
+) -> Result<Turn, String> {
     let map = request
         .as_object()
         .ok_or_else(|| "`request` must be a Messages request: an object".to_string())?;
 
     check_keys(map.contains_key("stream"), map.keys().map(String::as_str))?;
     check_messages(map.get("messages"))?;
-    let model = resolve_model(map.get("model"), default_model)?;
+    let model = resolve_model(map.get("model"), default_model, dialect)?;
     let max_tokens = resolve_max_tokens(map.get("max_tokens"))?;
     check_system(map.get("system"))?;
     check_tools(map.get("tools"))?;
-    let beta = resolve_betas(betas)?;
+    let beta = resolve_betas(betas, dialect)?;
 
     let mut body = map.clone();
     body.insert("model".to_string(), json!(model));
@@ -134,15 +142,39 @@ fn check_messages(messages: Option<&Value>) -> Result<(), String> {
     Ok(())
 }
 
-/// Picks the model: the one asked for, or the default. It must be a Claude model.
-fn resolve_model(model: Option<&Value>, default_model: &str) -> Result<String, String> {
+/// Picks the model: the one asked for, or the default. It must suit the provider.
+fn resolve_model(
+    model: Option<&Value>,
+    default_model: &str,
+    dialect: Dialect,
+) -> Result<String, String> {
     let name = match model {
         None => default_model,
         Some(Value::String(s)) if !s.is_empty() => s.as_str(),
         Some(_) => return Err("`model` must be a non-empty string".to_string()),
     };
-    if !name.starts_with("claude-") {
-        return Err("`model` must name a Claude model, such as claude-sonnet-5-5".to_string());
+    match dialect {
+        Dialect::Anthropic => {
+            if !name.starts_with("claude-") {
+                return Err(
+                    "`model` must name a Claude model, such as claude-sonnet-5-5".to_string(),
+                );
+            }
+        }
+        Dialect::OpenAi => {
+            let plain = !name.is_empty()
+                && name.len() <= 100
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':'));
+            if !plain {
+                return Err(
+                    "`model` must be a plain model id: letters, digits, `.`, `-`, `_` \
+                            and `:`, 100 characters at most"
+                        .to_string(),
+                );
+            }
+        }
     }
     Ok(name.to_string())
 }
@@ -212,7 +244,13 @@ fn check_tools(tools: Option<&Value>) -> Result<(), String> {
 }
 
 /// Turns the asked-for betas into a header value, or `None` when there are none.
-fn resolve_betas(betas: &Value) -> Result<Option<String>, String> {
+fn resolve_betas(betas: &Value, dialect: Dialect) -> Result<Option<String>, String> {
+    if dialect == Dialect::OpenAi
+        && betas.as_array().is_none_or(|l| !l.is_empty())
+        && !betas.is_null()
+    {
+        return Err("betas are Anthropic's: OpenAI takes none, so `betas` must be omitted".into());
+    }
     let list = match betas {
         Value::Null => return Ok(None),
         Value::Array(list) => list,

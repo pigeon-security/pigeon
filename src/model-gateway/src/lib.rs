@@ -41,14 +41,24 @@ fn gateway() -> ModelGateway {
     ModelGateway {
         models: Models {
             gateway: AI_GATEWAY.into(),
-            providers: vec![Provider {
-                slug: "anthropic",
-                alias: "default",
-                dialect: Dialect::Anthropic,
-                default_model: "claude-haiku-5-5",
-                key_help: "A Claude Platform API key, from the Claude Console's API keys page.",
-                billing: Some(Billing::AnthropicAdmin),
-            }],
+            providers: vec![
+                Provider {
+                    slug: "anthropic",
+                    alias: "default",
+                    dialect: Dialect::Anthropic,
+                    default_model: "claude-haiku-5-5",
+                    key_help: "A Claude Platform API key, from the Claude Console's API keys page.",
+                    billing: Some(Billing::AnthropicAdmin),
+                },
+                Provider {
+                    slug: "openai",
+                    alias: "default",
+                    dialect: Dialect::OpenAi,
+                    default_model: "gpt-6.2-sol",
+                    key_help: "An OpenAI API key, from the OpenAI platform's API keys page.",
+                    billing: None,
+                },
+            ],
             secrets_page: format!("https://{HOST}/access#credentials"),
             host: HOST.into(),
             proxy_host: PROXY_HOST.into(),

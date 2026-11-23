@@ -556,7 +556,8 @@ fn ai_agents_loop_budgets_tools_and_turns() {
         pigeon_models::turn::turn(
             &transcript::request(&spec, &messages),
             &Value::Null,
-            "claude-haiku-5-5"
+            "claude-haiku-5-5",
+            pigeon_models::Dialect::Anthropic
         )
         .is_ok()
     );

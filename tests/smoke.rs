@@ -429,3 +429,374 @@ fn platform_cost_daily_anthropic_unavailable() {
     assert_eq!(num_of(&a["total"]), 6.0);
     assert_eq!(a["unavailable"][0]["source"], "Anthropic");
 }
+
+#[test]
+fn models_openai_request_translation() {
+    use pigeon_models::openai;
+    let req = json!({
+        "model": "gpt-6.2-sol",
+        "max_tokens": 500,
+        "stream": true,
+        "system": [
+            { "type": "text", "text": "rules", "cache_control": { "type": "ephemeral" } },
+            { "type": "text", "text": "more" }
+        ],
+        "tools": [
+            { "name": "run", "description": "Run it", "input_schema": { "type": "object" }, "cache_control": { "type": "ephemeral" } },
+            { "type": "web_search_20260101", "name": "web_search" }
+        ],
+        "tool_choice": { "type": "any" },
+        "thinking": { "type": "adaptive" },
+        "context_management": { "edits": [] },
+        "metadata": { "user_id": "u" },
+        "top_k": 5,
+        "temperature": 0.5,
+        "top_p": 0.9,
+        "stop_sequences": ["a", "b", "c", "d", "e"],
+        "output_config": { "effort": "high" },
+        "messages": [
+            { "role": "user", "content": "go" },
+            { "role": "assistant", "content": [
+                { "type": "thinking", "thinking": "hm", "signature": "s" },
+                { "type": "redacted_thinking", "data": "x" },
+                { "type": "tool_use", "id": "t1", "name": "run", "input": { "cmd": "ls" } },
+                { "type": "tool_use", "id": "t2", "name": "run", "input": { "cmd": "pwd" } }
+            ] },
+            { "role": "user", "content": [
+                { "type": "tool_result", "tool_use_id": "t1", "content": "a.txt" },
+                { "type": "tool_result", "tool_use_id": "t2", "is_error": true,
+                  "content": [{ "type": "text", "text": "no" }, { "type": "text", "text": "way" }] },
+                { "type": "text", "text": "now?", "cache_control": { "type": "ephemeral" } },
+                { "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": "" } }
+            ] },
+            { "role": "assistant", "content": [{ "type": "text", "text": "done" }] }
+        ]
+    });
+    let out = openai::request(&req).unwrap();
+    assert_eq!(out["model"], "gpt-6.2-sol");
+    assert_eq!(out["max_completion_tokens"], 500);
+    assert!(out.get("max_tokens").is_none());
+    assert_eq!(out["stream"], true);
+    assert_eq!(out["stream_options"], json!({ "include_usage": true }));
+    assert_eq!(out["reasoning_effort"], "high");
+    assert_eq!(out["stop"], json!(["a", "b", "c", "d"]));
+    assert_eq!(out["temperature"], 0.5);
+    assert_eq!(out["top_p"], 0.9);
+    for k in [
+        "thinking",
+        "context_management",
+        "metadata",
+        "top_k",
+        "cache_control",
+    ] {
+        assert!(out.get(k).is_none(), "{k}");
+    }
+    assert_eq!(out["tool_choice"], "required");
+    assert_eq!(
+        out["tools"],
+        json!([{ "type": "function", "function": { "name": "run", "description": "Run it", "parameters": { "type": "object" } } }])
+    );
+    let m = out["messages"].as_array().unwrap();
+    assert_eq!(m[0], json!({ "role": "system", "content": "rules\nmore" }));
+    assert_eq!(m[1], json!({ "role": "user", "content": "go" }));
+    assert_eq!(m[2]["role"], "assistant");
+    assert!(m[2]["content"].is_null());
+    assert_eq!(m[2]["tool_calls"][0]["id"], "t1");
+    assert_eq!(m[2]["tool_calls"][0]["type"], "function");
+    assert_eq!(
+        m[2]["tool_calls"][1]["function"],
+        json!({ "name": "run", "arguments": "{\"cmd\":\"pwd\"}" })
+    );
+    assert_eq!(
+        m[3],
+        json!({ "role": "tool", "tool_call_id": "t1", "content": "a.txt" })
+    );
+    assert_eq!(
+        m[4],
+        json!({ "role": "tool", "tool_call_id": "t2", "content": "Error: no\nway" })
+    );
+    assert_eq!(
+        m[5],
+        json!({ "role": "user", "content": "now?\n[image omitted]" })
+    );
+    assert_eq!(m[6], json!({ "role": "assistant", "content": "done" }));
+    assert_eq!(m.len(), 7);
+
+    // The other tool choices, an unknown effort and a string system prompt.
+    let small = |extra: Value| {
+        let mut r = json!({
+            "system": "s",
+            "tools": [{ "name": "f", "input_schema": {} }],
+            "messages": [{ "role": "user", "content": "x" }]
+        });
+        for (k, v) in extra.as_object().unwrap() {
+            r[k] = v.clone();
+        }
+        openai::request(&r).unwrap()
+    };
+    assert_eq!(
+        small(json!({ "tool_choice": { "type": "auto" } }))["tool_choice"],
+        "auto"
+    );
+    assert_eq!(
+        small(json!({ "tool_choice": { "type": "tool", "name": "f" } }))["tool_choice"],
+        json!({ "type": "function", "function": { "name": "f" } })
+    );
+    let odd = small(json!({ "output_config": { "effort": "max" } }));
+    assert!(odd.get("reasoning_effort").is_none());
+    assert_eq!(odd["messages"][0]["content"], "s");
+}
+
+#[test]
+fn models_openai_stream() {
+    use pigeon_models::Dialect;
+    use pigeon_models::stream::Reading;
+    let lines = |chunks: &[Value]| {
+        let mut s = String::new();
+        for c in chunks {
+            s.push_str(&format!("data: {c}\n\n"));
+        }
+        s
+    };
+    let sse = lines(&[
+        json!({ "model": "gpt-6.2-sol", "choices": [{ "index": 0, "delta": { "role": "assistant", "content": "He" } }] }),
+        json!({ "model": "gpt-6.2-sol", "choices": [{ "index": 0, "delta": { "content": "llo" } }] }),
+        json!({ "choices": [{ "index": 0, "delta": { "tool_calls": [
+            { "index": 0, "id": "c1", "type": "function", "function": { "name": "run", "arguments": "" } },
+            { "index": 1, "id": "c2", "type": "function", "function": { "name": "read", "arguments": "" } }
+        ] } }] }),
+        json!({ "choices": [{ "index": 0, "delta": { "tool_calls": [{ "index": 0, "function": { "arguments": "{\"cmd\":" } }] } }] }),
+        json!({ "choices": [{ "index": 0, "delta": { "tool_calls": [{ "index": 1, "function": { "arguments": "{\"path\":\"a\"}" } }] } }] }),
+        json!({ "choices": [{ "index": 0, "delta": { "tool_calls": [{ "index": 0, "function": { "arguments": "\"ls\"}" } }] } }] }),
+        json!({ "choices": [{ "index": 0, "delta": {}, "finish_reason": "tool_calls" }] }),
+        json!({ "model": "gpt-6.2-sol", "choices": [], "usage": {
+            "prompt_tokens": 1000, "completion_tokens": 40, "total_tokens": 1040,
+            "prompt_tokens_details": { "cached_tokens": 600 } } }),
+    ]) + "data: [DONE]\n\n";
+    let mut r = Reading::default();
+    // Split anywhere: the reading does not care.
+    for part in sse.as_bytes().chunks(7) {
+        r.feed(Dialect::OpenAi, part);
+    }
+    r.end(Dialect::OpenAi);
+    assert!(r.done);
+    assert_eq!(r.error, None);
+    assert_eq!(r.model, "gpt-6.2-sol");
+    assert_eq!(r.text, "Hello");
+    assert_eq!(r.stop_reason.as_deref(), Some("tool_use"));
+    assert_eq!(
+        r.content(),
+        json!([
+            { "type": "text", "text": "Hello" },
+            { "type": "tool_use", "id": "c1", "name": "run", "input": { "cmd": "ls" } },
+            { "type": "tool_use", "id": "c2", "name": "read", "input": { "path": "a" } }
+        ])
+    );
+    assert_eq!(r.tokens_in, Some(400));
+    assert_eq!(r.cache_read, Some(600));
+    assert_eq!(r.tokens_out, Some(40));
+    assert_eq!(r.cache_write, Some(0));
+    let u = r.usage();
+    assert_eq!(u["input_tokens"], 400);
+    assert_eq!(u["cache_read_input_tokens"], 600);
+    assert_eq!(u["cache_creation_input_tokens"], 0);
+
+    // Finish reasons, and cached tokens above the prompt saturate.
+    for (from, to) in [
+        ("stop", "end_turn"),
+        ("length", "max_tokens"),
+        ("content_filter", "refusal"),
+        ("function_call", "function_call"),
+    ] {
+        let mut r = Reading::default();
+        let s = lines(&[
+            json!({ "choices": [{ "delta": { "content": "x" }, "finish_reason": from }] }),
+            json!({ "choices": [], "usage": { "prompt_tokens": 5, "completion_tokens": 1,
+                "prompt_tokens_details": { "cached_tokens": 9 } } }),
+        ]);
+        r.feed(Dialect::OpenAi, s.as_bytes());
+        r.end(Dialect::OpenAi);
+        assert_eq!(r.stop_reason.as_deref(), Some(to));
+        assert_eq!(r.tokens_in, Some(0));
+        assert!(!r.done);
+    }
+
+    // Bad tool arguments become {} and an error note; an error object is the error.
+    let mut r = Reading::default();
+    let s = lines(&[
+        json!({ "choices": [{ "delta": { "tool_calls": [{ "index": 0, "id": "c", "function": { "name": "f", "arguments": "{oops" } }] } }] }),
+        json!({ "choices": [{ "delta": {}, "finish_reason": "tool_calls" }] }),
+    ]);
+    r.feed(Dialect::OpenAi, s.as_bytes());
+    assert_eq!(r.content()[0]["input"], json!({}));
+    assert!(r.error.as_deref().unwrap().contains("not JSON"));
+    let mut r = Reading::default();
+    r.feed(
+        Dialect::OpenAi,
+        b"data: {\"error\": {\"type\": \"server_error\", \"message\": \"boom\"}}\n\n",
+    );
+    assert_eq!(r.error.as_deref(), Some("server_error: boom"));
+}
+
+#[test]
+fn models_openai_dialect_and_model_check() {
+    use pigeon_models::{Ask, Dialect, turn};
+    assert_eq!(Dialect::OpenAi.path(), "chat/completions");
+    assert!(Dialect::OpenAi.headers().is_empty());
+    assert_eq!(serde_json::to_value(Dialect::OpenAi).unwrap(), "openai");
+    let a = Ask {
+        model: "gpt-6.2-sol".into(),
+        system: Some("be brief".into()),
+        messages: json!([{ "role": "user", "content": "hi" }]),
+        max_tokens: 50,
+    };
+    let b = Dialect::OpenAi.body(&a);
+    assert_eq!(b["max_completion_tokens"], 50);
+    assert_eq!(
+        b["messages"][0],
+        json!({ "role": "system", "content": "be brief" })
+    );
+    assert_eq!(b["messages"][1]["content"], "hi");
+    let reply = Dialect::OpenAi
+        .reply(&json!({ "model": "gpt-6.2-sol",
+            "choices": [{ "message": { "content": "yo" }, "finish_reason": "stop" }],
+            "usage": { "prompt_tokens": 7, "completion_tokens": 2 } }))
+        .unwrap();
+    assert_eq!(reply.text, "yo");
+    assert_eq!(reply.stop_reason.as_deref(), Some("end_turn"));
+    assert_eq!(reply.tokens_in, Some(7));
+    assert_eq!(reply.tokens_out, Some(2));
+    assert!(Dialect::OpenAi.reply(&json!({})).is_err());
+
+    // The model check depends on the provider.
+    let msgs = json!([{ "role": "user", "content": "x" }]);
+    let with = |model: &str, d: Dialect| {
+        turn::turn(
+            &json!({ "model": model, "messages": msgs }),
+            &Value::Null,
+            "gpt-6.2-sol",
+            d,
+        )
+    };
+    assert!(with("gpt-6.2-sol", Dialect::OpenAi).is_ok());
+    assert!(with("ft:gpt-6_mini.v2", Dialect::OpenAi).is_ok());
+    assert!(with("bad model!", Dialect::OpenAi).is_err());
+    assert!(with(&"a".repeat(101), Dialect::OpenAi).is_err());
+    assert!(with("gpt-6.2-sol", Dialect::Anthropic).is_err());
+    assert!(with("claude-haiku-5-5", Dialect::Anthropic).is_ok());
+    let t = turn::turn(
+        &json!({ "messages": msgs }),
+        &Value::Null,
+        "gpt-6.2-sol",
+        Dialect::OpenAi,
+    )
+    .unwrap();
+    assert_eq!(t.model, "gpt-6.2-sol");
+    let betas = turn::turn(
+        &json!({ "messages": msgs }),
+        &json!(["compact-2026-01-12"]),
+        "gpt-6.2-sol",
+        Dialect::OpenAi,
+    );
+    assert!(betas.unwrap_err().contains("betas"));
+}
+
+#[test]
+fn models_openai_prices() {
+    use pigeon_core::ai_gateway::canonical_model;
+    use pigeon_core::model_prices::{cost_micros, estimate_micros, price};
+    assert_eq!(canonical_model("openai/gpt-6.2-sol"), "gpt-6.2-sol");
+    assert_eq!(
+        canonical_model("anthropic/claude-haiku-5.5"),
+        "claude-haiku-5-5"
+    );
+    let sol = price("openai/gpt-6.2-sol");
+    assert_eq!(
+        (sol.input, sol.cache_read, sol.output),
+        (2_000_000, 100_000, 10_000_000)
+    );
+    assert_eq!(
+        (sol.cache_write_5m, sol.cache_write_1h),
+        (sol.input, sol.input)
+    );
+    assert_eq!(price("gpt-6.2-astra").input, 8_000_000);
+    assert_eq!(price("gpt-6.1-terra").output, 5_000_000);
+    assert_eq!(price("gpt-6-luna").cache_read, 10_000);
+    // A dash suffix is the model; any other longer name is unknown, so the dearest.
+    assert_eq!(price("gpt-6.2-sol-mini"), sol);
+    assert_eq!(price("gpt-6.2-solar"), price("claude-fable-5-2"));
+    assert_eq!(price("gpt-9"), price("claude-fable-5-2"));
+    // Short context.
+    let short = json!({ "input_tokens": 100_000, "cache_read_input_tokens": 100_000,
+        "output_tokens": 1_000 });
+    assert_eq!(
+        cost_micros("gpt-6.2-sol", &short),
+        200_000 + 10_000 + 10_000
+    );
+    // Long context: input plus cache read over 272,000 uses the long price for everything.
+    let long = json!({ "input_tokens": 200_000, "cache_read_input_tokens": 100_000,
+        "output_tokens": 1_000 });
+    assert_eq!(cost_micros("gpt-6.2-sol", &long), 800_000 + 20_000 + 15_000);
+    let edge = json!({ "input_tokens": 272_000, "output_tokens": 0 });
+    assert_eq!(cost_micros("gpt-6.2-sol", &edge), 544_000);
+    assert_eq!(estimate_micros("gpt-6.2-sol", 272_001, 0), 1_088_004);
+    // Claude has no long price.
+    let big = json!({ "input_tokens": 500_000 });
+    assert_eq!(cost_micros("claude-sonnet-5-5", &big), 1_000_000);
+}
+
+#[test]
+fn models_openai_provider_declared_with_secret() {
+    use pigeon_models::{Billing, Dialect, Models, Provider};
+    // The declaration is in the wasm-only Worker crate: read it as text, then build the same.
+    let src = include_str!("../src/model-gateway/src/lib.rs");
+    for needle in [
+        "slug: \"openai\"",
+        "dialect: Dialect::OpenAi",
+        "default_model: \"gpt-6.2-sol\"",
+        "An OpenAI API key, from the OpenAI platform's API keys page.",
+    ] {
+        assert!(src.contains(needle), "{needle}");
+    }
+    assert!(src.find("slug: \"anthropic\"") < src.find("slug: \"openai\""));
+    let provider = |slug, dialect, billing| Provider {
+        slug,
+        alias: "default",
+        dialect,
+        default_model: "m",
+        key_help: "help",
+        billing,
+    };
+    let models = Models {
+        gateway: "pigeon".into(),
+        providers: vec![
+            provider(
+                "anthropic",
+                Dialect::Anthropic,
+                Some(Billing::AnthropicAdmin),
+            ),
+            provider("openai", Dialect::OpenAi, None),
+        ],
+        secrets_page: "https://x/secrets".into(),
+        host: "h".into(),
+        proxy_host: "p".into(),
+    };
+    let slots = models.secrets();
+    let open = slots
+        .iter()
+        .find(|s| s.name == "pigeon_openai_default")
+        .unwrap();
+    assert_eq!(
+        open.scopes,
+        vec![pigeon_core::ai_gateway::SECRET_SCOPE.to_string()]
+    );
+    assert_eq!(slots[0].name, "pigeon_anthropic_default");
+    let tools = models.tools();
+    for name in ["models_run", "models_submit"] {
+        let t = tools.iter().find(|t| t.name == name).unwrap();
+        assert_eq!(
+            t.input_schema["properties"]["provider"]["enum"],
+            json!(["anthropic", "openai"])
+        );
+    }
+}

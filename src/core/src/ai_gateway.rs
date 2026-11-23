@@ -471,10 +471,16 @@ fn tags_of<'de, D: serde::Deserializer<'de>>(
 
 /// One name for a model whichever form names it: without a provider prefix (`anthropic/`),
 /// lower case, with `-` for `.`. So a request's `claude-haiku-5-5` and a log's
-/// `anthropic/claude-haiku-5.5` are both `claude-haiku-5-5`.
+/// `anthropic/claude-haiku-5.5` are both `claude-haiku-5-5`. Only Claude names change their dots:
+/// another provider's names, such as OpenAI's `gpt-6.2-sol`, keep theirs.
 pub fn canonical_model(model: &str) -> String {
     let bare = model.rsplit('/').next().unwrap_or(model);
-    bare.trim().to_lowercase().replace('.', "-")
+    let lower = bare.trim().to_lowercase();
+    if lower.starts_with("claude-") {
+        lower.replace('.', "-")
+    } else {
+        lower
+    }
 }
 
 /// Which logs to count; an unset field keeps all.
