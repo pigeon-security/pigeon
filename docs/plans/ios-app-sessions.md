@@ -1,6 +1,6 @@
 # iOS app: Sessions, Needs you, Settings, and a Cost tab that shows real figures
 
-Status: **in progress** (planner run `claude/ai-agent-vwR5IpnxM9nc`). The Log at the end says what
+Status: **landed; release pending** (planner run `claude/ai-agent-vwR5IpnxM9nc`). The Log at the end says what
 landed.
 
 The person's brief: build the next iteration of the iOS app (`ios/Pigeon`) from their confirmed
@@ -137,4 +137,21 @@ Phases 1, 2 and 3 run at once (2 is written against the contracts above); they l
 - 2026-11-23: plan written. Read: ios-app-next.md, ios.md, ai-agents.md §6, agent-costs.md, the policy and CI
   files, `cost.rs`, `models_daily`, the run index and `ask_person`. Live: `models_usage` 24 h =
   $98.88 (truncated at 2,000 logs); the last release is build 42 (`f0d28d4`).
-- 2026-11-24: phase 2 app built (branch `claude/ai-agent-NeRojTZPJpPG`): three tabs, shared title row, Sessions, Needs you, Settings with Instances, Home; StatusView, ApprovalsView and InstancesView removed. Cost has only its title line changed.
+- 2026-11-23: phase 2 app built (branch `claude/ai-agent-NeRojTZPJpPG`): three tabs, shared title row, Sessions, Needs you, Settings with Instances, Home; StatusView, ApprovalsView and InstancesView removed. Cost has only its title line changed.
+- 2026-11-23: phase 4: the Cost screen shows, per source, "No data" plus the reason when Cloudflare or the AI Gateway is unavailable, "No cost in this range" when empty, and a "Without … : no data" line under the total when a source is missing.
+- 2026-11-23: phase 1 landed (`d4220be`, executor `ZzGMsB2dzlB6`): run `name` (`ai_agents_start`,
+  `spawn_executor`; `name`/`name_given` on status and inbox runs), `ask_person` `headline`, `facts`,
+  `conventional`, `answer_by`; `assumed` entries carry `name`, `branch`, `chose`, `instead`; a
+  question that times out with a known conventional option takes that option. Smoke
+  `ai_agents_run_names_and_structured_questions`. Deployed ai-agents and core.
+- 2026-11-23: phase 2 landed (`75a1d8b`, executor `NeRojTZPJpPG`); `ios-check` green.
+- 2026-11-23: phase 3 landed (`9a3583b`, executor `3hjPz2LYhsMg`). Cause of the AI Gateway $0:
+  `ai_gateway::logs_with` read up to 100 pages one after another, which ran past `cost_daily`'s
+  25 s source limit, so the source landed in `unavailable` and the app drew $0.00. Pages after the
+  first are now read 10 at a time. The Cloudflare cause was not found in the code: `billing_days`
+  now also reads FOCUS billing-period columns and other row wrappers, and `cloudflare.status` and
+  `why` show live whether the call fails or comes back empty. `cost_daily` gains
+  `cloudflare.status/why` and `ai_gateway.status/why`. Smoke `platform_cost_daily_sources_status`.
+  Not looked at: the `executors_cost` "$0" lead on old planners.
+- 2026-11-23: phase 4 (executor `zS5acEv7SuQG`, `ef8af81`) was refused by the Lander after phase 2
+  was rebased; it was cherry-picked onto main on the planner's branch and landed from there.

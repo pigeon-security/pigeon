@@ -51,8 +51,53 @@ private struct CostSeries {
     let requests: Double?
 }
 
+/// How one source (Cloudflare or the gateway) answered: its status and a reason when not ok.
+private struct CostSourceState {
+    /// "ok", "empty" or "unavailable"; nil when the server sent none.
+    var status: String?
+    /// A short sentence saying why the source has no figure.
+    var why: String?
+
+    /// Reads the source's object. Without a status, a matching entry in the `unavailable`
+    /// list makes the source unavailable. `name` is the list's source name, any letter case.
+    init(object: [String: Any], name: String, unavailable: [Any]) {
+        status = object["status"] as? String
+        why = object["why"] as? String
+        let entry = unavailable.compactMap { $0 as? [String: Any] }.first {
+            ($0["source"] as? String)?.lowercased() == name.lowercased()
+        }
+        if status == nil, entry != nil {
+            status = "unavailable"
+        }
+        if (why ?? "").isEmpty, status == "unavailable" {
+            why = entry?["why"] as? String
+        }
+    }
+
+    /// Whether the source failed or timed out.
+    var isUnavailable: Bool { status == "unavailable" }
+    /// Whether the source answered with no cost for the range.
+    var isEmpty: Bool { status == "empty" }
+    /// The reason to show beneath the amount, if any.
+    var reason: String? {
+        guard isUnavailable || isEmpty, let why, !why.isEmpty else { return nil }
+        return why
+    }
+
+    /// The text for the source's total: "No data", "No cost in this range" or the money.
+    func money(_ value: Double) -> String {
+        if isUnavailable { return "No data" }
+        if isEmpty { return "No cost in this range" }
+        return CostText.money(value)
+    }
+}
+
 /// The parts of a `cost_daily` answer the screen uses. Every field is read as optional.
 private struct CostData {
+    /// How Cloudflare answered.
+    var cloudflareState = CostSourceState(object: [:], name: "billable usage", unavailable: [])
+    /// How the AI Gateway answered.
+    var gatewayState = CostSourceState(object: [:], name: "AI Gateway", unavailable: [])
     var range = ""
     var days: [String] = []
     var total = 0.0
@@ -93,6 +138,11 @@ private struct CostData {
         unavailable = (root["unavailable"] as? [Any] ?? []).contains { entry in
             ((entry as? [String: Any])?["source"] as? String) != "Anthropic"
         }
+        let unavailableList = root["unavailable"] as? [Any] ?? []
+        cloudflareState = CostSourceState(
+            object: cloudflare, name: "billable usage", unavailable: unavailableList)
+        gatewayState = CostSourceState(
+            object: gateway, name: "AI Gateway", unavailable: unavailableList)
         storedFrom = root["stored_from"] as? String
         if let anthropic = root["anthropic"] as? [String: Any] {
             anthropicConnected = true
@@ -275,6 +325,8 @@ private struct DetailRow {
     let amount: Double
     /// The swatch colour; nil for the "+N more" row, which has none and is muted.
     let colour: Color?
+    /// Text shown in place of the amount (for a source with no data), if any.
+    var text: String? = nil
 }
 
 /// What the details box shows: a source line, a head line, then rows or note lines.
@@ -286,7 +338,9 @@ private struct Details {
 
     /// One sentence for VoiceOver.
     var summary: String {
-        let parts = [source, head] + notes + rows.map { "\($0.name) \(CostText.money($0.amount))" }
+        let parts = [source, head] + notes + rows.map {
+            "\($0.name) \($0.text ?? CostText.money($0.amount))"
+        }
         return parts.joined(separator: ", ")
     }
 }
@@ -420,10 +474,23 @@ struct CostScreen: View {
                 .font(AppFont.largeTitle).tracking(-0.8).monospacedDigit()
                 .foregroundStyle(Tokens.ink)
                 .lineLimit(1).minimumScaleFactor(0.5)
+            if let partial = partialNote {
+                Text(partial).font(.system(size: 13)).foregroundStyle(Tokens.muted)
+                    .lineLimit(2)
+            }
         }
         .padding(12)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .block()
+    }
+
+    /// A line saying the total leaves out a source with no data, or nil when it is whole.
+    private var partialNote: String? {
+        var missing: [String] = []
+        if data?.cloudflareState.isUnavailable == true { missing.append("Cloudflare") }
+        if data?.gatewayState.isUnavailable == true { missing.append("AI Gateway") }
+        if missing.isEmpty { return nil }
+        return "Without \(missing.joined(separator: " and ")): no data"
     }
 
     // MARK: Details
@@ -443,29 +510,48 @@ struct CostScreen: View {
     /// Anthropic part leaves the gateway's row, and Anthropic's row is what the total counts for
     /// Anthropic (its billed amount, the gateway's estimate on days it has not reported yet).
     private var sourceRows: [DetailRow] {
+        let cf = data?.cloudflareState
+        let gw = data?.gatewayState
+        func text(_ s: CostSourceState?) -> String? {
+            guard let s, s.isUnavailable || s.isEmpty else { return nil }
+            return s.money(0)
+        }
         var rows = [
             DetailRow(
                 name: "Cloudflare", amount: data?.cloudflareTotal ?? 0,
-                colour: ChartColour.workers)
+                colour: ChartColour.workers, text: text(cf))
         ]
         if let d = data, d.anthropicConnected {
             let others = max(d.aiTotal - d.gatewayAnthropic, 0)
-            rows.append(DetailRow(name: "Other models", amount: others, colour: Tokens.accent))
+            rows.append(
+                DetailRow(
+                    name: "Other models", amount: others, colour: Tokens.accent, text: text(gw)))
             rows.append(
                 DetailRow(
                     name: "Anthropic", amount: max(d.total - d.cloudflareTotal - others, 0),
                     colour: ChartColour.opus))
         } else {
             rows.append(
-                DetailRow(name: "AI Gateway", amount: data?.aiTotal ?? 0, colour: Tokens.accent))
+                DetailRow(
+                    name: "AI Gateway", amount: data?.aiTotal ?? 0, colour: Tokens.accent,
+                    text: text(gw)))
         }
         return rows.sorted { $0.amount > $1.amount }
+    }
+
+    /// The reasons, one line per source with no figure, for the details box.
+    private var sourceReasons: [String] {
+        var out: [String] = []
+        if let why = data?.cloudflareState.reason { out.append("Cloudflare: \(why)") }
+        if let why = data?.gatewayState.reason { out.append("AI Gateway: \(why)") }
+        return out
     }
 
     /// What the details box shows now.
     private var details: Details {
         guard let (source, bar) = selectedBar else {
-            return Details(source: "By source", head: rangeHead, rows: sourceRows)
+            return Details(
+                source: "By source", head: rangeHead, rows: sourceRows, notes: sourceReasons)
         }
         let items = bar.parts.filter { $0.value > 0 }.sorted { $0.value > $1.value }
         if range == .today {
@@ -530,7 +616,8 @@ struct CostScreen: View {
                 }
                 ForEach(d.notes, id: \.self) { note in
                     Text(note).font(.system(size: 13)).foregroundStyle(Tokens.muted)
-                        .frame(height: 17, alignment: .leading)
+                        .lineLimit(3)
+                        .frame(minHeight: 17, alignment: .leading)
                 }
             }
             .padding(.top, 0)
@@ -554,9 +641,9 @@ struct CostScreen: View {
                 .foregroundStyle(row.colour == nil ? Tokens.muted : Tokens.ink)
                 .lineLimit(1).truncationMode(.tail)
             Spacer(minLength: 2)
-            Text(CostText.money(row.amount)).font(.system(size: 13)).monospacedDigit()
+            Text(row.text ?? CostText.money(row.amount)).font(.system(size: 13)).monospacedDigit()
                 .foregroundStyle(row.colour == nil ? Tokens.muted : Tokens.ink)
-                .lineLimit(1)
+                .lineLimit(1).minimumScaleFactor(0.6)
         }
         .frame(height: 17)
     }
@@ -566,14 +653,28 @@ struct CostScreen: View {
     private func chartCard(_ source: CostSource) -> some View {
         let isCloudflare = source == .cloudflare
         let label = isCloudflare && range == .all ? "Cloudflare · period" : source.title
+        let state = isCloudflare ? data?.cloudflareState : data?.gatewayState
+        let noFigure = state?.isUnavailable == true || state?.isEmpty == true
         return VStack(alignment: .leading, spacing: 6) {
             Text(label).font(AppFont.label).foregroundStyle(Tokens.muted)
                 .lineLimit(1).minimumScaleFactor(0.7)
-            Text(CostText.money(isCloudflare ? data?.cloudflareTotal ?? 0 : data?.aiTotal ?? 0))
-                .font(AppFont.sourceTotal).tracking(-0.3).monospacedDigit()
-                .foregroundStyle(Tokens.ink)
-                .lineLimit(1).minimumScaleFactor(0.5)
-            chart(source)
+            if let state, noFigure {
+                Text(state.money(0))
+                    .font(AppFont.sourceTotal).tracking(-0.3)
+                    .foregroundStyle(Tokens.ink)
+                    .lineLimit(1).minimumScaleFactor(0.5)
+                if let why = state.reason {
+                    Text(why).font(.system(size: 13)).foregroundStyle(Tokens.muted)
+                        .lineLimit(3)
+                }
+                Spacer(minLength: 0)
+            } else {
+                Text(CostText.money(isCloudflare ? data?.cloudflareTotal ?? 0 : data?.aiTotal ?? 0))
+                    .font(AppFont.sourceTotal).tracking(-0.3).monospacedDigit()
+                    .foregroundStyle(Tokens.ink)
+                    .lineLimit(1).minimumScaleFactor(0.5)
+                chart(source)
+            }
         }
         .padding(EdgeInsets(top: 10, leading: 10, bottom: 8, trailing: 10))
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
