@@ -526,7 +526,8 @@ executors through it. Each item: state, next step, who it waits on.
 
 1. **A run that spends its budget before reporting** (overnight "What broke" 4). **Built** on
    this branch (Log, 2026-11-22): at 90% of its cost budget, or when a normal turn would cross
-   it, a run gets one report-only last turn. Waits on: review and landing.
+   it, a run gets one report-only last turn. The turn and wall limits are covered too (Log,
+   2026-11-23). Waits on: review and landing.
 2. **Revoke a run's git grant when the run ends** (`cleanup.md` item 12). **Built** on this
    branch (Log, 2026-11-22): core's `credential_revoke` op, called from the run's `end()` in
    every terminal state. Waits on: review and landing.
@@ -773,3 +774,16 @@ executors through it. Each item: state, next step, who it waits on.
   - `listing` adds `run` to each call (null when absent). The card shows an "AI agent run" row when it is a non-empty string.
   - It reads `summary.run`, so it shows once `claude/ai-agent-04O5pJP1q2fz` lands (the run in core's audit lines, MXgiXQgySZx77QbT). Until then the row is hidden.
   - The smoke scenario is `platform_approvals_list_shows_run`.
+- 2026-11-23: **The last turn also covers turns and wall time** (Open items 1).
+  - The last turn is due on the first of: cost (as before), turns (`spent.turns + 1 >=
+    budget.turns`, so the next turn is the last the budget allows), or wall time (less time left
+    than the reserve).
+  - The wall reserve is the larger of 10% of `wall_ms` and 5 minutes, and never more than half of
+    `wall_ms` (`budget::wall_reserve_ms`). For 8 hours it is 48 minutes.
+  - The `last_turn` column now holds a code: 1 cost, 2 turns, 3 wall. Every `last_turn != 0`
+    check still works; no migration. The prompt and the `over_budget` end text name the limit.
+  - The last turn still skips the cost and turn-count checks. The wall check still applies to
+    every step.
+  - Known limit: a long sandbox command that starts just before the reserve can outlast it, and
+    then the wall check ends the run before it reports. Not fixed.
+  - The smoke scenario is `ai_agents_last_turn_on_turns_and_wall`.

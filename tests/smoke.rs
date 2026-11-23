@@ -3770,6 +3770,59 @@ fn ai_agents_last_turn_reports_before_budget() {
     );
 }
 
+/// The last turn is also due on the turn and wall limits, and the prompt names the limit.
+#[test]
+fn ai_agents_last_turn_on_turns_and_wall() {
+    use pigeon_ai_agents::Role;
+    use pigeon_ai_agents::budget::{self, Budget, Over, Spent};
+    use pigeon_ai_agents::prompts;
+
+    let hour = 3_600_000;
+    let b = Budget {
+        turns: 10,
+        cost_micros: 1_000_000,
+        wall_ms: 8 * hour,
+        ..Budget::default_for(Role::Executor)
+    };
+    let turns = |turns: u32| Spent {
+        turns,
+        ..Spent::default()
+    };
+    let due = |s: &Spent, now: i64| budget::last_turn_over(&b, s, 0, now, 0);
+    assert_eq!(due(&turns(8), 0), None);
+    assert_eq!(due(&turns(9), 0), Some(Over::Turns));
+    let cost = Spent {
+        cost_micros: 900_000,
+        turns: 9,
+        ..Spent::default()
+    };
+    assert_eq!(due(&cost, 0), Some(Over::Cost), "cost wins");
+
+    // The reserve is 10% of 8 hours: 48 minutes.
+    assert_eq!(budget::wall_reserve_ms(8 * hour), 48 * 60_000);
+    assert_eq!(due(&turns(0), 8 * hour - 48 * 60_000 - 1), None);
+    assert_eq!(due(&turns(0), 8 * hour - 48 * 60_000 + 1), Some(Over::Wall));
+    // Short budgets: at least 5 minutes, never more than half.
+    assert_eq!(budget::wall_reserve_ms(20 * 60_000), 5 * 60_000);
+    assert_eq!(budget::wall_reserve_ms(6 * 60_000), 3 * 60_000);
+    assert_eq!(budget::wall_reserve_ms(0), 0);
+
+    // The codes round-trip and zero means no last turn.
+    for over in [Over::Cost, Over::Turns, Over::Wall] {
+        assert_eq!(
+            budget::last_turn_from_code(budget::last_turn_code(over)),
+            Some(over)
+        );
+    }
+    assert_eq!(budget::last_turn_from_code(0), None);
+
+    let p = |over, s: &Spent| prompts::last_turn(over, &b, s, 7 * hour + 20 * 60_000);
+    assert!(p(Over::Turns, &turns(9)).contains("9 of your 10 model turns"));
+    assert!(p(Over::Wall, &turns(0)).contains("of your 8 hours wall time"));
+    assert!(p(Over::Cost, &cost).contains("cost budget"));
+    assert!(p(Over::Wall, &turns(0)).contains("`report`"));
+}
+
 // ---- secrets ----
 
 #[test]

@@ -16,7 +16,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use worker::{Env, Error, Request, Response, Result, SqlStorageValue, State as ObjectState};
 
-use crate::budget::{self, Budget, Next, Spent};
+use crate::budget::{self, Budget, Next, Over, Spent};
 use crate::run::{self, Action, Call, Job, Recovery, State, View, Wait};
 use crate::tools::{self, Kind};
 use crate::transcript::{self, Spec};
@@ -1057,9 +1057,15 @@ impl AiAgentRuns {
                     }
                     State::OverBudget if row.last_turn != 0 && row.report.is_none() => {
                         self.last_text()?.unwrap_or_else(|| {
-                            "the run spent 90% of its cost budget and its last turn did not \
-                             report"
-                                .to_string()
+                            let limit = match budget::last_turn_from_code(row.last_turn) {
+                                Some(Over::Turns) => "turn budget",
+                                Some(Over::Wall) => "wall-clock budget",
+                                _ => "cost budget",
+                            };
+                            format!(
+                                "the run reached the end of its {limit} and its last turn did \
+                                 not report"
+                            )
                         })
                     }
                     _ => row.report.clone().unwrap_or_default(),
@@ -1272,11 +1278,19 @@ impl AiAgentRuns {
             transcript::input_tokens(&usage).max(20_000),
             transcript::max_tokens(role),
         );
-        // The last turn: report only. The 10% left of the cost budget is kept for it.
-        let last = row.last_turn != 0 || budget::last_turn_due(budget, spent, estimate);
+        // The last turn: report only. It is due on cost, turns or wall time; the code of the
+        // limit that made it due is kept in `last_turn`.
+        let started = row.started_at;
+        let due = budget::last_turn_over(budget, spent, started, now(), estimate);
+        let last = row.last_turn != 0 || due.is_some();
         if last && row.last_turn == 0 {
-            self.add_last_turn_text(&prompts::last_turn(spent.cost_micros, budget.cost_micros))?;
-            self.set("last_turn = 1", vec![])?;
+            let over = due.unwrap_or(Over::Cost);
+            let used = now().saturating_sub(started);
+            self.add_last_turn_text(&prompts::last_turn(over, budget, spent, used))?;
+            self.set(
+                &format!("last_turn = {}", budget::last_turn_code(over)),
+                vec![],
+            )?;
         }
         let mut messages = self.messages()?;
         if index > 0 {

@@ -323,7 +323,7 @@ pub fn money(micros: u64) -> String {
 }
 
 /// Writes milliseconds as whole hours or minutes, such as `8 hours` or `90 minutes`.
-fn duration(ms: i64) -> String {
+pub fn duration(ms: i64) -> String {
     let minutes = ms / MINUTE_MS;
     if minutes != 0 && minutes % 60 == 0 {
         let hours = minutes / 60;
@@ -448,6 +448,65 @@ pub fn last_turn_due(budget: &Budget, spent: &Spent, estimate_micros: u64) -> bo
     let at_percent = u128::from(spent.cost_micros).saturating_mul(100)
         >= u128::from(budget.cost_micros).saturating_mul(u128::from(LAST_TURN_PERCENT));
     at_percent || spent.cost_micros.saturating_add(estimate_micros) > budget.cost_micros
+}
+
+/// The share of `wall_ms`, in percent, kept as the wall-clock reserve for the last turn.
+pub const LAST_TURN_WALL_PERCENT: i64 = 10;
+
+/// The smallest wall-clock reserve for the last turn, in milliseconds (5 minutes).
+pub const LAST_TURN_WALL_MIN_MS: i64 = 300_000;
+
+/// The wall time kept for the last turn, in milliseconds: the larger of
+/// [`LAST_TURN_WALL_PERCENT`] of `wall_ms` and [`LAST_TURN_WALL_MIN_MS`], never more than half
+/// of `wall_ms`.
+pub fn wall_reserve_ms(wall_ms: i64) -> i64 {
+    let share = wall_ms.saturating_mul(LAST_TURN_WALL_PERCENT) / 100;
+    share.max(LAST_TURN_WALL_MIN_MS).min(wall_ms / 2).max(0)
+}
+
+/// Which limit makes the next turn the run's last one, if any. Cost is checked first, then
+/// turns (the next turn is the last the budget allows), then wall time (less than
+/// [`wall_reserve_ms`] left). Only [`Over::Cost`], [`Over::Turns`] and [`Over::Wall`] are
+/// answered.
+pub fn last_turn_over(
+    budget: &Budget,
+    spent: &Spent,
+    started_at: i64,
+    now: i64,
+    estimate_micros: u64,
+) -> Option<Over> {
+    if last_turn_due(budget, spent, estimate_micros) {
+        Some(Over::Cost)
+    } else if spent.turns.saturating_add(1) >= budget.turns {
+        Some(Over::Turns)
+    } else if budget.wall_ms.saturating_sub(elapsed(started_at, now))
+        < wall_reserve_ms(budget.wall_ms)
+    {
+        Some(Over::Wall)
+    } else {
+        None
+    }
+}
+
+/// The number stored in the `last_turn` column for a limit: 1 cost, 2 turns, 3 wall. Other
+/// limits give 1.
+pub fn last_turn_code(over: Over) -> i64 {
+    match over {
+        Over::Turns => 2,
+        Over::Wall => 3,
+        _ => 1,
+    }
+}
+
+/// The limit a stored `last_turn` code stands for. Zero is no last turn; unknown codes read
+/// as cost.
+pub fn last_turn_from_code(code: i64) -> Option<Over> {
+    match code {
+        0 => None,
+        2 => Some(Over::Turns),
+        3 => Some(Over::Wall),
+        _ => Some(Over::Cost),
+    }
 }
 
 /// Decides whether the next step may go ahead.
