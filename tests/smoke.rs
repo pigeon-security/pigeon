@@ -7543,6 +7543,45 @@ fn sites_deploy_reads_a_repository_tarball() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// The pigeon.dev apex pages (`pigeon_core::home`): routing, the home page, the architecture
+/// page and the policy.
+#[test]
+fn sites_apex_pages() {
+    use pigeon_core::home::{self, Route};
+    let known = [
+        ("/", Route::Home),
+        ("/architecture", Route::Architecture),
+        ("/architecture.json", Route::Json),
+        ("/logo.png", Route::Logo),
+    ];
+    for (p, want) in known {
+        assert_eq!(home::route("GET", p), want);
+        assert_eq!(home::route("HEAD", p), want);
+        assert_eq!(home::route("POST", p), Route::MethodNotAllowed);
+        assert_eq!(home::route("DELETE", p), Route::MethodNotAllowed);
+    }
+    for p in ["/nope", "//", "/architecture/", "", "/logo.png/"] {
+        assert_eq!(home::route("GET", p), Route::NotFound, "{p}");
+    }
+    assert_eq!(home::route("POST", "/nope"), Route::NotFound);
+    let h = home::home_html();
+    assert!(h.contains("href=\"https://platform.pigeon.dev\""));
+    assert!(h.contains(">Console<"));
+    assert!(h.contains("href=\"/architecture\""));
+    assert!(h.contains("src=\"/logo.png\""));
+    assert!(h.contains("radial-gradient"));
+    assert!(!h.contains("aria-current=\"page\""));
+    let a = home::architecture_html("<svg id=\"drawing\"></svg>", "0123456789abcdef");
+    assert!(a.contains("<svg id=\"drawing\"></svg>"));
+    assert!(a.contains("0123456789ab"));
+    assert!(!a.contains("0123456789abc"));
+    assert!(a.contains("aria-current=\"page\""));
+    assert!(home::architecture_html("", "<b>").contains("&lt;b&gt;"));
+    assert!(home::unavailable_html().contains("aria-current=\"page\""));
+    assert!(!home::CSP.contains("script-src"));
+    assert!(home::CSP.contains("frame-ancestors 'none'"));
+}
+
 /// The email parser (`pigeon_email`): raw MIME in, a typed message and its blobs out. It covers
 /// headers kept in order, decoded subject and names, addresses with groups flattened, the
 /// bodies, attachments stored once by content, signals, a JSON round trip, and bad input

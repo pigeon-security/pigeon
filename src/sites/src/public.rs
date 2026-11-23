@@ -20,7 +20,7 @@ thread_local! {
 }
 
 /// The caller this Worker signs as when it asks core: itself, a service, acting for no one.
-fn itself(worker: &str) -> Value {
+pub fn itself(worker: &str) -> Value {
     json!({
         "user": { "id": format!("worker:{worker}"), "kind": "service", "name": worker, "created_at": 0 },
         "acting_for": null,

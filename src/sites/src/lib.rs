@@ -6,6 +6,7 @@
 //! what it must not hold itself (a linked account's token) over its `PLATFORM` binding. Built
 //! for `wasm32-unknown-unknown` only.
 
+mod apex;
 mod deploy;
 pub mod public;
 
@@ -214,6 +215,9 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         .unwrap_or_default()
         .to_ascii_lowercase();
     let zone = env.var("ZONE")?.to_string();
+    if host == zone.to_ascii_lowercase() {
+        return apex::serve(req, &env, key.as_bytes(), WORKER).await;
+    }
     if host.ends_with(&format!(".{zone}")) {
         return public::serve(req, &env, key.as_bytes(), WORKER, &host).await;
     }

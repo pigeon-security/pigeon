@@ -24,6 +24,7 @@ pub mod expiry;
 pub mod git;
 pub mod github_app;
 pub mod gitobj;
+pub mod home;
 pub mod identity;
 pub mod job_token;
 pub mod lanes;
