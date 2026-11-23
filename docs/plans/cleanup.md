@@ -1,7 +1,7 @@
 # Clean-up: faster, safer iteration after the split
 
-Status: **planned; items 1 and 2 built on branches (CI green), item 9 (docs) on this branch**
-(2026-11-22).
+Status: **planned; items 1 and 2 landed; the rest planned per branch in "Second pass: the
+branch plan", not built** (2026-11-22).
 Nothing landed: the person's reviewer lands. Planner run `XE8RUxKJDU6J`, branch
 `claude/ai-agent-XE8RUxKJDU6J`.
 
@@ -231,7 +231,8 @@ day), L (more). "Tonight" means built on a branch tonight.
 - **Evidence.** The `ci_commit` timings for `5ced0e0`; `ci/deploy/deploy.sh` and
   `allowlist.sh`. Already recorded under "Later" in workers-split.md.
 - **Fix.** Not designed. It needs a build cache or artifact store shared by jobs, which means a
-  ci/ change and a decision about where builds are kept.
+  ci/ change and a decision about where builds are kept. The feasible first step (one build per
+  deploy job) is B1 in "Second pass: the branch plan".
 
 ### 12. An AI agent run's git grant outlives the run
 
@@ -343,6 +344,156 @@ alone (plus whatever the map adds for `src/capabilities`).
 5. **Decide whether item 4 (a new Worker in one landing) is worth building** before the next
    Worker is added. Until then, the procedure in item 4 is the way.
 
+## Second pass: the branch plan (2026-11-22)
+
+Planner run `wy1pD62aNvwr`, from the person's brief: finish workers-split.md's open items 4
+to 13 and this plan's items 4, 6, 8, 10, 11 and 13, safest first, one concern per branch,
+nothing landed. Item 12 belongs to the AI agents planner. Items 3 and 7 are the person's gate
+changes. The architecture diagram waits for the person. Read on main at `ca548c9`.
+
+**Not built.** The run had 29 minutes of sandbox time. Each executor asks for an hour, so none
+could start. The plan below is written so the next planner can hand each branch to an executor
+as it stands.
+
+### Facts the plan rests on
+
+- The CI scheduler's `status` op answers the job's `exit_code` and the tail of its output
+  (`src/ci/src/scheduler.rs`, `Row::public` and the `status` op). `Lander::job_ended` reads
+  `status` but keeps only `state` and `detail` ("exit code N").
+- `landings.ordered` is an INTEGER (migration 17, default 1). Bit flags keep old rows' meaning:
+  1 is core first, 2 is proxy first.
+- The deploy proxy's allowlist is `src/proxies/src/cf_proxy.rs`, in core's and the proxy's
+  lanes. The proxy builds its scope (`CfProxy::platform`) from the map compiled into it.
+- `Map::affected` (src/core) computes `ordered`. A src/core change deploys all six Workers. New
+  Lander rules therefore go in src/capabilities, which is core's lane only.
+- The Lander's line merge is strict. So each branch adds its smoke scenario after its own
+  existing function (below), never at the end of the file, and no branch edits the plans' Logs
+  (only the planner's docs branch does).
+
+### Branches
+
+The migration numbers and anchors below keep the branches from colliding. "After" is the
+existing smoke function the new scenario goes directly after.
+
+| # | Branch (concern) | Base | Paths | Lanes | Migration | Smoke scenario, after |
+| --- | --- | --- | --- | --- | --- | --- |
+| G1 | deploy.sh reports how far it got (gate change) | main | `ci/deploy/deploy.sh` (wrappers if needed) | all six (`shared`) | none | none (shell) |
+| L1 | skip the rollback when nothing uploaded | main | land.rs, land/lanes.rs | core | none | `core_land_skips_the_rollback_when_nothing_uploaded`, after `land_attributes_a_failed_deploy` |
+| L2 | first-deploy incident text (item 8) | main, parallel to L1 | land.rs `open_incident` text, lanes.rs `verdict` text | core | none | `core_land_first_deploy_incident_text`, after `land_from_check_to_landed` |
+| L3 | environment failures blame no landing | L1 | land.rs, land/lanes.rs | core | none | `core_land_environment_failures_blame_no_landing`, after `land_commit_attribution` |
+| L4 | proxy-first ordering for allowlist changes | main | land.rs (check), land/lanes.rs `starts` | core | none (bit 2 of `ordered`) | `core_land_deploys_the_proxy_first_for_allowlist_changes`, after `lanes_scope_paths_and_order_only_the_contract` |
+| L5 | deploy map from main at deploy time | main | land.rs `deploy_step`, `deploy_grant`, merge.rs or lanes.rs | core | **18**: `ALTER TABLE deploys ADD COLUMN script TEXT` | `core_land_resolves_the_deploy_map_from_main`, after `land_deploys_in_lanes_per_worker` |
+| L6 | a new Worker in one landing (item 4) | L4 and L5, rebased together | merge.rs `see`, land.rs check | core | none | `core_land_adds_a_worker_in_one_landing`, after `deploy_proxy_allowlist` |
+| L7 | delete `claude/land/<id>` test refs (item 10) | main | land.rs, merge.rs | core | none (marker in `settings`) | `core_land_deletes_test_refs`, after `land_rebases_disjoint_branches_and_lanes` |
+| K1 | per-Worker caller keys: design, then step 1 if safe alone | main | new `docs/plans/caller-keys.md`; remote.rs, split.rs | core (step 1) | none | `core_contract_per_worker_caller_keys`, after `contract_signed_callers_and_skew` |
+| R1 | core stops exporting `CiScheduler`/`ModelJobs` (item 6): rehearsal plan, then code; **do not land** | main | new section in `do-rehearsal.md`; src/platform | core | none | none |
+| R2 | `CiRunner` to the CI gateway (item 13): plan with the handover, then code; **do not land** | main | new `docs/plans/ci-runner-move.md`; src/ci, src/ci-gateway | core, ci-gateway | none | after `ci_route_and_run_on_a_fake_connector` |
+| B1 | reuse the build within the deploy job (item 11, first step; gate change) | G1 | `ci/deploy/allowlist.sh`, `deploy.sh` | all six | none | none |
+
+Waves: G1, L1, L2, L4, L5, L7, K1, R1, R2 together. Then L3 on L1, L6 on L4 + L5, B1 on G1.
+
+### Each branch's contract
+
+- **G1.** `deploy.sh` exits 3 if and only if it stopped before its first real `wrangler deploy`
+  through the proxy began: the token and URL checks, the grant check, `allowlist.sh` (its build
+  and the stand-in runs), `node.sh`, reading `wrangler.toml`. Nothing on Cloudflare changed.
+  Once the real deploy has started it never exits 3: a 3 from wrangler there is mapped to 1. A
+  refusal before the upload counts as started, to stay conservative. The header comment lists
+  the codes. No new API call, so no `standin.mjs` change. Checked by hand: no token gives 3; an
+  unreachable proxy gives 3; a stub `npx` that prints `Uploaded` and exits 3 gives 1.
+- **L1.** A pure `lanes` function: never uploaded = job state `failed` and `exit_code` 3.
+  Anything else may have uploaded, including every job before G1 lands. When nothing
+  uploaded *and* the Worker's newest earlier deploy (any purpose) is the succeeded one
+  `last_good` names, the incident starts as if the rollback passed. `bisect` goes straight to
+  bisecting: with one included landing, that landing is the cause and nothing is redeployed.
+  `core_incident` ends at once, core on its good build. Otherwise, as today. The summaries say
+  nothing was uploaded. It must not change the two first-deploy strings L2 owns.
+- **L2.** When the Worker has no earlier succeeded deploy: "first deploy of <worker> failed;
+  nothing was running and nothing is rolled back" at open and in `verdict`. "May still be on a
+  failing build: a person must look" stays for a Worker that had a good build but could not be
+  returned to it.
+- **L3.** A pure classifier over the job's state, exit code and output tail. Environment: job
+  state `error` (runner lost, no infrastructure), `cancelled`, or the tail naming a known
+  platform fault (Cloudflare `code: 10007`, a Cloudflare 5xx, "the proxy could not be
+  reached"). Match conservatively: anything unknown is a code fault, as today; `timed_out`
+  stays a code fault. A lane deploy that failed for the environment is deployed once more at
+  the same commit with the same landings. If that also fails for the environment, the landings
+  end `error` ("environment: <why>; not this landing's fault; land again"), not
+  `deploy_failed`. The incident ends in a new state `environment` with no bisect.
+  `incident_covered` closes it like `unisolated`. An incident redeploy that fails for the
+  environment counts as `Tried::Error` (no blame), not `Tried::Failed`.
+- **L4.** A constant in the Lander: proxy-first paths = `["src/proxies/src/cf_proxy.rs"]`. Set
+  at check time as bit 2 of `ordered`. `Merged.proxy_first`, and `starts` takes the proxy's name
+  (`"proxy"`). While the proxy has not deployed a proxy-first landing, no other lane (core's
+  included) deploys a commit at or after it. With both bits: core, then the proxy, then the
+  rest. A failed proxy deploy releases the others as a failed core deploy does for core first.
+- **L5.** When `deploy_step` submits a deploy, it reads `ci/workers.toml` at the deploy's commit
+  through git and takes the Worker's entry. If that fails, it falls back to the compiled map
+  and says which it used in the deploy's `detail`. It records the script on the deploy row
+  (migration 18). `deploy_grant` answers that script, so the proxy reads no git per call. Rows
+  without it fall back to the compiled map. The choice is a pure function that the smoke suite
+  tests.
+- **L6.** At checking, the map is main's map plus the `[[worker]]` entries the branch *adds*
+  (new names only, never changed ones; the map is guarded, so adding one already needs the
+  gate approval). A landing that adds a Worker is proxy-first (L4), so the order is core, then
+  the proxy (which now knows the script), then the new Worker's first deploy, resolved by L5.
+  Binding it in core stays a later landing: a service binding's target must exist first.
+- **L7.** When a landing is terminal, its test ref is deleted, best-effort, through the
+  Lander's git push (a ref update to the all-zero id). The work is done in the async loop
+  beside `push_notes`, a few per alarm. A pure check refuses any ref but
+  `refs/heads/claude/land/<id>`. Older refs are cleared the same way, once.
+- **K1.** Today one `CALLER_KEY` (Secrets Store) signs every call between core and the five
+  capability Workers, so any of them can sign as another. The design: one key per Worker,
+  `CALLER_KEY_<WORKER>`, made by `workers_setup`. Core holds all of them; each Worker binds only
+  its own. Rollout, each step safe alone:
+  1. Core verifies with the Worker's key *or* the shared key and still signs with the shared
+     one.
+  2. Each Worker binds its own key and verifies either, still signing with the shared one.
+  3. Each side signs with the per-Worker key.
+  4. The shared key is dropped.
+
+  Each wrangler binding change is checked with `allowlist.sh`. Build step 1 only, and only if
+  it needs no person action before it is safe.
+- **R1.** Plan first, as `do-rehearsal.md` did. Two throwaway scripts: A transfers a class to B,
+  then A stops exporting it, keeping its migrations and its binding with `script_name`. The
+  question is whether Cloudflare takes A's upload. Remember incident 5: after a transfer, the
+  source's binding must name the new host (`script_name`), or the upload is refused (10061).
+  Never add `deleted_classes` for a transferred class. Code: remove the two shims in
+  `src/platform/src/lib.rs` and `settings::ci()` / `settings::model_jobs()`. Keep migrations v2
+  and v4. Land only after the rehearsal passes, on a quiet queue.
+- **R2.** A container class cannot be transferred, so this is a handover, as phase 4 did.
+  1. The CI gateway gets a new container class and its own migration.
+  2. The scheduler dispatches to a second runner binding while core's `CiRunner` drains.
+  3. Core's binding and class are removed in a later landing.
+
+  It needs `containers = [...]` for ci-gateway in `ci/workers.toml` (the proxy's deploy
+  scope), which is the person's gate change, and a rehearsal of the container application's
+  creation through the proxy (`allowlist.sh` against the stand-in, with any new route in
+  `standin.mjs` in the same branch). Code behind the rehearsal; do not land.
+- **B1 (item 11, feasibility).** Reusing the *test job's* build is not feasible now. The gate
+  runs `cargo clippy` (no code generation) and no release build, so there is nothing to reuse.
+  Adding a release build of six Workers to every gate run and an artifact store for jobs (an
+  R2 bucket, a scoped token, the proxy's allowlist) is a design decision for the person. What
+  is feasible: each deploy job runs the Worker's `[build]` three times today (twice through
+  `allowlist.sh` against the stand-in, once for the real deploy). The later two are mostly
+  `wasm-bindgen`/optimiser work over an unchanged cargo build. B1 measures them and, if they
+  cost more than about 20 s per deploy, builds once and deploys the built output three times
+  (a config copy without `[build]`, beside the original so relative paths hold). It also
+  checks that what the stand-in saw is what deploys. It is a gate change and deploys all six
+  Workers.
+
+### Landing order (safest first)
+
+1. L2, L7: text and best-effort clean-up, core only.
+2. L1, then L3 (stacked).
+3. G1: a gate change that deploys all six Workers. It is safe before or after L1, because L1
+   reads exit 3 only as a hint.
+4. L5, then L4, then L6 (L6 is stacked on both). Land them on a quiet queue: they change how
+   deploys are ordered and what a deploy may deploy.
+5. K1 step 1.
+6. B1, after G1.
+7. R1 and R2: not to land until their rehearsals pass.
+
 ## Log
 
 - 2026-11-22: designed. Read the plans README, workers-split.md (its Log and open items),
@@ -369,3 +520,35 @@ alone (plus whatever the map adds for `src/capabilities`).
   workers-split.md, Open items (handoff).
 - 2026-11-22 23:40 UTC: handoff. Items 1 and 2 landed (`f0668a9`, `0baf513`). Items 3 and 7
   (gate changes) wait on the person's approval; item 12 is open in `ai-agents.md`, Open items 2.
+- 2026-11-22: second pass, planner run `wy1pD62aNvwr`. Wrote "Second pass: the branch plan"
+  for items 4, 6, 8, 10, 11 and 13, and workers-split.md's open items 8 to 12 (rollback skip,
+  environment attribution, per-Worker caller keys, map at deploy time, proxy first). Item 11
+  was checked: reusing the test job's build is not feasible without an artifact store, and
+  B1 is the step that is. Nothing was built: the run had 29 minutes of sandbox time and the
+  executors were refused for want of it. Next: a planner with an hour or more per executor
+  spawns wave 1 as written.
+- 2026-11-23: third pass, planner run `X0NALpyzcsSl`: the branch plan built, nothing landed.
+  Each branch passed `sh ci/runner/test.sh` and CI `test`. All of them on current main
+  together (L1 and L5 need a two-line merge in `deploy_step`) pass clippy and 53 smoke
+  scenarios in 15 s.
+  - G1 `claude/ai-agent-wZFCuBPHdEGP` (`d43fe72`), gate change: deploy.sh exits 3 only before
+    the real deploy starts (an EXIT trap). The token and URL checks used to exit 2.
+  - L1 `claude/ai-agent-qNtIHeBJWuPk` (`ffe0ff7`, on `283c4a1`): rollback skipped when the
+    job failed with exit 3. The exit code is kept as `(exit code N)` in the deploy's detail.
+    Review found a dropped SQL value in `drive_incidents` and an exit code read for every job
+    state; both fixed in `ffe0ff7`.
+  - L2 `claude/ai-agent-VgB5OyZrasn4` (`4a6d996`): first-deploy incident text.
+  - L4 `claude/ai-agent-cSLCd3tMzvMY` (`9ca1e3c`): proxy first, bit 2 of `ordered`.
+  - L5 `claude/ai-agent-5f4y0sNmaJGk` (`604c5cb`): the deploy entry from the map at the
+    deploy's commit, migration 18 `deploys.script`.
+  - L6 `claude/ai-agent-0X04t8tn5PQ5` (`1a7ca40`): L5 plus a merge of L4, then main's map
+    plus the Workers a branch adds. It also edits a comment in
+    `src/ai-agents-worker/wrangler.toml`, so it deploys ai-agents too.
+  - L7 `claude/ai-agent-2246DknBO8Em` (`3d3f6ba`): test refs deleted, five per alarm.
+  - K1 `claude/ai-agent-BL4VOu0OuzAO` (`9fee187`): `caller-keys.md` and step 1, inert until
+    core binds a per-Worker key.
+  - R1 and R2: rehearsal plans only (do-rehearsal.md, second rehearsal; ci-runner-move.md).
+  - Not started: L3 (on L1) and B1 (on G1). The run reached its limit of 12 executors. Two
+    were lost to Cloudflare API 500s when core minted their credentials, one went to L1's fix,
+    and one rebased the second-pass plan but could not push it (`commit_push` pushes only
+    uncommitted changes). This branch carries that rebase instead.

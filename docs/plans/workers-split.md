@@ -580,11 +580,16 @@ over their in-flight work.
 
 ## Open questions for the person
 
+Both closed (2026-11-22).
+
 1. Model job runner: may `pigeon-model-gateway` hold a minted gateway token for a job's lifetime (up to
    about 15 min)? The alternative is asking core per stream chunk.
+   **Closed:** settled by the job objects' scoped credentials (`9755740`).
 2. The DO rehearsal (T17) deploys two throwaway scripts. Either you deploy them once with a
    `deploy_token`, or the map lists them for the rehearsal and removes them after. The second
    way is a gate change (delegate).
+   **Closed:** the rehearsal ran (`do-rehearsal.md`); its Workers `pigeon-dotest-a` and
+   `pigeon-dotest-b` are to be deleted by the person (For the person, below).
 
 ## Open items (handoff, 2026-11-22)
 
@@ -627,7 +632,13 @@ Recorded, not started (no branch):
 13. Cleanup items 8 (clearer first-deploy incident text), 10 (delete `claude/land/<id>` test
     refs), 12 (revoke an AI agent run's git grant at its end): proposed, small.
 14. Open questions 1 and 2 above: 2 is settled (the rehearsal ran, its Workers are to be
-    deleted); 1 is settled by the job objects' scoped credentials (9755740). Close them.
+    deleted); 1 is settled by the job objects' scoped credentials (9755740). **Closed** in the
+    section above (2026-11-22).
+
+Items 4 to 13 are planned branch by branch in cleanup.md, "Second pass: the branch plan"
+(2026-11-22): each branch's contract, the migration and smoke anchor it owns, and the landing
+order. Not built yet: the planner run that wrote it had too little sandbox time to start
+executors.
 
 For the person:
 
@@ -672,6 +683,11 @@ What only this session knew (lessons for whoever picks this up):
   sequence; check `git status` first (the commits survive and can be reset to).
 
 ## Log
+
+- 2026-11-22: clean-up planner `wy1pD62aNvwr` took over open items 4 to 14. Open questions 1
+  and 2 closed. Items 4 to 13 planned per branch in cleanup.md ("Second pass: the branch
+  plan"); nothing built, because the run had 29 minutes of sandbox time and each executor needs
+  about an hour. Next: a planner with budget spawns wave 1 of that plan as written.
 
 - 2026-11-22: handoff. The person made the Claude chat the only entry point; this planner
   session wrapped up and handed its area to AI Gateway planners and executors. Landed since the

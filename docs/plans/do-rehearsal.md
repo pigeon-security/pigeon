@@ -80,3 +80,68 @@ The deploy proxy has no script DELETE, so the scripts are deleted by hand in the
 `pigeon-dotest-a` first (its `PROBE` binding names the class in b), then `pigeon-dotest-b`. Left
 alone they are inert: dummy rows, and an alarm that fires once. The two workers.dev hostnames
 can then leave the session environment's network allowlist.
+
+## Second rehearsal: a source stops exporting a transferred class
+
+Cleanup item 6 (docs/plans/cleanup.md, branch R1). Core still exports the shims `CiScheduler`
+and `ModelJobs` (`src/platform/src/lib.rs`) and builds them `settings::ci()` and
+`settings::model_jobs()` (`src/platform/src/settings.rs`). Both classes moved to the gateways
+with `transferred_classes`. Core's bindings already name the new hosts with `script_name`
+(`src/platform/wrangler.toml`), and core keeps migrations v2 and v4, which once created them.
+
+The question: does Cloudflare take an upload of a script whose migrations once created a class
+that it no longer exports, when that class was transferred away? Incident 5 (workers-split.md,
+Log) shows an upload can be refused over a moved class (10061), and core runs the Lander, so
+this is asked of a throwaway pair first.
+
+### The pair
+
+The first pair is reused if it still exists: `pigeon-dotest-a` exports `Probe` with migration
+v1, its `PROBE` binding names `pigeon-dotest-b`, and b hosts the class since the transfer. Check
+in the dashboard before anything else (cleanup.md, Follow-ups for the person, 4).
+
+- **If both still exist.** Only a is needed. Restore `src/dotest-a` from git history (the
+  delivery-speed batch removed it; `git log --diff-filter=D -- src/dotest-a`). Change one thing:
+  a no longer exports `Probe` (drop the class's `#[durable_object]` struct and its `impl`). Keep
+  a's v1 migration and its `PROBE` binding with `script_name = "pigeon-dotest-b"`. Never add
+  `deleted_classes` for a transferred class: it would ask Cloudflare to delete b's objects.
+- **If they were deleted.** Rebuild both from history and run the first rehearsal's three
+  landings (Deploying them, above). Then do the step above.
+
+### Landings
+
+1. A gate change (the person's approval): a's crate as it was, a's `[[worker]]` entry in
+   `ci/workers.toml`, `ci/deploy/deploy-dotest-a.sh` and `[jobs.deploy-dotest-a]` in
+   `.pigeon/ci.toml`. It deploys core and the proxy (the map), not a (cleanup item 4).
+2. A landing touching only `src/dotest-a/`, the export removed. It is a's lane alone.
+
+### What to record
+
+- Did a's deploy upload? The deploy job's output: accepted, or refused with which code and text.
+- After it: `GET /state` on `$A` and `$B` (Running it, above). `host` is `pigeon-dotest-b` and
+  `id`, `rows` and `alarm` are unchanged.
+- A second deploy of a (a one-line comment in `src/dotest-a/`). Incident 5 was missed because
+  the first rehearsal never redeployed the source; this one does.
+- A deploy of a's previous build, which still exports `Probe`, as the Lander's rollback would.
+  It must also be accepted, so a failed R1 landing can be rolled back.
+
+It passes when all four answers are as above. If a's upload is refused, R1 is not built: core
+keeps the shims, and the refusal's code and text go in cleanup.md's Log.
+
+### Then the code (branch R1, after it passes)
+
+- `src/platform/src/lib.rs`: remove the `CiScheduler` and `ModelJobs` structs and their
+  `impl`s, and correct the module's comments.
+- `src/platform/src/settings.rs`: remove `ci()` and `model_jobs()`. Drop `pigeon-models` from
+  `src/platform/Cargo.toml` only if nothing else in the crate uses it.
+- `src/platform/wrangler.toml`: keep migrations v2 and v4 and both bindings with `script_name`.
+  Only the comment that says "This Worker keeps both classes' migrations and exports" changes.
+- Lanes: `src/platform/*` is core's alone. No smoke scenario: the crate builds for WASM only, and
+  `cargo check -p pigeon-platform` in the gate covers it.
+- Land on a quiet queue, with no deploy of core in flight. If core's upload is refused anyway,
+  the Lander's incident keeps core on its good build (as in incident 5); the fix is to revert.
+
+A cheaper option, for the person to choose instead: skip the pair, and remove only `ModelJobs`
+from core first, on a quiet queue. A refused upload changes nothing on Cloudflare (incident 5:
+core kept serving its build), and the only user of model jobs is the AI agents planner. Then
+`CiScheduler` in a second landing. The plan above is the conservative one, as do-rehearsal did.
