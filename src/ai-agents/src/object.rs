@@ -44,7 +44,7 @@ pub const MAX_QUEUED: u32 = 20;
 
 /// Each object's schema, one statement per migration, applied in order and never edited. The
 /// index uses `runs` and `flags`; a run object uses `run`, `messages` and `calls`.
-const MIGRATIONS: [&str; 8] = [
+const MIGRATIONS: [&str; 9] = [
     "CREATE TABLE runs (id TEXT PRIMARY KEY, role TEXT NOT NULL, runtime TEXT NOT NULL, state TEXT NOT NULL, parent_run TEXT, session_id TEXT, caller TEXT NOT NULL, by_id TEXT, for_id TEXT, brief TEXT NOT NULL, base TEXT, branch TEXT, budget TEXT NOT NULL, spent TEXT NOT NULL, step TEXT, waiting TEXT, report TEXT, created_at INTEGER NOT NULL, started_at INTEGER, ended_at INTEGER, stop_asked INTEGER NOT NULL DEFAULT 0)",
     "CREATE TABLE flags (k TEXT PRIMARY KEY, v TEXT NOT NULL)",
     "CREATE TABLE run (id TEXT PRIMARY KEY, role TEXT NOT NULL, caller TEXT NOT NULL, brief TEXT NOT NULL, base TEXT NOT NULL, branch TEXT NOT NULL, budget TEXT NOT NULL, spent TEXT NOT NULL, state TEXT NOT NULL, started_at INTEGER NOT NULL, model_index INTEGER NOT NULL DEFAULT 0, fallback_left INTEGER NOT NULL DEFAULT 0, failures INTEGER NOT NULL DEFAULT 0, job_id TEXT, job_kind TEXT, job_state TEXT, job_at INTEGER, job_error TEXT, last_usage TEXT, stop_reason TEXT, reported TEXT, report TEXT, nudges INTEGER NOT NULL DEFAULT 0, waiting TEXT, prepare_tries INTEGER NOT NULL DEFAULT 0)",
@@ -55,6 +55,8 @@ const MIGRATIONS: [&str; 8] = [
     "ALTER TABLE runs ADD COLUMN extended TEXT",
     // ai_agents_note: notes waiting for the run's next turn.
     "ALTER TABLE run ADD COLUMN notes TEXT",
+    // The last turn (report only) before the cost budget runs out has begun.
+    "ALTER TABLE run ADD COLUMN last_turn INTEGER NOT NULL DEFAULT 0",
 ];
 
 fn now() -> i64 {
@@ -236,6 +238,7 @@ struct RunRow {
     waiting: Option<String>,
     prepare_tries: i64,
     notes: Option<String>,
+    last_turn: i64,
 }
 
 /// One stored tool call.
@@ -842,6 +845,24 @@ impl AiAgentRuns {
             .is_some_and(|m| m["role"] == "user"))
     }
 
+    /// The text of the model's last message, if it is the model's and has any.
+    fn last_text(&self) -> Result<Option<String>> {
+        let messages = self.messages()?;
+        Ok(messages
+            .last()
+            .filter(|m| m["role"] == "assistant")
+            .and_then(|m| m["content"].as_array())
+            .map(|blocks| {
+                blocks
+                    .iter()
+                    .filter(|b| b["type"] == "text")
+                    .filter_map(|b| b["text"].as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .filter(|t| !t.trim().is_empty()))
+    }
+
     /// Removes the thinking blocks from every stored assistant message, for good: the provider
     /// refused their signatures.
     fn strip_stored_thinking(&self) -> Result<()> {
@@ -903,6 +924,34 @@ impl AiAgentRuns {
             _ => self.push_message(&message)?,
         }
         self.set("notes = NULL", vec![])
+    }
+
+    /// Adds `text` to the last user message (or a new one), the way notes are added, so the
+    /// roles keep alternating.
+    fn add_last_turn_text(&self, text: &str) -> Result<()> {
+        #[derive(Deserialize)]
+        struct M {
+            n: i64,
+            body: String,
+        }
+        let last = self.db.row::<M>(
+            "SELECT n, body FROM messages ORDER BY n DESC LIMIT 1",
+            vec![],
+        )?;
+        let body = last
+            .as_ref()
+            .and_then(|m| serde_json::from_str::<Value>(&m.body).ok());
+        let (mut message, replaces) = transcript::with_notes(body.as_ref(), &[]);
+        if let Some(blocks) = message["content"].as_array_mut() {
+            blocks.push(json!({"type": "text", "text": text}));
+        }
+        match (replaces, last) {
+            (true, Some(m)) => self.db.exec(
+                "UPDATE messages SET body = ? WHERE n = ?",
+                vec![message.to_string().into(), m.n.into()],
+            ),
+            _ => self.push_message(&message),
+        }
     }
 
     fn push_message(&self, m: &Value) -> Result<()> {
@@ -985,6 +1034,7 @@ impl AiAgentRuns {
             reported: row.reported.as_deref().and_then(State::named),
             nudges: row.nudges as u32,
             user_last: self.user_last()?,
+            last_turn: row.last_turn != 0,
             waiting: waiting.as_ref(),
         };
         let action = run::next(&view);
@@ -1004,6 +1054,13 @@ impl AiAgentRuns {
                     State::Stopped => "stopped by the person or its planner".to_string(),
                     State::Failed if row.report.is_none() => {
                         "the model stopped twice without reporting".to_string()
+                    }
+                    State::OverBudget if row.last_turn != 0 && row.report.is_none() => {
+                        self.last_text()?.unwrap_or_else(|| {
+                            "the run spent 90% of its cost budget and its last turn did not \
+                             report"
+                                .to_string()
+                        })
                     }
                     _ => row.report.clone().unwrap_or_default(),
                 };
@@ -1200,19 +1257,30 @@ impl AiAgentRuns {
         let models = role.models();
         let index = (row.model_index.max(0) as usize).min(models.len() - 1);
         let model = models[index];
-        let mut messages = self.messages()?;
-        if index > 0 {
-            messages = transcript::strip_thinking(&messages);
-        }
         let usage: Value = row
             .last_usage
             .as_deref()
             .and_then(|u| serde_json::from_str(u).ok())
             .unwrap_or(Value::Null);
+        let estimate = budget::estimate_micros(
+            model,
+            transcript::input_tokens(&usage).max(20_000),
+            transcript::max_tokens(role),
+        );
+        // The last turn: report only. The 10% left of the cost budget is kept for it.
+        let last = row.last_turn != 0 || budget::last_turn_due(budget, spent, estimate);
+        if last && row.last_turn == 0 {
+            self.add_last_turn_text(&prompts::last_turn(spent.cost_micros, budget.cost_micros))?;
+            self.set("last_turn = 1", vec![])?;
+        }
+        let mut messages = self.messages()?;
+        if index > 0 {
+            messages = transcript::strip_thinking(&messages);
+        }
         let caller: Value = serde_json::from_str(&row.caller).unwrap_or(Value::Null);
-        // A long context is summarised first, on a cheap model.
+        // A long context is summarised first, on a cheap model. Never on the last turn.
         let (request, kind) = match (
-            transcript::needs_compaction(&usage),
+            !last && transcript::needs_compaction(&usage),
             transcript::cut_point(&messages, 20),
         ) {
             (true, Some(at)) => (
@@ -1228,23 +1296,24 @@ impl AiAgentRuns {
                     system: &system,
                     tools: &defs,
                 };
-                (transcript::request(&spec, &messages), "turn")
+                if last {
+                    (transcript::last_turn_request(&spec, &messages), "turn")
+                } else {
+                    (transcript::request(&spec, &messages), "turn")
+                }
             }
         };
-        let estimate = budget::estimate_micros(
-            model,
-            transcript::input_tokens(&usage).max(20_000),
-            transcript::max_tokens(role),
-        );
-        if let Err(over) = budget::check(
-            budget,
-            spent,
-            row.started_at,
-            now(),
-            Next::Turn {
-                estimate_micros: estimate,
-            },
-        ) {
+        if !last
+            && let Err(over) = budget::check(
+                budget,
+                spent,
+                row.started_at,
+                now(),
+                Next::Turn {
+                    estimate_micros: estimate,
+                },
+            )
+        {
             return self.end(row, State::OverBudget, &over.why(budget)).await;
         }
         let job = dispatch(

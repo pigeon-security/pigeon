@@ -2304,6 +2304,7 @@ fn ai_agents_loop_budgets_tools_and_turns() {
         reported: None,
         nudges: 0,
         user_last: false,
+        last_turn: false,
         waiting: None,
     };
     assert_eq!(run::next(&view(State::Queued)), Action::Prepare);
@@ -3272,6 +3273,107 @@ fn ai_agents_loop_budgets_tools_and_turns() {
     assert_eq!(
         transcript::strip_thinking(&thought)[0]["content"][0]["text"],
         "(thinking removed)"
+    );
+}
+
+/// A run reports before its cost budget runs out: the 90% rule, the report-only request, and
+/// what the loop does once the last turn is answered.
+#[test]
+fn ai_agents_last_turn_reports_before_budget() {
+    use pigeon_ai_agents::Role;
+    use pigeon_ai_agents::budget::{self, Budget, Spent};
+    use pigeon_ai_agents::run::{self, Action, Call, State, View};
+    use pigeon_ai_agents::transcript::{self, Spec};
+
+    let b = Budget {
+        cost_micros: 1_000_000,
+        ..Budget::default_for(Role::Executor)
+    };
+    let spent = |cost_micros: u64| Spent {
+        cost_micros,
+        ..Spent::default()
+    };
+    assert!(!budget::last_turn_due(&b, &spent(899_999), 10_000));
+    assert!(budget::last_turn_due(&b, &spent(900_000), 0));
+    assert!(budget::last_turn_due(&b, &spent(500_000), 500_001));
+    assert!(!budget::last_turn_due(&b, &spent(500_000), 500_000));
+
+    let tools = [
+        json!({"name": "run", "description": "d", "input_schema": {"type": "object"}}),
+        json!({"name": "report", "description": "d", "input_schema": {"type": "object"}}),
+        json!({"name": "grep", "description": "d", "input_schema": {"type": "object"}}),
+    ];
+    let spec = Spec {
+        role: Role::Planner,
+        model: "claude-opus-5-5",
+        system: "s",
+        tools: &tools,
+    };
+    let messages = [
+        json!({"role": "user", "content": "brief"}),
+        json!({"role": "assistant", "content": [
+            {"type": "thinking", "thinking": "t", "signature": "s"},
+            {"type": "text", "text": "ok"}
+        ]}),
+        json!({"role": "user", "content": "go on"}),
+    ];
+    let req = transcript::last_turn_request(&spec, &messages);
+    let names: Vec<&str> = req["tools"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|t| t["name"].as_str()).collect())
+        .unwrap_or_default();
+    assert_eq!(names, ["report"]);
+    assert!(
+        req["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|t| t.get("cache_control").is_none())
+    );
+    assert_eq!(
+        req["tool_choice"],
+        json!({"type": "tool", "name": "report"})
+    );
+    assert!(req.get("thinking").is_none() && req.get("output_config").is_none());
+    assert!(!req["messages"].to_string().contains("\"thinking\""));
+    assert_eq!(req["max_tokens"], 4096);
+    assert_eq!(transcript::LAST_TURN_MAX_TOKENS, 4096);
+
+    let view = View {
+        state: State::Running,
+        stop_asked: false,
+        paused: false,
+        job: None,
+        calls: &[],
+        turns: 5,
+        stop_reason: Some("end_turn"),
+        reported: None,
+        nudges: 0,
+        user_last: false,
+        last_turn: true,
+        waiting: None,
+    };
+    assert_eq!(run::next(&view), Action::End(State::OverBudget));
+    let pending = [Call {
+        id: "t".into(),
+        name: "report".into(),
+        started: false,
+        done: false,
+    }];
+    assert_eq!(
+        run::next(&View {
+            calls: &pending,
+            ..view.clone()
+        }),
+        Action::Call { index: 0 }
+    );
+    assert_eq!(
+        run::next(&View {
+            user_last: true,
+            ..view.clone()
+        }),
+        Action::Turn,
+        "a retry sends the last turn again"
     );
 }
 

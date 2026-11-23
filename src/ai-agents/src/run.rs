@@ -179,6 +179,8 @@ pub struct View<'a> {
     /// Whether the last message is the user's (a brief, results, a reminder, a summary): the
     /// model's turn is next.
     pub user_last: bool,
+    /// The run's last turn (the report-only turn before its cost budget runs out) has begun.
+    pub last_turn: bool,
     /// What it waits for, when waiting.
     pub waiting: Option<&'a Wait>,
 }
@@ -308,6 +310,10 @@ pub fn next(v: &View) -> Action {
     }
     if let Some(state) = v.reported {
         return Action::End(state);
+    }
+    if v.last_turn && !v.user_last && v.calls.is_empty() {
+        // The last turn was answered without a report: there is no other turn or nudge.
+        return Action::End(State::OverBudget);
     }
     if v.turns == 0 || !v.calls.is_empty() || v.user_last {
         // The first turn, the results of the last turn's calls, or a reminder: the model's turn.

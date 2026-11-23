@@ -10,6 +10,19 @@ use crate::Role;
 pub const NUDGE: &str = "You stopped without calling a tool. If the work is finished or cannot \
      go on, call `report`; otherwise keep working with your tools.";
 
+/// What the model reads before its last turn: it has used 90% of its cost budget and must
+/// report now. `spent` and `budget` are micro-dollars.
+pub fn last_turn(spent: u64, budget: u64) -> String {
+    format!(
+        "You have used {} of your {} cost budget (90% or more). This is your last turn, and \
+         your only tool is `report`. Call it now with what you did, what is pushed (branch and \
+         commit), what is left, and anything you assumed. State `done` only if the work is \
+         finished; otherwise state `failed`.",
+        crate::budget::money(spent),
+        crate::budget::money(budget)
+    )
+}
+
 /// The rules every run follows, whatever its role.
 const RULES: &str = "\
 Rules:

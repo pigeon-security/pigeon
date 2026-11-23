@@ -524,10 +524,9 @@ The AI agents planner session (`session_015XFA1p5x6wTEFRENJaCUxN`) is wrapping u
 made the Claude chat the only entry point, and open work goes to AI Gateway planners and
 executors through it. Each item: state, next step, who it waits on.
 
-1. **A run that spends its budget before reporting** (overnight "What broke" 4: the data
-   planner). Not built. Proposal: at 90% of its cost budget a run gets one last turn whose only
-   tool is `ai_agents_report`. `ai_agents_extend` (landed) raises a live run's budget meanwhile.
-   Next: build it in `src/ai-agents` with a smoke scenario. Waits on: an AI Gateway executor.
+1. **A run that spends its budget before reporting** (overnight "What broke" 4). **Built** on
+   this branch (Log, 2026-11-22): at 90% of its cost budget, or when a normal turn would cross
+   it, a run gets one report-only last turn. Waits on: review and landing.
 2. **Revoke a run's git grant when the run ends** (`cleanup.md` item 12). Not built; the grant
    lives 12 hours. Next: revoke in the run's end path. Waits on: an AI Gateway executor.
 3. **The run id in core's audit lines** (Log, landing 1 "Departure"). Needs a field on core's
@@ -734,3 +733,14 @@ executors through it. Each item: state, next step, who it waits on.
     new tool and a policy rule for it, not worth it for a number that changes rarely.
   - The smoke suite admits five planners at once, fills to 24 planners and the 8 reserved
     executors, holds the ceiling and keeps each role's queue in order.
+- 2026-11-22: **A run reports before its budget runs out** (overnight "What broke" 4, Open items 1).
+  - At 90% of its cost budget, or when a normal turn would cross it, a run gets one last turn.
+  - The last turn is report only: no thinking, `report` forced as the tool, 4096 output tokens.
+    The prompt says what was spent and that this is the last turn.
+  - That turn skips the cost and turn-count checks, since the last 10% is kept for it. The
+    wall-clock check still applies.
+  - If the model answers without calling `report`, the run ends `over_budget`. Its report is
+    the model's last text, or a line saying the last turn did not report.
+  - The report tool carries no cache marker: tools come before the planner's 1-hour system
+    marker, and a 5-minute one before it is refused.
+  - The smoke scenario is `ai_agents_last_turn_reports_before_budget`.

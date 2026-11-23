@@ -439,6 +439,17 @@ impl Over {
     }
 }
 
+/// The share of its cost budget, in percent, at which a run gets its last turn.
+pub const LAST_TURN_PERCENT: u64 = 90;
+
+/// Whether the run's next turn must be its last: it has spent at least [`LAST_TURN_PERCENT`] of
+/// its cost budget, or a normal turn (costing `estimate_micros`) would go over the budget.
+pub fn last_turn_due(budget: &Budget, spent: &Spent, estimate_micros: u64) -> bool {
+    let at_percent = u128::from(spent.cost_micros).saturating_mul(100)
+        >= u128::from(budget.cost_micros).saturating_mul(u128::from(LAST_TURN_PERCENT));
+    at_percent || spent.cost_micros.saturating_add(estimate_micros) > budget.cost_micros
+}
+
 /// Decides whether the next step may go ahead.
 ///
 /// Wall time is checked first, for every kind of step. Then the checks for that kind of step

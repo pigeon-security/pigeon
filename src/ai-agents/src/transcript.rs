@@ -82,6 +82,34 @@ pub fn request(spec: &Spec, messages: &[Value]) -> Value {
     Value::Object(body)
 }
 
+/// The most output tokens the last turn may use.
+pub const LAST_TURN_MAX_TOKENS: u64 = 4096;
+
+/// Builds the request for a run's last turn: only the `report` tool, forced, with no thinking
+/// (a forced tool choice is not allowed with it) and the messages' thinking blocks stripped
+/// (their signatures are bound to the full tool list). The tool carries no cache marker: tools
+/// come before the system prompt, and a 5-minute marker before a planner's 1-hour one is refused.
+pub fn last_turn_request(spec: &Spec, messages: &[Value]) -> Value {
+    let mut body = request(spec, &strip_thinking(messages));
+    if let Some(obj) = body.as_object_mut() {
+        let tools: Vec<Value> = spec
+            .tools
+            .iter()
+            .filter(|t| t.get("name").and_then(Value::as_str) == Some("report"))
+            .cloned()
+            .collect();
+        obj.insert("tools".to_string(), Value::Array(tools));
+        obj.insert(
+            "tool_choice".to_string(),
+            json!({"type": "tool", "name": "report"}),
+        );
+        obj.insert("max_tokens".to_string(), json!(LAST_TURN_MAX_TOKENS));
+        obj.remove("thinking");
+        obj.remove("output_config");
+    }
+    body
+}
+
 /// The longest tool result, in bytes, that is passed on without cutting.
 pub const MAX_RESULT_BYTES: usize = 16 * 1024;
 
