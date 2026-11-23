@@ -6059,6 +6059,47 @@ fn platform_approvals_list_shows_other_kinds() {
     assert!(out["plans"].as_array().unwrap().is_empty());
 }
 
+/// Core's audit lines can name an AI agent run: `run` is optional on the caller (old callers read
+/// as before), only a run id shape is kept, and a line has a `run` key only when one is given.
+#[test]
+fn core_audit_lines_name_the_run() {
+    use pigeon_capabilities::policy::{audit_line, audit_line_for, decide, run_label};
+    use pigeon_capabilities::users::Caller;
+    let user = json!({ "id": "u", "kind": "service", "name": "Exec", "created_at": 1 });
+    let old: Caller = serde_json::from_value(json!({ "user": user, "acting_for": null })).unwrap();
+    assert!(old.run.is_none());
+    assert!(serde_json::to_value(&old).unwrap().get("run").is_none());
+    let named: Caller =
+        serde_json::from_value(json!({ "user": user, "acting_for": null, "run": "r1" })).unwrap();
+    assert_eq!(named.run.as_deref(), Some("r1"));
+
+    let long = "a".repeat(33);
+    assert_eq!(run_label(Some("r1")), Some("r1"));
+    assert_eq!(run_label(Some("../x")), None);
+    assert_eq!(run_label(Some("")), None);
+    assert_eq!(run_label(Some(&long)), None);
+    assert_eq!(run_label(Some(&long[..32])), Some(&long[..32]));
+    assert_eq!(run_label(None), None);
+
+    let req = request("land", "claude/x", None);
+    let answer = decide(&vars(), &req);
+    let plain: Value = serde_json::from_str(&audit_line("b", &req, &answer)).unwrap();
+    assert!(plain.get("run").is_none());
+    let with: Value =
+        serde_json::from_str(&audit_line_for("b", &req, &answer, Some("r1"))).unwrap();
+    assert_eq!(with["run"], "r1");
+    let mut without = with.clone();
+    without.as_object_mut().unwrap().remove("run");
+    assert_eq!(without, plain);
+    let none: Value = serde_json::from_str(&audit_line_for("b", &req, &answer, None)).unwrap();
+    assert_eq!(none, plain);
+
+    let starter = json!({ "user": user, "acting_for": null });
+    let signed = pigeon_ai_agents::object::chosen_caller(&starter, None, "r1");
+    let c: Caller = serde_json::from_value(signed).unwrap();
+    assert_eq!(c.run.as_deref(), Some("r1"));
+}
+
 // ---- Buildkite setup ----
 
 /// The Buildkite setup's plan: a first run creates everything; the same state seen back is all

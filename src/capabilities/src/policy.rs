@@ -15,14 +15,23 @@ use crate::{Call, Capability, Context, unknown};
 
 /// The policy built into this Worker: its text, parsed once, deciding, and audit lines; in
 /// pigeon-core so the proxy Worker decides by the same rules.
-pub use pigeon_core::policy_file::{TEXT, audit_line, current, decide, request};
+pub use pigeon_core::policy_file::{
+    TEXT, audit_line, audit_line_for, current, decide, request, run_label,
+};
 
 /// How many decisions are kept.
 pub const LISTED: usize = 10;
 
-/// Writes `req`'s audit line and keeps the decision.
-pub async fn record(env: &Env, by: &str, req: &Request, a: &Answer) -> Result<()> {
-    console_log!("{}", audit_line(by, req, a));
+/// Writes `req`'s audit line and keeps the decision. `run` is the AI agent run, a label for the
+/// line only; the kept decision does not carry it.
+pub async fn record(
+    env: &Env,
+    by: &str,
+    req: &Request,
+    a: &Answer,
+    run: Option<&str>,
+) -> Result<()> {
+    console_log!("{}", audit_line_for(by, req, a, run_label(run)));
     directory(
         env,
         "policy.log",
@@ -87,7 +96,7 @@ impl Policy {
             ))
         })?;
         let answer = decide(&self.vars(), &req);
-        record(cx.env, "policy_check", &req, &answer).await?;
+        record(cx.env, "policy_check", &req, &answer, caller.run.as_deref()).await?;
         Ok(json!({
             "decision": answer.decision, "rule": answer.rule, "reason": answer.reason,
             "needs": answer.needs, "as": delegate(caller),

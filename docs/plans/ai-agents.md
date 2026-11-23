@@ -530,8 +530,10 @@ executors through it. Each item: state, next step, who it waits on.
 2. **Revoke a run's git grant when the run ends** (`cleanup.md` item 12). **Built** on this
    branch (Log, 2026-11-22): core's `credential_revoke` op, called from the run's `end()` in
    every terminal state. Waits on: review and landing.
-3. **The run id in core's audit lines** (Log, landing 1 "Departure"). Needs a field on core's
-   `Caller`. Next: design with core's owner. Waits on: a planner.
+3. **The run id in core's audit lines** (Log, landing 1 "Departure"). **Built** on this branch
+   (Log, 2026-11-22): an optional `run` on `users::Caller`, named in dispatch's policy audit
+   lines and kept in an approval's summary. Not on the console's approval card yet
+   (`console/approvals.js`). Waits on: review and landing.
 4. **Local test runs.** The workspace's default target is wasm32, so `cargo test` natively needs
    `--target x86_64-unknown-linux-gnu` (for example `cargo test --target
    x86_64-unknown-linux-gnu --test smoke apple`). Worth a line in the agents' brief.
@@ -758,3 +760,12 @@ executors through it. Each item: state, next step, who it waits on.
     for up to a minute more.
   - Smoke scenario: `core_run_grant_revoked_when_the_run_ends`. Deploy order: `src/contract` is
     shared, so core deploys first and knows the op before `pigeon-ai-agents` asks it.
+- 2026-11-22: **The run id in core's audit lines** (landing 1's Departure, Open items 3).
+  - `users::Caller` has an optional `run` (serde default, left out when `None`), so callers
+    without it read and write as before.
+  - It is a label only. It never decides anything and is not in the policy engine's input.
+  - Dispatch's tool-call lines carry it, and an approval keeps it in its summary, so the
+    later `ran`, `expired` and console lines for that approval carry it too. Only 1 to 32 ASCII
+    letters and digits are kept (`run_label`).
+  - The Directory's kept decisions are unchanged, so there is no migration.
+  - The smoke scenario is `core_audit_lines_name_the_run`.

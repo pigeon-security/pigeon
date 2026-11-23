@@ -2021,7 +2021,7 @@ impl Lander {
             .unwrap_or(&row.branch);
         let req = crate::policy::request(&row.by_name, Kind::Land, branch);
         let answer = crate::policy::decide(&git_proxy::vars(&s.main, state::PREFIX), &req);
-        crate::policy::record(&self.env, "lander", &req, &answer).await?;
+        crate::policy::record(&self.env, "lander", &req, &answer, None).await?;
         if answer.decision != Decision::Allow {
             let why = format!(
                 "the policy does not allow landing {branch}: {} ({})",
@@ -2063,7 +2063,7 @@ impl Lander {
             a
         });
         for (req, a) in &decided {
-            crate::policy::record(&self.env, "lander", req, a).await?;
+            crate::policy::record(&self.env, "lander", req, a, None).await?;
         }
         let reason = state::approval_reason(self.approval_on()?, &approvals.passkey);
         let delegated = (!approvals.delegate.is_empty()).then(|| {

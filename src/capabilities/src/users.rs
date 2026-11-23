@@ -49,7 +49,14 @@ pub struct User {
 pub struct Caller {
     pub user: User,
     pub acting_for: Option<User>,
+    /// The AI agent run this caller acts on behalf of, set when pigeon-ai-agents dispatches for a
+    /// run; a label for audit lines, never used to decide anything.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<String>,
 }
+
+/// The run id as an audit label: up to 32 ASCII letters and digits, else dropped.
+pub use pigeon_core::policy_file::run_label;
 
 /// A passkey, as kept: its credential ID, uncompressed P-256 point (base64url) and counter.
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -529,6 +536,7 @@ impl Directory {
                 {
                     Some(user) => to_value(Caller {
                         acting_for: self.acting_for(&user.id)?,
+                        run: None,
                         user,
                     }),
                     None => Value::Null,
@@ -543,6 +551,7 @@ impl Directory {
                 to_value(Caller {
                     user,
                     acting_for: None,
+                    run: None,
                 })
             }
             "enrol.create" => {
@@ -789,6 +798,7 @@ impl Directory {
             "caller.of" => match self.user(s("user_id"))? {
                 Some(user) => to_value(Caller {
                     acting_for: self.acting_for(&user.id)?,
+                    run: None,
                     user,
                 }),
                 None => Value::Null,

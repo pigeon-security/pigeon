@@ -79,6 +79,7 @@ async fn audit(
     decision: Decision,
     rule: Option<String>,
     reason: String,
+    run: Option<&str>,
 ) -> Result<()> {
     let mut req = crate::policy::request(actor, Kind::CallTool, tool);
     req.context.approval = approval;
@@ -88,7 +89,7 @@ async fn audit(
         reason,
         needs: None,
     };
-    crate::policy::record(env, by, &req, &a).await
+    crate::policy::record(env, by, &req, &a, run).await
 }
 
 /// The rule a tool call's approval was asked under, kept in its summary.
@@ -98,6 +99,11 @@ fn rule_of(r: &Record) -> Option<String> {
 
 fn actor_of(r: &Record) -> String {
     r.summary["caller"].as_str().unwrap_or_default().to_string()
+}
+
+/// The AI agent run an approval was asked under, kept in its summary.
+fn run_of(r: &Record) -> Option<String> {
+    r.summary["run"].as_str().map(str::to_string)
 }
 
 /// Records each approval the Directory found past its time.
@@ -113,6 +119,7 @@ async fn expired(env: &Env, answered: &Value) -> Result<()> {
             Decision::Deny,
             rule_of(r),
             format!("approval {} expired", r.id),
+            run_of(r).as_deref(),
         )
         .await?;
     }
@@ -140,7 +147,14 @@ pub async fn gate(cx: &Context<'_>, tool: &str, args: &Value) -> Result<Gate> {
     match (a.decision, a.needs) {
         (Decision::Allow, _) => Ok(Gate::Run(rest)),
         (Decision::Deny, None) => {
-            crate::policy::record(cx.env, BY, &req, &a).await?;
+            crate::policy::record(
+                cx.env,
+                BY,
+                &req,
+                &a,
+                cx.caller.and_then(|c| c.run.as_deref()),
+            )
+            .await?;
             Err(Error::RustError(format!(
                 "the person's policy refuses `{tool}`: {} ({})",
                 a.reason,
@@ -169,13 +183,19 @@ async fn ask(
     digest: String,
     a: Answer,
 ) -> Result<Gate> {
-    let summary = json!({
+    let mut summary = json!({
         "tool": tool,
         "args": args,
         "caller": caller.user.name,
         "acting_for": caller.acting_for.as_ref().map(|p| p.name.clone()),
         "rule": a.rule,
     });
+    if let (Some(run), Some(o)) = (
+        crate::policy::run_label(caller.run.as_deref()),
+        summary.as_object_mut(),
+    ) {
+        o.insert("run".into(), json!(run));
+    }
     let made = directory(
         env,
         "approval.create",
@@ -202,6 +222,7 @@ async fn ask(
             Decision::Deny,
             a.rule.clone(),
             format!("needs passkey: approval {} pending", r.id),
+            caller.run.as_deref(),
         )
         .await?;
     }
@@ -240,6 +261,7 @@ async fn use_approved(
             Decision::Deny,
             a.rule,
             format!("approval {id} refused: {why}"),
+            caller.run.as_deref(),
         )
         .await?;
         return Err(Error::RustError(format!("`{tool}` does not run: {why}")));
@@ -263,6 +285,7 @@ pub async fn ran(env: &Env, r: &Record, ok: bool) -> Result<()> {
             r.id,
             if ok { "ok" } else { "failed" }
         ),
+        run_of(r).as_deref(),
     )
     .await
 }
@@ -351,6 +374,7 @@ pub async fn decide(env: &Env, id: &str, approve: bool, person: &User) -> Result
             decision,
             rule_of(&r),
             format!("approval {id} {verb} by {}", person.name),
+            run_of(&r).as_deref(),
         )
         .await?;
     }

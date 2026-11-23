@@ -48,10 +48,24 @@ pub fn request(actor: &str, action: Kind, target: &str) -> Request {
 /// `req` and its answer as one JSON audit line. Worker logs are kept (docs/plans/observability.md),
 /// so it leaves out the actor, a person's or credential's name; the console's decision list keeps it.
 pub fn audit_line(by: &str, req: &Request, a: &Answer) -> String {
-    json!({
+    audit_line_for(by, req, a, None)
+}
+
+/// Like [`audit_line`], with a `"run"` key naming the AI agent run when `run` is `Some`.
+pub fn audit_line_for(by: &str, req: &Request, a: &Answer, run: Option<&str>) -> String {
+    let mut line = json!({
         "audit": "policy", "by": by, "action": req.action.name(),
         "target": req.target, "approval": req.context.approval.map(|x| x.name()),
         "decision": a.decision, "rule": a.rule, "reason": a.reason,
-    })
-    .to_string()
+    });
+    if let (Some(run), Some(o)) = (run, line.as_object_mut()) {
+        o.insert("run".into(), json!(run));
+    }
+    line.to_string()
+}
+
+/// The run id as an audit label: kept when it is 1 to 32 ASCII letters and digits, else dropped.
+/// A label for lines only; nothing is decided by it.
+pub fn run_label(run: Option<&str>) -> Option<&str> {
+    run.filter(|r| (1..=32).contains(&r.len()) && r.bytes().all(|b| b.is_ascii_alphanumeric()))
 }
