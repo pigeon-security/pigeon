@@ -527,8 +527,9 @@ executors through it. Each item: state, next step, who it waits on.
 1. **A run that spends its budget before reporting** (overnight "What broke" 4). **Built** on
    this branch (Log, 2026-11-22): at 90% of its cost budget, or when a normal turn would cross
    it, a run gets one report-only last turn. Waits on: review and landing.
-2. **Revoke a run's git grant when the run ends** (`cleanup.md` item 12). Not built; the grant
-   lives 12 hours. Next: revoke in the run's end path. Waits on: an AI Gateway executor.
+2. **Revoke a run's git grant when the run ends** (`cleanup.md` item 12). **Built** on this
+   branch (Log, 2026-11-22): core's `credential_revoke` op, called from the run's `end()` in
+   every terminal state. Waits on: review and landing.
 3. **The run id in core's audit lines** (Log, landing 1 "Departure"). Needs a field on core's
    `Caller`. Next: design with core's owner. Waits on: a planner.
 4. **Local test runs.** The workspace's default target is wasm32, so `cargo test` natively needs
@@ -744,3 +745,16 @@ executors through it. Each item: state, next step, who it waits on.
   - The report tool carries no cache marker: tools come before the planner's 1-hour system
     marker, and a 5-minute one before it is refused.
   - The smoke scenario is `ai_agents_last_turn_reports_before_budget`.
+- 2026-11-22: **A run's git grant is revoked when it ends** (cleanup.md item 12, Open items 2).
+  - New core op `credential_revoke` (body: a `CredentialRequest`, kind `run_grant`, the run as
+    `instance`), which asks the new Directory op `run_grant.revoke`. It deletes the grants whose
+    scope equals the run's branch prefix, never a prefix match, and answers `{"revoked": n}`;
+    a grant already gone is `0`.
+  - Who may revoke: the same person rule as minting (`split::grant_person`), so only the person
+    the grant was minted for.
+  - `end()` revokes in every terminal state (done, failed, stopped, over budget), after the
+    sandbox is destroyed. A failure only logs; the grant still expires after 12 hours.
+  - The proxy Worker keeps a verified credential for at most a minute, so a revoked grant works
+    for up to a minute more.
+  - Smoke scenario: `core_run_grant_revoked_when_the_run_ends`. Deploy order: `src/contract` is
+    shared, so core deploys first and knows the op before `pigeon-ai-agents` asks it.

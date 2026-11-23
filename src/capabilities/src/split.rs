@@ -186,6 +186,7 @@ pub async fn serve(mut req: Request, cx: &Context<'_>) -> Result<Response> {
             crate::dispatch(&cx, tool, &args).await
         }
         _ => match serde_json::from_slice::<CredentialRequest>(&body) {
+            Ok(r) if op == "credential_revoke" => credential_revoke(&cx, &r).await,
             Ok(r) => credential(&cx, &r).await,
             Err(e) => return reply(Answer::error(FailureKind::BadRequest, e.to_string()), 400),
         },
@@ -327,14 +328,7 @@ async fn credential(cx: &Context<'_>, r: &CredentialRequest) -> Result<Value> {
                 .instance
                 .as_deref()
                 .ok_or_else(|| bad("a run grant names its run"))?;
-            let caller = cx
-                .caller
-                .ok_or_else(|| bad("a run grant needs a caller acting for a person"))?;
-            let person = match (&caller.acting_for, caller.user.kind.as_str()) {
-                (Some(p), _) => p.id.clone(),
-                (None, "standard") => caller.user.id.clone(),
-                _ => return Err(bad("a run grant needs a caller acting for a person")),
-            };
+            let person = grant_person(cx.caller).map_err(|e| bad(&e))?;
             let (token, expires_at) = crate::proxy::issue_run_grant(cx.env, &person, run).await?;
             Ok(serde_json::to_value(Credential {
                 token,
@@ -344,6 +338,36 @@ async fn credential(cx: &Context<'_>, r: &CredentialRequest) -> Result<Value> {
         }
         other => Err(bad(&format!("no credential of kind `{other}`"))),
     }
+}
+
+/// The person a run grant is for: the person a caller acts for, or the caller itself when it is
+/// a standard user. Minting and revoking both use it, so they agree on whose grant it is.
+pub fn grant_person(caller: Option<&Caller>) -> std::result::Result<String, String> {
+    const NEEDS: &str = "a run grant needs a caller acting for a person";
+    let caller = caller.ok_or_else(|| NEEDS.to_string())?;
+    match (&caller.acting_for, caller.user.kind.as_str()) {
+        (Some(p), _) => Ok(p.id.clone()),
+        (None, "standard") => Ok(caller.user.id.clone()),
+        _ => Err(NEEDS.to_string()),
+    }
+}
+
+/// `credential_revoke`: ends AI agent run `instance`'s git grant for the caller's person.
+/// Answers `{"revoked": n}`; a grant already gone is `0`, not an error.
+async fn credential_revoke(cx: &Context<'_>, r: &CredentialRequest) -> Result<Value> {
+    if r.kind != "run_grant" {
+        return Err(bad(&format!(
+            "no credential of kind `{}` to revoke",
+            r.kind
+        )));
+    }
+    let run = r
+        .instance
+        .as_deref()
+        .ok_or_else(|| bad("a run grant names its run"))?;
+    let person = grant_person(cx.caller).map_err(|e| bad(&e))?;
+    let n = crate::proxy::revoke_run_grant(cx.env, &person, run).await?;
+    Ok(json!({ "revoked": n }))
 }
 
 /// How long a scoped token minted for a capability Worker lives, in seconds.

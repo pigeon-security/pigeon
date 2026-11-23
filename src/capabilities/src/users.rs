@@ -989,6 +989,23 @@ impl Directory {
                 )?;
                 Value::Null
             }
+            // Revokes a run's git grants for a person: scope equality, never a prefix match.
+            // Answers how many went.
+            "run_grant.revoke" => {
+                #[derive(Deserialize)]
+                struct Count {
+                    n: i64,
+                }
+                let found: Option<Count> = self.db.row(
+                    "SELECT COUNT(*) AS n FROM oauth_tokens WHERE kind = 'run_grant' AND scope = ? AND service_user_id = ?",
+                    vec![s("scope").into(), s("user_id").into()],
+                )?;
+                self.db.exec(
+                    "DELETE FROM oauth_tokens WHERE kind = 'run_grant' AND scope = ? AND service_user_id = ?",
+                    vec![s("scope").into(), s("user_id").into()],
+                )?;
+                json!(found.map_or(0, |c| c.n))
+            }
             // The live ones, and with `expired_within_ms` also those expired that recently.
             "proxy.tokens" => {
                 let since = t - a["expired_within_ms"].as_i64().unwrap_or(0).max(0);

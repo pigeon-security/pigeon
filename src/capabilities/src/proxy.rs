@@ -135,6 +135,19 @@ pub async fn issue_run_grant(env: &Env, person: &str, run: &str) -> Result<(Stri
     Ok((secret, worker::js_sys::Date::now() as i64 + RUN_GRANT_MS))
 }
 
+/// Revokes AI agent run `run`'s git grants held by `person`, when the run ends. Answers how
+/// many went; none left is not an error.
+pub async fn revoke_run_grant(env: &Env, person: &str, run: &str) -> Result<u64> {
+    let scope = run_branch_prefix(run).map_err(|e| bad(&e))?;
+    let n = directory(
+        env,
+        "run_grant.revoke",
+        json!({ "user_id": person, "scope": scope }),
+    )
+    .await?;
+    Ok(n.as_u64().unwrap_or(0))
+}
+
 /// The grant of CI job token `presented` when it is live and for repository `repo`: core's
 /// own check, and what its `grant` op answers the proxy Worker.
 pub async fn job_grant(env: &Env, presented: &str, repo: &str) -> Result<Option<Grant>> {

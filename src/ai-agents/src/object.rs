@@ -1172,6 +1172,11 @@ impl AiAgentRuns {
         if let Err(e) = sandbox::call(&self.env, &row.id, "destroy", &json!({})).await {
             worker::console_error!("agents: destroying run {}'s sandbox: {e}", row.id);
         }
+        // The run's git grant goes with it; a failure only logs, the grant expires on its own.
+        let caller: Value = serde_json::from_str(&row.caller).unwrap_or(Value::Null);
+        if let Err(e) = revoke_grant(&self.env, &caller, &row.id).await {
+            worker::console_error!("agents: revoking run {}'s git grant: {e}", row.id);
+        }
         self.set(
             "state = ?, job_id = NULL, waiting = NULL",
             vec![to.name().into()],
@@ -1912,6 +1917,32 @@ pub async fn grant(env: &Env, caller: &Value, start: &Value) -> Result<String> {
             .as_str()
             .map(String::from)
             .ok_or_else(|| bad("core answered no grant")),
+        Answer::Error(f) => Err(bad(f.message)),
+    }
+}
+
+/// The body of core's `credential_revoke` for run `run`: its `run_grant` credential.
+pub fn revoke_request(run: &str) -> Value {
+    json!({ "kind": "run_grant", "instance": run })
+}
+
+/// Revokes run `run`'s git grant, asked of core's `credential_revoke` as `caller` (the one the
+/// grant was minted for). Answers how many grants went.
+pub async fn revoke_grant(env: &Env, caller: &Value, run: &str) -> Result<u64> {
+    let key = caller_key(env).await?;
+    let nonce = pigeon_core::webauthn::random()?;
+    let platform = env.service(PLATFORM)?;
+    match pigeon_contract::ask(
+        &platform,
+        "https://core",
+        "credential_revoke",
+        &revoke_request(run),
+        Some((key.as_bytes(), caller)),
+        &nonce,
+    )
+    .await?
+    {
+        Answer::Ok(v) => Ok(v["revoked"].as_u64().unwrap_or(0)),
         Answer::Error(f) => Err(bad(f.message)),
     }
 }

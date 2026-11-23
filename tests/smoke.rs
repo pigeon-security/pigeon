@@ -4914,6 +4914,39 @@ fn proxy_and_job_tokens() {
     }
 }
 
+/// A run's git grant is revoked when the run ends: the op is core's and signed for a caller,
+/// both ends agree on whose grant it is, and one run's scope never reaches another's.
+#[test]
+fn core_run_grant_revoked_when_the_run_ends() {
+    use pigeon_capabilities::proxy::run_branch_prefix;
+    use pigeon_capabilities::split::grant_person;
+    use pigeon_capabilities::users::Caller;
+    use pigeon_contract::{CALLERLESS_OPS, CORE_OPS, CredentialRequest};
+
+    assert!(CORE_OPS.contains(&"credential_revoke"));
+    assert!(!CALLERLESS_OPS.contains(&"credential_revoke"));
+
+    let user =
+        |id: &str, kind: &str| json!({ "id": id, "kind": kind, "name": id, "created_at": 0 });
+    let caller = |user: Value, acting_for: Value| -> Caller {
+        serde_json::from_value(json!({ "user": user, "acting_for": acting_for })).unwrap()
+    };
+    let standard = caller(user("ana", "standard"), Value::Null);
+    assert_eq!(grant_person(Some(&standard)), Ok("ana".to_string()));
+    let acting = caller(user("bot", "service"), user("ben", "standard"));
+    assert_eq!(grant_person(Some(&acting)), Ok("ben".to_string()));
+    let alone = caller(user("bot", "service"), Value::Null);
+    assert!(grant_person(Some(&alone)).is_err());
+    assert!(grant_person(None).is_err());
+
+    let body = pigeon_ai_agents::object::revoke_request("r1");
+    let parsed: CredentialRequest = serde_json::from_value(body).unwrap();
+    assert_eq!(parsed.kind, "run_grant");
+    assert_eq!(parsed.instance.as_deref(), Some("r1"));
+
+    assert_ne!(run_branch_prefix("ab"), run_branch_prefix("abc"));
+}
+
 /// The proxy Worker's per-isolate memory: a scoped credential reused until a minute before it
 /// expires; a verified proxy credential kept a minute, by its hash, never its value; and the
 /// deploy proxy it builds matching core's. Grants are never kept, so there is nothing to keep.

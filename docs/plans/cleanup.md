@@ -240,6 +240,7 @@ day), L (more). "Tonight" means built on a branch tonight.
   grant when it ends is left for later."
 - **Fix.** Revoke it when the run ends. That belongs to the ai-agents planner; recorded here so
   it is not lost.
+- **Built.** Core's `credential_revoke` op; the run's `end()` calls it (ai-agents.md Log).
 
 ### 13. `CiRunner` still core's
 
