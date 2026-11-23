@@ -5,8 +5,11 @@
 # anything else, the job asks the proxy (`/cf/grant`) whether its token is a landing's deploy
 # grant and stops at once when it is not, so a deploy submitted by hand fails in seconds rather
 # than after the build. It then runs the allowlist check against the stand-in (which builds the
-# Worker), so a deploy that would make a call the proxy refuses stops before anything changes;
-# then the pinned wrangler deploys through the Cloudflare API proxy with this job's own token,
+# Worker, once), so a deploy that would make a call the proxy refuses stops before anything changes;
+# then the pinned wrangler deploys that same build through the Cloudflare API proxy with this
+# job's own token, using the build-free config copy the allowlist check left
+# (`.wrangler.built.toml`). The build is not run again: before the real deploy, a hash of build/
+# is checked against the one taken after the build, and a difference stops the job (exit 3),
 # which the proxy takes only while this job is its landing's deploy (see
 # src/capabilities/src/land.rs). No stored token.
 #
@@ -20,7 +23,7 @@
 # Exit codes, which the Lander reads:
 #   0  deployed.
 #   3  stopped before the first real `wrangler deploy` began (the token, URL and grant checks, the
-#      allowlist check, node, reading wrangler.toml). Nothing on Cloudflare changed.
+#      build, the allowlist check, the build hash check, node, reading wrangler.toml). Nothing on Cloudflare changed.
 #   1  any failure once the real deploy has started, even a refusal before the upload. Wrangler's
 #      own 3 is mapped to 1 too, so 3 never means anything else.
 set -eu
@@ -30,6 +33,8 @@ log=
 finish() {
     rc=$?
     [ -z "$log" ] || rm -f "$log"
+    rm -f "$root/${PIGEON_WORKER_DIR:-src/platform}/.wrangler.built.toml" \
+        "$root/${PIGEON_WORKER_DIR:-src/platform}/.wrangler.built.sha256"
     if [ "$rc" -ne 0 ]; then
         if [ "$started" = 0 ]; then rc=3; elif [ "$rc" = 3 ]; then rc=1; fi
     fi
@@ -77,7 +82,7 @@ else
     exit 1
 fi
 
-"$root/ci/deploy/allowlist.sh"
+PIGEON_KEEP_BUILT=1 "$root/ci/deploy/allowlist.sh"
 . "$root/ci/deploy/node.sh"
 
 dir=$root/${PIGEON_WORKER_DIR:-src/platform}
@@ -85,13 +90,20 @@ account=$(sed -n 's/^account_id = "\(.*\)"$/\1/p' "$dir/wrangler.toml" | head -n
 cd "$dir"
 log=$(mktemp)
 
+# What the stand-in saw must be what deploys: build/ must be as it was after the build.
+now=$(cd build && find . -type f | LC_ALL=C sort | xargs sha256sum | sha256sum)
+if [ ! -f .wrangler.built.toml ] || [ "$now" != "$(cat .wrangler.built.sha256)" ]; then
+    echo "build/ changed since the allowlist check, or its config copy is missing; not deploying" >&2
+    exit 1
+fi
+
 deploy() {
     printf '\n== wrangler deploy through %s (attempt %s)\n' "$proxy" "$1"
     started=1
     rc=0
     CLOUDFLARE_API_BASE_URL=$proxy/cf/client/v4 CLOUDFLARE_ACCOUNT_ID=$account \
         CLOUDFLARE_API_TOKEN=$PIGEON_JOB_TOKEN WRANGLER_SEND_METRICS=false \
-        npx --no-install wrangler deploy --containers-rollout immediate >"$log" 2>&1 || rc=$?
+        npx --no-install wrangler deploy -c .wrangler.built.toml --containers-rollout immediate >"$log" 2>&1 || rc=$?
     cat "$log"
     return "$rc"
 }

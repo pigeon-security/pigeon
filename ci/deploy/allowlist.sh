@@ -6,12 +6,25 @@
 # API proxy's allowlist (`cf_proxy::unlisted`, through the `allowlist` example). Fails naming each
 # call the proxy would refuse. Holds no credential: the stand-in takes a dummy token. Run from
 # anywhere in the repository; the `allowlist` and `deploy` jobs run it.
+#
+# The build runs once. The `[build]` command is read from wrangler.toml and run here; both stand-in
+# deploys then use `.wrangler.built.toml`, a copy of wrangler.toml without its `[build]` table, kept
+# beside it so relative paths hold. A hash of build/ is recorded after the build. When the
+# environment sets PIGEON_KEEP_BUILT (deploy.sh does), the copy and the hash
+# (`.wrangler.built.sha256`) are left for deploy.sh to reuse and remove; otherwise they are removed.
 set -eu
 root=$(cd "$(dirname "$0")/../.." && pwd)
 platform=$root/${PIGEON_WORKER_DIR:-src/platform}
 toml=$platform/wrangler.toml
 work=$(mktemp -d)
-trap 'kill "$standin" 2>/dev/null || true; rm -rf "$work"' EXIT
+built=$platform/.wrangler.built.toml
+builtsum=$platform/.wrangler.built.sha256
+cleanup() {
+    kill "$standin" 2>/dev/null || true
+    rm -rf "$work"
+    [ -n "${PIGEON_KEEP_BUILT:-}" ] || rm -f "$built" "$builtsum"
+}
+trap cleanup EXIT
 standin=
 
 # What the proxy's scope is made of, read from wrangler.toml.
@@ -27,6 +40,15 @@ containers=$(awk '/^\[\[containers\]\]/{p=1;next} /^\[/{p=0} p && /^class_name =
 . "$root/ci/deploy/node.sh"
 cd "$platform"
 npm ci --no-audit --no-fund --loglevel=error
+
+# Build once, from the command wrangler.toml names, then drop the `[build]` table from the copy.
+command=$(awk '/^\[build\]/{p=1;next} /^\[/{p=0} p && /^command = /{sub(/^command = "/,""); sub(/"$/,""); print; exit}' "$toml")
+[ -n "$command" ] || { echo "wrangler.toml has no [build] command" >&2; exit 2; }
+rm -f "$built" "$builtsum"
+printf '\n== build (once): %s\n' "$command"
+sh -c "$command"
+awk '/^\[build/{p=1;next} /^\[/{p=0} !p' "$toml" > "$built"
+(cd build && find . -type f | LC_ALL=C sort | xargs sha256sum | sha256sum) > "$builtsum"
 
 port=$((20000 + $$ % 20000))
 for mode in existing fresh; do
@@ -46,7 +68,7 @@ for mode in existing fresh; do
     CLOUDFLARE_API_BASE_URL=http://127.0.0.1:$port/client/v4 \
         CLOUDFLARE_API_TOKEN=stand-in CLOUDFLARE_ACCOUNT_ID=$account \
         WRANGLER_SEND_METRICS=false \
-        npx --no-install wrangler deploy --containers-rollout immediate
+        npx --no-install wrangler deploy -c .wrangler.built.toml --containers-rollout immediate
     kill "$standin"
     wait "$standin" 2>/dev/null || true
     standin=
