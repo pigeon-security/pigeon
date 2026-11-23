@@ -143,6 +143,10 @@ fn scan(pack: &[u8], only_commits: bool, max: usize) -> Result<Objects, String> 
             }
             _ => return Err(bad("unknown object type")),
         };
+        // No single object may pass INFLATED_MAX; this is checked before anything is inflated.
+        if size > INFLATED_MAX {
+            return Err(bad("it inflates too large"));
+        }
         let keep = !only_commits
             || kind == 1
             || match &base {

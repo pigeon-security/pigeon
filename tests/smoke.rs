@@ -1235,6 +1235,13 @@ fn core_land_history_pack_keeps_only_commits() {
     assert_eq!(commits.unresolved, 0);
     // A cap under the commits themselves is still refused.
     assert!(pack::commit_parents_with(&packed, 10).is_err());
+    // One commit that declares 64 MiB (over the per-object cap) is refused before inflating.
+    let mut big = b"PACK".to_vec();
+    big.extend_from_slice(&2u32.to_be_bytes());
+    big.extend_from_slice(&1u32.to_be_bytes());
+    big.extend_from_slice(&[0x90, 0x80, 0x80, 0x80, 0x02]);
+    big.extend_from_slice(&[0u8; 20]);
+    assert!(pack::commit_parents(&big).is_err());
 }
 
 // ---- deploy proxy ----
