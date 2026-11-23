@@ -31,6 +31,7 @@ pub mod lanes;
 pub mod mcp;
 pub mod mcp_portal;
 pub mod merge3;
+pub mod model_prices;
 pub mod notify;
 pub mod oauth;
 pub mod oidc;

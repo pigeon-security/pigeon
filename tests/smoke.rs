@@ -2843,13 +2843,15 @@ fn models_cache_tokens_priced() {
     assert_eq!(gh["requests"], 3);
     assert_eq!(gh["cache_read_tokens"], 2_000_000);
     assert_eq!(gh["cache_write_tokens"], 600_000);
-    assert!((gh["cache_cost"].as_f64().unwrap() - h as f64 / 1e6).abs() < 1e-9);
-    assert!((gh["cost_with_cache"].as_f64().unwrap() - (0.5 + h as f64 / 1e6)).abs() < 1e-9);
+    // The gateway's cost already includes the cache: no cache cost is added.
+    assert!(gh.get("cache_cost").is_none());
+    assert_eq!(gh["cost_with_cache"], 0.5);
     assert_eq!(
         (go["requests"].as_u64(), go["cost"].is_null()),
         (Some(0), true)
     );
-    assert!((go["cost_with_cache"].as_f64().unwrap() - o as f64 / 1e6).abs() < 1e-9);
+    assert_eq!(go["cost_with_cache"], 0.0);
+    assert!(go.get("cache_cost").is_none());
     // Grouped by task, the keys are the task tag's.
     let (by_task, _) = cache::merge(vec![], &rows, &[Dimension::Task]);
     assert_eq!(by_task.len(), 2);
@@ -2916,6 +2918,154 @@ fn models_cache_tokens_priced() {
         ),
         0
     );
+}
+
+/// The gateway's own per-request cost: one price table for the budget and the cache rows,
+/// `models_cost` checks and answer, and `models_usage` no longer adding cache cost.
+#[test]
+fn models_gateway_log_cost() {
+    use pigeon_ai_agents::budget;
+    use pigeon_core::ai_gateway::{Log, LogLookup, cost_answer};
+    use pigeon_core::model_prices;
+    use pigeon_models::cache;
+
+    // One table: budget, cache and core agree, and canonical names match.
+    for m in [
+        "claude-opus-5-5",
+        "anthropic/claude-opus-5.5",
+        "claude-sonnet-5-5-20261101",
+        "Anthropic/Claude-Haiku-5.5",
+        "claude-fable-5-2",
+        "gpt-9",
+    ] {
+        let core = model_prices::price(m);
+        assert_eq!(budget::price(m), core, "{m}");
+        assert_eq!(cache::price(m), core, "{m}");
+    }
+    assert_eq!(
+        model_prices::price("anthropic/claude-opus-5.5"),
+        model_prices::price("claude-opus-5-5")
+    );
+    assert_ne!(
+        model_prices::price("anthropic/claude-opus-5.5"),
+        model_prices::price("gpt-9")
+    );
+    let usage = json!({ "input_tokens": 10, "output_tokens": 20, "cache_read_input_tokens": 30 });
+    assert_eq!(
+        budget::cost_micros("anthropic/claude-haiku-5.5", &usage),
+        model_prices::cost_micros("claude-haiku-5-5", &usage)
+    );
+    assert_eq!(
+        budget::estimate_micros("claude-haiku-5-5", 1_000, 2_000),
+        model_prices::estimate_micros("claude-haiku-5-5", 1_000, 2_000)
+    );
+
+    // models_cost input: 1 to 50 ids of [A-Za-z0-9_-], 1 to 100 characters.
+    let ok = pigeon_models::log_ids(&json!({ "log_ids": ["a-b_C9", "0123"] })).unwrap();
+    assert_eq!(ok, ["a-b_C9", "0123"]);
+    let fifty: Vec<String> = (0..50).map(|n| format!("id{n}")).collect();
+    assert!(pigeon_models::log_ids(&json!({ "log_ids": fifty })).is_ok());
+    let fifty_one: Vec<String> = (0..51).map(|n| format!("id{n}")).collect();
+    for bad in [
+        json!({}),
+        json!({ "log_ids": "abc" }),
+        json!({ "log_ids": [] }),
+        json!({ "log_ids": fifty_one }),
+        json!({ "log_ids": [""] }),
+        json!({ "log_ids": ["a".repeat(101)] }),
+        json!({ "log_ids": ["a/b"] }),
+        json!({ "log_ids": ["a b"] }),
+        json!({ "log_ids": ["a?x=1"] }),
+        json!({ "log_ids": ["../x"] }),
+        json!({ "log_ids": [7] }),
+    ] {
+        assert!(pigeon_models::log_ids(&bad).is_err(), "{bad}");
+    }
+    assert!(pigeon_models::log_ids(&json!({ "log_ids": ["a".repeat(100)] })).is_ok());
+    assert!(pigeon_models::TOOLS.contains(&"models_cost"));
+    assert_eq!(
+        pigeon_models::purposes("models_cost"),
+        pigeon_models::purposes("models_usage")
+    );
+
+    // The answer: found, found without a cost, not found, failed; in request order.
+    let ids: Vec<String> = ["one", "two", "three", "four"].map(String::from).to_vec();
+    let found = Log {
+        model: "anthropic/claude-opus-5.5".into(),
+        tokens_in: Some(2),
+        tokens_out: Some(234),
+        cost: Some(0.83),
+        ..Log::default()
+    };
+    let free = Log {
+        model: "m".into(),
+        ..Log::default()
+    };
+    let lookups = [
+        LogLookup::Found(found),
+        LogLookup::NotFound,
+        LogLookup::Found(free),
+        LogLookup::Failed("boom".into()),
+    ];
+    let answer = cost_answer(&ids, &lookups);
+    let logs = answer["logs"].as_array().unwrap();
+    assert_eq!(logs.len(), 4);
+    assert_eq!(
+        logs.iter().map(|l| l["log_id"].clone()).collect::<Vec<_>>(),
+        ["one", "two", "three", "four"]
+    );
+    assert_eq!(logs[0]["found"], true);
+    assert_eq!(logs[0]["cost_usd"], 0.83);
+    assert_eq!(logs[0]["model"], "anthropic/claude-opus-5.5");
+    assert_eq!(
+        (
+            logs[0]["tokens_in"].as_u64(),
+            logs[0]["tokens_out"].as_u64()
+        ),
+        (Some(2), Some(234))
+    );
+    assert_eq!(
+        (logs[1]["found"].clone(), logs[1]["cost_usd"].is_null()),
+        (json!(false), true)
+    );
+    assert!(logs[1].get("error").is_none());
+    assert_eq!(
+        (logs[2]["found"].clone(), logs[2]["cost_usd"].is_null()),
+        (json!(true), true)
+    );
+    assert_eq!(logs[3]["found"], false);
+    assert_eq!(logs[3]["error"], "boom");
+
+    // models_usage: cost_with_cache equals cost, and there is no cache_cost.
+    let usage = pigeon_core::ai_gateway::Usage {
+        group: [
+            ("provider".to_string(), Some("anthropic".to_string())),
+            ("model".to_string(), Some("claude-haiku-5-5".to_string())),
+        ]
+        .into_iter()
+        .collect(),
+        requests: 1,
+        cost: Some(0.25),
+        ..Default::default()
+    };
+    let rows = [cache::Row::new(
+        1,
+        "anthropic",
+        "claude-haiku-5-5",
+        &[],
+        &json!({ "cache_read_input_tokens": 1_000_000 }),
+    )
+    .unwrap()];
+    let (groups, totals) = cache::merge(
+        vec![usage],
+        &rows,
+        &[pigeon_core::ai_gateway::Dimension::Model],
+    );
+    assert_eq!(groups[0]["cost"], 0.25);
+    assert_eq!(groups[0]["cost_with_cache"], groups[0]["cost"]);
+    assert!(groups[0].get("cache_cost").is_none());
+    assert_eq!(groups[0]["cache_read_tokens"], 1_000_000);
+    assert_eq!(totals.read, 1_000_000);
 }
 
 /// An AI agent run's logic (docs/plans/ai-agents.md, phase 2): its next action from what it knows,
@@ -3230,6 +3380,7 @@ fn ai_agents_loop_budgets_tools_and_turns() {
         cost_micros: 4_900_000,
         sandbox_ms: 0,
         executors: 0,
+        ..Spent::default()
     };
     assert_eq!(
         budget::check(
@@ -4093,7 +4244,294 @@ fn ai_agents_last_turn_on_turns_and_wall() {
     assert!(p(Over::Turns, &turns(9)).contains("9 of your 10 model turns"));
     assert!(p(Over::Wall, &turns(0)).contains("of your 8 hours wall time"));
     assert!(p(Over::Cost, &cost).contains("cost budget"));
-    assert!(p(Over::Wall, &turns(0)).contains("`report`"));
+}
+
+/// The cost estimate: kinds, actual costs (with the legacy planner correction), percentiles,
+/// the suggested budget and the nearest-ten choice. Fake past runs only.
+#[test]
+fn ai_agents_cost_estimate() {
+    use pigeon_ai_agents::Role;
+    use pigeon_ai_agents::budget::Budget;
+    use pigeon_ai_agents::estimate::{self, Past};
+
+    // Kinds: first match wins, case does not matter.
+    assert_eq!(estimate::kind("Update the README"), "docs");
+    assert_eq!(estimate::kind("Fix the broken build"), "fix");
+    assert_eq!(estimate::kind("add a smoke scenario"), "test");
+    assert_eq!(estimate::kind("Rename the module"), "mechanical");
+    assert_eq!(estimate::kind("Add a new tool"), "build");
+    assert_eq!(
+        estimate::kind("fix the docs-only plan"),
+        "docs",
+        "docs first"
+    );
+
+    // Fake index rows.
+    let row = |id: &str, role: &str, state: &str, parent: Value, budget: u64, spent: Value| {
+        json!({
+            "id": id, "role": role, "state": state, "parent_run": parent,
+            "brief": "x".repeat(100),
+            "budget": { "cost_micros": budget },
+            "spent": spent,
+            "ended_at": 1,
+        })
+    };
+    let kids = |p: &str| {
+        vec![
+            row(
+                "c1",
+                "executor",
+                "done",
+                json!(p),
+                3_000_000,
+                json!({ "turns": 5, "cost_micros": 400_000 }),
+            ),
+            row(
+                "c2",
+                "executor",
+                "done",
+                json!(p),
+                3_000_000,
+                json!({ "turns": 5, "cost_micros": 600_000 }),
+            ),
+        ]
+    };
+    // Legacy planner (no `v`): the children's budgets, 6M, are taken off; then their own costs
+    // are added: 7M - 6M + 1M = 2M.
+    let mut rows = kids("p");
+    rows.push(row(
+        "p",
+        "planner",
+        "done",
+        Value::Null,
+        25_000_000,
+        json!({ "turns": 9, "cost_micros": 7_000_000 }),
+    ));
+    let past = estimate::actual_costs(&rows);
+    let planner = past.iter().find(|p| p.role == Role::Planner).unwrap();
+    assert_eq!(planner.cost_micros, 2_000_000);
+    assert_eq!(planner.executors, 2);
+    assert_eq!(past.len(), 3);
+    // `v == 1`: nothing is taken off; the total includes the children: 7M + 1M.
+    let mut rows = kids("p");
+    rows.push(row(
+        "p",
+        "planner",
+        "done",
+        Value::Null,
+        25_000_000,
+        json!({ "v": 1, "turns": 9, "cost_micros": 7_000_000 }),
+    ));
+    let past = estimate::actual_costs(&rows);
+    let planner = past.iter().find(|p| p.role == Role::Planner).unwrap();
+    assert_eq!(planner.cost_micros, 8_000_000);
+    // The correction saturates.
+    let mut rows = kids("p");
+    rows.push(row(
+        "p",
+        "planner",
+        "failed",
+        Value::Null,
+        25_000_000,
+        json!({ "turns": 1, "cost_micros": 100 }),
+    ));
+    let past = estimate::actual_costs(&rows);
+    let planner = past.iter().find(|p| p.role == Role::Planner).unwrap();
+    assert_eq!(planner.cost_micros, 1_000_000);
+    // Live runs and stopped runs with no turns are not samples.
+    let mut live = row("l", "executor", "running", Value::Null, 1, json!({}));
+    live["ended_at"] = Value::Null;
+    let idle = row(
+        "s",
+        "executor",
+        "stopped",
+        Value::Null,
+        1,
+        json!({ "turns": 0 }),
+    );
+    let used = row(
+        "u",
+        "executor",
+        "stopped",
+        Value::Null,
+        1,
+        json!({ "turns": 2 }),
+    );
+    assert_eq!(estimate::actual_costs(&[live, idle, used]).len(), 1);
+
+    // Fewer than 3 samples: the role's default, and a note.
+    let samples = |sizes_costs: &[(usize, u64)]| -> Vec<Past> {
+        sizes_costs
+            .iter()
+            .map(|&(brief_bytes, cost_micros)| Past {
+                role: Role::Executor,
+                brief_bytes,
+                kind: "build",
+                executors: 0,
+                cost_micros,
+            })
+            .collect()
+    };
+    let brief = "x".repeat(100);
+    let few = estimate::estimate(Role::Executor, &brief, &samples(&[(100, 1), (100, 2)]));
+    assert_eq!(few.samples, 2);
+    assert_eq!(
+        few.suggested.cost_micros,
+        Budget::default_for(Role::Executor).cost_micros
+    );
+    assert!(
+        few.note
+            .contains("not enough similar past runs (2); the role's default")
+    );
+    // Other roles' runs do not count.
+    let none = estimate::estimate(Role::Planner, &brief, &samples(&[(100, 1); 5]));
+    assert_eq!(none.samples, 0);
+    assert_eq!(
+        none.suggested.executors,
+        Some(Budget::default_for(Role::Planner).executors)
+    );
+
+    // Ten runs of $1 to $10: median rank 5, low rank 1, high rank 9. 9 * 1.25 = 11.25, up to 11.5.
+    let ten: Vec<(usize, u64)> = (1..=10).map(|i| (100, i * 1_000_000)).collect();
+    let e = estimate::estimate(Role::Executor, &brief, &samples(&ten));
+    assert_eq!(
+        (e.samples, e.median_micros, e.low_micros, e.high_micros),
+        (10, 5_000_000, 1_000_000, 9_000_000)
+    );
+    assert_eq!(e.suggested.cost_micros, 11_500_000);
+    let j = e.to_json();
+    assert_eq!(j["median_usd"], 5.0);
+    assert_eq!(j["suggested_budget"]["cost_usd"], 11.5);
+    assert_eq!(j["kind"], "build");
+    // The minimum is $0.50 and the cap is the hard cap.
+    let cheap = estimate::estimate(Role::Executor, &brief, &samples(&[(100, 10); 3]));
+    assert_eq!(cheap.suggested.cost_micros, 500_000);
+    let dear = estimate::estimate(Role::Executor, &brief, &samples(&[(100, 90_000_000); 3]));
+    assert_eq!(dear.suggested.cost_micros, Budget::HARD.cost_micros);
+
+    // The nearest ten by size win over farther ones.
+    let mut mixed: Vec<(usize, u64)> = vec![(100_000, 50_000_000); 10];
+    mixed.extend(vec![(120, 1_000_000); 10]);
+    let near = estimate::estimate(Role::Executor, &brief, &samples(&mixed));
+    assert_eq!(near.samples, 10);
+    assert_eq!(near.high_micros, 1_000_000);
+}
+
+/// A live run's cost follows the gateway: old spend parses, logs are applied, executors count.
+#[test]
+fn ai_agents_cost_reconcile() {
+    use pigeon_ai_agents::Role;
+    use pigeon_ai_agents::budget::{self, Budget, Next, Over, Spent, TurnCost};
+
+    // Spend stored before the new fields still parses.
+    let old: Spent =
+        serde_json::from_str(r#"{"turns":3,"cost_micros":500,"sandbox_ms":0,"executors":1}"#)
+            .unwrap();
+    assert_eq!((old.gateway_micros, old.unreconciled, old.v), (0, 0, 0));
+    assert_eq!(old.executors_micros, 0);
+
+    // Found logs with a cost are applied; not found and null cost are skipped.
+    let rows = |ids: &[(i64, &str, u64)]| -> Vec<TurnCost> {
+        ids.iter()
+            .map(|(id, log, local)| TurnCost {
+                id: *id,
+                log_id: log.to_string(),
+                local_micros: *local,
+            })
+            .collect()
+    };
+    let spent = Spent {
+        turns: 4,
+        cost_micros: 1_000,
+        unreconciled: 4,
+        v: 1,
+        ..Spent::default()
+    };
+    let logs = json!({"logs": [
+        {"log_id": "a", "found": true, "cost_usd": 0.000_250_4},
+        {"log_id": "b", "found": false, "cost_usd": null},
+        {"log_id": "c", "found": true, "cost_usd": null},
+        {"log_id": "d", "found": true, "cost_usd": 0.0},
+    ]});
+    let (next, done) = budget::reconcile(
+        spent,
+        &rows(&[(1, "a", 300), (2, "b", 300), (3, "c", 300), (4, "d", 100)]),
+        &logs,
+    );
+    assert_eq!(done, vec![(1, 250), (4, 0)]);
+    assert_eq!(next.cost_micros, 1_000 - 300 + 250 - 100);
+    assert_eq!(next.gateway_micros, 250);
+    assert_eq!(next.unreconciled, 2);
+    // A local cost above the total saturates at zero.
+    let (next, _) = budget::reconcile(
+        Spent {
+            cost_micros: 10,
+            unreconciled: 0,
+            ..Spent::default()
+        },
+        &rows(&[(1, "a", 300)]),
+        &logs,
+    );
+    assert_eq!((next.cost_micros, next.unreconciled), (250, 0));
+    // No `logs` key changes nothing.
+    let (same, none) = budget::reconcile(spent, &rows(&[(1, "a", 1)]), &json!({}));
+    assert_eq!((same, none.len()), (spent, 0));
+
+    // A live child holds the larger of budget and spend; an ended child holds its spend.
+    let kids = json!([
+        {"ended_at": null, "spent": {"cost": "$1", "cost_usd": 1.0}, "budget": {"cost": "$5", "budget_cost_usd": 5.0}},
+        {"ended_at": null, "spent": {"cost": "$7", "cost_usd": 7.0}, "budget": {"cost": "$5", "budget_cost_usd": 5.0}},
+        {"ended_at": 9, "spent": {"cost": "$1.25"}, "budget": {"cost": "$5"}},
+    ]);
+    assert_eq!(
+        budget::executors_committed(&kids),
+        5_000_000 + 7_000_000 + 1_250_000
+    );
+    assert_eq!(budget::executors_committed(&json!([])), 0);
+    assert_eq!(budget::executors_committed(&json!(null)), 0);
+
+    // An old planner gets its children's budgets taken off once.
+    let old_planner = Spent {
+        cost_micros: 6_000_000,
+        ..Spent::default()
+    };
+    let moved = budget::migrate_planner(old_planner, 5_000_000);
+    assert_eq!(
+        (moved.cost_micros, moved.v),
+        (1_000_000, budget::SPENT_VERSION)
+    );
+    assert_eq!(budget::migrate_planner(moved, 5_000_000), moved);
+    let tiny = budget::migrate_planner(Spent::default(), 5_000_000);
+    assert_eq!(tiny.cost_micros, 0);
+
+    // Checks count the executors' hold.
+    let b = Budget {
+        cost_micros: 10_000_000,
+        executors: 5,
+        ..Budget::default_for(Role::Planner)
+    };
+    let planner = Spent {
+        cost_micros: 1_000_000,
+        executors_micros: 8_900_000,
+        v: 1,
+        ..Spent::default()
+    };
+    assert_eq!(planner.committed_micros(), 9_900_000);
+    let turn = Next::Turn {
+        estimate_micros: 200_000,
+    };
+    assert_eq!(budget::check(&b, &planner, 0, 1, turn), Err(Over::Cost));
+    assert_eq!(Spent::left(&b, &planner, 0, 1).cost_micros, 100_000);
+    assert!(budget::last_turn_due(&b, &planner, 0));
+    let spawn = Next::Spawn {
+        cost_micros: 200_000,
+    };
+    assert_eq!(budget::check(&b, &planner, 0, 1, spawn), Err(Over::Cost));
+    let roomy = Spent {
+        executors_micros: 2_000_000,
+        ..planner
+    };
+    assert_eq!(budget::check(&b, &roomy, 0, 1, spawn), Ok(()));
 }
 
 // ---- secrets ----
@@ -8964,6 +9402,25 @@ fn core_observability_summary_folds() {
     assert_eq!(listed, 4);
     assert_eq!(seconds.len(), 1);
     assert_eq!(seconds["linux-amd64-small"], 60.0);
+}
+
+/// The "AI agent runs" line (docs/plans/agent-costs.md): a run's own cost is read from the
+/// numeric `cost_usd` when the AI agents Worker gives it, else from the `cost` string, and the
+/// window's turns not yet read from AI Gateway are counted.
+#[test]
+fn core_observability_agent_cost_lines() {
+    use pigeon_capabilities::observability::{fold_agent_runs, unreconciled_agent_turns};
+    use serde_json::json;
+
+    let runs = json!({ "runs": [
+        { "created_at": 1500, "spent": { "cost": "$1.5", "cost_usd": 1.25, "unreconciled_turns": 2 } },
+        { "created_at": 1600, "spent": { "cost": "$0.25" } },
+        { "created_at": 1700, "spent": { "cost": 0.5, "unreconciled_turns": 1 } },
+        { "created_at": 100, "spent": { "cost_usd": 9.0, "unreconciled_turns": 7 } },
+    ] });
+    assert_eq!(fold_agent_runs(&runs, 1000, 2000), Ok((3, 2.0)));
+    assert_eq!(unreconciled_agent_turns(&runs, 1000, 2000), 3);
+    assert_eq!(unreconciled_agent_turns(&json!({}), 0, 1), 0);
 }
 
 /// The Platform section sits on the Cost tab, adds nothing to the overview total, keeps a

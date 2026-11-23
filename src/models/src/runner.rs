@@ -32,7 +32,7 @@ pub const INDEX: &str = "index";
 
 /// Each object's schema, one statement per migration, applied in order and never edited. An
 /// index object uses `jobs`; a job object uses `run`.
-const MIGRATIONS: [&str; 8] = [
+const MIGRATIONS: [&str; 9] = [
     "CREATE TABLE jobs (id TEXT PRIMARY KEY, caller TEXT, caller_name TEXT, for_id TEXT, task TEXT, provider TEXT NOT NULL, model TEXT NOT NULL, state TEXT NOT NULL, request TEXT, timeout_ms INTEGER NOT NULL, created_at INTEGER NOT NULL, started_at INTEGER, deadline_at INTEGER, finished_at INTEGER, progress_at INTEGER, progress_chars INTEGER, tokens_in INTEGER, tokens_out INTEGER, stop_reason TEXT, reply_model TEXT, text TEXT, error TEXT, notify_url TEXT, notify_key TEXT, notify_tries INTEGER NOT NULL DEFAULT 0, notify_at INTEGER, read_at INTEGER, expires_at INTEGER NOT NULL)",
     "CREATE TABLE run (id TEXT PRIMARY KEY, request TEXT NOT NULL, started INTEGER NOT NULL DEFAULT 0)",
     "ALTER TABLE jobs ADD COLUMN lane TEXT NOT NULL DEFAULT 'default'",
@@ -41,6 +41,7 @@ const MIGRATIONS: [&str; 8] = [
     "CREATE TABLE parts (owner TEXT NOT NULL, n INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY (owner, n))",
     "CREATE INDEX jobs_lane_state ON jobs (lane, state)",
     "CREATE TABLE cache_usage (finished_at INTEGER NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, caller TEXT, caller_name TEXT, for_id TEXT, for_name TEXT, task TEXT, cache_read INTEGER NOT NULL, cache_write_5m INTEGER NOT NULL, cache_write_1h INTEGER NOT NULL, cost_micros INTEGER NOT NULL)",
+    "ALTER TABLE jobs ADD COLUMN log_id TEXT",
 ];
 
 /// The longest piece of a large value kept in one row of `parts`, in bytes.
@@ -149,6 +150,8 @@ struct Row {
     #[serde(default = "default_lane")]
     lane: String,
     usage: Option<String>,
+    /// The AI Gateway log of the job's request, when the stream opened.
+    log_id: Option<String>,
 }
 
 impl Row {
@@ -175,6 +178,7 @@ impl Row {
             "tokens_in": self.tokens_in,
             "tokens_out": self.tokens_out,
             "stop_reason": self.stop_reason,
+            "log_id": self.log_id,
             "error": self.error,
             "timeout_ms": self.timeout_ms,
             "notify": self.notify_url.is_some(),
@@ -483,7 +487,7 @@ impl ModelJobs {
             .filter(|u| u.is_object())
             .map(Value::to_string);
         self.db.exec(
-            "UPDATE jobs SET state = ?, request = NULL, finished_at = ?, text = ?, reply_model = ?, stop_reason = ?, tokens_in = ?, tokens_out = ?, error = ?, notify_at = ?, usage = ? WHERE id = ? AND state = ?",
+            "UPDATE jobs SET state = ?, request = NULL, finished_at = ?, text = ?, reply_model = ?, stop_reason = ?, tokens_in = ?, tokens_out = ?, error = ?, notify_at = ?, usage = ?, log_id = ? WHERE id = ? AND state = ?",
             vec![
                 to.name().into(),
                 t.into(),
@@ -495,6 +499,7 @@ impl ModelJobs {
                 opt(error),
                 opt_i(row.notify_url.as_ref().map(|_| t)),
                 opt(usage.as_deref()),
+                opt(r["log_id"].as_str()),
                 row.id.as_str().into(),
                 row.state.as_str().into(),
             ],
@@ -592,6 +597,7 @@ impl ModelJobs {
             "tokens_in": row.tokens_in,
             "tokens_out": row.tokens_out,
             "usage": parsed(row.usage.clone()),
+            "log_id": row.log_id,
             "error": row.error,
             "kept_until": jobs::expires_at(row.created_at, Some(read_at)),
         }))
@@ -799,10 +805,13 @@ impl ModelJobs {
         let mut timed_out = false;
         let mut cancelled = false;
         let mut tries = 0u32;
+        // The gateway's log of the request; it bills a failed or timed-out stream too.
+        let mut log_id: Option<String> = None;
         let streamed = loop {
             let env = &self.env;
             let db = &self.db;
-            let read = async |mut body: worker::ByteStream| -> Result<()> {
+            let read = async |mut body: worker::ByteStream, opened: Option<String>| -> Result<()> {
+                log_id = opened;
                 let mut reported = now();
                 loop {
                     let left = deadline - now();
@@ -854,7 +863,8 @@ impl ModelJobs {
             .await;
             // A refusal before any of the answer arrived is sent again, a few times, while
             // there is time: nothing was streamed, so nothing is paid for twice.
-            if let Ok(Streamed::Refused(ran)) = &streamed {
+            if let Ok(Streamed::Refused(ran, opened)) = &streamed {
+                log_id = opened.clone();
                 tries += 1;
                 if jobs::retryable(ran.status)
                     && !stopped(&self.db)
@@ -874,24 +884,25 @@ impl ModelJobs {
         let mut reply = serde_json::to_value(reading.reply()).unwrap_or(Value::Null);
         reply["content"] = reading.content();
         reply["usage"] = reading.usage();
+        reply["log_id"] = json!(log_id);
         let (state, error) = match streamed {
             _ if cancelled => (State::Cancelled, Some("cancelled by its sender".into())),
             Err(e) => (State::Failed, Some(e.to_string())),
-            Ok(Streamed::Refused(ran)) => {
+            Ok(Streamed::Refused(ran, _)) => {
                 let shown: String = ran.body.to_string().chars().take(500).collect();
                 (
                     State::Failed,
                     Some(format!("{} answered {}: {shown}", ask.provider, ran.status)),
                 )
             }
-            Ok(Streamed::Read(())) if timed_out => (
+            Ok(Streamed::Read((), _)) if timed_out => (
                 State::TimedOut,
                 Some(format!(
                     "stopped after its timeout of {} min; the text so far is kept",
                     ask.timeout_ms / 60_000
                 )),
             ),
-            Ok(Streamed::Read(())) => match (&reading.error, reading.done) {
+            Ok(Streamed::Read((), _)) => match (&reading.error, reading.done) {
                 (Some(e), _) => (State::Failed, Some(e.clone())),
                 (None, false) => (
                     State::Failed,

@@ -20,8 +20,9 @@ pub const NAME: &str = "ai-agents";
 pub const WORKER: &str = "pigeon-ai-agents";
 
 /// Every tool the capability offers.
-pub const TOOLS: [&str; 13] = [
+pub const TOOLS: [&str; 14] = [
     "ai_agents_start",
+    "ai_agents_estimate",
     "ai_agents_status",
     "ai_agents_stop",
     "ai_agents_pause",
@@ -93,6 +94,29 @@ pub fn start_args(args: &Value) -> Result<(Role, String, String, Budget), String
     Ok((role, brief.to_string(), base.to_string(), budget))
 }
 
+/// The arguments of `ai_agents_estimate`, checked: the role (executor by default) and the brief.
+/// Pure.
+pub fn estimate_args(args: &Value) -> Result<(Role, String), String> {
+    let role = match args["role"].as_str().unwrap_or("executor") {
+        "executor" => Role::Executor,
+        "mechanical" => Role::Mechanical,
+        "planner" => Role::Planner,
+        other => {
+            return Err(format!(
+                "`role` must be `planner`, `executor` or `mechanical`, not `{other}`"
+            ));
+        }
+    };
+    let brief = args["brief"].as_str().map(str::trim).unwrap_or_default();
+    if brief.is_empty() {
+        return Err("`brief` is required: the brief the run would be started with".into());
+    }
+    if brief.len() > 64 * 1024 {
+        return Err("`brief` is longer than 64 KiB".into());
+    }
+    Ok((role, brief.to_string()))
+}
+
 /// The branch run `run` pushes: one of the person's session branches.
 pub fn branch(run: &str) -> String {
     format!("claude/ai-agent-{run}")
@@ -114,7 +138,22 @@ impl Agents {
         if paused == true {
             return Err("every run is paused (ai_agents_pause); ai_agents_resume first".into());
         }
-        object::call(
+        // Only a suggestion: a failed estimate is logged (never with the brief) and left out.
+        let estimate = match object::call(
+            env,
+            INDEX,
+            "estimate",
+            &json!({ "role": role.name(), "brief": brief }),
+        )
+        .await
+        {
+            Ok(e) => Some(e),
+            Err(e) => {
+                worker::console_error!("agents: the start estimate failed: {e}");
+                None
+            }
+        };
+        let mut answer = object::call(
             env,
             INDEX,
             "create",
@@ -127,10 +166,18 @@ impl Agents {
                 "base": base,
                 "branch": branch(&id),
                 "budget": budget,
+                "estimate": estimate,
             }),
         )
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+        if let (Some(e), Some(obj)) = (estimate, answer.as_object_mut()) {
+            obj.insert("suggested_budget".into(), e["suggested_budget"].clone());
+            obj.insert("estimate".into(), e);
+        } else if let Some(obj) = answer.as_object_mut() {
+            obj.remove("estimate");
+        }
+        Ok(answer)
     }
 
     async fn call_tool(
@@ -144,6 +191,16 @@ impl Agents {
         let r = |v: worker::Result<Value>| v.map_err(|e| e.to_string());
         match req.tool.as_str() {
             "ai_agents_start" => self.start(env, caller, a).await,
+            "ai_agents_estimate" => {
+                let (role, brief) = estimate_args(a)?;
+                r(object::call(
+                    env,
+                    INDEX,
+                    "estimate",
+                    &json!({ "role": role.name(), "brief": brief }),
+                )
+                .await)
+            }
             "ai_agents_status" => match a["run"].as_str() {
                 Some(run) => {
                     r(
@@ -331,6 +388,18 @@ impl Service for Agents {
                                 "brief": { "type": "string", "description": "What to build, standing alone: the run sees nothing else." },
                                 "base": { "type": "string", "description": "The branch or commit to start from; main by default." },
                                 "budget": { "type": "object", "description": "Any of turns, cost_usd, wall_min, sandbox_min; each at most its hard cap." }
+                            },
+                            "required": ["brief"]
+                        }),
+                    ),
+                    tool(
+                        "ai_agents_estimate",
+                        "Estimates a run's cost from similar past runs (same role, brief size and kind; actual AI Gateway-based cost), with a range and a suggested budget. Suggests only.",
+                        json!({
+                            "type": "object",
+                            "properties": {
+                                "role": { "type": "string", "enum": ["planner", "executor", "mechanical"], "description": "`executor` by default." },
+                                "brief": { "type": "string", "description": "The brief the run would be started with." }
                             },
                             "required": ["brief"]
                         }),

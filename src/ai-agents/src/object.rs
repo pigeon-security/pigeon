@@ -20,7 +20,7 @@ use crate::budget::{self, Budget, Next, Over, Spent};
 use crate::run::{self, Action, Call, Job, Recovery, State, View, Wait};
 use crate::tools::{self, Kind};
 use crate::transcript::{self, Spec};
-use crate::{Role, prompts, sandbox};
+use crate::{Role, estimate, prompts, sandbox};
 
 /// The class's binding.
 pub const BINDING: &str = "AI_AGENT_RUNS";
@@ -44,7 +44,7 @@ pub const MAX_QUEUED: u32 = 20;
 
 /// Each object's schema, one statement per migration, applied in order and never edited. The
 /// index uses `runs` and `flags`; a run object uses `run`, `messages` and `calls`.
-const MIGRATIONS: [&str; 9] = [
+const MIGRATIONS: [&str; 13] = [
     "CREATE TABLE runs (id TEXT PRIMARY KEY, role TEXT NOT NULL, runtime TEXT NOT NULL, state TEXT NOT NULL, parent_run TEXT, session_id TEXT, caller TEXT NOT NULL, by_id TEXT, for_id TEXT, brief TEXT NOT NULL, base TEXT, branch TEXT, budget TEXT NOT NULL, spent TEXT NOT NULL, step TEXT, waiting TEXT, report TEXT, created_at INTEGER NOT NULL, started_at INTEGER, ended_at INTEGER, stop_asked INTEGER NOT NULL DEFAULT 0)",
     "CREATE TABLE flags (k TEXT PRIMARY KEY, v TEXT NOT NULL)",
     "CREATE TABLE run (id TEXT PRIMARY KEY, role TEXT NOT NULL, caller TEXT NOT NULL, brief TEXT NOT NULL, base TEXT NOT NULL, branch TEXT NOT NULL, budget TEXT NOT NULL, spent TEXT NOT NULL, state TEXT NOT NULL, started_at INTEGER NOT NULL, model_index INTEGER NOT NULL DEFAULT 0, fallback_left INTEGER NOT NULL DEFAULT 0, failures INTEGER NOT NULL DEFAULT 0, job_id TEXT, job_kind TEXT, job_state TEXT, job_at INTEGER, job_error TEXT, last_usage TEXT, stop_reason TEXT, reported TEXT, report TEXT, nudges INTEGER NOT NULL DEFAULT 0, waiting TEXT, prepare_tries INTEGER NOT NULL DEFAULT 0)",
@@ -57,6 +57,12 @@ const MIGRATIONS: [&str; 9] = [
     "ALTER TABLE run ADD COLUMN notes TEXT",
     // The last turn (report only) before the cost budget runs out has begun.
     "ALTER TABLE run ADD COLUMN last_turn INTEGER NOT NULL DEFAULT 0",
+    // The gateway log of each turn, to read its real cost later.
+    "CREATE TABLE turn_costs (n INTEGER PRIMARY KEY, job_id TEXT, log_id TEXT, model TEXT, local_micros INTEGER NOT NULL, gateway_micros INTEGER, at INTEGER NOT NULL)",
+    "ALTER TABLE run ADD COLUMN last_reconcile_at INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE run ADD COLUMN reconcile_tries INTEGER NOT NULL DEFAULT 0",
+    // The cost estimate shown when the run started (JSON).
+    "ALTER TABLE runs ADD COLUMN estimate TEXT",
 ];
 
 fn now() -> i64 {
@@ -144,6 +150,7 @@ struct Row {
     stop_asked: i64,
     assumed: Option<String>,
     extended: Option<String>,
+    estimate: Option<String>,
 }
 
 impl Row {
@@ -157,6 +164,26 @@ impl Row {
         let spent: Spent = serde_json::from_str(&self.spent).unwrap_or_default();
         let budget: Option<Budget> = serde_json::from_str(&self.budget).ok();
         let brief: String = self.brief.chars().take(300).collect();
+        let mut spent_json = json!({
+            "turns": spent.turns,
+            "cost": budget::money(spent.cost_micros),
+            "cost_usd": spent.cost_micros as f64 / 1e6,
+            "gateway_cost": budget::money(spent.gateway_micros),
+            "unreconciled_turns": spent.unreconciled,
+            "cost_source": if spent.unreconciled == 0 && spent.turns > 0 && spent.gateway_micros > 0 {
+                "gateway"
+            } else if spent.gateway_micros > 0 {
+                "gateway+estimate"
+            } else {
+                "estimate"
+            },
+            "sandbox_min": spent.sandbox_ms / 60_000,
+        });
+        if self.role == "planner" {
+            spent_json["executors_cost"] = json!(budget::money(spent.executors_micros));
+            spent_json["executors_cost_usd"] = json!(spent.executors_micros as f64 / 1e6);
+            spent_json["total_cost"] = json!(budget::money(spent.committed_micros()));
+        }
         json!({
             "run": self.id,
             "role": self.role,
@@ -170,14 +197,11 @@ impl Row {
             "step": self.step,
             "waiting": parsed(&self.waiting),
             "report": self.report,
-            "spent": {
-                "turns": spent.turns,
-                "cost": budget::money(spent.cost_micros),
-                "sandbox_min": spent.sandbox_ms / 60_000,
-            },
+            "spent": spent_json,
             "budget": budget.map(|b| json!({
                 "turns": b.turns,
                 "cost": budget::money(b.cost_micros),
+                "budget_cost_usd": b.cost_micros as f64 / 1e6,
                 "wall_min": b.wall_ms / 60_000,
                 "sandbox_min": b.sandbox_ms / 60_000,
                 "executors": b.executors,
@@ -189,6 +213,7 @@ impl Row {
             "stop_asked": self.stop_asked != 0,
             "assumed": parsed(&self.assumed),
             "extended": parsed(&self.extended),
+            "estimate": parsed(&self.estimate),
         })
     }
 }
@@ -239,6 +264,8 @@ struct RunRow {
     prepare_tries: i64,
     notes: Option<String>,
     last_turn: i64,
+    last_reconcile_at: i64,
+    reconcile_tries: i64,
 }
 
 /// One stored tool call.
@@ -291,6 +318,7 @@ impl AiAgentRuns {
             // ---- the index ----
             "create" => self.create(a).await,
             "list" => self.list(a),
+            "estimate" => self.estimate(a),
             "section" => Ok(json!({
                 "paused": self.flag("paused")?,
                 "runs": self.section_rows(&s("reader"))?,
@@ -482,6 +510,45 @@ impl AiAgentRuns {
         Ok(n.map_or(0, |n| n.n.max(0) as u32))
     }
 
+    /// Estimates a run's cost (`role`, `brief`) from the latest ended runs, and the executors
+    /// of the latest planners. Reads at most a bounded number of rows.
+    fn estimate(&self, a: &Value) -> Result<Value> {
+        let role: Role = serde_json::from_value(a["role"].clone())
+            .map_err(|_| bad("`role` must be planner, executor or mechanical"))?;
+        let brief = a["brief"].as_str().unwrap_or_default();
+        let mut rows: Vec<Row> = self.db.rows(
+            "SELECT * FROM runs WHERE ended_at IS NOT NULL AND runtime = 'gateway' ORDER BY ended_at DESC LIMIT 500",
+            vec![],
+        )?;
+        let children: Vec<Row> = self.db.rows(
+            "SELECT * FROM runs WHERE parent_run IN (SELECT id FROM runs WHERE role = 'planner' AND ended_at IS NOT NULL AND runtime = 'gateway' ORDER BY ended_at DESC LIMIT 100) LIMIT 1000",
+            vec![],
+        )?;
+        for c in children {
+            if !rows.iter().any(|r| r.id == c.id) {
+                rows.push(c);
+            }
+        }
+        let values: Vec<Value> = rows
+            .iter()
+            .map(|r| {
+                let obj = |s: &str| serde_json::from_str::<Value>(s).unwrap_or(Value::Null);
+                json!({
+                    "id": r.id,
+                    "role": r.role,
+                    "state": r.state,
+                    "parent_run": r.parent_run,
+                    "brief": r.brief,
+                    "budget": obj(&r.budget),
+                    "spent": obj(&r.spent),
+                    "ended_at": r.ended_at,
+                })
+            })
+            .collect();
+        let past = estimate::actual_costs(&values);
+        Ok(estimate::estimate(role, brief, &past).to_json())
+    }
+
     /// Records a new run, queued, and starts its object.
     async fn create(&self, a: &Value) -> Result<Value> {
         let queued = self.count("('queued')", "('planner', 'executor', 'mechanical')")?;
@@ -494,7 +561,7 @@ impl AiAgentRuns {
         let id = a["run"].as_str().ok_or_else(|| bad("`run` is required"))?;
         let runtime = a["runtime"].as_str().unwrap_or("gateway");
         self.db.exec(
-            "INSERT INTO runs (id, role, runtime, state, parent_run, session_id, caller, by_id, for_id, brief, base, branch, budget, spent, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO runs (id, role, runtime, state, parent_run, session_id, caller, by_id, for_id, brief, base, branch, budget, spent, created_at, estimate) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             vec![
                 id.into(),
                 a["role"].as_str().unwrap_or("executor").into(),
@@ -511,6 +578,11 @@ impl AiAgentRuns {
                 a["budget"].to_string().into(),
                 serde_json::to_string(&Spent::default())?.into(),
                 t.into(),
+                if a["estimate"].is_object() {
+                    a["estimate"].to_string().into()
+                } else {
+                    SqlStorageValue::Null
+                },
             ],
         )?;
         if runtime == "gateway" {
@@ -671,7 +743,7 @@ impl AiAgentRuns {
             .and_then(State::named)
             .is_some_and(State::terminal);
         self.db.exec(
-            "UPDATE runs SET state = COALESCE(?, state), step = ?, spent = COALESCE(?, spent), waiting = ?, report = COALESCE(?, report), branch = COALESCE(?, branch), started_at = COALESCE(started_at, ?), ended_at = CASE WHEN ? THEN ? ELSE ended_at END WHERE id = ?",
+            "UPDATE runs SET state = COALESCE(?, state), step = ?, spent = COALESCE(?, spent), waiting = ?, report = COALESCE(?, report), branch = COALESCE(?, branch), started_at = COALESCE(started_at, ?), ended_at = CASE WHEN ? THEN COALESCE(ended_at, ?) ELSE ended_at END WHERE id = ?",
             vec![
                 opt(a["state"].as_str()),
                 opt(a["step"].as_str()),
@@ -810,7 +882,11 @@ impl AiAgentRuns {
                 a["base"].as_str().unwrap_or("main").into(),
                 a["branch"].as_str().unwrap_or_default().into(),
                 a["budget"].to_string().into(),
-                serde_json::to_string(&Spent::default())?.into(),
+                serde_json::to_string(&Spent {
+                    v: budget::SPENT_VERSION,
+                    ..Spent::default()
+                })?
+                .into(),
                 now().into(),
             ],
         )?;
@@ -1020,7 +1096,7 @@ impl AiAgentRuns {
     async fn step(&self, row: RunRow) -> Result<()> {
         let state = State::named(&row.state).unwrap_or(State::Failed);
         if state.terminal() {
-            return Ok(());
+            return self.settle(&row).await;
         }
         let role = role_named(&row.role);
         let calls = self.calls()?;
@@ -1129,6 +1205,7 @@ impl AiAgentRuns {
                 Some(Wait::Executors { since }) => {
                     let children =
                         call(&self.env, INDEX, "children", &json!({ "run": row.id })).await?;
+                    self.refresh_executors(&row, &spent, &children).await?;
                     if ended_since(&children, *since) || live_children(&children) == 0 {
                         let summary = children_summary(&children, *since);
                         let waiting_call = self
@@ -1224,7 +1301,12 @@ impl AiAgentRuns {
             &format!("ended: {}", to.name()),
             json!({ "report": report }),
         )
-        .await
+        .await?;
+        if self.unread(0)? > 0 {
+            self.set("reconcile_tries = 0", vec![])?;
+            self.state.storage().set_alarm(60_000).await?;
+        }
+        Ok(())
     }
 
     /// Takes a live slot, starts the sandbox and checks out the run's branch.
@@ -1277,6 +1359,8 @@ impl AiAgentRuns {
 
     /// Sends the run's next turn as a model job.
     async fn turn(&self, row: &RunRow, role: Role, budget: &Budget, spent: &Spent) -> Result<()> {
+        let (row, spent) = self.refresh_spent(row, role, spent).await?;
+        let (row, spent) = (&row, &spent);
         let calls = self.calls()?;
         if !calls.is_empty() {
             // The last turn's calls are all answered: their results go in, in the model's order.
@@ -1432,6 +1516,162 @@ impl AiAgentRuns {
         )
     }
 
+    /// Counts the turn rows with a log id whose gateway cost is not read yet. With `older_ms`,
+    /// only rows older than that many milliseconds.
+    fn unread(&self, older_ms: i64) -> Result<i64> {
+        #[derive(Deserialize)]
+        struct C {
+            c: i64,
+        }
+        let c: Option<C> = self.db.row(
+            "SELECT COUNT(*) AS c FROM turn_costs WHERE log_id IS NOT NULL AND gateway_micros IS NULL AND at <= ?",
+            vec![(now() - older_ms).into()],
+        )?;
+        Ok(c.map_or(0, |c| c.c))
+    }
+
+    /// Notes a turn's gateway log, so its real cost can be read later.
+    fn note_turn_cost(
+        &self,
+        job: &str,
+        log_id: &str,
+        model: &str,
+        local_micros: u64,
+    ) -> Result<()> {
+        self.db.exec(
+            "INSERT INTO turn_costs (job_id, log_id, model, local_micros, at) VALUES (?, ?, ?, ?, ?)",
+            vec![
+                job.into(),
+                log_id.into(),
+                model.into(),
+                (local_micros as i64).into(),
+                now().into(),
+            ],
+        )
+    }
+
+    /// Reads up to 50 turns' real cost from the gateway and swaps it in for the estimates.
+    /// Answers the new spend. A failure is logged and changes nothing.
+    async fn reconcile(&self, row: &RunRow, spent: Spent) -> Spent {
+        #[derive(Deserialize)]
+        struct T {
+            n: i64,
+            log_id: String,
+            local_micros: i64,
+        }
+        let _ = self.set("last_reconcile_at = ?", vec![now().into()]);
+        let rows: Vec<T> = match self.db.rows(
+            "SELECT n, log_id, local_micros FROM turn_costs WHERE log_id IS NOT NULL AND gateway_micros IS NULL ORDER BY n LIMIT 50",
+            vec![],
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                worker::console_error!("agents: run {} reading turn costs: {e}", row.id);
+                return spent;
+            }
+        };
+        if rows.is_empty() {
+            return spent;
+        }
+        let ids: Vec<&str> = rows.iter().map(|r| r.log_id.as_str()).collect();
+        let caller: Value = serde_json::from_str(&row.caller).unwrap_or(Value::Null);
+        let logs = match dispatch(
+            &self.env,
+            &caller,
+            "models_cost",
+            &json!({ "log_ids": ids }),
+        )
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                worker::console_error!("agents: run {} reading gateway costs: {e}", row.id);
+                return spent;
+            }
+        };
+        let costs: Vec<budget::TurnCost> = rows
+            .iter()
+            .map(|r| budget::TurnCost {
+                id: r.n,
+                log_id: r.log_id.clone(),
+                local_micros: r.local_micros.max(0) as u64,
+            })
+            .collect();
+        let (next, done) = budget::reconcile(spent, &costs, &logs);
+        for (n, micros) in done {
+            if let Err(e) = self.db.exec(
+                "UPDATE turn_costs SET gateway_micros = ? WHERE n = ?",
+                vec![(micros as i64).into(), n.into()],
+            ) {
+                worker::console_error!("agents: run {} storing a turn cost: {e}", row.id);
+            }
+        }
+        next
+    }
+
+    /// Before a turn: moves an old run to the current spend format, refreshes what a planner's
+    /// executors hold, and reads gateway costs when some are due. Stores and reports any change.
+    /// Answers the run row and spend to go on with.
+    async fn refresh_spent(
+        &self,
+        row: &RunRow,
+        role: Role,
+        spent: &Spent,
+    ) -> Result<(RunRow, Spent)> {
+        let mut s = *spent;
+        if role == Role::Planner {
+            let children = call(&self.env, INDEX, "children", &json!({ "run": row.id })).await;
+            match children {
+                Ok(children) => {
+                    s = budget::migrate_planner(s, children_budgets_micros(&children));
+                    s.executors_micros = budget::executors_committed(&children);
+                }
+                Err(e) => worker::console_error!("agents: run {} listing executors: {e}", row.id),
+            }
+        } else {
+            s.v = budget::SPENT_VERSION;
+        }
+        if self.unread(20_000)? > 0 && now() - row.last_reconcile_at >= 60_000 {
+            s = self.reconcile(row, s).await;
+        }
+        let mut r = row.clone();
+        if s != *spent {
+            let text = serde_json::to_string(&s)?;
+            self.set("spent = ?", vec![text.clone().into()])?;
+            r.spent = text;
+        }
+        Ok((r, s))
+    }
+
+    /// A finished run's last duty: read the gateway costs still missing, at about 1, 2, 5, 10
+    /// and 30 minutes after it ended. It never restarts the run.
+    async fn settle(&self, row: &RunRow) -> Result<()> {
+        const AFTER_MS: [i64; 5] = [60_000, 60_000, 180_000, 300_000, 1_200_000];
+        let tries = row.reconcile_tries.max(0) as usize;
+        if tries >= AFTER_MS.len() || self.unread(0)? == 0 {
+            return Ok(());
+        }
+        self.set("reconcile_tries = reconcile_tries + 1", vec![])?;
+        let spent: Spent = serde_json::from_str(&row.spent).unwrap_or_default();
+        let next = self.reconcile(row, spent).await;
+        if next != spent {
+            let text = serde_json::to_string(&next)?;
+            self.set("spent = ?", vec![text.clone().into()])?;
+            let mut r = row.clone();
+            r.spent = text;
+            if let Err(e) = self
+                .tell(&r, &format!("ended: {}", row.state), Value::Null)
+                .await
+            {
+                worker::console_error!("agents: run {} telling the index: {e}", row.id);
+            }
+        }
+        if tries + 1 < AFTER_MS.len() && self.unread(0)? > 0 {
+            self.state.storage().set_alarm(AFTER_MS[tries + 1]).await?;
+        }
+        Ok(())
+    }
+
     /// Reads the finished turn into the messages and its tool calls into `calls`.
     async fn read(&self, row: &RunRow, spent: &Spent) -> Result<()> {
         let Some(job) = &row.job_id else {
@@ -1446,6 +1686,11 @@ impl AiAgentRuns {
         spent.cost_micros = spent
             .cost_micros
             .saturating_add(budget::cost_micros(model, &usage));
+        if let Some(log_id) = result["log_id"].as_str().filter(|l| !l.is_empty()) {
+            // A turn with no log id stays at its estimate and is not counted as reconcilable.
+            self.note_turn_cost(job, log_id, model, budget::cost_micros(model, &usage))?;
+            spent.unreconciled = spent.unreconciled.saturating_add(1);
+        }
         let content = match &result["content"] {
             Value::Array(blocks) if !blocks.is_empty() => Value::Array(blocks.clone()),
             _ => json!([{ "type": "text", "text": result["text"].as_str().unwrap_or("") }]),
@@ -1519,8 +1764,58 @@ impl AiAgentRuns {
         self.state.storage().set_alarm(0).await
     }
 
+    /// While a planner waits: refreshes what its executors hold, and tells the index on change.
+    async fn refresh_executors(&self, row: &RunRow, spent: &Spent, children: &Value) -> Result<()> {
+        let mut s = *spent;
+        s.executors_micros = budget::executors_committed(children);
+        if s != *spent {
+            let text = serde_json::to_string(&s)?;
+            self.set("spent = ?", vec![text.clone().into()])?;
+            let mut r = row.clone();
+            r.spent = text;
+            self.tell(&r, "waiting for executors", Value::Null).await?;
+        }
+        Ok(())
+    }
+
+    /// A turn's job ended without an answer. If the gateway logged it, it was still paid for:
+    /// the log is noted with no local cost, so the gateway's cost is added once it is read.
+    /// Answers the row with the new spend. A failure to ask only logs.
+    async fn note_failed_turn(&self, row: &RunRow) -> RunRow {
+        let mut r = row.clone();
+        let Some(job) = &row.job_id else {
+            return r;
+        };
+        let caller: Value = serde_json::from_str(&row.caller).unwrap_or(Value::Null);
+        let status =
+            match dispatch(&self.env, &caller, "models_status", &json!({ "id": job })).await {
+                Ok(s) => s,
+                Err(e) => {
+                    worker::console_error!("agents: run {} reading a failed job: {e}", row.id);
+                    return r;
+                }
+            };
+        let Some(log_id) = status["log_id"].as_str().filter(|l| !l.is_empty()) else {
+            return r;
+        };
+        let model = status["model"].as_str().unwrap_or_default();
+        let mut spent: Spent = serde_json::from_str(&row.spent).unwrap_or_default();
+        spent.unreconciled = spent.unreconciled.saturating_add(1);
+        let saved = self.note_turn_cost(job, log_id, model, 0).and_then(|()| {
+            let text = serde_json::to_string(&spent)?;
+            self.set("spent = ?", vec![text.clone().into()])?;
+            r.spent = text;
+            Ok(())
+        });
+        if let Err(e) = saved {
+            worker::console_error!("agents: run {} noting a failed turn: {e}", row.id);
+        }
+        r
+    }
+
     /// The turn's job ended without an answer.
     async fn retry(&self, row: &RunRow, role: Role) -> Result<()> {
+        let row = &self.note_failed_turn(row).await;
         let failures = (row.failures + 1) as u32;
         let recovery = run::on_failure(
             row.job_state.as_deref().unwrap_or("failed"),
@@ -1771,6 +2066,13 @@ impl AiAgentRuns {
                     Role::Executor
                 };
                 let child_budget = Budget::asked(role, &input["budget"])?;
+                // What the executors hold counts against the budget, so it is read fresh.
+                let mut spent = *spent;
+                let listed = call(&self.env, INDEX, "children", &json!({ "run": row.id }))
+                    .await
+                    .map_err(e)?;
+                spent.executors_micros = budget::executors_committed(&listed);
+                let spent = &spent;
                 let left = Spent::left(budget, spent, row.started_at, now());
                 child_budget.within(&left)?;
                 budget::check(
@@ -1810,10 +2112,10 @@ impl AiAgentRuns {
                 )
                 .await
                 .map_err(e)?;
-                // The child's budget is set aside from the planner's at once.
+                // The child's budget is held against the planner's at once.
                 let mut s = *spent;
                 s.executors += 1;
-                s.cost_micros = s.cost_micros.saturating_add(child_budget.cost_micros);
+                s.executors_micros = s.executors_micros.saturating_add(child_budget.cost_micros);
                 self.set(
                     "spent = ?",
                     vec![serde_json::to_string(&s).map_err(|x| x.to_string())?.into()],
@@ -2151,4 +2453,18 @@ pub async fn run_caller(env: &Env, starter: &Value, role: Role, run: &str) -> Va
     let service = service_user(env, starter, service_key(role)).await.ok();
     let svc = service.as_ref().map(|s| &s["caller"]);
     chosen_caller(starter, svc, run)
+}
+
+/// The sum of the cost budgets of `children` (the index's rows), in micro-dollars. An old
+/// planner added exactly this to its cost at spawn, so it is taken off once when migrating.
+fn children_budgets_micros(children: &Value) -> u64 {
+    children
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|c| c.pointer("/budget/budget_cost_usd").and_then(Value::as_f64))
+        .filter(|usd| usd.is_finite() && *usd >= 0.0)
+        .fold(0u64, |sum, usd| {
+            sum.saturating_add((usd * 1e6).round() as u64)
+        })
 }

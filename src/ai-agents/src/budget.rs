@@ -8,9 +8,6 @@ use serde_json::Value;
 
 use crate::Role;
 
-/// One million, the token count that prices are quoted per.
-const PER_MILLION: u128 = 1_000_000;
-
 /// One minute in milliseconds.
 const MINUTE_MS: i64 = 60_000;
 
@@ -345,9 +342,29 @@ pub struct Spent {
     pub sandbox_ms: i64,
     /// Executors spawned.
     pub executors: u32,
+    /// The part of `cost_micros` that was read from the gateway.
+    #[serde(default)]
+    pub gateway_micros: u64,
+    /// Turns whose cost is still the local estimate and can be read from the gateway.
+    #[serde(default)]
+    pub unreconciled: u32,
+    /// For planners: what their executors hold against the budget, in micro-dollars.
+    #[serde(default)]
+    pub executors_micros: u64,
+    /// The format. 0 is old (cost holds executor reservations); 1 is current.
+    #[serde(default)]
+    pub v: u32,
 }
 
+/// The current [`Spent`] format: `cost_micros` holds no executor reservations.
+pub const SPENT_VERSION: u32 = 1;
+
 impl Spent {
+    /// The cost counted against the budget: the run's own cost plus its executors' hold.
+    pub fn committed_micros(&self) -> u64 {
+        self.cost_micros.saturating_add(self.executors_micros)
+    }
+
     /// Works out what is left of a budget.
     ///
     /// Differences saturate at zero. Wall time left is the wall budget less the time since
@@ -355,7 +372,7 @@ impl Spent {
     pub fn left(budget: &Budget, spent: &Spent, started_at: i64, now: i64) -> Budget {
         Budget {
             turns: budget.turns.saturating_sub(spent.turns),
-            cost_micros: budget.cost_micros.saturating_sub(spent.cost_micros),
+            cost_micros: budget.cost_micros.saturating_sub(spent.committed_micros()),
             wall_ms: budget
                 .wall_ms
                 .saturating_sub(elapsed(started_at, now))
@@ -445,9 +462,9 @@ pub const LAST_TURN_PERCENT: u64 = 90;
 /// Whether the run's next turn must be its last: it has spent at least [`LAST_TURN_PERCENT`] of
 /// its cost budget, or a normal turn (costing `estimate_micros`) would go over the budget.
 pub fn last_turn_due(budget: &Budget, spent: &Spent, estimate_micros: u64) -> bool {
-    let at_percent = u128::from(spent.cost_micros).saturating_mul(100)
+    let at_percent = u128::from(spent.committed_micros()).saturating_mul(100)
         >= u128::from(budget.cost_micros).saturating_mul(u128::from(LAST_TURN_PERCENT));
-    at_percent || spent.cost_micros.saturating_add(estimate_micros) > budget.cost_micros
+    at_percent || spent.committed_micros().saturating_add(estimate_micros) > budget.cost_micros
 }
 
 /// The share of `wall_ms`, in percent, kept as the wall-clock reserve for the last turn.
@@ -529,7 +546,7 @@ pub fn check(
             if spent.turns >= budget.turns {
                 return Err(Over::Turns);
             }
-            if spent.cost_micros.saturating_add(estimate_micros) > budget.cost_micros {
+            if spent.committed_micros().saturating_add(estimate_micros) > budget.cost_micros {
                 return Err(Over::Cost);
             }
             Ok(())
@@ -544,7 +561,7 @@ pub fn check(
             if spent.executors >= budget.executors {
                 return Err(Over::Executors);
             }
-            if spent.cost_micros.saturating_add(cost_micros) > budget.cost_micros {
+            if spent.committed_micros().saturating_add(cost_micros) > budget.cost_micros {
                 return Err(Over::Cost);
             }
             Ok(())
@@ -552,128 +569,145 @@ pub fn check(
     }
 }
 
-/// A model's prices, in micro-dollars per million tokens.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Price {
-    /// Fresh input tokens.
-    pub input: u64,
-    /// Output tokens.
-    pub output: u64,
-    /// Input tokens read from the cache.
-    pub cache_read: u64,
-    /// Input tokens written to the 5-minute cache.
-    pub cache_write_5m: u64,
-    /// Input tokens written to the 1-hour cache.
-    pub cache_write_1h: u64,
+/// One turn's cost row, as `reconcile` needs it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TurnCost {
+    /// The row id (the turn number).
+    pub id: i64,
+    /// The gateway log id of the turn.
+    pub log_id: String,
+    /// What the run counted for the turn locally, in micro-dollars.
+    pub local_micros: u64,
 }
 
-/// The price of `claude-opus-5-5`.
-const OPUS: Price = Price {
-    input: 4_000_000,
-    output: 20_000_000,
-    cache_read: 200_000,
-    cache_write_5m: 5_000_000,
-    cache_write_1h: 8_000_000,
-};
-
-/// The price of `claude-sonnet-5-5`.
-const SONNET: Price = Price {
-    input: 2_000_000,
-    output: 10_000_000,
-    cache_read: 100_000,
-    cache_write_5m: 2_500_000,
-    cache_write_1h: 4_000_000,
-};
-
-/// The price of `claude-haiku-5-5`.
-const HAIKU: Price = Price {
-    input: 100_000,
-    output: 500_000,
-    cache_read: 10_000,
-    cache_write_5m: 125_000,
-    cache_write_1h: 200_000,
-};
-
-/// The price of `claude-fable-5-2`. It is also the fallback, being the dearest.
-const FABLE: Price = Price {
-    input: 8_000_000,
-    output: 40_000_000,
-    cache_read: 800_000,
-    cache_write_5m: 10_000_000,
-    cache_write_1h: 16_000_000,
-};
-
-/// True when `model` is `name` or is `name` followed by a dash and a suffix.
-fn is_model(model: &str, name: &str) -> bool {
-    match model.strip_prefix(name) {
-        Some(rest) => rest.is_empty() || rest.starts_with('-'),
-        None => false,
+/// Turns dollars into whole micro-dollars, rounded. Bad numbers give `None`.
+fn usd_to_micros(usd: f64) -> Option<u64> {
+    if !usd.is_finite() || usd < 0.0 {
+        return None;
     }
+    Some((usd * 1e6).round() as u64)
 }
 
-/// Looks up the price for a model.
+/// Reads a money string such as `$1.25` into micro-dollars.
+fn parse_money(text: &str) -> Option<u64> {
+    text.trim()
+        .trim_start_matches('$')
+        .parse::<f64>()
+        .ok()
+        .and_then(usd_to_micros)
+}
+
+/// What the executors of a planner hold against its budget, from the index's `children` answer.
 ///
-/// A dated name such as `claude-sonnet-5-5-20261101` matches by prefix. An unknown model gets
-/// the dearest price, so it is never under-counted.
-pub fn price(model: &str) -> Price {
-    if is_model(model, "claude-opus-5-5") {
-        OPUS
-    } else if is_model(model, "claude-sonnet-5-5") {
-        SONNET
-    } else if is_model(model, "claude-haiku-5-5") {
-        HAIKU
-    } else {
-        FABLE
-    }
-}
-
-/// Reads a token count from a usage object. Missing, null or odd values are 0.
-fn tokens(value: &Value, key: &str) -> u64 {
-    value.get(key).and_then(Value::as_u64).unwrap_or(0)
-}
-
-/// Turns a sum of token-times-price into whole micro-dollars, rounding up.
-fn round_up_micros(total: u128) -> u64 {
-    let rounded = total.saturating_add(PER_MILLION - 1) / PER_MILLION;
-    u64::try_from(rounded).unwrap_or(u64::MAX)
-}
-
-/// Works out what a finished turn cost, in micro-dollars, rounded up.
-///
-/// If `cache_creation` gives a 5-minute and 1-hour split, it is used. Otherwise all
-/// cache-creation tokens are priced as 5-minute writes.
-pub fn cost_micros(model: &str, usage: &Value) -> u64 {
-    let p = price(model);
-
-    let (write_5m, write_1h) = match usage.get("cache_creation") {
-        Some(split) if split.is_object() => (
-            tokens(split, "ephemeral_5m_input_tokens"),
-            tokens(split, "ephemeral_1h_input_tokens"),
-        ),
-        _ => (tokens(usage, "cache_creation_input_tokens"), 0),
+/// A live child holds the larger of its cost budget and its own spend. An ended child holds
+/// its own spend. Children are read from the `children` array (or the value itself if it is
+/// an array). Numeric `cost_usd` fields are preferred; money strings are the fallback.
+pub fn executors_committed(children: &Value) -> u64 {
+    let list = children
+        .get("children")
+        .and_then(Value::as_array)
+        .or_else(|| children.as_array());
+    let Some(list) = list else {
+        return 0;
     };
-
-    let parts: [(u64, u64); 5] = [
-        (tokens(usage, "input_tokens"), p.input),
-        (tokens(usage, "output_tokens"), p.output),
-        (tokens(usage, "cache_read_input_tokens"), p.cache_read),
-        (write_5m, p.cache_write_5m),
-        (write_1h, p.cache_write_1h),
-    ];
-
-    let total = parts.iter().fold(0u128, |sum, (count, rate)| {
-        sum.saturating_add(u128::from(*count) * u128::from(*rate))
-    });
-    round_up_micros(total)
+    let mut total: u64 = 0;
+    for child in list {
+        let spent = child
+            .pointer("/spent/cost_usd")
+            .and_then(Value::as_f64)
+            .and_then(usd_to_micros)
+            .or_else(|| {
+                child
+                    .pointer("/spent/cost")
+                    .and_then(Value::as_str)
+                    .and_then(parse_money)
+            })
+            .unwrap_or(0);
+        let ended = child.get("ended_at").is_some_and(|v| !v.is_null());
+        let held = if ended {
+            spent
+        } else {
+            let budget = child
+                .pointer("/budget/budget_cost_usd")
+                .and_then(Value::as_f64)
+                .and_then(usd_to_micros)
+                .or_else(|| {
+                    child
+                        .pointer("/budget/cost")
+                        .and_then(Value::as_str)
+                        .and_then(parse_money)
+                })
+                .unwrap_or(0);
+            budget.max(spent)
+        };
+        total = total.saturating_add(held);
+    }
+    total
 }
 
-/// An upper estimate of a turn's cost before it runs, in micro-dollars.
+/// Applies the gateway's `models_cost` answer to a run's spend.
 ///
-/// All input is priced as fresh input. Then `max_tokens` is priced as output. The result is
-/// rounded up.
+/// For each row whose log was found with a cost, the local estimate is swapped for the gateway
+/// cost. Rows not found, or with a null cost, change nothing. Answers the new spend and the
+/// (row id, gateway micros) pairs to store.
+pub fn reconcile(spent: Spent, rows: &[TurnCost], logs: &Value) -> (Spent, Vec<(i64, u64)>) {
+    let mut spent = spent;
+    let mut done: Vec<(i64, u64)> = Vec::new();
+    let Some(list) = logs.get("logs").and_then(Value::as_array) else {
+        return (spent, done);
+    };
+    for row in rows {
+        let found = list.iter().find(|l| {
+            l.get("log_id").and_then(Value::as_str) == Some(row.log_id.as_str())
+                && l.get("found").and_then(Value::as_bool) == Some(true)
+        });
+        let Some(micros) = found
+            .and_then(|l| l.get("cost_usd"))
+            .and_then(Value::as_f64)
+            .and_then(usd_to_micros)
+        else {
+            continue;
+        };
+        if done.iter().any(|(id, _)| *id == row.id) {
+            continue;
+        }
+        spent.cost_micros = spent
+            .cost_micros
+            .saturating_sub(row.local_micros)
+            .saturating_add(micros);
+        spent.gateway_micros = spent.gateway_micros.saturating_add(micros);
+        spent.unreconciled = spent.unreconciled.saturating_sub(1);
+        done.push((row.id, micros));
+    }
+    (spent, done)
+}
+
+/// Moves an old (v 0) planner to the current format: its children's cost budgets were added
+/// to `cost_micros` at spawn, so they are subtracted once (saturating). Other versions are
+/// left as they are.
+pub fn migrate_planner(spent: Spent, child_budgets_micros: u64) -> Spent {
+    let mut spent = spent;
+    if spent.v == 0 {
+        spent.cost_micros = spent.cost_micros.saturating_sub(child_budgets_micros);
+        spent.v = SPENT_VERSION;
+    }
+    spent
+}
+
+/// A model's prices, in micro-dollars per million tokens: the shared table's.
+pub use pigeon_core::model_prices::Price;
+
+/// Looks up the price for a model, from the shared table (`pigeon_core::model_prices`).
+pub fn price(model: &str) -> Price {
+    pigeon_core::model_prices::price(model)
+}
+
+/// What a finished turn cost, in micro-dollars, rounded up; the shared table's logic.
+pub fn cost_micros(model: &str, usage: &Value) -> u64 {
+    pigeon_core::model_prices::cost_micros(model, usage)
+}
+
+/// An upper estimate of a turn's cost before it runs, in micro-dollars; the shared table's.
 pub fn estimate_micros(model: &str, input_tokens: u64, max_tokens: u64) -> u64 {
-    let p = price(model);
-    let total = (u128::from(input_tokens) * u128::from(p.input))
-        .saturating_add(u128::from(max_tokens) * u128::from(p.output));
-    round_up_micros(total)
+    pigeon_core::model_prices::estimate_micros(model, input_tokens, max_tokens)
 }

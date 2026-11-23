@@ -50,7 +50,7 @@ pub const NAME: &str = "models";
 pub const WORKER: &str = "pigeon-model-gateway";
 
 /// Every tool the capability offers.
-pub const TOOLS: [&str; 9] = [
+pub const TOOLS: [&str; 10] = [
     "models_setup",
     "models_providers",
     "models_run",
@@ -60,6 +60,7 @@ pub const TOOLS: [&str; 9] = [
     "models_cancel",
     "models_logs",
     "models_usage",
+    "models_cost",
 ];
 
 /// The Secrets Store binding of the key core signs callers with.
@@ -322,6 +323,31 @@ pub fn tags(caller: &Value, task: Option<&str>) -> Vec<(&'static str, String)> {
     out
 }
 
+/// The log ids in `args` for `models_cost`: 1 to [`ai_gateway::MAX_LOG_IDS`], each checked by
+/// [`ai_gateway::check_log_id`], so no unchecked id reaches a URL.
+pub fn log_ids(args: &Value) -> Result<Vec<String>> {
+    let list = args["log_ids"]
+        .as_array()
+        .ok_or_else(|| bad("`log_ids` is required: a list of log ids"))?;
+    if list.is_empty() || list.len() > ai_gateway::MAX_LOG_IDS {
+        return Err(bad(&format!(
+            "`log_ids` takes 1 to {} ids, not {}",
+            ai_gateway::MAX_LOG_IDS,
+            list.len()
+        )));
+    }
+    list.iter()
+        .enumerate()
+        .map(|(n, v)| {
+            let id = v
+                .as_str()
+                .ok_or_else(|| bad(&format!("`log_ids`[{n}] is not a string")))?;
+            ai_gateway::check_log_id(id).map_err(|e| bad(&format!("`log_ids`[{n}]: {e}")))?;
+            Ok(id.to_string())
+        })
+        .collect()
+}
+
 /// `args`' filter for `models_usage`.
 fn filter(args: &Value) -> Filter {
     let s = |k: &str| args[k].as_str().map(String::from);
@@ -550,6 +576,13 @@ impl Models {
         .await
     }
 
+    /// `models_cost`: the gateway's own cost of each request, by its log id.
+    async fn cost(&self, account: &Account, args: &Value) -> Result<Value> {
+        let ids = log_ids(args)?;
+        let lookups = ai_gateway::log_costs(account, &self.gateway, &ids).await?;
+        Ok(ai_gateway::cost_answer(&ids, &lookups))
+    }
+
     /// `models_usage`: the gateway's logs and the model gateway's cache tokens, added up.
     async fn usage(&self, env: &Env, account: &Account, args: &Value) -> Result<Value> {
         let hours = args["hours"]
@@ -570,7 +603,8 @@ impl Models {
         }
         let groups = ai_gateway::summarize(&logs, &by);
         let cost: f64 = groups.iter().filter_map(|u| u.cost).sum();
-        // The cache tokens are not in the gateway's logs: the model gateway's jobs kept them.
+        // The cache token counts are not in the gateway's logs: the model gateway's jobs kept
+        // them. The gateway's cost already includes the cache, so none is added to it.
         let rows: Vec<cache::Row> = serde_json::from_value(
             runner::call(
                 env,
@@ -602,8 +636,7 @@ impl Models {
             "cost": cost,
             "cache_read_tokens": cached.read,
             "cache_write_tokens": cached.write,
-            "cache_cost": cached.dollars(),
-            "cost_with_cache": cost + cached.dollars(),
+            "cost_with_cache": cost,
             "payloads_kept": payloads_kept,
             "by": by,
             "groups": groups,
@@ -752,14 +785,38 @@ impl Models {
                 }),
             },
             Tool {
+                name: "models_cost",
+                description: "The AI gateway's exact cost of single requests, by log id: the \
+                              `log_id` that `models_result` and `models_status` answer for a \
+                              job. Each answer has `found`, `cost_usd` (the gateway's, which \
+                              includes prompt-cache reads and writes), `model`, `tokens_in` and \
+                              `tokens_out`. A log not written yet is `found: false`; ask again \
+                              in a few seconds.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "log_ids": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": ai_gateway::MAX_LOG_IDS,
+                            "items": { "type": "string", "minLength": 1, "maxLength": 100, "pattern": "^[A-Za-z0-9_-]+$" },
+                            "description": "1 to 50 log ids."
+                        }
+                    },
+                    "required": ["log_ids"]
+                }),
+            },
+            Tool {
                 name: "models_usage",
                 description: "What the AI gateway's requests used over a window, from its \
                               logs: requests, failures, tokens in and out, and cost, in all and \
                               in groups: by provider and model unless `by` names others. The \
-                              logs lack prompt-cache tokens, so those come from the model \
-                              gateway's own jobs (not `models_run`): `cache_read_tokens`, \
-                              `cache_write_tokens`, `cache_cost` and `cost_with_cache`, which is \
-                              `cost` (the gateway's) plus `cache_cost`. \
+                              logs lack prompt-cache token counts, so those come from the model \
+                              gateway's own jobs (not `models_run`): `cache_read_tokens` and \
+                              `cache_write_tokens`, for information. `cost` is the gateway's \
+                              and already includes prompt-cache reads and writes; \
+                              `cost_with_cache` is a deprecated alias of `cost`, kept one \
+                              release. \
                               `model`, `caller` and `task` keep only the requests that match; \
                               a model in either form (`claude-haiku-5-5`, \
                               `anthropic/claude-haiku-5.5`).",
@@ -848,6 +905,7 @@ impl Models {
             }
             "models_run" => self.run(account()?, caller, args).await?,
             "models_usage" => self.usage(env, account()?, args).await?,
+            "models_cost" => self.cost(account()?, args).await?,
             "models_logs" => self.recent(account()?, args).await?,
             "models_submit" => self.submit(env, caller, args).await?,
             "models_status" => self.job(env, caller, "status", args).await?,

@@ -1,8 +1,8 @@
-//! Prompt-cache tokens and what they cost. AI Gateway's logs carry only the uncached input and
-//! its cost leaves cache reads and writes out, so the model gateway keeps its own rows of them
-//! and `models_usage` adds them to the gateway's groups. The prices follow the AI agents'
-//! budget (`pigeon-ai-agents`, `budget.rs`), which this crate cannot depend on. Pure: values
-//! in, values out.
+//! Prompt-cache tokens. AI Gateway's logs carry only the uncached input tokens, so the model
+//! gateway keeps its own rows of the cache tokens and `models_usage` shows them beside the
+//! gateway's groups. The gateway's `cost` already includes cache reads and writes, so the
+//! rows' own estimate (from the shared price table) is never added to it. Pure: values in,
+//! values out.
 
 use std::collections::BTreeMap;
 
@@ -19,59 +19,9 @@ const MICROS: f64 = 1_000_000.0;
 /// Tokens per price unit: prices are micro-dollars per million tokens.
 const PER_MILLION: u128 = 1_000_000;
 
-/// A model's cache prices, in micro-dollars per million tokens.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Price {
-    /// Input tokens read from the cache.
-    pub cache_read: u64,
-    /// Input tokens written to the 5-minute cache.
-    pub cache_write_5m: u64,
-    /// Input tokens written to the 1-hour cache.
-    pub cache_write_1h: u64,
-}
-
-const OPUS: Price = Price {
-    cache_read: 200_000,
-    cache_write_5m: 5_000_000,
-    cache_write_1h: 8_000_000,
-};
-const SONNET: Price = Price {
-    cache_read: 100_000,
-    cache_write_5m: 2_500_000,
-    cache_write_1h: 4_000_000,
-};
-const HAIKU: Price = Price {
-    cache_read: 10_000,
-    cache_write_5m: 125_000,
-    cache_write_1h: 200_000,
-};
-/// The dearest, and so the price of any unknown model.
-const FABLE: Price = Price {
-    cache_read: 800_000,
-    cache_write_5m: 10_000_000,
-    cache_write_1h: 16_000_000,
-};
-
-/// True when `model` is `name` or is `name` followed by a dash and a suffix.
-fn is_model(model: &str, name: &str) -> bool {
-    match model.strip_prefix(name) {
-        Some(rest) => rest.is_empty() || rest.starts_with('-'),
-        None => false,
-    }
-}
-
-/// The cache prices of `model`, matched by prefix; an unknown model gets the dearest.
-pub fn price(model: &str) -> Price {
-    if is_model(model, "claude-opus-5-5") {
-        OPUS
-    } else if is_model(model, "claude-sonnet-5-5") {
-        SONNET
-    } else if is_model(model, "claude-haiku-5-5") {
-        HAIKU
-    } else {
-        FABLE
-    }
-}
+/// A model's prices and the price lookup: the shared table (`pigeon_core::model_prices`). Only
+/// its cache prices are used here.
+pub use pigeon_core::model_prices::{Price, price};
 
 /// Cache tokens of one request.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -261,19 +211,19 @@ impl Totals {
     }
 }
 
-/// A group's JSON: `usage` as it is, plus the cache fields and `cost_with_cache`.
+/// A group's JSON: `usage` as it is, plus the cache token counts. `cost_with_cache` is a
+/// deprecated alias of `cost`, kept one release: the gateway's cost already includes the cache.
 fn group_json(usage: &Usage, t: Totals) -> Value {
     let mut v = serde_json::to_value(usage).unwrap_or(Value::Null);
-    let cache = t.dollars();
     v["cache_read_tokens"] = json!(t.read);
     v["cache_write_tokens"] = json!(t.write);
-    v["cache_cost"] = json!(cache);
-    v["cost_with_cache"] = json!(usage.cost.unwrap_or(0.0) + cache);
+    v["cost_with_cache"] = json!(usage.cost.unwrap_or(0.0));
     v
 }
 
-/// The gateway's `groups` with `rows` merged in by group key along `by`: a group the rows alone
-/// make is new. The costliest first. Also the cache totals of all rows.
+/// The gateway's `groups` with the cache token counts of `rows` merged in by group key along
+/// `by`: a group the rows alone make is new. The costliest first. Also the cache totals of all
+/// rows.
 pub fn merge(groups: Vec<Usage>, rows: &[Row], by: &[Dimension]) -> (Vec<Value>, Totals) {
     let mut cache: BTreeMap<BTreeMap<String, Option<String>>, Totals> = BTreeMap::new();
     let mut all = Totals::default();

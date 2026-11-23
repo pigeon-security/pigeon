@@ -10,6 +10,7 @@
 //! - [`transcript`]: the next turn's request, tool results, compaction.
 //! - [`tools`]: the tools each role is offered, and each call's checks.
 //! - [`prompts`]: what a run is told.
+//! - [`estimate`]: a run's cost, estimated from similar past runs.
 //!
 //! The Worker side carries out what [`run::next`] decides:
 //!
@@ -21,6 +22,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod budget;
+pub mod estimate;
 pub mod object;
 pub mod page;
 pub mod prompts;

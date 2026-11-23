@@ -209,3 +209,4 @@ handle its absence. The landing order is A, B, C, D, one at a time.
 ## Log
 
 - 2026-11-23: plan written from the code and the live `models_usage` evidence above.
+- 2026-11-23: phases A (executor run ryF79luXxZNf), B (22FzNTrA8Xhm), C (RuhgSRVEnBEe) and D, put together on the planner's branch for one landing. The executors' branches each had CI green. B's own branch, and then the planner's, were refused by the Lander ("the pack is malformed: it inflates too large"), and other planners' branches hit the same error. C's index migration was moved after B's three. A and B both edited `budget.rs`'s price section, resolved to A's re-exports.

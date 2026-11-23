@@ -278,10 +278,17 @@ pub async fn run(
     token.finish(ran).await
 }
 
+/// The response header that names a request's log in the gateway. The gateway sets it on its
+/// responses. Source: Cloudflare's AI Gateway docs, "Add human feedback using API", step
+/// "Retrieve the `cf-aig-log-id`", method "Locate the `cf-aig-log-id` in the request response"
+/// (cloudflare-docs, `ai-gateway/evaluations/add-human-feedback-api.mdx`).
+pub const LOG_ID_HEADER: &str = "cf-aig-log-id";
+
 /// What [`stream`] got: the provider's refusal, read whole, or what `read` made of its answer.
+/// Each also holds the gateway's log id, when it sent one.
 pub enum Streamed<T> {
-    Refused(Ran),
-    Read(T),
+    Refused(Ran, Option<String>),
+    Read(T, Option<String>),
 }
 
 /// How long a token minted for a streamed request lives: the ceiling if its revoke is lost. The
@@ -290,7 +297,8 @@ const STREAM_TOKEN_TTL: u64 = 1_200;
 
 /// [`run`], with the provider's answer handed to `read` as it arrives rather than read whole:
 /// for a body that asks the provider to stream. `read` decides when to stop; once it returns,
-/// the token is revoked. The same tags and the same payload-free log as [`run`].
+/// the token is revoked. `read` is given the log id ([`LOG_ID_HEADER`]) with the body, so it
+/// has it even if reading fails. The same tags and the same payload-free log as [`run`].
 #[allow(clippy::too_many_arguments)]
 pub async fn stream<T>(
     account: &Account,
@@ -300,7 +308,7 @@ pub async fn stream<T>(
     headers: &[(&str, &str)],
     tags: &[(&str, &str)],
     body: &Value,
-    read: impl AsyncFnOnce(worker::ByteStream) -> Result<T>,
+    read: impl AsyncFnOnce(worker::ByteStream, Option<String>) -> Result<T>,
 ) -> Result<Streamed<T>> {
     let metadata = metadata_header(tags)?;
     let mut headers = headers.to_vec();
@@ -319,12 +327,15 @@ pub async fn stream<T>(
     let streamed = async {
         let mut response = open(token.value(), &url, &headers, body).await?;
         let status = response.status_code();
+        // Read before the body is streamed.
+        let log_id = response.headers().get(LOG_ID_HEADER).ok().flatten();
         if !(200..300).contains(&status) {
             let text = response.text().await?;
             let body = serde_json::from_str(&text).unwrap_or(Value::String(text));
-            return Ok(Streamed::Refused(Ran { status, body }));
+            return Ok(Streamed::Refused(Ran { status, body }, log_id));
         }
-        Ok(Streamed::Read(read(response.stream()?).await?))
+        let made = read(response.stream()?, log_id.clone()).await?;
+        Ok(Streamed::Read(made, log_id))
     }
     .await;
     token.finish(streamed).await
@@ -540,6 +551,127 @@ async fn logs_with(
         if last_page {
             break;
         }
+    }
+    Ok(out)
+}
+
+/// How many log ids one [`log_costs`] call takes.
+pub const MAX_LOG_IDS: usize = 50;
+
+/// Whether `id` may be put in a log URL: 1 to 100 characters of `A-Za-z0-9_-`. The error says
+/// what is wrong.
+pub fn check_log_id(id: &str) -> std::result::Result<(), String> {
+    if id.is_empty() || id.len() > 100 {
+        return Err("a log id is 1 to 100 characters".into());
+    }
+    if !id
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        return Err("a log id has only letters, digits, `_` and `-`".into());
+    }
+    Ok(())
+}
+
+/// What looking one log up came to.
+#[derive(Debug, Clone)]
+pub enum LogLookup {
+    /// The log, as the gateway keeps it.
+    Found(Log),
+    /// The gateway has not written it yet (or has dropped it).
+    NotFound,
+    /// Any other failure; the text holds no account id.
+    Failed(String),
+}
+
+/// The answer of `models_cost`: `{"logs": [...]}`, one entry per id in `ids`, in order. A log
+/// not found, or one that failed to read, has `found: false` (and an `error` when it failed).
+/// A found log with no cost has `cost_usd: null`. Pure.
+pub fn cost_answer(ids: &[String], lookups: &[LogLookup]) -> Value {
+    let logs: Vec<Value> = ids
+        .iter()
+        .zip(lookups)
+        .map(|(id, lookup)| match lookup {
+            LogLookup::Found(log) => json!({
+                "log_id": id,
+                "found": true,
+                "cost_usd": log.cost,
+                "model": log.model,
+                "tokens_in": log.tokens_in,
+                "tokens_out": log.tokens_out,
+            }),
+            LogLookup::NotFound => json!({
+                "log_id": id,
+                "found": false,
+                "cost_usd": null,
+                "model": null,
+                "tokens_in": null,
+                "tokens_out": null,
+            }),
+            LogLookup::Failed(error) => json!({
+                "log_id": id,
+                "found": false,
+                "cost_usd": null,
+                "model": null,
+                "tokens_in": null,
+                "tokens_out": null,
+                "error": error,
+            }),
+        })
+        .collect();
+    json!({ "logs": logs })
+}
+
+/// Reads each log in `ids` from gateway `gateway` with ONE scoped read token; the lookups in
+/// order. One id's failure does not fail the others. The endpoint is
+/// `GET /accounts/{account_id}/ai-gateway/gateways/{gateway_id}/logs/{id}` in Cloudflare's API
+/// schema (github.com/cloudflare/api-schemas, `openapi.json`).
+pub async fn log_costs(account: &Account, gateway: &str, ids: &[String]) -> Result<Vec<LogLookup>> {
+    for id in ids {
+        check_log_id(id).map_err(worker::Error::RustError)?;
+    }
+    let token = Scoped::open(
+        account,
+        "ai-gateway",
+        vec![Policy::new(Scope::Account, &READ_PERMISSIONS)],
+    )
+    .await?;
+    let read = log_costs_with(token.value(), account, gateway, ids).await;
+    token.finish(read).await
+}
+
+async fn log_costs_with(
+    token: &str,
+    account: &Account,
+    gateway: &str,
+    ids: &[String],
+) -> Result<Vec<LogLookup>> {
+    let mut out = Vec::new();
+    for (n, id) in ids.iter().enumerate() {
+        let path = format!(
+            "/accounts/{}/ai-gateway/gateways/{gateway}/logs/{id}",
+            account.id
+        );
+        // The first call is the minted token's first, which may come before it is active.
+        let answer = if n == 0 {
+            call_fresh(token, Method::Get, &path, None).await
+        } else {
+            call(token, Method::Get, &path, None).await
+        };
+        out.push(match answer {
+            Ok(v) => match serde_json::from_value::<Log>(v) {
+                Ok(log) => LogLookup::Found(log),
+                Err(e) => LogLookup::Failed(format!("the log is unreadable: {e}")),
+            },
+            Err(e) => {
+                let text = e.to_string();
+                if text.contains(": 404:") {
+                    LogLookup::NotFound
+                } else {
+                    LogLookup::Failed(text.replace(account.id.as_str(), "<account>"))
+                }
+            }
+        });
     }
     Ok(out)
 }

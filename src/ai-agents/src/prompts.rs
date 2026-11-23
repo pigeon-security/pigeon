@@ -27,7 +27,7 @@ pub fn last_turn(over: Over, budget: &Budget, spent: &Spent, wall_used_ms: i64) 
         ),
         _ => format!(
             "You have used {} of your {} cost budget (90% or more).",
-            budget::money(spent.cost_micros),
+            budget::money(spent.committed_micros()),
             budget::money(budget.cost_micros)
         ),
     };

@@ -1879,9 +1879,13 @@ pub fn fold_agent_runs(
             continue;
         }
         count += 1;
-        let cost = &r["spent"]["cost"];
-        usd += cost
+        // A run's own cost: AI Gateway's cost per turn, the local estimate for turns not yet
+        // read. Executors are runs of their own, so a planner's executors are not added here.
+        let spent = &r["spent"];
+        let cost = &spent["cost"];
+        usd += spent["cost_usd"]
             .as_f64()
+            .or_else(|| cost.as_f64())
             .or_else(|| {
                 cost.as_str()
                     .and_then(|s| s.trim_start_matches('$').parse().ok())
@@ -1889,6 +1893,22 @@ pub fn fold_agent_runs(
             .unwrap_or(0.0);
     }
     Ok((count, usd))
+}
+
+/// The turns of the agent runs created in `[from_ms, to_ms]` whose cost is still the local
+/// estimate, not yet read from AI Gateway (`spent.unreconciled_turns`; absent counts as 0).
+pub fn unreconciled_agent_turns(answer: &Value, from_ms: i64, to_ms: i64) -> u64 {
+    answer["runs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|r| {
+            r["created_at"]
+                .as_i64()
+                .is_some_and(|c| c >= from_ms && c <= to_ms)
+        })
+        .filter_map(|r| r["spent"]["unreconciled_turns"].as_u64())
+        .sum()
 }
 
 /// Seconds of Containers time per class for jobs that finished in `[from_ms, to_ms]`, and how
@@ -2149,11 +2169,11 @@ async fn summary(this: &Observability, cx: &Context<'_>, hours: u64) -> Result<V
                 "Models",
                 "estimated",
                 if cut_short {
-                    "AI Gateway cost plus prompt-cache reads and writes priced from the model gateway's jobs; the log listing was cut short, so this is a lower bound. Requests not sent as model-gateway jobs, such as models_run, carry no cache count"
+                    "AI Gateway's own cost per request, prompt-cache reads and writes included; the log listing was cut short, so this is a lower bound"
                 } else {
-                    "AI Gateway cost plus prompt-cache reads and writes priced from the model gateway's jobs, such as AI agent turns. Requests not sent as model-gateway jobs, such as models_run, carry no cache count"
+                    "AI Gateway's own cost per request, prompt-cache reads and writes included"
                 },
-                v["cost_with_cache"].as_f64().or(v["cost"].as_f64()),
+                v["cost"].as_f64(),
                 json!({ "requests": v["requests"], "tokens_in": v["tokens_in"], "tokens_out": v["tokens_out"], "truncated": cut_short }),
             ));
         }
@@ -2166,9 +2186,13 @@ async fn summary(this: &Observability, cx: &Context<'_>, hours: u64) -> Result<V
             Ok((count, usd)) => cost.push(line(
                 "AI agent runs",
                 "metered",
-                "AI agents Worker, priced with prompt-cache tokens, so it can differ a little from the Models line, which counts cache tokens only for model-gateway jobs. The same model use, so it is not added to either total",
+                "each run's own turns at AI Gateway's cost (the local estimate for turns not yet read from the gateway), every executor counted once as its own run. The same model use as the Models line, so it is not added to either total",
                 Some(usd),
-                json!({ "runs": count, "listed": v["runs"].as_array().map_or(0, Vec::len) }),
+                json!({
+                    "runs": count,
+                    "listed": v["runs"].as_array().map_or(0, Vec::len),
+                    "unreconciled_turns": unreconciled_agent_turns(&v, from as i64, to as i64),
+                }),
             )),
             Err(why) => unavailable.push(missing("AI agent run spend", &why)),
         },
