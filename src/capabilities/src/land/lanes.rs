@@ -11,6 +11,10 @@
 //! at or after such a landing's merge until core has deployed one that covers it. Then the other
 //! lanes run in parallel. Any other landing's lanes, core's included, run in parallel at once.
 //!
+//! A landing that changed the deploy proxy's allowlist ([`PROXY_FIRST_PATHS`]) is `proxy_first`:
+//! no other lane, core's included, deploys a commit at or after it until the proxy has deployed
+//! it or its deploy has failed. If it is also `ordered`, core goes first, then the proxy.
+//!
 //! A landing is landed once every Worker it affects has deployed a commit at or after its merge.
 //! It is deploy_failed once an incident (a lane's deploy that failed, attributed by
 //! [`bisect`]) finds it the cause, or finds its commit holds the cause, or cannot isolate the
@@ -31,6 +35,25 @@ pub struct Merged {
     pub workers: Vec<String>,
     /// Whether the other lanes wait for core to deploy it first.
     pub ordered: bool,
+    /// Whether no lane deploys it before the proxy has (it changed the deploy proxy's allowlist).
+    pub proxy_first: bool,
+}
+
+/// The paths whose change makes a landing deploy the proxy first: the deploy proxy's allowlist.
+pub const PROXY_FIRST_PATHS: [&str; 1] = ["src/proxies/src/cf_proxy.rs"];
+
+/// The proxy's Worker name in `ci/workers.toml`.
+pub const PROXY_WORKER: &str = "proxy";
+
+/// Bit of `landings.ordered`: core deploys first.
+pub const ORDER_CORE_FIRST: i64 = 1;
+
+/// Bit of `landings.ordered`: the proxy deploys first.
+pub const ORDER_PROXY_FIRST: i64 = 2;
+
+/// Whether any of `changed` is a proxy-first path.
+pub fn changes_proxy_first(changed: &[&str]) -> bool {
+    changed.iter().any(|p| PROXY_FIRST_PATHS.contains(p))
 }
 
 /// How a lane's deploy stands.
@@ -155,7 +178,7 @@ pub fn starts(core: &str, landings: &[Merged], deploys: &[Deploy], held: &[&str]
             continue;
         }
         // Another lane deploys nothing at or after an ordered landing core has still to deploy.
-        let block = if w == core {
+        let core_block = if w == core {
             i64::MAX
         } else {
             sorted
@@ -166,6 +189,24 @@ pub fn starts(core: &str, landings: &[Merged], deploys: &[Deploy], held: &[&str]
                 .min()
                 .unwrap_or(i64::MAX)
         };
+        // Nor does a lane but the proxy's deploy at or after a proxy-first landing the proxy has
+        // still to deploy and has not failed. Core goes first for one that is also core first.
+        let proxy_block = if w == PROXY_WORKER {
+            i64::MAX
+        } else {
+            sorted
+                .iter()
+                .filter(|l| l.proxy_first && l.workers.iter().any(|x| x == PROXY_WORKER))
+                .filter(|l| w != core || !l.ordered)
+                .filter(|l| {
+                    !covered(deploys, PROXY_WORKER, l.merged_at)
+                        && failed_for(deploys, PROXY_WORKER, l.merged_at).is_none()
+                })
+                .map(|l| l.merged_at)
+                .min()
+                .unwrap_or(i64::MAX)
+        };
+        let block = core_block.min(proxy_block);
         let carried: Vec<&&Merged> = sorted
             .iter()
             .filter(|l| waits(l, w) && l.merged_at < block)
@@ -182,6 +223,56 @@ pub fn starts(core: &str, landings: &[Merged], deploys: &[Deploy], held: &[&str]
         });
     }
     out
+}
+
+/// Which map a deploy's Worker entry came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MapUsed {
+    /// `ci/workers.toml` at the deploy's commit.
+    Commit,
+    /// The map compiled into the running core.
+    Compiled,
+}
+
+/// The entry a deploy of `name` uses. `text` is what reading `ci/workers.toml` at the deploy's
+/// commit gave: its text, no file, or an error. The commit's map wins when it parses and has the
+/// Worker; otherwise the compiled map answers. The string says which map, and why when it is the
+/// compiled one. `None` when neither map has the Worker.
+pub fn resolve_entry(
+    text: Result<Option<String>, String>,
+    name: &str,
+    compiled: &pigeon_core::lanes::Map,
+) -> Option<(pigeon_core::lanes::Worker, MapUsed, String)> {
+    let why = match text {
+        Ok(Some(t)) => match pigeon_core::lanes::parse(&t) {
+            Ok(map) => match map.worker(name) {
+                Some(w) => {
+                    return Some((
+                        w.clone(),
+                        MapUsed::Commit,
+                        "map from the commit".to_string(),
+                    ));
+                }
+                None => format!("the commit's map has no Worker `{name}`"),
+            },
+            Err(e) => format!("the commit's map does not parse: {e}"),
+        },
+        Ok(None) => "the commit has no map".to_string(),
+        Err(e) => format!("the commit's map could not be read: {e}"),
+    };
+    compiled.worker(name).map(|w| {
+        (
+            w.clone(),
+            MapUsed::Compiled,
+            format!("compiled map ({why})"),
+        )
+    })
+}
+
+/// The script a deploy grant answers: the one recorded on the deploy row, or, for a row
+/// without one, the compiled map's.
+pub fn grant_script(recorded: Option<&str>, compiled: Option<&str>) -> Option<String> {
+    recorded.or(compiled).map(str::to_string)
 }
 
 /// One deploy as a landing's note and `land_status` name it: the Worker, why it ran, its job,

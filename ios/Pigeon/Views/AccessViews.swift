@@ -20,7 +20,7 @@ struct AccessView: View {
                     link("Secrets", "What is set and when it changed. Never the values.") {
                         SecretsView(session: session)
                     }
-                    Button("Sign out") { session.signOut() }
+                    Button("Sign out") { Task { await session.userSignOut() } }
                         .font(.token(Tokens.typeButton))
                 }
                 .padding(Tokens.spacePage)

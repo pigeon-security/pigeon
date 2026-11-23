@@ -122,10 +122,11 @@ pub async fn caller_key(env: &Env) -> Result<Vec<u8>> {
 pub const WORKER_HEADER: &str = "X-Pigeon-Worker";
 
 /// The capability Workers that may get a key of their own, by the name they claim in
-/// [`WORKER_HEADER`], with the Secrets Store name of that key.
+/// [`WORKER_HEADER`], with the Secrets Store name of that key. The names are the `name`s in
+/// ci/workers.toml.
 pub const WORKER_KEYS: [(&str, &str); 5] = [
-    ("ci", "CALLER_KEY_CI"),
-    ("models", "CALLER_KEY_MODELS"),
+    ("ci-gateway", "CALLER_KEY_CI_GATEWAY"),
+    ("model-gateway", "CALLER_KEY_MODEL_GATEWAY"),
     ("sites", "CALLER_KEY_SITES"),
     ("proxy", "CALLER_KEY_PROXY"),
     ("ai-agents", "CALLER_KEY_AI_AGENTS"),

@@ -24,8 +24,11 @@ capability Worker binds only its own. The shared `CALLER_KEY` is dropped at the 
 
 ## Design
 
-- Keys: `CALLER_KEY_CI`, `CALLER_KEY_MODELS`, `CALLER_KEY_SITES`, `CALLER_KEY_PROXY` and
-  `CALLER_KEY_AI_AGENTS`. `workers_setup` makes each one that is missing, readable by Workers,
+- Names. A Worker's name is its `name` in ci/workers.toml. That name is what the Worker sends
+  in `X-Pigeon-Worker`, and the key is `CALLER_KEY_` plus the name in upper case, with `-` as
+  `_`. This keeps one name per Worker across the map, the Lander and the header.
+- Keys: `CALLER_KEY_SITES`, `CALLER_KEY_MODEL_GATEWAY`, `CALLER_KEY_CI_GATEWAY`,
+  `CALLER_KEY_PROXY` and `CALLER_KEY_AI_AGENTS`. `workers_setup` makes each one that is missing, readable by Workers,
   and keeps existing ones. This is a small change to `Split::setup`, in step 0 below.
 - Core binds all five. Each Worker binds only its own, under the binding name `CALLER_KEY_OWN`,
   so Worker code does not change per Worker. (Chosen as the conventional option; the brief did

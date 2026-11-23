@@ -204,6 +204,18 @@ binding = "APPLE_ASC_KEY"
 store_id = "5185c227b9f34b4291045175695b78ec"
 secret_name = "APPLE_ASC_KEY"
 
+# The APNs provider key (src/capabilities/src/apple.rs, docs/plans/ios.md phase 6b): its key id
+# and .p8, set by the person; bound once both existed. Core only.
+[[secrets_store_secrets]]
+binding = "APNS_KEY_ID"
+store_id = "5185c227b9f34b4291045175695b78ec"
+secret_name = "APNS_KEY_ID"
+
+[[secrets_store_secrets]]
+binding = "APNS_KEY"
+store_id = "5185c227b9f34b4291045175695b78ec"
+secret_name = "APNS_KEY"
+
 # Seals the distribution keys pigeon makes (docs/plans/ios.md, phase 2). pigeon made it on the
 # first press of "Create signing identity"; no one types it.
 [[secrets_store_secrets]]

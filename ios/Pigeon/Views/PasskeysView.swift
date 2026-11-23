@@ -79,7 +79,7 @@ struct PasskeysView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                Button("Sign out") { session.signOut() }
+                Button("Sign out") { Task { await session.userSignOut() } }
             }
         }
         .task { await model.load(session.client) }

@@ -35,6 +35,26 @@ pub fn token_fresh(issued_at: u64, now_secs: u64) -> bool {
     now_secs.saturating_sub(issued_at) < TOKEN_REUSE_SECS
 }
 
+/// True when a cached provider token may be reused: there is one, it was made for the current
+/// key id and team, it is fresh, and no refresh is forced.
+pub fn reuse_token(
+    cached_issued_at: Option<u64>,
+    same_key: bool,
+    now_secs: u64,
+    forced: bool,
+) -> bool {
+    match cached_issued_at {
+        Some(at) => same_key && !forced && token_fresh(at, now_secs),
+        None => false,
+    }
+}
+
+/// True when a device row should be dropped after APNs says the token is gone: APNs's timestamp
+/// (milliseconds) is later than the row's `created_at` (milliseconds), or none was given.
+pub fn drop_on_gone(apns_timestamp_ms: Option<u64>, created_at_ms: u64) -> bool {
+    apns_timestamp_ms.is_none_or(|t| t > created_at_ms)
+}
+
 /// True when a new token may be signed: the cached one is at least 20 minutes old.
 pub fn may_refresh(issued_at: u64, now_secs: u64) -> bool {
     now_secs.saturating_sub(issued_at) >= TOKEN_MIN_REFRESH_SECS

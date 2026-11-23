@@ -32,6 +32,15 @@ cargo run -q -p pigeon-capabilities --example design_swift --target x86_64-unkno
 
 Add `-- --check` to only test for drift. Commit the result.
 
+## Push notifications
+
+When signed in, the app asks once to allow notifications. If the person allows them, it
+registers with APNs and sends the device token to the platform (`apns_register`, app
+`pigeon`). The environment is read from the embedded provisioning profile (`aps-environment`);
+without one, Debug builds use `development` and Release builds use `production`. The release
+script sets the entitlement to `production` for TestFlight and the App Store. Signing out
+calls `apns_unregister` first, and a failure does not block it.
+
 ## Sign-in is not complete yet
 
 Sign-in on a device needs the platform to serve `/.well-known/apple-app-site-association` for the

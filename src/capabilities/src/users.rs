@@ -487,6 +487,30 @@ impl Directory {
                 )?;
                 json!({ "ok": true })
             }
+            // A push went out: record the time and clear the last error. Answers no token.
+            "apns.ok" => {
+                self.db.exec(
+                    "UPDATE apns_devices SET last_ok_at = ?, last_error = NULL WHERE id = ?",
+                    vec![t.into(), s("id").into()],
+                )?;
+                json!({ "ok": true })
+            }
+            // Drops one row by id: APNs said its token is wrong or gone.
+            "apns.forget" => {
+                self.db.exec(
+                    "DELETE FROM apns_devices WHERE id = ?",
+                    vec![s("id").into()],
+                )?;
+                json!({ "ok": true })
+            }
+            // Records APNs's reason text on a row. Never a token.
+            "apns.mark" => {
+                self.db.exec(
+                    "UPDATE apns_devices SET last_error = ? WHERE id = ?",
+                    vec![s("error").into(), s("id").into()],
+                )?;
+                json!({ "ok": true })
+            }
             // The rows of an app, for one person when `person_id` is given. Holds tokens: only
             // the Worker reads this, and no tool answers it as is.
             "apns.devices" => {

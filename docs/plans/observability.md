@@ -395,4 +395,5 @@ Open items:
   row; `failed` keeps no cache rows, as a row cannot tell a failure. Left: synchronous
   `models_run` bypasses the runner and carries no cache count; jobs finished before this
   deploys have no rows; the console's daily Cost chart (`src/models/src/daily.rs`) still shows
-  the gateway's cost only; not run live.
+  the gateway's cost only; not run live. Rows are summed per provider, model and tag set when
+  read.

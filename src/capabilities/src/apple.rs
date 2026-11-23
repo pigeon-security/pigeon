@@ -13,6 +13,10 @@
 //! They are console writes and not MCP tools, so no agent can mint a signing identity. Neither
 //! touches a certificate or profile pigeon did not make.
 //!
+//! The release step (`release::identity`) ensures Push: it adds PUSH_NOTIFICATIONS to the bundle
+//! id if missing, and makes a new profile for the same certificate if the held one lacks it or
+//! is not ACTIVE. It never deletes or changes a certificate or profile.
+//!
 //! The key and every token stay in this Worker. No answer holds a key, a token, a certificate or
 //! a profile's bytes.
 
@@ -124,6 +128,7 @@ impl Identity {
             "made_by": self.made_by,
             "profile": self.profile.as_ref().map(|p| json!({
                 "id": p.id, "uuid": p.uuid, "name": p.name, "expires": p.expires,
+                "push": profile_has_push(&p.content),
             })),
         })
     }
@@ -138,6 +143,13 @@ impl Identity {
             (None, p) => p,
         }
     }
+}
+
+/// True when a profile (base64, as Apple gives it) grants `aps-environment`, that is Push
+/// Notifications. The plist sits in clear text inside the CMS envelope. False on bad base64.
+pub fn profile_has_push(content_b64: &str) -> bool {
+    let key = b"<key>aps-environment</key>";
+    apple::unb64(content_b64).is_some_and(|b| b.windows(key.len()).any(|w| w == key))
 }
 
 /// The associated data that binds a sealed key to its certificate.
@@ -530,6 +542,39 @@ async fn seal_key(env: &Env) -> Option<[u8; 32]> {
     crypto::key_from(&secret(env, SEAL_KEY).await?)
 }
 
+/// Adds the capabilities in `wanted` that `have` lacks to the bundle id `id`, one POST each.
+/// Answers the ones it added.
+async fn add_missing<'a>(
+    token: &str,
+    id: &str,
+    wanted: &[&'a str],
+    have: &[String],
+) -> Result<Vec<&'a str>> {
+    let add = missing(wanted, have);
+    for cap in &add {
+        apple::post(
+            token,
+            "/v1/bundleIdCapabilities",
+            &json!({ "data": { "type": "bundleIdCapabilities",
+                "attributes": { "capabilityType": cap },
+                "relationships": { "bundleId": { "data": { "type": "bundleIds", "id": id } } },
+            } }),
+        )
+        .await
+        .map_err(|e| bad(&format!("adding {cap} to {BUNDLE_ID}: {e}")))?;
+    }
+    Ok(add)
+}
+
+/// Reads the bundle id's capabilities and adds those in `wanted` that are missing.
+async fn add_capabilities(token: &str, id: &str, wanted: &[&str]) -> Result<()> {
+    let have = capabilities(token, id)
+        .await
+        .map_err(|e| bad(&format!("reading {BUNDLE_ID}'s capabilities: {e}")))?;
+    add_missing(token, id, wanted, &have).await?;
+    Ok(())
+}
+
 /// Adopt `dev.pigeon.app`: registers it if Apple has none, and adds the missing capabilities.
 async fn adopt(env: &Env) -> Result<String> {
     let token = token(env).await.ok_or_else(|| bad(SETUP))??;
@@ -553,19 +598,7 @@ async fn adopt(env: &Env) -> Result<String> {
     let have = capabilities(&token, &id)
         .await
         .map_err(|e| bad(&format!("reading {BUNDLE_ID}'s capabilities: {e}")))?;
-    let add = missing(&CAPABILITIES, &have);
-    for cap in &add {
-        apple::post(
-            &token,
-            "/v1/bundleIdCapabilities",
-            &json!({ "data": { "type": "bundleIdCapabilities",
-                "attributes": { "capabilityType": cap },
-                "relationships": { "bundleId": { "data": { "type": "bundleIds", "id": id } } },
-            } }),
-        )
-        .await
-        .map_err(|e| bad(&format!("adding {cap} to {BUNDLE_ID}: {e}")))?;
-    }
+    let add = add_missing(&token, &id, &CAPABILITIES, &have).await?;
     let mut said = if registered {
         format!("Registered {BUNDLE_ID}.")
     } else {
@@ -908,8 +941,10 @@ pub mod push {
             },
             Tool {
                 name: "apns_send",
-                description: "Send a push to a person's devices for an app. Sends nothing, and \
-                              says what to set, while the APNs key is not readable.",
+                description: "Send a push to every device of a person for an app (the person \
+                              argument, or the one the caller acts for). Answers row ids and \
+                              outcomes, never a token. Says what to set while the APNs key is \
+                              not readable.",
                 input_schema: json!({ "type": "object", "required": ["app", "alert"],
                     "properties": {
                         "app": { "type": "string" },
@@ -995,15 +1030,278 @@ pub mod push {
                         .ok_or_else(|| bad("push_type is alert or background"))?;
                 let title = args["alert"]["title"].as_str().unwrap_or_default();
                 let body = args["alert"]["body"].as_str().unwrap_or_default();
-                apns::payload(push_type, Some((title, body)), args.get("data"))
+                let payload = apns::payload(push_type, Some((title, body)), args.get("data"))
                     .map_err(|e| bad(&e))?;
-                apns::headers(app, push_type, args["collapse_id"].as_str()).map_err(|e| bad(&e))?;
-                Err(bad(
-                    "the key is set, but sending lands with the bindings (phase 6b)",
-                ))
+                let headers = apns::headers(app, push_type, args["collapse_id"].as_str())
+                    .map_err(|e| bad(&e))?;
+                let person = match args["person"].as_str().filter(|p| !p.is_empty()) {
+                    Some(p) => p.to_string(),
+                    None => {
+                        cx.caller
+                            .and_then(|c| {
+                                c.acting_for.as_ref().map(|p| p.id.clone()).or_else(|| {
+                                    (c.user.kind == "standard").then(|| c.user.id.clone())
+                                })
+                            })
+                            .ok_or_else(|| bad("name a person: the caller does not act for one"))?
+                    }
+                };
+                send(env, app, &person, &payload, &headers).await
             }
             other => Err(crate::unknown(other)),
         }
+    }
+
+    /// Where the provider token is cached in the Directory. Never answered, logged or audited.
+    const TOKEN_KEY: &str = "apns:provider-token";
+    /// How long the cached provider token is kept: 55 minutes.
+    const TOKEN_TTL_MS: i64 = 55 * 60 * 1000;
+    /// How long a device is skipped after APNs's 429 TooManyRequests: 10 minutes.
+    const BACKOFF_MS: i64 = 10 * 60 * 1000;
+    /// A day, in milliseconds: how long send times are kept.
+    const DAY_MS: i64 = 24 * 3_600_000;
+    /// Inline retries for a 500 or 503 answer.
+    const RETRIES: u32 = 2;
+
+    fn now_secs() -> u64 {
+        worker::Date::now().as_millis() / 1000
+    }
+
+    /// Writes a Directory setting that expires after `ttl_ms`.
+    async fn put(env: &Env, key: &str, value: &str, ttl_ms: i64) -> Result<()> {
+        directory(
+            env,
+            "setting.put",
+            json!({ "key": key, "value": value, "ttl_ms": ttl_ms }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// The APNs provider token. It reuses the cached one while `apns::reuse_token` says so.
+    /// With `forced` it signs a new one, unless the cached one for the same key is under 20
+    /// minutes old: then it answers None, because APNs would refuse the refresh.
+    async fn provider_token(env: &Env, forced: bool) -> Result<Option<String>> {
+        let (Some(key), Some(key_id), Some(team)) = (
+            secret(env, APNS_KEY).await,
+            secret(env, APNS_KEY_ID).await,
+            secret(env, TEAM_ID).await,
+        ) else {
+            return Err(bad(APNS_SETUP));
+        };
+        let now = now_secs();
+        let cached: Option<Value> = setting(env, TOKEN_KEY)
+            .await?
+            .and_then(|t| serde_json::from_str(&t).ok());
+        let issued = cached.as_ref().and_then(|c| c["issued_at"].as_u64());
+        let same = cached
+            .as_ref()
+            .is_some_and(|c| c["key_id"] == key_id.as_str() && c["team"] == team.as_str());
+        if apns::reuse_token(issued, same, now, forced)
+            && let Some(t) = cached.as_ref().and_then(|c| c["token"].as_str())
+        {
+            return Ok(Some(t.to_string()));
+        }
+        if forced && same && issued.is_some_and(|at| !apns::may_refresh(at, now)) {
+            return Ok(None);
+        }
+        let der = apple::p8_der(&key)
+            .ok_or_else(|| bad("the stored APNS_KEY is not a .p8 key; set it again"))?;
+        let token = apple::sign_es256(&der, &apns::signing_input(&key_id, &team, now)).await?;
+        let record = json!({ "token": token, "key_id": key_id, "team": team, "issued_at": now });
+        put(env, TOKEN_KEY, &record.to_string(), TOKEN_TTL_MS).await?;
+        Ok(Some(token))
+    }
+
+    /// What APNs answered for one device.
+    struct Answer {
+        status: u16,
+        apns_id: Option<String>,
+        reason: Option<String>,
+        timestamp: Option<u64>,
+    }
+
+    /// One POST to APNs. Holds the device token only for the URL; nothing here is logged.
+    async fn post(
+        host: &str,
+        device: &str,
+        bearer: &str,
+        headers: &[(&'static str, String)],
+        payload: &str,
+    ) -> Result<Answer> {
+        let h = Headers::new();
+        h.set("authorization", &format!("bearer {bearer}"))?;
+        h.set("content-type", "application/json")?;
+        for (k, v) in headers {
+            h.set(k, v)?;
+        }
+        let mut init = RequestInit::new();
+        init.with_method(Method::Post);
+        init.with_headers(h);
+        init.with_body(Some(payload.into()));
+        let request = Request::new_with_init(&format!("https://{host}/3/device/{device}"), &init)?;
+        let mut res = Fetch::Request(request).send().await?;
+        let status = res.status_code();
+        let apns_id = res.headers().get("apns-id")?;
+        let text = res.text().await.unwrap_or_default();
+        let body: Value = serde_json::from_str(&text).unwrap_or_default();
+        Ok(Answer {
+            status,
+            apns_id,
+            reason: body["reason"].as_str().map(String::from),
+            timestamp: body["timestamp"].as_u64(),
+        })
+    }
+
+    /// Sends to every device of `person` for `app`. Answers row ids and outcomes, never a device
+    /// token. Departures from docs/plans/ios.md, §3: a 400 BadDeviceToken drops the row at once
+    /// (the app registers again on every launch, so a wrong-environment token comes back
+    /// corrected), and a 500 or 503 is retried inline twice with a short delay, not through the
+    /// platform's queue. The rate limit is counted per call, in Directory settings.
+    async fn send(
+        env: &Env,
+        app: &str,
+        person: &str,
+        payload: &str,
+        headers: &[(&'static str, String)],
+    ) -> Result<Value> {
+        let now = now_secs();
+        let sends_key = format!("apns:sends:{app}:{person}");
+        let mut past: Vec<u64> = setting(env, &sends_key)
+            .await?
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default();
+        match apns::rate_limit(&past, now) {
+            Err(apns::Limited::Minute) => {
+                return Err(bad("too many pushes for this person: 30 a minute"));
+            }
+            Err(apns::Limited::Day) => {
+                return Err(bad("too many pushes for this person: 500 a day"));
+            }
+            Ok(()) => {}
+        }
+        past.retain(|t| now.saturating_sub(*t) < 86_400);
+        past.push(now);
+        put(env, &sends_key, &serde_json::to_string(&past)?, DAY_MS).await?;
+
+        let rows = directory(
+            env,
+            "apns.devices",
+            json!({ "app": app, "person_id": person }),
+        )
+        .await?;
+        let mut bearer = provider_token(env, false)
+            .await?
+            .ok_or_else(|| bad("no provider token"))?;
+        let mut refreshed = false;
+        let (mut sent, mut failed) = (0u32, 0u32);
+        let mut out: Vec<Value> = Vec::new();
+        let mut stopped: Option<String> = None;
+        'devices: for row in rows.as_array().into_iter().flatten() {
+            let id = row["id"].as_str().unwrap_or_default();
+            let environment = row["environment"].as_str().unwrap_or_default();
+            let entry = |status: u16, reason: Option<&str>, apns_id: Option<&str>| {
+                json!({ "id": id, "environment": environment, "status": status,
+                    "reason": reason, "apns_id": apns_id })
+            };
+            let Some(host) = apns::host(environment) else {
+                failed += 1;
+                out.push(entry(0, Some("unknown environment"), None));
+                continue;
+            };
+            let backoff_key = format!("apns:backoff:{id}");
+            if setting(env, &backoff_key).await?.is_some() {
+                failed += 1;
+                out.push(entry(0, Some("backed off"), None));
+                continue;
+            }
+            let device = row["token"].as_str().unwrap_or_default();
+            let created_at = row["created_at"].as_u64().unwrap_or_default();
+            let mut tries = 0;
+            loop {
+                let Ok(a) = post(host, device, &bearer, headers, payload).await else {
+                    failed += 1;
+                    out.push(entry(0, Some("the request to APNs failed"), None));
+                    continue 'devices;
+                };
+                let reason = a.reason.as_deref();
+                let apns_id = a.apns_id.as_deref();
+                let mut fail = |out: &mut Vec<Value>| {
+                    failed += 1;
+                    out.push(entry(a.status, reason, apns_id));
+                };
+                match apns::action(a.status, reason.unwrap_or_default()) {
+                    apns::Action::Ok => {
+                        directory(env, "apns.ok", json!({ "id": id })).await?;
+                        sent += 1;
+                        out.push(entry(a.status, reason, apns_id));
+                    }
+                    apns::Action::MarkDevice => {
+                        directory(env, "apns.forget", json!({ "id": id })).await?;
+                        fail(&mut out);
+                    }
+                    apns::Action::DeleteIfNewer => {
+                        if apns::drop_on_gone(a.timestamp, created_at) {
+                            directory(env, "apns.forget", json!({ "id": id })).await?;
+                        } else {
+                            let why = reason.unwrap_or("Unregistered");
+                            directory(env, "apns.mark", json!({ "id": id, "error": why })).await?;
+                        }
+                        fail(&mut out);
+                    }
+                    apns::Action::RefreshToken => {
+                        if !refreshed {
+                            refreshed = true;
+                            if let Some(t) = provider_token(env, true).await? {
+                                bearer = t;
+                                continue;
+                            }
+                        }
+                        fail(&mut out);
+                        stopped = Some(reason.unwrap_or("provider token refused").to_string());
+                        break 'devices;
+                    }
+                    apns::Action::StopReport | apns::Action::KeepTokenReport => {
+                        fail(&mut out);
+                        stopped = Some(reason.unwrap_or("APNs refused").to_string());
+                        break 'devices;
+                    }
+                    apns::Action::RefuseCaller => {
+                        return Err(bad(&format!(
+                            "APNs refused the push: {}",
+                            reason.unwrap_or("payload")
+                        )));
+                    }
+                    apns::Action::BackOff => {
+                        put(env, &backoff_key, "1", BACKOFF_MS).await?;
+                        fail(&mut out);
+                    }
+                    apns::Action::Retry => {
+                        if tries < RETRIES {
+                            tries += 1;
+                            let wait = std::time::Duration::from_millis(300 * u64::from(tries));
+                            worker::Delay::from(wait).await;
+                            continue;
+                        }
+                        let why = reason.unwrap_or("ServiceUnavailable");
+                        directory(env, "apns.mark", json!({ "id": id, "error": why })).await?;
+                        fail(&mut out);
+                    }
+                    apns::Action::Report => {
+                        let why = reason.unwrap_or("unknown");
+                        directory(env, "apns.mark", json!({ "id": id, "error": why })).await?;
+                        fail(&mut out);
+                    }
+                }
+                break;
+            }
+        }
+        let mut answer = json!({ "sent": sent, "failed": failed, "configured": true,
+            "devices": out });
+        if let Some(why) = stopped {
+            answer["stopped"] = json!(why);
+        }
+        Ok(answer)
     }
 
     /// `apns_status`: setup state, counts per environment, and the optional HTTP/2 probe.
@@ -1367,8 +1665,82 @@ pub mod release {
         Ok(json!({ "build_number": number, "state": r.state }))
     }
 
+    /// Makes sure `id` holds a profile with Push Notifications, and returns it. Adds the
+    /// capability to the bundle id if it is missing. If the held profile lacks push or Apple says
+    /// it is not ACTIVE, makes a new profile for the same certificate and keeps it in `id`. Never
+    /// deletes or changes any certificate or profile.
+    async fn ensure_push(env: &Env, id: &mut Identity) -> Result<()> {
+        let token = token(env).await.ok_or_else(|| bad(SETUP))??;
+        let bundle = bundle_id(&token)
+            .await?
+            .ok_or_else(|| bad(&format!("Apple has no {BUNDLE_ID}: press Adopt first")))?;
+        add_capabilities(&token, &bundle, &["PUSH_NOTIFICATIONS"]).await?;
+        let held = id.profile.as_ref().ok_or_else(|| bad("no profile"))?;
+        let mut usable = profile_has_push(&held.content);
+        if usable {
+            let state = apple::get(
+                &token,
+                &format!("/v1/profiles/{}?fields[profiles]=profileState", held.id),
+            )
+            .await
+            .map_err(|e| bad(&format!("reading the profile's state: {e}")))?;
+            usable = state["data"]["attributes"]["profileState"].as_str() == Some("ACTIVE");
+        }
+        if usable {
+            return Ok(());
+        }
+        let stamp = worker::js_sys::Date::new_0()
+            .to_iso_string()
+            .as_string()
+            .unwrap_or_default();
+        let day = stamp.get(..10).unwrap_or_default();
+        let hhmm = format!(
+            "{}{}",
+            stamp.get(11..13).unwrap_or_default(),
+            stamp.get(14..16).unwrap_or_default()
+        );
+        let name = format!("pigeon {BUNDLE_ID} {day}");
+        let (name, made) = match apple::post(
+            &token,
+            "/v1/profiles",
+            &profile_request(&name, &bundle, &id.id),
+        )
+        .await
+        {
+            Ok(m) => (name, m),
+            Err(_) => {
+                let again = format!("{name} {hhmm}");
+                let m = apple::post(
+                    &token,
+                    "/v1/profiles",
+                    &profile_request(&again, &bundle, &id.id),
+                )
+                .await
+                .map_err(|e| bad(&format!("Apple did not make a profile with Push: {e}")))?;
+                (again, m)
+            }
+        };
+        let d = &made["data"];
+        let a = &d["attributes"];
+        let content = a["profileContent"].as_str().unwrap_or_default();
+        if d["id"].as_str().is_none() || !profile_has_push(content) {
+            return Err(bad(
+                "Apple made a profile but it has no id or no Push Notifications",
+            ));
+        }
+        id.profile = Some(Profile {
+            id: d["id"].as_str().unwrap_or_default().into(),
+            uuid: a["uuid"].as_str().unwrap_or_default().into(),
+            name: a["name"].as_str().unwrap_or(&name).into(),
+            expires: a["expirationDate"].as_str().unwrap_or_default().into(),
+            content: content.into(),
+        });
+        save(env, id).await
+    }
+
     /// Hands the release its signing identity, once: the newest pigeon identity with a profile
-    /// that has more than a day left.
+    /// that has more than a day left. The profile is made to carry Push Notifications first
+    /// (`ensure_push`), before the release is marked "signing".
     async fn identity(env: &Env, job: &str) -> Result<Value> {
         let mut r = load(env, job)
             .await?
@@ -1383,9 +1755,13 @@ pub mod release {
             .iter()
             .rev()
             .find(|i| i.profile.is_some() && i.expires_ms().is_some_and(|t| t > now + 86_400_000))
+            .cloned()
             .ok_or_else(|| {
                 bad("pigeon holds no signing identity: press Create signing identity")
             })?;
+        let mut id = id;
+        ensure_push(env, &mut id).await?;
+        let id = &id;
         let profile = id.profile.as_ref().ok_or_else(|| bad("no profile"))?;
         let pkcs8 = crypto::open(&key, &id.sealed_key, seal_aad(&id.id).as_bytes()).await?;
         let team = secret(env, TEAM_ID)

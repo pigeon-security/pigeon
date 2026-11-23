@@ -405,7 +405,7 @@ impl Capability for Land {
 // ---- the Lander ----
 
 /// The Lander's schema, one statement per migration, applied in order and never edited.
-const MIGRATIONS: [&str; 17] = [
+const MIGRATIONS: [&str; 18] = [
     "CREATE TABLE landings (id TEXT PRIMARY KEY, branch TEXT NOT NULL, commit_sha TEXT NOT NULL, main_at TEXT NOT NULL, caller TEXT NOT NULL, by_name TEXT NOT NULL, state TEXT NOT NULL, approval_reason TEXT, approved_by TEXT, awaiting_since INTEGER, test_job TEXT, deploy_job TEXT, tries INTEGER NOT NULL DEFAULT 0, detail TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, finished_at INTEGER, note_pushed INTEGER NOT NULL DEFAULT 0, note_tries INTEGER NOT NULL DEFAULT 0)",
     "CREATE TABLE events (landing TEXT NOT NULL, at INTEGER NOT NULL, state TEXT NOT NULL, detail TEXT)",
     "CREATE TABLE notes (commit_sha TEXT PRIMARY KEY, text TEXT NOT NULL)",
@@ -440,6 +440,8 @@ const MIGRATIONS: [&str; 17] = [
     // Whether the other lanes wait for core to deploy a landing first (the map's
     // `core_first`); landings from before default to waiting, as they all did.
     "ALTER TABLE landings ADD COLUMN ordered INTEGER NOT NULL DEFAULT 1",
+    // The Worker's script a deploy resolved from the map at its commit; the deploy grant answers it.
+    "ALTER TABLE deploys ADD COLUMN script TEXT",
 ];
 
 /// What the Lander needs from the hosting Worker, beside the settings: the capabilities it
@@ -578,6 +580,8 @@ struct DeployRow {
     purpose: Option<String>,
     #[serde(default)]
     incident: Option<i64>,
+    #[serde(default)]
+    script: Option<String>,
 }
 
 impl DeployRow {
@@ -919,13 +923,18 @@ impl Lander {
                     vec![s("job").into(), s("commit").into()],
                 )?;
                 if let Some(d) = lane {
-                    let Some(w) = self.settings.map.worker(&d.worker) else {
+                    let compiled = self
+                        .settings
+                        .map
+                        .worker(&d.worker)
+                        .map(|w| w.script.as_str());
+                    let Some(script) = lanes::grant_script(d.script.as_deref(), compiled) else {
                         return Ok(Value::Null);
                     };
                     let by = self
                         .row(&d.landing)?
                         .map_or_else(|| "land".to_string(), |r| r.by_name);
-                    return Ok(json!({ "id": d.landing, "by": by, "script": w.script }));
+                    return Ok(json!({ "id": d.landing, "by": by, "script": script }));
                 }
                 // A deploy a Lander before lanes started, until it is adopted.
                 let row: Option<Row> = self.db.row(
@@ -1438,7 +1447,8 @@ impl Lander {
                     merged_at: r.merged_at.unwrap_or(r.updated_at),
                     commit: r.commit_sha.clone(),
                     workers: r.workers(),
-                    ordered: r.ordered != 0,
+                    ordered: r.ordered & lanes::ORDER_CORE_FIRST != 0,
+                    proxy_first: r.ordered & lanes::ORDER_PROXY_FIRST != 0,
                 };
                 (r, m)
             })
@@ -1685,19 +1695,40 @@ impl Lander {
         )
     }
 
+    /// The text of `ci/workers.toml` at `commit` through git: its text, no file, or why it could
+    /// not be read.
+    async fn map_text_at(&self, commit: &str) -> std::result::Result<Option<String>, String> {
+        let s = &self.settings;
+        let account = pigeon_core::account_from_env(&self.env, &s.parent)
+            .await
+            .map_err(|e| e.to_string())?;
+        let session = merge::Session::open(&account, &s.namespace, &s.repo, Access::Read)
+            .await
+            .map_err(|e| e.to_string())?;
+        let read = git::read_file(&session.remote, commit, merge::MAP_PATH).await;
+        session.close().await;
+        match read {
+            Ok(Some(bytes)) => String::from_utf8(bytes)
+                .map(Some)
+                .map_err(|e| e.to_string()),
+            Ok(None) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
     /// A running deploy's next step: its job submitted, or, once the job ended, its outcome
     /// and, when it passed, its Worker's `after` steps.
     async fn deploy_step(&self, d: DeployRow) -> Result<()> {
         let s = &self.settings;
-        let worker = s
-            .map
-            .worker(&d.worker)
-            .ok_or_else(|| bad(&format!("the map has no Worker `{}` to deploy", d.worker)))?
-            .clone();
         let Some(job) = &d.job else {
             let landing = self
                 .row(&d.landing)?
                 .ok_or_else(|| bad(&format!("no landing {} to deploy", d.landing)))?;
+            // The entry comes from the map at the deploy's commit; the compiled map is the
+            // fallback, and the detail says which one answered.
+            let text = self.map_text_at(&d.commit_sha).await;
+            let (worker, _, which) = lanes::resolve_entry(text, &d.worker, &s.map)
+                .ok_or_else(|| bad(&format!("the map has no Worker `{}` to deploy", d.worker)))?;
             let mut submit = json!({
                 "repo": s.repo_name(), "commit": d.commit_sha,
                 "job": worker.deploy_job,
@@ -1720,11 +1751,12 @@ impl Lander {
                 .as_str()
                 .ok_or_else(|| bad("CI answered no job id"))?;
             self.db.exec(
-                "UPDATE deploys SET job = ?, tries = 0, detail = ?, updated_at = ? WHERE id = ? AND state = 'running' AND job IS NULL",
+                "UPDATE deploys SET job = ?, script = ?, tries = 0, detail = ?, updated_at = ? WHERE id = ? AND state = 'running' AND job IS NULL",
                 vec![
                     job.into(),
+                    worker.script.as_str().into(),
                     format!(
-                        "deploying {} at {}: job {job} submitted{}",
+                        "deploying {} at {}: job {job} submitted, {which}{}",
                         worker.script,
                         d.commit_sha,
                         if d.detail.as_deref().is_some_and(|x| x.contains(lanes::ENV_RETRY)) {
@@ -1771,6 +1803,13 @@ impl Lander {
             return Ok(());
         };
         let (passed, exit_code) = (end.passed, end.exit_code);
+        let compiled = s.map.worker(&d.worker);
+        let script = d
+            .script
+            .clone()
+            .or_else(|| compiled.map(|w| w.script.clone()))
+            .ok_or_else(|| bad(&format!("the map has no Worker `{}` to deploy", d.worker)))?;
+        let after = compiled.map(|w| w.after.clone()).unwrap_or_default();
         // A failure of the environment blames no landing: a lane deploy is deployed once more,
         // anything else ends in error.
         if !passed && let Some(why) = lanes::environment_fault(&end.state, end.exit_code, &end.tail)
@@ -1786,7 +1825,7 @@ impl Lander {
                     vec![
                         format!(
                             "{}: environment fault ({why}); deploying once more at {} {}",
-                            worker.script,
+                            script,
                             d.commit_sha,
                             lanes::ENV_RETRY
                         )
@@ -1801,7 +1840,7 @@ impl Lander {
             }
             return Ok(());
         }
-        let mut detail = format!("{}: {}", worker.script, end.detail);
+        let mut detail = format!("{script}: {}", end.detail);
         if let Some(c) = exit_code {
             detail.push_str(&format!(" (exit code {c})"));
         }
@@ -1841,7 +1880,7 @@ impl Lander {
             console_error!("close_covered failed: {e}");
         }
         if passed {
-            for step in &worker.after {
+            for step in &after {
                 match step {
                     After::PortalSync => self.sync_portal(d.id, &detail).await,
                     After::ConnectorsSetup => self.setup_connectors(d.id, &d.commit_sha).await,
@@ -2195,6 +2234,8 @@ impl Lander {
         let affected = seen.map.classify(&for_lanes);
         let docs_only = affected.docs_only;
         let workers = serde_json::to_string(&affected.workers)?;
+        let order_bits = (i64::from(affected.ordered) * lanes::ORDER_CORE_FIRST)
+            | (i64::from(lanes::changes_proxy_first(&changed)) * lanes::ORDER_PROXY_FIRST);
         let on = if seen.forward() {
             format!("a fast-forward of main at {}", seen.main)
         } else {
@@ -2234,7 +2275,7 @@ impl Lander {
                 seen.base.as_str().into(),
                 i64::from(docs_only).into(),
                 workers.into(),
-                i64::from(affected.ordered).into(),
+                order_bits.into(),
                 opt(reason.as_deref()),
                 now().into(),
                 row.id.as_str().into(),

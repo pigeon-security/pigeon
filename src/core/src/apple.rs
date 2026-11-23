@@ -91,7 +91,7 @@ pub fn jwt_signing_input(key_id: &str, issuer_id: &str, now_secs: u64) -> String
     format!("{}.{}", b64url(&h), b64url(&c))
 }
 
-/// Signs a token with the `.p8`'s DER through WebCrypto (ECDSA P-256, SHA-256). WebCrypto's
+/// Signs an App Store Connect token with the `.p8`'s DER through [`sign_es256`]. WebCrypto's
 /// signature is raw `r‖s`, which is what a JWT carries. A key WebCrypto refuses gives an error
 /// that names no part of it.
 pub async fn sign_jwt(
@@ -101,6 +101,12 @@ pub async fn sign_jwt(
     now_secs: u64,
 ) -> Result<String> {
     let input = jwt_signing_input(key_id, issuer_id, now_secs);
+    sign_es256(p8_der, &input).await
+}
+
+/// Signs `input` with the `.p8`'s DER through WebCrypto and answers `input.sig`, the signature
+/// as base64url. Used for the App Store Connect token and the APNs provider token.
+pub async fn sign_es256(p8_der: &[u8], input: &str) -> Result<String> {
     let refused = || bad("WebCrypto refused the key: it is not a P-256 private key");
     let subtle = Reflect::get(
         &Reflect::get(&js_sys::global(), &"crypto".into())?,

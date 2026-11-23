@@ -3,6 +3,7 @@ import SwiftUI
 /// The app's entry point.
 @main
 struct PigeonApp: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @State private var session = Session()
 
     var body: some Scene {
@@ -33,6 +34,8 @@ struct Root: View {
                 }
                 // Counts waiting items for the badge even before the Approvals tab is opened.
                 .task { await approvals.load(session.client) }
+                // Asks to allow notifications and registers the device, at launch and after sign-in.
+                .task { await Push.shared.start(session.client) }
             } else {
                 NavigationStack { SignInView(session: session) }
             }

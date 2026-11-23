@@ -530,10 +530,15 @@ impl ModelJobs {
         )
     }
 
-    /// The cache rows finished since `since` (milliseconds), for `models_usage`.
+    /// The cache rows finished since `since` (milliseconds), for `models_usage`. Summed in SQL
+    /// per tag set: one row per provider, model and tag set, with the latest finish time.
     fn cache_rows(&self, since: i64) -> Result<Value> {
         let rows: Vec<cache::Row> = self.db.rows(
-            "SELECT * FROM cache_usage WHERE finished_at >= ? ORDER BY finished_at",
+            "SELECT MAX(finished_at) AS finished_at, provider, model, caller, caller_name, \
+             for_id, for_name, task, SUM(cache_read) AS cache_read, \
+             SUM(cache_write_5m) AS cache_write_5m, SUM(cache_write_1h) AS cache_write_1h, \
+             SUM(cost_micros) AS cost_micros FROM cache_usage WHERE finished_at >= ? \
+             GROUP BY provider, model, caller, caller_name, for_id, for_name, task",
             vec![since.into()],
         )?;
         Ok(serde_json::to_value(rows)?)

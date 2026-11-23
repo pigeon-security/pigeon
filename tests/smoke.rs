@@ -560,6 +560,7 @@ fn land_deploys_in_lanes_per_worker() {
         commit: format!("c{at}"),
         workers: workers.iter().map(|w| w.to_string()).collect(),
         ordered: true,
+        proxy_first: false,
     };
     let d = |worker: &str, covers: i64, state: DeployState| Deploy {
         worker: worker.into(),
@@ -689,6 +690,44 @@ fn land_deploys_in_lanes_per_worker() {
 }
 
 #[test]
+fn core_land_resolves_the_deploy_map_from_main() {
+    use pigeon_capabilities::land::lanes::{MapUsed, grant_script, resolve_entry};
+    let toml = |script: &str| {
+        format!(
+            "version = 1\n[docs]\npaths = [\"docs/*\"]\n[shared]\npaths = []\n\
+             [[worker]]\nname = \"core\"\nscript = \"pigeon-platform\"\ndir = \"src/platform\"\n\
+             paths = [\"src/platform/*\"]\ntest_job = \"test\"\ndeploy_job = \"deploy\"\n\
+             [[worker]]\nname = \"new\"\nscript = \"{script}\"\ndir = \"src/new\"\n\
+             paths = [\"*\"]\ntest_job = \"test\"\ndeploy_job = \"deploy\"\n"
+        )
+    };
+    let compiled = pigeon_core::lanes::parse(&toml("old-script")).unwrap();
+    // The commit's map wins when it has the Worker.
+    let (w, used, why) =
+        resolve_entry(Ok(Some(toml("new-script"))), "new", &compiled).expect("an entry");
+    assert_eq!((w.script.as_str(), used), ("new-script", MapUsed::Commit));
+    assert!(why.contains("commit"));
+    // A missing file, a read error, a parse error or no entry falls back, and says so.
+    let only_core = toml("x").replace("name = \"new\"", "name = \"other\"");
+    for text in [
+        Ok(None),
+        Err("boom".to_string()),
+        Ok(Some("not toml [".to_string())),
+        Ok(Some(only_core)),
+    ] {
+        let (w, used, why) = resolve_entry(text, "new", &compiled).expect("an entry");
+        assert_eq!((w.script.as_str(), used), ("old-script", MapUsed::Compiled));
+        assert!(why.starts_with("compiled map"));
+    }
+    // Neither map has the Worker.
+    assert!(resolve_entry(Ok(None), "ghost", &compiled).is_none());
+    // The grant answers the recorded script, else the compiled one.
+    assert_eq!(grant_script(Some("a"), Some("b")).as_deref(), Some("a"));
+    assert_eq!(grant_script(None, Some("b")).as_deref(), Some("b"));
+    assert_eq!(grant_script(None, None), None);
+}
+
+#[test]
 fn ci_retries_a_pinned_job_on_its_connector() {
     use pigeon_ci::scheduler::retry_away;
     // A deploy job pinned to containers whose container stopped before reporting retries on
@@ -809,6 +848,7 @@ deploy_job = "deploy-sites"
         commit: format!("c{at}"),
         workers: vec!["core".into(), "model-gateway".into()],
         ordered,
+        proxy_first: false,
     };
     let starting = |l: Merged| {
         lanes::starts("core", &[l], &[], &[])
@@ -818,6 +858,62 @@ deploy_job = "deploy-sites"
     };
     assert_eq!(starting(m("U", 1, false)), ["core", "model-gateway"]);
     assert_eq!(starting(m("O", 1, true)), ["core"]);
+}
+
+#[test]
+fn core_land_deploys_the_proxy_first_for_allowlist_changes() {
+    use pigeon_capabilities::land::lanes::{self, Deploy, DeployState, Merged};
+    let l = |ordered: bool, proxy_first: bool| Merged {
+        id: "P".into(),
+        merged_at: 1,
+        commit: "c1".into(),
+        workers: vec!["core".into(), "proxy".into(), "sites".into()],
+        ordered,
+        proxy_first,
+    };
+    let d = |worker: &str, state: DeployState| Deploy {
+        worker: worker.into(),
+        covers: 1,
+        state,
+        incident: false,
+    };
+    let go = |l: &Merged, deploys: &[Deploy]| {
+        lanes::starts("core", std::slice::from_ref(l), deploys, &[])
+            .into_iter()
+            .map(|s| s.worker)
+            .collect::<Vec<_>>()
+    };
+    assert!(lanes::changes_proxy_first(&[
+        "a",
+        "src/proxies/src/cf_proxy.rs"
+    ]));
+    assert!(!lanes::changes_proxy_first(&["src/proxies/src/other.rs"]));
+
+    // Proxy first alone: the proxy deploys, then the rest together.
+    let p = l(false, true);
+    assert_eq!(go(&p, &[]), ["proxy"]);
+    assert_eq!(
+        go(&p, &[d("proxy", DeployState::Succeeded)]),
+        ["core", "sites"]
+    );
+
+    // Core first and proxy first: core, then the proxy, then the rest.
+    let both = l(true, true);
+    assert_eq!(go(&both, &[]), ["core"]);
+    let core_done = d("core", DeployState::Succeeded);
+    assert_eq!(go(&both, std::slice::from_ref(&core_done)), ["proxy"]);
+    let proxy_done = d("proxy", DeployState::Succeeded);
+    assert_eq!(go(&both, &[core_done, proxy_done]), ["sites"]);
+
+    // A failed proxy deploy releases the others.
+    assert_eq!(
+        go(&p, &[d("proxy", DeployState::Failed)]),
+        ["core", "sites"]
+    );
+
+    // Old rows (ordered 0 or 1, no proxy bit) are unchanged.
+    assert_eq!(go(&l(false, false), &[]), ["core", "proxy", "sites"]);
+    assert_eq!(go(&l(true, false), &[]), ["core"]);
 }
 
 #[test]
@@ -954,6 +1050,7 @@ fn land_attributes_a_failed_deploy() {
         commit: "c5".into(),
         workers: vec!["sites".into()],
         ordered: true,
+        proxy_first: false,
     };
     let d = |covers: i64, state: DeployState, incident: bool| Deploy {
         worker: "sites".into(),
@@ -1782,6 +1879,12 @@ fn core_contract_per_worker_caller_keys() {
     );
     assert_eq!(worker_key_name("sites"), Some("CALLER_KEY_SITES"));
     assert_eq!(worker_key_name("root"), None);
+    assert_eq!(
+        worker_key_name("model-gateway"),
+        Some("CALLER_KEY_MODEL_GATEWAY")
+    );
+    assert_eq!(worker_key_name("ci-gateway"), Some("CALLER_KEY_CI_GATEWAY"));
+    assert_eq!(worker_key_name("models"), None);
 }
 
 /// Core's `dispatch` must see the bound Workers' tools (`models_submit` is the model gateway's),
@@ -2630,6 +2733,23 @@ fn models_cache_tokens_priced() {
         by_task
             .iter()
             .any(|g| g["task"] == "ai-agent/a" && g["cache_read_tokens"] == 2_000_000)
+    );
+    // Merging two rows of one key equals merging their sum, as the SQL sum feeds it.
+    let (a, b) = (rows[0].clone(), rows[2].clone());
+    let b = Row {
+        model: a.model.clone(),
+        ..b
+    };
+    let sum = Row {
+        cache_read: a.cache_read + b.cache_read,
+        cache_write_5m: a.cache_write_5m + b.cache_write_5m,
+        cache_write_1h: a.cache_write_1h + b.cache_write_1h,
+        cost_micros: a.cost_micros + b.cost_micros,
+        ..a.clone()
+    };
+    assert_eq!(
+        cache::merge(vec![], &[a, b], &by),
+        cache::merge(vec![], &[sum], &by)
     );
 
     // The filter: provider, model in either form, caller, task, task prefix; failures keep none.
@@ -4351,6 +4471,23 @@ fn apple_release_admits_by_record() {
     assert!(admit("other", "j1", "A", Some("A"), Some(&started), now).is_err());
 }
 
+/// The release step ensures a profile with Push: the pure parts.
+#[test]
+fn apple_release_profile_has_push() {
+    use pigeon_capabilities::apple::{CAPABILITIES, missing, profile_has_push};
+
+    let with = b"\x30\x82junk<plist><key>aps-environment</key><string>production</string></plist>";
+    let without = b"\x30\x82junk<plist><key>get-task-allow</key><false/></plist>";
+    assert!(profile_has_push(&pigeon_core::apple::b64(with)));
+    assert!(!profile_has_push(&pigeon_core::apple::b64(without)));
+    assert!(!profile_has_push("not base64 !!"));
+    assert!(CAPABILITIES.contains(&"PUSH_NOTIFICATIONS"));
+    assert_eq!(
+        missing(&CAPABILITIES, &["ASSOCIATED_DOMAINS".to_string()]),
+        vec!["PUSH_NOTIFICATIONS"]
+    );
+}
+
 /// APNs, the pure parts (docs/plans/ios.md, §3): signing input, hosts, payload limit, error
 /// table, token form and the rate limit.
 #[test]
@@ -4404,6 +4541,32 @@ fn apple_apns_payload_errors_and_registry() {
     assert_eq!(apns::rate_limit(&burst, 1100), Ok(()));
     let day: Vec<u64> = (0..500).map(|i| i * 100).collect();
     assert_eq!(apns::rate_limit(&day, 50_000), Err(Limited::Day));
+}
+
+#[test]
+fn apple_apns_send_token_and_actions() {
+    use pigeon_core::apns;
+
+    // The provider token is reused only when it exists, matches the key, is fresh and is not
+    // forced.
+    assert!(apns::reuse_token(Some(1000), true, 1000 + 49 * 60, false));
+    assert!(!apns::reuse_token(Some(1000), true, 1000 + 50 * 60, false));
+    assert!(!apns::reuse_token(Some(1000), false, 1100, false));
+    assert!(!apns::reuse_token(Some(1000), true, 1100, true));
+    assert!(!apns::reuse_token(None, true, 1100, false));
+
+    // A gone token drops the row when APNs's time is later than the row's, or is missing.
+    assert!(apns::drop_on_gone(None, 5000));
+    assert!(apns::drop_on_gone(Some(6000), 5000));
+    assert!(!apns::drop_on_gone(Some(5000), 5000));
+    assert!(!apns::drop_on_gone(Some(4000), 5000));
+
+    // Core binds the provider key, and the bindings sit in core's file only.
+    let wrangler = include_str!("../src/platform/wrangler.toml");
+    for name in ["APNS_KEY", "APNS_KEY_ID"] {
+        assert!(wrangler.contains(&format!("binding = \"{name}\"")));
+        assert!(wrangler.contains(&format!("secret_name = \"{name}\"")));
+    }
 }
 
 // ---- storage ----

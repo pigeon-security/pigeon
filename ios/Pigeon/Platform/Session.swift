@@ -15,6 +15,12 @@ final class Session {
         signedIn = true
     }
 
+    /// The person's sign-out: forgets the push device first (best effort), then signs out.
+    func userSignOut() async {
+        await Push.shared.unregister(client)
+        signOut()
+    }
+
     /// Deletes the stored tokens and client id.
     func signOut() {
         Keychain.delete(Keychain.Key.tokens)
