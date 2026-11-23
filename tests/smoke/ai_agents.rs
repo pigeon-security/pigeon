@@ -1602,8 +1602,8 @@ fn sandbox_prepare_retry() {
 
 /// `commit_push` pushes HEAD, so a rebase or cherry-pick leaves the sandbox, and takes `force`
 /// for a force-with-lease push of the run's own branch: the branch is always the run's, never
-/// one the model names. What the model reads covers the new sandboxd answers and image v2's,
-/// which pushes only with a new commit, until the image is rebuilt.
+/// one the model names. What the model reads covers sandboxd's answers, and an answer without
+/// `committed` stays harmless.
 #[test]
 fn ai_agents_commit_push_pushes_local_commits_with_lease() {
     use pigeon_ai_agents::{Role, sandbox, tools};
@@ -1678,11 +1678,11 @@ fn ai_agents_commit_push_pushes_local_commits_with_lease() {
         ),
         "nothing to commit or push; the branch is at c0ffee"
     );
-    // Image v2's answer: the commit unquoted, and why local commits did not leave.
-    let old = shown(json!({ "commit": c, "pushed": false, "nothing": true }));
-    assert!(
-        old.starts_with("nothing to commit; the branch is at c0ffee.") && old.contains("rebase"),
-        "{old}"
+    // An answer without `committed` (an older image) reads the same as v3's, with no
+    // claim about what the sandbox cannot do.
+    assert_eq!(
+        shown(json!({ "commit": c, "pushed": false, "nothing": true })),
+        "nothing to commit or push; the branch is at c0ffee"
     );
     assert_eq!(
         shown(json!({ "commit": c, "pushed": true })),

@@ -190,13 +190,6 @@ pub fn shown(op: &str, answer: &Value) -> String {
             answer["commit"].as_str().unwrap_or_default(),
             answer["at"].as_str().unwrap_or_default()
         ),
-        // Image v2's sandboxd answers without `committed`: it pushes only with a new commit.
-        "commit_push" if answer["nothing"] == true && answer.get("committed").is_none() => format!(
-            "nothing to commit; the branch is at {}. This sandbox's image pushes only with a new \
-             commit: commits made with `run` (a rebase, a cherry-pick) leave with the next change \
-             you commit_push, and `force` is not available yet",
-            answer["commit"].as_str().unwrap_or_default()
-        ),
         "commit_push" if answer["nothing"] == true => format!(
             "nothing to commit or push; the branch is at {}",
             answer["commit"].as_str().unwrap_or_default()

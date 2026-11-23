@@ -823,3 +823,6 @@ executors through it. Each item: state, next step, who it waits on.
     a bare origin: a local commit pushed with nothing staged, nothing to push, a rejected
     rewrite, a forced rewrite, a stale lease refused, a rebase onto the fetched branch pushed,
     and a half-done merge refused.
+- 2026-11-23: **Sandbox v3 pinned.** `src/ai-agents-worker/wrangler.toml` now pins v3's linux/amd64
+  manifest (`sha256:5dcfddbb…`), built by the person from 70da889, so `commit_push` pushes local
+  commits and takes `force`. The Worker no longer tells the model about image v2's limits.

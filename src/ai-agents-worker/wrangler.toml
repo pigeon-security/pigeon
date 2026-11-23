@@ -51,8 +51,8 @@ tag = "v1"
 new_sqlite_classes = ["AiAgentRuns", "Sandbox"]
 
 # A run's sandbox: the CI base image with pigeon-sandboxd (ci/sandbox/Dockerfile). The image's
-# digest is pinned: v2's linux/amd64 manifest, built and pushed by the person from 23afd44
-# (docs/plans/sandbox-v2.md).
+# digest is pinned: v3's linux/amd64 manifest, built and pushed by the person from 70da889
+# (fix 2: commit_push pushes local commits, with force-with-lease).
 # First deployed by its own landing, once core's map listed this Worker (the Lander reads
 # lanes from main, so the landing that adds a Worker's entry cannot deploy it).
 [[containers]]
@@ -60,7 +60,7 @@ class_name = "Sandbox"
 scheduling_policy = "durable_object"
 
 [containers.images.sandbox]
-image = "registry.cloudflare.com/4f94676cb2cbe46fd985b089ca97ea27/pigeon-ai-agent-sandbox@sha256:4d913d674922fea46c61ae8a63103b821b67deeb40086838570047c2ff74bf88"
+image = "registry.cloudflare.com/4f94676cb2cbe46fd985b089ca97ea27/pigeon-ai-agent-sandbox@sha256:5dcfddbb76534e7638ac0b78359947c66de79eae45e95e790a50bf90f0a2be46"
 
 # Container logs off: the top-level [observability] would otherwise keep this container's
 # output, which may hold what a job or run printed (docs/plans/observability.md).
