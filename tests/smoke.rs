@@ -5383,6 +5383,686 @@ fn storage_reads_s3_compatible_accounts() {
     assert!(!storage::bucket_allowed(&limited, "logs"));
 }
 
+// ---- ingest runner ----
+
+/// One request the fake S3 server saw.
+#[derive(Clone, Debug)]
+struct IngestRunnerRequest {
+    method: String,
+    /// The request target: path and query, as sent.
+    target: String,
+    /// Header names in lower case.
+    headers: Vec<(String, String)>,
+}
+
+impl IngestRunnerRequest {
+    fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.as_str())
+    }
+}
+
+/// One stored object: its bytes and the headers that came with it.
+#[derive(Clone, Default)]
+struct IngestRunnerObject {
+    bytes: Vec<u8>,
+    /// `x-amz-meta-*`, `x-amz-checksum-sha256` and `content-type`, as sent.
+    headers: Vec<(String, String)>,
+}
+
+/// An open multipart upload: its key, its headers and its parts by number.
+type IngestRunnerUpload = (
+    String,
+    Vec<(String, String)>,
+    std::collections::BTreeMap<u32, Vec<u8>>,
+);
+
+/// What the fake S3 server keeps and records.
+#[derive(Default)]
+struct IngestRunnerState {
+    objects: std::collections::BTreeMap<String, IngestRunnerObject>,
+    uploads: std::collections::BTreeMap<String, IngestRunnerUpload>,
+    requests: Vec<IngestRunnerRequest>,
+    /// Upload ids that were aborted.
+    aborted: Vec<String>,
+    /// Keys per list page.
+    page_size: usize,
+    next_upload: u32,
+}
+
+type IngestRunnerShared = std::sync::Arc<std::sync::Mutex<IngestRunnerState>>;
+
+fn ingest_runner_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn ingest_runner_b64(bytes: &[u8]) -> String {
+    const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for c in bytes.chunks(3) {
+        let n = (u32::from(c[0]) << 16)
+            | (u32::from(*c.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*c.get(2).unwrap_or(&0));
+        for i in 0..4 {
+            if i <= c.len() {
+                out.push(char::from(A[((n >> (18 - 6 * i)) & 63) as usize]));
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+fn ingest_runner_unescape(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%'
+            && i + 2 < b.len()
+            && let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16)
+        {
+            out.push(v);
+            i += 3;
+            continue;
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Answers one request against the state: (status, headers, body).
+fn ingest_runner_route(
+    st: &mut IngestRunnerState,
+    method: &str,
+    target: &str,
+    headers: &[(String, String)],
+    body: &[u8],
+) -> (u16, Vec<(String, String)>, Vec<u8>) {
+    use sha2::{Digest, Sha256};
+    let err = |code: u16, name: &str| {
+        (
+            code,
+            vec![("content-type".to_string(), "application/xml".to_string())],
+            format!("<Error><Code>{name}</Code><Message>fake {name}</Message></Error>")
+                .into_bytes(),
+        )
+    };
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    let q: Vec<(String, String)> = query
+        .split('&')
+        .filter(|p| !p.is_empty())
+        .map(|p| {
+            let (k, v) = p.split_once('=').unwrap_or((p, ""));
+            (ingest_runner_unescape(k), ingest_runner_unescape(v))
+        })
+        .collect();
+    let qv = |k: &str| q.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+    let rest = path.trim_start_matches('/');
+    let (_bucket, key) = rest.split_once('/').unwrap_or((rest, ""));
+    let key = ingest_runner_unescape(key);
+    let kept: Vec<(String, String)> = headers
+        .iter()
+        .filter(|(k, _)| {
+            k.starts_with("x-amz-meta-") || k == "x-amz-checksum-sha256" || k == "content-type"
+        })
+        .cloned()
+        .collect();
+    match method {
+        "GET" if key.is_empty() => {
+            let prefix = qv("prefix").unwrap_or_default();
+            let after = qv("continuation-token")
+                .or_else(|| qv("start-after"))
+                .unwrap_or_default();
+            let keys: Vec<&String> = st
+                .objects
+                .keys()
+                .filter(|k| k.starts_with(&prefix) && k.as_str() > after.as_str())
+                .collect();
+            let page: Vec<&&String> = keys.iter().take(st.page_size).collect();
+            let more = keys.len() > page.len();
+            let mut xml = String::from("<ListBucketResult>");
+            xml.push_str(&format!("<IsTruncated>{more}</IsTruncated>"));
+            for k in &page {
+                let size = st.objects[**k].bytes.len();
+                let esc = k.replace('&', "&amp;");
+                xml.push_str(&format!(
+                    "<Contents><Key>{esc}</Key><Size>{size}</Size><ETag>\"e-{size}\"</ETag>\
+                     <LastModified>2024-01-01T00:00:00.000Z</LastModified></Contents>"
+                ));
+            }
+            if more && let Some(last) = page.last() {
+                xml.push_str(&format!(
+                    "<NextContinuationToken>{last}</NextContinuationToken>"
+                ));
+            }
+            xml.push_str("</ListBucketResult>");
+            (200, vec![], xml.into_bytes())
+        }
+        "GET" | "HEAD" => match st.objects.get(&key) {
+            Some(o) => {
+                let mut h = vec![("content-length".to_string(), o.bytes.len().to_string())];
+                h.extend(
+                    o.headers
+                        .iter()
+                        .filter(|(k, _)| k.starts_with("x-amz-meta-"))
+                        .cloned(),
+                );
+                (
+                    200,
+                    h,
+                    if method == "GET" {
+                        o.bytes.clone()
+                    } else {
+                        vec![]
+                    },
+                )
+            }
+            None => err(404, "NoSuchKey"),
+        },
+        "POST" if qv("uploads").is_some() => {
+            st.next_upload += 1;
+            let id = format!("upload-{}", st.next_upload);
+            st.uploads
+                .insert(id.clone(), (key, kept, Default::default()));
+            (
+                200,
+                vec![],
+                format!(
+                    "<InitiateMultipartUploadResult><UploadId>{id}</UploadId>\
+                     </InitiateMultipartUploadResult>"
+                )
+                .into_bytes(),
+            )
+        }
+        "POST" => {
+            let Some(id) = qv("uploadId") else {
+                return err(400, "InvalidRequest");
+            };
+            let Some((key, hdrs, parts)) = st.uploads.remove(&id) else {
+                return err(404, "NoSuchUpload");
+            };
+            let xml = String::from_utf8_lossy(body).into_owned();
+            let mut bytes = Vec::new();
+            for chunk in xml.split("<PartNumber>").skip(1) {
+                let n: u32 = chunk.split('<').next().unwrap_or("").parse().unwrap_or(0);
+                if !chunk.contains(&format!("<ETag>\"etag-{n}\"</ETag>")) {
+                    return err(400, "InvalidPart");
+                }
+                match parts.get(&n) {
+                    Some(p) => bytes.extend_from_slice(p),
+                    None => return err(400, "InvalidPart"),
+                }
+            }
+            st.objects.insert(
+                key,
+                IngestRunnerObject {
+                    bytes,
+                    headers: hdrs,
+                },
+            );
+            (200, vec![], b"<CompleteMultipartUploadResult/>".to_vec())
+        }
+        "PUT" if qv("partNumber").is_some() => {
+            let (Some(id), Some(n)) = (qv("uploadId"), qv("partNumber")) else {
+                return err(400, "InvalidRequest");
+            };
+            let n: u32 = n.parse().unwrap_or(0);
+            match st.uploads.get_mut(&id) {
+                Some(u) => {
+                    u.2.insert(n, body.to_vec());
+                    (
+                        200,
+                        vec![("etag".to_string(), format!("\"etag-{n}\""))],
+                        vec![],
+                    )
+                }
+                None => err(404, "NoSuchUpload"),
+            }
+        }
+        "PUT" => {
+            if let Some(want) = headers
+                .iter()
+                .find(|(k, _)| k == "x-amz-checksum-sha256")
+                .map(|(_, v)| v)
+                && *want != ingest_runner_b64(&Sha256::digest(body))
+            {
+                return err(400, "BadDigest");
+            }
+            st.objects.insert(
+                key,
+                IngestRunnerObject {
+                    bytes: body.to_vec(),
+                    headers: kept,
+                },
+            );
+            (
+                200,
+                vec![("etag".to_string(), "\"put\"".to_string())],
+                vec![],
+            )
+        }
+        "DELETE" => match qv("uploadId") {
+            Some(id) => {
+                st.uploads.remove(&id);
+                st.aborted.push(id);
+                (204, vec![], vec![])
+            }
+            None => err(400, "InvalidRequest"),
+        },
+        _ => err(405, "MethodNotAllowed"),
+    }
+}
+
+fn ingest_runner_serve(stream: std::net::TcpStream, state: IngestRunnerShared) {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let Ok(mut out) = stream.try_clone() else {
+        return;
+    };
+    let mut reader = BufReader::new(stream);
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+            return;
+        }
+        let mut parts = line.split_whitespace();
+        let (Some(method), Some(target)) = (parts.next(), parts.next()) else {
+            return;
+        };
+        let (method, target) = (method.to_string(), target.to_string());
+        let mut headers = Vec::new();
+        loop {
+            let mut h = String::new();
+            if reader.read_line(&mut h).unwrap_or(0) == 0 {
+                return;
+            }
+            let h = h.trim_end();
+            if h.is_empty() {
+                break;
+            }
+            if let Some((k, v)) = h.split_once(':') {
+                headers.push((k.to_ascii_lowercase(), v.trim().to_string()));
+            }
+        }
+        let len = headers
+            .iter()
+            .find(|(k, _)| k == "content-length")
+            .and_then(|(_, v)| v.parse::<usize>().ok());
+        let chunked = headers.iter().any(|(k, _)| k == "transfer-encoding");
+        let mut body = vec![0u8; len.unwrap_or(0)];
+        let request = IngestRunnerRequest {
+            method: method.clone(),
+            target: target.clone(),
+            headers: headers.clone(),
+        };
+        if reader.read_exact(&mut body).is_err() {
+            // The client gave up mid-body: nothing is stored.
+            if let Ok(mut st) = state.lock() {
+                st.requests.push(request);
+            }
+            return;
+        }
+        let (status, mut rh, rbody) = {
+            let Ok(mut st) = state.lock() else {
+                return;
+            };
+            st.requests.push(request);
+            if chunked {
+                (
+                    411,
+                    vec![],
+                    b"<Error><Code>MissingContentLength</Code></Error>".to_vec(),
+                )
+            } else {
+                ingest_runner_route(&mut st, &method, &target, &headers, &body)
+            }
+        };
+        if !rh.iter().any(|(k, _)| k == "content-length") {
+            rh.push(("content-length".into(), rbody.len().to_string()));
+        }
+        let mut head = format!("HTTP/1.1 {status} X\r\n");
+        for (k, v) in &rh {
+            head.push_str(&format!("{k}: {v}\r\n"));
+        }
+        head.push_str("\r\n");
+        let mut bytes = head.into_bytes();
+        if method != "HEAD" {
+            bytes.extend_from_slice(&rbody);
+        }
+        if out.write_all(&bytes).is_err() {
+            return;
+        }
+    }
+}
+
+/// Starts a fake S3 server on 127.0.0.1 and answers its base URL and its shared state. It keeps
+/// objects with headers and records every request. It lists with ListObjectsV2 pagination
+/// (`page_size` keys a page, 2 at first), and does GET, HEAD, PUT (checking
+/// `x-amz-checksum-sha256`), and multipart create, part, complete and abort. Path-style:
+/// `{base}/{bucket}/{key}`. It runs for the life of the test process.
+fn ingest_runner_fake_s3() -> (String, IngestRunnerShared) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let state: IngestRunnerShared = std::sync::Arc::new(std::sync::Mutex::new(IngestRunnerState {
+        page_size: 2,
+        ..Default::default()
+    }));
+    let shared = std::sync::Arc::clone(&state);
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let st = std::sync::Arc::clone(&shared);
+            std::thread::spawn(move || ingest_runner_serve(stream, st));
+        }
+    });
+    (base, state)
+}
+
+/// A reader that gives `data`, then fails instead of ending, like `engine::Verify` does when
+/// the bytes do not match.
+struct IngestRunnerFailingBody {
+    data: std::io::Cursor<Vec<u8>>,
+}
+
+impl std::io::Read for IngestRunnerFailingBody {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.data.read(buf)?;
+        if n == 0 {
+            return Err(std::io::Error::other("the bytes do not match"));
+        }
+        Ok(n)
+    }
+}
+
+fn ingest_runner_metrics(bytes: &[u8]) -> pigeon_ingest_runner::pigeon_ingest::metrics::Metrics {
+    use pigeon_ingest_runner::pigeon_ingest::metrics::{Kind, Metrics};
+    use sha2::{Digest, Sha256};
+    Metrics {
+        size: bytes.len() as u64,
+        sha256: ingest_runner_hex(&Sha256::digest(bytes)),
+        blake3: "b3".repeat(32),
+        mime: "text/plain".into(),
+        kind: Kind::Text,
+        simhash: None,
+    }
+}
+
+#[test]
+fn ingest_runner_s3_source_r2_dest_and_spool() {
+    use pigeon_core::s3::parse_keys;
+    use pigeon_ingest_runner::pigeon_ingest::engine::{Dest, Source, Spool};
+    use pigeon_ingest_runner::{DirSpool, LocalSource, R2Dest, S3Source};
+    use sha2::{Digest, Sha256};
+    use std::io::{Cursor, Read, Seek, SeekFrom, Write};
+
+    const SECRET: &str = "SECRETSECRETSECRET";
+    let keys = || parse_keys(&format!("AKIDTEST:{SECRET}")).unwrap();
+    let (base, state) = ingest_runner_fake_s3();
+    let mut errors: Vec<String> = Vec::new();
+
+    // The S3 source: paged listing with start-after, then continuation tokens.
+    {
+        let mut st = state.lock().unwrap();
+        for k in ["a/1", "a/2", "b", "c/d e", "e&f"] {
+            st.objects.insert(
+                k.to_string(),
+                IngestRunnerObject {
+                    bytes: format!("bytes of {k}").into_bytes(),
+                    headers: vec![],
+                },
+            );
+        }
+    }
+    let src = S3Source::new(&base, "us-east-1", "src", "", keys());
+    let p1 = src.list(Some("a/1"), None).unwrap();
+    let k1: Vec<&str> = p1.objects.iter().map(|o| o.key.as_str()).collect();
+    assert_eq!(k1, ["a/2", "b"]);
+    assert_eq!(p1.objects[0].size, "bytes of a/2".len() as u64);
+    let p2 = src.list(Some("a/1"), p1.next.as_deref()).unwrap();
+    let k2: Vec<&str> = p2.objects.iter().map(|o| o.key.as_str()).collect();
+    assert_eq!(k2, ["c/d e", "e&f"]);
+    assert!(p2.next.is_none());
+    {
+        let st = state.lock().unwrap();
+        let first = &st.requests[0];
+        assert!(
+            first.target.contains("start-after=a%2F1"),
+            "{}",
+            first.target
+        );
+        assert!(first.target.contains("max-keys=1000"));
+        assert!(first.target.contains("list-type=2"));
+        assert!(st.requests[1].target.contains("continuation-token=b"));
+    }
+    let mut got = Vec::new();
+    src.open("c/d e").unwrap().read_to_end(&mut got).unwrap();
+    assert_eq!(got, b"bytes of c/d e");
+    let mut got = Vec::new();
+    src.open("e&f").unwrap().read_to_end(&mut got).unwrap();
+    assert_eq!(got, b"bytes of e&f");
+    match src.open("missing") {
+        Ok(_) => panic!("a missing object opened"),
+        Err(e) => {
+            assert!(e.to_string().contains("NoSuchKey"), "{e}");
+            errors.push(e.to_string());
+        }
+    }
+
+    // The local source: sorted bytewise, nested, symlinks not followed.
+    let dir =
+        std::env::temp_dir().join(format!("pigeon-smoke-ingest-local-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("a/y")).unwrap();
+    std::fs::write(dir.join("b.txt"), b"bee").unwrap();
+    std::fs::write(dir.join("A.txt"), b"capital").unwrap();
+    std::fs::write(dir.join("a/z"), b"zed").unwrap();
+    std::fs::write(dir.join("a/y/n.txt"), b"nested").unwrap();
+    std::os::unix::fs::symlink(dir.join("b.txt"), dir.join("a/link")).unwrap();
+    std::os::unix::fs::symlink(dir.join("a"), dir.join("dirlink")).unwrap();
+    let local = LocalSource::new(dir.clone());
+    let page = local.list(None, None).unwrap();
+    let keys_local: Vec<&str> = page.objects.iter().map(|o| o.key.as_str()).collect();
+    assert_eq!(keys_local, ["A.txt", "a/y/n.txt", "a/z", "b.txt"]);
+    assert!(page.next.is_none());
+    assert_eq!(page.objects[1].size, 6);
+    let after = local.list(Some("a/y/n.txt"), None).unwrap();
+    assert_eq!(after.objects.len(), 2);
+    let mut got = String::new();
+    local
+        .open("a/y/n.txt")
+        .unwrap()
+        .read_to_string(&mut got)
+        .unwrap();
+    assert_eq!(got, "nested");
+    assert!(local.open("a/link").is_err());
+    assert!(local.open("dirlink/z").is_err());
+    assert!(local.open("../outside").is_err());
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // The R2 destination: head, a single PUT, multipart, abort.
+    let dest = R2Dest::new(&base, "dst", keys()).with_multipart(10, 8);
+    assert_eq!(dest.head("blobs/x").unwrap(), None);
+    let small = b"hello blob";
+    let m = ingest_runner_metrics(small);
+    dest.put_blob("blobs/x", &mut Cursor::new(small.to_vec()), 10, &m)
+        .unwrap();
+    let head = dest.head("blobs/x").unwrap().unwrap();
+    assert_eq!(head.size, 10);
+    assert_eq!(head.sha256.as_deref(), Some(m.sha256.as_str()));
+    assert_eq!(head.blake3.as_deref(), Some(m.blake3.as_str()));
+    {
+        let st = state.lock().unwrap();
+        let o = &st.objects["blobs/x"];
+        let h = |n: &str| {
+            o.headers
+                .iter()
+                .find(|(k, _)| k == n)
+                .map(|(_, v)| v.clone())
+        };
+        assert_eq!(
+            h("x-amz-checksum-sha256"),
+            Some(ingest_runner_b64(&Sha256::digest(small)))
+        );
+        assert_eq!(h("x-amz-meta-size").as_deref(), Some("10"));
+        assert_eq!(h("x-amz-meta-mime").as_deref(), Some("text/plain"));
+        let put = st
+            .requests
+            .iter()
+            .find(|r| r.method == "PUT" && r.target.ends_with("/blobs/x"))
+            .unwrap();
+        assert_eq!(put.header("content-length"), Some("10"));
+        assert_eq!(put.header("x-amz-content-sha256"), Some("UNSIGNED-PAYLOAD"));
+    }
+    // Bytes that do not match the digest are refused by the server: nothing stored.
+    let wrong = ingest_runner_metrics(b"other bytes");
+    let e = dest
+        .put_blob(
+            "blobs/bad",
+            &mut Cursor::new(b"0123456789".to_vec()),
+            10,
+            &wrong,
+        )
+        .unwrap_err();
+    errors.push(e.to_string());
+    assert!(!state.lock().unwrap().objects.contains_key("blobs/bad"));
+    // A body that fails at its end is an error. A single PUT may already be complete on the
+    // server then; the checksum header is what keeps wrong bytes out (checked above).
+    let e = dest
+        .put_blob(
+            "blobs/bad2",
+            &mut IngestRunnerFailingBody {
+                data: Cursor::new(small.to_vec()),
+            },
+            10,
+            &m,
+        )
+        .unwrap_err();
+    errors.push(e.to_string());
+
+    // Multipart: 27 bytes in parts of 8.
+    let big: Vec<u8> = (0..27u8).collect();
+    let mb = ingest_runner_metrics(&big);
+    dest.put_blob("blobs/big", &mut Cursor::new(big.clone()), 27, &mb)
+        .unwrap();
+    {
+        let st = state.lock().unwrap();
+        assert_eq!(st.objects["blobs/big"].bytes, big);
+        assert!(st.uploads.is_empty());
+        let parts = st
+            .requests
+            .iter()
+            .filter(|r| r.method == "PUT" && r.target.contains("partNumber="))
+            .count();
+        assert_eq!(parts, 4);
+        assert!(
+            st.objects["blobs/big"]
+                .headers
+                .iter()
+                .any(|(k, v)| k == "x-amz-meta-sha256" && *v == mb.sha256)
+        );
+    }
+    assert_eq!(dest.head("blobs/big").unwrap().unwrap().size, 27);
+    // Multipart aborts when the body fails at its end.
+    let e = dest
+        .put_blob(
+            "blobs/torn",
+            &mut IngestRunnerFailingBody {
+                data: Cursor::new(big.clone()),
+            },
+            27,
+            &mb,
+        )
+        .unwrap_err();
+    errors.push(e.to_string());
+    // And when it fails in the middle.
+    let e = dest
+        .put_blob(
+            "blobs/torn2",
+            &mut IngestRunnerFailingBody {
+                data: Cursor::new(big[..12].to_vec()),
+            },
+            27,
+            &mb,
+        )
+        .unwrap_err();
+    errors.push(e.to_string());
+    {
+        let st = state.lock().unwrap();
+        assert!(!st.objects.contains_key("blobs/torn"));
+        assert!(!st.objects.contains_key("blobs/torn2"));
+        assert_eq!(st.aborted.len(), 2);
+        assert!(st.uploads.is_empty());
+    }
+    // Small objects.
+    assert_eq!(dest.get_object("ingest/runs/r/status.json").unwrap(), None);
+    dest.put_object(
+        "ingest/runs/r/status.json",
+        b"{\"state\":\"done\"}",
+        "application/json",
+    )
+    .unwrap();
+    assert_eq!(
+        dest.get_object("ingest/runs/r/status.json")
+            .unwrap()
+            .as_deref(),
+        Some(&b"{\"state\":\"done\"}"[..])
+    );
+
+    // Every request was signed, and no secret went anywhere.
+    {
+        let st = state.lock().unwrap();
+        assert!(st.requests.len() > 20);
+        for r in &st.requests {
+            let auth = r.header("authorization").unwrap_or("");
+            assert!(
+                auth.starts_with("AWS4-HMAC-SHA256 Credential=AKIDTEST/"),
+                "{r:?}"
+            );
+            assert!(!r.target.contains(SECRET));
+            assert!(r.headers.iter().all(|(_, v)| !v.contains(SECRET)));
+        }
+    }
+    assert!(errors.len() >= 5);
+    assert!(errors.iter().all(|e| !e.contains(SECRET)));
+
+    // The spool: accounting and removal; names are a counter.
+    let sdir =
+        std::env::temp_dir().join(format!("pigeon-smoke-ingest-spool-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&sdir);
+    let spool = DirSpool::new(sdir.clone(), 100).unwrap();
+    assert_eq!(spool.free_bytes(), 100);
+    let mut f1 = spool.create().unwrap();
+    f1.write_all(&[7u8; 30]).unwrap();
+    assert_eq!(spool.free_bytes(), 70);
+    let mut f2 = spool.create().unwrap();
+    f2.write_all(&[8u8; 50]).unwrap();
+    assert_eq!(spool.free_bytes(), 20);
+    f1.seek(SeekFrom::Start(0)).unwrap();
+    f1.write_all(&[9u8; 10]).unwrap();
+    assert_eq!(spool.free_bytes(), 20);
+    f1.seek(SeekFrom::Start(0)).unwrap();
+    let mut back = Vec::new();
+    f1.read_to_end(&mut back).unwrap();
+    assert_eq!(back.len(), 30);
+    assert_eq!(&back[..10], &[9u8; 10]);
+    let mut names: Vec<String> = std::fs::read_dir(&sdir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["spool-0.tmp", "spool-1.tmp"]);
+    drop(f1);
+    assert_eq!(spool.free_bytes(), 50);
+    assert_eq!(std::fs::read_dir(&sdir).unwrap().count(), 1);
+    drop(f2);
+    assert_eq!(spool.free_bytes(), 100);
+    assert_eq!(std::fs::read_dir(&sdir).unwrap().count(), 0);
+    let _ = std::fs::remove_dir_all(&sdir);
+}
+
 // ---- mirror ----
 
 #[test]
@@ -8392,6 +9072,177 @@ fn core_every_capability_declares_its_version() {
     assert_eq!(storage.versions().len(), 4);
 }
 
+/// The ingest capability's pure parts: its tools, secret slots, cloud-init and host request
+/// bodies, the job defaults, the estimates, and the approval digest.
+#[test]
+fn core_ingest_plans_hosts_and_estimates() {
+    use pigeon_capabilities::Capability;
+    use pigeon_capabilities::ingest::{Ingest, Target, hosts};
+    use pigeon_capabilities::passkeys::Passkeys;
+    use pigeon_capabilities::storage::{Account, Provider};
+    use pigeon_ingest::estimate::{Host, estimate};
+    use pigeon_ingest::manifest::SourceSpec;
+
+    let do_acct = Account::digitalocean("legacy", "fra1");
+    let scw_acct = Account::scaleway("archive", "fr-par");
+    let b2_acct = Account::backblaze("old", "us-west-004");
+    let cap = Ingest {
+        targets: vec![Target::new("willowgraysen")],
+        accounts: vec![do_acct.clone(), scw_acct.clone(), b2_acct.clone()],
+        passkeys: Passkeys {
+            host: "example.test".into(),
+            site_name: "pigeon".into(),
+        },
+    };
+
+    // The five tools, and the slots.
+    let tools: Vec<&str> = cap.tools().iter().map(|t| t.name).collect();
+    assert_eq!(
+        tools,
+        [
+            "ingest_plan",
+            "ingest_start",
+            "ingest_status",
+            "ingest_report",
+            "ingest_stop"
+        ]
+    );
+    let slots: Vec<String> = cap.secrets().into_iter().map(|s| s.name).collect();
+    assert_eq!(
+        slots,
+        [
+            "INGEST_R2_WILLOWGRAYSEN",
+            "INGEST_HOST_DIGITALOCEAN_LEGACY",
+            "INGEST_HOST_SCALEWAY_ARCHIVE"
+        ]
+    );
+    assert_eq!(Target::new("willowgraysen").bucket, "willowgraysen-data");
+
+    // Host choice.
+    assert_eq!(hosts::host_for(Provider::DigitalOcean), Host::DigitalOcean);
+    assert_eq!(hosts::host_for(Provider::Scaleway), Host::Scaleway);
+    assert_eq!(hosts::host_for(Provider::Backblaze), Host::Cloudflare);
+    assert_eq!(hosts::zone("fr-par"), "fr-par-1");
+
+    // The job and its defaults.
+    let commit = "0123456789abcdef0123456789abcdef01234567";
+    assert!(hosts::is_commit(commit));
+    assert!(!hosts::is_commit("main"));
+    let inputs = |account: &Account, dry_run: bool, commit: &str| {
+        hosts::job_spec(&hosts::JobInputs {
+            instance: "willowgraysen",
+            account,
+            bucket: "photos",
+            prefix: "",
+            dest_bucket: "willowgraysen-data",
+            account_id: &"a".repeat(32),
+            dry_run,
+            keep_archives: true,
+            fingerprints: false,
+            commit,
+            day: "20261123",
+            nonce: 0xabcdef,
+        })
+    };
+    let job = inputs(&do_acct, true, commit);
+    assert!(job.dry_run && job.keep_archives && !job.fingerprints);
+    assert_eq!(job.threads, 8);
+    assert_eq!(job.run, "20261123-digitalocean-legacy-photos-abcdef");
+    assert_eq!(
+        job.dest.endpoint,
+        format!("https://{}.r2.cloudflarestorage.com", "a".repeat(32))
+    );
+    assert!(matches!(&job.source, SourceSpec::S3 { region, .. } if region == "fra1"));
+
+    // Cloud-init: the pinned commit and URL; the redacted form holds no key.
+    let (src, dst) = ("FAKESRCID:fakesrcsecret", "FAKEDSTID:fakedstsecret");
+    let full = hosts::cloud_init(&job, src, dst);
+    assert!(full.contains(&format!("PIGEON_COMMIT={commit}")));
+    assert!(full.contains(&format!(
+        "https://github.com/pigeon-security/pigeon.git#{commit}"
+    )));
+    assert!(full.contains("src/ingest-runner/Dockerfile"));
+    assert!(full.contains(src) && full.contains(dst));
+    assert!(full.trim_end().ends_with("poweroff"));
+    let redacted = hosts::cloud_init_redacted(&job);
+    assert!(!redacted.contains("fakesrcsecret") && !redacted.contains("fakedstsecret"));
+    assert!(!redacted.contains("FAKESRCID") && redacted.contains("<redacted>"));
+    assert!(redacted.contains(commit));
+
+    // DigitalOcean's body.
+    let body = hosts::droplet_body(&job, "fra1", &redacted);
+    assert_eq!(body["region"], "fra1");
+    assert_eq!(body["size"], "s-4vcpu-8gb");
+    assert_eq!(body["image"], "ubuntu-24-04-x64");
+    assert_eq!(body["tags"], json!(["pigeon-ingest"]));
+    let name = body["name"].as_str().unwrap();
+    assert!(name.starts_with("pigeon-ingest-") && name.len() <= 63);
+    let long = hosts::vm_name(&"x".repeat(200));
+    assert!(long.len() <= 63 && !long.ends_with('-'));
+    assert!(long.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'));
+
+    // Scaleway's bodies.
+    let scw_job = inputs(&scw_acct, true, commit);
+    let server = hosts::scaleway_server_body(&scw_job, "proj-1");
+    assert_eq!(server["commercial_type"], "POP2-4C-16G");
+    assert_eq!(server["image"], "ubuntu_noble");
+    assert_eq!(server["project"], "proj-1");
+    assert_eq!(server["tags"], json!(["pigeon-ingest"]));
+    assert_eq!(server["volumes"]["0"]["size"], 100_000_000_000u64);
+    assert_eq!(hosts::scaleway_poweron(), json!({ "action": "poweron" }));
+    assert_eq!(
+        hosts::scaleway_terminate(),
+        json!({ "action": "terminate" })
+    );
+    assert_eq!(
+        hosts::scaleway_user_data_path("fr-par-1", "srv"),
+        "/instance/v1/zones/fr-par-1/servers/srv/user_data/cloud-init"
+    );
+    assert_eq!(
+        hosts::scaleway_parts("proj:key").unwrap(),
+        ("proj".to_string(), "key".to_string())
+    );
+    assert!(hosts::scaleway_parts("nocolon").is_err());
+
+    // The redacted request for each host holds no key.
+    for (h, region) in [
+        (Host::DigitalOcean, "fra1"),
+        (Host::Scaleway, "fr-par"),
+        (Host::Cloudflare, ""),
+    ] {
+        let text = hosts::host_request(h, &job, region).to_string();
+        assert!(!text.contains("fakesrcsecret") && text.contains("redacted"));
+    }
+
+    // Estimates, from decision 13.7.
+    let tb = 1_000_000_000_000u64;
+    let d = estimate(Host::DigitalOcean, 3_400_000_000_000, 4_000_000, 0.3);
+    assert!(d.hours_low >= 6.0 && d.hours_high <= 10.0, "{d:?}");
+    assert!(d.total_usd > 5.0 && d.total_usd < 30.0, "{d:?}");
+    assert!(!d.assumptions.is_empty());
+    let s = estimate(Host::Scaleway, 8 * tb / 10, 1_000_000, 0.3);
+    assert!(s.hours_low > 1.0 && s.hours_high < 3.0, "{s:?}");
+    assert!(s.total_usd > 1.0 && s.total_usd < 10.0, "{s:?}");
+    let c = estimate(Host::Cloudflare, 3 * tb / 2, 2_500_000, 0.3);
+    assert!(c.hours_low > 2.0 && c.hours_high < 7.0, "{c:?}");
+    assert!(c.total_usd > 1.0 && c.total_usd < 30.0, "{c:?}");
+    let l = estimate(Host::Local, tb, 1_000_000, 0.3);
+    assert_eq!(l.host_usd, 0.0);
+
+    // The approval digest moves with the commit and with dry_run.
+    use pigeon_core::approval::{Kind, payload_digest};
+    let kind = Kind::Other("ingest_run".into());
+    let digest_of = |j: &pigeon_ingest::manifest::JobSpec| {
+        let req = hosts::host_request(Host::DigitalOcean, j, "fra1");
+        payload_digest(&kind, &j.run, &hosts::approval_payload(j, &req))
+    };
+    let base = digest_of(&job);
+    assert_eq!(base, digest_of(&inputs(&do_acct, true, commit)));
+    let other_commit = "fedcba9876543210fedcba9876543210fedcba98";
+    assert_ne!(base, digest_of(&inputs(&do_acct, true, other_commit)));
+    assert_ne!(base, digest_of(&inputs(&do_acct, false, commit)));
+}
+
 // ---- blog: a consumer repository rendered with blog@1 ----
 
 /// The blog renderer (`pigeon_blog`): a consumer repository in, a static site out, with
@@ -10905,4 +11756,967 @@ fn land_portal_oauth_redirects_change_one_uri() {
     same["updated_at"] = json!("later");
     same["oauth_configuration"]["dynamic_client_registration"]["allowed_uris"] = json!([new]);
     assert!(differences(&app, &same).is_empty());
+}
+
+// ---- ingest: metrics, decisions, zip edges ----
+
+#[test]
+fn ingest_metrics_decisions_and_zip_edges() {
+    use pigeon_ingest::archive::{Budget, Flag, Limits, Zip, is_zip, safe_path};
+    use pigeon_ingest::decide::{Head, Lookup, Reason, Verdict, decide};
+    use pigeon_ingest::metrics::{Hasher, Kind, hamming, normalise, simhash, sniff};
+    use std::io::{Cursor, Write};
+    use zip::write::SimpleFileOptions;
+
+    // Hashes and size, streamed in pieces.
+    let mut h = Hasher::new(false);
+    h.update(b"a");
+    h.update(b"bc");
+    let m = h.finish().unwrap();
+    assert_eq!(m.size, 3);
+    assert_eq!(
+        m.sha256,
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+    assert_eq!(
+        m.blake3,
+        "6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85"
+    );
+    assert_eq!((m.mime.as_str(), m.kind), ("text/plain", Kind::Text));
+    assert_eq!(m.simhash, None);
+
+    // Fingerprint only when asked and text-like.
+    let mut h = Hasher::new(true);
+    h.update(b"one two three four five");
+    assert_eq!(h.finish().unwrap().simhash.map(|s| s.len()), Some(16));
+    let mut h = Hasher::new(true);
+    h.update(b"%PDF-1.7 one two three");
+    assert_eq!(h.finish().unwrap().simhash, None);
+
+    // Sniffing is by content.
+    assert_eq!(sniff(b"%PDF-1.4\n").1, Kind::Document);
+    assert_eq!(sniff(b"\x89PNG\r\n\x1a\n....").0, "image/png");
+    assert_eq!(sniff(&[0xFF, 0xD8, 0xFF, 0xE0]).0, "image/jpeg");
+    assert_eq!(
+        sniff(b"PK\x03\x04rest"),
+        ("application/zip".into(), Kind::Archive)
+    );
+    assert_eq!(sniff(b"\x1f\x8b\x08").1, Kind::Archive);
+    assert_eq!(sniff(b"\0\0\0\x18ftypmp42").1, Kind::Video);
+    assert_eq!(sniff(b"From: a@b.c\r\nTo: d@e.f\r\n").1, Kind::Email);
+    assert_eq!(sniff("héllo wörld".as_bytes()).1, Kind::Text);
+    assert_eq!(
+        sniff(&[0x80, 0x81, 0x82, 0x00]),
+        ("application/octet-stream".into(), Kind::Other)
+    );
+
+    // Names.
+    assert_eq!(
+        normalise("Photos\\Holiday  Pics\\Copy of IMG_1 (1).JPEG"),
+        ("img_1.jpg".into(), "photos/holiday pics/img_1.jpg".into())
+    );
+    assert_eq!(normalise("a/Report - Copy.HTM").0, "report.html");
+    assert_eq!(normalise("scan.tiff").0, "scan.tif");
+    assert_eq!(normalise("Cafe\u{301}.txt").0, "caf\u{e9}.txt");
+
+    // SimHash: near texts are near, unrelated texts are far.
+    let words = [
+        "river", "stone", "paper", "winter", "copper", "garden", "signal", "window", "harbour",
+        "lantern", "meadow", "orchard", "pillow", "quartz", "ribbon", "saddle",
+    ];
+    let base: Vec<&str> = (0..80).map(|i| words[(i * 7 + i / 3) % 16]).collect();
+    let mut near = base.clone();
+    near[40] = "velvet";
+    let far: Vec<&str> = (0..80).map(|i| words[(i * 5 + i * i) % 16]).collect();
+    let (a, b, c) = (
+        simhash(&base.join(" ")),
+        simhash(&near.join(" ")),
+        simhash(&far.join(" ").replace("river", "tunnel")),
+    );
+    assert_eq!(simhash(&base.join(" ").to_uppercase()), a);
+    assert!(hamming(a, b) <= 12, "near {}", hamming(a, b));
+    assert!(hamming(a, c) > hamming(a, b), "far {}", hamming(a, c));
+    assert_eq!(hamming(0b1011, 0b0001), 2);
+
+    // Decisions.
+    let head = |size, sha: Option<&str>, b3: Option<&str>| {
+        Lookup::Present(Head {
+            size,
+            sha256: sha.map(str::to_string),
+            blake3: b3.map(str::to_string),
+        })
+    };
+    let up = m.sha256.to_uppercase();
+    let d = |l: &Lookup, dry| {
+        let x = decide(&m, l, dry);
+        (x.verdict, x.reason)
+    };
+    let seen = (Verdict::Duplicate, Reason::SeenInRun);
+    assert_eq!(d(&Lookup::SeenInRun, false), seen);
+    assert_eq!(d(&Lookup::SeenInRun, true), seen);
+    assert_eq!(d(&Lookup::Absent, false), (Verdict::Upload, Reason::New));
+    assert_eq!(
+        d(&Lookup::Absent, true),
+        (Verdict::WouldUpload, Reason::New)
+    );
+    let same = head(3, Some(&up), Some(&m.blake3));
+    assert_eq!(d(&same, false), (Verdict::Duplicate, Reason::InR2));
+    assert_eq!(d(&same, true), (Verdict::Duplicate, Reason::InR2));
+    let no_b3 = head(3, Some(&m.sha256), None);
+    assert_eq!(d(&no_b3, false), (Verdict::Duplicate, Reason::InR2));
+    let conflict = (Verdict::Conflict, Reason::Mismatch);
+    let bad_b3 = head(3, Some(&m.sha256), Some(&"0".repeat(64)));
+    assert_eq!(d(&bad_b3, false), conflict);
+    assert_eq!(d(&bad_b3, true), conflict);
+    let bad_size = head(4, Some(&m.sha256), Some(&m.blake3));
+    assert_eq!(d(&bad_size, false), conflict);
+    let bad_sha = head(3, Some(&"0".repeat(64)), None);
+    assert_eq!(d(&bad_sha, false), conflict);
+    let unattested = head(3, None, Some(&m.blake3));
+    assert_eq!(d(&unattested, false), (Verdict::Upload, Reason::Unattested));
+    assert_eq!(
+        d(&unattested, true),
+        (Verdict::WouldUpload, Reason::Unattested)
+    );
+
+    // Zips.
+    let build = |files: &[(&str, &[u8], bool)]| -> Vec<u8> {
+        let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        for (name, data, deflate) in files {
+            let method = if *deflate {
+                zip::CompressionMethod::Deflated
+            } else {
+                zip::CompressionMethod::Stored
+            };
+            let opts = SimpleFileOptions::default().compression_method(method);
+            w.start_file(*name, opts).unwrap();
+            w.write_all(data).unwrap();
+        }
+        w.finish().unwrap().into_inner()
+    };
+    let extract = |z: &mut Zip<Cursor<Vec<u8>>>, i: u64, b: &mut Budget| {
+        let mut out = Vec::new();
+        let r = z.extract(i, b, &mut out).unwrap();
+        (r, out)
+    };
+
+    // Plain, with a nested zip.
+    let inner = build(&[("deep.txt", b"deep bytes", true)]);
+    assert!(is_zip(&inner));
+    assert!(is_zip(b"PK\x05\x06") && !is_zip(b"PK\x01\x02") && !is_zip(b"%PDF"));
+    let outer = build(&[
+        ("a.txt", b"alpha", true),
+        ("dir\\c.txt", b"beta", false),
+        ("inner.zip", &inner, false),
+    ]);
+    let mut z = Zip::open(Cursor::new(outer)).unwrap();
+    let es = z.entries();
+    assert_eq!(es.len(), 3);
+    assert_eq!(es[1].path, "dir/c.txt");
+    assert_eq!(es[1].raw_name, "dir\\c.txt");
+    let mut budget = Budget::new(Limits::default());
+    assert_eq!(extract(&mut z, 0, &mut budget), (Ok(5), b"alpha".to_vec()));
+    assert_eq!(extract(&mut z, 1, &mut budget), (Ok(4), b"beta".to_vec()));
+    let (r, bytes) = extract(&mut z, 2, &mut budget);
+    assert_eq!(r, Ok(inner.len() as u64));
+    assert_eq!(budget.used, 5 + 4 + inner.len() as u64);
+    let mut iz = Zip::open(Cursor::new(bytes)).unwrap();
+    assert_eq!(extract(&mut iz, 0, &mut budget).1, b"deep bytes");
+    assert_eq!(extract(&mut iz, 0, &mut budget).1, b"deep bytes");
+
+    // Path traversal: flagged, normalised, raw name kept.
+    assert_eq!(safe_path("/etc/../C:/x"), ("etc/C:/x".into(), true));
+    assert_eq!(
+        safe_path("C:\\Windows\\a.txt"),
+        ("Windows/a.txt".into(), true)
+    );
+    assert_eq!(safe_path("ok/file.txt"), ("ok/file.txt".into(), false));
+    let evil = build(&[("../evil.txt", b"x", false), ("fine.txt", b"y", false)]);
+    let z = Zip::open(Cursor::new(evil)).unwrap();
+    let es = z.entries();
+    assert_eq!(es[0].path, "evil.txt");
+    assert_eq!(es[0].raw_name, "../evil.txt");
+    assert_eq!(es[0].flags, vec![Flag::UnsafePath]);
+    assert!(es[1].flags.is_empty());
+
+    // Encrypted: bit 0 set by hand in the central directory; never opened.
+    let mut enc = build(&[
+        ("secret.txt", b"classified", false),
+        ("open.txt", b"fine", false),
+    ]);
+    let cd = enc.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
+    enc[cd + 8] |= 1;
+    let mut z = Zip::open(Cursor::new(enc)).unwrap();
+    assert_eq!(z.entries()[0].flags, vec![Flag::Encrypted]);
+    let mut budget = Budget::new(Limits::default());
+    assert_eq!(
+        extract(&mut z, 0, &mut budget),
+        (Err(Flag::Encrypted), Vec::new())
+    );
+    assert_eq!(extract(&mut z, 1, &mut budget).0, Ok(4));
+
+    // A bomb: tiny when deflated, large when inflated, with small limits.
+    let bomb = build(&[("zeros.bin", &vec![0u8; 200_000], true)]);
+    assert!(bomb.len() < 2_000);
+    let ratio = Limits {
+        ratio_floor: 1024,
+        max_ratio: 50,
+        ..Limits::default()
+    };
+    let mut z = Zip::open(Cursor::new(bomb.clone())).unwrap();
+    let mut budget = Budget::new(ratio);
+    assert_eq!(extract(&mut z, 0, &mut budget).0, Err(Flag::BombSuspect));
+    assert!(budget.used < 200_000, "stopped while streaming");
+    let mut z = Zip::open(Cursor::new(bomb.clone())).unwrap();
+    let mut budget = Budget::new(Limits {
+        max_total_bytes: 100_000,
+        ..Limits::default()
+    });
+    assert_eq!(extract(&mut z, 0, &mut budget).0, Err(Flag::BombSuspect));
+    let mut z = Zip::open(Cursor::new(bomb)).unwrap();
+    let mut budget = Budget::new(Limits {
+        max_member_bytes: 1000,
+        ..Limits::default()
+    });
+    assert_eq!(extract(&mut z, 0, &mut budget).0, Err(Flag::MemberTooLarge));
+
+    // A corrupted member is not stored; the next one is.
+    let mut bad = build(&[
+        ("one.txt", b"first member data", false),
+        ("two.txt", b"second", false),
+    ]);
+    let at = bad
+        .windows(17)
+        .position(|w| w == b"first member data")
+        .unwrap();
+    bad[at] ^= 0xFF;
+    let mut z = Zip::open(Cursor::new(bad)).unwrap();
+    let mut budget = Budget::new(Limits::default());
+    assert_eq!(extract(&mut z, 0, &mut budget).0, Err(Flag::CrcMismatch));
+    assert_eq!(extract(&mut z, 1, &mut budget), (Ok(6), b"second".to_vec()));
+
+    // Too many entries, with a small limit.
+    let many = build(&[("1", b"1", false), ("2", b"2", false), ("3", b"3", false)]);
+    let mut z = Zip::open(Cursor::new(many)).unwrap();
+    let mut budget = Budget::new(Limits {
+        max_entries: 2,
+        ..Limits::default()
+    });
+    assert_eq!(extract(&mut z, 0, &mut budget).0, Ok(1));
+    assert_eq!(extract(&mut z, 1, &mut budget).0, Ok(1));
+    assert_eq!(extract(&mut z, 2, &mut budget).0, Err(Flag::TooManyEntries));
+
+    // Not a zip, or a broken directory: an error, not a panic.
+    assert!(Zip::open(Cursor::new(b"PK\x03\x04 not really".to_vec())).is_err());
+    assert!(Zip::open(Cursor::new(Vec::new())).is_err());
+}
+
+/// The data Worker's ingest path: the D1 index schema and statements (run for real on an
+/// in-memory SQLite), signed starts, R2 event messages and the container's environment.
+#[test]
+fn ingest_index_applies_manifest_parts_and_verifies_starts() {
+    use pigeon_core::sign::{hex, hmac_sha256};
+    use pigeon_ingest::index::{MAX_PARAMS, Statement, apply_part, apply_run, schema_statements};
+    use pigeon_ingest::manifest::{JobSpec, ManifestLine, Status, part_key};
+    use pigeon_ingest::protocol::{
+        MAX_SKEW_MS, StartRequest, is_manifest_part, parse_event, signing_message, start_env,
+        verify,
+    };
+
+    fn run(db: &rusqlite::Connection, s: &Statement) {
+        let params: Vec<rusqlite::types::Value> = s
+            .params
+            .iter()
+            .map(|v| match v {
+                Value::Null => rusqlite::types::Value::Null,
+                Value::Number(n) if n.is_i64() => {
+                    rusqlite::types::Value::Integer(n.as_i64().unwrap())
+                }
+                Value::Number(n) => rusqlite::types::Value::Real(n.as_f64().unwrap()),
+                Value::String(t) => rusqlite::types::Value::Text(t.clone()),
+                other => rusqlite::types::Value::Text(other.to_string()),
+            })
+            .collect();
+        assert!(params.len() <= MAX_PARAMS, "{}", s.sql);
+        db.execute(&s.sql, rusqlite::params_from_iter(params))
+            .unwrap_or_else(|e| panic!("{e}: {}", s.sql));
+    }
+    fn count(db: &rusqlite::Connection, table: &str) -> i64 {
+        db.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap()
+    }
+    fn line(id: &str, sha: &str, verdict: &str, member: bool) -> ManifestLine {
+        serde_json::from_value(json!({
+            "id": id,
+            "origin": { "account": "local:laptop", "bucket": "b", "key": format!("k/{id}"),
+                        "etag": null, "listed_size": 5, "modified": null },
+            "member": if member { json!({ "parent_sha256": "aa", "path": "x.txt",
+                "raw_name": "x.txt", "index": 2, "depth": 1, "chain": [2] }) } else { Value::Null },
+            "sha256": sha, "blake3": "bb", "size": 5, "mime": "text/plain", "kind": "text",
+            "norm_name": "x.txt", "simhash": null, "verdict": verdict, "reason": "new",
+            "flags": ["encrypted"],
+            "hints": [{ "kind": "same_name_size", "other": "cc", "score": null }],
+            "r2_key": null, "error": null, "at_ms": 7
+        }))
+        .unwrap()
+    }
+
+    // The schema runs, twice (IF NOT EXISTS).
+    let db = rusqlite::Connection::open_in_memory().unwrap();
+    for _ in 0..2 {
+        for s in schema_statements() {
+            db.execute(&s.sql, []).unwrap();
+        }
+    }
+    assert_eq!(schema_statements().len(), 7);
+
+    // A part: a repeated sighting id, a would-upload (no blob), a skipped member with no hash,
+    // and enough lines to need several batches.
+    let part = part_key("run1", 0);
+    let mut lines = vec![
+        line("s1", "sha1", "upload", false),
+        line("s1", "sha1", "upload", false),
+        line("s2", "sha2", "duplicate", true),
+        line("s3", "sha3", "would_upload", false),
+        line("s4", "", "skipped", true),
+    ];
+    for i in 0..60 {
+        lines.push(line(&format!("m{i}"), "sha1", "duplicate", false));
+    }
+    let statements = apply_part(&part, &lines, 99);
+    assert!(statements[0].sql.starts_with("INSERT INTO applied"));
+    for s in &statements {
+        assert!(s.sql.ends_with("ON CONFLICT DO NOTHING"), "{}", s.sql);
+        assert!(s.params.len() <= MAX_PARAMS);
+    }
+    let sighting_batches = statements
+        .iter()
+        .filter(|s| s.sql.contains("INTO sightings"));
+    assert!(sighting_batches.count() > 1);
+    for s in &statements {
+        run(&db, s);
+    }
+    let counts = |db: &rusqlite::Connection| {
+        ["applied", "blobs", "sightings", "hints"].map(|t| count(db, t))
+    };
+    // 64 distinct sighting ids, blobs sha1 and sha2 only, one hint per hash with a blob or not.
+    assert_eq!(counts(&db), [1, 2, 64, 3]);
+    // Applying the same part again changes nothing.
+    for s in apply_part(&part, &lines, 100) {
+        run(&db, &s);
+    }
+    assert_eq!(counts(&db), [1, 2, 64, 3]);
+    let (decision, flags, run_id): (String, String, String) = db
+        .query_row(
+            "SELECT decision, flags, run FROM sightings WHERE id = 's2'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        (decision.as_str(), flags.as_str(), run_id.as_str()),
+        ("duplicate", "encrypted", "run1")
+    );
+
+    // The run row is an upsert.
+    let job: JobSpec = serde_json::from_value(json!({
+        "run": "run1", "instance": "i",
+        "source": { "kind": "s3", "account": "backblaze:b2", "endpoint": "https://s3.example",
+                    "region": "r", "bucket": "src", "prefix": "p/" },
+        "dest": { "endpoint": "https://d.example", "bucket": "dst" },
+        "dry_run": false, "keep_archives": true, "fingerprints": false,
+        "limits": pigeon_ingest::archive::Limits::default(), "threads": 4, "commit": "abc"
+    }))
+    .unwrap();
+    let mut status: Status = serde_json::from_value(json!({
+        "run": "run1", "state": "running", "dry_run": false,
+        "counters": pigeon_ingest::manifest::Counters::default(),
+        "started_ms": 1, "updated_ms": 2, "read_rate": 0.0, "eta_s": null, "last_error": null
+    }))
+    .unwrap();
+    run(&db, &apply_run(&job, &status, "cloudflare"));
+    status.state = pigeon_ingest::manifest::RunState::Done;
+    status.updated_ms = 3;
+    run(&db, &apply_run(&job, &status, "cloudflare"));
+    assert_eq!(count(&db, "runs"), 1);
+    let (state, updated): (String, i64) = db
+        .query_row("SELECT state, updated_ms FROM runs", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    assert_eq!((state.as_str(), updated), ("done", 3));
+
+    // Signatures, signed as the capability signs them.
+    let key = b"data-key";
+    let now = 1_700_000_000_000_i64;
+    let body = br#"{"run":"run1"}"#;
+    let sign = |k: &[u8], at: i64, body: &[u8]| {
+        let m = signing_message("POST", "/ingest/stop", at, body);
+        format!("t={at},v1={}", hex(&hmac_sha256(k, m.as_bytes())))
+    };
+    let good = sign(key, now, body);
+    let stop = "/ingest/stop";
+    assert!(verify(&good, "POST", stop, body, key, now + 1000).is_ok());
+    assert!(verify(&sign(b"other", now, body), "POST", stop, body, key, now).is_err());
+    assert!(verify(&good, "POST", stop, body, key, now + MAX_SKEW_MS + 1).is_err());
+    assert!(verify(&good, "POST", stop, body, key, now - MAX_SKEW_MS - 1).is_err());
+    assert!(verify(&good, "POST", stop, b"{}", key, now).is_err());
+    assert!(verify(&good, "POST", "/ingest/start", body, key, now).is_err());
+    let odd = format!("t={now},v1=abc");
+    let nonhex = format!("t={now},v1=zz");
+    for bad in ["", "garbage", "t=x,v1=00", "t=1", "v1=00", &odd, &nonhex] {
+        assert!(verify(bad, "POST", stop, body, key, now).is_err(), "{bad}");
+    }
+
+    // R2 event messages.
+    let event = |action: &str, key: &str| json!({ "action": action, "object": { "key": key } });
+    let e = parse_event(&event("PutObject", &part_key("run1", 3))).unwrap();
+    assert!(e.is_manifest_part && e.key.ends_with("00000003.jsonl"));
+    let status_event = parse_event(&event("PutObject", "ingest/runs/run1/status.json")).unwrap();
+    assert!(!status_event.is_manifest_part);
+    assert!(parse_event(&event("DeleteObject", &part_key("run1", 3))).is_none());
+    assert!(parse_event(&json!("garbage")).is_none());
+    assert!(parse_event(&json!({ "object": {} })).is_none());
+    for key in [
+        "ingest/runs/r/manifest/1.jsonl",
+        "ingest/runs/r/manifest/00000001.json",
+        "ingest/runs//manifest/00000001.jsonl",
+        "blobs/x",
+        "ingest/runs/r/manifest/a/00000001.jsonl",
+    ] {
+        assert!(!is_manifest_part(key), "{key}");
+    }
+
+    // The container's environment.
+    let req = StartRequest {
+        job,
+        source_keys: "AK:SK".into(),
+        dest_keys: "RK:RS".into(),
+    };
+    let env = start_env(&req).unwrap();
+    let get = |n: &str| {
+        env.iter()
+            .find(|(k, _)| k == n)
+            .map(|(_, v)| v.clone())
+            .unwrap()
+    };
+    assert_eq!(get("SOURCE_KEYS"), "AK:SK");
+    assert_eq!(get("DEST_KEYS"), "RK:RS");
+    assert_eq!(get("SPOOL_DIR"), "/spool");
+    let back: JobSpec = serde_json::from_str(&get("INGEST_JOB")).unwrap();
+    assert_eq!(back, req.job);
+}
+
+/// The ingest run engine over in-memory stubs: dedupe against R2, conflicts, dry runs, zips,
+/// retries, stop and resume, status and report.
+#[test]
+fn ingest_engine_dedupes_resumes_and_opens_zips() {
+    use pigeon_ingest::archive::Flag;
+    use pigeon_ingest::decide::{Head, Reason, Verdict};
+    use pigeon_ingest::engine::{
+        Clock, Dest, Object, Page, Run, Source, Spool, SpoolFile, Verify, run,
+    };
+    use pigeon_ingest::manifest::{
+        DestSpec, JobSpec, ManifestLine, Report, RunState, SourceSpec, Status, quarantine_key,
+    };
+    use pigeon_ingest::metrics::{Hasher, Metrics};
+    use pigeon_ingest::{Error, archive::Limits, blob_key};
+    use std::collections::{BTreeMap, HashMap};
+    use std::io::{Cursor, Read, Write};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct Bad;
+    impl Read for Bad {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("disk on fire"))
+        }
+    }
+    struct MemSource<'a> {
+        objs: BTreeMap<String, Vec<u8>>,
+        bad: String,
+        stop: &'a AtomicBool,
+        trigger: String,
+        opens: Mutex<HashMap<String, u32>>,
+    }
+    impl Source for MemSource<'_> {
+        fn list(&self, after: Option<&str>, token: Option<&str>) -> Result<Page, Error> {
+            let start = token.or(after);
+            let all: Vec<Object> = self
+                .objs
+                .iter()
+                .filter(|(k, _)| start.is_none_or(|s| k.as_str() > s))
+                .map(|(k, v)| Object {
+                    key: k.clone(),
+                    size: v.len() as u64,
+                    etag: None,
+                    modified: None,
+                })
+                .collect();
+            let next = if all.len() > 3 {
+                Some(all[2].key.clone())
+            } else {
+                None
+            };
+            Ok(Page {
+                objects: all.into_iter().take(3).collect(),
+                next,
+            })
+        }
+        fn open(&self, key: &str) -> Result<Box<dyn Read + Send>, Error> {
+            *self
+                .opens
+                .lock()
+                .unwrap()
+                .entry(key.to_string())
+                .or_insert(0) += 1;
+            if key == self.trigger {
+                self.stop.store(true, Ordering::SeqCst);
+            }
+            if key == self.bad {
+                return Ok(Box::new(Bad));
+            }
+            match self.objs.get(key) {
+                Some(v) => Ok(Box::new(Cursor::new(v.clone()))),
+                None => Err(Error::Source("no such key".into())),
+            }
+        }
+    }
+
+    type Stored = (Vec<u8>, Option<String>, Option<String>);
+    #[derive(Default)]
+    struct MemDest {
+        objs: Mutex<HashMap<String, Stored>>,
+        puts: Mutex<Vec<String>>,
+    }
+    impl MemDest {
+        fn seed(&self, key: &str, bytes: &[u8], sha: Option<String>, b3: Option<String>) {
+            self.objs
+                .lock()
+                .unwrap()
+                .insert(key.to_string(), (bytes.to_vec(), sha, b3));
+        }
+        fn bytes(&self, key: &str) -> Option<Vec<u8>> {
+            self.objs.lock().unwrap().get(key).map(|v| v.0.clone())
+        }
+        fn put_count(&self, key: &str) -> usize {
+            self.puts
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|k| *k == key)
+                .count()
+        }
+        fn lines(&self, run_id: &str) -> Vec<ManifestLine> {
+            let prefix = format!("ingest/runs/{run_id}/manifest/");
+            let mut keys: Vec<String> = self
+                .objs
+                .lock()
+                .unwrap()
+                .keys()
+                .filter(|k| k.starts_with(&prefix))
+                .cloned()
+                .collect();
+            keys.sort();
+            let mut out = Vec::new();
+            for k in keys {
+                let body = self.bytes(&k).unwrap();
+                for l in std::str::from_utf8(&body).unwrap().lines() {
+                    out.push(serde_json::from_str(l).unwrap());
+                }
+            }
+            out
+        }
+    }
+    impl Dest for MemDest {
+        fn head(&self, key: &str) -> Result<Option<Head>, Error> {
+            Ok(self.objs.lock().unwrap().get(key).map(|(b, s, h)| Head {
+                size: b.len() as u64,
+                sha256: s.clone(),
+                blake3: h.clone(),
+            }))
+        }
+        fn put_blob(
+            &self,
+            key: &str,
+            body: &mut dyn Read,
+            size: u64,
+            m: &Metrics,
+        ) -> Result<(), Error> {
+            let mut buf = Vec::new();
+            body.read_to_end(&mut buf)
+                .map_err(|e| Error::Dest(e.to_string()))?;
+            if buf.len() as u64 != size {
+                return Err(Error::Dest("wrong length".into()));
+            }
+            self.puts.lock().unwrap().push(key.to_string());
+            self.seed(key, &buf, Some(m.sha256.clone()), Some(m.blake3.clone()));
+            Ok(())
+        }
+        fn put_object(&self, key: &str, body: &[u8], _: &str) -> Result<(), Error> {
+            self.seed(key, body, None, None);
+            Ok(())
+        }
+        fn get_object(&self, key: &str) -> Result<Option<Vec<u8>>, Error> {
+            Ok(self.bytes(key))
+        }
+    }
+
+    struct MemSpool;
+    impl Spool for MemSpool {
+        fn create(&self) -> Result<Box<dyn SpoolFile>, Error> {
+            Ok(Box::new(Cursor::new(Vec::new())))
+        }
+        fn free_bytes(&self) -> u64 {
+            5000
+        }
+    }
+    struct Fixed;
+    impl Clock for Fixed {
+        fn now_ms(&self) -> i64 {
+            1000
+        }
+    }
+
+    let metrics = |b: &[u8]| {
+        let mut h = Hasher::new(false);
+        h.update(b);
+        h.finish().unwrap()
+    };
+    let build_zip = |files: &[(&str, &[u8], bool)]| -> Vec<u8> {
+        use zip::unstable::write::FileOptionsExt;
+        use zip::write::SimpleFileOptions;
+        let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        for (name, data, enc) in files {
+            let o = SimpleFileOptions::default();
+            if *enc {
+                w.start_file(*name, o.with_deprecated_encryption(b"pw"))
+                    .unwrap();
+            } else {
+                w.start_file(*name, o).unwrap();
+            }
+            w.write_all(data).unwrap();
+        }
+        w.add_directory("dir/", SimpleFileOptions::default())
+            .unwrap();
+        w.finish().unwrap().into_inner()
+    };
+    let job = |run_id: &str, dry: bool| JobSpec {
+        run: run_id.into(),
+        instance: "t".into(),
+        source: SourceSpec::S3 {
+            account: "acct".into(),
+            endpoint: "https://s3.test".into(),
+            region: "r".into(),
+            bucket: "src".into(),
+            prefix: String::new(),
+        },
+        dest: DestSpec {
+            endpoint: "https://r2.test".into(),
+            bucket: "dst".into(),
+        },
+        dry_run: dry,
+        keep_archives: true,
+        fingerprints: false,
+        limits: Limits::default(),
+        threads: 1,
+        commit: "c".into(),
+    };
+
+    // Verify passes the right bytes and fails on a short, long or changed stream.
+    let v = metrics(b"abc");
+    let mut out = Vec::new();
+    assert!(
+        Verify::new(Cursor::new(b"abc".to_vec()), v.clone())
+            .read_to_end(&mut out)
+            .is_ok()
+    );
+    for bad in [&b"ab"[..], b"abcd", b"abd"] {
+        let mut out = Vec::new();
+        assert!(
+            Verify::new(Cursor::new(bad.to_vec()), v.clone())
+                .read_to_end(&mut out)
+                .is_err()
+        );
+    }
+
+    // The source objects.
+    let new_bytes = b"hello new file\n".to_vec();
+    let exists = b"already in r2\n".to_vec();
+    let conflict_a = b"conflicting by size\n".to_vec();
+    let conflict_b = b"conflicting by blake3\n".to_vec();
+    let unattested = b"written by another path\n".to_vec();
+    let deep = b"deep inside\n".to_vec();
+    let inner = build_zip(&[("deep.txt", &deep, false)]);
+    let own = b"own member\n".to_vec();
+    let outer = build_zip(&[
+        ("m1.txt", &new_bytes, false),
+        ("inner.zip", &inner, false),
+        ("secret.txt", b"top secret\n", true),
+        ("own.txt", &own, false),
+    ]);
+    let known = build_zip(&[("z.txt", b"only in known zip\n", false)]);
+    let big: Vec<u8> = (0..6000u32).map(|i| (i % 251) as u8).collect();
+    let mut objs: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    for (k, v) in [
+        ("a/new.txt", &new_bytes),
+        ("b/same.txt", &new_bytes),
+        ("c/exists.bin", &exists),
+        ("d/conflict.bin", &conflict_a),
+        ("e/conflict2.bin", &conflict_b),
+        ("f/unattested.bin", &unattested),
+        ("g/outer.zip", &outer),
+        ("h/known.zip", &known),
+        ("i/broken.bin", &new_bytes),
+        ("k/big.bin", &big),
+        ("l/same.txt", &b"aaaa".to_vec()),
+        ("m/same.txt", &b"bbbb".to_vec()),
+    ] {
+        objs.insert(k.to_string(), v.clone());
+    }
+    let make_dest = || {
+        let d = MemDest::default();
+        let m = metrics(&exists);
+        d.seed(
+            &blob_key(&m.sha256),
+            &exists,
+            Some(m.sha256),
+            Some(m.blake3),
+        );
+        let m = metrics(&conflict_a);
+        d.seed(&blob_key(&m.sha256), b"zz", Some(m.sha256), Some(m.blake3));
+        let m = metrics(&conflict_b);
+        d.seed(
+            &blob_key(&m.sha256),
+            &conflict_b,
+            Some(m.sha256),
+            Some("ff".repeat(32)),
+        );
+        let m = metrics(&unattested);
+        d.seed(&blob_key(&m.sha256), b"x", None, None);
+        let m = metrics(&known);
+        d.seed(&blob_key(&m.sha256), &known, Some(m.sha256), Some(m.blake3));
+        d
+    };
+    let source = |stop: &'static AtomicBool, trigger: &str| MemSource {
+        objs: objs.clone(),
+        bad: "i/broken.bin".into(),
+        stop,
+        trigger: trigger.into(),
+        opens: Mutex::new(HashMap::new()),
+    };
+    let stop_never: &'static AtomicBool = Box::leak(Box::new(AtomicBool::new(false)));
+    let find = |lines: &[ManifestLine], key: &str| -> ManifestLine {
+        lines
+            .iter()
+            .find(|l| l.origin.key == key && l.member.is_none())
+            .cloned()
+            .unwrap()
+    };
+    let member = |lines: &[ManifestLine], path: &str| -> ManifestLine {
+        lines
+            .iter()
+            .find(|l| l.member.as_ref().is_some_and(|m| m.path == path))
+            .cloned()
+            .unwrap()
+    };
+
+    // ---- a full run ----
+    let dest = make_dest();
+    let src = source(stop_never, "");
+    let j = job("r1", false);
+    let r1 = run(&Run {
+        job: &j,
+        source: &src,
+        dest: &dest,
+        spool: &MemSpool,
+        clock: &Fixed,
+        stop: stop_never,
+    })
+    .unwrap();
+    assert_eq!(r1.state, RunState::Done);
+    let lines = dest.lines("r1");
+    let sha = |b: &[u8]| metrics(b).sha256;
+
+    let a = find(&lines, "a/new.txt");
+    assert_eq!((a.verdict, a.reason), (Verdict::Upload, Reason::New));
+    assert_eq!(a.r2_key, Some(blob_key(&sha(&new_bytes))));
+    let stored = dest
+        .objs
+        .lock()
+        .unwrap()
+        .get(&blob_key(&sha(&new_bytes)))
+        .cloned()
+        .unwrap();
+    assert_eq!(stored.0, new_bytes);
+    assert_eq!(stored.1, Some(sha(&new_bytes)));
+    let b = find(&lines, "b/same.txt");
+    assert_eq!(
+        (b.verdict, b.reason),
+        (Verdict::Duplicate, Reason::SeenInRun)
+    );
+    assert_eq!(dest.put_count(&blob_key(&sha(&new_bytes))), 1);
+
+    let c = find(&lines, "c/exists.bin");
+    assert_eq!((c.verdict, c.reason), (Verdict::Duplicate, Reason::InR2));
+    assert_eq!(dest.put_count(&blob_key(&sha(&exists))), 0);
+
+    for (key, bytes) in [
+        ("d/conflict.bin", &conflict_a),
+        ("e/conflict2.bin", &conflict_b),
+    ] {
+        let l = find(&lines, key);
+        assert_eq!((l.verdict, l.reason), (Verdict::Conflict, Reason::Mismatch));
+        let q = quarantine_key("r1", &sha(bytes));
+        assert_eq!(l.r2_key, Some(q.clone()));
+        assert_eq!(dest.bytes(&q).as_ref(), Some(bytes));
+        assert_eq!(dest.put_count(&blob_key(&sha(bytes))), 0);
+    }
+    assert_eq!(dest.bytes(&blob_key(&sha(&conflict_a))).unwrap(), b"zz");
+    assert_eq!(r1.counters.conflicts, 2);
+    assert_eq!(r1.conflicts.len(), 2);
+
+    let f = find(&lines, "f/unattested.bin");
+    assert_eq!((f.verdict, f.reason), (Verdict::Upload, Reason::Unattested));
+    assert_eq!(
+        dest.bytes(&blob_key(&sha(&unattested))).unwrap(),
+        unattested
+    );
+
+    // Zips.
+    let g = find(&lines, "g/outer.zip");
+    assert_eq!(g.verdict, Verdict::Upload);
+    let m1 = member(&lines, "m1.txt");
+    assert_eq!(
+        (m1.verdict, m1.reason),
+        (Verdict::Duplicate, Reason::SeenInRun)
+    );
+    assert_eq!(m1.member.as_ref().unwrap().parent_sha256, g.sha256);
+    assert_eq!(m1.member.as_ref().unwrap().depth, 1);
+    let iz = member(&lines, "inner.zip");
+    assert_eq!(iz.verdict, Verdict::Upload);
+    let dp = member(&lines, "deep.txt");
+    assert_eq!(dp.verdict, Verdict::Upload);
+    let dm = dp.member.as_ref().unwrap();
+    assert_eq!((dm.depth, dm.chain.len()), (2, 2));
+    assert_eq!(dm.parent_sha256, iz.sha256);
+    assert_eq!(dest.bytes(&blob_key(&sha(&deep))).unwrap(), deep);
+    let sec = member(&lines, "secret.txt");
+    assert_eq!(sec.verdict, Verdict::Skipped);
+    assert!(sec.flags.contains(&Flag::Encrypted));
+    assert_eq!(member(&lines, "own.txt").verdict, Verdict::Upload);
+    assert_eq!(r1.counters.archives_opened, 2);
+
+    // A zip already in R2 is not opened again.
+    let h = find(&lines, "h/known.zip");
+    assert_eq!((h.verdict, h.reason), (Verdict::Duplicate, Reason::InR2));
+    assert!(
+        lines
+            .iter()
+            .all(|l| l.member.as_ref().map(|m| &m.parent_sha256) != Some(&h.sha256))
+    );
+    assert_eq!(dest.put_count(&blob_key(&sha(b"only in known zip\n"))), 0);
+
+    // A failing read is retried, then Failed; never a duplicate.
+    let i = find(&lines, "i/broken.bin");
+    assert_eq!((i.verdict, i.reason), (Verdict::Failed, Reason::Error));
+    assert!(i.error.is_some() && i.sha256.is_empty());
+    assert_eq!(src.opens.lock().unwrap()["i/broken.bin"], 4);
+    assert_eq!(r1.counters.failed, 1);
+    assert_eq!(r1.failures.len(), 1);
+
+    // Larger than the spool: copied from a verified second read.
+    let k = find(&lines, "k/big.bin");
+    assert_eq!(k.verdict, Verdict::Upload);
+    assert!(k.flags.contains(&Flag::OverSpool));
+    assert_eq!(dest.bytes(&blob_key(&sha(&big))).unwrap(), big);
+    assert_eq!(src.opens.lock().unwrap()["k/big.bin"], 2);
+
+    // Hints.
+    let l = find(&lines, "l/same.txt");
+    let mm = find(&lines, "m/same.txt");
+    assert!(l.hints.is_empty());
+    assert_eq!(mm.hints.len(), 1);
+    assert_eq!(mm.hints[0].kind, "same_name_size");
+    assert_eq!(mm.hints[0].other, l.sha256);
+
+    // Status and report are written.
+    let status: Status =
+        serde_json::from_slice(&dest.bytes("ingest/runs/r1/status.json").unwrap()).unwrap();
+    assert_eq!(status.state, RunState::Done);
+    let written: Report =
+        serde_json::from_slice(&dest.bytes("ingest/runs/r1/report.json").unwrap()).unwrap();
+    assert_eq!(written.counters, r1.counters);
+    assert!(
+        written
+            .flags
+            .iter()
+            .any(|(f, n)| *f == Flag::Encrypted && *n == 1)
+    );
+
+    // ---- a dry run writes nothing to blobs/ or quarantine/ ----
+    let dest_d = make_dest();
+    let before: Vec<String> = dest_d.objs.lock().unwrap().keys().cloned().collect();
+    let src_d = source(stop_never, "");
+    let jd = job("dry", true);
+    let rd = run(&Run {
+        job: &jd,
+        source: &src_d,
+        dest: &dest_d,
+        spool: &MemSpool,
+        clock: &Fixed,
+        stop: stop_never,
+    })
+    .unwrap();
+    assert!(dest_d.puts.lock().unwrap().is_empty());
+    let after: Vec<String> = dest_d.objs.lock().unwrap().keys().cloned().collect();
+    assert!(
+        after
+            .iter()
+            .all(|k| before.contains(k) || k.starts_with("ingest/runs/dry/"))
+    );
+    assert_eq!(rd.counters.uploaded, 0);
+    assert!(rd.counters.would_upload > 0);
+    let dl = dest_d.lines("dry");
+    assert_eq!(find(&dl, "a/new.txt").verdict, Verdict::WouldUpload);
+    assert_eq!(find(&dl, "d/conflict.bin").verdict, Verdict::Conflict);
+
+    // ---- stop, then resume ----
+    let stop: &'static AtomicBool = Box::leak(Box::new(AtomicBool::new(false)));
+    let dest_s = make_dest();
+    let src_s = source(stop, "e/conflict2.bin");
+    let js = job("r2", false);
+    let go = |s: &MemSource<'_>| {
+        run(&Run {
+            job: &js,
+            source: s,
+            dest: &dest_s,
+            spool: &MemSpool,
+            clock: &Fixed,
+            stop,
+        })
+        .unwrap()
+    };
+    let first = go(&src_s);
+    assert_eq!(first.state, RunState::Stopped);
+    let cp: pigeon_ingest::manifest::Checkpoint =
+        serde_json::from_slice(&dest_s.bytes("ingest/runs/r2/checkpoint.json").unwrap()).unwrap();
+    assert_eq!(cp.after_key.as_deref(), Some("e/conflict2.bin"));
+    assert_eq!(cp.seq, 1);
+    let st: Status =
+        serde_json::from_slice(&dest_s.bytes("ingest/runs/r2/status.json").unwrap()).unwrap();
+    assert_eq!(st.state, RunState::Stopped);
+    stop.store(false, Ordering::SeqCst);
+    let src_s2 = source(stop, "");
+    let second = go(&src_s2);
+    assert_eq!(second.state, RunState::Done);
+    assert!(src_s2.opens.lock().unwrap().get("a/new.txt").is_none());
+    assert_eq!(second.counters, r1.counters);
+    let sl = dest_s.lines("r2");
+    let mut ids: Vec<&String> = sl.iter().map(|l| &l.id).collect();
+    let n = ids.len();
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids.len(), n, "no line twice across the resume");
+    assert_eq!(n, lines.len());
 }

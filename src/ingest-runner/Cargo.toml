@@ -1,0 +1,21 @@
+[package]
+name = "pigeon-ingest-runner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# The ingest runner: the container that runs one ingest job next to the data
+# (docs/plans/ingest.md, decision 13). Native only; on WASM it builds as an empty stub so the
+# workspace's WASM checks pass.
+[dependencies]
+pigeon-ingest = { path = "../ingest" }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+pigeon-core = { path = "../core" }
+serde_json = "1"
+sha2 = "0.10"
+base64 = "0.22"
+ureq = { version = "2", default-features = false, features = ["tls"] }
+ctrlc = { version = "3", features = ["termination"] }

@@ -1,0 +1,79 @@
+//! Reads the environment, builds the source, destination and spool, and runs the job.
+
+use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
+
+use pigeon_core::s3::{Keys, parse_keys};
+use pigeon_ingest::engine::{Clock, Run, Source, run};
+use pigeon_ingest::manifest::{JobSpec, RunState, SourceSpec};
+
+use crate::{DirSpool, LocalSource, R2Dest, S3Source};
+
+/// The default spool budget: 50 GiB.
+const DEFAULT_SPOOL_BYTES: u64 = 50 * 1024 * 1024 * 1024;
+
+/// The wall clock.
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now_ms(&self) -> i64 {
+        crate::client::now_ms() as i64
+    }
+}
+
+fn keys(env: &dyn Fn(&str) -> Option<String>, name: &str) -> Result<Keys, String> {
+    let value = env(name).ok_or_else(|| format!("{name} is not set"))?;
+    parse_keys(&value).map_err(|e| format!("{name}: {e}"))
+}
+
+/// Runs the job named by the environment (`INGEST_JOB`, `SOURCE_KEYS`, `DEST_KEYS`, `SPOOL_DIR`,
+/// `SPOOL_BYTES`; `env` looks a variable up) until it is done or `stop` is set. Answers the
+/// state the run ended in. An error never holds a key.
+pub fn run_job(
+    env: &dyn Fn(&str) -> Option<String>,
+    stop: &AtomicBool,
+) -> Result<RunState, String> {
+    let job_json = env("INGEST_JOB").ok_or("INGEST_JOB is not set")?;
+    let job: JobSpec =
+        serde_json::from_str(&job_json).map_err(|e| format!("INGEST_JOB is not a job: {e}"))?;
+    let source: Box<dyn Source> = match &job.source {
+        SourceSpec::S3 {
+            endpoint,
+            region,
+            bucket,
+            prefix,
+            ..
+        } => Box::new(S3Source::new(
+            endpoint,
+            region,
+            bucket,
+            prefix,
+            keys(env, "SOURCE_KEYS")?,
+        )),
+        SourceSpec::Local { root, .. } => Box::new(LocalSource::new(PathBuf::from(root))),
+    };
+    let dest = R2Dest::new(
+        &job.dest.endpoint,
+        &job.dest.bucket,
+        keys(env, "DEST_KEYS")?,
+    );
+    let budget = match env("SPOOL_BYTES") {
+        Some(v) => v
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| "SPOOL_BYTES is not a number".to_string())?,
+        None => DEFAULT_SPOOL_BYTES,
+    };
+    let dir = env("SPOOL_DIR").unwrap_or_else(|| "/spool".into());
+    let spool = DirSpool::new(PathBuf::from(dir), budget).map_err(|e| e.to_string())?;
+    let report = run(&Run {
+        job: &job,
+        source: source.as_ref(),
+        dest: &dest,
+        spool: &spool,
+        clock: &SystemClock,
+        stop,
+    })
+    .map_err(|e| e.to_string())?;
+    Ok(report.state)
+}

@@ -1,0 +1,39 @@
+# An example only, with placeholders: nothing deploys this file and no tool reads it by this
+# name. Copy it to wrangler.toml in the instance's account and replace each {instance}.
+# The secret DATA_KEY is set with `wrangler secret put DATA_KEY`, never written here.
+name = "{instance}-data"
+main = "build/worker/shim.mjs"
+compatibility_date = "2025-01-01"
+
+[build]
+command = "cargo install -q worker-build && worker-build --release"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "{instance}-data"
+database_id = "{d1-database-id}"
+
+[[r2_buckets]]
+binding = "DATA"
+bucket_name = "{instance}-data"
+
+# R2 event notifications on the prefix ingest/runs/ are sent to this queue:
+#   wrangler r2 bucket notification create {instance}-data --event-type object-create \
+#     --prefix ingest/runs/ --queue {instance}-ingest-manifests
+[[queues.consumers]]
+queue = "{instance}-ingest-manifests"
+max_batch_size = 10
+max_retries = 5
+
+[durable_objects]
+bindings = [{ name = "INGEST_JOB", class_name = "IngestJob" }]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["IngestJob"]
+
+[[containers]]
+class_name = "IngestJob"
+image = "../ingest-runner/Dockerfile"
+instance_type = "standard-4"
+scheduling_policy = "durable_object"

@@ -17,6 +17,7 @@ pub mod expiry;
 pub mod git_proxy;
 pub mod github;
 pub mod images;
+pub mod ingest;
 pub mod instances;
 pub mod land;
 pub mod linked;

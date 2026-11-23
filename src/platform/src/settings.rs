@@ -14,6 +14,7 @@ use pigeon_capabilities::dispatch::Dispatch;
 use pigeon_capabilities::git_proxy::GitProxy;
 use pigeon_capabilities::github::Github;
 use pigeon_capabilities::images::Images;
+use pigeon_capabilities::ingest;
 use pigeon_capabilities::instances::Instances;
 use pigeon_capabilities::land::{self, Land};
 use pigeon_capabilities::linked::Linked;
@@ -158,6 +159,12 @@ pub const BINDINGS: &[Binding] = &[
 /// an account here (see docs/plans/storage-providers.md).
 pub fn storage_accounts() -> Vec<storage::Account> {
     Vec::new()
+}
+
+/// The instances that take ingest runs (docs/plans/ingest.md). Nothing runs without a person's
+/// approval and the keys they bind.
+pub fn ingest_instances() -> Vec<ingest::Target> {
+    vec![ingest::Target::new("willowgraysen")]
 }
 
 /// The capabilities this Worker hosts.
@@ -310,6 +317,16 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
         // OAuth consent, its tokens sealed in the Directory.
         Box::new(Linked {
             host: HOST.into(),
+            passkeys: Passkeys {
+                host: HOST.into(),
+                site_name: "pigeon".into(),
+            },
+        }),
+        // Ingest: copies a storage account's bucket into an instance's R2 bucket. Latent until
+        // the person binds its keys; every run needs a passkey approval.
+        Box::new(ingest::Ingest {
+            targets: ingest_instances(),
+            accounts: storage_accounts(),
             passkeys: Passkeys {
                 host: HOST.into(),
                 site_name: "pigeon".into(),

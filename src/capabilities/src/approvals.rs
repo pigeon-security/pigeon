@@ -412,6 +412,13 @@ pub async fn decide(env: &Env, id: &str, approve: bool, person: &User) -> Result
             "Denied: no notification policy is created."
         } }));
     }
+    if r.kind.name() == "ingest_run" {
+        return Ok(json!({ "message": if approve {
+            format!("Approved: run {} starts once, when the agent that asked calls ingest_start.", r.subject)
+        } else {
+            "Denied: nothing starts.".to_string()
+        } }));
+    }
     if r.kind == ApprovalKind::LinkedPlan {
         return Ok(json!({ "message": if approve {
             format!("Approved: the plan for `{}` is applied once, by the agent that asked, if the account still gives the same plan.", r.subject)

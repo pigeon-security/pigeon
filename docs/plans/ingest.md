@@ -958,3 +958,12 @@ opened": the report says how many; a VM run can open them later).
   Container in the instance's account; D1 index applied from manifests in R2. Egress and
   instance prices read from the providers' pages from the sandbox. Planner
   `claude/ai-agent-lnX2my6PYsAz`; nothing deployed outside pigeon's account.
+- 2026-11-23 (overnight): phase 4r built and landed latent by planner
+  `claude/ai-agent-Pz9swlihkaev`: `pigeon-ingest` (metrics, rules 1–5, zip with limits and flags,
+  the engine with resume, the D1 schema and statements, signed starts), the runner, the `ingest_*`
+  tools and the data Worker's `IngestJob` and manifest consumer. No secret bound, no host or
+  instance account called. Known gaps: the engine is single-threaded (`threads` unused), the
+  status has no ETA and the report no estimate-against-actual; duplicate member names in one zip
+  are read as one (the `zip` crate keeps one entry per name); the data Worker and the container
+  start were built for WASM and never run; a CI job that builds the image needs `.pigeon/ci.toml`
+  (the person's file). Next: 13.9.

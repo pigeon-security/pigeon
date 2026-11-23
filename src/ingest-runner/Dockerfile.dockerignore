@@ -1,0 +1,6 @@
+target/
+**/target/
+ios/
+node_modules/
+**/node_modules/
+.git/

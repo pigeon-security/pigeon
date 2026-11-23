@@ -16,6 +16,9 @@ members = [
     "src/proxy",
     "src/ai-agents",
     "src/ai-agents-worker",
+    "src/ingest",
+    "src/ingest-runner",
+    "src/data-worker",
 ]
 
 [workspace.package]
