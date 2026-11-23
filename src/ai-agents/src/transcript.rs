@@ -85,9 +85,10 @@ pub fn request(spec: &Spec, messages: &[Value]) -> Value {
 /// The most output tokens the last turn may use.
 pub const LAST_TURN_MAX_TOKENS: u64 = 4096;
 
-/// Builds the request for a run's last turn: only the `report` tool, forced, with no thinking
-/// (a forced tool choice is not allowed with it) and the messages' thinking blocks stripped
-/// (their signatures are bound to the full tool list). The tool carries no cache marker: tools
+/// Builds the request for a run's last turn: only the `report` tool, with `tool_choice` auto
+/// (some models refuse a forced choice; the prompt tells the model to report), no thinking and
+/// the messages' thinking blocks stripped (their signatures are bound to the full tool list).
+/// A reply without a report ends the run over budget. The tool carries no cache marker: tools
 /// come before the system prompt, and a 5-minute marker before a planner's 1-hour one is refused.
 pub fn last_turn_request(spec: &Spec, messages: &[Value]) -> Value {
     let mut body = request(spec, &strip_thinking(messages));
@@ -99,10 +100,7 @@ pub fn last_turn_request(spec: &Spec, messages: &[Value]) -> Value {
             .cloned()
             .collect();
         obj.insert("tools".to_string(), Value::Array(tools));
-        obj.insert(
-            "tool_choice".to_string(),
-            json!({"type": "tool", "name": "report"}),
-        );
+        obj.insert("tool_choice".to_string(), json!({"type": "auto"}));
         obj.insert("max_tokens".to_string(), json!(LAST_TURN_MAX_TOKENS));
         obj.remove("thinking");
         obj.remove("output_config");

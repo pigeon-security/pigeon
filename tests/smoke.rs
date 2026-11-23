@@ -3725,7 +3725,8 @@ fn ai_agents_last_turn_reports_before_budget() {
     );
     assert_eq!(
         req["tool_choice"],
-        json!({"type": "tool", "name": "report"})
+        json!({"type": "auto"}),
+        "a forced tool choice is refused by some models"
     );
     assert!(req.get("thinking").is_none() && req.get("output_config").is_none());
     assert!(!req["messages"].to_string().contains("\"thinking\""));

@@ -787,3 +787,12 @@ executors through it. Each item: state, next step, who it waits on.
   - Known limit: a long sandbox command that starts just before the reserve can outlast it, and
     then the wall check ends the run before it reports. Not fixed.
   - The smoke scenario is `ai_agents_last_turn_on_turns_and_wall`.
+- 2026-11-23: **The last turn no longer forces `report`** (bug: run tOvWHV92KnYa, Anthropic 400
+  "tool_choice type tool and any are not supported for this model").
+  - The last turn offers only the `report` tool with `tool_choice` `{"type":"auto"}`. Thinking
+    stays off, old thinking blocks stay stripped, and the prompt still says to call `report` now.
+  - The request is the same for every model, planner or executor, so it is valid for all.
+  - A reply with plain text and no `report` still ends the run `over_budget`, with its last text
+    as the report.
+  - The smoke scenarios `ai_agents_last_turn_reports_before_budget` and
+    `ai_agents_last_turn_on_turns_and_wall` now expect `auto`.
