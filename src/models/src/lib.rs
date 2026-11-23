@@ -58,7 +58,7 @@ pub fn versions() -> Vec<pigeon_core::versions::Component> {
 pub const WORKER: &str = "pigeon-model-gateway";
 
 /// Every tool the capability offers.
-pub const TOOLS: [&str; 10] = [
+pub const TOOLS: [&str; 11] = [
     "models_setup",
     "models_providers",
     "models_run",
@@ -69,6 +69,7 @@ pub const TOOLS: [&str; 10] = [
     "models_logs",
     "models_usage",
     "models_cost",
+    "models_daily",
 ];
 
 /// The Secrets Store binding of the key core signs callers with.
@@ -652,6 +653,28 @@ impl Models {
     }
 }
 
+impl Models {
+    /// `models_daily`: the gateway's cost per UTC day over the last `days` days (1 to 31), by
+    /// model family and by AI agent run.
+    async fn daily_by_run(&self, account: &Account, args: &Value) -> Result<Value> {
+        let days = args["days"].as_u64().unwrap_or(7).clamp(1, 31) as usize;
+        let now = Date::new_0();
+        let today = String::from(now.to_iso_string());
+        let since = now.get_time() - (days as f64) * 86_400_000.0;
+        let logs = ai_gateway::logs(
+            account,
+            &self.gateway,
+            since,
+            &Filter::default(),
+            CHART_LOGS,
+        )
+        .await?;
+        let mut answer = to_value(daily::daily_by_run(&logs, &today, days));
+        answer["truncated"] = json!(logs.len() >= CHART_LOGS);
+        Ok(answer)
+    }
+}
+
 /// The tab the cost section sits on, as its path names it.
 pub const SECTION_TAB: &str = "cost";
 /// The cost section's title.
@@ -815,6 +838,17 @@ impl Models {
                 }),
             },
             Tool {
+                name: "models_daily",
+                description: "Read-only. The AI gateway's cost per UTC day over the last `days` \
+                              days, by model family and by AI agent run, from its logs.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "days": { "type": "integer", "description": "1 to 31; 7 by default." }
+                    }
+                }),
+            },
+            Tool {
                 name: "models_usage",
                 description: "What the AI gateway's requests used over a window, from its \
                               logs: requests, failures, tokens in and out, and cost, in all and \
@@ -915,6 +949,7 @@ impl Models {
             "models_run" => self.run(account()?, caller, args).await?,
             "models_usage" => self.usage(env, account()?, args).await?,
             "models_cost" => self.cost(account()?, args).await?,
+            "models_daily" => self.daily_by_run(account()?, args).await?,
             "models_logs" => self.recent(account()?, args).await?,
             "models_submit" => self.submit(env, caller, args).await?,
             "models_status" => self.job(env, caller, "status", args).await?,

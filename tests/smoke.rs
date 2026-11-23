@@ -10473,6 +10473,202 @@ fn core_observability_agent_cost_lines() {
     assert_eq!(unreconciled_agent_turns(&json!({}), 0, 1), 0);
 }
 
+/// The `cost_daily` buckets: the gateway's logs fold by day, family and run; billing rows land on
+/// their day or spread over their period; stored months merge with live days; totals add up.
+#[test]
+fn platform_cost_daily_buckets() {
+    use pigeon_capabilities::cost::*;
+    use pigeon_core::ai_gateway::Log;
+    use pigeon_models::daily::daily_by_run;
+    use std::collections::BTreeMap;
+
+    let today = "2026-03-10";
+    let near = |a: &Value, b: f64| (a.as_f64().unwrap_or(f64::NAN) - b).abs() < 1e-9;
+    let names = |v: &Value| -> Vec<String> {
+        v.as_array()
+            .map(|l| {
+                l.iter()
+                    .filter_map(|x| x["name"].as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    // Models: families, run attribution, unattributed; outside the window or free adds nothing.
+    let log = |at: &str, model: &str, cost: Option<f64>, task: Option<&str>| {
+        let mut l = Log {
+            created_at: at.into(),
+            model: model.into(),
+            cost,
+            ..Log::default()
+        };
+        if let Some(t) = task {
+            l.metadata.insert("task".into(), t.into());
+        }
+        l
+    };
+    let opus = "anthropic/claude-opus-4";
+    let logs = vec![
+        log(
+            "2026-03-10T01:00:00Z",
+            opus,
+            Some(1.0),
+            Some("ai-agent/r1/turn1"),
+        ),
+        log(
+            "2026-03-10T02:00:00Z",
+            "anthropic/claude-sonnet-4",
+            Some(0.5),
+            Some("ai-agent/r2/turn1"),
+        ),
+        log(
+            "2026-03-09T03:00:00Z",
+            "anthropic/claude-haiku-4",
+            Some(0.25),
+            None,
+        ),
+        log(
+            "2026-03-09T04:00:00Z",
+            "other/model-x",
+            Some(0.125),
+            Some("ai-agent/r1/turn2"),
+        ),
+        log("2026-01-01T00:00:00Z", opus, Some(9.0), None),
+        log("2026-03-10T05:00:00Z", opus, None, None),
+    ];
+    let folded = daily_by_run(&logs, today, 31);
+    assert_eq!(folded.days.len(), 31);
+    assert_eq!(folded.by_family["Opus"]["2026-03-10"], 1.0);
+    assert_eq!(folded.by_family["Other"]["2026-03-09"], 0.125);
+    assert_eq!(folded.by_run["r1"]["2026-03-09"], 0.125);
+    assert_eq!(folded.by_run["r2"]["2026-03-10"], 0.5);
+    assert_eq!(folded.unattributed["2026-03-09"], 0.25);
+    assert!(!folded.by_family["Opus"].contains_key("2026-01-01"));
+    let models = json!(folded);
+
+    // Roles: a planner, an executor, and a run the list does not know falls to other.
+    let roles = roles_of(&json!({ "runs": [
+        { "run": "r1", "role": "planner" }, { "run": "r2", "role": "executor" } ] }));
+    let live = live_days(None, Some(&models), Some(&roles));
+    assert!(near(&live["2026-03-10"]["roles"]["planner"], 1.0));
+    assert!(near(&live["2026-03-10"]["roles"]["executor"], 0.5));
+    assert!(near(&live["2026-03-09"]["roles"]["other"], 0.25));
+    let none = BTreeMap::new();
+    let live_other = live_days(None, Some(&models), Some(&none));
+    assert!(near(&live_other["2026-03-10"]["roles"]["other"], 1.5));
+    assert!(live_days(None, Some(&models), None)["2026-03-10"]["roles"].is_null());
+
+    // Billing: day rows on their day, a period row spread up to today, the account name dropped.
+    let rows = json!([
+        { "ServiceName": "Workers Paid", "BilledCost": 9.0, "ChargePeriodStart": "2026-03-01T00:00:00Z", "ChargePeriodEnd": "2026-04-01T00:00:00Z", "BillingAccountName": "Secret Co" },
+        { "ServiceName": "Workers", "BilledCost": 2.0, "ChargePeriodStart": "2026-03-09T00:00:00Z", "ChargePeriodEnd": "2026-03-10T00:00:00Z" },
+        { "ServiceName": "Containers", "BilledCost": 0.5, "ChargePeriodStart": "2026-03-10T00:00:00Z", "ChargePeriodEnd": "2026-03-11T00:00:00Z" },
+        { "ServiceName": "R2 Storage", "BilledCost": "1.5", "ChargePeriodStart": "2026-03-08T00:00:00Z", "ChargePeriodEnd": "2026-03-09T00:00:00Z" },
+        { "ServiceName": "Durable Objects", "BilledCost": 0.3, "ChargePeriodStart": "2026-03-10T00:00:00Z", "ChargePeriodEnd": "2026-03-11T00:00:00Z" },
+    ]);
+    assert_eq!(line_of("Workers Paid"), "Workers");
+    assert_eq!(line_of("Durable Objects"), "Other");
+    let billing = billing_days(&rows, today);
+    assert!(!json!(billing.days).to_string().contains("Secret"));
+    let nine = &billing.days["2026-03-09"];
+    assert!(near(&nine["cloudflare"]["Workers"], 2.9));
+    assert_eq!(nine["granularity"]["Workers"], "period");
+    assert_eq!(billing.days["2026-03-08"]["granularity"]["R2"], "day");
+    assert!(!billing.days.contains_key("2026-03-11"));
+
+    // Assemble 7d: order, Other lines, totals, notes, granularity.
+    let live = live_days(Some(&billing), Some(&models), Some(&roles));
+    let stored: BTreeMap<String, Value> = BTreeMap::from([
+        (
+            "2026-02".to_string(),
+            json!({ "2026-02-27": {
+            "cloudflare": { "Workers": 1.0 }, "granularity": { "Workers": "day" },
+            "models": { "Opus": 2.0 }, "roles": { "planner": 2.0 } } }),
+        ),
+        (
+            "2026-03".to_string(),
+            json!({ "2026-03-09": {
+            "models": { "Opus": 5.0 }, "roles": { "planner": 5.0 } } }),
+        ),
+    ]);
+    let week = assemble("7d", today, &stored, &live, false, vec![], vec![]);
+    assert_eq!(week["days"].as_array().map(Vec::len), Some(7));
+    assert_eq!(week["days"][0], "2026-03-04");
+    assert_eq!(week["stored_from"], "2026-02-27");
+    let lines = &week["cloudflare"]["lines"];
+    assert_eq!(
+        names(lines),
+        ["CI Containers", "Workers", "D1", "R2", "Other"]
+    );
+    assert_eq!(lines[1]["granularity"], "period");
+    assert_eq!(lines[3]["granularity"], "day");
+    assert_eq!(lines[3]["kind"], "billed");
+    assert!(near(&week["cloudflare"]["total"], 10.6));
+    assert!(near(&week["ai_gateway"]["total"], 1.875));
+    assert!(near(&week["total"], 12.475));
+    let note = week["notes"][0].as_str().unwrap_or_default();
+    assert!(note.contains("per billing period"));
+    // Live wins for a day it covers: stored Opus 5.0 on 03-09 is replaced.
+    assert!(
+        week["ai_gateway"]["by_model"][0]["by_day"]
+            .get("2026-03-09")
+            .is_none()
+    );
+    assert_eq!(
+        names(&week["ai_gateway"]["by_model"]),
+        ["Opus", "Sonnet", "Haiku", "Other"]
+    );
+    assert_eq!(
+        names(&week["ai_gateway"]["by_role"]),
+        ["planner", "executor", "other"]
+    );
+
+    // A truncated listing never overwrites the stored gateway values; Cloudflare's still land.
+    let cut = assemble("7d", today, &stored, &live, true, vec![], vec![]);
+    assert!(near(
+        &cut["ai_gateway"]["by_model"][0]["by_day"]["2026-03-09"],
+        5.0
+    ));
+    assert_eq!(cut["truncated"], true);
+    let closed = closed_by_month(&live, today);
+    let month = merge_month(&stored["2026-03"], &closed["2026-03"], true);
+    assert!(near(&month["2026-03-09"]["models"]["Opus"], 5.0));
+    assert!(near(&month["2026-03-09"]["cloudflare"]["Workers"], 2.9));
+    let month = merge_month(&stored["2026-03"], &closed["2026-03"], false);
+    assert!(month["2026-03-09"]["models"]["Opus"].is_null());
+    assert!(!closed["2026-03"].contains_key(today));
+
+    // All: from the first stored day to today.
+    let all = assemble("all", today, &stored, &live, false, vec![], vec![]);
+    assert_eq!(all["days"].as_array().map(Vec::len), Some(12));
+    assert_eq!(all["days"][0], "2026-02-27");
+    assert!(near(
+        &all["ai_gateway"]["by_model"][0]["by_day"]["2026-02-27"],
+        2.0
+    ));
+    assert!(near(
+        &all["ai_gateway"]["by_model"][0]["by_day"]["2026-03-10"],
+        1.0
+    ));
+    assert!(near(&all["total"], 12.475 + 2.7 + 3.0));
+    // With nothing stored, `all` is the 7d window; `today` is one day.
+    let empty = assemble(
+        "all",
+        today,
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        false,
+        vec![],
+        vec![],
+    );
+    assert_eq!(empty["days"].as_array().map(Vec::len), Some(7));
+    assert_eq!(empty["stored_from"], Value::Null);
+    assert_eq!(empty["total"], 0.0);
+    let one = assemble("today", today, &stored, &live, false, vec![], vec![]);
+    assert_eq!(one["days"], json!([today]));
+    assert!(near(&one["ai_gateway"]["total"], 1.5));
+}
+
 /// The Platform section sits on the Cost tab, adds nothing to the overview total, keeps a
 /// ten-minute snapshot, and its script is on the page.
 #[test]

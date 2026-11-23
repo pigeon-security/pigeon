@@ -10,6 +10,7 @@ pub mod cf_proxy;
 pub mod changelog;
 pub mod ci;
 pub mod console;
+pub mod cost;
 pub mod deploys;
 pub mod dispatch;
 pub mod expiry;

@@ -3,6 +3,7 @@
 
 use pigeon_core::ai_gateway::{Log, canonical_model};
 use serde::Serialize;
+use std::collections::BTreeMap;
 
 /// The families the chart draws, in its fixed order: their colours follow this order.
 pub const FAMILIES: [&str; 3] = ["Opus", "Sonnet", "Haiku"];
@@ -166,4 +167,63 @@ pub fn daily(logs: &[Log], today: &str, n: usize) -> Daily {
         cost,
         cost_7d,
     }
+}
+
+/// The gateway's cost per UTC day, by model family and by AI agent run.
+#[derive(Serialize, Debug, PartialEq, Default)]
+pub struct ByRun {
+    /// The window's days, oldest first.
+    pub days: Vec<String>,
+    /// Cost per family (Opus, Sonnet, Haiku, Other), per day; zero days are left out.
+    pub by_family: BTreeMap<String, BTreeMap<String, f64>>,
+    /// Cost per run id, per day, for logs whose `task` is `ai-agent/<run>/...`.
+    pub by_run: BTreeMap<String, BTreeMap<String, f64>>,
+    /// Cost per day of logs with no run id in their `task`.
+    pub unattributed: BTreeMap<String, f64>,
+}
+
+/// The run id in a log's `task` tag: the part after `ai-agent/` up to the next slash.
+fn run_of(log: &Log) -> Option<&str> {
+    let task = log.metadata.get("task")?;
+    let run = task.strip_prefix("ai-agent/")?.split('/').next()?;
+    (!run.is_empty()).then_some(run)
+}
+
+/// `logs` summed by day, family and run over the `n` days ending `today`. A log outside the
+/// window, or with no cost, adds nothing. Sums are rounded to a millionth.
+pub fn daily_by_run(logs: &[Log], today: &str, n: usize) -> ByRun {
+    let days = days_ending(today, n);
+    let mut out = ByRun {
+        days,
+        ..ByRun::default()
+    };
+    for log in logs {
+        let Some(cost) = log.cost.filter(|c| c.is_finite()) else {
+            continue;
+        };
+        let Some(day) = day_of(&log.created_at).filter(|d| out.days.iter().any(|x| x == d)) else {
+            continue;
+        };
+        let day = day.to_string();
+        *out.by_family
+            .entry(family(&log.model).to_string())
+            .or_default()
+            .entry(day.clone())
+            .or_default() += cost;
+        match run_of(log) {
+            Some(run) => {
+                *out.by_run
+                    .entry(run.to_string())
+                    .or_default()
+                    .entry(day)
+                    .or_default() += cost
+            }
+            None => *out.unattributed.entry(day).or_default() += cost,
+        }
+    }
+    for m in out.by_family.values_mut().chain(out.by_run.values_mut()) {
+        m.values_mut().for_each(|v| *v = round6(*v));
+    }
+    out.unattributed.values_mut().for_each(|v| *v = round6(*v));
+    out
 }

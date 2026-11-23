@@ -21,7 +21,7 @@ const ANALYTICS_PERMISSION: &str = "Account Analytics Read";
 /// The only permission the logs query endpoint accepts.
 const OBSERVABILITY_PERMISSION: &str = "Workers Observability Write";
 /// The billable usage permission.
-const BILLING_PERMISSION: &str = "Billing Read";
+pub(crate) const BILLING_PERMISSION: &str = "Billing Read";
 /// How long the token lives, in seconds.
 const TOKEN_TTL: u64 = 300;
 /// The longest a message is kept, in characters.
@@ -595,12 +595,22 @@ impl Capability for Observability {
                     "properties": { "hours": { "type": "integer", "description": "Window, 1 to 168; 24 by default." } }
                 }),
             },
+            Tool {
+                name: "cost_daily",
+                description: "Read-only. Daily cost buckets in US dollars: Cloudflare lines and AI \
+                              gateway cost by model and role; `range` is today, 7d or all.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": { "range": { "type": "string", "enum": ["today", "7d", "all"], "description": "7d by default." } }
+                }),
+            },
         ]
     }
 
     fn call<'a>(&'a self, cx: &'a Context<'a>, tool: &'a str, args: &'a Value) -> Call<'a> {
         Box::pin(async move {
             match tool {
+                "cost_daily" => return crate::cost::cost_daily(cx, args).await,
                 "observability_monitors_plan" if args["check"] == true => {
                     return monitors_check(cx).await;
                 }
@@ -1982,7 +1992,7 @@ async fn open<'a>(cx: &Context<'a>, permission: &str) -> Result<Scoped<'a>> {
 }
 
 /// `work`, or an error once [`SOURCE_LIMIT_MS`] has passed.
-async fn within<T>(work: impl std::future::Future<Output = Result<T>>) -> Result<T> {
+pub(crate) async fn within<T>(work: impl std::future::Future<Output = Result<T>>) -> Result<T> {
     let limit = worker::Delay::from(std::time::Duration::from_millis(SOURCE_LIMIT_MS));
     futures_util::pin_mut!(work);
     futures_util::pin_mut!(limit);
@@ -1997,7 +2007,7 @@ async fn within<T>(work: impl std::future::Future<Output = Result<T>>) -> Result
 
 /// Mints a token with `permission`, runs `work` with it and revokes it, all within
 /// [`SOURCE_LIMIT_MS`]. The error says which step failed, with the account id taken out.
-async fn with_token<'a, F, Fut>(
+pub(crate) async fn with_token<'a, F, Fut>(
     cx: &Context<'a>,
     permission: &str,
     work: F,
