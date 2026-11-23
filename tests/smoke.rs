@@ -1205,6 +1205,38 @@ fn core_land_skips_the_rollback_when_nothing_uploaded() {
     ));
 }
 
+#[test]
+fn core_land_history_pack_keeps_only_commits() {
+    use pigeon_core::pack;
+    let dir = repo("history-pack");
+    // Three commits, each with a 3000-byte blob: the pack inflates to over 9000 bytes.
+    let mut ids = Vec::new();
+    for (n, ch) in ["a", "b", "c"].iter().enumerate() {
+        std::fs::write(dir.join("f"), ch.repeat(3000)).unwrap();
+        git(&dir, &["add", "f"], None);
+        git(&dir, &["commit", "-q", "-m", &format!("c{n}")], None);
+        ids.push(String::from_utf8(git(&dir, &["rev-parse", "HEAD"], None)).unwrap());
+    }
+    let ids: Vec<String> = ids.iter().map(|i| i.trim().to_string()).collect();
+    let (a, b, c) = (ids[0].clone(), ids[1].clone(), ids[2].clone());
+    let all = String::from_utf8(git(&dir, &["rev-list", "--objects", &c], None)).unwrap();
+    assert!(all.lines().count() >= 9, "commits, trees and blobs");
+    let packed = git(
+        &dir,
+        &["pack-objects", "--stdout", "--revs", "-q"],
+        Some(&format!("{c}\n")),
+    );
+    // Whole, it is over a 2000-byte cap; commits alone fit under it.
+    let commits = pack::commit_parents_with(&packed, 2000).unwrap();
+    assert_eq!(commits.parents.len(), 3);
+    assert_eq!(commits.parents[&c], vec![b.clone()]);
+    assert_eq!(commits.parents[&b], vec![a.clone()]);
+    assert!(commits.parents[&a].is_empty());
+    assert_eq!(commits.unresolved, 0);
+    // A cap under the commits themselves is still refused.
+    assert!(pack::commit_parents_with(&packed, 10).is_err());
+}
+
 // ---- deploy proxy ----
 
 #[test]

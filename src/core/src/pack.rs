@@ -66,6 +66,39 @@ pub fn commits(pack: &[u8]) -> Result<Commits, String> {
 /// Every object in `pack`, deltas resolved where their base is in the pack. The pack is
 /// untrusted: anything malformed, or inflating past [`INFLATED_MAX`], is an error.
 pub fn objects(pack: &[u8]) -> Result<Objects, String> {
+    scan(pack, false, INFLATED_MAX)
+}
+
+/// How much all objects of a pack may inflate to when only commits are kept. This is
+/// counted, never stored.
+pub const SCAN_MAX: usize = 512 * 1024 * 1024;
+
+/// The commits in `pack` with their parents, for a pack that carries trees and blobs too.
+/// Trees, blobs and deltas of them are inflated to find the next object, then dropped, so
+/// only commits count toward [`INFLATED_MAX`]. The inflated total of all objects may reach
+/// [`SCAN_MAX`], and no single object may pass [`INFLATED_MAX`].
+pub fn commit_parents(pack: &[u8]) -> Result<Commits, String> {
+    commit_parents_with(pack, INFLATED_MAX)
+}
+
+/// [`commit_parents`] with the cap on what is kept given, so a test can use a small one.
+pub fn commit_parents_with(pack: &[u8], kept_max: usize) -> Result<Commits, String> {
+    let objects = scan(pack, true, kept_max)?;
+    let mut parents_of = HashMap::new();
+    for (id, (kind, data)) in &objects.by_id {
+        if *kind == 1 {
+            parents_of.insert(id.clone(), parents(data)?);
+        }
+    }
+    Ok(Commits {
+        parents: parents_of,
+        unresolved: objects.unresolved,
+    })
+}
+
+/// Reads `pack`, keeping every object, or with `only_commits` just commits and deltas on
+/// kept objects. At most `max` bytes are kept.
+fn scan(pack: &[u8], only_commits: bool, max: usize) -> Result<Objects, String> {
     if pack.len() < 32 || pack.get(..4) != Some(b"PACK".as_slice()) {
         return Err(bad("no pack header"));
     }
@@ -82,6 +115,9 @@ pub fn objects(pack: &[u8]) -> Result<Objects, String> {
     let body = &pack[..end];
     let mut objects: Vec<Object> = Vec::new();
     let mut total = 0usize;
+    let mut all = 0usize;
+    let mut kept_starts: HashSet<usize> = HashSet::new();
+    let mut kept_ids: HashSet<String> = HashSet::new();
     let mut at = 12;
     for _ in 0..count {
         if at >= end {
@@ -107,16 +143,37 @@ pub fn objects(pack: &[u8]) -> Result<Objects, String> {
             }
             _ => return Err(bad("unknown object type")),
         };
-        total = total
+        let keep = !only_commits
+            || kind == 1
+            || match &base {
+                Base::Offset(p) => kept_starts.contains(p),
+                Base::Id(i) => kept_ids.contains(i),
+                Base::None => false,
+            };
+        all = all
             .checked_add(size)
-            .filter(|t| *t <= INFLATED_MAX)
+            .filter(|t| *t <= if only_commits { SCAN_MAX } else { max })
             .ok_or_else(|| bad("it inflates too large"))?;
+        if keep {
+            total = total
+                .checked_add(size)
+                .filter(|t| *t <= max)
+                .ok_or_else(|| bad("it inflates too large"))?;
+        }
         let (data, next) = inflate(body, next, size)?;
+        if !keep {
+            at = next;
+            continue;
+        }
         let id = if base_known(kind) {
             Some(id(kind, &data)?)
         } else {
             None
         };
+        kept_starts.insert(start);
+        if let Some(i) = &id {
+            kept_ids.insert(i.clone());
+        }
         objects.push(Object {
             start,
             kind,
@@ -157,7 +214,7 @@ pub fn objects(pack: &[u8]) -> Result<Objects, String> {
             let data = apply_delta(&objects[j].data, &objects[i].data)?;
             total = total
                 .checked_add(data.len())
-                .filter(|t| *t <= INFLATED_MAX)
+                .filter(|t| *t <= max)
                 .ok_or_else(|| bad("it inflates too large"))?;
             let kind = objects[j].kind;
             let oid = id(kind, &data)?;

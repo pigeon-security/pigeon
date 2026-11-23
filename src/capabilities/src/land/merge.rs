@@ -153,8 +153,7 @@ pub async fn see(
             Some(HISTORY),
         )
         .await?;
-        let commits = pack::objects(&history.pack).map_err(bad)?;
-        let parents = rebase::parents(&commits);
+        let parents = pack::commit_parents(&history.pack).map_err(bad)?.parents;
         match rebase::merge_base(&parents, commit, &main) {
             Some(b) => b,
             None => {
