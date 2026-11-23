@@ -8366,7 +8366,7 @@ fn core_observability_monitors_plan() {
     assert_eq!(report["policies"]["mechanisms_fields"], json!(["email"]));
 
     // Live shape (2026-11-23): `status` is the only filter key of the errors alert, and the
-    // real-time type has none. The errors policy must carry `status`; values come from the API.
+    // real-time type has none. A required key with listed values gets all of them; no guess.
     let live = json!({ "Workers": [
         { "type": "workers_observability_alert", "filter_options": [
             { "Key": "status", "AvailableValues": [{ "Value": "success" }, { "Value": "error" }] }] },
@@ -8374,15 +8374,15 @@ fn core_observability_monitors_plan() {
     ] });
     let planned = plan_monitors(&live, &none, &scripts);
     assert_eq!(planned.len(), 2);
-    assert_eq!(planned[0]["filters"], json!({ "status": ["error"] }));
+    assert_eq!(
+        planned[0]["filters"],
+        json!({ "status": ["success", "error"] })
+    );
     assert_eq!(planned[1]["filters"], json!({}));
-    // With no values listed, the documented value is used.
+    // With no values listed, nothing is guessed: the policy is not planned.
     let bare = json!({ "Workers": [
         { "type": "workers_observability_alert", "filter_options": [{ "Key": "status" }] } ] });
-    assert_eq!(
-        plan_monitors(&bare, &none, &scripts)[0]["filters"],
-        json!({ "status": ["error"] })
-    );
+    assert!(plan_monitors(&bare, &none, &scripts).is_empty());
     // The check report shows option values, not just keys.
     assert_eq!(
         shape_report(&live, &none)["available_alerts"]["filter_values"]["workers_observability_alert"]
@@ -8392,6 +8392,107 @@ fn core_observability_monitors_plan() {
     assert!(
         !report.to_string().contains("\"x\""),
         "a filter value leaked: {report}"
+    );
+}
+
+#[test]
+fn core_observability_monitors_filters() {
+    use pigeon_capabilities::observability::{
+        filter_options, plan_line, plan_monitors_with, policy_body, shape_report, validate_filters,
+    };
+    use serde_json::json;
+    use std::collections::BTreeMap;
+
+    let none = json!([]);
+    let scripts = vec!["core".to_string()];
+    // Cloudflare's documented shape: values are `{ID, Description}`.
+    let available = json!({ "Workers": [
+        { "type": "workers_observability_alert", "filter_options": [
+            { "Key": "status", "Range": "1-n", "ComparisonOperator": "==",
+              "AvailableValues": [{ "ID": "PENDING", "Description": "p" }, { "ID": "FIRING", "Description": "f" }] },
+            { "Key": "slo", "Range": "0-1", "ComparisonOperator": ">=", "AvailableValues": null }] },
+        { "type": "workers_observability_real_time_issue", "filter_options": [] },
+    ] });
+
+    // ID-shaped values are parsed, with Range and operator.
+    let options = filter_options(&available);
+    let status = &options["workers_observability_alert"][0];
+    assert_eq!(status.ids, vec!["PENDING", "FIRING"]);
+    assert!(status.required());
+    assert!(!options["workers_observability_alert"][1].required());
+    let report = shape_report(&available, &none);
+    assert_eq!(
+        report["available_alerts"]["filter_options"]["workers_observability_alert"]["status"],
+        json!({ "range": "1-n", "comparison_operator": "==", "ids": ["PENDING", "FIRING"] })
+    );
+
+    // A required key with IDs gets all of them; the optional key is left out.
+    let plan = plan_monitors_with(&available, &none, &scripts, &BTreeMap::new());
+    assert!(plan.needs_filters.is_empty());
+    assert_eq!(plan.policies.len(), 2);
+    assert_eq!(
+        plan.policies[0]["filters"],
+        json!({ "status": ["PENDING", "FIRING"] })
+    );
+    let line = plan_line(&plan.policies[0]);
+    assert!(line.contains("PENDING") && line.contains("Workers Observability Monitor"));
+    let line = plan_line(&plan.policies[1]);
+    assert!(line.contains("Workers Issues automation") && line.contains("every Worker"));
+
+    // The real-time policy posts no `filters` key at all.
+    let body = policy_body(&plan.policies[1]);
+    assert!(body.get("filters").is_none(), "{body}");
+    assert!(policy_body(&plan.policies[0]).get("filters").is_some());
+
+    // A required key with no IDs: not planned, and listed with how to pass it.
+    let bare = json!({ "Workers": [
+        { "type": "workers_observability_alert", "filter_options": [{ "Key": "status", "Range": "1-n" }] } ] });
+    let plan = plan_monitors_with(&bare, &none, &scripts, &BTreeMap::new());
+    assert!(plan.policies.is_empty());
+    assert_eq!(plan.needs_filters.len(), 1);
+    assert_eq!(plan.needs_filters[0]["key"], "status");
+    assert_eq!(
+        plan.needs_filters[0]["alert_type"],
+        "workers_observability_alert"
+    );
+    assert!(
+        plan.needs_filters[0]["how"]
+            .as_str()
+            .unwrap()
+            .contains("filters:")
+    );
+
+    // Explicit filters win, once validated.
+    let given = json!({ "workers_observability_alert": { "status": ["FIRING"] } });
+    let explicit = validate_filters(&available, &given).unwrap();
+    let plan = plan_monitors_with(&available, &none, &scripts, &explicit);
+    assert_eq!(plan.policies[0]["filters"], json!({ "status": ["FIRING"] }));
+    let free = validate_filters(
+        &bare,
+        &json!({ "workers_observability_alert": { "status": ["x"] } }),
+    )
+    .unwrap();
+    let plan = plan_monitors_with(&bare, &none, &scripts, &free);
+    assert_eq!(plan.policies[0]["filters"], json!({ "status": ["x"] }));
+
+    // Bad input is an error, never a panic.
+    let bad = |v: serde_json::Value| validate_filters(&available, &v).unwrap_err();
+    assert!(bad(json!({ "workers_observability_alert": { "nope": ["a"] } })).contains("nope"));
+    let e = bad(json!({ "workers_observability_alert": { "status": ["GONE"] } }));
+    assert!(e.contains("PENDING") && e.contains("FIRING"), "{e}");
+    assert!(bad(json!({ "other_type": {} })).contains("other_type"));
+    assert!(bad(json!({ "workers_observability_alert": { "status": "FIRING" } })).contains("list"));
+    assert!(bad(json!({ "workers_observability_alert": { "status": [1] } })).contains("string"));
+    assert!(bad(json!({ "workers_observability_alert": { "status": [""] } })).contains("string"));
+    assert!(bad(json!({ "workers_observability_alert": { "status": [] } })).contains("1 to 20"));
+    assert!(bad(json!("x")).contains("object"));
+    let many: Vec<String> = (0..21).map(|i| i.to_string()).collect();
+    assert!(
+        validate_filters(
+            &bare,
+            &json!({ "workers_observability_alert": { "status": many } })
+        )
+        .is_err()
     );
 }
 
@@ -8444,6 +8545,102 @@ fn core_observability_spike_and_ci_price() {
     assert!((total - want).abs() < 1e-12, "{total} vs {want}");
     assert_eq!(by_class.len(), 1);
     assert_eq!(unpriced, vec!["mystery".to_string()]);
+}
+
+#[test]
+fn core_observability_monitors_updates() {
+    use pigeon_capabilities::observability::{
+        monitor_left_alone, plan_monitor_updates, update_line,
+    };
+    use serde_json::json;
+
+    let wanted = vec![json!({ "name": "pigeon: Workers errors",
+        "alert_type": "workers_observability_alert",
+        "filters": { "status": ["error", "fail"] }, "enabled": true })];
+    let email = "person@example.com";
+    let policy = |filters: Value, enabled: bool| {
+        json!([{ "id": "p1", "name": "pigeon: Workers errors",
+            "alert_type": "workers_observability_alert", "enabled": enabled,
+            "description": "kept", "alert_interval": "5m",
+            "filters": filters, "mechanisms": { "email": [{ "id": email }] } }])
+    };
+
+    // Identical (order differs): nothing to do.
+    let same = policy(json!({ "status": ["fail", "error"] }), true);
+    assert!(plan_monitor_updates(&wanted, &same).is_empty());
+
+    // Filters differ: one update with the diff; delivery and extra fields are kept.
+    let differ = policy(json!({ "status": ["error"] }), true);
+    let up = plan_monitor_updates(&wanted, &differ);
+    assert_eq!(up.len(), 1);
+    assert_eq!(up[0]["id"], "p1");
+    assert_eq!(
+        up[0]["changes"]["filters"]["to"],
+        json!({ "status": ["error", "fail"] })
+    );
+    assert!(up[0]["changes"]["enabled"].is_null());
+    assert_eq!(up[0]["body"]["mechanisms"]["email"][0]["id"], email);
+    assert_eq!(up[0]["body"]["description"], "kept");
+    assert_eq!(up[0]["body"]["alert_interval"], "5m");
+    assert_eq!(up[0]["body"]["enabled"], true);
+    assert_eq!(
+        up[0]["body"]["filters"],
+        json!({ "status": ["error", "fail"] })
+    );
+
+    // Disabled: an update; a missing filters list counts as `{}`.
+    let off = policy(json!({ "status": ["error", "fail"] }), false);
+    let up = plan_monitor_updates(&wanted, &off);
+    assert_eq!(up.len(), 1);
+    assert_eq!(
+        up[0]["changes"]["enabled"],
+        json!({ "from": false, "to": true })
+    );
+    assert!(up[0]["changes"]["filters"].is_null());
+    let bare = json!([{ "id": "p1", "name": "pigeon: Workers errors",
+        "alert_type": "workers_observability_alert", "enabled": true }]);
+    assert!(plan_monitor_updates(&wanted, &bare)[0]["changes"]["filters"].is_object());
+
+    // A policy that is not pigeon's is never touched, even with the same alert type.
+    let other = json!([{ "id": "p2", "name": "Workers errors",
+        "alert_type": "workers_observability_alert", "enabled": false, "filters": {} }]);
+    let named = vec![json!({ "name": "Workers errors",
+        "alert_type": "workers_observability_alert", "filters": {}, "enabled": true })];
+    assert!(plan_monitor_updates(&named, &other).is_empty());
+    assert!(plan_monitor_updates(&wanted, &other).is_empty());
+
+    // A pigeon policy of another type is left alone and reported.
+    let odd = json!([{ "id": "p3", "name": "pigeon: Workers errors",
+        "alert_type": "something_else", "enabled": false, "filters": {} }]);
+    assert!(plan_monitor_updates(&wanted, &odd).is_empty());
+    assert_eq!(
+        monitor_left_alone(&wanted, &odd),
+        vec!["`pigeon: Workers errors` exists as something_else; left alone"]
+    );
+
+    // Wanted delivery is merged in; counts show, ids do not.
+    let mut with_mail = wanted.clone();
+    with_mail[0]["mechanisms"] = json!({ "email": [{ "id": "other@example.com" }] });
+    let up = plan_monitor_updates(&with_mail, &same);
+    assert_eq!(up.len(), 1);
+    assert_eq!(
+        up[0]["changes"]["mechanisms"],
+        json!({ "from": { "email": 1 }, "to": { "email": 2 } })
+    );
+    assert_eq!(
+        up[0]["body"]["mechanisms"]["email"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+
+    // No change or diff text carries an existing email id.
+    let all = plan_monitor_updates(&with_mail, &off);
+    let text = format!("{} {}", all[0]["changes"], update_line(&all[0]));
+    assert!(!text.contains("example.com"), "an id leaked: {text}");
+    assert!(update_line(&all[0]).contains("delivery email 1 -> 2"));
+    assert!(update_line(&all[0]).contains("enabled false -> true"));
 }
 
 #[test]

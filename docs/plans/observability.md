@@ -217,8 +217,12 @@ pigeon cannot create them by API; the platform notification policies can be. Sli
   - delivery by email to the signed-in person's address (shown to them on the approval, not in
     tool output).
   Like `instance_plan`, a plan with changes asks the person's approval on the console.
-- `observability_monitors_apply {plan}`: once approved, creates exactly the planned policies
-  (`Notifications Write`), touching only policies named `pigeon: ...`; never deletes.
+- `observability_monitors_apply {plan}`: once approved, creates the planned policies and updates
+  existing `pigeon: ...` ones that differ (`Notifications Write`), touching only policies named
+  `pigeon: ...`; never deletes. An update is a full-body PUT of the wanted name, type, enabled
+  and filters, with the existing delivery kept (never removed) and the existing `description`
+  and `alert_interval`. A `pigeon: ...` policy of another alert type is reported and left alone.
+  The plan lines show the diff with delivery as types and counts, never ids.
 - For the person, in the dashboard (Alerts > Monitors), the monitors pigeon cannot create, with
   the SQL to paste: error rate per Worker over 5 minutes above 5% (SLO 99%), and any
   `console_error!` line from the Lander or the CI scheduler in 15 minutes.
@@ -371,6 +375,16 @@ Open items:
    `cache_creation_input_tokens`, and to price them, if the gateway's logs carry them.
 5. A `pigeon: ` billing usage watch, now that the live check gives `product` and `limit`: the
    product names are still to be read from Cloudflare.
+6. Rerun `observability_monitors_plan {check: true}` and read `filter_options`: the IDs and
+   Range of `status` for `workers_observability_alert`. Then plan again; pass `filters` if the
+   plan lists `needs_filters`. Whether Cloudflare accepts the all-IDs `status` filter is
+   unproved until the first apply.
+7. `workers_observability_real_time_issue` fires only through a Workers Issues automation
+   (`/workers/observability/issues/automations`) that names the policy. Not built. Until then
+   the policy never fires; the person may decline it.
+8. Update is built (2026-11-24 entry below) but not run live: the policies list may lack
+   `filters` (the plan then reads each `pigeon: ...` policy by id), and whether Cloudflare takes
+   the full-body PUT with `mechanisms` as read is unproved until the first apply that updates.
 
 - 2026-11-24: fix to `observability_monitors_apply`: creating `pigeon: Workers errors` failed
   live with Cloudflare 400 code 17103 "Filters selection must be provided". The live
@@ -397,3 +411,34 @@ Open items:
   deploys have no rows; the console's daily Cost chart (`src/models/src/daily.rs`) still shows
   the gateway's cost only; not run live. Rows are summed per provider, model and tag set when
   read.
+- 2026-11-24: filters of the `pigeon: ...` policies, replacing the `status = ["error"]` guess.
+  Sources: (1) Cloudflare OpenAPI (github.com/cloudflare/api-schemas), schema
+  `aaa_filter_options`: listed values are objects `{ID, Description}`, `Range` "1-n" reads as
+  required and "0-1" as optional; `aaa_filters` documents `status` only for health checks, so no
+  public doc lists `status` values for `workers_observability_alert`. (2) Cloudflare's MCP
+  server (github.com/cloudflare/mcp, `src/events/ans-bridge.ts`, `src/events/service.ts`): same
+  item shape; it creates a `workers_observability_real_time_issue` policy with no `filters` and
+  pairs it with a Workers Issues automation, without which the policy never fires. (3)
+  cloudflare-docs `webhook-payload-schema.mdx`: `workers_observability_alert` is the state
+  change of a Workers Observability Monitor, and its `status` is an alert state, not "error".
+  Changes in `observability.rs`: `available_filter_values` reads `ID` first (the old parser read
+  `Value`/`Name` and missed every listed value); the check report adds `filter_options` (Range,
+  ComparisonOperator, listed IDs per key); `DEFAULT_ERROR_STATUS` and `error_statuses` are gone.
+  Per filter key: the person's explicit filters win, else a script key gets pigeon's scripts,
+  else a required key with IDs gets all IDs, else a required key with no IDs leaves the policy
+  unplanned and in the plan answer's `needs_filters`; optional keys are left out. An empty
+  filter set is not posted (no `filters` field). `observability_monitors_plan` takes `filters`
+  (`{"<type>": {"<key>": [...]}}`), validated against the listed keys and IDs; the approval
+  payload keeps them as `inputs`, and apply reads them back and re-plans. A refusal's
+  `failed.why` is Cloudflare's text with only the account id hidden. Plan lines say what fires
+  each policy. Smoke: `core_observability_monitors_filters`. Not run live.
+- 2026-11-24: monitors update existing `pigeon: ...` policies. `plan_monitor_updates` (pure)
+  compares the wanted policies (`plan_monitors_with` against an empty list, with the person's
+  `filters`) with the existing ones by
+  exact name: filters per key as sets, `enabled`, and delivery merged as a union per type by id,
+  so an update never removes a delivery. A `pigeon: ...` policy of another alert type is left
+  alone and listed. The plan and approval carry `{policies, updates}`; apply re-plans, checks
+  the digest, posts the creates, then PUTs each update (full body, per Cloudflare's OpenAPI
+  schema and its own MCP server) and stops at the first refusal; the answer has `created`,
+  `updated` and `failed`. `read_alerts` reads a `pigeon: ...` policy by id when its list entry has
+  no `filters`. Smoke: `core_observability_monitors_updates`. Not run live.
