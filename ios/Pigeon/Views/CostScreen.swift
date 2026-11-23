@@ -304,7 +304,7 @@ struct CostScreen: View {
     private let gap: CGFloat = 12
 
     var body: some View {
-        Screen(errors: error.map { [$0] } ?? [], refresh: { await load() }) {
+        Screen(title: "Cost", root: true, errors: error.map { [$0] } ?? [], refresh: { await load() }) {
             VStack(alignment: .leading, spacing: gap) {
                 HStack {
                     Spacer(minLength: 0)
@@ -332,8 +332,6 @@ struct CostScreen: View {
                 side = max((width - gap) / 2, 80)
             }
         }
-        .navigationTitle("Cost")
-        .navigationBarTitleDisplayMode(.large)
         .task(id: range) { await load() }
         .onChange(of: range) { selection = nil }
         .onChange(of: selection) { announce() }

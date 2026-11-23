@@ -132,7 +132,7 @@ struct UsersView: View {
 
     var body: some View {
         Screen(
-            errors: [model.error].compactMap { $0 },
+            title: "Users", errors: [model.error].compactMap { $0 },
             side: Metrics.sideWide,
             refresh: { await model.load(session.client) }
         ) {
@@ -156,9 +156,6 @@ struct UsersView: View {
             }
             Footnote("Service users and apps appear under the person they act for.")
         }
-        .navigationTitle("Users")
-        .navigationBarTitleDisplayMode(.large)
-        .instanceMenu()
         .task { await model.load(session.client) }
     }
 
@@ -186,7 +183,7 @@ struct UserDetailView: View {
     let person: Person
 
     var body: some View {
-        Screen(errors: [], side: Metrics.sideWide, refresh: {}) {
+        Screen(title: "User", errors: [], side: Metrics.sideWide, refresh: {}) {
             VStack(spacing: 8) {
                 Avatar(name: person.name, initials: person.initials, picture: person.picture, size: 76)
                 Text(person.name).font(AppFont.name).foregroundStyle(Tokens.ink)
@@ -221,9 +218,6 @@ struct UserDetailView: View {
             }
             Footnote("Passkeys are added and removed in the console.")
         }
-        .navigationTitle("")
-        .navigationBarTitleDisplayMode(.inline)
-        .instanceMenu()
     }
 
     /// "Added 3 Mar 2026 · last used 5 Mar 2026" for a passkey.

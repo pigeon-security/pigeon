@@ -1,86 +1,44 @@
 import SwiftUI
 
-/// Settings: who is signed in, access, agents and sign out. Reached from the platform's row on
-/// the Instances tab.
+/// Settings: the instances at the top, then a section named after the current instance with
+/// who is signed in, access, agents and sign out (or, for a linked instance, its facts).
 struct SettingsView: View {
     let session: Session
-    let status: StatusModel
+    let sessions: SessionsModel
+    let onSwitchToPlatform: () -> Void
     @Environment(InstanceStore.self) private var store
     @State private var whoami = ToolModel("users_whoami")
     @State private var secrets = ToolModel("secrets_list")
     @State private var users = UsersModel()
     @State private var confirmSignOut = false
 
+    /// Whether the current instance is the platform, which has the full settings.
+    private var onPlatform: Bool { store.selected?.isPlatform ?? true }
+
     var body: some View {
         Screen(
-            errors: [whoami.error, secrets.error, users.error, status.loadError, status.actionError]
-                .compactMap { $0 },
+            title: "Settings", root: true,
+            errors: [
+                store.error, whoami.error, secrets.error, users.error, sessions.loadError,
+                sessions.actionError,
+            ].compactMap { $0 },
             refresh: { await reload() }
         ) {
-            Text(store.platform?.title ?? "Pigeon Platform")
-                .font(AppFont.body).foregroundStyle(Tokens.muted)
-                .padding(.leading, Metrics.sectionIndent)
-            profile
-            CardSection("Access") {
-                GroupedCard {
-                    NavigationLink {
-                        UsersView(session: session, model: users)
-                    } label: {
-                        row("Users", detail: users.loaded ? "\(users.people.count)" : "")
-                    }
-                    .buttonStyle(.plain)
-                    RowSeparator(inset: 16)
-                    NavigationLink {
-                        SecretsView(session: session)
-                    } label: {
-                        row("Secrets", detail: secretCount)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            CardSection("Agents") {
-                GroupedCard {
-                    HStack(spacing: 12) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Pause all agents").font(AppFont.row).foregroundStyle(Tokens.ink)
-                            Text(
-                                status.paused
-                                    ? "Paused: no run takes another turn"
-                                    : "Stops every run between turns"
-                            )
-                            .font(AppFont.meta).foregroundStyle(Tokens.muted)
+            CardSection("Instances") { instancesCard }
+            CardSection(store.selected?.title ?? "Pigeon Platform") {
+                VStack(alignment: .leading, spacing: Metrics.gap) {
+                    if onPlatform {
+                        platformSettings
+                    } else {
+                        InstanceFactsCard(store: store)
+                        if store.platform != nil {
+                            Button("Switch to Pigeon Platform", action: onSwitchToPlatform)
+                                .buttonStyle(ChipButtonStyle())
                         }
-                        Spacer(minLength: 8)
-                        Toggle(
-                            "Pause all agents",
-                            isOn: Binding(
-                                get: { status.paused },
-                                set: { on in Task { await status.setPaused(on, session.client) } })
-                        )
-                        .labelsHidden()
-                        .tint(Tokens.warn)
-                        .disabled(status.busy)
                     }
-                    .padding(.horizontal, 16)
-                    .frame(minHeight: 56)
                 }
-            }
-            GroupedCard {
-                Button {
-                    confirmSignOut = true
-                } label: {
-                    Text("Sign out")
-                        .font(AppFont.row).foregroundStyle(Tokens.warn)
-                        .padding(.horizontal, 16)
-                        .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
             }
         }
-        .navigationTitle("Settings")
-        .navigationBarTitleDisplayMode(.large)
-        .instanceMenu()
         .confirmationDialog(
             "Sign out of Pigeon?", isPresented: $confirmSignOut, titleVisibility: .visible
         ) {
@@ -90,6 +48,122 @@ struct SettingsView: View {
             Button("Cancel", role: .cancel) {}
         }
         .task { await reload() }
+    }
+
+    // MARK: Instances
+
+    /// Every instance in one grouped card; the current one is ticked, a tap switches to it.
+    @ViewBuilder
+    private var instancesCard: some View {
+        if store.instances.isEmpty {
+            PlainCard {
+                Text(store.error == nil ? "Loading…" : "No instances.")
+                    .font(AppFont.note).foregroundStyle(Tokens.muted)
+            }
+        } else {
+            GroupedCard {
+                ForEach(Array(store.instances.enumerated()), id: \.element.id) { index, instance in
+                    if index > 0 { RowSeparator(inset: 66) }
+                    instanceRow(instance)
+                }
+            }
+        }
+    }
+
+    /// One instance row: tile, title with a tick when current, and the subtitle.
+    private func instanceRow(_ instance: InstanceInfo) -> some View {
+        let current = instance.id == store.selected?.id
+        return Button {
+            store.select(instance.id)
+        } label: {
+            HStack(spacing: 12) {
+                Tile(size: 40, radius: 10, fill: current ? Tokens.accent : Tokens.chip) {
+                    Text(String(instance.title.prefix(1)).uppercased())
+                        .font(AppFont.initial)
+                        .foregroundStyle(current ? Tokens.onAccent : Tokens.ink)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(instance.title)
+                            .font(AppFont.cardTitle).foregroundStyle(Tokens.ink)
+                            .lineLimit(1)
+                        if current {
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(Tokens.accent)
+                        }
+                    }
+                    Text(instance.subtitle)
+                        .font(AppFont.meta).foregroundStyle(Tokens.muted)
+                        .lineLimit(1).truncationMode(.tail)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(14)
+            .frame(minHeight: 64)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: Platform settings
+
+    /// The platform's settings: signed-in card, access, agents, sign out.
+    @ViewBuilder
+    private var platformSettings: some View {
+        profile
+        GroupedCard {
+            NavigationLink {
+                UsersView(session: session, model: users)
+            } label: {
+                row("Users", detail: users.loaded ? "\(users.people.count)" : "")
+            }
+            .buttonStyle(.plain)
+            RowSeparator(inset: 16)
+            NavigationLink {
+                SecretsView(session: session)
+            } label: {
+                row("Secrets", detail: secretCount)
+            }
+            .buttonStyle(.plain)
+        }
+        GroupedCard {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Pause all agents").font(AppFont.row).foregroundStyle(Tokens.ink)
+                    Text(
+                        sessions.paused
+                            ? "Paused: no run takes another turn"
+                            : "Stops every run between turns"
+                    )
+                    .font(AppFont.meta).foregroundStyle(Tokens.muted)
+                }
+                Spacer(minLength: 8)
+                Toggle(
+                    "Pause all agents",
+                    isOn: Binding(
+                        get: { sessions.paused },
+                        set: { on in Task { await sessions.setPaused(on, session.client) } })
+                )
+                .labelsHidden()
+                .tint(Tokens.warn)
+                .disabled(sessions.busy)
+            }
+            .padding(.horizontal, 16)
+            .frame(minHeight: 56)
+        }
+        GroupedCard {
+            Button {
+                confirmSignOut = true
+            } label: {
+                Text("Sign out")
+                    .font(AppFont.row).foregroundStyle(Tokens.warn)
+                    .padding(.horizontal, 16)
+                    .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
     }
 
     /// The signed-in user: avatar and name.
@@ -116,7 +190,7 @@ struct SettingsView: View {
         (secrets.data as? [[String: Any]]).map { "\($0.count)" } ?? ""
     }
 
-    /// One row of the Access card: a name, a count and a chevron.
+    /// One row of the access card: a name, a count and a chevron.
     private func row(_ title: String, detail: String) -> some View {
         HStack(spacing: 8) {
             Text(title).font(AppFont.row).foregroundStyle(Tokens.ink)
@@ -129,12 +203,14 @@ struct SettingsView: View {
         .contentShape(Rectangle())
     }
 
-    /// Loads everything on the screen.
+    /// Loads everything on the screen. The platform's data loads only on the platform.
     private func reload() async {
+        await store.load(session.client)
+        guard onPlatform else { return }
         await whoami.load(session.client)
         await secrets.load(session.client)
         await users.load(session.client)
-        await status.load(session.client)
+        await sessions.load(session.client)
     }
 }
 
@@ -145,7 +221,7 @@ struct SecretsView: View {
 
     var body: some View {
         Screen(
-            errors: [secrets.error].compactMap { $0 },
+            title: "Secrets", errors: [secrets.error].compactMap { $0 },
             refresh: { await secrets.load(session.client) }
         ) {
             if let rows = secrets.data as? [[String: Any]] {
@@ -174,9 +250,6 @@ struct SecretsView: View {
                 ErrorBanner(text: "secrets_list failed: the answer was not a list of secrets.")
             }
         }
-        .navigationTitle("Secrets")
-        .navigationBarTitleDisplayMode(.large)
-        .instanceMenu()
         .task { await secrets.load(session.client) }
     }
 }

@@ -47,10 +47,10 @@ private struct MinimizeTabBar: ViewModifier {
 /// The signed-in tabs or the sign-in screen, by whether a session exists.
 struct Root: View {
     let session: Session
-    @State private var approvals = ApprovalsModel()
-    @State private var status = StatusModel()
+    @State private var needs = NeedsYouModel()
+    @State private var sessions = SessionsModel()
     @State private var store = InstanceStore()
-    @State private var tab: AppTab = .approvals
+    @State private var tab: AppTab = .sessions
 
     var body: some View {
         Group {
@@ -70,15 +70,15 @@ struct Root: View {
                 Tab(item.title, systemImage: item.symbol, value: item) {
                     NavigationStack { screen(item) }
                 }
-                .badge(item == .approvals ? approvals.count : 0)
+                .badge(item == .sessions ? needs.count : 0)
             }
         }
         .tint(Tokens.accent)
         .modifier(MinimizeTabBar())
         .environment(store)
-        .environment(\.showAllInstances) { tab = .instances }
-        // Counts waiting items for the badge even before the Approvals tab is opened.
-        .task { await approvals.load(session.client) }
+        .environment(\.showAllInstances) { tab = .settings }
+        // Counts waiting items for the badge even before the Sessions tab is opened.
+        .task { await needs.load(session.client) }
         .task { await store.load(session.client) }
         // Asks to allow notifications and registers the device, at launch and after sign-in.
         .task { await Push.shared.start(session.client) }
@@ -86,22 +86,19 @@ struct Root: View {
         .onChange(of: store.instances.count) { _, _ in keepTabValid() }
     }
 
-    /// The root screen of a tab, with the instance menu in its navigation bar.
+    /// The root screen of a tab. Each screen draws its own title row.
     @ViewBuilder
     private func screen(_ item: AppTab) -> some View {
         switch item {
-        case .approvals:
-            ApprovalsView(session: session, model: approvals).instanceMenu()
-        case .status:
-            StatusView(session: session, model: status, openApprovals: { tab = .approvals })
-                .instanceMenu()
+        case .sessions:
+            SessionsView(session: session, sessions: sessions, needs: needs)
         case .cost:
-            CostScreen(session: session).instanceMenu()
-        case .instances:
-            InstancesView(session: session, store: store, status: status).instanceMenu()
+            CostScreen(session: session)
+        case .settings:
+            SettingsView(
+                session: session, sessions: sessions, onSwitchToPlatform: switchToPlatform)
         case .home:
             HomeView(session: session, store: store, onSwitchToPlatform: switchToPlatform)
-                .instanceMenu()
         }
     }
 

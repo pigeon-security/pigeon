@@ -43,19 +43,76 @@ struct ErrorBanner: View {
     }
 }
 
-/// A screen: dot grid, errors at the top, pull to refresh.
+/// The page title row: a left-aligned large title with an optional control at the right.
+struct ScreenHeader: View {
+    let title: String
+    let trailing: AnyView?
+
+    /// A header reading `title`, with `trailing` at the right of the same row.
+    init(_ title: String, trailing: AnyView? = nil) {
+        self.title = title
+        self.trailing = trailing
+    }
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 12) {
+            Text(title)
+                .font(AppFont.largeTitle).tracking(-0.4)
+                .foregroundStyle(Tokens.ink)
+                .lineLimit(1).minimumScaleFactor(0.7)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityAddTraits(.isHeader)
+            if let trailing { trailing }
+        }
+        .frame(minHeight: 44)
+    }
+}
+
+/// A small rounded label: text on a soft fill.
+struct Chip: View {
+    let text: String
+    let colour: Color
+    let fill: Color
+
+    /// A chip reading `text` in `colour` on `fill`.
+    init(_ text: String, colour: Color = Tokens.muted, fill: Color = Tokens.chip) {
+        self.text = text
+        self.colour = colour
+        self.fill = fill
+    }
+
+    var body: some View {
+        Text(text)
+            .font(AppFont.label)
+            .foregroundStyle(colour)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 3)
+            .background(Capsule().fill(fill))
+    }
+}
+
+/// A screen: dot grid, title row, errors at the top, pull to refresh.
 struct Screen<Content: View>: View {
+    let title: String?
+    let trailing: AnyView?
+    let root: Bool
     let errors: [String]
     let side: CGFloat
     let refresh: @MainActor () async -> Void
     let content: Content
 
-    /// A screen with `side` padding at the page edges.
+    /// A screen with `side` padding at the page edges. With a `title`, the shared header is drawn
+    /// and the system title is hidden; a `root` screen hides the navigation bar, a pushed one
+    /// keeps it for the back button.
     init(
+        title: String? = nil, trailing: AnyView? = nil, root: Bool = false,
         errors: [String], side: CGFloat = Metrics.side,
         refresh: @escaping @MainActor () async -> Void,
         @ViewBuilder content: () -> Content
     ) {
+        self.title = title
+        self.trailing = trailing
+        self.root = root
         self.errors = errors
         self.side = side
         self.refresh = refresh
@@ -67,15 +124,20 @@ struct Screen<Content: View>: View {
             DotGrid()
             ScrollView {
                 VStack(alignment: .leading, spacing: Metrics.gap) {
+                    if let title { ScreenHeader(title, trailing: trailing) }
                     ForEach(errors, id: \.self) { ErrorBanner(text: $0) }
                     content
                 }
                 .padding(.horizontal, side)
                 .padding(.top, 4)
-                .padding(.bottom, 16)
+                // Room for the floating tab bar, so the last card's buttons stay reachable.
+                .padding(.bottom, 80)
             }
             .refreshable { await refresh() }
         }
+        .navigationTitle("")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar(title != nil && root ? .hidden : .automatic, for: .navigationBar)
     }
 }
 

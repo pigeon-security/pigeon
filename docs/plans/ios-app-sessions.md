@@ -137,3 +137,4 @@ Phases 1, 2 and 3 run at once (2 is written against the contracts above); they l
 - 2026-11-23: plan written. Read: ios-app-next.md, ios.md, ai-agents.md §6, agent-costs.md, the policy and CI
   files, `cost.rs`, `models_daily`, the run index and `ask_person`. Live: `models_usage` 24 h =
   $98.88 (truncated at 2,000 logs); the last release is build 42 (`f0d28d4`).
+- 2026-11-24: phase 2 app built (branch `claude/ai-agent-NeRojTZPJpPG`): three tabs, shared title row, Sessions, Needs you, Settings with Instances, Home; StatusView, ApprovalsView and InstancesView removed. Cost has only its title line changed.

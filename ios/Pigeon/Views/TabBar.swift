@@ -3,15 +3,14 @@ import UIKit
 
 /// A tab of the app. The server names them in `instances_tabs`.
 enum AppTab: String, CaseIterable {
-    case approvals, status, cost, instances, home
+    case sessions, cost, settings, home
 
     /// The label under the icon.
     var title: String {
         switch self {
-        case .approvals: return "Approvals"
-        case .status: return "Status"
+        case .sessions: return "Sessions"
         case .cost: return "Cost"
-        case .instances: return "Instances"
+        case .settings: return "Settings"
         case .home: return "Home"
         }
     }
@@ -19,11 +18,22 @@ enum AppTab: String, CaseIterable {
     /// The SF Symbol for the icon.
     var symbol: String {
         switch self {
-        case .approvals: return "checkmark.circle"
-        case .status: return "waveform.path.ecg"
+        case .sessions: return "waveform.path.ecg"
         case .cost: return "chart.bar"
-        case .instances: return "server.rack"
+        case .settings: return "gearshape"
         case .home: return "house"
+        }
+    }
+
+    /// The tab a server tab name stands for: `approvals` and `status` are Sessions, `instances`
+    /// is Settings. Nil for a name this app does not know.
+    static func fromServer(_ name: String) -> AppTab? {
+        switch name {
+        case "approvals", "status", "sessions": return .sessions
+        case "instances", "settings": return .settings
+        case "cost": return .cost
+        case "home": return .home
+        default: return nil
         }
     }
 }
@@ -64,7 +74,7 @@ final class InstanceStore {
     var selected: InstanceInfo? { instances.first { $0.id == selectedId } ?? platform }
 
     /// The tabs to show. Before the first load, the platform's four.
-    var tabs: [AppTab] { selected?.tabs ?? [.approvals, .status, .cost, .instances] }
+    var tabs: [AppTab] { selected?.tabs ?? [.sessions, .cost, .settings] }
 
     /// Chooses an instance and keeps the choice on this device.
     func select(_ id: String) {
@@ -108,12 +118,16 @@ final class InstanceStore {
         var kind = row["account_kind"] as? String ?? ""
         if kind.isEmpty { kind = (row["account"] as? [String: Any])?["kind"] as? String ?? "linked" }
         let zones = row["zones"] as? [String] ?? []
-        var tabs = (row["tabs"] as? [String] ?? []).compactMap { AppTab(rawValue: $0) }
-        if tabs.isEmpty {
-            tabs = kind == "home" ? [.approvals, .status, .cost, .instances] : [.home, .instances]
+        var tabs: [AppTab] = []
+        for tab in (row["tabs"] as? [String] ?? []).compactMap({ AppTab.fromServer($0) })
+        where !tabs.contains(tab) {
+            tabs.append(tab)
         }
-        // The Instances tab always stays, so the person can always switch back.
-        if !tabs.contains(.instances) { tabs.append(.instances) }
+        if tabs.isEmpty {
+            tabs = kind == "home" ? [.sessions, .cost, .settings] : [.home, .settings]
+        }
+        // Settings always stays, so the person can always switch back.
+        if !tabs.contains(.settings) { tabs.append(.settings) }
         let facts = row["facts"] as? [String: Any] ?? [:]
         var website = facts["website"] as? String
         var site = facts["site"] as? String
@@ -135,56 +149,55 @@ final class InstanceStore {
     }
 }
 
-/// The action for "All instances" in the instance menu. Root sets it to open the Instances tab.
+/// The action for "All instances" in the instance menu. Root sets it to open the Settings tab.
 extension EnvironmentValues {
     @Entry var showAllInstances: () -> Void = {}
 }
 
-/// The instance switcher: a menu in the navigation bar that lists the instances and "All instances".
-struct InstanceMenu: ViewModifier {
+/// The instance switcher: the instance's initial in a round avatar and a chevron, as a menu that
+/// lists the instances and "All instances". Only Sessions and Home carry it.
+struct InstanceSwitcher: View {
     @Environment(InstanceStore.self) private var store
     @Environment(\.showAllInstances) private var showAllInstances
 
-    /// The SF Symbol for the current instance: its first letter in a circle, else a server.
-    private var symbol: String {
-        guard let letter = store.selected?.title.lowercased().first,
-            letter >= "a", letter <= "z"
-        else { return "server.rack" }
-        return "\(letter).circle"
+    /// The first letter of the current instance's name, in capitals.
+    private var initial: String {
+        String((store.selected?.title ?? "?").prefix(1)).uppercased()
     }
 
-    func body(content: Content) -> some View {
-        content.toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Menu {
-                    if !store.instances.isEmpty {
-                        Section("Switch instance") {
-                            ForEach(store.instances) { i in
-                                Button {
-                                    store.select(i.id)
-                                } label: {
-                                    if i.id == store.selected?.id {
-                                        Label(i.title, systemImage: "checkmark")
-                                    } else {
-                                        Text(i.title)
-                                    }
-                                    Text(i.subtitle)
-                                }
+    var body: some View {
+        Menu {
+            if !store.instances.isEmpty {
+                Section("Switch instance") {
+                    ForEach(store.instances) { i in
+                        Button {
+                            store.select(i.id)
+                        } label: {
+                            if i.id == store.selected?.id {
+                                Label(i.title, systemImage: "checkmark")
+                            } else {
+                                Text(i.title)
                             }
+                            Text(i.subtitle)
                         }
-                        Divider()
                     }
-                    Button("All instances", systemImage: "square.grid.2x2") { showAllInstances() }
-                } label: {
-                    Image(systemName: symbol)
                 }
-                .accessibilityLabel("Instance: \(store.selected?.title ?? "none")")
+                Divider()
             }
+            Button("All instances", systemImage: "square.grid.2x2") { showAllInstances() }
+        } label: {
+            HStack(spacing: 6) {
+                Text(initial)
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(Tokens.onAccent)
+                    .frame(width: 32, height: 32)
+                    .background(Circle().fill(Tokens.accent))
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Tokens.muted)
+            }
+            .contentShape(Rectangle())
         }
+        .accessibilityLabel("Instance: \(store.selected?.title ?? "none")")
     }
-}
-
-extension View {
-    /// Adds the instance switcher menu to the navigation bar.
-    func instanceMenu() -> some View { modifier(InstanceMenu()) }
 }
