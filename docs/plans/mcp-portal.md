@@ -1,6 +1,6 @@
 # External MCP access through a Cloudflare MCP server portal
 
-Status: **phases 0 to 4 done** (21 November).
+Status: **phases 0 to 4 done** (21 November). Phase 6, a second client (Grok Bot), is planned below (23 November).
 - The portal `pigeon` is live at `https://mcp.pigeon.dev/mcp`, and the claude.ai connector "Pigeon MCP" is the only way sessions reach pigeon.
 - Every landing syncs the portal once it has deployed. `portal_sync` runs the same sync by hand.
 - The old "Pigeon" connector is removed. Its OAuth client `Claude` and the stray `probe` are revoked.
@@ -227,3 +227,73 @@ Zero Trust (one.dash.cloudflare.com), the pigeon account:
 
 None of these steps are possible from a session: Zero Trust settings and claude.ai connectors
 are outside what the proxy and the parent token are used for.
+
+## Phase 6: a second client, Grok Bot (23 November)
+
+The person is trying Grok Bot as a second way to use pigeon's MCP. Its OAuth sign-in to
+`mcp.pigeon.dev` failed with a `redirect_uri` error. The portal's Access application allows
+dynamically registered clients only on the redirect URIs it lists, plus localhost and loopback.
+Grok Bot's callback is not on that list.
+
+### What the portal's OAuth is today
+
+The portal's public metadata (`https://mcp.pigeon.dev/.well-known/oauth-protected-resource` and
+`/.well-known/oauth-authorization-server`), read on 23 November:
+
+| Field | Value |
+| --- | --- |
+| Authorization server | `https://pigeon-security.cloudflareaccess.com` (team `pigeon-security`) |
+| Registration endpoint (DCR) | `…/cdn-cgi/access/oauth/registration`: on |
+| Grant types | `authorization_code`, `refresh_token` |
+| PKCE | `S256` only |
+| Token endpoint auth | `client_secret_basic`, `client_secret_post`, `none` |
+| Response type and mode | `code`, `query` |
+
+The Access application behind the portal has type `mcp_portal` and domain `mcp.pigeon.dev`.
+Phase 0 recorded its OAuth settings from the dashboard: Managed OAuth on, localhost and loopback
+clients allowed, and one allowed redirect URI, `https://claude.ai/api/mcp/auth_callback`. Its
+policy is `mcp-portal-owner` (Allow, the person's email).
+
+In Cloudflare's API, these settings are the application's `oauth_configuration`:
+`enabled`, `dynamic_client_registration` (`enabled`, `allow_any_on_localhost`,
+`allow_any_on_loopback`, `allowed_uris`) and `grant` (`access_token_lifetime`,
+`session_duration`). PKCE (S256) and the two grants are not fields: Access always requires
+them. The MCP portal object (`…/ai-controls/mcp/portals/{id}`) holds no redirect settings.
+An Access application has GET and PUT, but no PATCH. A change is therefore a read, then a PUT
+of the whole application with one field changed.
+
+### Grok Bot's callback URI
+
+The callback is not known yet:
+- xAI's docs (`docs.x.ai`: Grok Connectors, Custom MCP connectors, the Grok CLI's MCP servers)
+  publish no callback URL for custom MCP connectors. The CLI signs in through a local browser
+  flow, which the localhost and loopback settings already allow.
+- A refused registration or authorization shows its `redirect_uri` on the error page Grok Bot
+  shows. pigeon has no tool that reads Access's logs, and nothing tonight could call one.
+- No URI is guessed. Wildcards and broad patterns (`/*`) are never added.
+
+### The tool
+
+`portal_oauth_redirects` changes one exact URI on the portal Access application's
+`allowed_uris`, in the plan-then-approve style of `observability_monitors_plan`:
+- `{"action": "list"}` reads only. It shows the application's id, name, type, domain,
+  `oauth_configuration` and its policies' ids and names, never the policies' rules.
+- `{"action": "add" | "remove", "uri": "https://…"}` checks the URI and plans the change. The
+  URI must be one exact HTTPS URI, already decoded, with no `*`. The plan shows the list before
+  and after, and asks the person's approval on the console's Approvals tab.
+- `portal_oauth_redirects_apply {"plan": "<approval id>"}` reads the application again,
+  checks that the plan is still the approved one, and PUTs it back with only `allowed_uris`
+  changed. Policies are kept as links to the same reusable policies, in the same order. Then it
+  reads the application once more and reports any field other than `allowed_uris` that
+  differs.
+
+What stays unchanged: the Access policy (who is allowed in), DCR on, localhost and loopback as
+they are, the grant settings, every other Access application.
+
+The tool is latent until someone calls it. For Grok Bot, the person:
+1. Starts Grok Bot's sign-in again and copies the `redirect_uri` from the error, decoded
+   (`%3A` → `:`, `%2F` → `/`).
+2. Calls `portal_oauth_redirects {"action": "add", "uri": "<that URI>"}`, approves the plan
+   with their passkey, then calls `portal_oauth_redirects_apply {"plan": "<id>"}`.
+
+Rollback: the same calls with `"action": "remove"`.
