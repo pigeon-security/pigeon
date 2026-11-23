@@ -1087,6 +1087,33 @@ impl Lander {
         Ok(out)
     }
 
+    /// Whether the rollback of the incident of failed deploy `failed` is skipped: nothing was
+    /// uploaded ([`lanes::never_uploaded`], from the exit code in the deploy's detail) and
+    /// the Worker's newest earlier deploy is the succeeded one `last_good` names.
+    fn rollback_skipped(&self, failed: &DeployRow) -> Result<bool> {
+        let code = failed.detail.as_deref().and_then(lanes::exit_code_in);
+        if !lanes::never_uploaded(&failed.state, code) {
+            return Ok(false);
+        }
+        #[derive(Deserialize)]
+        struct I {
+            id: i64,
+        }
+        let newest: Option<I> = self.db.row(
+            "SELECT id FROM deploys WHERE worker = ? AND id < ? ORDER BY id DESC LIMIT 1",
+            vec![failed.worker.as_str().into(), failed.id.into()],
+        )?;
+        let good: Option<I> = self.db.row(
+            "SELECT id FROM deploys WHERE worker = ? AND state = 'succeeded' AND id < ? ORDER BY id DESC LIMIT 1",
+            vec![failed.worker.as_str().into(), failed.id.into()],
+        )?;
+        Ok(lanes::skip_rollback(
+            true,
+            newest.map(|n| n.id),
+            good.map(|g| g.id),
+        ))
+    }
+
     /// Opens an incident for lane deploy `d`, which just failed: its Worker's last good build
     /// before it, and the landings it included, are what [`lanes::bisect`] works from.
     fn open_incident(&self, d: &DeployRow) -> Result<()> {
@@ -1095,12 +1122,28 @@ impl Lander {
             "SELECT * FROM deploys WHERE worker = ? AND state = 'succeeded' AND id < ? ORDER BY id DESC LIMIT 1",
             vec![d.worker.as_str().into(), d.id.into()],
         )?;
+        let skipped = match (&good, self.deploy(d.id)?) {
+            (Some(_), Some(f)) => self.rollback_skipped(&f)?,
+            _ => false,
+        };
         let last_good = good.map(|g| lanes::Good {
             commit: g.commit_sha,
             covers: g.covers,
         });
         let t = now();
-        let summary = if d.worker == CORE_WORKER {
+        let summary = if skipped && d.worker == CORE_WORKER {
+            format!(
+                "the core deploy of {} failed; nothing was uploaded, so core is still on its good build",
+                d.commit_sha
+            )
+        } else if skipped {
+            format!(
+                "{}'s deploy of {} failed; nothing was uploaded, so no rollback, then deploying the {} included commits one at a time, oldest first",
+                d.worker,
+                d.commit_sha,
+                included.len()
+            )
+        } else if d.worker == CORE_WORKER {
             format!(
                 "the core deploy of {} failed; rolling core back to its last good build that holds this Lander, if there is one; not bisected (core runs the Lander)",
                 d.commit_sha
@@ -1234,23 +1277,29 @@ impl Lander {
             let t = now();
             // Core runs the Lander: rolled back only to a build holding this Lander, never
             // bisected (`lanes::core_incident`).
+            let skipped = match self.deploy(inc.failed_deploy)? {
+                Some(f) => self.rollback_skipped(&f)?,
+                None => false,
+            };
             let next = if inc.worker == CORE_WORKER {
                 let failed: Option<DeployRow> = self.deploy(inc.failed_deploy)?;
                 let failed_commit = failed.map(|d| d.commit_sha).unwrap_or_default();
-                lanes::core_incident(
+                lanes::core_incident_from(
                     last_good.as_ref(),
                     self.core_lander_since()?,
                     &failed_commit,
                     &included,
                     &tried,
+                    skipped,
                 )
             } else {
-                lanes::bisect(
+                lanes::bisect_from(
                     &inc.worker,
                     last_good.as_ref(),
                     &included,
                     &tried,
                     lanes::REDEPLOYS,
+                    skipped,
                 )
             };
             match next {
@@ -1280,8 +1329,9 @@ impl Lander {
                         vec![
                             (tried.len() as i64 + 1).into(),
                             format!(
-                                "{}'s deploy failed; redeploy {} of at most {} ({}): {commit}",
+                                "{}'s deploy failed{}; redeploy {} of at most {} ({}): {commit}",
                                 inc.worker,
+                                if skipped { " (nothing was uploaded)" } else { "" },
                                 tried.len() + 1,
                                 lanes::REDEPLOYS,
                                 purpose.name()
@@ -1304,7 +1354,12 @@ impl Lander {
                         vec![
                             state.into(),
                             opt(v.guilty.as_deref()),
-                            v.summary.as_str().into(),
+                            if skipped && inc.worker != CORE_WORKER {
+                                format!("{}; nothing was uploaded, so no rollback", v.summary)
+                            } else {
+                                v.summary.clone()
+                            }
+                            .into(),
                             (v.redeploys as i64).into(),
                             t.into(),
                             t.into(),
@@ -1641,10 +1696,13 @@ impl Lander {
             }
             return Ok(());
         };
-        let Some((passed, detail)) = self.job_ended(job).await? else {
+        let Some((passed, detail, exit_code)) = self.job_ended_code(job).await? else {
             return Ok(());
         };
-        let detail = format!("{}: {detail}", worker.script);
+        let mut detail = format!("{}: {detail}", worker.script);
+        if let Some(c) = exit_code {
+            detail.push_str(&format!(" (exit code {c})"));
+        }
         let to = if passed {
             lanes::DeployState::Succeeded
         } else {
@@ -1888,6 +1946,16 @@ impl Lander {
 
     /// A CI job's state, as its scheduler holds it: `Some(passed)` once it has ended.
     async fn job_ended(&self, job: &str) -> Result<Option<(bool, String)>> {
+        Ok(self
+            .job_ended_code(job)
+            .await?
+            .map(|(passed, detail, _)| (passed, detail)))
+    }
+
+    /// [`Self::job_ended`], with the job's exit code too (kept in memory, then written into the
+    /// deploy's detail as `(exit code N)`). The exit code is returned only when the job's state
+    /// is exactly `failed`; for `timed_out`, `cancelled` and `error` it is `None`.
+    async fn job_ended_code(&self, job: &str) -> Result<Option<(bool, String, Option<i64>)>> {
         let status = durable::call(
             &self.env,
             CI_BINDING,
@@ -1908,7 +1976,12 @@ impl Lander {
             Some(d) => format!("CI job {job}: {state}: {d}"),
             None => format!("CI job {job}: {state}"),
         };
-        Ok(Some((state == "succeeded", detail)))
+        let exit_code = if state == "failed" {
+            status["exit_code"].as_i64()
+        } else {
+            None
+        };
+        Ok(Some((state == "succeeded", detail, exit_code)))
     }
 
     /// Runs `tool` as the landing's caller, through the same dispatch as `/mcp`.

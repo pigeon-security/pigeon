@@ -1035,6 +1035,79 @@ fn land_attributes_a_failed_deploy() {
     }
 }
 
+#[test]
+fn core_land_skips_the_rollback_when_nothing_uploaded() {
+    use pigeon_capabilities::land::lanes::{
+        self, Good, Included, Next, Purpose, REDEPLOYS, never_uploaded, skip_rollback,
+    };
+    // Only a failed job with exit code 3 never uploaded.
+    assert!(never_uploaded("failed", Some(3)));
+    assert!(!never_uploaded("failed", Some(1)));
+    assert!(!never_uploaded("timed_out", Some(3)));
+    assert!(!never_uploaded("error", Some(3)));
+    assert!(!never_uploaded("cancelled", Some(3)));
+    assert!(!never_uploaded("failed", None));
+    assert_eq!(
+        lanes::exit_code_in("w: CI job j: failed (exit code 3)"),
+        Some(3)
+    );
+    assert_eq!(lanes::exit_code_in("w: CI job j: failed"), None);
+
+    // The rollback is skipped only when last_good is the newest earlier deploy.
+    assert!(skip_rollback(true, Some(4), Some(4)));
+    assert!(!skip_rollback(true, Some(5), Some(4)));
+    assert!(!skip_rollback(true, Some(4), None));
+    assert!(!skip_rollback(true, None, None));
+    assert!(!skip_rollback(false, Some(4), Some(4)));
+
+    let included = |ids: &[i64]| -> Vec<Included> {
+        ids.iter()
+            .map(|at| Included {
+                id: format!("L{at}"),
+                commit: format!("c{at}"),
+                merged_at: *at,
+            })
+            .collect()
+    };
+    let g3 = Good {
+        commit: "c3".into(),
+        covers: 3,
+    };
+    // Bisect goes straight to bisecting; one landing is the cause, nothing is redeployed.
+    let two = included(&[5, 6]);
+    match lanes::bisect_from("sites", Some(&g3), &two, &[], REDEPLOYS, true) {
+        Next::Deploy {
+            purpose, commit, ..
+        } => {
+            assert_eq!((purpose, commit.as_str()), (Purpose::Bisect, "c5"));
+        }
+        other => panic!("not a deploy: {other:?}"),
+    }
+    match lanes::bisect_from("sites", Some(&g3), &included(&[5]), &[], REDEPLOYS, true) {
+        Next::Done(v) => {
+            assert_eq!((v.guilty.as_deref(), v.redeploys), (Some("L5"), 0));
+            assert_eq!(v.on, Some(g3.clone()));
+        }
+        other => panic!("not done: {other:?}"),
+    }
+    // Core ends at once, still on its good build.
+    match lanes::core_incident_from(Some(&g3), None, "c7", &two, &[], true) {
+        Next::Done(v) => {
+            assert_eq!((v.on, v.redeploys), (Some(g3.clone()), 0));
+            assert!(v.summary.contains("nothing was uploaded"));
+        }
+        other => panic!("not done: {other:?}"),
+    }
+    // Not skipped: the rollback comes first, as before.
+    assert!(matches!(
+        lanes::bisect_from("sites", Some(&g3), &two, &[], REDEPLOYS, false),
+        Next::Deploy {
+            purpose: Purpose::Rollback,
+            ..
+        }
+    ));
+}
+
 // ---- deploy proxy ----
 
 #[test]

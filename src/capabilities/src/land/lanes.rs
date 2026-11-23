@@ -416,11 +416,50 @@ pub fn bisect(
     tried: &[Tried],
     budget: usize,
 ) -> Next {
+    bisect_from(worker, last_good, included, tried, budget, false)
+}
+
+/// Whether a failed deploy job never uploaded: it `failed` with exit code 3, which the deploy
+/// script uses only when it stopped before its first real upload. Any other end, or no exit
+/// code (every job before that exit code existed), may have uploaded.
+pub fn never_uploaded(state: &str, exit_code: Option<i64>) -> bool {
+    state == "failed" && exit_code == Some(3)
+}
+
+/// The exit code a deploy's stored detail records as `(exit code N)`, if any. The last such
+/// mark wins.
+pub fn exit_code_in(detail: &str) -> Option<i64> {
+    let at = detail.rfind("(exit code ")? + "(exit code ".len();
+    let rest = &detail[at..];
+    rest[..rest.find(')')?].trim().parse().ok()
+}
+
+/// Whether the rollback is skipped: nothing was uploaded, and the Worker's newest earlier
+/// deploy of any purpose (`newest_earlier`, a deploy id) is the succeeded one `last_good`
+/// names (`last_good`, a deploy id). Then the Worker is still on its good build.
+pub fn skip_rollback(
+    never_uploaded: bool,
+    newest_earlier: Option<i64>,
+    last_good: Option<i64>,
+) -> bool {
+    never_uploaded && last_good.is_some() && newest_earlier == last_good
+}
+
+/// [`bisect`], where `rolled_back` says the Worker is already on `last_good`, so no rollback
+/// is deployed and `tried` holds only the bisect steps.
+pub fn bisect_from(
+    worker: &str,
+    last_good: Option<&Good>,
+    included: &[Included],
+    tried: &[Tried],
+    budget: usize,
+    rolled_back: bool,
+) -> Next {
     let k = included.len();
     let ids = |n: usize| -> Vec<String> { included[..n].iter().map(|l| l.id.clone()).collect() };
     let mut good: Option<Good> = last_good.cloned();
     // Whether the Worker is on a good build; at first it is on the one that failed.
-    let mut on_good = false;
+    let mut on_good = rolled_back && last_good.is_some();
     // The included landings before `idx` deployed and passed.
     let mut idx = 0;
     let mut guilty: Option<(usize, String)> = None;
@@ -617,6 +656,44 @@ pub fn core_incident(
     included: &[Included],
     tried: &[Tried],
 ) -> Next {
+    core_incident_from(
+        last_good,
+        lander_since,
+        failed_commit,
+        included,
+        tried,
+        false,
+    )
+}
+
+/// [`core_incident`], where `rolled_back` says nothing was uploaded and core is still on
+/// `last_good`: the incident ends at once with no redeploy.
+pub fn core_incident_from(
+    last_good: Option<&Good>,
+    lander_since: Option<i64>,
+    failed_commit: &str,
+    included: &[Included],
+    tried: &[Tried],
+    rolled_back: bool,
+) -> Next {
+    if let (true, Some(good)) = (rolled_back, last_good) {
+        return Next::Done(Verdict {
+            guilty: None,
+            passed: Vec::new(),
+            failed: included
+                .iter()
+                .map(|l| (l.id.clone(), CORE_NOT_BISECTED.to_string()))
+                .collect(),
+            summary: format!(
+                "the core deploy at commit {failed_commit} failed; nothing was uploaded, so core \
+                 is still on the good build {}; the landings it carried were not bisected (core \
+                 runs the Lander)",
+                good.commit
+            ),
+            on: Some(good.clone()),
+            redeploys: 0,
+        });
+    }
     let target = last_good
         .filter(|g| lander_since.is_some_and(|since| g.covers >= since))
         .cloned();
