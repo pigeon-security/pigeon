@@ -5,6 +5,7 @@ import SwiftUI
 struct SettingsView: View {
     let session: Session
     let status: StatusModel
+    @Environment(InstanceStore.self) private var store
     @State private var whoami = ToolModel("users_whoami")
     @State private var secrets = ToolModel("secrets_list")
     @State private var users = UsersModel()
@@ -16,64 +17,96 @@ struct SettingsView: View {
                 .compactMap { $0 },
             refresh: { await reload() }
         ) {
-            header
-            Text("Access").font(AppFont.label).foregroundStyle(Tokens.muted)
-            PlainCard {
-                NavigationLink {
-                    UsersView(session: session, model: users)
-                } label: {
-                    row("Users", detail: users.loaded ? "\(users.people.count)" : "", chevron: true)
+            Text(store.platform?.title ?? "Pigeon Platform")
+                .font(AppFont.body).foregroundStyle(Tokens.muted)
+                .padding(.leading, Metrics.sectionIndent)
+            profile
+            CardSection("Access") {
+                GroupedCard {
+                    NavigationLink {
+                        UsersView(session: session, model: users)
+                    } label: {
+                        row("Users", detail: users.loaded ? "\(users.people.count)" : "")
+                    }
+                    .buttonStyle(.plain)
+                    RowSeparator(inset: 16)
+                    NavigationLink {
+                        SecretsView(session: session)
+                    } label: {
+                        row("Secrets", detail: secretCount)
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
-                Divider()
-                NavigationLink {
-                    SecretsView(session: session)
-                } label: {
-                    row("Secrets", detail: secretCount, chevron: true)
-                }
-                .buttonStyle(.plain)
             }
-            Text("Agents").font(AppFont.label).foregroundStyle(Tokens.muted)
-            PlainCard {
-                Toggle(
-                    isOn: Binding(
-                        get: { status.paused },
-                        set: { on in Task { await status.setPaused(on, session.client) } })
-                ) {
-                    Text("Pause all agents").font(AppFont.row).foregroundStyle(Tokens.ink)
+            CardSection("Agents") {
+                GroupedCard {
+                    HStack(spacing: 12) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Pause all agents").font(AppFont.row).foregroundStyle(Tokens.ink)
+                            Text(
+                                status.paused
+                                    ? "Paused: no run takes another turn"
+                                    : "Stops every run between turns"
+                            )
+                            .font(AppFont.meta).foregroundStyle(Tokens.muted)
+                        }
+                        Spacer(minLength: 8)
+                        Toggle(
+                            "Pause all agents",
+                            isOn: Binding(
+                                get: { status.paused },
+                                set: { on in Task { await status.setPaused(on, session.client) } })
+                        )
+                        .labelsHidden()
+                        .tint(Tokens.warn)
+                        .disabled(status.busy)
+                    }
+                    .padding(.horizontal, 16)
+                    .frame(minHeight: 56)
                 }
-                .tint(Tokens.accent)
-                .disabled(status.busy)
             }
-            PlainCard {
-                Button(action: signOutTapped) {
-                    Text(confirmSignOut ? "Tap again to sign out" : "Sign out")
-                        .font(AppFont.row)
-                        .foregroundStyle(confirmSignOut ? Tokens.warn : Tokens.ink)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+            GroupedCard {
+                Button {
+                    confirmSignOut = true
+                } label: {
+                    Text("Sign out")
+                        .font(AppFont.row).foregroundStyle(Tokens.warn)
+                        .padding(.horizontal, 16)
+                        .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
             }
         }
         .navigationTitle("Settings")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar(.visible, for: .navigationBar)
+        .navigationBarTitleDisplayMode(.large)
+        .instanceMenu()
+        .confirmationDialog(
+            "Sign out of Pigeon?", isPresented: $confirmSignOut, titleVisibility: .visible
+        ) {
+            Button("Sign out", role: .destructive) {
+                Task { await session.userSignOut() }
+            }
+            Button("Cancel", role: .cancel) {}
+        }
         .task { await reload() }
     }
 
     /// The signed-in user: avatar and name.
-    private var header: some View {
+    private var profile: some View {
         let dict = whoami.data as? [String: Any] ?? [:]
         let acting = (dict["acting_for"] as? [String: Any])?["name"] as? String
         let own = (dict["user"] as? [String: Any])?["name"] as? String
         let name = acting ?? own ?? "Signed in"
         let picture = dict["picture"] as? String
-        return HStack(spacing: 14) {
-            Avatar(name: name, initials: dict["initials"] as? String, picture: picture, size: 64)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(name).font(AppFont.screenTitle).foregroundStyle(Tokens.ink)
-                Text("Signed in").font(AppFont.meta).foregroundStyle(Tokens.muted)
+        return PlainCard {
+            HStack(spacing: 12) {
+                Avatar(name: name, initials: dict["initials"] as? String, picture: picture, size: 48)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(name).font(AppFont.cardTitle).foregroundStyle(Tokens.ink)
+                    Text("Standard user · this iPhone")
+                        .font(AppFont.meta).foregroundStyle(Tokens.muted)
+                }
             }
         }
     }
@@ -83,28 +116,17 @@ struct SettingsView: View {
         (secrets.data as? [[String: Any]]).map { "\($0.count)" } ?? ""
     }
 
-    /// One row of a settings card: a name, a count and an optional chevron.
-    private func row(_ title: String, detail: String, chevron: Bool) -> some View {
-        HStack {
+    /// One row of the Access card: a name, a count and a chevron.
+    private func row(_ title: String, detail: String) -> some View {
+        HStack(spacing: 8) {
             Text(title).font(AppFont.row).foregroundStyle(Tokens.ink)
             Spacer()
-            Text(detail).font(AppFont.row).foregroundStyle(Tokens.muted)
-            if chevron { Image(systemName: "chevron.right").foregroundStyle(Tokens.muted) }
+            Text(detail).font(AppFont.row).foregroundStyle(Tokens.muted).monospacedDigit()
+            Chevron()
         }
+        .padding(.horizontal, 16)
+        .frame(minHeight: 48)
         .contentShape(Rectangle())
-    }
-
-    /// The first tap arms the row for 3 seconds; the second signs out.
-    private func signOutTapped() {
-        if confirmSignOut {
-            Task { await session.userSignOut() }
-            return
-        }
-        confirmSignOut = true
-        Task {
-            try? await Task.sleep(nanoseconds: 3_000_000_000)
-            confirmSignOut = false
-        }
     }
 
     /// Loads everything on the screen.
@@ -126,21 +148,26 @@ struct SecretsView: View {
             errors: [secrets.error].compactMap { $0 },
             refresh: { await secrets.load(session.client) }
         ) {
-            Text("Secrets").font(AppFont.screenTitle).foregroundStyle(Tokens.ink)
             if let rows = secrets.data as? [[String: Any]] {
                 if rows.isEmpty {
                     PlainCard {
-                        Text("No secrets.").font(AppFont.body).foregroundStyle(Tokens.muted)
+                        Text("No secrets.").font(AppFont.note).foregroundStyle(Tokens.muted)
                     }
-                }
-                ForEach(Array(rows.enumerated()), id: \.offset) { _, r in
-                    PlainCard {
-                        Text(r["name"] as? String ?? "Unnamed")
-                            .font(AppFont.row).foregroundStyle(Tokens.ink)
-                        Text(
-                            "\((r["set"] as? Bool ?? false) ? "Set" : "Not set") · modified \(jsonText(r["modified"]))"
-                        )
-                        .font(AppFont.meta).foregroundStyle(Tokens.muted)
+                } else {
+                    GroupedCard {
+                        ForEach(Array(rows.enumerated()), id: \.offset) { index, r in
+                            if index > 0 { RowSeparator(inset: 16) }
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(r["name"] as? String ?? "Unnamed")
+                                    .font(AppFont.row).foregroundStyle(Tokens.ink)
+                                Text(
+                                    "\((r["set"] as? Bool ?? false) ? "Set" : "Not set") · modified \(jsonText(r["modified"]))"
+                                )
+                                .font(AppFont.meta).foregroundStyle(Tokens.muted)
+                            }
+                            .padding(.horizontal, 16)
+                            .frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
+                        }
                     }
                 }
             } else if secrets.data != nil {
@@ -148,8 +175,8 @@ struct SecretsView: View {
             }
         }
         .navigationTitle("Secrets")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar(.visible, for: .navigationBar)
+        .navigationBarTitleDisplayMode(.large)
+        .instanceMenu()
         .task { await secrets.load(session.client) }
     }
 }

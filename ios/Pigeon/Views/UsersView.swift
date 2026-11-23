@@ -116,6 +116,15 @@ final class UsersModel {
     }
 }
 
+/// "d MMM yyyy" for a date in ms, or "unknown".
+private func shortDate(_ ms: Double?) -> String {
+    guard let ms else { return "unknown" }
+    let f = DateFormatter()
+    f.locale = Locale(identifier: "en_GB")
+    f.dateFormat = "d MMM yyyy"
+    return f.string(from: Date(timeIntervalSince1970: ms / 1000))
+}
+
 /// "Who can sign in": the people, each with their passkey count.
 struct UsersView: View {
     let session: Session
@@ -124,43 +133,51 @@ struct UsersView: View {
     var body: some View {
         Screen(
             errors: [model.error].compactMap { $0 },
+            side: Metrics.sideWide,
             refresh: { await model.load(session.client) }
         ) {
-            Text("Who can sign in · \(model.people.count)")
-                .font(AppFont.screenTitle).foregroundStyle(Tokens.ink)
             if model.people.isEmpty && model.loaded {
                 PlainCard {
-                    Text("No people.").font(AppFont.body).foregroundStyle(Tokens.muted)
+                    Text("No people.").font(AppFont.note).foregroundStyle(Tokens.muted)
                 }
             }
-            ForEach(model.people) { person in
-                NavigationLink {
-                    UserDetailView(person: person)
-                } label: {
-                    PlainCard {
-                        HStack(spacing: 12) {
-                            Avatar(name: person.name, initials: person.initials, picture: person.picture)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(person.name).font(AppFont.row).foregroundStyle(Tokens.ink)
-                                Text(
-                                    "\(person.passkeyCount) passkeys · added \(dateText(person.addedMs))"
-                                )
-                                .font(AppFont.meta).foregroundStyle(Tokens.muted)
-                            }
-                            Spacer()
-                            Image(systemName: "chevron.right").foregroundStyle(Tokens.muted)
+            CardSection("Who can sign in · \(model.people.count)") {
+                GroupedCard {
+                    ForEach(Array(model.people.enumerated()), id: \.element.id) { index, person in
+                        if index > 0 { RowSeparator(inset: 68) }
+                        NavigationLink {
+                            UserDetailView(person: person)
+                        } label: {
+                            personRow(person)
                         }
+                        .buttonStyle(.plain)
                     }
                 }
-                .buttonStyle(.plain)
             }
-            Text("Service users and apps appear under the person they act for.")
-                .font(AppFont.meta).foregroundStyle(Tokens.muted)
+            Footnote("Service users and apps appear under the person they act for.")
         }
         .navigationTitle("Users")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar(.visible, for: .navigationBar)
+        .navigationBarTitleDisplayMode(.large)
+        .instanceMenu()
         .task { await model.load(session.client) }
+    }
+
+    /// One person's row: avatar, name, passkey count and date, chevron.
+    private func personRow(_ person: Person) -> some View {
+        let keys = person.passkeyCount == 1 ? "1 passkey" : "\(person.passkeyCount) passkeys"
+        return HStack(spacing: 12) {
+            Avatar(name: person.name, initials: person.initials, picture: person.picture, size: 40)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(person.name).font(AppFont.row).foregroundStyle(Tokens.ink)
+                Text("\(keys) · added \(shortDate(person.addedMs))")
+                    .font(AppFont.meta).foregroundStyle(Tokens.muted)
+            }
+            Spacer(minLength: 8)
+            Chevron()
+        }
+        .padding(.horizontal, 16)
+        .frame(minHeight: 64)
+        .contentShape(Rectangle())
     }
 }
 
@@ -169,44 +186,75 @@ struct UserDetailView: View {
     let person: Person
 
     var body: some View {
-        Screen(errors: [], refresh: {}) {
-            HStack(spacing: 14) {
-                Avatar(name: person.name, initials: person.initials, picture: person.picture, size: 64)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(person.name).font(AppFont.screenTitle).foregroundStyle(Tokens.ink)
-                    Text("\(person.role) · added \(dateText(person.addedMs))")
-                        .font(AppFont.meta).foregroundStyle(Tokens.muted)
+        Screen(errors: [], side: Metrics.sideWide, refresh: {}) {
+            VStack(spacing: 8) {
+                Avatar(name: person.name, initials: person.initials, picture: person.picture, size: 76)
+                Text(person.name).font(AppFont.name).foregroundStyle(Tokens.ink)
+                Text("Standard user · added \(shortDate(person.addedMs))")
+                    .font(AppFont.note).foregroundStyle(Tokens.muted)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.top, 8)
+            CardSection("Passkeys · \(person.passkeyCount)") {
+                GroupedCard {
+                    if person.passkeys.isEmpty {
+                        plainRow("\(person.passkeyCount) passkeys")
+                    }
+                    ForEach(Array(person.passkeys.enumerated()), id: \.element.id) { index, key in
+                        if index > 0 { RowSeparator(inset: 58) }
+                        tileRow(
+                            symbol: "key", fill: Tokens.accentSoft, colour: Tokens.accent,
+                            title: key.name, sub: passkeySub(key))
+                    }
                 }
             }
-            Text("Passkeys · \(person.passkeyCount)")
-                .font(AppFont.label).foregroundStyle(Tokens.muted)
-            ForEach(person.passkeys) { key in
-                PlainCard {
-                    Text(key.name).font(AppFont.row).foregroundStyle(Tokens.ink)
-                    Text(
-                        "Added \(dateText(key.createdMs)) · last used \(key.lastUsedMs.map { dateText($0) } ?? "never")"
-                    )
-                    .font(AppFont.meta).foregroundStyle(Tokens.muted)
+            CardSection("Delegation · acts for \(person.name)") {
+                GroupedCard {
+                    if person.delegates.isEmpty { plainRow("Nothing acts for this person.") }
+                    ForEach(Array(person.delegates.enumerated()), id: \.element.id) { index, d in
+                        if index > 0 { RowSeparator(inset: 58) }
+                        tileRow(
+                            symbol: "cpu", fill: Tokens.chip, colour: Tokens.ink, title: d.name,
+                            sub: "\(d.kind == "app" ? "App" : "Service user") · added \(shortDate(d.addedMs))")
+                    }
                 }
             }
-            Text("Delegation · acts for \(person.name)")
-                .font(AppFont.label).foregroundStyle(Tokens.muted)
-            if person.delegates.isEmpty {
-                PlainCard {
-                    Text("Nothing acts for this person.")
-                        .font(AppFont.body).foregroundStyle(Tokens.muted)
-                }
-            }
-            ForEach(person.delegates) { d in
-                PlainCard {
-                    Text(d.name).font(AppFont.row).foregroundStyle(Tokens.ink)
-                    Text("\(d.kind == "app" ? "App" : "Service user") · added \(dateText(d.addedMs))")
-                        .font(AppFont.meta).foregroundStyle(Tokens.muted)
-                }
-            }
+            Footnote("Passkeys are added and removed in the console.")
         }
-        .navigationTitle(person.name)
+        .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar(.visible, for: .navigationBar)
+        .instanceMenu()
+    }
+
+    /// "Added 3 Mar 2026 · last used 5 Mar 2026" for a passkey.
+    private func passkeySub(_ key: PasskeyInfo) -> String {
+        let used = key.lastUsedMs.map { shortDate($0) } ?? "never"
+        return "Added \(shortDate(key.createdMs)) · last used \(used)"
+    }
+
+    /// A muted single-line row, for an empty list.
+    private func plainRow(_ text: String) -> some View {
+        Text(text)
+            .font(AppFont.row).foregroundStyle(Tokens.muted)
+            .padding(.horizontal, 16)
+            .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
+    }
+
+    /// A 60 pt row with a 30 pt symbol tile, a title and a sub line.
+    private func tileRow(
+        symbol: String, fill: Color, colour: Color, title: String, sub: String
+    ) -> some View {
+        HStack(spacing: 12) {
+            Tile(size: 30, radius: 8, fill: fill) {
+                Image(systemName: symbol).font(.system(size: 14)).foregroundStyle(colour)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(AppFont.row).foregroundStyle(Tokens.ink)
+                Text(sub).font(AppFont.meta).foregroundStyle(Tokens.muted)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 16)
+        .frame(minHeight: 60)
     }
 }

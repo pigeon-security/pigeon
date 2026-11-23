@@ -1,6 +1,7 @@
 import SwiftUI
+import UIKit
 
-// The Cost tab, from the confirmed mockup (docs/plans/ios-app-next.md). A title row, then a 2×2
+// The Cost tab, from the confirmed mockup (docs/plans/ios-app-next.md). A range control, then a 2×2
 // grid of equal squares: the total, a details box, a Cloudflare chart and an AI Gateway chart.
 // Everything here is private except the screen itself.
 
@@ -31,12 +32,14 @@ private enum CostSource {
     var title: String { self == .cloudflare ? "Cloudflare" : "AI Gateway" }
 }
 
-/// One line, model or role: a name, a total and its amount for each day.
+/// One line or model: a name, a total and its amount for each day.
 private struct CostSeries {
     let name: String
     let total: Double
     let byDay: [String: Double]
     let perPeriod: Bool
+    /// How many requests it made, when the server says.
+    let requests: Double?
 }
 
 /// The parts of a `cost_daily` answer the screen uses. Every field is read as optional.
@@ -48,7 +51,6 @@ private struct CostData {
     var lines: [CostSeries] = []
     var aiTotal = 0.0
     var models: [CostSeries] = []
-    var roles: [CostSeries] = []
     var unavailable = false
     var storedFrom: String?
 
@@ -65,7 +67,6 @@ private struct CostData {
         let gateway = root["ai_gateway"] as? [String: Any] ?? [:]
         aiTotal = Self.number(gateway["total"])
         models = Self.series(gateway["by_model"], order: ["Opus", "Sonnet", "Haiku", "Other"])
-        roles = Self.series(gateway["by_role"], order: ["planner", "executor", "other"])
         unavailable = !(root["unavailable"] as? [Any] ?? []).isEmpty
         storedFrom = root["stored_from"] as? String
     }
@@ -85,7 +86,8 @@ private struct CostData {
             }
             return CostSeries(
                 name: row["name"] as? String ?? "Other", total: number(row["total"]),
-                byDay: byDay, perPeriod: (row["granularity"] as? String) == "period")
+                byDay: byDay, perPeriod: (row["granularity"] as? String) == "period",
+                requests: (row["requests"] as? NSNumber)?.doubleValue)
         }
         func rank(_ s: CostSeries) -> Int { order.firstIndex(of: s.name) ?? order.count }
         return list.enumerated()
@@ -141,6 +143,20 @@ private enum CostText {
         return f.string(from: d)
     }
 
+    /// The short x label for a today bar: CI, Wkrs, D1, R2, or the first five letters.
+    static func shortName(_ name: String) -> String {
+        switch name {
+        case "CI Containers": return "CI"
+        case "Workers": return "Wkrs"
+        default: return String(name.prefix(5))
+        }
+    }
+
+    /// The amount above a today bar: "$5.40", or "$12" from ten dollars up.
+    static func shortMoney(_ v: Double) -> String {
+        v >= 10 ? String(format: "$%.0f", v) : money(v)
+    }
+
     /// Money as "$12.34"; a positive amount under a cent is "<$0.01".
     static func money(_ v: Double) -> String {
         if v > 0 && v < 0.01 { return "<$0.01" }
@@ -154,13 +170,15 @@ private func costBars(_ series: [CostSeries], days: [String], range: CostRange) 
         let day = days.first ?? ""
         return series.enumerated().map { i, s in
             CostBar(
-                id: i, axis: "", date: day, isWeek: false,
+                id: i, axis: CostText.shortName(s.name), date: day, isWeek: false,
                 parts: [CostPart(name: s.name, value: s.byDay[day] ?? s.total)])
         }
     }
     if range == .week || days.count <= 31 {
         return days.enumerated().map { i, day in
-            let initial = range == .week ? CostText.day(day, "EEEEE") : String(day.suffix(2))
+            let initial =
+                range == .week
+                ? CostText.day(day, "EEEEE") : (i % 7 == 0 ? String(Int(day.suffix(2)) ?? 0) : "")
             return CostBar(
                 id: i, axis: initial, date: day, isWeek: false,
                 parts: series.map { CostPart(name: $0.name, value: $0.byDay[day] ?? 0) })
@@ -183,7 +201,29 @@ private func costBars(_ series: [CostSeries], days: [String], range: CostRange) 
     return bars
 }
 
-/// The Cost tab: title and range control, then the 2×2 grid.
+/// One row of the details box: a swatch, a name and an amount.
+private struct DetailRow {
+    let name: String
+    let amount: Double
+    /// The swatch colour; nil for the "+N more" row, which has none and is muted.
+    let colour: Color?
+}
+
+/// What the details box shows: a source line, a head line, then rows or note lines.
+private struct Details {
+    var source: String
+    var head: String
+    var rows: [DetailRow] = []
+    var notes: [String] = []
+
+    /// One sentence for VoiceOver.
+    var summary: String {
+        let parts = [source, head] + notes + rows.map { "\($0.name) \(CostText.money($0.amount))" }
+        return parts.joined(separator: ", ")
+    }
+}
+
+/// The Cost tab: the range control, then the 2×2 grid.
 struct CostScreen: View {
     let session: Session
 
@@ -191,39 +231,45 @@ struct CostScreen: View {
     @State private var data: CostData?
     @State private var error: String?
     @State private var selection: CostSelection?
-    @State private var byRole = false
-    @State private var side: CGFloat = 150
+    @State private var side: CGFloat = 173
 
-    private let gap = Tokens.spaceGap
+    private let gap: CGFloat = 12
 
     var body: some View {
         Screen(errors: error.map { [$0] } ?? [], refresh: { await load() }) {
-            HStack(spacing: gap) {
-                Text("Cost").font(AppFont.screenTitle).foregroundStyle(Tokens.ink)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                Picker("Range", selection: $range) {
-                    ForEach(CostRange.allCases) { Text($0.title).tag($0) }
+            VStack(alignment: .leading, spacing: gap) {
+                HStack {
+                    Spacer(minLength: 0)
+                    Picker("Range", selection: $range) {
+                        ForEach(CostRange.allCases) { Text($0.title).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(width: side)
                 }
-                .pickerStyle(.segmented)
-                .frame(width: side)
+                HStack(spacing: gap) {
+                    totalCard.frame(width: side, height: side)
+                    detailsCard.frame(width: side, height: side)
+                }
+                HStack(spacing: gap) {
+                    chartCard(.cloudflare).frame(width: side, height: side)
+                    chartCard(.aiGateway).frame(width: side, height: side)
+                }
             }
+            .padding(.top, 2)
             .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width in
                 side = max((width - gap) / 2, 80)
             }
-            HStack(spacing: gap) {
-                totalCard.frame(width: side, height: side)
-                detailsCard.frame(width: side, height: side)
-            }
-            HStack(spacing: gap) {
-                chartCard(.cloudflare).frame(width: side, height: side)
-                chartCard(.aiGateway).frame(width: side, height: side)
-            }
         }
+        .navigationTitle("Cost")
+        .navigationBarTitleDisplayMode(.large)
         .task(id: range) { await load() }
         .onChange(of: range) { selection = nil }
-        .onChange(of: byRole) {
-            if selection?.source == .aiGateway { selection = nil }
-        }
+        .onChange(of: selection) { announce() }
+    }
+
+    /// Says the details box's new text to VoiceOver.
+    private func announce() {
+        UIAccessibility.post(notification: .announcement, argument: details.summary)
     }
 
     /// Loads the chosen range. On failure the error shows and the grid is empty.
@@ -254,8 +300,7 @@ struct CostScreen: View {
     }
 
     private var gatewayBars: [CostBar] {
-        costBars(
-            (byRole ? data?.roles : data?.models) ?? [], days: data?.days ?? [], range: range)
+        costBars(data?.models ?? [], days: data?.days ?? [], range: range)
     }
 
     private func bars(_ source: CostSource) -> [CostBar] {
@@ -277,175 +322,195 @@ struct CostScreen: View {
         selection = selection == next ? nil : next
     }
 
-    // MARK: Cards
+    // MARK: Total
 
-    /// The text under the total saying which range it covers.
-    private var rangeText: String {
+    /// The range in the total's label: "today", "7 days" or "31 days".
+    private var rangeWords: String {
         switch range {
-        case .today: return "Today"
-        case .week: return "Last 7 days"
-        case .all:
-            guard let from = data?.storedFrom else { return "All time" }
-            return "Since \(CostText.day(from, "d MMM yyyy"))"
+        case .today: return "today"
+        case .week: return "7 days"
+        case .all: return "\(data?.days.count ?? 0) days"
         }
     }
 
     private var totalCard: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("Total").font(AppFont.label).foregroundStyle(Tokens.muted)
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Total · \(rangeWords)").font(AppFont.label).foregroundStyle(Tokens.muted)
+                .lineLimit(1)
+            Spacer(minLength: 0)
             Text(CostText.money(data?.total ?? 0))
-                .font(AppFont.screenTitle).foregroundStyle(Tokens.ink)
+                .font(AppFont.largeTitle).tracking(-0.8).monospacedDigit()
+                .foregroundStyle(Tokens.ink)
                 .lineLimit(1).minimumScaleFactor(0.5)
-            Text(rangeText).font(AppFont.meta).foregroundStyle(Tokens.muted)
-                .lineLimit(2)
         }
         .padding(12)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .block()
     }
 
-    private var detailsCard: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            if let (source, bar) = selectedBar {
-                selectedDetails(source, bar)
-            } else {
-                overview
-            }
+    // MARK: Details
+
+    /// The head of the box with nothing selected: "Last 7 days · $12.00".
+    private var rangeHead: String {
+        let name: String
+        switch range {
+        case .today: name = "Today"
+        case .week: name = "Last 7 days"
+        case .all: name = "All"
         }
-        .padding(12)
+        return "\(name) · \(CostText.money(data?.total ?? 0))"
+    }
+
+    /// What the details box shows now.
+    private var details: Details {
+        guard let (source, bar) = selectedBar else {
+            let rows = [
+                DetailRow(
+                    name: "Cloudflare", amount: data?.cloudflareTotal ?? 0,
+                    colour: ChartColour.workers),
+                DetailRow(
+                    name: "AI Gateway", amount: data?.aiTotal ?? 0, colour: Tokens.accent),
+            ].sorted { $0.amount > $1.amount }
+            return Details(source: "By source", head: rangeHead, rows: rows)
+        }
+        let items = bar.parts.filter { $0.value > 0 }.sorted { $0.value > $1.value }
+        if range == .today {
+            return todayDetails(source, bar)
+        }
+        let day = CostText.day(bar.date, "EEE d MMM")
+        var out = Details(
+            source: source.title, head: "\(bar.isWeek ? "Week of " : "")\(day) · \(CostText.money(bar.total))")
+        func row(_ p: CostPart) -> DetailRow {
+            DetailRow(name: p.name, amount: p.value, colour: ChartColour.of(p.name))
+        }
+        if items.count > 4 {
+            out.rows = items.prefix(3).map(row)
+            let rest = items.dropFirst(3)
+            out.rows.append(
+                DetailRow(
+                    name: "+\(rest.count) more", amount: rest.reduce(0) { $0 + $1.value },
+                    colour: nil))
+        } else {
+            out.rows = items.map(row)
+        }
+        return out
+    }
+
+    /// The details of one item of today: its amount, its share of the day and a note.
+    private func todayDetails(_ source: CostSource, _ bar: CostBar) -> Details {
+        let part = bar.parts.first
+        let name = part?.name ?? source.title
+        let amount = part?.value ?? 0
+        var out = Details(source: source.title, head: "\(name) · \(CostText.money(amount))")
+        let total = data?.total ?? 0
+        let share = total > 0 ? Int((amount / total * 100).rounded()) : 0
+        out.notes.append("\(share)% of today")
+        let list = source == .cloudflare ? data?.lines : data?.models
+        let series = list?.first { $0.name == name }
+        if source == .cloudflare {
+            out.notes.append(series?.perPeriod == true ? "Billed" : "Estimated")
+        } else if let n = series?.requests {
+            out.notes.append("\(Int(n)) requests")
+        } else {
+            out.notes.append("Estimated")
+        }
+        return out
+    }
+
+    private var detailsCard: some View {
+        let d = details
+        return VStack(alignment: .leading, spacing: 5) {
+            Text(d.source).font(AppFont.label).foregroundStyle(Tokens.muted).lineLimit(1)
+            Text(d.head).font(AppFont.button).monospacedDigit().foregroundStyle(Tokens.ink)
+                .lineLimit(1).minimumScaleFactor(0.7)
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(d.rows.prefix(4).enumerated()), id: \.offset) { _, row in
+                    detailRow(row)
+                }
+                ForEach(d.notes, id: \.self) { note in
+                    Text(note).font(.system(size: 13)).foregroundStyle(Tokens.muted)
+                        .frame(height: 17, alignment: .leading)
+                }
+            }
+            .padding(.top, 0)
+            Spacer(minLength: 0)
+        }
+        .padding(EdgeInsets(top: 12, leading: 12, bottom: 14, trailing: 12))
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .contentShape(Rectangle())
         .onTapGesture { selection = nil }
         .block()
+        .accessibilityElement(children: .combine)
     }
 
-    /// The details with nothing selected: the total by source, most expensive first.
-    @ViewBuilder
-    private var overview: some View {
-        let rows = [(CostSource.cloudflare, data?.cloudflareTotal ?? 0),
-                    (CostSource.aiGateway, data?.aiTotal ?? 0)]
-            .sorted { $0.1 > $1.1 }
-        Text("Where it went").font(AppFont.label).foregroundStyle(Tokens.muted)
-        ForEach(rows, id: \.0.title) { source, amount in
-            HStack {
-                Text(source.title).font(AppFont.meta).foregroundStyle(Tokens.ink)
-                    .lineLimit(1).minimumScaleFactor(0.7)
-                Spacer(minLength: 4)
-                Text(CostText.money(amount)).font(AppFont.meta).foregroundStyle(Tokens.ink)
+    /// One row of the details box.
+    private func detailRow(_ row: DetailRow) -> some View {
+        HStack(spacing: 6) {
+            if let colour = row.colour {
+                RoundedRectangle(cornerRadius: 2).fill(colour).frame(width: 8, height: 8)
             }
+            Text(row.name).font(.system(size: 13))
+                .foregroundStyle(row.colour == nil ? Tokens.muted : Tokens.ink)
+                .lineLimit(1).truncationMode(.tail)
+            Spacer(minLength: 2)
+            Text(CostText.money(row.amount)).font(.system(size: 13)).monospacedDigit()
+                .foregroundStyle(row.colour == nil ? Tokens.muted : Tokens.ink)
+                .lineLimit(1)
         }
-        if data?.unavailable == true {
-            Text("Billing unavailable").font(AppFont.chart).foregroundStyle(Tokens.muted)
-        }
-        if data?.lines.contains(where: { $0.perPeriod }) == true {
-            Text("Some Cloudflare lines are billed per period")
-                .font(AppFont.chart).foregroundStyle(Tokens.muted)
-        }
+        .frame(height: 17)
     }
 
-    /// The details of one bar: source, date, total and up to four items.
-    @ViewBuilder
-    private func selectedDetails(_ source: CostSource, _ bar: CostBar) -> some View {
-        let items = bar.parts.filter { $0.value > 0 }.sorted { $0.value > $1.value }
-        let shown = Array(items.prefix(4))
-        let rest = items.dropFirst(4)
-        Text(source.title).font(AppFont.label).foregroundStyle(Tokens.muted)
-        Text(dateText(bar)).font(AppFont.meta).foregroundStyle(Tokens.muted)
-        Text(CostText.money(bar.total)).font(AppFont.sourceTotal).foregroundStyle(Tokens.ink)
-            .lineLimit(1).minimumScaleFactor(0.5)
-        if items.isEmpty {
-            Text("No cost").font(AppFont.chart).foregroundStyle(Tokens.muted)
-        }
-        ForEach(Array(shown.enumerated()), id: \.offset) { _, part in
-            HStack(spacing: 4) {
-                RoundedRectangle(cornerRadius: 2).fill(ChartColour.of(part.name))
-                    .frame(width: 8, height: 8)
-                Text(part.name).font(AppFont.chart).foregroundStyle(Tokens.ink)
-                    .lineLimit(1).minimumScaleFactor(0.7)
-                Spacer(minLength: 2)
-                Text(CostText.money(part.value)).font(AppFont.chart).foregroundStyle(Tokens.ink)
-            }
-        }
-        if !rest.isEmpty {
-            HStack {
-                Text("+\(rest.count) more").font(AppFont.chart).foregroundStyle(Tokens.muted)
-                Spacer(minLength: 2)
-                Text(CostText.money(rest.reduce(0) { $0 + $1.value }))
-                    .font(AppFont.chart).foregroundStyle(Tokens.muted)
-            }
-        }
-    }
-
-    /// A bar's date as "Mon 24 Nov", with "Week of" for a week bar.
-    private func dateText(_ bar: CostBar) -> String {
-        let day = CostText.day(bar.date, "EEE d MMM")
-        return bar.isWeek ? "Week of \(day)" : day
-    }
+    // MARK: Charts
 
     private func chartCard(_ source: CostSource) -> some View {
         let isCloudflare = source == .cloudflare
-        return VStack(alignment: .leading, spacing: 2) {
-            HStack(spacing: 4) {
-                Text(source.title).font(AppFont.label).foregroundStyle(Tokens.muted)
-                    .lineLimit(1).minimumScaleFactor(0.7)
-                if !isCloudflare {
-                    Spacer(minLength: 2)
-                    toggleButton("Model", active: !byRole) { byRole = false }
-                    toggleButton("Role", active: byRole) { byRole = true }
-                }
-            }
+        let label = isCloudflare && range == .all ? "Cloudflare · period" : source.title
+        return VStack(alignment: .leading, spacing: 6) {
+            Text(label).font(AppFont.label).foregroundStyle(Tokens.muted)
+                .lineLimit(1).minimumScaleFactor(0.7)
             Text(CostText.money(isCloudflare ? data?.cloudflareTotal ?? 0 : data?.aiTotal ?? 0))
-                .font(AppFont.sourceTotal).foregroundStyle(Tokens.ink)
+                .font(AppFont.sourceTotal).tracking(-0.3).monospacedDigit()
+                .foregroundStyle(Tokens.ink)
                 .lineLimit(1).minimumScaleFactor(0.5)
-            chart(source).padding(.top, 4)
+            chart(source)
         }
-        .padding(12)
+        .padding(EdgeInsets(top: 10, leading: 10, bottom: 8, trailing: 10))
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .block()
     }
 
-    /// One side of the Model / Role toggle.
-    private func toggleButton(_ title: String, active: Bool, action: @escaping () -> Void)
-        -> some View
-    {
-        Button(action: action) {
-            Text(title).font(AppFont.chart)
-                .foregroundStyle(active ? Tokens.ink : Tokens.muted)
-                .underline(active)
+    /// The space between bars: 6 for today, 5 for 7 days, 1 for All.
+    private var barGap: CGFloat {
+        switch range {
+        case .today: return 6
+        case .week: return 5
+        case .all: return 1
         }
-        .buttonStyle(.plain)
     }
 
-    // MARK: Chart
-
-    /// The stacked bars of one chart, scaled to its tallest bar.
+    /// The plot and its x labels. The plot is 86 pt high with a 1 pt baseline.
     private func chart(_ source: CostSource) -> some View {
         let list = bars(source)
         let peak = list.map(\.total).max() ?? 0
-        let valueHeight: CGFloat = 14
-        let axisHeight: CGFloat = 14
-        let step = max(Int((Double(list.count) / 6).rounded(.up)), 1)
-        return GeometryReader { geo in
-            let barArea = max(geo.size.height - valueHeight - axisHeight, 1)
-            HStack(alignment: .bottom, spacing: list.count > 12 ? 1 : 3) {
+        let valueHeight: CGFloat = range == .today ? 14 : 0
+        let plot: CGFloat = 86
+        return VStack(spacing: 0) {
+            HStack(alignment: .bottom, spacing: barGap) {
                 ForEach(list) { bar in
                     let faded = selection != nil && selection != CostSelection(
                         source: source, bar: bar.id)
                     VStack(spacing: 0) {
                         Spacer(minLength: 0)
                         if range == .today {
-                            Text(CostText.money(bar.total)).font(AppFont.chart)
+                            Text(CostText.shortMoney(bar.total))
+                                .font(.system(size: 11, weight: .semibold)).monospacedDigit()
                                 .foregroundStyle(Tokens.ink)
                                 .lineLimit(1).minimumScaleFactor(0.5)
                                 .frame(height: valueHeight)
                         }
-                        stack(bar, peak: peak, height: barArea)
-                            .opacity(faded ? 0.4 : 1)
-                        Text(list.count <= 8 || bar.id % step == 0 ? bar.axis : "")
-                            .font(AppFont.chart).foregroundStyle(Tokens.muted)
-                            .lineLimit(1).fixedSize()
-                            .frame(height: axisHeight)
+                        stack(bar, peak: peak, height: plot - valueHeight)
                     }
+                    .opacity(faded ? 0.4 : 1)
                     .frame(maxWidth: .infinity)
                     .contentShape(Rectangle())
                     .onTapGesture { tap(source, bar.id) }
@@ -454,6 +519,17 @@ struct CostScreen: View {
                     .accessibilityAddTraits(.isButton)
                 }
             }
+            .frame(height: plot)
+            Rectangle().fill(Tokens.line).frame(height: 1)
+            HStack(spacing: barGap) {
+                ForEach(list) { bar in
+                    Color.clear.frame(maxWidth: .infinity).frame(height: 14)
+                        .overlay(
+                            Text(bar.axis).font(AppFont.chart).foregroundStyle(Tokens.muted)
+                                .lineLimit(1).fixedSize())
+                }
+            }
+            .padding(.top, 3)
         }
     }
 
@@ -461,24 +537,31 @@ struct CostScreen: View {
     private func accessibility(_ source: CostSource, _ bar: CostBar) -> String {
         var name = source.title
         if range == .today, let item = bar.parts.first?.name { name += ", \(item)" }
-        return "\(dateText(bar)), \(name), \(CostText.money(bar.total))"
+        let day = CostText.day(bar.date, "EEE d MMM")
+        return "\(bar.isWeek ? "Week of " : "")\(day), \(name), \(CostText.money(bar.total))"
     }
 
-    /// One bar's stack, the first part at the bottom. A zero bar is a 1 pt tick.
+    /// One bar's stack, the first part at the bottom, 2 pt between parts and rounded top
+    /// corners. A zero bar is a 1 pt tick.
     private func stack(_ bar: CostBar, peak: Double, height: CGFloat) -> some View {
-        VStack(spacing: 0) {
-            Spacer(minLength: 0)
+        let parts = bar.parts.filter { $0.value > 0 }
+        let gaps = CGFloat(max(parts.count - 1, 0)) * 2
+        let whole = peak > 0 ? CGFloat(bar.total / peak) * height : 0
+        let usable = max(whole - gaps, 0)
+        return VStack(spacing: 2) {
             if bar.total <= 0 || peak <= 0 {
                 Rectangle().fill(Tokens.muted).frame(height: 1)
             } else {
-                ForEach(Array(bar.parts.enumerated().reversed()), id: \.offset) { _, part in
-                    if part.value > 0 {
-                        Rectangle().fill(ChartColour.of(part.name))
-                            .frame(height: CGFloat(part.value / peak) * height)
-                    }
+                ForEach(Array(parts.enumerated().reversed()), id: \.offset) { i, part in
+                    let h = max(CGFloat(part.value / bar.total) * usable, 1)
+                    UnevenRoundedRectangle(
+                        topLeadingRadius: i == parts.count - 1 ? 3 : 0,
+                        topTrailingRadius: i == parts.count - 1 ? 3 : 0
+                    )
+                    .fill(ChartColour.of(part.name))
+                    .frame(height: h)
                 }
             }
         }
-        .frame(maxWidth: 28, minHeight: height, maxHeight: height)
     }
 }

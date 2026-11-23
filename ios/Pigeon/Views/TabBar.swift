@@ -19,10 +19,10 @@ enum AppTab: String, CaseIterable {
     /// The SF Symbol for the icon.
     var symbol: String {
         switch self {
-        case .approvals: return "checkmark.seal"
+        case .approvals: return "checkmark.circle"
         case .status: return "waveform.path.ecg"
         case .cost: return "chart.bar"
-        case .instances: return "square.stack.3d.up"
+        case .instances: return "server.rack"
         case .home: return "house"
         }
     }
@@ -42,6 +42,11 @@ struct InstanceInfo: Identifiable {
 
     /// Whether this is the platform instance, which has the four data tabs and Settings.
     var isPlatform: Bool { accountKind == "home" }
+
+    /// The line under the title in the instance menu.
+    var subtitle: String {
+        "\(repository ?? id) · \(isPlatform ? "core account" : "linked account")"
+    }
 }
 
 /// The instances, and which one the app shows. The choice is kept in `UserDefaults`.
@@ -130,93 +135,56 @@ final class InstanceStore {
     }
 }
 
-/// The custom tab bar. A tap selects a tab; holding Instances for half a second opens the switcher.
-struct TabBar: View {
-    let tabs: [AppTab]
-    @Binding var selected: AppTab
-    let badge: Int
-    let onHoldInstances: () -> Void
+/// The action for "All instances" in the instance menu. Root sets it to open the Instances tab.
+extension EnvironmentValues {
+    @Entry var showAllInstances: () -> Void = {}
+}
 
-    var body: some View {
-        HStack(spacing: 0) {
-            ForEach(tabs, id: \.self) { tab in
-                item(tab)
-            }
-        }
-        .padding(.top, 8)
-        .padding(.bottom, 4)
-        .background(Tokens.card.ignoresSafeArea(edges: .bottom))
-        .overlay(alignment: .top) { Rectangle().fill(Tokens.line).frame(height: 1) }
+/// The instance switcher: a menu in the navigation bar that lists the instances and "All instances".
+struct InstanceMenu: ViewModifier {
+    @Environment(InstanceStore.self) private var store
+    @Environment(\.showAllInstances) private var showAllInstances
+
+    /// The SF Symbol for the current instance: its first letter in a circle, else a server.
+    private var symbol: String {
+        guard let letter = store.selected?.title.lowercased().first,
+            letter >= "a", letter <= "z"
+        else { return "server.rack" }
+        return "\(letter).circle"
     }
 
-    /// One tab: icon, label and, on Approvals, the count badge.
-    private func item(_ tab: AppTab) -> some View {
-        VStack(spacing: 3) {
-            Image(systemName: tab.symbol)
-                .font(.system(size: 22))
-                .overlay(alignment: .topTrailing) {
-                    if tab == .approvals && badge > 0 {
-                        Text("\(badge)")
-                            .font(AppFont.tab)
-                            .foregroundStyle(Tokens.onAccent)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1)
-                            .background(Capsule().fill(Tokens.accent))
-                            .offset(x: 12, y: -6)
+    func body(content: Content) -> some View {
+        content.toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    if !store.instances.isEmpty {
+                        Section("Switch instance") {
+                            ForEach(store.instances) { i in
+                                Button {
+                                    store.select(i.id)
+                                } label: {
+                                    if i.id == store.selected?.id {
+                                        Label(i.title, systemImage: "checkmark")
+                                    } else {
+                                        Text(i.title)
+                                    }
+                                    Text(i.subtitle)
+                                }
+                            }
+                        }
+                        Divider()
                     }
+                    Button("All instances", systemImage: "square.grid.2x2") { showAllInstances() }
+                } label: {
+                    Image(systemName: symbol)
                 }
-            Text(tab.title).font(AppFont.tab)
+                .accessibilityLabel("Instance: \(store.selected?.title ?? "none")")
+            }
         }
-        .foregroundStyle(selected == tab ? Tokens.accent : Tokens.muted)
-        .frame(maxWidth: .infinity)
-        .contentShape(Rectangle())
-        .onTapGesture { selected = tab }
-        .onLongPressGesture(minimumDuration: 0.5) {
-            guard tab == .instances else { return }
-            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-            onHoldInstances()
-        }
-        .accessibilityLabel(tab.title)
-        .accessibilityAddTraits(.isButton)
     }
 }
 
-/// The instance switcher menu: the current instance ticked, the others, then "All instances".
-struct InstanceSwitcher: View {
-    let store: InstanceStore
-    let onPick: (InstanceInfo) -> Void
-    let onAll: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            ForEach(store.instances) { instance in
-                Button {
-                    onPick(instance)
-                } label: {
-                    HStack {
-                        Text(instance.title).font(AppFont.row).foregroundStyle(Tokens.ink)
-                        Spacer(minLength: 24)
-                        if instance.id == store.selected?.id {
-                            Image(systemName: "checkmark").foregroundStyle(Tokens.accent)
-                        }
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 12)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                Divider()
-            }
-            Button(action: onAll) {
-                Text("All instances").font(AppFont.row).foregroundStyle(Tokens.accent)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 12)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-        }
-        .fixedSize(horizontal: true, vertical: false)
-        .block()
-    }
+extension View {
+    /// Adds the instance switcher menu to the navigation bar.
+    func instanceMenu() -> some View { modifier(InstanceMenu()) }
 }

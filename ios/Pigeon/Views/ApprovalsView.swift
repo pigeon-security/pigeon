@@ -234,6 +234,20 @@ final class ApprovalsModel {
     }
 }
 
+/// The count badge in the navigation bar. On iOS 26 its glass background is hidden.
+private struct CountToolbar: ToolbarContent {
+    let count: Int
+
+    var body: some ToolbarContent {
+        if #available(iOS 26.0, *) {
+            ToolbarItem(placement: .topBarTrailing) { CountBadge(count: count) }
+                .sharedBackgroundVisibility(.hidden)
+        } else {
+            ToolbarItem(placement: .topBarTrailing) { CountBadge(count: count) }
+        }
+    }
+}
+
 /// Everything waiting on the person: passkey decisions, agent questions and assumed notices.
 struct ApprovalsView: View {
     let session: Session
@@ -244,20 +258,21 @@ struct ApprovalsView: View {
             errors: [model.loadError, model.inboxError, model.actionError].compactMap { $0 },
             refresh: { await model.load(session.client) }
         ) {
-            TitleRow(title: "Approvals", count: model.count)
-            if let notice = model.notice {
-                PlainCard { Text(notice).font(AppFont.body).foregroundStyle(Tokens.good) }
-            }
             if model.items.isEmpty {
                 PlainCard {
-                    Text("Nothing waits for you.").font(AppFont.body).foregroundStyle(Tokens.muted)
+                    Text("Nothing waits for you.").font(AppFont.note).foregroundStyle(Tokens.muted)
                 }
             }
             ForEach(model.items) { item in
                 EntryCard(item: item, model: model, session: session)
             }
+            if let notice = model.notice {
+                Toast(notice)
+            }
         }
-        .toolbar(.hidden, for: .navigationBar)
+        .navigationTitle("Approvals")
+        .navigationBarTitleDisplayMode(.large)
+        .toolbar { CountToolbar(count: model.count) }
         .task { await model.load(session.client) }
     }
 }
@@ -278,36 +293,46 @@ struct EntryCard: View {
                 timeView
             }
             Text(item.title).font(AppFont.cardTitle).foregroundStyle(Tokens.ink)
-            Text(item.sub).font(AppFont.meta).foregroundStyle(Tokens.muted)
+            Text(item.sub).font(AppFont.body).foregroundStyle(Tokens.muted)
             buttons.padding(.top, 4)
         }
     }
 
-    /// The time left (orange under 15 minutes) or the time since it was made.
+    /// The time left (orange under 15 minutes) or the time since it was made, after a clock.
     @ViewBuilder
     private var timeView: some View {
         if let expires = item.expiresMs {
-            Text(timeLeftText(expires)).font(AppFont.meta)
-                .foregroundStyle(expires - nowMs() < 15 * 60_000 ? Tokens.warn : Tokens.muted)
+            clock(timeLeftText(expires), urgent: expires - nowMs() < 15 * 60_000)
         } else if let created = item.createdMs {
-            Text(timeAgoText(created)).font(AppFont.meta).foregroundStyle(Tokens.muted)
+            clock(timeAgoText(created), urgent: false)
         }
+    }
+
+    /// A clock symbol and a time, in one colour.
+    private func clock(_ text: String, urgent: Bool) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: "clock").font(.system(size: 12))
+            Text(text).font(.system(size: 13, weight: .semibold)).monospacedDigit()
+        }
+        .foregroundStyle(urgent ? Tokens.warn : Tokens.muted)
     }
 
     @ViewBuilder
     private var buttons: some View {
         switch item.body {
         case .approval(let kind):
-            HStack {
-                Button("Approve") {
+            HStack(spacing: Metrics.buttonGap) {
+                Button {
                     Task { await model.decide(item, approve: true, client: session.client) }
+                } label: {
+                    Label("Approve", systemImage: "key")
                 }
-                .buttonStyle(PrimaryButtonStyle())
+                .buttonStyle(ActionButtonStyle(.primary))
                 if kind.deny != nil {
                     Button("Deny") {
                         Task { await model.decide(item, approve: false, client: session.client) }
                     }
-                    .buttonStyle(OutlinedButtonStyle(colour: Tokens.warn))
+                    .buttonStyle(ActionButtonStyle(.destructive))
                 }
             }
             .disabled(model.busy != nil)
@@ -317,32 +342,41 @@ struct EntryCard: View {
                     Button(option) {
                         Task { await model.answer(run: run, text: option, client: session.client) }
                     }
-                    .buttonStyle(OutlinedButtonStyle())
+                    .buttonStyle(OptionButtonStyle())
                 }
                 Button("Something else…") { typing.toggle() }
-                    .buttonStyle(OutlinedButtonStyle())
+                    .buttonStyle(QuietButtonStyle())
                 if typing {
-                    TextField("Your answer", text: $text, axis: .vertical)
-                        .font(AppFont.body)
-                        .padding(10)
-                        .background(RoundedRectangle(cornerRadius: 8).fill(Tokens.chip))
-                    Button("Send") {
-                        let answer = text.trimmingCharacters(in: .whitespacesAndNewlines)
-                        guard !answer.isEmpty else { return }
-                        Task { await model.answer(run: run, text: answer, client: session.client) }
+                    HStack(spacing: Metrics.buttonGap) {
+                        TextField("Your answer", text: $text)
+                            .font(.system(size: 15))
+                            .padding(.horizontal, 10)
+                            .frame(minHeight: 40)
+                            .background(
+                                RoundedRectangle(cornerRadius: 10).fill(Tokens.background))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 10)
+                                    .strokeBorder(Tokens.line, lineWidth: 1))
+                        Button("Send") {
+                            let answer = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                            guard !answer.isEmpty else { return }
+                            Task {
+                                await model.answer(run: run, text: answer, client: session.client)
+                            }
+                        }
+                        .buttonStyle(ActionButtonStyle(.primary, small: true, fill: false))
                     }
-                    .buttonStyle(PrimaryButtonStyle())
                 }
             }
             .disabled(model.busy != nil)
         case .assumed(let run, let at):
-            HStack {
+            HStack(spacing: Metrics.buttonGap) {
                 Button("Fine, carry on") { model.dismiss(run: run, at: at) }
-                    .buttonStyle(PrimaryButtonStyle())
+                    .buttonStyle(ActionButtonStyle(.secondary))
                 Button("Stop the run") {
                     Task { await model.stop(run: run, client: session.client) }
                 }
-                .buttonStyle(OutlinedButtonStyle(colour: Tokens.warn))
+                .buttonStyle(ActionButtonStyle(.destructive))
             }
             .disabled(model.busy != nil)
         }

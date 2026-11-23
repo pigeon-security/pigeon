@@ -3,8 +3,9 @@
 A SwiftUI app for platform.pigeon.dev. It signs in the way any MCP client does (OAuth with PKCE,
 the passkey step on the platform's own page). Every screen reads and writes through MCP tools. Tabs:
 Approvals (passkey decisions, agent questions, assumed notices), Status (a card per planner with
-its executors), Cost and Instances (hold the tab to switch instance; Settings and Users are
-reached from there). A linked instance shows Home and Instances only.
+its executors), Cost and Instances (Settings and Users are reached from there). The tabs are the
+system `TabView` (Liquid Glass on iOS 26). The instance menu at the top right of every screen
+switches instance. A linked instance shows Home and Instances only.
 
 ## Not built on Linux
 

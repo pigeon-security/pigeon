@@ -169,7 +169,7 @@ has; the app already draws whatever tabs that tool names.
   pair under any of them is 18 ΔE apart (teal and magenta, deuteranopia, never adjacent in a
   stack); the first palette tried failed at 2 ΔE. Cloudflare: CI Containers, Workers, D1, R2 in that order; AI Gateway by model: Opus,
   Sonnet, Haiku; by role: planner, executor, other. `Other` is `Tokens.muted`.
-- **Tabs.** A custom tab bar (SwiftUI's `TabView` cannot take a long press on a tab): Approvals
+- **Tabs.** (Replaced on 2026-11-23 by the system `TabView` and an instance menu; see the last section.) A custom tab bar: Approvals
   (badge with the count), Status, Cost, Instances. Holding Instances for 0.5 s opens the switcher
   above the bar; a tap opens the tab.
 - **Screens** as the mockup says: Approvals, Status, Cost, Instances, Home (linked instance),
@@ -202,3 +202,58 @@ the app; each app branch reads new fields as optional.
 - 2026-11-24: plan written.
 - 2026-11-24: phase 3 app built (executor `claude/ai-agent-gxYEtGtfkQSo`): tab bar and switcher, Approvals, Status, Instances, Home, Settings, Users; Architecture, Access and Passkeys screens removed.
 - 2026-11-24: Cost screen built (`ios/Pigeon/Views/CostScreen.swift`): 2×2 grid, details box, two stacked bar charts from `cost_daily`.
+
+## 2026-11-23: mockup polish and the system tab bar
+
+The overnight build followed the written spec, not the mockup. This section lists what differs,
+screen by screen, and how it is fixed. The tokens' colours already match the mockup
+(`Tokens.swift` does not change, so `platform_design_tokens_for_ios` stays green). The CI runner
+has Xcode 26.6 (`ios/.xcode-version`), so the iOS 26 SDK and Liquid Glass build; the deployment
+target stays iOS 18.0, and iOS 26-only calls sit behind `#available`.
+
+### Gap list
+
+| Where | App today | Mockup |
+| --- | --- | --- |
+| Dot grid | hard 1.1 pt dots | 1.1 pt dots fading out by 1.4 pt, 16 pt grid, fixed behind scrolling content |
+| Page | 24 side padding, 18 between cards | 16 side padding (20 on Users and User detail), 10 between cards |
+| Cards | 18 padding all round, 8 between rows | 11 top, 14 sides, 12 bottom; rows 4 apart; radius 16 on a large empty-state card |
+| Buttons | 12/24 padding, radius 12, 16 pt; outlined second choice | 40 high (36 small), radius 10, 15 semibold; primary, secondary (chip), destructive (chip, warn text), answer option (1 pt accent outline, left aligned); two-button rows split 1:1, gap 8 |
+| Labels | Eyebrow in mono capitals still exists | 13 semibold muted, sentence case; section labels indented 4, 10 above |
+| Grouped lists | a card per row (Instances, Users) or Divider rows | one card, rows 48/56/60–64 high, 1 pt `line` separators inset to the text, 7×12 chevron in `line`, counts muted |
+| Numbers | proportional | tabular figures |
+| Tab bar | custom flat bar, accent badge, long press on Instances | system `TabView` (Liquid Glass on iOS 26), `.badge()` on Approvals |
+| Headers | drawn in content, nav bar hidden | system navigation bars with large titles set in 30 bold, −0.4 tracking |
+| Switcher | custom card above the tab bar, opened by holding Instances | system `Menu` in the navigation bar of every screen, showing the current instance |
+| Approvals | count in an accent capsule; sub 13; no clock; notice as a card at the top; Deny and Stop outlined; options outlined at 1.5 pt; "Something else…" outlined; "Fine, carry on" primary; empty text 15 | count badge 34 round, warn, 20 bold; sub 15 muted; 12 pt clock before the time, 13 semibold, warn when urgent; toast below the cards in 13 semibold `good`; Approve with a key icon, primary; Deny and Stop destructive; options 1 pt outline, left aligned; "Something else…" muted text; "Fine, carry on" secondary; empty text 14 |
+| Status | Divider between runs; role line under executors; Answer is a primary button; Note, Extend and Stop outlined | planner row: title and elapsed, then state · step, then "Planner · 34% of $25 budget" (warn at 80%); executor rows smaller with state · step · % of budget, Answer when waiting; Note, Extend secondary, Stop destructive |
+| Cost | 18 gap; "Where it went" by source; Model/Role toggle; range control beside a drawn title | 10 gap; the details box names each colour with its amount; AI Gateway by model only; the range control one square wide over the details box |
+| Instances | a card per instance, id and account lines, outlined Settings | one grouped card; 40×40 tile (radius 10, initial 17 bold, accent when current); title 17 semibold with an accent tick; "repo · core account" 13 muted; chip Settings button 36 high; a footnote |
+| Home (linked) | title card only; "Facts" card; primary switch button | empty-state card (64 chip tile with a globe, 17 semibold title, 15 muted text); "This instance" fact list; chip "Switch to Pigeon Platform" 44 high, radius 12 |
+| Settings | 64 avatar with the name at 30 bold; plain Toggle tinted accent; "Tap again to sign out" | subtitle "Pigeon Platform"; profile card with a 48 avatar, name 17 semibold, "Standard user · this iPhone"; Access rows with counts and chevrons; "Pause all agents" with its subtitle, switch tinted warn; Sign out in warn in its own card |
+| Users | title "Who can sign in · 4" at 30 bold; a card per person; soft avatar | title Users; section label "Who can sign in · 4"; one grouped card, 64-high rows, 40 chip avatar, separators inset 68; a footnote |
+| User detail | 64 avatar beside the name; passkeys and delegates as cards | centred 76 avatar (28 semibold initials), name 24 bold, "Standard user · added …" 14 muted; "Passkeys · 2" rows 60 high with a 30×30 soft key tile; "Delegation · acts for …" rows with a chip tile; a footnote |
+
+### Choices
+
+- **Tab bar.** SwiftUI's `TabView` with `Tab` values (iOS 18), which the iOS 26 SDK draws as the
+  floating Liquid Glass bar, and minimises on scroll on iOS 26. The Approvals count is `.badge()`.
+- **Switcher.** A system `Menu` as a toolbar button at the top right of every screen, its label
+  the current instance's initial (a glass button on iOS 26). It lists the instances with a tick
+  on the current one, and "All instances", which opens the Instances tab. A plain tap on the
+  Instances tab still opens it. `tabViewBottomAccessory` was not chosen: it is iOS 26 only and is
+  meant for a persistent mini player, and it takes room on every screen.
+- **Titles.** System large titles, set to the mockup's 30 bold with −0.4 tracking. The Users
+  title is 30, not 34: one appearance sets every large title.
+- **Lists.** Grouped lists stay hand-drawn cards in a `ScrollView`, because a system `List`
+  section cannot carry the hard offset shadow. Toggles, menus, alerts and dialogs are system ones.
+
+### Work
+
+1. Foundation (`Design/Components.swift`, `Views/Screen.swift`, `Views/TabBar.swift`,
+   `PigeonApp.swift`, `Views/SignInView.swift`): metrics, dot grid, cards, buttons, labels,
+   grouped rows, the tab view, title appearance and the switcher menu.
+2. Screens A (`ApprovalsView`, `StatusView`, `CostScreen`), on 1.
+3. Screens B (`InstancesView`, `SettingsView`, `UsersView`, `Avatar`), on 1.
+- 2026-11-23: foundation built (executor `claude/ai-agent-q4ecG2xGhW8A`): metrics, soft dot grid, cards, buttons, grouped rows, system `TabView`, title appearance, instance menu. ios-check green.
+- 2026-11-23: screens rewritten to the mockup (executors `claude/ai-agent-nknWRoxcSYRZ`: Approvals, Status, Cost with the drawn Status and Cost values and new chart colours; `claude/ai-agent-UiRpmn9nC59K`: Instances, Home, Settings, Secrets, Users, User detail). Old components removed.

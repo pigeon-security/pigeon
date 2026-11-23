@@ -9,23 +9,24 @@ struct SignInView: View {
     var body: some View {
         ZStack {
             DotGrid()
-            VStack(spacing: Tokens.spaceGap) {
-                Eyebrow(text: "Pigeon")
+            VStack(spacing: Metrics.gap) {
+                Text("Pigeon").font(AppFont.largeTitle).foregroundStyle(Tokens.ink)
                 Text("Sign in with your passkey on platform.pigeon.dev.")
-                    .font(.token(Tokens.typeBody))
-                    .foregroundStyle(Tokens.ink)
+                    .font(AppFont.body)
+                    .foregroundStyle(Tokens.muted)
                     .multilineTextAlignment(.center)
                 Button(busy ? "Signing in…" : "Sign in") { Task { await signIn() } }
-                    .buttonStyle(PrimaryButtonStyle())
+                    .buttonStyle(ActionButtonStyle(.primary))
+                    .frame(maxWidth: 280)
                     .disabled(busy)
                 if let error {
                     Text(error)
-                        .font(.token(Tokens.typeSmall))
+                        .font(AppFont.meta)
                         .foregroundStyle(Tokens.warn)
                         .multilineTextAlignment(.center)
                 }
             }
-            .padding(Tokens.spacePage)
+            .padding(Metrics.side)
         }
     }
 

@@ -11,54 +11,85 @@ struct InstancesView: View {
             errors: [store.error].compactMap { $0 },
             refresh: { await store.load(session.client) }
         ) {
-            TitleRow(title: "Instances")
             if store.instances.isEmpty && store.error == nil {
                 PlainCard {
-                    Text("Loading…").font(AppFont.body).foregroundStyle(Tokens.muted)
+                    Text("Loading…").font(AppFont.note).foregroundStyle(Tokens.muted)
                 }
             }
-            ForEach(store.instances) { instance in
-                PlainCard {
-                    HStack(alignment: .top) {
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(instance.title).font(AppFont.cardTitle).foregroundStyle(Tokens.ink)
-                            Text(instance.id).font(AppFont.meta).foregroundStyle(Tokens.muted)
-                            Text(detail(instance)).font(AppFont.meta).foregroundStyle(Tokens.muted)
-                        }
-                        Spacer()
-                        if instance.id == store.selected?.id {
-                            Image(systemName: "checkmark").foregroundStyle(Tokens.accent)
-                        }
-                    }
-                    .contentShape(Rectangle())
-                    .onTapGesture { store.select(instance.id) }
-                    if instance.isPlatform {
-                        NavigationLink {
-                            SettingsView(session: session, status: status)
-                        } label: {
-                            Text("Settings")
-                                .font(AppFont.button)
-                                .foregroundStyle(Tokens.accent)
-                                .padding(.vertical, 10)
-                                .padding(.horizontal, 18)
-                                .background(
-                                    RoundedRectangle(cornerRadius: Tokens.radiusButton)
-                                        .strokeBorder(Tokens.accent, lineWidth: 1.5))
-                        }
-                        .buttonStyle(.plain)
+            if !store.instances.isEmpty {
+                GroupedCard {
+                    ForEach(Array(store.instances.enumerated()), id: \.element.id) { index, instance in
+                        if index > 0 { RowSeparator(inset: 66) }
+                        row(instance)
                     }
                 }
             }
+            Footnote(
+                "Tap an instance to switch to it. The instance button at the top of every screen switches too."
+            )
         }
-        .toolbar(.hidden, for: .navigationBar)
+        .navigationTitle("Instances")
+        .navigationBarTitleDisplayMode(.large)
         .task { await store.load(session.client) }
     }
 
-    /// "Home account · pigeon.dev": the account kind, then the zone when there is one.
-    private func detail(_ i: InstanceInfo) -> String {
-        let account = i.isPlatform ? "Home account" : "Linked account"
-        guard let zone = i.zones.first else { return account }
-        return "\(account) · \(zone)"
+    /// One instance row: tile, title and sub line, and Settings on the platform's row.
+    private func row(_ instance: InstanceInfo) -> some View {
+        let current = instance.id == store.selected?.id
+        return HStack(spacing: 12) {
+            Button {
+                store.select(instance.id)
+            } label: {
+                HStack(spacing: 12) {
+                    Tile(size: 40, radius: 10, fill: current ? Tokens.accent : Tokens.chip) {
+                        Text(String(instance.title.prefix(1)).uppercased())
+                            .font(AppFont.initial)
+                            .foregroundStyle(current ? Tokens.onAccent : Tokens.ink)
+                    }
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            Text(instance.title)
+                                .font(AppFont.cardTitle).foregroundStyle(Tokens.ink)
+                                .lineLimit(1)
+                            if current {
+                                Image(systemName: "checkmark")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundStyle(Tokens.accent)
+                            }
+                        }
+                        Text(instance.subtitle)
+                            .font(AppFont.meta).foregroundStyle(Tokens.muted)
+                            .lineLimit(1).truncationMode(.tail)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            if instance.isPlatform {
+                NavigationLink {
+                    SettingsView(session: session, status: status)
+                } label: {
+                    Text("Settings")
+                }
+                .buttonStyle(ActionButtonStyle(.secondary, small: true, fill: false))
+            }
+        }
+        .padding(14)
+        .frame(minHeight: 64)
+    }
+}
+
+/// The chip button that switches back to the platform.
+private struct ChipButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(AppFont.button)
+            .foregroundStyle(Tokens.ink)
+            .frame(maxWidth: .infinity)
+            .frame(height: 44)
+            .background(RoundedRectangle(cornerRadius: 12).fill(Tokens.chip))
+            .opacity(configuration.isPressed ? 0.7 : 1)
     }
 }
 
@@ -68,49 +99,90 @@ struct HomeView: View {
     let store: InstanceStore
     let onSwitchToPlatform: () -> Void
 
+    /// One fact row: a name, a value and a link when the value is a web address.
+    private struct Fact: Identifiable {
+        let id: String
+        let value: String
+        let url: URL?
+    }
+
+    /// The facts the selected instance has.
+    private var facts: [Fact] {
+        guard let i = store.selected else { return [] }
+        var list: [Fact] = []
+        if let site = i.website, let url = URL(string: site) {
+            list.append(Fact(id: "Website", value: site, url: url))
+        }
+        if let site = i.site { list.append(Fact(id: "Site", value: site, url: nil)) }
+        if let repo = i.repository { list.append(Fact(id: "Repository", value: repo, url: nil)) }
+        return list
+    }
+
     var body: some View {
         Screen(
             errors: [store.error].compactMap { $0 },
             refresh: { await store.load(session.client) }
         ) {
-            TitleRow(title: store.selected?.title ?? "Home")
-            PlainCard {
-                Text("Nothing to act on here yet")
-                    .font(AppFont.cardTitle).foregroundStyle(Tokens.ink)
-            }
-            if let i = store.selected {
-                PlainCard {
-                    Text("Facts").font(AppFont.label).foregroundStyle(Tokens.muted)
-                    if let site = i.website, let url = URL(string: site) {
-                        fact("Website") {
-                            Link(site, destination: url).font(AppFont.body).tint(Tokens.accent)
-                        }
+            PlainCard(radius: Metrics.cardRadiusLarge) {
+                VStack(spacing: 8) {
+                    Tile(size: 64, radius: 16, fill: Tokens.chip) {
+                        Image(systemName: "globe")
+                            .font(.system(size: 26)).foregroundStyle(Tokens.ink)
                     }
-                    if let site = i.site { fact("Site") { plain(site) } }
-                    if let repo = i.repository { fact("Repository") { plain(repo) } }
-                    if i.website == nil && i.site == nil && i.repository == nil {
-                        plain("No facts are known yet.")
+                    Text("Nothing to act on here yet")
+                        .font(AppFont.cardTitle).foregroundStyle(Tokens.ink)
+                        .multilineTextAlignment(.center)
+                    Text(
+                        "This instance has no agents, approvals or costs that the app can show yet. Its site and repository are below."
+                    )
+                    .font(AppFont.body).foregroundStyle(Tokens.muted)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 20)
+            }
+            if store.selected != nil {
+                CardSection("This instance") {
+                    GroupedCard {
+                        if facts.isEmpty {
+                            Text("No facts are known yet.")
+                                .font(AppFont.row).foregroundStyle(Tokens.muted)
+                                .padding(.horizontal, 16)
+                                .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
+                        }
+                        ForEach(Array(facts.enumerated()), id: \.element.id) { index, fact in
+                            if index > 0 { RowSeparator(inset: 16) }
+                            factRow(fact)
+                        }
                     }
                 }
             }
             if store.platform != nil {
                 Button("Switch to Pigeon Platform", action: onSwitchToPlatform)
-                    .buttonStyle(PrimaryButtonStyle())
+                    .buttonStyle(ChipButtonStyle())
             }
         }
-        .toolbar(.hidden, for: .navigationBar)
+        .navigationTitle(store.selected?.title ?? "Home")
+        .navigationBarTitleDisplayMode(.large)
     }
 
-    /// A fact: its muted name, then its value.
-    private func fact<V: View>(_ name: String, @ViewBuilder _ value: () -> V) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(name).font(AppFont.meta).foregroundStyle(Tokens.muted)
-            value()
+    /// A fact: its name at the left, its value at the right.
+    private func factRow(_ fact: Fact) -> some View {
+        HStack(spacing: 12) {
+            Text(fact.id).font(AppFont.row).foregroundStyle(Tokens.ink)
+            Spacer(minLength: 8)
+            if let url = fact.url {
+                Link(fact.value, destination: url)
+                    .font(AppFont.body).tint(Tokens.accent)
+                    .lineLimit(1).truncationMode(.middle)
+            } else {
+                Text(fact.value)
+                    .font(AppFont.body).foregroundStyle(Tokens.muted)
+                    .lineLimit(1).truncationMode(.middle)
+            }
         }
-    }
-
-    /// A line of body text.
-    private func plain(_ text: String) -> some View {
-        Text(text).font(AppFont.body).foregroundStyle(Tokens.ink)
+        .padding(.horizontal, 16)
+        .frame(minHeight: 48)
     }
 }
