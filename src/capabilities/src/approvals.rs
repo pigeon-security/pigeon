@@ -503,8 +503,8 @@ impl Capability for Approvals {
     }
 }
 
-/// The pending records of each kind as `{calls, drafts, plans}`, the fields the console's
-/// Approvals section and the `approvals_list` tool both answer. Other states and kinds are left out.
+/// The pending records of each kind as `{calls, drafts, plans, other}`, the fields the console's
+/// Approvals section and the `approvals_list` tool both answer. Other states are left out.
 pub fn listing(open: &[Record]) -> Value {
     let pending = |kind: ApprovalKind| {
         open.iter()
@@ -530,5 +530,24 @@ pub fn listing(open: &[Record]) -> Value {
     };
     let drafts: Vec<Value> = pending(ApprovalKind::InstanceDraft).map(item).collect();
     let plans: Vec<Value> = pending(ApprovalKind::LinkedPlan).map(item).collect();
-    json!({ "calls": calls, "drafts": drafts, "plans": plans })
+    // Any other kind (such as `observability_monitors`) is listed under `other`, so it can
+    // be approved. The first three lists keep their fields.
+    let other: Vec<Value> = open
+        .iter()
+        .filter(|r| {
+            r.state == State::Pending
+                && !matches!(
+                    r.kind,
+                    ApprovalKind::ToolCall | ApprovalKind::InstanceDraft | ApprovalKind::LinkedPlan
+                )
+        })
+        .map(|r| {
+            json!({
+                "id": r.id, "kind": r.kind.name(), "title": r.subject, "summary": r.summary,
+                "created_ms": r.created_ms, "expires_ms": r.expires_ms,
+                "digest": short(r),
+            })
+        })
+        .collect();
+    json!({ "calls": calls, "drafts": drafts, "plans": plans, "other": other })
 }

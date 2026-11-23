@@ -130,6 +130,27 @@
       status);
   }
 
+  // One card for any other kind of approval, such as a monitors plan.
+  function otherCard(o, ctx) {
+    const status = statusLine();
+    const approveBtn = el("button", { class: "button", type: "button", text: "Approve with passkey",
+      onclick: () => run(approveBtn, "approval-approve", o.id, status, ctx) });
+    const denyBtn = el("button", { class: "button c-quiet", type: "button", text: "Deny",
+      onclick: () => run(denyBtn, "approval-deny", o.id, status, ctx) });
+    const lines = (Array.isArray((o.summary || {}).plan) ? o.summary.plan : []).map((l) =>
+      el("li", { text: String(l) }));
+    return el("article", { class: "card", style: "gap:10px" },
+      el("div", { class: "card-h" }, el("h3", { text: `${o.kind}: ${o.title}` }),
+        el("span", { class: "pill warn", text: until(o.expires_ms) })),
+      el("dl", { class: "c-kv" },
+        el("dt", { text: "Asked" }), el("dd", { text: when(o.created_ms) }),
+        el("dt", { text: "Digest" }), el("dd", { text: o.digest })),
+      el("ol", {}, ...lines),
+      o.summary ? el("pre", { class: "muted", text: JSON.stringify(o.summary, null, 2) }) : el("span", {}),
+      el("div", { class: "c-row" }, approveBtn, denyBtn),
+      status);
+  }
+
   section("approvals", (body, data, ctx) => {
     // With several owners the data comes by capability name; with one, as it is.
     const landings = (data.land || data).landings || [];
@@ -138,6 +159,7 @@
     const plans = (data.approvals || data).plans || [];
     const cards = [...calls.map((c) => callCard(c, ctx)), ...drafts.map((d) => draftCard(d, ctx)),
       ...plans.map((p) => planCard(p, ctx)),
+      ...((data.approvals || data).other || []).map((o) => otherCard(o, ctx)),
       ...landings.map((l) => approvalCard(l, ctx))];
     body.append(el("div", { class: "layer", style: "gap:16px" },
       cards.length

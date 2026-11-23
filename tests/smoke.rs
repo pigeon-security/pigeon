@@ -5799,6 +5799,38 @@ fn platform_approvals_list_and_bearer_writes() {
     assert_eq!(out["plans"].as_array().unwrap().len(), 1);
 }
 
+#[test]
+fn platform_approvals_list_shows_other_kinds() {
+    use pigeon_capabilities::approvals::listing;
+    use pigeon_core::approval::{self, Kind, State};
+
+    let make = |id: &str, kind: Kind| {
+        approval::new(
+            id.into(),
+            kind,
+            "monitors".into(),
+            "0123456789abcdef0123".into(),
+            json!({ "plan": ["create policy"] }),
+            Value::Null,
+            "svc".into(),
+            None,
+            1_000,
+        )
+    };
+    let mut used = make("o2", Kind::Other("observability_monitors".into()));
+    used.state = State::Used;
+    let out = listing(&[
+        make("o1", Kind::Other("observability_monitors".into())),
+        used,
+    ]);
+    assert_eq!(out["other"].as_array().unwrap().len(), 1);
+    assert_eq!(out["other"][0]["id"], "o1");
+    assert_eq!(out["other"][0]["kind"], "observability_monitors");
+    assert_eq!(out["other"][0]["digest"], "0123456789ab");
+    assert!(out["calls"].as_array().unwrap().is_empty());
+    assert!(out["plans"].as_array().unwrap().is_empty());
+}
+
 // ---- Buildkite setup ----
 
 /// The Buildkite setup's plan: a first run creates everything; the same state seen back is all
