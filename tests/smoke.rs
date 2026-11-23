@@ -3913,6 +3913,34 @@ fn ai_agents_loop_budgets_tools_and_turns() {
     );
 }
 
+/// An assistant message never ends in a thinking block: the repair drops trailing ones, drops
+/// a message left empty, and the provider's refusal is recognised and retried once.
+#[test]
+fn ai_agents_repairs_trailing_thinking() {
+    use pigeon_ai_agents::run::{self, Recovery};
+    use pigeon_ai_agents::transcript;
+    let think = json!({ "type": "thinking", "thinking": "t", "signature": "s" });
+    let text = json!({ "type": "text", "text": "hi" });
+    let msgs = [
+        json!({ "role": "user", "content": "go" }),
+        json!({ "role": "assistant", "content": [text.clone(), think.clone()] }),
+        json!({ "role": "assistant", "content": [think.clone()] }),
+        json!({ "role": "assistant", "content": [think.clone(), text.clone()] }),
+    ];
+    let fixed = transcript::repair_transcript(&msgs);
+    assert_eq!(fixed.len(), 3);
+    assert_eq!(fixed[1]["content"], json!([text.clone()]));
+    assert_eq!(fixed[2], msgs[3]);
+    let e =
+        "answered 400: messages.1: The final block in an assistant message cannot be `thinking`.";
+    assert!(run::trailing_thinking(e));
+    assert_eq!(
+        run::on_failure("failed", e, 1, 0, &["a"]),
+        Recovery::RepairTranscript
+    );
+    assert_eq!(run::on_failure("failed", e, 2, 0, &["a"]), Recovery::Fail);
+}
+
 /// A run reports before its cost budget runs out: the 90% rule, the report-only request, and
 /// what the loop does once the last turn is answered.
 #[test]

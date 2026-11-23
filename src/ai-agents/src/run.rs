@@ -343,8 +343,17 @@ pub enum Recovery {
     /// tool list, which a deploy that changes the tools changes): drop them from the stored
     /// transcript and send the turn again on the same model.
     StripThinking,
+    /// The provider refused an assistant message that ends in a thinking block: repair the
+    /// stored transcript and send the turn again on the same model.
+    RepairTranscript,
     /// Give up: the failure is not the provider's (a refused request, an over-long context).
     Fail,
+}
+
+/// Whether the provider refused an assistant message whose final block is thinking.
+pub fn trailing_thinking(error: &str) -> bool {
+    let e = error.to_ascii_lowercase();
+    e.contains("final block in an assistant message") && e.contains("thinking")
 }
 
 /// Whether a job's failure is the provider's or the gateway's and worth trying again: overload,
@@ -381,6 +390,14 @@ pub fn on_failure(
 ) -> Recovery {
     if state == "cancelled" {
         return Recovery::Fail;
+    }
+    if trailing_thinking(error) {
+        // Once: the repaired transcript has no such message, so a second refusal is another fault.
+        return if failures < 2 {
+            Recovery::RepairTranscript
+        } else {
+            Recovery::Fail
+        };
     }
     if stale_thinking(error) {
         // Once: stripping leaves no thinking block to refuse, so a second refusal is another fault.

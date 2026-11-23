@@ -423,6 +423,46 @@ pub fn strip_thinking(messages: &[Value]) -> Vec<Value> {
         .collect()
 }
 
+/// Removes the thinking blocks that end an assistant message's content.
+///
+/// The provider refuses a message whose final block is thinking (a turn cut off by `max_tokens`
+/// during thinking leaves one). Returns `None` when nothing is left, so the caller drops the
+/// message. Other messages come back unchanged.
+pub fn repair_message(message: &Value) -> Option<Value> {
+    if message.get("role").and_then(Value::as_str) != Some("assistant") {
+        return Some(message.clone());
+    }
+    let Some(blocks) = message.get("content").and_then(Value::as_array) else {
+        return Some(message.clone());
+    };
+    let is_thinking = |b: &Value| {
+        matches!(
+            b.get("type").and_then(Value::as_str),
+            Some("thinking") | Some("redacted_thinking")
+        )
+    };
+    let mut end = blocks.len();
+    while end > 0 && is_thinking(&blocks[end - 1]) {
+        end -= 1;
+    }
+    if end == blocks.len() {
+        return Some(message.clone());
+    }
+    if end == 0 {
+        return None;
+    }
+    let mut copy = message.clone();
+    if let Some(obj) = copy.as_object_mut() {
+        obj.insert("content".to_string(), Value::Array(blocks[..end].to_vec()));
+    }
+    Some(copy)
+}
+
+/// Copies the messages with `repair_message` applied, dropping the ones left empty.
+pub fn repair_transcript(messages: &[Value]) -> Vec<Value> {
+    messages.iter().filter_map(repair_message).collect()
+}
+
 /// The longest note `ai_agents_note` takes, in bytes.
 pub const MAX_NOTE_BYTES: usize = 4000;
 

@@ -889,6 +889,35 @@ impl AiAgentRuns {
         Ok(())
     }
 
+    /// Drops trailing thinking blocks from the stored assistant messages, and the messages that
+    /// end up empty: the provider refuses a message whose final block is thinking.
+    fn repair_stored_messages(&self) -> Result<()> {
+        #[derive(Deserialize)]
+        struct M {
+            n: i64,
+            body: String,
+        }
+        let rows = self
+            .db
+            .rows::<M>("SELECT n, body FROM messages ORDER BY n", vec![])?;
+        for m in rows {
+            let Ok(body) = serde_json::from_str::<Value>(&m.body) else {
+                continue;
+            };
+            match transcript::repair_message(&body) {
+                None => self
+                    .db
+                    .exec("DELETE FROM messages WHERE n = ?", vec![m.n.into()])?,
+                Some(new) if new != body => self.db.exec(
+                    "UPDATE messages SET body = ? WHERE n = ?",
+                    vec![new.to_string().into(), m.n.into()],
+                )?,
+                Some(_) => {}
+            }
+        }
+        Ok(())
+    }
+
     /// Puts the notes queued by `ai_agents_note` in the transcript, before a turn.
     fn take_notes(&self) -> Result<()> {
         // Read now, not from the step's row: a note may have come in since.
@@ -1292,7 +1321,8 @@ impl AiAgentRuns {
                 vec![],
             )?;
         }
-        let mut messages = self.messages()?;
+        // Never replay an assistant message that ends in thinking.
+        let mut messages = transcript::repair_transcript(&self.messages()?);
         if index > 0 {
             messages = transcript::strip_thinking(&messages);
         }
@@ -1435,7 +1465,24 @@ impl AiAgentRuns {
                 "job_id = NULL, job_kind = NULL, job_state = NULL, last_usage = NULL, spent = ?",
                 vec![serde_json::to_string(&spent)?.into()],
             )?;
+        } else if transcript::repair_message(&json!({ "role": "assistant", "content": content }))
+            .is_none()
+        {
+            // The turn held only thinking (cut off by the token limit): store nothing, ask again.
+            self.set(
+                "job_id = NULL, job_kind = NULL, job_state = NULL, failures = failures + 1, last_usage = ?, spent = ?",
+                vec![
+                    usage.to_string().into(),
+                    serde_json::to_string(&spent)?.into(),
+                ],
+            )?;
+            return self.state.storage().set_alarm(0).await;
         } else {
+            let content = {
+                let m =
+                    transcript::repair_message(&json!({ "role": "assistant", "content": content }));
+                m.and_then(|m| m.get("content").cloned()).unwrap_or(content)
+            };
             self.push_message(&json!({ "role": "assistant", "content": content }))?;
             for (n, (id, name, input)) in transcript::tool_uses(&content).into_iter().enumerate() {
                 self.db.exec(
@@ -1519,6 +1566,14 @@ impl AiAgentRuns {
             }
             Recovery::StripThinking => {
                 self.strip_stored_thinking()?;
+                self.set(
+                    &format!("{clear}, failures = ?"),
+                    vec![i64::from(failures).into()],
+                )?;
+                storage.set_alarm(0).await
+            }
+            Recovery::RepairTranscript => {
+                self.repair_stored_messages()?;
                 self.set(
                     &format!("{clear}, failures = ?"),
                     vec![i64::from(failures).into()],
