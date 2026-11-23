@@ -1,9 +1,12 @@
 # Ingest: content-addressed files on R2, Iceberg as the record, Vectorize as the index
 
 Status: **designed** (2026-11-22; decision 11 revised the same evening with the person's
-answer on where the data lives). Nothing is built, deployed or enabled. Branch
-`claude/ai-agent-AFc1coPrsJTT` (docs only). The first code it relies on, the email schema, is
-built off by default on the code branch named in [email.md](email.md).
+answer on where the data lives). **Decision 13 added 2026-11-23**: the ingest runner, a
+container next to the data that hashes every file and copies only what R2 does not certainly
+hold; it is being built overnight (planner branch `claude/ai-agent-lnX2my6PYsAz`), landed
+latent: nothing is deployed into DigitalOcean, Scaleway, Backblaze or an instance account
+until the person provides keys and approves a run. The first code it relies on, the email
+schema, is built off by default on the code branch named in [email.md](email.md).
 
 Related plans: [email.md](email.md) (the first source), [data-worker.md](data-worker.md) (where
 this runs), [mail-connectors.md](mail-connectors.md) (mail pulled from mailboxes),
@@ -474,6 +477,12 @@ actual figure before anything moves, and the person sees it on `data_status`.
 
 Within a provider, the copy in the bucket the person marks as primary wins; then the oldest.
 
+**Revised 2026-11-23 (decision 13).** For the three clouds, steps 2 to 4 are replaced by the
+ingest runner: a container next to each source reads every object (free within the provider's
+region), hashes it, and uploads only what R2 does not certainly hold. ETag grouping (step 2)
+stays as a report figure only; an MD5 ETag is not strong enough to leave a file behind. Super
+Slurper and the Worker copier below stay as fallbacks.
+
 **Step 4: transfer.** Two mechanisms, chosen per bucket after the listing:
 - **Super Slurper** (Cloudflare's bulk copy, no charge on Cloudflare's side beyond R2
   operations) for a bucket whose objects are mostly unique (say, over 70% chosen in step 3). It
@@ -572,6 +581,311 @@ The largest monthly line is Vectorize's query pricing, which counts every stored
 month with queries. Dimension is the lever: phase 0 compares recall at 768 and 256 dimensions
 (embeddinggemma-2's Matryoshka sizes) on the person's own questions.
 
+### 13. The ingest runner: deduplicate next to the data, copy only what is new
+
+The person (2026-11-23): a container deployed in DigitalOcean or Scaleway, next to the data,
+reads the files, inflates zip files, and checks the R2 destination to decide whether each file
+already exists, using several metrics. A file is left behind only when pigeon is absolutely
+certain (a strong hash match plus the size); otherwise it is brought into Cloudflare. The same
+runs inside Cloudflare for Backblaze B2, which has no compute. It is a pigeon capability
+deployed into an instance's account: the R2 bucket, the dedupe index and Vectorize live in the
+instance's account (`willowgraysen` first), not pigeon's.
+
+**Parts** (all in this repository):
+
+| Part | Crate or file | What it is |
+| --- | --- | --- |
+| Dedupe library | `src/ingest` (`pigeon-ingest`) | pure Rust, no I/O of its own, builds for WASM and natively: metrics, decision rules, zip walking, manifests and checkpoints, the index schema, estimates, and the engine that drives one run over a `Source` and a `Dest` |
+| Runner | `src/ingest-runner` (`pigeon-ingest-runner`), `src/ingest-runner/Dockerfile` | the container: a native binary that implements `Source` (S3 list and get, SigV4 through `pigeon_core::s3`; a local folder) and `Dest` (R2's S3 API) over blocking HTTPS, with worker threads and a spool directory |
+| Capability | `src/capabilities/src/ingest.rs` (+ `ingest/`) | the tools `ingest_plan`, `ingest_start`, `ingest_status`, `ingest_report`, `ingest_stop` in core, the run approval, the hosts' API requests, secret slots |
+| Cloudflare-side path | `src/data-worker` (`pigeon-data-worker`) | the instance's data Worker (data-worker.md) with only its ingest parts so far: a Durable Object `IngestJob` that runs the runner image as a Cloudflare Container (for B2), and the queue consumer that applies manifests to the D1 index |
+
+**One image, three hosts.** The same runner image runs everywhere; only the host differs:
+
+| Source | Host | Why there |
+| --- | --- | --- |
+| DigitalOcean Spaces (3.4 TB) | a Droplet in the Space's region | Spaces to Droplets in the same region is free ([Spaces pricing](https://docs.digitalocean.com/products/spaces/details/pricing/), read 2026-11-23); only unique bytes leave, against the team's Droplet transfer pool |
+| Scaleway Object Storage (0.8 TB) | an Instance in the bucket's region (`fr-par` → zone `fr-par-1`) | intra-region Object Storage traffic is free and Instances have no egress fees ([storage pricing](https://www.scaleway.com/en/pricing/storage/), [Instances pricing](https://www.scaleway.com/en/pricing/virtual-instances/), read 2026-11-23) |
+| Backblaze B2 (1–2 TB) | a Cloudflare Container in the instance's account, held by the data Worker's `IngestJob` | B2 has no compute; B2 to Cloudflare is free under the partner programme (decision 11) |
+| Local disks (~1 TB, later) | the runner binary on the person's machine, `source.kind = "local"` | the uploader of decision 11, now the same code |
+
+VMs rather than serverless containers on DigitalOcean and Scaleway: a run lasts hours (3.4 TB
+at 100–150 MB/s is 6–10 hours), App Platform and Serverless Containers are built for requests,
+and a VM can build the image itself (below), so no registry is needed.
+
+#### 13.1 The decision: when a file is left behind
+
+Metrics computed for every file (top-level objects and archive members alike):
+
+| Metric | How | Used for |
+| --- | --- | --- |
+| `size` | bytes read, counted while streaming (never the listing's or the zip header's claim) | certainty |
+| `sha256` | streaming SHA-256 | certainty; the R2 key `blobs/sha256/{2}/{2}/{64}` |
+| `blake3` | streaming BLAKE3, same pass | a second independent hash, recorded on the R2 object |
+| `mime`, `kind` | magic-byte sniff of the first 8 KiB (`infer`), then UTF-8 text check; never the extension | index, report, later extraction |
+| `norm_name`, `norm_path` | Unicode NFC, lowercased, `\` → `/`, whitespace collapsed, copy markers (`(1)`, `copy of`, `- copy`) removed, extension aliases (`jpeg` → `jpg`, `htm` → `html`, `tiff` → `tif`) | hints only |
+| archive identity | `(parent_sha256, member_path, member_index)` | where a member came from |
+| `simhash` (optional, `fingerprints: true`) | 64-bit SimHash over word 3-shingles of normalised text, text-like types up to 16 MiB | near-identical documents: hints only |
+| source identity | `(account, bucket, key, etag, size, modified)` from the listing | sightings, resume |
+
+Each R2 blob is written with metadata `x-amz-meta-sha256`, `x-amz-meta-blake3`,
+`x-amz-meta-size` and `x-amz-meta-mime`, and a single PUT also carries
+`x-amz-checksum-sha256`, so R2 itself refuses bytes that do not match.
+
+The rules, in order, for one file (`pigeon_ingest::decide`):
+
+| # | What R2 (and the run) says | Decision | Bytes copied? |
+| --- | --- | --- | --- |
+| 1 | the run already stored or confirmed this `sha256` | `duplicate` (reason `seen_in_run`) | no |
+| 2 | `HEAD blobs/sha256/…` answers, its length equals `size`, its `sha256` metadata equals ours, and its `blake3` metadata, when present, equals ours | `duplicate` (reason `in_r2`) | no |
+| 3 | `HEAD` answers but the length or a hash differs | `conflict`: the bytes go to `quarantine/{run}/{sha256}`, the blob is not touched, the report lists it | yes, aside |
+| 4 | `HEAD` answers with no `sha256` metadata (written by another path) | `upload` (reason `unattested`): rewritten with our verified bytes, which cannot change the content since the key is their hash | yes |
+| 5 | `HEAD` answers 404 | `upload` (reason `new`) | yes |
+| any | reading or hashing failed | `failed`, retried 3 times with back-off, then listed in the report; never counted as a duplicate | no |
+
+So the certainty threshold is exactly: **equal SHA-256 and equal size, attested by the R2
+object itself**, plus BLAKE3 when both sides have it. Nothing else ever leaves a file behind.
+The other metrics only add **hints** to the manifest line (`same_name_size` when
+`(norm_name, size)` matched another file with a different hash, `near_text` when SimHash is
+within 3 bits), which the index keeps as relations (decision 2's tiers 2 and 3) for the person
+to review. In a dry run the decisions are the same and nothing is written to `blobs/` or
+`quarantine/` (the decision reads `would_upload`).
+
+#### 13.2 Archives: zip and nested zip
+
+- **Detected by content** (`PK\x03\x04` or an empty archive's `PK\x05\x06`), never by name.
+  Other archive types (tar, gzip, 7z, rar) are stored as files and listed in the report as
+  "not opened"; tar and gzip come next.
+- **The archive is a file first**: its own bytes go through 13.1 and are kept (`keep_archives`,
+  default true), so nothing depends on re-zipping. Its members then go through 13.1 each, as
+  children with `parent_sha256`, `member_path` and `depth`. A zip whose own SHA-256 is already
+  in R2 is not opened again.
+- **Limits** (`Limits`, per top-level archive, nested ones included; counted on inflated bytes as
+  they stream, never trusting the sizes the headers declare):
+
+  | Limit | Default | When exceeded |
+  | --- | --- | --- |
+  | nesting depth | 3 | deeper archives are kept as files, not opened (`depth_limit`) |
+  | entries | 100,000 | the rest are not opened (`too_many_entries`) |
+  | one member's inflated size | 8 GiB | that member is skipped (`member_too_large`) |
+  | inflated : compressed ratio, for members over 1 MiB | 200 | the archive stops opening (`bomb_suspect`) |
+  | total inflated bytes | 32 GiB, and never more than the spool's free space | the archive stops opening (`bomb_suspect`) |
+
+  Members already done stay done; the archive itself is always kept. A stopped archive is
+  listed in the report with its flag.
+- **Encrypted** members (general-purpose bit 0, or the AES extra field `0x9901`) are not
+  opened: the manifest records the name and declared size with flag `encrypted`, and the
+  archive is kept whole. No password is ever tried.
+- **Path traversal**: member names are never used as file-system paths: members spool to files
+  named by a counter. The recorded `member_path` is normalised (`\` → `/`, leading `/` and drive
+  letters removed, `.` dropped, `..` removed); any of that, a NUL or a control character adds
+  `unsafe_path`, and the raw name is kept (escaped) beside it.
+- **Symlink** entries are recorded (`symlink`) and not followed; directory entries are skipped.
+  Duplicate names in one archive are allowed: `member_index` tells them apart.
+- **Corrupt** archives or a CRC mismatch: that member is not stored (`crc_mismatch`), the rest
+  go on; an unreadable central directory keeps the archive as a file only (`unreadable`).
+
+#### 13.3 Manifests, checkpoints, resume
+
+Everything about a run lives in the instance bucket under `ingest/runs/{run}/`:
+
+| Key | Written by | What |
+| --- | --- | --- |
+| `job.json` | pigeon, at `ingest_start` | the `JobSpec` (no secrets) |
+| `manifest/{seq:08}.jsonl` | runner | one `ManifestLine` per file or member: source identity, metrics, decision, reason, flags, hints, R2 key; a part closes at 5,000 lines or 8 MiB |
+| `checkpoint.json` | runner, after each part | `{seq, after_key, counters}`: `after_key` is the highest listing key with every key at or below it finished |
+| `status.json` | runner, every 30 s and at the end | state (`starting`, `listing`, `running`, `done`, `failed`, `stopped`), counters, rates, ETA, last error |
+| `report.json` | runner, at the end | totals per decision and flag, bytes read and copied, conflicts, failures, archives not opened, the largest duplicate groups, estimate against actual |
+
+Order of writes per file: the blob PUT is confirmed before its manifest line is kept; a part is
+written before the checkpoint that covers it. A restarted runner reads `checkpoint.json` and
+lists from `after_key` (ListObjectsV2 `start-after`), so at most the files in flight are done
+again, which is harmless: the HEAD finds their blobs, and manifest lines have a stable id (the
+SHA-256 of `(source, bucket, key, member_index…)`), so the index keeps one sighting. Run ids are
+`{yyyymmdd}-{provider}-{name}-{bucket}-{6 hex}`.
+
+#### 13.4 The dedupe index (D1, in the instance's account)
+
+The certainty check needs only R2 (13.1). The index is the queryable record of sightings,
+types and hints, and the base for later steps. It is D1 database `{instance}-data`
+(data-worker.md decision 6), applied from the manifests by the data Worker (R2 event
+notification on `ingest/runs/` → queue `{instance}-ingest-manifests` → consumer), so it can be
+rebuilt from R2 at any time. The schema (`pigeon_ingest::index::SCHEMA`):
+
+```sql
+CREATE TABLE blobs (            -- one row per unique content
+  sha256 TEXT PRIMARY KEY,      -- 64 hex
+  blake3 TEXT NOT NULL,
+  size INTEGER NOT NULL,
+  mime TEXT NOT NULL,
+  kind TEXT NOT NULL,           -- document, image, video, audio, archive, email, text, other
+  r2_key TEXT NOT NULL,         -- blobs/sha256/aa/bb/<64 hex>
+  simhash TEXT,                 -- 16 hex, text-like files only
+  first_run TEXT NOT NULL,
+  first_seen_ms INTEGER NOT NULL
+);
+CREATE TABLE sightings (        -- every place a content was seen ("sources seen")
+  id TEXT PRIMARY KEY,          -- sha256 of (account, bucket, key, member indexes)
+  sha256 TEXT NOT NULL,         -- empty for members not opened (encrypted)
+  account TEXT NOT NULL,        -- digitalocean:legacy, local:laptop…
+  bucket TEXT NOT NULL,
+  key TEXT NOT NULL,
+  parent_sha256 TEXT,           -- the archive, for a member
+  member_path TEXT,
+  member_index INTEGER,
+  depth INTEGER NOT NULL,
+  norm_name TEXT NOT NULL,
+  etag TEXT, size INTEGER NOT NULL, modified TEXT,
+  decision TEXT NOT NULL,       -- uploaded, would_upload, duplicate, conflict, failed, skipped
+  reason TEXT NOT NULL,
+  flags TEXT NOT NULL,          -- comma-separated: encrypted, unsafe_path, bomb_suspect…
+  run TEXT NOT NULL,
+  seen_ms INTEGER NOT NULL
+);
+CREATE INDEX sightings_sha256 ON sightings (sha256);
+CREATE INDEX sightings_name_size ON sightings (norm_name, size);
+CREATE TABLE hints (            -- relations from the weaker metrics, never decisions
+  a TEXT NOT NULL, b TEXT NOT NULL, kind TEXT NOT NULL, score REAL,
+  run TEXT NOT NULL, PRIMARY KEY (a, b, kind)
+);
+CREATE TABLE runs (
+  run TEXT PRIMARY KEY, account TEXT NOT NULL, bucket TEXT NOT NULL, prefix TEXT NOT NULL,
+  host TEXT NOT NULL, dry_run INTEGER NOT NULL, state TEXT NOT NULL,
+  started_ms INTEGER NOT NULL, updated_ms INTEGER NOT NULL, counters TEXT NOT NULL
+);
+CREATE TABLE applied (          -- manifest parts already applied: applying is idempotent
+  part TEXT PRIMARY KEY, lines INTEGER NOT NULL, at_ms INTEGER NOT NULL
+);
+```
+
+Size: about 8 million sightings at ~350 bytes is under 3 GB, inside D1's 10 GB. Every write is
+`INSERT … ON CONFLICT DO NOTHING` (blobs, sightings, hints) or an upsert (runs), so a part
+applied twice changes nothing. The rows also feed decision 3's `items` and `sightings` Iceberg
+tables when Basin Pipelines exist; D1 stays the operational index.
+
+#### 13.5 The image
+
+`src/ingest-runner/Dockerfile`, multi-stage: `rust:1-bookworm` builds
+`pigeon-ingest-runner --release --target x86_64-unknown-linux-gnu`; the final stage is
+`debian:bookworm-slim` with `ca-certificates`, a non-root user and `/spool`. Configuration is by
+environment only: `INGEST_JOB` (the `JobSpec` JSON, or `INGEST_JOB_URL` naming `job.json`'s
+key), `SOURCE_KEYS` and `DEST_KEYS` (`ACCESS_KEY_ID:SECRET`), `SPOOL_DIR`. It exits 0 when the
+run is done, non-zero on a fatal error after writing `status.json`.
+
+**No registry tonight.** On a Droplet or an Instance, cloud-init builds the image from the
+public repository at the run's commit (`docker build -f src/ingest-runner/Dockerfile
+https://github.com/pigeon-security/pigeon.git#<commit>`), about 5–10 minutes on 4 vCPUs, so the
+person approves an exact commit and nothing is pushed anywhere. For the Cloudflare Container,
+`wrangler deploy` of the data Worker builds and pushes the image to the instance account's own
+Cloudflare registry; that is a deploy step for the person's go-ahead (13.9). The CI check is the
+`test` job: the runner crate builds natively inside the smoke build and its scenario runs the
+engine against a fake S3 server; building the Docker image in CI would need a new job in
+`.pigeon/ci.toml`, which is the person's file (follow-up).
+
+#### 13.6 How pigeon deploys and drives it
+
+`ingest_plan {instance, source, bucket, prefix?, dry_run = true, keep_archives = true,
+fingerprints = false, size?}` reads only, then asks the person: it checks the instance is
+linked, the source account is declared and its key bound, the host and R2 secrets are bound,
+and the instance bucket exists (if not, the plan's first step creates it through the link);
+lists the first page of the source for a sample; and answers the plan lines, the `JobSpec`, the
+host request with secrets redacted, the estimate (13.7), and an approval of kind `ingest_run`
+on the console's Approvals tab, bound to the digest of all of that and the commit. Anything
+missing makes the answer `applies: false` with what the person must do.
+
+`ingest_start {plan}` takes the approval (once; refused if the plan's digest changed), creates
+the bucket if the plan said so, writes `job.json`, then starts the host:
+
+| Host | Calls | Credentials |
+| --- | --- | --- |
+| DigitalOcean | `POST https://api.digitalocean.com/v2/droplets` (`name: pigeon-ingest-{run}`, the Space's region, size `s-4vcpu-8gb`, image `ubuntu-24-04-x64`, tags `pigeon-ingest`, `user_data`: cloud-init that installs Docker, builds the image, runs it once with `--rm`, then powers off); `GET /v2/droplets/{id}`; `DELETE /v2/droplets/{id}` | secret `INGEST_HOST_DIGITALOCEAN_<NAME>`: a DigitalOcean API token with custom scopes `droplet:create`, `droplet:read`, `droplet:delete` (and the read scopes DigitalOcean adds with them) |
+| Scaleway | `POST https://api.scaleway.com/instance/v1/zones/{zone}/servers` (`name`, `commercial_type: POP2-4C-16G`, image `ubuntu_noble`, `project`, `tags`, a 100 GB block volume for the spool), `PATCH /servers/{id}/user_data/cloud-init`, `POST /servers/{id}/action {"action":"poweron"}`, `GET /servers/{id}`, `POST /servers/{id}/action {"action":"terminate"}` | secret `INGEST_HOST_SCALEWAY_<NAME>`: `PROJECT_ID:SECRET_KEY` of an IAM application with `InstancesFullAccess` on that project only |
+| Cloudflare (B2) | `POST https://{instance}-data.{subdomain}.workers.dev/ingest/start` signed with the instance's `DATA_KEY` (data-worker.md decision 2): the `IngestJob` object named by the run starts the container (`standard-4`), passes the keys as its environment, keeps nothing | the data Worker deployed with its `DATA_KEY` (data-worker.md) |
+
+Keys reach the container only as environment at start: the source account's read-only key
+(`STORAGE_<PROVIDER>_<NAME>`, from the storage capability) and the instance bucket's R2 key
+(`INGEST_R2_<INSTANCE>`: an R2 API token for `{instance}-data` only, Object Read & Write, made by
+the person in the instance's dashboard, since an OAuth link cannot create R2 API tokens). On a
+VM they are in cloud-init user data, which the provider shows to the account owner and the VM's
+metadata service; the VM is deleted when the run ends (`ingest_status` deletes a Droplet or
+Instance whose run is `done`, `failed` or `stopped`; `ingest_stop {run}` does it at once), and
+the person may rotate the R2 key after the backfill. Later: R2 temporary credentials scoped to
+the run's prefixes, minted through the link, replace the long-lived R2 key once phase 0 shows
+the OAuth link may call that endpoint.
+
+Every secret is set on the console's Access tab, never in chat. A slot exists for each declared
+storage account on DigitalOcean or Scaleway (`INGEST_HOST_…`) and for each instance that takes
+ingest (`INGEST_R2_<INSTANCE>`, `willowgraysen` declared). Each is checked live before it is
+written (`GET /v2/account`; Scaleway `GET /instance/v1/zones/{zone}/servers?per_page=1`; R2
+`HEAD` on the bucket). As with every Secrets Store secret, its binding in
+`src/platform/wrangler.toml` lands after the secret exists.
+
+`ingest_status {instance, run?}` reads `status.json` through the link (`r2::get` with the
+instance's account) and the host's state; without `run` it lists the instance's runs, kept in
+the Directory as `ingest:run:{run}` (host, ids, approval, commit). `ingest_report {instance,
+run}` answers `report.json`, at most 200 rows of each list. Nothing on the runner listens on a
+port: results flow back only through R2.
+
+#### 13.7 Throughput and cost (estimates; the first dry run measures)
+
+Assumptions: SHA-256 with SHA extensions about 1.5 GB/s a core and BLAKE3 over 3 GB/s, so
+hashing is never the limit; the source read rate is 100–150 MB/s per VM in region (B2 to a
+Cloudflare Container 80–120 MB/s); unique share about 25–30% (decision 11).
+`pigeon_ingest::estimate` computes the same table for `ingest_plan` from the sampled sizes.
+
+| Source | Read | Time at 100–150 MB/s | Host | Copy out (unique ~25–30%) | Requests | Total |
+| --- | --- | --- | --- | --- | --- | --- |
+| DigitalOcean, 3.4 TB | free in region | 6.3–9.5 h | `s-4vcpu-8gb` at $0.071/h: ~$1 | ~0.9–1 TB from the Droplet pool: the Droplet accrues 5,000 GiB / 28 days (~180 GiB a day), the rest $0.01/GiB: ~$8 | ~4M R2 HEADs $1.50, ~1M PUTs $4.50 | **~$15** |
+| Scaleway, 0.8 TB | free in region | 1.5–2.2 h | `POP2-4C-16G` about €0.15/h plus a 100 GB volume: ~€1 | Instances have no egress fee: €0 | ~1M HEADs, ~0.25M PUTs: ~$1.50 | **~€3** |
+| B2, 1–2 TB, Cloudflare Container | free to Cloudflare | 2.3–7 h | `standard-4` ≈ $0.40/h: ~$1–3 | container egress to R2's endpoint: 1 TB a month included, then $0.025/GB: $0–13 | ~2.5M HEADs, ~0.6M PUTs: ~$4 | **~$5–20** |
+| Local, 1 TB | the person's disk | uplink-bound (decision 11) | the person's machine | unique only | ~1M HEADs | under $2 |
+
+Storage after ingest is decision 12's. Disk: the spool needs the largest single file plus the
+archive budget; 100 GB volumes on the VMs, 20 GB on `standard-4` (larger files are streamed and
+hashed without spooling, so archives over the spool are kept as files and listed as "not
+opened": the report says how many; a VM run can open them later).
+
+#### 13.8 Later steps
+
+1. Tar, gzip and mbox members (mbox through `pigeon-email`), 7z and rar listed only.
+2. The manifest applier feeds Basin Pipelines (decision 3) as well as D1.
+3. Embeddings: after a run, each new blob is queued for extract → classify → embed (decisions
+   4, 5 and 8) in the data Worker; Vectorize `{instance}-data-v1` is filled from the `chunks`
+   table, never from the runner. The runner's `kind` and `simhash` let the embed stage skip
+   near-identical text.
+4. R2 temporary credentials per run (13.6), and a CI job that builds the image (13.5).
+5. The local source as the person's uploader (decision 11), with a `have` check through the
+   data Worker instead of R2 keys on the person's machine.
+
+#### 13.9 What the person provides, and the first dry run
+
+1. **Link willowgraysen**: approve its instance record on the Instances tab and press Link
+   Cloudflare account (data-worker.md follow-up 1). Turn on Workers Paid there.
+2. **Name the source accounts** (`digitalocean:<name>`, `scaleway:<name>`, `backblaze:<name>`,
+   with regions and buckets) and ask an agent to declare them in `storage_accounts()`
+   (storage-providers.md follow-up 5). That makes the slots below appear.
+3. **Create keys**, each on the provider's console, and set each on the Access tab:
+   - `STORAGE_DIGITALOCEAN_<NAME>`: a Spaces key, Limited Access, Read on the source buckets.
+   - `INGEST_HOST_DIGITALOCEAN_<NAME>`: an API token with `droplet:create`, `droplet:read`,
+     `droplet:delete`.
+   - `STORAGE_SCALEWAY_<NAME>`: an application key with `ObjectStorageReadOnly`.
+   - `INGEST_HOST_SCALEWAY_<NAME>`: `PROJECT_ID:SECRET_KEY` of an application with
+     `InstancesFullAccess` on one project.
+   - `STORAGE_BACKBLAZE_<NAME>`: a read-only application key.
+   - `INGEST_R2_WILLOWGRAYSEN`: in willowgraysen's dashboard, R2 → Manage API tokens → Create,
+     Object Read & Write, bucket `willowgraysen-data` only (create the bucket first, or let
+     the first approved plan create it and set the key after).
+4. **Ask an agent to bind the secrets** in `src/platform/wrangler.toml` and land (a binding to a
+   missing secret fails the deploy, so this comes after step 3).
+5. **The first dry run** (DigitalOcean, one prefix): `ingest_plan {"instance":
+   "willowgraysen", "source": "digitalocean:<name>", "bucket": "<bucket>", "prefix":
+   "<a small prefix>", "dry_run": true}`, approve it on the Approvals tab, then
+   `ingest_start {"plan": "<approval id>"}`; follow with `ingest_status` and read
+   `ingest_report`. Nothing is copied in a dry run; the Droplet is deleted at the end.
+6. For B2: the data Worker must be deployed into willowgraysen first (data-worker.md phases 1
+   and 3, plus a `wrangler deploy` that builds the container image there), which is a separate
+   go-ahead.
+
 ## Phases
 
 | Phase | What | Lands with | Who |
@@ -581,6 +895,7 @@ month with queries. Dimension is the lever: phase 0 compares recall at 768 and 2
 | 2 | The data Worker shell and its resources (data-worker.md phases 1–3) | person's passkey on the instance record | agent, person |
 | 3 | Email end to end: capture → identify → extract → classify (rules only) → embed; entity linking by address and domain | person enables `data.email` | agent |
 | 4 | The listing pass over every source bucket (read-only), dedup from listings, then the copier and Super Slurper per bucket (decision 11); real counts replace decision 12's assumptions; then the uploader for local disks | person declares the accounts; person runs the uploader | agent, person |
+| 4r | **The ingest runner (decision 13)**: `pigeon-ingest`, the runner and its image source, the `ingest_*` tools, the data Worker's `IngestJob` and manifest applier; built and landed latent overnight 2026-11-23; then the first dry run after 13.9 | landings, code only; runs with the person's keys and approval | planner, executors, person |
 | 5 | Model classification and fields; name matching; merges; `data_reprocess` | | agent |
 | 6 | Container jobs for large files and deletes | | agent |
 | 7 | B2 backup and reconciliation | person sets the B2 key | agent, person |
@@ -637,3 +952,9 @@ month with queries. Dimension is the lever: phase 0 compares recall at 768 and 2
 - 2026-11-22 23:40 UTC: handoff. The AI agents planner session wraps up; this plan's next
   steps wait on the person's answers (`overnight-2026-11-22.md`, "#4–#7 Data platform" and
   its handoff section), then an AI Gateway planner.
+- 2026-11-23: decision 13 (the ingest runner) designed at the person's request: a container
+  next to each source hashes every file and copies only what R2 does not hold with equal
+  SHA-256 and size; DigitalOcean on a Droplet, Scaleway on an Instance, B2 on a Cloudflare
+  Container in the instance's account; D1 index applied from manifests in R2. Egress and
+  instance prices read from the providers' pages from the sandbox. Planner
+  `claude/ai-agent-lnX2my6PYsAz`; nothing deployed outside pigeon's account.
