@@ -245,6 +245,38 @@ fn models_turns_blocks_and_lanes() {
     );
 }
 
+/// A model job whose token the AI gateway refuses (401, code 2009: what killed every AI agent
+/// run in flight while pigeon-model-gateway deployed) asks core for a new token and sends again
+/// after a wait, a few times; the provider's own 401 and other refusals are not taken for it.
+#[test]
+fn models_gateway_refused_token_retried() {
+    use pigeon_core::ai_gateway;
+    use pigeon_models::jobs;
+    let refused = json!({ "code": 2009, "message": "Unauthorized", "name": "AiGatewayError" });
+    assert!(ai_gateway::refused_token(401, &refused));
+    assert!(ai_gateway::refused_token(401, &json!([refused.clone()])));
+    assert!(ai_gateway::refused_token(
+        401,
+        &json!({ "success": false, "errors": [{ "code": 2009, "message": "Unauthorized" }] })
+    ));
+    assert!(!ai_gateway::refused_token(500, &refused));
+    assert!(!ai_gateway::refused_token(
+        401,
+        &json!({ "type": "error", "error": { "type": "authentication_error", "message": "invalid x-api-key" } })
+    ));
+    assert!(!ai_gateway::refused_token(401, &json!("Unauthorized")));
+    // Not one of the provider's retryable refusals: it has its own waits.
+    assert!(!jobs::retryable(401));
+    assert_eq!(
+        (
+            jobs::fresh_token_wait_ms(1),
+            jobs::fresh_token_wait_ms(3),
+            jobs::fresh_token_wait_ms(4)
+        ),
+        (Some(2_000), Some(30_000), None)
+    );
+}
+
 /// The model gateway's cache tokens (docs/plans/observability.md, Open item 4): their prices
 /// equal the AI agents' budget, a usage with and without the 5-minute/1-hour split is priced as
 /// the budget prices it, and cache rows merge into the gateway's groups by key.

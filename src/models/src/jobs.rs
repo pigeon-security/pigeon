@@ -171,6 +171,15 @@ pub fn retry_wait_ms(tries: u32) -> Option<u64> {
         .copied()
 }
 
+/// How long to wait before asking core for a new token and sending again, after the gateway
+/// refused the job's token ([`pigeon_core::ai_gateway::refused_token`]) `tries` times; `None` once
+/// it has been tried enough. Each try already retried its own token for 15 seconds.
+pub fn fresh_token_wait_ms(tries: u32) -> Option<u64> {
+    [2_000, 10_000, 30_000]
+        .get(tries.saturating_sub(1) as usize)
+        .copied()
+}
+
 /// When a job's row goes: [`KEPT_MS`] after submission, or [`KEPT_AFTER_READ_MS`] after its
 /// result was first read, whichever is sooner.
 pub fn expires_at(created_at: i64, read_at: Option<i64>) -> i64 {

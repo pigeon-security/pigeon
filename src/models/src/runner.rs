@@ -780,14 +780,18 @@ impl ModelJobs {
         Ok(())
     }
 
+    /// The account a job's model call acts with: a fresh token each time it is asked.
+    async fn account(&self) -> Result<pigeon_core::Account> {
+        match &self.settings.token {
+            Token::Parent(binding) => pigeon_core::account_from_env(&self.env, binding).await,
+            Token::Scoped(caller) => super::credential_as(&self.env, caller, &["ai_gateway"]).await,
+        }
+    }
+
     /// Streams `ask` until it ends, fails or runs out of time; the `finish` report.
     async fn stream(&self, id: &str, ask: &Ask) -> Value {
         let deadline = now() + ask.timeout_ms;
-        let account = match &self.settings.token {
-            Token::Parent(binding) => pigeon_core::account_from_env(&self.env, binding).await,
-            Token::Scoped(caller) => super::credential_as(&self.env, caller, &["ai_gateway"]).await,
-        };
-        let account = match account {
+        let mut account = match self.account().await {
             Ok(a) => a,
             Err(e) => return json!({ "id": id, "state": "failed", "error": e.to_string() }),
         };
@@ -805,6 +809,7 @@ impl ModelJobs {
         let mut timed_out = false;
         let mut cancelled = false;
         let mut tries = 0u32;
+        let mut token_tries = 0u32;
         // The gateway's log of the request; it bills a failed or timed-out stream too.
         let mut log_id: Option<String> = None;
         let streamed = loop {
@@ -865,6 +870,27 @@ impl ModelJobs {
             // there is time: nothing was streamed, so nothing is paid for twice.
             if let Ok(Streamed::Refused(ran, opened)) = &streamed {
                 log_id = opened.clone();
+                // The gateway refused the token itself (401, code 2009): a token minted moments
+                // before can be refused for a while, as when a deploy restarts every job at once.
+                // Wait, ask core for a new token, and send again. Nothing was streamed.
+                if ai_gateway::refused_token(ran.status, &ran.body) {
+                    token_tries += 1;
+                    if !stopped(&self.db)
+                        && let Some(wait) = jobs::fresh_token_wait_ms(token_tries)
+                        && now() + (wait as i64) < deadline
+                    {
+                        console_error!(
+                            "models: job {id}: the gateway refused its token; a new one in {wait} ms"
+                        );
+                        worker::Delay::from(std::time::Duration::from_millis(wait)).await;
+                        match self.account().await {
+                            Ok(a) => account = a,
+                            Err(e) => break Err(e),
+                        }
+                        continue;
+                    }
+                    break streamed;
+                }
                 tries += 1;
                 if jobs::retryable(ran.status)
                     && !stopped(&self.db)

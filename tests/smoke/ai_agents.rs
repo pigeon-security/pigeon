@@ -1026,6 +1026,47 @@ fn ai_agents_repairs_trailing_thinking() {
     assert_eq!(run::on_failure("failed", e, 2, 0, &["a"]), Recovery::Fail);
 }
 
+/// The AI gateway refusing its token (401, code 2009), as it did to every run in flight while
+/// pigeon-model-gateway deployed (2026-11-22 and -23), is the environment's fault: the turn is
+/// sent again after a short wait, a few times, then the run waits for the provider. It never
+/// ends the run, and a provider's own 401 is still not retried.
+#[test]
+fn ai_agents_gateway_unauthorized_waits() {
+    use pigeon_ai_agents::run::{self, Recovery};
+    let e =
+        r#"anthropic answered 401: {"code":2009,"message":"Unauthorized","name":"AiGatewayError"}"#;
+    assert!(run::gateway_unauthorized(e));
+    assert!(!run::gateway_unauthorized(
+        r#"anthropic answered 401: {"type":"error","error":{"type":"authentication_error"}}"#
+    ));
+    assert!(!run::gateway_unauthorized(
+        "anthropic answered 400: code 2009"
+    ));
+    let models = &["a", "b"];
+    assert_eq!(
+        run::on_failure("failed", e, 1, 0, models),
+        Recovery::WaitGateway { after_ms: 15_000 }
+    );
+    // After a lost job (a deploy restarted its runner), the count goes on.
+    assert_eq!(
+        run::on_failure("failed", e, 2, 0, models),
+        Recovery::WaitGateway { after_ms: 30_000 }
+    );
+    assert_eq!(
+        run::on_failure("failed", e, 4, 0, models),
+        Recovery::WaitGateway { after_ms: 120_000 }
+    );
+    assert_eq!(
+        run::on_failure("failed", e, 5, 0, models),
+        Recovery::WaitProvider
+    );
+    assert_eq!(run::gateway_wait_ms(0), Some(15_000));
+    assert_eq!(
+        run::on_failure("cancelled", e, 1, 0, models),
+        Recovery::Fail
+    );
+}
+
 /// A run reports before its cost budget runs out: the 90% rule, the report-only request, and
 /// what the loop does once the last turn is answered.
 #[test]

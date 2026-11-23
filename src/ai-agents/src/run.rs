@@ -346,8 +346,30 @@ pub enum Recovery {
     /// The provider refused an assistant message that ends in a thinking block: repair the
     /// stored transcript and send the turn again on the same model.
     RepairTranscript,
+    /// The gateway refused its own token (401, code 2009), as it did to every run in flight while
+    /// a deploy restarted the model jobs: send the same turn again on the same model after
+    /// `after_ms`. Not the model's fault, so no fallback.
+    WaitGateway {
+        /// How long to wait first.
+        after_ms: u64,
+    },
     /// Give up: the failure is not the provider's (a refused request, an over-long context).
     Fail,
+}
+
+/// Whether a job failed because the AI gateway refused its token (`answered 401` with the
+/// gateway's code 2009 or its `AiGatewayError`): the platform's environment, never the request.
+pub fn gateway_unauthorized(error: &str) -> bool {
+    let e = error.to_ascii_lowercase();
+    e.contains("answered 401") && (e.contains("2009") || e.contains("aigatewayerror"))
+}
+
+/// How long to wait before sending a turn again after its `failures`th failure in a row, when
+/// the gateway refused its token; `None` once tried enough, when the run waits for the provider.
+pub fn gateway_wait_ms(failures: u32) -> Option<u64> {
+    [15_000, 30_000, 60_000, 120_000]
+        .get(failures.saturating_sub(1) as usize)
+        .copied()
 }
 
 /// Whether the provider refused an assistant message whose final block is thinking.
@@ -405,6 +427,12 @@ pub fn on_failure(
             Recovery::StripThinking
         } else {
             Recovery::Fail
+        };
+    }
+    if gateway_unauthorized(error) {
+        return match gateway_wait_ms(failures) {
+            Some(after_ms) => Recovery::WaitGateway { after_ms },
+            None => Recovery::WaitProvider,
         };
     }
     if !transient(state, error) {

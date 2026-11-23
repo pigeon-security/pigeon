@@ -64,6 +64,26 @@ pub mod tag {
 /// before may not have reached the gateway yet.
 const NOT_YET_ACTIVE_WAITS_MS: [u64; 4] = [1_000, 2_000, 4_000, 8_000];
 
+/// The error code the gateway answers, with status 401, when it does not take a request's
+/// `cf-aig-authorization` token: `{"code":2009,"message":"Unauthorized","name":"AiGatewayError"}`.
+pub const UNAUTHORIZED_CODE: u64 = 2009;
+
+/// Whether a refusal with `status` and `body` is the gateway refusing the token, not the provider
+/// refusing the request. A token minted moments before can be refused this way for a while, so
+/// the cure is to wait and send again with a token minted afresh. The body may be the error
+/// object itself, a list of them, or an object holding them in `errors` or `error`.
+pub fn refused_token(status: u16, body: &Value) -> bool {
+    if status != 401 {
+        return false;
+    }
+    let is_it = |v: &Value| {
+        v["code"].as_u64() == Some(UNAUTHORIZED_CODE)
+            || v["name"].as_str() == Some("AiGatewayError")
+    };
+    let listed = |v: &Value| v.as_array().is_some_and(|a| a.iter().any(is_it));
+    is_it(body) || listed(body) || listed(&body["errors"]) || is_it(&body["error"])
+}
+
 /// The Secrets Store name a gateway looks a provider's key up by.
 pub fn secret_name(gateway: &str, provider: &str, alias: &str) -> String {
     format!("{gateway}_{provider}_{alias}")

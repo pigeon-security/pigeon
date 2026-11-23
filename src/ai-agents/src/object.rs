@@ -1884,6 +1884,13 @@ impl AiAgentRuns {
                 )?;
                 storage.set_alarm(2_000).await
             }
+            Recovery::WaitGateway { after_ms } => {
+                self.set(
+                    &format!("{clear}, failures = ?"),
+                    vec![i64::from(failures).into()],
+                )?;
+                storage.set_alarm(after_ms as i64).await
+            }
             Recovery::Fallback { index } => {
                 self.set(
                     &format!("{clear}, failures = 0, model_index = ?, fallback_left = ?"),
