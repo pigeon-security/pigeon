@@ -332,6 +332,13 @@ impl Capability for Passkeys {
         "passkeys"
     }
 
+    fn versions(&self) -> Vec<pigeon_core::versions::Component> {
+        vec![pigeon_core::versions::Component::began(
+            "passkeys",
+            pigeon_core::versions::Kind::Capability,
+        )]
+    }
+
     fn tools(&self) -> Vec<Tool> {
         vec![
             Tool {

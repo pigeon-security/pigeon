@@ -167,6 +167,13 @@ impl Instances {
             reserved_workers: &workers,
         };
         let mut problems = record::validate(&record, &others, &rules);
+        let carried: Vec<pigeon_core::versions::Component> = cx
+            .hosted
+            .capabilities
+            .iter()
+            .flat_map(|c| c.versions())
+            .collect();
+        problems.extend(pigeon_core::versions::pin_problems(&record.pins, &carried));
         let at = current.as_ref().map_or(0, |c| c.version);
         if record.version != at {
             problems.push(format!(
@@ -705,6 +712,15 @@ impl Instances {
 impl Capability for Instances {
     fn name(&self) -> &'static str {
         "instances"
+    }
+
+    fn versions(&self) -> Vec<pigeon_core::versions::Component> {
+        use pigeon_core::versions::{Component, Kind};
+        vec![
+            Component::began("instances", Kind::Capability),
+            // The site Worker module (`plan::SITE_WORKER`) that instance_apply uploads.
+            Component::began("instances.site_worker", Kind::Installed),
+        ]
     }
 
     fn tools(&self) -> Vec<Tool> {

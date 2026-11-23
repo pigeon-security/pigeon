@@ -1347,6 +1347,13 @@ impl Capability for Users {
         "users"
     }
 
+    fn versions(&self) -> Vec<pigeon_core::versions::Component> {
+        vec![pigeon_core::versions::Component::began(
+            "users",
+            pigeon_core::versions::Kind::Capability,
+        )]
+    }
+
     fn sections(&self) -> Vec<Section> {
         vec![
             Section {

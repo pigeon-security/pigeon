@@ -38,6 +38,10 @@ pub struct Instance {
     /// the diff they approve.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub worker_override: bool,
+    /// Version pins: a component name to the requirement the instance holds it to, such as
+    /// `{"blog": "^1"}`. Set only by the person approving the record. Absent when empty.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub pins: std::collections::BTreeMap<String, String>,
     /// The record version, which is not part of a diff.
     #[serde(default)]
     pub version: u64,

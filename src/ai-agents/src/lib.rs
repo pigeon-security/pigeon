@@ -32,6 +32,14 @@ pub mod service;
 pub mod tools;
 pub mod transcript;
 
+/// The versions the ai-agents Worker declares: the `ai-agents` capability.
+pub fn versions() -> Vec<pigeon_core::versions::Component> {
+    vec![pigeon_core::versions::Component::began(
+        service::NAME,
+        pigeon_core::versions::Kind::Capability,
+    )]
+}
+
 /// What an AI agent run is for.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

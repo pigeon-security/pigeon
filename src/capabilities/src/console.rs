@@ -534,6 +534,13 @@ impl Capability for Console {
         "console"
     }
 
+    fn versions(&self) -> Vec<pigeon_core::versions::Component> {
+        vec![pigeon_core::versions::Component::began(
+            "console",
+            pigeon_core::versions::Kind::Capability,
+        )]
+    }
+
     fn tools(&self) -> Vec<Tool> {
         Vec::new()
     }

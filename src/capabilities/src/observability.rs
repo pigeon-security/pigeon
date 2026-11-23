@@ -514,6 +514,13 @@ impl Capability for Observability {
         "observability"
     }
 
+    fn versions(&self) -> Vec<pigeon_core::versions::Component> {
+        vec![pigeon_core::versions::Component::began(
+            "observability",
+            pigeon_core::versions::Kind::Capability,
+        )]
+    }
+
     fn sections(&self) -> Vec<Section> {
         vec![Section {
             tab: Tab::Cost,

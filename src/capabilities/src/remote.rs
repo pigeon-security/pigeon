@@ -419,6 +419,10 @@ impl Capability for Remote {
         serde_json::from_value(self.spec.footprint.clone()).unwrap_or_default()
     }
 
+    fn versions(&self) -> Vec<pigeon_core::versions::Component> {
+        self.spec.versions.clone()
+    }
+
     fn sections(&self) -> Vec<Section> {
         self.spec
             .sections

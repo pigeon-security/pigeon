@@ -38,6 +38,13 @@ impl Provider {
             Provider::Backblaze => "backblaze",
         }
     }
+
+    /// Every provider, for declaring their connectors.
+    pub const ALL: [Provider; 3] = [
+        Provider::Scaleway,
+        Provider::DigitalOcean,
+        Provider::Backblaze,
+    ];
 }
 
 /// What an account may do.
@@ -382,6 +389,18 @@ fn head_fields(res: &worker::Response) -> Result<Value> {
 impl Capability for Storage {
     fn name(&self) -> &'static str {
         "storage"
+    }
+
+    fn versions(&self) -> Vec<pigeon_core::versions::Component> {
+        use pigeon_core::versions::{Component, Kind};
+        let mut out = vec![Component::began("storage", Kind::Capability)];
+        for p in Provider::ALL {
+            out.push(Component::began(
+                &format!("storage.{}", p.slug()),
+                Kind::Connector,
+            ));
+        }
+        out
     }
 
     fn tools(&self) -> Vec<Tool> {

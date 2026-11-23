@@ -6735,6 +6735,118 @@ fn instances_are_data_a_person_approves() {
     assert!(site_for_host(&all, "noisypigeon.pigeon.dev.evil.com", "pigeon.dev").is_none());
 }
 
+/// Instance pins: a record carries `pins` (absent when empty, so old records digest as before),
+/// the diff shows each pin, unknown names and bad requirements are problems, and
+/// `capabilities_versions` and `capabilities_upgrade_plan` answer from fake components.
+#[test]
+fn core_instances_pins_checked_and_planned() {
+    use pigeon_capabilities::instances::record::{self, Instance, diff};
+    use pigeon_capabilities::versioning::{upgrade_view, versions_view};
+    use pigeon_core::versions::{Component, Kind, pin_problems};
+    use std::collections::BTreeMap;
+
+    let base = json!({
+        "id": "example-a", "title": "Example A",
+        "account": { "kind": "home" }, "zones": ["example.test"]
+    });
+
+    // A record with pins parses; other unknown keys are still refused.
+    let mut with_pins = base.clone();
+    with_pins["pins"] = json!({ "blog": "^1" });
+    let pinned: Instance = serde_json::from_value(with_pins).unwrap();
+    assert_eq!(pinned.pins.get("blog").map(String::as_str), Some("^1"));
+    let mut odd = base.clone();
+    odd["surprise"] = json!(1);
+    assert!(serde_json::from_value::<Instance>(odd).is_err());
+
+    // Without pins the JSON has no `pins` key, and the digest is that of the same JSON text.
+    let plain: Instance = serde_json::from_value(base).unwrap();
+    let text = serde_json::to_string(&plain).unwrap();
+    assert!(!text.contains("pins"), "{text}");
+    assert_eq!(record::digest(&plain), pigeon_core::oauth::hash(&text));
+
+    // The diff shows the pin by itself.
+    let changes = diff(Some(&plain), &pinned);
+    let pin = changes.iter().find(|c| c.path == "pins.blog").unwrap();
+    assert_eq!(pin.from, Value::Null);
+    assert_eq!(pin.to, json!("^1"));
+
+    // Fake components: `sites` serves 1.0.0 and 2.0.0 (2.0.0 is breaking), `blog` serves only
+    // 2.0.0 (breaking), `ci` is declared twice and the first wins.
+    let sites = Component::began("sites", Kind::Capability)
+        .breaking("2.0.0", "new shape", "rename the field")
+        .serving(&["2.0.0", "1.0.0"]);
+    let blog =
+        Component::began("blog", Kind::Template).breaking("2.0.0", "new layout", "move the config");
+    let ci = Component::began("ci", Kind::Capability);
+    let components = vec![
+        (sites, "example-core".to_string()),
+        (blog, "example-core".to_string()),
+        (ci.clone(), "example-core".to_string()),
+        (ci, "example-ci".to_string()),
+    ];
+    let carried: Vec<Component> = components.iter().map(|(c, _)| c.clone()).collect();
+
+    let pins = |p: &[(&str, &str)]| -> BTreeMap<String, String> {
+        p.iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    };
+    assert!(!pin_problems(&pins(&[("nope", "^1")]), &carried).is_empty());
+    assert!(!pin_problems(&pins(&[("blog", "not a version")]), &carried).is_empty());
+    assert!(pin_problems(&pins(&[("blog", "^1")]), &carried).is_empty());
+
+    let mut a = plain.clone();
+    a.pins = pins(&[("blog", "^1"), ("sites", "^1")]);
+    let mut b = plain.clone();
+    b.id = "example-b".into();
+    b.pins = pins(&[("blog", "^2")]);
+    let c = {
+        let mut c = plain.clone();
+        c.id = "example-c".into();
+        c
+    };
+    let instances = vec![a, b, c];
+
+    let undeclared = vec!["legacy".to_string()];
+    let v = versions_view(&components, &undeclared, &instances, false);
+    let names: Vec<&str> = v["components"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["sites", "blog", "ci"]);
+    assert_eq!(v["components"][2]["worker"], "example-core");
+    assert_eq!(v["components"][1]["kind"], "template");
+    assert!(v["components"][0].get("changelog").is_none());
+    assert_eq!(v["undeclared"], json!(["legacy"]));
+    assert_eq!(v["instances"].as_array().unwrap().len(), 3);
+    assert_eq!(v["instances"][2]["pins"], json!([]));
+    assert_eq!(v["instances"][0]["pins"][0]["component"], "blog");
+    assert_eq!(v["instances"][0]["pins"][0]["state"], "held");
+    assert_eq!(v["instances"][1]["pins"][0]["state"], "ok");
+    let with_log = versions_view(&components, &undeclared, &instances, true);
+    assert!(with_log["components"][0]["changelog"].is_array());
+
+    let plan = upgrade_view(&components, &instances);
+    assert_eq!(plan["instances"][0]["id"], "example-a");
+    let steps = plan["instances"][0]["steps"].as_array().unwrap();
+    let step_names: Vec<&str> = steps
+        .iter()
+        .map(|s| s["component"].as_str().unwrap())
+        .collect();
+    assert_eq!(step_names, ["blog", "sites"]);
+    assert_eq!(steps[1]["from"], "1.0.0");
+    assert_eq!(steps[1]["to"], "2.0.0");
+    assert_eq!(steps[1]["suggested"], "^2.0.0");
+    assert_eq!(steps[1]["work"][0]["migration"], "rename the field");
+    assert_eq!(plan["instances"][0]["held"], json!(["blog"]));
+    assert_eq!(plan["instances"][1]["steps"], json!([]));
+    assert_eq!(plan["instances"][1]["held"], json!([]));
+    assert!(plan["note"].as_str().unwrap().contains("instance_propose"));
+}
+
 // ---- Buildkite iOS pipelines ----
 
 #[test]
@@ -7781,6 +7893,333 @@ fn instance_plans_touch_only_what_pigeon_made() {
     assert_eq!(d1, digest(&inst, &"a".repeat(32), &first));
 }
 
+// ---- versions: components, pins and upgrade plans (docs/plans/versioning.md) ----
+
+/// `pigeon_core::versions`: semver versions and Cargo's requirements, a declaration's rules
+/// (changelog newest first, breaking entries move MAJOR and name their migration), pins checked
+/// against what is served (ok, held, unknown, invalid), and the upgrade plan's work items.
+#[test]
+fn core_versions_semver_pins_and_upgrades() {
+    use pigeon_core::versions::{
+        Component, Kind, PinState, Requirement, Version, pin_problems, pin_status, upgrade,
+    };
+    use std::collections::BTreeMap;
+
+    // Versions: three numbers, ordered, shown as written.
+    let v = |s: &str| Version::parse(s).unwrap();
+    assert_eq!(v("1.2.3"), Version::new(1, 2, 3));
+    assert!(v("1.10.0") > v("1.9.9"));
+    assert_eq!(v("2.0.1").to_string(), "2.0.1");
+    for bad in [
+        "1.2",
+        "1.2.3.4",
+        "01.2.3",
+        "1.x.3",
+        "",
+        "v1.2.3",
+        "1.2.3-beta",
+    ] {
+        assert!(Version::parse(bad).is_err(), "{bad} is not a version");
+    }
+    assert_eq!(serde_json::to_value(v("1.2.3")).unwrap(), json!("1.2.3"));
+
+    // Requirements: Cargo's grammar; bare means ^.
+    let m = |r: &str, ver: &str| Requirement::parse(r).unwrap().matches(&v(ver));
+    assert!(m("=1.2.3", "1.2.3") && !m("=1.2.3", "1.2.4"));
+    assert!(m("^1.2", "1.9.0") && !m("^1.2", "1.1.9") && !m("^1.2", "2.0.0"));
+    assert!(m("1.2.3", "1.4.0") && !m("1.2.3", "2.0.0"), "bare is ^");
+    assert!(m("2.0", "2.5.1") && !m("2.0", "3.0.0"));
+    assert!(m("3", "3.0.0") && !m("3", "4.0.0") && !m("3", "2.9.9"));
+    assert!(m("~1.2", "1.2.9") && !m("~1.2", "1.3.0"));
+    assert!(m("~1", "1.9.0") && !m("~1", "2.0.0"));
+    assert!(
+        m("^0.2", "0.2.5") && !m("^0.2", "0.3.0"),
+        "below 1.0.0, MINOR breaks"
+    );
+    assert!(m("^0.0.3", "0.0.3") && !m("^0.0.3", "0.0.4"));
+    assert!(m("*", "9.9.9"));
+    for bad in ["", "^", "=1.2", "1.2.3.4", ">=1.0", "latest", "^1.x"] {
+        assert!(
+            Requirement::parse(bad).is_err(),
+            "{bad} is not a requirement"
+        );
+    }
+    assert_eq!(Requirement::parse(" ^1.2 ").unwrap().to_string(), "^1.2");
+
+    // Declarations: began at 1.0.0, then entries newest last; the rules hold.
+    let blog = Component::began("blog", Kind::Template)
+        .entry("1.1.0", "Dark look.")
+        .breaking(
+            "2.0.0",
+            "[site.look] is [site.theme].",
+            "Rename [site.look] to [site.theme] in .pigeon/site.toml; template = \"blog@2\".",
+        )
+        .entry("2.0.1", "A fix.")
+        .breaking(
+            "3.0.0",
+            "Posts move to /p/.",
+            "Add aliases for every post's old URL.",
+        )
+        .serving(&["3.0.0", "2.0.1", "1.1.0"]);
+    assert_eq!(blog.version, "3.0.0");
+    assert_eq!(blog.changelog[0].version, "3.0.0", "newest first");
+    assert!(blog.problems().is_empty(), "{:?}", blog.problems());
+    assert_eq!(blog.served(), vec![v("3.0.0"), v("2.0.1"), v("1.1.0")]);
+    let began = Component::began("instances", Kind::Capability);
+    assert_eq!(began.version, "1.0.0");
+    assert!(began.problems().is_empty());
+
+    let broken = Component::began("x", Kind::Connector).entry("2.0.0", "Silently breaking.");
+    assert!(
+        broken
+            .problems()
+            .iter()
+            .any(|p| p.contains("marked breaking")),
+        "{:?}",
+        broken.problems()
+    );
+    let mut no_migration = Component::began("x", Kind::Connector).breaking("2.0.0", "B.", "m");
+    no_migration.changelog[0].migration = None;
+    assert!(
+        no_migration
+            .problems()
+            .iter()
+            .any(|p| p.contains("migration"))
+    );
+    let fake_break = Component::began("x", Kind::Connector).breaking("1.1.0", "B.", "m");
+    assert!(
+        fake_break
+            .problems()
+            .iter()
+            .any(|p| p.contains("moves MAJOR"))
+    );
+    let mut out_of_order = Component::began("x", Kind::Connector).entry("1.1.0", "A.");
+    out_of_order.changelog.swap(0, 1);
+    out_of_order.version = "1.0.0".into();
+    assert!(
+        out_of_order
+            .problems()
+            .iter()
+            .any(|p| p.contains("newest first"))
+    );
+    let mut mismatch = Component::began("x", Kind::Connector);
+    mismatch.version = "1.0.1".into();
+    assert!(
+        mismatch
+            .problems()
+            .iter()
+            .any(|p| p.contains("newest changelog entry"))
+    );
+    assert!(
+        Component::began("Bad Name", Kind::Capability)
+            .problems()
+            .iter()
+            .any(|p| p.contains("name"))
+    );
+    let unserved = Component::began("x", Kind::Template)
+        .entry("1.1.0", "A.")
+        .serving(&["1.0.0"]);
+    assert!(unserved.problems().iter().any(|p| p.contains("serves")));
+
+    // Wire form: what a capability Worker's manifest carries, read back the same.
+    let wire = serde_json::to_value(&blog).unwrap();
+    assert_eq!(wire["kind"], "template");
+    assert_eq!(wire["changelog"][0]["breaking"], true);
+    assert!(
+        wire["changelog"][1].get("breaking").is_none(),
+        "false is left out"
+    );
+    let back: Component = serde_json::from_value(wire).unwrap();
+    assert_eq!(back, blog);
+
+    // Pins: the person's example, as noisypigeon and willowgraysen would pin.
+    let sites = Component::began("sites", Kind::Capability)
+        .entry("1.2.3", "Deploy records.")
+        .breaking(
+            "2.0.0",
+            "site_deploy takes a site name.",
+            "Name the site in each call.",
+        );
+    let carried = vec![sites.clone(), blog.clone(), began.clone()];
+    let pins = |p: &[(&str, &str)]| -> BTreeMap<String, String> {
+        p.iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect()
+    };
+    let noisy = pins(&[("sites", "=1.2.3"), ("blog", "=2.0.1")]);
+    let willow = pins(&[("sites", "2.0"), ("blog", "3")]);
+    assert!(pin_problems(&noisy, &carried).is_empty());
+    assert!(pin_problems(&willow, &carried).is_empty());
+
+    let st = pin_status(&noisy, &carried);
+    assert_eq!(st.len(), 2);
+    assert_eq!(st[0].component, "blog", "in name order");
+    assert_eq!(st[0].state, PinState::Ok);
+    assert_eq!(
+        st[0].selected.as_deref(),
+        Some("2.0.1"),
+        "an older served template"
+    );
+    assert_eq!(st[1].component, "sites");
+    assert_eq!(st[1].state, PinState::Held, "one live sites version, 2.0.0");
+    assert_eq!(st[1].work.len(), 1);
+    assert_eq!(st[1].work[0].version, "2.0.0");
+    assert!(st[1].note.contains("refuse"));
+    let st = pin_status(&willow, &carried);
+    assert!(st.iter().all(|s| s.state == PinState::Ok));
+    assert_eq!(st[0].selected.as_deref(), Some("3.0.0"));
+
+    let odd = pins(&[("nope", "^1"), ("blog", "latest")]);
+    let problems = pin_problems(&odd, &carried);
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.starts_with("pins.nope") && p.contains("blog, instances, sites"))
+    );
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.starts_with("pins.blog") && p.contains("not a requirement"))
+    );
+    let st = pin_status(&odd, &carried);
+    assert_eq!(st[0].state, PinState::Invalid);
+    assert_eq!(st[1].state, PinState::Unknown);
+
+    // Upgrades: what each pin needs to reach the newest version, breaking work oldest first.
+    let up = upgrade(&noisy, &carried);
+    assert_eq!(up.len(), 2);
+    assert_eq!(up[0].component, "blog");
+    assert_eq!(up[0].from.as_deref(), Some("2.0.1"));
+    assert_eq!(up[0].to, "3.0.0");
+    assert_eq!(up[0].suggested, "^3.0.0");
+    assert_eq!(up[0].work.len(), 1);
+    assert_eq!(up[0].work[0].version, "3.0.0");
+    assert!(
+        up[0].work[0]
+            .migration
+            .as_deref()
+            .unwrap()
+            .contains("aliases")
+    );
+    assert_eq!(up[1].component, "sites");
+    assert_eq!(up[1].from, None, "held: nothing served allows =1.2.3");
+    assert_eq!(up[1].work[0].version, "2.0.0");
+    assert!(
+        upgrade(&willow, &carried).is_empty(),
+        "already on the newest"
+    );
+    let old = pins(&[("blog", "^1")]);
+    let up = upgrade(&old, &carried);
+    let work: Vec<&str> = up[0].work.iter().map(|e| e.version.as_str()).collect();
+    assert_eq!(
+        work,
+        ["2.0.0", "3.0.0"],
+        "both breaking entries, oldest first"
+    );
+    assert_eq!(up[0].from.as_deref(), Some("1.1.0"));
+    let safe = pins(&[("sites", "=2.0.0")]);
+    assert!(upgrade(&safe, &carried).is_empty());
+    let patch = pins(&[("blog", "=2.0.1")]);
+    let one = vec![Component::began("blog", Kind::Template).entry("1.0.1", "Fix.")];
+    let up = upgrade(&pins(&[("blog", "=1.0.0")]), &one);
+    assert!(up[0].work.is_empty(), "a fix needs no work");
+    assert!(
+        upgrade(&patch, &one).is_empty(),
+        "held above what is served: nothing to move up to"
+    );
+}
+
+/// Every capability in `src/capabilities` declares its version (a source check), and the
+/// declarations the suite can build natively (CI, models, AI agents, storage, linked,
+/// instances) keep the rules: own component first, unique names, parts named `owner.part`.
+#[test]
+fn core_every_capability_declares_its_version() {
+    use pigeon_capabilities::Capability;
+    use pigeon_capabilities::linked::Linked;
+    use pigeon_capabilities::passkeys::Passkeys;
+    use pigeon_capabilities::storage::Storage;
+    use pigeon_core::versions::{Component, Kind};
+
+    // Source coverage: every `impl Capability for` outside remote.rs has a `fn versions(`.
+    let mut root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    while !root.join("ci/workers.toml").exists() {
+        assert!(root.pop(), "ci/workers.toml is above the checkout");
+    }
+    fn rust(dir: &Path, out: &mut Vec<(String, String)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                rust(&p, out);
+            } else if p.extension().is_some_and(|x| x == "rs")
+                && let Ok(text) = std::fs::read_to_string(&p)
+            {
+                out.push((p.display().to_string(), text));
+            }
+        }
+    }
+    let mut files = Vec::new();
+    rust(&root.join("src/capabilities/src"), &mut files);
+    assert!(!files.is_empty(), "no capability sources were found");
+    let offenders: Vec<&str> = files
+        .iter()
+        .filter(|(p, _)| !p.ends_with("remote.rs"))
+        .filter(|(_, t)| t.contains("impl Capability for") && !t.contains("fn versions("))
+        .map(|(p, _)| p.as_str())
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "capabilities without fn versions: {offenders:?}"
+    );
+
+    // The declarations that build natively keep the rules.
+    let storage = Storage { accounts: vec![] };
+    let linked = Linked {
+        host: "example.test".into(),
+        passkeys: Passkeys {
+            host: "example.test".into(),
+            site_name: "pigeon".into(),
+        },
+    };
+    let instances = pigeon_capabilities::instances::Instances {
+        zone: "example.test".into(),
+        passkeys: Passkeys {
+            host: "example.test".into(),
+            site_name: "pigeon".into(),
+        },
+    };
+    let sets: Vec<(&str, Vec<Component>)> = vec![
+        ("ci", pigeon_ci::versions()),
+        ("models", pigeon_models::versions()),
+        ("ai-agents", pigeon_ai_agents::versions()),
+        ("storage", storage.versions()),
+        ("linked", linked.versions()),
+        ("instances", instances.versions()),
+    ];
+    for (own, list) in sets {
+        assert_eq!(list[0].name, own, "own component first");
+        assert_eq!(list[0].kind, Kind::Capability);
+        let mut names: Vec<&str> = list.iter().map(|c| c.name.as_str()).collect();
+        for c in &list {
+            assert!(c.problems().is_empty(), "{}: {:?}", c.name, c.problems());
+        }
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), list.len(), "{own}: names are unique");
+        for c in &list[1..] {
+            assert!(
+                matches!(c.kind, Kind::Connector | Kind::Installed),
+                "{}",
+                c.name
+            );
+            assert!(c.name.starts_with(&format!("{own}.")), "{}", c.name);
+        }
+    }
+    assert_eq!(storage.versions().len(), 4);
+}
+
 // ---- blog: a consumer repository rendered with blog@1 ----
 
 /// The blog renderer (`pigeon_blog`): a consumer repository in, a static site out, with
@@ -8002,6 +8441,76 @@ type = "image/png"
     ));
     assert!(has("static/robots.txt", "is generated by blog@1"));
     assert!(has("content/", "/pages/names/ is also"), "{problems:#?}");
+}
+
+/// Template versions are selected by the instance's pin: the newest carried version of
+/// `site.toml`'s major that the pin allows, with a problem naming the carried versions when the
+/// pin allows none, and a changelog that keeps the versioning rules.
+#[test]
+fn blog_template_versions_selected_by_pin() {
+    use pigeon_blog::{Input, render, render_pinned};
+    use pigeon_core::versions::{Component, Entry, Kind, Requirement, Version};
+
+    let input = |template: &str| Input {
+        site_toml: format!(
+            "template = \"{template}\"\n\n[site]\ntitle = \"Example\"\ndescription = \"Notes.\"\n"
+        ),
+        statics: ["apple-touch-icon", "favicon-16x16", "favicon-32x32"]
+            .iter()
+            .map(|f| format!("assets/images/site/{f}.png"))
+            .collect(),
+        base_url: "https://example.com".into(),
+        commit: "abc1234".into(),
+        commit_year: 2025,
+        ..Input::default()
+    };
+    let pinned = |template: &str, pin: &str| {
+        let req = Requirement::parse(pin).expect("a requirement");
+        render_pinned(&input(template), &|v| {
+            Version::parse(v).is_ok_and(|v| req.matches(&v))
+        })
+    };
+
+    for pin in ["^1", "=1.0.0"] {
+        let out = pinned("blog@1", pin).expect("renders");
+        assert_eq!(out.version, "1.0.0");
+        assert_eq!(out.template, "blog@1");
+        assert_eq!(out.digest, pigeon_blog::digest());
+    }
+    for pin in ["^2", "=1.0.1"] {
+        let problems = pinned("blog@1", pin).expect_err("the pin allows none");
+        assert!(
+            problems.iter().any(|p| p.file == ".pigeon/site.toml"
+                && p.message.contains("blog@1 versions 1.0.0")
+                && p.message.contains("pin allows none")),
+            "{problems:#?}"
+        );
+    }
+    let problems = render(&input("blog@2")).expect_err("blog@2 is not carried");
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.file == ".pigeon/site.toml" && p.message.contains("blog@1")),
+        "{problems:#?}"
+    );
+    assert_eq!(
+        render(&input("blog@1")),
+        render_pinned(&input("blog@1"), &|_| true)
+    );
+
+    let serves: Vec<&str> = pigeon_blog::TEMPLATES.iter().map(|t| t.version).collect();
+    let mut blog = Component::new("blog", Kind::Template, serves[0]).serving(&serves);
+    blog.changelog = pigeon_blog::CHANGELOG
+        .iter()
+        .map(|e| Entry {
+            version: e.version.into(),
+            breaking: e.breaking,
+            summary: e.summary.into(),
+            migration: e.migration.map(str::to_string),
+        })
+        .collect();
+    assert_eq!(blog.problems(), Vec::<String>::new());
+    assert_eq!(blog.changelog[0].summary, pigeon_core::versions::BEGAN);
 }
 
 /// The sites deploy's pure parts: a repository tarball as GitHub serves one (a top folder, gzip)
@@ -8843,56 +9352,6 @@ fn core_architecture_draws_every_worker_in_the_map() {
             "{var} is not drawn"
         );
     }
-
-    // The public view: nothing from any Worker's [vars], the account or the Secrets Store, no
-    // email address, and none of the Access token names or external details.
-    let shown = public(&described);
-    let shown_text = format!(
-        "{}{}",
-        serde_json::to_string(&shown).unwrap(),
-        render(&shown)
-    );
-    let mut secret: Vec<String> = vec!["fake-token".into(), "secret-detail".into()];
-    for w in &map.workers {
-        let toml = std::fs::read_to_string(root.join(&w.dir).join("wrangler.toml")).unwrap();
-        secret.extend(Wrangler::read(&toml).vars.values().cloned());
-        for line in toml.lines() {
-            let Some((key, value)) = line.split_once('=') else {
-                continue;
-            };
-            if matches!(key.trim(), "account_id" | "store_id") {
-                secret.push(value.trim().trim_matches('"').to_string());
-            }
-        }
-    }
-    // The zone and its hostnames are vars too, and are public by design: the drawing is of them.
-    let zone = shown.resources.zone.clone().unwrap();
-    for value in secret
-        .iter()
-        .filter(|v| !v.is_empty() && **v != zone && !v.ends_with(&format!(".{zone}")))
-    {
-        assert!(
-            !shown_text.contains(value.as_str()),
-            "{value} is not public"
-        );
-    }
-    for (at, _) in shown_text.match_indices('@') {
-        let before = shown_text[..at].chars().next_back().unwrap_or(' ');
-        let after: String = shown_text[at + 1..]
-            .chars()
-            .take_while(|c| c.is_alphanumeric() || *c == '.' || *c == '-')
-            .collect();
-        assert!(
-            !(before.is_alphanumeric() && after.contains('.')),
-            "an email shape near {after}"
-        );
-    }
-    let hosts: Vec<&str> = shown.hostnames.iter().map(|h| h.host.as_str()).collect();
-    assert!(hosts.contains(&"fake.pigeon.dev"), "{hosts:?}");
-    assert!(!hosts.contains(&"elsewhere.example.net"), "off the zone");
-    assert!(shown.hostnames.iter().any(|h| h.behind_access));
-    assert!(text.contains("secret-detail") && text.contains("fake-token"));
-    assert!(shown.resources.repos.is_empty() && shown.resources.mirrors.is_empty());
 
     // The public view: nothing from any Worker's [vars], the account or the Secrets Store, no
     // email address, and none of the Access token names or external details.

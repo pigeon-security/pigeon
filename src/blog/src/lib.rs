@@ -24,18 +24,60 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use sha2::{Digest, Sha256};
 
-/// The template a consumer names in `site.toml`.
+/// The newest template a consumer can name in `site.toml`.
 pub const TEMPLATE: &str = "blog@1";
 
-/// The exact version of `blog@1` this build carries. A deploy records it.
+/// The newest exact version this build carries. A deploy records the one it used.
 pub const VERSION: &str = "1.0.0";
 
-/// The template's stylesheets, byte copies of upstream 1.0.5's, served at `/assets/css/`.
+/// The newest template's stylesheets, byte copies of upstream 1.0.5's, served at `/assets/css/`.
 pub const CSS: [(&str, &str); 3] = [
     ("main.css", include_str!("v1/main.css")),
     ("tokens.css", include_str!("v1/tokens.css")),
     ("pigeon.css", include_str!("v1/pigeon.css")),
 ];
+
+/// One template version this build carries.
+#[derive(Clone, Copy, Debug)]
+pub struct Template {
+    /// What `site.toml` names, such as `blog@1`.
+    pub name: &'static str,
+    /// The major version the name stands for.
+    pub major: u64,
+    /// The exact version, `MAJOR.MINOR.PATCH`.
+    pub version: &'static str,
+    /// The stylesheets this version serves: file name and text.
+    pub css: &'static [(&'static str, &'static str)],
+}
+
+/// Every template version this build carries, newest first.
+pub const TEMPLATES: &[Template] = &[Template {
+    name: TEMPLATE,
+    major: 1,
+    version: VERSION,
+    css: &CSS,
+}];
+
+/// One line of the template's changelog.
+#[derive(Clone, Copy, Debug)]
+pub struct Change {
+    /// The version the change came in.
+    pub version: &'static str,
+    /// Whether an instance or a consumer repository must change something.
+    pub breaking: bool,
+    /// What changed, in a line.
+    pub summary: &'static str,
+    /// The work a breaking change needs; set when `breaking` is true.
+    pub migration: Option<&'static str>,
+}
+
+/// The template's changelog, newest first.
+pub const CHANGELOG: &[Change] = &[Change {
+    version: "1.0.0",
+    breaking: false,
+    summary: "The state when versions began (docs/plans/versioning.md).",
+    migration: None,
+}];
 
 /// What a deploy hands the renderer.
 #[derive(Clone, Debug, Default)]
@@ -65,9 +107,9 @@ pub struct Output {
     pub files: BTreeMap<String, (Vec<u8>, &'static str)>,
     /// Paths under `static/` to serve as they are, at the same path.
     pub statics: Vec<String>,
-    /// [`TEMPLATE`].
+    /// The selected template's name.
     pub template: &'static str,
-    /// [`VERSION`].
+    /// The selected template's exact version.
     pub version: &'static str,
     /// The template's digest: sha256 over its version and embedded files.
     pub digest: String,
@@ -90,30 +132,65 @@ impl std::fmt::Display for Problem {
 
 /// Renders the consumer's repository, or lists everything wrong with it.
 pub fn render(input: &Input) -> Result<Output, Vec<Problem>> {
+    render_pinned(input, &|_| true)
+}
+
+/// Renders with the newest carried template of the major `site.toml` names whose version
+/// `allows` accepts, or lists everything wrong.
+pub fn render_pinned(input: &Input, allows: &dyn Fn(&str) -> bool) -> Result<Output, Vec<Problem>> {
     let mut problems = Vec::new();
-    let settings = site::parse(&input.site_toml, &mut problems);
+    let settings = site::parse_major(&input.site_toml, &mut problems);
     let posts = content::parse_all(content::Kind::Post, &input.posts, &mut problems);
     let pages = content::parse_all(content::Kind::Page, &input.pages, &mut problems);
-    let Some((settings, features)) = settings else {
+    let Some((settings, features, major)) = settings else {
         problems.sort();
         return Err(problems);
     };
+    let mut chosen = None;
+    if let Some(major) = major {
+        chosen = TEMPLATES
+            .iter()
+            .find(|t| t.major == major && allows(t.version));
+        if chosen.is_none() {
+            let carried: Vec<&str> = TEMPLATES
+                .iter()
+                .filter(|t| t.major == major)
+                .map(|t| t.version)
+                .collect();
+            problems.push(Problem {
+                file: site::FILE.into(),
+                message: format!(
+                    "this pigeon carries blog@{major} versions {}; the instance's pin allows none of them, so either the pin or `template` must move",
+                    carried.join(", ")
+                ),
+            });
+        }
+    }
     let site = Site::new(settings, features, posts, pages, input);
     site.check(&input.statics, &mut problems);
-    let files = site.files();
+    let mut files = site.files();
+    if let Some(t) = chosen {
+        for (name, css) in t.css {
+            files.insert(
+                format!("assets/css/{name}"),
+                (css.to_string(), "text/css; charset=utf-8"),
+            );
+        }
+    }
+    let template_name = chosen.map_or(TEMPLATE, |t| t.name);
     for path in files.keys() {
         if input.statics.contains(path) {
             problems.push(Problem {
                 file: format!("static/{path}"),
-                message: format!("/{path} is generated by {TEMPLATE}; remove this file"),
+                message: format!("/{path} is generated by {template_name}; remove this file"),
             });
         }
     }
-    if !problems.is_empty() {
+    let Some(t) = chosen.filter(|_| problems.is_empty()) else {
         problems.sort();
         problems.dedup();
         return Err(problems);
-    }
+    };
     let files = files
         .into_iter()
         .map(|(path, (body, kind))| (path, (body.into_bytes(), kind)))
@@ -121,18 +198,23 @@ pub fn render(input: &Input) -> Result<Output, Vec<Problem>> {
     Ok(Output {
         files,
         statics: input.statics.iter().cloned().collect(),
-        template: TEMPLATE,
-        version: VERSION,
-        digest: digest(),
+        template: t.name,
+        version: t.version,
+        digest: template_digest(t),
     })
 }
 
-/// The template's digest: sha256 over its version and embedded files.
+/// The newest template's digest: sha256 over its name, version and embedded files.
 pub fn digest() -> String {
+    TEMPLATES.first().map(template_digest).unwrap_or_default()
+}
+
+/// A template's digest: sha256 over its name, version and embedded files.
+pub fn template_digest(t: &Template) -> String {
     let mut h = Sha256::new();
-    h.update(TEMPLATE.as_bytes());
-    h.update(VERSION.as_bytes());
-    for (name, css) in CSS {
+    h.update(t.name.as_bytes());
+    h.update(t.version.as_bytes());
+    for (name, css) in t.css {
         h.update(name.as_bytes());
         h.update(css.as_bytes());
     }

@@ -274,6 +274,13 @@ impl Capability for Land {
         "land"
     }
 
+    fn versions(&self) -> Vec<pigeon_core::versions::Component> {
+        vec![pigeon_core::versions::Component::began(
+            "land",
+            pigeon_core::versions::Kind::Capability,
+        )]
+    }
+
     fn tools(&self) -> Vec<Tool> {
         vec![
             Tool {

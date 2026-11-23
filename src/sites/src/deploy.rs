@@ -11,6 +11,7 @@ use std::collections::BTreeSet;
 
 use pigeon_contract::{Answer, Signed};
 use pigeon_core::r2::{self, Bucket, Manifest};
+use pigeon_core::versions::{Requirement, Version};
 use pigeon_core::{Account, tarball};
 use serde_json::{Value, json};
 use worker::{Env, Error, Fetch, Headers, Method, Request, RequestInit, Result};
@@ -76,6 +77,51 @@ pub fn target(record: &Value) -> std::result::Result<Target, String> {
     })
 }
 
+/// The pins a record carries that this Worker acts on.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Pins {
+    /// The requirement on `sites`, if set.
+    pub sites: Option<String>,
+    /// The requirement on `blog`, if set.
+    pub blog: Option<String>,
+}
+
+/// Reads [`Pins`] from a record as core's `instances_list` answers it. Pure.
+pub fn pins(record: &Value) -> Pins {
+    let get = |k: &str| record["pins"][k].as_str().map(str::to_string);
+    Pins {
+        sites: get("sites"),
+        blog: get("blog"),
+    }
+}
+
+/// Refuses when the `sites` pin does not allow the running version. Pure.
+pub fn check_sites_pin(pin: Option<&str>, running: &str) -> std::result::Result<(), String> {
+    let Some(pin) = pin else {
+        return Ok(());
+    };
+    let req = Requirement::parse(pin).map_err(|e| format!("the sites pin `{pin}`: {e}"))?;
+    let version = Version::parse(running).map_err(|e| format!("running sites {running}: {e}"))?;
+    if req.matches(&version) {
+        Ok(())
+    } else {
+        Err(format!(
+            "the instance pins sites to `{pin}`, but the running sites is {running}; plan the move with capabilities_upgrade_plan"
+        ))
+    }
+}
+
+/// Parses the `blog` pin into a requirement. Pure.
+pub fn blog_requirement(pin: Option<&str>) -> std::result::Result<Option<Requirement>, String> {
+    pin.map(|p| Requirement::parse(p).map_err(|e| format!("the blog pin `{p}`: {e}")))
+        .transpose()
+}
+
+/// Whether the requirement, when there is one, allows the template version `v`. Pure.
+pub fn allows(req: Option<&Requirement>, v: &str) -> bool {
+    req.is_none_or(|r| Version::parse(v).is_ok_and(|v| r.matches(&v)))
+}
+
 /// The repository's tarball at `rev`: through the API with the App's token when there is one,
 /// else from codeload, which serves public repositories.
 async fn tarball_of(repo: &str, rev: &str, token: Option<&str>) -> Result<Vec<u8>> {
@@ -125,6 +171,13 @@ pub async fn deploy(
         .flatten()
         .find(|r| r["id"] == instance)
         .ok_or_else(|| bad(format!("there is no instance {instance}")))?;
+    let pins = pins(record);
+    check_sites_pin(
+        pins.sites.as_deref(),
+        &crate::versions::sites_component().version,
+    )
+    .map_err(bad)?;
+    let blog_pin = blog_requirement(pins.blog.as_deref()).map_err(bad)?;
     let t = target(record).map_err(bad)?;
 
     let ask = |kind: &str| json!({ "kind": kind, "instance": instance });
@@ -152,7 +205,7 @@ pub async fn deploy(
         commit: commit.chars().take(7).collect(),
         commit_year: year,
     };
-    let out = match pigeon_blog::render(&input) {
+    let out = match pigeon_blog::render_pinned(&input, &|v| allows(blog_pin.as_ref(), v)) {
         Ok(o) => o,
         Err(problems) => {
             return Ok(json!({
@@ -237,5 +290,6 @@ pub async fn deploy(
         "template": out.template,
         "template_version": out.version,
         "template_digest": out.digest,
+        "pins": record.get("pins").cloned().unwrap_or_else(|| json!({})),
     }))
 }

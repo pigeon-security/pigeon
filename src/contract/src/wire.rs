@@ -70,6 +70,10 @@ pub struct CapabilityManifest {
     /// Event patterns: an object whose every key equals the event's same key ([`wants`]).
     #[serde(default)]
     pub wants: Vec<Value>,
+    /// Its versions and those of the parts it carries, each with its changelog
+    /// (docs/plans/versioning.md). Empty from a Worker built before versions began.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub versions: Vec<pigeon_core::versions::Component>,
 }
 
 /// An MCP tool a capability offers.

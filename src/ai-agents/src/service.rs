@@ -370,6 +370,7 @@ impl Service for Agents {
             commit: option_env!("PIGEON_COMMIT").unwrap_or_default().into(),
             capabilities: vec![CapabilityManifest {
                 name: NAME.into(),
+                versions: crate::versions(),
                 tools: vec![
                     tool(
                         "ai_agents_start",

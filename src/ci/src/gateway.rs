@@ -62,6 +62,7 @@ impl Service for CiGateway {
                 routes: vec![ROUTE.into()],
                 footprint: self.ci.footprint(),
                 secrets: self.ci.secrets(),
+                versions: crate::versions(),
                 ..CapabilityManifest::default()
             }],
         }

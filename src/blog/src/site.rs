@@ -3,9 +3,9 @@
 
 use serde::Deserialize;
 
-use super::{Problem, TEMPLATE};
+use super::{Problem, TEMPLATE, TEMPLATES};
 
-const FILE: &str = ".pigeon/site.toml";
+pub(crate) const FILE: &str = ".pigeon/site.toml";
 
 /// The file as written.
 #[derive(Deserialize)]
@@ -256,6 +256,14 @@ impl Features {
 /// Parses `site.toml`, adding a problem for everything wrong with it. Answers the settings
 /// whenever the file parses, so the rest of the site is still checked.
 pub fn parse(text: &str, problems: &mut Vec<Problem>) -> Option<(Settings, Features)> {
+    parse_major(text, problems).map(|(s, f, _)| (s, f))
+}
+
+/// Like [`parse`], and also answers the major of `blog@N` when the file names a carried one.
+pub fn parse_major(
+    text: &str,
+    problems: &mut Vec<Problem>,
+) -> Option<(Settings, Features, Option<u64>)> {
     let mut problem = |message: String| {
         problems.push(Problem {
             file: FILE.into(),
@@ -275,10 +283,17 @@ pub fn parse(text: &str, problems: &mut Vec<Problem>) -> Option<(Settings, Featu
             message,
         });
     };
-    if file.template != TEMPLATE {
+    let major = file
+        .template
+        .strip_prefix("blog@")
+        .and_then(|n| n.parse::<u64>().ok())
+        .filter(|n| TEMPLATES.iter().any(|t| t.major == *n));
+    if major.is_none() {
+        let carried: Vec<&str> = TEMPLATES.iter().map(|t| t.name).collect();
         problem(format!(
-            "template is `{}`; this pigeon renders `{TEMPLATE}`",
-            file.template
+            "template is `{}`; this pigeon carries {}",
+            file.template,
+            carried.join(", ")
         ));
     }
     let mut features = Features::default();
@@ -344,5 +359,5 @@ pub fn parse(text: &str, problems: &mut Vec<Problem>) -> Option<(Settings, Featu
     if features.banner && s.banner.is_none() {
         problem("the banner feature is on, but [site.banner] is missing".into());
     }
-    Some((file.site, features))
+    Some((file.site, features, major))
 }

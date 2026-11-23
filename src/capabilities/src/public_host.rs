@@ -105,6 +105,13 @@ impl Capability for PublicHost {
         "public_host"
     }
 
+    fn versions(&self) -> Vec<pigeon_core::versions::Component> {
+        vec![pigeon_core::versions::Component::began(
+            "public_host",
+            pigeon_core::versions::Kind::Capability,
+        )]
+    }
+
     fn tools(&self) -> Vec<Tool> {
         let description = "Make sure the hostname is served by its Worker in public, and that \
                            the Access setup it had is gone.";

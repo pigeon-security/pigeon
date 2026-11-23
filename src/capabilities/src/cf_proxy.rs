@@ -16,6 +16,13 @@ impl Capability for CfProxy {
         "cf_proxy"
     }
 
+    fn versions(&self) -> Vec<pigeon_core::versions::Component> {
+        vec![pigeon_core::versions::Component::began(
+            "cf_proxy",
+            pigeon_core::versions::Kind::Capability,
+        )]
+    }
+
     fn tools(&self) -> Vec<Tool> {
         Vec::new()
     }

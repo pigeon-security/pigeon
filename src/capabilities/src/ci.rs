@@ -30,6 +30,10 @@ impl Capability for Local {
         Ci::NAME
     }
 
+    fn versions(&self) -> Vec<pigeon_core::versions::Component> {
+        pigeon_ci::versions()
+    }
+
     fn tools(&self) -> Vec<Tool> {
         self.ci.tools()
     }

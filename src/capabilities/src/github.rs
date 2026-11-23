@@ -320,6 +320,13 @@ impl Capability for Github {
         "github"
     }
 
+    fn versions(&self) -> Vec<pigeon_core::versions::Component> {
+        vec![pigeon_core::versions::Component::began(
+            "github",
+            pigeon_core::versions::Kind::Capability,
+        )]
+    }
+
     fn footprint(&self) -> crate::Footprint {
         crate::Footprint {
             externals: vec![crate::External::new(

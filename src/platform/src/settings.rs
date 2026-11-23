@@ -31,6 +31,7 @@ use pigeon_capabilities::source::Source;
 use pigeon_capabilities::split::Split;
 use pigeon_capabilities::storage::{self, Storage};
 use pigeon_capabilities::users::Users;
+use pigeon_capabilities::versioning::Versioning;
 
 /// This Worker's wrangler.toml, the authority for its bindings, queues and containers.
 pub fn wrangler() -> Wrangler {
@@ -300,6 +301,8 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
         // The GitHub App: its key and webhook secret, /github/hook, installation tokens.
         Box::new(Github),
         Box::new(Architecture),
+        // Versions: what pigeon declares, instance pins and upgrade plans, read-only.
+        Box::new(Versioning),
         // Instances: what pigeon runs, here and in linked accounts. Only their shape is code;
         // every value is data a person approves on the console with their passkey.
         // Linked accounts: another Cloudflare account linked to an instance with Cloudflare's

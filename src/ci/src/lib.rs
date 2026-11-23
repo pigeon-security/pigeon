@@ -56,6 +56,16 @@ use config::{Job, Needs};
 use route::Availability;
 use state::Report;
 
+/// The versions CI declares: the capability, then the connectors it carries.
+pub fn versions() -> Vec<pigeon_core::versions::Component> {
+    use pigeon_core::versions::{Component, Kind};
+    vec![
+        Component::began(Ci::NAME, Kind::Capability),
+        Component::began(&format!("ci.{}", containers::NAME), Kind::Connector),
+        Component::began(&format!("ci.{}", buildkite::NAME), Kind::Connector),
+    ]
+}
+
 /// A connector's or reader's work in flight.
 pub type Pending<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + 'a>>;
 

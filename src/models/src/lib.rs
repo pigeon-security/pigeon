@@ -46,6 +46,14 @@ pub mod turn;
 /// The capability's name.
 pub const NAME: &str = "models";
 
+/// The versions the model gateway declares: the `models` capability.
+pub fn versions() -> Vec<pigeon_core::versions::Component> {
+    vec![pigeon_core::versions::Component::began(
+        NAME,
+        pigeon_core::versions::Kind::Capability,
+    )]
+}
+
 /// The model gateway Worker's script name.
 pub const WORKER: &str = "pigeon-model-gateway";
 
@@ -884,6 +892,7 @@ impl Models {
             }),
             secrets: self.secrets(),
             wants: Vec::new(),
+            versions: versions(),
         }
     }
 

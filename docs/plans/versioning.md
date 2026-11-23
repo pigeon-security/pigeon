@@ -1,6 +1,6 @@
 # Versions of every capability, connector and template, and pins per instance
 
-Status: **designed; phase 1 under way** (2026-11-23, overnight). Branch
+Status: **phase 1 built (1a to 1d), landing as one change** (2026-11-23, overnight). Branch
 `claude/ai-agent-Xtnf1hGsI6gk`. Nothing here changes a live instance: pins are set only by the
 person approving an instance record, as every record change is today.
 
@@ -210,5 +210,18 @@ with `pins`, such as `{"blog": "^1", "sites": "^1"}`.
 
 ## Log
 
+- 2026-11-23: phase 1 built (1a to 1d) and integrated on one branch on top of main. Executors:
+  1b declarations (`claude/ai-agent-OeG1Kh1Hc89P`), 1c pins and tools
+  (`claude/ai-agent-lzzoqMHJxPJF`), 1d templates (`claude/ai-agent-74G42nBbl15s`); 1a by the
+  planner. Declared, all at 1.0.0: every core capability; `ci` with `ci.containers` and
+  `ci.buildkite`; `models`; `ai-agents`; `sites` with template `blog`; `storage` with
+  `storage.scaleway`, `storage.digitalocean` and `storage.backblaze`; `linked` with
+  `linked.cloudflare`; `instances` with `instances.site_worker`; `versioning` (the new
+  capability serving `capabilities_versions` and `capabilities_upgrade_plan`). Smoke:
+  `core_versions_semver_pins_and_upgrades`, `core_every_capability_declares_its_version`,
+  `core_instances_pins_checked_and_planned`, `blog_template_versions_selected_by_pin`.
+  - The first try to land phase 1a alone dropped out at the Lander's check ("the pack is
+    malformed: it inflates too large"), twice. The branch then carried the docs commit under its
+    pre-landing id; the integrated branch is rebuilt on main instead.
 - 2026-11-23: design. Read: the instances capability (record, plan, propose), `pigeon_blog`,
   `pigeon-sites`' deploy, the contract's manifest, the architecture model and `ci/workers.toml`.

@@ -1,5 +1,5 @@
 //! pigeon-sites: the sites Worker (docs/plans/workers-split.md). It renders consumer
-//! repositories with the `blog@1` template ([`pigeon_blog`]) and deploys instance sites
+//! repositories with the blog template ([`pigeon_blog`], the version an instance's pin selects) and deploys instance sites
 //! ([`deploy`]).
 //! A capability Worker: it has no public surface, and answers only core over a Service Binding,
 //! through [`pigeon_contract::serve`], which checks the caller core signed. It asks core for
@@ -9,6 +9,7 @@
 mod apex;
 mod deploy;
 pub mod public;
+mod versions;
 
 #[cfg(not(target_arch = "wasm32"))]
 compile_error!("pigeon-sites builds for wasm32 only: cargo build --target wasm32-unknown-unknown");
@@ -20,6 +21,7 @@ use pigeon_contract::{
     ToolSpec,
 };
 use pigeon_core::secrets_store;
+use pigeon_core::versions::{Requirement, Version};
 use serde_json::{Value, json};
 use worker::{Context, Env, Request, Response, Result, event};
 
@@ -51,7 +53,7 @@ fn files(pairs: &Value) -> std::result::Result<Vec<(String, String)>, String> {
         .collect()
 }
 
-/// `site_render`: a consumer repository's content rendered with `blog@1`, answering what the
+/// `site_render`: a consumer repository's content rendered with the blog template version `pin` selects, answering what the
 /// site would hold (every path, its size and type, and the template's digest) or the problems
 /// with the content. Nothing is written anywhere.
 fn render(args: &Value) -> std::result::Result<Value, String> {
@@ -76,7 +78,15 @@ fn render(args: &Value) -> std::result::Result<Value, String> {
             .and_then(|y| u16::try_from(y).ok())
             .unwrap_or(1970),
     };
-    Ok(match pigeon_blog::render(&input) {
+    let pin = match args["pin"].as_str() {
+        Some(p) => Some(Requirement::parse(p).map_err(|e| format!("`pin` `{p}`: {e}"))?),
+        None => None,
+    };
+    let allows = |v: &str| {
+        pin.as_ref()
+            .is_none_or(|r| Version::parse(v).is_ok_and(|v| r.matches(&v)))
+    };
+    Ok(match pigeon_blog::render_pinned(&input, &allows) {
         Ok(out) => json!({
             "template": out.template,
             "version": out.version,
@@ -105,7 +115,7 @@ impl Service for Sites {
                     ToolSpec {
                         name: "site_render".into(),
                         description:
-                            "Render a consumer repository's content with template blog@1, \
+                            "Render a consumer repository's content with the blog template version the pin selects, \
                                   as a dry run: every path the site would hold, with its size \
                                   and type, and the template's digest; or the problems with \
                                   the content. Nothing is written. Served by pigeon-sites."
@@ -119,7 +129,8 @@ impl Service for Sites {
                                 "statics": { "type": "array", "items": { "type": "string" }, "description": "Paths under static/." },
                                 "base_url": { "type": "string", "description": "Such as https://example.com." },
                                 "commit": { "type": "string", "description": "The short commit, for the footer." },
-                                "commit_year": { "type": "integer" }
+                                "commit_year": { "type": "integer" },
+                                "pin": { "type": "string", "description": "A version requirement such as ^1 or =1.0.0; the newest carried version when omitted." }
                             },
                             "required": ["site_toml"]
                         }),
@@ -128,7 +139,7 @@ impl Service for Sites {
                         name: "site_deploy".into(),
                         description:
                             "Deploy an instance's site: its GitHub repository at `rev` (a \
-                                  commit or branch; main when omitted), rendered with blog@1 \
+                                  commit or branch; main when omitted), rendered with the blog template version the instance's pin selects \
                                   and written to the bucket its record names, then made live. \
                                   Only adds objects and moves `live`, so the previous deploy \
                                   stays whole. Answers the commit and counts, or the content's \
@@ -144,6 +155,7 @@ impl Service for Sites {
                         }),
                     },
                 ],
+                versions: versions::declared(),
                 ..CapabilityManifest::default()
             }],
         }

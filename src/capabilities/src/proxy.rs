@@ -313,6 +313,13 @@ impl Capability for Tokens {
         "proxy"
     }
 
+    fn versions(&self) -> Vec<pigeon_core::versions::Component> {
+        vec![pigeon_core::versions::Component::began(
+            "proxy",
+            pigeon_core::versions::Kind::Capability,
+        )]
+    }
+
     fn sections(&self) -> Vec<Section> {
         vec![crate::secrets::keys_section()]
     }

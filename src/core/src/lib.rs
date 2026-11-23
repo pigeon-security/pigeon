@@ -48,6 +48,7 @@ pub mod secrets_store;
 pub mod sign;
 pub mod tarball;
 pub mod tokens;
+pub mod versions;
 pub mod webauthn;
 pub mod workers;
 pub mod zones;

@@ -26,6 +26,10 @@ impl Capability for Models {
         pigeon_models::NAME
     }
 
+    fn versions(&self) -> Vec<pigeon_core::versions::Component> {
+        pigeon_models::versions()
+    }
+
     fn sections(&self) -> Vec<Section> {
         vec![Section {
             tab: Tab::Cost,

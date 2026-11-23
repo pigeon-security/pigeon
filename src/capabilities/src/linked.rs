@@ -599,6 +599,14 @@ impl Capability for Linked {
         "linked"
     }
 
+    fn versions(&self) -> Vec<pigeon_core::versions::Component> {
+        use pigeon_core::versions::{Component, Kind};
+        vec![
+            Component::began("linked", Kind::Capability),
+            Component::began("linked.cloudflare", Kind::Connector),
+        ]
+    }
+
     fn footprint(&self) -> crate::Footprint {
         crate::Footprint {
             externals: vec![crate::External::new(

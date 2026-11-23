@@ -152,6 +152,13 @@ impl Capability for Site {
         "site"
     }
 
+    fn versions(&self) -> Vec<pigeon_core::versions::Component> {
+        vec![pigeon_core::versions::Component::began(
+            "site",
+            pigeon_core::versions::Kind::Capability,
+        )]
+    }
+
     fn tools(&self) -> Vec<Tool> {
         let mut workers = vec![self.worker.clone()];
         workers.extend(self.also.iter().cloned());

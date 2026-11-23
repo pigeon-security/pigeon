@@ -304,6 +304,13 @@ impl Capability for Secrets {
         "secrets"
     }
 
+    fn versions(&self) -> Vec<pigeon_core::versions::Component> {
+        vec![pigeon_core::versions::Component::began(
+            "secrets",
+            pigeon_core::versions::Kind::Capability,
+        )]
+    }
+
     fn sections(&self) -> Vec<Section> {
         vec![keys_section()]
     }

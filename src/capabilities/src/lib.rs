@@ -38,6 +38,7 @@ pub mod source;
 pub mod split;
 pub mod storage;
 pub mod users;
+pub mod versioning;
 
 use std::future::Future;
 use std::pin::Pin;
@@ -120,6 +121,13 @@ pub trait Capability {
     /// What it brings to the platform, for the architecture page.
     fn footprint(&self) -> Footprint {
         Footprint::default()
+    }
+
+    /// Its versions (docs/plans/versioning.md): its own component, named as the capability,
+    /// first; then the connectors, templates and installed code it carries, each with its
+    /// changelog. Empty means undeclared, which `capabilities_versions` flags.
+    fn versions(&self) -> Vec<pigeon_core::versions::Component> {
+        Vec::new()
     }
 
     /// The console sections it fills.

@@ -109,6 +109,13 @@ impl Capability for Policy {
         "policy"
     }
 
+    fn versions(&self) -> Vec<pigeon_core::versions::Component> {
+        vec![pigeon_core::versions::Component::began(
+            "policy",
+            pigeon_core::versions::Kind::Capability,
+        )]
+    }
+
     fn tools(&self) -> Vec<Tool> {
         let kinds: Vec<Value> = Kind::ALL.iter().map(|k| json!(k.name())).collect();
         vec![Tool {

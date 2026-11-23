@@ -27,6 +27,11 @@ impl Capability for Architecture {
         "architecture"
     }
 
+    fn versions(&self) -> Vec<pigeon_core::versions::Component> {
+        use pigeon_core::versions::{Component, Kind};
+        vec![Component::began("architecture", Kind::Capability)]
+    }
+
     fn sections(&self) -> Vec<Section> {
         vec![Section {
             tab: Tab::Architecture,
@@ -179,11 +184,26 @@ pub struct Model {
     /// Services outside the platform's Workers, from the capabilities' footprints.
     pub externals: Vec<Dependency>,
     pub resources: Resources,
+    /// The versions the hosted capabilities declare, by name, without changelogs.
+    pub versions: Vec<VersionRow>,
     /// How many files it was read from, and a digest of them.
     pub files: usize,
     pub digest: String,
     /// The commit it was built from (`PIGEON_COMMIT` at build time); empty for a local build.
     pub commit: String,
+}
+
+/// One declared component's version, as the architecture shows it.
+#[derive(Serialize, Clone)]
+pub struct VersionRow {
+    /// The component's name, such as `instances.site_worker`.
+    pub name: String,
+    /// Its kind, such as `capability`.
+    pub kind: String,
+    /// The newest version this build serves.
+    pub version: String,
+    /// The Worker that serves it.
+    pub worker: String,
 }
 
 /// A capability or a building block.
@@ -398,6 +418,7 @@ pub fn public(m: &Model) -> Model {
             permissions: Vec::new(),
             unused: Vec::new(),
         },
+        versions: m.versions.clone(),
         files: m.files,
         digest: m.digest.clone(),
         commit: m.commit.clone(),
@@ -654,10 +675,27 @@ pub fn describe(sources: &[Source], hosted: &Hosted) -> Model {
     hostnames.sort_by(|a, b| a.host.cmp(&b.host));
     externals.sort_by(|a, b| a.name.cmp(&b.name));
 
+    let mut version_rows: Vec<VersionRow> = Vec::new();
+    for c in hosted.capabilities {
+        for v in c.versions() {
+            if version_rows.iter().any(|r| r.name == v.name) {
+                continue;
+            }
+            version_rows.push(VersionRow {
+                name: v.name,
+                kind: to_value(v.kind).as_str().unwrap_or_default().to_string(),
+                version: v.version,
+                worker: c.worker().unwrap_or(hosted.worker).to_string(),
+            });
+        }
+    }
+    version_rows.sort_by(|a, b| a.name.cmp(&b.name));
+
     let mut parts = caps;
     parts.extend(blocks);
     Model {
         parts,
+        versions: version_rows,
         workers,
         hostnames,
         links,
