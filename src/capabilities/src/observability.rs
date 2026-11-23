@@ -1314,11 +1314,11 @@ async fn summary(this: &Observability, cx: &Context<'_>, hours: u64) -> Result<V
                 "Models",
                 "estimated",
                 if cut_short {
-                    "AI Gateway; the log listing was cut short, so this is a lower bound. Prompt-cache reads and writes are not in the gateway's token counts or cost, so this is low for cached work"
+                    "AI Gateway cost plus prompt-cache reads and writes priced from the model gateway's jobs; the log listing was cut short, so this is a lower bound. Requests not sent as model-gateway jobs, such as models_run, carry no cache count"
                 } else {
-                    "AI Gateway. Prompt-cache reads and writes are not in the gateway's token counts or cost, so this is low for cached work such as AI agent runs"
+                    "AI Gateway cost plus prompt-cache reads and writes priced from the model gateway's jobs, such as AI agent turns. Requests not sent as model-gateway jobs, such as models_run, carry no cache count"
                 },
-                v["cost"].as_f64(),
+                v["cost_with_cache"].as_f64().or(v["cost"].as_f64()),
                 json!({ "requests": v["requests"], "tokens_in": v["tokens_in"], "tokens_out": v["tokens_out"], "truncated": cut_short }),
             ));
         }
@@ -1331,7 +1331,7 @@ async fn summary(this: &Observability, cx: &Context<'_>, hours: u64) -> Result<V
             Ok((count, usd)) => cost.push(line(
                 "AI agent runs",
                 "metered",
-                "AI agents Worker, priced with prompt-cache tokens, so it can be above the Models line, which omits them. The same model use, so it is not added to either total",
+                "AI agents Worker, priced with prompt-cache tokens, so it can differ a little from the Models line, which counts cache tokens only for model-gateway jobs. The same model use, so it is not added to either total",
                 Some(usd),
                 json!({ "runs": count, "listed": v["runs"].as_array().map_or(0, Vec::len) }),
             )),

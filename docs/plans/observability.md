@@ -367,7 +367,7 @@ Open items:
   level on every isolate start; the `fetch 401` lines on model-gateway, ci-gateway and proxy
   are unauthenticated or stale-key calls refused (no error rate, since they are answered
   responses); the one Artifacts 401 and the old changelog R2 403 are past.
-4. `models_usage` (pigeon-models) to count `cache_read_input_tokens` and
+4. **Built (2026-11-24).** `models_usage` (pigeon-models) to count `cache_read_input_tokens` and
    `cache_creation_input_tokens`, and to price them, if the gateway's logs carry them.
 5. A `pigeon: ` billing usage watch, now that the live check gives `product` and `limit`: the
    product names are still to be read from Cloudflare.
@@ -382,3 +382,17 @@ Open items:
   too, drop it from the plan. `observability_monitors_plan {check:true}` now also reports
   `filter_values` (the listed values per filter key) so the next mismatch is visible. Open:
   read `filter_values` from the check and confirm `error` is a listed value.
+- 2026-11-24: Open item 4 built. The model gateway's index object keeps one row per finished
+  job that used the prompt cache (new table `cache_usage`, migration 8, pruned past 744 h):
+  time, provider, canonical model, the request's tags, cache read tokens, 5-minute and 1-hour
+  write tokens, and the cache cost in micro-dollars. `stream.rs` now keeps the 5m/1h split.
+  `src/models/src/cache.rs` holds the price table (same numbers, prefix match and dearest
+  fallback as `budget.rs`; pigeon-models cannot depend on pigeon-ai-agents), and the merge.
+  `models_usage` adds `cache_read_tokens`, `cache_write_tokens`, `cache_cost` and
+  `cost_with_cache` at the top and per group; `cost` stays the gateway's. The Models line shows
+  `cost_with_cache`. Departures: the rows go in the index object because `end` there already
+  reads the job's request tags, so no per-job data moves; a job with no cache tokens makes no
+  row; `failed` keeps no cache rows, as a row cannot tell a failure. Left: synchronous
+  `models_run` bypasses the runner and carries no cache count; jobs finished before this
+  deploys have no rows; the console's daily Cost chart (`src/models/src/daily.rs`) still shows
+  the gateway's cost only; not run live.

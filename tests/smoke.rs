@@ -2490,6 +2490,190 @@ fn models_turns_blocks_and_lanes() {
     );
 }
 
+/// The model gateway's cache tokens (docs/plans/observability.md, Open item 4): their prices
+/// equal the AI agents' budget, a usage with and without the 5-minute/1-hour split is priced as
+/// the budget prices it, and cache rows merge into the gateway's groups by key.
+#[test]
+fn models_cache_tokens_priced() {
+    use pigeon_ai_agents::budget;
+    use pigeon_core::ai_gateway::{Dimension, Filter, Usage};
+    use pigeon_models::cache::{self, Row, Tokens};
+
+    for m in [
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+        "claude-haiku-5-5",
+        "claude-fable-5-2",
+        "claude-sonnet-5-5-20261101",
+        "gpt-9",
+    ] {
+        let (a, b) = (cache::price(m), budget::price(m));
+        assert_eq!(
+            (a.cache_read, a.cache_write_5m, a.cache_write_1h),
+            (b.cache_read, b.cache_write_5m, b.cache_write_1h),
+            "{m}"
+        );
+    }
+
+    // With the split, and without it (all writes are 5-minute writes). Cache parts only.
+    let split = json!({
+        "input_tokens": 0, "output_tokens": 0,
+        "cache_read_input_tokens": 1_000_000,
+        "cache_creation_input_tokens": 300_000,
+        "cache_creation": { "ephemeral_5m_input_tokens": 100_000, "ephemeral_1h_input_tokens": 200_000 }
+    });
+    let plain = json!({
+        "cache_read_input_tokens": 1_000_000,
+        "cache_creation_input_tokens": 300_000
+    });
+    for m in [
+        "claude-opus-5-5",
+        "claude-haiku-5-5",
+        "claude-fable-5-2",
+        "gpt-9",
+    ] {
+        for u in [&split, &plain] {
+            assert_eq!(
+                cache::cost_micros(m, cache::tokens(u)),
+                budget::cost_micros(m, u)
+            );
+        }
+    }
+    assert_eq!(
+        cache::tokens(&split),
+        Tokens {
+            read: 1_000_000,
+            write_5m: 100_000,
+            write_1h: 200_000
+        }
+    );
+    assert_eq!(
+        cache::tokens(&plain),
+        Tokens {
+            read: 1_000_000,
+            write_5m: 300_000,
+            write_1h: 0
+        }
+    );
+
+    // The stream keeps the split when the provider sends it.
+    let mut r = pigeon_models::stream::Reading::default();
+    let ev = "data: {\"type\":\"message_start\",\"message\":{\"model\":\"m\",\"usage\":{\"input_tokens\":1,\"cache_read_input_tokens\":7,\"cache_creation_input_tokens\":30,\"cache_creation\":{\"ephemeral_5m_input_tokens\":10,\"ephemeral_1h_input_tokens\":20}}}}\n\n";
+    r.feed(pigeon_models::Dialect::Anthropic, ev.as_bytes());
+    assert_eq!(
+        cache::tokens(&r.usage()),
+        Tokens {
+            read: 7,
+            write_5m: 10,
+            write_1h: 20
+        }
+    );
+    assert_eq!(r.usage()["cache_creation_input_tokens"], 30);
+
+    // The merge: one gateway group with cache rows, and a cache-only group.
+    let tags = |task: &str| vec![("task".to_string(), task.to_string())];
+    let rows: Vec<Row> = [
+        ("claude-haiku-5-5", "ai-agent/a", &split),
+        ("anthropic/claude-haiku.5-5", "ai-agent/b", &plain),
+        ("claude-opus-5-5", "ai-agent/a", &plain),
+    ]
+    .iter()
+    .map(|(m, t, u)| Row::new(1, "anthropic", m, &tags(t), u).unwrap())
+    .collect();
+    assert!(
+        Row::new(
+            1,
+            "anthropic",
+            "claude-haiku-5-5",
+            &[],
+            &json!({ "input_tokens": 5 })
+        )
+        .is_none()
+    );
+    let haiku = |m: &str| Usage {
+        group: [
+            ("provider".to_string(), Some("anthropic".to_string())),
+            ("model".to_string(), Some(m.to_string())),
+        ]
+        .into_iter()
+        .collect(),
+        requests: 3,
+        tokens_in: 10,
+        cost: Some(0.5),
+        ..Usage::default()
+    };
+    let by = [Dimension::Model];
+    let (groups, all) = cache::merge(vec![haiku("claude-haiku-5-5")], &rows, &by);
+    let micros = |m: &str, u: &Value| cache::cost_micros(m, cache::tokens(u));
+    let h = micros("claude-haiku-5-5", &split) + micros("claude-haiku-5-5", &plain);
+    let o = micros("claude-opus-5-5", &plain);
+    assert_eq!(groups.len(), 2);
+    assert_eq!(all.micros, h + o);
+    assert_eq!((all.read, all.write), (3_000_000, 900_000));
+    let find = |m: &str| groups.iter().find(|g| g["model"] == m).unwrap();
+    let (gh, go) = (find("claude-haiku-5-5"), find("claude-opus-5-5"));
+    assert_eq!(gh["cost"], 0.5);
+    assert_eq!(gh["requests"], 3);
+    assert_eq!(gh["cache_read_tokens"], 2_000_000);
+    assert_eq!(gh["cache_write_tokens"], 600_000);
+    assert!((gh["cache_cost"].as_f64().unwrap() - h as f64 / 1e6).abs() < 1e-9);
+    assert!((gh["cost_with_cache"].as_f64().unwrap() - (0.5 + h as f64 / 1e6)).abs() < 1e-9);
+    assert_eq!(
+        (go["requests"].as_u64(), go["cost"].is_null()),
+        (Some(0), true)
+    );
+    assert!((go["cost_with_cache"].as_f64().unwrap() - o as f64 / 1e6).abs() < 1e-9);
+    // Grouped by task, the keys are the task tag's.
+    let (by_task, _) = cache::merge(vec![], &rows, &[Dimension::Task]);
+    assert_eq!(by_task.len(), 2);
+    assert!(
+        by_task
+            .iter()
+            .any(|g| g["task"] == "ai-agent/a" && g["cache_read_tokens"] == 2_000_000)
+    );
+
+    // The filter: provider, model in either form, caller, task, task prefix; failures keep none.
+    let keep = |f: &Filter, p: Option<&str>| rows.iter().filter(|r| cache::keeps(r, f, p)).count();
+    assert_eq!(keep(&Filter::default(), None), 3);
+    let f = |m: &str| Filter {
+        model: Some(m.into()),
+        ..Filter::default()
+    };
+    assert_eq!(keep(&f("anthropic/claude-haiku-5.5"), None), 2);
+    assert_eq!(
+        keep(
+            &Filter {
+                task: Some("ai-agent/a".into()),
+                ..Filter::default()
+            },
+            None
+        ),
+        2
+    );
+    assert_eq!(keep(&Filter::default(), Some("ai-agent/")), 3);
+    assert_eq!(keep(&Filter::default(), Some("ci/")), 0);
+    assert_eq!(
+        keep(
+            &Filter {
+                failed: true,
+                ..Filter::default()
+            },
+            None
+        ),
+        0
+    );
+    assert_eq!(
+        keep(
+            &Filter {
+                provider: Some("openai".into()),
+                ..Filter::default()
+            },
+            None
+        ),
+        0
+    );
+}
+
 /// An AI agent run's logic (docs/plans/ai-agents.md, phase 2): its next action from what it knows,
 /// recovery from a failed turn, budgets and prices, the tools each role is offered and their
 /// checks, and the turn it sends.

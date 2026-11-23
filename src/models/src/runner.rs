@@ -21,6 +21,7 @@ use worker::{
 };
 
 use super::Dialect;
+use super::cache;
 use super::jobs::{self, State};
 use super::stream::Reading;
 
@@ -31,7 +32,7 @@ pub const INDEX: &str = "index";
 
 /// Each object's schema, one statement per migration, applied in order and never edited. An
 /// index object uses `jobs`; a job object uses `run`.
-const MIGRATIONS: [&str; 7] = [
+const MIGRATIONS: [&str; 8] = [
     "CREATE TABLE jobs (id TEXT PRIMARY KEY, caller TEXT, caller_name TEXT, for_id TEXT, task TEXT, provider TEXT NOT NULL, model TEXT NOT NULL, state TEXT NOT NULL, request TEXT, timeout_ms INTEGER NOT NULL, created_at INTEGER NOT NULL, started_at INTEGER, deadline_at INTEGER, finished_at INTEGER, progress_at INTEGER, progress_chars INTEGER, tokens_in INTEGER, tokens_out INTEGER, stop_reason TEXT, reply_model TEXT, text TEXT, error TEXT, notify_url TEXT, notify_key TEXT, notify_tries INTEGER NOT NULL DEFAULT 0, notify_at INTEGER, read_at INTEGER, expires_at INTEGER NOT NULL)",
     "CREATE TABLE run (id TEXT PRIMARY KEY, request TEXT NOT NULL, started INTEGER NOT NULL DEFAULT 0)",
     "ALTER TABLE jobs ADD COLUMN lane TEXT NOT NULL DEFAULT 'default'",
@@ -39,6 +40,7 @@ const MIGRATIONS: [&str; 7] = [
     "ALTER TABLE run ADD COLUMN cancelled INTEGER NOT NULL DEFAULT 0",
     "CREATE TABLE parts (owner TEXT NOT NULL, n INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY (owner, n))",
     "CREATE INDEX jobs_lane_state ON jobs (lane, state)",
+    "CREATE TABLE cache_usage (finished_at INTEGER NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, caller TEXT, caller_name TEXT, for_id TEXT, for_name TEXT, task TEXT, cache_read INTEGER NOT NULL, cache_write_5m INTEGER NOT NULL, cache_write_1h INTEGER NOT NULL, cost_micros INTEGER NOT NULL)",
 ];
 
 /// The longest piece of a large value kept in one row of `parts`, in bytes.
@@ -298,6 +300,7 @@ impl ModelJobs {
                 Ok(Value::Null)
             }
             "finish" => self.finish(a).await,
+            "cache_usage" => self.cache_rows(a["since"].as_i64().unwrap_or(0)),
             // ---- a job object ----
             "start" => {
                 if self.run_row()?.is_none() {
@@ -463,6 +466,11 @@ impl ModelJobs {
         }
         let r = reply.cloned().unwrap_or(Value::Null);
         let t = now();
+        let tags = self
+            .get_parts(&format!("req:{}", row.id))?
+            .and_then(|p| serde_json::from_str::<Ask>(&p).ok())
+            .map(|a| a.tags)
+            .unwrap_or_default();
         self.drop_parts(&format!("req:{}", row.id))?;
         if let Some(blocks) = r["content"].as_array().filter(|b| !b.is_empty()) {
             self.put_parts(
@@ -491,7 +499,44 @@ impl ModelJobs {
                 row.state.as_str().into(),
             ],
         )?;
+        if let Some(c) = cache::Row::new(t, &row.provider, &row.model, &tags, &r["usage"]) {
+            self.keep_cache(&c)?;
+        }
         Ok(true)
+    }
+
+    /// Keeps `c` in `cache_usage` and drops the rows past [`cache::KEEP_HOURS`].
+    fn keep_cache(&self, c: &cache::Row) -> Result<()> {
+        self.db.exec(
+            "DELETE FROM cache_usage WHERE finished_at < ?",
+            vec![(c.finished_at - cache::KEEP_HOURS * 3_600_000).into()],
+        )?;
+        self.db.exec(
+            "INSERT INTO cache_usage (finished_at, provider, model, caller, caller_name, for_id, for_name, task, cache_read, cache_write_5m, cache_write_1h, cost_micros) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            vec![
+                c.finished_at.into(),
+                c.provider.as_str().into(),
+                c.model.as_str().into(),
+                opt(c.caller.as_deref()),
+                opt(c.caller_name.as_deref()),
+                opt(c.for_id.as_deref()),
+                opt(c.for_name.as_deref()),
+                opt(c.task.as_deref()),
+                c.cache_read.into(),
+                c.cache_write_5m.into(),
+                c.cache_write_1h.into(),
+                c.cost_micros.into(),
+            ],
+        )
+    }
+
+    /// The cache rows finished since `since` (milliseconds), for `models_usage`.
+    fn cache_rows(&self, since: i64) -> Result<Value> {
+        let rows: Vec<cache::Row> = self.db.rows(
+            "SELECT * FROM cache_usage WHERE finished_at >= ? ORDER BY finished_at",
+            vec![since.into()],
+        )?;
+        Ok(serde_json::to_value(rows)?)
     }
 
     async fn finish(&self, a: &Value) -> Result<Value> {

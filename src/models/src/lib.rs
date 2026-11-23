@@ -36,6 +36,7 @@ use serde_json::{Value, json};
 use worker::js_sys::Date;
 use worker::{Env, Error, Fetch, Headers, Method, Request, RequestInit, Result};
 
+pub mod cache;
 pub mod daily;
 pub mod jobs;
 pub mod runner;
@@ -549,7 +550,8 @@ impl Models {
         .await
     }
 
-    async fn usage(&self, account: &Account, args: &Value) -> Result<Value> {
+    /// `models_usage`: the gateway's logs and the model gateway's cache tokens, added up.
+    async fn usage(&self, env: &Env, account: &Account, args: &Value) -> Result<Value> {
         let hours = args["hours"]
             .as_f64()
             .unwrap_or(24.0)
@@ -557,8 +559,9 @@ impl Models {
         let by = dimensions(args)?;
         let filter = filter(args);
         let since = Date::now() - hours * 3_600_000.0;
+        let prefix = args["task_prefix"].as_str().filter(|p| !p.is_empty());
         let mut logs = ai_gateway::logs(account, &self.gateway, since, &filter, 2_000).await?;
-        if let Some(prefix) = args["task_prefix"].as_str().filter(|p| !p.is_empty()) {
+        if let Some(prefix) = prefix {
             logs.retain(|l| {
                 l.metadata
                     .get("task")
@@ -567,6 +570,24 @@ impl Models {
         }
         let groups = ai_gateway::summarize(&logs, &by);
         let cost: f64 = groups.iter().filter_map(|u| u.cost).sum();
+        // The cache tokens are not in the gateway's logs: the model gateway's jobs kept them.
+        let rows: Vec<cache::Row> = serde_json::from_value(
+            runner::call(
+                env,
+                runner::INDEX,
+                "cache_usage",
+                &json!({ "since": since as i64 }),
+            )
+            .await?,
+        )?;
+        let rows: Vec<cache::Row> = rows
+            .into_iter()
+            .filter(|r| cache::keeps(r, &filter, prefix))
+            .collect();
+        let tokens_in: u64 = groups.iter().map(|u| u.tokens_in).sum();
+        let tokens_out: u64 = groups.iter().map(|u| u.tokens_out).sum();
+        let payloads_kept: u64 = groups.iter().map(|u| u.payloads_kept).sum();
+        let (groups, cached) = cache::merge(groups, &rows, &by);
         let by: Vec<&str> = by
             .iter()
             .filter_map(|d| Dimension::ALL.iter().find(|(_, x)| x == d).map(|(n, _)| *n))
@@ -576,10 +597,14 @@ impl Models {
             "hours": hours,
             "requests": logs.len(),
             "truncated": logs.len() >= 2_000,
-            "tokens_in": groups.iter().map(|u| u.tokens_in).sum::<u64>(),
-            "tokens_out": groups.iter().map(|u| u.tokens_out).sum::<u64>(),
+            "tokens_in": tokens_in,
+            "tokens_out": tokens_out,
             "cost": cost,
-            "payloads_kept": groups.iter().map(|u| u.payloads_kept).sum::<u64>(),
+            "cache_read_tokens": cached.read,
+            "cache_write_tokens": cached.write,
+            "cache_cost": cached.dollars(),
+            "cost_with_cache": cost + cached.dollars(),
+            "payloads_kept": payloads_kept,
             "by": by,
             "groups": groups,
         }))
@@ -730,7 +755,11 @@ impl Models {
                 name: "models_usage",
                 description: "What the AI gateway's requests used over a window, from its \
                               logs: requests, failures, tokens in and out, and cost, in all and \
-                              in groups: by provider and model unless `by` names others. \
+                              in groups: by provider and model unless `by` names others. The \
+                              logs lack prompt-cache tokens, so those come from the model \
+                              gateway's own jobs (not `models_run`): `cache_read_tokens`, \
+                              `cache_write_tokens`, `cache_cost` and `cost_with_cache`, which is \
+                              `cost` (the gateway's) plus `cache_cost`. \
                               `model`, `caller` and `task` keep only the requests that match; \
                               a model in either form (`claude-haiku-5-5`, \
                               `anthropic/claude-haiku-5.5`).",
@@ -818,7 +847,7 @@ impl Models {
                 to_value(ai_gateway::provider_configs(account()?, &self.gateway).await?)
             }
             "models_run" => self.run(account()?, caller, args).await?,
-            "models_usage" => self.usage(account()?, args).await?,
+            "models_usage" => self.usage(env, account()?, args).await?,
             "models_logs" => self.recent(account()?, args).await?,
             "models_submit" => self.submit(env, caller, args).await?,
             "models_status" => self.job(env, caller, "status", args).await?,

@@ -32,6 +32,10 @@ pub struct Reading {
     pub cache_read: Option<u64>,
     /// The tokens written to the provider's cache.
     pub cache_write: Option<u64>,
+    /// The part of the cache writes made to the 5-minute cache, when the provider splits them.
+    pub cache_write_5m: Option<u64>,
+    /// The part of the cache writes made to the 1-hour cache, when the provider splits them.
+    pub cache_write_1h: Option<u64>,
     /// The provider's error, when it sent one in the stream.
     pub error: Option<String>,
     /// Whether the provider said the answer is complete.
@@ -134,6 +138,13 @@ impl Reading {
         self.cache_write = u["cache_creation_input_tokens"]
             .as_u64()
             .or(self.cache_write);
+        let split = &u["cache_creation"];
+        self.cache_write_5m = split["ephemeral_5m_input_tokens"]
+            .as_u64()
+            .or(self.cache_write_5m);
+        self.cache_write_1h = split["ephemeral_1h_input_tokens"]
+            .as_u64()
+            .or(self.cache_write_1h);
     }
 
     /// Makes room for block `i` and answers its place, or sets an error when `i` is too high.
@@ -280,12 +291,19 @@ impl Reading {
 
     /// The usage so far, as a JSON object. What is not known is null.
     pub fn usage(&self) -> Value {
-        json!({
+        let mut usage = json!({
             "input_tokens": self.tokens_in,
             "output_tokens": self.tokens_out,
             "cache_read_input_tokens": self.cache_read,
             "cache_creation_input_tokens": self.cache_write,
-        })
+        });
+        if self.cache_write_5m.is_some() || self.cache_write_1h.is_some() {
+            usage["cache_creation"] = json!({
+                "ephemeral_5m_input_tokens": self.cache_write_5m.unwrap_or(0),
+                "ephemeral_1h_input_tokens": self.cache_write_1h.unwrap_or(0),
+            });
+        }
+        usage
     }
 
     /// The reply so far.
