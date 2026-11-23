@@ -299,15 +299,22 @@ pub fn fold_billing(result: &Value) -> Vec<Value> {
         let Some(name) = row["ServiceName"].as_str() else {
             continue;
         };
-        let unit = row["ConsumedUnit"].as_str().unwrap_or_default();
+        // Live rows often carry an empty `ConsumedUnit` (Workers requests, Durable Objects
+        // requests): fall back to `PricingUnit`, then `ChargeDescription`, so two meters of one
+        // service never add together under an empty unit.
+        let unit = ["ConsumedUnit", "PricingUnit", "ChargeDescription"]
+            .iter()
+            .filter_map(|k| row[*k].as_str())
+            .find(|s| !s.trim().is_empty())
+            .unwrap_or("unspecified");
         let entry = by
             .entry((name.to_string(), unit.to_string()))
             .or_insert_with(|| {
                 let mut kept =
                     json!({ "ServiceName": name, "ConsumedQuantity": 0.0, "BilledCost": 0.0 });
+                kept["ConsumedUnit"] = json!(unit);
                 for k in [
                     "ServiceFamilyName",
-                    "ConsumedUnit",
                     "BillingCurrency",
                     "ChargePeriodStart",
                     "ChargePeriodEnd",
@@ -653,8 +660,15 @@ async fn monitors_plan(this: &Observability, cx: &Context<'_>) -> Result<Value> 
     let lines: Vec<String> = planned
         .iter()
         .map(|p| {
+            // Live check (2026-11-23): neither Workers alert type offers a script filter, so
+            // such a policy watches every Worker in the account. The approval says so.
+            let scope = if p["filters"].as_object().is_some_and(|f| f.is_empty()) {
+                ", every Worker in the account: Cloudflare offers no script filter for this type"
+            } else {
+                ", pigeon's Workers only"
+            };
             format!(
-                "create `{}` ({})",
+                "create `{}` ({}{scope})",
                 p["name"].as_str().unwrap_or(""),
                 p["alert_type"].as_str().unwrap_or("")
             )
@@ -1027,9 +1041,9 @@ async fn summary(this: &Observability, cx: &Context<'_>, hours: u64) -> Result<V
                 "Models",
                 "estimated",
                 if cut_short {
-                    "AI Gateway; the log listing was cut short, so this is a lower bound"
+                    "AI Gateway; the log listing was cut short, so this is a lower bound. Prompt-cache reads and writes are not in the gateway's token counts or cost, so this is low for cached work"
                 } else {
-                    "AI Gateway"
+                    "AI Gateway. Prompt-cache reads and writes are not in the gateway's token counts or cost, so this is low for cached work such as AI agent runs"
                 },
                 v["cost"].as_f64(),
                 json!({ "requests": v["requests"], "tokens_in": v["tokens_in"], "tokens_out": v["tokens_out"], "truncated": cut_short }),
@@ -1044,7 +1058,7 @@ async fn summary(this: &Observability, cx: &Context<'_>, hours: u64) -> Result<V
             Ok((count, usd)) => cost.push(line(
                 "AI agent runs",
                 "metered",
-                "AI agents Worker; this is model use already counted in the Models line, so it is not added to either total",
+                "AI agents Worker, priced with prompt-cache tokens, so it can be above the Models line, which omits them. The same model use, so it is not added to either total",
                 Some(usd),
                 json!({ "runs": count, "listed": v["runs"].as_array().map_or(0, Vec::len) }),
             )),

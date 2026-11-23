@@ -1,10 +1,9 @@
 # Cloudflare Observability for every pigeon Worker
 
-Status: in progress, nothing landed. Three slices, each on its own branch, CI `test` green on
-each: (a) settings and coverage check, on the planner's branch `claude/ai-agent-QrV7alyFFsv6`;
-(b) the query client and `observability_summary`, on `claude/ai-agent-tOTEYTUOTkNp`; (c)
-monitors by plan and apply, on `claude/ai-agent-E57UIF16D9q8`, built on (b). The person
-approves each landing, and does the follow-ups listed at the end. See the Log.
+Status: (a), (b) and (c) landed and deployed (core at bbbdb96 serves all three tools). Still on
+branches, not landed: `spike_after_deploy` and the CI price, and the console's Platform
+section (see the latest Log entry). The live checks in the handoff entry have not been run yet.
+The person approves each landing, and does the follow-ups listed under "For the person".
 
 The request: turn on Cloudflare Observability (logging, traces, analytics, monitors, usage) for
 every Worker, and add one tool that gives high-level error stats and one view of cost.
@@ -237,9 +236,8 @@ until the person approves a plan.
 
 ## For the person
 
-- Approve each landing; (a) deploys all six Workers, and its policy audit line change is in
-  `src/core`, a shared path.
-- Land (b) before (c): (c) is built on (b)'s branch.
+- (a), (b) and (c) are landed. Approve the part-3 landings (core only).
+- Apply the monitors plan on the console only after the live shape check (Log, open item 1).
 - In the dashboard, create the Monitors listed above, and add email delivery to the
   `pigeon: ...` notification policies that (c) creates (pigeon holds no person's email).
 - Optional: a Workers spending limit (an account setting).
@@ -333,3 +331,43 @@ until the person approves a plan.
      shapes (telemetry result, `wallTime*`, billable usage rows) did not match. A Worker that
      logs nothing in the window shows "its Workers Logs may be off": a known false positive.
   3. Still not built: `spike_after_deploy`, the CI price, the console Cost section.
+- 2026-11-23: gateway planner 4yjseGrHCRkt. (c) is deployed: `architecture_describe` reports
+  core at bbbdb96, which carries 2e9d2e5 and lists `observability_monitors_plan` and
+  `observability_summary`. The planner's toolset cannot call pigeon's own MCP tools, and the
+  person did not answer within the wait, so handoff steps 1 and 2 (the live shape check and one
+  summary run) were **not run**; they stay open below. Part 3 went to two executors:
+  `spike_after_deploy` and the CI price on `claude/ai-agent-7cMSL39zrAsx`, the console's
+  Platform section on `claude/ai-agent-mUxMmmZOg9xH`. See the planner's report for their tips
+  and CI.
+
+Open items:
+1. Run `observability_monitors_plan {check: true}` and compare it as handoff step 1 says, before
+   anyone runs `observability_monitors_apply` (the person applies, on the console).
+2. Run `observability_summary {hours: 24}` once. Each `unavailable` entry that names a mint
+   ("the token was not minted") is a permission the parent token cannot grant; any other entry
+   is a live shape to fix.
+3. Review and land the two part-3 branches. The Platform section adds nothing to the
+   overview's total, because its Models line is already the Models section's cost.
+- 2026-11-23: the person ran both live checks (core at ca548c9). Monitors check: alert types
+  read as an object (61 types), `wanted_absent` empty; filter keys: `workers_observability_alert`
+  only `status`, `workers_observability_real_time_issue` none, `billing_usage_alert` `product`
+  and `limit`, `billing_budget_alert` `total_spend_dollars`; 3 policies, none `pigeon: `, a
+  policy's fields `alert_type, created, enabled, id, mechanisms, modified, name`, its
+  `mechanisms` holds `email`. So the two Workers policies go out with no script filter and
+  watch every Worker in the account; the plan line now says so. Whether Cloudflare accepts
+  `mechanisms: {}` is still unproved: the first apply shows it. Summary: every source answered.
+  Fixes on the planner's branch: billing rows with an empty `ConsumedUnit` now key on
+  `PricingUnit`, then `ChargeDescription`. The Models line was below the agent run line ($48.56
+  against $164.47) because AI Gateway's logs carry Anthropic's uncached `input_tokens` only, and
+  its cost leaves out prompt-cache reads and writes, which the agents' budget prices
+  (`src/ai-agents/src/budget.rs`). The texts now say so. Counting cache tokens in
+  `models_usage` is open item 4.
+  Read from the top errors: "remote capability ci clashes with a local one" is expected while
+  core still serves CI itself (workers-split phase 4), so it is noise, but it logs at error
+  level on every isolate start; the `fetch 401` lines on model-gateway, ci-gateway and proxy
+  are unauthenticated or stale-key calls refused (no error rate, since they are answered
+  responses); the one Artifacts 401 and the old changelog R2 403 are past.
+4. `models_usage` (pigeon-models) to count `cache_read_input_tokens` and
+   `cache_creation_input_tokens`, and to price them, if the gateway's logs carry them.
+5. A `pigeon: ` billing usage watch, now that the live check gives `product` and `limit`: the
+   product names are still to be read from Cloudflare.

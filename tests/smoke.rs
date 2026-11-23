@@ -7453,6 +7453,15 @@ fn core_observability_summary_folds() {
     assert_eq!(requests.map(|b| b["BilledCost"].as_f64()), Some(Some(1.5)));
     assert!(!json!(billing).to_string().contains("Secret"));
 
+    // An empty ConsumedUnit (as live rows often have) falls back to the charge description, so
+    // two meters of one service still stay apart.
+    let billing = fold_billing(&json!([
+        { "ServiceName": "Durable Objects", "ConsumedUnit": "", "ChargeDescription": "Requests", "ConsumedQuantity": 9, "BilledCost": 0.0 },
+        { "ServiceName": "Durable Objects", "ConsumedUnit": "", "ChargeDescription": "Duration", "ConsumedQuantity": 4, "BilledCost": 0.0 },
+    ]));
+    assert_eq!(billing.len(), 2, "{billing:?}");
+    assert!(billing.iter().any(|b| b["ConsumedUnit"] == "Duration"));
+
     // The Workers estimate: 2M requests and 10M CPU ms.
     assert!((workers_estimate(2e6, 1e7) - 0.8).abs() < 1e-9);
 
