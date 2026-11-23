@@ -1599,3 +1599,93 @@ fn sandbox_prepare_retry() {
     );
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// `commit_push` pushes HEAD, so a rebase or cherry-pick leaves the sandbox, and takes `force`
+/// for a force-with-lease push of the run's own branch: the branch is always the run's, never
+/// one the model names. What the model reads covers the new sandboxd answers and image v2's,
+/// which pushes only with a new commit, until the image is rebuilt.
+#[test]
+fn ai_agents_commit_push_pushes_local_commits_with_lease() {
+    use pigeon_ai_agents::{Role, sandbox, tools};
+    // Offered with an optional boolean `force`; `message` stays the one required field.
+    let defs = tools::definitions(Role::Executor, &[]);
+    let cp = defs.iter().find(|d| d["name"] == "commit_push").unwrap();
+    assert_eq!(cp["input_schema"]["properties"]["force"]["type"], "boolean");
+    assert_eq!(cp["input_schema"]["required"], json!(["message"]));
+    assert!(
+        cp["description"]
+            .as_str()
+            .unwrap()
+            .contains("local commits")
+    );
+    // `force` is true, false or absent; nothing else.
+    for ok in [
+        json!({ "message": "m" }),
+        json!({ "message": "m", "force": true }),
+        json!({ "message": "m", "force": false }),
+    ] {
+        assert_eq!(
+            tools::check(Role::Executor, "commit_push", &ok),
+            Ok(()),
+            "{ok}"
+        );
+    }
+    for bad in [
+        json!({ "message": "m", "force": "yes" }),
+        json!({ "message": "m", "force": 1 }),
+        json!({ "force": true }),
+    ] {
+        assert!(
+            tools::check(Role::Planner, "commit_push", &bad).is_err(),
+            "{bad}"
+        );
+    }
+    // The server is told the run's branch and whether to force; a branch the model names is
+    // ignored, and a missing `force` is a plain push.
+    let (op, body) = sandbox::op_for(
+        "commit_push",
+        &json!({ "message": "m", "force": true, "branch": "main" }),
+        "claude/ai-agent-r1",
+    )
+    .unwrap();
+    assert_eq!(op, "commit_push");
+    assert_eq!(
+        body,
+        json!({ "message": "m", "branch": "claude/ai-agent-r1", "force": true })
+    );
+    let (_, plain) = sandbox::op_for("commit_push", &json!({ "message": "m" }), "b").unwrap();
+    assert_eq!(plain["force"], false);
+    // What the model reads.
+    let shown = |a: Value| sandbox::shown("commit_push", &a);
+    let c = "c0ffee";
+    assert_eq!(
+        shown(
+            json!({ "commit": c, "pushed": true, "committed": true, "forced": false, "nothing": false })
+        ),
+        "pushed c0ffee"
+    );
+    assert!(
+        shown(json!({ "commit": c, "pushed": true, "committed": false, "forced": false, "nothing": false }))
+            .contains("local commits")
+    );
+    assert!(
+        shown(json!({ "commit": c, "pushed": true, "committed": false, "forced": true, "nothing": false }))
+            .contains("forced, with lease")
+    );
+    assert_eq!(
+        shown(
+            json!({ "commit": c, "pushed": false, "committed": false, "forced": false, "nothing": true })
+        ),
+        "nothing to commit or push; the branch is at c0ffee"
+    );
+    // Image v2's answer: the commit unquoted, and why local commits did not leave.
+    let old = shown(json!({ "commit": c, "pushed": false, "nothing": true }));
+    assert!(
+        old.starts_with("nothing to commit; the branch is at c0ffee.") && old.contains("rebase"),
+        "{old}"
+    );
+    assert_eq!(
+        shown(json!({ "commit": c, "pushed": true })),
+        "pushed c0ffee"
+    );
+}

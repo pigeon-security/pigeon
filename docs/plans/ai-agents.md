@@ -237,7 +237,8 @@ The 4 job tags stay. `task` carries the run: `ai-agent/{run}/{role}/{turn}` (100
   - Files: `read_file`, `write_file`, `edit_file` (exact replace, failing unless unique), `list`,
     `grep`.
   - `run {cmd, timeout_s ≤ 1800}`, answering the exit code and the tails of stdout and stderr.
-  - `commit_push {message}`.
+  - `commit_push {message, force?}`: commits any change, then pushes HEAD (local commits
+    included) to the run's branch; `force` pushes with `--force-with-lease`.
 - **Instances.** Executors run on `standard-4` (cargo needs it), planners on `standard-1` (reading
   and grepping). At most 4 sandboxes at once (a setting), apart from CI's 4. An idle sandbox
   sleeps after 10 min, and a finished run destroys its own.
@@ -796,3 +797,29 @@ executors through it. Each item: state, next step, who it waits on.
     as the report.
   - The smoke scenarios `ai_agents_last_turn_reports_before_budget` and
     `ai_agents_last_turn_on_turns_and_wall` now expect `auto`.
+- 2026-11-23: **`commit_push` pushes local commits, and can force-push the run's own branch**
+  (bug: a rebase or cherry-pick committed with `run` never left the sandbox, since
+  `commit_push` pushed only when it had something new to commit).
+  - sandboxd (`ci/sandbox/sandboxd`, a gate change): it commits when there is a change, then
+    pushes HEAD, whatever it is, to the run's branch. With `force` it pushes with
+    `--force-with-lease`. The lease is `refs/remotes/origin/{branch}`, the tip this checkout
+    last saw on the remote: set by `prepare`, by each push, and by `fetch` of the branch. It
+    answers `committed`, `pushed`, `forced` and `nothing` (nothing to commit or push). It
+    refuses while a rebase, merge, cherry-pick or revert is half done. A rejected push says
+    whether to fetch first or to push with `force`.
+  - The Worker: the `commit_push` tool takes an optional boolean `force`. The branch is still
+    the run's own, never one the model names. Image v2's answer, which has no `committed`,
+    tells the model that local commits leave only with its next commit and `force` is not
+    available yet. Changing the tool list makes live runs retry once (stale thinking).
+  - The git proxy: a run's grant now covers only `claude/ai-agent-{run}` and
+    `claude/ai-agent-{run}-…`, as the design says. Before, any ref starting with the prefix
+    passed, so run `ab` could push or force-push run `abc`'s branch. The policy still allows
+    the rewrite (`session-branches`). Main still never moves by a push.
+  - **Needs the person:** rebuild and push the sandbox image (`ci/sandbox/Dockerfile`), then pin
+    its digest in `src/ai-agents-worker/wrangler.toml`. Until then runs keep image v2's
+    behaviour.
+  - Smoke scenarios: `git_proxy_run_grant_rewrites_only_its_own_branch` and
+    `ai_agents_commit_push_pushes_local_commits_with_lease`. sandboxd was tested by hand against
+    a bare origin: a local commit pushed with nothing staged, nothing to push, a rejected
+    rewrite, a forced rewrite, a stale lease refused, a rebase onto the fetched branch pushed,
+    and a half-done merge refused.

@@ -275,6 +275,67 @@ fn git_proxy_push_rules() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A run's git grant pushes, rewrites (a force-push after a rebase) and deletes only its own
+/// branch and `{branch}-…`: never main, a tag, another session branch, or another run's branch
+/// whose name starts with this run's (run `ab`, branch `claude/ai-agent-abc`). The policy
+/// still allows the rewrite itself (`session-branches`), so the grant's scope is what keeps a
+/// force-push on the run's own branch.
+#[test]
+fn git_proxy_run_grant_rewrites_only_its_own_branch() {
+    use pigeon_capabilities::git_proxy::{Rule, check_all};
+    use pigeon_capabilities::proxy::run_branch_prefix;
+    use pigeon_core::git::{self, Command as Update, ZERO};
+    use pigeon_core::proxy_caller::within_prefix;
+    const P: &str = "refs/heads/main";
+    const X: &str = "refs/heads/claude/";
+    let prefix = run_branch_prefix("ab").unwrap();
+    let own = format!("refs/heads/{prefix}");
+
+    // A real rewrite of the run's branch, as `git push --force-with-lease` sends it: the old
+    // tip is not in the new one's history.
+    let dir = repo("run-rewrite");
+    let a = commit(&dir, "a");
+    let b = commit(&dir, "a\nb");
+    git(&dir, &["checkout", "-q", "-b", "rebased", &a], None);
+    let c = commit(&dir, "a\nc");
+    let line = format!("{b} {c} {own}\0report-status side-band-64k\n");
+    let mut body = format!("{:04x}{line}0000", line.len() + 4).into_bytes();
+    body.extend(pack(&dir, &c, &a));
+    let pushed = git::commands(&body).unwrap().unwrap();
+    assert!(within_prefix(pushed.commands.iter().map(|u| u.name.as_str()), &prefix).is_ok());
+    assert_eq!(check_all(&pushed.commands, P, X), Ok(vec![Rule::Stream]));
+
+    // Inside the grant: the branch itself and `{branch}-…`, pushed, rewritten or deleted.
+    let wip = format!("{own}-wip");
+    assert!(within_prefix([own.as_str(), wip.as_str()], &prefix).is_ok());
+    let cmd = |old: &str, new: &str, name: &str| Update {
+        old: old.into(),
+        new: new.into(),
+        name: name.into(),
+    };
+    for u in [cmd(ZERO, &a, &own), cmd(&b, &c, &own), cmd(&c, ZERO, &wip)] {
+        assert_eq!(check_all(&[u], P, X), Ok(vec![Rule::Stream]));
+    }
+
+    // Outside it, each named: another run's branch that shares the prefix, other session
+    // branches, main, a tag, and a path that climbs out.
+    let tried = [
+        own.as_str(),
+        "refs/heads/claude/ai-agent-abc",
+        "refs/heads/claude/ai-agent-abc-wip",
+        "refs/heads/claude/ai-agent-a",
+        "refs/heads/claude/ai-agent-ab/x",
+        "refs/heads/claude/someone",
+        P,
+        "refs/tags/claude/ai-agent-ab",
+        "refs/heads/claude/ai-agent-ab-../main",
+    ];
+    assert_eq!(within_prefix(tried, &prefix).unwrap_err(), tried[1..]);
+    // Main stays refused by the policy too, forced or not.
+    assert!(check_all(&[cmd(&b, &c, P)], P, X).is_err());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A run's git grant is revoked when the run ends: the op is core's and signed for a caller,
 /// both ends agree on whose grant it is, and one run's scope never reaches another's.
 #[test]

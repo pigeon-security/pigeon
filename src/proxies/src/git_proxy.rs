@@ -672,7 +672,7 @@ impl GitProxy {
                 )
             {
                 drain(&mut p.rest, BUFFERED_MAX).await;
-                let why = format!("this run's git grant pushes only {prefix}…");
+                let why = format!("this run's git grant pushes only {prefix} and {prefix}-…");
                 let refused: Vec<(String, String)> =
                     outside.into_iter().map(|r| (r, why.clone())).collect();
                 return refusal(&p.commands, &refused);

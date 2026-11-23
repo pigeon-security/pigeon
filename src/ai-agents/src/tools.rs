@@ -224,11 +224,12 @@ fn sandbox_definitions() -> Vec<Value> {
         ),
         tool(
             "commit_push",
-            "Commits every change in the checkout and pushes the run's branch. Answers the new commit id.",
+            "Commits every change in the checkout, if there is any, and pushes HEAD to the run's branch, local commits included (a rebase, a cherry-pick). After you rewrite the branch (a rebase), set `force`: it pushes with --force-with-lease, to your run's branch only. Answers the pushed commit id.",
             json!({
                 "type": "object",
                 "properties": {
-                    "message": {"type": "string", "description": "The commit message (at most 2000 bytes)."}
+                    "message": {"type": "string", "description": "The commit message (at most 2000 bytes), used when there are changes to commit."},
+                    "force": {"type": "boolean", "default": false, "description": "Push with --force-with-lease, for a branch you rewrote. The push fails if the branch moved since you last saw it."}
                 },
                 "required": ["message"]
             }),
@@ -529,7 +530,12 @@ pub fn check(role: Role, name: &str, input: &Value) -> Result<(), String> {
         }
         "commit_push" => {
             need_text(obj, "message", MAX_MESSAGE_BYTES)?;
-            Ok(())
+            match obj.get("force") {
+                None | Some(Value::Null | Value::Bool(_)) => Ok(()),
+                Some(_) => {
+                    Err("`force` must be true or false; leave it out for a plain push".into())
+                }
+            }
         }
         "fetch" => {
             need_text(obj, "ref", 200)?;

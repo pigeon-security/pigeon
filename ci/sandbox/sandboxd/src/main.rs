@@ -1070,6 +1070,13 @@ fn finish_prepare(
         Some(0) => {
             git_ok(cfg, Some(root), &["fetch", repo_url, &remote_ref], true)?;
             git_ok(cfg, Some(root), &["reset", "--hard", "FETCH_HEAD"], false)?;
+            // The tip seen on the remote: the lease of a forced `commit_push`.
+            git_ok(
+                cfg,
+                Some(root),
+                &["update-ref", &tracking_ref(branch), "FETCH_HEAD"],
+                false,
+            )?;
         }
         Some(2) => {}
         _ => {
@@ -1415,10 +1422,57 @@ fn op_exec(cfg: &Config, o: &JsonObject) -> Reply {
     }))
 }
 
-/// `commit_push`: stage everything, commit, and push without force.
+/// Gets an optional boolean field. Null counts as false.
+fn opt_bool(o: &JsonObject, k: &str) -> Result<bool, ApiError> {
+    match o.get(k) {
+        None | Some(Value::Null) => Ok(false),
+        Some(Value::Bool(b)) => Ok(*b),
+        Some(_) => Err(bad(format!("field `{k}` must be true or false"))),
+    }
+}
+
+/// The remote-tracking ref that holds the last tip of `branch` this checkout saw on the
+/// remote: set by `prepare` and by each push, and the lease of a forced push.
+fn tracking_ref(branch: &str) -> String {
+    format!("refs/remotes/origin/{branch}")
+}
+
+/// The commit `name` points at, or `None` when it does not resolve.
+fn resolve(cfg: &Config, root: &Path, name: &str) -> Result<Option<String>, ApiError> {
+    let cap = run_git(
+        cfg,
+        Some(root),
+        &["rev-parse", "--verify", "-q", name],
+        false,
+    )?;
+    let out = String::from_utf8_lossy(&cap.stdout).trim().to_string();
+    Ok((cap.code == Some(0) && !out.is_empty()).then_some(out))
+}
+
+/// The git operation left half done in the checkout, if any: committing on top of it would
+/// commit its conflict markers.
+fn unfinished(root: &Path) -> Option<&'static str> {
+    let git = root.join(".git");
+    [
+        ("rebase-merge", "a rebase"),
+        ("rebase-apply", "a rebase"),
+        ("MERGE_HEAD", "a merge"),
+        ("CHERRY_PICK_HEAD", "a cherry-pick"),
+        ("REVERT_HEAD", "a revert"),
+    ]
+    .into_iter()
+    .find(|(f, _)| git.join(f).exists())
+    .map(|(_, what)| what)
+}
+
+/// `commit_push`: stage everything and commit it when there is anything, then push HEAD,
+/// whatever it is (local commits from a rebase or cherry-pick included), to `branch`. With
+/// `force`, the push is `--force-with-lease`, the lease being the tip this checkout last saw
+/// on the remote; the git proxy still decides which branches the run may rewrite.
 fn op_commit_push(cfg: &Config, o: &JsonObject) -> Reply {
     let message = req_str(o, "message")?;
     let branch = req_str(o, "branch")?;
+    let force = opt_bool(o, "force")?;
     if message.trim().is_empty() || message.contains('\0') {
         return Err(bad("invalid message"));
     }
@@ -1427,29 +1481,59 @@ fn op_commit_push(cfg: &Config, o: &JsonObject) -> Reply {
     if !root.join(".git").exists() {
         return Err(bad("sandbox is not prepared; call prepare first"));
     }
+    if let Some(what) = unfinished(root) {
+        return Err(bad(format!(
+            "{what} is in progress in the checkout; finish it (--continue) or abort it first"
+        )));
+    }
     git_ok(cfg, Some(root), &["add", "-A"], false)?;
     let staged = run_git(cfg, Some(root), &["diff", "--cached", "--quiet"], false)?;
-    match staged.code {
-        Some(0) => {
-            let head = git_head(cfg, root)?;
-            return Ok(json!({ "commit": head, "pushed": false, "nothing": true }));
-        }
-        Some(1) => {}
+    let committed = match staged.code {
+        Some(0) => false,
+        Some(1) => true,
         _ => {
             let tail = redact(cfg, tail_lossy(&staged.stderr, 2048));
             return Err(fail(format!("git diff failed: {tail}")));
         }
-    }
-    git_ok(cfg, Some(root), &["commit", "-q", "-m", message], false)?;
-    let target = format!("HEAD:refs/heads/{branch}");
-    let url = repo_url().ok_or_else(|| bad("sandbox is not prepared; call prepare first"))?;
-    let push = run_git(cfg, Some(root), &["push", &url, &target], true)?;
-    if push.code != Some(0) {
-        let tail = redact(cfg, tail_lossy(&push.stderr, 2048));
-        return Err(fail(format!("git push failed: {tail}")));
+    };
+    if committed {
+        git_ok(cfg, Some(root), &["commit", "-q", "-m", message], false)?;
     }
     let head = git_head(cfg, root)?;
-    Ok(json!({ "commit": head, "pushed": true }))
+    let tracking = tracking_ref(branch);
+    let seen = resolve(cfg, root, &tracking)?;
+    if !committed && seen.as_deref() == Some(head.as_str()) {
+        return Ok(json!({
+            "commit": head, "pushed": false, "committed": false, "forced": false, "nothing": true
+        }));
+    }
+    let target = format!("HEAD:refs/heads/{branch}");
+    let url = repo_url().ok_or_else(|| bad("sandbox is not prepared; call prepare first"))?;
+    let lease = format!(
+        "--force-with-lease=refs/heads/{branch}:{}",
+        seen.as_deref().unwrap_or_default()
+    );
+    let mut args = vec!["push"];
+    if force {
+        args.push(&lease);
+    }
+    args.extend([url.as_str(), target.as_str()]);
+    let push = run_git(cfg, Some(root), &args, true)?;
+    if push.code != Some(0) {
+        let tail = redact(cfg, tail_lossy(&push.stderr, 2048));
+        let hint = if tail.contains("stale info") || tail.contains("fetch first") {
+            "; the branch has commits this checkout has not seen: fetch it, look, and try again"
+        } else if tail.contains("non-fast-forward") && !force {
+            "; if you rewrote the branch (a rebase), push again with force"
+        } else {
+            ""
+        };
+        return Err(fail(format!("git push failed: {tail}{hint}")));
+    }
+    git_ok(cfg, Some(root), &["update-ref", &tracking, &head], false)?;
+    Ok(json!({
+        "commit": head, "pushed": true, "committed": committed, "forced": force, "nothing": false
+    }))
 }
 
 /// `diff`: show the change summary and the short status.

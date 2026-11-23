@@ -115,7 +115,8 @@ pub fn run_branch_prefix(run: &str) -> std::result::Result<String, String> {
 }
 
 /// Mints AI agent run `run`'s git grant for `person` (a user id): a proxy credential that
-/// reaches `/git/` only and pushes only `claude/ai-agent-{run}…`, for [`RUN_GRANT_MS`].
+/// reaches `/git/` only and pushes only `claude/ai-agent-{run}` and `claude/ai-agent-{run}-…`,
+/// for [`RUN_GRANT_MS`].
 /// Answers the token, shown only to the run's sandbox, and when it expires.
 pub async fn issue_run_grant(env: &Env, person: &str, run: &str) -> Result<(String, i64)> {
     let prefix = run_branch_prefix(run).map_err(|e| bad(&e))?;
