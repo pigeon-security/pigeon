@@ -450,7 +450,7 @@ impl Approvals {
         };
         let open = open_for(cx.env, person).await?;
         let mut out = listing(&open);
-        out["landings"] = Value::Array(crate::land::awaiting(cx.env).await?);
+        out["landings"] = Value::Array(with_plain(crate::land::awaiting(cx.env).await?));
         Ok(out)
     }
 
@@ -567,18 +567,23 @@ pub fn listing(open: &[Record]) -> Value {
                 "run": r.summary["run"],
                 "created_ms": r.created_ms, "expires_ms": r.expires_ms,
                 "digest": short(r),
+                "plain": plain_call(&r.subject, &r.summary["args"], &r.summary["acting_for"]),
             })
         })
         .collect();
-    let item = |r: &Record| {
+    let item = |r: &Record, plain: String| {
         json!({
             "id": r.id, "instance": r.subject, "summary": r.summary,
             "created_ms": r.created_ms, "expires_ms": r.expires_ms,
-            "digest": short(r),
+            "digest": short(r), "plain": plain,
         })
     };
-    let drafts: Vec<Value> = pending(ApprovalKind::InstanceDraft).map(item).collect();
-    let plans: Vec<Value> = pending(ApprovalKind::LinkedPlan).map(item).collect();
+    let drafts: Vec<Value> = pending(ApprovalKind::InstanceDraft)
+        .map(|r| item(r, format!("Save the changes to instance {}", r.subject)))
+        .collect();
+    let plans: Vec<Value> = pending(ApprovalKind::LinkedPlan)
+        .map(|r| item(r, format!("Apply the plan for {}", r.subject)))
+        .collect();
     // Any other kind (such as `observability_monitors`) is listed under `other`, so it can
     // be approved. The first three lists keep their fields.
     let other: Vec<Value> = open
@@ -595,8 +600,66 @@ pub fn listing(open: &[Record]) -> Value {
                 "id": r.id, "kind": r.kind.name(), "title": r.subject, "summary": r.summary,
                 "created_ms": r.created_ms, "expires_ms": r.expires_ms,
                 "digest": short(r),
+                "plain": if r.subject.is_empty() {
+                    format!("Approve {}", r.kind.name())
+                } else {
+                    r.subject.clone()
+                },
             })
         })
         .collect();
     json!({ "calls": calls, "drafts": drafts, "plans": plans, "other": other })
+}
+
+/// One plain sentence saying what approving the tool call `tool` with `args` does, for the
+/// caller named in `acting_for` (a name, or null).
+pub fn plain_call(tool: &str, args: &Value, acting_for: &Value) -> String {
+    let who = acting_for
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("the caller");
+    let text = |k: &str| args[k].as_str().unwrap_or("?").to_string();
+    match tool {
+        "deploy_token" => format!("Give a deploy token to {who}"),
+        "source_token" => format!("Give a source token to {who}"),
+        "setup_platform" => "Set up the platform".to_string(),
+        "users_remove" => format!("Remove user {}", text("id")),
+        "passkeys_remove" => format!("Remove passkey {}", text("id")),
+        "oauth_revoke" => format!("Disconnect app {}", text("client_id")),
+        _ => {
+            let n = args.as_object().map_or(0, |o| o.len());
+            format!("Run {tool} with {n} argument(s)")
+        }
+    }
+}
+
+/// One plain sentence for a landing awaiting approval: its branch and the first 7 characters of
+/// its commit.
+pub fn plain_landing(landing: &Value) -> String {
+    let branch = landing["branch"].as_str().unwrap_or("?");
+    let commit: String = landing["commit"]
+        .as_str()
+        .unwrap_or("")
+        .chars()
+        .take(7)
+        .collect();
+    if commit.is_empty() {
+        format!("Land {branch}")
+    } else {
+        format!("Land {branch} at {commit}")
+    }
+}
+
+/// `landings` with `plain` (and `created_ms`, from `created_at`) added to each item.
+pub fn with_plain(landings: Vec<Value>) -> Vec<Value> {
+    landings
+        .into_iter()
+        .map(|mut l| {
+            l["plain"] = json!(plain_landing(&l));
+            if l.get("created_ms").is_none() && l["created_at"].is_i64() {
+                l["created_ms"] = l["created_at"].clone();
+            }
+            l
+        })
+        .collect()
 }

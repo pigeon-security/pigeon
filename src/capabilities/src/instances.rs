@@ -739,6 +739,10 @@ impl Capability for Instances {
                 "List the platform's instances: each one's account, zones, sites with their \
                  targets and subdomains, Worker, repository and version. Read-only.",
             ),
+            Tool::bare(
+                "instances_tabs",
+                "For the app: each instance's tabs, whether it has settings, and a few facts. Read-only.",
+            ),
             Tool {
                 name: "instance_plan",
                 description: "Dry run of what a linked instance needs in its account: its R2 \
@@ -790,6 +794,7 @@ impl Capability for Instances {
         Box::pin(async move {
             match tool {
                 "instances_list" => Ok(to_value(all(cx.env).await?)),
+                "instances_tabs" => Ok(tabs(&all(cx.env).await?)),
                 "instance_propose" => self.propose(cx, args).await,
                 "instance_plan" => self.plan(cx, args).await,
                 "instance_subdomains" => subdomains(cx.env, &self.zone).await,
@@ -820,4 +825,57 @@ impl Capability for Instances {
     fn fetch<'a>(&'a self, cx: &'a Context<'a>, req: Request) -> Serve<'a> {
         Box::pin(self.serve(cx, req))
     }
+}
+
+/// The first hostname a site is published at: its first zone or domain target.
+fn first_hostname(i: &Instance) -> Option<&str> {
+    i.sites
+        .iter()
+        .flat_map(|s| s.targets.iter())
+        .find_map(|t| match t {
+            record::Target::Zone { hostname, .. } | record::Target::Domain { hostname } => {
+                Some(hostname.as_str())
+            }
+            _ => None,
+        })
+}
+
+/// The `instances_tabs` answer: which instance the app is on, and for each instance which tabs
+/// and settings it shows and a few facts to display. The home account's instance gets the
+/// full set of tabs; a linked one gets fewer.
+pub fn tabs(instances: &[Instance]) -> Value {
+    let home = |i: &Instance| i.account == record::AccountRef::Home;
+    let list: Vec<Value> = instances
+        .iter()
+        .map(|i| {
+            let is_home = home(i);
+            let host = first_hostname(i).or_else(|| i.zones.first().map(String::as_str));
+            let site = first_hostname(i).or_else(|| i.sites.first().map(|s| s.name.as_str()));
+            let repository = i.repo.as_ref().map(|r| match r {
+                record::RepoRef::Artifacts { namespace, repo } => format!("{namespace}/{repo}"),
+                record::RepoRef::Github { full_name, .. } => full_name.clone(),
+            });
+            json!({
+                "id": i.id, "title": i.title,
+                "account_kind": if is_home { "home" } else { "linked" },
+                "zones": i.zones,
+                "tabs": if is_home {
+                    json!(["approvals", "status", "cost", "instances"])
+                } else {
+                    json!(["home", "instances"])
+                },
+                "settings": is_home,
+                "facts": {
+                    "website": host.map(|h| format!("https://{h}")),
+                    "site": site,
+                    "repository": repository,
+                },
+            })
+        })
+        .collect();
+    json!({
+        "current": instances.iter().find(|i| home(i)).map(|i| i.id.as_str()),
+        "scoping": "app",
+        "instances": list,
+    })
 }

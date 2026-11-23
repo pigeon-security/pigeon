@@ -4534,6 +4534,31 @@ fn ai_agents_cost_reconcile() {
     assert_eq!(budget::check(&b, &roomy, 0, 1, spawn), Ok(()));
 }
 
+/// A run's title comes from its brief, and its elapsed time is never negative.
+#[test]
+fn ai_agents_run_title_and_elapsed() {
+    use pigeon_ai_agents::object::{elapsed_ms, run_title};
+
+    assert_eq!(run_title(""), "Untitled run");
+    assert_eq!(run_title("\n  \n"), "Untitled run");
+    assert_eq!(
+        run_title("## Brief: Fix the sample page\nmore"),
+        "Fix the sample page"
+    );
+    assert_eq!(run_title("\n  task: Add a thing  \nx"), "Add a thing");
+    assert_eq!(run_title("Brief:"), "Untitled run");
+    let long = "word ".repeat(40);
+    let t = run_title(&long);
+    assert!(t.ends_with('…') && t.chars().count() <= 80, "{t}");
+    assert!(t.trim_end_matches('…').ends_with("word"));
+    let one = "x".repeat(200);
+    assert!(run_title(&one).chars().count() <= 80);
+
+    assert_eq!(elapsed_ms(100, Some(150), Some(400), 999), 250);
+    assert_eq!(elapsed_ms(100, None, None, 600), 500);
+    assert_eq!(elapsed_ms(100, Some(500), None, 200), 0);
+}
+
 // ---- secrets ----
 
 #[test]
@@ -6847,6 +6872,54 @@ fn core_instances_pins_checked_and_planned() {
     assert!(plan["note"].as_str().unwrap().contains("instance_propose"));
 }
 
+/// `instances_tabs` gives the home instance the full tabs and a linked one fewer.
+#[test]
+fn instances_tabs_for_the_app() {
+    use pigeon_capabilities::instances::record::Instance;
+    use pigeon_capabilities::instances::tabs;
+
+    let home: Instance = serde_json::from_value(json!({
+        "id": "example/platform", "title": "Example", "account": { "kind": "home" },
+        "zones": ["example.com"],
+        "repo": { "kind": "artifacts", "namespace": "example", "repo": "platform" }
+    }))
+    .unwrap();
+    let linked: Instance = serde_json::from_value(json!({
+        "id": "sample", "title": "Sample", "account": { "kind": "linked" },
+        "repo": { "kind": "github", "full_name": "sample/site" },
+        "sites": [{ "name": "blog", "bucket": "sample-site",
+            "targets": [{ "kind": "domain", "hostname": "blog.example.com" }] }]
+    }))
+    .unwrap();
+    let out = tabs(&[linked.clone(), home]);
+    assert_eq!(out["current"], "example/platform");
+    assert_eq!(out["scoping"], "app");
+    assert_eq!(out["instances"][0]["account_kind"], "linked");
+    assert_eq!(out["instances"][0]["tabs"], json!(["home", "instances"]));
+    assert_eq!(out["instances"][0]["settings"], false);
+    assert_eq!(
+        out["instances"][0]["facts"]["website"],
+        "https://blog.example.com"
+    );
+    assert_eq!(out["instances"][0]["facts"]["site"], "blog.example.com");
+    assert_eq!(out["instances"][0]["facts"]["repository"], "sample/site");
+    assert_eq!(
+        out["instances"][1]["tabs"],
+        json!(["approvals", "status", "cost", "instances"])
+    );
+    assert_eq!(out["instances"][1]["settings"], true);
+    assert_eq!(
+        out["instances"][1]["facts"]["website"],
+        "https://example.com"
+    );
+    assert!(out["instances"][1]["facts"]["site"].is_null());
+    assert_eq!(
+        out["instances"][1]["facts"]["repository"],
+        "example/platform"
+    );
+    assert!(tabs(&[linked])["current"].is_null());
+}
+
 // ---- Buildkite iOS pipelines ----
 
 #[test]
@@ -7277,6 +7350,62 @@ fn platform_approvals_list_shows_other_kinds() {
     assert!(out["plans"].as_array().unwrap().is_empty());
 }
 
+#[test]
+fn platform_approvals_list_plain_sentences() {
+    use pigeon_capabilities::approvals::{listing, plain_call, with_plain};
+    use pigeon_core::approval::{self, Kind};
+
+    let make = |kind: Kind, subject: &str, summary: Value| {
+        approval::new(
+            "i1".into(),
+            kind,
+            subject.into(),
+            "0123456789abcdef0123".into(),
+            summary,
+            Value::Null,
+            "svc".into(),
+            None,
+            1_000,
+        )
+    };
+    let who = json!("Sample Person");
+    assert_eq!(
+        plain_call("deploy_token", &json!({}), &who),
+        "Give a deploy token to Sample Person"
+    );
+    assert_eq!(
+        plain_call("passkeys_remove", &json!({ "id": "pk1" }), &Value::Null),
+        "Remove passkey pk1"
+    );
+    assert_eq!(
+        plain_call("odd_tool", &json!({ "a": 1, "b": 2 }), &Value::Null),
+        "Run odd_tool with 2 argument(s)"
+    );
+    let out = listing(&[
+        make(
+            Kind::ToolCall,
+            "users_remove",
+            json!({ "args": { "id": "u9" } }),
+        ),
+        make(Kind::InstanceDraft, "example", json!({})),
+        make(Kind::LinkedPlan, "example", json!({})),
+        make(Kind::Other("monitors_plan".into()), "", json!({})),
+    ]);
+    assert_eq!(out["calls"][0]["plain"], "Remove user u9");
+    assert_eq!(out["calls"][0]["created_ms"], 1_000);
+    assert_eq!(
+        out["drafts"][0]["plain"],
+        "Save the changes to instance example"
+    );
+    assert_eq!(out["plans"][0]["plain"], "Apply the plan for example");
+    assert_eq!(out["other"][0]["plain"], "Approve monitors_plan");
+    let l = with_plain(vec![
+        json!({ "branch": "claude/x", "commit": "0123456789abcdef", "created_at": 5 }),
+    ]);
+    assert_eq!(l[0]["plain"], "Land claude/x at 0123456");
+    assert_eq!(l[0]["created_ms"], 5);
+}
+
 /// Core's audit lines can name an AI agent run: `run` is optional on the caller (old callers read
 /// as before), only a run id shape is kept, and a line has a `run` key only when one is given.
 #[test]
@@ -7316,6 +7445,49 @@ fn core_audit_lines_name_the_run() {
     let signed = pigeon_ai_agents::object::chosen_caller(&starter, None, "r1");
     let c: Caller = serde_json::from_value(signed).unwrap();
     assert_eq!(c.run.as_deref(), Some("r1"));
+}
+
+/// `users_people` lists standard users with their passkeys and what acts for them.
+#[test]
+fn platform_users_people() {
+    use pigeon_capabilities::users::{User, initials, people};
+
+    assert_eq!(initials("Sample Person"), "SP");
+    assert_eq!(initials("sample"), "S");
+    assert_eq!(initials("ann b cole"), "AC");
+    let user = |id: &str, kind: &str, name: &str, at: i64| User {
+        id: id.into(),
+        kind: kind.into(),
+        name: name.into(),
+        created_at: at,
+    };
+    let users = [
+        user("p2", "standard", "Second Person", 20),
+        user("p1", "standard", "Sample Person", 10),
+        user("s1", "service", "Sample App", 30),
+        user("s2", "service", "Sample Agent", 40),
+        user("s3", "service", "Loose Agent", 50),
+    ];
+    let links = [
+        json!({ "service_user_id": "s1", "standard_user_id": "p1" }),
+        json!({ "service_user_id": "s2", "standard_user_id": "p1" }),
+    ];
+    let keys = [json!({ "id": "k1", "user_id": "p1", "name": "Laptop",
+        "created_at": 11, "last_used_at": null })];
+    let out = people(&users, &links, &keys, &["s1".to_string()]);
+    assert_eq!(out["unlinked"], 1);
+    let list = out["people"].as_array().unwrap();
+    assert_eq!(list.len(), 2);
+    assert_eq!(list[0]["id"], "p1");
+    assert_eq!(list[0]["initials"], "SP");
+    assert!(list[0]["picture"].is_null());
+    assert_eq!(list[0]["role"], "Person");
+    assert_eq!(list[0]["added_ms"], 10);
+    assert_eq!(list[0]["passkeys"][0]["name"], "Laptop");
+    assert_eq!(list[0]["acting_for_me"][0]["kind"], "app");
+    assert_eq!(list[0]["acting_for_me"][1]["kind"], "service");
+    assert_eq!(list[1]["id"], "p2");
+    assert!(list[1]["acting_for_me"].as_array().unwrap().is_empty());
 }
 
 /// Approval push is on, and its alert carries the link and collapse id.

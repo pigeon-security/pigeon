@@ -153,6 +153,52 @@ struct Row {
     estimate: Option<String>,
 }
 
+/// A short title for a run, from its brief's first non-empty line: leading `#`s, `Brief:` or
+/// `Task:` are dropped, and a long line is cut on a word boundary with `…`, at most 80 characters.
+pub fn run_title(brief: &str) -> String {
+    let line = brief
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+    let mut text = line.trim_start_matches('#').trim();
+    for prefix in ["brief:", "task:"] {
+        if text.len() >= prefix.len()
+            && text.is_char_boundary(prefix.len())
+            && text[..prefix.len()].eq_ignore_ascii_case(prefix)
+        {
+            text = text[prefix.len()..].trim();
+            break;
+        }
+    }
+    if text.is_empty() {
+        return "Untitled run".to_string();
+    }
+    if text.chars().count() <= 80 {
+        return text.to_string();
+    }
+    let room: String = text.chars().take(79).collect();
+    let next_is_space = text.chars().nth(79).is_some_and(char::is_whitespace);
+    let cut = if next_is_space {
+        room.as_str()
+    } else {
+        room.rfind(char::is_whitespace)
+            .map_or(room.as_str(), |i| &room[..i])
+    };
+    format!("{}…", cut.trim_end())
+}
+
+/// Milliseconds a run has taken: from `started_at` (or `created_at`) to `ended_at` (or `now`),
+/// never negative.
+pub fn elapsed_ms(
+    created_at: i64,
+    started_at: Option<i64>,
+    ended_at: Option<i64>,
+    now: i64,
+) -> i64 {
+    (ended_at.unwrap_or(now) - started_at.unwrap_or(created_at)).max(0)
+}
+
 impl Row {
     /// What `ai_agents_status` shows: never the caller's JSON or the messages.
     fn public(&self) -> Value {
@@ -184,6 +230,8 @@ impl Row {
             spent_json["executors_cost_usd"] = json!(spent.executors_micros as f64 / 1e6);
             spent_json["total_cost"] = json!(budget::money(spent.committed_micros()));
         }
+        let title = run_title(&self.brief);
+        let elapsed = elapsed_ms(self.created_at, self.started_at, self.ended_at, now());
         json!({
             "run": self.id,
             "role": self.role,
@@ -192,6 +240,8 @@ impl Row {
             "parent_run": self.parent_run,
             "session_id": self.session_id,
             "brief": brief,
+            "title": title,
+            "elapsed_ms": elapsed,
             "base": self.base,
             "branch": self.branch,
             "step": self.step,

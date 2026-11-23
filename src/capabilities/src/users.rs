@@ -13,7 +13,6 @@ use pigeon_core::durable::{self, Db, opt};
 use pigeon_core::identity::{self, Expected};
 use pigeon_core::mcp::Tool;
 
-use crate::console::initials;
 use crate::console::sections::{Section, Tab};
 use pigeon_core::webauthn::{CHALLENGE_TTL_MS, random};
 use serde::{Deserialize, Serialize};
@@ -322,6 +321,24 @@ impl Directory {
                     vec![],
                 )?;
                 json!({ "users": users, "links": links, "passkeys": counts })
+            }
+            // The raw rows `people` turns into the `users_people` answer; no key material.
+            "users.people" => {
+                let users: Vec<User> = self
+                    .db
+                    .rows("SELECT * FROM users ORDER BY created_at", vec![])?;
+                let links: Vec<Value> = self.db.rows(
+                    "SELECT service_user_id, standard_user_id FROM links",
+                    vec![],
+                )?;
+                let passkeys: Vec<Value> = self.db.rows(
+                    "SELECT id, user_id, name, created_at, last_used_at FROM passkeys ORDER BY created_at",
+                    vec![],
+                )?;
+                let clients: Vec<Value> = self
+                    .db
+                    .rows("SELECT service_user_id FROM oauth_clients", vec![])?;
+                json!({ "users": users, "links": links, "passkeys": passkeys, "clients": clients })
             }
             "users.get" => to_value(self.user(s("id"))?),
             "users.create" => {
@@ -1277,10 +1294,30 @@ impl Users {
         };
         Ok(match tool {
             "users_whoami" => match cx.caller {
-                Some(c) => to_value(c),
+                Some(c) => {
+                    let mut out = to_value(c);
+                    let person = if c.user.kind == "standard" {
+                        Some(&c.user)
+                    } else {
+                        c.acting_for.as_ref().filter(|u| u.kind == "standard")
+                    };
+                    out["initials"] = person.map_or(Value::Null, |u| json!(initials(&u.name)));
+                    out["picture"] = Value::Null;
+                    out
+                }
                 None => json!({ "caller": null, "why": cx.caller_note }),
             },
             "users_list" => directory(env, "users.list", json!({})).await?,
+            "users_people" => {
+                let raw = directory(env, "users.people", json!({})).await?;
+                let users: Vec<User> = serde_json::from_value(raw["users"].clone())?;
+                let rows = |k: &str| raw[k].as_array().cloned().unwrap_or_default();
+                let clients: Vec<String> = rows("clients")
+                    .iter()
+                    .filter_map(|c| c["service_user_id"].as_str().map(str::to_string))
+                    .collect();
+                people(&users, &rows("links"), &rows("passkeys"), &clients)
+            }
             "users_bootstrap" => {
                 let n = directory(env, "users.standard_count", json!({})).await?;
                 if n.as_i64().unwrap_or(0) > 0 {
@@ -1454,6 +1491,10 @@ impl Capability for Users {
                 "users_list",
                 "Every user, standard and service, with links and passkey counts.",
             ),
+            Tool::bare(
+                "users_people",
+                "The people who can sign in, with their passkeys and the apps and services acting for them.",
+            ),
             one(
                 "users_bootstrap",
                 "Create the first standard user, only while there is none, and answer a \
@@ -1517,4 +1558,61 @@ impl Capability for Users {
     fn call<'a>(&'a self, cx: &'a Context<'a>, tool: &'a str, args: &'a Value) -> Call<'a> {
         Box::pin(self.run(cx, tool, args))
     }
+}
+
+/// One or two uppercase letters for `name`: the first letters of its first and last words.
+pub fn initials(name: &str) -> String {
+    crate::console::initials(name)
+}
+
+/// The `users_people` answer from the Directory's raw rows: `users` (all kinds), `links`
+/// (`service_user_id`, `standard_user_id`), `passkeys` (id, user_id, name, created_at,
+/// last_used_at only) and `clients` (the service user ids that have an OAuth client). Only
+/// standard users are listed, oldest first; service users linked to no one are counted.
+pub fn people(users: &[User], links: &[Value], passkeys: &[Value], clients: &[String]) -> Value {
+    let linked_to = |service: &str| {
+        links
+            .iter()
+            .find(|l| l["service_user_id"] == service)
+            .and_then(|l| l["standard_user_id"].as_str())
+    };
+    let mut standard: Vec<&User> = users.iter().filter(|u| u.kind == "standard").collect();
+    standard.sort_by_key(|u| u.created_at);
+    let list: Vec<Value> = standard
+        .iter()
+        .map(|p| {
+            let keys: Vec<Value> = passkeys
+                .iter()
+                .filter(|k| k["user_id"] == p.id.as_str())
+                .map(|k| {
+                    json!({
+                        "id": k["id"], "name": k["name"],
+                        "created_at": k["created_at"], "last_used_at": k["last_used_at"],
+                    })
+                })
+                .collect();
+            let acting: Vec<Value> = users
+                .iter()
+                .filter(|u| u.kind == "service" && linked_to(&u.id) == Some(p.id.as_str()))
+                .map(|u| {
+                    let kind = if clients.contains(&u.id) {
+                        "app"
+                    } else {
+                        "service"
+                    };
+                    json!({ "id": u.id, "name": u.name, "kind": kind, "added_ms": u.created_at })
+                })
+                .collect();
+            json!({
+                "id": p.id, "name": p.name, "initials": initials(&p.name), "picture": null,
+                "role": "Person", "added_ms": p.created_at,
+                "passkeys": keys, "acting_for_me": acting,
+            })
+        })
+        .collect();
+    let unlinked = users
+        .iter()
+        .filter(|u| u.kind == "service" && linked_to(&u.id).is_none())
+        .count();
+    json!({ "people": list, "unlinked": unlinked })
 }
