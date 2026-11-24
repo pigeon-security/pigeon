@@ -72,6 +72,9 @@ and revoked) when the model is on Workers AI. A turn lasts roughly 20 to 60 s, s
 the 500 cap was crossed by the turns alone, and then every other mint (landing steps, the proxy
 credential, the tools) hit the quota error with nothing left to free until tokens expired.
 
+After phase 2: one shared token per (caller, permission set), so 0 mints per turn in steady
+state and at most one per 900 s per caller and set.
+
 ### Why revocation does not help yet (the 2026-11-24 `pigeon:worker-` check)
 
 Commit `ebfead9` (2026-11-24 03:32) made `credential_revoke` read a token and refuse any whose
@@ -184,3 +187,14 @@ ai-agents and can run beside phase 1).
 - **2026-11-24, phase 1.** Added `tokens::minted`, `tokens::name`, `TokenApi`, `sweep_plan` and `sweep`;
   `scoped_token_revocable` uses the shared `WORKER_NAME_PREFIX`; the platform cron sweeps every fifth minute; `core_token_*` smoke scenarios.
 - **2026-11-25, phase 4 (planner concurrency).** Stored caps `max_live_runs` (8), `max_executors_per_planner` (3) and `executor_reserve` (3) replace `MAX_LIVE` and `EXECUTOR_RESERVE`; `ai_agents_config` reads and sets them; queued runs show the reason in `step`.
+- **2026-11-24, phase 2.** Added the `TokenLedger` Durable Object (platform Worker, migration
+  v6; logic in `capabilities/ledger.rs`, a state machine with a `TokenApi` seam). `credential`
+  kind `scoped` leases through it; `credential_revoke` of a leased token answers
+  `{revoked: 0, kept: "shared"}`; `close_call_token` no longer revokes a core-issued token; new
+  core op `credential_release`, called by ai-agents when a run ends and its caller has no other
+  live run (new index op `live_for`); the cron sweep also deletes released ledger tokens and
+  forgets expired rows. Deviations: a lease key hashes with `oauth::hash` (base64url
+  SHA-256); a mint failure is returned as it came, and the quota retry runs `tokens::sweep`
+  once (it deletes only expired tokens, so a ledger-live token is not freed by it); a failed
+  revoke of an older token never fails the lease: the row stays `released` for the sweeper;
+  `models::revoke_scoped` was removed, nothing called it any more.

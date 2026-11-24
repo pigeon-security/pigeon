@@ -971,6 +971,7 @@ struct MockTokens {
     fail_delete: Vec<&'static str>,
     deleted: std::cell::RefCell<Vec<String>>,
     next: std::cell::Cell<u32>,
+    attempts: std::cell::Cell<u32>,
 }
 
 impl MockTokens {
@@ -982,6 +983,7 @@ impl MockTokens {
             fail_delete: Vec::new(),
             deleted: Default::default(),
             next: std::cell::Cell::new(100),
+            attempts: std::cell::Cell::new(0),
         }
     }
 
@@ -1009,6 +1011,7 @@ impl pigeon_core::tokens::TokenApi for MockTokens {
     }
 
     async fn create(&self, body: &Value) -> worker::Result<pigeon_core::tokens::Minted> {
+        self.attempts.set(self.attempts.get() + 1);
         if self.tokens.borrow().len() >= self.cap {
             return Err(worker::Error::RustError(
                 r#"/accounts/acct/tokens: 400: [{"code":1001,"message":"Quota limit exceeded. You can create no more than 500 tokens"}]"#
@@ -1191,4 +1194,292 @@ fn core_token_sweep_frees_the_quota() {
     // The new token is live, so a second sweep keeps it.
     let report = token_block_on(sweep(&mock, TOKEN_NOW_MS)).unwrap();
     assert_eq!((report.deleted, report.kept_pigeon), (0, 1));
+}
+
+/// Polls two futures together, as a Durable Object's interleaved requests would run, until both
+/// are ready.
+fn token_join2<A: std::future::Future, B: std::future::Future>(
+    a: A,
+    b: B,
+) -> (A::Output, B::Output) {
+    use std::task::{Context, Poll, Waker};
+    let mut cx = Context::from_waker(Waker::noop());
+    let (mut a, mut b) = (std::pin::pin!(a), std::pin::pin!(b));
+    let (mut ra, mut rb) = (None, None);
+    for _ in 0..1000 {
+        if ra.is_none()
+            && let Poll::Ready(v) = a.as_mut().poll(&mut cx)
+        {
+            ra = Some(v);
+        }
+        if rb.is_none()
+            && let Poll::Ready(v) = b.as_mut().poll(&mut cx)
+        {
+            rb = Some(v);
+        }
+        if ra.is_some() && rb.is_some() {
+            return (ra.take().unwrap(), rb.take().unwrap());
+        }
+    }
+    panic!("the futures did not finish");
+}
+
+/// The body a mint would send: a name and an expiry 15 minutes on.
+fn token_body(expires_on: &str) -> worker::Result<Value> {
+    Ok(json!({
+        "name": pigeon_core::tokens::name("worker-ai_gateway", "2026-11-24T06:00:00Z"),
+        "expires_on": expires_on,
+    }))
+}
+
+const TOKEN_EXPIRY: &str = "2026-11-24T06:15:00Z";
+
+/// A lease key and caller hash for user `user` acting for nobody, with `permissions`.
+fn token_keys(user: &str, permissions: &[&str]) -> (String, String) {
+    use pigeon_capabilities::ledger::{caller_hash, lease_key};
+    let caller = caller_hash(user, None);
+    (lease_key(&caller, permissions), caller)
+}
+
+fn token_lease(
+    ledger: &pigeon_capabilities::ledger::Ledger<()>,
+    api: &MockTokens,
+    keys: &(String, String),
+    now_ms: i64,
+) -> worker::Result<pigeon_capabilities::ledger::Lease> {
+    token_block_on(ledger.lease(
+        api,
+        &pigeon_capabilities::ledger::LeaseRequest {
+            key: &keys.0,
+            caller: &keys.1,
+            purpose: "worker-ai_gateway",
+            ttl_secs: 900,
+        },
+        now_ms,
+        async || token_body(TOKEN_EXPIRY),
+    ))
+}
+
+fn token_mints(api: &MockTokens) -> u32 {
+    api.next.get() - 100
+}
+
+#[test]
+fn core_token_ledger_two_leases_mint_once() {
+    use pigeon_capabilities::ledger::{Ledger, lease_key};
+    let (api, ledger) = (MockTokens::new(500, 50), Ledger::new((), Vec::new()));
+    let keys = token_keys("u1", &["A", "B"]);
+    let a = token_lease(&ledger, &api, &keys, TOKEN_NOW_MS).unwrap();
+    let b = token_lease(&ledger, &api, &keys, TOKEN_NOW_MS + 60_000).unwrap();
+    assert_eq!(a, b);
+    assert_eq!(a.expires_at, TOKEN_NOW_MS + 900_000);
+    assert_eq!(token_mints(&api), 1);
+    // The order and repeats of the permissions do not change the key.
+    assert_eq!(
+        lease_key("c", &["B", "A", "A"]),
+        lease_key("c", &["A", "B"])
+    );
+    assert_eq!(ledger.rows().len(), 1);
+}
+
+#[test]
+fn core_token_ledger_other_caller_or_set_mints_apart() {
+    use pigeon_capabilities::ledger::{Ledger, caller_hash, lease_key};
+    let (api, ledger) = (MockTokens::new(500, 50), Ledger::new((), Vec::new()));
+    let one = token_keys("u1", &["A"]);
+    let other_caller = token_keys("u2", &["A"]);
+    let other_set = token_keys("u1", &["A", "B"]);
+    let a = token_lease(&ledger, &api, &one, TOKEN_NOW_MS).unwrap();
+    let b = token_lease(&ledger, &api, &other_caller, TOKEN_NOW_MS).unwrap();
+    let c = token_lease(&ledger, &api, &other_set, TOKEN_NOW_MS).unwrap();
+    assert_eq!(token_mints(&api), 3);
+    assert!(a.id != b.id && a.id != c.id && b.id != c.id);
+    // Acting for a person is part of the caller.
+    assert!(caller_hash("u1", Some("p")) != caller_hash("u1", None));
+    assert!(lease_key(&caller_hash("u1", Some("p")), &["A"]) != one.0);
+}
+
+#[test]
+fn core_token_ledger_a_nearly_expired_lease_mints_anew() {
+    use pigeon_capabilities::ledger::Ledger;
+    let (api, ledger) = (MockTokens::new(500, 50), Ledger::new((), Vec::new()));
+    let keys = token_keys("u1", &["A"]);
+    let first = token_lease(&ledger, &api, &keys, TOKEN_NOW_MS).unwrap();
+    // 120 s left is still handed out; 119 s is not.
+    let still = token_lease(&ledger, &api, &keys, TOKEN_NOW_MS + 780_000).unwrap();
+    assert_eq!(still.id, first.id);
+    let next = token_lease(&ledger, &api, &keys, TOKEN_NOW_MS + 781_000).unwrap();
+    assert!(next.id != first.id);
+    assert_eq!(token_mints(&api), 2);
+    assert_eq!(*api.deleted.borrow(), [first.id.clone()]);
+    assert_eq!(ledger.rows().len(), 1);
+    assert!(ledger.holds(&next.id) && !ledger.holds(&first.id));
+}
+
+#[test]
+fn core_token_ledger_concurrent_leases_mint_once() {
+    use pigeon_capabilities::ledger::{LeaseRequest, Ledger};
+    let (api, ledger) = (MockTokens::new(500, 50), Ledger::new((), Vec::new()));
+    let keys = token_keys("u1", &["A"]);
+    let ask = async || {
+        ledger
+            .lease(
+                &api,
+                &LeaseRequest {
+                    key: &keys.0,
+                    caller: &keys.1,
+                    purpose: "worker-ai_gateway",
+                    ttl_secs: 900,
+                },
+                TOKEN_NOW_MS,
+                async || {
+                    // Wait once, as a network call does, so the other lease runs meanwhile.
+                    let mut yielded = false;
+                    std::future::poll_fn(|cx| {
+                        if yielded {
+                            return std::task::Poll::Ready(());
+                        }
+                        yielded = true;
+                        cx.waker().wake_by_ref();
+                        std::task::Poll::Pending
+                    })
+                    .await;
+                    token_body(TOKEN_EXPIRY)
+                },
+            )
+            .await
+    };
+    let (a, b) = token_join2(ask(), ask());
+    assert_eq!(a.unwrap(), b.unwrap());
+    assert_eq!(token_mints(&api), 1);
+}
+
+#[test]
+fn core_token_ledger_an_orphan_row_is_revoked_and_replaced() {
+    use pigeon_capabilities::ledger::{Ledger, Row};
+    let api = MockTokens::new(500, 50);
+    let keys = token_keys("u1", &["A"]);
+    let name = "pigeon:worker-ai_gateway:2026-11-24T05:50:00Z";
+    api.add("t50", name, Some(TOKEN_EXPIRY), "active");
+    // The object restarted: a row, and no value in memory.
+    let orphan = Row {
+        id: "t50".into(),
+        key: keys.0.clone(),
+        name: name.into(),
+        purpose: "worker-ai_gateway".into(),
+        expires_at: TOKEN_NOW_MS + 600_000,
+        caller: keys.1.clone(),
+        released: false,
+    };
+    let ledger = Ledger::new((), vec![orphan]);
+    let got = token_lease(&ledger, &api, &keys, TOKEN_NOW_MS).unwrap();
+    assert_eq!(got.id, "t100");
+    assert_eq!(*api.deleted.borrow(), ["t50"]);
+    assert_eq!(ledger.rows().len(), 1);
+    assert_eq!(ledger.rows()[0].id, "t100");
+}
+
+#[test]
+fn core_token_ledger_a_quota_error_sweeps_once_and_retries_once() {
+    use pigeon_capabilities::ledger::Ledger;
+    // Full of expired pigeon tokens: the sweep frees room and the retry works.
+    let (api, ledger) = (MockTokens::new(2, 50), Ledger::new((), Vec::new()));
+    for id in ["t1", "t2"] {
+        api.add(
+            id,
+            "pigeon:a:2026-11-24T04:00:00Z",
+            Some("2026-11-24T05:00:00Z"),
+            "active",
+        );
+    }
+    let keys = token_keys("u1", &["A"]);
+    let got = token_lease(&ledger, &api, &keys, TOKEN_NOW_MS).unwrap();
+    assert_eq!(got.id, "t100");
+    assert_eq!(api.attempts.get(), 2);
+    assert_eq!(*api.deleted.borrow(), ["t1", "t2"]);
+
+    // Full of live tokens: one retry, then the error comes back unchanged in meaning.
+    let (api, ledger) = (MockTokens::new(1, 50), Ledger::new((), Vec::new()));
+    api.add(
+        "t1",
+        "pigeon:a:2026-11-24T05:59:00Z",
+        Some(TOKEN_EXPIRY),
+        "active",
+    );
+    let err = token_lease(&ledger, &api, &keys, TOKEN_NOW_MS)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("1001"), "{err}");
+    assert_eq!(api.attempts.get(), 2);
+    assert!(ledger.rows().is_empty());
+}
+
+#[test]
+fn core_token_ledger_release_revokes_one_callers_tokens_only() {
+    use pigeon_capabilities::ledger::Ledger;
+    let (mut api, ledger) = (MockTokens::new(500, 50), Ledger::new((), Vec::new()));
+    let (a1, a2) = (token_keys("u1", &["A"]), token_keys("u1", &["B"]));
+    let b1 = token_keys("u2", &["A"]);
+    let t1 = token_lease(&ledger, &api, &a1, TOKEN_NOW_MS).unwrap();
+    let t2 = token_lease(&ledger, &api, &a2, TOKEN_NOW_MS).unwrap();
+    let t3 = token_lease(&ledger, &api, &b1, TOKEN_NOW_MS).unwrap();
+    // A leased token is held: a taker's revoke of it answers `kept`.
+    assert!(ledger.holds(&t1.id) && ledger.holds(&t3.id));
+    assert!(!ledger.holds("t999"));
+    let n = token_block_on(ledger.release(&api, &a1.1)).unwrap();
+    assert_eq!(n, 2);
+    assert_eq!(*api.deleted.borrow(), [t1.id.clone(), t2.id.clone()]);
+    assert!(ledger.holds(&t3.id) && !ledger.holds(&t1.id));
+    assert_eq!(ledger.rows().len(), 1);
+    // A new lease for the released caller mints again.
+    let again = token_lease(&ledger, &api, &a1, TOKEN_NOW_MS).unwrap();
+    assert_eq!(again.id, "t103");
+
+    // A revoke that fails leaves the row released and unexpired, for the sweeper.
+    api.fail_delete = vec!["t103"];
+    let n = token_block_on(ledger.release(&api, &a1.1)).unwrap();
+    assert_eq!(n, 1);
+    let stuck = ledger
+        .rows()
+        .into_iter()
+        .find(|r| r.id == "t103")
+        .expect("the row stays");
+    assert!(stuck.released && stuck.expires_at > TOKEN_NOW_MS);
+    assert!(!ledger.holds("t103"));
+    // The sweeper retries it once the revoke works, and forgets the row.
+    api.fail_delete.clear();
+    let reaped = token_block_on(ledger.reap(&api, TOKEN_NOW_MS)).unwrap();
+    assert_eq!((reaped.deleted, reaped.forgotten, reaped.failed), (1, 1, 0));
+    assert!(ledger.rows().iter().all(|r| r.id != "t103"));
+}
+
+#[test]
+fn core_token_ledger_reap_keeps_other_names_and_forgets_the_expired() {
+    use pigeon_capabilities::ledger::{Ledger, Row};
+    let api = MockTokens::new(500, 50);
+    let row = |id: &str, name: &str, expires_at: i64, released: bool| Row {
+        id: id.into(),
+        key: format!("k{id}"),
+        name: name.into(),
+        purpose: "p".into(),
+        expires_at,
+        caller: "c".into(),
+        released,
+    };
+    let mine = "pigeon:a:2026-11-24T05:00:00Z";
+    let ledger = Ledger::new(
+        (),
+        vec![
+            row("t1", mine, TOKEN_NOW_MS + 1000, true),
+            row("t2", "my-own-token", TOKEN_NOW_MS + 1000, true),
+            row("t3", mine, TOKEN_NOW_MS - 1, false),
+            row("t4", mine, TOKEN_NOW_MS + 1000, false),
+        ],
+    );
+    let r = token_block_on(ledger.reap(&api, TOKEN_NOW_MS)).unwrap();
+    assert_eq!((r.deleted, r.forgotten, r.failed), (1, 3, 0));
+    // Only the released pigeon token was deleted: the other name was never touched.
+    assert_eq!(*api.deleted.borrow(), ["t1"]);
+    let left: Vec<String> = ledger.rows().into_iter().map(|r| r.id).collect();
+    assert_eq!(left, ["t4"]);
 }
