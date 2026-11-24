@@ -1076,3 +1076,10 @@ executors through it. Each item: state, next step, who it waits on.
   in that order, and `docs` needs the brief's first sentence or line, or `docs-only`, not a stray
   `plan`. `Past.kind` is the stored run kind, else classified. The estimate shows `kind` and
   `kind_source`. `build` and `live check` have no model slot: they use the planner default.
+
+- 2026-11-27: **8d turn job ids in status built.** `ai_agents_status {run}` adds `turns_recent`
+  (the last `turns` turns, 1 to 50, 10 by default, newest last, each `{n, job_id, model, at}`;
+  null job_id for old rows). The run object answers a new `turns_recent` op from `turn_costs`;
+  the pure shaping is `service::turns_recent` and `turns_arg`. `job` (the job in flight) is added
+  only when the status has no `job` yet. Status does not call `models_status`; its tool text says
+  `models_status {id}` with a listed job_id shows the endpoint. The list view is unchanged.

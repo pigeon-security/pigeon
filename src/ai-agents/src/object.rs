@@ -609,6 +609,7 @@ impl AiAgentRuns {
                 }
                 Ok(json!({ "queued": notes.len() }))
             }
+            "turns_recent" => self.turns_recent(a["turns"].as_i64().unwrap_or(10).clamp(1, 50)),
             "halt" => {
                 self.db.exec("UPDATE run SET waiting = NULL", vec![])?;
                 self.state.storage().set_alarm(0).await?;
@@ -2010,6 +2011,28 @@ impl AiAgentRuns {
             vec![(now() - older_ms).into()],
         )?;
         Ok(c.map_or(0, |c| c.c))
+    }
+
+    /// The last `count` rows of `turn_costs` (`n`, `job_id`, `model`, `at`; newest first) and the
+    /// job now in flight, for `ai_agents_status`. Rows from before job ids were kept hold null.
+    fn turns_recent(&self, count: i64) -> Result<Value> {
+        #[derive(Deserialize)]
+        struct T {
+            n: i64,
+            job_id: Option<String>,
+            model: Option<String>,
+            at: i64,
+        }
+        let rows: Vec<T> = self.db.rows(
+            "SELECT n, job_id, model, at FROM turn_costs ORDER BY n DESC LIMIT ?",
+            vec![count.into()],
+        )?;
+        let turns: Vec<Value> = rows
+            .iter()
+            .map(|t| json!({ "n": t.n, "job_id": t.job_id, "model": t.model, "at": t.at }))
+            .collect();
+        let job = self.run_row()?.and_then(|r| r.job_id);
+        Ok(json!({ "turns": turns, "job": job }))
     }
 
     /// Notes a turn's gateway log, so its real cost can be read later.

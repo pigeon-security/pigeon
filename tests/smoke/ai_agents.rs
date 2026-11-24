@@ -1693,6 +1693,41 @@ fn ai_agents_status_shape_options() {
 }
 
 #[test]
+fn ai_agents_status_turns_recent_shape_and_bounds() {
+    use pigeon_ai_agents::service::{turns_arg, turns_recent};
+    let rows = |k: i64| -> Vec<Value> {
+        (1..=k)
+            .rev()
+            .map(|n| {
+                json!({ "n": n, "job_id": if n > 1 { json!(format!("j{n}")) } else { Value::Null },
+                        "model": "m", "at": n * 10, "extra": 1 })
+            })
+            .collect()
+    };
+    assert_eq!(turns_recent(&rows(0), 10), json!([]));
+    let three = turns_recent(&rows(3), 10);
+    assert_eq!(three.as_array().unwrap().len(), 3);
+    assert_eq!(
+        three[0],
+        json!({ "n": 1, "job_id": null, "model": "m", "at": 10 })
+    );
+    assert_eq!(three[2]["job_id"], "j3");
+    let many = turns_recent(&rows(25), 10);
+    let many = many.as_array().unwrap();
+    assert_eq!(many.len(), 10);
+    assert_eq!(many[0]["n"], 16);
+    assert_eq!(many[9]["n"], 25);
+    assert_eq!(turns_recent(&rows(25), 50).as_array().unwrap().len(), 25);
+    assert_eq!(turns_arg(&json!({})).unwrap(), 10);
+    assert_eq!(turns_arg(&json!({ "turns": 1 })).unwrap(), 1);
+    assert_eq!(turns_arg(&json!({ "turns": 50 })).unwrap(), 50);
+    for bad in [json!(0), json!(51), json!("5"), json!(2.5)] {
+        let e = turns_arg(&json!({ "turns": bad })).unwrap_err();
+        assert!(e.contains("1 to 50"), "{e}");
+    }
+}
+
+#[test]
 fn ai_agents_event_notes_and_wait_events() {
     use pigeon_ai_agents::Role;
     use pigeon_ai_agents::run::{self, Action, State, View, Wait};

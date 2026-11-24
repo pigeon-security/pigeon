@@ -271,15 +271,31 @@ impl Agents {
             }
             "ai_agents_status" => {
                 let opts = shape_args(a)?;
+                let count = turns_arg(a)?;
                 match a["run"].as_str() {
-                    Some(run) => r(object::call(
-                        env,
-                        INDEX,
-                        "get",
-                        &json!({ "run": run, "reader": reader }),
-                    )
-                    .await)
-                    .map(|v| shape(&v, &opts)),
+                    Some(run) => {
+                        let mut v = r(object::call(
+                            env,
+                            INDEX,
+                            "get",
+                            &json!({ "run": run, "reader": reader }),
+                        )
+                        .await)?;
+                        // Only a gateway run has an object with turn rows; a failure here
+                        // leaves the status as it was.
+                        if v["runtime"] == "gateway"
+                            && let Ok(t) = object::call(
+                                env,
+                                &format!("run:{run}"),
+                                "turns_recent",
+                                &json!({ "turns": count }),
+                            )
+                            .await
+                        {
+                            add_turns(&mut v, &t, count);
+                        }
+                        Ok(shape(&v, &opts))
+                    }
                     None => {
                         let mut v = r(object::call(
                             env,
@@ -546,11 +562,16 @@ impl Service for Agents {
                          spending against its budget, its branch and its report. Without \
                          `run`, your recent runs and whether runs are paused. Size options: \
                          `brief` false or \"line\", `report` \"short\" or false, `fields` (keys \
-                         to keep; `run` always stays).",
+                         to keep; `run` always stays). With `run`, `turns_recent` lists the \
+                         last `turns` turns (1 to 50, 10 by default), newest last, each \
+                         `{n, job_id, model, at}`; `models_status {id}` with a listed job_id \
+                         shows that job's endpoint (`chat` or `responses`). `job` is the job \
+                         in flight.",
                         json!({
                             "type": "object",
                             "properties": {
                                 "run": { "type": "string" },
+                                "turns": { "type": "integer", "minimum": 1, "maximum": 50, "description": "With `run`: how many recent turns to list (10 by default, 50 at most)." },
                                 "limit": { "type": "integer", "description": "20 by default, 100 at most." },
                                 "live": { "type": "boolean", "description": "List only runs that have not ended." },
                                 "brief": { "anyOf": [{ "type": "boolean" }, { "type": "string" }], "description": "true (default), false, or \"line\" (first line, 100 characters)." },
@@ -953,6 +974,53 @@ pub fn shape_args(a: &Value) -> Result<Shape, String> {
         report,
         fields,
     })
+}
+
+/// Reads `turns` (how many recent turns `ai_agents_status {run}` lists): 1 to 50, 10 when absent.
+pub fn turns_arg(a: &Value) -> Result<usize, String> {
+    match &a["turns"] {
+        Value::Null => Ok(10),
+        v => match v.as_i64() {
+            Some(n) if (1..=50).contains(&n) => Ok(n as usize),
+            _ => Err("`turns` must be a whole number from 1 to 50".into()),
+        },
+    }
+}
+
+/// The last `limit` of `rows` (each `{n, job_id, model, at}`, any order) as a list ordered by
+/// `n`, newest last. A missing job id shows as null.
+pub fn turns_recent(rows: &[Value], limit: usize) -> Value {
+    let mut rows: Vec<&Value> = rows.iter().collect();
+    rows.sort_by_key(|r| r["n"].as_i64().unwrap_or(0));
+    let skip = rows.len().saturating_sub(limit);
+    Value::Array(
+        rows.into_iter()
+            .skip(skip)
+            .map(|r| {
+                json!({
+                    "n": r["n"],
+                    "job_id": r["job_id"],
+                    "model": r["model"],
+                    "at": r["at"],
+                })
+            })
+            .collect(),
+    )
+}
+
+/// Puts `turns_recent` and, when a job is in flight and the status does not show it yet, `job`
+/// into one run's status. `t` is the run object's `{turns, job}` answer.
+fn add_turns(status: &mut Value, t: &Value, limit: usize) {
+    let rows = t["turns"].as_array().cloned().unwrap_or_default();
+    let Some(obj) = status.as_object_mut() else {
+        return;
+    };
+    obj.insert("turns_recent".into(), turns_recent(&rows, limit));
+    if let Some(job) = t["job"].as_str()
+        && !obj.contains_key("job")
+    {
+        obj.insert("job".into(), json!(job));
+    }
 }
 
 /// The first line of `text`, cut to at most `max` characters.
