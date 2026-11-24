@@ -1499,7 +1499,7 @@ fn models_two_gateways_specs_guard_routes_and_daily() {
 /// refusal of `openai/…`, a stored openai default read as unset, and a
 /// fallback that stays within its provider.
 #[test]
-fn ai_agents_models_credits_routes_and_openai_refused() {
+fn ai_agents_models_credits_routes_and_openai_accepted() {
     use pigeon_ai_agents::Role;
     use pigeon_ai_agents::compare::groups;
     use pigeon_ai_agents::models::{
@@ -1533,13 +1533,9 @@ fn ai_agents_models_credits_routes_and_openai_refused() {
     assert_eq!(route("anthropic"), "byok");
     assert_eq!(route("cf-anthropic"), "credits");
     assert_eq!(route("cf-openai"), "credits");
-    // OpenAI is credits only; Workers AI comes later.
+    // `openai/...` is accepted now: the gateway has a BYOK `openai` provider.
     for t in ["openai/gpt-6.2-sol", "openai"] {
-        let e = Choice::parse(t, Slot::Executor).unwrap_err();
-        assert!(
-            e.contains("OpenAI is paid with Cloudflare credits: use cf-openai/"),
-            "{e}"
-        );
+        assert!(Choice::parse(t, Slot::Executor).is_ok(), "{t}");
     }
     // Workers AI is built (phase 6); its choices are checked in
     // ai_agents_workers_ai_choices.
@@ -1547,13 +1543,13 @@ fn ai_agents_models_credits_routes_and_openai_refused() {
         p("workers-ai", Slot::Executor).text(),
         "workers-ai/@cf/moonshotai/kimi-k2.7-code"
     );
-    // A stored openai default reads as unset, and the answer says so.
-    let raw = json!({ "executor": "openai/gpt-6.2-sol", "planner": "cf-openai/gpt-6.2-astra" });
+    // A stored default of an unknown provider reads as unset, and the answer says so.
+    let raw = json!({ "executor": "mistral/large", "planner": "cf-openai/gpt-6.2-astra" });
     let d = Defaults::from_json(&raw);
     assert!(d.stored_for(Slot::Executor).is_none());
     let notes = ignored_notes(&raw);
     assert_eq!(notes.len(), 1);
-    assert!(notes[0].contains("openai/gpt-6.2-sol"));
+    assert!(notes[0].contains("mistral/large"));
     let a = defaults_answer(&d, &notes);
     assert_eq!(
         a["defaults"]["executor"]["model"],

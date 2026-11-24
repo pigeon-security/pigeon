@@ -949,3 +949,7 @@ executors through it. Each item: state, next step, who it waits on.
   `EXECUTOR_RESERVE_MICROS` ($0.50) of its unspent budget; an ended one holds only its spend. A
   spawn needs the planner's remaining cost to cover just that reserve. `spent` shows
   `executors_spent` and `executors_reserved` next to `executors_cost` (the hold).
+- 2026-11-24: **`openai/…` is a choice.** The model gateway has a BYOK `openai` provider (key slot
+  `pigeon-openai_openai_default`), so ai-agents no longer refuses `openai/<model>` or bare `openai`
+  (tiers as `cf-openai`, paid by the person's own key). Its model ids use the gateway's own rule;
+  a run with no key set gets the gateway's "not ready" message. No default changed.

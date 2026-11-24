@@ -6,7 +6,13 @@ use serde_json::{Map, Value, json};
 use crate::Role;
 
 /// The providers a run may use.
-pub const PROVIDERS: [&str; 4] = ["anthropic", "cf-anthropic", "cf-openai", "workers-ai"];
+pub const PROVIDERS: [&str; 5] = [
+    "anthropic",
+    "cf-anthropic",
+    "openai",
+    "cf-openai",
+    "workers-ai",
+];
 
 /// Who pays for a provider: `byok` (the person's own key) or `credits` (Cloudflare credits).
 pub fn route(provider: &str) -> &'static str {
@@ -16,9 +22,6 @@ pub fn route(provider: &str) -> &'static str {
         "byok"
     }
 }
-
-/// The text shown when a choice names OpenAI without Cloudflare credits.
-const OPENAI_REFUSED: &str = "OpenAI is paid with Cloudflare credits: use cf-openai/… (docs/plans/model-providers-cloudflare.md)";
 
 /// The text shown when a bare `workers-ai` names a slot that has no Workers AI model.
 const WORKERS_AI_NO_SMALL: &str = "Workers AI has no small model: name one (workers-ai/@cf/…) or choose another provider for this slot";
@@ -94,9 +97,9 @@ pub fn tier_model(provider: &str, tier: Tier) -> Option<&'static str> {
         ("anthropic" | "cf-anthropic", Tier::Top) => Some("claude-opus-5-5"),
         ("anthropic" | "cf-anthropic", Tier::Middle) => Some("claude-sonnet-5-5"),
         ("anthropic" | "cf-anthropic", Tier::Small) => Some("claude-haiku-5-5"),
-        ("cf-openai", Tier::Top) => Some("gpt-6.2-astra"),
-        ("cf-openai", Tier::Middle) => Some("gpt-6.2-sol"),
-        ("cf-openai", Tier::Small) => Some("gpt-6.1-terra"),
+        ("openai" | "cf-openai", Tier::Top) => Some("gpt-6.2-astra"),
+        ("openai" | "cf-openai", Tier::Middle) => Some("gpt-6.2-sol"),
+        ("openai" | "cf-openai", Tier::Small) => Some("gpt-6.1-terra"),
         ("workers-ai", Tier::Top) => Some("@cf/zai-org/glm-5.3"),
         ("workers-ai", Tier::Middle) => Some("@cf/moonshotai/kimi-k2.7-code"),
         _ => None,
@@ -120,7 +123,7 @@ pub fn known(provider: &str, model: &str) -> bool {
 /// One model of one provider.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Choice {
-    /// The provider: `anthropic`, `cf-anthropic`, `cf-openai` or `workers-ai`.
+    /// The provider: `anthropic`, `cf-anthropic`, `openai`, `cf-openai` or `workers-ai`.
     pub provider: String,
     /// The model id the provider knows.
     pub model: String,
@@ -129,6 +132,10 @@ pub struct Choice {
 /// Checks a model id: letters, digits and `. - _ :`, at most 100 characters. A Workers AI id
 /// (`@cf/vendor/name`) may also hold `@` and `/`.
 fn check_model(provider: &str, model: &str) -> Result<(), String> {
+    // `openai` takes the model gateway's own id rule, so there is one rule for it.
+    if provider == "openai" {
+        return pigeon_models::ModelIds::Plain.check(model);
+    }
     let extra = if provider == "workers-ai" {
         ".-_:@/"
     } else {
@@ -158,16 +165,10 @@ impl Choice {
     /// or a bare provider name (that provider's model for the slot's tier).
     pub fn parse(text: &str, slot: Slot) -> Result<Choice, String> {
         let text = text.trim();
-        if text == "openai" {
-            return Err(OPENAI_REFUSED.into());
-        }
         if let Some((provider, model)) = text.split_once('/') {
-            if provider == "openai" {
-                return Err(OPENAI_REFUSED.into());
-            }
             if !PROVIDERS.contains(&provider) {
                 return Err(format!(
-                    "unknown provider `{provider}`: use `anthropic`, `cf-anthropic`, `cf-openai` or `workers-ai`"
+                    "unknown provider `{provider}`: use `anthropic`, `cf-anthropic`, `openai`, `cf-openai` or `workers-ai`"
                 ));
             }
             check_model(provider, model)?;
@@ -177,7 +178,7 @@ impl Choice {
                         "`{model}` is not a Workers AI model: `workers-ai` models start with `@cf/`"
                     ));
                 }
-            } else if provider != "cf-openai" && !model.starts_with("claude-") {
+            } else if !matches!(provider, "openai" | "cf-openai") && !model.starts_with("claude-") {
                 return Err(format!(
                     "`{model}` is not a Claude model: `{provider}` models start with `claude-`"
                 ));
@@ -205,7 +206,7 @@ impl Choice {
         }
         Err(format!(
             "`{text}` is not a model choice: use `provider/model` (e.g. cf-openai/gpt-6.2-sol), \
-             a `claude-…` name, or `anthropic`, `cf-anthropic`, `cf-openai` or `workers-ai`"
+             a `claude-…` name, or `anthropic`, `cf-anthropic`, `openai`, `cf-openai` or `workers-ai`"
         ))
     }
 
@@ -352,7 +353,7 @@ pub fn check_set(set: &Value) -> Result<Vec<(Slot, Choice)>, String> {
     Ok(out)
 }
 
-/// Notes for stored default entries that cannot be read (such as an old `openai/…`): the built-in
+/// Notes for stored default entries that cannot be read (such as an old `mistral/…`): the built-in
 /// default applies to that slot instead.
 pub fn ignored_notes(raw: &Value) -> Vec<String> {
     SLOTS

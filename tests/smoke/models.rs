@@ -847,7 +847,10 @@ fn models_openai_byok_latent() {
     ] {
         assert!(cf.contains(needle), "{needle}");
     }
-    assert_eq!(tier_model("openai", Tier::Top), None);
+    assert_eq!(
+        tier_model("openai", Tier::Top),
+        tier_model("cf-openai", Tier::Top)
+    );
     // The gateway spec only takes stored keys, and has no credits fallback.
     let g = spec("pigeon-openai", "store", GatewayKind::Byok);
     assert_eq!(g["byok_only"], true);

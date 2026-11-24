@@ -2001,3 +2001,43 @@ fn ai_agents_executor_reserve_leaves_planner_room() {
     };
     assert_eq!(budget::check(&b, &broke, 0, 1, spawn), Err(Over::Cost));
 }
+/// An `openai/...` choice is accepted: it names the gateway's BYOK provider `openai`, it takes the
+/// gateway's plain model-id rule, it is paid by the person's own key, and no text says Cloudflare
+/// credits pay for it. The bare word `openai` picks the tier model, as `anthropic` does.
+#[test]
+fn ai_agents_openai_choice_routes_to_byok_provider() {
+    use pigeon_ai_agents::models::{Choice, Defaults, Slot, defaults_answer, route};
+    let c = Choice::parse("openai/gpt-6.2-sol", Slot::Executor).unwrap();
+    assert_eq!(
+        (c.provider.as_str(), c.model.as_str()),
+        ("openai", "gpt-6.2-sol")
+    );
+    assert_eq!(c.text(), "openai/gpt-6.2-sol");
+    // The provider name is the one the model gateway declares.
+    let src = include_str!("../../src/model-gateway/src/lib.rs");
+    assert!(src.contains("name: \"openai\","));
+    assert_eq!(
+        Choice::parse("openai", Slot::Planner).unwrap().text(),
+        "openai/gpt-6.2-astra"
+    );
+    assert_eq!(
+        Choice::parse("openai", Slot::Summary).unwrap().text(),
+        "openai/gpt-6.1-terra"
+    );
+    // The gateway's id rule decides which ids are taken.
+    assert!(Choice::parse("openai/gpt 6", Slot::Executor).is_err());
+    assert!(Choice::parse("openai/", Slot::Executor).is_err());
+    assert!(Choice::parse("openai/@cf/x/y", Slot::Executor).is_err());
+    // It is on the person's own key, not credits.
+    assert_eq!(route("openai"), "byok");
+    assert_eq!(route("cf-openai"), "credits");
+    let raw = json!({ "executor": "openai/gpt-6.2-sol" });
+    let a = defaults_answer(&Defaults::from_json(&raw), &[]);
+    assert_eq!(a["defaults"]["executor"]["model"], "openai/gpt-6.2-sol");
+    assert_eq!(a["defaults"]["executor"]["route"], "byok");
+    let shown = a.to_string();
+    assert!(
+        !shown.contains("OpenAI is paid with Cloudflare credits"),
+        "{shown}"
+    );
+}
