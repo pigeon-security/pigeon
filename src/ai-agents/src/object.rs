@@ -22,7 +22,7 @@ use crate::models::{self, ChildModels, Choice, Defaults, Slot};
 use crate::run::{self, Action, Call, Job, Recovery, State, View, Wait};
 use crate::tools::{self, Kind};
 use crate::transcript::{self, Spec};
-use crate::{Role, compare, estimate, prompts, sandbox};
+use crate::{Role, compare, estimate, handoff, prompts, sandbox};
 
 /// The class's binding.
 pub const BINDING: &str = "AI_AGENT_RUNS";
@@ -1692,13 +1692,23 @@ impl AiAgentRuns {
             worker::console_error!("agents: revoking run {}'s git grant: {e}", row.id);
         }
         self.release_tokens(row, &caller).await;
+        let handed = if row.role == "planner" {
+            self.hand_off(row, why).await
+        } else {
+            None
+        };
+        if let Some(text) = &handed {
+            self.set("report = ?", vec![text.as_str().into()])?;
+        }
         self.set(
             "state = ?, job_id = NULL, waiting = NULL",
             vec![to.name().into()],
         )?;
         let mut ended = row.clone();
         ended.state = to.name().into();
-        let report = row.report.clone().unwrap_or_else(|| why.to_string());
+        let report = handed
+            .or_else(|| row.report.clone())
+            .unwrap_or_else(|| why.to_string());
         self.tell(
             &ended,
             &format!("ended: {}", to.name()),
@@ -1828,6 +1838,15 @@ impl AiAgentRuns {
                 &format!("last_turn = {}", budget::last_turn_code(over)),
                 vec![],
             )?;
+        }
+        // At 75% a planner is warned once: stop spawning, hand off, report.
+        if !last
+            && role == Role::Planner
+            && let Some(over) = budget::warn_due(budget, spent)
+            && !self.run_flag_set(WARNED_KEY)?
+        {
+            self.add_last_turn_text(&handoff::warning_text(over, budget, spent))?;
+            self.set_run_flag(WARNED_KEY)?;
         }
         // Never replay an assistant message that ends in thinking.
         let mut messages = transcript::repair_transcript(&self.messages()?);
@@ -2992,6 +3011,64 @@ fn children_budgets_micros(children: &Value) -> u64 {
 
 /// The flag row that counts a run's probes.
 const PROBES_KEY: &str = "probes";
+
+/// The flag row that says a planner has had its 75% budget warning.
+const WARNED_KEY: &str = "warned75";
+
+impl AiAgentRuns {
+    /// Tells whether the flag row `key` is set in the run's own `flags` table.
+    fn run_flag_set(&self, key: &str) -> Result<bool> {
+        #[derive(Deserialize)]
+        struct F {
+            #[allow(dead_code)]
+            v: String,
+        }
+        Ok(self
+            .db
+            .row::<F>("SELECT v FROM flags WHERE k = ?", vec![key.into()])?
+            .is_some())
+    }
+
+    /// Sets the flag row `key` in the run's own `flags` table.
+    fn set_run_flag(&self, key: &str) -> Result<()> {
+        self.db.exec(
+            "INSERT INTO flags (k, v) VALUES (?, '1') ON CONFLICT (k) DO UPDATE SET v = excluded.v",
+            vec![key.into()],
+        )
+    }
+
+    /// The planner's report with the "Unlanded branches" section after it, or `None` when there
+    /// is nothing to add or the children cannot be read. Lookups that fail leave their column
+    /// as unknown (CI) or keep the row (landed).
+    async fn hand_off(&self, row: &RunRow, why: &str) -> Option<String> {
+        let children = match call(&self.env, INDEX, "children", &json!({ "run": row.id })).await {
+            Ok(v) => v,
+            Err(e) => {
+                worker::console_error!("agents: reading children for the hand-off: {e}");
+                return None;
+            }
+        };
+        let caller: Value = serde_json::from_str(&row.caller).unwrap_or(Value::Null);
+        let landed = match dispatch(&self.env, &caller, "land_list", &json!({ "limit": 50 })).await
+        {
+            Ok(v) => handoff::landed_branches(&v),
+            Err(_) => Default::default(),
+        };
+        let mut ci = std::collections::HashMap::new();
+        for c in handoff::unlanded(&children, &landed) {
+            let Some(tip) = c["report"].as_str().and_then(handoff::tip_from_report) else {
+                continue;
+            };
+            let args = json!({ "repo": "pigeon-security/pigeon", "commit": tip });
+            if let Ok(v) = dispatch(&self.env, &caller, "ci_commit", &args).await {
+                ci.insert(tip, handoff::ci_word(&v));
+            }
+        }
+        let section = handoff::section(&children, &landed, &ci)?;
+        let base = row.report.clone().unwrap_or_else(|| why.to_string());
+        Some(handoff::append(&base, &section))
+    }
+}
 
 impl AiAgentRuns {
     /// How many probes this run has sent (kept in the run's own `flags` table).

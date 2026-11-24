@@ -2317,3 +2317,88 @@ fn ai_agents_compaction_keeps_the_cached_prefix() {
         );
     }
 }
+
+/// The 75% warning: cost counts what executors hold, sandbox time counts too, and a zero budget
+/// never warns.
+#[test]
+fn ai_agents_warn_due_at_75_percent() {
+    use pigeon_ai_agents::budget::{Budget, Over, Spent, warn_due};
+    let budget = Budget {
+        cost_micros: 10_000_000,
+        sandbox_ms: 60 * 60_000,
+        ..Budget::default_for(pigeon_ai_agents::Role::Planner)
+    };
+    assert_eq!(warn_due(&budget, &Spent::default()), None);
+    let own = Spent {
+        cost_micros: 7_499_999,
+        ..Spent::default()
+    };
+    assert_eq!(warn_due(&budget, &own), None);
+    let own = Spent {
+        cost_micros: 7_500_000,
+        ..Spent::default()
+    };
+    assert_eq!(warn_due(&budget, &own), Some(Over::Cost));
+    let held = Spent {
+        cost_micros: 2_000_000,
+        executors_micros: 5_500_000,
+        ..Spent::default()
+    };
+    assert_eq!(warn_due(&budget, &held), Some(Over::Cost));
+    let sandbox = Spent {
+        sandbox_ms: 45 * 60_000,
+        ..Spent::default()
+    };
+    assert_eq!(warn_due(&budget, &sandbox), Some(Over::Sandbox));
+    let zero = Budget {
+        cost_micros: 0,
+        sandbox_ms: 0,
+        ..budget
+    };
+    assert_eq!(warn_due(&zero, &Spent::default()), None);
+}
+
+/// The hand-off section: rows for executors not landed, tips from reports, CI when known.
+#[test]
+fn ai_agents_handoff_section_from_children() {
+    use pigeon_ai_agents::handoff;
+    let tip = "0123456789abcdef0123456789abcdef01234567";
+    let children = json!([
+        { "run": "a", "branch": "claude/ai-agent-a", "state": "done", "ended_at": 5,
+          "report": format!("Pushed. Tip {tip}, CI green.") },
+        { "run": "b", "branch": "claude/ai-agent-b", "state": "done", "ended_at": 6,
+          "report": "landed already" },
+        { "run": "c", "branch": "claude/ai-agent-c", "state": "running", "ended_at": null,
+          "report": null },
+    ]);
+    assert_eq!(
+        handoff::tip_from_report(&format!("x {tip}.")),
+        Some(tip.to_string())
+    );
+    assert_eq!(handoff::tip_from_report("abc1234"), None);
+    let landed = handoff::landed_branches(&json!([
+        { "branch": "refs/heads/claude/ai-agent-b", "state": "landed" },
+        { "branch": "claude/ai-agent-c", "state": "failed" },
+    ]));
+    assert!(landed.contains("claude/ai-agent-b") && landed.len() == 1);
+    let ci_answer = json!({ "jobs": [
+        { "job": "lint", "state": "failed" }, { "job": "test", "state": "passed" } ] });
+    assert_eq!(handoff::ci_word(&ci_answer), "passed");
+    assert_eq!(handoff::ci_word(&json!({ "jobs": [] })), "none recorded");
+    let mut ci = std::collections::HashMap::new();
+    ci.insert(tip.to_string(), handoff::ci_word(&ci_answer));
+    let text = handoff::section(&children, &landed, &ci).unwrap();
+    assert!(text.starts_with("## Unlanded branches"));
+    assert!(text.contains(&format!(
+        "| `claude/ai-agent-a` | `{tip}` | done | passed |"
+    )));
+    assert!(text.contains("| `claude/ai-agent-c` | unknown | running (not ended) | unknown |"));
+    assert!(!text.contains("ai-agent-b"));
+    // Nothing to show: no section.
+    assert!(handoff::section(&json!([]), &landed, &ci).is_none());
+    // The model's text comes first; a second append adds nothing.
+    let report = handoff::append("All done.", &text);
+    assert!(report.starts_with("All done.\n\n## Unlanded branches"));
+    assert_eq!(handoff::append(&report, &text), report);
+    assert_eq!(handoff::append("", &text), text);
+}
