@@ -510,6 +510,112 @@ pure and well under a second.
 - The default-runtime toggle (optional).
 - The budget extend flow.
 
+### Phase 6: planners that can see and finish (2026-11-23, from a week of runs)
+
+Evidence (7 days, `ai_agents_compare`): Opus planners cost $721 over 44 runs (19 failed, median
+$9.78, median 64 turns). Sonnet executors cost $46 over 148 runs. Haiku mechanical runs cost
+$0.07. In the last 24 h the gateway saw 953 Opus requests; the brief counts 182 M cache-read
+tokens against 0.6 M output tokens (`models_usage` shows 613 k output tokens and no cache counts
+for the same window). That is about 190 k cache-read tokens per planner turn. Planners improvised
+around seven gaps. Each step below is one executor, one branch and one landing. Nothing here
+changes a stored or built-in model default, `src/model-gateway`'s provider routing or the MCP
+schema files beyond adding the new tools. Every new tool is scoped to what the run owns.
+
+**What already exists, so it is not rebuilt.** `wait_executors` (blocks until one executor ends)
+and `wait_events {minutes}` (also wakes on a note, event or timeout) are planner tools since phase
+4, and a planner's history is already compacted by a Haiku summary
+(`transcript::needs_compaction`). So the brief's `executors_wait` is not added. The planner's
+prompt tells it to use `wait_executors` instead of polling `executor_status`.
+
+**6a. Compaction that fires (item 6).**
+- Finding: `transcript::cut_point` only cuts at a user message with no `tool_result`. In a tool
+  loop every user message after the first is a tool result, so there is almost never a cut and a
+  planner's context grows without bound. A mean of 190 k cache-read tokens per turn, above the
+  150 k trigger, fits that.
+- Fix: cut before an assistant message, which is always a clean cut (its `tool_use` blocks and
+  their results are both kept). `compacted` already handles a kept list that starts with an
+  assistant message, by putting the summary first as a user message.
+- Threshold, from the token data and Opus prices (a cache write for 1 hour costs about 20 times a
+  read; the summary on Haiku costs about 0.05 USD): after a compaction the context is about 35 k
+  tokens (tools, system, summary, last 16 messages). It then grows about 3 k per turn (tool
+  results are cut at 16 KB). A compaction costs about 0.40 USD (the new prefix is written again).
+  The cost per turn is lowest when a compaction comes every 20 to 25 turns, at a context of about
+  100 k, and is flat from 80 k to 120 k. So `COMPACT_AT` goes from 150 k to 100 k and the kept
+  tail from 20 to 16 messages. The executor re-checks the growth figure on stored `last_usage`
+  data where it can, and says so if it changes the numbers.
+- The cache prefix stays stable: the tools and the system prompt are built the same on every turn
+  (`transcript::request`), and a compaction only replaces the messages after them.
+- Effect to measure: cache-read tokens per planner turn, before (about 190 k) and after, from
+  `models_usage {task_prefix: "ai-agent/", by: [model]}` once the Worker is deployed and planner
+  runs have used it.
+
+**6b. Read tools for a run (items 1, 2, 3).** Agent and pigeon tools, offered to planners and
+executors, all read-only.
+- `model_probe {model, prompt?, max_tokens?}`: one bounded request (at most 64 output tokens, a
+  prompt of at most 500 characters, 30 s) to a named model through the model gateway, as the run's
+  caller, with the task tag `ai-agent/{run}/probe/{n}`. It answers `status`, `latency_ms`, token
+  counts, cost and the provider's error text as the gateway gave it. A probe is not a run, takes
+  no run id and spends no turn. Its cost counts against the run's own cost budget. At most 10
+  probes per run. The model is checked with the same rules as a run's `model`; nothing is added to
+  the gateway.
+- `run_spend {}`: this run's own turns, tokens and cost so far and the budget left (numbers the
+  run already keeps), plus `models_usage` for its own task prefix. No other run's spend.
+- `cost_daily` joins the planner and executor pigeon tool lists (a read-only tool core already
+  serves; its answer is platform-wide and holds no secrets).
+- `observability_errors {worker?, hours?}`: a new read-only tool in
+  `src/capabilities/src/observability.rs`. It answers, per Worker, the data
+  `observability_summary` already gathers (top error messages, `by_status`, counts), filtered by
+  `worker` (a script name). Where a log line names the run (core's audit lines carry the run
+  label), `run` narrows to it; where the logs carry no tag, the answer says the filter was not
+  applied. It reuses the summary's folding code and adds no new source. Planners and executors
+  are offered it.
+
+**6c. `branch_restack` and `branch_combine` (item 4).** A run's git grant lets it push only
+`claude/ai-agent-{run}` and `claude/ai-agent-{run}-*`, and the sandbox image is pinned, so no new
+sandboxd op is added (that would need the person to rebuild the image). Both are agent tools that
+the run's Durable Object carries out over the sandbox ops that exist: `fetch`, `run` (git, in the
+checkout) and `commit_push {force}`.
+- `branch_restack {}`: fetches `main`, rebases the run's own branch onto it and force-pushes it
+  with the lease. On a conflict it aborts the rebase, leaves the checkout clean and answers the
+  conflicting paths (`git diff --name-only --diff-filter=U`) without pushing.
+- `branch_combine {branches: [..]}` (planners): each name must be a branch of one of the
+  planner's own executors (checked against the children the index lists,
+  `claude/ai-agent-{child}`), or its own branch. It fetches `main` and each branch, resets the
+  checkout to `origin/main`, cherry-picks each branch's commits (`main..branch`, oldest first) in
+  the order given, then force-pushes the result to the planner's own branch. A conflict aborts and
+  names the files and the branch. It refuses while the planner's own branch holds commits that
+  are not in the list (it would drop them), unless the list names the planner's own branch.
+- Both refuse any branch outside the run's ownership, and `main` is never moved. The pure part
+  (the command lines, the ownership check, parsing the conflict list) is a new module,
+  `src/ai-agents/src/branches.rs`, so the smoke suite tests it natively.
+- Not built: pushing to an executor's branch. The planner's own branch is the one it lands.
+
+**6d. Warn at 75%, hand off at the end (item 5).**
+- Budget: when a planner's cost or sandbox minutes pass 75% of the budget, once, the run adds a
+  user message: stop spawning executors, land or hand off what is green, then report. The
+  existing last turn at 90% stays.
+- Structure: when a planner ends (a `report`, or the over-budget end), the run appends a
+  machine-made section, "Unlanded branches", with one row per executor: branch, tip (from the
+  executor's last push), the executor's end state and CI status for the tip (`ci_commit`), leaving
+  out those that `land_list` shows merged. The model's own text comes first, and the run adds the
+  section, so it is there even when the model forgets.
+
+**6e. A `kind` hint for planners (item 7).**
+- `ai_agents_start {kind?}`, with `kind` one of `integrate`, `docs`, `fix`, `design`. It is kept
+  on the run and shown in `ai_agents_get` and `ai_agents_compare`.
+- A stored per-kind planner model: `ai_agents_models` can set one per kind, beside the existing
+  slots. Resolution for a planner: the run's own `model`, the stored model for its kind if there
+  is one, the stored planner default, the built-in default. **No stored or built-in default is
+  changed**, and this work stores no per-kind value. The person decides after comparing tonight's
+  Sonnet-planned runs.
+
+Order and landing: 6a to 6e are built in parallel, each from `main`. The plan lands first. Then
+each lands on its own after `sh ci/runner/test.sh` and the `test` job are green, and the next
+restacks onto the new main. Conflicts are likely in `tools.rs`, `prompts.rs` and `object.rs`,
+because each adds a tool or a step; keep both sides. Smoke scenarios go in
+`tests/smoke/ai_agents.rs` (prefix `ai_agents_`) and, for the observability tool,
+`tests/smoke/observability.rs`.
+
 ## The person's answers (2026-11-22, relayed by the parent)
 
 1. Runs push and run CI only; landing stays with the planner or the parent. Phase 2's `land` flag
@@ -826,3 +932,8 @@ executors through it. Each item: state, next step, who it waits on.
 - 2026-11-23: **Sandbox v3 pinned.** `src/ai-agents-worker/wrangler.toml` now pins v3's linux/amd64
   manifest (`sha256:5dcfddbb…`), built by the person from 70da889, so `commit_push` pushes local
   commits and takes `force`. The Worker no longer tells the model about image v2's limits.
+- 2026-11-23: **Phase 6 planned** (a week of runs: planners improvised around no probe, no logs, no
+  cost view, manual landing trains, budget end-games, long contexts and a missing kind hint).
+  `wait_executors` and `wait_events` already exist, so `executors_wait` is not built. Compaction
+  never fires in a tool loop because `cut_point` wants a user message without a tool result; 6a
+  fixes that. Per-kind planner models are stored but unset, and no default changes.
