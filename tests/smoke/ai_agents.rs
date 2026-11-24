@@ -1953,6 +1953,8 @@ fn ai_agents_read_only_observability_tools_offered() {
         let mut seen = std::collections::BTreeSet::new();
         assert!(list.iter().all(|t| seen.insert(*t)), "no name twice");
     }
+}
+
 /// `model_probe` and `run_spend` are offered to every role, and `run_spend` alone is safe to
 /// repeat.
 #[test]
