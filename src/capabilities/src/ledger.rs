@@ -28,8 +28,9 @@ pub const BINDING: &str = "TOKEN_LEDGER";
 /// The name of the one ledger object.
 pub const OBJECT: &str = "ledger";
 
-/// A token with less than this left (milliseconds) is not handed out again.
-pub const MIN_LEFT_MS: i64 = 120_000;
+/// A token with less than this left (milliseconds) is not handed out again. Five minutes, so a
+/// taker that keeps one token for a job's steps still has time to finish with it.
+pub const MIN_LEFT_MS: i64 = 300_000;
 
 const MIGRATIONS: [&str; 1] = ["CREATE TABLE tokens (
         id TEXT PRIMARY KEY,
@@ -279,7 +280,7 @@ impl<S: Store> Ledger<S> {
         }
     }
 
-    /// Mints a token for `req`, revokes the older ones of its key and records the new one.
+    /// Mints a token for `req`, revokes the orphans of its key and records the new one.
     async fn fresh(
         &self,
         api: &impl TokenApi,
@@ -290,11 +291,15 @@ impl<S: Store> Ledger<S> {
         let (minted, name) = self.create(api, now_ms, body).await?;
         let expires_at =
             tokens::parse_ms(&minted.expires_on).unwrap_or(now_ms + (req.ttl_secs as i64) * 1000);
+        // The token handed out last for this key is left to expire: a taker may still be using
+        // it, and it has at most `MIN_LEFT_MS` to live. Only orphans (rows with no value held,
+        // after a restart) are revoked now.
+        let in_use = self.values.borrow().get(req.key).map(|(id, _)| id.clone());
         let older: Vec<Row> = self
             .rows
             .borrow()
             .iter()
-            .filter(|r| r.key == req.key)
+            .filter(|r| r.key == req.key && Some(&r.id) != in_use.as_ref())
             .cloned()
             .collect();
         for old in &older {

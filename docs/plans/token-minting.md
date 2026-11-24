@@ -102,7 +102,7 @@ name does not start with `pigeon:worker-`. I checked what it stops:
    `scoped_token_revocable`. Kind A tokens are core's own and are revoked in core. Nothing else
    is revocable by anyone.
 3. **Reuse in core.** `credential` kind `scoped` returns a cached token for the same
-   (caller, permission set) while it has at least 120 s left, and mints a new one otherwise.
+   (caller, permission set) while it has at least 300 s left, and mints a new one otherwise. The token it replaces is left to expire (a taker may still be using it); only orphans are revoked at once.
    - The key is the caller's user id, the person it acts for (or none), and the sorted
      permission set. Never a different caller or set.
    - The cache is a Durable Object in core (`TokenLedger`, one named instance), so every
@@ -110,7 +110,7 @@ name does not start with `pigeon:worker-`. I checked what it stops:
    - The token's **value is held in the object's memory only**. Storage keeps the id, key
      hash, name, purpose, expiry and caller. If the object restarts, the next ask revokes the
      orphan by id and mints again.
-   - A token is revoked when it expires from the cache, when a replacement is minted, and when
+   - A token is revoked when it is an orphan (the object restarted), and when
      the caller's last live run ends (see 6). A taker never revokes a shared token:
      `credential_revoke` kind `scoped` on a shared token answers `{revoked: 0, kept: "shared"}`.
      Takers that revoked after use (`close_call_token`) stop doing so for core-issued tokens.

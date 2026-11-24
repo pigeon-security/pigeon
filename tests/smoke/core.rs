@@ -1305,18 +1305,15 @@ fn core_token_ledger_a_nearly_expired_lease_mints_anew() {
     let (api, ledger) = (MockTokens::new(500, 50), Ledger::new((), Vec::new()));
     let keys = token_keys("u1", &["A"]);
     let first = token_lease(&ledger, &api, &keys, TOKEN_NOW_MS).unwrap();
-    // 120 s left is still handed out; 119 s is not.
-    let still = token_lease(&ledger, &api, &keys, TOKEN_NOW_MS + 780_000).unwrap();
+    // 300 s left is still handed out; 299 s is not.
+    let still = token_lease(&ledger, &api, &keys, TOKEN_NOW_MS + 600_000).unwrap();
     assert_eq!(still.id, first.id);
-    let next = token_lease(&ledger, &api, &keys, TOKEN_NOW_MS + 781_000).unwrap();
+    let next = token_lease(&ledger, &api, &keys, TOKEN_NOW_MS + 601_000).unwrap();
     assert!(next.id != first.id);
     assert_eq!(token_mints(&api), 2);
-    assert_eq!(
-        api.deleted.borrow().as_slice(),
-        std::slice::from_ref(&first.id)
-    );
-    assert_eq!(ledger.rows().len(), 1);
-    assert!(ledger.holds(&next.id) && !ledger.holds(&first.id));
+    // The replaced token is left to expire: a taker may still be using it.
+    assert!(api.deleted.borrow().is_empty());
+    assert!(ledger.holds(&next.id) && ledger.holds(&first.id));
 }
 
 #[test]
