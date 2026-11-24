@@ -353,15 +353,14 @@ async fn mcp_post(mut req: Request, env: &Env) -> Result<Response> {
     if targets.next().is_some() {
         return Response::error("specify one target instance", 400);
     }
-    if let Some(id) = &instance {
-        let records = pigeon_capabilities::instances::all(env).await?;
-        let Some(record) = records.iter().find(|record| record.id == *id) else {
+    let scope = if let Some(id) = &instance {
+        let Some(record) = pigeon_capabilities::instances::one(env, id).await? else {
             return Response::error("unknown instance", 404);
         };
-        if pigeon_core::site_publish::site(&serde_json::to_value(record)?).is_err() {
-            return Response::error("site publishing is unavailable for this instance", 403);
-        }
-    }
+        Some(pigeon_capabilities::instances::tools::Scope::new(&record)?)
+    } else {
+        None
+    };
     let message: Value = match req.json().await {
         Ok(v) => v,
         Err(e) => return Response::error(format!("not JSON: {e}"), 400),
@@ -369,22 +368,17 @@ async fn mcp_post(mut req: Request, env: &Env) -> Result<Response> {
     let caps = split::all(env, settings::capabilities(), settings::BINDINGS).await;
     let hosted = hosted(&caps);
     let mut tools: Vec<mcp::Tool> = caps.iter().flat_map(|c| c.tools()).collect();
-    if instance.is_some() {
-        tools.retain(|tool| pigeon_core::site_publish::scoped_tool(tool.name));
-        for tool in &mut tools {
-            if let Some(properties) = tool.input_schema["properties"].as_object_mut() {
-                properties.remove("instance");
-            }
-            if let Some(required) = tool.input_schema["required"].as_array_mut() {
-                required.retain(|name| name != "instance");
-            }
-        }
+    if let Some(scope) = &scope {
+        scope.restrict_tools(&mut tools);
     }
     pigeon_capabilities::approvals::annotate(&mut tools);
     let server = Server {
         name: settings::WORKER,
         version: env!("CARGO_PKG_VERSION"),
-        instructions: "pigeon's platform. Source code lives in Cloudflare Artifacts; GitHub is \
+        instructions: if scope.is_some() {
+            "The instance is selected by this endpoint. Tools use its approved resources."
+        } else {
+            "pigeon's platform. Source code lives in Cloudflare Artifacts; GitHub is \
                        a read-only copy of main. A cloud session reaches git at \
                        https://proxy.pigeon.dev/git/pigeon-security/pigeon.git and deploys with \
                        the pinned wrangler (`npm ci`, then `npx wrangler deploy`, in \
@@ -401,12 +395,13 @@ async fn mcp_post(mut req: Request, env: &Env) -> Result<Response> {
                        reason. Never propose new rules or loosen one; only the person changes \
                        the policy. `call {tool, args}` reaches any tool deployed after this \
                        session started. source_token and deploy_token remain for callers \
-                       without the proxy credential.",
+                       without the proxy credential."
+        },
     };
     let call = async |name: &str, args: &Value| -> Result<Value> {
-        let bound = instance
+        let bound = scope
             .as_ref()
-            .map(|id| pigeon_core::site_publish::scoped_args(id, name, args))
+            .map(|scope| scope.bind(name, args))
             .transpose()
             .map_err(Error::RustError)?;
         let args = bound.as_ref().unwrap_or(args);

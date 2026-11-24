@@ -26,28 +26,6 @@ pub fn site(record: &Value) -> Result<&Value, String> {
     }
 }
 
-/// The scoped MCP endpoint offers publishing only; generic dispatch cannot escape the profile.
-pub fn scoped_tool(name: &str) -> bool {
-    matches!(name, "site_deploy" | "site_rollback")
-}
-
-/// The scoped endpoint binds the target before invoking the regular dispatcher.
-pub fn scoped_args(instance: &str, tool: &str, args: &Value) -> Result<Value, String> {
-    if !scoped_tool(tool) {
-        return Err("tool is unavailable on this instance".into());
-    }
-    let mut bound = args.clone();
-    let parameters = bound.as_object_mut().ok_or("expected tool arguments")?;
-    if parameters
-        .get("instance")
-        .is_some_and(|target| target != instance)
-    {
-        return Err("tool arguments cannot change the target instance".into());
-    }
-    parameters.insert("instance".into(), serde_json::json!(instance));
-    Ok(bound)
-}
-
 /// Identifies the complete release inputs and manifest. An identical deployment is idempotent.
 pub fn release_id(provenance: &Value, manifest: &crate::r2::Manifest) -> String {
     let data = serde_json::json!([provenance, manifest]);

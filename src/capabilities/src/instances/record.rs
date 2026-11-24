@@ -45,6 +45,9 @@ pub struct Instance {
     /// Explicit publishing selection. Missing preserves the first site's legacy behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publishing: Option<pigeon_core::site_publish::Profile>,
+    /// Optional read-only access to a declared object storage account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage: Option<crate::storage::scope::Profile>,
     /// The record version, which is not part of a diff.
     #[serde(default)]
     pub version: u64,
@@ -612,6 +615,15 @@ pub fn validate(instance: &Instance, others: &[Instance], rules: &Rules) -> Vec<
         {
             problems.push("Publishing needs a GitHub repository and a linked account.".into());
         }
+    }
+
+    if let Some(profile) = instance
+        .storage
+        .as_ref()
+        .filter(|profile| profile.enabled())
+        && let Err(problem) = profile.scope()
+    {
+        problems.push(problem);
     }
 
     if others.iter().any(|o| o.id == instance.id) {

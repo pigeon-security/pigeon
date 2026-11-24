@@ -407,3 +407,25 @@ executors through it. Each item: state, next step, who it waits on.
     answers 403). So the code was reviewed only from the executor's report, not line by line,
     and the duplicate file is still there. When landing, keep this version of the file.
   - Nothing in `ci/`, `.pigeon/`, `.claude/`, `ci/workers.toml` or any `wrangler.toml` changed.
+
+## Instance-scoped read-only storage
+
+An approved instance record can enable storage with a reference to an existing
+declared storage account, a bucket, and an optional directory prefix. The
+record binds names and scope. Provider endpoints and secret references are
+still resolved from the platform's storage account declarations. An enabled
+profile does not grant access to other buckets the provider key can see.
+
+The instance tool registry supplies both discovery and dispatch for
+`/mcp?instance=<id>`. Publishing and storage have independent entries.
+An archive can expose list and read, and a publishing-only instance can
+continue to use its own internal bucket without exposing storage tools.
+The scoped endpoint binds the instance before authorization and dispatch,
+including when a tool is requested through the generic `call` wrapper.
+
+Scoped storage callers supply relative object keys and listing prefixes.
+The handler uses the approved store, bucket, and prefix, restricts page
+continuations to the listing that issued them, and returns reads inline
+within the existing size limit. Scoped reads do not issue presigned URLs.
+Existing main-platform storage calls continue to use their explicit account
+and bucket arguments.

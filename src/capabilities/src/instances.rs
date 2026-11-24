@@ -8,6 +8,7 @@
 
 pub mod plan;
 pub mod record;
+pub mod tools;
 
 use pigeon_core::mcp::Tool;
 use pigeon_core::oauth::hash;

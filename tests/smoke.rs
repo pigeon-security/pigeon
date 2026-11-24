@@ -2387,7 +2387,7 @@ fn platform_cost_daily_promotional_grants() {
 
 #[test]
 fn sites_publishing_profile_binds_the_scope_and_preserves_legacy_records() {
-    use pigeon_core::site_publish::{scoped_args, site};
+    use pigeon_core::site_publish::site;
     let mut record = json!({"sites": [{"name":"first"}, {"name":"second"}]});
     assert_eq!(site(&record).unwrap()["name"], "first");
     record["publishing"] = json!({"state":"enabled", "site":"second"});
@@ -2396,13 +2396,100 @@ fn sites_publishing_profile_binds_the_scope_and_preserves_legacy_records() {
     assert!(site(&record).is_err());
     record["publishing"] = json!({"state":"disabled"});
     assert!(site(&record).is_err());
+}
+
+#[test]
+fn instance_tool_profiles_share_discovery_and_binding() {
+    use pigeon_capabilities::instances::{record::Instance, tools::Scope};
+    use pigeon_core::mcp::Tool;
+
+    let site: Instance = serde_json::from_value(json!({
+        "id": "blog", "title": "Blog", "account": {"kind":"home"},
+        "sites": [{"name":"blog", "bucket":"site", "targets":[]}]
+    }))
+    .unwrap();
+    let archive: Instance = serde_json::from_value(json!({
+        "id": "archive", "title": "Archive", "account": {"kind":"home"},
+        "storage": {"state":"enabled", "store":"archive-store", "bucket":"archive", "prefix":"published/"}
+    })).unwrap();
+    let catalog = || {
+        ["site_deploy", "storage_get_object", "storage_list_objects", "land", "call"]
+        .into_iter()
+        .map(|name| Tool {
+            name,
+            description: "",
+            input_schema: json!({
+                "properties": {"instance": {}, "account": {}, "bucket": {}, "presign": {}, "expires_s": {}, "key": {}},
+                "required": ["instance", "account", "bucket", "key"]
+            })
+        }).collect::<Vec<_>>()
+    };
+    let site = Scope::new(&site).unwrap();
+    let mut listed = catalog();
+    site.restrict_tools(&mut listed);
     assert_eq!(
-        scoped_args("one", "site_deploy", &json!({"rev":"main"})).unwrap(),
-        json!({"instance":"one","rev":"main"})
+        listed.iter().map(|tool| tool.name).collect::<Vec<_>>(),
+        ["site_deploy", "call"]
     );
-    assert!(scoped_args("one", "site_deploy", &json!({"instance":"two"})).is_err());
-    assert!(scoped_args("one", "land", &json!({})).is_err());
-    assert!(scoped_args("one", "call", &json!({"tool":"land"})).is_err());
+    assert_eq!(
+        site.bind("site_deploy", &json!({"rev":"main"})).unwrap(),
+        json!({"instance":"blog","rev":"main"})
+    );
+    assert!(
+        site.bind("site_deploy", &json!({"instance":"other"}))
+            .is_err()
+    );
+    assert!(
+        site.bind("storage_get_object", &json!({"key":"note"}))
+            .is_err()
+    );
+    assert!(site.bind("land", &json!({})).is_err());
+    assert!(site.bind("call", &json!({"tool":"land"})).is_err());
+
+    let archive = Scope::new(&archive).unwrap();
+    let mut listed = catalog();
+    archive.restrict_tools(&mut listed);
+    assert_eq!(
+        listed.iter().map(|tool| tool.name).collect::<Vec<_>>(),
+        ["storage_get_object", "storage_list_objects", "call"]
+    );
+    assert_eq!(listed[0].input_schema["required"], json!(["key"]));
+    assert_eq!(listed[0].input_schema["properties"], json!({"key":{}}));
+    assert_eq!(
+        archive
+            .bind("storage_get_object", &json!({"key":"note"}))
+            .unwrap(),
+        json!({"instance":"archive","key":"note"})
+    );
+    assert_eq!(
+        archive
+            .bind("call", &json!({"tool":"storage_list_objects"}))
+            .unwrap(),
+        json!({"tool":"storage_list_objects","args":{"instance":"archive"}})
+    );
+    assert!(
+        archive
+            .bind("call", &json!({"tool":"site_deploy"}))
+            .is_err()
+    );
+    assert!(
+        archive
+            .bind("call", &json!({"tool":"call","args":{"tool":"land"}}))
+            .is_err()
+    );
+    for args in [
+        json!({"key":"note","instance":"blog"}),
+        json!({"key":"note","account":"elsewhere"}),
+        json!({"key":"note","bucket":"site"}),
+        json!({"key":"note","presign":true}),
+    ] {
+        assert!(archive.bind("storage_get_object", &args).is_err());
+        assert!(
+            archive
+                .bind("call", &json!({"tool":"storage_get_object","args":args}))
+                .is_err()
+        );
+    }
 }
 
 #[test]
@@ -2425,4 +2512,59 @@ fn sites_release_identity_changes_with_theme_and_manifest_at_the_same_commit() {
         r2::manifest_key("legacy-commit"),
         "deploys/legacy-commit.json"
     );
+}
+
+#[test]
+fn instance_storage_binds_keys_and_cursors_to_the_approved_scope() {
+    use pigeon_capabilities::storage::scope::Profile;
+    use pigeon_core::s3::{Listing, object_path};
+
+    let profile: Profile = serde_json::from_value(json!({
+        "state": "enabled",
+        "store": "scaleway:archive",
+        "bucket": "archive",
+        "prefix": "published/"
+    }))
+    .unwrap();
+    let scope = profile.scope().unwrap();
+    assert_eq!(scope.key("report.txt").unwrap(), "published/report.txt");
+    assert!(scope.key("../private.txt").is_err());
+    let literal = scope.key("%2e%2e/private.txt").unwrap();
+    assert_eq!(
+        object_path(scope.bucket, &literal),
+        "/archive/published/%252e%252e/private.txt"
+    );
+    let endpoint = "https://s3.fr-par.scw.cloud";
+    let prefix = scope.listing_prefix("reports/").unwrap();
+    let page = scope.page("one", endpoint, "fr-par", &prefix, Some("/"));
+    let cursor = page.encode(b"fake secret", "provider-cursor");
+    assert_eq!(
+        page.decode(b"fake secret", &cursor).unwrap(),
+        "provider-cursor"
+    );
+    assert!(page.decode(b"fake secret", "provider-cursor").is_err());
+    assert!(
+        scope
+            .page("two", endpoint, "fr-par", &prefix, Some("/"))
+            .decode(b"fake secret", &cursor)
+            .is_err()
+    );
+    assert!(
+        scope
+            .page("one", endpoint, "fr-par", "published/other/", Some("/"))
+            .decode(b"fake secret", &cursor)
+            .is_err()
+    );
+
+    let mut result = Listing {
+        objects: vec![],
+        prefixes: vec![
+            "published/reports/2026/".into(),
+            "published-other/".into(),
+            "private/".into(),
+        ],
+        next: None,
+    };
+    scope.filter_listing(&prefix, &mut result);
+    assert_eq!(result.prefixes, ["reports/2026/"]);
 }

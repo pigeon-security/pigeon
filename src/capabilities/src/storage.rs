@@ -3,6 +3,8 @@
 //! tool only says how to set one up. Keys live in the Secrets Store, one secret per account, and
 //! are never answered by any tool.
 
+pub mod scope;
+
 use pigeon_core::mcp::Tool;
 use pigeon_core::s3::{self, Endpoint, Keys};
 use pigeon_core::secrets_store;
@@ -131,6 +133,10 @@ fn slug_chars(s: &str, extra: &[char]) -> bool {
         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || extra.contains(&c))
 }
 
+fn valid_bucket(bucket: &str) -> bool {
+    (3..=63).contains(&bucket.len()) && slug_chars(bucket, &['.'])
+}
+
 /// Checks the declared accounts: names, ids, regions, endpoints, buckets, and that DigitalOcean
 /// accounts are read-only.
 pub fn validate(accounts: &[Account]) -> Result<()> {
@@ -171,7 +177,7 @@ pub fn validate(accounts: &[Account]) -> Result<()> {
             return bad(a, "DigitalOcean accounts must be read-only");
         }
         for b in &a.buckets {
-            if !(3..=63).contains(&b.len()) || !slug_chars(b, &['.']) {
+            if !valid_bucket(b) {
                 return bad(a, "a bucket name must be 3 to 63 of a-z, 0-9, `.` and `-`");
             }
         }
@@ -223,7 +229,7 @@ impl Storage {
         let account = find(&self.accounts, arg(args, "account")?)?;
         // A bucket goes into the request path as it is, so it must be a plain bucket name.
         if let Some(bucket) = args["bucket"].as_str()
-            && (!(3..=63).contains(&bucket.len()) || !slug_chars(bucket, &['.']))
+            && !valid_bucket(bucket)
         {
             return Err(Error::RustError(format!(
                 "`{bucket}` is not a bucket name: 3 to 63 of a-z, 0-9, `.` and `-`"
@@ -298,6 +304,85 @@ impl Storage {
         Ok(json!({ "buckets": buckets }))
     }
 
+    async fn scoped(&self, cx: &Context<'_>, tool: &str, args: &Value) -> Result<Value> {
+        let bad = Error::RustError;
+        let instance = arg(args, "instance")?;
+        let allowed: &[&str] = match tool {
+            "storage_list_objects" => &["instance", "prefix", "delimiter", "max_keys", "token"],
+            "storage_get_object" => &["instance", "key"],
+            _ => return Err(unknown(tool)),
+        };
+        if !args
+            .as_object()
+            .is_some_and(|fields| fields.keys().all(|field| allowed.contains(&field.as_str())))
+        {
+            return Err(bad(
+                "instance storage accepts only relative object arguments".into(),
+            ));
+        }
+
+        let record = crate::instances::one(cx.env, instance)
+            .await?
+            .ok_or_else(|| bad("unknown storage instance".into()))?;
+        let binding = record
+            .storage
+            .as_ref()
+            .ok_or_else(|| bad("object storage is disabled for this instance".into()))?
+            .scope()
+            .map_err(bad)?;
+        validate(&self.accounts)?;
+        let account = find(&self.accounts, binding.store)?;
+        if !bucket_allowed(account, binding.bucket) {
+            return Err(bad(
+                "the approved bucket is unavailable in the declared storage account".into(),
+            ));
+        }
+        let keys = self.keys(cx, account).await?;
+        let endpoint = account.s3_endpoint();
+        if tool == "storage_get_object" {
+            let key = binding.key(arg(args, "key")?).map_err(bad)?;
+            let path = s3::object_path(binding.bucket, &key);
+            return read_scoped_inline(&endpoint, &path, &keys).await;
+        }
+
+        let optional = |name: &str| {
+            args.get(name)
+                .map(|value| {
+                    value
+                        .as_str()
+                        .ok_or_else(|| bad(format!("expected a string for `{name}`")))
+                })
+                .transpose()
+        };
+        let prefix = binding
+            .listing_prefix(optional("prefix")?.unwrap_or_default())
+            .map_err(bad)?;
+        let delimiter = optional("delimiter")?.filter(|delimiter| !delimiter.is_empty());
+        let page = binding.page(
+            instance,
+            &account.endpoint,
+            &account.region,
+            &prefix,
+            delimiter,
+        );
+        let token = optional("token")?
+            .map(|token| {
+                page.decode(keys.secret_access_key.as_bytes(), token)
+                    .map_err(bad)
+            })
+            .transpose()?;
+        let max = args["max_keys"].as_u64().unwrap_or(100).clamp(1, 1000) as u32;
+        let path = s3::object_path(binding.bucket, "");
+        let query = s3::list_objects_query(Some(&prefix), delimiter, max, token.as_deref());
+        let mut res = s3::send(Method::Get, &endpoint, &path, &query, &[], &keys).await?;
+        let mut listing = s3::parse_list_objects(&res.text().await?)?;
+        binding.filter_listing(&prefix, &mut listing);
+        listing.next = listing
+            .next
+            .map(|token| page.encode(keys.secret_access_key.as_bytes(), &token));
+        Ok(to_value(listing))
+    }
+
     async fn list_objects(&self, cx: &Context<'_>, args: &Value) -> Result<Value> {
         let account = self.account(args)?;
         let bucket = arg(args, "bucket")?;
@@ -359,17 +444,48 @@ impl Storage {
                 "the object is over the inline limit: ask again with `presign: true`".into(),
             ));
         }
-        let (encoding, body) = match String::from_utf8(bytes) {
-            Ok(text) => ("utf-8", text),
-            Err(e) => ("base64", pigeon_core::git::base64(e.as_bytes())),
-        };
-        Ok(json!({
-            "content_type": fields["content_type"],
-            "size": size,
-            "encoding": encoding,
-            "body": body,
-        }))
+        Ok(inline_fields(&fields, size, bytes))
     }
+}
+
+/// Reads a scoped object inline, without creating a reusable link or reading past the limit.
+async fn read_scoped_inline(endpoint: &Endpoint, path: &str, keys: &Keys) -> Result<Value> {
+    let limit_error = || {
+        Error::RustError(format!(
+            "the object exceeds the {INLINE_MAX} byte inline limit"
+        ))
+    };
+    let head = s3::send(Method::Head, endpoint, path, &[], &[], keys).await?;
+    let fields = head_fields(&head)?;
+    if fields["size"].as_u64().unwrap_or(0) > INLINE_MAX {
+        return Err(limit_error());
+    }
+    let mut res = s3::send(Method::Get, endpoint, path, &[], &[], keys).await?;
+    // The object may have grown since HEAD. Bound the read as bytes arrive.
+    use futures_util::StreamExt;
+    let mut stream = res.stream()?;
+    let mut bytes = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        if (bytes.len() + chunk.len()) as u64 > INLINE_MAX {
+            return Err(limit_error());
+        }
+        bytes.extend(chunk);
+    }
+    Ok(inline_fields(&fields, bytes.len() as u64, bytes))
+}
+
+fn inline_fields(fields: &Value, size: u64, bytes: Vec<u8>) -> Value {
+    let (encoding, body) = match String::from_utf8(bytes) {
+        Ok(text) => ("utf-8", text),
+        Err(e) => ("base64", pigeon_core::git::base64(e.as_bytes())),
+    };
+    json!({
+        "content_type": fields["content_type"],
+        "size": size,
+        "encoding": encoding,
+        "body": body,
+    })
 }
 
 /// Size, type, ETag and modified time from a HEAD response's headers.
@@ -451,6 +567,9 @@ impl Capability for Storage {
 
     fn call<'a>(&'a self, cx: &'a Context<'a>, tool: &'a str, args: &'a Value) -> Call<'a> {
         Box::pin(async move {
+            if args.get("instance").is_some() {
+                return self.scoped(cx, tool, args).await;
+            }
             match tool {
                 "storage_accounts" => self.accounts_tool(cx).await,
                 "storage_list_buckets" => self.list_buckets(cx, args).await,
