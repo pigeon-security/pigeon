@@ -1,6 +1,6 @@
 # The Cloud Gateway: cloud providers behind one capability Worker
 
-Status: **Phases 0 to 3 landed; phase 4 landing** (plan by planner run `vSg5LiNay8Uw`; phase 1 by executor
+Status: **Phases 0 to 4 landed** (plan by planner run `vSg5LiNay8Uw`; phase 1 by executor
 `KmMJEBZ8UUNA`; phase 2 and the restack by planner run `qzv3qK9SBfNU`). Ships latent: no
 Scaleway credential exists yet, and every tool says so until the person sets the slots and the
 bindings land (phase 6). The person's morning steps are in "For the person". Open items are
@@ -275,9 +275,11 @@ nowhere else: never paste it into a chat, a command or a file.
 
 ## Open items
 
-1. **Phase 4** (core binds `CLOUD`): landing now. Phase 3 needed no landing of its own: the
+1. **Phase 5**, the live check through the portal: not done by the planner, which has no
+   MCP client for core. The person's first `cloud_status` is the check; before the slots are
+   set it must say Scaleway is not set up. Phases 3 and 4 are done: phase 3 needed no landing of its own: the
    one-landing path for a new Worker (`core_land_adds_a_worker_in_one_landing`) deployed
-   `pigeon-cloud-gateway` with phases 0 to 2. Then phase 5, a live check through the portal.
+   `pigeon-cloud-gateway` with phases 0 to 2, and landing `HiHMQFgR8wJFVeL0` bound `CLOUD` in core.
 2. **The Scaleway slots and their bindings** (phase 6). Waits on: the person (morning steps).
 3. **The Access tab lists `CLOUD_…` slots** a plan writes? Today it lists only declared slots;
    a written slot exists in the Secrets Store but is not shown. Later, if wanted.
