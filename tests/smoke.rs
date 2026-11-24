@@ -2157,3 +2157,230 @@ fn models_admin_key_refusal_reason() {
     assert!(src.contains("(s @ (401 | 403), body) => Err(bad(&admin_refusal(s, &body)))"));
     assert!(src.contains("admin role: an organization admin gives it"));
 }
+
+/// Shared model IDs stay separate by gateway, and configured zero-spend gateways still show.
+#[test]
+fn platform_cost_daily_gateway_models() {
+    use pigeon_capabilities::cost::{assemble, live_days};
+    use pigeon_core::ai_gateway::{GatewayKind, Log};
+    use pigeon_models::daily::{GatewayLogs, daily_by_gateways};
+    use std::collections::BTreeMap;
+
+    let today = "2026-03-10";
+    let yesterday = "2026-03-09";
+    let claude = "anthropic/claude-sonnet-5.5";
+    let workers = "@cf/zai-org/glm-5.3";
+    let log = |day: &str, provider: &str, model: &str, cost: f64| -> Log {
+        serde_json::from_value(json!({
+            "created_at": format!("{day}T01:00:00Z"), "provider": provider,
+            "model": model, "cost": cost,
+        }))
+        .unwrap()
+    };
+    let gateway = |id: &str, kind, logs| GatewayLogs {
+        id: id.into(),
+        kind,
+        logs,
+        truncated: false,
+    };
+    let models = daily_by_gateways(
+        &[
+            gateway(
+                "pigeon-anthropic",
+                GatewayKind::Byok,
+                vec![
+                    log(yesterday, "anthropic", claude, 2.0),
+                    log(today, "anthropic", claude, 3.0),
+                ],
+            ),
+            gateway(
+                "pigeon-cloudflare",
+                GatewayKind::Credits,
+                vec![
+                    log(today, "anthropic", claude, 4.0),
+                    log(today, "workers-ai", workers, 1.0),
+                ],
+            ),
+            gateway(
+                "pigeon",
+                GatewayKind::Retired,
+                vec![log(yesterday, "anthropic", claude, 1.0)],
+            ),
+        ],
+        today,
+        7,
+    );
+    assert_eq!(
+        models.by_gateway["pigeon-anthropic"].by_provider_model["anthropic"][claude][today],
+        3.0
+    );
+    assert_eq!(models.by_gateway["pigeon-cloudflare"].by_day[today], 5.0);
+    let models = serde_json::to_value(models).unwrap();
+    let billed = json!({"by_day": { (yesterday): {"cost_usd": 6.0}}});
+    let live = live_days(None, Some(&models), None, Some(&billed));
+    let weekly = assemble(
+        "7d",
+        today,
+        &BTreeMap::new(),
+        &live,
+        false,
+        false,
+        vec![],
+        vec![],
+    );
+    let get = |answer: &Value, id: &str| -> Value {
+        answer["ai_gateway"]["by_gateway"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|g| g["id"] == id)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(
+        get(&weekly, "pigeon-openai"),
+        json!({
+            "id": "pigeon-openai", "billing": "byok", "provider": "openai", "label": "OpenAI BYOK",
+            "total": 0.0, "by_day": {}, "by_model": [],
+        })
+    );
+    let anth = get(&weekly, "pigeon-anthropic");
+    assert_eq!(anth["total"], 5.0);
+    assert_eq!(
+        anth["by_model"],
+        json!([{"name": claude, "provider": "anthropic", "total": 5.0,
+        "by_day": {(yesterday): 2.0, (today): 3.0}}])
+    );
+    let unified = get(&weekly, "pigeon-cloudflare");
+    assert_eq!(unified["billing"], "unified");
+    assert_eq!(unified["by_model"][0]["name"], claude);
+    assert_eq!(unified["by_model"][0]["total"], 4.0);
+    assert_eq!(unified["by_model"][1]["name"], workers);
+    assert_eq!(get(&weekly, "pigeon")["total"], 1.0);
+    assert_eq!(weekly["ai_gateway"]["total"], 11.0);
+    assert_eq!(weekly["total"], 14.25); // Raw logs + Anthropic adjustment + estimated fee.
+    assert_eq!(weekly["net_total"], weekly["total"]);
+    assert_eq!(weekly["credits"]["grants"], json!([]));
+    let daily = assemble(
+        "today",
+        today,
+        &BTreeMap::new(),
+        &live,
+        false,
+        false,
+        vec![],
+        vec![],
+    );
+    assert_eq!(
+        get(&daily, "pigeon-anthropic")["by_day"],
+        json!({(today): 3.0})
+    );
+}
+
+/// Legacy days stay unattributed and truncated snapshots cannot overwrite existing detail.
+#[test]
+fn platform_cost_daily_gateway_rollups() {
+    use pigeon_capabilities::cost::{assemble, closed_by_month, live_days, merge_month};
+    use std::collections::BTreeMap;
+
+    let old_day = "2026-01-05";
+    let day = "2026-01-06";
+    let today = "2026-01-07";
+    let old = json!({
+        (old_day): {"models": {"Sonnet": 9.0}, "gateway_providers": {"anthropic": 9.0}},
+        (day): {"models": {"Sonnet": 7.0}, "gateway_details": {"pigeon-anthropic": {
+            "total": 7.0, "models": {"anthropic": {"claude-sonnet": 7.0}}, "truncated": false
+        }}},
+    });
+    let partial = json!({
+        "days": [day], "truncated": true, "by_family": {"Sonnet": {(day): 5.0}},
+        "gateways": {"pigeon-anthropic": {"truncated": true}, "pigeon-cloudflare": {"truncated": false}},
+        "by_gateway": {
+            "pigeon-anthropic": {"by_day": {(day): 2.0}, "by_provider_model": {"anthropic": {"claude-sonnet": {(day): 2.0}}}},
+            "pigeon-cloudflare": {"by_day": {(day): 3.0}, "by_provider_model": {"anthropic": {"claude-sonnet": {(day): 3.0}}}},
+        },
+    });
+    let live = live_days(None, Some(&partial), None, None);
+    let split = closed_by_month(&live, today);
+    let persisted = merge_month(&old, &split["2026-01"], true);
+    assert_eq!(persisted[old_day], old[old_day]);
+    assert_eq!(
+        persisted[day]["gateway_details"]["pigeon-anthropic"],
+        old[day]["gateway_details"]["pigeon-anthropic"]
+    );
+    let before = BTreeMap::from([("2026-01".into(), old)]);
+    let after = BTreeMap::from([("2026-01".into(), persisted)]);
+    let current = assemble("7d", today, &before, &live, true, true, vec![], vec![]);
+    let historical = assemble(
+        "all",
+        "2026-03-10",
+        &after,
+        &BTreeMap::new(),
+        false,
+        true,
+        vec![],
+        vec![],
+    );
+    let historical_gateways = &historical["ai_gateway"]["by_gateway"];
+    assert_eq!(&current["ai_gateway"]["by_gateway"], historical_gateways);
+    assert_eq!(historical["ai_gateway"]["total"], 16.0);
+    assert_eq!(historical_gateways[0]["by_day"], json!({ (day): 7.0 }));
+    assert_eq!(historical_gateways[1]["by_day"], json!({ (day): 3.0 }));
+}
+
+/// Only dated promotional applications inside the returned period change net cost.
+#[test]
+fn platform_cost_daily_promotional_grants() {
+    use pigeon_capabilities::cost::{apply_promotional_grants, assemble, billing_days, live_days};
+    use std::collections::BTreeMap;
+
+    let today = "2026-03-10";
+    let billing = billing_days(
+        &json!([
+            {"ServiceName": "Workers", "BilledCost": 10, "ChargePeriodStart": today},
+            {"ServiceName": "AI Gateway prepaid credits", "BilledCost": 50, "ChargePeriodStart": today},
+        ]),
+        today,
+    );
+    let live = live_days(Some(&billing), None, None, None);
+    let stored = BTreeMap::from([(
+        "2026-01".into(),
+        json!({"2026-01-01": {"cloudflare": {"Workers": 1}}}),
+    )]);
+    let config = r#"
+        [[grants]]
+        name = "Test promotion"
+        amount_cents = 1000
+        expiry = "2026-03-31"
+        applications = [
+            { day = "2025-12-31", amount_cents = 25 },
+            { day = "2026-01-01", amount_cents = 50 },
+            { day = "2026-03-04", amount_cents = 75 },
+            { day = "2026-03-10", amount_cents = 125 },
+            { day = "2026-03-11", amount_cents = 100 },
+        ]
+        [[grants]]
+        name = "Expired test promotion"
+        amount_cents = 100
+        expiry = "2026-01-02"
+        applications = []
+    "#;
+    for (range, gross, net) in [("today", 10.0, 8.75), ("7d", 10.0, 8.0), ("all", 11.0, 8.5)] {
+        let mut answer = assemble(range, today, &stored, &live, false, true, vec![], vec![]);
+        assert_eq!(answer["credits"]["billing_usd"], 50.0);
+        assert_eq!(answer["net_total"], gross);
+        apply_promotional_grants(&mut answer, config);
+        assert_eq!(answer["total"], gross);
+        assert_eq!(answer["net_total"], net);
+        assert_eq!(
+            answer["credits"]["grants"],
+            json!([
+                {"name": "Test promotion", "amount": 10.0, "used": 2.75, "remaining": 7.25, "expiry": "2026-03-31"},
+                {"name": "Expired test promotion", "amount": 1.0, "used": 0.0, "remaining": 1.0, "expiry": "2026-01-02"},
+            ])
+        );
+        apply_promotional_grants(&mut answer, &config.replace("2026-03-04", "2026-02-30"));
+        assert_eq!(answer["credits"]["grants"], json!([]));
+        assert_eq!(answer["net_total"], gross);
+    }
+}
