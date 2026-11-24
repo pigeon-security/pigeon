@@ -447,6 +447,8 @@ impl AiAgentRuns {
                 .unwrap_or(Value::Null)),
             "update" => self.update(a),
             "slot" => self.slot(&s("run")),
+            // How many other live runs the same caller (user and person) has.
+            "live_for" => Ok(json!(self.live_for(&s("except"), a)?)),
             "inbox" => self.inbox(&s("reader"), a["since"].as_i64().unwrap_or(0)),
             "relay_answer" => {
                 let id = s("run");
@@ -1106,6 +1108,20 @@ impl AiAgentRuns {
         Ok(json!({ "ok": why.is_none(), "why": why.unwrap_or_default() }))
     }
 
+    /// How many live runs other than `except` have the caller in `a["by"]` (user id) and
+    /// `a["for"]` (the person it acts for, or null).
+    fn live_for(&self, except: &str, a: &Value) -> Result<i64> {
+        #[derive(Deserialize)]
+        struct N {
+            n: i64,
+        }
+        let n = self.db.row::<N>(
+            "SELECT COUNT(*) AS n FROM runs WHERE state IN ('queued', 'preparing', 'running', 'waiting') AND id != ? AND by_id IS ? AND for_id IS ?",
+            vec![except.into(), opt(a["by"].as_str()), opt(a["for"].as_str())],
+        )?;
+        Ok(n.map_or(0, |n| n.n))
+    }
+
     /// Asks run `run` (or every live run, with `all`) to stop; a planner's executors stop too.
     async fn stop(&self, a: &Value) -> Result<Value> {
         let reader = a["reader"].as_str().unwrap_or_default();
@@ -1627,6 +1643,28 @@ impl AiAgentRuns {
             .is_some_and(|s| s.stop_asked)
     }
 
+    /// When no other live run has the run's caller, asks core to release the caller's shared
+    /// Cloudflare tokens. A failure logs a warning and never fails the end.
+    async fn release_tokens(&self, row: &RunRow, caller: &Value) {
+        let others = call(
+            &self.env,
+            INDEX,
+            "live_for",
+            &json!({
+                "except": row.id,
+                "by": caller["user"]["id"],
+                "for": caller["acting_for"]["id"],
+            }),
+        )
+        .await;
+        if !matches!(others, Ok(ref n) if n.as_i64() == Some(0)) {
+            return;
+        }
+        if let Err(e) = release_tokens(&self.env, caller).await {
+            worker::console_warn!("agents: releasing a caller's tokens failed: {e}");
+        }
+    }
+
     /// Ends the run: its sandbox goes, the index learns how it ended.
     async fn end(&self, row: &RunRow, to: State, why: &str) -> Result<()> {
         if let Some(job) = &row.job_id {
@@ -1641,6 +1679,7 @@ impl AiAgentRuns {
         if let Err(e) = revoke_grant(&self.env, &caller, &row.id).await {
             worker::console_error!("agents: revoking run {}'s git grant: {e}", row.id);
         }
+        self.release_tokens(row, &caller).await;
         self.set(
             "state = ?, job_id = NULL, waiting = NULL",
             vec![to.name().into()],
@@ -2725,6 +2764,27 @@ pub async fn revoke_grant(env: &Env, caller: &Value, run: &str) -> Result<u64> {
     .await?
     {
         Answer::Ok(v) => Ok(v["revoked"].as_u64().unwrap_or(0)),
+        Answer::Error(f) => Err(bad(f.message)),
+    }
+}
+
+/// Asks core's `credential_release` (kind `scoped`) to revoke every shared Cloudflare token
+/// leased to `caller`. Answers how many.
+pub async fn release_tokens(env: &Env, caller: &Value) -> Result<u64> {
+    let key = caller_key(env).await?;
+    let nonce = pigeon_core::webauthn::random()?;
+    let platform = env.service(PLATFORM)?;
+    match pigeon_contract::ask(
+        &platform,
+        "https://core",
+        "credential_release",
+        &json!({ "kind": "scoped" }),
+        Some((key.as_bytes(), caller)),
+        &nonce,
+    )
+    .await?
+    {
+        Answer::Ok(v) => Ok(v["released"].as_u64().unwrap_or(0)),
         Answer::Error(f) => Err(bad(f.message)),
     }
 }

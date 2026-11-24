@@ -12,10 +12,13 @@ pub const OPS: [&str; 6] = ["manifest", "call", "section", "fetch", "events", "s
 /// The ops core answers for capability Workers. `verify`, `grant` and `deploy_grant` are the
 /// proxy Worker's checks: each carries the credential it asks about, so it is signed with
 /// `CALLER_KEY` but for no caller. `credential_revoke` takes a [`CredentialRequest`] and ends a
-/// run's git grant; it is signed for the run's caller.
-pub const CORE_OPS: [&str; 7] = [
+/// run's git grant; it is signed for the run's caller. `credential_release` takes a
+/// [`CredentialRequest`] of kind `scoped` and revokes every shared token leased to the signed
+/// caller, when its last live run ends.
+pub const CORE_OPS: [&str; 8] = [
     "credential",
     "credential_revoke",
+    "credential_release",
     "dispatch",
     "verify",
     "grant",

@@ -1240,15 +1240,15 @@ pub async fn open_call_token(
     }))
 }
 
-/// Revokes a call's token. A failure is logged as a warning and never fails the turn: the token
-/// expires on its own in minutes.
-pub async fn close_call_token(env: &Env, account: &Account, caller: &Value, token: CallToken) {
-    let revoked = if account.parent.is_empty() {
-        revoke_scoped(env, caller, &token.id).await
-    } else {
-        pigeon_core::tokens::revoke(&account.parent, &account.id, &token.id).await
-    };
-    if let Err(e) = revoked {
+/// Ends a call's token. With a parent token in `account` the call minted its own token and
+/// revokes it. A token from core's `credential` is shared and core owns its life, so nothing is
+/// revoked. A failure is logged as a warning and never fails the turn: the token expires on its
+/// own in minutes.
+pub async fn close_call_token(_env: &Env, account: &Account, _caller: &Value, token: CallToken) {
+    if account.parent.is_empty() {
+        return;
+    }
+    if let Err(e) = pigeon_core::tokens::revoke(&account.parent, &account.id, &token.id).await {
         worker::console_warn!("a Workers AI call token could not be revoked: {e}");
     }
 }
@@ -1864,32 +1864,6 @@ async fn credential_given(env: &Env, caller: &Value, purposes: &[&str]) -> Resul
         Answer::Ok(value) => serde_json::from_value(value)
             .map_err(|e| bad(&format!("core's credential does not parse: {e}"))),
         Answer::Error(f) => Err(bad(&format!("core gave no credential: {}", f.message))),
-    }
-}
-
-/// Asks core to revoke the scoped token `id` it minted for this Worker. Core refuses any token
-/// it did not mint for a capability Worker.
-async fn revoke_scoped(env: &Env, caller: &Value, id: &str) -> Result<()> {
-    let platform = env.service(PLATFORM)?;
-    let key = caller_key(env).await?;
-    let nonce = random()?;
-    let request = CredentialRequest {
-        kind: "scoped".into(),
-        instance: Some(id.to_string()),
-        scopes: Vec::new(),
-    };
-    let answer = pigeon_contract::ask(
-        &platform,
-        "https://core",
-        "credential_revoke",
-        &serde_json::to_value(&request)?,
-        Some((key.as_bytes(), caller)),
-        &nonce,
-    )
-    .await?;
-    match answer {
-        Answer::Ok(_) => Ok(()),
-        Answer::Error(f) => Err(bad(&format!("core did not revoke it: {}", f.message))),
     }
 }
 

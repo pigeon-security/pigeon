@@ -254,6 +254,7 @@ pub async fn serve(mut req: Request, cx: &Context<'_>) -> Result<Response> {
         }
         _ => match serde_json::from_slice::<CredentialRequest>(&body) {
             Ok(r) if op == "credential_revoke" => credential_revoke(&cx, &r).await,
+            Ok(r) if op == "credential_release" => credential_release(&cx, &r).await,
             Ok(r) => credential(&cx, &r).await,
             Err(e) => return reply(Answer::error(FailureKind::BadRequest, e.to_string()), 400),
         },
@@ -443,6 +444,10 @@ async fn credential_revoke(cx: &Context<'_>, r: &CredentialRequest) -> Result<Va
             .as_deref()
             .filter(|i| !i.is_empty() && i.chars().all(|c| c.is_ascii_alphanumeric()))
             .ok_or_else(|| bad("a scoped revoke names the token's id"))?;
+        // A leased token is shared: core owns its life, so a taker's revoke keeps it.
+        if crate::ledger::holds(cx.env, id).await? {
+            return Ok(json!({ "revoked": 0, "kept": "shared" }));
+        }
         let path = format!("/accounts/{}/tokens/{id}", cx.account.id);
         let read =
             pigeon_core::cloudflare::call(&cx.account.parent, worker::Method::Get, &path, None)
@@ -528,21 +533,47 @@ async fn scoped(cx: &Context<'_>, purposes: &[String]) -> Result<Value> {
             }
         }
     }
-    let request = pigeon_core::tokens::MintRequest {
-        purpose: format!("worker-{}", purposes.join("-")),
-        policies: vec![pigeon_core::tokens::Policy::new(
-            pigeon_core::tokens::Scope::Account,
-            &permissions,
-        )],
-        ttl_secs: SCOPED_TTL_SECS,
-    };
-    let minted = pigeon_core::tokens::mint(&cx.account.parent, &cx.account.id, &request).await?;
+    let caller = cx
+        .caller
+        .ok_or_else(|| bad("a scoped credential is for a signed caller"))?;
+    let lease = crate::ledger::lease(
+        cx.env,
+        &ledger_caller(caller),
+        &format!("worker-{}", purposes.join("-")),
+        &permissions,
+        SCOPED_TTL_SECS,
+    )
+    .await?;
     Ok(serde_json::to_value(Credential {
-        token: minted.value,
+        token: lease.value,
         account_id: cx.account.id.clone(),
-        expires_at: now_ms() + (SCOPED_TTL_SECS as i64) * 1000,
-        token_id: Some(minted.id),
+        expires_at: lease.expires_at,
+        token_id: Some(lease.id),
     })?)
+}
+
+/// The ledger's hash of `caller`: its user id and the person it acts for, if any.
+fn ledger_caller(caller: &Caller) -> String {
+    crate::ledger::caller_hash(
+        &caller.user.id,
+        caller.acting_for.as_ref().map(|p| p.id.as_str()),
+    )
+}
+
+/// `credential_release`: revokes every shared token leased to the signed caller (all permission
+/// sets), as the caller's last live run ends. Answers `{"released": n}`.
+async fn credential_release(cx: &Context<'_>, r: &CredentialRequest) -> Result<Value> {
+    if r.kind != "scoped" {
+        return Err(bad(&format!(
+            "no credential of kind `{}` to release",
+            r.kind
+        )));
+    }
+    let caller = cx
+        .caller
+        .ok_or_else(|| bad("a release is for a signed caller"))?;
+    let n = crate::ledger::release(cx.env, &ledger_caller(caller)).await?;
+    Ok(json!({ "released": n }))
 }
 
 /// `workers_setup` and `manifest_refresh`.

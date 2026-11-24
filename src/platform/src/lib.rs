@@ -76,6 +76,26 @@ impl worker::DurableObject for Lander {
     }
 }
 
+/// The token ledger: one shared Cloudflare token per caller and permission set
+/// (docs/plans/token-minting.md). Core leases, releases and sweeps through it.
+#[worker::durable_object]
+pub struct TokenLedger {
+    inner: pigeon_capabilities::ledger::TokenLedger,
+}
+
+impl worker::DurableObject for TokenLedger {
+    fn new(state: worker::State, env: Env) -> Self {
+        let inner =
+            pigeon_capabilities::ledger::TokenLedger::new(state, env, settings::PARENT_TOKEN)
+                .expect("the token ledger's migrations apply");
+        Self { inner }
+    }
+
+    async fn fetch(&self, req: Request) -> Result<Response> {
+        self.inner.fetch(req).await
+    }
+}
+
 /// Async model jobs: the index and each job's own object.
 #[worker::durable_object]
 pub struct ModelJobs {
@@ -232,6 +252,16 @@ async fn sweep_tokens(env: &Env, now_ms: i64) {
             );
         }
         Err(e) => console_error!("token sweep failed: {e}"),
+    }
+    // The ledger's released tokens go too, and its rows past their expiry are forgotten.
+    match pigeon_capabilities::ledger::reap(env).await {
+        Ok(r) => console_log!(
+            "ledger sweep: deleted {}, forgotten {}, failed {}",
+            r.deleted,
+            r.forgotten,
+            r.failed
+        ),
+        Err(e) => console_error!("ledger sweep failed: {e}"),
     }
 }
 

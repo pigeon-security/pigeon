@@ -20,6 +20,7 @@ pub mod images;
 pub mod ingest;
 pub mod instances;
 pub mod land;
+pub mod ledger;
 pub mod linked;
 pub mod mirror;
 pub mod models;

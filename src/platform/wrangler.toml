@@ -129,6 +129,7 @@ bindings = [
   { name = "CI_RUNNER", class_name = "CiRunner" },
   { name = "MODEL_JOBS", class_name = "ModelJobs", script_name = "pigeon-model-gateway" },
   { name = "LANDER", class_name = "Lander" },
+  { name = "TOKEN_LEDGER", class_name = "TokenLedger" },
 ]
 
 [[migrations]]
@@ -152,6 +153,11 @@ new_sqlite_classes = ["ModelJobs"]
 [[migrations]]
 tag = "v5"
 new_sqlite_classes = ["Lander"]
+
+# The token ledger: one object holding the shared Cloudflare tokens' ids (never their values).
+[[migrations]]
+tag = "v6"
+new_sqlite_classes = ["TokenLedger"]
 
 # CI job containers: one per job attempt, held by a CiRunner object, which picks the image and
 # the instance size on each start. The base image carries git, curl, coreutils, sh, a Rust

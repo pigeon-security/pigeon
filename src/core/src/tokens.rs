@@ -111,8 +111,9 @@ async fn permission_groups(parent: &str, account: &str) -> Result<Vec<Group>> {
     Ok(groups)
 }
 
-/// Mints `request` on `account`, as `parent`.
-pub async fn mint(parent: &str, account: &str, request: &MintRequest) -> Result<Minted> {
+/// The JSON body that creates `request` on `account`: its policies with their permission group
+/// ids, a name from [`name`], and the validity window. Reads the permission groups as `parent`.
+pub async fn mint_body(parent: &str, account: &str, request: &MintRequest) -> Result<Value> {
     let groups = permission_groups(parent, account).await?;
     let mut policies = Vec::new();
     for policy in &request.policies {
@@ -151,12 +152,18 @@ pub async fn mint(parent: &str, account: &str, request: &MintRequest) -> Result<
     }
     let now = Date::now();
     let expires_on = iso(now + (request.ttl_secs as f64) * 1000.0);
-    let body = json!({
+    Ok(json!({
         "name": name(&request.purpose, &iso(now)),
         "policies": policies,
         "not_before": iso(now),
         "expires_on": expires_on,
-    });
+    }))
+}
+
+/// Mints `request` on `account`, as `parent`.
+pub async fn mint(parent: &str, account: &str, request: &MintRequest) -> Result<Minted> {
+    let body = mint_body(parent, account, request).await?;
+    let expires_on = body["expires_on"].as_str().unwrap_or_default().to_string();
     let v = call(
         parent,
         Method::Post,
@@ -321,7 +328,7 @@ impl TokenApi for CloudflareTokens<'_> {
 
 /// Milliseconds since the epoch of an RFC 3339 time such as `2026-11-24T05:04:00Z`, with an
 /// optional fraction, ending in `Z`. `None` when it does not parse. Pure.
-fn parse_ms(t: &str) -> Option<i64> {
+pub fn parse_ms(t: &str) -> Option<i64> {
     let t = t.strip_suffix('Z')?;
     let (t, frac) = t.split_once('.').unwrap_or((t, ""));
     if t.len() != TIME_LEN - 1 || !frac.bytes().all(|b| b.is_ascii_digit()) {
