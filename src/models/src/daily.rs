@@ -199,8 +199,19 @@ pub struct ByRun {
     pub by_provider_model: BTreeMap<String, BTreeMap<String, BTreeMap<String, ModelDay>>>,
     /// Cost per route (`byok` and `credits`, both always present), per day.
     pub by_route: BTreeMap<String, BTreeMap<String, f64>>,
+    /// Log cost per gateway, without merging the same model across gateways.
+    pub by_gateway: BTreeMap<String, GatewaySpend>,
     /// What each gateway gave: its log count, and whether it was cut off.
     pub gateways: BTreeMap<String, GatewayInfo>,
+}
+
+/// One gateway's log cost, by UTC day and by the provider and model IDs in its logs.
+#[derive(Serialize, Debug, PartialEq, Default)]
+pub struct GatewaySpend {
+    /// All log cost, even when the model is not named.
+    pub by_day: BTreeMap<String, f64>,
+    /// Cost for each provider, model and day, in that order.
+    pub by_provider_model: BTreeMap<String, BTreeMap<String, BTreeMap<String, f64>>>,
 }
 
 /// One model's use on one day, from the gateway's logs.
@@ -275,9 +286,19 @@ pub fn daily_by_gateways(gateways: &[GatewayLogs], today: &str, n: usize) -> ByR
                 truncated: g.truncated,
             },
         );
+        let mut spend = GatewaySpend::default();
         for log in &g.logs {
-            add(&mut out, log, g.kind);
+            add(&mut out, &mut spend, log, g.kind);
         }
+        spend.by_day.values_mut().for_each(|v| *v = round6(*v));
+        for by_day in spend
+            .by_provider_model
+            .values_mut()
+            .flat_map(|m| m.values_mut())
+        {
+            by_day.values_mut().for_each(|v| *v = round6(*v));
+        }
+        out.by_gateway.insert(g.id.clone(), spend);
     }
     for m in out
         .by_family
@@ -301,7 +322,7 @@ pub fn daily_by_gateways(gateways: &[GatewayLogs], today: &str, n: usize) -> ByR
 }
 
 /// Adds one log to `out`, when it falls in the window.
-fn add(out: &mut ByRun, log: &Log, kind: GatewayKind) {
+fn add(out: &mut ByRun, spend: &mut GatewaySpend, log: &Log, kind: GatewayKind) {
     let Some(day) = day_of(&log.created_at).filter(|d| out.days.iter().any(|x| x == d)) else {
         return;
     };
@@ -328,6 +349,17 @@ fn add(out: &mut ByRun, log: &Log, kind: GatewayKind) {
     let Some(cost) = cost else {
         return;
     };
+    *spend.by_day.entry(day.clone()).or_default() += cost;
+    if !log.model.is_empty() {
+        *spend
+            .by_provider_model
+            .entry(base.to_string())
+            .or_default()
+            .entry(log.model.clone())
+            .or_default()
+            .entry(day.clone())
+            .or_default() += cost;
+    }
     *out.by_route
         .entry(route.name().to_string())
         .or_default()

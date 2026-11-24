@@ -43,6 +43,7 @@ pub mod capabilities;
 pub mod daily;
 pub mod jobs;
 pub mod openai;
+pub mod platform_gateways;
 pub mod runner;
 pub mod stream;
 pub mod turn;
@@ -1005,12 +1006,25 @@ impl Models {
         since_ms: f64,
         filter: &Filter,
         max: usize,
+        allow_unprovisioned: bool,
     ) -> Result<Vec<daily::GatewayLogs>> {
         let mut order: Vec<&Gateway> = self.gateways.iter().collect();
         order.sort_by_key(|g| kind_rank(g.kind));
         let mut out = Vec::new();
         for g in order {
-            let logs = ai_gateway::logs(account, &g.id, since_ms, filter, max).await?;
+            let logs = match ai_gateway::logs(account, &g.id, since_ms, filter, max).await {
+                Ok(logs) => logs,
+                // A configured gateway may not have been created yet. Only accept a 404
+                // from its logs endpoint, not a failure to get the scoped credential.
+                Err(e)
+                    if allow_unprovisioned
+                        && e.to_string().contains(&format!("/gateways/{}/logs?", g.id))
+                        && e.to_string().contains(": 404:") =>
+                {
+                    Vec::new()
+                }
+                Err(e) => return Err(e),
+            };
             out.push(daily::GatewayLogs {
                 id: g.id.clone(),
                 kind: g.kind,
@@ -1031,7 +1045,10 @@ impl Models {
         max: usize,
     ) -> Result<Vec<ai_gateway::Log>> {
         let mut all = Vec::new();
-        for g in self.gateway_logs(account, since_ms, filter, max).await? {
+        for g in self
+            .gateway_logs(account, since_ms, filter, max, false)
+            .await?
+        {
             for mut log in g.logs {
                 log.provider = route_of(g.kind, &log.provider).0;
                 all.push(log);
@@ -1262,7 +1279,7 @@ impl Models {
         let today = String::from(now.to_iso_string());
         let since = now.get_time() - (days as f64) * 86_400_000.0;
         let gateways = self
-            .gateway_logs(account, since, &Filter::default(), CHART_LOGS)
+            .gateway_logs(account, since, &Filter::default(), CHART_LOGS, true)
             .await?;
         let truncated = gateways.iter().any(|g| g.truncated);
         let mut answer = to_value(daily::daily_by_gateways(&gateways, &today, days));
@@ -1682,7 +1699,7 @@ impl Models {
             Tool {
                 name: "models_daily",
                 description: "Read-only. The AI gateway's cost per UTC day over the last `days` \
-                              days, by model family and by AI agent run, from its logs.",
+                              days, by model family by actual model per gateway, and by AI agent run, from its logs.",
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -1841,7 +1858,7 @@ impl Models {
         // Reaching back past the start of the window's first UTC day; daily() trims.
         let since = now.get_time() - (days as f64) * 86_400_000.0;
         let gateways = self
-            .gateway_logs(account, since, &Filter::default(), CHART_LOGS)
+            .gateway_logs(account, since, &Filter::default(), CHART_LOGS, false)
             .await?;
         let truncated = gateways.iter().any(|g| g.truncated);
         let logs: Vec<ai_gateway::Log> = gateways.into_iter().flat_map(|g| g.logs).collect();

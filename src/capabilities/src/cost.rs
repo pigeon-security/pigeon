@@ -7,6 +7,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use pigeon_models::daily::{day_of, days_ending};
+use pigeon_models::platform_gateways::{Declaration, GATEWAYS};
+use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use worker::js_sys::Date;
 use worker::{Error, Method, Result};
@@ -275,6 +277,11 @@ fn gateway_days(
         })
         .unwrap_or_default();
     for day in days {
+        let mut rec = Map::new();
+        let gateway_details = gateway_details_for_day(models, &day);
+        if !gateway_details.is_empty() {
+            rec.insert("gateway_details".into(), Value::Object(gateway_details));
+        }
         let mut families = Map::new();
         for (name, by_day) in models["by_family"].as_object().into_iter().flatten() {
             let usd = num(&by_day[&day]);
@@ -297,9 +304,12 @@ fn gateway_days(
         // A day with no cost in the listing says nothing: the gateway's logs may be shorter
         // than what is stored, so an empty day never replaces a stored one.
         if families.is_empty() && by_role.values().all(|v| *v == 0.0) {
+            if !rec.is_empty() {
+                let old = out.get(&day).cloned().unwrap_or(Value::Null);
+                out.insert(day, merge_day(&old, &Value::Object(rec), false));
+            }
             continue;
         }
-        let mut rec = Map::new();
         rec.insert("models".into(), Value::Object(families));
         let mut providers = Map::new();
         for (name, by_day) in models["by_provider"].as_object().into_iter().flatten() {
@@ -349,12 +359,69 @@ fn gateway_days(
     }
 }
 
-/// A stored or live day `old` with the keys of `new` laid over it. The gateway's keys (`models`,
-/// `roles`, `gateway_providers`, `gateway_anthropic`) of `old` stay when `truncated` says `new`
-/// came from a cut-short log listing. Anthropic's own `anthropic` always overwrites.
+/// Extracts one day's gateway snapshots. No costs for a gateway/day says nothing about history,
+/// just as for the existing family totals.
+fn gateway_details_for_day(models: &Value, day: &str) -> Map<String, Value> {
+    let mut details = Map::new();
+    for (id, gateway) in models["by_gateway"].as_object().into_iter().flatten() {
+        let total = num(&gateway["by_day"][day]);
+        let mut providers = Map::new();
+        for (provider, model_days) in gateway["by_provider_model"]
+            .as_object()
+            .into_iter()
+            .flatten()
+        {
+            let costs: Map<String, Value> = model_days
+                .as_object()
+                .into_iter()
+                .flatten()
+                .filter_map(|(name, days)| {
+                    let usd = num(&days[day]);
+                    (usd != 0.0).then(|| (name.clone(), json!(usd)))
+                })
+                .collect();
+            if !costs.is_empty() {
+                providers.insert(provider.clone(), Value::Object(costs));
+            }
+        }
+        if total != 0.0 || !providers.is_empty() {
+            let truncated = models["gateways"][id]["truncated"]
+                .as_bool()
+                .unwrap_or(models["truncated"] == true);
+            details.insert(
+                id.clone(),
+                json!({ "total": total, "models": providers, "truncated": truncated }),
+            );
+        }
+    }
+    details
+}
+
+/// A stored or live day `old` with the keys of `new` laid over it. The legacy gateway keys of
+/// `old` stay when the listing was truncated. Gateway snapshots merge independently; the
+/// other sources keep their existing merge rules.
 pub fn merge_day(old: &Value, new: &Value, truncated: bool) -> Value {
     let mut out = old.as_object().cloned().unwrap_or_default();
     for (key, value) in new.as_object().into_iter().flatten() {
+        if key == "gateway_details" {
+            if let Some(fresh) = value.as_object() {
+                let mut details = out
+                    .get(key)
+                    .and_then(Value::as_object)
+                    .cloned()
+                    .unwrap_or_default();
+                for (id, snapshot) in fresh {
+                    if snapshot.is_object()
+                        && !(snapshot["truncated"].as_bool().unwrap_or(truncated)
+                            && details.contains_key(id))
+                    {
+                        details.insert(id.clone(), snapshot.clone());
+                    }
+                }
+                out.insert(key.clone(), Value::Object(details));
+            }
+            continue;
+        }
         let gateway = matches!(
             key.as_str(),
             "models" | "roles" | "gateway_providers" | "gateway_anthropic" | "gateway_routes"
@@ -499,6 +566,136 @@ fn take_gateway_workers_ai(
         *billed = kept;
     }
     round6(taken)
+}
+
+type DayCosts = BTreeMap<String, f64>;
+
+/// Raw log totals, and model series scoped to the gateway that served them.
+fn gateway_entry(g: &Declaration, days: &[String], merged: &BTreeMap<String, Value>) -> Value {
+    let mut totals = DayCosts::new();
+    let mut models: BTreeMap<(&str, &str), DayCosts> = BTreeMap::new();
+    for day in days {
+        let Some(rec) = merged.get(day) else { continue };
+        let gateway = &rec["gateway_details"][g.id];
+        totals.insert(day.clone(), num(&gateway["total"]));
+        for (provider, costs) in gateway["models"].as_object().into_iter().flatten() {
+            for (name, cost) in costs.as_object().into_iter().flatten() {
+                models
+                    .entry((provider, name))
+                    .or_default()
+                    .insert(day.clone(), num(cost));
+            }
+        }
+    }
+    let by_model: Vec<_> = models
+        .iter()
+        .map(|(&(provider, name), costs)| {
+            let mut model = entry(name, Some(costs)).0;
+            model["provider"] = json!(provider);
+            model
+        })
+        .collect();
+    let (gateway, total) = entry(g.label, Some(&totals));
+    json!({
+        "id": g.id,
+        "billing": g.billing(),
+        "provider": g.provider,
+        "label": g.label,
+        "total": total,
+        "by_day": gateway["by_day"],
+        "by_model": by_model,
+    })
+}
+
+const PROMOTIONAL_GRANTS: &str = include_str!("promotional-grants.toml");
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GrantConfig {
+    grants: Vec<Grant>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Grant {
+    name: String,
+    amount_cents: u64,
+    expiry: String,
+    applications: Vec<Application>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Application {
+    day: String,
+    amount_cents: u64,
+}
+
+/// Adds the public promotional ledger and net cost to an assembled response. The ledger
+/// counts only recorded applications, not the grant face value or any billing rows.
+pub fn apply_promotional_grants(answer: &mut Value, config: &str) {
+    let days: BTreeSet<&str> = answer["days"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let gross = num(&answer["total"]);
+    let (grants, period_cents) = match promotional_summary(config, &days) {
+        Some(summary) => summary,
+        None => {
+            if let Some(notes) = answer["notes"].as_array_mut() {
+                notes.push(json!(
+                    "The promotional grant configuration is invalid; no discount was applied."
+                ));
+            }
+            (Vec::new(), 0)
+        }
+    };
+    answer["credits"]["grants"] = json!(grants);
+    answer["net_total"] = json!(round6(gross - usd(period_cents)));
+}
+
+fn usd(cents: u64) -> f64 {
+    cents as f64 / 100.0
+}
+
+fn promotional_summary(config: &str, days: &BTreeSet<&str>) -> Option<(Vec<Value>, u64)> {
+    let config: GrantConfig = toml::from_str(config).ok()?;
+    let valid_day = |day: &str| day_of(day) == Some(day) && days_ending(day, 1) == [day];
+    let today = days.last().copied().unwrap_or_default();
+    let mut period = 0_u64;
+    let mut grants = Vec::new();
+    for grant in config.grants {
+        if grant.name.trim().is_empty() || !valid_day(&grant.expiry) {
+            return None;
+        }
+        let mut used = 0_u64;
+        let mut lifetime = 0_u64;
+        for app in grant.applications {
+            if !valid_day(&app.day) {
+                return None;
+            }
+            lifetime = lifetime.checked_add(app.amount_cents)?;
+            if app.day.as_str() <= today {
+                used = used.checked_add(app.amount_cents)?;
+            }
+            if days.contains(app.day.as_str()) {
+                period = period.checked_add(app.amount_cents)?;
+            }
+        }
+        if lifetime > grant.amount_cents {
+            return None;
+        }
+        grants.push(json!({
+            "name": grant.name,
+            "amount": usd(grant.amount_cents),
+            "used": usd(used),
+            "remaining": usd(grant.amount_cents - used),
+            "expiry": grant.expiry,
+        }));
+    }
+    Some((grants, period))
 }
 
 /// The answer for `range` (`today`, `7d` or `all`; anything else is `7d`) on `today`: the
@@ -729,19 +926,25 @@ pub fn assemble(
             "source": "Anthropic Admin API",
         })
     };
-    json!({
+    let by_gateway: Vec<_> = GATEWAYS
+        .iter()
+        .map(|g| gateway_entry(g, &days, &merged))
+        .collect();
+    let mut answer = json!({
         "range": match range { "today" | "all" => range, _ => "7d" },
         "days": days,
         "total": round6(cf_total + ai_total + swap + fee_usd),
         "cloudflare": { "total": cf_total, "lines": lines },
-        "ai_gateway": { "total": ai_total, "by_model": by_model, "by_role": by_role, "by_provider": by_provider, "by_route": by_route },
+        "ai_gateway": { "total": ai_total, "by_model": by_model, "by_role": by_role, "by_provider": by_provider, "by_route": by_route, "by_gateway": by_gateway },
         "credits": credits,
         "anthropic": anthropic,
         "notes": notes,
         "unavailable": unavailable,
         "truncated": truncated,
         "stored_from": stored_from,
-    })
+    });
+    apply_promotional_grants(&mut answer, PROMOTIONAL_GRANTS);
+    answer
 }
 
 /// The settings value at `key` as JSON; null when none is kept or it does not parse.

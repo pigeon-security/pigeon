@@ -16,10 +16,10 @@ compile_error!(
 );
 
 use pigeon_contract::{Answer, FailureKind};
-use pigeon_core::ai_gateway::GatewayKind;
 use pigeon_core::secrets_store;
+use pigeon_models::platform_gateways::{BYOK_GATEWAY, CREDITS_GATEWAY, GATEWAYS, OPENAI_GATEWAY};
 use pigeon_models::runner::{self, Token};
-use pigeon_models::{Billing, Dialect, Gateway, ModelGateway, ModelIds, Models, Provider, Route};
+use pigeon_models::{Billing, Dialect, ModelGateway, ModelIds, Models, Provider, Route};
 use serde_json::json;
 use worker::{Context, Env, Request, Response, Result, event};
 // The `durable_object` macro's expansion names `wasm_bindgen` at the crate root.
@@ -27,17 +27,6 @@ use worker::wasm_bindgen;
 
 /// This Worker's script name: the service it signs as when no one is calling.
 const WORKER: &str = "pigeon-model-gateway";
-/// The Cloudflare AI Gateways this platform declares, each with one payer.
-const BYOK_GATEWAY: &str = "pigeon-anthropic";
-/// The credits gateway: `cf-anthropic` and `cf-openai` go through it. It never holds a key.
-const CREDITS_GATEWAY: &str = "pigeon-cloudflare";
-/// The OpenAI BYOK gateway: `openai` goes through it, on the person's own OpenAI key. It is
-/// `byok_only`, so a missing key never falls back to credits. Its key slot is
-/// `pigeon-openai_openai_default`.
-const OPENAI_GATEWAY: &str = "pigeon-openai";
-/// The retired gateway: no provider routes to it. Its logs are still read, as BYOK, under the
-/// log's own provider.
-const RETIRED_GATEWAY: &str = "pigeon";
 
 /// The Secrets Store binding of the key core signs callers with.
 const CALLER_KEY: &str = "CALLER_KEY";
@@ -50,24 +39,7 @@ const PROXY_HOST: &str = "proxy.pigeon.dev";
 fn gateway() -> ModelGateway {
     ModelGateway {
         models: Models {
-            gateways: vec![
-                Gateway {
-                    id: BYOK_GATEWAY.into(),
-                    kind: GatewayKind::Byok,
-                },
-                Gateway {
-                    id: CREDITS_GATEWAY.into(),
-                    kind: GatewayKind::Credits,
-                },
-                Gateway {
-                    id: OPENAI_GATEWAY.into(),
-                    kind: GatewayKind::Byok,
-                },
-                Gateway {
-                    id: RETIRED_GATEWAY.into(),
-                    kind: GatewayKind::Retired,
-                },
-            ],
+            gateways: GATEWAYS.iter().map(|g| g.gateway()).collect(),
             providers: vec![
                 // Anthropic BYOK goes through `pigeon-anthropic` and its key slot
                 // `pigeon-anthropic_anthropic_default` (docs/plans/model-providers-cloudflare.md,
