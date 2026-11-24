@@ -603,7 +603,8 @@ fn models_openai_request_translation() {
     // Without tools, its effort goes through as asked.
     let luna = small(json!({ "model": "gpt-6-luna", "output_config": { "effort": "low" } }));
     assert_eq!(luna["reasoning_effort"], "none");
-    let dated = small(json!({ "model": "gpt-6-luna-2026-10-01", "output_config": { "effort": "high" } }));
+    let dated =
+        small(json!({ "model": "gpt-6-luna-2026-10-01", "output_config": { "effort": "high" } }));
     assert_eq!(dated["reasoning_effort"], "none");
     let bare = openai::request(&json!({
         "model": "gpt-6-luna", "output_config": { "effort": "low" },
