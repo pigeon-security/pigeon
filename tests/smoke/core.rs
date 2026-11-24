@@ -2175,3 +2175,61 @@ fn core_schema_lint_catches_a_bad_schema() {
         1
     );
 }
+
+#[test]
+fn core_artifacts_token_is_minted_once_and_a_401_mints_at_most_once_more() {
+    use pigeon_core::artifacts::{TokenCache, with_cached_token};
+    use std::cell::Cell;
+    let cache = TokenCache::default();
+    let mints = Cell::new(0u32);
+    let expires = TOKEN_NOW_MS + 3_600_000;
+    let mint = || async {
+        mints.set(mints.get() + 1);
+        Ok((format!("token-{}", mints.get()), expires))
+    };
+    let ok = |t: String| async move { Ok(t) };
+    // Two requests share one token.
+    let a = token_block_on(with_cached_token(&cache, "acc", TOKEN_NOW_MS, mint, ok)).unwrap();
+    let b = token_block_on(with_cached_token(
+        &cache,
+        "acc",
+        TOKEN_NOW_MS + 60_000,
+        mint,
+        ok,
+    ))
+    .unwrap();
+    assert_eq!(
+        (a.as_str(), b.as_str(), mints.get()),
+        ("token-1", "token-1", 1)
+    );
+    // A 401 on the kept token drops it and mints once more.
+    let uses = Cell::new(0u32);
+    let refused_once = |t: String| {
+        uses.set(uses.get() + 1);
+        let first = uses.get() == 1;
+        async move {
+            if first {
+                Err(worker::Error::RustError("/x: 401: refused".into()))
+            } else {
+                Ok(t)
+            }
+        }
+    };
+    let c = token_block_on(with_cached_token(
+        &cache,
+        "acc",
+        TOKEN_NOW_MS,
+        mint,
+        refused_once,
+    ))
+    .unwrap();
+    assert_eq!((c.as_str(), mints.get(), uses.get()), ("token-2", 2, 2));
+    // A 401 that keeps coming mints once and stops.
+    let always =
+        |_: String| async { Err::<String, _>(worker::Error::RustError("/x: 401: no".into())) };
+    assert!(token_block_on(with_cached_token(&cache, "acc", TOKEN_NOW_MS, mint, always)).is_err());
+    assert_eq!(mints.get(), 3);
+    // A token with under five minutes left is replaced.
+    let d = token_block_on(with_cached_token(&cache, "acc", expires - 60_000, mint, ok)).unwrap();
+    assert_eq!((d.as_str(), mints.get()), ("token-4", 4));
+}

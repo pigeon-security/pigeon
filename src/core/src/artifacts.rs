@@ -10,7 +10,7 @@ use worker::{Error, Method, Result};
 use crate::Account;
 use crate::cloudflare::call_fresh as call;
 use crate::secrets_store::Writer;
-use crate::tokens::{Policy, Scope, Scoped};
+use crate::tokens::{self, MintRequest, Policy, Scope, Scoped};
 
 /// A repository to have.
 pub struct Spec {
@@ -113,6 +113,106 @@ pub async fn delete(account: &Account, namespace: &str, name: &str) -> Result<()
     token.finish(deleted).await
 }
 
+/// How long an account token must still have to be reused, in milliseconds.
+const REUSE_MIN_LEFT_MS: i64 = 5 * 60 * 1000;
+
+/// One Cloudflare account token kept for reuse: the account it is for, its value and when it
+/// expires, in milliseconds since the epoch.
+type Kept = (String, String, i64);
+
+/// A slot holding one account token, so requests share it instead of minting one each.
+#[derive(Default)]
+pub struct TokenCache {
+    kept: std::cell::RefCell<Option<Kept>>,
+}
+
+impl TokenCache {
+    /// The kept token's value for `account`, if it has at least five minutes left at `now_ms`.
+    fn fresh(&self, account: &str, now_ms: i64) -> Option<String> {
+        let kept = self.kept.borrow();
+        let (a, value, expires) = kept.as_ref()?;
+        (a == account && *expires - now_ms >= REUSE_MIN_LEFT_MS).then(|| value.clone())
+    }
+
+    /// Keeps `value`, expiring at `expires_ms`, for `account`.
+    fn put(&self, account: &str, value: &str, expires_ms: i64) {
+        *self.kept.borrow_mut() = Some((account.to_string(), value.to_string(), expires_ms));
+    }
+
+    /// Forgets the kept token.
+    fn clear(&self) {
+        *self.kept.borrow_mut() = None;
+    }
+}
+
+std::thread_local! {
+    /// The account token the git proxy's Artifacts calls share, for this isolate.
+    static ACCOUNT_TOKEN: std::rc::Rc<TokenCache> = std::rc::Rc::default();
+}
+
+/// Runs `work` with a cached account token for `account`. `mint` makes a token as
+/// `(value, expires_ms)`, called only when none is kept with five minutes left. When `work`
+/// fails with a 401 on a kept token, the token is dropped and one new one is minted for a second
+/// try; a freshly minted token that gets a 401 is dropped and the error returned. Never loops.
+/// Kept tokens are not revoked: they expire on their own.
+pub async fn with_cached_token<T, M, MF, W, WF>(
+    cache: &TokenCache,
+    account: &str,
+    now_ms: i64,
+    mut mint: M,
+    mut work: W,
+) -> Result<T>
+where
+    M: FnMut() -> MF,
+    MF: std::future::Future<Output = Result<(String, i64)>>,
+    W: FnMut(String) -> WF,
+    WF: std::future::Future<Output = Result<T>>,
+{
+    let mut minted_here = false;
+    loop {
+        let value = match cache.fresh(account, now_ms) {
+            Some(v) => v,
+            None => {
+                let (value, expires_ms) = mint().await?;
+                cache.put(account, &value, expires_ms);
+                minted_here = true;
+                value
+            }
+        };
+        match work(value).await {
+            Err(e) if e.to_string().contains(": 401:") => {
+                cache.clear();
+                if minted_here {
+                    return Err(e);
+                }
+            }
+            other => return other,
+        }
+    }
+}
+
+/// [`with_cached_token`] for the real account: a linked account's bearer is used as it is.
+async fn with_account_token<T, W, WF>(account: &Account, work: W) -> Result<T>
+where
+    W: FnMut(String) -> WF,
+    WF: std::future::Future<Output = Result<T>>,
+{
+    if let Some(bearer) = account.bearer.as_deref() {
+        let mut work = work;
+        return work(bearer.to_string()).await;
+    }
+    let now_ms = worker::Date::now().as_millis() as i64;
+    let mint = || async {
+        let request = MintRequest::new("artifacts", policies());
+        let m = tokens::mint_for(account, &request).await?;
+        let expires = tokens::parse_ms(&m.expires_on)
+            .ok_or_else(|| Error::RustError("the minted token has no expiry".into()))?;
+        Ok((m.value, expires))
+    };
+    let cache = ACCOUNT_TOKEN.with(std::rc::Rc::clone);
+    with_cached_token(&cache, &account.id, now_ms, mint, work).await
+}
+
 /// Mints a git token for repository `name` in `namespace`, living `ttl_secs`.
 pub async fn mint(
     account: &Account,
@@ -136,17 +236,15 @@ pub async fn session(
     access: Access,
     ttl_secs: u64,
 ) -> Result<(Repo, GitToken)> {
-    let token = Scoped::open(account, "artifacts", policies()).await?;
-    let api = Api::new(account, token.value());
-    let both = async {
+    with_account_token(account, |token| async move {
+        let api = Api::new(account, &token);
         let repo = api.repo(namespace, name).await?.ok_or_else(|| {
             Error::RustError(format!("repository `{namespace}/{name}` does not exist"))
         })?;
         let minted = api.mint(namespace, name, access, ttl_secs).await?;
         Ok((repo, minted))
-    }
-    .await;
-    token.finish(both).await
+    })
+    .await
 }
 
 /// The git tokens of repository `name` in `namespace`, live and past, without their values.
@@ -165,10 +263,10 @@ pub async fn tokens(account: &Account, namespace: &str, name: &str) -> Result<Ve
 
 /// Revokes git token `id` of repository `name` in `namespace`.
 pub async fn revoke(account: &Account, namespace: &str, name: &str, id: &str) -> Result<()> {
-    let token = Scoped::open(account, "artifacts", policies()).await?;
-    let api = Api::new(account, token.value());
-    let revoked = api.revoke(namespace, name, id).await;
-    token.finish(revoked).await
+    with_account_token(account, |token| async move {
+        Api::new(account, &token).revoke(namespace, name, id).await
+    })
+    .await
 }
 
 impl Api<'_> {
