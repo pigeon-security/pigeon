@@ -2,7 +2,7 @@
 
 Status: **Option B** (the person, 2026-11-24): three gateways, each with one payer. Phases 1 to 4
 landed under the earlier design; phases 8, 6 and 9 rework them for option B (planner run
-`flYJq203hPLb`). Follows [model-providers.md](model-providers.md) (Parts 1 and 2).
+`v9X4Ac28iqNm`, a restart of `flYJq203hPLb`). Follows [model-providers.md](model-providers.md) (Parts 1 and 2).
 
 ## Goal
 
@@ -163,7 +163,8 @@ gateway reads `pigeon-cloudflare`'s settings and provider configs (cached in the
 holds any stored key. So a credits turn can never bill a key by mistake, and no landing has to
 wait for the person's dashboard steps.
 
-**BYOK readiness.** Before a request on a BYOK provider (a run, a job's submit and its start),
+**BYOK readiness.** Before a request on a BYOK provider (`models_run`, and a job when it starts;
+`models_submit` takes no account, so a job is checked when it starts, not when it is submitted),
 the model gateway checks that the provider's gateway exists, has `byok_only` on, and holds a
 stored key for the provider. A secret set in the store is not enough: that is how phase 4 went
 wrong (Log, 2026-11-24). Only a success is cached (5 minutes). A refusal says what to do. A
@@ -302,7 +303,7 @@ the "Workers AI" line is other use of the account.
 | 2 | Choices: `cf-anthropic`, `cf-openai`, `openai/` retired, route on the ai-agents surfaces | executor, **landed** `aaf8c9a` | `src/ai-agents/src/*` |
 | 3 | `cost_daily`: AI Gateway billing rows out, Workers AI line, `credits`, `by_route`, reconciliation on BYOK Anthropic only | executor, **landed** `2ba4b42` | `src/capabilities/src/cost.rs` |
 | 4 | The Anthropic route to `pigeon-anthropic`; `CREDITS_SINCE` set | planner, **landed** `03b263b` (too early: Log) | `src/model-gateway/src/lib.rs` |
-| 8 | **Option B**: kinds BYOK / Credits / Retired; `pigeon-cloudflare` created and used by the credits providers; `pigeon` retired; `CREDITS_SINCE` and all time-based labelling removed; the BYOK readiness check; `models_providers` readiness | executor | `src/core/src/ai_gateway.rs`, `src/models/src/*`, `src/model-gateway/src/lib.rs`, `src/platform/src/settings.rs`, smoke |
+| 8 | **Option B**: kinds BYOK / Credits / Retired; `pigeon-cloudflare` created and used by the credits providers; `pigeon` retired; `CREDITS_SINCE` and all time-based labelling removed; the BYOK readiness check; `models_providers` readiness | executor `aIy09VcWZV1t` | `src/core/src/ai_gateway.rs`, `src/models/src/*`, `src/model-gateway/src/lib.rs`, smoke |
 | 6 | Workers AI (decision 5), rebased onto phase 8: through `pigeon-cloudflare`, counted once in `cost_daily` | executor, after phase 8 | `src/core/src/ai_gateway.rs`, `src/models/src/*`, `src/model-gateway/*`, `src/ai-agents/src/models.rs`, `src/capabilities/src/cost.rs`, smoke |
 | 9 | Docs: this plan for option B | planner | `docs/plans/model-providers-cloudflare.md` |
 | 5 | Live check: an executor turn on `cf-anthropic/claude-haiku-5-5`; read its log on `pigeon-cloudflare` and its cost under credits | planner, **after Open items 1 to 3** | none |
@@ -421,3 +422,17 @@ Decided before (2026-11-25): no spend limit in pigeon; OpenAI on credits only (`
   `pigeon-anthropic` keeps the Anthropic key. Each gateway has one payer, so the payer follows
   from the gateway and `CREDITS_SINCE` goes. Planner run `flYJq203hPLb` reworks it: phase 8
   (gateways, routes, the readiness check), phase 6 rebased onto it, phase 9 (this plan).
+- 2026-11-24: planner run `flYJq203hPLb` and its executor `zecXC6yohJr9` stopped after about
+  10 minutes: Anthropic refused every call because the Claude Console's spend limit was
+  reached. They landed nothing; the planner had pushed this plan's rewrite only. The person
+  raised the limit, and planner run `v9X4Ac28iqNm` restarted the work from that rewrite.
+- 2026-11-24: phase 8 built by executor `aIy09VcWZV1t` (CI `test` green, job
+  `PdNCphVopJ1838ORFC77HN`). Choices it made:
+  - `credits_guard` no longer takes a provider slug: the credits gateway must hold no key at
+    all, whatever the request.
+  - A missing gateway is read as the API's 404. `guard_credits` refuses it; `guard_byok`
+    refuses it too, but lets a request go ahead on any other read error.
+  - Keys go to a gateway only through one helper, which refuses any gateway not declared BYOK.
+  - A job stored without a gateway now uses `pigeon-anthropic`.
+  - `models_providers` answers `{gateways: [{id, kind, exists, keys}], providers: [{name,
+    gateway, route, ready, why}]}`.
