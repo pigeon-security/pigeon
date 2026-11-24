@@ -32,6 +32,15 @@ case $PIGEON_TIMEOUT_MIN in
     *[!0-9]*) exit 2 ;;
 esac
 
+# Timing lines, `[timing] <stage> <seconds>s`. They never fail the runner.
+t0=$(date +%s)
+tick=$t0
+lap() {
+    now=$(date +%s)
+    printf '[timing] %s %ss\n' "$1" "$(( now - tick ))" || true
+    tick=$now
+}
+
 # Where the commit is checked out: /work in a container, a temporary directory elsewhere.
 work=${PIGEON_WORK:-/work}
 
@@ -63,7 +72,9 @@ if ! GIT_TERMINAL_PROMPT=0 \
 then
     exit 3
 fi
+lap fetch
 git -C "$work" checkout -q --detach FETCH_HEAD || exit 3
+lap checkout
 
 # The checked-out commit must be the one asked for.
 head=$(git -C "$work" rev-parse HEAD) || exit 3
@@ -104,6 +115,8 @@ else
     env -u PIGEON_JOB_TOKEN $limit sh "$work/$PIGEON_SCRIPT" >"$out" 2>&1 || rc=$?
 fi
 cat "$out"
+lap script
+printf '[timing] total %ss\n' "$(( $(date +%s) - t0 ))" || true
 tail=$(tail -c 4096 "$out" | base64 | tr -d '\n')
 
 # The final JSON. Details hold only digits and fixed words; the output is base64.

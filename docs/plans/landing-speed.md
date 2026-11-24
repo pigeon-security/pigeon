@@ -103,3 +103,11 @@ Core first when affected is kept.
 ## Log
 
 - 2026-11-24: plan written from the measurements above.
+- 2026-11-24: timing lines added. Every job script prints `[timing] <stage> <seconds>s` to its
+  output: `ci/runner/test.sh` (stages `guard`, `fetch`, `fmt`, `clippy`, `smoke-build`,
+  `smoke-run`, `settings`, `check-platform`, then `total`), `ci/deploy/deploy.sh` (`grant`,
+  `node`, `deploy` per attempt, `published`, `total`), `ci/deploy/allowlist.sh` (`node`, `build`,
+  `allowlist`) and `ci/runner/entrypoint.sh` (`fetch`, `checkout`, `script`, `total`; these go to
+  the container log, not to the job's own output). Free build wins, by environment variable in
+  test.sh and allowlist.sh: `CARGO_INCREMENTAL=0`, `CARGO_PROFILE_DEV_DEBUG=0`, and one
+  `cargo fetch --locked` before the timed builds. Same checks and flags otherwise.

@@ -13,6 +13,16 @@
 # environment sets PIGEON_KEEP_BUILT (deploy.sh does), the copy and the hash
 # (`.wrangler.built.sha256`) are left for deploy.sh to reuse and remove; otherwise they are removed.
 set -eu
+# Timing lines, `[timing] <stage> <seconds>s`; they never fail the script.
+tick=$(date +%s)
+lap() {
+    now=$(date +%s)
+    printf '[timing] %s %ss\n' "$1" "$(( now - tick ))" || true
+    tick=$now
+}
+# The same cargo settings as ci/runner/test.sh, for the builds below.
+export CARGO_INCREMENTAL=0
+export CARGO_PROFILE_DEV_DEBUG=0
 root=$(cd "$(dirname "$0")/../.." && pwd)
 platform=$root/${PIGEON_WORKER_DIR:-src/platform}
 toml=$platform/wrangler.toml
@@ -46,7 +56,9 @@ command=$(awk '/^\[build\]/{p=1;next} /^\[/{p=0} p && /^command = /{sub(/^comman
 [ -n "$command" ] || { echo "wrangler.toml has no [build] command" >&2; exit 2; }
 rm -f "$built" "$builtsum"
 printf '\n== build (once): %s\n' "$command"
+lap node
 sh -c "$command"
+lap build
 awk '/^\[build/{p=1;next} /^\[/{p=0} !p' "$toml" > "$built"
 (cd build && find . -type f | LC_ALL=C sort | xargs sha256sum | sha256sum) > "$builtsum"
 
@@ -85,3 +97,4 @@ sed 's/ body=.*/ (with a JSON body)/' "$work/calls.txt" | sort | uniq -c
 cd "$root"
 cargo run -q -p pigeon-capabilities --example allowlist --target x86_64-unknown-linux-gnu -- \
     "$work/calls.txt" "$@"
+lap allowlist

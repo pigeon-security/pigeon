@@ -14,11 +14,35 @@ cd "$(dirname "$0")/../.."
 NATIVE=x86_64-unknown-linux-gnu
 SMOKE_LIMIT_SECS=60
 
+# The same cargo settings for every step, so clippy, the test build and the run share artifacts.
+export CARGO_INCREMENTAL=0
+export CARGO_PROFILE_DEV_DEBUG=0
+
+# Timing: `step <stage> <words>` prints `[timing] <stage> <seconds>s` for the stage that just
+# finished, then starts the next one. `timing_end` closes the last stage and prints the total.
+# These prints never fail the script.
+script_start=$(date +%s)
+stage=
+stage_start=$script_start
+stage_end() {
+    if [ -n "$stage" ]; then
+        printf '[timing] %s %ss\n' "$stage" "$(( $(date +%s) - stage_start ))" || true
+    fi
+    stage=
+}
 step() {
+    stage_end
+    stage=$1
+    shift
     printf '\n== %s\n' "$*"
+    stage_start=$(date +%s)
+}
+timing_end() {
+    stage_end
+    printf '[timing] total %ss\n' "$(( $(date +%s) - script_start ))" || true
 }
 
-step 'no tests outside the smoke suite (tests/smoke.rs and tests/smoke/)'
+step guard 'no tests outside the smoke suite (tests/smoke.rs and tests/smoke/)'
 outside=$(grep -rln --include='*.rs' '#\[test\]' . --exclude-dir=target --exclude-dir=node_modules \
     | grep -v -e '^\./tests/smoke\.rs$' -e '^\./tests/smoke/.*\.rs$' || true)
 if [ -n "$outside" ]; then
@@ -26,16 +50,21 @@ if [ -n "$outside" ]; then
     exit 1
 fi
 
-step cargo fmt --check
+step fmt cargo fmt --check
 cargo fmt --all --check
 
-step cargo clippy --workspace -D warnings
+step fetch cargo fetch --locked
+cargo fetch --locked
+
+step clippy cargo clippy --workspace -D warnings
 cargo clippy --workspace -- -D warnings
 cargo clippy -p pigeon-capabilities --test smoke --target "$NATIVE" -- -D warnings
 
-step the smoke suite, within ${SMOKE_LIMIT_SECS}s
+step smoke-build the smoke suite, build
 # Built first, so the limit holds the scenarios' running time, not the compile.
 cargo test -p pigeon-capabilities --test smoke --target "$NATIVE" --no-run
+
+step smoke-run the smoke suite, within ${SMOKE_LIMIT_SECS}s
 start=$(date +%s)
 cargo test -p pigeon-capabilities --test smoke --target "$NATIVE"
 took=$(( $(date +%s) - start ))
@@ -45,10 +74,12 @@ if [ "$took" -gt "$SMOKE_LIMIT_SECS" ]; then
     exit 1
 fi
 
-step .claude/settings.json is what .pigeon/policy.toml generates
+step settings .claude/settings.json is what .pigeon/policy.toml generates
 cargo run -q -p pigeon-capabilities --example settings --target "$NATIVE" -- --check
 
-step cargo check -p pigeon-platform
+step check-platform cargo check -p pigeon-platform
 cargo check -p pigeon-platform
 
-step passed
+stage_end
+printf '\n== passed\n'
+timing_end

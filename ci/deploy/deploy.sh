@@ -29,6 +29,14 @@
 set -eu
 # The one place the code is decided: before the start every failure is 3, after it never 3.
 started=0
+# Timing lines, `[timing] <stage> <seconds>s`; they never fail the script.
+t0=$(date +%s)
+tick=$t0
+lap() {
+    now=$(date +%s)
+    printf '[timing] %s %ss\n' "$1" "$(( now - tick ))" || true
+    tick=$now
+}
 log=
 finish() {
     rc=$?
@@ -38,6 +46,7 @@ finish() {
     if [ "$rc" -ne 0 ]; then
         if [ "$started" = 0 ]; then rc=3; elif [ "$rc" = 3 ]; then rc=1; fi
     fi
+    printf '[timing] total %ss\n' "$(( $(date +%s) - t0 ))" || true
     exit "$rc"
 }
 trap finish EXIT
@@ -82,8 +91,11 @@ else
     exit 1
 fi
 
+lap grant
 PIGEON_KEEP_BUILT=1 "$root/ci/deploy/allowlist.sh"
+tick=$(date +%s)
 . "$root/ci/deploy/node.sh"
+lap node
 
 dir=$root/${PIGEON_WORKER_DIR:-src/platform}
 account=$(sed -n 's/^account_id = "\(.*\)"$/\1/p' "$dir/wrangler.toml" | head -n 1)
@@ -100,11 +112,13 @@ fi
 deploy() {
     printf '\n== wrangler deploy through %s (attempt %s)\n' "$proxy" "$1"
     started=1
+    tick=$(date +%s)
     rc=0
     CLOUDFLARE_API_BASE_URL=$proxy/cf/client/v4 CLOUDFLARE_ACCOUNT_ID=$account \
         CLOUDFLARE_API_TOKEN=$PIGEON_JOB_TOKEN WRANGLER_SEND_METRICS=false \
         npx --no-install wrangler deploy -c .wrangler.built.toml --containers-rollout immediate >"$log" 2>&1 || rc=$?
     cat "$log"
+    lap deploy
     return "$rc"
 }
 
@@ -117,17 +131,20 @@ zone=$(sed -n 's/^ZONE = "\(.*\)"$/\1/p' "$root/src/platform/wrangler.toml" | he
 published() {
     printf '\n== the architecture page on %s names this commit\n' "$zone"
     seen=
+    tick=$(date +%s)
     for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
         seen=$(curl -sS --max-time 15 "https://$zone/architecture.json" 2>/dev/null \
             | grep -o '"commit": *"[0-9a-f]*"' | head -n 1 | grep -o '[0-9a-f]\{40\}' || true)
         if [ "$seen" = "$PIGEON_COMMIT" ]; then
             echo "https://$zone/architecture.json is $PIGEON_COMMIT's"
+            lap published
             return 0
         fi
         sleep 10
     done
     echo "https://$zone/architecture.json names commit '${seen:-none}', not $PIGEON_COMMIT:" >&2
     echo "the apex is not serving this deploy's architecture page" >&2
+    lap published
     return 1
 }
 

@@ -624,3 +624,33 @@ fn buildkite_setup_plan() {
     assert!(!same_build(&json!({"buildkite": {"off": "…"}}), "abc"));
     assert!(same_build(&json!({}), ""));
 }
+
+#[test]
+fn ci_scripts_print_timing_lines() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let read =
+        |p: &str| std::fs::read_to_string(root.join(p)).unwrap_or_else(|e| panic!("{p}: {e}"));
+    let test = read("ci/runner/test.sh");
+    for (name, text) in [
+        ("test.sh", &test),
+        ("deploy.sh", &read("ci/deploy/deploy.sh")),
+        ("allowlist.sh", &read("ci/deploy/allowlist.sh")),
+    ] {
+        assert!(text.contains("[timing] "), "{name} prints no timing line");
+    }
+    for stage in [
+        "guard",
+        "fmt",
+        "clippy",
+        "smoke-build",
+        "smoke-run",
+        "settings",
+        "check-platform",
+    ] {
+        assert!(
+            test.contains(&format!("step {stage} ")),
+            "test.sh lacks stage {stage}"
+        );
+    }
+    assert!(test.contains("export CARGO_INCREMENTAL=0"));
+}
