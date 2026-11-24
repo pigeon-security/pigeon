@@ -1,0 +1,14 @@
+[package]
+name = "pigeon-cloud"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+pigeon-core = { path = "../core" }
+pigeon-contract = { path = "../contract" }
+worker = "0.9.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

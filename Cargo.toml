@@ -10,6 +10,8 @@ members = [
     "src/sites",
     "src/models",
     "src/model-gateway",
+    "src/cloud",
+    "src/cloud-gateway",
     "src/ci",
     "src/ci-gateway",
     "src/proxies",

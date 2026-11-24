@@ -73,6 +73,17 @@ cpu = 4
 memory_gb = 12
 disk_gb = 20
 
+# Deploys the pigeon-cloud-gateway Worker (src/cloud-gateway) from a landed commit, as `deploy` deploys core.
+[jobs.deploy-cloud-gateway]
+run = "ci/deploy/deploy-cloud-gateway.sh"
+timeout_min = 60
+token = true
+
+[jobs.deploy-cloud-gateway.needs]
+cpu = 4
+memory_gb = 12
+disk_gb = 20
+
 # Deploys the pigeon-ci-gateway Worker (src/ci-gateway) from a landed commit, as `deploy` deploys core.
 [jobs.deploy-ci-gateway]
 run = "ci/deploy/deploy-ci-gateway.sh"

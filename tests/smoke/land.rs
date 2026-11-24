@@ -1060,6 +1060,7 @@ fn land_rebases_disjoint_branches_and_lanes() {
             "pigeon-platform",
             "pigeon-sites",
             "pigeon-model-gateway",
+            "pigeon-cloud-gateway",
             "pigeon-ci-gateway",
             "pigeon-proxy",
             "pigeon-ai-agents"
@@ -1108,6 +1109,7 @@ fn land_rebases_disjoint_branches_and_lanes() {
             "core",
             "sites",
             "model-gateway",
+            "cloud-gateway",
             "ci-gateway",
             "proxy",
             "ai-agents"

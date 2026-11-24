@@ -24,6 +24,7 @@ toml = { version = "0.8", default-features = false, features = ["parse"] }
 [dev-dependencies]
 pigeon-ai-agents = { path = "../ai-agents" }
 pigeon-blog = { path = "../blog" }
+pigeon-cloud = { path = "../cloud" }
 pigeon-email = { path = "../email" }
 pigeon-ingest-runner = { path = "../ingest-runner" }
 rsa = { version = "0.9", default-features = false, features = ["std"] }

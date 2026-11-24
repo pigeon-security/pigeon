@@ -911,6 +911,7 @@ fn proxy_worker_caches_and_core_ops() {
         [
             "pigeon-sites",
             "pigeon-model-gateway",
+            "pigeon-cloud-gateway",
             "pigeon-ci-gateway",
             "pigeon-proxy",
             "pigeon-ai-agents"

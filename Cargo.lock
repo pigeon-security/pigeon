@@ -902,6 +902,7 @@ dependencies = [
  "pigeon-ai-agents",
  "pigeon-blog",
  "pigeon-ci",
+ "pigeon-cloud",
  "pigeon-contract",
  "pigeon-core",
  "pigeon-email",
@@ -938,6 +939,27 @@ name = "pigeon-ci-gateway"
 version = "0.1.0"
 dependencies = [
  "pigeon-ci",
+ "pigeon-contract",
+ "pigeon-core",
+ "worker",
+]
+
+[[package]]
+name = "pigeon-cloud"
+version = "0.1.0"
+dependencies = [
+ "pigeon-contract",
+ "pigeon-core",
+ "serde",
+ "serde_json",
+ "worker",
+]
+
+[[package]]
+name = "pigeon-cloud-gateway"
+version = "0.1.0"
+dependencies = [
+ "pigeon-cloud",
  "pigeon-contract",
  "pigeon-core",
  "worker",

@@ -106,6 +106,18 @@ test_job = "test"
 deploy_job = "deploy-model-gateway"
 after = ["portal_sync"]
 
+# The cloud gateway Worker: Scaleway's API keys, buckets and objects behind the contract, every
+# change a plan the person approves first. A capability Worker behind core
+# (docs/plans/cloud-gateway.md).
+[[worker]]
+name = "cloud-gateway"
+script = "pigeon-cloud-gateway"
+dir = "src/cloud-gateway"
+paths = ["src/cloud-gateway/*", "src/cloud/*", "ci/deploy/deploy-cloud-gateway.sh"]
+test_job = "test"
+deploy_job = "deploy-cloud-gateway"
+after = ["portal_sync"]
+
 # The CI gateway Worker: CI's tools and /ci/ routes behind the contract, and the scheduler's
 # class since the transfer; the runners are still core's (docs/plans/workers-split.md, phase 4).
 # The connectors' setup runs after its deploys: the scheduler applies it once per build, and

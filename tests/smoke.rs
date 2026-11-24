@@ -104,6 +104,10 @@ mod apple;
 /// CI routing, connectors and the Buildkite pipelines and setup.
 #[path = "smoke/ci.rs"]
 mod ci;
+/// The cloud gateway: Scaleway keys, buckets and objects, plans and approvals, with a mocked
+/// Scaleway.
+#[path = "smoke/cloud.rs"]
+mod cloud;
 /// The console, mail, changelog and architecture views of the core Worker.
 #[path = "smoke/core.rs"]
 mod core;
