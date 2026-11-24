@@ -731,20 +731,43 @@ fn sites_apex_pages() {
         assert_eq!(home::route("GET", p), Route::NotFound, "{p}");
     }
     assert_eq!(home::route("POST", "/nope"), Route::NotFound);
-    let h = home::home_html();
-    assert!(h.contains("href=\"https://platform.pigeon.dev\""));
-    assert!(h.contains(">Console<"));
-    assert!(h.contains("href=\"/architecture\""));
-    assert!(h.contains("src=\"/logo.png\""));
+    let build = home::Build {
+        commit: "0123456789abcdef",
+        digest: "a1b2c3d4",
+    };
+    let h = home::home_html(Some(build));
+    assert!(h.contains("href=\"https://platform.pigeon.dev/app\""));
+    assert!(h.contains(">Console ") && h.contains("↗"));
+    assert!(h.contains("href=\"/architecture\">Architecture"));
+    assert!(h.contains("href=\"/\" aria-current=\"page\">Overview"));
+    assert!(h.contains(">P</span>pigeon"));
     assert!(h.contains("radial-gradient"));
-    assert!(!h.contains("aria-current=\"page\""));
-    let a = home::architecture_html("<svg id=\"drawing\"></svg>", "0123456789abcdef");
-    assert!(a.contains("<svg id=\"drawing\"></svg>"));
-    assert!(a.contains("0123456789ab"));
-    assert!(!a.contains("0123456789abc"));
-    assert!(a.contains("aria-current=\"page\""));
-    assert!(home::architecture_html("", "<b>").contains("&lt;b&gt;"));
-    assert!(home::unavailable_html().contains("aria-current=\"page\""));
+    assert!(h.contains(">Coming soon</p><h1>Find the pattern. Act with confidence.</h1>"));
+    assert!(h.contains("<footer>0123456789ab · digest a1b2c3d4</footer>"));
+    assert!(!h.contains("data:image/svg+xml"));
+
+    let svg = "<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>";
+    let a = home::architecture_html(svg, build);
+    assert!(a.contains("href=\"/architecture\" aria-current=\"page\">Architecture"));
+    assert!(a.contains(">Architecture</p><h1>Diagram</h1>"));
+    assert!(a.contains(&format!(
+        "data:image/svg+xml;base64,{}",
+        pigeon_core::git::base64(svg.as_bytes())
+    )));
+    assert!(!a.contains("<svg"), "the drawing is an image, not HTML");
+    assert!(!a.contains("<h2>Workers</h2>"));
+    assert!(a.contains("<footer>0123456789ab · digest a1b2c3d4</footer>"));
+    let escaped = home::architecture_html(
+        svg,
+        home::Build {
+            commit: "<b>",
+            digest: "<i>",
+        },
+    );
+    assert!(escaped.contains("<footer>&lt;b&gt; · digest &lt;i&gt;</footer>"));
+    assert!(home::home_html(None).contains("Deployment metadata unavailable"));
+    assert!(home::unavailable_html(None).contains("The architecture is not available right now."));
+    assert!(home::unavailable_html(Some(build)).contains("0123456789ab · digest a1b2c3d4"));
     assert!(!home::CSP.contains("script-src"));
     assert!(home::CSP.contains("frame-ancestors 'none'"));
 }

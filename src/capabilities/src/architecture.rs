@@ -71,6 +71,10 @@ impl Capability for Architecture {
                         "public": {
                             "type": "boolean",
                             "description": "Answer the public view: commit, digest, model, drawing."
+                        },
+                        "svg": {
+                            "type": "boolean",
+                            "description": "Include the diagram as an SVG image in drawing, instead of public HTML or a model alone."
                         }
                     }
                 }),
@@ -101,15 +105,20 @@ impl Capability for Architecture {
                 return Err(unknown(tool));
             }
             let built = built(cx.hosted);
+            let svg = args["svg"].as_bool() == Some(true);
             if args.get("public").and_then(Value::as_bool) == Some(true) {
                 return Ok(serde_json::json!({
                     "commit": built.public_model["commit"],
                     "digest": built.digest,
                     "model": built.public_model,
-                    "drawing": built.public_drawing,
+                    "drawing": if svg { &built.public_svg } else { &built.public_drawing },
                 }));
             }
-            Ok(built.model.clone())
+            let mut model = built.model.clone();
+            if svg {
+                model["drawing"] = Value::String(built.drawing.clone());
+            }
+            Ok(model)
         })
     }
 }
@@ -120,7 +129,11 @@ impl Capability for Architecture {
 pub struct Built {
     /// The model, as `architecture_describe` answers it and `/architecture.json` serves it.
     pub model: Value,
-    /// The drawing, as the console's Architecture tab places it.
+    /// The SVG for the signed-in console.
+    drawing: String,
+    /// The SVG drawn only from the public model.
+    public_svg: String,
+    /// The HTML for the legacy console's architecture tab.
     pub html: String,
     /// The whole page, as the site serves it.
     pub page: String,
@@ -153,14 +166,19 @@ pub fn built(hosted: &Hosted) -> &'static Built {
         .collect();
     let model = describe(&sources, hosted);
     let shown = public(&model);
+    let drawing = diagram(&model);
+    let public_svg = diagram(&shown);
+    let html = render_around(&model, &drawing);
     // Leaked: a build is kept for the rest of the isolate, and a new one is made only when the
     // capabilities change.
     let built: &'static Built = Box::leak(Box::new(Built {
         model: to_value(&model),
-        html: render(&model),
-        page: page(&model),
+        page: page_around(&html),
+        html,
         public_model: to_value(&shown),
-        public_drawing: render(&shown),
+        public_drawing: render_around(&shown, &public_svg),
+        drawing,
+        public_svg,
         digest: model.digest.clone(),
         commit: model.commit.chars().take(12).collect(),
     }));
@@ -1427,6 +1445,30 @@ const W: f64 = 1000.0;
 const M: f64 = 32.0;
 const GAP: f64 = 36.0;
 
+// The CSS travels with the SVG so both the app and the apex can use it as an image.
+const DIAGRAM_STYLE: &str = r#"
+.diagram { font-family: Inter, system-ui, sans-serif; }
+.dg-shadow { fill: #0B0B0E; }
+.dg-card { fill: #1F1F25; stroke: #3B3942; stroke-width: 1.2; }
+.dg-inner, .dg-chip { fill: #2A2A31; stroke: #3B3942; }
+.dg-access, .dg-store { stroke: #C9A7EE; }
+.dg-worker, .dg-chip.accent { stroke: #E07FA8; }
+.dg-cf { stroke: #E9B587; }
+.dg-vendor { stroke: #9FC6F5; }
+.dg-zone { fill: #17171C; stroke: #3B3942; stroke-width: 1.5; }
+.dg-zone-name { fill: #E9B587; font: 700 12px ui-monospace, monospace; letter-spacing: .1em; }
+.dg-t { fill: #ECEAE6; font-weight: 700; font-size: 14px; }
+.dg-t.dg-big { font-size: 18px; }
+.dg-wname { fill: #E07FA8; }
+.dg-vname { fill: #9FC6F5; }
+.dg-s { fill: #B9B6BF; font-size: 12px; }
+.dg-m, .dg-e, .dg-lbl { fill: #B9B6BF; font: 11px ui-monospace, monospace; }
+.dg-e { font-weight: 600; letter-spacing: .06em; }
+.dg-link { fill: none; stroke: #A3A0A8; stroke-width: 1.8; }
+.dg-link.dashed { stroke-dasharray: 5 5; }
+.dg-head { fill: #A3A0A8; }
+"#;
+
 /// An SVG drawn in order.
 struct Svg(Vec<String>);
 
@@ -1438,9 +1480,9 @@ impl Svg {
     /// A card with the hard offset shadow.
     fn card(&mut self, x: f64, y: f64, w: f64, h: f64, class: &str) {
         self.push(format!(
-            r#"<rect class="dg-shadow" x="{:.0}" y="{:.0}" width="{w:.0}" height="{h:.0}" rx="14"/><rect class="dg-card {class}" x="{x:.0}" y="{y:.0}" width="{w:.0}" height="{h:.0}" rx="14"/>"#,
-            x + 3.0,
-            y + 3.0
+            r#"<rect class="dg-shadow" x="{:.0}" y="{:.0}" width="{w:.0}" height="{h:.0}" rx="22"/><rect class="dg-card {class}" x="{x:.0}" y="{y:.0}" width="{w:.0}" height="{h:.0}" rx="22"/>"#,
+            x,
+            y + 6.0
         ));
     }
 
@@ -1632,7 +1674,25 @@ fn worker_card(s: &mut Svg, wk: &Worker, x: f64, y: f64, w: f64) {
         .collect();
     s.row(x + 16.0, y + 124.0, right, "OBJECTS", &hosted);
     s.row(x + 16.0, y + 154.0, right, "CONTAINERS", &wk.containers);
-    s.row(x + 16.0, y + 184.0, right, "SECRETS", &wk.secrets);
+    if let Some(first) = wk.routes.first() {
+        let extra = wk.routes.len() - 1;
+        let suffix = if extra == 0 {
+            String::new()
+        } else {
+            format!(" +{extra}")
+        };
+        s.text(x + 16.0, y + 200.0, "dg-lbl", "ROUTES", "start");
+        s.text(
+            x + 108.0,
+            y + 200.0,
+            "dg-m",
+            &format!(
+                "{}{suffix}",
+                fit(first, w - 124.0 - suffix.len() as f64 * 7.0, 7.0)
+            ),
+            "start",
+        );
+    }
 }
 
 fn diagram(m: &Model) -> String {
@@ -2171,7 +2231,7 @@ fn diagram(m: &Model) -> String {
     let height = bottom + 24.0;
 
     format!(
-        r#"<div class="dg-canvas"><svg class="diagram" viewBox="0 0 {W:.0} {height:.0}" role="img" aria-label="pigeon's architecture, from clients through hostnames, Workers and their bindings to account resources and external services"><defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path class="dg-head" d="M0 0L10 5L0 10z"/></marker></defs>{}</svg></div>"#,
+        r#"<svg xmlns="http://www.w3.org/2000/svg" class="diagram" viewBox="0 0 {W:.0} {height:.0}" role="img" aria-label="Pigeon architecture: routes, Workers, Durable Objects, containers and services"><style>{DIAGRAM_STYLE}</style><defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path class="dg-head" d="M0 0L10 5L0 10z"/></marker></defs>{}</svg>"#,
         s.0.concat()
     )
 }
@@ -2187,8 +2247,12 @@ fn pills(items: &[String], class: &str) -> String {
     format!(r#"<div class="pills">{inner}</div>"#)
 }
 
-/// The drawing alone, without a page around it: for the architecture page and the console.
+/// The legacy architecture view, with definitions below the diagram.
 pub fn render(m: &Model) -> String {
+    render_around(m, &diagram(m))
+}
+
+fn render_around(m: &Model, drawing: &str) -> String {
     let tool_count: usize = m.workers.iter().map(|w| w.tools.len()).sum();
     // Who uses each capability: Workers and other capabilities.
     let used_by = |name: &str| -> Vec<String> {
@@ -2346,7 +2410,7 @@ pub fn render(m: &Model) -> String {
   <p>Read from the platform's own source and wrangler.toml each time it is deployed, and drawn top to bottom in the order a request travels. Nothing here is written by hand.</p>
   <div class="pills"><span class="pill">{} Workers</span><span class="pill">{} capabilities</span><span class="pill">{} core blocks</span><span class="pill">{tool_count} MCP tools</span><span class="pill">digest {}</span></div>
 </header>
-<section aria-label="Diagram" style="margin-top:24px">{}</section>
+<section aria-label="Diagram" style="margin-top:24px"><div class="dg-canvas" tabindex="0" role="region" aria-label="Platform diagram">{drawing}</div></section>
 {}
 {}
 {}
@@ -2358,7 +2422,6 @@ pub fn render(m: &Model) -> String {
         m.parts.iter().filter(|c| c.capability).count(),
         m.parts.iter().filter(|c| !c.capability).count(),
         m.digest,
-        diagram(m),
         section("Definitions", "Workers", &workers),
         section("Definitions", "Capabilities", &public),
         section("Foundation", "Core building blocks", &internal),

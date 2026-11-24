@@ -32,6 +32,15 @@ struct Architecture {
     drawing: String,
 }
 
+impl Architecture {
+    fn build(&self) -> home::Build<'_> {
+        home::Build {
+            commit: &self.commit,
+            digest: &self.digest,
+        }
+    }
+}
+
 thread_local! {
     static KEPT: RefCell<Option<(f64, Architecture)>> = const { RefCell::new(None) };
 }
@@ -71,7 +80,7 @@ async fn architecture(env: &Env, key: &[u8], worker: &str) -> Result<Architectur
         &env.service("PLATFORM")?,
         "https://core",
         "dispatch",
-        &json!({ "tool": "architecture_describe", "args": { "public": true } }),
+        &json!({ "tool": "architecture_describe", "args": { "public": true, "svg": true } }),
         Some((key, &crate::public::itself(worker))),
         &nonce,
     )
@@ -116,7 +125,12 @@ pub async fn serve(req: Request, env: &Env, key: &[u8], worker: &str) -> Result<
             r.headers().set("Allow", "GET, HEAD")?;
             Ok(r)
         }
-        Route::Home => reply(200, HTML, SHORT, home::home_html().into_bytes(), head),
+        Route::Home => {
+            let a = architecture(env, key, worker).await;
+            let cache = if a.is_ok() { SHORT } else { "no-store" };
+            let page = home::home_html(a.as_ref().ok().map(Architecture::build));
+            reply(200, HTML, cache, page.into_bytes(), head)
+        }
         Route::Logo => reply(
             200,
             "image/png",
@@ -125,13 +139,18 @@ pub async fn serve(req: Request, env: &Env, key: &[u8], worker: &str) -> Result<
             head,
         ),
         Route::Architecture => match architecture(env, key, worker).await {
-            Ok(a) => {
-                let page = home::architecture_html(&a.drawing, &a.commit);
+            Ok(a) if a.drawing.starts_with("<svg ") => {
+                let page = home::architecture_html(&a.drawing, a.build());
                 reply(200, HTML, SHORT, page.into_bytes(), head)
+            }
+            Ok(a) => {
+                // An older core can still answer the overview and JSON during a rollout.
+                let page = home::unavailable_html(Some(a.build()));
+                reply(503, HTML, "no-store", page.into_bytes(), head)
             }
             Err(e) => {
                 console_error!("apex architecture: {e}");
-                let page = home::unavailable_html();
+                let page = home::unavailable_html(None);
                 reply(503, HTML, "no-store", page.into_bytes(), head)
             }
         },

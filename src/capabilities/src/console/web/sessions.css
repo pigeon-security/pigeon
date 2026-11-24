@@ -1,0 +1,50 @@
+/* Sessions and Compare share the shell's cards, buttons and status colors. */
+.ps-view { max-width: 80rem; }
+.ps-view, .ps-view * { min-width: 0; }
+.ps-stack { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; }
+.ps-compact { gap: 4px; }
+.ps-line { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.ps-view > header { justify-content: space-between; }
+.ps-view h2 { font-size: 1.25rem; }
+.ps-view h3 { font-size: 1.125rem; }
+.ps-view .app-muted { font-size: .9rem; }
+.ps-view [role="status"]:empty, .ps-actions > div:empty, .ps-approval:empty { display: none; }
+.ps-value, .ps-stat, .ps-table td:nth-child(n+5) { font-variant-numeric: tabular-nums; }
+.ps-value { margin-inline-start: auto; color: var(--app-muted); }
+.ps-rows { list-style: none; margin-block-end: 0; padding: 0; }
+.ps-rows > li { padding-block: 10px; border-block-start: 1px solid var(--app-divider); }
+.ps-rows > li:last-child { padding-block-end: 0; }
+.ps-stats, .ps-charts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr));
+  gap: 16px;
+  align-items: start;
+  margin: 0;
+}
+.ps-stats { grid-template-columns: repeat(auto-fit, minmax(min(100%, 11rem), 1fr)); }
+.ps-stats dd { margin: 0; }
+.ps-stat { font: 700 1.4rem/1.2 var(--app-title-font); }
+.ps-bar { display: flex; background: var(--app-pill); border-radius: 10px; overflow: hidden; height: 8px; }
+.ps-fill { display: block; }
+.ps-fill-cost { background: var(--app-accent); }
+.ps-fill-done { background: var(--app-running); }
+.ps-fill-failed { background: var(--app-failed); }
+.ps-fill-stopped { background: var(--app-done); }
+.ps-fill-over_budget { background: var(--app-accent); }
+.ps-form { padding-block-start: 12px; border-block-start: 1px solid var(--app-divider); }
+.ps-view textarea, .ps-view select {
+  padding: 8px;
+  color: var(--app-ink);
+  background: var(--app-bg);
+  border: 1px solid var(--app-divider);
+  border-radius: 8px;
+  max-width: 100%;
+}
+.ps-view textarea { display: block; width: 100%; resize: vertical; }
+.ps-view fieldset { display: flex; flex-wrap: wrap; gap: 8px 16px; margin: 0; border: 1px solid var(--app-divider); }
+.ps-view input[type="checkbox"] { accent-color: var(--app-accent); }
+.ps-table { max-width: 100%; overflow: auto; }
+.ps-table table { border-collapse: collapse; width: 100%; font-size: .875rem; }
+.ps-table caption { text-align: start; color: var(--app-muted); padding-block-end: 8px; }
+.ps-table :is(td, th) { padding: 8px 10px; text-align: start; white-space: nowrap; border-bottom: 1px solid var(--app-divider); }
+.ps-table tbody th { white-space: normal; min-width: 9rem; }

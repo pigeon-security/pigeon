@@ -7,6 +7,8 @@
 //! still takes a passkey of its own, bound to what it changes. Every POST must come from this
 //! host's own pages, in JSON.
 
+#[path = "console/web/ops.rs"]
+mod ops;
 pub mod page;
 pub mod sections;
 pub mod session;
@@ -299,6 +301,14 @@ impl Console {
                 p if p == "/" || Tab::from_path(p).is_some() => {
                     page::html(&page::shell(&self.passkeys.site_name))
                 }
+                "/app" | "/app/" => {
+                    let signed = self.signed(cx.env, &req).await?;
+                    page::html(&page::app_shell(
+                        &self.passkeys.site_name,
+                        signed.as_ref().map(|s| s.user.name.as_str()),
+                    ))
+                }
+                p if p.starts_with("/app/") => page::app_asset(p),
                 "/console/app.js" => page::asset(APP, "text/javascript; charset=utf-8"),
                 "/console/chart.js" => page::asset(CHART, "text/javascript; charset=utf-8"),
                 "/console/platform.js" => page::asset(PLATFORM, "text/javascript; charset=utf-8"),
@@ -362,6 +372,12 @@ impl Console {
         }
         let body: Value = req.json().await.unwrap_or(Value::Null);
         match path.as_str() {
+            "/app/op" => {
+                let Some(signed) = self.signed(cx.env, &req).await? else {
+                    return answer(&json!({ "error": "sign in first" }), 401);
+                };
+                ops::serve(cx, signed.user, &body).await
+            }
             "/console/sign-in/begin" => {
                 match self.passkeys.sign_in_begin(cx.env, SIGN_IN, None).await {
                     Ok(v) => answer(&v, 200),
@@ -554,6 +570,7 @@ impl Capability for Console {
     fn routes(&self) -> Vec<&'static str> {
         vec![
             "/console/",
+            "/app",
             "/approvals",
             "/instances",
             "/architecture",

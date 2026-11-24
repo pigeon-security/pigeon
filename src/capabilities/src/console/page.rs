@@ -46,6 +46,66 @@ pub fn shell(site_name: &str) -> String {
     .render()
 }
 
+// The asset list serves both the page tags and the exact paths they load.
+macro_rules! app_assets {
+    ($($view:literal),+ $(,)?) => {
+        const APP_ASSETS: &[(&str, &str, &str)] = &[
+            $((concat!("/app/", $view, ".css"), "text/css; charset=utf-8",
+                include_str!(concat!("web/", $view, ".css"))),)+
+            $((concat!("/app/", $view, ".js"), "text/javascript; charset=utf-8",
+                include_str!(concat!("web/", $view, ".js"))),)+
+        ];
+    };
+}
+app_assets!(
+    "shell",
+    "sessions",
+    "cost",
+    "settings",
+    "connections",
+    "architecture"
+);
+
+/// The app shell, with the signed-in person's display name if the session is fresh.
+pub(super) fn app_shell(site_name: &str, person: Option<&str>) -> String {
+    let mut assets = String::new();
+    for (path, _, _) in APP_ASSETS
+        .iter()
+        .filter(|(path, _, _)| path.ends_with(".css"))
+    {
+        assets.push_str(&format!("<link rel=\"stylesheet\" href=\"{path}\">\n"));
+    }
+    assets.push_str("<link rel=\"icon\" href=\"/console/icon.png\">\n");
+    assets.push_str("<script src=\"/auth/passkey.js\" defer></script>\n");
+    for (path, _, _) in APP_ASSETS
+        .iter()
+        .filter(|(path, _, _)| path.ends_with(".js"))
+    {
+        assets.push_str(&format!("<script src=\"{path}\" defer></script>\n"));
+    }
+    let person = person.map_or_else(String::new, |name| {
+        format!(" data-person=\"{}\"", escape(name))
+    });
+    format!(
+        "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\n\
+         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
+         <meta name=\"theme-color\" content=\"#141418\">\n\
+         <title>{site} · App</title>\n{assets}</head><body>\n\
+         <div id=\"pigeon-app\" data-site=\"{site}\"{person}></div>\n\
+         <noscript><p>The app needs JavaScript. <a href=\"/\">Open the legacy console</a>.</p></noscript>\n\
+         </body></html>",
+        site = escape(site_name),
+    )
+}
+
+/// Serves only the app assets registered in the page.
+pub(super) fn app_asset(path: &str) -> Result<Response> {
+    match APP_ASSETS.iter().find(|(url, _, _)| *url == path) {
+        Some((_, kind, body)) => asset(body, kind),
+        None => Response::error("not found", 404),
+    }
+}
+
 /// The shell as a response, under the console's policy and the pages' other headers.
 pub fn html(page: &str) -> Result<Response> {
     let headers = Headers::new();

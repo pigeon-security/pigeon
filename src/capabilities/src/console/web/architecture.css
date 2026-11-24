@@ -1,0 +1,25 @@
+.arch-view { display: grid; gap: 20px; min-width: 0; }
+.arch-counts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 0; }
+.arch-counts > div, .arch-frame {
+  min-width: 0;
+  background: var(--app-card);
+  border: 1px solid var(--app-border);
+  border-radius: 22px;
+  box-shadow: 0 6px 0 var(--app-shadow);
+}
+.arch-counts > div { display: flex; flex-direction: column-reverse; padding: 12px 16px; }
+.arch-counts dt { color: var(--app-secondary); font-size: 13px; }
+.arch-counts dd { margin: 0; font: 700 26px/1.2 var(--app-title-font); }
+.arch-frame { overflow-x: auto; }
+.arch-map { padding: 8px; }
+.arch-map img { display: block; width: 100%; min-width: 840px; height: auto; }
+.arch-table table { border-collapse: collapse; width: 100%; min-width: 640px; text-align: left; }
+.arch-table :is(th, td) { padding: 12px 16px; border-bottom: 1px solid var(--app-divider); vertical-align: top; }
+.arch-table thead { color: var(--app-secondary); font-size: 13px; }
+.arch-table tbody tr:last-child > * { border-bottom: 0; }
+.arch-table ul { list-style: none; margin: 0; padding: 0; }
+.arch-table li + li { margin-top: 4px; }
+.arch-build { color: var(--app-muted); font: 13px/1.5 var(--app-mono-font); text-align: right; border-top: 1px solid var(--app-divider); padding-top: 12px; }
+@media (max-width: 860px) {
+  .arch-counts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
