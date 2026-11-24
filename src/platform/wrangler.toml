@@ -100,6 +100,12 @@ service = "pigeon-ci-gateway"
 binding = "AI_AGENTS"
 service = "pigeon-ai-agents"
 
+# The cloud gateway Worker (docs/plans/cloud-gateway.md): deployed by its first landing, bound
+# here after. Its tools answer "Scaleway is not set up" until the person sets the Scaleway slots.
+[[services]]
+binding = "CLOUD"
+service = "pigeon-cloud-gateway"
+
 # The GitHub App (src/capabilities/src/github.rs): its private key and webhook secret, set by the
 # person on the Access tab; bound once they exist, since a binding to a missing secret fails the
 # deploy.

@@ -776,6 +776,7 @@ fn core_architecture_draws_every_worker_in_the_map() {
         ("MODELS", "pigeon-model-gateway"),
         ("CI", "pigeon-ci-gateway"),
         ("AI_AGENTS", "pigeon-ai-agents"),
+        ("CLOUD", "pigeon-cloud-gateway"),
     ] {
         assert!(has("pigeon-platform", to, binding), "core binds {binding}");
     }
@@ -785,6 +786,7 @@ fn core_architecture_draws_every_worker_in_the_map() {
         "pigeon-ci-gateway",
         "pigeon-proxy",
         "pigeon-ai-agents",
+        "pigeon-cloud-gateway",
     ] {
         assert!(has(from, "pigeon-platform", "PLATFORM"), "{from}: PLATFORM");
     }
@@ -840,7 +842,7 @@ fn core_architecture_draws_every_worker_in_the_map() {
     // The drawing names every link's binding and every external, in both views.
     let public_drawing = render(&public(&described));
     for view in [&drawing, &public_drawing] {
-        for binding in ["SITES", "MODELS", "CI", "AI_AGENTS", "PLATFORM"] {
+        for binding in ["SITES", "MODELS", "CI", "AI_AGENTS", "CLOUD", "PLATFORM"] {
             assert!(view.contains(binding), "{binding} labels an arrow");
         }
         for name in &externals {

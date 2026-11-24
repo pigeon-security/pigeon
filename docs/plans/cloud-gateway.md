@@ -1,6 +1,6 @@
 # The Cloud Gateway: cloud providers behind one capability Worker
 
-Status: **Phases 0 to 2 landing** (plan by planner run `vSg5LiNay8Uw`; phase 1 by executor
+Status: **Phases 0 to 3 landed; phase 4 landing** (plan by planner run `vSg5LiNay8Uw`; phase 1 by executor
 `KmMJEBZ8UUNA`; phase 2 and the restack by planner run `qzv3qK9SBfNU`). Ships latent: no
 Scaleway credential exists yet, and every tool says so until the person sets the slots and the
 bindings land (phase 6). The person's morning steps are in "For the person". Open items are
@@ -275,8 +275,9 @@ nowhere else: never paste it into a chat, a command or a file.
 
 ## Open items
 
-1. **Phases 3 and 4** (first deploy, then core binds `CLOUD`): after the landing of phases 0 to
-   2 has deployed. Waits on: that landing.
+1. **Phase 4** (core binds `CLOUD`): landing now. Phase 3 needed no landing of its own: the
+   one-landing path for a new Worker (`core_land_adds_a_worker_in_one_landing`) deployed
+   `pigeon-cloud-gateway` with phases 0 to 2. Then phase 5, a live check through the portal.
 2. **The Scaleway slots and their bindings** (phase 6). Waits on: the person (morning steps).
 3. **The Access tab lists `CLOUD_…` slots** a plan writes? Today it lists only declared slots;
    a written slot exists in the Secrets Store but is not shown. Later, if wanted.
@@ -302,3 +303,6 @@ nowhere else: never paste it into a chat, a command or a file.
   `take` work only for the caller that made the approval, an addition to Decision 6. Smoke:
   `core_approval_op_for_capability_workers`, and `core_architecture_draws_every_worker_in_the_map`
   draws the cloud gateway's real manifest entry and its four hosts.
+- Landing `VMd5RhGvdu9UOtOv` (phases 0 to 2, commit `79497ebed392`) landed and deployed all seven
+  lanes, including `cloud-gateway`. Phase 4 follows: `CLOUD` in core's `wrangler.toml` and
+  `settings::BINDINGS`, and the architecture scenario checks the link.

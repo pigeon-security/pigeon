@@ -153,6 +153,10 @@ pub const BINDINGS: &[Binding] = &[
         binding: "AI_AGENTS",
         worker: "pigeon-ai-agents",
     },
+    Binding {
+        binding: "CLOUD",
+        worker: "pigeon-cloud-gateway",
+    },
 ];
 
 /// The object storage accounts. Empty on purpose: storage stays off until the person declares
