@@ -43,7 +43,7 @@ struct SecretsView: View {
             title: "Secrets", errors: [secrets.error].compactMap { $0 },
             refresh: { await secrets.load(session.client) }
         ) {
-            if saved { Toast(text: "Secret set.") }
+            if saved { Toast("Secret set.") }
             if let rows {
                 if slots.count != rows.count {
                     ErrorBanner(text: "Some secret slots couldn't be read.")
