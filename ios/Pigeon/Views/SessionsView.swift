@@ -273,18 +273,21 @@ struct SessionsView: View {
     /// The top card: how many things need the person, or that all is caught up.
     private var needsCard: some View {
         let n = needs.count
+        let incomplete = !needs.loaded || needs.loadingNotices || !needs.readErrors.isEmpty
+        let awaitingNotices = !needs.checkedNotices
         return PlainCard(radius: Metrics.cardRadiusLarge) {
             HStack(spacing: 12) {
                 if n > 0 {
                     CountBadge(count: n)
                 } else {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 30)).foregroundStyle(Tokens.good)
+                    Image(systemName: incomplete || awaitingNotices ? "bell" : "checkmark.circle.fill")
+                        .font(.system(size: 30))
+                        .foregroundStyle(incomplete || awaitingNotices ? Tokens.muted : Tokens.good)
                 }
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(n == 0 ? "You're all caught up" : n == 1 ? "One thing needs your call" : "\(n) things need your call")
+                    Text(n > 0 || incomplete || awaitingNotices ? "Needs you" : "You're all caught up")
                         .font(AppFont.cardTitle).foregroundStyle(Tokens.ink)
-                    Text(n == 0 ? "Your agents have what they need" : needsSubline)
+                    Text(n > 0 ? needsSubline : emptyNeedsSubline)
                         .font(AppFont.meta).foregroundStyle(Tokens.muted)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -294,7 +297,15 @@ struct SessionsView: View {
         }
     }
 
-    /// "1 question · 1 decision to check · 2 approvals"; parts at zero are left out.
+    /// The empty card distinguishes unread notices from an empty inbox.
+    private var emptyNeedsSubline: String {
+        if !needs.readErrors.isEmpty { return "Some items couldn't be checked" }
+        if !needs.loaded || needs.loadingNotices { return "Checking for items…" }
+        if !needs.checkedNotices { return "Open to check for notices" }
+        return "Your agents have what they need"
+    }
+
+    /// Counts each kind of inbox item and read-only notice.
     private var needsSubline: String {
         var parts: [String] = []
         let q = needs.questions.count
@@ -303,6 +314,10 @@ struct SessionsView: View {
         if q > 0 { parts.append("\(q) question\(q == 1 ? "" : "s")") }
         if d > 0 { parts.append("\(d) decision\(d == 1 ? "" : "s") to check") }
         if a > 0 { parts.append("\(a) approval\(a == 1 ? "" : "s")") }
+        let grants = needs.expiringGrants.count
+        let updates = needs.breakingUpdates.count
+        if grants > 0 { parts.append("\(grants) expiring grant\(grants == 1 ? "" : "s")") }
+        if updates > 0 { parts.append("\(updates) breaking update\(updates == 1 ? "" : "s")") }
         return parts.joined(separator: " · ")
     }
 }

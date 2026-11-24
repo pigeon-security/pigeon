@@ -7,6 +7,8 @@ final class MCPClient {
     private var initialized = false
     private var nextId = 1
     private var sessionId: String?
+    private var lastCost: (date: Date, payload: [String: Any])?
+    private var costGeneration = 0
     private let onSignedOut: @MainActor () -> Void
 
     /// A client that calls `onSignedOut` when the platform refuses the tokens for good.
@@ -14,8 +16,41 @@ final class MCPClient {
         self.onSignedOut = onSignedOut
     }
 
-    /// Calls the tool `name` and answers its data: `structuredContent`, else the JSON in the text.
+    /// Calls the tool and remembers the latest Cost payload for the grant notices.
     func call(_ name: String, _ arguments: [String: Any] = [:]) async throws -> Any {
+        let started = Date()
+        let generation = costGeneration
+        let data = try await toolResult(name, arguments)
+        if name == "cost_daily", generation == costGeneration, !Task.isCancelled,
+            let payload = data as? [String: Any], lastCost.map({ $0.date <= started }) ?? true
+        {
+            lastCost = (started, payload)
+        }
+        return data
+    }
+
+    /// Reads Cost once for notices, reusing a recent payload from any range on detail opening.
+    func grantCost(reuse: Bool) async throws -> Any {
+        let now = Date()
+        var utc = Calendar(identifier: .gregorian)
+        utc.timeZone = .gmt
+        if reuse, let lastCost, now.timeIntervalSince(lastCost.date) < 300,
+            utc.isDate(lastCost.date, inSameDayAs: now),
+            (lastCost.payload["credits"] as? [String: Any])?["grants"] is [[String: Any]]
+        {
+            return lastCost.payload
+        }
+        return try await call("cost_daily", ["range": "today"])
+    }
+
+    /// Drops shared Cost data and prevents in-flight requests from repopulating it on sign-out.
+    func forgetCost() {
+        costGeneration += 1
+        lastCost = nil
+    }
+
+    /// Answers structured content, or the JSON in the tool's text.
+    private func toolResult(_ name: String, _ arguments: [String: Any]) async throws -> Any {
         try await ensureInitialized()
         let result = try await rpc("tools/call", ["name": name, "arguments": arguments])
         let text = ((result["content"] as? [[String: Any]])?.first?["text"]) as? String

@@ -94,10 +94,73 @@ final class NeedsYouModel {
     @ObservationIgnored private let approver = Approver()
     @ObservationIgnored private static let dismissedKey = "dismissedNotices"
 
-    /// How many things need the person, for the Sessions badge.
-    var count: Int { questions.count + decisions.count + approvals.count }
+    private var grants: [GrantExpiry] = []
+    private var noticeDay = Date.now
+    private(set) var breakingUpdates: [BreakingUpdate] = []
+    private(set) var grantError: String?
+    private(set) var upgradeError: String?
+    private(set) var loadingNotices = false
+    private(set) var checkedNotices = false
 
-    /// Fetches both lists. A failure in one keeps the other's items.
+    /// Checks the UTC window locally, without asking Cost again.
+    func updateNoticeDay() { noticeDay = .now }
+
+    /// Positive balances expiring today through seven UTC days from today.
+    var expiringGrants: [(GrantExpiry, Int)] {
+        grants.compactMap { grant in
+            guard let days = grant.daysLeft(on: noticeDay), (0...7).contains(days) else { return nil }
+            return (grant, days)
+        }
+    }
+
+    /// The shared total for the detail, the Sessions card and the tab badge.
+    var count: Int {
+        questions.count + decisions.count + approvals.count + expiringGrants.count + breakingUpdates.count
+    }
+
+    /// Shows which reads failed without surfacing tool payloads or identifiers.
+    var readErrors: [String] { [loadError, inboxError, grantError, upgradeError].compactMap { $0 } }
+
+    /// Loads notices only from the detail. Inbox actions still call `load` alone.
+    func loadDetail(_ client: MCPClient, reuseCost: Bool) async {
+        guard !loadingNotices else { return }
+        loadingNotices = true
+        defer { loadingNotices = false }
+        async let inbox: Void = load(client)
+        async let grantNotices: Void = loadGrants(client, reuseCost: reuseCost)
+        async let upgradeNotices: Void = loadBreakingUpdates(client)
+        _ = await (inbox, grantNotices, upgradeNotices)
+        if !Task.isCancelled { checkedNotices = true }
+    }
+
+    private func loadGrants(_ client: MCPClient, reuseCost: Bool) async {
+        do {
+            let fresh = try GrantExpiry.read(try await client.grantCost(reuse: reuseCost))
+            guard !Task.isCancelled else { return }
+            updateNoticeDay()
+            grants = fresh
+            grantError = nil
+        } catch {
+            guard !Task.isCancelled else { return }
+            grants = []
+            grantError = "Grant expiry notices are unavailable. Pull to refresh."
+        }
+    }
+
+    private func loadBreakingUpdates(_ client: MCPClient) async {
+        do {
+            let fresh = try BreakingUpdate.read(try await client.call("capabilities_upgrade_plan"))
+            guard !Task.isCancelled else { return }
+            breakingUpdates = fresh
+            upgradeError = nil
+        } catch {
+            guard !Task.isCancelled else { return }
+            breakingUpdates = []
+            upgradeError = "Breaking update notices are unavailable. Pull to refresh."
+        }
+    }
+
+    /// Fetches both inbox lists. A failure in one keeps the other's items.
     func load(_ client: MCPClient) async {
         await loadApprovals(client)
         await loadInbox(client)
@@ -285,10 +348,12 @@ struct NeedsYouView: View {
     var body: some View {
         Screen(
             title: "Needs you",
-            errors: [model.loadError, model.inboxError, model.actionError].compactMap { $0 },
-            refresh: { await model.load(session.client) }
+            errors: model.readErrors + [model.actionError].compactMap { $0 },
+            refresh: { await model.loadDetail(session.client, reuseCost: false) }
         ) {
-            if model.count == 0 && model.loaded {
+            if model.loadingNotices || !model.checkedNotices {
+                ProgressView("Checking for notices…")
+            } else if model.count == 0 && model.loaded && model.readErrors.isEmpty {
                 PlainCard {
                     Text("You're all caught up").font(AppFont.cardTitle)
                         .foregroundStyle(Tokens.ink)
@@ -323,11 +388,12 @@ struct NeedsYouView: View {
                     }
                 }
             }
+            NeedsYouNotices(model: model)
             if let notice = model.notice {
                 Toast(notice)
             }
         }
-        .task { await model.load(session.client) }
+        .task { await model.loadDetail(session.client, reuseCost: true) }
     }
 }
 

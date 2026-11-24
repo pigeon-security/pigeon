@@ -25,6 +25,7 @@ final class Session {
     func signOut() {
         Keychain.delete(Keychain.Key.tokens)
         Keychain.delete(Keychain.Key.clientId)
+        client.forgetCost()
         signedIn = false
     }
 }

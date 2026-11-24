@@ -47,6 +47,7 @@ private struct MinimizeTabBar: ViewModifier {
 /// The signed-in tabs or the sign-in screen, by whether a session exists.
 struct Root: View {
     let session: Session
+    @Environment(\.scenePhase) private var scenePhase
     @State private var needs = NeedsYouModel()
     @State private var sessions = SessionsModel()
     @State private var store = InstanceStore()
@@ -61,6 +62,9 @@ struct Root: View {
             }
         }
         .tint(Tokens.accent)
+        .onChange(of: session.signedIn) { _, signedIn in
+            if !signedIn { needs = NeedsYouModel() }
+        }
     }
 
     /// The system tab bar with one navigation stack per tab.
@@ -79,6 +83,19 @@ struct Root: View {
         .environment(\.showAllInstances) { tab = .settings }
         // Counts waiting items for the badge even before the Sessions tab is opened.
         .task { await needs.load(session.client) }
+        // Refresh expiry windows at UTC midnight and on foregrounding, without a tool call.
+        .task(id: scenePhase) {
+            guard scenePhase == .active else { return }
+            while !Task.isCancelled {
+                needs.updateNoticeDay()
+                let utc = GrantExpiry.utc
+                let now = Date.now
+                guard let tomorrow = utc.date(byAdding: .day, value: 1, to: utc.startOfDay(for: now))
+                else { return }
+                do { try await Task.sleep(for: .seconds(tomorrow.timeIntervalSince(now))) }
+                catch { return }
+            }
+        }
         .task { await store.load(session.client) }
         // Asks to allow notifications and registers the device, at launch and after sign-in.
         .task { await Push.shared.start(session.client) }
