@@ -719,10 +719,17 @@ fn models_capability_table_openai_rows() {
         let out = req(m, json!({}));
         assert_eq!(out["reasoning"], json!({ "effort": "high" }), "{m}");
         assert!(out.get("messages").is_none() && out.get("reasoning_effort").is_none());
-        // Tools but no effort asked: chat, with effort `none`.
+        // Tools but no effort asked: luna stays on chat with `none`; the others refuse `none`,
+        // so they go to Responses with effort low.
         let chat = req(m, json!({ "output_config": {} }));
-        assert_eq!(chat["reasoning_effort"], "none", "{m}");
-        assert!(chat["messages"].is_array(), "{m}");
+        if caps.accepts_none {
+            assert_eq!(chat["reasoning_effort"], "none", "{m}");
+            assert!(chat["messages"].is_array(), "{m}");
+        } else {
+            assert_eq!(chat["reasoning"], json!({ "effort": "low" }), "{m}");
+            assert!(chat.get("reasoning_effort").is_none(), "{m}");
+            assert!(chat.get("messages").is_none(), "{m}");
+        }
     }
     let no_tools = openai::request(&json!({
         "model": "gpt-6-luna", "output_config": { "effort": "low" },
@@ -1042,7 +1049,7 @@ fn models_openai_responses_request() {
     assert_eq!(openai::request(&r2).unwrap()["tool_choice"], "required");
     assert_eq!(Dialect::OpenAi.path_for(&out), "responses");
     let chat = openai::request(&json!({
-        "model": "gpt-6.1-terra", "tools": [{ "name": "f", "input_schema": {} }],
+        "model": "gpt-6-luna", "tools": [{ "name": "f", "input_schema": {} }],
         "messages": [{ "role": "user", "content": "x" }]
     }))
     .unwrap();

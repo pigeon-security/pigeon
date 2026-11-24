@@ -49,6 +49,10 @@ pub struct Capabilities {
     /// Whether Chat Completions takes function tools and a reasoning effort in one request. When
     /// not, the effort is sent as `none` beside tools.
     pub effort_with_tools: bool,
+    /// Whether the model accepts `reasoning_effort` `none`. The values it accepts besides are
+    /// `low`, `medium` and `high` (and `xhigh`, which is never sent). When not, a tool turn
+    /// with no effort is sent as `low`.
+    pub accepts_none: bool,
     /// The endpoint it is called on.
     pub endpoint: Endpoint,
     /// Whether it takes `tool_choice` `auto`.
@@ -86,6 +90,7 @@ pub const SAFE: Capabilities = Capabilities {
     tools: true,
     effort: false,
     effort_with_tools: false,
+    accepts_none: false,
     endpoint: Endpoint::Chat,
     auto: true,
     any: false,
@@ -164,7 +169,15 @@ const TABLE: &[(&str, Capabilities)] = &[
     ),
     // OpenAI's page for gpt-6-luna: "Chat Completions supports function calling only with
     // reasoning_effort set to none." Its 400 says the same.
-    ("gpt-6-luna", OPENAI_ALL),
+    (
+        "gpt-6-luna",
+        Capabilities {
+            accepts_none: true,
+            ..OPENAI_ALL
+        },
+    ),
+    // gpt-6.2-sol takes low, medium, high and xhigh and refuses `none` (a live 400,
+    // 2026-11-24). Astra and terra are assumed to be the same.
     ("gpt-6.2-astra", OPENAI_ALL),
     ("gpt-6.2-sol", OPENAI_ALL),
     ("gpt-6.1-terra", OPENAI_ALL),

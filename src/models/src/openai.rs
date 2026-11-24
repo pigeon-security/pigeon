@@ -20,13 +20,23 @@ fn effort_asked(body: &Value) -> Option<&str> {
         .filter(|e| matches!(*e, "low" | "medium" | "high"))
 }
 
+/// The effort to send: the one asked, or `low` for a tool turn on a model that refuses `none`.
+fn effort_sent<'a>(body: &'a Value, caps: &Capabilities) -> Option<&'a str> {
+    let has_tools = caps.tools && !tools(body.get("tools")).is_empty();
+    match effort_asked(body) {
+        Some(e) => Some(e),
+        None if caps.effort && has_tools && !caps.accepts_none => Some("low"),
+        None => None,
+    }
+}
+
 /// Whether `body`, a checked Messages request, goes to the Responses API: its model's row says
-/// so, it has tools and it asks for an effort. Pure.
+/// so, it has tools and it has an effort to send. Pure.
 pub fn wants_responses(body: &Value) -> bool {
     let caps = capabilities::of(body["model"].as_str().unwrap_or(""));
     caps.uses_responses(
         caps.tools && !tools(body.get("tools")).is_empty(),
-        effort_asked(body).is_some(),
+        effort_sent(body, &caps).is_some(),
     )
 }
 
@@ -334,7 +344,7 @@ fn responses(map: &Map<String, Value>) -> Result<Value, String> {
             out.insert("parallel_tool_calls".into(), json!(p));
         }
     }
-    if let Some(effort) = effort_asked(&Value::Object(map.clone())) {
+    if let Some(effort) = effort_sent(&Value::Object(map.clone()), &caps) {
         out.insert("reasoning".into(), json!({ "effort": effort }));
     }
     if let Some(n) = map.get("max_tokens").and_then(Value::as_u64) {

@@ -2740,15 +2740,19 @@ fn ai_agents_role_effort_routes_openai_to_responses() {
         assert_eq!(req["output_config"]["effort"], want);
         assert!(pigeon_models::openai::wants_responses(&req));
     }
-    // The last turn carries no effort: it goes to chat completions.
+    // The last turn carries no effort; terra refuses `none`, so it still goes to Responses.
+    let report = [json!({
+        "name": "report", "description": "d",
+        "input_schema": { "type": "object", "properties": {} }
+    })];
     let spec = Spec {
         role: Role::Executor,
         model: "gpt-6.1-terra",
         system: "rules",
-        tools: &tools,
+        tools: &report,
     };
     let last = transcript::last_turn_request(&spec, &messages);
-    assert!(!pigeon_models::openai::wants_responses(&last));
+    assert!(pigeon_models::openai::wants_responses(&last));
     // Anthropic: a Claude without thinking carries none; a thinking Claude's mechanical turn too.
     for model in ["claude-haiku-5-5", "claude-sonnet-5-5"] {
         let spec = Spec {
@@ -2788,7 +2792,7 @@ fn models_job_endpoint_chat_or_responses() {
     }]);
     let req = |effort: Option<&str>| {
         let mut r = json!({
-            "model": "gpt-6.1-terra", "max_tokens": 100, "tools": tools,
+            "model": "gpt-6-luna", "max_tokens": 100, "tools": tools,
             "messages": [{ "role": "user", "content": "go" }]
         });
         if let Some(e) = effort {
@@ -2820,6 +2824,36 @@ fn ai_agents_token_capacity_retries_the_same_turn() {
         on_failure("cancelled", error, 1, 0, &["model"]),
         Recovery::Fail
     );
+}
+
+/// The last turn never sends a reasoning effort the model refuses: gpt-6.2-sol goes to Responses
+/// with effort low, luna stays on chat with `none`, and a Claude request has no effort.
+#[test]
+fn ai_agents_last_turn_sends_an_accepted_effort() {
+    use pigeon_ai_agents::Role;
+    use pigeon_ai_agents::transcript::{self, Spec};
+    let tools = [json!({
+        "name": "report", "description": "d",
+        "input_schema": { "type": "object", "properties": {} }
+    })];
+    let messages = [json!({ "role": "user", "content": "go" })];
+    let last = |model: &str| {
+        let spec = Spec {
+            role: Role::Executor,
+            model,
+            system: "rules",
+            tools: &tools,
+        };
+        transcript::last_turn_request(&spec, &messages)
+    };
+    let sol = pigeon_models::openai::request(&last("openai/gpt-6.2-sol")).unwrap();
+    assert_eq!(sol["reasoning"], json!({ "effort": "low" }));
+    assert!(sol.get("reasoning_effort").is_none() && sol.get("messages").is_none());
+    let luna = pigeon_models::openai::request(&last("gpt-6-luna")).unwrap();
+    assert_eq!(luna["reasoning_effort"], "none");
+    assert!(luna["messages"].is_array());
+    let claude = last("claude-opus-5-5");
+    assert!(claude.get("output_config").is_none());
 }
 
 #[test]

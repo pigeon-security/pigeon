@@ -491,7 +491,7 @@ fn platform_cost_daily_sources_status() {
 fn models_openai_request_translation() {
     use pigeon_models::openai;
     let req = json!({
-        "model": "gpt-6.2-sol",
+        "model": "gpt-6-luna",
         "max_tokens": 500,
         "stream": true,
         "system": [
@@ -530,7 +530,7 @@ fn models_openai_request_translation() {
         ]
     });
     let out = openai::request(&req).unwrap();
-    assert_eq!(out["model"], "gpt-6.2-sol");
+    assert_eq!(out["model"], "gpt-6-luna");
     assert_eq!(out["max_completion_tokens"], 500);
     assert!(out.get("max_tokens").is_none());
     assert_eq!(out["stream"], true);
@@ -583,7 +583,7 @@ fn models_openai_request_translation() {
     // The other tool choices, an unknown effort and a string system prompt.
     let small = |extra: Value| {
         let mut r = json!({
-            "model": "gpt-6.2-sol",
+            "model": "gpt-6-luna",
             "system": "s",
             "tools": [{ "name": "f", "input_schema": {} }],
             "messages": [{ "role": "user", "content": "x" }]
