@@ -947,3 +947,248 @@ fn core_console_platform_section() {
     assert_eq!(snapshot::fresh_ms("platform"), Some(600_000));
     assert!(page::SCRIPTS.contains(&"/console/platform.js"));
 }
+
+/// 2026-11-24T06:00:00Z in milliseconds since the epoch.
+const TOKEN_NOW_MS: i64 = 1_795_500_000_000;
+
+/// Runs a future that never waits to its end, with no runtime.
+fn token_block_on<F: std::future::Future>(f: F) -> F::Output {
+    use std::task::{Context, Poll, Waker};
+    let mut cx = Context::from_waker(Waker::noop());
+    let mut f = std::pin::pin!(f);
+    loop {
+        if let Poll::Ready(v) = f.as_mut().poll(&mut cx) {
+            return v;
+        }
+    }
+}
+
+/// A token list with a cap, a page size, failing deletes and a record of deletes.
+struct MockTokens {
+    tokens: std::cell::RefCell<Vec<pigeon_core::tokens::Listed>>,
+    cap: usize,
+    page_size: usize,
+    fail_delete: Vec<&'static str>,
+    deleted: std::cell::RefCell<Vec<String>>,
+    next: std::cell::Cell<u32>,
+}
+
+impl MockTokens {
+    fn new(cap: usize, page_size: usize) -> Self {
+        Self {
+            tokens: Default::default(),
+            cap,
+            page_size,
+            fail_delete: Vec::new(),
+            deleted: Default::default(),
+            next: std::cell::Cell::new(100),
+        }
+    }
+
+    fn add(&self, id: &str, name: &str, expires_on: Option<&str>, status: &str) {
+        self.tokens.borrow_mut().push(pigeon_core::tokens::Listed {
+            id: id.into(),
+            name: name.into(),
+            expires_on: expires_on.map(Into::into),
+            status: status.into(),
+        });
+    }
+}
+
+impl pigeon_core::tokens::TokenApi for MockTokens {
+    async fn list(&self, page: u32) -> worker::Result<Vec<pigeon_core::tokens::Listed>> {
+        let from = (page as usize - 1) * self.page_size;
+        Ok(self
+            .tokens
+            .borrow()
+            .iter()
+            .skip(from)
+            .take(self.page_size)
+            .cloned()
+            .collect())
+    }
+
+    async fn create(&self, body: &Value) -> worker::Result<pigeon_core::tokens::Minted> {
+        if self.tokens.borrow().len() >= self.cap {
+            return Err(worker::Error::RustError(
+                r#"/accounts/acct/tokens: 400: [{"code":1001,"message":"Quota limit exceeded. You can create no more than 500 tokens"}]"#
+                    .into(),
+            ));
+        }
+        let n = self.next.get();
+        self.next.set(n + 1);
+        let id = format!("t{n}");
+        let expires_on = body["expires_on"].as_str().unwrap_or_default();
+        self.add(
+            &id,
+            body["name"].as_str().unwrap_or_default(),
+            Some(expires_on),
+            "active",
+        );
+        Ok(pigeon_core::tokens::Minted {
+            id,
+            value: "v".into(),
+            expires_on: expires_on.into(),
+        })
+    }
+
+    async fn delete(&self, id: &str) -> worker::Result<()> {
+        if self.fail_delete.contains(&id) {
+            return Err(worker::Error::RustError("delete refused".into()));
+        }
+        self.tokens.borrow_mut().retain(|t| t.id != id);
+        self.deleted.borrow_mut().push(id.into());
+        Ok(())
+    }
+}
+
+#[test]
+fn core_token_minted_names() {
+    use pigeon_core::tokens::{minted, name};
+    let t = "2026-11-24T05:04:00Z";
+    for (n, purpose) in [
+        (format!("pigeon:worker-workers_ai:{t}"), "worker-workers_ai"),
+        (format!("pigeon:upload worker:{t}"), "upload worker"),
+        (format!("pigeon:artifacts:{t}"), "artifacts"),
+    ] {
+        assert_eq!(minted(&n), Some(purpose), "{n}");
+    }
+    assert_eq!(name("artifacts", t), format!("pigeon:artifacts:{t}"));
+    assert_eq!(minted(&name("a b", t)), Some("a b"));
+    for n in [
+        "",
+        "pigeon:",
+        "pigeon:x",
+        "pigeon:x:notatime",
+        "my-own-token",
+        "pigeon::2026-11-24T05:04:00Z",
+        "pigeon:a:b:2026-11-24T05:04:00Z",
+        "pigeon:x:2026-11-24T05:04:00Z-suffix",
+        "pigeon:x:2026-11-24T05:04:00.000Z",
+        "pigeon:x:2026-11-24 05:04:00Z",
+        "pigeon:x:2026-11-24T05:04:00",
+        "x:pigeon:x:2026-11-24T05:04:00Z",
+        "pigeon:é:2026-11-24T05:04:00Z",
+    ] {
+        // The multi-byte purpose is a valid name; every other entry is not.
+        if n.contains('é') {
+            assert_eq!(minted(n), Some("é"));
+        } else {
+            assert_eq!(minted(n), None, "{n}");
+        }
+    }
+}
+
+#[test]
+fn core_token_sweep_plan_and_counts() {
+    use pigeon_core::tokens::{sweep, sweep_plan};
+    let mock = MockTokens::new(500, 50);
+    mock.add(
+        "t1",
+        "pigeon:a:2026-11-24T04:00:00Z",
+        Some("2026-11-24T05:00:00Z"),
+        "active",
+    );
+    mock.add(
+        "t2",
+        "pigeon:a:2026-11-24T05:50:00Z",
+        Some("2026-11-24T06:05:00Z"),
+        "active",
+    );
+    mock.add("t3", "pigeon:a:2026-11-24T04:00:00Z", None, "active");
+    mock.add(
+        "t4",
+        "my-own-token",
+        Some("2020-01-01T00:00:00Z"),
+        "expired",
+    );
+    mock.add("t5", "pigeon:b:2026-11-24T04:00:00Z", None, "expired");
+    mock.add(
+        "t6",
+        "pigeon:b:2026-11-24T04:00:00Z",
+        Some("2026-11-24T05:59:59.500Z"),
+        "active",
+    );
+    assert_eq!(
+        sweep_plan(&mock.tokens.borrow(), TOKEN_NOW_MS),
+        ["t1", "t5", "t6"]
+    );
+    let report = token_block_on(sweep(&mock, TOKEN_NOW_MS)).unwrap();
+    assert_eq!(report.deleted, 3);
+    assert_eq!(report.kept_pigeon, 2);
+    assert_eq!(report.skipped_other, 1);
+    assert!(report.failed.is_empty());
+    assert_eq!(*mock.deleted.borrow(), ["t1", "t5", "t6"]);
+}
+
+#[test]
+fn core_token_sweep_goes_on_after_a_failed_delete() {
+    let mut mock = MockTokens::new(500, 50);
+    mock.fail_delete = vec!["t1"];
+    for id in ["t1", "t2", "t3"] {
+        mock.add(
+            id,
+            "pigeon:a:2026-11-24T04:00:00Z",
+            Some("2026-11-24T05:00:00Z"),
+            "active",
+        );
+    }
+    let report = token_block_on(pigeon_core::tokens::sweep(&mock, TOKEN_NOW_MS)).unwrap();
+    assert_eq!(report.deleted, 2);
+    assert_eq!(report.failed.len(), 1);
+    assert_eq!(report.failed[0].0, "t1");
+    assert_eq!(*mock.deleted.borrow(), ["t2", "t3"]);
+}
+
+#[test]
+fn core_token_sweep_pages_through_the_list() {
+    let mock = MockTokens::new(500, 2);
+    for i in 0..7 {
+        let name = if i % 2 == 0 {
+            "pigeon:a:2026-11-24T04:00:00Z"
+        } else {
+            "other"
+        };
+        mock.add(
+            &format!("t{i}"),
+            name,
+            Some("2026-11-24T05:00:00Z"),
+            "active",
+        );
+    }
+    let report = token_block_on(pigeon_core::tokens::sweep(&mock, TOKEN_NOW_MS)).unwrap();
+    assert_eq!((report.deleted, report.skipped_other), (4, 3));
+}
+
+#[test]
+fn core_token_sweep_frees_the_quota() {
+    use pigeon_core::tokens::{TokenApi, name, sweep};
+    let mock = MockTokens::new(3, 2);
+    for id in ["t1", "t2", "t3"] {
+        mock.add(
+            id,
+            "pigeon:a:2026-11-24T04:00:00Z",
+            Some("2026-11-24T05:00:00Z"),
+            "active",
+        );
+    }
+    let body = json!({
+        "name": name("a", "2026-11-24T06:00:00Z"),
+        "expires_on": "2026-11-24T07:00:00Z",
+    });
+    let err = token_block_on(mock.create(&body))
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(
+        err.contains("1001") && err.contains("Quota limit exceeded"),
+        "{err}"
+    );
+    let report = token_block_on(sweep(&mock, TOKEN_NOW_MS)).unwrap();
+    assert_eq!(report.deleted, 3);
+    let made = token_block_on(mock.create(&body)).unwrap();
+    assert_eq!(made.expires_on, "2026-11-24T07:00:00Z");
+    // The new token is live, so a second sweep keeps it.
+    let report = token_block_on(sweep(&mock, TOKEN_NOW_MS)).unwrap();
+    assert_eq!((report.deleted, report.kept_pigeon), (0, 1));
+}

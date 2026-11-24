@@ -181,3 +181,5 @@ ai-agents and can run beside phase 1).
   900 s token for the model job that nobody revoked, so live tokens grew with turns times runs.
   The `pigeon:worker-` revoke check (2026-11-24 03:32) was not the cause.
 - **2026-11-24, this plan.** Inventory written; phases 1 to 4 planned.
+- **2026-11-24, phase 1.** Added `tokens::minted`, `tokens::name`, `TokenApi`, `sweep_plan` and `sweep`;
+  `scoped_token_revocable` uses the shared `WORKER_NAME_PREFIX`; the platform cron sweeps every fifth minute; `core_token_*` smoke scenarios.

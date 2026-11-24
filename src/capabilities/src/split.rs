@@ -422,21 +422,20 @@ pub fn grant_person(caller: Option<&Caller>) -> std::result::Result<String, Stri
     }
 }
 
-/// The name prefix of every token core mints for a capability Worker ([`scoped`]): the tokens
-/// API names a token `pigeon:<purpose>:<time>` and the purpose starts with `worker-`.
-const SCOPED_NAME_PREFIX: &str = "pigeon:worker-";
-
 /// Whether a token named `name` is one core minted for a capability Worker, and so one
-/// `credential_revoke` may end. Any other token (the parent, a person's, a job's) is refused.
-/// Pure.
+/// `credential_revoke` may end. Workers may revoke only `pigeon:worker-` tokens
+/// ([`pigeon_core::tokens::WORKER_NAME_PREFIX`]); any other token (the parent, a person's, a
+/// job's, or another pigeon token, see [`pigeon_core::tokens::minted`]) is refused. Pure.
 pub fn scoped_token_revocable(name: &str) -> bool {
-    name.starts_with(SCOPED_NAME_PREFIX)
+    name.starts_with(pigeon_core::tokens::WORKER_NAME_PREFIX)
 }
 
 /// `credential_revoke`: ends AI agent run `instance`'s git grant for the caller's person, or
 /// (kind `scoped`) the scoped token whose id is `instance`. A scoped token is read from
-/// Cloudflare first and revoked only when [`scoped_token_revocable`] accepts its name.
-/// Answers `{"revoked": n}`; a grant or token already gone is `0`, not an error.
+/// Cloudflare first and revoked only when [`scoped_token_revocable`] accepts its name (a
+/// `pigeon:worker-` token; see [`pigeon_core::tokens::minted`] for pigeon's names). This check
+/// was not the cause of the 2026-11-24 quota incident and is not widened: the cause was tokens
+/// nobody revoked (docs/plans/token-minting.md). Answers `{"revoked": n}`; a grant or token already gone is `0`, not an error.
 async fn credential_revoke(cx: &Context<'_>, r: &CredentialRequest) -> Result<Value> {
     if r.kind == "scoped" {
         let id = r

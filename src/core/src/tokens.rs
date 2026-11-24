@@ -152,7 +152,7 @@ pub async fn mint(parent: &str, account: &str, request: &MintRequest) -> Result<
     let now = Date::now();
     let expires_on = iso(now + (request.ttl_secs as f64) * 1000.0);
     let body = json!({
-        "name": format!("pigeon:{}:{}", request.purpose, iso(now)),
+        "name": name(&request.purpose, &iso(now)),
         "policies": policies,
         "not_before": iso(now),
         "expires_on": expires_on,
@@ -211,6 +211,204 @@ pub async fn verify_detail(token: &str, account: &str) -> Result<Value> {
     )
     .await?;
     Ok(json!({ "status": v["status"], "expires_on": v["expires_on"] }))
+}
+
+/// The start of every name pigeon gives a token it mints.
+pub const NAME_PREFIX: &str = "pigeon:";
+
+/// The start of the name of every token core mints for a capability Worker. Workers may revoke
+/// only tokens whose name starts with it (see `scoped_token_revocable` in the capabilities).
+pub const WORKER_NAME_PREFIX: &str = "pigeon:worker-";
+
+/// The length of a name's time part, `YYYY-MM-DDTHH:MM:SSZ`.
+const TIME_LEN: usize = 20;
+
+/// The name of a token minted for `purpose` at `time` (RFC 3339 to the second, ending in `Z`):
+/// `pigeon:<purpose>:<time>`. [`minted`] is its inverse. Pure.
+pub fn name(purpose: &str, time: &str) -> String {
+    format!("{NAME_PREFIX}{purpose}:{time}")
+}
+
+/// Whether `t` has the shape `YYYY-MM-DDTHH:MM:SSZ`.
+fn is_time(t: &str) -> bool {
+    t.len() == TIME_LEN
+        && t.bytes().enumerate().all(|(i, b)| match i {
+            4 | 7 => b == b'-',
+            10 => b == b'T',
+            13 | 16 => b == b':',
+            19 => b == b'Z',
+            _ => b.is_ascii_digit(),
+        })
+}
+
+/// The purpose of a token name of the exact shape `pigeon:<purpose>:<YYYY-MM-DDTHH:MM:SSZ>`,
+/// with a non-empty purpose holding no `:`. Any other name (the parent token, a person's or a
+/// job's token, a name with extra parts) answers `None`. Pure.
+pub fn minted(name: &str) -> Option<&str> {
+    let rest = name.strip_prefix(NAME_PREFIX)?;
+    let split = rest.len().checked_sub(TIME_LEN + 1)?;
+    let (purpose, time) = (rest.get(..split)?, rest.get(split + 1..)?);
+    let colon = rest.as_bytes()[split] == b':';
+    (colon && !purpose.is_empty() && !purpose.contains(':') && is_time(time)).then_some(purpose)
+}
+
+/// One token as the account's token list shows it. Never holds the token's value.
+#[derive(Deserialize, Clone, Debug, PartialEq)]
+pub struct Listed {
+    /// The token's id.
+    pub id: String,
+    /// The token's name.
+    #[serde(default)]
+    pub name: String,
+    /// When it expires, RFC 3339; absent for a token that never expires.
+    #[serde(default)]
+    pub expires_on: Option<String>,
+    /// Cloudflare's status, such as `active` or `expired`.
+    #[serde(default)]
+    pub status: String,
+}
+
+/// The account's tokens, as far as the sweeper and its tests need them.
+#[allow(async_fn_in_trait)] // Workers futures are not `Send`; nothing here needs it.
+pub trait TokenApi {
+    /// One page of the account's tokens, numbered from 1. An empty page ends the list.
+    async fn list(&self, page: u32) -> Result<Vec<Listed>>;
+    /// Creates the token `body` describes (the JSON the tokens API takes).
+    async fn create(&self, body: &Value) -> Result<Minted>;
+    /// Deletes token `id`.
+    async fn delete(&self, id: &str) -> Result<()>;
+}
+
+/// [`TokenApi`] over Cloudflare, as the parent token, on one account.
+pub struct CloudflareTokens<'a> {
+    /// The parent token.
+    pub parent: &'a str,
+    /// The account's id.
+    pub account: &'a str,
+}
+
+impl TokenApi for CloudflareTokens<'_> {
+    async fn list(&self, page: u32) -> Result<Vec<Listed>> {
+        let path = format!("/accounts/{}/tokens?page={page}&per_page=50", self.account);
+        let v = call(self.parent, Method::Get, &path, None).await?;
+        Ok(serde_json::from_value(v)?)
+    }
+
+    async fn create(&self, body: &Value) -> Result<Minted> {
+        let v = call(
+            self.parent,
+            Method::Post,
+            &format!("/accounts/{}/tokens", self.account),
+            Some(body),
+        )
+        .await?;
+        match (v["id"].as_str(), v["value"].as_str()) {
+            (Some(id), Some(value)) => Ok(Minted {
+                id: id.to_string(),
+                value: value.to_string(),
+                expires_on: body["expires_on"].as_str().unwrap_or_default().to_string(),
+            }),
+            _ => Err(Error::RustError(
+                "the minted token came back without its id or value".into(),
+            )),
+        }
+    }
+
+    async fn delete(&self, id: &str) -> Result<()> {
+        revoke(self.parent, self.account, id).await
+    }
+}
+
+/// Milliseconds since the epoch of an RFC 3339 time such as `2026-11-24T05:04:00Z`, with an
+/// optional fraction, ending in `Z`. `None` when it does not parse. Pure.
+fn parse_ms(t: &str) -> Option<i64> {
+    let t = t.strip_suffix('Z')?;
+    let (t, frac) = t.split_once('.').unwrap_or((t, ""));
+    if t.len() != TIME_LEN - 1 || !frac.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let n = |r: std::ops::Range<usize>| t.get(r)?.parse::<i64>().ok();
+    let (y, m, d) = (n(0..4)?, n(5..7)?, n(8..10)?);
+    let (h, mi, s) = (n(11..13)?, n(14..16)?, n(17..19)?);
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) || h > 23 || mi > 59 || s > 60 {
+        return None;
+    }
+    // Days from the civil date (Howard Hinnant's algorithm).
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let millis: i64 = format!("{frac:0<3}")[..3].parse().ok()?;
+    Some(((days * 24 + h) * 60 + mi) * 60_000 + s * 1000 + millis)
+}
+
+/// Whether the sweeper may delete `token`: pigeon minted it and it has expired.
+fn sweepable(token: &Listed, now_ms: i64) -> bool {
+    minted(&token.name).is_some()
+        && (token.status == "expired"
+            || token
+                .expires_on
+                .as_deref()
+                .and_then(parse_ms)
+                .is_some_and(|at| at <= now_ms))
+}
+
+/// The ids to delete: tokens named by [`minted`] that have expired (an `expires_on` in the past,
+/// or status `expired`). A token of any other name, an unexpired one, and one with no
+/// `expires_on` are never in it. Pure.
+pub fn sweep_plan(tokens: &[Listed], now_ms: i64) -> Vec<String> {
+    tokens
+        .iter()
+        .filter(|t| sweepable(t, now_ms))
+        .map(|t| t.id.clone())
+        .collect()
+}
+
+/// What one sweep did: tokens `deleted`, pigeon's live tokens `kept_pigeon` (the live-token
+/// gauge), tokens `skipped_other` (not pigeon's), and the deletes that `failed` as (id, error).
+/// The errors name the account, so log their count, not their text.
+#[derive(Debug, Default, PartialEq)]
+pub struct SweepReport {
+    /// Expired pigeon tokens deleted.
+    pub deleted: usize,
+    /// Pigeon tokens left alone because they have not expired.
+    pub kept_pigeon: usize,
+    /// Tokens whose name is not pigeon's, never touched.
+    pub skipped_other: usize,
+    /// Deletes that failed, as (token id, error). They do not stop the sweep.
+    pub failed: Vec<(String, String)>,
+}
+
+/// The most pages a sweep reads, so an API that ignores `page` cannot loop it forever.
+const MAX_PAGES: u32 = 200;
+
+/// Lists the account's tokens (page by page until an empty page), deletes the expired ones
+/// named by [`minted`], and counts. A failed delete is recorded and the rest go on.
+pub async fn sweep(api: &impl TokenApi, now_ms: i64) -> Result<SweepReport> {
+    let mut all = Vec::new();
+    for page in 1..=MAX_PAGES {
+        let got = api.list(page).await?;
+        if got.is_empty() {
+            break;
+        }
+        all.extend(got);
+    }
+    let mut report = SweepReport::default();
+    for token in &all {
+        if minted(&token.name).is_none() {
+            report.skipped_other += 1;
+        } else if sweepable(token, now_ms) {
+            match api.delete(&token.id).await {
+                Ok(()) => report.deleted += 1,
+                Err(e) => report.failed.push((token.id.clone(), e.to_string())),
+            }
+        } else {
+            report.kept_pigeon += 1;
+        }
+    }
+    Ok(report)
 }
 
 /// `ms` since the epoch as RFC 3339 to the second, as the tokens API takes it.

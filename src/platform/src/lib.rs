@@ -196,13 +196,42 @@ async fn fetch(req: Request, env: Env, ctx: WorkerContext) -> Result<Response> {
 
 /// Queue messages: each capability that wants one of the batch acts once. A failure fails the
 /// batch, so the queue retries it.
-/// The minute's cron: push-started site deploys that wait or were cut off.
+/// The minute's cron: push-started site deploys that wait or were cut off, and, every fifth
+/// minute, the sweep of expired pigeon tokens.
 #[event(scheduled)]
-async fn scheduled(_event: worker::ScheduledEvent, env: Env, _ctx: worker::ScheduleContext) {
+async fn scheduled(event: worker::ScheduledEvent, env: Env, _ctx: worker::ScheduleContext) {
     match pigeon_capabilities::github::run_pending(&env).await {
         Ok(ran) if !ran.is_empty() => console_log!("github deploys: {ran:?}"),
         Ok(_) => {}
         Err(e) => console_error!("github deploys failed: {e}"),
+    }
+    let at_ms = event.schedule() as i64;
+    if (at_ms / 60_000) % 5 == 0 {
+        sweep_tokens(&env, at_ms).await;
+    }
+}
+
+/// Deletes the account's expired pigeon-minted tokens and logs the counts. Errors are logged.
+async fn sweep_tokens(env: &Env, now_ms: i64) {
+    let account = match account(env).await {
+        Ok(a) => a,
+        Err(e) => return console_error!("token sweep failed: {e}"),
+    };
+    let api = pigeon_core::tokens::CloudflareTokens {
+        parent: &account.parent,
+        account: &account.id,
+    };
+    match pigeon_core::tokens::sweep(&api, now_ms).await {
+        Ok(r) => {
+            console_log!(
+                "token sweep: deleted {}, kept_pigeon {}, skipped_other {}, failed {}",
+                r.deleted,
+                r.kept_pigeon,
+                r.skipped_other,
+                r.failed.len()
+            );
+        }
+        Err(e) => console_error!("token sweep failed: {e}"),
     }
 }
 
