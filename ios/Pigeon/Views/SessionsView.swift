@@ -247,7 +247,7 @@ struct SessionsView: View {
             let finished = sessions.finishedToday
             if !finished.isEmpty {
                 NavigationLink {
-                    FinishedTodayView(runs: finished)
+                    FinishedTodayView(model: sessions, session: session)
                 } label: {
                     HStack {
                         Text("\(finished.count) finished session\(finished.count == 1 ? "" : "s") today")
@@ -309,10 +309,14 @@ struct SessionsView: View {
 
 /// A simple list of the runs that ended today: name, state and cost.
 struct FinishedTodayView: View {
-    let runs: [RunInfo]
+    let model: SessionsModel
+    let session: Session
 
     var body: some View {
-        Screen(title: "Finished today", errors: [], refresh: {}) {
+        Screen(title: "Finished today", errors: [model.loadError].compactMap { $0 },
+               refresh: { await model.load(session.client) }) {
+            let runs = model.finishedToday
+            if runs.isEmpty { Footnote("No sessions finished today.") }
             GroupedCard {
                 ForEach(Array(runs.enumerated()), id: \.element.id) { index, r in
                     if index > 0 { RowSeparator(inset: 16) }

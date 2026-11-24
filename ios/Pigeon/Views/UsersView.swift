@@ -181,7 +181,7 @@ struct UsersView: View {
                     ForEach(Array(model.people.enumerated()), id: \.element.id) { index, person in
                         if index > 0 { RowSeparator(inset: 68) }
                         NavigationLink {
-                            UserDetailView(person: person)
+                            UserDetailView(id: person.id, model: model, session: session)
                         } label: {
                             personRow(person)
                         }
@@ -215,44 +215,56 @@ struct UsersView: View {
 
 /// One person: their passkeys and the apps and service users acting for them.
 struct UserDetailView: View {
-    let person: Person
+    let id: String
+    let model: UsersModel
+    let session: Session
 
     var body: some View {
-        Screen(title: "User", errors: [], side: Metrics.sideWide, refresh: {}) {
-            VStack(spacing: 8) {
-                Avatar(name: person.name, initials: person.initials, picture: person.picture, size: 76)
-                Text(person.name).font(AppFont.name).foregroundStyle(Tokens.ink)
-                Text("Standard user · added \(timestampText(person.addedMs))")
-                    .font(AppFont.note).foregroundStyle(Tokens.muted)
+        Screen(title: "User", errors: [model.error].compactMap { $0 }, side: Metrics.sideWide,
+               refresh: { await model.load(session.client) }) {
+            if let person = model.people.first(where: { $0.id == id }) {
+                details(person)
+            } else {
+                Footnote("This person is no longer in the Users list.")
             }
-            .frame(maxWidth: .infinity)
-            .padding(.top, 8)
-            CardSection("Passkeys · \(person.passkeyCount)") {
-                GroupedCard {
-                    if person.passkeys.isEmpty {
-                        plainRow("\(person.passkeyCount) passkeys")
-                    }
-                    ForEach(Array(person.passkeys.enumerated()), id: \.element.id) { index, key in
-                        if index > 0 { RowSeparator(inset: 58) }
-                        tileRow(
-                            symbol: "key", fill: Tokens.accentSoft, colour: Tokens.accent,
-                            title: key.name, sub: passkeySub(key))
-                    }
-                }
-            }
-            CardSection("Delegation · acts for \(person.name)") {
-                GroupedCard {
-                    if person.delegates.isEmpty { plainRow("Nothing acts for this person.") }
-                    ForEach(Array(person.delegates.enumerated()), id: \.element.id) { index, d in
-                        if index > 0 { RowSeparator(inset: 58) }
-                        tileRow(
-                            symbol: "cpu", fill: Tokens.chip, colour: Tokens.ink, title: d.name,
-                            sub: "\(d.kind == "app" ? "App" : "Service user") · added \(timestampText(d.addedMs))")
-                    }
-                }
-            }
-            Footnote("Passkeys are added and removed in the console.")
         }
+    }
+
+    @ViewBuilder
+    private func details(_ person: Person) -> some View {
+        VStack(spacing: 8) {
+            Avatar(name: person.name, initials: person.initials, picture: person.picture, size: 76)
+            Text(person.name).font(AppFont.name).foregroundStyle(Tokens.ink)
+            Text("Standard user · added \(timestampText(person.addedMs))")
+                .font(AppFont.note).foregroundStyle(Tokens.muted)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, 8)
+        CardSection("Passkeys · \(person.passkeyCount)") {
+            GroupedCard {
+                if person.passkeys.isEmpty {
+                    plainRow("\(person.passkeyCount) passkeys")
+                }
+                ForEach(Array(person.passkeys.enumerated()), id: \.element.id) { index, key in
+                    if index > 0 { RowSeparator(inset: 58) }
+                    tileRow(
+                        symbol: "key", fill: Tokens.accentSoft, colour: Tokens.accent,
+                        title: key.name, sub: passkeySub(key))
+                }
+            }
+        }
+        CardSection("Delegation · acts for \(person.name)") {
+            GroupedCard {
+                if person.delegates.isEmpty { plainRow("Nothing acts for this person.") }
+                ForEach(Array(person.delegates.enumerated()), id: \.element.id) { index, d in
+                    if index > 0 { RowSeparator(inset: 58) }
+                    tileRow(
+                        symbol: "cpu", fill: Tokens.chip, colour: Tokens.ink, title: d.name,
+                        sub: "\(d.kind == "app" ? "App" : "Service user") · added \(timestampText(d.addedMs))")
+                }
+            }
+        }
+        Footnote("Passkeys are added and removed in the console.")
     }
 
     /// Formats the creation and last-use timestamps for a passkey.
