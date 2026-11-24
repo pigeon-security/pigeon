@@ -208,7 +208,8 @@ async fn fetch(req: Request, env: Env, ctx: WorkerContext) -> Result<Response> {
     }
     match (req.method(), path.as_str()) {
         (Method::Get, "/health") => Response::ok("ok"),
-        (Method::Post, "/mcp") => mcp_post(req, &env).await,
+        (Method::Options, "/mcp") => Ok(mcp_cors(Response::empty()?.with_status(204))),
+        (Method::Post, "/mcp") => mcp_post(req, &env).await.map(mcp_cors),
         (_, "/mcp") => Response::error("the MCP endpoint takes POST only", 405),
         _ => Response::error("not found", 404),
     }
@@ -324,6 +325,20 @@ async fn account(env: &Env) -> Result<Account> {
         secrets_store: env.var("CF_SECRETS_STORE_ID")?.to_string(),
         bearer: None,
     })
+}
+
+/// Lets a browser client such as ChatGPT call `/mcp`: any origin, the headers an MCP client sends,
+/// and `WWW-Authenticate` readable so it can start the OAuth flow from a 401.
+fn mcp_cors(res: Response) -> Response {
+    let headers = res.headers().clone();
+    let _ = headers.set("Access-Control-Allow-Origin", "*");
+    let _ = headers.set(
+        "Access-Control-Allow-Headers",
+        "Authorization, Content-Type, MCP-Protocol-Version, Mcp-Session-Id",
+    );
+    let _ = headers.set("Access-Control-Allow-Methods", "POST, OPTIONS");
+    let _ = headers.set("Access-Control-Expose-Headers", "WWW-Authenticate");
+    res.with_headers(headers)
 }
 
 /// One MCP message, answered as JSON; a notification gets 202 and no body. The tools are every

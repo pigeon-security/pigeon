@@ -44,6 +44,38 @@ person a tool to check it live.
 | 17a | The lint, the smoke test over every served tool, fixes to every schema, the `mcp_conformance` tool | `src/core/src/mcp.rs`, the capabilities that declare tools, `tests/smoke/core.rs` |
 | 17b | The discovery documents and payload size, read with `curl`, recorded in the Log | this file |
 
+## Live findings (2026-11-24, planner run `S4EpbKvZpBLe`, read with `curl` from outside)
+
+The two entry points, side by side:
+
+| Check | `https://mcp.pigeon.dev/mcp` (Access portal) | `https://platform.pigeon.dev/mcp` (core) |
+| --- | --- | --- |
+| Protected-resource metadata | 200 at `/.well-known/oauth-protected-resource` and `.../mcp`; `resource` is the portal, `authorization_servers` is `https://pigeon-security.cloudflareaccess.com` | 200, same two paths; `authorization_servers` is `https://platform.pigeon.dev` |
+| Authorization-server metadata | on the Access host: 200 with `registration_endpoint` (dynamic client registration), `code_challenge_methods_supported: [S256]`, grants `authorization_code` and `refresh_token`. On `mcp.pigeon.dev` itself: 200 at `/.well-known/oauth-authorization-server`, **404** at `/.well-known/oauth-authorization-server/mcp` and at `/.well-known/openid-configuration` | 200 at `/.well-known/oauth-authorization-server` and at `.../mcp`: `registration_endpoint`, `S256`, `token_endpoint_auth_methods_supported: [none]`; no openid-configuration (404) |
+| Unauthenticated POST | 401 with `WWW-Authenticate: Bearer realm="OAuth", error="invalid_token", resource_metadata="https://mcp.pigeon.dev/.well-known/oauth-protected-resource/mcp"` | 401 with `WWW-Authenticate: Bearer resource_metadata="https://platform.pigeon.dev/.well-known/oauth-protected-resource"` |
+| CORS preflight to `/mcp` from `https://chatgpt.com` | 200, `Allow-Origin: *`, `Allow-Methods: POST`; `Allow-Headers` is the list the browser asked for (`authorization, content-type, mcp-protocol-version`), and absent when the preflight asks for none. This is Cloudflare's edge answering, not pigeon | **was 405** ("takes POST only") with no CORS headers on the 401 either; the discovery, `/oauth/register` and `/oauth/token` paths do answer preflights. Fixed in `src/platform/src/lib.rs` (`mcp_cors`): `OPTIONS /mcp` gives 204, and every `/mcp` answer carries the CORS headers and `Expose-Headers: WWW-Authenticate`. Live after the next deploy |
+| CORS on discovery and registration | `Allow-Origin` echoes `https://chatgpt.com`; registration preflight 204 | `Allow-Origin: *` |
+
+The earlier note that the portal answered a preflight with `Allow-Methods: POST` only was
+right, but `Allow-Headers` is present when the preflight asks for headers, so it is not the
+failure. The platform's missing preflight answer on `/mcp` was a real gap and is fixed.
+
+**Recommendation: connect ChatGPT to `https://platform.pigeon.dev/mcp`.** Its discovery is
+complete at both well-known paths, it is pigeon's own code (we can read, test and fix it), it
+needs no dashboard setting, and its OAuth ends in a pigeon-minted bearer token that `mcp_post` accepts.
+The portal is the second choice.
+
+What is Cloudflare's to configure and what is pigeon's:
+
+- Cloudflare's (Zero Trust dashboard, the person): the portal's own metadata and CORS (the
+  portal does not serve `/.well-known/oauth-authorization-server/mcp`, the path-suffixed form
+  some clients try first), its Allow-Methods list, the Access policy that decides who may sign
+  in, and the portal's allowed redirect URIs (`https://chatgpt.com/connector_platform_oauth_redirect`
+  is already there, see [mcp-portal.md](mcp-portal.md)). Pigeon cannot change any of these from
+  code.
+- Pigeon's: everything on `platform.pigeon.dev` (discovery, registration, token, `/mcp`, CORS,
+  tool schemas, the `mcp_conformance` tool).
+
 ## Unknowns
 
 - The exact error ChatGPT showed. If it still fails, send: the message ChatGPT shows, the time,
@@ -52,3 +84,4 @@ person a tool to check it live.
 ## Log
 
 - 2026-11-25: plan written.
+- 2026-11-24: live discovery and CORS read with `curl` (section above). `OPTIONS /mcp` on the platform answered 405; it now answers 204 with CORS headers.
