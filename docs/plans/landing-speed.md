@@ -1,0 +1,105 @@
+# Landing speed: from green branch to deployed, and CI job overhead
+
+Status: **planned (2026-11-24)**; phases below are landed one by one and each records its
+before and after numbers in the Log. Planner run `OSRnBP7PiYg0`.
+
+## Goal
+
+Every later agent run gets cheaper and faster when the time between "the branch is green" and
+"landed and deployed" falls (about 10 minutes per landing today), and when a CI job stops
+spending most of its time on starting up. Correctness comes before speed: the Lander never
+lands something that was not tested for its exact tree.
+
+## What was measured (`ci_jobs` and `ci_commit`, 2026-11-23 and 24)
+
+1. **A `test` job takes 140 to 500 s, about 170 s typically, and the suite itself takes about
+   17 s.** What is left is the container start, the checkout and `cargo` building every
+   dependency from scratch (clippy for WASM, clippy and the tests natively, the settings
+   example, `cargo check -p pigeon-platform`). Example: commit `3ba923257a9d`, executor job
+   `-x17msxu9Pjfbt6ktuiLu2` 190 s, Lander job `H5kKoxV76EXxK3x2bcVkaX` 180 s.
+2. **The same commit's `test` job runs more than once.** `3ba923257a9d` was tested by its
+   executor and again by the Lander. `6a28b96b7b52` ran twice in the Lander
+   (`kG9b8Opcl1RLS9g-eQ3JD7` and a retest). `32c2f2b7287e` ran twice.
+3. **Deploy scope.** Landing `eXkOoM1zmRYWHXka` changed `ai-agents` and `model-gateway` code
+   and deployed all six Workers (core, ai-agents, ci-gateway, model-gateway, proxy, sites), core
+   first, about 2.5 minutes each. Its commit `ebfead9` touched `src/core` and `src/contract`,
+   which every Worker links (`ci/workers.toml` `[shared]`), so by crate the six were right; but
+   the map is written by hand, and a path it does not name (`src/ingest*`, `src/data-worker`)
+   counts as shared and deploys everything. The map is not checked against Cargo.
+4. **A deploy job takes 130 to 250 s.** On `3ba923257a9d`: core 217 s, ai-agents 140 s,
+   ci-gateway 154 s, model-gateway 137 s, proxy 130 s, sites 155 s. Each job builds its Worker
+   from scratch, then runs `wrangler deploy` against the stand-in and then for real. The lanes
+   also start about 25 to 30 s apart, not together.
+5. **Merge to landed.** For `3ba923257a9d` the test job ended at +0 s and the last deploy
+   ended at +350 s; with queueing and the lane stagger a landing takes about 6 to 10 minutes.
+
+Baseline to beat (from the above): median `test` job about 175 s; deploy jobs 130 to 217 s;
+six deploys for a change to a shared crate, and for any path the map does not name.
+
+## Phases
+
+Each phase is its own landing. Where it changes `ci/` or `.pigeon/ci.toml` (rule
+`gate-changes`) the landing waits for the person's delegate; the work ships latent where it
+needs the image or a Worker's permissions to change.
+
+### Phase 1: reuse a green test for the same commit (Lander)
+
+When the Lander is about to submit the `test` job for a commit, it first asks CI for jobs of
+that repo and commit. A job that is `succeeded`, is the same job name, and ran on the same
+runner image is reused: the landing goes straight to its green state and its step text says
+`reused test job <id>`. The commit sha is the tree and the `.pigeon/ci.toml` at it, so the job
+definition is the same by construction. The runner image is recorded on the job row when the
+job is dispatched; a row with no image recorded is never reused (fails closed). After a rebase
+onto a moved main the commit differs, so it is tested as today. Nothing but a `succeeded`
+`test` job is ever reused, and never a result for another commit.
+
+### Phase 2: where a `test` job's time goes, and a cheaper start
+
+- Timing lines per stage in the job output: the runner (fetch, checkout, script) and each step
+  of `test.sh` and the deploy scripts print `[timing] <stage> <seconds>s`.
+- Free wins that keep results identical: no incremental compilation, no debug info in the dev
+  and test profiles (by environment variable in the scripts, not in `Cargo.toml`), the
+  registry fetched once (`cargo fetch --locked`) before the timed steps.
+- A warm image: `ci/image/Dockerfile` v4 builds the dependencies for the current `Cargo.lock`
+  (WASM and native) into a target directory in the image. The scripts use it only when the
+  lockfile's hash recorded in the image equals the checkout's, else they build as today.
+  **Latent**: pushing the image and pinning its digest in `src/platform/wrangler.toml` is the
+  person's step.
+- A shared cache outside the image (sccache or a target tarball on R2, keyed by `Cargo.lock`
+  and the toolchain) is designed in the Log, not built: it needs a credential for the job and
+  a binding the person must approve.
+- Test outcomes are never cached here.
+
+### Phase 3: deploy scope from Cargo
+
+The Lander runs in a Worker and cannot run `cargo`, so the map stays a file the Lander reads,
+and the gate checks it against Cargo. A smoke scenario derives, for each Worker, the crates it
+builds (its crate and the path dependencies of its normal and build dependencies, transitively,
+read from each `Cargo.toml`), the files compiled in (`include_str!` and `include_bytes!` that
+leave the crate) and its own config and deploy script, and compares them with
+`ci/workers.toml`. A path the map does not name, or a crate a Worker links that its patterns
+omit, fails the gate. The map is corrected to match (crates no Worker links get `[checks]` or
+their own entry, so they stop counting as shared). Scenarios pin the mapping for representative
+paths (`src/models/x.rs` deploys core and model-gateway only; `src/blog/x.rs` core and sites;
+`src/proxies/x.rs` core and proxy; `src/ci-gateway/x.rs` ci-gateway only; docs deploy nothing).
+Core first when affected is kept.
+
+### Phase 4: deploy job overhead
+
+- The deploy scripts print the same stage timings and use the warm image of phase 2.
+- Each deploy job builds its Worker's WASM once (`allowlist.sh` builds and `deploy.sh` reuses
+  it, as today); the build's hash is printed as `artifact sha256 <hex>`.
+- Latent, off by default: the Lander keeps the last deployed artifact hash per Worker and a
+  deploy whose artifact is byte-identical to it uploads nothing.
+- The lanes of one landing start in the same Lander step instead of about 25 s apart, with
+  core still first when the contract or the map changed.
+
+## What stays as it is
+
+- Every landing is tested for its exact tree. Docs-only landings still merge without tests.
+- The Lander reads the map from main, never from the branch.
+- No secret goes into any commit, and nothing here changes the policy or the Claude settings.
+
+## Log
+
+- 2026-11-24: plan written from the measurements above.

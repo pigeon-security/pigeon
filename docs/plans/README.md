@@ -45,6 +45,7 @@ up to date.
 | [model-providers-cloudflare.md](model-providers-cloudflare.md) | Part 3: models paid with Cloudflare credits (AI Gateway Unified Billing). Option B: three gateways, one payer each: `pigeon-anthropic` (Anthropic key, BYOK), `pigeon-cloudflare` (credits), `pigeon` (retired, its logs count as BYOK). Model names say who pays (`anthropic/…` BYOK, `cf-anthropic/…`, `cf-openai/…` and `workers-ai/…` credits). Each dollar counts once in `cost_daily`, by route | Phases 1 to 4 landed; option B (phases 8, 6, 9) in progress; live check after the person's Open items 1 to 3 |
 | [chatgpt-mcp.md](chatgpt-mcp.md) | ChatGPT as an MCP client of pigeon: a conformance lint over every tool's input schema, the discovery documents, payload size, and a read-only `mcp_conformance` tool | Planned (2026-11-25) |
 | [sites.md](sites.md) | pigeon-sites: passkey sign-in for a site (off by default, opted in on the instance record), and pigeon.dev redesigned and moved to pigeon-sites with a public, corrected architecture diagram | Planned (2026-11-23) |
+| [landing-speed.md](landing-speed.md) | Faster landings and cheaper CI: the Lander reuses a green `test` job for the same commit, stage timings and a warm build image for `test` and deploy jobs, deploy scope checked against Cargo, deploy lanes started together | Planned (2026-11-24); phases land one by one |
 
 When a plan's status changes, change it in both places: the plan's first lines and this table.
 
