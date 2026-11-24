@@ -82,7 +82,8 @@ struct BreakingUpdate: Identifiable {
 }
 
 private func decodeNoticeJSON<T: Decodable>(_ type: T.Type, _ json: Any) throws -> T {
-    try JSONDecoder().decode(type, from: JSONSerialization.data(withJSONObject: json))
+    let data = try JSONSerialization.data(withJSONObject: json, options: [.fragmentsAllowed])
+    return try JSONDecoder().decode(type, from: data)
 }
 
 /// Displays notices without putting actions on them.
