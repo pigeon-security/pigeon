@@ -355,3 +355,12 @@ trivial rebase.
   only; Workers AI yes (phase 6). Open item 1 is done with a new Anthropic key. Phase 2
   (executor `xXp120MbTCD2`) and phase 3 (executor `s26pnPrL6YvC`) run in parallel, 70 sandbox
   minutes each.
+- 2026-11-24: phase 2 (executor `xXp120MbTCD2`, finishing `55NtNZ02oPRu`'s branch) landed as
+  `aaf8c9a` (landing `MTnYTSjVVFHaafyO`); the spend-limit removal landed first as `d23563d`
+  (landing `DWckQF2NNNu_9--T`). Phase 3 (executor `s26pnPrL6YvC`) landed as `2ba4b42` (landing
+  `YAoNp0t9MW-KNhni`). Choices the executors made: a bare `openai` is refused like `openai/…`;
+  `anthropic` and `cf-anthropic` take only `claude-…` names; old BYOK `openai` logs fall under
+  Other in `cost_daily`'s `ai_gateway.by_provider`; `Workers AI` is an always-present
+  Cloudflare line.
+- 2026-11-24: phase 4 (step C): `anthropic` goes through `pigeon-anthropic` with the new key;
+  `pigeon_anthropic_default` is no longer declared; `CREDITS_SINCE` is `2026-11-24T01:45:00Z`.
