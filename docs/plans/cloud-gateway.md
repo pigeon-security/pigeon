@@ -1,8 +1,10 @@
 # The Cloud Gateway: cloud providers behind one capability Worker
 
-Status: **Phase 0 (this plan) landing** (planner run `vSg5LiNay8Uw`). Ships latent: no
+Status: **Phases 0 to 2 landing** (plan by planner run `vSg5LiNay8Uw`; phase 1 by executor
+`KmMJEBZ8UUNA`; phase 2 and the restack by planner run `qzv3qK9SBfNU`). Ships latent: no
 Scaleway credential exists yet, and every tool says so until the person sets the slots and the
-bindings land (phase 6). Open items are listed before the Log.
+bindings land (phase 6). The person's morning steps are in "For the person". Open items are
+listed before the Log.
 
 The person's words, in short: a new capability Worker, the Cloud Gateway
 (`pigeon-cloud-gateway`, short name `cloud-gateway`), that is to cloud providers what the model
@@ -108,7 +110,8 @@ Read from this sandbox while planning.
      for, and a caller acting for no one cannot plan.
    - Core computes the digest itself (`approval::payload_digest(kind, subject, payload)`),
      sets the summary to `{plan: lines}` and the wait to 30 minutes, as `portal_oauth`.
-   - `get` answers a record of a table kind only; `take` re-computes the digest from the payload
+   - `get` answers a record of a table kind that the signed caller made, and reads `expired` once
+     it lapses; `take` re-computes the digest from the payload
      the Worker re-planned and spends the approval once for the signed caller, as
      `approval.take` does.
    This adds an op to `CORE_OPS`, which the contract allows (fields and ops are only added). A
@@ -189,15 +192,20 @@ Read from this sandbox while planning.
 
 ## How to use it
 
-Once phases 0 to 4 have landed, and phase 6 after the person's slots:
+Once phases 0 to 4 have landed (the tools then appear through core's MCP and the portal), and
+phase 6 after the person's slots. Until phase 6 every tool answers "Scaleway is not set up: set
+<slots> on the Access tab", and `cloud_status` says which slot is missing.
 
-- `cloud_status`: which providers are set up and ready, and why not.
+- `cloud_status`: which providers are set up and ready, and why not. When ready it also reads
+  the gateway's own key (its expiry and default project).
 - Read: `cloud_tokens_list`, `cloud_buckets_list`, `cloud_objects_list`, `cloud_object_head`.
 - Change: call a plan tool, such as
   `cloud_buckets_plan_create {region: "fr-par", bucket: "pigeon-backups"}`. It answers the plan
   lines and an approval id. The person approves it on the console's Approvals tab with their
-  passkey. Then `cloud_apply {plan: "<approval id>"}` makes the change once, and reports any
-  drift.
+  passkey (it waits 30 minutes, and once approved it can be used for 10). Then
+  `cloud_apply {plan: "<approval id>"}` makes the change once, and reports any drift. The
+  caller that planned must be the caller that applies, and must act for a person: a caller
+  acting for no one cannot plan.
 - A new scoped key:
   `cloud_tokens_plan_create {name: "backups", permission_sets: ["ObjectStorageFullAccess"],
   project_ids: ["<project id>"], expires_days: 30, slot: "CLOUD_SCW_BACKUPS"}`, approve,
@@ -206,28 +214,57 @@ Once phases 0 to 4 have landed, and phase 6 after the person's slots:
 
 ## For the person (morning)
 
-Nothing here is needed for phases 0 to 5. Phase 6 waits on these steps.
+Nothing here is needed for phases 0 to 5: those land and wait. Phase 6 waits on these steps. They
+make a Scaleway API key for pigeon that can manage Object Storage in one project and manage IAM
+(so it can make scoped keys for other uses). The key's secret goes into pigeon's Access tab and
+nowhere else: never paste it into a chat, a command or a file.
 
-1. Scaleway console → **IAM** → **Applications** → **Create application**. Name
-   `pigeon-cloud-gateway`, description "pigeon's cloud gateway". No API key yet.
-2. **IAM** → **Policies** → **Create policy**. Name `pigeon-cloud-gateway`, principal: the
-   application `pigeon-cloud-gateway`. Add two rules:
-   - Scope **Organization**, permission set **`IAMManager`**. The gateway needs it to list,
-     create and delete API keys, applications and policies. The code only grants Object
-     Storage permission sets (Decision 8), but the key itself can do anything in IAM: guard it.
-   - Scope **Access to resources**, the project(s) whose buckets pigeon manages, permission set
-     **`ObjectStorageFullAccess`**.
-3. **IAM** → **Applications** → `pigeon-cloud-gateway` → **API keys** → **Generate API key**.
-   Expiry: one year at most (pick a date you will see). **Will this API key be used for Object
-   Storage?** Yes, and choose the project buckets should be created in as the preferred project.
-   Copy the access key (`SCW…`) and the secret key (shown once).
-4. Find the organization id (console → **Organization** → **Settings**, "Organization ID") and
-   the default project id (**Project** → **Settings**, "Project ID").
-5. pigeon console → **Access** → Secrets and credentials. Set each, approving with your passkey:
-   `SCW_ACCESS_KEY`, `SCW_SECRET_KEY`, `SCW_DEFAULT_ORGANIZATION_ID`, `SCW_DEFAULT_PROJECT_ID`.
-   Never paste a key into a chat or a command.
-6. Ask an agent: "cloud-gateway.md phase 6: bind the Scaleway slots and land". Then
-   `cloud_status` should say Scaleway is ready.
+1. **An application for pigeon.** Scaleway console (console.scaleway.com) → **IAM** →
+   **Applications** tab → **Create application**. Name `pigeon-cloud-gateway`, description
+   "pigeon's cloud gateway". Create it. Do not make an API key here.
+2. **A policy for it.** **IAM** → **Policies** tab → **Create policy**. Name
+   `pigeon-cloud-gateway`. Principal: **Application**, then `pigeon-cloud-gateway`. Add two rules:
+   - Scope **Organization**, permission set **IAMManager**. The gateway needs it to list, make
+     and delete API keys, applications and policies. The code grants only Object Storage
+     permission sets in the keys it makes (Decision 8), but this key itself can do anything in
+     IAM: guard it, and give it the shortest expiry you will keep up with.
+   - Scope **Access to resources**, the project(s) whose buckets pigeon manages, permission
+     set **ObjectStorageFullAccess**.
+   Create the policy.
+3. **The API key.** **IAM** → **API keys** tab → **Generate an API key**. API key bearer:
+   **An application**, then `pigeon-cloud-gateway`. Expiration: one year at most; pick a date
+   you will notice. **Will this API key be used for Object Storage?** Yes, and choose the project
+   new buckets should land in as the preferred project. Generate it. The page shows the **access
+   key** (`SCW` and 17 capitals or digits) and the **secret key** (a UUID, shown once). Keep the
+   page open until step 5 is done.
+4. **Two ids.** The **organization ID**: console → your organization's name (top left) →
+   **Organization settings**, field "Organization ID". The **project ID**: open the project →
+   **Project settings**, field "Project ID". Both are UUIDs.
+5. **Set the four slots.** pigeon console → **Access** tab → Secrets and credentials. Set each
+   one and approve it with your passkey:
+   - `SCW_ACCESS_KEY`: the access key from step 3.
+   - `SCW_SECRET_KEY`: the secret key from step 3.
+   - `SCW_DEFAULT_ORGANIZATION_ID`: the organization ID from step 4.
+   - `SCW_DEFAULT_PROJECT_ID`: the project ID from step 4, the same project as the preferred
+     project in step 3.
+   The console checks only the form of each value (it does not call Scaleway).
+6. **Bind them.** Ask an agent: "cloud-gateway.md phase 6: bind the Scaleway slots and land".
+   It adds the four secret bindings to `src/cloud-gateway/wrangler.toml` and lands them.
+7. **First calls**, from any MCP client signed in as you (or an agent acting for you):
+   1. `cloud_status`. Expect `ready: true` for Scaleway, each slot bound and set, and the live
+      check showing the key's expiry and default project. If it says a slot is missing or not
+      bound, it names the slot.
+   2. `cloud_buckets_list` (no arguments: all three regions). Expect your existing buckets, or
+      none.
+   3. `cloud_buckets_plan_create {region: "fr-par", bucket: "pigeon-first-test-<something
+      unique>"}`. Bucket names are global to a region, lower case, 3 to 63 characters. It
+      answers the plan and an approval id. Nothing has changed at Scaleway yet.
+   4. Console → **Approvals** tab: the plan is listed (kind `cloud_change`). Read it and approve
+      it with your passkey, within 30 minutes.
+   5. `cloud_apply {plan: "<approval id>"}`. Expect `created` and an empty `differences` list.
+      `cloud_buckets_list {region: "fr-par"}` now shows the bucket.
+   6. Clean up: `cloud_buckets_plan_delete {region: "fr-par", bucket: "…"}`, approve,
+      `cloud_apply`. The bucket must be empty.
 
 ## Rollback
 
@@ -238,7 +275,8 @@ Nothing here is needed for phases 0 to 5. Phase 6 waits on these steps.
 
 ## Open items
 
-1. **Phases 1 and 2**: not built yet. Next: executors. Waits on: nobody.
+1. **Phases 3 and 4** (first deploy, then core binds `CLOUD`): after the landing of phases 0 to
+   2 has deployed. Waits on: that landing.
 2. **The Scaleway slots and their bindings** (phase 6). Waits on: the person (morning steps).
 3. **The Access tab lists `CLOUD_…` slots** a plan writes? Today it lists only declared slots;
    a written slot exists in the Secrets Store but is not shown. Later, if wanted.
@@ -255,3 +293,12 @@ Nothing here is needed for phases 0 to 5. Phase 6 waits on these steps.
   `portal_oauth.rs`, `approvals.rs`, `pigeon_core::s3`, `storage` and the plans named in
   Sources; checked Scaleway's IAM endpoints against its generated Go SDK and that both hosts
   answer. Wrote this plan.
+- Planner run `qzv3qK9SBfNU`: reviewed phase 1 (`KmMJEBZ8UUNA`) and restacked it onto main.
+  Changes: the Secrets Store names are listed once per survey, not once per unbound slot (each
+  listing leases a core token); a failed look after a key is made no longer hides the new key.
+  Built phase 2 myself: core's `approval` op (`split::remote_approval`, with pure checks
+  `remote_plan`, `remote_digest`, `remote_view`; `REMOTE_APPROVAL_KINDS`), `ApprovalRequest` in
+  the contract, `CORE_OPS` gains `approval`, `WORKER_KEYS` gains `cloud-gateway`. `get` and
+  `take` work only for the caller that made the approval, an addition to Decision 6. Smoke:
+  `core_approval_op_for_capability_workers`, and `core_architecture_draws_every_worker_in_the_map`
+  draws the cloud gateway's real manifest entry and its four hosts.
