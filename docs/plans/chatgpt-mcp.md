@@ -105,3 +105,58 @@ What is Cloudflare's to configure and what is pigeon's:
   - `array` with no `items`: `site_render.posts` and `.pages` (now arrays of string pairs).
   The smoke suite runs the lint over every tool it can build offline and over a bad schema.
   The two sites tools are not built there; they were read by hand.
+- 2026-11-24: **ChatGPT app creation failed against the portal** (reported 10:30:28 and
+  10:30:47 Vancouver, 18:30 UTC). chatgpt.com/plugins → "Create as a plugin", URL
+  `https://mcp.pigeon.dev/mcp`, ChatGPT found the Access endpoints and chose dynamic client
+  registration (client id and secret blank). Both tries: "Some app settings were rejected.
+  Check the server URL or tunnel ID, icon, and authentication settings, then try again." No
+  Access login page, no redirect URI shown: creation stopped before a management page existed.
+
+  Reproduced in ChatGPT's order with `curl` and `Origin: https://chatgpt.com` (about 18:56 UTC):
+
+  | Step | Status | Key fields |
+  | --- | --- | --- |
+  | `POST /mcp`, no token | 401 | `resource_metadata=".../.well-known/oauth-protected-resource/mcp"`, `Allow-Origin` echoes ChatGPT, `Expose-Headers: WWW-Authenticate` |
+  | Protected-resource metadata, root / `/mcp` | 200 / 200 | `resource` `https://mcp.pigeon.dev` / `https://mcp.pigeon.dev/mcp`; both name issuer `https://pigeon-security.cloudflareaccess.com`; no `scopes_supported` |
+  | AS metadata on portal and on Access issuer (root RFC 8414 path) | 200 / 200 | identical: `registration_endpoint`, S256, grants `authorization_code` and `refresh_token`, auth methods `client_secret_basic`, `client_secret_post`, `none`; no `scopes_supported`, no `authorization_response_iss_parameter_supported` |
+  | AS metadata `/.well-known/oauth-authorization-server/mcp` on portal | 404 | the issuer has no path, so RFC 8414 uses the root URL, which works |
+  | DCR, public client, `redirect_uris` = `https://chatgpt.com/connector/oauth/<id>` (alone, or with the legacy callback) | **400** | `{"error":"invalid_client_metadata","error_description":"redirect_uri is not allowed by the account configuration"}` |
+  | DCR, same body, legacy `https://chatgpt.com/connector_platform_oauth_redirect` only | 201 | also 201 with `scope` set and with `client_secret_post`: scope and auth method are not refused |
+
+  `portal_oauth_redirects list` (read-only): `allowed_uris` are exactly the Claude, Grok and legacy
+  ChatGPT callbacks; DCR on, localhost and loopback allowed, type `mcp_portal`, policy
+  `mcp-portal-owner`.
+
+  **Cause.** A new ChatGPT app registers by DCR when it is created, with its per-connector
+  callback `https://chatgpt.com/connector/oauth/{callback_id}` (OpenAI's auth docs: new clients
+  get this form unless the authorization server meets RFC 9207, which Access does not
+  advertise). Access refuses any redirect not on the portal's exact list with 400
+  `invalid_client_metadata`, ChatGPT surfaces that as "settings were rejected", and no
+  management page (and so no callback id) ever appears. The other candidates are not the
+  failure: the suffixed 404 is off the documented path, both `resource` values match their
+  documents, and a `scope` registers. Nothing in pigeon's code is involved (the portal's OAuth
+  is all Access's), so no code changed. Three throwaway DCR clients for the legacy
+  callback were registered at Access by the probe; they hold no grant.
+
+  **Steps for the person** (no change applied; Claude's callback stays untouched):
+  1. Get the exact callback id. It is unknown until ChatGPT shows it, and a wildcard or prefix is
+     impossible on Access. Try, in ChatGPT's create form, the advanced OAuth settings: if it
+     shows the redirect URI before saving, copy it. Otherwise create the app once with a
+     user-defined OAuth client (register one at the Access registration endpoint for the legacy
+     callback and enter its client id, no secret) so creation passes and the server management
+     page shows the redirect URI.
+  2. Add that one exact URI: `portal_oauth_redirects {"action":"add","uri":"https://chatgpt.com/connector/oauth/<callback_id>"}`,
+     approve the plan with your passkey, then `portal_oauth_redirects_apply {"plan":"<approval id>"}`.
+     What you approve: one exact URI appended to `allowed_uris` of the `mcp_portal` application
+     `pigeon` (`f55918b5-…`, `mcp.pigeon.dev`); the three existing URIs, DCR, localhost and
+     loopback, the policy and grants unchanged. (Dashboard alternative: Zero Trust → Access
+     controls → MCP Portals → pigeon → Edit → Advanced settings → Allowed redirect URIs.)
+  3. In ChatGPT, switch the same app back to dynamic client registration (or recreate it, if the
+     callback id survives; if it does not, repeat step 2 with the new id) and connect: Access
+     login should appear.
+  4. Lasting fix outside pigeon: ask Cloudflare for RFC 9207 on Access (return `iss` and
+     advertise `authorization_response_iss_parameter_supported`), so ChatGPT keeps the legacy
+     callback already allowed. Do not front Access with a Worker that claims it.
+  Not verified: OpenAI's docs were unreachable from this session, so what ChatGPT checks at
+  creation (icon, `scopes_supported`) and whether the callback id is shown before saving are
+  from earlier reads, not re-read today.
