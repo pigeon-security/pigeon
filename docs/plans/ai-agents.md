@@ -944,3 +944,10 @@ executors through it. Each item: state, next step, who it waits on.
   `observability_errors` reuses the summary's metrics and log folds; log lines carry no run tag, so
   there is no `run` filter and the answer says so. An unknown `worker` answers an empty list and
   the known script names.
+- 2026-11-23: **`model_probe` and `run_spend`** added as agent tools for every role (new module
+  `probe.rs`). A probe is one `models_run` request (at most 64 tokens, 30 s), tagged
+  `ai-agent/{run}/probe/{n}`, never a run or a turn; at most 10 per run, counted in the run's
+  `flags` table before it is sent. Its cost is added to `Spent.cost_micros` (and `gateway_micros`
+  only if the gateway gave it) with no `turn_costs` row, so reconcile never touches it. The
+  gateway's `models_run` gives tokens but no cost, so the cost is normally an estimate. A timed-out
+  probe is not charged. `run_spend` reads only what the run keeps.

@@ -1953,4 +1953,186 @@ fn ai_agents_read_only_observability_tools_offered() {
         let mut seen = std::collections::BTreeSet::new();
         assert!(list.iter().all(|t| seen.insert(*t)), "no name twice");
     }
+/// `model_probe` and `run_spend` are offered to every role, and `run_spend` alone is safe to
+/// repeat.
+#[test]
+fn ai_agents_probe_and_spend_are_in_every_role_list() {
+    use pigeon_ai_agents::{Role, tools};
+    for role in [Role::Planner, Role::Executor, Role::Mechanical] {
+        let names: Vec<String> = tools::definitions(role, &[])
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_string())
+            .collect();
+        for n in ["model_probe", "run_spend"] {
+            assert!(names.contains(&n.to_string()), "{role:?} lacks {n}");
+            assert_eq!(tools::kind(role, n), Some(tools::Kind::Agent));
+        }
+    }
+    assert!(tools::idempotent("run_spend") && !tools::idempotent("model_probe"));
+}
+
+/// The inputs of the two tools: bounds, the model rule, unknown keys.
+#[test]
+fn ai_agents_probe_and_spend_check_their_input() {
+    use pigeon_ai_agents::{Role, probe, tools};
+    let probe_err = |v: Value| tools::check(Role::Planner, "model_probe", &v).unwrap_err();
+    assert!(
+        tools::check(
+            Role::Executor,
+            "model_probe",
+            &json!({ "model": "cf-openai/gpt-6.2-sol" })
+        )
+        .is_ok()
+    );
+    assert!(
+        tools::check(
+            Role::Executor,
+            "model_probe",
+            &json!({ "model": "claude-haiku-5-5", "prompt": "hi", "max_tokens": 64 })
+        )
+        .is_ok()
+    );
+    assert!(probe_err(json!({})).contains("`model` is required"));
+    assert!(probe_err(json!({ "model": 3 })).contains("string"));
+    assert!(probe_err(json!({ "model": "openai/gpt-5" })).contains("OpenAI"));
+    assert!(probe_err(json!({ "model": "anthropic/bad name" })).contains("`model`"));
+    assert!(probe_err(json!({ "model": "anthropic", "max_tokens": 65 })).contains("64"));
+    assert!(probe_err(json!({ "model": "anthropic", "max_tokens": 0 })).contains("between"));
+    assert!(probe_err(json!({ "model": "anthropic", "max_tokens": "8" })).contains("whole number"));
+    assert!(probe_err(json!({ "model": "anthropic", "prompt": "x".repeat(501) })).contains("500"));
+    assert!(probe_err(json!({ "model": "anthropic", "prompt": "" })).contains("empty"));
+    assert!(probe_err(json!({ "model": "anthropic", "run": "r1" })).contains("`run`"));
+    assert!(tools::check(Role::Planner, "run_spend", &json!({})).is_ok());
+    assert!(
+        tools::check(Role::Planner, "run_spend", &json!({ "run": "r1" }))
+            .unwrap_err()
+            .contains("`run`")
+    );
+    // Defaults, and the model as the run's `model` field reads it.
+    let r = probe::parse(Role::Executor, &json!({ "model": "cf-openai/gpt-6.2-sol" })).unwrap();
+    assert_eq!(
+        (r.provider.as_str(), r.model.as_str()),
+        ("cf-openai", "gpt-6.2-sol")
+    );
+    assert_eq!(
+        (r.prompt.as_str(), r.max_tokens),
+        (probe::DEFAULT_PROMPT, 16)
+    );
+    assert_eq!(probe::task("r1", 3), "ai-agent/r1/probe/3");
+}
+
+/// The tenth probe is the last; the eleventh is refused in plain words.
+#[test]
+fn ai_agents_probe_limit_is_ten() {
+    use pigeon_ai_agents::probe;
+    assert!(probe::may_send(0).is_ok() && probe::may_send(9).is_ok());
+    assert!(probe::may_send(10).unwrap_err().contains("10 probes"));
+}
+
+/// A probe's answer from a canned gateway reply and error; its cost counts in the run's spend.
+#[test]
+fn ai_agents_probe_shapes_the_gateway_answer() {
+    use pigeon_ai_agents::budget::{Budget, Spent};
+    use pigeon_ai_agents::probe::{self, Outcome};
+    let reply = json!({ "model": "claude-haiku-5-5", "text": "ok".repeat(300), "tokens_in": 20, "tokens_out": 2 });
+    let s = probe::shape("claude-haiku-5-5", &Outcome::Reply(reply), 123);
+    assert_eq!(s.answer["ok"], true);
+    assert_eq!(s.answer["status"], 200);
+    assert_eq!(s.answer["latency_ms"], 123);
+    assert_eq!(s.answer["input_tokens"], 20);
+    assert_eq!(s.answer["cost_source"], "estimate");
+    assert_eq!(s.answer["text"].as_str().unwrap().chars().count(), 200);
+    assert!(!s.from_gateway && s.cost_micros > 0);
+    // A gateway cost wins and counts as gateway money.
+    let g = probe::shape(
+        "claude-haiku-5-5",
+        &Outcome::Reply(json!({ "text": "ok", "cost_usd": 0.0004 })),
+        5,
+    );
+    assert_eq!((g.cost_micros, g.from_gateway), (400, true));
+    assert_eq!(g.answer["cost_source"], "gateway");
+    let spent = probe::charge(&Spent::default(), &g);
+    assert_eq!(
+        (spent.cost_micros, spent.gateway_micros, spent.unreconciled),
+        (400, 400, 0)
+    );
+    let spent = probe::charge(&Spent::default(), &s);
+    assert_eq!(
+        (spent.cost_micros, spent.gateway_micros),
+        (s.cost_micros, 0)
+    );
+    // A provider error keeps its text and status, cut to 500 characters.
+    let text = format!("Anthropic answered 429: {}", "rate limited ".repeat(100));
+    let f = probe::shape("m", &Outcome::Failed(text.clone()), 9);
+    assert_eq!(f.answer["ok"], false);
+    assert_eq!(f.answer["status"], 429);
+    assert_eq!(f.answer["error"].as_str().unwrap(), &text[..500]);
+    assert_eq!(f.cost_micros, 0);
+    // A refusal with no status keeps its words, whatever they are.
+    let n = probe::shape(
+        "m",
+        &Outcome::Failed("provider `cf-openai` is not ready: no key".into()),
+        1,
+    );
+    assert_eq!(n.answer["status"], "error");
+    assert_eq!(
+        n.answer["error"],
+        "provider `cf-openai` is not ready: no key"
+    );
+    assert_eq!(
+        probe::shape("m", &Outcome::TimedOut, 30_000).answer["status"],
+        "timeout"
+    );
+    // The run's budget decides whether a probe may go.
+    let b = Budget::default_for(pigeon_ai_agents::Role::Executor);
+    assert!(probe::budget_allows(&b, &Spent::default(), 0, 1_000, 100).is_ok());
+    let rich = Spent {
+        cost_micros: b.cost_micros,
+        ..Spent::default()
+    };
+    assert!(
+        probe::budget_allows(&b, &rich, 0, 1_000, 100)
+            .unwrap_err()
+            .contains("cost budget")
+    );
+    assert!(
+        probe::budget_allows(&b, &Spent::default(), 0, b.wall_ms + 1, 100)
+            .unwrap_err()
+            .contains("wall")
+    );
+}
+
+/// `run_spend` shows this run's numbers and what is left.
+#[test]
+fn ai_agents_run_spend_answers_from_what_the_run_keeps() {
+    use pigeon_ai_agents::budget::{Budget, Spent};
+    use pigeon_ai_agents::{Role, probe};
+    let b = Budget::default_for(Role::Planner);
+    let spent = Spent {
+        turns: 3,
+        cost_micros: 2_000_000,
+        gateway_micros: 2_000_000,
+        executors: 2,
+        executors_micros: 1_000_000,
+        ..Spent::default()
+    };
+    let a = probe::spend_answer(&b, &spent, 0, 10 * 60_000, 4);
+    assert_eq!(a["turns"], 3);
+    assert_eq!(a["cost"], "$2");
+    assert_eq!(a["cost_source"], "gateway");
+    assert_eq!(a["probes_used"], 4);
+    assert_eq!(a["left"]["turns"], 197);
+    assert_eq!(a["left"]["cost"], "$22");
+    assert_eq!(a["left"]["probes"], 6);
+    assert_eq!(a["left"]["wall_min"], 8 * 60 - 10);
+    assert_eq!(a["left"]["executors"], 10);
+    assert_eq!(a["executors_cost"], "$1");
+    let est = Spent {
+        cost_micros: 5,
+        ..Spent::default()
+    };
+    assert_eq!(
+        probe::spend_answer(&b, &est, 0, 0, 0)["cost_source"],
+        "estimate"
+    );
 }

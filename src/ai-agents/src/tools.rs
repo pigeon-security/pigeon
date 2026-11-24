@@ -66,7 +66,7 @@ const SANDBOX: [&str; 8] = [
 ];
 
 /// Agent tools every role is offered.
-const AGENT_COMMON: [&str; 2] = ["ask_person", "report"];
+const AGENT_COMMON: [&str; 4] = ["ask_person", "report", "model_probe", "run_spend"];
 
 /// Agent tools only a planner is offered.
 const AGENT_PLANNER: [&str; 6] = [
@@ -132,6 +132,7 @@ pub fn idempotent(name: &str) -> bool {
             | "land_status"
             | "land_list"
             | "work_status"
+            | "run_spend"
             | "models_usage"
             | "architecture_describe"
             | "cost_daily"
@@ -254,6 +255,30 @@ fn sandbox_definitions() -> Vec<Value> {
     ]
 }
 
+/// Definitions for `model_probe` and `run_spend`, which every role is offered.
+fn probe_definitions() -> Vec<Value> {
+    vec![
+        tool(
+            "model_probe",
+            "Sends one small request (at most 64 output tokens, 30 s) to a named model through the model gateway and answers whether it worked: ok, status, latency_ms, tokens, cost_usd, the reply text and the provider's error text. Use it to test whether a model works. It is not a run, takes no turn, and its cost counts against your budget. At most 10 per run.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "model": {"type": "string", "description": "The model: `provider/model` (cf-openai/gpt-6.2-sol), a `claude-…` name, or a provider name for its model for your kind."},
+                    "prompt": {"type": "string", "maxLength": 500, "description": "What to send; \"Reply with the single word: ok\" by default."},
+                    "max_tokens": {"type": "integer", "minimum": 1, "maximum": 64, "default": 16, "description": "The most output tokens."}
+                },
+                "required": ["model"]
+            }),
+        ),
+        tool(
+            "run_spend",
+            "Answers this run's own spend: turns, cost so far (and whether it is the gateway's or an estimate), what is left of each budget limit, probes used, and what your executors hold. Cheap and read-only.",
+            json!({ "type": "object", "properties": {} }),
+        ),
+    ]
+}
+
 /// Definitions for the AI agent tools the role is offered, in offer order.
 fn agent_definitions(role: Role) -> Vec<Value> {
     let mut out = vec![
@@ -304,6 +329,7 @@ fn agent_definitions(role: Role) -> Vec<Value> {
             }),
         ),
     ];
+    out.extend(probe_definitions());
     if role == Role::Planner {
         out.push(tool(
             "spawn_executor",
@@ -745,6 +771,8 @@ pub fn check(role: Role, name: &str, input: &Value) -> Result<(), String> {
             get_int(obj, "minutes", 1, 120)?;
             Ok(())
         }
+        "model_probe" => crate::probe::parse(role, input).map(|_| ()),
+        "run_spend" => crate::probe::check_spend(input),
         _ => Ok(()),
     }
 }

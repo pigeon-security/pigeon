@@ -2493,6 +2493,11 @@ impl AiAgentRuns {
                 .await?;
                 return storage.set_alarm(run::EXECUTORS_EVERY_MS).await;
             }
+            Some(Kind::Agent) if c.name == "model_probe" => {
+                self.probe_tool(row, role, &caller, &input, budget, spent)
+                    .await
+            }
+            Some(Kind::Agent) if c.name == "run_spend" => self.spend_tool(row, budget, spent),
             Some(Kind::Agent) if c.name != "report" => {
                 self.planner_tool(row, &c.name, &input, budget, spent).await
             }
@@ -2965,4 +2970,88 @@ fn children_budgets_micros(children: &Value) -> u64 {
         .fold(0u64, |sum, usd| {
             sum.saturating_add((usd * 1e6).round() as u64)
         })
+}
+
+/// The flag row that counts a run's probes.
+const PROBES_KEY: &str = "probes";
+
+impl AiAgentRuns {
+    /// How many probes this run has sent (kept in the run's own `flags` table).
+    fn probes_used(&self) -> Result<u32> {
+        #[derive(Deserialize)]
+        struct F {
+            v: String,
+        }
+        Ok(self
+            .db
+            .row::<F>("SELECT v FROM flags WHERE k = ?", vec![PROBES_KEY.into()])?
+            .and_then(|f| f.v.parse().ok())
+            .unwrap_or(0))
+    }
+
+    /// `run_spend`: this run's own spend, from what the run keeps. It asks nobody.
+    fn spend_tool(
+        &self,
+        row: &RunRow,
+        budget: &Budget,
+        spent: &Spent,
+    ) -> std::result::Result<String, String> {
+        let used = self.probes_used().map_err(|e| e.to_string())?;
+        Ok(crate::probe::spend_answer(budget, spent, row.started_at, now(), used).to_string())
+    }
+
+    /// `model_probe`: one small request to a named model through the gateway's one-shot
+    /// `models_run`, as the run's caller, within 30 s. The probe is counted before it is sent, so
+    /// a failed one still counts. Its cost goes into the run's spend with no `turn_costs` row, so
+    /// the reconcile pass never touches it. A request that times out is not charged.
+    async fn probe_tool(
+        &self,
+        row: &RunRow,
+        role: Role,
+        caller: &Value,
+        input: &Value,
+        budget: &Budget,
+        spent: &Spent,
+    ) -> std::result::Result<String, String> {
+        use crate::probe;
+        let req = probe::parse(role, input)?;
+        let used = self.probes_used().map_err(|e| e.to_string())?;
+        probe::may_send(used)?;
+        let input_tokens = req.prompt.chars().count() as u64 + 50;
+        let estimate = budget::estimate_micros(&req.model, input_tokens, req.max_tokens);
+        probe::budget_allows(budget, spent, row.started_at, now(), estimate)?;
+        self.db
+            .exec(
+                "INSERT INTO flags (k, v) VALUES (?, ?) ON CONFLICT (k) DO UPDATE SET v = excluded.v",
+                vec![PROBES_KEY.into(), (used + 1).to_string().into()],
+            )
+            .map_err(|e| e.to_string())?;
+        let args = json!({
+            "provider": req.provider,
+            "model": req.model,
+            "prompt": req.prompt,
+            "max_tokens": req.max_tokens,
+            "task": probe::task(&row.id, used + 1),
+        });
+        let t0 = now();
+        let call = dispatch(&self.env, caller, "models_run", &args);
+        let limit = worker::Delay::from(std::time::Duration::from_millis(probe::TIMEOUT_MS));
+        futures_util::pin_mut!(call);
+        futures_util::pin_mut!(limit);
+        let outcome = match futures_util::future::select(call, limit).await {
+            futures_util::future::Either::Left((Ok(v), _)) => probe::Outcome::Reply(v),
+            futures_util::future::Either::Left((Err(e), _)) => {
+                probe::Outcome::Failed(e.to_string())
+            }
+            futures_util::future::Either::Right(_) => probe::Outcome::TimedOut,
+        };
+        let shaped = probe::shape(&req.model, &outcome, now() - t0);
+        let next = probe::charge(spent, &shaped);
+        if next != *spent {
+            let text = serde_json::to_string(&next).map_err(|e| e.to_string())?;
+            self.set("spent = ?", vec![text.into()])
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(shaped.answer.to_string())
+    }
 }

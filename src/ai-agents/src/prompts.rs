@@ -65,6 +65,11 @@ output's saved file only when you need more.
 Style: plain English in comments and docs, short sentences, no marketing words, every public \
 item documented in a line or two saying what it is for. Errors are returned, never panicked.";
 
+/// Two read-only tools every run has: what each is for, one line each.
+const PROBE_NOTE: &str = "\
+Read-only tools: `model_probe` tests whether a named model answers (at most 10, small, counted \
+in your cost); `run_spend` shows your own spend and what is left of your budget.";
+
 /// The system prompt of a run of `role` working on `branch`.
 pub fn system(role: Role, branch: &str) -> String {
     let who = match role {
@@ -90,7 +95,7 @@ pub fn system(role: Role, branch: &str) -> String {
     };
     format!(
         "{who}\n\nYour checkout is the repository at your branch, `{branch}`. Your tools act \
-         in it; `commit_push` pushes that branch and nothing else.\n\n{RULES}"
+         in it; `commit_push` pushes that branch and nothing else.\n\n{PROBE_NOTE}\n\n{RULES}"
     )
 }
 
