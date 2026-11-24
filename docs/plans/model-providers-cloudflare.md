@@ -1,6 +1,8 @@
 # Model providers, Part 3: models paid with Cloudflare credits
 
-Status: **Phase 1 landed** (2026-11-25, `934a532`). Phases 2 and 3 in progress (planner run `A2apepRW1Vyb`). Open item 1 is done; phase 4 lands after phases 2 and 3. Follows [model-providers.md](model-providers.md) (Parts 1 and 2).
+Status: **Option B** (the person, 2026-11-24): three gateways, each with one payer. Phases 1 to 4
+landed under the earlier design; phases 8 to 10 rework them for option B (planner run
+`flYJq203hPLb`). Follows [model-providers.md](model-providers.md) (Parts 1 and 2).
 
 ## Goal
 
@@ -23,7 +25,9 @@ Gateway models."
 Hard lines: no change to `.pigeon/policy.toml`, `.claude/settings.json` or `.pigeon/ci.toml`.
 New tests go only in the smoke suite, appended at the end of `tests/smoke.rs`.
 
-## What is true today (main at `d4220be`, read 2026-11-25)
+## What was true before Part 3 (main at `d4220be`, read 2026-11-25)
+
+This section is history. Decision 1 describes the gateways under option B.
 
 - **One gateway, `pigeon`.** `pigeon_core::ai_gateway::spec` creates it with `authentication:
   true`, `byok_only: true`, `collect_logs: true` and the account's Secrets Store. `ensure` never
@@ -109,49 +113,63 @@ phase 5: an executor run on a credits model after phases 1 and 2 are deployed.
 
 ## Decisions
 
-### 1. Two gateways; `pigeon` becomes the credits gateway (the person, 2026-11-25)
+### 1. Three gateways, each with one payer (option B, the person, 2026-11-24)
 
-| Gateway | Route | `byok_only` | Stored keys | Other settings |
-| --- | --- | --- | --- | --- |
-| `pigeon` | credits (Unified Billing) | **false** | **none** | `authentication: true`, logs on, `zdr: true`; no spend limit from pigeon (the person's decision) |
-| `pigeon-anthropic` (new) | Anthropic BYOK | true | `pigeon-anthropic_anthropic_default` | `authentication: true`, logs on, the account's store |
+| Gateway | Kind | Route | `byok_only` | Stored keys | Other settings |
+| --- | --- | --- | --- | --- | --- |
+| `pigeon-anthropic` | BYOK | Anthropic on the person's key | true | `pigeon-anthropic_anthropic_default` | `authentication: true`, logs on, the account's store |
+| `pigeon-cloudflare` (new) | Credits | `cf-anthropic`, `cf-openai`, Workers AI, paid with credits | **false** | **none, ever** | `authentication: true`, logs on, `zdr: true`; no spend limit from pigeon |
+| `pigeon` | Retired | none: no new traffic | true | none, once the person deletes the old key | its logs are still read, and always count as BYOK |
 
-No `pigeon-cloudflare` gateway is made.
-
-Why two gateways: a stored key always wins over credits on its gateway (above). Why `byok_only`
+Why three: Cloudflare cannot rename a gateway, and the earlier design (turn `pigeon` itself into
+the credits gateway) would have mixed two payers in one gateway's logs, told apart only by a
+time (`CREDITS_SINCE`). Now the payer follows from the gateway alone. A stored key always wins
+over credits on its gateway (above), so the credits gateway must never hold one. `byok_only`
 stays on for `pigeon-anthropic`: if its key is missing or refused, an Anthropic BYOK turn fails
-loudly (2044) and never bills credits by accident.
+loudly (2044) and never bills credits by accident. `pigeon` keeps `byok_only` on as well, so
+nothing sent to it by mistake could bill credits.
 
 **Security.**
 - **Who can spend credits:** anyone holding a token with AI Gateway Run on this account (any
   gateway without `byok_only`), or Workers AI Read (through the REST API). Pigeon holds no such
   standing token: core mints one per call or job, for at most 20 minutes, and revokes it after.
   The parent token stays in core. The person's own dashboard tokens are the other holders.
-- `authentication` stays on for both gateways. It is required for Unified Billing anyway, and it
+- `authentication` stays on for every gateway. It is required for Unified Billing anyway, and it
   cannot be turned off.
 - Pigeon neither sets nor requires a spend limit (the person's decision). The person may set one
-  on `pigeon` in the dashboard to cap a leaked token or a runaway run; drift never reports it.
+  on `pigeon-cloudflare` in the dashboard to cap a leaked token or a runaway run; drift never
+  reports it.
 - `zdr: true`: credits traffic goes only to provider endpoints that keep no prompts. Pigeon
   already keeps no payloads in its logs (`cf-aig-collect-log-payload: false`).
 - The account's auto-created `default` gateway is a risk once credits are loaded: a Workers AI
   Read token sending REST calls without `cf-aig-gateway-id` would land there. Pigeon always names
   its gateway. The person may turn on "Require provider credentials" on `default` (Open items).
 
-**Spec and drift.** `spec` takes the gateway's kind (`Byok` or `Credits`). `drift()` compares
-the settings in the table, and it also reports:
-- for a credits gateway: any stored provider key ("holds a stored key for anthropic: credits
+**Spec and drift.** `spec` takes the gateway's kind (`Byok`, `Credits` or `Retired`). `drift()`
+compares the settings in the table, and it also reports:
+- for the credits gateway: any stored provider key ("holds a stored key for anthropic: credits
   requests for it would bill that key instead");
-- for a BYOK gateway: a missing key for a declared provider.
+- for a BYOK gateway: a missing key for a declared provider;
+- for the retired gateway: any stored key ("delete it to retire this gateway"), and
+  `byok_only` if it is off. Never "should be credits".
 
-`ensure` still creates a missing gateway from its spec and never changes one that exists. The
-move of `pigeon` from BYOK to credits is done by the person in the dashboard (Open items), and
-drift shows what is left.
+`ensure` creates a missing BYOK or credits gateway from its spec and never changes one that
+exists. It never creates the retired gateway. `models_setup` hands keys only to BYOK gateways:
+it never adds a key to `pigeon-cloudflare` or to `pigeon`.
 
 **Credits guard.** Before the first request of a run or job on a credits provider, the model
-gateway reads the credits gateway's settings and provider configs (cached in the isolate for
-5 minutes). It refuses the request, naming the Open item, if `byok_only` is still on or a stored
-key exists for that provider. So a credits turn can never bill a BYOK key by mistake, and no
-landing has to wait for the person's dashboard steps.
+gateway reads `pigeon-cloudflare`'s settings and provider configs (cached in the isolate for
+5 minutes). It refuses the request, naming the gateway, if `byok_only` is on or the gateway
+holds any stored key. So a credits turn can never bill a key by mistake, and no landing has to
+wait for the person's dashboard steps.
+
+**BYOK readiness.** Before a request on a BYOK provider (a run, a job's submit and its start),
+the model gateway checks that the provider's gateway exists, has `byok_only` on, and holds a
+stored key for the provider. A secret set in the store is not enough: that is how phase 4 went
+wrong (Log, 2026-11-24). Only a success is cached (5 minutes). A refusal says what to do. A
+failure to read the gateway lets the request go ahead, so a Cloudflare API error does not stop
+every agent turn; the request then fails or succeeds on its own. `models_providers` answers each
+provider's readiness (`ready`, `why`).
 
 ### 2. Model names: who pays is in the name
 
@@ -160,9 +178,9 @@ A choice is `provider/model`, and the provider names its route:
 | Choice provider | Paid by | Gateway | Path and dialect | Tiers (top / middle / small) |
 | --- | --- | --- | --- | --- |
 | `anthropic` | the person's Anthropic key (BYOK) | `pigeon-anthropic` | `anthropic`, Messages | `claude-opus-5-5` / `claude-sonnet-5-5` / `claude-haiku-5-5` |
-| `cf-anthropic` | Cloudflare credits | `pigeon` | `anthropic`, Messages | the same Claude models |
-| `cf-openai` | Cloudflare credits | `pigeon` | `openai`, Chat Completions | `gpt-6.2-astra` / `gpt-6.2-sol` / `gpt-6.1-terra` |
-| `workers-ai` (phase 6, not yet) | Cloudflare credits | `pigeon` | REST `ai/v1/chat/completions`, OpenAI dialect | the person to choose |
+| `cf-anthropic` | Cloudflare credits | `pigeon-cloudflare` | `anthropic`, Messages | the same Claude models |
+| `cf-openai` | Cloudflare credits | `pigeon-cloudflare` | `openai`, Chat Completions | `gpt-6.2-astra` / `gpt-6.2-sol` / `gpt-6.1-terra` |
+| `workers-ai` (phase 6) | Cloudflare credits | `pigeon-cloudflare` | REST `ai/v1/chat/completions`, OpenAI dialect | `@cf/zai-org/glm-5.3` / `@cf/moonshotai/kimi-k2.7-code` / none |
 
 - A bare `claude-…` name stays Anthropic BYOK. A bare provider name picks its tier model, so
   `model: "cf-anthropic"` on a planner is `cf-anthropic/claude-opus-5-5`.
@@ -186,32 +204,36 @@ models: {executor: "cf-openai"}`.
 
 ### 3. The migration: no in-flight run breaks, no Anthropic call bills credits
 
-Turns are separate jobs. A job's gateway is fixed when it is submitted (a new `gateway` field on
-the job; a job stored without one uses `pigeon`, which is today's behaviour). A deploy therefore
-changes only the turns that start after it.
+Turns are separate jobs. A job's gateway is fixed when it is submitted (the job's `gateway`
+field; a job stored without one uses the first declared gateway, `pigeon-anthropic`). A deploy
+therefore changes only the turns that start after it.
 
 | Step | Who | What | `anthropic` turns go to | Safe because |
 | --- | --- | --- | --- | --- |
-| A | phase 1 lands | Both gateways declared. `pigeon-anthropic` is made, and the slot `pigeon-anthropic_anthropic_default` is declared and handed to it when set. The Anthropic route stays on `pigeon`. Credits providers are declared but stopped by the guard while `pigeon` holds a key. | `pigeon` (its key) | nothing moves |
-| B | **the person** | Sets `pigeon-anthropic_anthropic_default` on the Access tab with their passkey (a new Anthropic key; done 2026-11-24). `secret_set` adds it to `pigeon-anthropic`. | `pigeon` (the old key) | both gateways hold a key: `pigeon` the old one, `pigeon-anthropic` the new one |
-| C | planner lands phase 4 | The Anthropic route points at `pigeon-anthropic`. `pigeon_anthropic_default` is no longer declared, so `models_setup` stops putting it back on `pigeon`. `CREDITS_SINCE` is set to this deploy's time. | `pigeon-anthropic` | a turn in flight finishes on `pigeon` with the old key; the next turn uses the new gateway, which has the key; if the key were missing, `byok_only` would refuse the turn, never bill credits |
-| D | **the person** | In the dashboard, on `pigeon`: deletes the stored Anthropic key, turns off "Require provider credentials", turns on ZDR. Deletes the secret `pigeon_anthropic_default`. | `pigeon-anthropic` | no Anthropic BYOK traffic uses `pigeon` any more; the guard frees the credits route only now |
-| E | person, then planner | Buys credits, then the planner runs the live check (phase 5). | | |
+| A | phase 1 landed (`934a532`) | `pigeon-anthropic` declared, its key slot declared. | `pigeon` (old key) | nothing moved |
+| B | **the person** (done) | Set `pigeon-anthropic_anthropic_default` (a new Anthropic key). | `pigeon` (old key) | |
+| C | phase 4 landed (`03b263b`) | The Anthropic route moved to `pigeon-anthropic`. | `pigeon-anthropic` | **it was not**: the gateway did not exist yet, and turns failed with 2001 (Log). Fixed by hand. Phase 8 adds the readiness check that refuses such a turn with a plain message. |
+| D | phase 8 lands | Option B: `pigeon-cloudflare` is the credits gateway, created by `models_setup`; `pigeon` is declared retired; `CREDITS_SINCE` is removed; the BYOK readiness check. | `pigeon-anthropic` | `pigeon-anthropic` exists and holds the key, checked before turns (cached 5 minutes) |
+| E | **the person** | Retires `pigeon` (deletes its stored key and the old secret), confirms `pigeon-cloudflare`'s settings, buys credits (Open items 1 to 3). | `pigeon-anthropic` | nothing routes to `pigeon` any more |
+| F | planner | The live check (phase 5): one turn on `cf-anthropic/claude-haiku-5-5`. | | the credits guard lets it through only once `pigeon-cloudflare` is right |
 
-The OpenAI key slot `pigeon_openai_default` is no longer declared from step A. **No key is ever
-set on `pigeon`.**
+**No key is ever set on `pigeon-cloudflare`, and none is ever added again to `pigeon`.**
 
-### 4. Cost: two gateways' logs, each dollar once
+### 4. Cost: three gateways' logs, each dollar once
 
 **`models_daily`** reads the logs of every declared gateway (5,000 at most each, `truncated` per
-gateway), and labels each log with a provider `name` and a `route`:
-- on `pigeon-anthropic`: `anthropic`, BYOK;
-- on `pigeon`: if before `CREDITS_SINCE`, BYOK under its own provider (`anthropic`, `openai`);
-  from then on, credits: `cf-anthropic`, `cf-openai`, or `cf-{provider}` for any other provider.
-  `CREDITS_SINCE` is an RFC 3339 constant beside the gateway declaration. It is far in the future
-  until step C sets it.
+gateway), and labels each log with a provider `name` and a `route` **by its gateway alone**:
+- on `pigeon-anthropic` (BYOK): `anthropic`, BYOK;
+- on `pigeon` (retired): BYOK under the log's own provider (`anthropic`, `openai`), whatever its
+  time. Every request it served was paid with a stored key: it never had credits on;
+- on `pigeon-cloudflare` (credits): `cf-anthropic`, `cf-openai`, `cf-{provider}` for any other
+  provider, and `workers-ai` (phase 6), all credits.
 
-New fields, existing ones unchanged:
+There is no time-based labelling any more: `CREDITS_SINCE` is gone. It was
+`2026-11-24T01:45:00Z`, set by phase 4, and option B removed it before any stored day could be
+labelled credits by it.
+
+Fields:
 - `by_route: {byok: {day: usd}, credits: {day: usd}}`;
 - `by_provider` and `by_provider_model` keyed by the provider `name`;
 - `gateways: {id: {logs, truncated}}`.
@@ -222,22 +244,23 @@ New fields, existing ones unchanged:
 callers need not know which gateway served the turn.
 
 **`cost_daily`**:
-- Anthropic's report is reconciled only against provider `anthropic` (BYOK). Cloudflare pays
-  Anthropic for `cf-anthropic` on its own account, so that spend is never in Anthropic's report
-  and is never subtracted from the gateway's figure.
+- Anthropic's report is reconciled only against provider `anthropic` (BYOK: `pigeon-anthropic`
+  and the retired `pigeon`). Cloudflare pays Anthropic for `cf-anthropic` on its own account, so
+  that spend is never in Anthropic's report and is never subtracted from the gateway's figure.
 - Cloudflare billing rows whose `ServiceName` names AI Gateway (credit purchases, the monthly
   AI Gateway usage invoice) are **left out of the Cloudflare lines and of the total**. The
   gateway's logs count the same spend per request and per day. Those rows show as
-  `credits.billing_usd` for checking. "Workers AI" rows get their own line, not "Workers".
+  `credits.billing_usd` for checking. "Workers AI" rows get their own line, not "Workers"; for
+  Workers AI calls through `pigeon-cloudflare`, see decision 5.
 - `credits: {usage_usd, fee_usd, billing_usd, by_provider}`. `usage_usd` is the credits route's
   log cost. `fee_usd` is 5% of that, an estimate of the purchase fee spread over use.
 - `total(day) = cloudflare(day, without AI Gateway rows) + byok_gateway(day) - gateway_anthropic(day)
   + anthropic_or_gateway(day) + credits_usage(day) + credits_fee(day)`.
 - `ai_gateway.by_route: [{name: "BYOK"|"Credits", total, by_day}]`. `ai_gateway.by_provider`
   names `Anthropic`, `Anthropic (credits)`, `OpenAI (credits)`, then Other. `ai_gateway.total`
-  stays the sum of both gateways' logs.
-- Closed days stored before this change have no route. They read as BYOK, which is true:
-  credits did not exist before step D.
+  is the sum of all three gateways' logs.
+- Closed days stored before option B read as BYOK where they hold no credits figure, which is
+  true: no credits request had succeeded before `pigeon-cloudflare` existed.
 
 Runs keep their per-turn cost (gateway cost by log id, or the local estimate).
 `pigeon_core::model_prices` needs nothing new for `cf-anthropic` and `cf-openai`: the model ids
@@ -245,71 +268,90 @@ are the same and the prices are the provider's. `ai_agents_compare` groups by th
 (`cf-anthropic/claude-sonnet-5-5` and `anthropic/claude-sonnet-5-5` are two rows) and adds a
 `route` field.
 
-### 5. Workers AI: later, behind a live check
+### 5. Workers AI, through `pigeon-cloudflare`
 
 Three Workers AI models are documented with function calling and reasoning (above). Using them
 takes:
-- the REST endpoint (a third request shape in `ai_gateway`);
-- a token with Workers AI Read (a change to core's purpose table, `split.rs`, and a check that
-  the parent token may mint it);
-- `workers_ai_billing_mode: "unified"` on `pigeon`;
-- tier models chosen by the person.
+- the REST endpoint (a third request shape in `ai_gateway`), always with `cf-aig-gateway-id:
+  pigeon-cloudflare`, so the account's `default` gateway never serves it;
+- a token with Workers AI Read, set by the person in the slot `pigeon_workers_ai_token`;
+- `workers_ai_billing_mode: "unified"` on `pigeon-cloudflare` (in its spec and checked by the
+  credits guard);
+- tiers chosen by the person (2026-11-25): top `@cf/zai-org/glm-5.3`, middle
+  `@cf/moonshotai/kimi-k2.7-code`, small none.
 
-It is phase 6, approved by the person (2026-11-25) with the tiers above. It is built in
-parallel once phase 2 has landed and lands after phase 4; it stays off until its token slot is
-set. Until then, `workers-ai/…` is refused with "not yet".
+It is phase 6. It stays off until the token is set: until then `workers-ai/…` is refused with a
+message naming the slot.
+
+**Counted once.** A Workers AI call through `pigeon-cloudflare` shows in the gateway's log (with
+its cost, provider `workers-ai`, route credits). With Unified Billing it is paid from credits,
+whose billing rows are AI Gateway rows and already left out. But Cloudflare's billing may also
+list it under `ServiceName` "Workers AI" (postpaid mode, or if Cloudflare books it that way),
+and that is not verified. So `cost_daily` takes, per day, the gateway's `workers-ai` log cost off
+the Cloudflare "Workers AI" line, never below zero, and shows what it took off as
+`credits.workers_ai_overlap_usd`. Whichever way Cloudflare books it, each dollar counts once:
+under credits, from the gateway's log. Pigeon makes no other Workers AI calls, so the rest of
+the "Workers AI" line is other use of the account.
 
 ## Phases and branches
 
 | Phase | What | Who | Touches |
 | --- | --- | --- | --- |
 | 0 | This plan | planner | `docs/plans/model-providers-cloudflare.md`, `docs/plans/README.md` |
-| 1 | Gateways and routes in the model gateway: `Gateway {id, kind}`, `Provider {name, gateway, route}`, spec and drift per kind, the credits guard, per-job gateway, two-gateway logs, `models_daily` `by_route`, `models_cost` across gateways, step A's declaration | executor | `src/core/src/ai_gateway.rs`, `src/models/src/*`, `src/model-gateway/src/lib.rs`, smoke `models_*` |
-| 2 | Choices: `cf-anthropic`, `cf-openai`, `openai/` retired, route in `ai_agents_models`, `ai_agents_status` and `ai_agents_compare` | executor | `src/ai-agents/src/*`, smoke `ai_agents_*` |
-| 3 | `cost_daily`: AI Gateway billing rows out, Workers AI line, `credits` section, `by_route`, reconciliation on BYOK Anthropic only | executor | `src/capabilities/src/cost.rs`, smoke `platform_cost_daily_*` |
-| 4 | Step C: the Anthropic route to `pigeon-anthropic`, `CREDITS_SINCE`, the old slot no longer declared | planner, **after the person sets the key** | `src/model-gateway/src/lib.rs` |
-| 5 | Live check: an executor on `cf-anthropic/claude-haiku-5-5`; read its turn's log and cost | planner, **after step D and credits** | none |
-| 6 | Workers AI (decision 5) | executor, if phase 5 passes and budget remains | `src/core/src/ai_gateway.rs`, `src/models/src/*`, `src/capabilities/src/split.rs`, `src/ai-agents/src/models.rs` |
-| 7 | Docs: this plan's Log, how to use it | planner | `docs/plans/*` |
+| 1 | Gateways and routes: `Gateway {id, kind}`, `Provider {name, gateway, route}`, spec and drift per kind, the credits guard, per-job gateway | executor, **landed** `934a532` | `src/core/src/ai_gateway.rs`, `src/models/src/*`, `src/model-gateway/src/lib.rs` |
+| 2 | Choices: `cf-anthropic`, `cf-openai`, `openai/` retired, route on the ai-agents surfaces | executor, **landed** `aaf8c9a` | `src/ai-agents/src/*` |
+| 3 | `cost_daily`: AI Gateway billing rows out, Workers AI line, `credits`, `by_route`, reconciliation on BYOK Anthropic only | executor, **landed** `2ba4b42` | `src/capabilities/src/cost.rs` |
+| 4 | The Anthropic route to `pigeon-anthropic`; `CREDITS_SINCE` set | planner, **landed** `03b263b` (too early: Log) | `src/model-gateway/src/lib.rs` |
+| 8 | **Option B**: kinds BYOK / Credits / Retired; `pigeon-cloudflare` created and used by the credits providers; `pigeon` retired; `CREDITS_SINCE` and all time-based labelling removed; the BYOK readiness check; `models_providers` readiness | executor | `src/core/src/ai_gateway.rs`, `src/models/src/*`, `src/model-gateway/src/lib.rs`, `src/platform/src/settings.rs`, smoke |
+| 6 | Workers AI (decision 5), rebased onto phase 8: through `pigeon-cloudflare`, counted once in `cost_daily` | executor, after phase 8 | `src/core/src/ai_gateway.rs`, `src/models/src/*`, `src/model-gateway/*`, `src/ai-agents/src/models.rs`, `src/capabilities/src/cost.rs`, smoke |
+| 9 | Docs: this plan for option B | planner | `docs/plans/model-providers-cloudflare.md` |
+| 5 | Live check: an executor turn on `cf-anthropic/claude-haiku-5-5`; read its log on `pigeon-cloudflare` and its cost under credits | planner, **after Open items 1 to 3** | none |
 
-Phases 1, 2 and 3 run together, on disjoint crates. Phase 3 builds against the `models_daily`
-shape above. The landing order is 1, 2, 3. Each branch is rebased onto main before it lands.
-Their smoke scenarios all append to the end of `tests/smoke.rs`, so the second and third need a
-trivial rebase.
+The landing order is 9 (or with 8), 8, 6, then 5. Phase 6 starts from phase 8's branch once it
+is green, and is rebased onto main before it lands.
 
 ## How to use it (once deployed)
 
-- Credits models: `model: "cf-anthropic/claude-sonnet-5-5"`, `"cf-openai/gpt-6.2-sol"`, or a bare
-  `"cf-anthropic"` / `"cf-openai"` for the role's tier. BYOK Claude: `"anthropic/…"` or a bare
-  `claude-…` name.
+- Credits models (through `pigeon-cloudflare`): `model: "cf-anthropic/claude-sonnet-5-5"`,
+  `"cf-openai/gpt-6.2-sol"`, `"workers-ai/@cf/zai-org/glm-5.3"` (phase 6, once its token is set),
+  or a bare `"cf-anthropic"` / `"cf-openai"` / `"workers-ai"` for the role's tier.
+- BYOK Claude (through `pigeon-anthropic`): `"anthropic/…"` or a bare `claude-…` name. These
+  are the defaults.
+- Nothing routes to `pigeon`; its old logs still count, as BYOK.
 - Defaults: `ai_agents_models` shows each slot's choice and route.
+- Readiness: `models_providers` lists each gateway (kind, whether it exists, its keys) and each
+  provider's `ready` and `why`. `models_setup` creates a missing BYOK or credits gateway, hands
+  keys to BYOK gateways only, and reports drift for all three.
 - Cost: `cost_daily` gives `ai_gateway.by_route`, `ai_gateway.by_provider` and `credits`.
 
 ## Open items (for the person)
 
-1. **Done (2026-11-24).** The person set `pigeon-anthropic_anthropic_default` on the Access tab:
-   a NEW Anthropic key, not the one in `pigeon_anthropic_default`. So until phase 4 deploys,
-   Anthropic BYOK turns still use the old key on `pigeon`; from then on they use the new key on
-   `pigeon-anthropic`.
-2. **Make `pigeon` the credits gateway** (step D, after phase 4 is deployed). Cloudflare dashboard,
-   AI, AI Gateway, gateway `pigeon`:
-   1. Provider keys (BYOK): delete the Anthropic key (alias `default`; the OLD key). Also delete
+1. **Retire `pigeon`**, only once nothing routes to it (true from phase 8's deploy). Cloudflare
+   dashboard, AI, AI Gateway, gateway `pigeon`:
+   1. Provider keys (BYOK): delete the stored Anthropic key (alias `default`, the OLD key), and
       an OpenAI key if one is listed.
-   2. Settings: turn off **Require provider credentials**. Leave **Authenticated Gateway** on.
-   3. Settings: turn on **Zero Data Retention** if it is offered.
-   4. Secrets Store (Account, Secrets Store): delete the secret `pigeon_anthropic_default` (the
-      old key; revoke it in the Anthropic console too if it is not used elsewhere). Delete
-      `pigeon_openai_default` if it exists.
+   2. Settings: keep **Require provider credentials** ON, so nothing sent there can bill credits.
+   3. Account, Secrets Store: delete the secret `pigeon_anthropic_default` (the old key; revoke
+      it in the Claude Console too if nothing else uses it), and `pigeon_openai_default` if it
+      exists.
 
-   Pigeon sets no spend limit. You may add one under Settings, Spend limits, if you want a cap.
+   `models_setup` then reports no drift for `pigeon`.
+2. **Confirm `pigeon-cloudflare`'s settings** (`models_setup` creates it): **Require provider
+   credentials** OFF, **Authenticated Gateway** ON, **Zero Data Retention** ON, no provider keys.
+   Pigeon sets no spend limit; you may add one under Settings, Spend limits.
 3. **Buy credits.** AI Gateway page, **Credits Available**, **Manage**, **Top-up credits**: enter
    the amount and confirm (5% fee; a credit or debit card set as the primary payment method, not
    PayPal or Apple Pay). Auto top-up is optional, from the same card.
 4. **Optional:** on the account's auto-made `default` gateway, if it exists, turn on **Require
    provider credentials**, so nothing can spend credits through it.
-5. **Decided (2026-11-25):** no spend limit in pigeon; OpenAI on credits only (`cf-openai/…`;
-   `openai/…` is refused and points there); Workers AI yes, as phase 6, with tiers top
-   `@cf/zai-org/glm-5.3`, middle `@cf/moonshotai/kimi-k2.7-code`, small none.
+5. **Optional, for Workers AI:** a Cloudflare API token with Workers AI Read for this account,
+   set as `pigeon_workers_ai_token` on the Access tab. Then its binding in
+   `src/model-gateway/wrangler.toml` is uncommented and deployed (phase 6's note there).
+
+Decided before (2026-11-25): no spend limit in pigeon; OpenAI on credits only (`cf-openai/…`;
+`openai/…` is refused and points there); Workers AI with tiers top `@cf/zai-org/glm-5.3`, middle
+`@cf/moonshotai/kimi-k2.7-code`, small none. Done (2026-11-24): the new Anthropic key in
+`pigeon-anthropic_anthropic_default`, on `pigeon-anthropic`.
 
 ## Log
 
@@ -364,3 +406,18 @@ trivial rebase.
   Cloudflare line.
 - 2026-11-24: phase 4 (step C): `anthropic` goes through `pigeon-anthropic` with the new key;
   `pigeon_anthropic_default` is no longer declared; `CREDITS_SINCE` is `2026-11-24T01:45:00Z`.
+- 2026-11-24: **phase 4 landed too early.** The secret `pigeon-anthropic_anthropic_default` was
+  set, but the gateway `pigeon-anthropic` did not exist and held no key. Every Anthropic turn
+  after the deploy got 400, code 2001 ("Please configure AI Gateway"), and planner run
+  `A2apepRW1Vyb` failed on its next turn. The check before landing looked only at the secret.
+- 2026-11-24: **fixed by hand.** `models_setup` created `pigeon-anthropic` (BYOK, no drift) and
+  added the key (alias `default`); a Haiku call through it succeeded. `models_setup` reported
+  drift on `pigeon` (then declared credits): `byok_only` true, `zdr` false, a stored Anthropic
+  key. `pigeon` was not changed and still holds the old key.
+- 2026-11-24: phase 6 (Workers AI) built and CI-green on `claude/ai-agent-tHKTib1pE9j6`
+  (`8bb35bf`), not landed; it targeted `pigeon`.
+- 2026-11-24: **the person changed the design to option B** (decision 1): Cloudflare cannot
+  rename a gateway, so `pigeon` is retired, a new `pigeon-cloudflare` takes credits, and
+  `pigeon-anthropic` keeps the Anthropic key. Each gateway has one payer, so the payer follows
+  from the gateway and `CREDITS_SINCE` goes. Planner run `flYJq203hPLb` reworks it: phase 8
+  (gateways, routes, the readiness check), phase 6 rebased onto it, phase 9 (this plan).
