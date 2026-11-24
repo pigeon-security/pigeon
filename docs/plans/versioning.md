@@ -187,6 +187,29 @@ Three cases, from cheap to expensive:
   `capabilities_upgrade_propose {instance, component}`, which does exactly that in one call: the
   record with that one pin moved, waiting on the Approvals tab.
 
+### iOS Settings: capability upgrades
+
+This is phase 4 of the iOS billing/settings plan, not phase 4 of this versioning plan.
+The app shows capability declarations from the hosted set, not connectors, templates or
+installed code. The server has no separate per-instance capability enable list. A capability
+without a pin follows the hosted version; a held pin has no selected version and is never shown
+as up to date. Without a stored instance record, versions are informational only. A plan step is
+Breaking if the plan lists breaking migration work or the target changes major from the selected
+version (or the held pin’s major). Other steps are Patch. This keeps pre-1.0 breaking changes
+out of the patch batch. Bad or missing declarations do not count as up to date.
+
+A patch batch moves all its shown pins in one `instance_propose` draft based on one record
+version. Two drafts based on the same version cannot both apply. The app reads the stored record
+and checks that its plan inputs haven't changed before proposing; the server still validates the
+record and rejects a stale draft at approval. The owner approves the exact draft via the
+existing passkey flow. Only a used, person-decided draft and a fresh record read with an advanced
+record version and the expected pins can produce the green confirmation. Refresh checks a draft
+whose approval was interrupted; it never resubmits it automatically.
+
+These plans contain migration instructions, not an automated migration runner. The iOS footnote
+says the passkey confirms a pin change and any listed migration steps are manual; it does not
+promise that approving a pin runs the migration.
+
 ## Phases
 
 Each phase is one landing (or a few, one concern each), with its smoke scenarios.

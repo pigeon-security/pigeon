@@ -9,6 +9,7 @@ struct SettingsView: View {
     @Environment(InstanceStore.self) private var store
     @State private var whoami = ToolModel("users_whoami")
     @State private var secrets = ToolModel("secrets_list")
+    @State private var upgrades = CapabilityUpgrades()
     @State private var users = UsersModel()
     @State private var confirmSignOut = false
 
@@ -20,9 +21,12 @@ struct SettingsView: View {
             title: "Settings", root: true,
             errors: [
                 store.error, whoami.error, secrets.error, users.error, sessions.loadError,
-                sessions.actionError,
+                sessions.actionError, upgrades.error,
             ].compactMap { $0 },
-            refresh: { await reload() }
+            refresh: {
+                await reload()
+                await upgrades.load(store.selected?.id, client: session.client)
+            }
         ) {
             CardSection("Instances") { instancesCard }
             CardSection(store.selected?.title ?? "Pigeon Platform") {
@@ -31,6 +35,7 @@ struct SettingsView: View {
                         platformSettings
                     } else {
                         InstanceFactsCard(store: store)
+                        GroupedCard { capabilitiesLink }
                         if store.platform != nil {
                             Button("Switch to Pigeon Platform", action: onSwitchToPlatform)
                                 .buttonStyle(ChipButtonStyle())
@@ -48,6 +53,9 @@ struct SettingsView: View {
             Button("Cancel", role: .cancel) {}
         }
         .task { await reload() }
+        .task(id: store.selected?.id) {
+            await upgrades.load(store.selected?.id, client: session.client)
+        }
     }
 
     // MARK: Instances
@@ -123,9 +131,11 @@ struct SettingsView: View {
             NavigationLink {
                 SecretsView(session: session)
             } label: {
-                row("Secrets", detail: secretCount)
+                row("Secrets", detail: secretCount, colour: missingSecrets > 0 ? Tokens.warn : Tokens.muted)
             }
             .buttonStyle(.plain)
+            RowSeparator(inset: 16)
+            capabilitiesLink
         }
         GroupedCard {
             HStack(spacing: 12) {
@@ -185,17 +195,32 @@ struct SettingsView: View {
         }
     }
 
-    /// How many secrets there are, or nothing before they load.
+    private var missingSecrets: Int {
+        (secrets.data as? [[String: Any]])?.filter { $0["set"] as? Bool == false }.count ?? 0
+    }
+
     private var secretCount: String {
-        (secrets.data as? [[String: Any]]).map { "\($0.count)" } ?? ""
+        if missingSecrets > 0 { return "\(missingSecrets) not set" }
+        return (secrets.data as? [[String: Any]]).map { "\($0.count)" } ?? ""
+    }
+
+    private var capabilitiesLink: some View {
+        let instance = store.selected
+        let updates = upgrades.current(instance?.id)?.steps.count ?? 0
+        return NavigationLink {
+            CapabilitiesView(session: session, instance: instance, model: upgrades)
+        } label: {
+            row("Capabilities", detail: updates > 0 ? "\(updates) updates" : "", colour: Tokens.accent)
+        }
+        .buttonStyle(.plain)
     }
 
     /// One row of the access card: a name, a count and a chevron.
-    private func row(_ title: String, detail: String) -> some View {
+    private func row(_ title: String, detail: String, colour: Color = Tokens.muted) -> some View {
         HStack(spacing: 8) {
             Text(title).font(AppFont.row).foregroundStyle(Tokens.ink)
             Spacer()
-            Text(detail).font(AppFont.row).foregroundStyle(Tokens.muted).monospacedDigit()
+            Text(detail).font(AppFont.row).foregroundStyle(colour).monospacedDigit()
             Chevron()
         }
         .padding(.horizontal, 16)
