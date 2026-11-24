@@ -1853,7 +1853,7 @@ impl AiAgentRuns {
         }
         let (request, kind) = match (
             !last && transcript::needs_compaction(&usage),
-            transcript::cut_point(&messages, 20),
+            transcript::cut_point(&messages, transcript::KEEP_TAIL),
         ) {
             (true, Some(at)) => (
                 transcript::summary_request(&summary_model.model, &messages[..at]),
@@ -2144,7 +2144,7 @@ impl AiAgentRuns {
         if row.job_kind.as_deref() == Some("summary") {
             let summary = result["text"].as_str().unwrap_or_default();
             let messages = self.messages()?;
-            if let Some(at) = transcript::cut_point(&messages, 20) {
+            if let Some(at) = transcript::cut_point(&messages, transcript::KEEP_TAIL) {
                 let kept = transcript::compacted(summary, &messages[at..]);
                 self.db.exec("DELETE FROM messages", vec![])?;
                 for m in &kept {

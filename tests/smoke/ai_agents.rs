@@ -595,8 +595,8 @@ fn ai_agents_loop_budgets_tools_and_turns() {
     }
     assert_eq!(
         transcript::cut_point(&history, 20),
-        None,
-        "no clean place to cut"
+        Some(41),
+        "a tool loop cuts before an assistant message"
     );
     history.push(json!({ "role": "assistant", "content": [{ "type": "text", "text": "done?" }] }));
     history.push(
@@ -604,16 +604,11 @@ fn ai_agents_loop_budgets_tools_and_turns() {
     );
     history.push(json!({ "role": "assistant", "content": [{ "type": "text", "text": "ok" }] }));
     let at = transcript::cut_point(&history, 4).unwrap();
-    assert_eq!(history[at]["role"], "user");
+    assert_eq!(history[at]["role"], "assistant");
     let kept = transcript::compacted("did things", &history[at..]);
     assert_eq!(kept[0]["role"], "user");
     assert_eq!(kept[1]["role"], "assistant");
-    assert!(
-        kept[0]["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("did things")
-    );
+    assert!(kept[0]["content"].as_str().unwrap().contains("did things"));
     let summary = transcript::summary_request("claude-haiku-5-5", &history[..at]);
     assert!(
         summary["messages"][0]["content"]
@@ -2247,4 +2242,78 @@ fn ai_agents_openai_choice_routes_to_byok_provider() {
         !shown.contains("OpenAI is paid with Cloudflare credits"),
         "{shown}"
     );
+}
+
+/// Builds a tool-loop transcript: the brief, then `pairs` of assistant tool_use and user result.
+fn ai_agents_loop_history(pairs: usize) -> Vec<Value> {
+    let mut history = vec![json!({ "role": "user", "content": "brief" })];
+    for i in 0..pairs {
+        history.push(json!({ "role": "assistant", "content": [{ "type": "tool_use", "id": format!("t{i}"), "name": "run", "input": {} }] }));
+        history.push(json!({ "role": "user", "content": [{ "type": "tool_result", "tool_use_id": format!("t{i}"), "content": "ok" }] }));
+    }
+    history
+}
+
+/// A compaction of a tool loop keeps every tool_result next to its tool_use, alternates roles and
+/// starts with a user message.
+#[test]
+fn ai_agents_compaction_cuts_a_tool_loop_cleanly() {
+    use pigeon_ai_agents::transcript;
+    for pairs in [10, 11, 25, 40] {
+        let history = ai_agents_loop_history(pairs);
+        let at = transcript::cut_point(&history, transcript::KEEP_TAIL).unwrap();
+        assert_eq!(history[at]["role"], "assistant");
+        let kept = transcript::compacted("summary", &history[at..]);
+        assert_eq!(kept[0]["role"], "user");
+        let mut uses = std::collections::HashSet::new();
+        for (i, m) in kept.iter().enumerate() {
+            let want = if i % 2 == 0 { "user" } else { "assistant" };
+            assert_eq!(m["role"], want, "roles alternate at {i}");
+            for b in m["content"].as_array().into_iter().flatten() {
+                match b["type"].as_str() {
+                    Some("tool_use") => {
+                        uses.insert(b["id"].as_str().unwrap().to_string());
+                    }
+                    Some("tool_result") => assert!(
+                        uses.contains(b["tool_use_id"].as_str().unwrap()),
+                        "a result lost its tool_use"
+                    ),
+                    _ => {}
+                }
+            }
+        }
+    }
+    assert!(transcript::cut_point(&ai_agents_loop_history(3), transcript::KEEP_TAIL).is_none());
+    assert_eq!(transcript::COMPACT_AT, 100_000);
+}
+
+/// The tools and the system prompt in a request are the same bytes before and after a compaction,
+/// so the cached prefix survives.
+#[test]
+fn ai_agents_compaction_keeps_the_cached_prefix() {
+    use pigeon_ai_agents::Role;
+    use pigeon_ai_agents::transcript::{self, Spec};
+    let tools = vec![
+        json!({ "name": "run", "description": "d", "input_schema": { "type": "object" } }),
+        json!({ "name": "report", "description": "r", "input_schema": { "type": "object" } }),
+    ];
+    let spec = Spec {
+        role: Role::Planner,
+        model: "claude-opus-4-5",
+        system: "You are a planner.",
+        tools: &tools,
+    };
+    let history = ai_agents_loop_history(30);
+    let at = transcript::cut_point(&history, transcript::KEEP_TAIL).unwrap();
+    let after = transcript::compacted("summary", &history[at..]);
+    let before = transcript::request(&spec, &history);
+    let later = transcript::request(&spec, &after);
+    assert_ne!(before["messages"], later["messages"]);
+    for key in ["tools", "system", "model"] {
+        assert_eq!(
+            serde_json::to_vec(&before[key]).unwrap(),
+            serde_json::to_vec(&later[key]).unwrap(),
+            "{key} changed"
+        );
+    }
 }
