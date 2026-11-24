@@ -90,7 +90,7 @@ pub fn check_slot(slot: &str) -> Result<()> {
 }
 
 /// The normalised arguments of a key to create, or why they are refused.
-pub fn token_create_args(args: &Value, org: &str, default_project: &str) -> Result<Value> {
+pub fn token_create_args(args: &Value, default_project: &str) -> Result<Value> {
     if !args["organization_id"].is_null() || !args["organization"].is_null() {
         return Err(bad(
             "an organization-wide rule is refused: name `project_ids` instead",
@@ -138,12 +138,11 @@ pub fn token_create_args(args: &Value, org: &str, default_project: &str) -> Resu
         "project_ids": projects,
         "expires_days": days,
         "slot": slot,
-        "organization_id": org,
     }))
 }
 
 async fn plan_token_create(api: &Api<'_>, args: &Value) -> Result<Plan> {
-    let args = token_create_args(args, &api.creds.org, &api.creds.project)?;
+    let args = token_create_args(args, &api.creds.project)?;
     let name = args["name"].as_str().unwrap_or_default();
     let slot = args["slot"].as_str().unwrap_or_default();
     let app_name = format!("pigeon-{name}");
@@ -327,7 +326,8 @@ async fn clean_up(api: &Api<'_>, paths: &[String]) {
 async fn apply_token_create(api: &Api<'_>, plan: &Plan) -> Result<Value> {
     let a = &plan.args;
     let text = |k: &str| a[k].as_str().unwrap_or_default().to_string();
-    let (name, slot, org) = (text("name"), text("slot"), text("organization_id"));
+    let (name, slot) = (text("name"), text("slot"));
+    let org = api.creds.org.clone();
     let app_name = format!("pigeon-{name}");
     let projects = a["project_ids"].clone();
     let project = projects[0].as_str().unwrap_or_default().to_string();

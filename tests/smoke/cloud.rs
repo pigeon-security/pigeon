@@ -547,3 +547,659 @@ fn cloud_gateway_sigv4_matches_the_published_examples() {
             .contains("x-amz-acl;x-amz-content-sha256")
     );
 }
+
+#[test]
+fn cloud_gateway_reads_keys_buckets_and_objects() {
+    // A key list: the secret Scaleway should never send is dropped if it does.
+    let fx = Fx::new(|req| {
+        let (host, path, q) = split(&req.url);
+        match (host.as_str(), path.as_str()) {
+            ("api.scaleway.com", "/iam/v1alpha1/api-keys") => json_res(
+                200,
+                json!({ "total_count": 1, "api_keys": [{
+                    "access_key": NEW_KEY, "secret_key": "LEAKLEAKLEAK", "application_id": APP,
+                    "description": "backups", "created_at": "2013-05-01T00:00:00Z",
+                    "expires_at": "2014-05-01T00:00:00Z", "default_project_id": PROJ,
+                    "editable": true, "deletable": true, "managed": false,
+                    "creation_ip": "203.0.113.9",
+                }] }),
+            ),
+            (_, "/iam/v1alpha1/applications") => json_res(
+                200,
+                json!({ "applications": [{ "id": APP, "name": "pigeon-backups", "tags": ["pigeon"] }] }),
+            ),
+            (_, "/iam/v1alpha1/policies") => json_res(
+                200,
+                json!({ "policies": [{ "id": POLICY, "name": "pigeon-backups", "application_id": APP }] }),
+            ),
+            ("s3.fr-par.scw.cloud", "/") => text_res(200, BUCKETS_XML),
+            ("s3.nl-ams.scw.cloud", "/") => text_res(
+                200,
+                "<ListAllMyBucketsResult><Buckets><Bucket><Name>logs</Name>\
+                 <CreationDate>2021-01-02T03:04:05.000Z</CreationDate></Bucket></Buckets>\
+                 </ListAllMyBucketsResult>",
+            ),
+            ("s3.pl-waw.scw.cloud", "/") => text_res(
+                403,
+                "<Error><Code>AccessDenied</Code><Message>no</Message></Error>",
+            ),
+            ("s3.fr-par.scw.cloud", "/photos") if q.contains("continuation-token=tok1") => {
+                text_res(
+                    200,
+                    "<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>b.txt</Key>\
+                 <Size>3</Size><ETag>\"e2\"</ETag><LastModified>2020-01-01T00:00:00.000Z</LastModified>\
+                 </Contents></ListBucketResult>",
+                )
+            }
+            ("s3.fr-par.scw.cloud", "/photos") => text_res(
+                200,
+                "<ListBucketResult><IsTruncated>true</IsTruncated>\
+                 <NextContinuationToken>tok1</NextContinuationToken><Contents><Key>a.txt</Key>\
+                 <Size>12</Size><ETag>\"e1\"</ETag><LastModified>2020-01-01T00:00:00.000Z</LastModified>\
+                 </Contents><CommonPrefixes><Prefix>dir/</Prefix></CommonPrefixes></ListBucketResult>",
+            ),
+            ("s3.fr-par.scw.cloud", "/photos/dir/a%20b.txt") => HttpResponse {
+                status: 200,
+                headers: vec![
+                    ("Content-Length".into(), "12".into()),
+                    ("ETag".into(), "\"e1\"".into()),
+                    (
+                        "Last-Modified".into(),
+                        "Tue, 01 Jan 2020 00:00:00 GMT".into(),
+                    ),
+                    ("Content-Type".into(), "text/plain".into()),
+                ],
+                body: String::new(),
+            },
+            _ => nothing(req),
+        }
+    });
+
+    let keys = fx.run("cloud_tokens_list", json!({})).unwrap();
+    let text = keys.to_string();
+    assert!(
+        !text.contains("LEAKLEAKLEAK") && !text.contains("secret_key"),
+        "{text}"
+    );
+    assert_eq!(keys["total_count"], 1);
+    assert_eq!(keys["api_keys"][0]["access_key"], NEW_KEY);
+    assert_eq!(keys["api_keys"][0]["application"]["name"], "pigeon-backups");
+    assert_eq!(keys["api_keys"][0]["policies"][0]["id"], POLICY);
+    let first = &fx.log()[0];
+    assert_eq!(first.header("X-Auth-Token"), Some(SECRET));
+    assert!(first.url.contains(&format!("organization_id={ORG}")));
+    assert_eq!(first.method, "GET");
+    // The paging arguments are checked.
+    assert!(
+        fx.run("cloud_tokens_list", json!({ "page_size": 101 }))
+            .is_err()
+    );
+
+    // Buckets across the three regions: one fails and is reported beside the others.
+    let all = fx.run("cloud_buckets_list", json!({})).unwrap();
+    let names: Vec<String> = all["buckets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| {
+            format!(
+                "{}/{}",
+                b["region"].as_str().unwrap(),
+                b["name"].as_str().unwrap()
+            )
+        })
+        .collect();
+    assert_eq!(names, ["fr-par/photos", "nl-ams/logs"]);
+    assert_eq!(all["errors"][0]["region"], "pl-waw");
+    assert!(
+        all["errors"][0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("AccessDenied")
+    );
+    // One region named: one request, and its failure is the error.
+    let before = fx.log().len();
+    let one = fx
+        .run("cloud_buckets_list", json!({ "region": "nl-ams" }))
+        .unwrap();
+    assert_eq!(fx.log().len(), before + 1);
+    assert_eq!(one["buckets"].as_array().unwrap().len(), 1);
+    let denied = fx.run("cloud_buckets_list", json!({ "region": "pl-waw" }));
+    assert!(denied.unwrap_err().contains("AccessDenied"));
+    // A region that is not one of the three never reaches the network.
+    let before = fx.log().len();
+    assert!(
+        fx.run("cloud_buckets_list", json!({ "region": "evil.com/x" }))
+            .is_err()
+    );
+    assert_eq!(fx.log().len(), before);
+
+    // Objects, with a paging token.
+    let args = json!({ "region": "fr-par", "bucket": "photos", "prefix": "a", "delimiter": "/", "max_keys": 1 });
+    let page = fx.run("cloud_objects_list", args).unwrap();
+    assert_eq!(page["objects"][0]["key"], "a.txt");
+    assert_eq!(page["prefixes"][0], "dir/");
+    assert_eq!(page["next_token"], "tok1");
+    let url = fx.log().last().unwrap().url.clone();
+    for part in ["list-type=2", "max-keys=1", "prefix=a", "delimiter=%2F"] {
+        assert!(url.contains(part), "{url}");
+    }
+    let args = json!({ "region": "fr-par", "bucket": "photos", "token": "tok1" });
+    let next = fx.run("cloud_objects_list", args).unwrap();
+    assert_eq!(next["objects"][0]["key"], "b.txt");
+    assert!(next["next_token"].is_null());
+    let args = json!({ "region": "fr-par", "bucket": "photos", "max_keys": 1001 });
+    assert!(fx.run("cloud_objects_list", args).is_err());
+    let args = json!({ "region": "fr-par", "bucket": "Bad_Bucket" });
+    assert!(fx.run("cloud_objects_list", args).is_err());
+
+    // Head.
+    let args = json!({ "region": "fr-par", "bucket": "photos", "key": "dir/a b.txt" });
+    let head = fx.run("cloud_object_head", args).unwrap();
+    assert_eq!(head["size"], 12);
+    assert_eq!(head["etag"], "e1");
+    assert_eq!(head["content_type"], "text/plain");
+    assert_eq!(fx.log().last().unwrap().method, "HEAD");
+    let args = json!({ "region": "fr-par", "bucket": "photos", "key": "nope" });
+    let missing = fx.run("cloud_object_head", args).unwrap_err();
+    assert!(missing.contains("404"), "{missing}");
+
+    // Every request went to an allowed host, and the host allowlist holds.
+    assert!(fx.log().iter().all(|r| transport::allowed(&r.url)));
+    for url in [
+        "https://api.scaleway.com/iam/v1alpha1/api-keys",
+        "https://s3.fr-par.scw.cloud/",
+        "https://s3.nl-ams.scw.cloud/b?x=1",
+        "https://s3.pl-waw.scw.cloud",
+    ] {
+        assert!(transport::allowed(url), "{url}");
+    }
+    for url in [
+        "http://api.scaleway.com/x",
+        "https://example.com/",
+        "https://api.scaleway.com.evil.com/",
+        "https://s3.fr-par.scw.cloud.evil.com/",
+        "https://evil.com/s3.fr-par.scw.cloud",
+        "https://user@api.scaleway.com/",
+        "https://api.scaleway.com@evil.com/",
+        "https://evil.com@api.scaleway.com/",
+        "https://api.scaleway.com:8443/",
+        "https://api.scaleway.com\\@evil.com/",
+        "https://API.scaleway.com/",
+        "https://photos.s3.fr-par.scw.cloud/",
+        "https://s3.us-east-1.scw.cloud/",
+        "ftp://api.scaleway.com/",
+        "//api.scaleway.com/",
+        "api.scaleway.com",
+        "",
+    ] {
+        assert!(!transport::allowed(url), "{url}");
+    }
+    // The Worker's transport refuses before it fetches (so this needs no runtime).
+    let refused = block(transport::FetchTransport.send(HttpRequest {
+        method: "GET".into(),
+        url: "https://user:pw@evil.com/x?k=v".into(),
+        headers: vec![("X-Auth-Token".into(), SECRET.into())],
+        body: String::new(),
+    }));
+    assert_eq!(
+        refused.unwrap_err().to_string(),
+        "the cloud gateway does not call evil.com"
+    );
+    // A request's Debug shows no header value.
+    let req = iam::request("GET", "/api-keys", &[], None, &iam::SecretKey::new(SECRET));
+    assert!(!format!("{req:?}").contains(SECRET));
+}
+
+const NO_VERSIONS: &str = "<ListVersionsResult><Name>newbucket</Name><MaxKeys>1</MaxKeys>\
+    <IsTruncated>false</IsTruncated></ListVersionsResult>";
+const ONE_VERSION: &str = "<ListVersionsResult><Name>newbucket</Name><MaxKeys>1</MaxKeys>\
+    <IsTruncated>true</IsTruncated><Version><Key>a</Key></Version></ListVersionsResult>";
+
+/// A Scaleway holding at most one bucket, `newbucket`, whose state the scenario moves.
+fn bucket_world(
+    exists: Rc<Cell<bool>>,
+    full: Rc<Cell<bool>>,
+) -> impl Fn(&HttpRequest) -> HttpResponse {
+    move |req| {
+        let (_, path, q) = split(&req.url);
+        match (req.method.as_str(), path.as_str()) {
+            ("GET", "/") if exists.get() => text_res(
+                200,
+                "<ListAllMyBucketsResult><Buckets><Bucket><Name>newbucket</Name>\
+                 <CreationDate>2013-05-24T00:00:00.000Z</CreationDate></Bucket></Buckets>\
+                 </ListAllMyBucketsResult>",
+            ),
+            ("GET", "/") => text_res(
+                200,
+                "<ListAllMyBucketsResult><Buckets></Buckets></ListAllMyBucketsResult>",
+            ),
+            ("GET", "/newbucket") if q.contains("versions") => {
+                text_res(200, if full.get() { ONE_VERSION } else { NO_VERSIONS })
+            }
+            ("PUT", "/newbucket") => {
+                exists.set(true);
+                text_res(200, "")
+            }
+            ("DELETE", "/newbucket") => {
+                exists.set(false);
+                text_res(204, "")
+            }
+            _ => nothing(req),
+        }
+    }
+}
+
+#[test]
+fn cloud_gateway_buckets_plan_then_apply() {
+    let (exists, full) = (Rc::new(Cell::new(false)), Rc::new(Cell::new(false)));
+    let fx = Fx::new(bucket_world(exists.clone(), full.clone()));
+    let args = json!({ "region": "fr-par", "bucket": "newbucket" });
+
+    // Planning changes nothing and makes one approval, whose payload is the plan.
+    let planned = fx.run("cloud_buckets_plan_create", args.clone()).unwrap();
+    assert!(fx.sent("PUT").is_empty() && !exists.get());
+    assert_eq!(planned["approval"], "ap1");
+    assert!(planned["plan"][0].as_str().unwrap().contains("newbucket"));
+    let rec = fx.appr.recs.borrow()[0].clone();
+    assert_eq!(rec.kind, "cloud_change");
+    assert_eq!(rec.subject, "cloud:scaleway:buckets:create");
+    assert_eq!(
+        rec.payload,
+        json!({
+            "provider": "scaleway", "kind": "buckets", "action": "create",
+            "args": { "region": "fr-par", "bucket": "newbucket" },
+            "before": { "exists": false },
+        })
+    );
+    assert!(!fx.appr.lines.borrow()[0].is_empty());
+
+    // Not approved yet: nothing happens.
+    let waiting = fx.run("cloud_apply", json!({ "plan": "ap1" })).unwrap_err();
+    assert!(waiting.contains("waiting for the person"), "{waiting}");
+    assert!(fx.sent("PUT").is_empty() && fx.appr.taken.borrow().is_empty());
+    assert!(fx.run("cloud_apply", json!({ "plan": "nope" })).is_err());
+    assert!(fx.run("cloud_apply", json!({})).is_err());
+
+    // Approved: the bucket is made private, the approval spent, and nothing differs.
+    fx.approve("ap1");
+    let done = fx.run("cloud_apply", json!({ "plan": "ap1" })).unwrap();
+    assert_eq!(done["created"]["bucket"], "newbucket");
+    assert_eq!(done["differences"], json!([]));
+    assert!(exists.get());
+    let puts = fx.sent("PUT");
+    assert_eq!(puts.len(), 1);
+    assert_eq!(puts[0].url, "https://s3.fr-par.scw.cloud/newbucket");
+    assert_eq!(puts[0].header("x-amz-acl"), Some("private"));
+    assert_eq!(
+        puts[0].header("x-amz-content-sha256"),
+        Some(pigeon_core::s3::EMPTY_SHA256)
+    );
+    assert!(
+        puts[0]
+            .header("authorization")
+            .unwrap()
+            .contains("SignedHeaders=host;x-amz-acl;")
+    );
+    assert_eq!(*fx.appr.taken.borrow(), ["ap1"]);
+    // An approval is used once.
+    let again = fx.run("cloud_apply", json!({ "plan": "ap1" })).unwrap_err();
+    assert!(again.contains("used"), "{again}");
+    assert_eq!(fx.sent("PUT").len(), 1);
+    // The bucket exists now: a second plan to create it is refused.
+    let e = fx
+        .run("cloud_buckets_plan_create", args.clone())
+        .unwrap_err();
+    assert!(e.contains("already exists"), "{e}");
+
+    // Drift: planned while absent, made by someone else before the apply. Nothing is changed
+    // and the approval is not spent.
+    exists.set(false);
+    let planned = fx.run("cloud_buckets_plan_create", args.clone()).unwrap();
+    let id = planned["approval"].as_str().unwrap().to_string();
+    fx.approve(&id);
+    exists.set(true);
+    let puts = fx.sent("PUT").len();
+    let e = fx.run("cloud_apply", json!({ "plan": id })).unwrap_err();
+    assert!(
+        e.contains("no longer holds") && e.contains("plan again"),
+        "{e}"
+    );
+    assert_eq!(fx.sent("PUT").len(), puts);
+    assert_eq!(fx.appr.taken.borrow().len(), 1);
+
+    // Delete: refused when the bucket holds anything, even an old version.
+    full.set(true);
+    let e = fx
+        .run("cloud_buckets_plan_delete", args.clone())
+        .unwrap_err();
+    assert!(e.contains("not empty"), "{e}");
+    let versions = fx
+        .log()
+        .into_iter()
+        .rev()
+        .find(|r| r.url.contains("versions"))
+        .unwrap();
+    assert!(
+        versions.url.contains("max-keys=1") && versions.url.contains("versions="),
+        "{}",
+        versions.url
+    );
+    assert!(fx.sent("DELETE").is_empty());
+    // Empty at plan time, then something lands before the apply: refused again.
+    full.set(false);
+    let planned = fx.run("cloud_buckets_plan_delete", args.clone()).unwrap();
+    let id = planned["approval"].as_str().unwrap().to_string();
+    fx.approve(&id);
+    full.set(true);
+    let e = fx.run("cloud_apply", json!({ "plan": id })).unwrap_err();
+    assert!(e.contains("not empty") && e.contains("plan again"), "{e}");
+    assert!(fx.sent("DELETE").is_empty() && exists.get());
+    // Empty at both: deleted, and the apply reads the bucket gone.
+    full.set(false);
+    let planned = fx.run("cloud_buckets_plan_delete", args.clone()).unwrap();
+    let id = planned["approval"].as_str().unwrap().to_string();
+    fx.approve(&id);
+    let done = fx.run("cloud_apply", json!({ "plan": id })).unwrap();
+    assert_eq!(done["differences"], json!([]));
+    assert_eq!(fx.sent("DELETE").len(), 1);
+    assert!(!exists.get());
+    let e = fx.run("cloud_buckets_plan_delete", args).unwrap_err();
+    assert!(e.contains("does not exist"), "{e}");
+
+    // Names and regions are checked before anything is read.
+    let before = fx.log().len();
+    for bucket in [
+        "ab",
+        "Abc",
+        "a_b",
+        "-abc",
+        "abc-",
+        "a.b.c",
+        "xn--abc",
+        &"a".repeat(64),
+        "a b",
+    ] {
+        let args = json!({ "region": "fr-par", "bucket": bucket });
+        assert!(
+            fx.run("cloud_buckets_plan_create", args).is_err(),
+            "{bucket}"
+        );
+    }
+    let args = json!({ "region": "us-east-1", "bucket": "newbucket" });
+    assert!(fx.run("cloud_buckets_plan_create", args).is_err());
+    assert_eq!(fx.log().len(), before);
+    // A public bucket is not an option: an `acl` argument changes nothing.
+    exists.set(false);
+    let args = json!({ "region": "fr-par", "bucket": "newbucket", "acl": "public-read" });
+    let planned = fx.run("cloud_buckets_plan_create", args).unwrap();
+    assert!(planned["args"].get("acl").is_none());
+}
+
+/// The state of the mocked IAM, which a scenario moves.
+struct World {
+    key_gone: Cell<bool>,
+    app_gone: Cell<bool>,
+    app_tag: RefCell<String>,
+    other_key: Cell<bool>,
+    description: RefCell<String>,
+}
+
+fn world() -> Rc<World> {
+    Rc::new(World {
+        key_gone: Cell::new(false),
+        app_gone: Cell::new(false),
+        app_tag: RefCell::new("pigeon".into()),
+        other_key: Cell::new(false),
+        description: RefCell::new("pigeon cloud gateway: backups".into()),
+    })
+}
+
+/// A Scaleway IAM with one application, one policy and one key, `NEW_KEY`.
+fn token_world(w: Rc<World>) -> impl Fn(&HttpRequest) -> HttpResponse {
+    move |req| {
+        let (_, path, _) = split(&req.url);
+        let path = path
+            .strip_prefix("/iam/v1alpha1")
+            .unwrap_or(&path)
+            .to_string();
+        let key = |secret: bool| {
+            let mut k = json!({
+                "access_key": NEW_KEY, "application_id": APP, "default_project_id": PROJ2,
+                "description": *w.description.borrow(), "expires_at": "2013-06-23T00:00:00Z",
+                "editable": true, "deletable": true, "managed": false,
+            });
+            if secret {
+                k["secret_key"] = json!(NEW_SECRET);
+            }
+            k
+        };
+        match (req.method.as_str(), path.as_str()) {
+            ("GET", "/applications") => json_res(200, json!({ "applications": [] })),
+            ("POST", "/applications") => {
+                json_res(200, json!({ "id": APP, "name": "pigeon-backups" }))
+            }
+            ("GET", p) if p == format!("/applications/{APP}") && !w.app_gone.get() => json_res(
+                200,
+                json!({ "id": APP, "name": "pigeon-backups", "tags": [w.app_tag.borrow().clone()] }),
+            ),
+            ("DELETE", p) if p == format!("/applications/{APP}") => {
+                w.app_gone.set(true);
+                text_res(204, "")
+            }
+            ("POST", "/policies") => json_res(200, json!({ "id": POLICY })),
+            ("GET", "/policies") => json_res(
+                200,
+                json!({ "policies": [{ "id": POLICY, "name": "pigeon-backups", "application_id": APP }] }),
+            ),
+            ("DELETE", p) if p == format!("/policies/{POLICY}") => text_res(204, ""),
+            ("POST", "/api-keys") => json_res(200, key(true)),
+            ("GET", "/api-keys") => {
+                let mut keys = vec![key(false)];
+                if w.other_key.get() {
+                    keys.push(
+                        json!({ "access_key": "SCWOTHERKEY0000000000", "application_id": APP }),
+                    );
+                }
+                json_res(200, json!({ "api_keys": keys, "total_count": keys.len() }))
+            }
+            ("GET", p) if p == format!("/api-keys/{NEW_KEY}") && !w.key_gone.get() => {
+                json_res(200, key(false))
+            }
+            ("DELETE", p) if p == format!("/api-keys/{NEW_KEY}") => {
+                w.key_gone.set(true);
+                text_res(204, "")
+            }
+            _ => nothing(req),
+        }
+    }
+}
+
+fn token_args() -> Value {
+    json!({
+        "name": "backups",
+        "permission_sets": ["ObjectStorageReadOnly", "ObjectStorageFullAccess"],
+        "project_ids": [PROJ2],
+        "slot": "CLOUD_SCW_BACKUPS",
+    })
+}
+
+#[test]
+fn cloud_gateway_creates_a_key_and_never_shows_its_secret() {
+    let w = world();
+    let fx = Fx::new(token_world(w.clone()));
+
+    // What a plan refuses, before any call goes out.
+    let with = |k: &str, v: Value| {
+        let mut a = token_args();
+        a[k] = v;
+        a
+    };
+    let refused = [
+        with("permission_sets", json!(["IAMManager"])),
+        with(
+            "permission_sets",
+            json!(["ObjectStorageFullAccess", "OrganizationManager"]),
+        ),
+        with("permission_sets", json!(["IAMFullAccess"])),
+        with("permission_sets", json!([])),
+        with("permission_sets", json!("ObjectStorageFullAccess")),
+        with("organization_id", json!(ORG)),
+        with("project_ids", json!(["not-a-uuid"])),
+        with("expires_days", json!(0)),
+        with("expires_days", json!(366)),
+        with("expires_days", json!("30")),
+        with("name", json!("Bad Name")),
+        with("name", json!("")),
+        with("slot", json!("SCW_ACCESS_KEY")),
+        with("slot", json!("CLOUD_")),
+        with("slot", json!("cloud_x")),
+        with("slot", json!("CLOUD_A-B")),
+        with("slot", json!("CLOUD_SCW_SECRET_KEY ")),
+        with("slot", json!(format!("CLOUD_{}", "A".repeat(57)))),
+    ];
+    for args in refused {
+        assert!(
+            fx.run("cloud_tokens_plan_create", args.clone()).is_err(),
+            "{args}"
+        );
+    }
+    assert!(fx.log().is_empty(), "a refused plan reads nothing");
+    // The longest slot is fine, and an existing slot is not.
+    let mut ok = token_args();
+    ok["slot"] = json!(format!("CLOUD_{}", "A".repeat(56)));
+    assert!(fx.run("cloud_tokens_plan_create", ok).is_ok());
+    fx.store.names.borrow_mut().push("CLOUD_TAKEN".into());
+    let e = fx
+        .run(
+            "cloud_tokens_plan_create",
+            with("slot", json!("CLOUD_TAKEN")),
+        )
+        .unwrap_err();
+    assert!(e.contains("already exists"), "{e}");
+    // A sink that cannot be written to stops the plan.
+    fx.store.fail_exists.set(true);
+    assert!(
+        fx.run("cloud_tokens_plan_create", token_args())
+            .unwrap_err()
+            .contains("cannot be checked")
+    );
+    fx.store.fail_exists.set(false);
+
+    // The plan: normalised arguments, a default of 30 days, the approval's payload.
+    let planned = fx.run("cloud_tokens_plan_create", token_args()).unwrap();
+    let id = planned["approval"].as_str().unwrap().to_string();
+    let rec = fx
+        .appr
+        .recs
+        .borrow()
+        .iter()
+        .find(|r| r.id == id)
+        .cloned()
+        .unwrap();
+    assert_eq!(rec.subject, "cloud:scaleway:tokens:create");
+    assert_eq!(
+        rec.payload["args"]["permission_sets"],
+        json!(["ObjectStorageFullAccess", "ObjectStorageReadOnly"])
+    );
+    assert_eq!(rec.payload["args"]["expires_days"], 30);
+    assert_eq!(rec.payload["args"]["project_ids"], json!([PROJ2]));
+    assert_eq!(
+        rec.payload["before"],
+        json!({ "application_exists": false, "slot_exists": false })
+    );
+    assert!(fx.sent("POST").is_empty(), "a plan creates nothing");
+
+    // Apply: application, policy, key, then the slot.
+    fx.approve(&id);
+    let done = fx.run("cloud_apply", json!({ "plan": id })).unwrap();
+    let text = done.to_string();
+    assert!(
+        !text.contains(NEW_SECRET) && !text.contains("secret_key"),
+        "{text}"
+    );
+    assert_eq!(done["created"]["slot"], "CLOUD_SCW_BACKUPS");
+    assert_eq!(done["created"]["access_key"], NEW_KEY);
+    assert_eq!(done["created"]["application"]["name"], "pigeon-backups");
+    assert_eq!(done["created"]["expires_at"], "2013-06-23T00:00:00Z");
+    assert_eq!(done["differences"], json!([]));
+    let posts: Vec<String> = fx.sent("POST").iter().map(|r| split(&r.url).1).collect();
+    assert_eq!(
+        posts,
+        [
+            "/iam/v1alpha1/applications",
+            "/iam/v1alpha1/policies",
+            "/iam/v1alpha1/api-keys"
+        ]
+    );
+    let bodies: Vec<Value> = fx
+        .sent("POST")
+        .iter()
+        .map(|r| serde_json::from_str(&r.body).unwrap())
+        .collect();
+    assert_eq!(bodies[0]["name"], "pigeon-backups");
+    assert_eq!(bodies[0]["tags"], json!(["pigeon"]));
+    assert_eq!(bodies[0]["organization_id"], ORG);
+    // One rule, naming the projects: never an organization-wide one.
+    assert_eq!(
+        bodies[1]["rules"],
+        json!([{ "permission_set_names": ["ObjectStorageFullAccess", "ObjectStorageReadOnly"], "project_ids": [PROJ2] }])
+    );
+    assert_eq!(bodies[1]["application_id"], APP);
+    assert_eq!(bodies[2]["application_id"], APP);
+    assert_eq!(bodies[2]["default_project_id"], PROJ2);
+    assert_eq!(bodies[2]["expires_at"], "2013-06-23T00:00:00Z");
+    // The secret is in the sink as ACCESS:SECRET, under the named slot, and nowhere else.
+    let written = fx.store.written.borrow().clone();
+    assert_eq!(written.len(), 1);
+    assert_eq!(written[0].0, "CLOUD_SCW_BACKUPS");
+    assert_eq!(written[0].1, format!("{NEW_KEY}:{NEW_SECRET}"));
+    assert!(!written[0].2.contains(NEW_SECRET));
+    let keys = pigeon_core::s3::parse_keys(&written[0].1).unwrap();
+    assert_eq!(keys.access_key_id, NEW_KEY);
+    assert_eq!(keys.secret_access_key, NEW_SECRET);
+    let approvals = format!("{:?}{:?}", fx.appr.recs.borrow(), fx.appr.lines.borrow());
+    assert!(!approvals.contains(NEW_SECRET));
+    assert!(!format!("{:?}", fx.log()).contains(NEW_SECRET));
+    // Debug of the new key hides the secret.
+    let made =
+        iam::parse_new_key(&json!({ "access_key": NEW_KEY, "secret_key": NEW_SECRET })).unwrap();
+    assert!(!format!("{made:?}").contains(NEW_SECRET));
+    assert!(!format!("{:?}", made.secret).contains(NEW_SECRET));
+    // A secret key Scaleway sends on a read is never copied.
+    let read = iam::parse_key(&json!({ "access_key": NEW_KEY, "secret_key": NEW_SECRET })).unwrap();
+    assert!(!format!("{read:?}{}", read.to_json()).contains(NEW_SECRET));
+    let mut v = json!({ "a": [{ "secret_key": "x", "keep": 1 }], "secret_key": "y" });
+    iam::strip_secrets(&mut v);
+    assert_eq!(v, json!({ "a": [{ "keep": 1 }] }));
+
+    // The slot cannot be written: the new key is deleted at once, and the error hides the
+    // secret even though the sink's error held it.
+    let w2 = world();
+    let fx2 = Fx::new(token_world(w2.clone()));
+    let planned = fx2.run("cloud_tokens_plan_create", token_args()).unwrap();
+    let id = planned["approval"].as_str().unwrap().to_string();
+    fx2.approve(&id);
+    fx2.store.fail_write.set(true);
+    let e = fx2.run("cloud_apply", json!({ "plan": id })).unwrap_err();
+    assert!(!e.contains(NEW_SECRET) && !e.contains(NEW_KEY), "{e}");
+    assert!(e.contains("was deleted"), "{e}");
+    assert!(w2.key_gone.get(), "the new key was deleted");
+    assert!(
+        fx2.sent("DELETE")
+            .iter()
+            .any(|r| r.url.ends_with(&format!("/api-keys/{NEW_KEY}")))
+    );
+    assert!(fx2.store.written.borrow().is_empty());
+    assert!(!format!("{:?}", fx2.log()).contains(NEW_SECRET));
+
+    // A sink that cannot be written to when the plan is applied: nothing is created.
+    let fx3 = Fx::new(token_world(world()));
+    let planned = fx3.run("cloud_tokens_plan_create", token_args()).unwrap();
+    let id = planned["approval"].as_str().unwrap().to_string();
+    fx3.approve(&id);
+    fx3.store.fail_exists.set(true);
+    let e = fx3.run("cloud_apply", json!({ "plan": id })).unwrap_err();
+    assert!(e.contains("cannot"), "{e}");
+    assert!(fx3.sent("POST").is_empty());
+}
