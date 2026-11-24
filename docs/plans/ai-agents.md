@@ -623,6 +623,62 @@ actual spend plus a reserve of at most $0.50; the unspent part of its budget is 
 ended executor holds only its spend. The child's own budget is still its own cap. At spawn the
 planner needs only the reserve left, plus turns, wall time and sandbox time for the child.
 
+### Phase 8: briefs that start right (2026-11-27, from a day of planner runs)
+
+Four small items, each its own landing, in this order. Each is built from `main` by one executor
+(at most two live at once, at most $4 each), lands on its own after `sh ci/runner/test.sh` and the
+`test` job are green, and the next restacks onto the new main. Smoke scenarios go in
+`tests/smoke/ai_agents.rs` (prefix `ai_agents_`).
+
+**8a. Brief preflight.** Evidence: a planner was briefed with paths from another repository
+(`CLAUDE.md`, `.claude/decisions/`, `src/pigeon-ios`) and spent turns asking about them.
+- A pure function in a new module `src/ai-agents/src/preflight.rs` takes a brief and returns the
+  repo paths it names. A token is a candidate when it is inside backticks, or it contains a `/`
+  and has no `://`, spaces or other markup. Trailing punctuation, `:line` suffixes and a trailing
+  `/*` or `*` are stripped. Branch names (`claude/…`, `origin/…`), URLs, versions, `a/b` words
+  such as `and/or`, absolute paths and tokens with shell or template characters are not paths.
+  Only paths with a known top-level directory or file name pattern are kept (a dot in the last
+  part, or a slash) so prose does not give false alarms. At most 40 are checked.
+- `ai_agents_start` checks each path against the base commit's tree (a file or a directory) and
+  adds `missing_paths: [...]` and a one-line `preflight` sentence to its answer. When any are
+  missing it also queues a note to the new run (the same way `ai_agents_note` does) before its
+  first turn, saying which paths do not exist at `base` and that it should look for the real ones
+  rather than ask. A failed check is logged and left out; it never stops the start.
+- The tree read goes through the sandbox's `run` or the git proxy, whichever the object already
+  uses to fetch the base; the executor picks the cheaper and says which in the Log.
+
+**8b. Repo map.** Runs keep re-exploring the same layout.
+- `ci/repo-map.sh` writes `src/ai-agents/repo-map.md`, about 150 lines: the workspace crates and
+  what each is for (the first line of its crate docs), each Worker and the crates it links
+  (`ci/workers.toml`, the `wrangler.toml` files), and where tools, plans, tests, CI and deploy
+  scripts live. It holds no counts, dates or hashes, so it changes only when the layout does.
+- The file is committed and compiled in with `include_str!`, so the runner reads it with no
+  fetch. A smoke scenario runs the script and fails when the committed file differs; that is how
+  CI regenerates and checks it on main without a bot pushing. `ci/` is a gate change (rule
+  `gate-changes`, the delegate's approval): if the landing asks for it, the script ships and
+  the prompt use waits on the approval.
+- The map is the first block after the system prompt and before the brief, in the cached prefix,
+  the same bytes for every turn and every run of one build. It is never rebuilt per turn.
+
+**8c. Estimator kinds.** Today every run is `docs`, because the word `plan` is in every planner
+brief.
+- Kinds: `design`, `fix`, `integrate`, `docs`, `build`, `live check`. `ai_agents_start {kind}` and
+  `ai_agents_estimate {kind}` take one of them (the planner hint's enum grows by `build` and
+  `live check`; the model slots stay as they are). With no `kind`, the brief is classified by
+  keyword, first match wins in the order `live check`, `integrate`, `fix`, `design`, `docs`, else
+  `build`, and `docs` needs the brief's own first sentence or an explicit `docs-only`, not a
+  stray `plan`.
+- Per-kind history: `Past.kind` is the kind the run was started with, else classified from its
+  brief by the same rule. The estimate's distance and its note use it, and the answer shows
+  `kind` and `kind_source` (`given` or `classified`).
+
+**8d. Turn job ids in status.** `ai_agents_status {run}` shows `turns_recent`: the last 10 turns
+as `{n, job_id, model, at}` from the `turn_costs` table (new turn rows already hold `job_id`), so
+`models_status {id}` can be read for any turn of a run, and the endpoint (`chat` or `responses`)
+it records. The list view is unchanged.
+
+Not done in this phase: no stored or built-in default changes, and nothing here limits a run.
+
 ## The person's answers (2026-11-22, relayed by the parent)
 
 1. Runs push and run CI only; landing stays with the planner or the parent. Phase 2's `land` flag
