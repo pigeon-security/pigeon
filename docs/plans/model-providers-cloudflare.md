@@ -1,8 +1,9 @@
 # Model providers, Part 3: models paid with Cloudflare credits
 
 Status: **Option B** (the person, 2026-11-24): three gateways, each with one payer. Phases 1 to 4
-landed under the earlier design; phases 8, 6 and 9 rework them for option B (planner run
-`v9X4Ac28iqNm`, a restart of `flYJq203hPLb`). Follows [model-providers.md](model-providers.md) (Parts 1 and 2).
+landed under the earlier design; phases 8, 6, 9, 10 and 11 rework them for option B, and all
+have landed (planner run `v9X4Ac28iqNm`, a restart of `flYJq203hPLb`). Credits work for Claude
+and GPT; the Workers AI live check failed and is open (Log). Follows [model-providers.md](model-providers.md) (Parts 1 and 2).
 
 ## Goal
 
@@ -275,14 +276,17 @@ Three Workers AI models are documented with function calling and reasoning (abov
 takes:
 - the REST endpoint (a third request shape in `ai_gateway`), always with `cf-aig-gateway-id:
   pigeon-cloudflare`, so the account's `default` gateway never serves it;
-- a token with Workers AI Read, set by the person in the slot `pigeon_workers_ai_token`;
+- a token with Workers AI Read, minted by core from the parent token for each call (purpose
+  `workers_ai`, this account only, 15 minutes at most) and revoked right after the call
+  (phase 10). Nothing is stored and the person sets nothing;
 - `workers_ai_billing_mode: "unified"` on `pigeon-cloudflare` (in its spec and checked by the
   credits guard);
 - tiers chosen by the person (2026-11-25): top `@cf/zai-org/glm-5.3`, middle
   `@cf/moonshotai/kimi-k2.7-code`, small none.
 
-It is phase 6. It stays off until the token is set: until then `workers-ai/…` is refused with a
-message naming the slot.
+It is phase 6, with phase 10's minted token. It is ready as soon as `pigeon-cloudflare` passes
+the credits guard and `workers_ai_guard`. Core revokes only tokens it minted for a capability
+Worker: it reads the token first and refuses any whose name does not start `pigeon:worker-`.
 
 **Counted once.** A Workers AI call through `pigeon-cloudflare` shows in the gateway's log (with
 its cost, provider `workers-ai`, route credits). With Unified Billing it is paid from credits,
@@ -303,18 +307,19 @@ the "Workers AI" line is other use of the account.
 | 2 | Choices: `cf-anthropic`, `cf-openai`, `openai/` retired, route on the ai-agents surfaces | executor, **landed** `aaf8c9a` | `src/ai-agents/src/*` |
 | 3 | `cost_daily`: AI Gateway billing rows out, Workers AI line, `credits`, `by_route`, reconciliation on BYOK Anthropic only | executor, **landed** `2ba4b42` | `src/capabilities/src/cost.rs` |
 | 4 | The Anthropic route to `pigeon-anthropic`; `CREDITS_SINCE` set | planner, **landed** `03b263b` (too early: Log) | `src/model-gateway/src/lib.rs` |
-| 8 | **Option B**: kinds BYOK / Credits / Retired; `pigeon-cloudflare` created and used by the credits providers; `pigeon` retired; `CREDITS_SINCE` and all time-based labelling removed; the BYOK readiness check; `models_providers` readiness | executor `aIy09VcWZV1t` | `src/core/src/ai_gateway.rs`, `src/models/src/*`, `src/model-gateway/src/lib.rs`, smoke |
-| 6 | Workers AI (decision 5), rebased onto phase 8: through `pigeon-cloudflare`, counted once in `cost_daily` | executor `y3NjXGDYiDD7` | `src/core/src/ai_gateway.rs`, `src/models/src/*`, `src/model-gateway/*`, `src/ai-agents/src/models.rs`, `src/capabilities/src/cost.rs`, smoke |
-| 9 | Docs: this plan for option B | planner | `docs/plans/model-providers-cloudflare.md` |
-| 5 | Live check: an executor turn on `cf-anthropic/claude-haiku-5-5`; read its log on `pigeon-cloudflare` and its cost under credits | planner, **after Open items 1 to 3** | none |
+| 8 | **Option B**: kinds BYOK / Credits / Retired; `pigeon-cloudflare` created and used by the credits providers; `pigeon` retired; `CREDITS_SINCE` and all time-based labelling removed; the BYOK readiness check; `models_providers` readiness | executor `aIy09VcWZV1t`, **landed** `a91eda5` | `src/core/src/ai_gateway.rs`, `src/models/src/*`, `src/model-gateway/src/lib.rs`, smoke |
+| 6 | Workers AI (decision 5), rebased onto phase 8: through `pigeon-cloudflare`, counted once in `cost_daily` | executor `y3NjXGDYiDD7`, **landed** `3ba9232` | `src/core/src/ai_gateway.rs`, `src/models/src/*`, `src/model-gateway/*`, `src/ai-agents/src/models.rs`, `src/capabilities/src/cost.rs`, smoke |
+| 9 | Docs: this plan for option B | planner, **landed** `32c2f2b` | `docs/plans/model-providers-cloudflare.md` |
+| 10 | Workers AI on a token core mints per call and revokes; the stored slot removed | executor `QOjfcouwyiEZ`, **landed** `ebfead9` | `src/capabilities/src/split.rs`, `src/contract/src/wire.rs`, `src/models/src/*`, `src/core/src/ai_gateway.rs`, smoke |
+| 11 | OpenAI dialect: `reasoning_effort: "none"` with tools for `gpt-6-luna` | planner, **landed** `6a28b96` | `src/models/src/openai.rs`, smoke |
+| 5 | Live checks: one short call each on `cf-anthropic` (passed), `cf-openai/gpt-6-luna` (passed) and `workers-ai/@cf/moonshotai/kimi-k2.7-code` (**failed**: Log); each logged on `pigeon-cloudflare` and counted once under credits | planner | none |
 
-The landing order was 8, 6, then 9 (this plan), then 5. Phase 6 started from phase 8's branch
-once it was green.
+The landing order was 8, 6, 9, then 11 and 10, then the live checks.
 
 ## How to use it (once deployed)
 
 - Credits models (through `pigeon-cloudflare`): `model: "cf-anthropic/claude-sonnet-5-5"`,
-  `"cf-openai/gpt-6.2-sol"`, `"workers-ai/@cf/zai-org/glm-5.3"` (phase 6, once its token is set),
+  `"cf-openai/gpt-6.2-sol"`, `"workers-ai/@cf/zai-org/glm-5.3"`,
   or a bare `"cf-anthropic"` / `"cf-openai"` / `"workers-ai"` for the role's tier.
 - BYOK Claude (through `pigeon-anthropic`): `"anthropic/…"` or a bare `claude-…` name. These
   are the defaults.
@@ -348,9 +353,10 @@ once it was green.
    PayPal or Apple Pay). Auto top-up is optional, from the same card.
 4. **Optional:** on the account's auto-made `default` gateway, if it exists, turn on **Require
    provider credentials**, so nothing can spend credits through it.
-5. **Optional, for Workers AI:** a Cloudflare API token with Workers AI Read for this account,
-   set as `pigeon_workers_ai_token` on the Access tab. Then its binding in
-   `src/model-gateway/wrangler.toml` is uncommented and deployed (phase 6's note there).
+
+Done (2026-11-24): items 1 and 2 (the person: `pigeon` holds no key, the secret
+`pigeon_anthropic_default` is deleted, `pigeon-cloudflare` checked) and item 3 ($50 of
+credits). Workers AI needs no step from the person (phase 10).
 
 Decided before (2026-11-25): no spend limit in pigeon; OpenAI on credits only (`cf-openai/…`;
 `openai/…` is refused and points there); Workers AI with tiers top `@cf/zai-org/glm-5.3`, middle
@@ -451,3 +457,35 @@ Decided before (2026-11-25): no spend limit in pigeon; OpenAI on credits only (`
   `workers-ai` cost, never below zero, and the amount taken off is `credits.workers_ai_billing_usd`.
   In `ai_gateway.by_provider`, `workers-ai` still falls under Other. A missing gateway is now
   also recognised by a "not found" error text, not only a 404.
+- 2026-11-24: phases 8, 6 and 9 deployed. The person ran `models_setup`, which created
+  `pigeon-cloudflare` (no drift). They deleted `pigeon`'s stored key and the secret
+  `pigeon_anthropic_default`, and bought $50 of credits. `models_providers` then reported
+  `cf-anthropic`, `cf-openai` and `workers-ai` ready. `pigeon` holds no key.
+- 2026-11-24: live check, `cf-anthropic/claude-haiku-5-5` (executor `BzC2Ufyv9HVy`): passed on
+  credits, 2 turns, gateway cost $0.000669.
+- 2026-11-24: the person asked for cheaper checks from then on: one short call each on GPT and
+  on Workers AI. The planner has no `models_run` tool, so each check is an executor capped at
+  one turn with a one-word answer.
+- 2026-11-24: the `cf-openai/gpt-6-luna` check (executor `PQHeJmU95i9J`) failed before any
+  turn: OpenAI answered 400, "Function tools with reasoning_effort are not supported for
+  gpt-6-luna in /v1/chat/completions". Agent runs always send tools. Phase 11: the OpenAI
+  dialect sends `reasoning_effort: "none"` when tools are present for `gpt-6-luna` (a list in
+  `src/models/src/openai.rs`), and the role's effort otherwise.
+- 2026-11-24: phase 10, approved by the person: Workers AI no longer uses a stored token. The
+  slot `pigeon_workers_ai_token` (never set) is gone. Executor `QOjfcouwyiEZ` built it. Core
+  adds the purpose `workers_ai` (`Workers AI Read`) and a `credential_revoke` of kind
+  `scoped`. The model gateway mints a token per call (per attempt for a job) and revokes it
+  after, success or failure. A failed revoke is only a warning; the token expires within
+  15 minutes anyway.
+- 2026-11-24: phases 11 (`d05f0bb`, `6a28b96`; landing `O_5IllQN52p5HZxw`) and 10 (`ebfead9`;
+  landing `eXkOoM1zmRYWHXka`) landed and deployed.
+- 2026-11-24: live check, `cf-openai/gpt-6-luna` (executor `iegmWHfAXkdN`): **passed**. It
+  answered "ok" in one turn, on route credits. `models_usage` shows its log as provider
+  `cf-openai` (a `pigeon-cloudflare` log): 831 tokens in, 4 out, $0.0000851.
+- 2026-11-24: live check, `workers-ai/@cf/moonshotai/kimi-k2.7-code` (executor `hpp2GGS4L1Xb`):
+  **failed**. The run's one turn never finished in its 10 minutes of wall time: 0 turns, $0,
+  and no request in any gateway's logs. Not yet diagnosed. To find out: the model gateway's
+  Worker logs for that job. The token mint (`Workers AI Read` may not resolve), core's revoke,
+  and the REST stream (Kimi may stream reasoning before any text) are the places to look.
+  `cost_daily` could not be read from the planner's tools, so counting once is shown only by
+  the smoke scenario `platform_cost_daily_workers_ai_once`.
