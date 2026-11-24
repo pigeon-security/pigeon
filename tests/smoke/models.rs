@@ -14,6 +14,7 @@ fn models_request() {
         slug: "anthropic",
         alias: "default",
         dialect: Dialect::Anthropic,
+        ids: pigeon_models::ModelIds::Claude,
         default_model: "claude-haiku-5-5",
         key_help: "",
         billing: None,
@@ -113,6 +114,7 @@ fn models_turns_blocks_and_lanes() {
         &json!(["compact-2026-01-12", "compact-2026-01-12"]),
         "claude-haiku-5-5",
         pigeon_models::Dialect::Anthropic,
+        pigeon_models::ModelIds::Claude,
     )
     .unwrap();
     assert_eq!(t.model, "claude-haiku-5-5");
@@ -125,6 +127,7 @@ fn models_turns_blocks_and_lanes() {
             &betas,
             "claude-haiku-5-5",
             pigeon_models::Dialect::Anthropic,
+            pigeon_models::ModelIds::Claude,
         )
         .unwrap_err()
     };
@@ -639,4 +642,43 @@ fn models_gateway_log_cost() {
     assert!(groups[0].get("cache_cost").is_none());
     assert_eq!(groups[0]["cache_read_tokens"], 1_000_000);
     assert_eq!(totals.read, 1_000_000);
+}
+
+/// A model id is checked by the rule of its provider: a Workers AI id is accepted there, an
+/// OpenAI-style plain id is refused with `@` or `/`, and the refusal names the provider's rule.
+#[test]
+fn models_id_rule_per_provider() {
+    use pigeon_models::{Dialect, ModelIds, turn};
+    let msgs = json!([{ "role": "user", "content": "x" }]);
+    let with = |model: &str, ids: ModelIds| {
+        turn::turn(
+            &json!({ "model": model, "messages": msgs }),
+            &Value::Null,
+            "gpt-6.2-sol",
+            Dialect::OpenAi,
+            ids,
+        )
+    };
+    let kimi = "@cf/moonshotai/kimi-k2.7-code";
+    assert_eq!(with(kimi, ModelIds::WorkersAi).unwrap().model, kimi);
+    assert!(with("@cf/zai-org/glm-5.3", ModelIds::WorkersAi).is_ok());
+    // OpenAI's plain rule refuses `@` and `/`, and says its own rule.
+    let e = with(kimi, ModelIds::Plain).unwrap_err();
+    assert!(e.starts_with(turn::REFUSED), "{e}");
+    assert!(e.contains("plain model id"), "{e}");
+    assert!(with("gpt-6.2-sol", ModelIds::Plain).is_ok());
+    // Workers AI takes exactly `@cf/<org>/<model>`.
+    for bad in [
+        "gpt-6.2-sol",
+        "@cf/moonshotai",
+        "@cf/a/b/c",
+        "cf/a/b",
+        "@cf//b",
+        "@cf/a/b c",
+        "@cf/a/b:c",
+    ] {
+        let e = with(bad, ModelIds::WorkersAi).unwrap_err();
+        assert!(e.contains("`@cf/<org>/<model>`"), "{bad}: {e}");
+    }
+    assert!(with(&format!("@cf/a/{}", "b".repeat(100)), ModelIds::WorkersAi).is_err());
 }

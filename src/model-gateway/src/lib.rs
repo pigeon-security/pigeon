@@ -19,7 +19,7 @@ use pigeon_contract::{Answer, FailureKind};
 use pigeon_core::ai_gateway::GatewayKind;
 use pigeon_core::secrets_store;
 use pigeon_models::runner::{self, Token};
-use pigeon_models::{Billing, Dialect, Gateway, ModelGateway, Models, Provider, Route};
+use pigeon_models::{Billing, Dialect, Gateway, ModelGateway, ModelIds, Models, Provider, Route};
 use serde_json::json;
 use worker::{Context, Env, Request, Response, Result, event};
 // The `durable_object` macro's expansion names `wasm_bindgen` at the crate root.
@@ -71,6 +71,7 @@ fn gateway() -> ModelGateway {
                     slug: "anthropic",
                     alias: "default",
                     dialect: Dialect::Anthropic,
+                    ids: ModelIds::Claude,
                     default_model: "claude-haiku-5-5",
                     key_help: "A Claude Platform API key, from the Claude Console's API keys page.",
                     billing: Some(Billing::AnthropicAdmin),
@@ -82,6 +83,7 @@ fn gateway() -> ModelGateway {
                     slug: "anthropic",
                     alias: "default",
                     dialect: Dialect::Anthropic,
+                    ids: ModelIds::Claude,
                     default_model: "claude-haiku-5-5",
                     key_help: "",
                     billing: None,
@@ -93,6 +95,7 @@ fn gateway() -> ModelGateway {
                     slug: "openai",
                     alias: "default",
                     dialect: Dialect::OpenAi,
+                    ids: ModelIds::Plain,
                     default_model: "gpt-6.2-sol",
                     key_help: "",
                     billing: None,
@@ -106,6 +109,7 @@ fn gateway() -> ModelGateway {
                     slug: "workers-ai",
                     alias: "default",
                     dialect: Dialect::OpenAi,
+                    ids: ModelIds::WorkersAi,
                     default_model: "@cf/zai-org/glm-5.3",
                     key_help: "",
                     billing: None,

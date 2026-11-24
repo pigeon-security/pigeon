@@ -209,6 +209,8 @@ pub struct Provider {
     pub alias: &'static str,
     /// How its requests and answers are shaped.
     pub dialect: Dialect,
+    /// What a model id looks like for it.
+    pub ids: ModelIds,
     /// The model a request names when it names none.
     pub default_model: &'static str,
     /// Where to get a key, for the secrets page.
@@ -233,6 +235,66 @@ pub enum Dialect {
     /// OpenAI's Chat Completions API.
     #[serde(rename = "openai")]
     OpenAi,
+}
+
+/// What a model id looks like for one provider. A refusal names the rule.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModelIds {
+    /// A Claude id: `claude-` and a name.
+    Claude,
+    /// A plain id: letters, digits, `.`, `-`, `_` and `:`, 100 characters at most.
+    Plain,
+    /// A Workers AI id: exactly `@cf/<org>/<model>`, each part of letters, digits, `.`, `-`, `_`.
+    WorkersAi,
+}
+
+impl ModelIds {
+    /// Whether `name` is an id this rule takes. The error names the rule.
+    pub fn check(self, name: &str) -> std::result::Result<(), String> {
+        let part = |s: &str| {
+            !s.is_empty()
+                && s.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+        };
+        let ok = match self {
+            ModelIds::Claude => name.starts_with("claude-"),
+            ModelIds::Plain => {
+                !name.is_empty()
+                    && name.len() <= 100
+                    && name
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':'))
+            }
+            ModelIds::WorkersAi => {
+                let mut parts = name.strip_prefix("@cf/").unwrap_or("").split('/');
+                name.len() <= 100
+                    && matches!(
+                        (parts.next(), parts.next(), parts.next()),
+                        (Some(org), Some(model), None) if part(org) && part(model)
+                    )
+            }
+        };
+        if ok {
+            Ok(())
+        } else {
+            Err(self.rule().to_string())
+        }
+    }
+
+    /// The rule in words, as a refusal says it.
+    pub fn rule(self) -> &'static str {
+        match self {
+            ModelIds::Claude => "`model` must name a Claude model, such as claude-sonnet-5-5",
+            ModelIds::Plain => {
+                "`model` must be a plain model id: letters, digits, `.`, `-`, `_` and `:`, \
+                 100 characters at most"
+            }
+            ModelIds::WorkersAi => {
+                "`model` must be a Workers AI model id, exactly `@cf/<org>/<model>`, each part \
+                 of letters, digits, `.`, `-` and `_`, 100 characters at most"
+            }
+        }
+    }
 }
 
 /// A request in the common shape.
@@ -986,7 +1048,7 @@ impl Models {
                 if !args["prompt"].is_null() || !args["messages"].is_null() {
                     return Err(bad("give `request`, or `prompt`/`messages`, not both"));
                 }
-                let t = turn::turn(request, &args["betas"], p.default_model, p.dialect)
+                let t = turn::turn(request, &args["betas"], p.default_model, p.dialect, p.ids)
                     .map_err(|e| bad(&e))?;
                 if let Some(b) = t.beta {
                     headers.push(("anthropic-beta".into(), b));

@@ -557,7 +557,8 @@ fn ai_agents_loop_budgets_tools_and_turns() {
             &transcript::request(&spec, &messages),
             &Value::Null,
             "claude-haiku-5-5",
-            pigeon_models::Dialect::Anthropic
+            pigeon_models::Dialect::Anthropic,
+            pigeon_models::ModelIds::Claude
         )
         .is_ok()
     );
@@ -1907,4 +1908,26 @@ fn ai_agents_token_gauge_ceiling() {
     );
     assert_eq!(gauge_of(&json!({ "live": 12 })), None);
     assert_eq!(gauge_of(&Value::Null), None);
+}
+
+/// The model gateway refusing the turn itself (a model id it does not take) is permanent: the
+/// runner reads the refusal and ends the run `failed` with the gateway's words, not a retry. The
+/// gateway being full or unreachable is still retried.
+#[test]
+fn ai_agents_refused_turn_fails_at_once() {
+    use pigeon_ai_agents::run;
+    use pigeon_models::{Dialect, ModelIds, turn};
+    let e = turn::turn(
+        &json!({ "model": "@cf/a/b", "messages": [{ "role": "user", "content": "x" }] }),
+        &Value::Null,
+        "gpt-6.2-sol",
+        Dialect::OpenAi,
+        ModelIds::Plain,
+    )
+    .unwrap_err();
+    assert_eq!(run::REFUSED, turn::REFUSED);
+    assert!(run::refused_turn(&e));
+    assert!(e.contains("plain model id"));
+    assert!(!run::refused_turn("the model gateway is full: try later"));
+    assert!(!run::refused_turn("anthropic answered 529: overloaded"));
 }

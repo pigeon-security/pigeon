@@ -714,7 +714,7 @@ fn models_openai_stream() {
 
 #[test]
 fn models_openai_dialect_and_model_check() {
-    use pigeon_models::{Ask, Dialect, turn};
+    use pigeon_models::{Ask, Dialect, ModelIds, turn};
     assert_eq!(Dialect::OpenAi.path(), "chat/completions");
     assert!(Dialect::OpenAi.headers().is_empty());
     assert_eq!(serde_json::to_value(Dialect::OpenAi).unwrap(), "openai");
@@ -750,6 +750,11 @@ fn models_openai_dialect_and_model_check() {
             &Value::Null,
             "gpt-6.2-sol",
             d,
+            if d == Dialect::Anthropic {
+                ModelIds::Claude
+            } else {
+                ModelIds::Plain
+            },
         )
     };
     assert!(with("gpt-6.2-sol", Dialect::OpenAi).is_ok());
@@ -763,6 +768,7 @@ fn models_openai_dialect_and_model_check() {
         &Value::Null,
         "gpt-6.2-sol",
         Dialect::OpenAi,
+        ModelIds::Plain,
     )
     .unwrap();
     assert_eq!(t.model, "gpt-6.2-sol");
@@ -771,6 +777,7 @@ fn models_openai_dialect_and_model_check() {
         &json!(["compact-2026-01-12"]),
         "gpt-6.2-sol",
         Dialect::OpenAi,
+        ModelIds::Plain,
     );
     assert!(betas.unwrap_err().contains("betas"));
 }
@@ -839,6 +846,7 @@ fn models_openai_provider_declared_with_secret() {
         slug,
         alias: "default",
         dialect,
+        ids: pigeon_models::ModelIds::Plain,
         default_model: "m",
         key_help: "help",
         billing,
@@ -1385,6 +1393,7 @@ fn models_two_gateways_specs_guard_routes_and_daily() {
         slug,
         alias: "default",
         dialect,
+        ids: pigeon_models::ModelIds::Plain,
         default_model: "m",
         key_help: "help",
         billing,

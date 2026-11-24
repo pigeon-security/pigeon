@@ -401,6 +401,15 @@ pub fn gateway_wait_ms(failures: u32) -> Option<u64> {
         .copied()
 }
 
+/// How the model gateway begins its refusal of a turn (a model id, a bad request): the same turn
+/// would be refused again. Keep it equal to `pigeon_models::turn::REFUSED`.
+pub const REFUSED: &str = "the model gateway refused the turn:";
+
+/// Whether `error` is the model gateway refusing the turn itself, which no retry can mend.
+pub fn refused_turn(error: &str) -> bool {
+    error.contains(REFUSED)
+}
+
 /// Whether the provider refused an assistant message whose final block is thinking.
 pub fn trailing_thinking(error: &str) -> bool {
     let e = error.to_ascii_lowercase();

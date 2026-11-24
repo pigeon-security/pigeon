@@ -1914,8 +1914,14 @@ impl AiAgentRuns {
                 self.state.storage().set_alarm(1_000).await
             }
             Err(e) => {
-                // The gateway refused the job itself (full, or unreachable): try again later.
                 worker::console_error!("agents: run {} could not submit a turn: {e}", row.id);
+                if run::refused_turn(&e.to_string()) {
+                    // The gateway refused the turn itself (a model it does not take): the same
+                    // turn is refused again, so the run fails now with the gateway's words.
+                    let why: String = e.to_string().chars().take(600).collect();
+                    return self.end(row, State::Failed, &why).await;
+                }
+                // The gateway refused the job itself (full, or unreachable): try again later.
                 self.set(
                     "failures = failures + 1, job_error = ?",
                     vec![e.to_string().into()],

@@ -4,7 +4,7 @@
 
 use serde_json::{Value, json};
 
-use super::Dialect;
+use super::{Dialect, ModelIds};
 
 /// The betas a turn may ask for, sent as `anthropic-beta`.
 pub const BETAS: [&str; 3] = [
@@ -54,13 +54,35 @@ pub struct Turn {
 }
 
 /// Checks `request` (a Messages body) and `betas` (null, or an array of names), naming
-/// `default_model` when the request names none. The model is checked for the provider's
-/// `dialect`. The body stays a Messages body: translating it for OpenAI is the caller's step.
+/// `default_model` when the request names none. The model is checked against the provider's
+/// `ids` rule, and the betas for its `dialect`. The body stays a Messages body: translating it
+/// for OpenAI is the caller's step. A refusal begins with [`REFUSED`].
 pub fn turn(
     request: &Value,
     betas: &Value,
     default_model: &str,
     dialect: Dialect,
+    ids: ModelIds,
+) -> Result<Turn, String> {
+    refuse(check_turn(request, betas, default_model, dialect, ids))
+}
+
+/// How every refusal of a turn begins. The AI agent runner reads it to end a run at once, because
+/// the same turn would be refused again. Keep it equal to `pigeon_ai_agents::run::REFUSED`.
+pub const REFUSED: &str = "the model gateway refused the turn:";
+
+/// Puts [`REFUSED`] before an error.
+pub fn refuse<T>(r: Result<T, String>) -> Result<T, String> {
+    r.map_err(|e| format!("{REFUSED} {e}"))
+}
+
+/// The checks of [`turn`], with plain errors.
+fn check_turn(
+    request: &Value,
+    betas: &Value,
+    default_model: &str,
+    dialect: Dialect,
+    ids: ModelIds,
 ) -> Result<Turn, String> {
     let map = request
         .as_object()
@@ -68,7 +90,7 @@ pub fn turn(
 
     check_keys(map.contains_key("stream"), map.keys().map(String::as_str))?;
     check_messages(map.get("messages"))?;
-    let model = resolve_model(map.get("model"), default_model, dialect)?;
+    let model = resolve_model(map.get("model"), default_model, ids)?;
     let max_tokens = resolve_max_tokens(map.get("max_tokens"))?;
     check_system(map.get("system"))?;
     check_tools(map.get("tools"))?;
@@ -142,40 +164,18 @@ fn check_messages(messages: Option<&Value>) -> Result<(), String> {
     Ok(())
 }
 
-/// Picks the model: the one asked for, or the default. It must suit the provider.
+/// Picks the model: the one asked for, or the default. It must suit the provider's id rule.
 fn resolve_model(
     model: Option<&Value>,
     default_model: &str,
-    dialect: Dialect,
+    ids: ModelIds,
 ) -> Result<String, String> {
     let name = match model {
         None => default_model,
         Some(Value::String(s)) if !s.is_empty() => s.as_str(),
         Some(_) => return Err("`model` must be a non-empty string".to_string()),
     };
-    match dialect {
-        Dialect::Anthropic => {
-            if !name.starts_with("claude-") {
-                return Err(
-                    "`model` must name a Claude model, such as claude-sonnet-5-5".to_string(),
-                );
-            }
-        }
-        Dialect::OpenAi => {
-            let plain = !name.is_empty()
-                && name.len() <= 100
-                && name
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':'));
-            if !plain {
-                return Err(
-                    "`model` must be a plain model id: letters, digits, `.`, `-`, `_` \
-                            and `:`, 100 characters at most"
-                        .to_string(),
-                );
-            }
-        }
-    }
+    ids.check(name)?;
     Ok(name.to_string())
 }
 
