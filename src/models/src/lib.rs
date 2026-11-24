@@ -36,8 +36,10 @@ use serde_json::{Value, json};
 use worker::js_sys::Date;
 use worker::{Env, Error, Fetch, Headers, Method, Request, RequestInit, Result};
 
+pub mod anthropic;
 pub mod billing;
 pub mod cache;
+pub mod capabilities;
 pub mod daily;
 pub mod jobs;
 pub mod openai;
@@ -478,12 +480,12 @@ impl Dialect {
     }
 }
 
-/// A checked Messages `body` in the shape `dialect` takes: unchanged for Anthropic, translated
-/// for OpenAI.
+/// A checked Messages `body` in the shape `dialect` takes: shaped for the model by the capability
+/// table for Anthropic, translated for OpenAI. A body the model cannot take is refused.
 fn translated(dialect: Dialect, body: Value) -> Result<Value> {
     match dialect {
-        Dialect::Anthropic => Ok(body),
-        Dialect::OpenAi => openai::request(&body).map_err(|e| bad(&e)),
+        Dialect::Anthropic => Ok(anthropic::request(&body)),
+        Dialect::OpenAi => turn::refuse(openai::request(&body)).map_err(|e| bad(&e)),
     }
 }
 

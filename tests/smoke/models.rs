@@ -682,3 +682,124 @@ fn models_id_rule_per_provider() {
     }
     assert!(with(&format!("@cf/a/{}", "b".repeat(100)), ModelIds::WorkersAi).is_err());
 }
+
+/// The capability table shapes OpenAI requests: gpt-6-luna with tools on Chat Completions sends
+/// reasoning effort `none`, and an unknown model gets the safe row (no effort, `auto` and `none`
+/// only, chat).
+#[test]
+fn models_capability_table_openai_rows() {
+    use pigeon_models::capabilities::{self, Endpoint};
+    use pigeon_models::openai;
+    let req = |model: &str, extra: Value| {
+        let mut r = json!({
+            "model": model,
+            "tools": [{ "name": "f", "input_schema": {} }],
+            "messages": [{ "role": "user", "content": "x" }],
+            "output_config": { "effort": "high" }
+        });
+        for (k, v) in extra.as_object().unwrap() {
+            r[k] = v.clone();
+        }
+        openai::request(&r).unwrap()
+    };
+    // Luna: tools and effort do not go together on chat; a dated name and a prefix are read.
+    assert_eq!(req("gpt-6-luna", json!({}))["reasoning_effort"], "none");
+    assert_eq!(
+        req("gpt-6-luna-2026-10-01", json!({}))["reasoning_effort"],
+        "none"
+    );
+    assert_eq!(req("gpt-6.2-sol", json!({}))["reasoning_effort"], "high");
+    let no_tools = openai::request(&json!({
+        "model": "gpt-6-luna", "output_config": { "effort": "low" },
+        "messages": [{ "role": "user", "content": "x" }]
+    }))
+    .unwrap();
+    assert_eq!(no_tools["reasoning_effort"], "low");
+    // An unknown model: the safe row, so no effort and a forced choice becomes auto.
+    let safe = capabilities::of("gpt-6-lunar");
+    assert_eq!(safe, capabilities::SAFE);
+    assert_eq!(
+        capabilities::of("@cf/moonshotai/kimi-k2.7-code"),
+        capabilities::SAFE
+    );
+    assert_eq!(safe.endpoint, Endpoint::Chat);
+    assert!(safe.tools && !safe.effort && safe.auto && safe.none && !safe.any && !safe.tool);
+    let out = req("mystery-1", json!({ "tool_choice": { "type": "any" } }));
+    assert!(out.get("reasoning_effort").is_none());
+    assert_eq!(out["tool_choice"], "auto");
+    assert_eq!(
+        req("mystery-1", json!({ "tool_choice": { "type": "none" } }))["tool_choice"],
+        "none"
+    );
+    assert!(out["tools"].is_array());
+}
+
+/// A model that does not take `tool_choice` kinds `tool` and `any` gets `auto` on Anthropic, and
+/// keeps `disable_parallel_tool_use`; a model that takes them keeps its choice.
+#[test]
+fn models_anthropic_tool_choice_downgraded() {
+    use pigeon_models::anthropic;
+    let req = |model: &str, choice: Value| {
+        anthropic::request(&json!({
+            "model": model,
+            "max_tokens": 1000,
+            "tools": [{ "name": "f", "input_schema": {} }],
+            "tool_choice": choice,
+            "messages": [{ "role": "user", "content": "x" }]
+        }))
+    };
+    let forced = json!({ "type": "tool", "name": "f", "disable_parallel_tool_use": true });
+    // Opus takes auto and none only (a guess: see the plan's Log).
+    let out = req("claude-opus-5-5", forced.clone());
+    assert_eq!(
+        out["tool_choice"],
+        json!({ "type": "auto", "disable_parallel_tool_use": true })
+    );
+    assert_eq!(
+        req("claude-opus-5-5", json!({ "type": "any" }))["tool_choice"],
+        json!({ "type": "auto" })
+    );
+    assert_eq!(
+        req("claude-opus-5-5", json!({ "type": "none" }))["tool_choice"],
+        json!({ "type": "none" })
+    );
+    // An unknown Claude gets the safe row.
+    assert_eq!(
+        req("claude-new-1", json!({ "type": "any" }))["tool_choice"],
+        json!({ "type": "auto" })
+    );
+    // Sonnet takes every kind.
+    assert_eq!(
+        req("claude-sonnet-5-5", forced.clone())["tool_choice"],
+        forced
+    );
+    assert_eq!(out["max_tokens"], 1000);
+}
+
+/// A history that ends an assistant message in a thinking block is replayed to Anthropic without
+/// it; a message left empty is dropped; other messages are unchanged.
+#[test]
+fn models_anthropic_replay_drops_trailing_thinking() {
+    use pigeon_models::anthropic;
+    let think = json!({ "type": "thinking", "thinking": "t", "signature": "s" });
+    let redacted = json!({ "type": "redacted_thinking", "data": "d" });
+    let text = json!({ "type": "text", "text": "hi" });
+    let user = json!({ "role": "user", "content": "go" });
+    let out = anthropic::request(&json!({
+        "model": "claude-sonnet-5-5",
+        "messages": [
+            user.clone(),
+            { "role": "assistant", "content": [text.clone(), think.clone(), redacted.clone()] },
+            user.clone(),
+            { "role": "assistant", "content": [think.clone()] },
+            user.clone(),
+            { "role": "assistant", "content": [think.clone(), text.clone()] },
+        ]
+    }));
+    let m = out["messages"].as_array().unwrap();
+    assert_eq!(m.len(), 5);
+    assert_eq!(m[1]["content"], json!([text.clone()]));
+    assert_eq!(m[2], user);
+    assert_eq!(m[3], user);
+    assert_eq!(m[4]["content"], json!([think, text]));
+}

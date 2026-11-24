@@ -4,6 +4,8 @@
 
 use serde_json::{Map, Value, json};
 
+use crate::capabilities::{self, Capabilities, Choice, Endpoint};
+
 /// The note that stands where an image was dropped.
 const IMAGE_NOTE: &str = "[image omitted]";
 
@@ -37,11 +39,23 @@ pub fn request(body: &Value) -> Result<Value, String> {
     }
     out.insert("messages".into(), Value::Array(messages));
 
-    let tools = tools(map.get("tools"));
+    let model = map.get("model").and_then(Value::as_str).unwrap_or("");
+    let caps = capabilities::of(model);
+    if caps.endpoint != Endpoint::Chat {
+        return Err(format!(
+            "`{model}` is called on the Responses API, which this request builder does not speak"
+        ));
+    }
+
+    let tools = if caps.tools {
+        tools(map.get("tools"))
+    } else {
+        Vec::new()
+    };
     let has_tools = !tools.is_empty();
     if has_tools {
         out.insert("tools".into(), Value::Array(tools));
-        if let Some((choice, parallel)) = tool_choice(map.get("tool_choice")) {
+        if let Some((choice, parallel)) = tool_choice(map.get("tool_choice"), &caps) {
             out.insert("tool_choice".into(), choice);
             if let Some(p) = parallel {
                 out.insert("parallel_tool_calls".into(), json!(p));
@@ -49,13 +63,17 @@ pub fn request(body: &Value) -> Result<Value, String> {
         }
     }
 
-    if let Some(n) = map.get("max_tokens").filter(|v| v.is_u64()) {
-        out.insert("max_completion_tokens".into(), n.clone());
+    if let Some(n) = map.get("max_tokens").and_then(Value::as_u64) {
+        out.insert(
+            "max_completion_tokens".into(),
+            json!(n.min(caps.max_output)),
+        );
     }
-    let model = map.get("model").and_then(Value::as_str).unwrap_or("");
-    if has_tools && !effort_with_tools(model) {
-        // Chat Completions refuses function tools with a reasoning effort on these models,
-        // and asks for `none` instead.
+    if !caps.effort {
+        // The model takes no reasoning effort: none is sent.
+    } else if has_tools && !caps.effort_with_tools {
+        // Chat Completions refuses function tools with a reasoning effort on this model, and
+        // asks for `none` instead.
         out.insert("reasoning_effort".into(), json!("none"));
     } else if let Some(effort) = body["output_config"]["effort"].as_str()
         && matches!(effort, "low" | "medium" | "high")
@@ -81,19 +99,6 @@ pub fn request(body: &Value) -> Result<Value, String> {
     out.insert("stream".into(), json!(true));
     out.insert("stream_options".into(), json!({ "include_usage": true }));
     Ok(Value::Object(out))
-}
-
-/// The models Chat Completions refuses function tools with a reasoning effort for (OpenAI's
-/// 400: "Function tools with reasoning_effort are not supported for gpt-6-luna").
-const NO_EFFORT_WITH_TOOLS: [&str; 1] = ["gpt-6-luna"];
-
-/// Whether `model` takes a reasoning effort beside function tools in Chat Completions. A
-/// `provider/` prefix and a dated suffix (`gpt-6-luna-2026-…`) are read as the model. Pure.
-pub fn effort_with_tools(model: &str) -> bool {
-    let model = model.rsplit('/').next().unwrap_or(model);
-    !NO_EFFORT_WITH_TOOLS
-        .iter()
-        .any(|m| model == *m || model.strip_prefix(m).is_some_and(|r| r.starts_with('-')))
 }
 
 /// The system prompt as one string: the string itself, or its text blocks joined.
@@ -135,20 +140,28 @@ fn tools(tools: Option<&Value>) -> Vec<Value> {
 }
 
 /// `tool_choice` as Chat Completions takes it, with `parallel_tool_calls` when the request
-/// turned parallel calls off.
-fn tool_choice(choice: Option<&Value>) -> Option<(Value, Option<bool>)> {
+/// turned parallel calls off. A kind the model does not take (`caps`) becomes `auto`, and an
+/// unsupported `none` is left out.
+fn tool_choice(choice: Option<&Value>, caps: &Capabilities) -> Option<(Value, Option<bool>)> {
     let choice = choice?;
     let parallel = if choice["disable_parallel_tool_use"].as_bool() == Some(true) {
         Some(false)
     } else {
         None
     };
-    let value = match choice["type"].as_str()? {
-        "auto" => json!("auto"),
-        "any" => json!("required"),
-        "none" => return Some((json!("none"), None)),
-        "tool" => json!({ "type": "function", "function": { "name": choice["name"].as_str()? } }),
-        _ => return None,
+    let kind = Choice::named(choice["type"].as_str()?)?;
+    let kind = match kind {
+        Choice::None if !caps.takes(Choice::None) => return None,
+        k if caps.takes(k) => k,
+        _ => Choice::Auto,
+    };
+    let value = match kind {
+        Choice::Auto => json!("auto"),
+        Choice::Any => json!("required"),
+        Choice::None => return Some((json!("none"), None)),
+        Choice::Tool => {
+            json!({ "type": "function", "function": { "name": choice["name"].as_str()? } })
+        }
     };
     Some((value, parallel))
 }

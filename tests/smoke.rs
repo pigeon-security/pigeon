@@ -582,6 +582,7 @@ fn models_openai_request_translation() {
     // The other tool choices, an unknown effort and a string system prompt.
     let small = |extra: Value| {
         let mut r = json!({
+            "model": "gpt-6.2-sol",
             "system": "s",
             "tools": [{ "name": "f", "input_schema": {} }],
             "messages": [{ "role": "user", "content": "x" }]
@@ -616,9 +617,6 @@ fn models_openai_request_translation() {
     }))
     .unwrap();
     assert_eq!(bare["reasoning_effort"], "low");
-    assert!(openai::effort_with_tools("gpt-6.2-sol"));
-    assert!(!openai::effort_with_tools("openai/gpt-6-luna"));
-    assert!(openai::effort_with_tools("gpt-6-lunar"));
 }
 
 #[test]
