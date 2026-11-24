@@ -1,0 +1,257 @@
+# The Cloud Gateway: cloud providers behind one capability Worker
+
+Status: **Phase 0 (this plan) landing** (planner run `vSg5LiNay8Uw`). Ships latent: no
+Scaleway credential exists yet, and every tool says so until the person sets the slots and the
+bindings land (phase 6). Open items are listed before the Log.
+
+The person's words, in short: a new capability Worker, the Cloud Gateway
+(`pigeon-cloud-gateway`, short name `cloud-gateway`), that is to cloud providers what the model
+gateway is to model providers and the CI gateway is to CI connectors. One Worker holds the
+provider credentials, talks to provider APIs, and offers MCP tools through core's capability
+manifest, so a person or an agent can view resources and change them. A provider-neutral core
+(a provider trait: list, plan and apply per resource kind) with Scaleway as the first and only
+provider. First resources: Scaleway IAM API keys (with the applications and policies they
+belong to), and Object Storage buckets and objects. Every write is plan then apply, behind the
+person's passkey.
+
+**In short.**
+- A library crate `pigeon-cloud` (`src/cloud`) holds the provider trait, the Scaleway provider
+  and the tools, as `pigeon-models` does for the model gateway. A thin Worker crate
+  `src/cloud-gateway` serves it through `pigeon_contract::serve`, as `src/model-gateway` does.
+- Reads need no approval. A plan tool reads the provider, builds the change, and creates an
+  approval exactly as `portal_oauth_redirects` does. `cloud_apply {plan}` runs only once the
+  person approved it with their passkey on the Approvals tab. It re-reads the provider, refuses
+  and names the drift if the state moved, makes the change, reads again and reports any
+  difference.
+- Approvals live in core's Directory, which a capability Worker cannot reach. So core gets one
+  new op for capability Workers, `approval` (create, get, take), limited to a fixed table of
+  kinds, with the approver always the person the signed caller acts for.
+- A new Scaleway API key's secret is never in a tool's answer or a log line. It is written to
+  the pigeon secret slot the caller names (`CLOUD_…`), and the answer says which slot.
+- Outbound hosts are fixed in code: `api.scaleway.com`, `s3.fr-par.scw.cloud`,
+  `s3.nl-ams.scw.cloud`, `s3.pl-waw.scw.cloud`. The transport refuses any other host.
+
+## Sources
+
+Read from this sandbox while planning.
+
+- **Scaleway IAM API** (`api.scaleway.com/iam/v1alpha1`). Checked against Scaleway's generated
+  Go SDK, `scaleway/scaleway-sdk-go`, `api/iam/v1alpha1/iam_sdk.go` at `master`, which is
+  generated from the same API description as the docs. Auth is the header
+  `X-Auth-Token: <secret key>`. Endpoints used:
+  - `GET /api-keys` (query `organization_id`, `application_id`, `page`, `page_size`, `order_by`;
+    answers `{api_keys, total_count}`; each key has `access_key`, `secret_key` (null on reads),
+    `application_id`, `user_id`, `description`, `created_at`, `updated_at`, `expires_at`,
+    `default_project_id`, `editable`, `deletable`, `managed`, `creation_ip`).
+  - `GET /api-keys/{access_key}`, `DELETE /api-keys/{access_key}`.
+  - `POST /api-keys` with `{application_id, expires_at, default_project_id, description}`;
+    the answer is the one place the secret key appears.
+  - `GET|POST /applications` (`{name, organization_id, description, tags}`),
+    `GET|DELETE /applications/{id}`.
+  - `GET|POST /policies` (`{name, description, organization_id, rules, tags, application_id}`;
+    a rule is `{permission_set_names, condition, project_ids | organization_id}`),
+    `DELETE /policies/{id}`.
+  - `GET /permission-sets`.
+  An unauthenticated `GET https://api.scaleway.com/iam/v1alpha1/api-keys` answers 401 from
+  here, so the host and path exist.
+- **Scaleway Object Storage**: the S3 API at `https://s3.<region>.scw.cloud` for regions
+  `fr-par`, `nl-ams` and `pl-waw`, path-style, signed with AWS Signature Version 4 with the
+  region as the signing region and `s3` as the service. `https://s3.fr-par.scw.cloud/` answers
+  from here. The calls are S3's own: ListBuckets, ListObjectsV2, HeadObject, CreateBucket,
+  ListObjectVersions, DeleteBucket.
+- **SigV4**: pigeon already signs S3 requests in `pigeon_core::s3` (used by `storage`), checked
+  against the S3 API reference's worked examples. The cloud gateway uses it, not a second
+  signer. The smoke scenario checks it against AWS's published examples ("Signature Calculations
+  for the Authorization Header", the GET Object, PUT Object, GET Bucket Lifecycle and GET Bucket
+  (List Objects) examples, keys `AKIAIOSFODNN7EXAMPLE` and its published example secret).
+- **pigeon**: `src/model-gateway`, `src/models` (`ModelGateway`, `credential`, `purposes`,
+  `models_providers`), `src/ci-gateway`, `src/ci` (`Buildkite::secrets`, `secret`),
+  `src/contract`, `src/capabilities/src/split.rs` (core's ops, `WORKER_KEYS`),
+  `src/capabilities/src/portal_oauth.rs` (plan, approval, apply, drift),
+  `src/capabilities/src/approvals.rs`, `ci/workers.toml`, `docs/plans/cleanup.md` item 4 (a new
+  Worker takes three landings), `docs/plans/model-providers.md` phase 1b (a binding to a secret
+  that does not exist yet waits for the person).
+
+## Decisions
+
+1. **Two crates, as the model gateway has.** `src/cloud` (`pigeon-cloud`, a library: the
+   provider trait, Scaleway, the tools and the `Service` impl `CloudGateway`) and
+   `src/cloud-gateway` (`pigeon-cloud-gateway`, the Worker: reads `CALLER_KEY`, then
+   `pigeon_contract::serve`). The smoke suite reaches the library as a dev-dependency of
+   `pigeon-capabilities`, as it does `pigeon-ai-agents`.
+2. **The provider trait.** One trait, `Provider`, per cloud: its name, its secret slots, its
+   resource kinds, `status` (configured and ready, or why not), and per kind `list`, `plan` and
+   `apply`. A plan is data: provider, kind, action (`create` or `delete`), the normalised
+   arguments, the state read when planning (`before`) and plain lines for the person. All HTTP
+   goes through a `Transport` trait, so the smoke suite runs the whole tool flow against a
+   mocked Scaleway, and the Worker's transport is `worker::Fetch`.
+3. **One host allowlist, in the transport.** `HOSTS` lists the four hosts above. The Worker's
+   transport refuses a URL whose host is not on it, before any fetch. Buckets are addressed
+   path-style only, so a bucket name never becomes a host. The capability's footprint names
+   Scaleway as an external with these hosts, so the architecture page shows them.
+4. **Credentials ship latent.** The capability declares four slots, all scope `workers`, named
+   as Scaleway's own tools name them: `SCW_ACCESS_KEY`, `SCW_SECRET_KEY`,
+   `SCW_DEFAULT_ORGANIZATION_ID`, `SCW_DEFAULT_PROJECT_ID`. The ids are secrets too, so nothing
+   commits them. A binding to a secret that does not exist yet may stop a deploy, so the
+   bindings land only after the person sets the slots (phase 6), as `ANTHROPIC_ADMIN_KEY` did.
+   Until then every tool answers "Scaleway is not set up: set <the missing slots> on the Access
+   tab", and says when they are set but not bound yet.
+5. **`cloud_status`** (the pattern of `models_providers`): each provider, whether each slot is
+   bound and set (never a value), whether it is ready, why not, its hosts, and, when ready, a
+   live check (the gateway's own key read from `GET /iam/v1alpha1/api-keys/{access_key}`: its
+   expiry and default project).
+6. **Plans become approvals through a new core op.** Core's Directory keeps approvals, and only
+   core reaches it. Core gets one new op for capability Workers, `approval`, signed for the
+   caller like `credential`, with `action` `create`, `get` or `take`:
+   - Only kinds in core's fixed table `REMOTE_APPROVAL_KINDS` (today `cloud_change`); any other
+     is refused. A Worker never chooses the approver: it is the person the signed caller acts
+     for, and a caller acting for no one cannot plan.
+   - Core computes the digest itself (`approval::payload_digest(kind, subject, payload)`),
+     sets the summary to `{plan: lines}` and the wait to 30 minutes, as `portal_oauth`.
+   - `get` answers a record of a table kind only; `take` re-computes the digest from the payload
+     the Worker re-planned and spends the approval once for the signed caller, as
+     `approval.take` does.
+   This adds an op to `CORE_OPS`, which the contract allows (fields and ops are only added). A
+   core one version behind answers `unknown_op`, which the gateway reports as "core does not
+   take capability approvals yet".
+7. **Plan then apply, as `portal_oauth_redirects`.** Each `cloud_*_plan_*` tool reads the
+   provider, plans, and creates a `cloud_change` approval whose payload is the plan (provider,
+   kind, action, arguments, `before`). Nothing changes at the provider. `cloud_apply {plan}`
+   gets the approval, re-reads the provider and re-plans; if the new payload differs it names
+   what moved and does not take the approval ("plan again"). Otherwise it takes the approval,
+   applies, reads again and reports `differences` from what the plan expected. One apply tool
+   serves every kind.
+8. **Tokens.**
+   - `cloud_tokens_list`: API keys of the default organization, paged, with their
+     application's name and policies. The `secret_key` field is dropped from every answer even
+     when present.
+   - `cloud_tokens_plan_create {name, permission_sets, project_ids, expires_days, slot}`: an
+     IAM application `pigeon-<name>` tagged `pigeon`, a policy on it with one rule granting the
+     named permission sets on the named projects (the default project if none), and an API key
+     for it expiring in `expires_days` (30 by default, 365 at most), with the first project as
+     its default project.
+   - Permission sets are limited to a fixed allowlist in code, the Object Storage sets
+     (`ObjectStorageFullAccess`, `ObjectStorageReadOnly`, `ObjectStorageBucketsRead`,
+     `ObjectStorageBucketsWrite`, `ObjectStorageBucketsDelete`, `ObjectStorageObjectsRead`,
+     `ObjectStorageObjectsWrite`, `ObjectStorageObjectsDelete`). The gateway's own key must
+     manage IAM, so without this list a plan could grant IAM or organization rights.
+     Organization-wide rules are refused; a rule names projects.
+   - `slot` must be `CLOUD_` then 1 to 56 of `A-Z`, `0-9`, `_`, must not be one of the
+     gateway's own four, and must not exist yet in the Secrets Store (no overwrite in this
+     cut). On apply, the gateway first checks it can write the slot (a `secrets_store` scoped
+     credential, `Writer::open`, `list`), then creates the application, the policy and the key,
+     then writes `ACCESS_KEY:SECRET_KEY` (the form `pigeon_core::s3::parse_keys` reads) to the
+     slot with scope `workers`. If the write fails, it deletes the new key at once and says so.
+     The answer names the slot, the access key, the application and the expiry; never the
+     secret.
+   - `cloud_tokens_plan_delete {access_key, with_application}`: deletes one API key. It refuses
+     the gateway's own key. With `with_application`, it also deletes the key's application and
+     its policies, only when the application is tagged `pigeon` and holds no other key.
+9. **Object Storage.**
+   - `cloud_buckets_list {region?}` (all three regions when none), `cloud_objects_list {region,
+     bucket, prefix?, delimiter?, max_keys?, token?}` (ListObjectsV2, paged by continuation
+     token, `max_keys` 1 to 1000), `cloud_object_head {region, bucket, key}`.
+   - `cloud_buckets_plan_create {region, bucket}`: S3 bucket name rules checked; refused if the
+     bucket exists. Applied as `PUT /{bucket}` with `x-amz-acl: private`; no public ACL option
+     in this cut. The bucket lands in the gateway key's preferred project (Scaleway's S3 API has
+     no project argument), and the plan says so.
+   - `cloud_buckets_plan_delete {region, bucket}`: only when empty, checked with
+     ListObjectVersions (`max-keys=1`, which also sees old versions and delete markers) when
+     planning and again when applying.
+10. **Secrets never leave.** Keys are held in types whose `Debug` hides the secret (as
+    `pigeon_core::s3::Keys`). Every error from Scaleway passes through one redactor that
+    replaces each known value (the gateway's secret key, its access key, a new key's secret)
+    and anything shaped like a Scaleway access key (`SCW` and 17 more of `A-Z0-9`) with
+    `<redacted>`. Request headers are never part of an error. No `console_log!` of a request or
+    an answer body. The organization and project ids appear in tool answers (a person needs
+    them to scope a plan) but never in a commit.
+11. **Three landings for the Worker**, per cleanup.md item 4, since lanes come from main's map:
+    A (crates, map entry, deploy job, the core op), then B (a one-line change in the Worker's
+    crate: its first deploy), then C (core binds it as `CLOUD` and lists it in
+    `settings::BINDINGS`). Then the tools appear behind the portal, latent.
+12. **Overlap with `storage` and `ingest`.** `storage` (in core) reads objects across three
+    providers with one `ACCESS:SECRET` secret per account; `ingest` holds its own Scaleway
+    project key for spot VMs. The cloud gateway manages resources; it does not move them into
+    either. A key the gateway makes can be declared as a `storage` account later, since it is
+    stored in the same form. Consolidation is an open item, not this plan.
+
+## Phases
+
+| # | What | Who | Paths | Landing |
+| --- | --- | --- | --- | --- |
+| 0 | This plan and its README row | planner | `docs/plans/` | docs only |
+| 1 | `pigeon-cloud`: provider trait, transport, host allowlist, redaction, Scaleway IAM and S3 request builders and parsers, plan/apply, the tools, `CloudGateway` (`Service`); the Worker crate `src/cloud-gateway` (CALLER_KEY only); workspace member; `ci/workers.toml` entry, `ci/deploy/deploy-cloud-gateway.sh`, `[jobs.deploy-cloud-gateway]`; smoke `cloud_*` with a mocked Scaleway | executor | `src/cloud/*`, `src/cloud-gateway/*`, `Cargo.toml`, `Cargo.lock`, `src/capabilities/Cargo.toml` (dev-dep), `ci/`, `.pigeon/ci.toml`, `tests/smoke.rs`, `tests/smoke/cloud.rs` | A |
+| 2 | Core's `approval` op for capability Workers (`CORE_OPS`, `ApprovalRequest`, `REMOTE_APPROVAL_KINDS`), `WORKER_KEYS` gains `cloud-gateway`; smoke | executor, beside 1 | `src/contract/*`, `src/capabilities/src/split.rs`, `tests/smoke/proxy.rs` or `core.rs` | A |
+| 3 | First deploy of `pigeon-cloud-gateway` | planner | one line in `src/cloud-gateway/src/lib.rs` | B |
+| 4 | Core binds it: `[[services]] CLOUD` in `src/platform/wrangler.toml`, `settings::BINDINGS`; architecture smoke | planner | `src/platform/*`, `tests/smoke/core.rs` | C |
+| 5 | Live check, latent: `cloud_status` and each tool answer "not set up" through the portal | planner | none | none |
+| 6 | **After the person sets the four slots**: bind them in `src/cloud-gateway/wrangler.toml`, then `cloud_status` live | planner | `src/cloud-gateway/wrangler.toml` | D |
+
+## How to use it
+
+Once phases 0 to 4 have landed, and phase 6 after the person's slots:
+
+- `cloud_status`: which providers are set up and ready, and why not.
+- Read: `cloud_tokens_list`, `cloud_buckets_list`, `cloud_objects_list`, `cloud_object_head`.
+- Change: call a plan tool, such as
+  `cloud_buckets_plan_create {region: "fr-par", bucket: "pigeon-backups"}`. It answers the plan
+  lines and an approval id. The person approves it on the console's Approvals tab with their
+  passkey. Then `cloud_apply {plan: "<approval id>"}` makes the change once, and reports any
+  drift.
+- A new scoped key:
+  `cloud_tokens_plan_create {name: "backups", permission_sets: ["ObjectStorageFullAccess"],
+  project_ids: ["<project id>"], expires_days: 30, slot: "CLOUD_SCW_BACKUPS"}`, approve,
+  `cloud_apply`. The key's secret is in Secrets Store secret `CLOUD_SCW_BACKUPS` as
+  `ACCESS_KEY:SECRET_KEY`; it is never shown.
+
+## For the person (morning)
+
+Nothing here is needed for phases 0 to 5. Phase 6 waits on these steps.
+
+1. Scaleway console → **IAM** → **Applications** → **Create application**. Name
+   `pigeon-cloud-gateway`, description "pigeon's cloud gateway". No API key yet.
+2. **IAM** → **Policies** → **Create policy**. Name `pigeon-cloud-gateway`, principal: the
+   application `pigeon-cloud-gateway`. Add two rules:
+   - Scope **Organization**, permission set **`IAMManager`**. The gateway needs it to list,
+     create and delete API keys, applications and policies. The code only grants Object
+     Storage permission sets (Decision 8), but the key itself can do anything in IAM: guard it.
+   - Scope **Access to resources**, the project(s) whose buckets pigeon manages, permission set
+     **`ObjectStorageFullAccess`**.
+3. **IAM** → **Applications** → `pigeon-cloud-gateway` → **API keys** → **Generate API key**.
+   Expiry: one year at most (pick a date you will see). **Will this API key be used for Object
+   Storage?** Yes, and choose the project buckets should be created in as the preferred project.
+   Copy the access key (`SCW…`) and the secret key (shown once).
+4. Find the organization id (console → **Organization** → **Settings**, "Organization ID") and
+   the default project id (**Project** → **Settings**, "Project ID").
+5. pigeon console → **Access** → Secrets and credentials. Set each, approving with your passkey:
+   `SCW_ACCESS_KEY`, `SCW_SECRET_KEY`, `SCW_DEFAULT_ORGANIZATION_ID`, `SCW_DEFAULT_PROJECT_ID`.
+   Never paste a key into a chat or a command.
+6. Ask an agent: "cloud-gateway.md phase 6: bind the Scaleway slots and land". Then
+   `cloud_status` should say Scaleway is ready.
+
+## Rollback
+
+- Before phase 6 the gateway can do nothing at Scaleway: it holds no credential.
+- At once, without a landing: revoke the API key in the Scaleway console (IAM → API keys), or
+  switch the `pigeon_cloud_*` tools off in the portal.
+- A landing: revert C to unbind the Worker from core; delete the script by hand if wanted.
+
+## Open items
+
+1. **Phases 1 and 2**: not built yet. Next: executors. Waits on: nobody.
+2. **The Scaleway slots and their bindings** (phase 6). Waits on: the person (morning steps).
+3. **The Access tab lists `CLOUD_…` slots** a plan writes? Today it lists only declared slots;
+   a written slot exists in the Secrets Store but is not shown. Later, if wanted.
+4. **More resource kinds and providers** (instances for spot compute, DigitalOcean, B2): the
+   trait allows them; not this plan.
+5. **Consolidate with `storage` and `ingest`** (Decision 12). Not this plan.
+6. **Policy rule for `cloud_apply`?** Every apply already needs a passkey-approved plan. The
+   person may also add `cloud_apply` to `risky-tools-need-passkey`; only they change the
+   policy.
+
+## Log
+
+- Planner run `vSg5LiNay8Uw`: read the model and CI gateways, the contract, `split.rs`,
+  `portal_oauth.rs`, `approvals.rs`, `pigeon_core::s3`, `storage` and the plans named in
+  Sources; checked Scaleway's IAM endpoints against its generated Go SDK and that both hosts
+  answer. Wrote this plan.
