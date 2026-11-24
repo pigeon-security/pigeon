@@ -595,8 +595,8 @@ fn ai_agents_loop_budgets_tools_and_turns() {
     }
     assert_eq!(
         transcript::cut_point(&history, 20),
-        None,
-        "no clean place to cut"
+        Some(41),
+        "a tool loop cuts before an assistant message"
     );
     history.push(json!({ "role": "assistant", "content": [{ "type": "text", "text": "done?" }] }));
     history.push(
@@ -604,16 +604,11 @@ fn ai_agents_loop_budgets_tools_and_turns() {
     );
     history.push(json!({ "role": "assistant", "content": [{ "type": "text", "text": "ok" }] }));
     let at = transcript::cut_point(&history, 4).unwrap();
-    assert_eq!(history[at]["role"], "user");
+    assert_eq!(history[at]["role"], "assistant");
     let kept = transcript::compacted("did things", &history[at..]);
     assert_eq!(kept[0]["role"], "user");
     assert_eq!(kept[1]["role"], "assistant");
-    assert!(
-        kept[0]["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("did things")
-    );
+    assert!(kept[0]["content"].as_str().unwrap().contains("did things"));
     let summary = transcript::summary_request("claude-haiku-5-5", &history[..at]);
     assert!(
         summary["messages"][0]["content"]
@@ -2379,4 +2374,163 @@ fn ai_agents_branch_combine_plan_and_scripts() {
     assert!(!cs.contains("push") && !restack_script().contains("push"));
     assert!(restack_script().contains("git rebase origin/main"));
     assert!(restack_script().contains("git rebase --abort"));
+}
+
+/// Builds a tool-loop transcript: the brief, then `pairs` of assistant tool_use and user result.
+fn ai_agents_loop_history(pairs: usize) -> Vec<Value> {
+    let mut history = vec![json!({ "role": "user", "content": "brief" })];
+    for i in 0..pairs {
+        history.push(json!({ "role": "assistant", "content": [{ "type": "tool_use", "id": format!("t{i}"), "name": "run", "input": {} }] }));
+        history.push(json!({ "role": "user", "content": [{ "type": "tool_result", "tool_use_id": format!("t{i}"), "content": "ok" }] }));
+    }
+    history
+}
+
+/// A compaction of a tool loop keeps every tool_result next to its tool_use, alternates roles and
+/// starts with a user message.
+#[test]
+fn ai_agents_compaction_cuts_a_tool_loop_cleanly() {
+    use pigeon_ai_agents::transcript;
+    for pairs in [10, 11, 25, 40] {
+        let history = ai_agents_loop_history(pairs);
+        let at = transcript::cut_point(&history, transcript::KEEP_TAIL).unwrap();
+        assert_eq!(history[at]["role"], "assistant");
+        let kept = transcript::compacted("summary", &history[at..]);
+        assert_eq!(kept[0]["role"], "user");
+        let mut uses = std::collections::HashSet::new();
+        for (i, m) in kept.iter().enumerate() {
+            let want = if i % 2 == 0 { "user" } else { "assistant" };
+            assert_eq!(m["role"], want, "roles alternate at {i}");
+            for b in m["content"].as_array().into_iter().flatten() {
+                match b["type"].as_str() {
+                    Some("tool_use") => {
+                        uses.insert(b["id"].as_str().unwrap().to_string());
+                    }
+                    Some("tool_result") => assert!(
+                        uses.contains(b["tool_use_id"].as_str().unwrap()),
+                        "a result lost its tool_use"
+                    ),
+                    _ => {}
+                }
+            }
+        }
+    }
+    assert!(transcript::cut_point(&ai_agents_loop_history(3), transcript::KEEP_TAIL).is_none());
+    assert_eq!(transcript::COMPACT_AT, 100_000);
+}
+
+/// The tools and the system prompt in a request are the same bytes before and after a compaction,
+/// so the cached prefix survives.
+#[test]
+fn ai_agents_compaction_keeps_the_cached_prefix() {
+    use pigeon_ai_agents::Role;
+    use pigeon_ai_agents::transcript::{self, Spec};
+    let tools = vec![
+        json!({ "name": "run", "description": "d", "input_schema": { "type": "object" } }),
+        json!({ "name": "report", "description": "r", "input_schema": { "type": "object" } }),
+    ];
+    let spec = Spec {
+        role: Role::Planner,
+        model: "claude-opus-4-5",
+        system: "You are a planner.",
+        tools: &tools,
+    };
+    let history = ai_agents_loop_history(30);
+    let at = transcript::cut_point(&history, transcript::KEEP_TAIL).unwrap();
+    let after = transcript::compacted("summary", &history[at..]);
+    let before = transcript::request(&spec, &history);
+    let later = transcript::request(&spec, &after);
+    assert_ne!(before["messages"], later["messages"]);
+    for key in ["tools", "system", "model"] {
+        assert_eq!(
+            serde_json::to_vec(&before[key]).unwrap(),
+            serde_json::to_vec(&later[key]).unwrap(),
+            "{key} changed"
+        );
+    }
+}
+
+/// The 75% warning: cost counts what executors hold, sandbox time counts too, and a zero budget
+/// never warns.
+#[test]
+fn ai_agents_warn_due_at_75_percent() {
+    use pigeon_ai_agents::budget::{Budget, Over, Spent, warn_due};
+    let budget = Budget {
+        cost_micros: 10_000_000,
+        sandbox_ms: 60 * 60_000,
+        ..Budget::default_for(pigeon_ai_agents::Role::Planner)
+    };
+    assert_eq!(warn_due(&budget, &Spent::default()), None);
+    let own = Spent {
+        cost_micros: 7_499_999,
+        ..Spent::default()
+    };
+    assert_eq!(warn_due(&budget, &own), None);
+    let own = Spent {
+        cost_micros: 7_500_000,
+        ..Spent::default()
+    };
+    assert_eq!(warn_due(&budget, &own), Some(Over::Cost));
+    let held = Spent {
+        cost_micros: 2_000_000,
+        executors_micros: 5_500_000,
+        ..Spent::default()
+    };
+    assert_eq!(warn_due(&budget, &held), Some(Over::Cost));
+    let sandbox = Spent {
+        sandbox_ms: 45 * 60_000,
+        ..Spent::default()
+    };
+    assert_eq!(warn_due(&budget, &sandbox), Some(Over::Sandbox));
+    let zero = Budget {
+        cost_micros: 0,
+        sandbox_ms: 0,
+        ..budget
+    };
+    assert_eq!(warn_due(&zero, &Spent::default()), None);
+}
+
+/// The hand-off section: rows for executors not landed, tips from reports, CI when known.
+#[test]
+fn ai_agents_handoff_section_from_children() {
+    use pigeon_ai_agents::handoff;
+    let tip = "0123456789abcdef0123456789abcdef01234567";
+    let children = json!([
+        { "run": "a", "branch": "claude/ai-agent-a", "state": "done", "ended_at": 5,
+          "report": format!("Pushed. Tip {tip}, CI green.") },
+        { "run": "b", "branch": "claude/ai-agent-b", "state": "done", "ended_at": 6,
+          "report": "landed already" },
+        { "run": "c", "branch": "claude/ai-agent-c", "state": "running", "ended_at": null,
+          "report": null },
+    ]);
+    assert_eq!(
+        handoff::tip_from_report(&format!("x {tip}.")),
+        Some(tip.to_string())
+    );
+    assert_eq!(handoff::tip_from_report("abc1234"), None);
+    let landed = handoff::landed_branches(&json!([
+        { "branch": "refs/heads/claude/ai-agent-b", "state": "landed" },
+        { "branch": "claude/ai-agent-c", "state": "failed" },
+    ]));
+    assert!(landed.contains("claude/ai-agent-b") && landed.len() == 1);
+    let ci_answer = json!({ "jobs": [
+        { "job": "lint", "state": "failed" }, { "job": "test", "state": "passed" } ] });
+    assert_eq!(handoff::ci_word(&ci_answer), "passed");
+    assert_eq!(handoff::ci_word(&json!({ "jobs": [] })), "none recorded");
+    let mut ci = std::collections::HashMap::new();
+    ci.insert(tip.to_string(), handoff::ci_word(&ci_answer));
+    let text = handoff::section(&children, &landed, &ci).unwrap();
+    assert!(text.starts_with("## Unlanded branches"));
+    assert!(text.contains(&format!(
+        "| `claude/ai-agent-a` | `{tip}` | done | passed |"
+    )));
+    assert!(text.contains("| `claude/ai-agent-c` | unknown | running (not ended) | unknown |"));
+    assert!(!text.contains("ai-agent-b"));
+    // Nothing to show: no section.
+    assert!(handoff::section(&json!([]), &landed, &ci).is_none());
+    // The model's text comes first; a second append adds nothing.
+    let report = handoff::append("All done.", &text);
+    assert!(report.starts_with("All done.\n\n## Unlanded branches"));
+    assert_eq!(handoff::append(&report, &text), report);
+    assert_eq!(handoff::append("", &text), text);
 }

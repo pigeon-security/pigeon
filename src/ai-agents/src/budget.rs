@@ -747,3 +747,26 @@ pub fn cost_micros(model: &str, usage: &Value) -> u64 {
 pub fn estimate_micros(model: &str, input_tokens: u64, max_tokens: u64) -> u64 {
     pigeon_core::model_prices::estimate_micros(model, input_tokens, max_tokens)
 }
+
+/// The share of its cost or sandbox budget, in percent, at which a planner is warned once.
+pub const WARN_PERCENT: u64 = 75;
+
+/// Which budget a planner has passed [`WARN_PERCENT`] of, if any: [`Over::Cost`] when its
+/// committed cost (own spend plus its executors' hold) is at or past the share, else
+/// [`Over::Sandbox`] when its sandbox time is. A zero budget never warns.
+pub fn warn_due(budget: &Budget, spent: &Spent) -> Option<Over> {
+    let past = |used: u128, cap: u128| cap > 0 && used * 100 >= cap * u128::from(WARN_PERCENT);
+    if past(
+        u128::from(spent.committed_micros()),
+        u128::from(budget.cost_micros),
+    ) {
+        Some(Over::Cost)
+    } else if past(
+        spent.sandbox_ms.max(0) as u128,
+        budget.sandbox_ms.max(0) as u128,
+    ) {
+        Some(Over::Sandbox)
+    } else {
+        None
+    }
+}

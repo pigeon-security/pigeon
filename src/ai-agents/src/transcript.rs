@@ -230,34 +230,28 @@ pub fn input_tokens(usage: &Value) -> u64 {
 }
 
 /// The context size at which a run should be compacted.
-pub const COMPACT_AT: u64 = 150_000;
+///
+/// After a compaction the context is about 35k tokens (tools, system prompt, summary and the
+/// kept tail). It then grows about 3k a turn, since tool results are cut at 16 KB. A compaction
+/// costs about 0.40 USD, because the new prefix is written to the cache again. The cost per turn
+/// is lowest when a compaction comes every 20 to 25 turns, at about 100k, and is flat from 80k
+/// to 120k. So the trigger is 100k (it was 150k, which a tool loop rarely stayed under).
+pub const COMPACT_AT: u64 = 100_000;
+
+/// How many of the newest messages a compaction keeps as they are.
+pub const KEEP_TAIL: usize = 16;
 
 /// Tells whether the last turn's context is big enough to compact.
 pub fn needs_compaction(usage: &Value) -> bool {
     input_tokens(usage) >= COMPACT_AT
 }
 
-/// Tells whether a message is a user message that starts a clean cut.
-///
-/// Its content must be a string, or an array with no `tool_result` block.
-fn starts_cleanly(message: &Value) -> bool {
-    if message.get("role").and_then(Value::as_str) != Some("user") {
-        return false;
-    }
-    match message.get("content") {
-        Some(Value::String(_)) => true,
-        Some(Value::Array(blocks)) => !blocks
-            .iter()
-            .any(|b| b.get("type").and_then(Value::as_str) == Some("tool_result")),
-        _ => false,
-    }
-}
-
 /// Finds where to cut the history so that `messages[cut..]` is the part to keep.
 ///
-/// It aims to keep about the last `keep_last` messages. It moves forward to the first clean user
-/// message, so no tool result loses its tool use. Returns None if there is no good cut or fewer
-/// than 2 messages would stay.
+/// It aims to keep about the last `keep_last` messages. It moves forward to the first assistant
+/// message. That cut is always clean: the assistant's `tool_use` blocks and their results both
+/// stay, and the message before the cut is a user message. Returns None if there is no such
+/// message or fewer than 2 messages would stay.
 pub fn cut_point(messages: &[Value], keep_last: usize) -> Option<usize> {
     let len = messages.len();
     if len <= keep_last.saturating_add(1) {
@@ -267,8 +261,8 @@ pub fn cut_point(messages: &[Value], keep_last: usize) -> Option<usize> {
     let (index, _) = messages
         .iter()
         .enumerate()
-        .skip(start)
-        .find(|(_, m)| starts_cleanly(m))?;
+        .skip(start.max(1))
+        .find(|(_, m)| m.get("role").and_then(Value::as_str) == Some("assistant"))?;
     if len.saturating_sub(index) < 2 {
         return None;
     }

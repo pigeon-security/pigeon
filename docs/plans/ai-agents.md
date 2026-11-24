@@ -973,3 +973,12 @@ executors through it. Each item: state, next step, who it waits on.
   (`--no-merges`), a commit named by two branches is picked once, and the planner's own branch is
   read from the checkout's `HEAD`. A dirty checkout is refused. A conflict aborts and restores the
   checkout. The git scripts run only in a real sandbox; the smoke suite tests the pure parts.
+- 2026-11-24: **6a and 6d built.** `transcript::cut_point` now cuts before an assistant message, so
+  a tool loop compacts; `COMPACT_AT` is 100k and the kept tail is `KEEP_TAIL` = 16. The data check
+  was thin: `models_usage` was not offered to the executor and `cost_daily` has no token counts,
+  so the plan's figures were not contradicted but not re-measured either. A planner past 75% of
+  its cost (own plus executors' hold) or sandbox minutes gets one warning user message
+  (`budget::warn_due`, flag `warned75` in the run's `flags`). When a planner ends, the run
+  appends "## Unlanded branches" to its report (`handoff.rs`): one row per executor not shown as
+  landed by `land_list`. The index keeps no tip, so the tip is the last 40-character commit id in
+  the executor's report; CI comes from `ci_commit` for that tip, else `unknown`.
