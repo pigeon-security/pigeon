@@ -764,11 +764,18 @@ fn platform_cost_daily_buckets() {
     let lines = &week["cloudflare"]["lines"];
     assert_eq!(
         names(lines),
-        ["CI Containers", "Workers", "D1", "R2", "Other"]
+        [
+            "CI Containers",
+            "Workers",
+            "Workers AI",
+            "D1",
+            "R2",
+            "Other"
+        ]
     );
     assert_eq!(lines[1]["granularity"], "period");
-    assert_eq!(lines[3]["granularity"], "day");
-    assert_eq!(lines[3]["kind"], "billed");
+    assert_eq!(lines[4]["granularity"], "day");
+    assert_eq!(lines[4]["kind"], "billed");
     assert!(near(&week["cloudflare"]["total"], 10.6));
     assert!(near(&week["ai_gateway"]["total"], 1.875));
     assert!(near(&week["total"], 12.475));

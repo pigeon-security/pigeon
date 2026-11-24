@@ -361,9 +361,10 @@ fn platform_cost_daily_anthropic_total_without_double_counting() {
     let p = &a["ai_gateway"]["by_provider"];
     assert_eq!(p[0]["name"], "Anthropic");
     assert_eq!(num_of(&p[0]["total"]), 5.0);
-    assert_eq!(p[1]["name"], "OpenAI");
-    assert_eq!(num_of(&p[1]["total"]), 1.0);
-    assert_eq!(p.as_array().map(Vec::len), Some(2));
+    assert_eq!(p[1]["name"], "Anthropic (credits)");
+    assert_eq!(p[3]["name"], "Other");
+    assert_eq!(num_of(&p[3]["total"]), 1.0);
+    assert_eq!(p.as_array().map(Vec::len), Some(4));
     assert_eq!(num_of(&a["anthropic"]["total"]), 3.5);
     assert_eq!(a["anthropic"]["by_model"][0]["name"], "claude-sonnet-5");
     assert_eq!(a["anthropic"]["source"], "Anthropic Admin API");
@@ -1571,4 +1572,121 @@ fn ai_agents_models_credits_routes_and_openai_refused() {
     assert_eq!(g[0]["route"], "byok");
     assert_eq!(g[1]["model"], "cf-anthropic/claude-sonnet-5-5");
     assert_eq!(g[1]["route"], "credits");
+}
+
+/// `cost_daily` with the credits route: AI Gateway billing rows are left out and shown as
+/// `credits.billing_usd`, Workers AI has its own line, credits usage and a 5% fee join the total,
+/// Anthropic's report is reconciled on `anthropic` only, and old closed days read as BYOK.
+#[test]
+fn platform_cost_daily_credits_route_and_ai_gateway_rows() {
+    use pigeon_capabilities::cost::{assemble, billing_days, live_days};
+    use std::collections::BTreeMap;
+    let today = "2026-03-10";
+    let day = |d: &str| (format!("{d}T00:00:00Z"), format!("{d}T23:59:59Z"));
+    let row = |name: &str, usd: f64, d: &str| {
+        let (a, b) = day(d);
+        json!({ "ServiceName": name, "BilledCost": usd, "ChargePeriodStart": a, "ChargePeriodEnd": b })
+    };
+    let rows = json!([
+        row("Workers Paid", 1.0, "2026-03-10"),
+        row("Workers AI", 0.5, "2026-03-10"),
+        row("AI Gateway Credits", 20.0, "2026-03-10"),
+        row("AI Gateway", 3.0, "2026-03-10"),
+    ]);
+    let billing = billing_days(&rows, today);
+    let cf = &billing.days[today]["cloudflare"];
+    assert_eq!(num_of(&cf["Workers"]), 1.0);
+    assert_eq!(num_of(&cf["Workers AI"]), 0.5);
+    assert!(cf.get("AI Gateway").is_none() && cf.get("Other").is_none());
+
+    // 03-08: BYOK Anthropic $3 and credits cf-anthropic $2. 03-10: credits cf-openai $10.
+    let models = json!({
+        "days": ["2026-03-08", "2026-03-09", "2026-03-10"],
+        "by_family": { "Sonnet": { "2026-03-08": 5.0 }, "OpenAI": { "2026-03-10": 10.0 } },
+        "by_run": {}, "unattributed": { "2026-03-08": 5.0, "2026-03-10": 10.0 },
+        "by_provider": {
+            "anthropic": { "2026-03-08": 3.0 },
+            "cf-anthropic": { "2026-03-08": 2.0 },
+            "cf-openai": { "2026-03-10": 10.0 } },
+        "by_provider_model": {
+            "anthropic": { "claude-sonnet-5": { "2026-03-08": { "cost_usd": 3.0, "tokens_in": 1000, "tokens_out": 500 } } },
+            "cf-anthropic": { "claude-sonnet-5": { "2026-03-08": { "cost_usd": 2.0, "tokens_in": 700, "tokens_out": 300 } } } },
+        "by_route": {
+            "byok": { "2026-03-08": 3.0 },
+            "credits": { "2026-03-08": 2.0, "2026-03-10": 10.0 } },
+    });
+    let anthropic = json!({ "by_day": { "2026-03-08": {
+        "cost_usd": 3.5, "tokens": { "uncached_input": 1000, "output": 500 },
+        "by_model": { "claude-sonnet-5": { "cost_usd": 3.5 } } } } });
+    let roles = BTreeMap::new();
+    let live = live_days(
+        Some(&billing),
+        Some(&models),
+        Some(&roles),
+        Some(&anthropic),
+    );
+    // An old closed day: stored with no route, $4 of gateway cost.
+    let stored = BTreeMap::from([(
+        "2026-03".to_string(),
+        json!({ "2026-03-07": { "models": { "Opus": 4.0 } } }),
+    )]);
+    let a = assemble("7d", today, &stored, &live, false, false, vec![], vec![]);
+
+    // Cloudflare: 1.0 + 0.5, without the $23 of AI Gateway rows.
+    assert_eq!(num_of(&a["cloudflare"]["total"]), 1.5);
+    assert_eq!(num_of(&a["credits"]["billing_usd"]), 23.0);
+    assert_eq!(num_of(&a["credits"]["usage_usd"]), 12.0);
+    assert_eq!(num_of(&a["credits"]["fee_usd"]), 0.6);
+    let cp = &a["credits"]["by_provider"];
+    assert_eq!(cp[0]["name"], "Anthropic");
+    assert_eq!(num_of(&cp[0]["total"]), 2.0);
+    assert_eq!(cp[1]["name"], "OpenAI");
+    assert_eq!(num_of(&cp[1]["total"]), 10.0);
+
+    // Gateway logs: 4 (old) + 5 + 10 = 19. Anthropic's 3.5 replaces only the BYOK 3.0.
+    assert_eq!(num_of(&a["ai_gateway"]["total"]), 19.0);
+    // 1.5 + 19 + (3.5 - 3.0) + 0.6
+    assert_eq!(num_of(&a["total"]), 21.6);
+    let routes = &a["ai_gateway"]["by_route"];
+    assert_eq!(routes[0]["name"], "BYOK");
+    assert_eq!(num_of(&routes[0]["total"]), 7.0);
+    assert_eq!(num_of(&routes[0]["by_day"]["2026-03-07"]), 4.0);
+    assert_eq!(routes[1]["name"], "Credits");
+    assert_eq!(num_of(&routes[1]["total"]), 12.0);
+    let p = &a["ai_gateway"]["by_provider"];
+    let names: Vec<&str> = p
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|x| x["name"].as_str())
+        .collect();
+    assert_eq!(
+        names,
+        ["Anthropic", "Anthropic (credits)", "OpenAI (credits)"]
+    );
+    // Reconciled on BYOK only: 3.5 against the gateway's 3.0, not 5.0.
+    let recon = &a["anthropic"]["reconciliation"]["days"];
+    let d8 = recon
+        .as_array()
+        .and_then(|r| r.iter().find(|d| d["day"] == "2026-03-08"));
+    assert_eq!(d8.map(|d| d["status"].clone()), Some(json!("pricing")));
+
+    // A gateway with no `by_route` reads as all BYOK.
+    let mut old_models = models.clone();
+    old_models.as_object_mut().map(|m| m.remove("by_route"));
+    let live = live_days(None, Some(&old_models), Some(&roles), None);
+    let a = assemble(
+        "7d",
+        today,
+        &BTreeMap::new(),
+        &live,
+        false,
+        false,
+        vec![],
+        vec![],
+    );
+    assert_eq!(num_of(&a["credits"]["usage_usd"]), 0.0);
+    assert_eq!(num_of(&a["credits"]["fee_usd"]), 0.0);
+    assert_eq!(num_of(&a["ai_gateway"]["by_route"][0]["total"]), 15.0);
+    assert_eq!(num_of(&a["total"]), 15.0);
 }

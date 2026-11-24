@@ -15,7 +15,12 @@ use crate::observability::{BILLING_PERMISSION, with_token, within};
 use crate::{Context, dispatch};
 
 /// The Cloudflare lines that are always answered, in order. `Other` follows when it cost something.
-const LINES: [&str; 4] = ["CI Containers", "Workers", "D1", "R2"];
+const LINES: [&str; 5] = ["CI Containers", "Workers", "Workers AI", "D1", "R2"];
+/// The line name that stands for Cloudflare AI Gateway billing rows. They never reach the answer's
+/// Cloudflare lines: the gateway's logs already count the same spend.
+const AI_GATEWAY_LINE: &str = "AI Gateway";
+/// The estimated purchase fee on credits usage, as a share of that usage.
+const CREDITS_FEE: f64 = 0.05;
 /// The model families that are always answered, in order. `Other` follows when it cost something.
 const MODELS: [&str; 4] = ["Opus", "Sonnet", "Haiku", "OpenAI"];
 /// The roles that are always answered, in order. `other` follows when it cost something.
@@ -45,8 +50,12 @@ fn num(v: &Value) -> f64 {
 
 /// The answer's Cloudflare line for a billing `ServiceName`.
 pub fn line_of(service: &str) -> &'static str {
-    if service.contains("Container") {
+    if service.contains("AI Gateway") {
+        AI_GATEWAY_LINE
+    } else if service.contains("Container") {
         "CI Containers"
+    } else if service.contains("Workers AI") {
+        "Workers AI"
     } else if service.contains("Workers") {
         "Workers"
     } else if service.contains("D1") {
@@ -59,7 +68,8 @@ pub fn line_of(service: &str) -> &'static str {
 }
 
 /// Billing rows folded into days: each day's `{"cloudflare": {line: usd}, "granularity":
-/// {line: "day"|"period"}}`.
+/// {line: "day"|"period"}, "ai_gateway_billing": usd}`. The last is the AI Gateway rows, which
+/// are left out of the lines.
 #[derive(Debug, Default, PartialEq)]
 pub struct Billing {
     /// The days that have any cost row, up to today.
@@ -166,14 +176,23 @@ pub fn billing_days(result: &Value, today: &str) -> Billing {
         .map(|(day, lines)| {
             let mut cloudflare = Map::new();
             let mut granularity = Map::new();
+            let mut gateway_usd = 0.0;
             for (line, (usd, period)) in lines {
+                if line == AI_GATEWAY_LINE {
+                    gateway_usd += usd;
+                    continue;
+                }
                 cloudflare.insert(line.to_string(), json!(round6(usd)));
                 let g = if period { "period" } else { "day" };
                 granularity.insert(line.to_string(), json!(g));
             }
             (
                 day,
-                json!({ "cloudflare": cloudflare, "granularity": granularity }),
+                json!({
+                    "cloudflare": cloudflare,
+                    "granularity": granularity,
+                    "ai_gateway_billing": round6(gateway_usd),
+                }),
             )
         })
         .collect();
@@ -288,6 +307,14 @@ fn gateway_days(
             }
         }
         rec.insert("gateway_providers".into(), Value::Object(providers));
+        // The route split. A gateway without `by_route` leaves it out, which reads as all BYOK.
+        if models["by_route"].is_object() {
+            let route = |name: &str| round6(num(&models["by_route"][name][&day]));
+            rec.insert(
+                "gateway_routes".into(),
+                json!({ "byok": route("byok"), "credits": route("credits") }),
+            );
+        }
         let mut anth = Map::new();
         for (model, by_day) in models["by_provider_model"]["anthropic"]
             .as_object()
@@ -328,7 +355,7 @@ pub fn merge_day(old: &Value, new: &Value, truncated: bool) -> Value {
     for (key, value) in new.as_object().into_iter().flatten() {
         let gateway = matches!(
             key.as_str(),
-            "models" | "roles" | "gateway_providers" | "gateway_anthropic"
+            "models" | "roles" | "gateway_providers" | "gateway_anthropic" | "gateway_routes"
         );
         if gateway && truncated && out.contains_key(key) {
             continue;
@@ -520,6 +547,7 @@ pub fn assemble(
     // Gateway cost per provider, by the answer's names.
     let mut providers: BTreeMap<String, BTreeMap<String, f64>> = BTreeMap::new();
     let mut gateway_anthropic: BTreeMap<String, f64> = BTreeMap::new();
+    let mut credit_providers: BTreeMap<String, BTreeMap<String, f64>> = BTreeMap::new();
     for day in &days {
         let rec = merged.get(day);
         for (slug, usd) in rec
@@ -529,9 +557,17 @@ pub fn assemble(
         {
             let name = match slug.as_str() {
                 "anthropic" => "Anthropic",
-                "openai" => "OpenAI",
+                "cf-anthropic" => "Anthropic (credits)",
+                "cf-openai" => "OpenAI (credits)",
                 _ => "Other",
             };
+            if let Some(provider) = slug.strip_prefix("cf-") {
+                *credit_providers
+                    .entry(provider.to_string())
+                    .or_default()
+                    .entry(day.clone())
+                    .or_default() += num(usd);
+            }
             *providers
                 .entry(name.to_string())
                 .or_default()
@@ -542,7 +578,53 @@ pub fn assemble(
             }
         }
     }
-    let (by_provider, _) = entries(&["Anthropic", "OpenAI"], "Other", &providers);
+    let (by_provider, _) = entries(
+        &["Anthropic", "Anthropic (credits)", "OpenAI (credits)"],
+        "Other",
+        &providers,
+    );
+
+    // The route split and the credits section. A day with no stored route is all BYOK.
+    let mut ai_by_day: BTreeMap<String, f64> = BTreeMap::new();
+    for by_day in models.values() {
+        for (day, usd) in by_day {
+            *ai_by_day.entry(day.clone()).or_default() += usd;
+        }
+    }
+    let mut credits_by_day: BTreeMap<String, f64> = BTreeMap::new();
+    let mut byok_by_day: BTreeMap<String, f64> = BTreeMap::new();
+    let mut billing_usd = 0.0;
+    for day in &days {
+        let rec = merged.get(day);
+        let credits = rec.map_or(0.0, |r| num(&r["gateway_routes"]["credits"]));
+        let all = ai_by_day.get(day).copied().unwrap_or(0.0);
+        credits_by_day.insert(day.clone(), credits);
+        byok_by_day.insert(day.clone(), all - credits);
+        billing_usd += rec.map_or(0.0, |r| num(&r["ai_gateway_billing"]));
+    }
+    let by_route = vec![
+        entry("BYOK", Some(&byok_by_day)).0,
+        entry("Credits", Some(&credits_by_day)).0,
+    ];
+    let usage_usd = round6(credits_by_day.values().sum());
+    let fee_usd = round6(usage_usd * CREDITS_FEE);
+    let credit_entries: Vec<Value> = credit_providers
+        .iter()
+        .map(|(provider, by_day)| {
+            let name = match provider.as_str() {
+                "anthropic" => "Anthropic",
+                "openai" => "OpenAI",
+                other => other,
+            };
+            entry(name, Some(by_day)).0
+        })
+        .collect();
+    let credits = json!({
+        "usage_usd": usage_usd,
+        "fee_usd": fee_usd,
+        "billing_usd": round6(billing_usd),
+        "by_provider": credit_entries,
+    });
 
     // Anthropic's own figures replace the gateway's Anthropic cost on the days it reported.
     let mut a_days = serde_json::Map::new();
@@ -610,9 +692,10 @@ pub fn assemble(
     json!({
         "range": match range { "today" | "all" => range, _ => "7d" },
         "days": days,
-        "total": round6(cf_total + ai_total + swap),
+        "total": round6(cf_total + ai_total + swap + fee_usd),
         "cloudflare": { "total": cf_total, "lines": lines },
-        "ai_gateway": { "total": ai_total, "by_model": by_model, "by_role": by_role, "by_provider": by_provider },
+        "ai_gateway": { "total": ai_total, "by_model": by_model, "by_role": by_role, "by_provider": by_provider, "by_route": by_route },
+        "credits": credits,
         "anthropic": anthropic,
         "notes": notes,
         "unavailable": unavailable,
