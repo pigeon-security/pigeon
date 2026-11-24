@@ -217,54 +217,29 @@ async fn fetch(req: Request, env: Env, ctx: WorkerContext) -> Result<Response> {
 
 /// Queue messages: each capability that wants one of the batch acts once. A failure fails the
 /// batch, so the queue retries it.
-/// The minute's cron: push-started site deploys that wait or were cut off, and, every fifth
-/// minute, the sweep of expired pigeon tokens (the live-token gauge needs it each minute).
+/// The minute's cron processes pending site deploys and sweeps Pigeon's API tokens.
 #[event(scheduled)]
-async fn scheduled(event: worker::ScheduledEvent, env: Env, _ctx: worker::ScheduleContext) {
+async fn scheduled(_event: worker::ScheduledEvent, env: Env, _ctx: worker::ScheduleContext) {
+    sweep_tokens(&env).await;
     match pigeon_capabilities::github::run_pending(&env).await {
         Ok(ran) if !ran.is_empty() => console_log!("github deploys: {ran:?}"),
         Ok(_) => {}
         Err(e) => console_error!("github deploys failed: {e}"),
     }
-    sweep_tokens(&env, event.schedule() as i64).await;
 }
 
-/// Deletes the account's expired pigeon-minted tokens and logs the counts. Errors are logged.
-async fn sweep_tokens(env: &Env, now_ms: i64) {
-    let account = match account(env).await {
-        Ok(a) => a,
-        Err(e) => return console_error!("token sweep failed: {e}"),
-    };
-    let api = pigeon_core::tokens::CloudflareTokens {
-        parent: &account.parent,
-        account: &account.id,
-    };
-    match pigeon_core::tokens::sweep(&api, now_ms).await {
-        Ok(r) => {
-            console_log!(
-                "token sweep: deleted {}, kept_pigeon {}, skipped_other {}, failed {}",
-                r.deleted,
-                r.kept_pigeon,
-                r.skipped_other,
-                r.failed.len()
-            );
-            // The gauge: the live pigeon tokens the list showed, for the soft ceiling.
-            if let Err(e) = pigeon_capabilities::ledger::gauge_set(env, r.kept_pigeon, now_ms).await
-            {
-                console_error!("gauge store failed: {e}");
-            }
-        }
-        Err(e) => console_error!("token sweep failed: {e}"),
-    }
-    // The ledger's released tokens go too, and its rows past their expiry are forgotten.
+/// Reconciles pending/released leases and expired tokens in the account ledger.
+async fn sweep_tokens(env: &Env) {
     match pigeon_capabilities::ledger::reap(env).await {
         Ok(r) => console_log!(
-            "ledger sweep: deleted {}, forgotten {}, failed {}",
+            "token sweep: deleted {}, forgotten {}, failed {}",
             r.deleted,
             r.forgotten,
             r.failed
         ),
-        Err(e) => console_error!("ledger sweep failed: {e}"),
+        Err(_) => {
+            console_error!("token sweep failed; check tokens_status for the last successful sweep")
+        }
     }
 }
 
@@ -324,6 +299,7 @@ async fn account(env: &Env) -> Result<Account> {
         parent,
         secrets_store: env.var("CF_SECRETS_STORE_ID")?.to_string(),
         bearer: None,
+        token_ledger: Some(env.clone()),
     })
 }
 

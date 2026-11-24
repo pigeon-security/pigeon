@@ -999,6 +999,8 @@ struct MockTokens {
     attempts: std::cell::Cell<u32>,
     /// While set, listing the tokens fails.
     fail_list: std::cell::Cell<bool>,
+    lose_create_response: std::cell::Cell<bool>,
+    suspend_create: std::cell::Cell<bool>,
 }
 
 impl MockTokens {
@@ -1012,6 +1014,8 @@ impl MockTokens {
             next: std::cell::Cell::new(100),
             attempts: std::cell::Cell::new(0),
             fail_list: std::cell::Cell::new(false),
+            lose_create_response: std::cell::Cell::new(false),
+            suspend_create: std::cell::Cell::new(false),
         }
     }
 
@@ -1059,6 +1063,12 @@ impl pigeon_core::tokens::TokenApi for MockTokens {
             Some(expires_on),
             "active",
         );
+        if self.suspend_create.get() {
+            std::future::pending::<()>().await;
+        }
+        if self.lose_create_response.get() {
+            return Err(worker::Error::RustError("create response timed out".into()));
+        }
         Ok(pigeon_core::tokens::Minted {
             id,
             value: "v".into(),
@@ -1273,7 +1283,7 @@ fn token_keys(user: &str, permissions: &[&str]) -> (String, String) {
 }
 
 fn token_lease(
-    ledger: &pigeon_capabilities::ledger::Ledger<()>,
+    ledger: &pigeon_capabilities::ledger::Ledger<impl pigeon_capabilities::ledger::Store>,
     api: &MockTokens,
     keys: &(String, String),
     now_ms: i64,
@@ -1415,8 +1425,12 @@ fn core_token_ledger_an_orphan_row_is_revoked_and_replaced() {
 fn core_token_ledger_a_quota_error_sweeps_once_and_retries_once() {
     use pigeon_capabilities::ledger::Ledger;
     // Full of expired pigeon tokens: the sweep frees room and the retry works.
-    let (api, ledger) = (MockTokens::new(2, 50), Ledger::new((), Vec::new()));
+    let api = MockTokens::new(2, 50);
+    let mut rows = Vec::new();
     for id in ["t1", "t2"] {
+        let mut row = gauge_row(id, TOKEN_NOW_MS - 1, false, None);
+        row.name = "pigeon:a:2026-11-24T04:00:00Z".into();
+        rows.push(row);
         api.add(
             id,
             "pigeon:a:2026-11-24T04:00:00Z",
@@ -1424,6 +1438,7 @@ fn core_token_ledger_a_quota_error_sweeps_once_and_retries_once() {
             "active",
         );
     }
+    let ledger = Ledger::new((), rows);
     let keys = token_keys("u1", &["A"]);
     let got = token_lease(&ledger, &api, &keys, TOKEN_NOW_MS).unwrap();
     assert_eq!(got.id, "t100");
@@ -1441,9 +1456,181 @@ fn core_token_ledger_a_quota_error_sweeps_once_and_retries_once() {
     let err = token_lease(&ledger, &api, &keys, TOKEN_NOW_MS)
         .unwrap_err()
         .to_string();
-    assert!(err.contains("1001"), "{err}");
+    assert!(err.contains(pigeon_core::tokens::CAPACITY_ERROR), "{err}");
     assert_eq!(api.attempts.get(), 2);
     assert!(ledger.rows().is_empty());
+}
+
+#[test]
+fn core_token_ledger_capacity_counts_external_tokens_and_sweeps_only_owned_rows() {
+    use pigeon_capabilities::ledger::Ledger;
+    let api = MockTokens::new(500, 3);
+    for i in 0..9 {
+        api.add(&format!("external{i}"), "outside", None, "active");
+    }
+    api.add(
+        "lookalike",
+        "pigeon:a:2026-11-24T04:00:00Z",
+        Some("2026-11-24T05:00:00Z"),
+        "expired",
+    );
+    let ledger = Ledger::new((), Vec::new());
+    ledger.ceiling_set(10).unwrap();
+    let error = token_lease(&ledger, &api, &token_keys("u1", &["A"]), TOKEN_NOW_MS).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains(pigeon_core::tokens::CAPACITY_ERROR)
+    );
+    assert_eq!(api.attempts.get(), 0);
+    assert!(api.deleted.borrow().is_empty());
+    let gauge = token_block_on(ledger.gauge(&api, TOKEN_NOW_MS)).unwrap();
+    assert_eq!((gauge.live, gauge.account_total), (0, Some(10)));
+    assert_eq!(gauge.last_sweep_succeeded_at_ms, Some(TOKEN_NOW_MS));
+}
+
+#[test]
+fn core_token_ledger_charges_each_new_mint_against_the_cached_total() {
+    use pigeon_capabilities::ledger::Ledger;
+    let api = MockTokens::new(500, 50);
+    for i in 0..9 {
+        api.add(&format!("external{i}"), "outside", None, "active");
+    }
+    let ledger = Ledger::new((), Vec::new());
+    ledger.ceiling_set(10).unwrap();
+    let keys = token_keys("u1", &["A"]);
+    let first = token_lease(&ledger, &api, &keys, TOKEN_NOW_MS).unwrap();
+    let gauge = token_block_on(ledger.gauge(&api, TOKEN_NOW_MS)).unwrap();
+    assert_eq!((gauge.live, gauge.account_total), (1, Some(9)));
+    // A cache hit for an existing lease does not consume an additional slot.
+    assert_eq!(
+        token_lease(&ledger, &api, &keys, TOKEN_NOW_MS).unwrap(),
+        first
+    );
+    let other = token_keys("u2", &["A"]);
+    assert!(token_lease(&ledger, &api, &other, TOKEN_NOW_MS).is_err());
+    assert_eq!(api.attempts.get(), 1);
+
+    api.fail_list.set(true);
+    let later = TOKEN_NOW_MS + 16_000;
+    assert!(token_lease(&ledger, &api, &other, later).is_err());
+    assert_eq!(api.attempts.get(), 1);
+    let gauge = token_block_on(ledger.gauge(&api, later)).unwrap();
+    assert_eq!(gauge.account_total, None);
+}
+
+#[test]
+fn core_token_ledger_recovers_an_ambiguous_create_across_restart() {
+    use pigeon_capabilities::ledger::Ledger;
+    let api = MockTokens::new(500, 50);
+    let ledger = Ledger::new((), Vec::new());
+    let keys = token_keys("u1", &["A"]);
+
+    api.lose_create_response.set(true);
+    assert!(token_lease(&ledger, &api, &keys, TOKEN_NOW_MS).is_err());
+    assert_eq!(ledger.rows().len(), 1);
+    assert_eq!(api.tokens.borrow().len(), 1);
+    api.lose_create_response.set(false);
+
+    let restarted = Ledger::new((), ledger.rows());
+    let gauge = token_block_on(restarted.gauge(&api, TOKEN_NOW_MS)).unwrap();
+    assert_eq!((gauge.live, gauge.account_total), (1, Some(1)));
+    let reaped = token_block_on(restarted.reap(&api, TOKEN_NOW_MS)).unwrap();
+    assert_eq!((reaped.deleted, reaped.forgotten), (1, 1));
+    assert!(restarted.rows().is_empty());
+    assert!(api.tokens.borrow().is_empty());
+
+    // Cancellation or eviction after POST behaves the same way, even without a response error.
+    api.suspend_create.set(true);
+    {
+        use std::future::Future;
+        use std::task::{Context, Poll, Waker};
+        let request = pigeon_capabilities::ledger::LeaseRequest {
+            key: &keys.0,
+            caller: &keys.1,
+            purpose: "worker-ai_gateway",
+            ttl_secs: 900,
+        };
+        let mut mint =
+            std::pin::pin!(
+                restarted.lease(&api, &request, TOKEN_NOW_MS, async || token_body(
+                    TOKEN_EXPIRY
+                ))
+            );
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(matches!(mint.as_mut().poll(&mut context), Poll::Pending));
+        assert_eq!(restarted.rows().len(), 1);
+        assert_eq!(api.tokens.borrow().len(), 1);
+    }
+    let reaped = token_block_on(restarted.reap(&api, TOKEN_NOW_MS)).unwrap();
+    assert_eq!(reaped.deleted, 1);
+    assert!(api.tokens.borrow().is_empty());
+}
+
+#[test]
+fn core_token_ledger_failed_storage_commit_attempts_cleanup() {
+    use pigeon_capabilities::ledger::{Ledger, Row, Store};
+    struct RejectMinted;
+    impl Store for RejectMinted {
+        fn save(&self, row: &Row) -> worker::Result<()> {
+            if row.id.starts_with("pending:") {
+                Ok(())
+            } else {
+                Err(worker::Error::RustError("store unavailable".into()))
+            }
+        }
+        fn remove(&self, _id: &str) -> worker::Result<()> {
+            Ok(())
+        }
+    }
+    let api = MockTokens::new(500, 50);
+    let ledger = Ledger::new(RejectMinted, Vec::new());
+    assert!(token_lease(&ledger, &api, &token_keys("u1", &["A"]), TOKEN_NOW_MS).is_err());
+    assert_eq!(*api.deleted.borrow(), ["t100"]);
+    assert!(ledger.rows().is_empty());
+}
+
+#[test]
+fn core_token_transient_cleanup_retries_failed_revocation_and_checks_sweep_time() {
+    use pigeon_capabilities::ledger::Ledger;
+    let mut api = MockTokens::new(500, 50);
+    let ledger = Ledger::new((), Vec::new());
+    let token = token_block_on(ledger.mint_transient(
+        &api,
+        "artifacts",
+        900,
+        TOKEN_NOW_MS,
+        token_body(TOKEN_EXPIRY).unwrap(),
+    ))
+    .unwrap();
+    let later = TOKEN_NOW_MS + 1_000;
+    // A transient call can still be active after the ledger restarts.
+    let ledger = Ledger::new((), ledger.rows());
+    assert_eq!(token_block_on(ledger.reap(&api, later)).unwrap().deleted, 0);
+    api.fail_delete = vec!["t100"];
+    assert!(token_block_on(ledger.revoke_transient(&api, &token.id)).is_err());
+    assert!(ledger.rows()[0].released);
+    let after_failure = later + 1_000;
+    assert_eq!(
+        token_block_on(ledger.reap(&api, after_failure))
+            .unwrap()
+            .failed,
+        1
+    );
+    let gauge = token_block_on(ledger.gauge(&api, after_failure)).unwrap();
+    assert_eq!(gauge.last_sweep_succeeded_at_ms, Some(later));
+    assert_eq!((gauge.live, gauge.account_total), (1, Some(1)));
+    api.fail_delete.clear();
+    assert_eq!(
+        token_block_on(ledger.reap(&api, after_failure))
+            .unwrap()
+            .deleted,
+        1
+    );
+    assert!(ledger.rows().is_empty());
+    let gauge = token_block_on(ledger.gauge(&api, after_failure)).unwrap();
+    assert_eq!(gauge.last_sweep_succeeded_at_ms, Some(after_failure));
+    assert_eq!((gauge.live, gauge.account_total), (0, Some(0)));
 }
 
 #[test]
@@ -1510,11 +1697,10 @@ fn core_token_ledger_reap_keeps_other_names_and_forgets_the_expired() {
         ],
     );
     let r = token_block_on(ledger.reap(&api, TOKEN_NOW_MS)).unwrap();
-    assert_eq!((r.deleted, r.forgotten, r.failed), (1, 3, 0));
-    // Only the released pigeon token was deleted: the other name was never touched.
-    assert_eq!(*api.deleted.borrow(), ["t1"]);
-    let left: Vec<String> = ledger.rows().into_iter().map(|r| r.id).collect();
-    assert_eq!(left, ["t4"]);
+    assert_eq!((r.deleted, r.forgotten, r.failed), (3, 4, 0));
+    // Released, expired, and restarted shared leases are reclaimed. Other names are untouched.
+    assert_eq!(*api.deleted.borrow(), ["t1", "t3", "t4"]);
+    assert!(ledger.rows().is_empty());
 }
 
 /// A ledger row for the gauge scenarios: live until `expires_at`, minted at `created_at`.
@@ -1559,14 +1745,14 @@ fn core_token_gauge_arithmetic() {
         at_ms: TOKEN_NOW_MS + 60_000,
     };
     assert_eq!(live_now(Some(&low), &rows, later), 4);
-    // Released and expired rows are not live rows.
+    // Released rows still occupy capacity until deletion succeeds.
     let rows = vec![
         gauge_row("e", later + 1000, true, None),
         gauge_row("f", later - 1, false, None),
         gauge_row("g", later + 1000, false, None),
     ];
-    assert_eq!(live_now(None, &rows, later), 1);
-    assert_eq!(live_now(Some(&low), &rows, later), 1);
+    assert_eq!(live_now(None, &rows, later), 2);
+    assert_eq!(live_now(Some(&low), &rows, later), 2);
 }
 
 #[test]
@@ -1668,11 +1854,11 @@ fn core_token_gauge_full_account_queues_then_sweep_frees_it() {
     let ledger = Ledger::new((), Vec::new());
     let g = token_block_on(ledger.gauge(&api, TOKEN_NOW_MS)).unwrap();
     assert_eq!((g.live, g.soft_ceiling, g.hard_cap), (500, 300, 500));
-    // A mint now meets the quota error.
+    // The mint is blocked before POST.
     let err = token_lease(&ledger, &api, &token_keys("u1", &["A"]), TOKEN_NOW_MS)
         .unwrap_err()
         .to_string();
-    assert!(err.contains("1001"), "{err}");
+    assert!(err.contains(pigeon_core::tokens::CAPACITY_ERROR), "{err}");
     // A new run queues, with the reason; a gauge that is unknown does not hold it.
     let limits = Limits::default();
     let why = queue_reason(
@@ -1698,7 +1884,7 @@ fn core_token_gauge_full_account_queues_then_sweep_frees_it() {
     assert_eq!((report.deleted, report.kept_pigeon), (250, 250));
     ledger.gauge_set(report.kept_pigeon as u32, later).unwrap();
     let g = token_block_on(ledger.gauge(&api, later + 30_000)).unwrap();
-    assert_eq!((g.live, g.source.as_str()), (250, "sweep"));
+    assert_eq!((g.live, g.account_total), (250, Some(250)));
     assert_eq!(
         queue_reason(
             Executor,

@@ -1312,7 +1312,7 @@ pub async fn open_call_token(
             )],
             ttl_secs: 900,
         };
-        let m = pigeon_core::tokens::mint(&account.parent, &account.id, &request).await?;
+        let m = pigeon_core::tokens::mint_for(account, &request).await?;
         return Ok(Some(CallToken {
             value: m.value,
             id: m.id,
@@ -1337,8 +1337,11 @@ pub async fn close_call_token(_env: &Env, account: &Account, _caller: &Value, to
     if account.parent.is_empty() {
         return;
     }
-    if let Err(e) = pigeon_core::tokens::revoke(&account.parent, &account.id, &token.id).await {
-        worker::console_warn!("a Workers AI call token could not be revoked: {e}");
+    if pigeon_core::tokens::revoke_for(account, &token.id)
+        .await
+        .is_err()
+    {
+        worker::console_warn!("a Workers AI call token could not be revoked");
     }
 }
 
@@ -1958,6 +1961,7 @@ pub async fn credential_as(env: &Env, caller: &Value, purposes: &[&str]) -> Resu
         parent: String::new(),
         secrets_store: env.var("CF_SECRETS_STORE_ID")?.to_string(),
         bearer: Some(given.token),
+        token_ledger: None,
     })
 }
 

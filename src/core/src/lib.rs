@@ -69,6 +69,8 @@ pub struct Account {
     /// it is for every call instead of a token minted from `parent`, which is then empty. Never
     /// printed: `Account` has no `Debug`.
     pub bearer: Option<String>,
+    /// Local binding to the account-wide mint ledger, when this Worker hosts it.
+    pub token_ledger: Option<worker::Env>,
 }
 
 /// The account `env` acts on, with the parent token read from Secrets Store binding `parent` and
@@ -84,5 +86,9 @@ pub async fn account_from_env(env: &worker::Env, parent: &str) -> worker::Result
         parent: token,
         secrets_store: env.var("CF_SECRETS_STORE_ID")?.to_string(),
         bearer: None,
+        token_ledger: env
+            .durable_object(tokens::LEDGER_BINDING)
+            .ok()
+            .map(|_| env.clone()),
     })
 }

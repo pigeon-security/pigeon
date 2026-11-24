@@ -715,12 +715,13 @@ impl Capability for Observability {
             },
             Tool {
                 name: "tokens_status",
-                description: "Cloudflare API tokens pigeon minted that are live now (`live`), the \
-                              soft ceiling above which new agent runs queue (`soft_ceiling`, 300 \
-                              by default), Cloudflare's cap (`hard_cap`, 500), when the count \
-                              was taken (`as_of_ms`) and where it came from (`source`). With \
-                              `soft_ceiling` (10 to 450), sets the ceiling first; only a person, \
-                              or an agent acting for one, may set it.",
+                description: "Pigeon's live Cloudflare API tokens (`live`), the configured mint \
+                              ceiling (`soft_ceiling`, default 300), and Cloudflare's hard cap \
+                              (`hard_cap`, 500). Includes the account-wide count \
+                              (`account_total`) and its timestamp (`account_total_as_of_ms`), \
+                              and `last_sweep_succeeded_at_ms`. An unavailable total or sweep \
+                              timestamp is null. Only a person or their delegate can set \
+                              `soft_ceiling` (10 to 450).",
                 input_schema: json!({
                     "type": "object",
                     "properties": { "soft_ceiling": { "type": "integer", "description": "New soft ceiling, 10 to 450." } }
@@ -2191,6 +2192,9 @@ pub(crate) fn gauge_view(g: &crate::ledger::Gauge) -> Value {
         "hard_cap": g.hard_cap,
         "as_of": iso(g.as_of_ms as f64),
         "source": g.source,
+        "account_total": g.account_total,
+        "account_total_as_of_ms": g.account_total_as_of_ms,
+        "last_sweep_succeeded_at_ms": g.last_sweep_succeeded_at_ms,
     })
 }
 

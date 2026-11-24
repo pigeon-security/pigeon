@@ -273,10 +273,10 @@ impl Secrets {
                 vec![Policy::new(Scope::Account, &["Account Settings Read"])],
             )
         };
-        let minted = tokens::mint(value, &cx.account.id, &request)
+        let minted = tokens::mint_as(cx.account, &request, Some(value))
             .await
             .map_err(|e| bad(&format!("this token cannot mint tokens: {e}")))?;
-        tokens::revoke(value, &cx.account.id, &minted.id)
+        tokens::revoke_as(cx.account, &minted.id, Some(value))
             .await
             .map_err(|e| bad(&format!("this token minted one but cannot revoke it: {e}")))?;
         Ok(Value::String(

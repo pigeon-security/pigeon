@@ -144,7 +144,10 @@ pub fn check_config(args: &Value, stored: &StoredLimits) -> Result<StoredLimits,
 /// (or from the same two keys), `None` when either is missing. Pure.
 pub fn gauge_of(status: &Value) -> Option<(u32, u32)> {
     let n = |k: &str| status[k].as_u64().and_then(|n| u32::try_from(n).ok());
-    Some((n("live")?, n("soft_ceiling")?))
+    Some((
+        n("account_total").or_else(|| n("live"))?,
+        n("soft_ceiling")?,
+    ))
 }
 
 /// Why a queued run may not take a live slot now, as the plain text shown in its `step`, or

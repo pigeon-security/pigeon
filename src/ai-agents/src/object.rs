@@ -2303,6 +2303,15 @@ impl AiAgentRuns {
         let clear = "job_id = NULL, job_kind = NULL, job_state = NULL";
         let storage = self.state.storage();
         match recovery {
+            Recovery::WaitTokenCapacity => {
+                self.set(clear, vec![])?;
+                storage.set_alarm(60_000).await?;
+                self.tell(
+                    row,
+                    "waiting for Cloudflare token capacity; retrying in one minute. Review API tokens in the Cloudflare dashboard if it persists",
+                    Value::Null,
+                ).await
+            }
             Recovery::Again => {
                 self.set(
                     &format!("{clear}, failures = ?"),

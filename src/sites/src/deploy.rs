@@ -229,6 +229,7 @@ pub async fn deploy(
                 .ok_or_else(|| bad("core's linked credential has no token"))?
                 .to_string(),
         ),
+        token_ledger: None,
     };
     let present: BTreeSet<String> = r2::list(&account, &t.bucket, "blobs/")
         .await?

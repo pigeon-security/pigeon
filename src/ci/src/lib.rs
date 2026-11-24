@@ -197,6 +197,7 @@ pub async fn account(cx: &Cx<'_>, purposes: &[&str]) -> Result<Account> {
                     .map(|v| v.to_string())
                     .unwrap_or_default(),
                 bearer: Some(credential.token),
+                token_ledger: None,
             })
         }
     }

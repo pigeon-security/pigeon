@@ -93,7 +93,7 @@ async fn mint(cx: &Context<'_>, args: &Value) -> Result<ApiToken> {
         policies: vec![Policy::new(Scope::Account, &names)],
         ttl_secs,
     };
-    let minted = tokens::mint(&cx.account.parent, &cx.account.id, &request).await?;
+    let minted = tokens::mint_for(cx.account, &request).await?;
     Ok(ApiToken {
         id: minted.id,
         token: minted.value,

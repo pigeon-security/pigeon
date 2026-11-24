@@ -67,6 +67,7 @@ impl Link<'_> {
                     parent: String::new(),
                     secrets_store: self.env.var("CF_SECRETS_STORE_ID")?.to_string(),
                     bearer: Some(given.token),
+                    token_ledger: None,
                 })
             }
             Answer::Error(f) => Err(bad(format!("core gave no credential: {}", f.message))),

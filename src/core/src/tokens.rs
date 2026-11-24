@@ -1,7 +1,7 @@
 //! Mints and revokes short-lived Cloudflare account API tokens from a parent token.
 //! A minted token's value is returned to the caller only; it is never stored or logged.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use worker::js_sys::Date;
 use worker::wasm_bindgen::JsValue;
@@ -61,6 +61,7 @@ impl MintRequest {
 }
 
 /// A minted token. `value` is the secret.
+#[derive(Serialize, Deserialize)]
 pub struct Minted {
     pub id: String,
     pub value: String,
@@ -162,25 +163,77 @@ pub async fn mint_body(parent: &str, account: &str, request: &MintRequest) -> Re
 
 /// Mints `request` on `account`, as `parent`.
 pub async fn mint(parent: &str, account: &str, request: &MintRequest) -> Result<Minted> {
-    let body = mint_body(parent, account, request).await?;
-    let expires_on = body["expires_on"].as_str().unwrap_or_default().to_string();
-    let v = call(
-        parent,
-        Method::Post,
-        &format!("/accounts/{account}/tokens"),
-        Some(&body),
-    )
-    .await?;
-    match (v["id"].as_str(), v["value"].as_str()) {
-        (Some(id), Some(value)) => Ok(Minted {
-            id: id.to_string(),
-            value: value.to_string(),
-            expires_on,
-        }),
-        _ => Err(Error::RustError(
-            "the minted token came back without its id or value".into(),
-        )),
+    let body = mint_body(parent, account, request)
+        .await
+        .map_err(|_| Error::RustError("could not prepare Cloudflare token permissions".into()))?;
+    let api = CloudflareTokens { parent, account };
+    // Standalone callers without a ledger binding still keep headroom. The home
+    // account uses mint_for to serialize all mint reservations.
+    for attempt in 0..2 {
+        let total = list_all(&api).await.map_err(|_| capacity_error())?.len();
+        if total < DEFAULT_SOFT_CEILING as usize {
+            match api.create(&body).await {
+                Err(error) if quota_error(&error) && attempt == 0 => {}
+                Err(error) if quota_error(&error) => return Err(capacity_error()),
+                Err(_) => return Err(Error::RustError("Cloudflare token creation failed".into())),
+                Ok(token) => return Ok(token),
+            }
+        } else if attempt != 0 {
+            break;
+        }
     }
+    Err(capacity_error())
+}
+
+/// The home account routes transient tokens through the same ledger as shared leases.
+pub const LEDGER_BINDING: &str = "TOKEN_LEDGER";
+pub const LEDGER_OBJECT: &str = "ledger";
+pub const DEFAULT_SOFT_CEILING: u32 = 300;
+
+pub async fn mint_for(account: &crate::Account, request: &MintRequest) -> Result<Minted> {
+    mint_as(account, request, None).await
+}
+
+/// The parent-token setup probe must actually test the candidate's own permissions. The
+/// candidate is passed only to the internal ledger request and never stored.
+pub async fn mint_as(
+    account: &crate::Account,
+    request: &MintRequest,
+    candidate: Option<&str>,
+) -> Result<Minted> {
+    let parent = candidate.unwrap_or(&account.parent);
+    let Some(env) = &account.token_ledger else {
+        return mint(parent, &account.id, request).await;
+    };
+    let body = mint_body(parent, &account.id, request)
+        .await
+        .map_err(|_| Error::RustError("could not prepare Cloudflare token permissions".into()))?;
+    let result = crate::durable::call(
+        env, LEDGER_BINDING, LEDGER_OBJECT, "mint",
+        &json!({ "body": body, "purpose": request.purpose, "ttl_secs": request.ttl_secs, "candidate": candidate }),
+    ).await?;
+    Ok(serde_json::from_value(result)?)
+}
+
+pub async fn revoke_for(account: &crate::Account, id: &str) -> Result<()> {
+    revoke_as(account, id, None).await
+}
+
+pub async fn revoke_as(account: &crate::Account, id: &str, candidate: Option<&str>) -> Result<()> {
+    if let Some(env) = &account.token_ledger {
+        crate::durable::call(
+            env,
+            LEDGER_BINDING,
+            LEDGER_OBJECT,
+            "revoke",
+            &json!({ "id": id, "candidate": candidate }),
+        )
+        .await?;
+        return Ok(());
+    }
+    revoke(candidate.unwrap_or(&account.parent), &account.id, id)
+        .await
+        .map_err(|_| Error::RustError("Cloudflare token revocation failed".into()))
 }
 
 /// Revokes token `id` on `account`, as `parent`.
@@ -394,14 +447,7 @@ const MAX_PAGES: u32 = 200;
 /// Lists the account's tokens (page by page until an empty page), deletes the expired ones
 /// named by [`minted`], and counts. A failed delete is recorded and the rest go on.
 pub async fn sweep(api: &impl TokenApi, now_ms: i64) -> Result<SweepReport> {
-    let mut all = Vec::new();
-    for page in 1..=MAX_PAGES {
-        let got = api.list(page).await?;
-        if got.is_empty() {
-            break;
-        }
-        all.extend(got);
-    }
+    let all = list_all(api).await?;
     let mut report = SweepReport::default();
     for token in &all {
         if minted(&token.name).is_none() {
@@ -418,24 +464,49 @@ pub async fn sweep(api: &impl TokenApi, now_ms: i64) -> Result<SweepReport> {
     Ok(report)
 }
 
+/// Lists every token, including tokens created outside Pigeon and expired records.
+pub async fn list_all(api: &impl TokenApi) -> Result<Vec<Listed>> {
+    let mut all = Vec::new();
+    for page in 1..=MAX_PAGES {
+        let got = api.list(page).await?;
+        if got.is_empty() {
+            return Ok(all);
+        }
+        all.extend(got);
+    }
+    Err(Error::RustError(
+        "Cloudflare token listing did not finish".into(),
+    ))
+}
+
+/// Stable prefix shared with the agent's turn recovery.
+pub const CAPACITY_ERROR: &str = "Cloudflare token capacity unavailable";
+
+pub fn quota_error(error: &Error) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    message.contains("1001") && message.contains("quota")
+}
+
+pub fn capacity_error() -> Error {
+    Error::RustError(format!(
+        "{CAPACITY_ERROR}: retry after the token sweep or review API tokens in the Cloudflare dashboard"
+    ))
+}
+
 /// Whether `token` is named by [`minted`] and has not expired at `now_ms`. A token with no
 /// `expires_on` counts as live. Pure.
-fn live_pigeon(token: &Listed, now_ms: i64) -> bool {
+pub fn live_pigeon(token: &Listed, now_ms: i64) -> bool {
     minted(&token.name).is_some() && !sweepable(token, now_ms) && token.status != "expired"
 }
 
 /// Counts the account's live pigeon-minted tokens: lists every page and counts the names
 /// [`minted`] accepts that have not expired. Read-only: it deletes nothing.
 pub async fn count_live(api: &impl TokenApi, now_ms: i64) -> Result<usize> {
-    let mut live = 0;
-    for page in 1..=MAX_PAGES {
-        let got = api.list(page).await?;
-        if got.is_empty() {
-            break;
-        }
-        live += got.iter().filter(|t| live_pigeon(t, now_ms)).count();
-    }
-    Ok(live)
+    Ok(list_all(api)
+        .await?
+        .iter()
+        .filter(|t| live_pigeon(t, now_ms))
+        .count())
 }
 
 /// `ms` since the epoch as RFC 3339 to the second, as the tokens API takes it.
@@ -499,7 +570,7 @@ impl<'a> Scoped<'a> {
             ttl_secs,
             ..MintRequest::new(purpose, policies)
         };
-        let minted = mint(&account.parent, &account.id, &request).await?;
+        let minted = mint_for(account, &request).await?;
         Ok(Self {
             account,
             minted: Some(minted),
@@ -522,7 +593,7 @@ impl<'a> Scoped<'a> {
         let Some(minted) = self.minted else {
             return result;
         };
-        let revoked = revoke(&self.account.parent, &self.account.id, &minted.id).await;
+        let revoked = revoke_for(self.account, &minted.id).await;
         let value = result?;
         revoked?;
         Ok(value)

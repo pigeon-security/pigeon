@@ -10,7 +10,7 @@
 //! restarted) is an orphan: it is revoked by id and replaced at the next lease.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context as TaskContext, Poll, Waker};
@@ -23,10 +23,10 @@ use serde_json::{Value, json};
 use worker::{Env, Error, Request, Response, Result, State as ObjectState};
 
 /// The ledger's Durable Object binding in the platform Worker.
-pub const BINDING: &str = "TOKEN_LEDGER";
+pub const BINDING: &str = tokens::LEDGER_BINDING;
 
 /// The name of the one ledger object.
-pub const OBJECT: &str = "ledger";
+pub const OBJECT: &str = tokens::LEDGER_OBJECT;
 
 /// A token with less than this left (milliseconds) is not handed out again. Five minutes, so a
 /// taker that keeps one token for a job's steps still has time to finish with it.
@@ -54,13 +54,16 @@ const MIGRATIONS: [&str; 2] = [
 pub const HARD_CAP: u32 = 500;
 
 /// The soft ceiling until someone sets one: new agent runs queue at or above it.
-pub const DEFAULT_SOFT_CEILING: u32 = 300;
+pub const DEFAULT_SOFT_CEILING: u32 = tokens::DEFAULT_SOFT_CEILING;
 
 /// The soft ceilings that may be set.
 pub const CEILING_RANGE: std::ops::RangeInclusive<u32> = 10..=450;
 
 /// A stored gauge older than this (milliseconds) is refreshed when it is read.
 pub const GAUGE_MAX_AGE_MS: i64 = 120_000;
+const ACCOUNT_CACHE_MS: i64 = 15_000;
+const PENDING_PREFIX: &str = "pending:";
+const MINT_FLIGHT: &str = "account mint";
 
 /// Checks a soft ceiling against [`CEILING_RANGE`]. The error is a plain sentence. Pure.
 pub fn check_ceiling(v: i64) -> std::result::Result<u32, String> {
@@ -85,6 +88,20 @@ pub struct SweepGauge {
     pub at_ms: i64,
 }
 
+#[derive(Clone, Copy)]
+struct AccountCount {
+    listed: u32,
+    reserved: u32,
+    pigeon_live: u32,
+    at_ms: i64,
+}
+
+impl AccountCount {
+    fn fresh(self, now_ms: i64) -> bool {
+        (0..ACCOUNT_CACHE_MS).contains(&(now_ms - self.at_ms))
+    }
+}
+
 /// The gauge as it is read.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Gauge {
@@ -99,21 +116,22 @@ pub struct Gauge {
     /// Where the count came from: `sweep`, `refreshed`, `stored (refresh failed)` or
     /// `ledger rows (refresh failed)`.
     pub source: String,
+    /// All records in the account token listing, including tokens outside Pigeon.
+    pub account_total: Option<u32>,
+    pub account_total_as_of_ms: Option<i64>,
+    pub last_sweep_succeeded_at_ms: Option<i64>,
 }
 
 /// The live count: the last list's count plus the rows the ledger minted after it, and never
-/// less than the ledger's live rows (not released, not expired). With no list yet, the rows
+/// less than the ledger's unexpired rows, including pending and released rows. With no list yet, the rows
 /// alone. Pure.
 pub fn live_now(last: Option<&SweepGauge>, rows: &[Row], now_ms: i64) -> u32 {
-    let floor = rows
-        .iter()
-        .filter(|r| !r.released && r.expires_at > now_ms)
-        .count() as u32;
+    let floor = rows.iter().filter(|r| r.expires_at > now_ms).count() as u32;
     match last {
         Some(g) => {
             let since = rows
                 .iter()
-                .filter(|r| r.created_at.is_some_and(|c| c > g.at_ms))
+                .filter(|r| r.expires_at > now_ms && r.created_at.is_some_and(|c| c >= g.at_ms))
                 .count() as u32;
             (g.count + since).max(floor)
         }
@@ -217,15 +235,10 @@ pub struct Reaped {
     pub failed: usize,
 }
 
-/// Whether `e` is Cloudflare's token quota error (code 1001).
-fn quota(e: &Error) -> bool {
-    e.to_string().contains("1001")
-}
-
 /// Whether `e` says the token is already gone.
 fn gone(e: &Error) -> bool {
     let t = e.to_string().to_lowercase();
-    t.contains("not found") || t.contains("404")
+    t.contains(": 404:")
 }
 
 /// The machine's single-flight markers: a key in the map is being minted, and the wakers are the
@@ -269,11 +282,14 @@ impl Future for Idle<'_> {
 /// The ledger's decisions: rows, the values held in memory, and the single-flight markers.
 pub struct Ledger<S: Store> {
     rows: RefCell<Vec<Row>>,
+    restart_orphans: HashSet<String>,
     /// Lease key to (token id, value). Memory only.
     values: RefCell<HashMap<String, (String, String)>>,
     flights: Flights,
     gauge: RefCell<Option<SweepGauge>>,
     ceiling: Cell<u32>,
+    account_total: Cell<Option<AccountCount>>,
+    last_sweep: Cell<Option<i64>>,
     store: S,
 }
 
@@ -282,11 +298,18 @@ impl<S: Store> Ledger<S> {
     /// it is replaced.
     pub fn new(store: S, rows: Vec<Row>) -> Self {
         Self {
+            restart_orphans: rows
+                .iter()
+                .filter(|row| !row.key.is_empty())
+                .map(|row| row.id.clone())
+                .collect(),
             rows: RefCell::new(rows),
             values: RefCell::default(),
             flights: RefCell::default(),
             gauge: RefCell::new(None),
             ceiling: Cell::new(DEFAULT_SOFT_CEILING),
+            account_total: Cell::new(None),
+            last_sweep: Cell::new(None),
             store,
         }
     }
@@ -317,26 +340,45 @@ impl<S: Store> Ledger<S> {
     /// The gauge. A stored count older than [`GAUGE_MAX_AGE_MS`] (or none) is refreshed first
     /// by listing through `api`; when that fails, the stored count is used and `source` says so.
     pub async fn gauge(&self, api: &impl TokenApi, now_ms: i64) -> Result<Gauge> {
+        let _slot = self.mint_slot().await;
         let stored = *self.gauge.borrow();
         let stale = stored.is_none_or(|g| now_ms - g.at_ms > GAUGE_MAX_AGE_MS);
         let mut source = "sweep";
         if stale {
-            match tokens::count_live(api, now_ms).await {
-                Ok(n) => {
-                    self.gauge_set(n as u32, now_ms)?;
+            match self.refresh_total(api, now_ms).await {
+                Ok(_) => {
                     source = "refreshed";
                 }
                 Err(_) if stored.is_some() => source = "stored (refresh failed)",
                 Err(_) => source = "ledger rows (refresh failed)",
             }
         }
+        if self
+            .account_total
+            .get()
+            .is_none_or(|snapshot| !snapshot.fresh(now_ms))
+            && !stale
+            && self.account_total(api, now_ms).await.is_ok()
+        {
+            source = "refreshed";
+        }
         let last = *self.gauge.borrow();
+        let account = self
+            .account_total
+            .get()
+            .filter(|snapshot| snapshot.fresh(now_ms));
         Ok(Gauge {
-            live: live_now(last.as_ref(), &self.rows.borrow(), now_ms),
+            live: account.map_or_else(
+                || live_now(last.as_ref(), &self.rows.borrow(), now_ms),
+                |snapshot| snapshot.pigeon_live,
+            ),
             soft_ceiling: self.ceiling.get(),
             hard_cap: HARD_CAP,
             as_of_ms: last.map_or(now_ms, |g| g.at_ms),
             source: source.to_string(),
+            account_total: account.map(|snapshot| snapshot.listed),
+            account_total_as_of_ms: account.map(|snapshot| snapshot.at_ms),
+            last_sweep_succeeded_at_ms: self.last_sweep.get(),
         })
     }
 
@@ -394,27 +436,130 @@ impl<S: Store> Ledger<S> {
         }
     }
 
-    /// Creates through `api`, with one sweep and one retry on the quota error. Answers the
-    /// token and the name it was given.
+    async fn refresh_total(&self, api: &impl TokenApi, now_ms: i64) -> Result<u32> {
+        let listed = tokens::list_all(api).await?;
+        let names: HashSet<&str> = listed.iter().map(|t| t.name.as_str()).collect();
+        let unseen = self
+            .rows
+            .borrow()
+            .iter()
+            .filter(|r| r.expires_at > now_ms && !names.contains(r.name.as_str()))
+            .count();
+        let live = listed
+            .iter()
+            .filter(|token| tokens::live_pigeon(token, now_ms))
+            .count() as u32;
+        let snapshot = AccountCount {
+            listed: listed.len() as u32,
+            reserved: unseen as u32,
+            pigeon_live: live + unseen as u32,
+            at_ms: now_ms,
+        };
+        self.gauge_set(live, now_ms)?;
+        self.account_total.set(Some(snapshot));
+        Ok(snapshot.listed + snapshot.reserved)
+    }
+
+    async fn account_total(&self, api: &impl TokenApi, now_ms: i64) -> Result<u32> {
+        match self.account_total.get() {
+            Some(snapshot) if snapshot.fresh(now_ms) => Ok(snapshot.listed + snapshot.reserved),
+            _ => self.refresh_total(api, now_ms).await,
+        }
+    }
+
+    /// Serialize new leases across keys so concurrent requests cannot spend the same capacity.
+    async fn mint_slot(&self) -> Flight<'_> {
+        while self.flights.borrow().contains_key(MINT_FLIGHT) {
+            Idle {
+                flights: &self.flights,
+                key: MINT_FLIGHT,
+            }
+            .await;
+        }
+        self.flights
+            .borrow_mut()
+            .insert(MINT_FLIGHT.into(), Vec::new());
+        Flight {
+            flights: &self.flights,
+            key: MINT_FLIGHT.into(),
+        }
+    }
+
+    /// Persist the intended name before POST. If the response is lost or saving the resulting
+    /// ID fails, the sweep can recover the token by its unique name.
     async fn create(
         &self,
         api: &impl TokenApi,
+        req: &LeaseRequest<'_>,
         now_ms: i64,
-        body: &impl AsyncFn() -> Result<Value>,
-    ) -> Result<(tokens::Minted, String)> {
-        let mut tried = false;
-        loop {
-            let body = body().await?;
-            let name = body["name"].as_str().unwrap_or_default().to_string();
+        mut body: Value,
+    ) -> Result<Lease> {
+        let random = pigeon_core::webauthn::random()?;
+        let nonce = &random[..22];
+        let original = body["name"].as_str().unwrap_or_default();
+        let timestamp = original
+            .get(original.len().saturating_sub(20)..)
+            .ok_or_else(|| Error::RustError("invalid token mint name".into()))?;
+        let name = tokens::name(&format!("{}-{nonce}", req.purpose), timestamp);
+        body["name"] = json!(&name);
+        let pending = Row {
+            id: format!("{PENDING_PREFIX}{nonce}"),
+            key: req.key.into(),
+            name,
+            purpose: req.purpose.into(),
+            expires_at: tokens::parse_ms(body["expires_on"].as_str().unwrap_or_default())
+                .unwrap_or(now_ms + (req.ttl_secs as i64) * 1000),
+            caller: req.caller.into(),
+            released: false,
+            created_at: Some(now_ms),
+        };
+        self.store.save(&pending)?;
+        self.rows.borrow_mut().push(pending.clone());
+        // Invalidate on an ambiguous failure or interruption. A later list sees the result
+        // even when no token ID made it back to us.
+        let observed = self.account_total.take();
+        let minted =
             match api.create(&body).await {
-                Err(e) if quota(&e) && !tried => {
-                    tried = true;
-                    // A failed sweep is no reason not to try again.
-                    let _ = tokens::sweep(api, now_ms).await;
+                Ok(minted) => minted,
+                Err(e) if tokens::quota_error(&e) => {
+                    self.forget(&pending.id)?;
+                    return Err(tokens::capacity_error());
                 }
-                other => return other.map(|m| (m, name)),
+                Err(_) => return Err(Error::RustError(
+                    "Cloudflare token creation failed; the sweep will reconcile its reservation"
+                        .into(),
+                )),
+            };
+        let row = Row {
+            id: minted.id.clone(),
+            ..pending.clone()
+        };
+        if let Err(error) = self.store.save(&row) {
+            if api.delete(&minted.id).await.is_ok() {
+                self.forget(&pending.id)?;
             }
+            return Err(error);
         }
+        self.rows.borrow_mut().push(row.clone());
+        if let Err(error) = self.forget(&pending.id) {
+            self.revoke_row(api, &row).await?;
+            return Err(error);
+        }
+        self.account_total.set(observed.map(|mut snapshot| {
+            snapshot.reserved += 1;
+            snapshot.pigeon_live += 1;
+            snapshot
+        }));
+        if !req.key.is_empty() {
+            self.values
+                .borrow_mut()
+                .insert(req.key.into(), (minted.id.clone(), minted.value.clone()));
+        }
+        Ok(Lease {
+            value: minted.value,
+            id: minted.id,
+            expires_at: pending.expires_at,
+        })
     }
 
     /// Mints a token for `req`, revokes the orphans of its key and records the new one.
@@ -425,44 +570,54 @@ impl<S: Store> Ledger<S> {
         now_ms: i64,
         body: &impl AsyncFn() -> Result<Value>,
     ) -> Result<Lease> {
-        let (minted, name) = self.create(api, now_ms, body).await?;
-        let expires_at =
-            tokens::parse_ms(&minted.expires_on).unwrap_or(now_ms + (req.ttl_secs as i64) * 1000);
-        // The token handed out last for this key is left to expire: a taker may still be using
-        // it, and it has at most `MIN_LEFT_MS` to live. Only orphans (rows with no value held,
-        // after a restart) are revoked now.
+        let _slot = self.mint_slot().await;
         let in_use = self.values.borrow().get(req.key).map(|(id, _)| id.clone());
         let older: Vec<Row> = self
-            .rows
-            .borrow()
-            .iter()
-            .filter(|r| r.key == req.key && Some(&r.id) != in_use.as_ref())
-            .cloned()
+            .rows()
+            .into_iter()
+            .filter(|r| {
+                r.key == req.key
+                    && !r.id.starts_with(PENDING_PREFIX)
+                    && (r.released
+                        || r.expires_at <= now_ms
+                        || self.restart_orphans.contains(&r.id))
+                    && Some(&r.id) != in_use.as_ref()
+            })
             .collect();
         for old in &older {
             self.revoke_row(api, old).await?;
         }
-        let row = Row {
-            id: minted.id.clone(),
-            key: req.key.to_string(),
-            name,
-            purpose: req.purpose.to_string(),
-            expires_at,
-            caller: req.caller.to_string(),
-            released: false,
-            created_at: Some(now_ms),
-        };
-        self.store.save(&row)?;
-        self.rows.borrow_mut().push(row);
-        self.values.borrow_mut().insert(
-            req.key.to_string(),
-            (minted.id.clone(), minted.value.clone()),
-        );
-        Ok(Lease {
-            value: minted.value,
-            id: minted.id,
-            expires_at,
-        })
+        let body = body().await.map_err(|_| {
+            Error::RustError("could not prepare Cloudflare token permissions".into())
+        })?;
+        self.mint_locked(api, req, now_ms, body).await
+    }
+
+    async fn mint_locked(
+        &self,
+        api: &impl TokenApi,
+        req: &LeaseRequest<'_>,
+        now_ms: i64,
+        body: Value,
+    ) -> Result<Lease> {
+        for attempt in 0..2 {
+            let total = self
+                .account_total(api, now_ms)
+                .await
+                .map_err(|_| tokens::capacity_error())?;
+            if total < self.ceiling.get() {
+                match self.create(api, req, now_ms, body.clone()).await {
+                    Err(e) if attempt == 0 && e.to_string().contains(tokens::CAPACITY_ERROR) => {}
+                    result => return result,
+                }
+            } else if attempt != 0 {
+                break;
+            }
+            self.sweep_locked(api, now_ms)
+                .await
+                .map_err(|_| tokens::capacity_error())?;
+        }
+        Err(tokens::capacity_error())
     }
 
     /// Revokes `row`'s token and forgets the row. A token already gone counts as revoked. Any
@@ -475,16 +630,23 @@ impl<S: Store> Ledger<S> {
             }
         }
         match api.delete(&row.id).await {
-            Ok(()) => self.forget(&row.id),
-            Err(e) if gone(&e) => self.forget(&row.id),
+            Ok(()) => {
+                self.account_total.set(None);
+                self.forget(&row.id)
+            }
+            Err(e) if gone(&e) => {
+                self.account_total.set(None);
+                self.forget(&row.id)
+            }
             Err(_) => self.mark_released(&row.id),
         }
     }
 
     /// Drops the row of `id`.
     fn forget(&self, id: &str) -> Result<()> {
+        self.store.remove(id)?;
         self.rows.borrow_mut().retain(|r| r.id != id);
-        self.store.remove(id)
+        Ok(())
     }
 
     /// Marks the row of `id` released.
@@ -510,11 +672,12 @@ impl<S: Store> Ledger<S> {
     /// Revokes every token leased to `caller` (all permission sets), drops their values and
     /// answers how many. A revoke that fails leaves the row released, for the sweeper.
     pub async fn release(&self, api: &impl TokenApi, caller: &str) -> Result<usize> {
+        let _slot = self.mint_slot().await;
         let mine: Vec<Row> = self
             .rows
             .borrow()
             .iter()
-            .filter(|r| r.caller == caller)
+            .filter(|r| r.caller == caller && !r.id.starts_with(PENDING_PREFIX))
             .cloned()
             .collect();
         for row in &mine {
@@ -524,13 +687,83 @@ impl<S: Store> Ledger<S> {
         Ok(mine.len())
     }
 
-    /// The sweeper's part: deletes the tokens of released rows (only names that
-    /// [`tokens::minted`] accepts) and forgets them, and forgets rows whose expiry passed. A
-    /// failed delete keeps its row.
+    /// Reconciles abandoned reservations, released and expired tokens, and shared leases
+    /// recovered after a restart. It only deletes tokens the ledger can identify as its own.
     pub async fn reap(&self, api: &impl TokenApi, now_ms: i64) -> Result<Reaped> {
+        let _slot = self.mint_slot().await;
+        self.sweep_locked(api, now_ms).await
+    }
+
+    /// Mints a single-use token with the same account capacity and durable cleanup as leases.
+    pub async fn mint_transient(
+        &self,
+        api: &impl TokenApi,
+        purpose: &str,
+        ttl_secs: u64,
+        now_ms: i64,
+        body: Value,
+    ) -> Result<Lease> {
+        let _slot = self.mint_slot().await;
+        self.mint_locked(
+            api,
+            &LeaseRequest {
+                key: "",
+                caller: "",
+                purpose,
+                ttl_secs,
+            },
+            now_ms,
+            body,
+        )
+        .await
+    }
+
+    /// Revokes a token issued to an individual call. Failed deletions are left for the sweep.
+    pub async fn revoke_transient(&self, api: &impl TokenApi, id: &str) -> Result<()> {
+        let _slot = self.mint_slot().await;
+        if let Some(row) = self
+            .rows()
+            .into_iter()
+            .find(|row| row.id == id && row.key.is_empty())
+        {
+            self.mark_released(id)?;
+            self.revoke_row(api, &row).await?;
+            if self.rows.borrow().iter().any(|row| row.id == id) {
+                return Err(Error::RustError(
+                    "Cloudflare token revocation failed; the sweep will retry".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    async fn sweep_locked(&self, api: &impl TokenApi, now_ms: i64) -> Result<Reaped> {
+        self.account_total.set(None);
+        let listed = tokens::list_all(api).await?;
         let mut out = Reaped::default();
         for row in self.rows() {
-            if row.released {
+            if row.id.starts_with(PENDING_PREFIX) {
+                if let Some(token) = listed.iter().find(|token| token.name == row.name) {
+                    // A saved lease with this ID can still be in use.
+                    if !self.rows.borrow().iter().any(|known| known.id == token.id) {
+                        match api.delete(&token.id).await {
+                            Ok(()) => out.deleted += 1,
+                            Err(e) if gone(&e) => {}
+                            Err(_) => {
+                                out.failed += 1;
+                                continue;
+                            }
+                        }
+                    }
+                } else if row.expires_at > now_ms {
+                    // An ambiguous POST can still be in flight on Cloudflare's side.
+                    continue;
+                }
+                self.forget(&row.id)?;
+                out.forgotten += 1;
+                continue;
+            }
+            if row.released || row.expires_at <= now_ms || self.restart_orphans.contains(&row.id) {
                 if tokens::minted(&row.name).is_none() {
                     self.forget(&row.id)?;
                     out.forgotten += 1;
@@ -546,10 +779,12 @@ impl<S: Store> Ledger<S> {
                 }
                 self.forget(&row.id)?;
                 out.forgotten += 1;
-            } else if row.expires_at <= now_ms {
-                self.forget(&row.id)?;
-                out.forgotten += 1;
             }
+        }
+        self.refresh_total(api, now_ms).await?;
+        if out.failed == 0 {
+            self.store.save_setting("last_sweep_ms", now_ms)?;
+            self.last_sweep.set(Some(now_ms));
         }
         let rows = self.rows.borrow();
         self.values
@@ -653,14 +888,16 @@ impl TokenLedger {
                 at_ms,
             });
         let ceiling = get("ceiling").and_then(|v| check_ceiling(v).ok());
+        let ledger = Ledger::new(DbStore(db), rows).with_settings(gauge, ceiling);
+        ledger.last_sweep.set(get("last_sweep_ms"));
         Ok(Self {
             env,
             parent: parent_binding.to_string(),
-            ledger: Ledger::new(DbStore(db), rows).with_settings(gauge, ceiling),
+            ledger,
         })
     }
 
-    /// Answers one op: `lease`, `release`, `holds`, `reap`, `gauge_set`, `gauge` or `ceiling_set`.
+    /// Dispatches token lifecycle and status operations.
     pub async fn fetch(&self, req: Request) -> Result<Response> {
         durable::serve(req, async |op, args| self.handle(op, &args).await).await
     }
@@ -713,6 +950,40 @@ impl TokenLedger {
                     .await?;
                 Ok(serde_json::to_value(lease)?)
             }
+            "mint" | "revoke" => {
+                let parent = match a["candidate"].as_str() {
+                    Some(candidate) => Parent {
+                        token: candidate.to_string(),
+                        account: self.env.var("CF_ACCOUNT_ID")?.to_string(),
+                    },
+                    None => self.parent().await?,
+                };
+                let api = tokens::CloudflareTokens {
+                    parent: &parent.token,
+                    account: &parent.account,
+                };
+                if op == "revoke" {
+                    self.ledger.revoke_transient(&api, &s("id")).await?;
+                    return Ok(json!({ "ok": true }));
+                }
+                let body = a["body"].clone();
+                let expires_on = body["expires_on"].as_str().unwrap_or_default().to_string();
+                let token = self
+                    .ledger
+                    .mint_transient(
+                        &api,
+                        &s("purpose"),
+                        a["ttl_secs"].as_u64().unwrap_or(tokens::DEFAULT_TTL_SECS),
+                        now_ms,
+                        body,
+                    )
+                    .await?;
+                Ok(serde_json::to_value(tokens::Minted {
+                    id: token.id,
+                    value: token.value,
+                    expires_on,
+                })?)
+            }
             "release" => {
                 let parent = self.parent().await?;
                 let api = tokens::CloudflareTokens {
@@ -729,12 +1000,6 @@ impl TokenLedger {
                     account: &parent.account,
                 };
                 Ok(serde_json::to_value(self.ledger.reap(&api, now_ms).await?)?)
-            }
-            "gauge_set" => {
-                let count = a["count"].as_u64().unwrap_or(0) as u32;
-                self.ledger
-                    .gauge_set(count, a["at_ms"].as_i64().unwrap_or(now_ms))?;
-                Ok(json!({ "ok": true }))
             }
             "ceiling_set" => {
                 let v = a["soft_ceiling"].as_i64().unwrap_or(-1);
@@ -794,13 +1059,6 @@ pub async fn release(env: &Env, caller: &str) -> Result<usize> {
 }
 
 /// Stores the sweep's count of live pigeon tokens, taken at `at_ms`.
-pub async fn gauge_set(env: &Env, count: usize, at_ms: i64) -> Result<()> {
-    let args = json!({ "count": count, "at_ms": at_ms });
-    durable::call(env, BINDING, OBJECT, "gauge_set", &args).await?;
-    Ok(())
-}
-
-/// Reads the gauge, refreshing a stale one first.
 pub async fn gauge(env: &Env) -> Result<Gauge> {
     let v = durable::call(env, BINDING, OBJECT, "gauge", &json!({})).await?;
     Ok(serde_json::from_value(v)?)

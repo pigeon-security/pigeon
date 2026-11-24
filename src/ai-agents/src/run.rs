@@ -382,6 +382,8 @@ pub enum Recovery {
         /// How long to wait first.
         after_ms: u64,
     },
+    /// Wait for account token capacity without consuming model retries.
+    WaitTokenCapacity,
     /// Give up: the failure is not the provider's (a refused request, an over-long context).
     Fail,
 }
@@ -450,6 +452,11 @@ pub fn on_failure(
 ) -> Recovery {
     if state == "cancelled" {
         return Recovery::Fail;
+    }
+    if error.contains(pigeon_core::tokens::CAPACITY_ERROR)
+        || (error.contains("1001") && error.contains("Quota limit exceeded"))
+    {
+        return Recovery::WaitTokenCapacity;
     }
     if trailing_thinking(error) {
         // Once: the repaired transcript has no such message, so a second refusal is another fault.

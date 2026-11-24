@@ -213,3 +213,41 @@ ai-agents and can run beside phase 1).
   `queued` asks. A failed call logs a warning and does not hold the run. `queue_reason` takes the
   gauge as `Option<(live, ceiling)>` and names it after the run caps and before "older queued
   runs go first".
+
+## Mint-time account admission and recovery
+
+The incident above happened before shared credentials. In the deployed design that followed,
+the soft ceiling still only applied at run admission. The ledger also wrote the token ID
+after Cloudflare returned and after attempting older-token cleanup. An interruption or a
+storage failure in that window could leave a live token outside the ledger. The old gauge
+was scoped to Pigeon-shaped names and a cron tick did not prove that every deletion succeeded.
+A count taken hours later cannot reconstruct the account's token inventory at the incident.
+
+All home-account mint paths with the platform ledger binding use the same Durable Object,
+including shared leases, ordinary scoped calls, and deploy tokens. The ledger serializes
+new mints, counts every account token record conservatively, and caches the count for
+15 seconds with local mints included. Reusing an existing shared lease consumes no capacity.
+The configured ceiling applies to each new mint. At the ceiling, or on Cloudflare quota
+refusal, the ledger sweeps and reevaluates capacity once. An incomplete list blocks a new
+mint. An agent turn encountering token capacity waits a minute and retries on the same model.
+Cancellation and the run budget still apply.
+
+Before a Cloudflare create, the ledger commits a reservation with a unique token name.
+The returned ID replaces the reservation. A lost response leaves the durable reservation
+available to the minute sweep, which can find the exact name even after a Worker restart.
+If the ID cannot be saved, deletion is attempted immediately. Failed deletions remain
+eligible for the next sweep. Transient callers revoke by ID when they finish. If a caller
+disappears after receiving its token, the sweep deletes it after expiry because it cannot
+distinguish a dead caller from a slow one. Shared tokens are released after the caller's
+last run ends, and shared rows loaded after a ledger restart can be reclaimed.
+
+The automated sweep deletes by ledger-owned ID or an exact unique reserved name. It leaves
+untracked legacy records alone, including names that resemble Pigeon tokens. Standalone
+parent-token use without the ledger binding checks a fresh account list against the default ceiling and relies on explicit
+revocation and token expiry. The candidate-parent credential probe uses the ledger and
+tests with the candidate credential, which is held only for the internal request. Cloudflare remains the authority if an external client changes
+the account between listing and minting.
+
+`tokens_status` includes the account total and its observation time, and the last successful
+sweep time. The total is the last complete list and is null if that list is stale or unavailable. Admission also accounts for unlisted reservations and fresh mints. The sweep timestamp
+advances only when reconciliation, deletion, and the refreshed listing all succeed.

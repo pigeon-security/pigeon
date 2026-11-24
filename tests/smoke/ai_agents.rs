@@ -2803,3 +2803,21 @@ fn models_job_endpoint_chat_or_responses() {
     assert_eq!(endpoint_of(Dialect::OpenAi, &req(None)), Some("chat"));
     assert_eq!(endpoint_of(Dialect::Anthropic, &json!({})), None);
 }
+
+#[test]
+fn ai_agents_token_capacity_retries_the_same_turn() {
+    use pigeon_ai_agents::run::{Recovery, on_failure};
+    let error = pigeon_core::tokens::CAPACITY_ERROR;
+    assert_eq!(
+        on_failure("failed", error, 1, 0, &["model"]),
+        Recovery::WaitTokenCapacity
+    );
+    assert_eq!(
+        on_failure("failed", error, 50, 0, &["model"]),
+        Recovery::WaitTokenCapacity
+    );
+    assert_eq!(
+        on_failure("cancelled", error, 1, 0, &["model"]),
+        Recovery::Fail
+    );
+}

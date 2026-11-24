@@ -197,6 +197,7 @@ impl Host for Core<'_> {
                 parent: String::new(),
                 secrets_store: self.secrets_store.clone(),
                 bearer: Some(credential.token),
+                token_ledger: None,
             })
         })
     }
