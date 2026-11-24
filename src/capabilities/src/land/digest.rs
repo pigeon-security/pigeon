@@ -273,6 +273,27 @@ pub struct Sources {
     pub inbox: Result<Value, String>,
     /// `ios_releases`.
     pub release: Result<Value, String>,
+    /// The token gauge (`live`, `soft_ceiling`, `hard_cap`, `as_of`); `None` when not asked.
+    pub tokens: Option<Result<Value, String>>,
+}
+
+/// The digest's short `tokens` entry from a gauge: its numbers, and a plain `note` when live
+/// tokens are at or above the soft ceiling. Pure.
+pub fn tokens_entry(gauge: &Value) -> Value {
+    let mut out = json!({
+        "live": gauge["live"],
+        "soft_ceiling": gauge["soft_ceiling"],
+        "hard_cap": gauge["hard_cap"],
+        "as_of": gauge["as_of"],
+    });
+    if let (Some(live), Some(ceiling)) = (gauge["live"].as_u64(), gauge["soft_ceiling"].as_u64())
+        && live >= ceiling
+    {
+        out["note"] = json!(format!(
+            "{live} live Cloudflare tokens, at or above the soft ceiling of {ceiling}: new agent runs wait"
+        ));
+    }
+    out
 }
 
 /// The digest from what the sources answered. A source that failed is named under `unavailable`
@@ -326,6 +347,15 @@ pub fn build(sources: &Sources, since: Option<i64>) -> Value {
         "ios_release": release_v,
         "unavailable": unavailable,
     });
+    match &sources.tokens {
+        Some(Ok(v)) => out["tokens"] = tokens_entry(v),
+        Some(Err(why)) => {
+            if let Some(list) = out["unavailable"].as_array_mut() {
+                list.push(json!({ "source": "tokens", "why": cut(why, 160) }));
+            }
+        }
+        None => {}
+    }
     fit(&mut out);
     out
 }

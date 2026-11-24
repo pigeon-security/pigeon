@@ -1853,7 +1853,8 @@ fn ai_agents_queue_reasons() {
     use pigeon_ai_agents::Role::{Executor, Planner};
     use pigeon_ai_agents::object::{Limits, queue_reason};
     let l = Limits::default();
-    let why = |role, live, own, paused, oldest| queue_reason(role, live, own, &l, paused, oldest);
+    let why =
+        |role, live, own, paused, oldest| queue_reason(role, live, own, &l, paused, oldest, None);
     assert_eq!(
         why(Executor, 8, 0, false, true).unwrap(),
         "queued: 8 of 8 live runs (max_live_runs)"
@@ -1875,4 +1876,35 @@ fn ai_agents_queue_reasons() {
         "queued: older queued runs go first"
     );
     assert_eq!(why(Executor, 0, 0, false, true), None);
+}
+
+/// The token gauge in `queue_reason`: below the ceiling a run starts, at or above it queues
+/// with the reason, an unknown gauge never holds it, and the reason comes after the caps.
+#[test]
+fn ai_agents_token_gauge_ceiling() {
+    use pigeon_ai_agents::Role::{Executor, Planner};
+    use pigeon_ai_agents::object::{Limits, gauge_of, queue_reason};
+    let l = Limits::default();
+    let why = |role, live, tokens| queue_reason(role, live, 0, &l, false, true, tokens);
+    assert_eq!(why(Executor, 0, Some((299, 300))), None);
+    let text = "queued: 300 live Cloudflare tokens, at or above the soft ceiling of 300 (waits until fewer than 300)";
+    assert_eq!(why(Executor, 0, Some((300, 300))).unwrap(), text);
+    assert_eq!(
+        why(Planner, 0, Some((450, 300))).unwrap(),
+        "queued: 450 live Cloudflare tokens, at or above the soft ceiling of 300 (waits until fewer than 300)"
+    );
+    // The gauge could not be read: the run starts.
+    assert_eq!(why(Executor, 0, None), None);
+    // The live-run cap is named first.
+    assert_eq!(
+        why(Executor, 8, Some((400, 300))).unwrap(),
+        "queued: 8 of 8 live runs (max_live_runs)"
+    );
+    // The index reads the gauge from a `tokens_status` answer, and from nothing else.
+    assert_eq!(
+        gauge_of(&json!({ "live": 12, "soft_ceiling": 300, "hard_cap": 500 })),
+        Some((12, 300))
+    );
+    assert_eq!(gauge_of(&json!({ "live": 12 })), None);
+    assert_eq!(gauge_of(&Value::Null), None);
 }

@@ -140,11 +140,20 @@ pub fn check_config(args: &Value, stored: &StoredLimits) -> Result<StoredLimits,
     Ok(next)
 }
 
+/// The token gauge as the index takes it: `(live, soft_ceiling)` from a `tokens_status` answer
+/// (or from the same two keys), `None` when either is missing. Pure.
+pub fn gauge_of(status: &Value) -> Option<(u32, u32)> {
+    let n = |k: &str| status[k].as_u64().and_then(|n| u32::try_from(n).ok());
+    Some((n("live")?, n("soft_ceiling")?))
+}
+
 /// Why a queued run may not take a live slot now, as the plain text shown in its `step`, or
 /// `None` when it may start. This is the one place that composes the reason; a new reason is
 /// added here. Arguments: the run's `role`; `live` runs of every role; `own_executors`, the live
-/// executors of the run's planner (0 for a planner or a run with none); `paused`; and `oldest`,
-/// whether no older queued run of its kind that is allowed to start is ahead of it.
+/// executors of the run's planner (0 for a planner or a run with none); `paused`; `oldest`,
+/// whether no older queued run of its kind that is allowed to start is ahead of it; and `tokens`,
+/// the Cloudflare token gauge as `(live tokens, soft ceiling)`, or `None` when it is unknown
+/// (an unknown gauge never holds a run).
 pub fn queue_reason(
     role: Role,
     live: u32,
@@ -152,6 +161,7 @@ pub fn queue_reason(
     limits: &Limits,
     paused: bool,
     oldest: bool,
+    tokens: Option<(u32, u32)>,
 ) -> Option<String> {
     if paused {
         return Some("queued: runs are paused".into());
@@ -173,6 +183,13 @@ pub fn queue_reason(
             limits.reserve
         ));
     }
+    if let Some((live_tokens, ceiling)) = tokens
+        && live_tokens >= ceiling
+    {
+        return Some(format!(
+            "queued: {live_tokens} live Cloudflare tokens, at or above the soft ceiling of {ceiling} (waits until fewer than {ceiling})"
+        ));
+    }
     if !oldest {
         return Some("queued: older queued runs go first".into());
     }
@@ -185,5 +202,5 @@ pub fn queue_reason(
 /// either kind among themselves). Every run needs a slot under `max_live`; a planner also leaves
 /// `reserve` of them free; an executor needs room under its planner's `per_planner`.
 pub fn may_start(role: Role, live: u32, own_executors: u32, limits: &Limits, oldest: bool) -> bool {
-    queue_reason(role, live, own_executors, limits, false, oldest).is_none()
+    queue_reason(role, live, own_executors, limits, false, oldest, None).is_none()
 }

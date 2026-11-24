@@ -1,6 +1,6 @@
 # Token minting: stay under Cloudflare's 500-token cap
 
-Status: **planned (2026-11-24)**; phases land one by one, each noting its before and after in the
+Status: **phases 1 to 4 landed (2026-11-25)**; each phase noted its before and after in the
 Log. Planner run `oT2Ty60eh5U2`.
 
 ## Goal
@@ -198,3 +198,18 @@ ai-agents and can run beside phase 1).
   once (it deletes only expired tokens, so a ledger-live token is not freed by it); a failed
   revoke of an older token never fails the lease: the row stays `released` for the sweeper;
   `models::revoke_scoped` was removed, nothing called it any more.
+- **2026-11-25, phase 3 (gauge and ceiling).** The `TokenLedger` object keeps the last sweep's
+  count and time and the soft ceiling (migration 2: a `gauge` key/value table and a nullable
+  `created_at` on `tokens`). New ledger ops `gauge_set`, `gauge` and `ceiling_set`; the read is
+  the last count plus the ledger's mints since, never below its live rows, and a count older than
+  120 s is refreshed from `tokens::count_live` first (a failed refresh falls back and says so in
+  `source`). The cron sweep now runs every minute and stores `kept_pigeon`. New core tool
+  `tokens_status` (in the `observability` capability): reads the gauge, and sets `soft_ceiling`
+  (10 to 450) for a person or an agent acting for one. The gauge shows in
+  `observability_summary` (`tokens`) and `work_status` (`tokens`, with a `note` at or above the
+  ceiling). Deviations: the run object (not the index's `slot()`) asks `tokens_status`, as the
+  run's caller, just before it calls `slot`, and passes the answer in; `slot()` stays
+  synchronous, so its checks stay atomic and the index row needs no caller. Only a run still
+  `queued` asks. A failed call logs a warning and does not hold the run. `queue_reason` takes the
+  gauge as `Option<(live, ceiling)>` and names it after the run caps and before "older queued
+  runs go first".

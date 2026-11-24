@@ -1693,6 +1693,7 @@ fn core_land_work_status_digest() {
         release: Ok(
             json!({ "releases": [{ "job": "j", "build_number": "7", "version": "1.0", "state": "complete", "apple_processing": "VALID", "commit": "c".repeat(40) }] }),
         ),
+        tokens: None,
     };
     let d = digest::build(&sources, None);
     let text = d.to_string();
@@ -1726,6 +1727,7 @@ fn core_land_work_status_digest() {
         approvals: Err("needs a person".into()),
         inbox: Ok(json!({ "waiting": [] })),
         release: Ok(json!({ "releases": [] })),
+        tokens: None,
     };
     let none = digest::build(&sources, None);
     assert_eq!(none["runs"].as_array().unwrap().len(), 1);

@@ -312,12 +312,15 @@ impl Land {
             let (live, recent) = futures_util::future::join(live, recent).await;
             Ok((live?, recent?))
         };
-        let (runs, landings, approvals, inbox, release) = futures_util::future::join5(
-            within(crate::dispatch(cx, "ai_agents_status", &runs_args)),
-            within(landings_work),
-            within(crate::dispatch(cx, "approvals_list", &none)),
-            within(crate::dispatch(cx, "ai_agents_inbox", &inbox_args)),
-            within(crate::dispatch(cx, "ios_releases", &none)),
+        let ((runs, landings, approvals, inbox, release), tokens) = futures_util::future::join(
+            futures_util::future::join5(
+                within(crate::dispatch(cx, "ai_agents_status", &runs_args)),
+                within(landings_work),
+                within(crate::dispatch(cx, "approvals_list", &none)),
+                within(crate::dispatch(cx, "ai_agents_inbox", &inbox_args)),
+                within(crate::dispatch(cx, "ios_releases", &none)),
+            ),
+            within(crate::ledger::gauge(cx.env)),
         )
         .await;
         let why = |r: Result<Value>| r.map_err(|e| e.to_string());
@@ -327,6 +330,11 @@ impl Land {
             approvals: why(approvals),
             inbox: why(inbox),
             release: why(release),
+            tokens: Some(
+                tokens
+                    .map(|g| crate::observability::gauge_view(&g))
+                    .map_err(|e| e.to_string()),
+            ),
         };
         Ok(digest::build(&sources, since))
     }

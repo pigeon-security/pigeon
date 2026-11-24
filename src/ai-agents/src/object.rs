@@ -80,7 +80,7 @@ fn opt_i(v: Option<i64>) -> SqlStorageValue {
     v.map_or(SqlStorageValue::Null, Into::into)
 }
 
-pub use crate::limits::{Limits, may_start, queue_reason};
+pub use crate::limits::{Limits, gauge_of, may_start, queue_reason};
 
 /// Calls `op` on object `name`.
 pub async fn call(env: &Env, name: &str, op: &str, args: &Value) -> Result<Value> {
@@ -446,7 +446,7 @@ impl AiAgentRuns {
                 .map(|r| r.public())
                 .unwrap_or(Value::Null)),
             "update" => self.update(a),
-            "slot" => self.slot(&s("run")),
+            "slot" => self.slot(&s("run"), gauge_of(&a["tokens"])),
             // How many other live runs the same caller (user and person) has.
             "live_for" => Ok(json!(self.live_for(&s("except"), a)?)),
             "inbox" => self.inbox(&s("reader"), a["since"].as_i64().unwrap_or(0)),
@@ -1037,8 +1037,9 @@ impl AiAgentRuns {
     /// (live cap, planner reserve, its planner's executor cap, not paused) and no older queued run
     /// of its kind that its own planner's cap allows is ahead of it. A run that may not start
     /// stays `queued`, with the reason ([`queue_reason`]) in its `step`; the reason is cleared
-    /// when it starts.
-    fn slot(&self, id: &str) -> Result<Value> {
+    /// when it starts. `tokens` is the Cloudflare token gauge `(live, soft ceiling)` the run
+    /// object read from core, or `None` when it could not.
+    fn slot(&self, id: &str, tokens: Option<(u32, u32)>) -> Result<Value> {
         let Some(row) = self.row(id)? else {
             return Ok(json!({ "ok": false, "why": "no such run" }));
         };
@@ -1090,7 +1091,7 @@ impl AiAgentRuns {
             }
         }
         let oldest = first == Some(id);
-        let why = queue_reason(role, live, own, &limits, paused, oldest);
+        let why = queue_reason(role, live, own, &limits, paused, oldest, tokens);
         match &why {
             None => {
                 self.db.exec(
@@ -1703,7 +1704,27 @@ impl AiAgentRuns {
     /// Takes a live slot, starts the sandbox and checks out the run's branch.
     async fn prepare(&self, row: &RunRow) -> Result<()> {
         let storage = self.state.storage();
-        let slot = call(&self.env, INDEX, "slot", &json!({ "run": row.id })).await?;
+        // Only a queued run is held by the token gauge; the index is told what it read. When
+        // core cannot answer, the run is not held.
+        let tokens = if row.state == "queued" {
+            let caller: Value = serde_json::from_str(&row.caller).unwrap_or(Value::Null);
+            match dispatch(&self.env, &caller, "tokens_status", &json!({})).await {
+                Ok(v) => gauge_of(&v),
+                Err(_) => {
+                    worker::console_warn!("agents: the Cloudflare token gauge is unavailable");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let slot = call(
+            &self.env,
+            INDEX,
+            "slot",
+            &json!({ "run": row.id, "tokens": tokens.map(|(live, ceiling)| json!({ "live": live, "soft_ceiling": ceiling })) }),
+        )
+        .await?;
         if slot["ok"] != true {
             return storage.set_alarm(30_000).await;
         }

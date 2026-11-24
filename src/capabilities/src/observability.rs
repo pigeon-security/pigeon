@@ -596,6 +596,19 @@ impl Capability for Observability {
                 }),
             },
             Tool {
+                name: "tokens_status",
+                description: "Cloudflare API tokens pigeon minted that are live now (`live`), the \
+                              soft ceiling above which new agent runs queue (`soft_ceiling`, 300 \
+                              by default), Cloudflare's cap (`hard_cap`, 500), when the count \
+                              was taken (`as_of_ms`) and where it came from (`source`). With \
+                              `soft_ceiling` (10 to 450), sets the ceiling first; only a person, \
+                              or an agent acting for one, may set it.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": { "soft_ceiling": { "type": "integer", "description": "New soft ceiling, 10 to 450." } }
+                }),
+            },
+            Tool {
                 name: "cost_daily",
                 description: "Read-only. Daily cost buckets in US dollars: Cloudflare lines and AI \
                               gateway cost by model and role; `range` is today, 7d or all.",
@@ -611,6 +624,7 @@ impl Capability for Observability {
         Box::pin(async move {
             match tool {
                 "cost_daily" => return crate::cost::cost_daily(cx, args).await,
+                "tokens_status" => return tokens_status(cx, args).await,
                 "observability_monitors_plan" if args["check"] == true => {
                     return monitors_check(cx).await;
                 }
@@ -2028,6 +2042,39 @@ where
     outcome.map_err(hide)
 }
 
+/// `tokens_status`: the live-token gauge, after setting the soft ceiling when `soft_ceiling` is
+/// given. Setting it is for a person or an agent acting for one; a value outside 10 to 450 is
+/// refused.
+async fn tokens_status(cx: &Context<'_>, args: &Value) -> Result<Value> {
+    if !args["soft_ceiling"].is_null() {
+        let may = cx
+            .caller
+            .is_some_and(|c| c.user.kind == "standard" || c.acting_for.is_some());
+        if !may {
+            return Err(Error::RustError(
+                "only a person, or an agent acting for one, may set the soft ceiling".into(),
+            ));
+        }
+        let want = args["soft_ceiling"].as_i64().ok_or_else(|| {
+            Error::RustError("soft_ceiling must be a whole number from 10 to 450".into())
+        })?;
+        crate::ledger::ceiling_set(cx.env, want).await?;
+    }
+    Ok(serde_json::to_value(crate::ledger::gauge(cx.env).await?)?)
+}
+
+/// The gauge as the summary and `work_status` show it: live, soft ceiling, hard cap and when the
+/// count was taken (`as_of`, ISO time).
+pub(crate) fn gauge_view(g: &crate::ledger::Gauge) -> Value {
+    json!({
+        "live": g.live,
+        "soft_ceiling": g.soft_ceiling,
+        "hard_cap": g.hard_cap,
+        "as_of": iso(g.as_of_ms as f64),
+        "source": g.source,
+    })
+}
+
 /// Builds the answer for the last `hours`. The sources run together, each within
 /// [`SOURCE_LIMIT_MS`]; a source that cannot be read goes to `unavailable` and the rest is
 /// still answered.
@@ -2072,13 +2119,27 @@ async fn summary(this: &Observability, cx: &Context<'_>, hours: u64) -> Result<V
     let models_work = within(crate::dispatch(cx, "models_usage", &models_args));
     let agents_work = within(crate::dispatch(cx, "ai_agents_status", &agents_args));
     let ci_work = within(crate::dispatch(cx, "ci_jobs", &ci_args));
+    let tokens_work = within(crate::ledger::gauge(cx.env));
 
-    let ((metrics_v, logs_v, billing_v), (deploys_v, models_v, agents_v, ci_v)) =
+    let ((metrics_v, logs_v, billing_v), (deploys_v, models_v, agents_v, ci_v, tokens_v)) =
         futures_util::future::join(
             futures_util::future::join3(metrics_work, logs_work, billing_work),
-            futures_util::future::join4(deploys_work, models_work, agents_work, ci_work),
+            futures_util::future::join5(
+                deploys_work,
+                models_work,
+                agents_work,
+                ci_work,
+                tokens_work,
+            ),
         )
         .await;
+    let tokens = match tokens_v {
+        Ok(g) => gauge_view(&g),
+        Err(e) => {
+            unavailable.push(missing("Cloudflare tokens", &hide(e)));
+            Value::Null
+        }
+    };
 
     let mut hourly = BTreeMap::new();
     let mut metrics_ok = true;
@@ -2253,6 +2314,7 @@ async fn summary(this: &Observability, cx: &Context<'_>, hours: u64) -> Result<V
         "workers": workers,
         "cost": cost,
         "totals": { "estimated_usd": sum("estimated"), "billed_usd": sum("billed") },
+        "tokens": tokens,
         "unavailable": unavailable,
     }))
 }

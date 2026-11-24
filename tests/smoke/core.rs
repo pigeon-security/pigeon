@@ -972,6 +972,8 @@ struct MockTokens {
     deleted: std::cell::RefCell<Vec<String>>,
     next: std::cell::Cell<u32>,
     attempts: std::cell::Cell<u32>,
+    /// While set, listing the tokens fails.
+    fail_list: std::cell::Cell<bool>,
 }
 
 impl MockTokens {
@@ -984,6 +986,7 @@ impl MockTokens {
             deleted: Default::default(),
             next: std::cell::Cell::new(100),
             attempts: std::cell::Cell::new(0),
+            fail_list: std::cell::Cell::new(false),
         }
     }
 
@@ -999,6 +1002,9 @@ impl MockTokens {
 
 impl pigeon_core::tokens::TokenApi for MockTokens {
     async fn list(&self, page: u32) -> worker::Result<Vec<pigeon_core::tokens::Listed>> {
+        if self.fail_list.get() {
+            return Err(worker::Error::RustError("list refused".into()));
+        }
         let from = (page as usize - 1) * self.page_size;
         Ok(self
             .tokens
@@ -1484,4 +1490,217 @@ fn core_token_ledger_reap_keeps_other_names_and_forgets_the_expired() {
     assert_eq!(*api.deleted.borrow(), ["t1"]);
     let left: Vec<String> = ledger.rows().into_iter().map(|r| r.id).collect();
     assert_eq!(left, ["t4"]);
+}
+
+/// A ledger row for the gauge scenarios: live until `expires_at`, minted at `created_at`.
+fn gauge_row(
+    id: &str,
+    expires_at: i64,
+    released: bool,
+    created_at: Option<i64>,
+) -> pigeon_capabilities::ledger::Row {
+    pigeon_capabilities::ledger::Row {
+        id: id.into(),
+        key: format!("k{id}"),
+        name: "pigeon:a:2026-11-24T05:50:00Z".into(),
+        purpose: "p".into(),
+        expires_at,
+        caller: "c".into(),
+        released,
+        created_at,
+    }
+}
+
+#[test]
+fn core_token_gauge_arithmetic() {
+    use pigeon_capabilities::ledger::{SweepGauge, live_now};
+    let last = SweepGauge {
+        count: 100,
+        at_ms: TOKEN_NOW_MS,
+    };
+    let later = TOKEN_NOW_MS + 30_000;
+    let rows = vec![
+        // Minted after the list: counted on top of it.
+        gauge_row("a", later + 600_000, false, Some(TOKEN_NOW_MS + 10_000)),
+        gauge_row("b", later + 600_000, false, Some(TOKEN_NOW_MS + 20_000)),
+        // Minted before the list (or before created_at existed): already in the count.
+        gauge_row("c", later + 600_000, false, Some(TOKEN_NOW_MS - 1)),
+        gauge_row("d", later + 600_000, false, None),
+    ];
+    assert_eq!(live_now(Some(&last), &rows, later), 102);
+    // Never less than the ledger's live rows: a count of 1 with four live rows reads 4.
+    let low = SweepGauge {
+        count: 1,
+        at_ms: TOKEN_NOW_MS + 60_000,
+    };
+    assert_eq!(live_now(Some(&low), &rows, later), 4);
+    // Released and expired rows are not live rows.
+    let rows = vec![
+        gauge_row("e", later + 1000, true, None),
+        gauge_row("f", later - 1, false, None),
+        gauge_row("g", later + 1000, false, None),
+    ];
+    assert_eq!(live_now(None, &rows, later), 1);
+    assert_eq!(live_now(Some(&low), &rows, later), 1);
+}
+
+#[test]
+fn core_token_gauge_count_live_counts_only_unexpired_minted_names() {
+    let mock = MockTokens::new(500, 2);
+    let live = Some("2026-11-24T06:30:00Z");
+    let past = Some("2026-11-24T05:00:00Z");
+    mock.add("t1", "pigeon:a:2026-11-24T05:00:00Z", live, "active");
+    mock.add("t2", "pigeon:b:2026-11-24T05:00:00Z", live, "active");
+    mock.add("t3", "pigeon:c:2026-11-24T05:00:00Z", past, "active");
+    mock.add("t4", "pigeon:d:2026-11-24T05:00:00Z", live, "expired");
+    mock.add("t5", "my-own-token", live, "active");
+    mock.add("t6", "pigeon:notatime", live, "active");
+    // No expiry: counted as live, like the sweep keeps it.
+    mock.add("t7", "pigeon:e:2026-11-24T05:00:00Z", None, "active");
+    let n = token_block_on(pigeon_core::tokens::count_live(&mock, TOKEN_NOW_MS)).unwrap();
+    assert_eq!(n, 3);
+    // Read-only.
+    assert!(mock.deleted.borrow().is_empty());
+    assert_eq!(mock.tokens.borrow().len(), 7);
+}
+
+#[test]
+fn core_token_gauge_ceiling_bounds() {
+    use pigeon_capabilities::ledger::{DEFAULT_SOFT_CEILING, Ledger, check_ceiling};
+    assert_eq!(DEFAULT_SOFT_CEILING, 300);
+    assert_eq!(check_ceiling(10), Ok(10));
+    assert_eq!(check_ceiling(450), Ok(450));
+    for bad in [9, 451, 0, -5, 500] {
+        let why = check_ceiling(bad).unwrap_err();
+        assert!(
+            why.contains("from 10 to 450") && why.contains("hard cap is 500"),
+            "{why}"
+        );
+    }
+    let (api, ledger) = (MockTokens::new(500, 50), Ledger::new((), Vec::new()));
+    assert!(ledger.ceiling_set(451).is_err());
+    assert_eq!(ledger.ceiling_set(120).unwrap(), 120);
+    let g = token_block_on(ledger.gauge(&api, TOKEN_NOW_MS)).unwrap();
+    assert_eq!((g.soft_ceiling, g.hard_cap), (120, 500));
+}
+
+#[test]
+fn core_token_gauge_stale_refresh_and_fallback() {
+    use pigeon_capabilities::ledger::Ledger;
+    let api = MockTokens::new(500, 50);
+    for i in 0..5 {
+        api.add(
+            &format!("t{i}"),
+            "pigeon:a:2026-11-24T05:50:00Z",
+            Some("2026-11-24T06:30:00Z"),
+            "active",
+        );
+    }
+    let ledger = Ledger::new((), Vec::new());
+    // A fresh stored gauge is used as it is, with no list call.
+    ledger.gauge_set(2, TOKEN_NOW_MS).unwrap();
+    api.fail_list.set(true);
+    let g = token_block_on(ledger.gauge(&api, TOKEN_NOW_MS + 60_000)).unwrap();
+    assert_eq!((g.live, g.source.as_str()), (2, "sweep"));
+    // Older than 120 s: refreshed from the list.
+    api.fail_list.set(false);
+    let g = token_block_on(ledger.gauge(&api, TOKEN_NOW_MS + 121_000)).unwrap();
+    assert_eq!((g.live, g.source.as_str()), (5, "refreshed"));
+    assert_eq!(g.as_of_ms, TOKEN_NOW_MS + 121_000);
+    // Stale again and the list fails: the stored count, and it says so.
+    api.fail_list.set(true);
+    let g = token_block_on(ledger.gauge(&api, TOKEN_NOW_MS + 400_000)).unwrap();
+    assert_eq!((g.live, g.source.as_str()), (5, "stored (refresh failed)"));
+    // Nothing stored and the list fails: the ledger's rows alone.
+    let fresh = Ledger::new((), vec![gauge_row("x", TOKEN_NOW_MS + 5000, false, None)]);
+    let g = token_block_on(fresh.gauge(&api, TOKEN_NOW_MS)).unwrap();
+    assert_eq!(
+        (g.live, g.source.as_str()),
+        (1, "ledger rows (refresh failed)")
+    );
+}
+
+#[test]
+fn core_token_gauge_full_account_queues_then_sweep_frees_it() {
+    use pigeon_ai_agents::Role::Executor;
+    use pigeon_ai_agents::object::{Limits, queue_reason};
+    use pigeon_capabilities::ledger::Ledger;
+    // 500 live tokens: 250 expire at 06:05, 250 at 06:30. The account is at its cap.
+    let api = MockTokens::new(500, 50);
+    for i in 0..500 {
+        let expires = if i < 250 {
+            "2026-11-24T06:05:00Z"
+        } else {
+            "2026-11-24T06:30:00Z"
+        };
+        api.add(
+            &format!("t{i}"),
+            "pigeon:a:2026-11-24T05:00:00Z",
+            Some(expires),
+            "active",
+        );
+    }
+    let ledger = Ledger::new((), Vec::new());
+    let g = token_block_on(ledger.gauge(&api, TOKEN_NOW_MS)).unwrap();
+    assert_eq!((g.live, g.soft_ceiling, g.hard_cap), (500, 300, 500));
+    // A mint now meets the quota error.
+    let err = token_lease(&ledger, &api, &token_keys("u1", &["A"]), TOKEN_NOW_MS)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("1001"), "{err}");
+    // A new run queues, with the reason; a gauge that is unknown does not hold it.
+    let limits = Limits::default();
+    let why = queue_reason(
+        Executor,
+        0,
+        0,
+        &limits,
+        false,
+        true,
+        Some((g.live, g.soft_ceiling)),
+    );
+    assert_eq!(
+        why.unwrap(),
+        "queued: 500 live Cloudflare tokens, at or above the soft ceiling of 300 (waits until fewer than 300)"
+    );
+    assert_eq!(
+        queue_reason(Executor, 0, 0, &limits, false, true, None),
+        None
+    );
+    // Ten minutes on, the sweep deletes the expired 250 and stores what it kept.
+    let later = TOKEN_NOW_MS + 600_000;
+    let report = token_block_on(pigeon_core::tokens::sweep(&api, later)).unwrap();
+    assert_eq!((report.deleted, report.kept_pigeon), (250, 250));
+    ledger.gauge_set(report.kept_pigeon as u32, later).unwrap();
+    let g = token_block_on(ledger.gauge(&api, later + 30_000)).unwrap();
+    assert_eq!((g.live, g.source.as_str()), (250, "sweep"));
+    assert_eq!(
+        queue_reason(
+            Executor,
+            0,
+            0,
+            &limits,
+            false,
+            true,
+            Some((g.live, g.soft_ceiling))
+        ),
+        None
+    );
+}
+
+#[test]
+fn core_token_gauge_digest_entry_and_note() {
+    use pigeon_capabilities::land::digest::tokens_entry;
+    let below =
+        tokens_entry(&json!({ "live": 10, "soft_ceiling": 300, "hard_cap": 500, "as_of": "t" }));
+    assert_eq!(below["live"], 10);
+    assert!(below.get("note").is_none());
+    let at =
+        tokens_entry(&json!({ "live": 300, "soft_ceiling": 300, "hard_cap": 500, "as_of": "t" }));
+    assert!(
+        at["note"]
+            .as_str()
+            .unwrap()
+            .contains("at or above the soft ceiling of 300")
+    );
 }
