@@ -598,6 +598,22 @@ fn models_openai_request_translation() {
     let odd = small(json!({ "output_config": { "effort": "max" } }));
     assert!(odd.get("reasoning_effort").is_none());
     assert_eq!(odd["messages"][0]["content"], "s");
+
+    // gpt-6-luna refuses function tools with a reasoning effort: `none` is sent instead.
+    // Without tools, its effort goes through as asked.
+    let luna = small(json!({ "model": "gpt-6-luna", "output_config": { "effort": "low" } }));
+    assert_eq!(luna["reasoning_effort"], "none");
+    let dated = small(json!({ "model": "gpt-6-luna-2026-10-01", "output_config": { "effort": "high" } }));
+    assert_eq!(dated["reasoning_effort"], "none");
+    let bare = openai::request(&json!({
+        "model": "gpt-6-luna", "output_config": { "effort": "low" },
+        "messages": [{ "role": "user", "content": "x" }]
+    }))
+    .unwrap();
+    assert_eq!(bare["reasoning_effort"], "low");
+    assert!(openai::effort_with_tools("gpt-6.2-sol"));
+    assert!(!openai::effort_with_tools("openai/gpt-6-luna"));
+    assert!(openai::effort_with_tools("gpt-6-lunar"));
 }
 
 #[test]

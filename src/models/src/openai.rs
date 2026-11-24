@@ -38,7 +38,8 @@ pub fn request(body: &Value) -> Result<Value, String> {
     out.insert("messages".into(), Value::Array(messages));
 
     let tools = tools(map.get("tools"));
-    if !tools.is_empty() {
+    let has_tools = !tools.is_empty();
+    if has_tools {
         out.insert("tools".into(), Value::Array(tools));
         if let Some((choice, parallel)) = tool_choice(map.get("tool_choice")) {
             out.insert("tool_choice".into(), choice);
@@ -51,7 +52,12 @@ pub fn request(body: &Value) -> Result<Value, String> {
     if let Some(n) = map.get("max_tokens").filter(|v| v.is_u64()) {
         out.insert("max_completion_tokens".into(), n.clone());
     }
-    if let Some(effort) = body["output_config"]["effort"].as_str()
+    let model = map.get("model").and_then(Value::as_str).unwrap_or("");
+    if has_tools && !effort_with_tools(model) {
+        // Chat Completions refuses function tools with a reasoning effort on these models,
+        // and asks for `none` instead.
+        out.insert("reasoning_effort".into(), json!("none"));
+    } else if let Some(effort) = body["output_config"]["effort"].as_str()
         && matches!(effort, "low" | "medium" | "high")
     {
         out.insert("reasoning_effort".into(), json!(effort));
@@ -75,6 +81,19 @@ pub fn request(body: &Value) -> Result<Value, String> {
     out.insert("stream".into(), json!(true));
     out.insert("stream_options".into(), json!({ "include_usage": true }));
     Ok(Value::Object(out))
+}
+
+/// The models Chat Completions refuses function tools with a reasoning effort for (OpenAI's
+/// 400: "Function tools with reasoning_effort are not supported for gpt-6-luna").
+const NO_EFFORT_WITH_TOOLS: [&str; 1] = ["gpt-6-luna"];
+
+/// Whether `model` takes a reasoning effort beside function tools in Chat Completions. A
+/// `provider/` prefix and a dated suffix (`gpt-6-luna-2026-…`) are read as the model. Pure.
+pub fn effort_with_tools(model: &str) -> bool {
+    let model = model.rsplit('/').next().unwrap_or(model);
+    !NO_EFFORT_WITH_TOOLS
+        .iter()
+        .any(|m| model == *m || model.strip_prefix(m).is_some_and(|r| r.starts_with('-')))
 }
 
 /// The system prompt as one string: the string itself, or its text blocks joined.
