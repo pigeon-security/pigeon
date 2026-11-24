@@ -29,6 +29,10 @@ Declare the additive `models` and `observability` answers as 1.1.0, still compat
 - Show unset slots in “Needs setting”, followed by the set slots grouped by service. List metadata only. The secure paste sheet writes through the existing passkey-authorised console path, never through MCP, and refreshes the list after confirmation.
 - Retry Users once for a cancelled request while the screen task is still active. Keep the last successful list and its timestamp on failure and offer a Retry pill. Use the legacy list only when the newer tool is unavailable.
 
+## Phase 5 day selection
+
+Remember the selected period locally. Tapping a bar toggles a day filter on the billing cells, using only reported gateway and product day maps. The server omits zero entries in these maps; a missing map is different from an empty one. Period totals in the hero and lifetime grant balances stay unchanged. There is no additional network request.
+
 ## Phase 5 detail refresh
 
 The shared screen supports pull-to-refresh. User detail and Finished today still hold snapshots: read each from its parent’s model instead, and refresh that model on pull. If the user disappears from a successful read, stop showing their old details. No background polling.

@@ -65,10 +65,15 @@ private struct CostSeries {
     }
 }
 
+private func dayAmount(_ amounts: [String: Double]?, day: String) -> Double? {
+    amounts.map { $0[day, default: 0] }
+}
+
 private struct CostGateway: Identifiable {
     let id: String
     let label: String?
     let total: Double?
+    let byDay: [String: Double]?
     let models: [CostSeries]?
     let isAnthropicBYOK: Bool
 }
@@ -155,7 +160,9 @@ private struct CostData {
                 return CostSeries(row: model, color: color)
             }
             return CostGateway(id: id, label: row["label"] as? String,
-                               total: costNumber(row["total"]), models: models,
+                               total: costNumber(row["total"]),
+                               byDay: (row["by_day"] as? CostObject)?.compactMapValues(costNumber),
+                               models: models,
                                isAnthropicBYOK: byok && row["provider"] as? String == "anthropic")
         }
         if let rows = (root["credits"] as? CostObject)?["grants"] as? [CostObject] {
@@ -166,6 +173,13 @@ private struct CostData {
         } else {
             grants = nil
         }
+    }
+
+    func cloudflareAmount(on day: String?) -> Double? {
+        guard let day else { return cloudflareTotal }
+        guard let products, !products.isEmpty else { return nil }
+        let amounts = products.compactMap { dayAmount($0.byDay, day: day) }
+        return amounts.count == products.count ? amounts.reduce(0, +) : nil
     }
 
     var chartSeries: [CostSeries] {
@@ -232,7 +246,8 @@ struct CostScreen: View {
     let session: Session
 
     @Environment(\.displayScale) private var displayScale
-    @State private var range = CostRange.week
+    @AppStorage("costPeriod") private var range = CostRange.week
+    @State private var selectedDay: String?
     @State private var loadedRange: CostRange?
     @State private var data: CostData?
     @State private var failed = false
@@ -247,7 +262,14 @@ struct CostScreen: View {
                 if loadedRange == range, let data {
                     hero(data)
                     daily(data)
-                    Text("By billing").font(.headline).accessibilityAddTraits(.isHeader)
+                    HStack {
+                        Text("By billing").font(.headline).accessibilityAddTraits(.isHeader)
+                        if let day = selectedDay {
+                            Text(CostText.date(day).map(CostText.day) ?? day).font(.subheadline)
+                            Spacer()
+                            Button("Show period") { selectedDay = nil }.tint(CostPalette.accent)
+                        }
+                    }
                     billing(data)
                 } else if loadedRange == range && failed {
                     card { Text("Cost unavailable. Pull to refresh.").foregroundStyle(CostPalette.warning) }
@@ -274,6 +296,7 @@ struct CostScreen: View {
             HStack(spacing: 2) {
                 ForEach(CostRange.allCases) { choice in
                     Button {
+                        if range != choice { selectedDay = nil }
                         range = choice
                     } label: {
                         Text(choice.title).font(.subheadline.weight(.semibold))
@@ -302,7 +325,9 @@ struct CostScreen: View {
         do {
             let json = try await session.client.call("cost_daily", ["range": asked.rawValue])
             guard !Task.isCancelled, asked == range, request == token else { return }
-            data = CostData(json: json)
+            let result = CostData(json: json)
+            if let day = selectedDay, !result.days.contains(day) { selectedDay = nil }
+            data = result
             failed = false
             loadedRange = asked
         } catch PlatformError.signedOut {
@@ -350,7 +375,8 @@ struct CostScreen: View {
             ForEach(gateways) { gateway in
                 card {
                     billingHeader("Cloudflare AI Gateway", subtitle: gateway.label,
-                                  total: gateway.total, state: data.gatewayState)
+                                  total: selectedDay == nil ? gateway.total : selectedDay.flatMap { dayAmount(gateway.byDay, day: $0) },
+                                  state: data.gatewayState)
                     if data.gatewayState != .unavailable {
                         seriesRows("By model", gateway.models,
                                    empty: gateway.total == 0 ? "No spend in this period" : "Model detail unavailable")
@@ -366,7 +392,7 @@ struct CostScreen: View {
         }
         card {
             billingHeader("Cloudflare", subtitle: "Workers, Containers, storage",
-                          total: data.cloudflareTotal, state: data.cloudflareState)
+                          total: data.cloudflareAmount(on: selectedDay), state: data.cloudflareState)
             if data.cloudflareState != .unavailable {
                 seriesRows("By product", data.products,
                            empty: data.cloudflareState == .empty ? "No spend in this period" : "Product detail unavailable")
@@ -403,7 +429,7 @@ struct CostScreen: View {
                             .accessibilityHidden(true)
                         Text(item.name)
                         Spacer(minLength: 4)
-                        money(item.total)
+                        money(selectedDay == nil ? item.total : selectedDay.flatMap { dayAmount(item.byDay, day: $0) })
                     }
                     .font(.subheadline)
                     .accessibilityElement(children: .combine)
@@ -496,6 +522,7 @@ struct CostScreen: View {
         return card {
             Text("Daily spend").font(.headline).accessibilityAddTraits(.isHeader)
             if positive + negative > 0 {
+                Text("Tap a day to filter By billing.").font(.caption).foregroundStyle(CostPalette.muted)
                 chart(bars, positive: positive, negative: negative)
                 if data.hasMissingDailyDetail {
                     Text("Some daily detail is unavailable.").font(.caption).foregroundStyle(CostPalette.muted)
@@ -516,22 +543,30 @@ struct CostScreen: View {
             ScrollView(.horizontal) {
                 HStack(spacing: pixel) {
                     ForEach(Array(bars.enumerated()), id: \.offset) { index, bar in
-                        VStack(spacing: 0) {
-                            stack(bar.charges.reversed(), sum: bar.positive, maximum: positive, height: above)
-                                .frame(height: above, alignment: .bottom)
-                            Rectangle().fill(CostPalette.border).frame(height: pixel)
-                            stack(bar.adjustments, sum: bar.negative, maximum: negative, height: below)
-                                .frame(height: below, alignment: .top)
-                            if range != .all || bars.count <= 7 || index.isMultiple(of: 7) {
-                                Text(bar.axis).font(.caption2).foregroundStyle(CostPalette.muted)
-                                    .lineLimit(1).minimumScaleFactor(0.7).padding(.top, 4)
-                            } else {
-                                Color.clear.frame(height: 0)
+                        Button {
+                            selectedDay = selectedDay == bar.day ? nil : bar.day
+                        } label: {
+                            VStack(spacing: 0) {
+                                stack(bar.charges.reversed(), sum: bar.positive, maximum: positive, height: above)
+                                    .frame(height: above, alignment: .bottom)
+                                Rectangle().fill(CostPalette.border).frame(height: pixel)
+                                stack(bar.adjustments, sum: bar.negative, maximum: negative, height: below)
+                                    .frame(height: below, alignment: .top)
+                                if range != .all || bars.count <= 7 || index.isMultiple(of: 7) {
+                                    Text(bar.axis).font(.caption2).foregroundStyle(CostPalette.muted)
+                                        .lineLimit(1).minimumScaleFactor(0.7).padding(.top, 4)
+                                } else {
+                                    Color.clear.frame(height: 0)
+                                }
                             }
+                            .frame(minWidth: barWidth, maxWidth: range == .today ? 40 : .infinity,
+                                   alignment: .top)
+                            .frame(height: plotHeight + 22, alignment: .top)
+                            .background(selectedDay == bar.day ? CostPalette.accent.opacity(0.19) : Color.clear)
+                            .contentShape(Rectangle())
                         }
-                        .frame(minWidth: barWidth, maxWidth: range == .today ? 40 : .infinity,
-                               alignment: .top)
-                        .frame(height: plotHeight + 22, alignment: .top)
+                        .buttonStyle(.plain)
+                        .accessibilityAddTraits(selectedDay == bar.day ? .isSelected : [])
                         .accessibilityElement(children: .ignore)
                         .accessibilityLabel(bar.label)
                     }
@@ -576,7 +611,7 @@ private struct CostBar {
     init(day: String, series: [CostSeries]) {
         self.day = day
         let parts = series.enumerated().compactMap { index, item -> Part? in
-            guard let amount = item.byDay?[day] else { return nil }
+            guard let amount = dayAmount(item.byDay, day: day) else { return nil }
             return Part(id: index, amount: amount, color: item.color)
         }
         hasDailyDetail = !parts.isEmpty
