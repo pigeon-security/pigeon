@@ -8,6 +8,23 @@ use std::collections::BTreeMap;
 
 /// The Secrets Store binding (and secret) holding the Anthropic Admin API key.
 pub const ADMIN_KEY: &str = "ANTHROPIC_ADMIN_KEY";
+/// The prefixes an Anthropic key that can read the Admin API starts with: an organization-scoped
+/// user key (`sk-ant-usr-`, made with "Create API key", Scope Organization) or an older admin key
+/// (`sk-ant-admin`).
+pub const ADMIN_KEY_PREFIXES: [&str; 2] = ["sk-ant-usr-", "sk-ant-admin"];
+
+/// Whether `value` has the shape of a key for the Admin API: `Ok(())`, or why not. Only the
+/// prefix is checked; the live one-row usage read is the real test.
+pub fn admin_key_shape(value: &str) -> Result<(), &'static str> {
+    if ADMIN_KEY_PREFIXES.iter().any(|p| value.starts_with(p)) {
+        Ok(())
+    } else {
+        Err(
+            "an Anthropic Admin API key starts with `sk-ant-usr-` (an organization-scoped key \
+             from Create API key in the Claude Console) or `sk-ant-admin` (an older admin key)",
+        )
+    }
+}
 /// Where the Admin API's reports live.
 const BASE: &str = "https://api.anthropic.com/v1/organizations";
 /// The most one-day buckets a usage page holds.

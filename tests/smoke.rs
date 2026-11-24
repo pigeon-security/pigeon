@@ -2079,3 +2079,34 @@ fn model_gateway_workers_ai_minted_token() {
         assert!(!scoped_token_revocable(name), "{name}");
     }
 }
+
+/// The `ANTHROPIC_ADMIN_KEY` value check takes both Admin API key shapes: the Console's
+/// organization-scoped user keys (`sk-ant-usr-`) and the older admin keys (`sk-ant-admin`), and
+/// refuses any other shape naming both. The slot's purpose says how to make the key and that it
+/// expires. Pure.
+#[test]
+fn models_admin_key_prefixes() {
+    use pigeon_models::billing::{ADMIN_KEY_PREFIXES, admin_key_shape};
+
+    assert_eq!(ADMIN_KEY_PREFIXES, ["sk-ant-usr-", "sk-ant-admin"]);
+    for ok in ["sk-ant-usr-abc123", "sk-ant-admin01-abc123", "sk-ant-admin"] {
+        assert_eq!(admin_key_shape(ok), Ok(()), "{ok}");
+    }
+    for no in [
+        "",
+        "sk-ant-api03-abc123",
+        "sk-ant-usr",
+        "sk-ant-oat01-abc",
+        "SK-ANT-USR-abc",
+        " sk-ant-usr-abc",
+    ] {
+        let why = admin_key_shape(no).expect_err(no);
+        assert!(why.contains("`sk-ant-usr-`"), "{why}");
+        assert!(why.contains("`sk-ant-admin`"), "{why}");
+    }
+
+    let src = include_str!("../src/models/src/lib.rs");
+    assert!(src.contains("Create API key, Scope Organization"));
+    assert!(src.contains("It expires on the"));
+    assert!(!src.contains("Anthropic reports no expiry for admin keys"));
+}

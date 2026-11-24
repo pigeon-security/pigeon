@@ -1726,9 +1726,11 @@ impl Models {
         {
             out.push(SlotSpec {
                 name: billing::ADMIN_KEY.into(),
-                purpose: "An Anthropic Admin API key (sk-ant-admin…, made by an organization \
-                          admin in the Claude Console), used to read Anthropic's usage and cost \
-                          reports."
+                purpose: "An Anthropic key for the Admin API, used to read Anthropic's usage \
+                          and cost reports. An organization admin makes it in the Claude Console: \
+                          API keys, Create API key, Scope Organization. It starts with \
+                          sk-ant-usr- (or sk-ant-admin for an older admin key). It expires on the \
+                          date chosen in the Console: set it again here before then."
                     .into(),
                 scopes: vec![secrets_store::WORKERS.to_string()],
             });
@@ -1826,11 +1828,14 @@ impl Models {
     /// Checks `value` as secret `name` with its provider, before it is written.
     pub async fn check_secret(&self, name: &str, value: &str) -> Result<String> {
         if name == billing::ADMIN_KEY {
-            if !value.starts_with("sk-ant-admin") {
-                return Err(bad("an Anthropic Admin API key starts with `sk-ant-admin`"));
-            }
+            billing::admin_key_shape(value).map_err(bad)?;
             return match admin_probe(value).await? {
                 200 => Ok("Anthropic accepts the admin key".into()),
+                s @ (401 | 403) => Err(bad(&format!(
+                    "Anthropic refused the key on its usage report ({s}): it is wrong, expired \
+                     or revoked, or not organization-scoped (Scope Organization), or its \
+                     account cannot read the Admin API"
+                ))),
                 s => Err(bad(&format!("Anthropic refused the admin key: {s}"))),
             };
         }
@@ -1860,7 +1865,9 @@ impl Models {
                     .into(),
             },
             Ok(200) => Expiry::Unknown {
-                why: "Anthropic reports no expiry for admin keys; the key works".into(),
+                why: "the key works; Anthropic does not report this key's expiry here: it expires \
+                      on the date chosen in the Claude Console"
+                    .into(),
             },
             Ok(s) => Expiry::Unknown {
                 why: format!("the check failed: Anthropic answered {s}"),
