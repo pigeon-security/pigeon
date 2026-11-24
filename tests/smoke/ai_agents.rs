@@ -2366,7 +2366,11 @@ fn ai_agents_branch_combine_plan_and_scripts() {
     assert!(plan(own, &n(&[c2]), &parse_listing("DIRTY\nB x s\n", &n(&[c2]))).is_err());
     // The scripts: own branch is read from HEAD, picks are in order, nothing touches main.
     let ls = list_script(own, &with_own);
-    assert!(ls.contains("origin/main..HEAD") && ls.contains(&format!("origin/main..origin/{c1}")));
+    assert!(ls.contains("origin/main..HEAD") && ls.contains(&format!("origin/main...origin/{c1}")));
+    assert!(
+        !ls.contains("sed"),
+        "a branch name has `/` in it, so no sed"
+    );
     assert!(ls.contains("--no-merges") && ls.contains("--reverse"));
     let cs = combine_script(&p);
     assert!(cs.find("cherry-pick o1").unwrap() < cs.find("cherry-pick s1 s2").unwrap());
@@ -2374,6 +2378,56 @@ fn ai_agents_branch_combine_plan_and_scripts() {
     assert!(!cs.contains("push") && !restack_script().contains("push"));
     assert!(restack_script().contains("git rebase origin/main"));
     assert!(restack_script().contains("git rebase --abort"));
+}
+
+/// The list and combine scripts run in a real git repository with branch names that have `/` in
+/// them: the listing is read back, and a commit main already holds is left out.
+#[test]
+fn ai_agents_branch_combine_scripts_run_in_git() {
+    use pigeon_ai_agents::branches::{combine_script, list_script, parse_listing, plan};
+    use std::process::Command;
+    let dir = std::env::temp_dir().join(format!("pigeon-combine-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let sh = |script: &str| -> String {
+        let out = Command::new("sh")
+            .args(["-c", script])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{script}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+    sh(
+        "git init -q -b main . && git config user.email t@example.com && git config user.name t \
+        && echo a > a && git add a && git commit -qm base \
+        && git update-ref refs/remotes/origin/main HEAD",
+    );
+    // The branch has one commit that main also gets (same change), and one that it does not.
+    sh(
+        "git checkout -qb work && echo b > b && git add b && git commit -qm same \
+        && echo c > c && git add c && git commit -qm only \
+        && git update-ref refs/remotes/origin/claude/ai-agent-x HEAD \
+        && git checkout -q main && echo b > b && git add b && git commit -qm same-on-main \
+        && git update-ref refs/remotes/origin/main HEAD",
+    );
+    let own = "claude/ai-agent-p";
+    let names = vec!["claude/ai-agent-x".to_string()];
+    let out = sh(&list_script(own, &names));
+    let listing = parse_listing(&out, &names);
+    assert_eq!(
+        listing.branches[0].1.len(),
+        1,
+        "only the commit main lacks: {out}"
+    );
+    let p = plan(own, &names, &listing).unwrap();
+    sh(&combine_script(&p));
+    assert!(dir.join("c").exists() && dir.join("b").exists());
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Builds a tool-loop transcript: the brief, then `pairs` of assistant tool_use and user result.

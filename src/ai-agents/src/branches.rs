@@ -153,19 +153,21 @@ fn source(own: &str, branch: &str) -> String {
 
 /// The script that lists what `branch_combine` needs, one line each: `DIRTY` if the checkout
 /// has uncommitted changes, `OWN <sha>` for each commit of `HEAD` not in main, and
-/// `B <branch> <sha>` for each commit of each branch not in main, oldest first.
+/// `B <branch> <sha>` for each commit of each branch not in main, oldest first. A commit whose
+/// change main already holds (`--cherry-pick`) is left out. The lines come from a shell loop,
+/// not `sed`, because a branch name has `/` in it.
 pub fn list_script(own: &str, names: &[String]) -> String {
     let mut s = format!(
         "st=$(git status --porcelain) || exit 2\n\
          [ -z \"$st\" ] || echo DIRTY\n\
          o=$(git rev-list --no-merges origin/{MAIN}..HEAD) || exit 2\n\
-         printf '%s\\n' \"$o\" | sed 's/^/OWN /'\n"
+         for c in $o; do echo \"OWN $c\"; done\n"
     );
     for n in names {
         let src = source(own, n);
         s.push_str(&format!(
-            "o=$(git rev-list --no-merges --topo-order --reverse origin/{MAIN}..{src}) || {{ echo \"FAIL {n}\"; exit 2; }}\n\
-             printf '%s\\n' \"$o\" | sed 's/^/B {n} /'\n"
+            "o=$(git rev-list --no-merges --topo-order --reverse --cherry-pick --right-only origin/{MAIN}...{src}) || {{ echo \"FAIL {n}\"; exit 2; }}\n\
+             for c in $o; do echo \"B {n} $c\"; done\n"
         ));
     }
     s

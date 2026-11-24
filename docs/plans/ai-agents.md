@@ -989,3 +989,9 @@ executors through it. Each item: state, next step, who it waits on.
   `planner_design`, checked like the others and shown `unset` by default. `models::resolve`:
   own model, else the kind's slot, else the stored planner default, else the built-in. No stored
   or built-in default changed; nothing per-kind is stored.
+- 2026-11-24: **`branch_combine` listing fixed.** The list script built its lines with
+  `sed 's/^/B <branch> /'`, and a branch name has `/` in it, so `sed` failed ("unknown option to
+  `s'") and every combine of an executor branch stopped at "could not list the commits". The
+  lines now come from a shell loop. The listing also uses `--cherry-pick --right-only`, so a
+  commit whose change main already holds is not picked (it would be an empty cherry-pick). A
+  smoke scenario runs both scripts in a real git repository with `/` in the branch names.
