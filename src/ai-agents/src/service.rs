@@ -171,6 +171,7 @@ impl Agents {
                 "brief": brief,
                 "name": name,
                 "kind": kind.map(|k| k.name()),
+                "base": base,
                 "branch": branch(&id),
                 "budget": budget,
                 "estimate": estimate,
