@@ -1983,8 +1983,9 @@ fn ai_agents_executor_reserve_leaves_planner_room() {
     assert_eq!(sj["executors_spent_usd"], 0.3);
     assert_eq!(sj["executors_cost_usd"], 1.3);
     assert_eq!(sj["total_cost"], "$1.62");
-    let old: Spent = serde_json::from_str(r#"{"turns":1,"cost_micros":2,"sandbox_ms":0,"executors":0}"#)
-        .unwrap();
+    let old: Spent =
+        serde_json::from_str(r#"{"turns":1,"cost_micros":2,"sandbox_ms":0,"executors":0}"#)
+            .unwrap();
     assert_eq!(old.executors_reserved_micros, 0);
     assert_eq!(old.executors_spent_micros, 0);
 
