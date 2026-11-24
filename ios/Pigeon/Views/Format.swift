@@ -32,16 +32,44 @@ func timeLeftText(_ expiresMs: Double) -> String {
     return left <= 0 ? "expired" : "\(durationText(left)) left"
 }
 
-/// "5 min ago" for a time in ms, or "just now".
-func timeAgoText(_ ms: Double) -> String {
-    let ago = nowMs() - ms
-    return ago < 60_000 ? "just now" : "\(durationText(ago)) ago"
-}
+/// A timestamp in epoch milliseconds or ISO 8601, shown in the device's time zone.
+func timestampText(_ value: Any?, now: Date = Date()) -> String {
+    let date: Date
+    if let value = value as? Date {
+        date = value
+    } else if let ms = num(value), ms.isFinite {
+        date = Date(timeIntervalSince1970: ms / 1000)
+    } else if let text = value as? String {
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let parsed = iso.date(from: text) {
+            date = parsed
+        } else {
+            iso.formatOptions = [.withInternetDateTime]
+            guard let parsed = iso.date(from: text) else { return "unknown" }
+            date = parsed
+        }
+    } else {
+        return "unknown"
+    }
 
-/// A date in ms as "24 Nov 2026", or "unknown".
-func dateText(_ ms: Double?) -> String {
-    guard let ms else { return "unknown" }
-    return Date(timeIntervalSince1970: ms / 1000).formatted(date: .abbreviated, time: .omitted)
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = .autoupdatingCurrent
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "en_GB")
+    formatter.calendar = calendar
+    formatter.timeZone = calendar.timeZone
+    formatter.dateFormat = "HH:mm"
+    if calendar.isDate(date, inSameDayAs: now) {
+        return "Today, \(formatter.string(from: date))"
+    }
+    if let yesterday = calendar.date(byAdding: .day, value: -1, to: now),
+        calendar.isDate(date, inSameDayAs: yesterday)
+    {
+        return "Yesterday, \(formatter.string(from: date))"
+    }
+    formatter.dateFormat = "d MMM, HH:mm"
+    return formatter.string(from: date)
 }
 
 /// One or two capital letters from a name: the first letters of its first two words.

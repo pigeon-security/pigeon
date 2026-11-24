@@ -35,61 +35,81 @@ struct Person: Identifiable {
 @Observable
 final class UsersModel {
     private(set) var people: [Person] = []
-    private(set) var loaded = false
+    private(set) var lastLoaded: Date?
+    var loaded: Bool { lastLoaded != nil }
     private(set) var error: String?
+    private(set) var loading = false
 
-    /// Fetches the people.
+    /// Fetches the people, retrying a cancelled request once unless the view's task was cancelled.
     func load(_ client: MCPClient) async {
-        do {
-            let data = try await client.call("users_people")
-            let rows = (data as? [String: Any])?["people"] as? [[String: Any]] ?? []
-            people = rows.compactMap(Self.person)
-            loaded = true
-            error = nil
-        } catch PlatformError.signedOut {
-            // The session has already signed out.
-        } catch {
-            await loadFallback(client)
+        guard !loading, !Task.isCancelled else { return }
+        loading = true
+        defer { loading = false }
+        var tool = "users_people"
+        var retriedCancellation = false
+        while !Task.isCancelled {
+            do {
+                let data = try await client.call(tool)
+                let next: [Person]
+                if tool == "users_people" {
+                    guard let rows = (data as? [String: Any])?["people"] as? [[String: Any]] else {
+                        throw PlatformError.badResponse("users_people shape")
+                    }
+                    next = rows.compactMap(Self.person)
+                } else {
+                    next = try Self.legacyPeople(data)
+                }
+                try Task.checkCancellation()
+                people = next
+                lastLoaded = Date()
+                error = nil
+                return
+            } catch PlatformError.signedOut {
+                return
+            } catch PlatformError.server(let message)
+                where tool == "users_people" && message.contains("unknown tool `users_people`")
+            {
+                tool = "users_list"
+            } catch {
+                guard !Task.isCancelled else { return }
+                let cancelled = error is CancellationError || (error as? URLError)?.code == .cancelled
+                if cancelled && !retriedCancellation {
+                    retriedCancellation = true
+                    continue
+                }
+                self.error = "Couldn't load users."
+                return
+            }
         }
     }
 
     /// Builds the people from `users_list`: its standard users, passkey counts and links.
-    private func loadFallback(_ client: MCPClient) async {
-        do {
-            let data = try await client.call("users_list")
-            guard let dict = data as? [String: Any] else {
-                throw PlatformError.badResponse("users_list shape")
+    private static func legacyPeople(_ data: Any) throws -> [Person] {
+        guard let dict = data as? [String: Any], let users = dict["users"] as? [[String: Any]] else {
+            throw PlatformError.badResponse("users_list shape")
+        }
+        let links = dict["links"] as? [[String: Any]] ?? []
+        var counts: [String: Int] = [:]
+        for row in dict["passkeys"] as? [[String: Any]] ?? [] {
+            if let id = row["user_id"] as? String, let n = num(row["passkeys"]) {
+                counts[id] = Int(n)
             }
-            let users = dict["users"] as? [[String: Any]] ?? []
-            let links = dict["links"] as? [[String: Any]] ?? []
-            var counts: [String: Int] = [:]
-            for row in dict["passkeys"] as? [[String: Any]] ?? [] {
-                if let id = row["user_id"] as? String, let n = num(row["passkeys"]) {
-                    counts[id] = Int(n)
+        }
+        return users.filter { $0["kind"] as? String == "standard" }.compactMap { u in
+            guard let id = u["id"] as? String else { return nil }
+            let delegates = links.filter { $0["standard_user_id"] as? String == id }
+                .compactMap { link -> Delegate? in
+                    guard let sid = link["service_user_id"] as? String,
+                        let s = users.first(where: { $0["id"] as? String == sid })
+                    else { return nil }
+                    return Delegate(
+                        id: sid, name: s["name"] as? String ?? sid, kind: "service",
+                        addedMs: num(s["created_at"]))
                 }
-            }
-            people = users.filter { $0["kind"] as? String == "standard" }.compactMap { u in
-                guard let id = u["id"] as? String else { return nil }
-                let delegates = links.filter { $0["standard_user_id"] as? String == id }
-                    .compactMap { link -> Delegate? in
-                        guard let sid = link["service_user_id"] as? String,
-                            let s = users.first(where: { $0["id"] as? String == sid })
-                        else { return nil }
-                        return Delegate(
-                            id: sid, name: s["name"] as? String ?? sid, kind: "service",
-                            addedMs: num(s["created_at"]))
-                    }
-                return Person(
-                    id: id, name: u["name"] as? String ?? "Unnamed", initials: nil, picture: nil,
-                    role: "Person", addedMs: num(u["created_at"]), passkeyCount: counts[id] ?? 0,
-                    passkeys: [], delegates: delegates)
-            }
-            loaded = true
-            error = nil
-        } catch PlatformError.signedOut {
-            // The session has already signed out.
-        } catch {
-            self.error = "users_people failed: \(error.localizedDescription)"
+            return Person(
+                id: id, name: u["name"] as? String ?? "Unnamed", initials: nil, picture: nil,
+                role: "Person", addedMs: num(u["created_at"]), passkeyCount: counts[id] ?? 0,
+                passkeys: [], delegates: delegates)
         }
     }
 
@@ -116,15 +136,6 @@ final class UsersModel {
     }
 }
 
-/// "d MMM yyyy" for a date in ms, or "unknown".
-private func shortDate(_ ms: Double?) -> String {
-    guard let ms else { return "unknown" }
-    let f = DateFormatter()
-    f.locale = Locale(identifier: "en_GB")
-    f.dateFormat = "d MMM yyyy"
-    return f.string(from: Date(timeIntervalSince1970: ms / 1000))
-}
-
 /// "Who can sign in": the people, each with their passkey count.
 struct UsersView: View {
     let session: Session
@@ -132,10 +143,34 @@ struct UsersView: View {
 
     var body: some View {
         Screen(
-            title: "Users", errors: [model.error].compactMap { $0 },
+            title: "Users", errors: [],
             side: Metrics.sideWide,
             refresh: { await model.load(session.client) }
         ) {
+            if let error = model.error {
+                PlainCard {
+                    HStack(spacing: 12) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(error).font(AppFont.note).foregroundStyle(Tokens.warn)
+                            if let lastLoaded = model.lastLoaded {
+                                Text("Last refreshed \(timestampText(lastLoaded))")
+                                    .font(AppFont.meta).foregroundStyle(Tokens.muted)
+                            }
+                        }
+                        Spacer(minLength: 0)
+                        Button("Retry") { Task { await model.load(session.client) } }
+                            .font(AppFont.label)
+                            .padding(.horizontal, 12)
+                            .frame(minHeight: 44)
+                            .background(Capsule().fill(Tokens.chip))
+                            .foregroundStyle(Tokens.ink)
+                            .buttonStyle(.plain)
+                            .disabled(model.loading)
+                    }
+                }
+            } else if !model.loaded {
+                ProgressView("Loading users…")
+            }
             if model.people.isEmpty && model.loaded {
                 PlainCard {
                     Text("No people.").font(AppFont.note).foregroundStyle(Tokens.muted)
@@ -166,7 +201,7 @@ struct UsersView: View {
             Avatar(name: person.name, initials: person.initials, picture: person.picture, size: 40)
             VStack(alignment: .leading, spacing: 2) {
                 Text(person.name).font(AppFont.row).foregroundStyle(Tokens.ink)
-                Text("\(keys) · added \(shortDate(person.addedMs))")
+                Text("\(keys) · added \(timestampText(person.addedMs))")
                     .font(AppFont.meta).foregroundStyle(Tokens.muted)
             }
             Spacer(minLength: 8)
@@ -187,7 +222,7 @@ struct UserDetailView: View {
             VStack(spacing: 8) {
                 Avatar(name: person.name, initials: person.initials, picture: person.picture, size: 76)
                 Text(person.name).font(AppFont.name).foregroundStyle(Tokens.ink)
-                Text("Standard user · added \(shortDate(person.addedMs))")
+                Text("Standard user · added \(timestampText(person.addedMs))")
                     .font(AppFont.note).foregroundStyle(Tokens.muted)
             }
             .frame(maxWidth: .infinity)
@@ -212,7 +247,7 @@ struct UserDetailView: View {
                         if index > 0 { RowSeparator(inset: 58) }
                         tileRow(
                             symbol: "cpu", fill: Tokens.chip, colour: Tokens.ink, title: d.name,
-                            sub: "\(d.kind == "app" ? "App" : "Service user") · added \(shortDate(d.addedMs))")
+                            sub: "\(d.kind == "app" ? "App" : "Service user") · added \(timestampText(d.addedMs))")
                     }
                 }
             }
@@ -220,10 +255,10 @@ struct UserDetailView: View {
         }
     }
 
-    /// "Added 3 Mar 2026 · last used 5 Mar 2026" for a passkey.
+    /// Formats the creation and last-use timestamps for a passkey.
     private func passkeySub(_ key: PasskeyInfo) -> String {
-        let used = key.lastUsedMs.map { shortDate($0) } ?? "never"
-        return "Added \(shortDate(key.createdMs)) · last used \(used)"
+        let used = key.lastUsedMs.map { timestampText($0) } ?? "never"
+        return "Added \(timestampText(key.createdMs)) · last used \(used)"
     }
 
     /// A muted single-line row, for an empty list.

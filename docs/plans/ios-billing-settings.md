@@ -22,4 +22,11 @@ Declare the additive `models` and `observability` answers as 1.1.0, still compat
 - Use the server's gross and net as-is. The difference is promotional credits applied in the period, not the lifetime grant balance. Use `cloudflare.lines` and `ai_gateway.by_gateway[].by_model` for both the chart and the rows. The chart shows reported daily detail, which need not add up to gross when older spend has no attribution or gross includes billing adjustments. Do not spread period totals across days or guess missing gateway detail. Keep source failures, missing detail and no spend distinct.
 - Give each series its own colour within its billing family (BYOK orange, Unified Billing yellow/green, Cloudflare products blue). Keep the supplied palette local to Cost. Show gateway labels and model names, not gateway IDs. Put lifetime grant balances in the Anthropic BYOK cell, sorted by expiry, then name. Use UTC calendar days for expiry warnings and distinguish an empty grant list from a missing one.
 
+## Phase 3 design
+
+- Put one round Back control and the title in the shared pushed header; hide the system bar to avoid a second Back control. Root headers retain their existing layout.
+- Format event timestamps in the device time zone using `Today, HH:mm`, `Yesterday, HH:mm` or `d MMM, HH:mm`. Date-only billing buckets are not event timestamps.
+- Show unset slots in “Needs setting”, followed by the set slots grouped by service. List metadata only. The secure paste sheet writes through the existing passkey-authorised console path, never through MCP, and refreshes the list after confirmation.
+- Retry Users once for a cancelled request while the screen task is still active. Keep the last successful list and its timestamp on failure and offer a Retry pill. Use the legacy list only when the newer tool is unavailable.
+
 Release via `ios-release` at main HEAD; the release service assigns the next build number and submits to TestFlight. Do not submit to App Review or alter approval policy.

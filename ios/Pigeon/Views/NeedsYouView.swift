@@ -497,7 +497,7 @@ struct DecisionCard: View {
             HStack {
                 Chip("Decided for you")
                 Spacer()
-                Text("\(timeAgoText(decision.at)) · \(decision.name)")
+                Text("\(timestampText(decision.at)) · \(decision.name)")
                     .font(AppFont.meta).foregroundStyle(Tokens.muted).lineLimit(1)
             }
             if let chose = decision.chose, !chose.isEmpty {
@@ -588,7 +588,7 @@ struct EntryCard: View {
         if let expires = item.expiresMs {
             clock(timeLeftText(expires), urgent: expires - nowMs() < 15 * 60_000)
         } else if let created = item.createdMs {
-            clock(timeAgoText(created), urgent: false)
+            clock(timestampText(created), urgent: false)
         }
     }
 

@@ -47,15 +47,30 @@ struct ErrorBanner: View {
 struct ScreenHeader: View {
     let title: String
     let trailing: AnyView?
+    let showsBack: Bool
+    @Environment(\.dismiss) private var dismiss
 
-    /// A header reading `title`, with `trailing` at the right of the same row.
-    init(_ title: String, trailing: AnyView? = nil) {
+    /// A title with Back on pushed screens and an optional control on the right.
+    init(_ title: String, trailing: AnyView? = nil, showsBack: Bool = false) {
         self.title = title
         self.trailing = trailing
+        self.showsBack = showsBack
     }
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
+            if showsBack {
+                Button { dismiss() } label: {
+                    Image(systemName: "chevron.backward")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(Tokens.ink)
+                        .frame(width: 44, height: 44)
+                        .background(Circle().fill(Tokens.chip))
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Back")
+            }
             Text(title)
                 .font(AppFont.largeTitle).tracking(-0.4)
                 .foregroundStyle(Tokens.ink)
@@ -102,8 +117,7 @@ struct Screen<Content: View>: View {
     let content: Content
 
     /// A screen with `side` padding at the page edges. With a `title`, the shared header is drawn
-    /// and the system title is hidden; a `root` screen hides the navigation bar, a pushed one
-    /// keeps it for the back button.
+    /// in place of the navigation bar. A `root` screen leaves out the Back control.
     init(
         title: String? = nil, trailing: AnyView? = nil, root: Bool = false,
         errors: [String], side: CGFloat = Metrics.side,
@@ -124,7 +138,7 @@ struct Screen<Content: View>: View {
             DotGrid()
             ScrollView {
                 VStack(alignment: .leading, spacing: Metrics.gap) {
-                    if let title { ScreenHeader(title, trailing: trailing) }
+                    if let title { ScreenHeader(title, trailing: trailing, showsBack: !root) }
                     ForEach(errors, id: \.self) { ErrorBanner(text: $0) }
                     content
                 }
@@ -137,7 +151,7 @@ struct Screen<Content: View>: View {
         }
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar(title != nil && root ? .hidden : .automatic, for: .navigationBar)
+        .toolbar(title != nil ? .hidden : .automatic, for: .navigationBar)
     }
 }
 

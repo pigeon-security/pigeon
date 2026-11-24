@@ -1,4 +1,5 @@
 import AuthenticationServices
+import CryptoKit
 import Foundation
 import UIKit
 
@@ -35,33 +36,70 @@ final class Approver: NSObject, ASAuthorizationControllerDelegate,
         let base = "/console/write/\(action)"
         let begin = try await client.post(
             "\(base)/begin", ["target": target], step: "\(action) begin")
+        let (challengeId, assertion) = try await answer(begin, step: "\(action) begin")
+        let finish = try await client.post(
+            "\(base)/finish",
+            ["target": target, "challenge_id": challengeId, "assertion": assertion],
+            step: "\(action) finish")
+        guard let message = finish["message"] as? String else {
+            throw PlatformError.badResponse("\(action) finish: no message")
+        }
+        return message
+    }
+
+    /// Writes one secret using the console's name-and-digest passkey challenge, not MCP.
+    func putSecret(name: String, value: String) async throws {
+        let value = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { throw PlatformError.badResponse("empty secret") }
+        let digest = Base64URL.encode(Data(SHA256.hash(data: Data(value.utf8))))
+        let session = URLSession(configuration: .ephemeral, delegate: SecretRedirectGuard(), delegateQueue: nil)
+        defer { session.finishTasksAndInvalidate() }
+        let begin = try await secretPost("begin", ["name": name, "digest": digest], session: session)
+        let (challengeId, assertion) = try await answer(begin, step: "secret begin")
+        try Task.checkCancellation()
+        let finish = try await secretPost(
+            "finish",
+            ["name": name, "value": value, "challenge_id": challengeId, "assertion": assertion],
+            session: session)
+        guard finish["message"] is String else {
+            throw PlatformError.badResponse("secret write confirmation")
+        }
+    }
+
+    /// The passkey authenticates the write. Do not send a bearer or report response bodies.
+    private func secretPost(_ step: String, _ body: [String: Any], session: URLSession) async throws
+        -> [String: Any]
+    {
+        var request = URLRequest(url: OAuth.base.appendingPathComponent("secrets/put/\(step)"))
+        request.httpMethod = "POST"
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+            let result = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        else { throw PlatformError.badResponse("secret \(step)") }
+        return result
+    }
+
+    private func answer(_ begin: [String: Any], step: String) async throws -> (String, [String: Any]) {
         guard let challengeId = begin["challenge_id"] as? String,
             let options = begin["options"] as? [String: Any],
             let challengeText = options["challenge"] as? String,
             let challenge = Base64URL.decode(challengeText),
             let rpId = options["rpId"] as? String
-        else { throw PlatformError.badResponse("\(action) begin: no challenge") }
+        else { throw PlatformError.badResponse("\(step): no challenge") }
         let allowText = options["allow"] as? [String] ?? []
         let allow = allowText.compactMap(Base64URL.decode)
         if allow.count != allowText.count {
-            throw PlatformError.badResponse("\(action) begin: a passkey id is not base64url")
+            throw PlatformError.badResponse("\(step): a passkey id is not base64url")
         }
         let credential = try await assert(challenge: challenge, rpId: rpId, allow: allow)
-        let finish = try await client.post(
-            "\(base)/finish",
-            [
-                "target": target, "challenge_id": challengeId,
-                "assertion": [
-                    "id": Base64URL.encode(credential.credentialID),
-                    "clientDataJSON": Base64URL.encode(credential.rawClientDataJSON),
-                    "authenticatorData": Base64URL.encode(credential.rawAuthenticatorData),
-                    "signature": Base64URL.encode(credential.signature),
-                ] as [String: Any],
-            ], step: "\(action) finish")
-        guard let message = finish["message"] as? String else {
-            throw PlatformError.badResponse("\(action) finish: no message")
-        }
-        return message
+        return (challengeId, [
+            "id": Base64URL.encode(credential.credentialID),
+            "clientDataJSON": Base64URL.encode(credential.rawClientDataJSON),
+            "authenticatorData": Base64URL.encode(credential.rawAuthenticatorData),
+            "signature": Base64URL.encode(credential.signature),
+        ])
     }
 
     /// Asks the person for a passkey assertion over `challenge`, from this device or a security key.
@@ -113,7 +151,7 @@ final class Approver: NSObject, ASAuthorizationControllerDelegate,
         controller: ASAuthorizationController, didCompleteWithError error: Error
     ) {
         let ns = error as NSError
-        NSLog("Pigeon passkey: %@ %ld %@", ns.domain, ns.code, ns.userInfo.description)
+        NSLog("Pigeon passkey: %@ %ld", ns.domain, ns.code)
         let failure = PlatformError.server(
             "The passkey step failed: \(ns.localizedDescription) (\(ns.domain) \(ns.code)).")
         MainActor.assumeIsolated {
@@ -127,5 +165,16 @@ final class Approver: NSObject, ASAuthorizationControllerDelegate,
         -> ASPresentationAnchor
     {
         MainActor.assumeIsolated { WebAuth.appWindow() }
+    }
+}
+
+/// Do not forward a secret body to a redirected URL.
+private final class SecretRedirectGuard: NSObject, URLSessionTaskDelegate {
+    func urlSession(
+        _ session: URLSession, task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        completionHandler(nil)
     }
 }
