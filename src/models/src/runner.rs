@@ -32,7 +32,7 @@ pub const INDEX: &str = "index";
 
 /// Each object's schema, one statement per migration, applied in order and never edited. An
 /// index object uses `jobs`; a job object uses `run`.
-const MIGRATIONS: [&str; 9] = [
+const MIGRATIONS: [&str; 10] = [
     "CREATE TABLE jobs (id TEXT PRIMARY KEY, caller TEXT, caller_name TEXT, for_id TEXT, task TEXT, provider TEXT NOT NULL, model TEXT NOT NULL, state TEXT NOT NULL, request TEXT, timeout_ms INTEGER NOT NULL, created_at INTEGER NOT NULL, started_at INTEGER, deadline_at INTEGER, finished_at INTEGER, progress_at INTEGER, progress_chars INTEGER, tokens_in INTEGER, tokens_out INTEGER, stop_reason TEXT, reply_model TEXT, text TEXT, error TEXT, notify_url TEXT, notify_key TEXT, notify_tries INTEGER NOT NULL DEFAULT 0, notify_at INTEGER, read_at INTEGER, expires_at INTEGER NOT NULL)",
     "CREATE TABLE run (id TEXT PRIMARY KEY, request TEXT NOT NULL, started INTEGER NOT NULL DEFAULT 0)",
     "ALTER TABLE jobs ADD COLUMN lane TEXT NOT NULL DEFAULT 'default'",
@@ -42,6 +42,7 @@ const MIGRATIONS: [&str; 9] = [
     "CREATE INDEX jobs_lane_state ON jobs (lane, state)",
     "CREATE TABLE cache_usage (finished_at INTEGER NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, caller TEXT, caller_name TEXT, for_id TEXT, for_name TEXT, task TEXT, cache_read INTEGER NOT NULL, cache_write_5m INTEGER NOT NULL, cache_write_1h INTEGER NOT NULL, cost_micros INTEGER NOT NULL)",
     "ALTER TABLE jobs ADD COLUMN log_id TEXT",
+    "ALTER TABLE jobs ADD COLUMN endpoint TEXT",
 ];
 
 /// The longest piece of a large value kept in one row of `parts`, in bytes.
@@ -115,6 +116,9 @@ pub struct New {
     /// The lane it runs in.
     #[serde(default = "default_lane")]
     pub lane: String,
+    /// The OpenAI endpoint the request goes to, `chat` or `responses`; none for other dialects.
+    #[serde(default)]
+    pub endpoint: Option<String>,
     /// The request itself.
     pub ask: Ask,
 }
@@ -158,6 +162,9 @@ struct Row {
     usage: Option<String>,
     /// The AI Gateway log of the job's request, when the stream opened.
     log_id: Option<String>,
+    /// The OpenAI endpoint the request goes to, `chat` or `responses`; none for other dialects.
+    #[serde(default)]
+    endpoint: Option<String>,
 }
 
 impl Row {
@@ -185,6 +192,7 @@ impl Row {
             "tokens_out": self.tokens_out,
             "stop_reason": self.stop_reason,
             "log_id": self.log_id,
+            "endpoint": self.endpoint,
             "error": self.error,
             "timeout_ms": self.timeout_ms,
             "notify": self.notify_url.is_some(),
@@ -376,7 +384,7 @@ impl ModelJobs {
             &serde_json::to_string(&new.ask)?,
         )?;
         self.db.exec(
-            "INSERT INTO jobs (id, caller, caller_name, for_id, task, provider, model, state, request, timeout_ms, created_at, notify_url, notify_key, expires_at, lane) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', NULL, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO jobs (id, caller, caller_name, for_id, task, provider, model, state, request, timeout_ms, created_at, notify_url, notify_key, expires_at, lane, endpoint) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', NULL, ?, ?, ?, ?, ?, ?, ?)",
             vec![
                 new.id.as_str().into(),
                 opt(new.caller.as_deref()),
@@ -391,6 +399,7 @@ impl ModelJobs {
                 opt(new.notify_key.as_deref()),
                 jobs::expires_at(t, None).into(),
                 new.lane.as_str().into(),
+                opt(new.endpoint.as_deref()),
             ],
         )?;
         self.pump().await?;
@@ -604,6 +613,7 @@ impl ModelJobs {
             "tokens_out": row.tokens_out,
             "usage": parsed(row.usage.clone()),
             "log_id": row.log_id,
+            "endpoint": row.endpoint,
             "error": row.error,
             "kept_until": jobs::expires_at(row.created_at, Some(read_at)),
         }))

@@ -503,6 +503,16 @@ fn translated(dialect: Dialect, body: Value) -> Result<Value> {
     }
 }
 
+/// The OpenAI endpoint a request body goes to, `chat` or `responses`, shown in `models_status`.
+/// Other dialects have none.
+pub fn endpoint_of(dialect: Dialect, body: &Value) -> Option<&'static str> {
+    match (dialect, dialect.path_for(body)) {
+        (Dialect::OpenAi, "responses") => Some("responses"),
+        (Dialect::OpenAi, _) => Some("chat"),
+        _ => None,
+    }
+}
+
 /// `args` in the common shape, for `provider`.
 pub fn ask(args: &Value, provider: &Provider) -> Result<Ask> {
     let messages = match (&args["messages"], args["prompt"].as_str()) {
@@ -1118,6 +1128,7 @@ impl Models {
             notify_url,
             notify_key: notify_key.clone(),
             lane: lane.into(),
+            endpoint: endpoint_of(p.dialect, &body).map(String::from),
             ask: runner::Ask {
                 dialect: p.dialect,
                 provider: p.slug.into(),

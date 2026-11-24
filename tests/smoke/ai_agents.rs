@@ -2712,3 +2712,94 @@ fn ai_agents_kind_in_compare() {
     let kinds: Vec<&Value> = g.iter().map(|x| &x["kind"]).collect();
     assert!(kinds.contains(&&json!("fix")) && kinds.contains(&&Value::Null));
 }
+
+/// Agent turns ask a reasoning effort by role on OpenAI models, so GPT-6 tool turns go to
+/// /responses; Anthropic requests without thinking stay without effort.
+#[test]
+fn ai_agents_role_effort_routes_openai_to_responses() {
+    use pigeon_ai_agents::Role;
+    use pigeon_ai_agents::models::{Defaults, SLOTS, defaults_answer};
+    use pigeon_ai_agents::transcript::{self, Spec};
+    let tools = [json!({
+        "name": "grep", "description": "d",
+        "input_schema": { "type": "object", "properties": {} }
+    })];
+    let messages = [json!({ "role": "user", "content": "go" })];
+    for (role, want) in [
+        (Role::Planner, "high"),
+        (Role::Executor, "medium"),
+        (Role::Mechanical, "low"),
+    ] {
+        let spec = Spec {
+            role,
+            model: "gpt-6.1-terra",
+            system: "rules",
+            tools: &tools,
+        };
+        let req = transcript::request(&spec, &messages);
+        assert_eq!(req["output_config"]["effort"], want);
+        assert!(pigeon_models::openai::wants_responses(&req));
+    }
+    // The last turn carries no effort: it goes to chat completions.
+    let spec = Spec {
+        role: Role::Executor,
+        model: "gpt-6.1-terra",
+        system: "rules",
+        tools: &tools,
+    };
+    let last = transcript::last_turn_request(&spec, &messages);
+    assert!(!pigeon_models::openai::wants_responses(&last));
+    // Anthropic: a Claude without thinking carries none; a thinking Claude's mechanical turn too.
+    for model in ["claude-haiku-5-5", "claude-sonnet-5-5"] {
+        let spec = Spec {
+            role: Role::Mechanical,
+            model,
+            system: "rules",
+            tools: &tools,
+        };
+        assert!(
+            transcript::request(&spec, &messages)
+                .get("output_config")
+                .is_none()
+        );
+    }
+    // The summary asks low on OpenAI only.
+    let s = transcript::summary_request("gpt-6.1-terra", &messages);
+    assert_eq!(s["output_config"]["effort"], "low");
+    assert!(
+        transcript::summary_request("claude-haiku-5-5", &messages)
+            .get("output_config")
+            .is_none()
+    );
+    // ai_agents_models shows each slot's default effort.
+    let a = defaults_answer(&Defaults::default(), &[]);
+    for (slot, want) in SLOTS.iter().zip(["high", "medium", "low", "low"]) {
+        assert_eq!(a["defaults"][slot.name()]["effort"], want);
+    }
+}
+
+/// The job record names the OpenAI endpoint a request goes to.
+#[test]
+fn models_job_endpoint_chat_or_responses() {
+    use pigeon_models::{Dialect, endpoint_of};
+    let tools = json!([{
+        "name": "grep", "description": "d",
+        "input_schema": { "type": "object", "properties": {} }
+    }]);
+    let req = |effort: Option<&str>| {
+        let mut r = json!({
+            "model": "gpt-6.1-terra", "max_tokens": 100, "tools": tools,
+            "messages": [{ "role": "user", "content": "go" }]
+        });
+        if let Some(e) = effort {
+            r["output_config"] = json!({ "effort": e });
+        }
+        pigeon_models::openai::request(&r).unwrap()
+    };
+    assert_eq!(
+        endpoint_of(Dialect::OpenAi, &req(Some("medium"))),
+        Some("responses")
+    );
+    assert_eq!(endpoint_of(Dialect::OpenAi, &req(None)), Some("chat"));
+    assert_eq!(endpoint_of(Dialect::Anthropic, &json!({})), None);
+}

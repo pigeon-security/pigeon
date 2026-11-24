@@ -32,9 +32,12 @@ pub fn effort(role: Role) -> Option<&'static str> {
     match role {
         Role::Planner => Some("high"),
         Role::Executor => Some("medium"),
-        Role::Mechanical => None,
+        Role::Mechanical => Some("low"),
     }
 }
+
+/// The thinking effort of the compaction summary.
+pub const SUMMARY_EFFORT: &str = "low";
 
 /// Tells whether the model supports adaptive thinking: true only for Claude models that do.
 pub fn thinks(model: &str) -> bool {
@@ -78,8 +81,13 @@ pub fn request(spec: &Spec, messages: &[Value]) -> Value {
     if thinking {
         body.insert("thinking".to_string(), json!({"type": "adaptive"}));
     }
-    if (thinking || !spec.model.starts_with("claude-"))
+    // A thinking Claude keeps its planner and executor effort only, so mechanical Anthropic
+    // requests stay as they were. Other models get it when their capability row takes one.
+    let claude = spec.model.starts_with("claude-");
+    if (thinking || !claude)
         && let Some(e) = effort(spec.role)
+        && (!claude || spec.role != Role::Mechanical)
+        && (claude || pigeon_models::capabilities::of(spec.model).effort)
     {
         body.insert("output_config".to_string(), json!({"effort": e}));
     }
@@ -350,14 +358,25 @@ fn render_messages(older: &[Value]) -> String {
 ///
 /// The request has no thinking and no tools, and allows 4096 output tokens.
 pub fn summary_request(model: &str, older: &[Value]) -> Value {
-    json!({
+    let mut body = json!({
         "model": model,
         "max_tokens": 4096,
         "system": SUMMARY_SYSTEM,
         "messages": [
             {"role": "user", "content": render_messages(older)}
         ],
-    })
+    });
+    // Only a non-Claude model whose row takes an effort; Anthropic bytes stay as they were.
+    if !model.starts_with("claude-")
+        && pigeon_models::capabilities::of(model).effort
+        && let Some(obj) = body.as_object_mut()
+    {
+        obj.insert(
+            "output_config".to_string(),
+            json!({"effort": SUMMARY_EFFORT}),
+        );
+    }
+    body
 }
 
 /// Builds the new message list after compaction: the summary, then `kept`.

@@ -1082,7 +1082,7 @@ fn ai_agents_models_merge_and_stored_defaults() {
     let a = defaults_answer(&d, &[]);
     assert_eq!(
         a["defaults"]["executor"],
-        json!({ "model": "cf-openai/gpt-6.2-sol", "route": "credits", "source": "stored" })
+        json!({ "model": "cf-openai/gpt-6.2-sol", "route": "credits", "source": "stored", "effort": "medium" })
     );
     assert_eq!(a["defaults"]["planner"]["source"], "built_in");
     assert_eq!(

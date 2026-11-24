@@ -151,6 +151,16 @@ impl Slot {
         }
     }
 
+    /// The default reasoning effort asked for this slot on models that take one: planner (and
+    /// its kinds) high, executor medium, mechanical and summary low.
+    pub fn effort(self) -> &'static str {
+        match self {
+            Slot::Planner | Slot::Kind(_) => "high",
+            Slot::Executor => "medium",
+            Slot::Mechanical | Slot::Summary => "low",
+        }
+    }
+
     /// The tier its model belongs to: planner top, executor middle, mechanical and summary small.
     pub fn tier(self) -> Tier {
         match self {
@@ -470,6 +480,7 @@ pub fn defaults_answer(d: &Defaults, notes: &[String]) -> Value {
                 "model": choice.text(),
                 "route": route(&choice.provider),
                 "source": if stored { "stored" } else { "built_in" },
+                "effort": slot.effort(),
             }),
         );
     }
