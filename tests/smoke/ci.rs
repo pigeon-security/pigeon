@@ -654,3 +654,126 @@ fn ci_scripts_print_timing_lines() {
     }
     assert!(test.contains("export CARGO_INCREMENTAL=0"));
 }
+
+#[test]
+fn ci_reads_the_pinned_runner_image() {
+    use pigeon_ci::reuse::{base_image, runner_image};
+    let digest = "a".repeat(64);
+    let good = format!(
+        "[[containers]]\nclass_name = \"X\"\n\n[containers.images.base]\nimage = \"reg/base@sha256:{digest}\"\n"
+    );
+    assert_eq!(
+        base_image(&good).as_deref(),
+        Some(format!("reg/base@sha256:{digest}").as_str())
+    );
+    // No digest, a short digest, another key and a missing section all give nothing.
+    for text in [
+        "[[containers]]\n[containers.images.base]\nimage = \"reg/base:latest\"\n".to_string(),
+        "[[containers]]\n[containers.images.base]\nimage = \"reg/base@sha256:abc\"\n".to_string(),
+        format!("[[containers]]\n[containers.images.other]\nimage = \"r@sha256:{digest}\"\n"),
+        "[[containers]]\nclass_name = \"X\"\n".to_string(),
+        "name = \"x\"\n".to_string(),
+        "not toml [".to_string(),
+    ] {
+        assert_eq!(base_image(&text), None, "{text}");
+    }
+    // The repository's own wrangler.toml pins one.
+    assert!(runner_image().is_some_and(|i| i.contains("@sha256:")));
+}
+
+#[test]
+fn ci_reuses_only_the_same_green_job() {
+    use pigeon_ci::reuse::{Candidate, Want, reusable};
+    let sha = "0123456789abcdef0123456789abcdef01234567";
+    let image = "reg/base@sha256:1111111111111111111111111111111111111111111111111111111111111111";
+    let job = |id: &str| Candidate {
+        id: id.into(),
+        repo: "pigeon".into(),
+        commit: sha.into(),
+        name: "test".into(),
+        state: "succeeded".into(),
+        image: Some(image.into()),
+    };
+    let want = Want {
+        repo: "pigeon".into(),
+        commit: sha.into(),
+        name: "test".into(),
+        image: image.into(),
+    };
+    // The first match (the newest) is the one reused.
+    let list = [job("new"), job("old")];
+    assert_eq!(reusable(&list, &want).map(|c| c.id.as_str()), Some("new"));
+    let none = |c: Candidate| assert!(reusable(&[c], &want).is_none());
+    none(Candidate {
+        state: "failed".into(),
+        ..job("x")
+    });
+    none(Candidate {
+        state: "running".into(),
+        ..job("x")
+    });
+    none(Candidate {
+        state: "cancelled".into(),
+        ..job("x")
+    });
+    none(Candidate {
+        commit: "f".repeat(40),
+        ..job("x")
+    });
+    none(Candidate {
+        commit: sha[..12].into(),
+        ..job("x")
+    });
+    none(Candidate {
+        commit: sha.to_uppercase(),
+        ..job("x")
+    });
+    none(Candidate {
+        image: None,
+        ..job("x")
+    });
+    none(Candidate {
+        image: Some("reg/base@sha256:2222".into()),
+        ..job("x")
+    });
+    none(Candidate {
+        name: "deploy".into(),
+        ..job("x")
+    });
+    none(Candidate {
+        repo: "other".into(),
+        ..job("x")
+    });
+    // A want that is not a full lowercase sha, or has no image, reuses nothing.
+    for bad in [sha.to_uppercase(), sha[..12].to_string()] {
+        let w = Want {
+            commit: bad,
+            ..want.clone()
+        };
+        assert!(reusable(&[job("x")], &w).is_none());
+    }
+    let w = Want {
+        image: String::new(),
+        ..want.clone()
+    };
+    assert!(
+        reusable(
+            &[Candidate {
+                image: Some(String::new()),
+                ..job("x")
+            }],
+            &w
+        )
+        .is_none()
+    );
+    // The tool takes `reuse` as a boolean.
+    let ci = pigeon_ci::Ci {
+        settings: pigeon_ci::pigeon::settings(pigeon_ci::Accounts::Parent("P".into())),
+    };
+    let tools = ci.tools();
+    let submit = tools.iter().find(|t| t.name == "ci_submit").unwrap();
+    assert_eq!(
+        submit.input_schema["properties"]["reuse"]["type"],
+        "boolean"
+    );
+}

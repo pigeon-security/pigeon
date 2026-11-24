@@ -129,6 +129,7 @@ dir = "src/ci-gateway"
 paths = [
     "src/ci-gateway/*",
     "src/ci/*",
+    "src/platform/wrangler.toml",
     "ci/runner/entrypoint.sh",
     "ci/runner/buildkite.sh",
     "ci/deploy/deploy-ci-gateway.sh",

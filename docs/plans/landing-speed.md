@@ -111,3 +111,27 @@ Core first when affected is kept.
   the container log, not to the job's own output). Free build wins, by environment variable in
   test.sh and allowlist.sh: `CARGO_INCREMENTAL=0`, `CARGO_PROFILE_DEV_DEBUG=0`, and one
   `cargo fetch --locked` before the timed builds. Same checks and flags otherwise.
+
+- 2026-11-24: phase 1 built.
+  - CI scheduler: migration 16 adds `jobs.image`. When the containers connector dispatches a
+    job, the row records the base image string pinned in `src/platform/wrangler.toml` under
+    `[containers.images.base]`, read at compile time by `reuse::runner_image`. It is recorded
+    only when it has a full `@sha256:<64 hex>` digest. Other connectors record none, and a
+    requeue clears it. `image` shows in `ci_status` and `ci_jobs`.
+  - `ci_submit` takes an optional boolean `reuse`. When true, the job has no `token = true`, and
+    the job is not pinned to another connector, the gateway asks the scheduler for the newest job
+    with `state = succeeded`, the same repo, the same job name, the same full lowercase 40-char
+    commit and an `image` equal to the one recorded now. If one exists, the answer is
+    `{id, state: "succeeded", reused: true}` and no job is created. Otherwise it submits as before.
+    Without `reuse` nothing changes.
+  - "The same image" means the same string, digest included. A row with no image, a different
+    image, or an image of an older base is never reused. Never reused either: a job in any state
+    but `succeeded`, a `token = true` job, another commit (a rebase gives a new sha), another job
+    name, another repo.
+  - The Lander sends `reuse: true` on the `test` dispatch only, never for deploy jobs. On
+    `reused: true` it writes `reused test job <id>` as the landing's detail and keeps the id in
+    `test_job`; `job_ended` then reads the job's real state as before. Cancelling a landing calls
+    `ci_cancel` on that id; a finished job answers "it had already finished" and is left alone,
+    so a reused job is never changed by it.
+  - `ci/workers.toml`: `src/platform/wrangler.toml` is added to the `ci-gateway` paths because it
+    is now compiled into that Worker.

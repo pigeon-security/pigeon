@@ -2696,17 +2696,24 @@ impl Lander {
                             &json!({
                                 "repo": s.repo_name(), "commit": row.commit_sha,
                                 "job": s.test_job, "task": format!("land {} test", row.id),
+                                "reuse": true,
                             }),
                         )
                         .await?;
+                    let reused = job["reused"].as_bool() == Some(true);
                     let job = job["id"]
                         .as_str()
                         .ok_or_else(|| bad("CI answered no job id"))?;
+                    let detail = if reused {
+                        format!("reused test job {job}")
+                    } else {
+                        format!("test job {job} submitted")
+                    };
                     self.db.exec(
                         "UPDATE landings SET test_job = ?, detail = ?, updated_at = ? WHERE id = ? AND state = 'testing'",
                         vec![
                             job.into(),
-                            format!("test job {job} submitted").into(),
+                            detail.into(),
                             now().into(),
                             row.id.as_str().into(),
                         ],

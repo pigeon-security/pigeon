@@ -33,7 +33,7 @@ use super::{
 use pigeon_core::buildkite_setup::{Kind, Owned};
 
 /// The scheduler's schema, one statement per migration, applied in order and never edited.
-const MIGRATIONS: [&str; 15] = [
+const MIGRATIONS: [&str; 16] = [
     "CREATE TABLE jobs (id TEXT PRIMARY KEY, repo TEXT NOT NULL, commit_sha TEXT NOT NULL, name TEXT NOT NULL, job TEXT NOT NULL, class TEXT NOT NULL, pin TEXT, task TEXT, caller TEXT, caller_name TEXT, notify_url TEXT, notify_key TEXT, state TEXT NOT NULL, attempt INTEGER NOT NULL, connector TEXT, handle TEXT, url TEXT, excluded TEXT NOT NULL, token_hash TEXT, token_expires_at INTEGER, deadline_at INTEGER, claimed_at INTEGER, next_poll_at INTEGER, created_at INTEGER NOT NULL, queued_at INTEGER NOT NULL, dispatched_at INTEGER, started_at INTEGER, finished_at INTEGER, detail TEXT)",
     "CREATE INDEX jobs_state ON jobs (state)",
     "CREATE INDEX jobs_commit ON jobs (repo, commit_sha)",
@@ -49,6 +49,7 @@ const MIGRATIONS: [&str; 15] = [
     "CREATE TABLE setup_keys (connector TEXT PRIMARY KEY, key TEXT NOT NULL, created_at INTEGER NOT NULL)",
     "CREATE TABLE setup_runs (connector TEXT PRIMARY KEY, at INTEGER NOT NULL, applied INTEGER NOT NULL, report TEXT NOT NULL)",
     "CREATE TABLE setup_builds (build TEXT PRIMARY KEY, at INTEGER NOT NULL)",
+    "ALTER TABLE jobs ADD COLUMN image TEXT",
 ];
 
 /// How long the pool's availability is trusted.
@@ -115,6 +116,8 @@ struct Row {
     detail: Option<String>,
     exit_code: Option<i64>,
     output: Option<String>,
+    /// The runner image recorded at dispatch; `None` where the connector records none.
+    image: Option<String>,
 }
 
 impl Row {
@@ -153,6 +156,7 @@ impl Row {
             "dispatched_at": self.dispatched_at, "started_at": self.started_at,
             "finished_at": self.finished_at, "deadline_at": self.deadline_at,
             "exit_code": self.exit_code, "duration_ms": self.duration_ms(),
+            "image": self.image,
         })
     }
 }
@@ -526,6 +530,7 @@ impl Scheduler {
                 Ok(json!({ "build": super::BUILD, "reports": reports, "last_applied": last }))
             }
             "setup_key" => Ok(json!(self.held(s("connector"))?.hook_key)),
+            "reusable" => self.reusable(a),
             "jobs" => self.jobs(a),
             "cancel" => self.cancel(s("id")).await,
             "commit" => {
@@ -831,8 +836,12 @@ impl Scheduler {
             match after_dispatch(row.attempt(), connector.name(), result) {
                 Outcome::Dispatched(d) => {
                     let t = now();
+                    // Only the containers connector records its image; others record none.
+                    let image = (connector.name() == super::containers::NAME)
+                        .then(super::reuse::runner_image)
+                        .flatten();
                     self.db.exec(
-                        "UPDATE jobs SET state = 'dispatched', connector = ?, handle = ?, url = ?, token_hash = ?, token_expires_at = ?, deadline_at = ?, dispatched_at = ?, next_poll_at = ?, claimed_at = NULL, class = ? WHERE id = ?",
+                        "UPDATE jobs SET state = 'dispatched', connector = ?, handle = ?, url = ?, token_hash = ?, token_expires_at = ?, deadline_at = ?, dispatched_at = ?, next_poll_at = ?, claimed_at = NULL, class = ?, image = ? WHERE id = ?",
                         vec![
                             connector.name().into(),
                             d.handle.as_str().into(),
@@ -843,6 +852,7 @@ impl Scheduler {
                             t.into(),
                             (t + POLL_MS).into(),
                             pick.class.name().into(),
+                            opt(image.as_deref()),
                             row.id.as_str().into(),
                         ],
                     )?;
@@ -863,7 +873,7 @@ impl Scheduler {
     fn requeue(&self, row: &Row, exclude: &str, why: &str) -> Result<()> {
         let (excluded, said) = retry_away(row.excluded(), exclude, row.pin.as_deref(), why);
         self.db.exec(
-            "UPDATE jobs SET state = 'queued', attempt = attempt + 1, excluded = ?, connector = NULL, handle = NULL, url = NULL, token_hash = NULL, token_expires_at = NULL, deadline_at = NULL, claimed_at = NULL, next_poll_at = NULL, dispatched_at = NULL, started_at = NULL, queued_at = ?, detail = ? WHERE id = ?",
+            "UPDATE jobs SET state = 'queued', attempt = attempt + 1, excluded = ?, connector = NULL, handle = NULL, url = NULL, token_hash = NULL, token_expires_at = NULL, deadline_at = NULL, claimed_at = NULL, next_poll_at = NULL, dispatched_at = NULL, started_at = NULL, image = NULL, queued_at = ?, detail = ? WHERE id = ?",
             vec![
                 serde_json::to_string(&excluded)?.into(),
                 now().into(),
@@ -1317,6 +1327,40 @@ impl Scheduler {
         q.push_str(&format!(" ORDER BY created_at DESC LIMIT {limit}"));
         let rows: Vec<Row> = self.db.rows(&q, args)?;
         Ok(json!({ "jobs": rows.iter().map(Row::public).collect::<Vec<_>>() }))
+    }
+
+    /// The newest job that may stand in for a new one ([`super::reuse::reusable`]), or `{}`.
+    fn reusable(&self, a: &Value) -> Result<Value> {
+        let text = |k: &str| a[k].as_str().unwrap_or_default().to_string();
+        let want = super::reuse::Want {
+            repo: text("repo"),
+            commit: text("commit"),
+            name: text("name"),
+            image: text("image"),
+        };
+        let rows: Vec<Row> = self.db.rows(
+            "SELECT * FROM jobs WHERE repo = ? AND commit_sha = ? AND name = ? AND state = 'succeeded' AND image IS NOT NULL ORDER BY finished_at DESC, created_at DESC LIMIT 50",
+            vec![
+                want.repo.as_str().into(),
+                want.commit.as_str().into(),
+                want.name.as_str().into(),
+            ],
+        )?;
+        let candidates: Vec<super::reuse::Candidate> = rows
+            .iter()
+            .map(|r| super::reuse::Candidate {
+                id: r.id.clone(),
+                repo: r.repo.clone(),
+                commit: r.commit_sha.clone(),
+                name: r.name.clone(),
+                state: r.state.clone(),
+                image: r.image.clone(),
+            })
+            .collect();
+        Ok(match super::reuse::reusable(&candidates, &want) {
+            Some(c) => json!({ "id": c.id }),
+            None => json!({}),
+        })
     }
 
     async fn cancel(&self, id: &str) -> Result<Value> {

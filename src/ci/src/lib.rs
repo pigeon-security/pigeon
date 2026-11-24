@@ -31,6 +31,7 @@ pub mod notes;
 pub mod notify;
 pub mod output;
 pub mod pigeon;
+pub mod reuse;
 pub mod route;
 pub mod scheduler;
 pub mod state;
@@ -753,6 +754,24 @@ impl Ci {
             None => None,
         };
         let job = self.job(cx, repo, &commit, name).await?;
+        // With `reuse`: a green job of the same commit on the same runner image stands in for a
+        // new one. Never for a job that takes the job token, and never when the job is pinned
+        // to a connector that does not record an image.
+        if args["reuse"].as_bool() == Some(true)
+            && !job.token
+            && pin.is_none_or(|p| p == containers::NAME)
+            && let Some(image) = reuse::runner_image()
+        {
+            let found = scheduler(
+                cx.env,
+                "reusable",
+                json!({ "repo": repo, "commit": commit, "name": name, "image": image }),
+            )
+            .await?;
+            if found["id"].is_string() {
+                return Ok(json!({ "id": found["id"], "state": "succeeded", "reused": true }));
+            }
+        }
         let class = class_for(&job.needs).map_err(|e| bad(&e))?;
         // A job nothing could run now is refused at once.
         if let Err(why) = self.route(cx.env, &job.needs, job.timeout_min, pin).await? {
@@ -1050,7 +1069,8 @@ impl Ci {
                         "repo": job["repo"], "commit": job["commit"], "job": job["job"],
                         "connector": job["connector"],
                         "task": { "type": "string", "description": "A short label for what the run is for; 100 characters at most." },
-                        "notify": { "type": "string", "description": "An https URL to POST each state change to, signed." }
+                        "notify": { "type": "string", "description": "An https URL to POST each state change to, signed." },
+                        "reuse": { "type": "boolean", "description": "When true, a succeeded job of the same repo, commit, job name and runner image is answered instead of a new one (`reused: true`). Never for a job that takes the job token." }
                     }
                 }),
             },

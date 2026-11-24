@@ -2894,3 +2894,27 @@ fn land_text_merge_is_diff3_and_never_duplicates() {
 
     assert!(started.elapsed().as_secs() < 5, "{:?}", started.elapsed());
 }
+
+#[test]
+fn land_reuses_a_green_test_for_the_same_commit() {
+    use pigeon_capabilities::land::state::{self, Seen, State};
+    // The test dispatch asks CI to reuse; the deploy dispatch does not.
+    let src = include_str!("../../src/capabilities/src/land.rs");
+    let test_at = src.find("\"job\": s.test_job").unwrap();
+    let test_call = &src[test_at..test_at + 200];
+    assert!(test_call.contains("\"reuse\": true"), "{test_call}");
+    assert_eq!(src.matches("\"reuse\"").count(), 1);
+    // A reused job gets its own words in the landing's detail.
+    assert!(src.contains("format!(\"reused test job {job}\")"));
+    assert!(src.contains("format!(\"test job {job} submitted\")"));
+    // A landing goes on from testing to merging as it does off a new job: the job ended green.
+    let passed = Seen::JobEnded { passed: true };
+    assert_eq!(
+        state::next(State::Testing, false, &passed),
+        Some(State::Ready)
+    );
+    assert_eq!(
+        state::next(State::Ready, false, &Seen::Start),
+        Some(State::Merging)
+    );
+}
