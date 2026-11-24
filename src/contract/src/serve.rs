@@ -89,13 +89,24 @@ pub async fn serve(
         return service.fetch(env, forwarded).await;
     }
     let header = req.headers().get(HEADER)?;
+    let method = req.method().to_string();
+    let agent = trimmed_agent(req.headers().get("User-Agent")?.as_deref());
     let body = req.bytes().await?;
     match run(op, header.as_deref(), &body, env, service, key).await {
         Ok(answer) => reply(&answer, 200),
-        Err(rejection) => reply(
-            &Answer::error(rejection.kind, rejection.message),
-            rejection.status,
-        ),
+        Err(rejection) => {
+            let answer = match rejection.reason {
+                Some(reason) => {
+                    // One line per refusal: who asked and why, never the header itself.
+                    worker::console_error!(
+                        "refused 401 reason={reason} op={op} method={method} route=/{trimmed} user_agent={agent:?}"
+                    );
+                    Answer::refused(reason, rejection.message)
+                }
+                None => Answer::error(rejection.kind, rejection.message),
+            };
+            reply(&answer, rejection.status)
+        }
     }
 }
 
@@ -104,6 +115,8 @@ struct Rejection {
     kind: FailureKind,
     message: String,
     status: u16,
+    /// The machine-readable reason of a refused caller.
+    reason: Option<&'static str>,
 }
 
 impl Rejection {
@@ -112,8 +125,14 @@ impl Rejection {
             kind,
             message: message.into(),
             status,
+            reason: None,
         }
     }
+}
+
+/// The User-Agent cut to 64 characters, or an empty string when there is none.
+fn trimmed_agent(agent: Option<&str>) -> String {
+    agent.unwrap_or("").chars().take(64).collect()
 }
 
 /// Runs every op but `fetch`.
@@ -167,7 +186,10 @@ fn signed_body<T: DeserializeOwned>(
     body: &[u8],
 ) -> Result<(Signed, T), Rejection> {
     let signed = verify(key, header, op, body, now_ms())
-        .map_err(|r| Rejection::new(FailureKind::Unauthorized, r.to_string(), 401))?;
+        .map_err(|r| Rejection {
+            reason: Some(r.reason()),
+            ..Rejection::new(FailureKind::Unauthorized, r.to_string(), 401)
+        })?;
     Ok((signed, parse(body)?))
 }
 

@@ -48,6 +48,20 @@ pub enum Refused {
     FromTheFuture,
 }
 
+impl Refused {
+    /// A short machine-readable reason, safe to log and to send back: it names the failure and
+    /// never carries the header or any part of it.
+    pub fn reason(&self) -> &'static str {
+        match self {
+            Refused::Missing => "missing_authorization",
+            Refused::Malformed => "malformed_authorization",
+            Refused::BadSignature => "token_invalid",
+            Refused::Expired => "token_expired",
+            Refused::FromTheFuture => "token_not_yet_valid",
+        }
+    }
+}
+
 impl fmt::Display for Refused {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {

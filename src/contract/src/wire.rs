@@ -277,6 +277,16 @@ impl Answer {
         Answer::Error(Failure {
             message: message.into(),
             kind,
+            reason: None,
+        })
+    }
+
+    /// An `unauthorized` answer with `message` and a short machine-readable `reason`.
+    pub fn refused(reason: &str, message: impl Into<String>) -> Self {
+        Answer::Error(Failure {
+            message: message.into(),
+            kind: FailureKind::Unauthorized,
+            reason: Some(reason.to_string()),
         })
     }
 }
@@ -290,6 +300,9 @@ pub struct Failure {
     /// The kind of failure.
     #[serde(default)]
     pub kind: FailureKind,
+    /// A short machine-readable reason, such as `missing_authorization`; never a secret.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// The kinds of failure; a kind from a newer peer reads as `Failed`.
