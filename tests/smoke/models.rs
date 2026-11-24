@@ -749,7 +749,7 @@ fn models_anthropic_tool_choice_downgraded() {
         }))
     };
     let forced = json!({ "type": "tool", "name": "f", "disable_parallel_tool_use": true });
-    // Opus takes auto and none only (a guess: see the plan's Log).
+    // Opus 5.5 takes auto and none only (Anthropic's tool use guide).
     let out = req("claude-opus-5-5", forced.clone());
     assert_eq!(
         out["tool_choice"],
@@ -768,11 +768,18 @@ fn models_anthropic_tool_choice_downgraded() {
         req("claude-new-1", json!({ "type": "any" }))["tool_choice"],
         json!({ "type": "auto" })
     );
-    // Sonnet takes every kind.
+    // Sonnet 5.5 refuses forced tool use too; Haiku 5.5, Opus 5 and Sonnet 4.5 take every kind.
     assert_eq!(
         req("claude-sonnet-5-5", forced.clone())["tool_choice"],
-        forced
+        json!({ "type": "auto", "disable_parallel_tool_use": true })
     );
+    for m in [
+        "claude-haiku-5-5",
+        "claude-opus-5",
+        "claude-sonnet-4-5-20250929",
+    ] {
+        assert_eq!(req(m, forced.clone())["tool_choice"], forced);
+    }
     assert_eq!(out["max_tokens"], 1000);
 }
 

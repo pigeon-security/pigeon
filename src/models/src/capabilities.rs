@@ -94,43 +94,72 @@ const CLAUDE_ALL: Capabilities = Capabilities {
     effort_with_tools: true,
     any: true,
     tool: true,
-    max_output: 64_000,
+    max_output: 128_000,
     ..SAFE
 };
 
+/// A Claude row that takes `tool_choice` `auto` and `none` only. Anthropic's tool use guide says
+/// `any` and `tool` return a 400 for these models.
+const CLAUDE_AUTO: Capabilities = Capabilities {
+    any: false,
+    tool: false,
+    ..CLAUDE_ALL
+};
+
 /// An OpenAI row on Chat Completions that takes every `tool_choice` kind and an effort beside
-/// tools.
+/// tools. Every GPT-6 model lists 128,000 as its largest output.
 const OPENAI_ALL: Capabilities = Capabilities {
     effort: true,
     effort_with_tools: true,
     any: true,
     tool: true,
-    max_output: 100_000,
+    max_output: 128_000,
     ..SAFE
 };
 
 /// The table: a family's name, and its row. The first family that matches is used, so a more
-/// specific name goes before a shorter one.
-const TABLE: [(&str, Capabilities); 7] = [
-    // Opus: a guess, the conservative one: only `auto` and `none`.
+/// specific name goes before a shorter one. Checked against Anthropic's models overview and tool
+/// use guide and OpenAI's model pages on 2026-11-24. A Claude model not listed gets [`SAFE`],
+/// because the docs do not say whether it takes forced tool use.
+const TABLE: &[(&str, Capabilities)] = &[
+    // The 5.5 line, Fable and Mythos: the guide lists these as refusing `any` and `tool`.
+    ("claude-opus-5-5", CLAUDE_AUTO),
+    ("claude-sonnet-5-5", CLAUDE_AUTO),
+    ("claude-fable-5", CLAUDE_AUTO),
+    ("claude-mythos-5", CLAUDE_AUTO),
+    // Opus 5 and Haiku 5.5 take forced tool use (the call then skips thinking).
+    ("claude-opus-5", CLAUDE_ALL),
+    ("claude-haiku-5-5", CLAUDE_ALL),
+    // Sonnet 5 is not named in the guide either way: the safe kinds, the 5.x output size.
+    ("claude-sonnet-5", CLAUDE_AUTO),
+    // The 4.5 line: 64,000 output tokens.
     (
-        "claude-opus",
+        "claude-opus-4-5",
         Capabilities {
-            any: false,
-            tool: false,
-            max_output: 128_000,
+            max_output: 64_000,
             ..CLAUDE_ALL
         },
     ),
-    ("claude-sonnet", CLAUDE_ALL),
-    ("claude-haiku", CLAUDE_ALL),
-    // Chat Completions refuses function tools with a reasoning effort for this model (OpenAI's
-    // 400: "Function tools with reasoning_effort are not supported for gpt-6-luna").
+    (
+        "claude-sonnet-4-5",
+        Capabilities {
+            max_output: 64_000,
+            ..CLAUDE_ALL
+        },
+    ),
+    (
+        "claude-haiku-4-5",
+        Capabilities {
+            max_output: 64_000,
+            ..CLAUDE_ALL
+        },
+    ),
+    // OpenAI's page for gpt-6-luna: "Chat Completions supports function calling only with
+    // reasoning_effort set to none." Its 400 says the same.
     (
         "gpt-6-luna",
         Capabilities {
             effort_with_tools: false,
-            max_output: 32_768,
             ..OPENAI_ALL
         },
     ),
