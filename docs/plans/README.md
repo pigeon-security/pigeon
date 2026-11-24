@@ -66,6 +66,12 @@ The person's policy, `.pigeon/policy.toml`, says what agents acting for them may
   session", "in chat"), start a Claude Code session instead with `create_session`. Then:
   - record it with `ai_agents_register`;
   - ask it to call `ai_agents_report` with its run's id as it goes and at its end.
+- **When the person asks for Codex in ChatGPT**, start a native Codex subagent in the
+  ChatGPT conversation. Register it with `ai_agents_register {runtime: "codex_chat",
+  session_id, role, brief}` using the agent's session identifier. Record progress and the
+  final result with `ai_agents_report`. The parent can report for the child when the child
+  lacks the Pigeon connector. Use the authorized source checkout for repository work.
+  Pigeon tracks the run while ChatGPT runs the agent.
 - **Read `ai_agents_inbox`** whenever the person writes, and after starting a run. Relay a run's
   questions and reports. Answer a question with `ai_agents_answer`.
 - **Stop** one run with `ai_agents_stop`, or every run with `ai_agents_pause`.

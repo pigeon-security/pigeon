@@ -902,7 +902,7 @@ impl AiAgentRuns {
         }))
     }
 
-    /// A Claude Code session registered as a run reports how it ended.
+    /// An external session registered as a run reports its progress or outcome.
     fn report(&self, a: &Value) -> Result<Value> {
         let id = a["run"].as_str().unwrap_or_default();
         let reader = a["reader"].as_str().unwrap_or_default();
@@ -910,9 +910,9 @@ impl AiAgentRuns {
             .row(id)?
             .filter(|r| Self::may_read(r, reader))
             .ok_or_else(|| bad(format!("no run {id}, or not yours")))?;
-        if row.runtime != "claude_code" {
+        if !matches!(row.runtime.as_str(), "claude_code" | "codex_chat") {
             return Err(bad(
-                "a gateway run reports by itself; ai_agents_report is for Claude Code sessions",
+                "a gateway run reports by itself; ai_agents_report is for external sessions",
             ));
         }
         let state = match a["state"].as_str() {

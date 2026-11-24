@@ -312,8 +312,18 @@ impl Agents {
             }
             "ai_agents_register" => {
                 let session = a["session_id"].as_str().unwrap_or_default();
-                if !session.starts_with("session_") {
+                let runtime = match a.get("runtime") {
+                    None => "claude_code",
+                    Some(value) => match value.as_str() {
+                        Some(runtime @ ("claude_code" | "codex_chat")) => runtime,
+                        _ => return Err("`runtime` must be claude_code or codex_chat".into()),
+                    },
+                };
+                if runtime == "claude_code" && !session.starts_with("session_") {
                     return Err("`session_id` must be a Claude Code session's id".into());
+                }
+                if runtime == "codex_chat" && session.trim().is_empty() {
+                    return Err("`session_id` must identify the ChatGPT Codex session".into());
                 }
                 let role = match a["role"].as_str().unwrap_or("executor") {
                     r @ ("planner" | "executor" | "mechanical") => r,
@@ -333,7 +343,7 @@ impl Agents {
                     &json!({
                         "run": id,
                         "role": role,
-                        "runtime": "claude_code",
+                        "runtime": runtime,
                         "session_id": session,
                         "parent_run": a["parent_run"],
                         "caller": caller.caller,
@@ -580,14 +590,14 @@ impl Service for Agents {
                     ),
                     tool(
                         "ai_agents_register",
-                        "Record a Claude Code session started for a task (when the person \
-                         asked for the work in the Claude chat) as a run, so it is listed and \
-                         reports like a gateway run. Answers the run's id; tell the session \
-                         to call ai_agents_report with it at its end.",
+                        "Record a Claude Code or ChatGPT Codex session as a Pigeon run. \
+                         The session runs in its own client and reports progress and results \
+                         with ai_agents_report using the returned run id.",
                         json!({
                             "type": "object",
                             "properties": {
                                 "session_id": { "type": "string" },
+                                "runtime": { "type": "string", "enum": ["claude_code", "codex_chat"], "default": "claude_code" },
                                 "role": { "type": "string", "enum": ["planner", "executor", "mechanical"] },
                                 "brief": { "type": "string" },
                                 "branch": { "type": "string" },
@@ -598,7 +608,7 @@ impl Service for Agents {
                     ),
                     tool(
                         "ai_agents_report",
-                        "From a Claude Code session registered with ai_agents_register: where \
+                        "From an external session registered with ai_agents_register: where \
                          it is (`running`, with a `step`) or how it ended (`done` or \
                          `failed`, with a `report`: what changed, the branch and its tip, \
                          CI, any landing).",
@@ -705,7 +715,7 @@ impl Service for Agents {
                     id: SECTION.into(),
                     title: "AI Agents".into(),
                     description: "Planner and executor runs, through the model gateway or in \
-                                  your Claude chat, and what they wait for from you."
+                                  external sessions, and what they wait for from you."
                         .into(),
                     order: 50,
                     cost: None,

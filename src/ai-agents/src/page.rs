@@ -72,7 +72,7 @@ pub fn section(data: &Value) -> String {
         out.push_str("<div class=\"card\"><h3>Waiting for you</h3><ul>");
         for r in waiting {
             out.push_str(&format!(
-                "<li><code>{}</code> {}. Answer in your Claude chat, or with \
+                "<li><code>{}</code> {}. Answer in your chat, or with \
                  <code>ai_agents_answer</code>.</li>",
                 text(&r["run"]),
                 waits_for(&r["waiting"])
@@ -100,8 +100,8 @@ pub fn section(data: &Value) -> String {
     }
     if runs.is_empty() {
         out.push_str(
-            "<p class=\"muted\">No runs yet. Your Claude chat starts them with \
-             <code>ai_agents_start</code>, unless you ask for the work to be done in the chat.</p>",
+            "<p class=\"muted\">No runs yet. Start a gateway run with \
+             <code>ai_agents_start</code> or register a chat session with <code>ai_agents_register</code>.</p>",
         );
         return out;
     }
@@ -121,10 +121,10 @@ pub fn section(data: &Value) -> String {
             r["spent"]["cost"].as_str().unwrap_or("$0"),
             r["spent"]["turns"].as_u64().unwrap_or(0)
         );
-        let where_ = if r["runtime"] == "claude_code" {
-            "Claude chat"
-        } else {
-            "gateway"
+        let where_ = match r["runtime"].as_str() {
+            Some("claude_code") => "Claude chat",
+            Some("codex_chat") => "ChatGPT Codex",
+            _ => "gateway",
         };
         let now = if r["state"] == "done" || r["state"] == "failed" {
             r["report"]
