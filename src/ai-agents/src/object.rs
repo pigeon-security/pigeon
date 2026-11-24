@@ -17,6 +17,7 @@ use serde_json::{Value, json};
 use worker::{Env, Error, Request, Response, Result, SqlStorageValue, State as ObjectState};
 
 use crate::budget::{self, Budget, Next, Over, Spent};
+use crate::limits::{self, StoredLimits};
 use crate::models::{self, ChildModels, Choice, Defaults, Slot};
 use crate::run::{self, Action, Call, Job, Recovery, State, View, Wait};
 use crate::tools::{self, Kind};
@@ -32,14 +33,8 @@ pub const CALLER_KEY: &str = "CALLER_KEY";
 /// The service binding to core.
 pub const PLATFORM: &str = "PLATFORM";
 
-/// How many gateway runs may be live at once (preparing, running or waiting), of every role
-/// together: the one ceiling on runs and so on sandboxes, one per run. There is no per-role cap;
-/// a planner's executors are bounded by its `executors` budget, and `ai_agents_pause` and
-/// `ai_agents_stop` stay the kill switch.
-pub const MAX_LIVE: u32 = 32;
-/// How many live slots a planner may not take: planners start only while more than this many
-/// are free, so executors always have room and a planner never waits forever on its own.
-pub const EXECUTOR_RESERVE: u32 = 8;
+// The caps on live runs (`max_live_runs`, `max_executors_per_planner`, `executor_reserve`) are
+// stored config: see `crate::limits`. `ai_agents_pause` and `ai_agents_stop` stay the kill switch.
 /// How many runs may wait, queued, beyond the live ones.
 pub const MAX_QUEUED: u32 = 20;
 
@@ -85,17 +80,7 @@ fn opt_i(v: Option<i64>) -> SqlStorageValue {
     v.map_or(SqlStorageValue::Null, Into::into)
 }
 
-/// Whether a queued run of `role` may take a live slot while `live` runs of every role are
-/// live; `oldest` is whether it is the oldest queued run of its role (planners queue among
-/// planners, executors of either kind among themselves). An executor needs a slot under
-/// [`MAX_LIVE`]; a planner also leaves [`EXECUTOR_RESERVE`] of them free.
-pub fn may_start(role: Role, live: u32, oldest: bool) -> bool {
-    let cap = match role {
-        Role::Planner => MAX_LIVE.saturating_sub(EXECUTOR_RESERVE),
-        Role::Executor | Role::Mechanical => MAX_LIVE,
-    };
-    oldest && live < cap
-}
+pub use crate::limits::{Limits, may_start, queue_reason};
 
 /// Calls `op` on object `name`.
 pub async fn call(env: &Env, name: &str, op: &str, args: &Value) -> Result<Value> {
@@ -448,6 +433,7 @@ impl AiAgentRuns {
             "list" => self.list(a),
             "estimate" => self.estimate(a),
             "models" => self.models_op(a),
+            "config" => self.config_op(a),
             "compare" => self.compare(a),
             "section" => Ok(json!({
                 "paused": self.flag("paused")?,
@@ -634,6 +620,44 @@ impl AiAgentRuns {
             vec![k.into(), if on { "1" } else { "0" }.into()],
         )?;
         Ok(json!({ k: on }))
+    }
+
+    /// The stored concurrency settings (one `flags` row each); unreadable ones read as unset.
+    fn stored_limits(&self) -> Result<StoredLimits> {
+        #[derive(Deserialize)]
+        struct F {
+            v: String,
+        }
+        let get = |k: &str| -> Result<Option<u32>> {
+            Ok(self
+                .db
+                .row::<F>("SELECT v FROM flags WHERE k = ?", vec![k.into()])?
+                .and_then(|f| f.v.parse().ok()))
+        };
+        Ok(StoredLimits {
+            max_live: get("max_live_runs")?,
+            per_planner: get("max_executors_per_planner")?,
+            reserve: get("executor_reserve")?,
+        })
+    }
+
+    /// `ai_agents_config`: checks and stores the settings given in `set`, answers all of them.
+    fn config_op(&self, a: &Value) -> Result<Value> {
+        let stored = self.stored_limits()?;
+        let next = limits::check_config(&a["set"], &stored).map_err(bad)?;
+        for (k, v) in [
+            ("max_live_runs", next.max_live),
+            ("max_executors_per_planner", next.per_planner),
+            ("executor_reserve", next.reserve),
+        ] {
+            if let Some(v) = v.filter(|_| next != stored) {
+                self.db.exec(
+                    "INSERT INTO flags (k, v) VALUES (?, ?) ON CONFLICT (k) DO UPDATE SET v = excluded.v",
+                    vec![k.into(), v.to_string().into()],
+                )?;
+            }
+        }
+        Ok(next.answer())
     }
 
     /// The stored model defaults (`models.defaults` in `flags`); none stored reads as empty.
@@ -994,9 +1018,24 @@ impl AiAgentRuns {
         Ok(Value::Null)
     }
 
-    /// Whether run `id` may take a live slot now: it already holds one, or it is the oldest
-    /// queued run of its role, there is room under [`MAX_LIVE`] ([`may_start`]) and the runs are
-    /// not paused.
+    /// The live executors (preparing, running or waiting) that planner `planner` has.
+    fn live_executors_of(&self, planner: &str) -> Result<u32> {
+        #[derive(Deserialize)]
+        struct N {
+            n: i64,
+        }
+        let n: Option<N> = self.db.row(
+            "SELECT COUNT(*) AS n FROM runs WHERE runtime = 'gateway' AND parent_run = ? AND role IN ('executor', 'mechanical') AND state IN ('preparing', 'running', 'waiting')",
+            vec![planner.into()],
+        )?;
+        Ok(n.map_or(0, |n| n.n.max(0) as u32))
+    }
+
+    /// Whether run `id` may take a live slot now: it already holds one, or [`may_start`] lets it
+    /// (live cap, planner reserve, its planner's executor cap, not paused) and no older queued run
+    /// of its kind that its own planner's cap allows is ahead of it. A run that may not start
+    /// stays `queued`, with the reason ([`queue_reason`]) in its `step`; the reason is cleared
+    /// when it starts.
     fn slot(&self, id: &str) -> Result<Value> {
         let Some(row) = self.row(id)? else {
             return Ok(json!({ "ok": false, "why": "no such run" }));
@@ -1004,10 +1043,14 @@ impl AiAgentRuns {
         if row.state != "queued" {
             return Ok(json!({ "ok": true }));
         }
-        if self.flag("paused")? {
-            return Ok(json!({ "ok": false, "why": "every run is paused" }));
-        }
+        let limits = self.stored_limits()?.limits();
+        let paused = self.flag("paused")?;
         let planner = row.role == "planner";
+        let role = if planner {
+            Role::Planner
+        } else {
+            Role::Executor
+        };
         let roles = if planner {
             "('planner')"
         } else {
@@ -1017,30 +1060,50 @@ impl AiAgentRuns {
             "('preparing', 'running', 'waiting')",
             "('planner', 'executor', 'mechanical')",
         )?;
-        // The oldest queued run of the role goes first.
+        let own = match (&row.parent_run, planner) {
+            (Some(p), false) => self.live_executors_of(p)?,
+            _ => 0,
+        };
+        // The oldest queued run of the kind that its own planner's cap lets start goes first.
         #[derive(Deserialize)]
-        struct First {
+        struct Queued {
             id: String,
+            parent_run: Option<String>,
         }
-        let first: Option<First> = self.db.row(
+        let queued: Vec<Queued> = self.db.rows(
             &format!(
-                "SELECT id FROM runs WHERE runtime = 'gateway' AND state = 'queued' AND role IN {roles} ORDER BY created_at, id LIMIT 1"
+                "SELECT id, parent_run FROM runs WHERE runtime = 'gateway' AND state = 'queued' AND role IN {roles} ORDER BY created_at, id LIMIT 100"
             ),
             vec![],
         )?;
-        let role = if planner {
-            Role::Planner
-        } else {
-            Role::Executor
-        };
-        let ok = may_start(role, live, first.is_some_and(|f| f.id == id));
-        if ok {
-            self.db.exec(
-                "UPDATE runs SET state = 'preparing' WHERE id = ? AND state = 'queued'",
-                vec![id.into()],
-            )?;
+        let mut first = None;
+        for q in &queued {
+            let blocked = match (&q.parent_run, planner) {
+                (Some(p), false) => self.live_executors_of(p)? >= limits.per_planner,
+                _ => false,
+            };
+            if !blocked {
+                first = Some(q.id.as_str());
+                break;
+            }
         }
-        Ok(json!({ "ok": ok, "why": if ok { "" } else { "waiting for a free slot" } }))
+        let oldest = first == Some(id);
+        let why = queue_reason(role, live, own, &limits, paused, oldest);
+        match &why {
+            None => {
+                self.db.exec(
+                    "UPDATE runs SET state = 'preparing', step = NULL WHERE id = ? AND state = 'queued'",
+                    vec![id.into()],
+                )?;
+            }
+            Some(why) => {
+                self.db.exec(
+                    "UPDATE runs SET step = ? WHERE id = ? AND state = 'queued'",
+                    vec![why.as_str().into(), id.into()],
+                )?;
+            }
+        }
+        Ok(json!({ "ok": why.is_none(), "why": why.unwrap_or_default() }))
     }
 
     /// Asks run `run` (or every live run, with `all`) to stop; a planner's executors stop too.

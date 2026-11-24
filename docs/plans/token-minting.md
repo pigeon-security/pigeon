@@ -183,3 +183,4 @@ ai-agents and can run beside phase 1).
 - **2026-11-24, this plan.** Inventory written; phases 1 to 4 planned.
 - **2026-11-24, phase 1.** Added `tokens::minted`, `tokens::name`, `TokenApi`, `sweep_plan` and `sweep`;
   `scoped_token_revocable` uses the shared `WORKER_NAME_PREFIX`; the platform cron sweeps every fifth minute; `core_token_*` smoke scenarios.
+- **2026-11-25, phase 4 (planner concurrency).** Stored caps `max_live_runs` (8), `max_executors_per_planner` (3) and `executor_reserve` (3) replace `MAX_LIVE` and `EXECUTOR_RESERVE`; `ai_agents_config` reads and sets them; queued runs show the reason in `step`.

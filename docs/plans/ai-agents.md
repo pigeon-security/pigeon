@@ -307,20 +307,20 @@ deploys as for any session. A run waits on `land_status` like a session does.
 - The price table is only for enforcement. The Cost tab and `models_usage` read the gateway's own
   cost, as today.
 
-**Concurrency** (constants, one place each; changed 2026-11-22, see the Log):
-- live runs: **one ceiling of 32 over every role** (`MAX_LIVE` in `src/ai-agents/src/object.rs`).
-  There is no per-role cap. A planner starts only while more than `EXECUTOR_RESERVE` (8) slots are
-  free, so at most 24 planners are live and executors always have room: a planner never waits
-  forever for its own executors. Executors (either kind) may use every slot.
-- sandboxes: one per live run, so the same 32. Nothing else caps them (Cloudflare does not, under
-  `scheduling_policy = "durable_object"`); cost and the model gateway are the real limits.
-- executors: each planner's `executors` budget (12 by default, 30 at most), carved from its own
-  cost, turn and wall budgets.
-- model turns: the `ai-agents` lane, 16. A run spends most of its time in tools, CI and its
-  sandbox, so 16 turns at once serve 32 live runs; a turn beyond them waits queued in the lane
-  (the run polls, and its wall budget keeps counting). The gateway's 50 open jobs (`MAX_OPEN`)
-  still leave room beside 32 runs, one turn each.
-- queued runs: 20 at most (`MAX_QUEUED`); more starts are refused.
+**Concurrency** (stored config in the index, set with `ai_agents_config`; changed 2026-11-25, see
+`docs/plans/token-minting.md` decision 7):
+- live runs: **`max_live_runs` over every role, default 8** (`src/ai-agents/src/limits.rs`). A
+  planner starts only while live runs are fewer than `max_live_runs - executor_reserve` (default
+  reserve 3), so executors always have room. The reserve is clamped below `max_live_runs`, so one
+  planner can always start.
+- executors: at most `max_executors_per_planner` (default 3) live per planner, and each planner's
+  `executors` budget (12 by default, 30 at most) bounds how many it starts in all. An executor
+  beyond the cap is queued, not refused; it does not block other planners' executors.
+- sandboxes: one per live run. Cost and the model gateway are the real limits.
+- model turns: the `ai-agents` lane, 16; a turn beyond them waits queued in the lane (the run
+  polls, and its wall budget keeps counting).
+- queued runs: 20 at most (`MAX_QUEUED`); more starts are refused. A queued run says why it
+  waits in its `step` (`ai_agents_status`), for example "queued: 8 of 8 live runs (max_live_runs)".
 
 More runs wait `queued` in the `index` object, oldest first within their role (planners among
 planners, executors among executors). The kill switch (`ai_agents_pause`, `ai_agents_stop`) is

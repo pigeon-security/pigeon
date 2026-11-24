@@ -20,7 +20,7 @@ pub const NAME: &str = "ai-agents";
 pub const WORKER: &str = "pigeon-ai-agents";
 
 /// Every tool the capability offers.
-pub const TOOLS: [&str; 16] = [
+pub const TOOLS: [&str; 17] = [
     "ai_agents_start",
     "ai_agents_estimate",
     "ai_agents_status",
@@ -36,6 +36,7 @@ pub const TOOLS: [&str; 16] = [
     "ai_agents_handoff",
     "ai_agents_setup",
     "ai_agents_models",
+    "ai_agents_config",
     "ai_agents_compare",
 ];
 
@@ -394,6 +395,10 @@ impl Agents {
                 }
                 r(object::call(env, INDEX, "models", &json!({ "set": set })).await)
             }
+            "ai_agents_config" => {
+                let set = a.as_object().filter(|o| !o.is_empty()).map(|_| a.clone());
+                r(object::call(env, INDEX, "config", &json!({ "set": set })).await)
+            }
             "ai_agents_compare" => {
                 let days = crate::compare::days_arg(&a["days"])?;
                 let role = crate::compare::role_arg(&a["role"])?;
@@ -648,6 +653,24 @@ impl Service for Agents {
                                         "summary": { "type": "string" }
                                     }
                                 }
+                            }
+                        }),
+                    ),
+                    tool(
+                        "ai_agents_config",
+                        "Show the concurrency caps, and set them. With no arguments, answers \
+                         max_live_runs (live runs of every role, default 8, 1 to 64), \
+                         max_executors_per_planner (default 3, 1 to 16) and executor_reserve \
+                         (slots planners leave to executors, default 3, 0 up to max_live_runs - 1), \
+                         with `is_default` saying which are not stored. With arguments, the ones \
+                         given are checked and stored. A run beyond a cap stays queued, with the \
+                         reason in its `step` in ai_agents_status, and starts as slots free.",
+                        json!({
+                            "type": "object",
+                            "properties": {
+                                "max_live_runs": { "type": "integer", "description": "1 to 64." },
+                                "max_executors_per_planner": { "type": "integer", "description": "1 to 16." },
+                                "executor_reserve": { "type": "integer", "description": "0 up to max_live_runs - 1." }
                             }
                         }),
                     ),

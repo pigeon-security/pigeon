@@ -693,82 +693,6 @@ fn ai_agents_loop_budgets_tools_and_turns() {
 
     // ---- the Worker side's pure parts ----
     use pigeon_ai_agents::{object, prompts, sandbox, service};
-    // Live slots (docs/plans/ai-agents.md, decision 4): one ceiling over every role, no per-role
-    // planner cap, executors always keep a reserve, and each role starts oldest first.
-    {
-        use pigeon_ai_agents::Role;
-        let planner_cap = object::MAX_LIVE - object::EXECUTOR_RESERVE;
-        assert!(planner_cap > 2 && object::MAX_LIVE >= 32);
-        // Not the oldest of its role: waits, whatever the room.
-        assert!(!object::may_start(Role::Planner, 0, false));
-        assert!(!object::may_start(Role::Executor, 0, false));
-        // The index's admission, as `slot` runs it: queued runs, in created order, each taking a
-        // slot when it is the oldest queued of its role and `may_start` lets it.
-        let admit = |queue: &mut Vec<(Role, u32)>, live: &mut Vec<(Role, u32)>| {
-            loop {
-                let next = queue.iter().position(|(role, _)| {
-                    let oldest = queue
-                        .iter()
-                        .find(|(r, _)| (*r == Role::Planner) == (*role == Role::Planner))
-                        .map(|(_, n)| *n);
-                    let me = queue.iter().find(|(r, _)| r == role).map(|(_, n)| *n);
-                    object::may_start(*role, live.len() as u32, oldest == me)
-                });
-                match next {
-                    Some(i) => live.push(queue.remove(i)),
-                    None => break,
-                }
-            }
-        };
-        // Five planners queued at once all start: no more waiting behind two.
-        let mut live = vec![];
-        let mut queue: Vec<(Role, u32)> = (0..5).map(|n| (Role::Planner, n)).collect();
-        admit(&mut queue, &mut live);
-        assert_eq!(live.len(), 5);
-        assert!(queue.is_empty());
-        // Many more planners: they fill up to the ceiling less the reserve, oldest first.
-        let mut queue: Vec<(Role, u32)> = (5..40).map(|n| (Role::Planner, n)).collect();
-        admit(&mut queue, &mut live);
-        assert_eq!(live.len() as u32, planner_cap);
-        assert_eq!(
-            live.iter().map(|(_, n)| *n).collect::<Vec<_>>(),
-            (0..planner_cap).collect::<Vec<_>>()
-        );
-        assert_eq!(queue.first(), Some(&(Role::Planner, planner_cap)));
-        // Their executors still start, in the reserve, oldest first, up to the ceiling.
-        queue.extend((100..120).map(|n| {
-            (
-                if n % 2 == 0 {
-                    Role::Executor
-                } else {
-                    Role::Mechanical
-                },
-                n,
-            )
-        }));
-        admit(&mut queue, &mut live);
-        assert_eq!(live.len() as u32, object::MAX_LIVE);
-        let started: Vec<u32> = live[planner_cap as usize..]
-            .iter()
-            .map(|(_, n)| *n)
-            .collect();
-        assert_eq!(
-            started,
-            (100..100 + object::EXECUTOR_RESERVE).collect::<Vec<_>>()
-        );
-        // At the ceiling nothing starts.
-        assert!(!object::may_start(Role::Executor, object::MAX_LIVE, true));
-        assert!(!object::may_start(Role::Planner, planner_cap, true));
-        // A run ends: the oldest queued executor takes its place, not a planner (no room for one
-        // while the reserve is in use).
-        live.retain(|(_, n)| *n != 3);
-        admit(&mut queue, &mut live);
-        assert_eq!(
-            live.last(),
-            Some(&(Role::Executor, 100 + object::EXECUTOR_RESERVE))
-        );
-        assert_eq!(queue.first(), Some(&(Role::Planner, planner_cap)));
-    }
     // A passkey wait, read from dispatch's own words.
     let refusal = "`deploy_token` needs the person's passkey for this call: approval `aP3x_9-k` waits on the console's Approvals tab until 14:32 UTC. Once approved, call `deploy_token` again with the same arguments and \"approval\": \"aP3x_9-k\"; `approvals_status` says where it stands.";
     assert_eq!(object::approval_id(refusal).as_deref(), Some("aP3x_9-k"));
@@ -1814,4 +1738,141 @@ fn ai_agents_event_notes_and_wait_events() {
     assert!(ok(json!({ "minutes": 0 })).is_err());
     assert!(ok(json!({ "minutes": 121 })).is_err());
     assert!(ok(json!({ "minutes": "5" })).is_err());
+}
+
+/// `may_start` over a table: the live cap, the planner reserve, the per-planner executor cap,
+/// and another planner's executors not being blocked.
+#[test]
+fn ai_agents_may_start_table() {
+    use pigeon_ai_agents::Role::{Executor, Mechanical, Planner};
+    use pigeon_ai_agents::object::{Limits, may_start};
+    let l = Limits::default();
+    assert_eq!((l.max_live, l.per_planner, l.reserve), (8, 3, 3));
+    // (role, live, own live executors, oldest, may start)
+    let table = [
+        (Planner, 0, 0, true, true),
+        (Planner, 4, 0, true, true),
+        // Planners stop at max_live - reserve = 5.
+        (Planner, 5, 0, true, false),
+        (Executor, 5, 0, true, true),
+        (Executor, 7, 0, true, true),
+        // The live cap.
+        (Executor, 8, 0, true, false),
+        (Mechanical, 8, 0, true, false),
+        (Planner, 8, 0, true, false),
+        // The per-planner cap: 3 live executors of its own planner block it.
+        (Executor, 4, 3, true, false),
+        (Mechanical, 4, 3, true, false),
+        (Executor, 4, 2, true, true),
+        // Another planner's executor, with room under its own cap, is not blocked by that.
+        (Executor, 4, 0, true, true),
+        // Not the oldest allowed: waits whatever the room.
+        (Planner, 0, 0, false, false),
+        (Executor, 0, 0, false, false),
+    ];
+    for (role, live, own, oldest, want) in table {
+        assert_eq!(
+            may_start(role, live, own, &l, oldest),
+            want,
+            "{role:?} live {live} own {own} oldest {oldest}"
+        );
+    }
+    // A reserve is clamped so that one planner can always start.
+    let one = Limits {
+        max_live: 1,
+        per_planner: 1,
+        reserve: 0,
+    };
+    assert!(may_start(Planner, 0, 0, &one, true));
+}
+
+/// The stored caps: defaults, bounds, clamping and the refusal text.
+#[test]
+fn ai_agents_config_defaults_and_bounds() {
+    use pigeon_ai_agents::limits::{StoredLimits, check_config};
+    let none = StoredLimits::default();
+    let a = none.answer();
+    assert_eq!(a["max_live_runs"], 8);
+    assert_eq!(a["max_executors_per_planner"], 3);
+    assert_eq!(a["executor_reserve"], 3);
+    assert_eq!(a["is_default"]["max_live_runs"], true);
+    // No arguments change nothing.
+    assert_eq!(check_config(&json!(null), &none).unwrap(), none);
+    // Setting some marks them stored.
+    let s = check_config(
+        &json!({ "max_live_runs": 12, "executor_reserve": 11 }),
+        &none,
+    )
+    .unwrap();
+    let a = s.answer();
+    assert_eq!(
+        (a["max_live_runs"].as_u64(), a["executor_reserve"].as_u64()),
+        (Some(12), Some(11))
+    );
+    assert_eq!(a["is_default"]["max_live_runs"], false);
+    assert_eq!(a["is_default"]["max_executors_per_planner"], true);
+    // Bounds.
+    for bad in [
+        json!({ "max_live_runs": 0 }),
+        json!({ "max_live_runs": 65 }),
+        json!({ "max_live_runs": "8" }),
+        json!({ "max_executors_per_planner": 0 }),
+        json!({ "max_executors_per_planner": 17 }),
+        json!({ "executor_reserve": 8 }),
+        json!({ "max_live_runs": 4, "executor_reserve": 4 }),
+        json!({ "colour": 1 }),
+    ] {
+        assert!(check_config(&bad, &none).is_err(), "{bad}");
+    }
+    let e = check_config(&json!({ "max_live_runs": 65 }), &none).unwrap_err();
+    assert_eq!(e, "`max_live_runs` must be from 1 to 64, not 65");
+    let e = check_config(&json!({ "executor_reserve": 8 }), &none).unwrap_err();
+    assert!(
+        e.contains("from 0 to 7") && e.contains("max_live_runs"),
+        "{e}"
+    );
+    assert!(
+        check_config(
+            &json!({ "max_live_runs": 64, "max_executors_per_planner": 16, "executor_reserve": 0 }),
+            &none
+        )
+        .is_ok()
+    );
+    // A stored reserve too big for a smaller max_live reads clamped, so a planner can start.
+    let s = StoredLimits {
+        max_live: Some(2),
+        reserve: Some(9),
+        ..none
+    };
+    assert_eq!(s.limits().reserve, 1);
+}
+
+/// The reasons shown in `ai_agents_status` for a queued run.
+#[test]
+fn ai_agents_queue_reasons() {
+    use pigeon_ai_agents::Role::{Executor, Planner};
+    use pigeon_ai_agents::object::{Limits, queue_reason};
+    let l = Limits::default();
+    let why = |role, live, own, paused, oldest| queue_reason(role, live, own, &l, paused, oldest);
+    assert_eq!(
+        why(Executor, 8, 0, false, true).unwrap(),
+        "queued: 8 of 8 live runs (max_live_runs)"
+    );
+    assert_eq!(
+        why(Executor, 4, 3, false, true).unwrap(),
+        "queued: this planner already has 3 live executors (max_executors_per_planner)"
+    );
+    assert_eq!(
+        why(Planner, 5, 0, false, true).unwrap(),
+        "queued: planners leave 3 slots for executors (executor_reserve)"
+    );
+    assert_eq!(
+        why(Planner, 0, 0, true, true).unwrap(),
+        "queued: runs are paused"
+    );
+    assert_eq!(
+        why(Executor, 0, 0, false, false).unwrap(),
+        "queued: older queued runs go first"
+    );
+    assert_eq!(why(Executor, 0, 0, false, true), None);
 }
