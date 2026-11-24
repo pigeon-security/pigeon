@@ -190,6 +190,7 @@ A choice is `provider/model`, and the provider names its route:
   `openai/…` is refused with "OpenAI is paid with Cloudflare credits: use cf-openai/…". A stored
   default `openai/…` reads as unset, so the built-in default applies, and `ai_agents_models`
   says so. Pigeon never moves a choice from one payer to another by itself.
+  (Superseded for the BYOK route only: `openai/…` on the person's own key is declared, latent, in model-providers.md Part 4, decision 4. The ai-agents choice refusal above is unchanged.)
 - Fallback stays within the choice's provider, and so within its route. A credits run never
   falls back to BYOK, and the reverse.
 - In the model gateway, a `Provider` gains `name` (the choice's provider), `gateway` and `route`

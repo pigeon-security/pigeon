@@ -810,3 +810,91 @@ fn models_anthropic_replay_drops_trailing_thinking() {
     assert_eq!(m[3], user);
     assert_eq!(m[4]["content"], json!([think, text]));
 }
+
+/// `openai/…` on the person's own key (docs/plans/model-providers.md, Part 4, decision 4): the
+/// provider and its gateway are declared, it is not ready without its key and never falls back,
+/// `cf-openai` is unchanged, and the tiers and prices match `cf-openai`.
+#[test]
+fn models_openai_byok_latent() {
+    use pigeon_ai_agents::models::{Tier, tier_model};
+    use pigeon_core::ai_gateway::{GatewayKind, ProviderConfig, byok_ready, secret_name, spec};
+    use pigeon_core::model_prices::price;
+    // The declaration is in the wasm-only Worker crate: read it as text.
+    let src = include_str!("../../src/model-gateway/src/lib.rs");
+    assert!(src.contains("const OPENAI_GATEWAY: &str = \"pigeon-openai\";"));
+    let start = src.find("name: \"openai\"").expect("openai is declared");
+    let block = &src[start..start + src[start..].find("},").unwrap()];
+    for needle in [
+        "gateway: OPENAI_GATEWAY",
+        "route: Route::Byok",
+        "slug: \"openai\"",
+        "alias: \"default\"",
+        "dialect: Dialect::OpenAi",
+        "ids: ModelIds::Plain",
+        "default_model: \"gpt-6.2-sol\"",
+    ] {
+        assert!(block.contains(needle), "{needle}");
+    }
+    let gw = "id: OPENAI_GATEWAY.into(),\n                    kind: GatewayKind::Byok";
+    assert!(src.contains(gw));
+    // cf-openai is as it was.
+    let cf = &src[src.find("name: \"cf-openai\"").unwrap()..];
+    let cf = &cf[..cf.find("},").unwrap()];
+    for needle in [
+        "gateway: CREDITS_GATEWAY",
+        "route: Route::Credits",
+        "default_model: \"gpt-6.2-sol\"",
+    ] {
+        assert!(cf.contains(needle), "{needle}");
+    }
+    assert_eq!(tier_model("openai", Tier::Top), None);
+    // The gateway spec only takes stored keys, and has no credits fallback.
+    let g = spec("pigeon-openai", "store", GatewayKind::Byok);
+    assert_eq!(g["byok_only"], true);
+    assert_eq!(g["authentication"], true);
+    // The slot's name is the usual one, and it is named, without a secret, when it is not set.
+    let slot = secret_name("pigeon-openai", "openai", "default");
+    assert_eq!(slot, "pigeon-openai_openai_default");
+    let config = |slug: &str| ProviderConfig {
+        id: "i".into(),
+        provider_slug: slug.into(),
+        alias: "default".into(),
+        default_config: true,
+        secret_id: None,
+        secret_preview: None,
+        last_used_at: None,
+        modified_at: None,
+    };
+    let strict = json!({ "byok_only": true });
+    let e = byok_ready(Some(&strict), &[], "pigeon-openai", "openai").unwrap_err();
+    assert!(e.contains(&format!("set {slot} on the Access tab")), "{e}");
+    let e = byok_ready(
+        Some(&strict),
+        &[config("anthropic")],
+        "pigeon-openai",
+        "openai",
+    );
+    assert!(e.is_err());
+    // With a key handed to the gateway (a fake one), it is ready.
+    assert!(
+        byok_ready(
+            Some(&strict),
+            &[config("openai")],
+            "pigeon-openai",
+            "openai"
+        )
+        .is_ok()
+    );
+    // A gateway that does not require stored keys is not ready: no fall back to credits.
+    let open = json!({ "byok_only": false });
+    assert!(byok_ready(Some(&open), &[config("openai")], "pigeon-openai", "openai").is_err());
+    // Tiers and prices: the same models as cf-openai, priced alike.
+    for tier in [Tier::Top, Tier::Middle, Tier::Small] {
+        let m = tier_model("cf-openai", tier).unwrap();
+        assert_eq!(
+            price(&format!("openai/{m}")),
+            price(&format!("cf-openai/{m}"))
+        );
+        assert_ne!(price(m), price("claude-fable-5-2"), "{m} has its own price");
+    }
+}

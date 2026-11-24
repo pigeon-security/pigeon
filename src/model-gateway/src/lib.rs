@@ -31,6 +31,10 @@ const WORKER: &str = "pigeon-model-gateway";
 const BYOK_GATEWAY: &str = "pigeon-anthropic";
 /// The credits gateway: `cf-anthropic` and `cf-openai` go through it. It never holds a key.
 const CREDITS_GATEWAY: &str = "pigeon-cloudflare";
+/// The OpenAI BYOK gateway: `openai` goes through it, on the person's own OpenAI key. It is
+/// `byok_only`, so a missing key never falls back to credits. Its key slot is
+/// `pigeon-openai_openai_default`.
+const OPENAI_GATEWAY: &str = "pigeon-openai";
 /// The retired gateway: no provider routes to it. Its logs are still read, as BYOK, under the
 /// log's own provider.
 const RETIRED_GATEWAY: &str = "pigeon";
@@ -42,7 +46,7 @@ const HOST: &str = "platform.pigeon.dev";
 /// The proxies' hostname, as core's settings name it.
 const PROXY_HOST: &str = "proxy.pigeon.dev";
 
-/// The models capability as this platform declares it: three gateways, three providers.
+/// The models capability as this platform declares it: four gateways, five providers.
 fn gateway() -> ModelGateway {
     ModelGateway {
         models: Models {
@@ -54,6 +58,10 @@ fn gateway() -> ModelGateway {
                 Gateway {
                     id: CREDITS_GATEWAY.into(),
                     kind: GatewayKind::Credits,
+                },
+                Gateway {
+                    id: OPENAI_GATEWAY.into(),
+                    kind: GatewayKind::Byok,
                 },
                 Gateway {
                     id: RETIRED_GATEWAY.into(),
@@ -112,6 +120,21 @@ fn gateway() -> ModelGateway {
                     ids: ModelIds::WorkersAi,
                     default_model: "@cf/zai-org/glm-5.3",
                     key_help: "",
+                    billing: None,
+                },
+                // OpenAI on the person's own key, through `pigeon-openai`. Latent until its key
+                // slot `pigeon-openai_openai_default` is set (docs/plans/model-providers.md,
+                // Part 4, decision 4). Tiers mirror `cf-openai`.
+                Provider {
+                    name: "openai",
+                    gateway: OPENAI_GATEWAY,
+                    route: Route::Byok,
+                    slug: "openai",
+                    alias: "default",
+                    dialect: Dialect::OpenAi,
+                    ids: ModelIds::Plain,
+                    default_model: "gpt-6.2-sol",
+                    key_help: "An OpenAI API Platform key, from the OpenAI dashboard's API keys page.",
                     billing: None,
                 },
             ],
