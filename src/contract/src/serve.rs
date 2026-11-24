@@ -185,11 +185,10 @@ fn signed_body<T: DeserializeOwned>(
     op: &str,
     body: &[u8],
 ) -> Result<(Signed, T), Rejection> {
-    let signed = verify(key, header, op, body, now_ms())
-        .map_err(|r| Rejection {
-            reason: Some(r.reason()),
-            ..Rejection::new(FailureKind::Unauthorized, r.to_string(), 401)
-        })?;
+    let signed = verify(key, header, op, body, now_ms()).map_err(|r| Rejection {
+        reason: Some(r.reason()),
+        ..Rejection::new(FailureKind::Unauthorized, r.to_string(), 401)
+    })?;
     Ok((signed, parse(body)?))
 }
 

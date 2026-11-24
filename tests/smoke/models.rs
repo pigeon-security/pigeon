@@ -898,3 +898,40 @@ fn models_openai_byok_latent() {
         assert_ne!(price(m), price("claude-fable-5-2"), "{m} has its own price");
     }
 }
+
+/// The model gateway refuses a call with no caller or a bad one with 401 and a short reason
+/// (`missing_authorization`, `token_invalid`, ...), and the answer never holds the header.
+#[test]
+fn model_gateway_refusal_names_reason() {
+    use pigeon_contract::{Answer, FailureKind, Refused, sign, verify};
+    let (key, body, now) = (&b"caller key"[..], &b"{}"[..], 1_800_000_000_000);
+    let secret_header = sign(b"another key", &json!(null), "call", body, now, "n");
+    let body_of = |refused: Refused| {
+        serde_json::to_string(&Answer::refused(refused.reason(), refused.to_string())).unwrap()
+    };
+
+    let missing = verify(key, None, "call", body, now).unwrap_err();
+    assert_eq!(missing.reason(), "missing_authorization");
+    let missing_body = body_of(missing);
+    assert!(missing_body.contains("\"reason\":\"missing_authorization\""));
+    assert!(missing_body.contains("\"kind\":\"unauthorized\""));
+
+    let bad = verify(key, Some(&secret_header), "call", body, now).unwrap_err();
+    assert_eq!(bad.reason(), "token_invalid");
+    let bad_body = body_of(bad);
+    assert!(bad_body.contains("\"reason\":\"token_invalid\""));
+    let (first, tag) = secret_header.split_once('.').unwrap();
+    for piece in [secret_header.as_str(), first, tag] {
+        assert!(!bad_body.contains(piece) && !missing_body.contains(piece));
+    }
+
+    let malformed = verify(key, Some("no dot"), "call", body, now).unwrap_err();
+    assert_eq!(malformed.reason(), "malformed_authorization");
+    let own = sign(key, &json!(null), "call", body, now, "n");
+    let expired = verify(key, Some(&own), "call", body, now + 61_000).unwrap_err();
+    assert_eq!(expired.reason(), "token_expired");
+    assert!(matches!(
+        Answer::refused("x", "y"),
+        Answer::Error(f) if f.kind == FailureKind::Unauthorized
+    ));
+}

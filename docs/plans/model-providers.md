@@ -394,3 +394,50 @@ they share `src/models`.
 - 2026-11-25: phase 14 (B) (same executor). `src/models/src/capabilities.rs` is the one table; `NO_EFFORT_WITH_TOOLS` and `openai::effort_with_tools` are gone. `openai::request` reads tools, effort, `tool_choice` kinds, endpoint and max output from it; the new `anthropic::request` (called by `models_submit`) downgrades `tool`/`any` to `auto` (keeping `disable_parallel_tool_use`), drops an unsupported `none`, cuts `max_tokens`, and drops trailing thinking blocks of assistant messages (and messages left empty). The transcript already repaired trailing thinking before it stores a message (`repair_message`), so `transcript.rs` is unchanged. Guesses (conservative): `claude-opus` takes `auto` and `none` only, `claude-sonnet` and `claude-haiku` take all four; max output 128000 for opus, 64000 for sonnet/haiku, 32768 for luna, 100000 for other gpt-6 rows, 16384 for the safe row; gpt-6.2-astra/sol and gpt-6.1-terra take effort beside tools, all four choices. Workers AI models and unknown names get the safe row, so they send no `reasoning_effort` (before, it was sent when asked). No row uses the Responses endpoint yet; `openai::request` refuses a model whose row says `responses`. Smoke: `models_capability_table_openai_rows`, `models_anthropic_tool_choice_downgraded`, `models_anthropic_replay_drops_trailing_thinking`.
 - 2026-11-24: phase 14 table checked against the public docs (planner run `S4EpbKvZpBLe`). Anthropic's tool use guide says Claude Opus 5.5, Sonnet 5.5, Fable 5.x and Mythos 5.x return a 400 for `tool_choice` `any` and `tool`; Opus 5 and Haiku 5.5 take them. So the earlier row "all Sonnet takes every kind" was wrong and is now `auto` and `none` only. Largest output: 128,000 for every 5.x Claude model and for all four GPT-6 models, 64,000 for the 4.5 line. The table now lists models by version, and a Claude model not listed gets the safe row. `gpt-6-luna`: "Chat Completions supports function calling only with reasoning_effort set to none" (confirmed). Not checked: whether Opus 4.6 to 4.8 take forced tool use (they get the safe row).
 - 2026-11-25: phase 16 (D). `openai/…` on the person's own key is declared and latent. `pigeon-model-gateway` declares the BYOK gateway `pigeon-openai` (`byok_only` on, like every BYOK gateway spec) and the provider `openai` (slug `openai`, OpenAI dialect, `ModelIds::Plain`, default `gpt-6.2-sol`) with key slot `pigeon-openai_openai_default`. Until the key is handed to the gateway, `openai/…` is refused by the usual BYOK readiness check ("… holds no key for openai: set `pigeon-openai_openai_default` on the Access tab, then run models_setup"), and `models_providers` shows `openai` not ready with that reason; nothing falls back to credits or another provider. `cf-openai` is unchanged, and `openai/…` ids price as `cf-openai/…` ids (the price table strips the prefix). Nothing was created or called live. Not done: the AI agents choice layer (`ai_agents_models`, `Choice::parse`) still refuses `openai/…` and keeps its tiers for `cf-openai` only, so stored defaults do not change; `openai` is reached through `models_run`/`models_submit` with `provider: "openai"`. TODO: no capability row says Responses yet, so `openai` has no Responses wiring. Smoke: `models_openai_byok_latent`. To turn it on, the person: (1) sets `pigeon-openai_openai_default` with their passkey on the Access tab; (2) runs `models_setup`, which creates `pigeon-openai` and hands it the key; then `openai/gpt-6.2-sol` works.
+
+### Model gateway 401s
+
+Phase 15 (C), found from code only. No live service was called.
+
+**How the gateway answers 401.** `pigeon-model-gateway` has no public URL (`workers_dev = false`,
+no routes) and no `Authorization` header. Core reaches it over a service binding and signs each
+`call`, `section` and `secret` request with `X-Pigeon-Caller` (`pigeon_contract::serve`). A
+refused caller gets HTTP 401. `manifest`, `events` and `fetch` carry no caller and never answer
+401. So a CORS preflight, a favicon probe or a health ping cannot reach it, and none is let
+through without auth.
+
+**Callers.**
+- Core's `Remote` (`src/capabilities/src/remote.rs`): `call`, `section`, `secret`, and
+  `call_owned`. It signs with the shared `CALLER_KEY` just before each send, so the signature is
+  fresh. This is the only caller of the gateway.
+- The AI agents Worker, the proxy and the CI code reach core, not the gateway. The model job
+  objects live in the gateway and ask core (`PLATFORM`) for a credential: a refusal there is
+  core's 401, not the gateway's.
+- `ci/deploy/deploy-model-gateway.sh` only deploys.
+
+**What could produce the 401s.** Each is a bad signature (`token_invalid`), an old one
+(`token_expired`), or one dated ahead of the gateway's clock (`token_not_yet_valid`):
+a `CALLER_KEY` that differs between core and the gateway (a rotation or a half-finished
+`workers_setup`), a signature older than 60 seconds when it arrives (a stalled send), or a
+request body changed after signing. I found no code path that sends no header on `call`.
+Another source is not the gateway's own answer: the Cloudflare AI Gateway's 401 (code 2009,
+a refused token) is handled in the job runner by asking core for a new token
+(`models_gateway_refused_token_retried`). It may be counted with the Worker's 401s in a
+dashboard, since the gateway makes that subrequest.
+
+**What changed.** A refused caller's answer now has `error.reason`, one of
+`missing_authorization`, `malformed_authorization`, `token_invalid`, `token_expired`,
+`token_not_yet_valid`. Each refusal also logs one `console_error` line:
+`refused 401 reason=… op=… method=… route=… user_agent=…` (User-Agent cut to 64 characters). The
+header, its parts and key ids are never put in either. The status stays 401. The change is in
+`pigeon_contract::serve`, so every capability Worker has it. Smoke:
+`model_gateway_refusal_names_reason`.
+
+**Not determined from code.** Which of the causes above is the real one, and how many of the 737
+are the AI Gateway's own 401. No caller was changed, since none was found wrong.
+
+**What to look for in logs.** Search the gateway's logs for `refused 401`. Count by `reason`:
+mostly `token_invalid` points at key mismatch; `token_expired` at slow sends or clock skew;
+`missing_authorization` at something calling a signed op with no header. Check `op` and
+`user_agent` (empty for service-binding calls). If there are no such lines, the 401s are the AI
+Gateway's.
