@@ -53,10 +53,11 @@ pub const NAME: &str = "models";
 
 /// The versions the model gateway declares: the `models` capability.
 pub fn versions() -> Vec<pigeon_core::versions::Component> {
-    vec![pigeon_core::versions::Component::began(
-        NAME,
-        pigeon_core::versions::Kind::Capability,
-    )]
+    vec![
+        pigeon_core::versions::Component::began(NAME, pigeon_core::versions::Kind::Capability)
+            .entry("1.1.0", "Report per-gateway log spend by model and day.")
+            .serving(&["1.1.0", "1.0.0"]),
+    ]
 }
 
 /// The model gateway Worker's script name.
@@ -1699,7 +1700,7 @@ impl Models {
             Tool {
                 name: "models_daily",
                 description: "Read-only. The AI gateway's cost per UTC day over the last `days` \
-                              days, by model family by actual model per gateway, and by AI agent run, from its logs.",
+                              days, by model family, by actual model per gateway, and by AI agent run, from its logs.",
                 input_schema: json!({
                     "type": "object",
                     "properties": {

@@ -836,7 +836,8 @@ fn models_openai_byok_latent() {
     use pigeon_core::model_prices::price;
     // The declaration is in the wasm-only Worker crate: read it as text.
     let src = include_str!("../../src/model-gateway/src/lib.rs");
-    assert!(src.contains("const OPENAI_GATEWAY: &str = \"pigeon-openai\";"));
+    use pigeon_models::platform_gateways::{GATEWAYS, OPENAI_GATEWAY};
+    assert_eq!(OPENAI_GATEWAY, "pigeon-openai");
     let start = src.find("name: \"openai\"").expect("openai is declared");
     let block = &src[start..start + src[start..].find("},").unwrap()];
     for needle in [
@@ -850,8 +851,11 @@ fn models_openai_byok_latent() {
     ] {
         assert!(block.contains(needle), "{needle}");
     }
-    let gw = "id: OPENAI_GATEWAY.into(),\n                    kind: GatewayKind::Byok";
-    assert!(src.contains(gw));
+    assert!(
+        GATEWAYS
+            .iter()
+            .any(|g| g.id == OPENAI_GATEWAY && g.kind == GatewayKind::Byok)
+    );
     // cf-openai is as it was.
     let cf = &src[src.find("name: \"cf-openai\"").unwrap()..];
     let cf = &cf[..cf.find("},").unwrap()];

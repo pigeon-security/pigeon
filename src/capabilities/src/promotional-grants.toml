@@ -1,4 +1,5 @@
-# Public promotional grants only. Do not add purchased credits or private identifiers.
+# Subscription-included promotional API grants only. Never record purchased Cloudflare,
+# Anthropic or OpenAI credits, account identifiers, keys or invoice IDs.
 # Each [[grants]] entry has name, amount_cents, expiry (a quoted UTC date), and
 # applications = [{ day = "YYYY-MM-DD", amount_cents = ... }]. Amounts are USD cents.
 grants = []

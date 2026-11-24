@@ -2240,7 +2240,7 @@ fn platform_cost_daily_gateway_models() {
     assert_eq!(
         get(&weekly, "pigeon-openai"),
         json!({
-            "id": "pigeon-openai", "billing": "byok", "provider": "openai", "label": "OpenAI BYOK",
+            "id": "pigeon-openai", "billing": "byok", "provider": "openai", "label": "Models via OpenAI BYOK",
             "total": 0.0, "by_day": {}, "by_model": [],
         })
     );
@@ -2376,7 +2376,7 @@ fn platform_cost_daily_promotional_grants() {
             answer["credits"]["grants"],
             json!([
                 {"name": "Test promotion", "amount": 10.0, "used": 2.75, "remaining": 7.25, "expiry": "2026-03-31"},
-                {"name": "Expired test promotion", "amount": 1.0, "used": 0.0, "remaining": 1.0, "expiry": "2026-01-02"},
+                {"name": "Expired test promotion", "amount": 1.0, "used": 0.0, "remaining": 0.0, "expiry": "2026-01-02"},
             ])
         );
         apply_promotional_grants(&mut answer, &config.replace("2026-03-04", "2026-02-30"));

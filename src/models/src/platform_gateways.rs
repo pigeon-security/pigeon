@@ -46,24 +46,24 @@ pub const GATEWAYS: &[Declaration] = &[
         id: BYOK_GATEWAY,
         kind: GatewayKind::Byok,
         provider: "anthropic",
-        label: "Anthropic BYOK",
+        label: "Models via Anthropic BYOK",
     },
     Declaration {
         id: CREDITS_GATEWAY,
         kind: GatewayKind::Credits,
         provider: "cloudflare",
-        label: "Cloudflare Unified Billing",
+        label: "Models via Unified Billing",
     },
     Declaration {
         id: OPENAI_GATEWAY,
         kind: GatewayKind::Byok,
         provider: "openai",
-        label: "OpenAI BYOK",
+        label: "Models via OpenAI BYOK",
     },
     Declaration {
         id: "pigeon",
         kind: GatewayKind::Retired,
         provider: "other",
-        label: "Legacy BYOK",
+        label: "Models via legacy BYOK",
     },
 ];

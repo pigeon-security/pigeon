@@ -673,7 +673,7 @@ fn promotional_summary(config: &str, days: &BTreeSet<&str>) -> Option<(Vec<Value
         let mut used = 0_u64;
         let mut lifetime = 0_u64;
         for app in grant.applications {
-            if !valid_day(&app.day) {
+            if !valid_day(&app.day) || app.day > grant.expiry {
                 return None;
             }
             lifetime = lifetime.checked_add(app.amount_cents)?;
@@ -691,7 +691,7 @@ fn promotional_summary(config: &str, days: &BTreeSet<&str>) -> Option<(Vec<Value
             "name": grant.name,
             "amount": usd(grant.amount_cents),
             "used": usd(used),
-            "remaining": usd(grant.amount_cents - used),
+            "remaining": if grant.expiry.as_str() < today { 0.0 } else { usd(grant.amount_cents - used) },
             "expiry": grant.expiry,
         }));
     }
@@ -928,7 +928,11 @@ pub fn assemble(
     };
     let by_gateway: Vec<_> = GATEWAYS
         .iter()
-        .map(|g| gateway_entry(g, &days, &merged))
+        .filter_map(|g| {
+            let entry = gateway_entry(g, &days, &merged);
+            (g.kind != pigeon_core::ai_gateway::GatewayKind::Retired || num(&entry["total"]) != 0.0)
+                .then_some(entry)
+        })
         .collect();
     let mut answer = json!({
         "range": match range { "today" | "all" => range, _ => "7d" },

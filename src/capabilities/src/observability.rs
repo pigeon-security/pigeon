@@ -730,7 +730,7 @@ impl Capability for Observability {
             Tool {
                 name: "cost_daily",
                 description: "Read-only. Daily cost buckets in US dollars: Cloudflare lines and AI \
-                              gateway cost by model and role; `range` is today, 7d or all.",
+                              gateway cost by gateway, model and role; promotional grants and net cost. `range` is today, 7d or all.",
                 input_schema: json!({
                     "type": "object",
                     "properties": { "range": { "type": "string", "enum": ["today", "7d", "all"], "description": "7d by default." } }
