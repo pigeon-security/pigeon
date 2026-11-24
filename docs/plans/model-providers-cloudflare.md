@@ -1,7 +1,7 @@
 # Model providers, Part 3: models paid with Cloudflare credits
 
 Status: **Option B** (the person, 2026-11-24): three gateways, each with one payer. Phases 1 to 4
-landed under the earlier design; phases 8 to 10 rework them for option B (planner run
+landed under the earlier design; phases 8, 6 and 9 rework them for option B (planner run
 `flYJq203hPLb`). Follows [model-providers.md](model-providers.md) (Parts 1 and 2).
 
 ## Goal
