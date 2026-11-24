@@ -1311,7 +1311,10 @@ fn core_token_ledger_a_nearly_expired_lease_mints_anew() {
     let next = token_lease(&ledger, &api, &keys, TOKEN_NOW_MS + 781_000).unwrap();
     assert!(next.id != first.id);
     assert_eq!(token_mints(&api), 2);
-    assert_eq!(*api.deleted.borrow(), [first.id.clone()]);
+    assert_eq!(
+        api.deleted.borrow().as_slice(),
+        std::slice::from_ref(&first.id)
+    );
     assert_eq!(ledger.rows().len(), 1);
     assert!(ledger.holds(&next.id) && !ledger.holds(&first.id));
 }
