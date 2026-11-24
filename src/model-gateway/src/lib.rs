@@ -1,6 +1,6 @@
 //! pigeon-model-gateway: the models Worker (docs/plans/workers-split.md, phase 3). It serves
 //! the models capability ([`pigeon_models::ModelGateway`]): requests to model providers
-//! through one Cloudflare AI Gateway, their usage, and async model jobs, whose Durable Object
+//! through Cloudflare AI Gateways, their usage, and async model jobs, whose Durable Object
 //! class ([`ModelJobs`]) it hosts: the class moved here from pigeon-platform with
 //! `transferred_classes`, its objects and their rows with it (docs/plans/workers-split.md, T18).
 //! A capability Worker: it has no public surface, and answers only core over a Service Binding,
@@ -31,9 +31,11 @@ const WORKER: &str = "pigeon-model-gateway";
 const AI_GATEWAY: &str = "pigeon";
 /// The BYOK gateway for Anthropic keys.
 const BYOK_GATEWAY: &str = "pigeon-anthropic";
-/// When `pigeon` starts to bill credits; its logs before then were paid with stored keys. Far in
-/// the future until the person has made the switch.
-pub const CREDITS_SINCE: &str = "9999-12-31T00:00:00Z";
+/// When `pigeon` starts to bill credits; its logs before then were paid with stored keys. Set by
+/// phase 4 (step C), a little after its deploy, so that Anthropic turns still in flight on the
+/// old key count as BYOK. Credits cannot flow before the person's step D anyway: the credits
+/// guard refuses while `pigeon` holds a key.
+pub const CREDITS_SINCE: &str = "2026-11-24T01:45:00Z";
 
 /// The Secrets Store binding of the key core signs callers with.
 const CALLER_KEY: &str = "CALLER_KEY";
@@ -57,12 +59,12 @@ fn gateway() -> ModelGateway {
                 },
             ],
             providers: vec![
-                // The anthropic provider moves to `pigeon-anthropic` only after the person sets
-                // that gateway's key slot (docs/plans/model-providers-cloudflare.md, decision 3).
-                // Until then it stays on `pigeon` with its stored key, as before.
+                // Anthropic BYOK goes through `pigeon-anthropic` and its key slot
+                // `pigeon-anthropic_anthropic_default` (docs/plans/model-providers-cloudflare.md,
+                // decision 3, step C). The old slot on `pigeon` is no longer declared.
                 Provider {
                     name: "anthropic",
-                    gateway: AI_GATEWAY,
+                    gateway: BYOK_GATEWAY,
                     route: Route::Byok,
                     slug: "anthropic",
                     alias: "default",
@@ -94,7 +96,7 @@ fn gateway() -> ModelGateway {
                     billing: None,
                 },
             ],
-            staged: vec![(BYOK_GATEWAY, "anthropic", "default")],
+            staged: Vec::new(),
             credits_since: CREDITS_SINCE.into(),
             secrets_page: format!("https://{HOST}/access#credentials"),
             host: HOST.into(),
