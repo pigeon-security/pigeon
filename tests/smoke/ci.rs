@@ -777,3 +777,46 @@ fn ci_reuses_only_the_same_green_job() {
         "boolean"
     );
 }
+
+#[test]
+fn ci_warm_image_cache_is_latent_and_keyed_by_cargo_lock() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let read =
+        |p: &str| std::fs::read_to_string(root.join(p)).unwrap_or_else(|e| panic!("{p}: {e}"));
+    let (docker, warm) = (read("ci/image/Dockerfile"), read("ci/runner/warm.sh"));
+    let (test, allow) = (read("ci/runner/test.sh"), read("ci/deploy/allowlist.sh"));
+    // Both scripts source the helper; the image writes the key it checks.
+    assert!(test.contains("ci/runner/warm.sh") && test.contains("warm_target"));
+    assert!(allow.contains("ci/runner/warm.sh") && allow.contains("warm_target"));
+    assert!(docker.contains("/opt/pigeon-target/WARM_KEY"));
+    // The key rule is the same in the image and the helper: Cargo.lock's hash, then rustc's.
+    for text in [&docker, &warm] {
+        assert!(
+            text.contains("sha256sum") && text.contains("Cargo.lock") && text.contains("rustc -Vv")
+        );
+    }
+    assert!(
+        warm.contains("using the image's dependency cache") && warm.contains("[warm] cold build")
+    );
+    assert!(warm.contains("[timing] warm"));
+    // The deploy build's hash is printed.
+    assert!(allow.contains("artifact sha256"));
+    // Without the image's directory the helper reports a cold build, changes nothing and exits 0.
+    let out = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(". \"$1\"; warm_target .; echo \"target=${CARGO_TARGET_DIR:-unset}\"")
+        .arg("sh")
+        .arg(root.join("ci/runner/warm.sh"))
+        .current_dir(std::env::temp_dir())
+        .env(
+            "PIGEON_WARM_DIR",
+            std::env::temp_dir().join("pigeon-no-such-warm-dir"),
+        )
+        .env_remove("CARGO_TARGET_DIR")
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{said}");
+    assert!(said.contains("[warm] cold build"), "{said}");
+    assert!(said.contains("target=unset"), "{said}");
+}

@@ -24,6 +24,9 @@ lap() {
 export CARGO_INCREMENTAL=0
 export CARGO_PROFILE_DEV_DEBUG=0
 root=$(cd "$(dirname "$0")/../.." && pwd)
+# The image's warm dependency cache, when its key matches this Cargo.lock; else a cold build.
+. "$root/ci/runner/warm.sh"
+warm_target "$root"
 platform=$root/${PIGEON_WORKER_DIR:-src/platform}
 toml=$platform/wrangler.toml
 work=$(mktemp -d)
@@ -61,6 +64,7 @@ sh -c "$command"
 lap build
 awk '/^\[build/{p=1;next} /^\[/{p=0} !p' "$toml" > "$built"
 (cd build && find . -type f | LC_ALL=C sort | xargs sha256sum | sha256sum) > "$builtsum"
+printf 'artifact sha256 %s\n' "$(cut -d' ' -f1 "$builtsum")"
 
 port=$((20000 + $$ % 20000))
 for mode in existing fresh; do

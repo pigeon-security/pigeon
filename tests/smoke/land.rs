@@ -2918,3 +2918,207 @@ fn land_reuses_a_green_test_for_the_same_commit() {
         Some(State::Merging)
     );
 }
+
+/// land (deploy scope): the map `ci/workers.toml` is checked against Cargo. For each Worker the
+/// test derives the crates it builds, the files compiled in from outside their crates, its
+/// wrangler.toml, assets and deploy script, and asserts the map's patterns (the Lander's own
+/// `matches`) own every one of them. Every crate directory under `src/` must also be named.
+#[test]
+fn land_scope_map_matches_the_cargo_graph() {
+    use pigeon_core::lanes::{self, matches};
+    use std::collections::BTreeSet;
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let map = lanes::parse(include_str!("../../ci/workers.toml")).unwrap();
+    let read = |p: &Path| std::fs::read_to_string(p).unwrap_or_else(|e| panic!("{p:?}: {e}"));
+
+    // The path dependencies of one crate's normal and build dependencies, as `src/<dir>`.
+    let path_deps = |krate: &str| -> Vec<String> {
+        let manifest: toml::Value = read(&root.join(krate).join("Cargo.toml")).parse().unwrap();
+        let mut tables: Vec<&toml::Value> = Vec::new();
+        for key in ["dependencies", "build-dependencies"] {
+            tables.extend(manifest.get(key));
+        }
+        if let Some(targets) = manifest.get("target").and_then(|t| t.as_table()) {
+            for t in targets.values() {
+                for key in ["dependencies", "build-dependencies"] {
+                    tables.extend(t.get(key));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        for table in tables {
+            for dep in table.as_table().into_iter().flat_map(|t| t.values()) {
+                if let Some(rel) = dep.get("path").and_then(|p| p.as_str()) {
+                    let name = rel.trim_start_matches("../").trim_end_matches('/');
+                    out.push(format!("src/{name}"));
+                }
+            }
+        }
+        out
+    };
+    // The Rust files under a directory.
+    fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
+        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                rust_files(&p, out);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                out.push(p);
+            }
+        }
+    }
+    // Files a crate compiles in from outside its own directory, as paths from the root.
+    let outside_includes = |krate: &str| -> Vec<String> {
+        let mut files = Vec::new();
+        rust_files(&root.join(krate).join("src"), &mut files);
+        files.push(root.join(krate).join("build.rs"));
+        let mut out = Vec::new();
+        for f in files.iter().filter(|f| f.exists()) {
+            let canon_root = root.canonicalize().unwrap();
+            let rel = f
+                .canonicalize()
+                .unwrap()
+                .strip_prefix(&canon_root)
+                .unwrap()
+                .parent()
+                .unwrap()
+                .to_path_buf();
+            for line in read(f)
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+            {
+                for key in ["include_str!(\"", "include_bytes!(\""] {
+                    let Some(at) = line.find(key) else { continue };
+                    let rest = &line[at + key.len()..];
+                    let Some(end) = rest.find('"') else { continue };
+                    let mut parts: Vec<String> = Vec::new();
+                    for seg in rel.join(&rest[..end]).components() {
+                        match seg.as_os_str().to_str().unwrap() {
+                            ".." => {
+                                parts.pop();
+                            }
+                            "." => {}
+                            s => parts.push(s.to_string()),
+                        }
+                    }
+                    let path = parts.join("/");
+                    if !path.starts_with(&format!("{krate}/")) {
+                        out.push(path);
+                    }
+                }
+            }
+        }
+        out
+    };
+
+    for w in &map.workers {
+        // The crates it builds: its own, and path dependencies, transitively.
+        let mut crates: BTreeSet<String> = BTreeSet::new();
+        let mut todo = vec![w.dir.clone()];
+        while let Some(c) = todo.pop() {
+            if crates.insert(c.clone()) {
+                todo.extend(path_deps(&c));
+            }
+        }
+        let mut needed: BTreeSet<String> = BTreeSet::new();
+        for c in &crates {
+            needed.insert(format!("{c}/Cargo.toml"));
+            needed.insert(format!("{c}/src/lib.rs"));
+            needed.extend(outside_includes(c));
+        }
+        // Its own config, assets and deploy script.
+        let wrangler = format!("{}/wrangler.toml", w.dir);
+        let config: toml::Value = read(&root.join(&wrangler)).parse().unwrap();
+        needed.insert(wrangler);
+        if let Some(dir) = config
+            .get("assets")
+            .and_then(|a| a.get("directory"))
+            .and_then(|d| d.as_str())
+        {
+            needed.insert(format!("{}/{}/x", w.dir, dir.trim_start_matches("./")));
+        }
+        let script = format!("ci/deploy/{}.sh", w.deploy_job);
+        assert!(
+            root.join(&script).exists(),
+            "worker {}: no {script}",
+            w.name
+        );
+        needed.insert(script);
+
+        for path in needed {
+            // A path matched by [shared] deploys every Worker, so it is owned too.
+            let owned = w.paths.iter().chain(&map.shared).any(|p| matches(p, &path));
+            assert!(
+                owned,
+                "worker {:?} builds {path:?}, but none of its paths (or [shared]) match it",
+                w.name
+            );
+        }
+    }
+
+    // Every crate directory under src/ is named by some entry, so none silently counts as shared.
+    let all: Vec<&String> = map
+        .docs
+        .iter()
+        .chain(&map.shared)
+        .chain(&map.checks)
+        .chain(map.workers.iter().flat_map(|w| &w.paths))
+        .collect();
+    for e in std::fs::read_dir(root.join("src")).unwrap().flatten() {
+        if !e.path().join("Cargo.toml").exists() {
+            continue;
+        }
+        let probe = format!("src/{}/Cargo.toml", e.file_name().to_string_lossy());
+        assert!(
+            all.iter().any(|p| matches(p, &probe)),
+            "{probe}: no entry of ci/workers.toml names this crate; add it to a Worker or [checks]"
+        );
+    }
+}
+
+/// land (deploy scope): representative paths on the Lander's real scope function.
+#[test]
+fn land_scope_pins_representative_paths() {
+    use pigeon_core::lanes;
+
+    let map = lanes::parse(include_str!("../../ci/workers.toml")).unwrap();
+    let scope = |path: &str| -> Vec<String> {
+        let a = map.classify(&[path]);
+        let mut names: Vec<String> = map
+            .deploy_order(&a)
+            .into_iter()
+            .map(|w| w.name.clone())
+            .collect();
+        names.sort_by_key(|n| n != "core");
+        names
+    };
+    // pigeon-ai-agents links pigeon-models too, so the Worker deploys with it (the plan's
+    // example named only core and model-gateway; the Cargo graph says three).
+    assert_eq!(
+        scope("src/models/x.rs"),
+        ["core", "model-gateway", "ai-agents"]
+    );
+    assert_eq!(scope("src/blog/x.rs"), ["core", "sites"]);
+    assert_eq!(scope("src/proxies/x.rs"), ["core", "proxy"]);
+    assert_eq!(scope("src/ci-gateway/x.rs"), ["ci-gateway"]);
+    // The map counts src/ai-agents as core's (core's build script embeds every crate's sources
+    // for the architecture page), so it deploys core and the Worker.
+    assert_eq!(scope("src/ai-agents/x.rs"), ["core", "ai-agents"]);
+    // pigeon-capabilities links pigeon-ingest, so core builds with it.
+    assert_eq!(scope("src/ingest/x.rs"), ["core"]);
+    // Named as deploying nothing: not platform Workers.
+    for path in [
+        "src/data-worker/x.rs",
+        "src/ingest-runner/x.rs",
+        "src/email/x.rs",
+    ] {
+        let a = map.classify(&[path]);
+        assert!(!a.shared && a.workers.is_empty(), "{path}");
+    }
+    // Docs deploy nothing and need no tests.
+    let docs = map.classify(&["docs/plans/landing-speed.md"]);
+    assert!(docs.docs_only && !docs.shared && docs.workers.is_empty());
+    // A path nothing names is still shared at run time, the safe side.
+    assert!(map.classify(&["src/nothing-names-this/x.rs"]).shared);
+}

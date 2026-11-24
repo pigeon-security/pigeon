@@ -1,3 +1,7 @@
-# Only the runner goes into the build context.
+# Only what the image needs: the runner script and, for the warm dependency layer, the manifests.
 *
 !ci/runner/entrypoint.sh
+!Cargo.toml
+!Cargo.lock
+!rust-toolchain.toml
+!src/*/Cargo.toml

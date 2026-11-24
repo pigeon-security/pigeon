@@ -112,7 +112,23 @@ Core first when affected is kept.
   test.sh and allowlist.sh: `CARGO_INCREMENTAL=0`, `CARGO_PROFILE_DEV_DEBUG=0`, and one
   `cargo fetch --locked` before the timed builds. Same checks and flags otherwise.
 
-- 2026-11-24: phase 1 built.
+- 2026-11-24: phase 3 built. The deploy scope is now checked against Cargo by two smoke
+  scenarios in `tests/smoke/land.rs`.
+  - `land_scope_map_matches_the_cargo_graph` derives, for each Worker in `ci/workers.toml`, the
+    crates it builds (path dependencies of normal, build and target dependencies, transitively),
+    the `include_str!` and `include_bytes!` files that leave a crate, its `wrangler.toml`, assets
+    and deploy script, and fails, naming the Worker and the path, when the Worker's patterns (or
+    `[shared]`) do not match one. It uses the Lander's own `matches`. It also fails for a crate
+    directory under `src/` that no entry names. The Lander at run time is unchanged: a path
+    nothing names is still shared.
+  - `land_scope_pins_representative_paths` pins the scope of sample paths on `Map::classify`.
+  - Map correction: `src/ingest/*` added to core (pigeon-capabilities links pigeon-ingest);
+    `src/models/*` added to ai-agents (pigeon-ai-agents links pigeon-models), so a models change
+    now deploys core, model-gateway and ai-agents; `src/data-worker/*` and `src/ingest-runner/*`
+    added to `[checks]`, since no Worker links them. Not changed: core keeps `src/blog/*` and
+    `src/ai-agents/*`, because its build script embeds every crate's sources for the architecture
+    page, though Cargo shows them only as dev-dependencies of capabilities.
+
   - CI scheduler: migration 16 adds `jobs.image`. When the containers connector dispatches a
     job, the row records the base image string pinned in `src/platform/wrangler.toml` under
     `[containers.images.base]`, read at compile time by `reuse::runner_image`. It is recorded
@@ -135,3 +151,64 @@ Core first when affected is kept.
     so a reused job is never changed by it.
   - `ci/workers.toml`: `src/platform/wrangler.toml` is added to the `ci-gateway` paths because it
     is now compiled into that Worker.
+
+- 2026-11-24: warm build and artifact hash built. The warm image is **latent**.
+  - `ci/image/Dockerfile` is now v4. After the v3 steps it copies only `Cargo.toml`,
+    `Cargo.lock`, `rust-toolchain.toml` and each member's `Cargo.toml` (no repository source),
+    writes an empty `lib.rs` and `main.rs` per member (and a `build.rs` where a member has build
+    dependencies), and builds the dependencies into `/opt/pigeon-target` with the environment
+    of `test.sh`: WASM clippy and check, the native clippy and smoke build, the `capabilities`
+    examples, and a release build of each `cdylib` Worker. It then removes pigeon's own stub
+    artifacts and writes `/opt/pigeon-target/WARM_KEY`. The image was not built in the sandbox
+    (no Docker there), so the layer is untested.
+  - `ci/runner/warm.sh` is sourced by `test.sh` and `allowlist.sh`. `warm_target` compares
+    `WARM_KEY` with the key for the checkout. **Key rule:** the sha256 of `Cargo.lock`, a space,
+    and the sha256 of `rustc -Vv`. If they are equal it copies the directory (`cp -a`) to a
+    temporary directory, exports `CARGO_TARGET_DIR` there and prints
+    `[warm] using the image's dependency cache`. Otherwise it prints `[warm] cold build:
+    <reason>` and changes nothing; a failed copy falls back the same way. It never fails the
+    script and prints `[timing] warm <seconds>s`. Without the image (local runs, today's image)
+    the build is as before.
+  - `allowlist.sh` prints `artifact sha256 <hex>`, the hash of `build/` it already recorded, once
+    per deploy (`deploy.sh` runs it). Exit codes and the finish trap of `deploy.sh` are unchanged.
+  - A smoke scenario pins the above and runs `warm.sh` with no image directory.
+  - **The person's steps to turn it on:**
+    1. From the repository root: `docker build --platform linux/amd64 -f ci/image/Dockerfile -t
+       pigeon-ci-base:v4 .` and fix the layer if the build finds a problem.
+    2. From `src/platform`, with the pinned wrangler: `npx wrangler containers push
+       pigeon-ci-base:v4`.
+    3. Put the pushed `@sha256:` digest in `src/platform/wrangler.toml` under
+       `[containers.images.base]`, and land that change.
+    4. Rebuild and re-pin the image whenever `Cargo.lock` or the Rust toolchain changes; until
+       then jobs print `[warm] cold build` and build as before.
+    5. Check one job prints `[warm] using the image's dependency cache`, and that `worker-build`
+       finds its output when `CARGO_TARGET_DIR` is set.
+  - Designed, not built: a shared cache outside the image (sccache or a target tarball on R2,
+    keyed by `Cargo.lock` and the toolchain). It needs a credential for the job and a binding
+    the person must approve. Also not built: skipping a deploy whose artifact is identical to
+    the last one (the Lander would keep the hash per Worker); it stays latent and out of scope.
+- 2026-11-24: **before and after, first measurement.** Source: `ci_commit` and `ci_status` for
+  commit `a01c4f17f50c` (the timing change itself, landed by `LGKMSYlaLVakkJT-`). Phase 1
+  (reuse) was not live for it, and the warm image is not built, so this shows only the timing
+  lines and the free build wins (no incremental build, no debug info, one `cargo fetch`).
+
+  | Measure | Before (plan baseline) | After (`a01c4f17f50c`) |
+  | --- | --- | --- |
+  | Lander `test` job | about 175 s median (140 to 500 s) | 147 s (`vKH-aG39dy8NmjrfMxp_uW`) |
+  | Executor `test` job | 190 s (`3ba923257a9d`) | 163 s (`PFpt0VcXIRVOU87MzelSnR`) |
+  | Deploy core | 217 s | 205 s |
+  | Deploy ai-agents | 140 s | 133 s |
+  | Deploy ci-gateway | 154 s | 307 s (one slow run) |
+  | Deploy model-gateway / proxy / sites | 137 / 130 / 155 s | 134 / 126 / 135 s |
+  | Deploy cloud-gateway | not measured | 125 s |
+
+  Where the time goes, from the new lines. Last stages of the Lander `test` job: `smoke-run`
+  12 s, `settings` 1 s, `check-platform` 13 s, `total` 145 s, so the dependency builds
+  (clippy, `smoke-build`) are about 110 s of it. Deploy core: `deploy` 14 s, `published` 1 s,
+  `total` 205 s. Deploy ai-agents: `allowlist` 52 s, `node` 0 s, `deploy` 10 s, `total` 132 s.
+  So a Worker's own `wrangler deploy` is 10 to 14 s; the build and the stand-in check are the
+  rest. That is the target of the warm image. The numbers are single runs, not medians; the
+  tail of the output is all `ci_status` keeps, so earlier stages are not shown. The effect of
+  reuse (phase 1) and of the narrower scope (phase 3) is not in this table: the next landings
+  carry it. Landing `LYb8T6cNuoHdzlct` was refused on a docs conflict and landed instead as
+  `ZCYqUmC-4Ua9qF4x`, which deployed four Workers (ai-agents, ci-gateway, core, proxy), not six.

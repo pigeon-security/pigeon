@@ -59,6 +59,10 @@ paths = [
     # The email library (docs/plans/email.md): used by no Worker yet. Move it into its Worker's
     # paths when one depends on it.
     "src/email/*",
+    # The data Worker and the ingest runner (docs/plans/ingest.md): not platform Workers, never
+    # deployed by a landing. The ingest library they use is linked by core, so it is core's.
+    "src/data-worker/*",
+    "src/ingest-runner/*",
 ]
 
 [[worker]]
@@ -74,6 +78,8 @@ paths = [
     "src/proxies/*",
     "src/blog/*",
     "src/ai-agents/*",
+    # pigeon-capabilities links pigeon-ingest.
+    "src/ingest/*",
     # Compiled in: the map (core's deploy scope) and CI's runner scripts (src/ci).
     "ci/workers.toml",
     "ci/runner/entrypoint.sh",
@@ -165,7 +171,13 @@ after = []
 name = "ai-agents"
 script = "pigeon-ai-agents"
 dir = "src/ai-agents-worker"
-paths = ["src/ai-agents-worker/*", "src/ai-agents/*", "ci/deploy/deploy-ai-agents.sh"]
+paths = [
+    "src/ai-agents-worker/*",
+    "src/ai-agents/*",
+    # pigeon-ai-agents links pigeon-models.
+    "src/models/*",
+    "ci/deploy/deploy-ai-agents.sh",
+]
 test_job = "test"
 deploy_job = "deploy-ai-agents"
 after = ["portal_sync"]

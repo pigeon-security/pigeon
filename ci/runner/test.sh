@@ -18,6 +18,10 @@ SMOKE_LIMIT_SECS=60
 export CARGO_INCREMENTAL=0
 export CARGO_PROFILE_DEV_DEBUG=0
 
+# The image's warm dependency cache, when its key matches this Cargo.lock; else a cold build.
+. ./ci/runner/warm.sh
+warm_target .
+
 # Timing: `step <stage> <words>` prints `[timing] <stage> <seconds>s` for the stage that just
 # finished, then starts the next one. `timing_end` closes the last stage and prints the total.
 # These prints never fail the script.
