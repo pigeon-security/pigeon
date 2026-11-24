@@ -1203,3 +1203,198 @@ fn cloud_gateway_creates_a_key_and_never_shows_its_secret() {
     assert!(e.contains("cannot"), "{e}");
     assert!(fx3.sent("POST").is_empty());
 }
+
+#[test]
+fn cloud_gateway_deletes_keys_with_care() {
+    let w = world();
+    let fx = Fx::new(token_world(w.clone()));
+
+    // The gateway's own key is never deleted, and no call is made to find that out.
+    let e = fx
+        .run("cloud_tokens_plan_delete", json!({ "access_key": OWN }))
+        .unwrap_err();
+    assert!(e.contains("own API key"), "{e}");
+    assert!(fx.log().is_empty());
+    // Something that is not an access key is refused as well.
+    for bad in [
+        "",
+        "SCW",
+        "scwnewkey00000000000",
+        "SCWNEWKEY0000000000",
+        "../api-keys",
+    ] {
+        assert!(
+            fx.run("cloud_tokens_plan_delete", json!({ "access_key": bad }))
+                .is_err(),
+            "{bad}"
+        );
+    }
+    assert!(fx.log().is_empty());
+    // An apply of a plan naming the own key is refused too, whatever the approval says.
+    let forged = json!({
+        "provider": "scaleway", "kind": "tokens", "action": "delete",
+        "args": { "access_key": OWN, "with_application": false }, "before": {},
+    });
+    fx.appr.recs.borrow_mut().push(Record {
+        id: "forged".into(),
+        kind: KIND.into(),
+        subject: "cloud:scaleway:tokens:delete".into(),
+        state: "approved".into(),
+        payload: forged,
+        expires_ms: NOW,
+    });
+    assert!(fx.run("cloud_apply", json!({ "plan": "forged" })).is_err());
+    assert!(fx.sent("DELETE").is_empty() && fx.appr.taken.borrow().is_empty());
+
+    // A key alone.
+    let planned = fx
+        .run("cloud_tokens_plan_delete", json!({ "access_key": NEW_KEY }))
+        .unwrap();
+    let id = planned["approval"].as_str().unwrap().to_string();
+    fx.approve(&id);
+    let done = fx.run("cloud_apply", json!({ "plan": id })).unwrap();
+    assert_eq!(done["differences"], json!([]));
+    assert_eq!(fx.sent("DELETE").len(), 1);
+    assert!(w.key_gone.get() && !w.app_gone.get());
+
+    // With its application: only a `pigeon` one, and only when it holds no other key.
+    let w = world();
+    let fx = Fx::new(token_world(w.clone()));
+    let args = json!({ "access_key": NEW_KEY, "with_application": true });
+    *w.app_tag.borrow_mut() = "someone-else".into();
+    let e = fx
+        .run("cloud_tokens_plan_delete", args.clone())
+        .unwrap_err();
+    assert!(e.contains("not tagged `pigeon`"), "{e}");
+    *w.app_tag.borrow_mut() = "pigeon".into();
+    w.other_key.set(true);
+    let e = fx
+        .run("cloud_tokens_plan_delete", args.clone())
+        .unwrap_err();
+    assert!(e.contains("another API key"), "{e}");
+    assert!(fx.sent("DELETE").is_empty());
+    w.other_key.set(false);
+    let planned = fx.run("cloud_tokens_plan_delete", args.clone()).unwrap();
+    let id = planned["approval"].as_str().unwrap().to_string();
+    let rec = fx.appr.recs.borrow()[0].clone();
+    assert_eq!(rec.payload["before"]["policies"], json!([POLICY]));
+    assert_eq!(
+        rec.payload["before"]["application"]["name"],
+        "pigeon-backups"
+    );
+
+    // Drift: the key's description changes between plan and apply. The apply names what
+    // moved and does not spend the approval.
+    fx.approve(&id);
+    *w.description.borrow_mut() = "someone edited this".into();
+    let e = fx.run("cloud_apply", json!({ "plan": id })).unwrap_err();
+    assert!(
+        e.contains("before.description") && e.contains("plan again"),
+        "{e}"
+    );
+    assert!(fx.sent("DELETE").is_empty() && fx.appr.taken.borrow().is_empty());
+    // Planned again, it goes through: the key, its policy and its application.
+    let planned = fx.run("cloud_tokens_plan_delete", args).unwrap();
+    let id = planned["approval"].as_str().unwrap().to_string();
+    fx.approve(&id);
+    let done = fx.run("cloud_apply", json!({ "plan": id })).unwrap();
+    assert_eq!(done["differences"], json!([]));
+    let deletes: Vec<String> = fx.sent("DELETE").iter().map(|r| split(&r.url).1).collect();
+    assert_eq!(
+        deletes,
+        [
+            format!("/iam/v1alpha1/api-keys/{NEW_KEY}"),
+            format!("/iam/v1alpha1/policies/{POLICY}"),
+            format!("/iam/v1alpha1/applications/{APP}"),
+        ]
+    );
+    assert!(w.key_gone.get() && w.app_gone.get());
+}
+
+#[test]
+fn cloud_gateway_redacts_what_scaleway_says() {
+    use redact::redact as hide;
+    // Known values, and anything shaped like an access key.
+    let text =
+        format!("bad {SECRET} for {OWN}; also SCWABCDEFGHIJKLMNOPQ and SCW123456789012345678X");
+    let out = hide(&text, &[SECRET, OWN, ""]);
+    assert_eq!(
+        out,
+        "bad <redacted> for <redacted>; also <redacted> and <redacted>"
+    );
+    // A value inside another is hidden whole, and a short SCW word stays.
+    assert_eq!(
+        hide("abc-secret-xyz", &["secret", "abc-secret"]),
+        "<redacted>-xyz"
+    );
+    assert_eq!(
+        hide("SCW is Scaleway, SCW123 too", &[]),
+        "SCW is Scaleway, SCW123 too"
+    );
+    assert_eq!(hide("SCWabcdefghijklmnopq", &[]), "SCWabcdefghijklmnopq");
+    assert_eq!(hide("", &["x"]), "");
+
+    // Scaleway's error carries the keys: the tool's error does not.
+    let leak = format!(
+        "{{\"message\":\"denied for {OWN} with {SECRET}, new {NEW_SECRET} and SCWZZZZZZZZZZZZZZZZZ\"}}"
+    );
+    let fx = Fx::new(move |_| text_res(403, &leak));
+    let e = fx.run("cloud_tokens_list", json!({})).unwrap_err();
+    for hidden in [SECRET, OWN, "SCWZZZZZZZZZZZZZZZZZ"] {
+        assert!(!e.contains(hidden), "{e}");
+    }
+    assert!(
+        e.contains("Scaleway 403") && e.contains("<redacted>"),
+        "{e}"
+    );
+    // S3's too.
+    let body = format!("<Error><Code>Denied</Code><Message>{OWN} {SECRET}</Message></Error>");
+    let fx = Fx::new(move |_| text_res(403, &body));
+    let e = fx
+        .run("cloud_buckets_list", json!({ "region": "fr-par" }))
+        .unwrap_err();
+    assert!(
+        !e.contains(OWN) && !e.contains(SECRET) && e.contains("Denied"),
+        "{e}"
+    );
+    // A creation whose key answer is not usable leaves no secret in the error, and the objects
+    // it made are removed again.
+    let w = world();
+    let inner = token_world(w.clone());
+    let fx = Fx::new(move |req| {
+        if req.method == "POST" && req.url.ends_with("/api-keys") {
+            return text_res(500, &format!("{{\"message\":\"boom {NEW_SECRET}\"}}"));
+        }
+        inner(req)
+    });
+    let planned = fx.run("cloud_tokens_plan_create", token_args()).unwrap();
+    let id = planned["approval"].as_str().unwrap().to_string();
+    fx.approve(&id);
+    let e = fx.run("cloud_apply", json!({ "plan": id })).unwrap_err();
+    assert!(e.contains("Scaleway 500"), "{e}");
+    assert!(w.app_gone.get(), "the application was removed again");
+    assert!(fx.store.written.borrow().is_empty());
+    // A transport failure is redacted as well.
+    struct Down;
+    impl Transport for Down {
+        fn send<'a>(&'a self, req: HttpRequest) -> Fut<'a, HttpResponse> {
+            let why = format!(
+                "connect failed for {}",
+                req.header("X-Auth-Token").unwrap_or_default()
+            );
+            Box::pin(async move { Err(worker::Error::RustError(why)) })
+        }
+    }
+    let fx = Fx::new(nothing);
+    let ports = Ports {
+        transport: &Down,
+        ..fx.ports()
+    };
+    let e = block(tools::run_tool(&ports, "cloud_buckets_list", &json!({}))).unwrap();
+    assert_eq!(e["buckets"], json!([]));
+    assert!(!e["errors"].to_string().contains(SECRET), "{e}");
+    let e = block(tools::run_tool(&ports, "cloud_tokens_list", &json!({})))
+        .unwrap_err()
+        .to_string();
+    assert!(!e.contains(SECRET) && e.contains("connect failed"), "{e}");
+}
