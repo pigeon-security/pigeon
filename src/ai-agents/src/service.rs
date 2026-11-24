@@ -144,6 +144,45 @@ impl Agents {
         if paused == true {
             return Err("every run is paused (ai_agents_pause); ai_agents_resume first".into());
         }
+        // The brief's repo paths, checked against the base. A failed check is logged (never with
+        // the brief) and left out; it never stops the start.
+        let paths = crate::preflight::paths_in(&brief);
+        let missing = if paths.is_empty() {
+            None
+        } else {
+            let checked = crate::sandbox::call(
+                env,
+                &id,
+                "preflight",
+                &json!({
+                    "run": id,
+                    "role": role.name(),
+                    "base": base,
+                    "branch": branch(&id),
+                    "caller": as_caller,
+                    "paths": paths,
+                }),
+            )
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|v| {
+                crate::preflight::missing_from(
+                    v["exit"].as_i64().unwrap_or(-1),
+                    v["output"].as_str().unwrap_or_default(),
+                    &paths,
+                )
+            });
+            match checked {
+                Ok(m) => Some(m),
+                Err(e) => {
+                    worker::console_error!("agents: the start preflight failed: {e}");
+                    None
+                }
+            }
+        };
+        let note = missing
+            .as_deref()
+            .and_then(|m| crate::preflight::note_for(m, &base));
         // Only a suggestion: a failed estimate is logged (never with the brief) and left out.
         let estimate = match object::call(
             env,
@@ -175,6 +214,7 @@ impl Agents {
                 "branch": branch(&id),
                 "budget": budget,
                 "estimate": estimate,
+                "preflight_note": note,
                 "model": model.map(|c| c.text()),
                 "child_models": if child_models.is_empty() { Value::Null } else { child_models.to_json() },
             }),
@@ -186,6 +226,13 @@ impl Agents {
             obj.insert("estimate".into(), e);
         } else if let Some(obj) = answer.as_object_mut() {
             obj.remove("estimate");
+        }
+        if let (Some(m), Some(obj)) = (&missing, answer.as_object_mut()) {
+            obj.insert("missing_paths".into(), json!(m));
+            obj.insert(
+                "preflight".into(),
+                json!(crate::preflight::sentence(paths.len(), m, &base)),
+            );
         }
         Ok(answer)
     }

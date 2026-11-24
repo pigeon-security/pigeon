@@ -257,7 +257,7 @@ impl Sandbox {
 
     async fn handle(&self, op: &str, a: &Value) -> Result<Value> {
         match op {
-            "prepare" => {
+            "prepare" | "preflight" => {
                 if self.sb()?.is_none() {
                     let key = format!(
                         "{}{}",
@@ -279,7 +279,24 @@ impl Sandbox {
                     )?;
                 }
                 let sb = self.sb()?.ok_or_else(|| bad("the sandbox vanished"))?;
-                self.ready(&sb).await
+                let ready = self.ready(&sb).await?;
+                if op == "preflight" {
+                    // The checkout's HEAD is the base: the run has made no commit yet.
+                    let paths: Vec<String> = a["paths"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|p| p.as_str().map(String::from))
+                        .collect();
+                    self.post(
+                        &sb,
+                        "exec",
+                        &json!({ "cmd": crate::preflight::command(&paths), "timeout_s": 30 }),
+                    )
+                    .await
+                } else {
+                    Ok(ready)
+                }
             }
             "tool" => {
                 let sb = self

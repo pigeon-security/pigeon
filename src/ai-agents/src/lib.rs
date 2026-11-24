@@ -13,6 +13,7 @@
 //! - [`estimate`]: a run's cost, estimated from similar past runs.
 //! - [`models`]: which model a run uses (a choice per run, stored defaults, fallback chains).
 //! - [`compare`]: ended runs grouped by role and model.
+//! - [`preflight`]: the repo paths a brief names, checked against the base at start.
 //! - [`handoff`]: the 75% budget warning and the "Unlanded branches" section of a planner report.
 //!
 //! The Worker side carries out what [`run::next`] decides:
@@ -33,6 +34,7 @@ pub mod limits;
 pub mod models;
 pub mod object;
 pub mod page;
+pub mod preflight;
 pub mod probe;
 pub mod prompts;
 pub mod run;

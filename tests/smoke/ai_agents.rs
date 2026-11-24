@@ -2821,3 +2821,65 @@ fn ai_agents_token_capacity_retries_the_same_turn() {
         Recovery::Fail
     );
 }
+
+#[test]
+fn ai_agents_preflight_extracts_the_paths_a_brief_names() {
+    use pigeon_ai_agents::preflight::paths_in;
+    let brief = "Read `CLAUDE.md` and `.claude/decisions/`, then src/pigeon-ios/App.swift:42. \
+                 Also see src/ai-agents/src/*, docs/plans/ai-agents.md.";
+    assert_eq!(
+        paths_in(brief),
+        vec![
+            "CLAUDE.md",
+            ".claude/decisions",
+            "src/pigeon-ios/App.swift",
+            "src/ai-agents/src",
+            "docs/plans/ai-agents.md",
+        ]
+    );
+    // Repeats once, and the cap holds.
+    assert_eq!(paths_in("`a/b` a/b `a/b/`"), vec!["a/b"]);
+    let many: String = (0..60).map(|i| format!("dir/f{i}.rs ")).collect();
+    assert_eq!(paths_in(&many).len(), 40);
+}
+
+#[test]
+fn ai_agents_preflight_ignores_what_is_not_a_path() {
+    use pigeon_ai_agents::preflight::paths_in;
+    for brief in [
+        "use and/or here, yes/no, read/write",
+        "see https://example.com/a/b.html and http://x.dev/y",
+        "branch claude/ai-agent-abc, origin/main, refs/heads/x",
+        "run /usr/bin/env or ~/notes/a.md",
+        "version v1/v2 or 1.2/3",
+        "`git log src/x`, `$HOME/a`, {{tpl/x}}, src/**/*.rs, a/$b, `x|y/z`",
+        "plain words and `Vec.len` or `main`",
+    ] {
+        assert!(paths_in(brief).is_empty(), "{brief}: {:?}", paths_in(brief));
+    }
+}
+
+#[test]
+fn ai_agents_preflight_answer_shape() {
+    use pigeon_ai_agents::preflight::{command, missing_from, note_for, sentence};
+    let paths: Vec<String> = ["CLAUDE.md", "src/core", ".claude/decisions"]
+        .map(String::from)
+        .to_vec();
+    assert!(command(&paths).contains("'.claude/decisions'"));
+    let out = "MISSING CLAUDE.md\nMISSING .claude/decisions\n";
+    let missing = missing_from(0, out, &paths).unwrap();
+    assert_eq!(missing, vec!["CLAUDE.md", ".claude/decisions"]);
+    assert_eq!(
+        sentence(3, &missing, "main"),
+        "preflight: 2 of 3 paths named in the brief do not exist at `main`: CLAUDE.md, .claude/decisions."
+    );
+    let note = note_for(&missing, "main").unwrap();
+    assert!(note.contains("CLAUDE.md") && note.contains("instead of asking"));
+    // Nothing missing: no note. A broken check is an error, not "all missing".
+    assert!(note_for(&[], "main").is_none());
+    assert!(sentence(3, &[], "main").contains("all 3 paths"));
+    assert!(sentence(0, &[], "main").contains("no repo paths"));
+    assert!(missing_from(3, "NOGIT\n", &paths).is_err());
+    assert!(missing_from(1, "", &paths).is_err());
+    assert_eq!(missing_from(0, "", &paths).unwrap(), Vec::<String>::new());
+}

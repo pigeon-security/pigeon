@@ -1051,3 +1051,12 @@ executors through it. Each item: state, next step, who it waits on.
   lines now come from a shell loop. The listing also uses `--cherry-pick --right-only`, so a
   commit whose change main already holds is not picked (it would be an empty cherry-pick). A
   smoke scenario runs both scripts in a real git repository with `/` in the branch names.
+- 2026-11-27: **8a brief preflight built.** `src/ai-agents/src/preflight.rs` holds the pure part
+  (`paths_in`, the check command, `missing_from`, the answer sentence and the note). The tree is
+  read through the run's sandbox, not the git proxy: the proxy needs a git smart-HTTP exchange and
+  pack parsing in the Worker, while the sandbox already clones the base. `ai_agents_start` calls a
+  new `preflight` op on the run's sandbox (same as `prepare`, then one `git cat-file -e HEAD:<path>`
+  per path, HEAD being the base) before the run is created, so the run's own prepare finds the
+  checkout ready. It adds `missing_paths` and `preflight` to the answer, and passes the note in
+  the create call, where `begin` queues it as an `ai_agents_note` would. A failed check is logged
+  and left out. Cost: start now waits for the container and clone when the brief names paths.

@@ -1229,6 +1229,10 @@ impl AiAgentRuns {
             ],
         )?;
         self.push_message(&json!({ "role": "user", "content": prompts::first_message(a) }))?;
+        // The start preflight's note, queued like an `ai_agents_note`, so the first turn has it.
+        if let Some(note) = a["preflight_note"].as_str().filter(|n| !n.is_empty()) {
+            self.set("notes = ?", vec![json!([note]).to_string().into()])?;
+        }
         self.state.storage().set_alarm(0).await?;
         Ok(Value::Null)
     }
