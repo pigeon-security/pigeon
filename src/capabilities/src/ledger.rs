@@ -9,7 +9,7 @@
 //! purpose, expiry, caller and a `released` flag. A row with no value in memory (the object
 //! restarted) is an orphan: it is revoked by id and replaced at the next lease.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -32,7 +32,8 @@ pub const OBJECT: &str = "ledger";
 /// taker that keeps one token for a job's steps still has time to finish with it.
 pub const MIN_LEFT_MS: i64 = 300_000;
 
-const MIGRATIONS: [&str; 1] = ["CREATE TABLE tokens (
+const MIGRATIONS: [&str; 2] = [
+    "CREATE TABLE tokens (
         id TEXT PRIMARY KEY,
         key TEXT NOT NULL,
         name TEXT NOT NULL,
@@ -42,7 +43,83 @@ const MIGRATIONS: [&str; 1] = ["CREATE TABLE tokens (
         released INTEGER NOT NULL DEFAULT 0
     );
     CREATE INDEX tokens_key ON tokens (key);
-    CREATE INDEX tokens_caller ON tokens (caller)"];
+    CREATE INDEX tokens_caller ON tokens (caller)",
+    // The gauge and the soft ceiling: one key and value per row (`count`, `at_ms`, `ceiling`).
+    // `created_at` is when the ledger minted a row; rows from before are NULL.
+    "ALTER TABLE tokens ADD COLUMN created_at INTEGER;
+    CREATE TABLE gauge (k TEXT PRIMARY KEY, v INTEGER NOT NULL)",
+];
+
+/// Cloudflare's cap on live API tokens in an account.
+pub const HARD_CAP: u32 = 500;
+
+/// The soft ceiling until someone sets one: new agent runs queue at or above it.
+pub const DEFAULT_SOFT_CEILING: u32 = 300;
+
+/// The soft ceilings that may be set.
+pub const CEILING_RANGE: std::ops::RangeInclusive<u32> = 10..=450;
+
+/// A stored gauge older than this (milliseconds) is refreshed when it is read.
+pub const GAUGE_MAX_AGE_MS: i64 = 120_000;
+
+/// Checks a soft ceiling against [`CEILING_RANGE`]. The error is a plain sentence. Pure.
+pub fn check_ceiling(v: i64) -> std::result::Result<u32, String> {
+    u32::try_from(v)
+        .ok()
+        .filter(|v| CEILING_RANGE.contains(v))
+        .ok_or_else(|| {
+            format!(
+                "soft_ceiling must be from {} to {} (Cloudflare's hard cap is {HARD_CAP}), not {v}",
+                CEILING_RANGE.start(),
+                CEILING_RANGE.end()
+            )
+        })
+}
+
+/// The last count of live pigeon tokens from the account's list, and when it was taken.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SweepGauge {
+    /// Unexpired pigeon-minted tokens the list showed.
+    pub count: u32,
+    /// When the list was taken, in milliseconds since the epoch.
+    pub at_ms: i64,
+}
+
+/// The gauge as it is read.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Gauge {
+    /// Live pigeon-minted tokens, as best known.
+    pub live: u32,
+    /// New agent runs queue at or above this.
+    pub soft_ceiling: u32,
+    /// Cloudflare's cap, [`HARD_CAP`].
+    pub hard_cap: u32,
+    /// When the count it is based on was taken, in milliseconds since the epoch.
+    pub as_of_ms: i64,
+    /// Where the count came from: `sweep`, `refreshed`, `stored (refresh failed)` or
+    /// `ledger rows (refresh failed)`.
+    pub source: String,
+}
+
+/// The live count: the last list's count plus the rows the ledger minted after it, and never
+/// less than the ledger's live rows (not released, not expired). With no list yet, the rows
+/// alone. Pure.
+pub fn live_now(last: Option<&SweepGauge>, rows: &[Row], now_ms: i64) -> u32 {
+    let floor = rows
+        .iter()
+        .filter(|r| !r.released && r.expires_at > now_ms)
+        .count() as u32;
+    match last {
+        Some(g) => {
+            let since = rows
+                .iter()
+                .filter(|r| r.created_at.is_some_and(|c| c > g.at_ms))
+                .count() as u32;
+            (g.count + since).max(floor)
+        }
+        None => floor,
+    }
+}
 
 /// The hash that names a caller: its user id and the id of the person it acts for (or none).
 /// Stable, and different for any different pair. Pure.
@@ -79,6 +156,9 @@ pub struct Row {
     pub caller: String,
     /// Set when it must be revoked: released, or a revoke that failed. The sweeper deletes it.
     pub released: bool,
+    /// When the ledger minted it, in milliseconds since the epoch; `None` for a row from before
+    /// the gauge existed.
+    pub created_at: Option<i64>,
 }
 
 /// A token handed to a caller.
@@ -110,6 +190,10 @@ pub trait Store {
     fn save(&self, row: &Row) -> Result<()>;
     /// Deletes the row of `id`.
     fn remove(&self, id: &str) -> Result<()>;
+    /// Keeps the setting `key` (`count`, `at_ms` or `ceiling`) as `value`. Nothing by default.
+    fn save_setting(&self, _key: &str, _value: i64) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// No storage: for tests.
@@ -188,6 +272,8 @@ pub struct Ledger<S: Store> {
     /// Lease key to (token id, value). Memory only.
     values: RefCell<HashMap<String, (String, String)>>,
     flights: Flights,
+    gauge: RefCell<Option<SweepGauge>>,
+    ceiling: Cell<u32>,
     store: S,
 }
 
@@ -199,8 +285,59 @@ impl<S: Store> Ledger<S> {
             rows: RefCell::new(rows),
             values: RefCell::default(),
             flights: RefCell::default(),
+            gauge: RefCell::new(None),
+            ceiling: Cell::new(DEFAULT_SOFT_CEILING),
             store,
         }
+    }
+
+    /// Starts with the stored gauge and soft ceiling, as read back after a restart.
+    pub fn with_settings(self, gauge: Option<SweepGauge>, ceiling: Option<u32>) -> Self {
+        *self.gauge.borrow_mut() = gauge;
+        self.ceiling.set(ceiling.unwrap_or(DEFAULT_SOFT_CEILING));
+        self
+    }
+
+    /// Stores the count the sweep's list showed, and when.
+    pub fn gauge_set(&self, count: u32, at_ms: i64) -> Result<()> {
+        self.store.save_setting("count", i64::from(count))?;
+        self.store.save_setting("at_ms", at_ms)?;
+        *self.gauge.borrow_mut() = Some(SweepGauge { count, at_ms });
+        Ok(())
+    }
+
+    /// Sets the soft ceiling; a value outside [`CEILING_RANGE`] is refused.
+    pub fn ceiling_set(&self, value: i64) -> Result<u32> {
+        let v = check_ceiling(value).map_err(Error::RustError)?;
+        self.store.save_setting("ceiling", i64::from(v))?;
+        self.ceiling.set(v);
+        Ok(v)
+    }
+
+    /// The gauge. A stored count older than [`GAUGE_MAX_AGE_MS`] (or none) is refreshed first
+    /// by listing through `api`; when that fails, the stored count is used and `source` says so.
+    pub async fn gauge(&self, api: &impl TokenApi, now_ms: i64) -> Result<Gauge> {
+        let stored = *self.gauge.borrow();
+        let stale = stored.is_none_or(|g| now_ms - g.at_ms > GAUGE_MAX_AGE_MS);
+        let mut source = "sweep";
+        if stale {
+            match tokens::count_live(api, now_ms).await {
+                Ok(n) => {
+                    self.gauge_set(n as u32, now_ms)?;
+                    source = "refreshed";
+                }
+                Err(_) if stored.is_some() => source = "stored (refresh failed)",
+                Err(_) => source = "ledger rows (refresh failed)",
+            }
+        }
+        let last = *self.gauge.borrow();
+        Ok(Gauge {
+            live: live_now(last.as_ref(), &self.rows.borrow(), now_ms),
+            soft_ceiling: self.ceiling.get(),
+            hard_cap: HARD_CAP,
+            as_of_ms: last.map_or(now_ms, |g| g.at_ms),
+            source: source.to_string(),
+        })
     }
 
     /// A copy of the rows.
@@ -313,6 +450,7 @@ impl<S: Store> Ledger<S> {
             expires_at,
             caller: req.caller.to_string(),
             released: false,
+            created_at: Some(now_ms),
         };
         self.store.save(&row)?;
         self.rows.borrow_mut().push(row);
@@ -433,13 +571,21 @@ struct DbRow {
     expires_at: i64,
     caller: String,
     released: i64,
+    created_at: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct DbSetting {
+    k: String,
+    v: i64,
 }
 
 impl Store for DbStore {
     fn save(&self, r: &Row) -> Result<()> {
         self.0.exec(
-            "INSERT OR REPLACE INTO tokens (id, key, name, purpose, expires_at, caller, released) \
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO tokens \
+             (id, key, name, purpose, expires_at, caller, released, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             vec![
                 r.id.as_str().into(),
                 r.key.as_str().into(),
@@ -448,7 +594,16 @@ impl Store for DbStore {
                 r.expires_at.into(),
                 r.caller.as_str().into(),
                 i64::from(r.released).into(),
+                r.created_at
+                    .map_or(worker::SqlStorageValue::Null, Into::into),
             ],
+        )
+    }
+
+    fn save_setting(&self, key: &str, value: i64) -> Result<()> {
+        self.0.exec(
+            "INSERT OR REPLACE INTO gauge (k, v) VALUES (?, ?)",
+            vec![key.into(), value.into()],
         )
     }
 
@@ -486,16 +641,26 @@ impl TokenLedger {
                 expires_at: r.expires_at,
                 caller: r.caller,
                 released: r.released != 0,
+                created_at: r.created_at,
             })
             .collect();
+        let settings = db.rows::<DbSetting>("SELECT k, v FROM gauge", vec![])?;
+        let get = |k: &str| settings.iter().find(|s| s.k == k).map(|s| s.v);
+        let gauge = get("count")
+            .zip(get("at_ms"))
+            .map(|(count, at_ms)| SweepGauge {
+                count: count.max(0) as u32,
+                at_ms,
+            });
+        let ceiling = get("ceiling").and_then(|v| check_ceiling(v).ok());
         Ok(Self {
             env,
             parent: parent_binding.to_string(),
-            ledger: Ledger::new(DbStore(db), rows),
+            ledger: Ledger::new(DbStore(db), rows).with_settings(gauge, ceiling),
         })
     }
 
-    /// Answers one op: `lease`, `release`, `holds` or `reap`.
+    /// Answers one op: `lease`, `release`, `holds`, `reap`, `gauge_set`, `gauge` or `ceiling_set`.
     pub async fn fetch(&self, req: Request) -> Result<Response> {
         durable::serve(req, async |op, args| self.handle(op, &args).await).await
     }
@@ -565,6 +730,26 @@ impl TokenLedger {
                 };
                 Ok(serde_json::to_value(self.ledger.reap(&api, now_ms).await?)?)
             }
+            "gauge_set" => {
+                let count = a["count"].as_u64().unwrap_or(0) as u32;
+                self.ledger
+                    .gauge_set(count, a["at_ms"].as_i64().unwrap_or(now_ms))?;
+                Ok(json!({ "ok": true }))
+            }
+            "ceiling_set" => {
+                let v = a["soft_ceiling"].as_i64().unwrap_or(-1);
+                Ok(json!({ "soft_ceiling": self.ledger.ceiling_set(v)? }))
+            }
+            "gauge" => {
+                let parent = self.parent().await?;
+                let api = tokens::CloudflareTokens {
+                    parent: &parent.token,
+                    account: &parent.account,
+                };
+                Ok(serde_json::to_value(
+                    self.ledger.gauge(&api, now_ms).await?,
+                )?)
+            }
             other => Err(Error::RustError(format!("the ledger has no op `{other}`"))),
         }
     }
@@ -606,6 +791,26 @@ pub async fn release(env: &Env, caller: &str) -> Result<usize> {
     )
     .await?;
     Ok(v["released"].as_u64().unwrap_or(0) as usize)
+}
+
+/// Stores the sweep's count of live pigeon tokens, taken at `at_ms`.
+pub async fn gauge_set(env: &Env, count: usize, at_ms: i64) -> Result<()> {
+    let args = json!({ "count": count, "at_ms": at_ms });
+    durable::call(env, BINDING, OBJECT, "gauge_set", &args).await?;
+    Ok(())
+}
+
+/// Reads the gauge, refreshing a stale one first.
+pub async fn gauge(env: &Env) -> Result<Gauge> {
+    let v = durable::call(env, BINDING, OBJECT, "gauge", &json!({})).await?;
+    Ok(serde_json::from_value(v)?)
+}
+
+/// Sets the soft ceiling (10 to 450) and answers it.
+pub async fn ceiling_set(env: &Env, soft_ceiling: i64) -> Result<u32> {
+    let args = json!({ "soft_ceiling": soft_ceiling });
+    let v = durable::call(env, BINDING, OBJECT, "ceiling_set", &args).await?;
+    Ok(v["soft_ceiling"].as_u64().unwrap_or(0) as u32)
 }
 
 /// The sweeper's call: deletes released tokens and forgets expired rows.

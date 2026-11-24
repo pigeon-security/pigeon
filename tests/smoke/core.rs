@@ -1370,6 +1370,7 @@ fn core_token_ledger_an_orphan_row_is_revoked_and_replaced() {
         expires_at: TOKEN_NOW_MS + 600_000,
         caller: keys.1.clone(),
         released: false,
+        created_at: None,
     };
     let ledger = Ledger::new((), vec![orphan]);
     let got = token_lease(&ledger, &api, &keys, TOKEN_NOW_MS).unwrap();
@@ -1465,6 +1466,7 @@ fn core_token_ledger_reap_keeps_other_names_and_forgets_the_expired() {
         expires_at,
         caller: "c".into(),
         released,
+        created_at: None,
     };
     let mine = "pigeon:a:2026-11-24T05:00:00Z";
     let ledger = Ledger::new(

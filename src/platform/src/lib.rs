@@ -217,7 +217,7 @@ async fn fetch(req: Request, env: Env, ctx: WorkerContext) -> Result<Response> {
 /// Queue messages: each capability that wants one of the batch acts once. A failure fails the
 /// batch, so the queue retries it.
 /// The minute's cron: push-started site deploys that wait or were cut off, and, every fifth
-/// minute, the sweep of expired pigeon tokens.
+/// minute, the sweep of expired pigeon tokens (the live-token gauge needs it each minute).
 #[event(scheduled)]
 async fn scheduled(event: worker::ScheduledEvent, env: Env, _ctx: worker::ScheduleContext) {
     match pigeon_capabilities::github::run_pending(&env).await {
@@ -225,10 +225,7 @@ async fn scheduled(event: worker::ScheduledEvent, env: Env, _ctx: worker::Schedu
         Ok(_) => {}
         Err(e) => console_error!("github deploys failed: {e}"),
     }
-    let at_ms = event.schedule() as i64;
-    if (at_ms / 60_000) % 5 == 0 {
-        sweep_tokens(&env, at_ms).await;
-    }
+    sweep_tokens(&env, event.schedule() as i64).await;
 }
 
 /// Deletes the account's expired pigeon-minted tokens and logs the counts. Errors are logged.
@@ -250,6 +247,11 @@ async fn sweep_tokens(env: &Env, now_ms: i64) {
                 r.skipped_other,
                 r.failed.len()
             );
+            // The gauge: the live pigeon tokens the list showed, for the soft ceiling.
+            if let Err(e) = pigeon_capabilities::ledger::gauge_set(env, r.kept_pigeon, now_ms).await
+            {
+                console_error!("gauge store failed: {e}");
+            }
         }
         Err(e) => console_error!("token sweep failed: {e}"),
     }

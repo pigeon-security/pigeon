@@ -418,6 +418,26 @@ pub async fn sweep(api: &impl TokenApi, now_ms: i64) -> Result<SweepReport> {
     Ok(report)
 }
 
+/// Whether `token` is named by [`minted`] and has not expired at `now_ms`. A token with no
+/// `expires_on` counts as live. Pure.
+fn live_pigeon(token: &Listed, now_ms: i64) -> bool {
+    minted(&token.name).is_some() && !sweepable(token, now_ms) && token.status != "expired"
+}
+
+/// Counts the account's live pigeon-minted tokens: lists every page and counts the names
+/// [`minted`] accepts that have not expired. Read-only: it deletes nothing.
+pub async fn count_live(api: &impl TokenApi, now_ms: i64) -> Result<usize> {
+    let mut live = 0;
+    for page in 1..=MAX_PAGES {
+        let got = api.list(page).await?;
+        if got.is_empty() {
+            break;
+        }
+        live += got.iter().filter(|t| live_pigeon(t, now_ms)).count();
+    }
+    Ok(live)
+}
+
 /// `ms` since the epoch as RFC 3339 to the second, as the tokens API takes it.
 fn iso(ms: f64) -> String {
     let s = String::from(Date::new(&JsValue::from_f64(ms)).to_iso_string());
