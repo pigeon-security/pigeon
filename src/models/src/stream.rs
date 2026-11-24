@@ -105,6 +105,7 @@ impl Reading {
             return;
         };
         match dialect {
+            Dialect::OpenAi if v["type"].is_string() => self.response_event(&v),
             Dialect::OpenAi => self.chunk(&v),
             Dialect::Anthropic => match v["type"].as_str() {
                 Some("message_start") => {
@@ -160,20 +161,7 @@ impl Reading {
         if let Some(t) = choice["delta"]["content"].as_str()
             && !t.is_empty()
         {
-            self.text.push_str(t);
-            let at = match self.text_at {
-                Some(at) => at,
-                None => {
-                    self.blocks.push(json!({"type": "text", "text": ""}));
-                    self.partial.push(String::new());
-                    let at = self.blocks.len() - 1;
-                    self.text_at = Some(at);
-                    at
-                }
-            };
-            if let Some(m) = self.blocks.get_mut(at).and_then(Value::as_object_mut) {
-                append(m, "text", t);
-            }
+            self.push_text(t);
         }
         if let Some(calls) = choice["delta"]["tool_calls"].as_array() {
             for (n, call) in calls.iter().enumerate() {
@@ -203,6 +191,118 @@ impl Reading {
             self.cache_read = prompt.map(|_| cached).or(self.cache_read);
             self.tokens_out = u["completion_tokens"].as_u64().or(self.tokens_out);
             self.cache_write = Some(0);
+        }
+    }
+
+    /// Adds `t` to the text and to the one text block, which it makes when there is none yet.
+    fn push_text(&mut self, t: &str) {
+        self.text.push_str(t);
+        let at = match self.text_at {
+            Some(at) => at,
+            None => {
+                self.blocks.push(json!({"type": "text", "text": ""}));
+                self.partial.push(String::new());
+                let at = self.blocks.len() - 1;
+                self.text_at = Some(at);
+                at
+            }
+        };
+        if let Some(m) = self.blocks.get_mut(at).and_then(Value::as_object_mut) {
+            append(m, "text", t);
+        }
+    }
+
+    /// Reads one Responses API event, told by its `type`. Tool calls are keyed by `output_index`.
+    fn response_event(&mut self, v: &Value) {
+        let kind = v["type"].as_str().unwrap_or("");
+        match kind {
+            "response.created" | "response.in_progress" => {
+                if let Some(m) = v["response"]["model"].as_str() {
+                    self.model = m.into();
+                }
+            }
+            "response.output_text.delta" => {
+                if let Some(t) = v["delta"].as_str().filter(|t| !t.is_empty()) {
+                    self.push_text(t);
+                }
+            }
+            "response.output_item.added" if v["item"]["type"] == "function_call" => {
+                let index = v["output_index"].as_u64().unwrap_or(0);
+                let item = &v["item"];
+                let call = json!({
+                    "id": item["call_id"],
+                    "function": { "name": item["name"], "arguments": item["arguments"] },
+                });
+                self.tool_call(index, &call);
+            }
+            "response.function_call_arguments.delta" => {
+                let index = v["output_index"].as_u64().unwrap_or(0);
+                let call = json!({ "index": index, "function": { "arguments": v["delta"] } });
+                self.tool_call(index, &call);
+            }
+            "response.output_item.done" if v["item"]["type"] == "function_call" => {
+                // The whole arguments, when no delta came.
+                let index = v["output_index"].as_u64().unwrap_or(0);
+                let at = self
+                    .calls
+                    .iter()
+                    .find(|(i, _)| *i == index)
+                    .map(|(_, at)| *at);
+                let empty = at
+                    .and_then(|at| self.partial.get(at))
+                    .is_none_or(String::is_empty);
+                if empty {
+                    let item = &v["item"];
+                    let call = json!({
+                        "index": index,
+                        "id": item["call_id"],
+                        "function": { "name": "", "arguments": item["arguments"] },
+                    });
+                    self.tool_call(index, &call);
+                }
+            }
+            "response.completed" | "response.incomplete" => {
+                let r = &v["response"];
+                if let Some(m) = r["model"].as_str() {
+                    self.model = m.into();
+                }
+                self.finish_calls();
+                let calls = !self.calls.is_empty();
+                self.stop_reason = responses_stop(r, calls);
+                let u = &r["usage"];
+                if u.is_object() {
+                    let input = u["input_tokens"].as_u64();
+                    let cached = u["input_tokens_details"]["cached_tokens"]
+                        .as_u64()
+                        .unwrap_or(0);
+                    self.tokens_in = input.map(|p| p.saturating_sub(cached)).or(self.tokens_in);
+                    self.cache_read = input.map(|_| cached).or(self.cache_read);
+                    // Reasoning tokens are billed as output and are already in this count.
+                    self.tokens_out = u["output_tokens"].as_u64().or(self.tokens_out);
+                    self.cache_write = Some(0);
+                }
+                self.done = true;
+            }
+            "response.failed" => {
+                let e = &v["response"]["error"];
+                self.error = Some(format!(
+                    "{}: {}",
+                    e["code"].as_str().unwrap_or("error"),
+                    e["message"]
+                        .as_str()
+                        .unwrap_or("the provider failed mid-stream")
+                ));
+            }
+            "error" => {
+                self.error = Some(format!(
+                    "{}: {}",
+                    v["code"].as_str().unwrap_or("error"),
+                    v["message"]
+                        .as_str()
+                        .unwrap_or("the provider failed mid-stream")
+                ));
+            }
+            _ => {}
         }
     }
 
@@ -447,4 +547,21 @@ impl Reading {
             tokens_out: self.tokens_out,
         }
     }
+}
+
+/// Why a Responses API answer `r` stopped, in Anthropic's words: `tool_use` when it called a
+/// function, `max_tokens` or `refusal` when it is incomplete for that reason, else `end_turn`.
+/// `None` when the answer says no status.
+pub fn responses_stop(r: &Value, calls: bool) -> Option<String> {
+    let reason = match r["status"].as_str()? {
+        "incomplete" => match r["incomplete_details"]["reason"].as_str() {
+            Some("max_output_tokens") => "max_tokens",
+            Some("content_filter") => "refusal",
+            _ => "end_turn",
+        },
+        "completed" if calls => "tool_use",
+        "completed" => "end_turn",
+        other => other,
+    };
+    Some(reason.into())
 }

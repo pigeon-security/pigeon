@@ -702,13 +702,28 @@ fn models_capability_table_openai_rows() {
         }
         openai::request(&r).unwrap()
     };
-    // Luna: tools and effort do not go together on chat; a dated name and a prefix are read.
-    assert_eq!(req("gpt-6-luna", json!({}))["reasoning_effort"], "none");
-    assert_eq!(
-        req("gpt-6-luna-2026-10-01", json!({}))["reasoning_effort"],
-        "none"
-    );
-    assert_eq!(req("gpt-6.2-sol", json!({}))["reasoning_effort"], "high");
+    // Every GPT-6 row: tools with an effort asked go to the Responses API (chat refuses that pair
+    // with a 400); a dated name and a `provider/` prefix are read.
+    for m in [
+        "gpt-6-luna",
+        "gpt-6-luna-2026-10-01",
+        "gpt-6.2-astra",
+        "gpt-6.2-sol",
+        "gpt-6.1-terra",
+        "cf-openai/gpt-6.1-terra",
+        "openai/gpt-6.2-sol",
+    ] {
+        let caps = capabilities::of(m);
+        assert_eq!(caps.endpoint, Endpoint::Responses, "{m}");
+        assert!(!caps.effort_with_tools, "{m}");
+        let out = req(m, json!({}));
+        assert_eq!(out["reasoning"], json!({ "effort": "high" }), "{m}");
+        assert!(out.get("messages").is_none() && out.get("reasoning_effort").is_none());
+        // Tools but no effort asked: chat, with effort `none`.
+        let chat = req(m, json!({ "output_config": {} }));
+        assert_eq!(chat["reasoning_effort"], "none", "{m}");
+        assert!(chat["messages"].is_array(), "{m}");
+    }
     let no_tools = openai::request(&json!({
         "model": "gpt-6-luna", "output_config": { "effort": "low" },
         "messages": [{ "role": "user", "content": "x" }]
@@ -937,4 +952,207 @@ fn model_gateway_refusal_names_reason() {
         Answer::refused("x", "y"),
         Answer::Error(f) if f.kind == FailureKind::Unauthorized
     ));
+}
+
+/// A tool turn that asks for reasoning on a GPT-6 model becomes a Responses API request: input
+/// items, flat function tools, `reasoning`, `max_output_tokens`, `tool_choice`, and tool results
+/// as `function_call_output` items. The item shapes are those in OpenAI's public Responses API
+/// reference ("Create a model response", "function_call", "function_call_output").
+#[test]
+fn models_openai_responses_request() {
+    use pigeon_models::{Dialect, openai};
+    let req = json!({
+        "model": "gpt-6.1-terra",
+        "max_tokens": 500000,
+        "system": [{ "type": "text", "text": "rules" }, { "type": "text", "text": "more" }],
+        "tools": [
+            { "name": "run", "description": "Run it", "input_schema": { "type": "object" } },
+            { "type": "web_search_20260101", "name": "web_search" }
+        ],
+        "tool_choice": { "type": "tool", "name": "run", "disable_parallel_tool_use": true },
+        "output_config": { "effort": "medium" },
+        "thinking": { "type": "adaptive" },
+        "stop_sequences": ["x"],
+        "temperature": 0.5,
+        "messages": [
+            { "role": "user", "content": "go" },
+            { "role": "assistant", "content": [
+                { "type": "thinking", "thinking": "hm", "signature": "s" },
+                { "type": "text", "text": "ok" },
+                { "type": "tool_use", "id": "call_1", "name": "run", "input": { "cmd": "ls" } },
+                { "type": "tool_use", "id": "call_2", "name": "run", "input": {} }
+            ] },
+            { "role": "user", "content": [
+                { "type": "tool_result", "tool_use_id": "call_1", "content": "a.txt" },
+                { "type": "tool_result", "tool_use_id": "call_2", "is_error": true, "content": "no" },
+                { "type": "text", "text": "now?" }
+            ] }
+        ]
+    });
+    assert!(openai::wants_responses(&req));
+    let out = openai::request(&req).unwrap();
+    assert_eq!(out["model"], "gpt-6.1-terra");
+    assert_eq!(out["instructions"], "rules\nmore");
+    assert_eq!(out["reasoning"], json!({ "effort": "medium" }));
+    assert_eq!(out["max_output_tokens"], 128_000);
+    assert_eq!(out["stream"], true);
+    assert_eq!(out["store"], false);
+    assert_eq!(out["temperature"], 0.5);
+    assert_eq!(out["parallel_tool_calls"], false);
+    assert_eq!(
+        out["tool_choice"],
+        json!({ "type": "function", "name": "run" })
+    );
+    assert_eq!(
+        out["tools"],
+        json!([{ "type": "function", "name": "run", "description": "Run it",
+                 "parameters": { "type": "object" }, "strict": false }])
+    );
+    for k in [
+        "messages",
+        "stream_options",
+        "stop",
+        "thinking",
+        "stop_sequences",
+        "max_completion_tokens",
+        "reasoning_effort",
+        "system",
+    ] {
+        assert!(out.get(k).is_none(), "{k}");
+    }
+    assert_eq!(
+        out["input"],
+        json!([
+            { "role": "user", "content": "go" },
+            { "role": "assistant", "content": "ok" },
+            { "type": "function_call", "call_id": "call_1", "name": "run", "arguments": "{\"cmd\":\"ls\"}" },
+            { "type": "function_call", "call_id": "call_2", "name": "run", "arguments": "{}" },
+            { "type": "function_call_output", "call_id": "call_1", "output": "a.txt" },
+            { "type": "function_call_output", "call_id": "call_2", "output": "Error: no" },
+            { "role": "user", "content": "now?" }
+        ])
+    );
+    // `any` is `required`; the path is `responses` for this body only.
+    let mut r2 = req.clone();
+    r2["tool_choice"] = json!({ "type": "any" });
+    assert_eq!(openai::request(&r2).unwrap()["tool_choice"], "required");
+    assert_eq!(Dialect::OpenAi.path_for(&out), "responses");
+    let chat = openai::request(&json!({
+        "model": "gpt-6.1-terra", "tools": [{ "name": "f", "input_schema": {} }],
+        "messages": [{ "role": "user", "content": "x" }]
+    }))
+    .unwrap();
+    assert_eq!(Dialect::OpenAi.path_for(&chat), "chat/completions");
+    // A row that does not say `responses` stays on chat, whatever is asked.
+    let safe_req = json!({
+        "model": "mystery-1", "output_config": { "effort": "high" },
+        "tools": [{ "name": "f", "input_schema": {} }],
+        "messages": [{ "role": "user", "content": "x" }]
+    });
+    assert!(!openai::wants_responses(&safe_req));
+    assert!(openai::request(&safe_req).unwrap()["messages"].is_array());
+}
+
+/// A Responses API stream is read into pigeon's blocks, stop reason and usage, split anywhere.
+/// The events are those of OpenAI's public streaming reference: `response.created`,
+/// `response.output_text.delta`, `response.output_item.added`,
+/// `response.function_call_arguments.delta`, `response.output_item.done`, `response.completed`.
+#[test]
+fn models_openai_responses_stream() {
+    use pigeon_models::Dialect;
+    use pigeon_models::stream::Reading;
+    let sse = |events: &[Value]| {
+        events
+            .iter()
+            .map(|e| format!("event: {}\ndata: {e}\n\n", e["type"].as_str().unwrap()))
+            .collect::<String>()
+    };
+    let call = |i: u64, id: &str, name: &str, args: &str| json!({ "type": "function_call", "id": format!("fc_{i}"), "call_id": id, "name": name, "arguments": args });
+    let delta = |i: u64, d: &str| json!({ "type": "response.function_call_arguments.delta", "output_index": i, "delta": d });
+    let text = sse(&[
+        json!({ "type": "response.created", "response": { "model": "gpt-6.1-terra", "status": "in_progress" } }),
+        json!({ "type": "response.output_item.added", "output_index": 0, "item": { "type": "reasoning", "id": "rs_1" } }),
+        json!({ "type": "response.output_item.done", "output_index": 0, "item": { "type": "reasoning", "id": "rs_1" } }),
+        json!({ "type": "response.output_text.delta", "output_index": 1, "delta": "He" }),
+        json!({ "type": "response.output_text.delta", "output_index": 1, "delta": "llo" }),
+        json!({ "type": "response.output_item.added", "output_index": 2, "item": call(2, "call_1", "run", "") }),
+        delta(2, "{\"cmd\":"),
+        delta(2, "\"ls\"}"),
+        json!({ "type": "response.output_item.added", "output_index": 3, "item": call(3, "call_2", "read", "") }),
+        json!({ "type": "response.output_item.done", "output_index": 3, "item": call(3, "call_2", "read", "{\"path\":\"a\"}") }),
+        json!({ "type": "response.completed", "response": {
+            "model": "gpt-6.1-terra", "status": "completed",
+            "usage": { "input_tokens": 1000, "output_tokens": 240,
+                       "input_tokens_details": { "cached_tokens": 600 },
+                       "output_tokens_details": { "reasoning_tokens": 200 } } } }),
+    ]);
+    let mut r = Reading::default();
+    for part in text.as_bytes().chunks(11) {
+        r.feed(Dialect::OpenAi, part);
+    }
+    r.end(Dialect::OpenAi);
+    assert!(r.done);
+    assert_eq!(r.error, None);
+    assert_eq!(r.model, "gpt-6.1-terra");
+    assert_eq!(r.text, "Hello");
+    assert_eq!(r.stop_reason.as_deref(), Some("tool_use"));
+    assert_eq!(
+        r.content(),
+        json!([
+            { "type": "text", "text": "Hello" },
+            { "type": "tool_use", "id": "call_1", "name": "run", "input": { "cmd": "ls" } },
+            { "type": "tool_use", "id": "call_2", "name": "read", "input": { "path": "a" } }
+        ])
+    );
+    // Reasoning tokens are inside `output_tokens`, so they are billed as output.
+    assert_eq!(
+        (r.tokens_in, r.cache_read, r.tokens_out),
+        (Some(400), Some(600), Some(240))
+    );
+    assert_eq!(r.usage()["cache_creation_input_tokens"], 0);
+
+    // A plain answer, an answer cut short, and two failures.
+    let read = |events: &[Value]| {
+        let mut r = Reading::default();
+        r.feed(Dialect::OpenAi, sse(events).as_bytes());
+        r.end(Dialect::OpenAi);
+        r
+    };
+    let ok = read(&[
+        json!({ "type": "response.output_text.delta", "delta": "hi" }),
+        json!({ "type": "response.completed", "response": { "status": "completed" } }),
+    ]);
+    assert_eq!(ok.stop_reason.as_deref(), Some("end_turn"));
+    let cut = read(&[json!({ "type": "response.incomplete", "response": {
+        "status": "incomplete", "incomplete_details": { "reason": "max_output_tokens" } } })]);
+    assert_eq!(cut.stop_reason.as_deref(), Some("max_tokens"));
+    assert!(cut.done);
+    let failed = read(&[json!({ "type": "response.failed", "response": {
+        "status": "failed", "error": { "code": "server_error", "message": "boom" } } })]);
+    assert_eq!(failed.error.as_deref(), Some("server_error: boom"));
+    let err = read(&[json!({ "type": "error", "code": "rate_limit_exceeded", "message": "slow" })]);
+    assert_eq!(err.error.as_deref(), Some("rate_limit_exceeded: slow"));
+}
+
+/// A whole Responses API answer (the shape of OpenAI's "response" object) reads as a reply.
+#[test]
+fn models_openai_responses_reply() {
+    use pigeon_models::Dialect;
+    let v = json!({
+        "id": "resp_1", "object": "response", "status": "completed", "model": "gpt-6.2-sol",
+        "output": [
+            { "type": "reasoning", "id": "rs_1", "summary": [] },
+            { "type": "message", "role": "assistant", "content": [
+                { "type": "output_text", "text": "Hel", "annotations": [] },
+                { "type": "output_text", "text": "lo", "annotations": [] } ] },
+            { "type": "function_call", "call_id": "call_1", "name": "run", "arguments": "{}" }
+        ],
+        "usage": { "input_tokens": 10, "output_tokens": 30,
+                   "output_tokens_details": { "reasoning_tokens": 20 } }
+    });
+    let reply = Dialect::OpenAi.reply(&v).unwrap();
+    assert_eq!(reply.text, "Hello");
+    assert_eq!(reply.model, "gpt-6.2-sol");
+    assert_eq!(reply.stop_reason.as_deref(), Some("tool_use"));
+    assert_eq!((reply.tokens_in, reply.tokens_out), (Some(10), Some(30)));
 }

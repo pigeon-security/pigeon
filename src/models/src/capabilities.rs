@@ -8,7 +8,8 @@
 pub enum Endpoint {
     /// Chat Completions.
     Chat,
-    /// The Responses API. No row uses it yet; the request builders only read it.
+    /// The Responses API, `/v1/responses`. A row that says this is called there when a request
+    /// has tools and asks for a reasoning effort; every other request goes to Chat Completions.
     Responses,
 }
 
@@ -72,6 +73,11 @@ impl Capabilities {
             Choice::None => self.none,
         }
     }
+
+    /// Whether a request with these tools and this asked effort goes to the Responses API.
+    pub fn uses_responses(&self, has_tools: bool, effort_asked: bool) -> bool {
+        self.endpoint == Endpoint::Responses && self.effort && has_tools && effort_asked
+    }
 }
 
 /// The row for a model the table does not know: Chat Completions, tools without a reasoning
@@ -106,11 +112,13 @@ const CLAUDE_AUTO: Capabilities = Capabilities {
     ..CLAUDE_ALL
 };
 
-/// An OpenAI row on Chat Completions that takes every `tool_choice` kind and an effort beside
-/// tools. Every GPT-6 model lists 128,000 as its largest output.
+/// An OpenAI row that takes every `tool_choice` kind. Chat Completions refuses an effort beside
+/// tools on these models (a live 400, 2026-11-24), so a request with tools and an effort goes to
+/// the Responses API, and a request with tools and no effort sends effort `none` on chat. Every GPT-6 model lists 128,000 as its largest output.
 const OPENAI_ALL: Capabilities = Capabilities {
     effort: true,
-    effort_with_tools: true,
+    effort_with_tools: false,
+    endpoint: Endpoint::Responses,
     any: true,
     tool: true,
     max_output: 128_000,
@@ -156,13 +164,7 @@ const TABLE: &[(&str, Capabilities)] = &[
     ),
     // OpenAI's page for gpt-6-luna: "Chat Completions supports function calling only with
     // reasoning_effort set to none." Its 400 says the same.
-    (
-        "gpt-6-luna",
-        Capabilities {
-            effort_with_tools: false,
-            ..OPENAI_ALL
-        },
-    ),
+    ("gpt-6-luna", OPENAI_ALL),
     ("gpt-6.2-astra", OPENAI_ALL),
     ("gpt-6.2-sol", OPENAI_ALL),
     ("gpt-6.1-terra", OPENAI_ALL),

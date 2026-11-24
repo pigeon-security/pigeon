@@ -510,7 +510,7 @@ fn models_openai_request_translation() {
         "temperature": 0.5,
         "top_p": 0.9,
         "stop_sequences": ["a", "b", "c", "d", "e"],
-        "output_config": { "effort": "high" },
+        "output_config": { "effort": "max" },
         "messages": [
             { "role": "user", "content": "go" },
             { "role": "assistant", "content": [
@@ -535,7 +535,8 @@ fn models_openai_request_translation() {
     assert!(out.get("max_tokens").is_none());
     assert_eq!(out["stream"], true);
     assert_eq!(out["stream_options"], json!({ "include_usage": true }));
-    assert_eq!(out["reasoning_effort"], "high");
+    // An effort OpenAI does not take, with tools on a GPT-6 row: chat, effort `none`.
+    assert_eq!(out["reasoning_effort"], "none");
     assert_eq!(out["stop"], json!(["a", "b", "c", "d"]));
     assert_eq!(out["temperature"], 0.5);
     assert_eq!(out["top_p"], 0.9);
@@ -601,16 +602,28 @@ fn models_openai_request_translation() {
         json!({ "type": "function", "function": { "name": "f" } })
     );
     let odd = small(json!({ "output_config": { "effort": "max" } }));
-    assert!(odd.get("reasoning_effort").is_none());
+    assert_eq!(odd["reasoning_effort"], "none");
     assert_eq!(odd["messages"][0]["content"], "s");
 
-    // gpt-6-luna refuses function tools with a reasoning effort: `none` is sent instead.
-    // Without tools, its effort goes through as asked.
-    let luna = small(json!({ "model": "gpt-6-luna", "output_config": { "effort": "low" } }));
+    // A tool turn that asks for an effort goes to the Responses API on every GPT-6 row, luna
+    // too, dated or prefixed names included.
+    for m in [
+        "gpt-6-luna",
+        "gpt-6-luna-2026-10-01",
+        "cf-openai/gpt-6.1-terra",
+        "openai/gpt-6.2-astra",
+    ] {
+        let r = small(json!({ "model": m, "output_config": { "effort": "low" } }));
+        assert_eq!(r["reasoning"], json!({ "effort": "low" }), "{m}");
+        assert!(
+            r.get("messages").is_none() && r.get("reasoning_effort").is_none(),
+            "{m}"
+        );
+    }
+    // With tools and no effort asked they stay on chat, with effort `none`.
+    let luna = small(json!({ "model": "gpt-6-luna" }));
     assert_eq!(luna["reasoning_effort"], "none");
-    let dated =
-        small(json!({ "model": "gpt-6-luna-2026-10-01", "output_config": { "effort": "high" } }));
-    assert_eq!(dated["reasoning_effort"], "none");
+    // Without tools, chat takes the effort as asked.
     let bare = openai::request(&json!({
         "model": "gpt-6-luna", "output_config": { "effort": "low" },
         "messages": [{ "role": "user", "content": "x" }]

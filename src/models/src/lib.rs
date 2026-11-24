@@ -340,6 +340,17 @@ impl Dialect {
         }
     }
 
+    /// The provider's path for a request with this `body`: OpenAI's `responses` for a body in
+    /// the Responses shape (`input`, no `messages`), else [`Dialect::path`].
+    pub fn path_for(self, body: &Value) -> &'static str {
+        if self == Dialect::OpenAi && body.get("input").is_some() && body.get("messages").is_none()
+        {
+            "responses"
+        } else {
+            self.path()
+        }
+    }
+
     /// Headers a request needs beside the gateway's.
     pub fn headers(self) -> &'static [(&'static str, &'static str)] {
         match self {
@@ -401,6 +412,9 @@ impl Dialect {
                 })
             }
             Dialect::OpenAi => {
+                if v["output"].is_array() {
+                    return Ok(responses_reply(v));
+                }
                 let choice = v["choices"]
                     .get(0)
                     .ok_or_else(|| bad(&format!("not a Chat Completions answer: {v}")))?;
@@ -943,7 +957,7 @@ impl Models {
             account,
             p.gateway,
             p.slug,
-            p.dialect.path(),
+            p.dialect.path_for(&body),
             &headers,
             &tags,
             &body,
@@ -1107,7 +1121,7 @@ impl Models {
             ask: runner::Ask {
                 dialect: p.dialect,
                 provider: p.slug.into(),
-                path: p.dialect.path().into(),
+                path: p.dialect.path_for(&body).into(),
                 headers,
                 tags,
                 body,
@@ -2039,5 +2053,30 @@ impl Service for ModelGateway {
         req: SecretRequest,
     ) -> pigeon_contract::serve::Answering<'a> {
         Box::pin(async move { self.key(env, caller, &req).await })
+    }
+}
+
+/// A whole (not streamed) Responses API answer in the common shape. Its `output_tokens` already
+/// include the reasoning tokens.
+fn responses_reply(v: &Value) -> Reply {
+    let items = v["output"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let text = items
+        .iter()
+        .filter(|i| i["type"] == "message")
+        .flat_map(|i| i["content"].as_array().into_iter().flatten())
+        .filter(|c| c["type"] == "output_text")
+        .filter_map(|c| c["text"].as_str())
+        .collect::<Vec<_>>()
+        .join("");
+    let calls = items.iter().any(|i| i["type"] == "function_call");
+    Reply {
+        model: v["model"].as_str().unwrap_or_default().into(),
+        text,
+        stop_reason: stream::responses_stop(v, calls),
+        tokens_in: v["usage"]["input_tokens"].as_u64(),
+        tokens_out: v["usage"]["output_tokens"].as_u64(),
     }
 }
