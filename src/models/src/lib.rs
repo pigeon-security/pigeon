@@ -1381,13 +1381,36 @@ async fn admin_get(url: &str, key: &str) -> Result<(u16, Value)> {
 
 /// A short reason from a failed report's answer; never the key.
 fn why_failed(status: u16, body: &Value) -> String {
-    let msg = body["error"]["message"].as_str().unwrap_or_default();
-    let shown: String = msg.chars().take(200).collect();
+    let shown = billing::anthropic_reason(body).unwrap_or_default();
     format!("Anthropic answered {status}: {shown}")
 }
 
-/// The status of a one-row usage report read, from yesterday to now.
-async fn admin_probe(key: &str) -> Result<u16> {
+/// Why Anthropic refused the admin key with `status` (401 or 403), with Anthropic's own reason
+/// from `body`; never the key. A 403 means the key was accepted but its account may not read the
+/// report: an `sk-ant-usr-` key acts with its linked account's organization role.
+fn admin_refusal(status: u16, body: &Value) -> String {
+    let theirs = billing::anthropic_reason(body)
+        .map(|r| format!(" Anthropic says: \"{r}\"."))
+        .unwrap_or_default();
+    if status == 403 {
+        format!(
+            "Anthropic accepted the key but refused it on its usage report (403).{theirs} An \
+             `sk-ant-usr-` key has its linked account's permissions, so that account needs the \
+             admin role: an organization admin gives it in the Claude Console's organization \
+             settings, where members' roles are set. Or use an admin key from Settings, Admin \
+             keys (`sk-ant-admin01-`). The key must also have Scope Organization, not a \
+             workspace"
+        )
+    } else {
+        format!(
+            "Anthropic refused the key on its usage report ({status}).{theirs} It is wrong, \
+             expired or revoked: make a new one in the Claude Console and set it again"
+        )
+    }
+}
+
+/// The status and body of a one-row usage report read, from yesterday to now.
+async fn admin_probe(key: &str) -> Result<(u16, Value)> {
     let now = String::from(Date::new_0().to_iso_string());
     let today = now.get(..10).unwrap_or_default();
     let from = daily::days_ending(today, 2)
@@ -1395,7 +1418,7 @@ async fn admin_probe(key: &str) -> Result<u16> {
         .next()
         .unwrap_or_default();
     let url = billing::usage_url(&format!("{from}T00:00:00Z"), &now, 1, None);
-    Ok(admin_get(&url, key).await?.0)
+    admin_get(&url, key).await
 }
 
 impl Models {
@@ -1830,13 +1853,9 @@ impl Models {
         if name == billing::ADMIN_KEY {
             billing::admin_key_shape(value).map_err(bad)?;
             return match admin_probe(value).await? {
-                200 => Ok("Anthropic accepts the admin key".into()),
-                s @ (401 | 403) => Err(bad(&format!(
-                    "Anthropic refused the key on its usage report ({s}): it is wrong, expired \
-                     or revoked, or not organization-scoped (Scope Organization), or its \
-                     account cannot read the Admin API"
-                ))),
-                s => Err(bad(&format!("Anthropic refused the admin key: {s}"))),
+                (200, _) => Ok("Anthropic accepts the admin key".into()),
+                (s @ (401 | 403), body) => Err(bad(&admin_refusal(s, &body))),
+                (s, body) => Err(bad(&why_failed(s, &body))),
             };
         }
         self.keyed(name)?.dialect.check(value).await
@@ -1860,17 +1879,16 @@ impl Models {
             }
         };
         match admin_probe(&key).await {
-            Ok(401 | 403) => Expiry::Refused {
-                why: "Anthropic refuses the admin key (401/403): it has expired or been revoked"
-                    .into(),
+            Ok((s @ (401 | 403), body)) => Expiry::Refused {
+                why: admin_refusal(s, &body),
             },
-            Ok(200) => Expiry::Unknown {
+            Ok((200, _)) => Expiry::Unknown {
                 why: "the key works; Anthropic does not report this key's expiry here: it expires \
                       on the date chosen in the Claude Console"
                     .into(),
             },
-            Ok(s) => Expiry::Unknown {
-                why: format!("the check failed: Anthropic answered {s}"),
+            Ok((s, body)) => Expiry::Unknown {
+                why: format!("the check failed: {}", why_failed(s, &body)),
             },
             Err(e) => Expiry::Unknown {
                 why: format!("the check failed: {e}"),

@@ -25,6 +25,37 @@ pub fn admin_key_shape(value: &str) -> Result<(), &'static str> {
         )
     }
 }
+
+/// The most characters of Anthropic's own reason shown in a refusal.
+pub const REASON_MAX_CHARS: usize = 300;
+
+/// Anthropic's own reason from an error answer's JSON body (`{"error": {"type", "message"}}`):
+/// `"<type>: <message>"`, whitespace collapsed, any `sk-ant-…` word cut to `sk-ant-…`, at most
+/// [`REASON_MAX_CHARS`] characters. `None` when the body names neither.
+pub fn anthropic_reason(body: &Value) -> Option<String> {
+    let kind = body["error"]["type"].as_str().unwrap_or_default().trim();
+    let msg = body["error"]["message"].as_str().unwrap_or_default();
+    let msg = msg
+        .split_whitespace()
+        .map(|w| match w.find("sk-ant-") {
+            Some(i) => format!("{}sk-ant-…", &w[..i]),
+            None => w.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let full = match (kind.is_empty(), msg.is_empty()) {
+        (true, true) => return None,
+        (false, true) => kind.to_string(),
+        (true, false) => msg,
+        (false, false) => format!("{kind}: {msg}"),
+    };
+    let mut shown: String = full.chars().take(REASON_MAX_CHARS).collect();
+    if shown.len() < full.len() {
+        shown.push('…');
+    }
+    Some(shown)
+}
+
 /// Where the Admin API's reports live.
 const BASE: &str = "https://api.anthropic.com/v1/organizations";
 /// The most one-day buckets a usage page holds.

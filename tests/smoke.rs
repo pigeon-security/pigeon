@@ -2110,3 +2110,44 @@ fn models_admin_key_prefixes() {
     assert!(src.contains("It expires on the"));
     assert!(!src.contains("Anthropic reports no expiry for admin keys"));
 }
+
+/// A refused `ANTHROPIC_ADMIN_KEY` shows Anthropic's own reason: `billing::anthropic_reason`
+/// reads `error.type` and `error.message` from the answer's body, collapses whitespace, cuts any
+/// `sk-ant-` word so no key is shown, and keeps at most 300 characters. The check and `Expiry`
+/// both use it, and a 403 names the linked account's admin role. Pure.
+#[test]
+fn models_admin_key_refusal_reason() {
+    use pigeon_models::billing::{REASON_MAX_CHARS, anthropic_reason};
+    use serde_json::json;
+
+    let body = json!({"type": "error", "error": {"type": "permission_error",
+        "message": "This key  does not have\npermission to read usage."}, "request_id": "req_1"});
+    assert_eq!(
+        anthropic_reason(&body).as_deref(),
+        Some("permission_error: This key does not have permission to read usage.")
+    );
+    let only_type = json!({"error": {"type": "authentication_error"}});
+    assert_eq!(
+        anthropic_reason(&only_type).as_deref(),
+        Some("authentication_error")
+    );
+    for none in [json!(null), json!({}), json!({"error": {}}), json!("text")] {
+        assert_eq!(anthropic_reason(&none), None, "{none}");
+    }
+
+    let leaky = json!({"error": {"type": "authentication_error",
+        "message": "invalid key 'sk-ant-usr-SECRET123' given"}});
+    let why = anthropic_reason(&leaky).unwrap();
+    assert!(!why.contains("SECRET123"), "{why}");
+    assert!(why.contains("'sk-ant-…"), "{why}");
+
+    let long = json!({"error": {"type": "permission_error", "message": "x".repeat(1000)}});
+    let why = anthropic_reason(&long).unwrap();
+    assert_eq!(why.chars().count(), REASON_MAX_CHARS + 1, "{why}");
+    assert!(why.ends_with('…'));
+
+    let src = include_str!("../src/models/src/lib.rs");
+    assert!(src.contains("Ok((s @ (401 | 403), body)) => Expiry::Refused"));
+    assert!(src.contains("(s @ (401 | 403), body) => Err(bad(&admin_refusal(s, &body)))"));
+    assert!(src.contains("admin role: an organization admin gives it"));
+}
