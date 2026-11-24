@@ -66,16 +66,23 @@ const SANDBOX: [&str; 8] = [
 ];
 
 /// Agent tools every role is offered.
-const AGENT_COMMON: [&str; 4] = ["ask_person", "report", "model_probe", "run_spend"];
+const AGENT_COMMON: [&str; 5] = [
+    "ask_person",
+    "report",
+    "model_probe",
+    "run_spend",
+    "branch_restack",
+];
 
 /// Agent tools only a planner is offered.
-const AGENT_PLANNER: [&str; 6] = [
+const AGENT_PLANNER: [&str; 7] = [
     "spawn_executor",
     "executor_status",
     "executor_result",
     "executor_stop",
     "wait_executors",
     "wait_events",
+    "branch_combine",
 ];
 
 /// Largest `write_file` content, in bytes (1 MiB).
@@ -330,7 +337,23 @@ fn agent_definitions(role: Role) -> Vec<Value> {
         ),
     ];
     out.extend(probe_definitions());
+    out.push(tool(
+        "branch_restack",
+        "Fetches main, rebases your own branch onto origin/main and force-pushes it with the lease. On a conflict it aborts the rebase, leaves the checkout clean, pushes nothing and answers the conflicting files.",
+        json!({ "type": "object", "properties": {} }),
+    ));
     if role == Role::Planner {
+        out.push(tool(
+            "branch_combine",
+            "Fetches main and the branches, resets your checkout to origin/main, cherry-picks each branch's commits (oldest first, merge commits skipped) in the order given and force-pushes the result to your own branch. Each name must be your own branch or an executor's branch (`claude/ai-agent-{run}`). On a conflict it aborts, restores the checkout and answers the files and the branch. It refuses if your own branch has commits that are not in main and not in the list, unless the list names your own branch.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "branches": {"type": "array", "minItems": 1, "maxItems": 10, "items": {"type": "string"}, "description": "Branch names, in the order to apply them."}
+                },
+                "required": ["branches"]
+            }),
+        ));
         out.push(tool(
             "spawn_executor",
             "Starts an executor run on a brief and answers its run id. The brief must stand alone, because the executor sees nothing else.",
@@ -773,6 +796,8 @@ pub fn check(role: Role, name: &str, input: &Value) -> Result<(), String> {
         }
         "model_probe" => crate::probe::parse(role, input).map(|_| ()),
         "run_spend" => crate::probe::check_spend(input),
+        "branch_restack" => crate::branches::check_restack(input),
+        "branch_combine" => crate::branches::parse_combine(input).map(|_| ()),
         _ => Ok(()),
     }
 }

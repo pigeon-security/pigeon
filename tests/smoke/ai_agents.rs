@@ -2248,3 +2248,135 @@ fn ai_agents_openai_choice_routes_to_byok_provider() {
         "{shown}"
     );
 }
+
+/// Both branch tools are offered by role: restack to all, combine to planners only, and
+/// neither is safe to repeat.
+#[test]
+fn ai_agents_branch_tools_are_in_the_right_role_lists() {
+    use pigeon_ai_agents::{Role, tools};
+    for role in [Role::Planner, Role::Executor, Role::Mechanical] {
+        let names: Vec<String> = tools::definitions(role, &[])
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_string())
+            .collect();
+        assert!(names.contains(&"branch_restack".to_string()));
+        let combine = names.contains(&"branch_combine".to_string());
+        assert_eq!(combine, role == Role::Planner, "{role:?}");
+        assert_eq!(
+            tools::kind(role, "branch_combine").is_some(),
+            role == Role::Planner
+        );
+    }
+    assert!(!tools::idempotent("branch_restack") && !tools::idempotent("branch_combine"));
+}
+
+/// Argument checks, through `tools::check` and the module's own parser.
+#[test]
+fn ai_agents_branch_tools_check_their_input() {
+    use pigeon_ai_agents::{Role, branches, tools};
+    assert!(tools::check(Role::Executor, "branch_restack", &json!({})).is_ok());
+    assert!(tools::check(Role::Executor, "branch_restack", &json!({"x": 1})).is_err());
+    assert!(
+        tools::check(
+            Role::Executor,
+            "branch_combine",
+            &json!({"branches": ["a"]})
+        )
+        .is_err()
+    );
+    let p = |v: Value| tools::check(Role::Planner, "branch_combine", &v);
+    assert!(p(json!({})).is_err());
+    assert!(p(json!({"branches": []})).is_err());
+    assert!(p(json!({"branches": "claude/ai-agent-r1"})).is_err());
+    assert!(p(json!({"branches": [1]})).is_err());
+    assert!(p(json!({"branches": ["a b"]})).is_err());
+    assert!(p(json!({"branches": ["-x"]})).is_err());
+    assert!(p(json!({"branches": ["a/../b"]})).is_err());
+    assert!(p(json!({"branches": ["claude/ai-agent-r1"], "x": 1})).is_err());
+    let many: Vec<String> = (0..11).map(|i| format!("claude/ai-agent-r{i}")).collect();
+    assert!(p(json!({ "branches": many })).is_err());
+    // Order is kept and a repeat is dropped.
+    let names = branches::parse_combine(
+        &json!({"branches": ["claude/ai-agent-b", "claude/ai-agent-a", "claude/ai-agent-b"]}),
+    )
+    .unwrap();
+    assert_eq!(names, ["claude/ai-agent-b", "claude/ai-agent-a"]);
+}
+
+/// Ownership: the own branch and the executors' branches pass; main and others are refused.
+#[test]
+fn ai_agents_branch_combine_ownership() {
+    use pigeon_ai_agents::branches::check_ownership;
+    let own = "claude/ai-agent-p1";
+    let kids = json!([{"run": "c1"}, {"run": "c2"}]);
+    let n = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    assert!(check_ownership(own, &kids, &n(&[own, "claude/ai-agent-c2"])).is_ok());
+    assert!(check_ownership(own, &kids, &n(&["main"])).is_err());
+    assert!(check_ownership(own, &kids, &n(&["origin/main"])).is_err());
+    assert!(check_ownership(own, &kids, &n(&["claude/ai-agent-c3"])).is_err());
+    assert!(check_ownership(own, &kids, &n(&["claude/ai-agent-c1", "claude/ai-agent-x"])).is_err());
+    assert!(check_ownership(own, &json!([]), &n(&["claude/ai-agent-c1"])).is_err());
+}
+
+/// Conflict lists and exit codes are read from canned sandbox answers.
+#[test]
+fn ai_agents_branch_conflict_parse() {
+    use pigeon_ai_agents::branches::{Conflict, parse_conflicts, parse_exit};
+    let text = "exit 1 after 80 ms; 90 bytes of output, the whole of it in `/tmp/o`\n\
+                @@CONFLICT@@ claude/ai-agent-c2\nsrc/a.rs\ndocs/b.md\n@@END@@\nerror: could not apply";
+    assert_eq!(parse_exit(text), Some(1));
+    assert_eq!(
+        parse_conflicts(text),
+        Some(Conflict {
+            branch: Some("claude/ai-agent-c2".into()),
+            paths: vec!["src/a.rs".into(), "docs/b.md".into()],
+        })
+    );
+    let restack = "exit 1 after 5 ms\n@@CONFLICT@@\nx.rs\n@@END@@\n";
+    let c = parse_conflicts(restack).unwrap();
+    assert_eq!((c.branch, c.paths), (None, vec!["x.rs".to_string()]));
+    assert_eq!(parse_conflicts("exit 0 after 5 ms\n@@DONE@@\n"), None);
+    assert_eq!(parse_exit("timed out after 5 ms"), None);
+}
+
+/// The plan: commit order, one pick per commit, the dirty refusal and the dropping check.
+#[test]
+fn ai_agents_branch_combine_plan_and_scripts() {
+    use pigeon_ai_agents::branches::{
+        combine_script, list_script, parse_listing, plan, restack_script,
+    };
+    let own = "claude/ai-agent-p1";
+    let n = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let c1 = "claude/ai-agent-c1";
+    let c2 = "claude/ai-agent-c2";
+    let names = n(&[c2, c1]);
+    let out = format!("exit 0 after 9 ms\nOWN o1\nB {c2} s1\nB {c2} s2\nB {c1} s2\nB {c1} s3\n");
+    let l = parse_listing(&out, &names);
+    assert_eq!(l.own, ["o1"]);
+    // o1 is in no listed branch, so it would be dropped.
+    let err = plan(own, &names, &l).unwrap_err();
+    assert!(err.contains("drop"), "{err}");
+    // Naming the own branch lifts the refusal.
+    let with_own = n(&[own, c2, c1]);
+    let l2 = parse_listing(&format!("OWN o1\nB {own} o1\n{}", &out[18..]), &with_own);
+    let p = plan(own, &with_own, &l2).unwrap();
+    assert_eq!(p[0], (own.to_string(), vec!["o1".to_string()]));
+    // Order is the list's; s2 is picked once, for the first branch that has it.
+    assert_eq!(p[1].1, ["s1", "s2"]);
+    assert_eq!(p[2].1, ["s3"]);
+    // A covered own commit passes.
+    let covered = parse_listing(&format!("OWN s1\nB {c2} s1\n"), &n(&[c2]));
+    assert!(plan(own, &n(&[c2]), &covered).is_ok());
+    // A dirty checkout is refused.
+    assert!(plan(own, &n(&[c2]), &parse_listing("DIRTY\nB x s\n", &n(&[c2]))).is_err());
+    // The scripts: own branch is read from HEAD, picks are in order, nothing touches main.
+    let ls = list_script(own, &with_own);
+    assert!(ls.contains("origin/main..HEAD") && ls.contains(&format!("origin/main..origin/{c1}")));
+    assert!(ls.contains("--no-merges") && ls.contains("--reverse"));
+    let cs = combine_script(&p);
+    assert!(cs.find("cherry-pick o1").unwrap() < cs.find("cherry-pick s1 s2").unwrap());
+    assert!(cs.contains("cherry-pick --abort") && cs.contains("reset -q --hard \"$orig\""));
+    assert!(!cs.contains("push") && !restack_script().contains("push"));
+    assert!(restack_script().contains("git rebase origin/main"));
+    assert!(restack_script().contains("git rebase --abort"));
+}

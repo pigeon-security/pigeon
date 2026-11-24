@@ -72,7 +72,9 @@ item documented in a line or two saying what it is for. Errors are returned, nev
 /// Two read-only tools every run has: what each is for, one line each.
 const PROBE_NOTE: &str = "\
 Read-only tools: `model_probe` tests whether a named model answers (at most 10, small, counted \
-in your cost); `run_spend` shows your own spend and what is left of your budget.";
+in your cost); `run_spend` shows your own spend and what is left of your budget.\n\
+`branch_restack` rebases your branch onto the new main and force-pushes it; `branch_combine` \
+(planners) cherry-picks your own and your executors' branches onto main into your branch.";
 
 /// The system prompt of a run of `role` working on `branch`.
 pub fn system(role: Role, branch: &str) -> String {

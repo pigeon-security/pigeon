@@ -2508,6 +2508,9 @@ impl AiAgentRuns {
                     .await
             }
             Some(Kind::Agent) if c.name == "run_spend" => self.spend_tool(row, budget, spent),
+            Some(Kind::Agent) if c.name == "branch_restack" || c.name == "branch_combine" => {
+                self.branch_tool(row, &c.name, &input).await
+            }
             Some(Kind::Agent) if c.name != "report" => {
                 self.planner_tool(row, &c.name, &input, budget, spent).await
             }
@@ -3071,5 +3074,96 @@ impl AiAgentRuns {
                 .map_err(|e| e.to_string())?;
         }
         Ok(shaped.answer.to_string())
+    }
+
+    /// Runs sandbox tool `name` for this run, as `call_tool` does for the model's own calls.
+    async fn sandbox_step(
+        &self,
+        row: &RunRow,
+        name: &str,
+        input: Value,
+    ) -> std::result::Result<String, String> {
+        sandbox::tool(&self.env, &row.id, &row.branch, name, &input)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    /// Runs a git script in the checkout; answers its exit code and the sandbox's text.
+    async fn git_script(
+        &self,
+        row: &RunRow,
+        script: &str,
+    ) -> std::result::Result<(i64, String), String> {
+        let text = self
+            .sandbox_step(row, "run", json!({ "cmd": script, "timeout_s": 300 }))
+            .await?;
+        let code = crate::branches::parse_exit(&text).unwrap_or(-1);
+        Ok((code, text))
+    }
+
+    /// `branch_restack` and `branch_combine`: git in the checkout over the sandbox's `fetch`,
+    /// `run` and `commit_push {force}`. The pure parts are in `branches`.
+    async fn branch_tool(
+        &self,
+        row: &RunRow,
+        name: &str,
+        input: &Value,
+    ) -> std::result::Result<String, String> {
+        use crate::branches as b;
+        self.sandbox_step(row, "fetch", json!({ "ref": b::MAIN }))
+            .await?;
+        if name == "branch_restack" {
+            let (code, text) = self.git_script(row, &b::restack_script()).await?;
+            if let Some(c) = b::parse_conflicts(&text) {
+                if c.paths.is_empty() {
+                    return Err(format!("the rebase failed without a conflict:\n{text}"));
+                }
+                return Err(b::conflict_text(name, &c));
+            }
+            if code != 0 {
+                return Err(format!("the rebase failed:\n{text}"));
+            }
+            return self
+                .sandbox_step(
+                    row,
+                    "commit_push",
+                    json!({ "message": "restack onto main", "force": true }),
+                )
+                .await;
+        }
+        let names = b::parse_combine(input)?;
+        let children = call(&self.env, INDEX, "children", &json!({ "run": row.id }))
+            .await
+            .map_err(|e| e.to_string())?;
+        b::check_ownership(&row.branch, &children, &names)?;
+        for n in names.iter().filter(|n| **n != row.branch) {
+            self.sandbox_step(row, "fetch", json!({ "ref": n })).await?;
+        }
+        let (code, text) = self
+            .git_script(row, &b::list_script(&row.branch, &names))
+            .await?;
+        if code != 0 {
+            return Err(format!("could not list the commits:\n{text}"));
+        }
+        let listing = b::parse_listing(&text, &names);
+        let plan = b::plan(&row.branch, &names, &listing)?;
+        let (code, text) = self.git_script(row, &b::combine_script(&plan)).await?;
+        if let Some(c) = b::parse_conflicts(&text) {
+            if c.paths.is_empty() {
+                return Err(format!(
+                    "a cherry-pick failed without a conflict; the checkout is as it was:\n{text}"
+                ));
+            }
+            return Err(b::conflict_text(name, &c));
+        }
+        if code != 0 || !text.contains(b::DONE_MARK) {
+            return Err(format!("the combine failed:\n{text}"));
+        }
+        self.sandbox_step(
+            row,
+            "commit_push",
+            json!({ "message": "combine branches onto main", "force": true }),
+        )
+        .await
     }
 }

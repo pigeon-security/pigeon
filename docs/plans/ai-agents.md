@@ -967,3 +967,9 @@ executors through it. Each item: state, next step, who it waits on.
   `pigeon-openai_openai_default`), so ai-agents no longer refuses `openai/<model>` or bare `openai`
   (tiers as `cf-openai`, paid by the person's own key). Its model ids use the gateway's own rule;
   a run with no key set gets the gateway's "not ready" message. No default changed.
+- 2026-11-24: **`branch_restack` and `branch_combine` (6c).** Both are agent tools the run's object
+  carries out over the sandbox's `fetch`, `run` and `commit_push {force}`; no sandboxd op was added.
+  The pure part is `src/ai-agents/src/branches.rs`. Merge commits are skipped
+  (`--no-merges`), a commit named by two branches is picked once, and the planner's own branch is
+  read from the checkout's `HEAD`. A dirty checkout is refused. A conflict aborts and restores the
+  checkout. The git scripts run only in a real sandbox; the smoke suite tests the pure parts.
