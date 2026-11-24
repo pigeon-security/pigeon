@@ -124,8 +124,8 @@ impl Service for Sites {
                             "type": "object",
                             "properties": {
                                 "site_toml": { "type": "string", "description": "The text of .pigeon/site.toml." },
-                                "posts": { "type": "array", "description": "content/posts/*.md as [name, text] pairs." },
-                                "pages": { "type": "array", "description": "content/pages/*.md as [name, text] pairs." },
+                                "posts": { "type": "array", "items": { "type": "array", "items": { "type": "string" } }, "description": "content/posts/*.md as [name, text] pairs." },
+                                "pages": { "type": "array", "items": { "type": "array", "items": { "type": "string" } }, "description": "content/pages/*.md as [name, text] pairs." },
                                 "statics": { "type": "array", "items": { "type": "string" }, "description": "Paths under static/." },
                                 "base_url": { "type": "string", "description": "Such as https://example.com." },
                                 "commit": { "type": "string", "description": "The short commit, for the footer." },

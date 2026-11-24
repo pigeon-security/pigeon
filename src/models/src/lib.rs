@@ -1506,9 +1506,9 @@ impl Models {
                         "model": { "type": "string", "description": "The provider's default when omitted." },
                         "system": { "type": "string" },
                         "prompt": { "type": "string" },
-                        "messages": { "type": "array", "items": { "type": "object" } },
+                        "messages": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
                         "max_tokens": { "type": "integer", "description": "1024 by default." },
-                        "raw": { "type": "object" },
+                        "raw": { "type": "object", "additionalProperties": true },
                         "task": { "type": "string", "description": "A short label for what the request is for, such as `triage`; 100 characters at most." }
                     }
                 }),
@@ -1532,12 +1532,12 @@ impl Models {
                         "model": { "type": "string", "description": "The provider's default when omitted." },
                         "system": { "type": "string" },
                         "prompt": { "type": "string" },
-                        "messages": { "type": "array", "items": { "type": "object" } },
+                        "messages": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
                         "max_tokens": { "type": "integer", "description": "1024 by default, 64000 at most." },
                         "task": { "type": "string", "description": "A short label, as for models_run." },
                         "timeout_min": { "type": "integer", "description": "1 to 14; 10 by default." },
                         "notify": { "type": "string", "description": "An https URL to POST to when the job ends." },
-                        "request": { "type": "object", "description": "Instead of prompt or messages: a whole Messages request (system blocks, tools, tool_choice, thinking, cache_control and the like), as an AI agent's turn sends it, for any provider: an Anthropic Messages body, translated for OpenAI. The job streams it; models_result answers its content blocks and usage." },
+                        "request": { "type": "object", "additionalProperties": true, "description": "Instead of prompt or messages: a whole Messages request (system blocks, tools, tool_choice, thinking, cache_control and the like), as an AI agent's turn sends it, for any provider: an Anthropic Messages body, translated for OpenAI. The job streams it; models_result answers its content blocks and usage." },
                         "betas": { "type": "array", "items": { "type": "string", "enum": turn::BETAS }, "description": "With `request`: the provider betas it uses." },
                         "lane": { "type": "string", "enum": ["default", "ai-agents"], "description": "`ai-agents` for an AI agent's turn, which runs beside other jobs with its own cap; `default` otherwise." }
                     }

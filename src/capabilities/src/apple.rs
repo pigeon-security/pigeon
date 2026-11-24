@@ -959,7 +959,7 @@ pub mod push {
                         "alert": { "type": "object", "required": ["title", "body"],
                             "properties": { "title": { "type": "string" },
                                             "body": { "type": "string" } } },
-                        "data": { "type": "object" },
+                        "data": { "type": "object", "additionalProperties": true },
                         "push_type": { "type": "string", "enum": ["alert", "background"] },
                         "collapse_id": { "type": "string" },
                     } }),

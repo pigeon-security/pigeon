@@ -1,6 +1,6 @@
 # ChatGPT as an MCP client of pigeon
 
-Status: **planned** (2026-11-25). Planner run `vnr3cWzWC3aX`. Part of [model-providers.md](model-providers.md), Part 4, phase 17 (E).
+Status: **phase 17a implemented** (2026-11-25); 17b open. Planner run `vnr3cWzWC3aX`. Part of [model-providers.md](model-providers.md), Part 4, phase 17 (E).
 
 ## Goal
 
@@ -85,3 +85,23 @@ What is Cloudflare's to configure and what is pigeon's:
 
 - 2026-11-25: plan written.
 - 2026-11-24: live discovery and CORS read with `curl` (section above). `OPTIONS /mcp` on the platform answered 405; it now answers 204 with CORS headers.
+- 2026-11-25: phase 17a implemented. `pigeon_core::mcp::lint_tool` is the lint and
+  `mcp::conformance` the report; the read-only tool `mcp_conformance` (in the architecture
+  capability, listed beside `architecture_describe`) runs it over every tool the hosting Worker
+  lists, after the approval annotation, and answers violations, counts, tool count and bytes.
+  Measured offline (the smoke suite builds the tools; the live number is what
+  `mcp_conformance` answers): core's own tools, 84, 31,795 bytes of `tools/list` JSON; the
+  capability Workers add about 26,800 bytes for CI, models, AI agents and cloud (8 + 12 + 17 + 10
+  tools) and 2 sites tools, so about 133 tools and about 60 KB in all.
+  Violations found, all fixed by explicit types, no tool dropped, no behaviour changed:
+  - no `type`: `brief` and `report` of `ai_agents_status` and `ai_agents_inbox`. They carry a
+    boolean or a string (`brief`: true, false or "line"; `report`: "full", "short" or false), so
+    each is now `anyOf` boolean and string;
+  - `object` with no `properties` or `additionalProperties` (now `additionalProperties: true`):
+    `apns_send.data`, `observability_monitors_plan.billing` and `.filters`, `call.args`,
+    `instance_propose.record`, `site_passkey.assertion` and `.credential`, `ci_route.needs`,
+    `models_run.messages[]` and `.raw`, `models_submit.messages[]` and `.request`,
+    `ai_agents_start.budget`;
+  - `array` with no `items`: `site_render.posts` and `.pages` (now arrays of string pairs).
+  The smoke suite runs the lint over every tool it can build offline and over a bad schema.
+  The two sites tools are not built there; they were read by hand.

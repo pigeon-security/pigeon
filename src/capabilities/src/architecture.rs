@@ -58,26 +58,45 @@ impl Capability for Architecture {
     }
 
     fn tools(&self) -> Vec<Tool> {
-        vec![Tool {
-            name: "architecture_describe",
-            description: "The platform's architecture as data: building blocks, capabilities, \
+        vec![
+            Tool {
+                name: "architecture_describe",
+                description: "The platform's architecture as data: building blocks, capabilities, \
                           Workers, hostnames and resources, read from the sources this Worker \
                           was built with. With public true, only the public view and its \
                           drawing.",
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "public": {
-                        "type": "boolean",
-                        "description": "Answer the public view: commit, digest, model, drawing."
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "public": {
+                            "type": "boolean",
+                            "description": "Answer the public view: commit, digest, model, drawing."
+                        }
                     }
-                }
-            }),
-        }]
+                }),
+            },
+            Tool::bare(
+                "mcp_conformance",
+                "Checks every tool this server lists against the schema rules ChatGPT and other \
+             MCP clients enforce. Answers the violations as {tool, path, rule}, the counts, the \
+             tool count and the size of the tools/list answer in bytes. Read only.",
+            ),
+        ]
     }
 
     fn call<'a>(&'a self, cx: &'a Context<'a>, tool: &'a str, args: &'a Value) -> Call<'a> {
         Box::pin(async move {
+            if tool == "mcp_conformance" {
+                // The tools exactly as `/mcp` lists them: every hosted capability's, annotated.
+                let mut tools: Vec<Tool> = cx
+                    .hosted
+                    .capabilities
+                    .iter()
+                    .flat_map(|c| c.tools())
+                    .collect();
+                crate::approvals::annotate(&mut tools);
+                return Ok(pigeon_core::mcp::conformance(&tools));
+            }
             if tool != "architecture_describe" {
                 return Err(unknown(tool));
             }

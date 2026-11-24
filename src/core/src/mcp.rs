@@ -103,3 +103,136 @@ fn call_result(v: Value) -> Value {
 fn text(v: &Value) -> String {
     serde_json::to_string_pretty(v).unwrap_or_default()
 }
+
+/// One way a tool's declaration breaks the rules some MCP clients (ChatGPT) enforce.
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+pub struct Violation {
+    /// The tool's name.
+    pub tool: String,
+    /// Where in the `inputSchema`, such as `/properties/brief`; empty for the tool's name.
+    pub path: String,
+    /// The rule broken, as a short code: `name`, `top-type`, `type`, `items`, `shape` or `ref`.
+    pub rule: &'static str,
+}
+
+/// Whether `name` matches `^[a-zA-Z0-9_-]{1,64}$`.
+fn name_ok(name: &str) -> bool {
+    (1..=64).contains(&name.len())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// Every rule that tool `name`, with `input_schema`, breaks. Pure: it reads nothing else and
+/// changes nothing. An empty list means the tool conforms.
+pub fn lint_tool(name: &str, input_schema: &Value) -> Vec<Violation> {
+    let mut found = Vec::new();
+    if !name_ok(name) {
+        found.push(Violation {
+            tool: name.into(),
+            path: String::new(),
+            rule: "name",
+        });
+    }
+    lint_schema(name, input_schema, "", true, &mut found);
+    found
+}
+
+/// Checks `schema` at `path`, then its properties, items and `anyOf`/`oneOf` branches.
+/// `top` is true for the tool's whole schema, which must be an `object` with no `anyOf`.
+fn lint_schema(tool: &str, schema: &Value, path: &str, top: bool, out: &mut Vec<Violation>) {
+    let mut bad = |path: &str, rule: &'static str| {
+        out.push(Violation {
+            tool: tool.into(),
+            path: path.into(),
+            rule,
+        })
+    };
+    let Some(obj) = schema.as_object() else {
+        bad(path, if top { "top-type" } else { "type" });
+        return;
+    };
+    if obj.contains_key("$ref") {
+        bad(path, "ref");
+        return;
+    }
+    // The declared types: one name, or a list of names.
+    let kinds: Vec<&str> = match obj.get("type") {
+        Some(Value::String(s)) => vec![s.as_str()],
+        Some(Value::Array(a)) => a.iter().filter_map(Value::as_str).collect(),
+        _ => Vec::new(),
+    };
+    let branches: Vec<(&str, &Vec<Value>)> = ["anyOf", "oneOf"]
+        .into_iter()
+        .filter_map(|k| obj.get(k).and_then(Value::as_array).map(|a| (k, a)))
+        .collect();
+    if top {
+        if kinds != ["object"] {
+            bad(path, "top-type");
+        }
+    } else if kinds.is_empty() && branches.is_empty() {
+        bad(path, "type");
+    }
+    if kinds.contains(&"array") {
+        if obj.contains_key("items") {
+            let items = format!("{path}/items");
+            let mut inner = Vec::new();
+            lint_schema(tool, &obj["items"], &items, false, &mut inner);
+            out.extend(inner);
+        } else {
+            out.push(Violation {
+                tool: tool.into(),
+                path: path.into(),
+                rule: "items",
+            });
+        }
+    }
+    if kinds.contains(&"object")
+        && !obj.contains_key("properties")
+        && !obj.contains_key("additionalProperties")
+    {
+        out.push(Violation {
+            tool: tool.into(),
+            path: path.into(),
+            rule: "shape",
+        });
+    }
+    if let Some(props) = obj.get("properties").and_then(Value::as_object) {
+        for (key, sub) in props {
+            lint_schema(tool, sub, &format!("{path}/properties/{key}"), false, out);
+        }
+    }
+    if let Some(extra) = obj.get("additionalProperties").filter(|v| v.is_object()) {
+        lint_schema(
+            tool,
+            extra,
+            &format!("{path}/additionalProperties"),
+            false,
+            out,
+        );
+    }
+    if !top {
+        for (key, list) in branches {
+            for (i, sub) in list.iter().enumerate() {
+                lint_schema(tool, sub, &format!("{path}/{key}/{i}"), false, out);
+            }
+        }
+    }
+}
+
+/// The conformance report of `tools`: every violation, the counts, and the size of the
+/// `tools/list` answer's `tools` as JSON, in bytes. Read-only.
+pub fn conformance(tools: &[Tool]) -> Value {
+    let violations: Vec<Violation> = tools
+        .iter()
+        .flat_map(|t| lint_tool(t.name, &t.input_schema))
+        .collect();
+    let bytes = serde_json::to_string(&json!({ "tools": tools })).map_or(0, |s| s.len());
+    json!({
+        "tools_checked": tools.len(),
+        "violation_count": violations.len(),
+        "violations": violations,
+        "tools_list_bytes": bytes,
+        "tool_count": tools.len(),
+    })
+}

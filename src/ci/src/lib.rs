@@ -1032,7 +1032,7 @@ impl Ci {
                     "properties": {
                         "repo": job["repo"], "commit": job["commit"], "job": job["job"],
                         "connector": job["connector"],
-                        "needs": { "type": "object", "description": "os, arch, cpu, memory_gb, disk_gb, docker, gpu, network (egress or none); small Linux defaults." },
+                        "needs": { "type": "object", "additionalProperties": true, "description": "os, arch, cpu, memory_gb, disk_gb, docker, gpu, network (egress or none); small Linux defaults." },
                         "timeout_min": { "type": "integer" }
                     }
                 }),

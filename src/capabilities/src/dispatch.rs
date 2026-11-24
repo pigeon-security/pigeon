@@ -56,7 +56,7 @@ impl Capability for Dispatch {
                 "type": "object",
                 "properties": {
                     "tool": { "type": "string", "description": "The tool's name, such as `land_status`." },
-                    "args": { "type": "object", "description": "Its arguments; none when omitted." }
+                    "args": { "type": "object", "additionalProperties": true, "description": "Its arguments; none when omitted." }
                 },
                 "required": ["tool"]
             }),

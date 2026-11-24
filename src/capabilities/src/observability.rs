@@ -569,8 +569,8 @@ impl Capability for Observability {
                     "properties": {
                         "check": { "type": "boolean", "description": "Read-only shape check; no approval is asked." },
                         "email": { "type": "string", "description": "One address to deliver every `pigeon: ...` policy to by email. Only what the person gives; it is shown once in the plan the person approves." },
-                        "filters": { "type": "object", "description": "Filters for a policy, as {\"<alert type>\": {\"<key>\": [\"value\", ...]}}. Needed for a key Cloudflare requires and lists no IDs for; when it lists IDs, values must be among them." },
-                        "billing": { "type": "object", "description": "Billing usage watches, as {\"<product ID>\": \"<limit>\"}, such as {\"worker_requests\": \"100\"}; one `pigeon: billing <product>` policy each (billing_usage_alert). The limit is in Cloudflare's unit for the product. Without it no billing watch is planned. Run `check` to see the product IDs Cloudflare lists." }
+                        "filters": { "type": "object", "additionalProperties": true, "description": "Filters for a policy, as {\"<alert type>\": {\"<key>\": [\"value\", ...]}}. Needed for a key Cloudflare requires and lists no IDs for; when it lists IDs, values must be among them." },
+                        "billing": { "type": "object", "additionalProperties": true, "description": "Billing usage watches, as {\"<product ID>\": \"<limit>\"}, such as {\"worker_requests\": \"100\"}; one `pigeon: billing <product>` policy each (billing_usage_alert). The limit is in Cloudflare's unit for the product. Without it no billing watch is planned. Run `check` to see the product IDs Cloudflare lists." }
                     }
                 }),
             },

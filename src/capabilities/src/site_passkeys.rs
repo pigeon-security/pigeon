@@ -114,8 +114,8 @@ impl Capability for SitePasskeys {
                     "host": { "type": "string", "description": "The site's host, such as notes.pigeon.dev." },
                     "code": { "type": "string" },
                     "challenge_id": { "type": "string" },
-                    "assertion": { "type": "object" },
-                    "credential": { "type": "object" }
+                    "assertion": { "type": "object", "additionalProperties": true },
+                    "credential": { "type": "object", "additionalProperties": true }
                 },
                 "required": ["step", "host"]
             }),

@@ -449,7 +449,7 @@ impl Service for Agents {
                                 "brief": { "type": "string", "description": "What to build, standing alone: the run sees nothing else." },
                                 "name": { "type": "string", "minLength": 1, "maxLength": 60, "description": "A short name for the run, one line, 1 to 60 characters. Else it is made from the brief." },
                                 "base": { "type": "string", "description": "The branch or commit to start from; main by default." },
-                                "budget": { "type": "object", "description": "Any of turns, cost_usd, wall_min, sandbox_min; each at most its hard cap." }
+                                "budget": { "type": "object", "additionalProperties": true, "description": "Any of turns, cost_usd, wall_min, sandbox_min; each at most its hard cap." }
                             },
                             "required": ["brief"]
                         }),
@@ -479,8 +479,8 @@ impl Service for Agents {
                                 "run": { "type": "string" },
                                 "limit": { "type": "integer", "description": "20 by default, 100 at most." },
                                 "live": { "type": "boolean", "description": "List only runs that have not ended." },
-                                "brief": { "description": "true (default), false, or \"line\" (first line, 100 characters)." },
-                                "report": { "description": "\"full\" (default), \"short\" (first line, 200 characters) or false." },
+                                "brief": { "anyOf": [{ "type": "boolean" }, { "type": "string" }], "description": "true (default), false, or \"line\" (first line, 100 characters)." },
+                                "report": { "anyOf": [{ "type": "string" }, { "type": "boolean" }], "description": "\"full\" (default), \"short\" (first line, 200 characters) or false." },
                                 "fields": { "type": "array", "items": { "type": "string" }, "description": "Top-level keys to keep." }
                             }
                         }),
@@ -521,8 +521,8 @@ impl Service for Agents {
                             "type": "object",
                             "properties": {
                                 "since": { "type": "integer" },
-                                "brief": { "description": "true (default), false, or \"line\"." },
-                                "report": { "description": "\"full\" (default), \"short\" or false." },
+                                "brief": { "anyOf": [{ "type": "boolean" }, { "type": "string" }], "description": "true (default), false, or \"line\"." },
+                                "report": { "anyOf": [{ "type": "string" }, { "type": "boolean" }], "description": "\"full\" (default), \"short\" or false." },
                                 "fields": { "type": "array", "items": { "type": "string" } }
                             }
                         }),

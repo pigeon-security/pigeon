@@ -783,7 +783,7 @@ impl Capability for Instances {
                               the approval's id and the changes, or the problems.",
                 input_schema: json!({
                     "type": "object",
-                    "properties": { "record": { "type": "object" } },
+                    "properties": { "record": { "type": "object", "additionalProperties": true } },
                     "required": ["record"]
                 }),
             },

@@ -1854,3 +1854,138 @@ fn core_approval_op_for_capability_workers() {
         Some("CALLER_KEY_CLOUD_GATEWAY")
     );
 }
+
+/// Every tool core's smoke suite can build offline: the unit capabilities, the CI, models, cloud
+/// and AI agents tools their Workers declare in their manifests.
+fn core_served_tools() -> Vec<pigeon_core::mcp::Tool> {
+    use pigeon_capabilities::Capability;
+    use pigeon_capabilities::approvals::Approvals;
+    use pigeon_capabilities::architecture::Architecture;
+    use pigeon_capabilities::deploys::Deploys;
+    use pigeon_capabilities::dispatch::Dispatch;
+    use pigeon_capabilities::github::Github;
+    use pigeon_capabilities::images::Images;
+    use pigeon_capabilities::policy::Policy;
+    use pigeon_capabilities::versioning::Versioning;
+    use pigeon_contract::Service;
+    use pigeon_core::mcp::Tool;
+
+    let caps: Vec<Box<dyn Capability>> = vec![
+        Box::new(Approvals),
+        Box::new(Architecture),
+        Box::new(Deploys),
+        Box::new(Dispatch),
+        Box::new(Github),
+        Box::new(Images),
+        Box::new(Versioning),
+        Box::new(Policy {
+            session_prefix: "claude/".into(),
+            main: "main".into(),
+        }),
+    ];
+    let mut tools: Vec<Tool> = caps.iter().flat_map(|c| c.tools()).collect();
+    let ci = pigeon_ci::Ci {
+        settings: pigeon_ci::pigeon::settings(pigeon_ci::Accounts::Parent("P".into())),
+    };
+    tools.extend(ci.tools());
+    let models = pigeon_models::Models {
+        gateways: Vec::new(),
+        providers: Vec::new(),
+        staged: Vec::new(),
+        secrets_page: "https://x/secrets".into(),
+        host: "h".into(),
+        proxy_host: "p".into(),
+    };
+    tools.extend(models.tools());
+    // The Workers whose tools core merges from their manifests: leaked names keep `Tool`'s
+    // static strings; a test process is short.
+    let leak = |s: &str| -> &'static str { Box::leak(s.to_string().into_boxed_str()) };
+    let manifests = [
+        pigeon_ai_agents::service::Agents.manifest(),
+        pigeon_cloud::CloudGateway::new().manifest(),
+    ];
+    for m in manifests {
+        for cap in m.capabilities {
+            for t in cap.tools {
+                tools.push(Tool {
+                    name: leak(&t.name),
+                    description: leak(&t.description),
+                    input_schema: t.input_schema,
+                });
+            }
+        }
+    }
+    tools
+}
+
+/// The lint finds nothing in any tool core serves, and the conformance report counts them.
+#[test]
+fn core_every_served_tool_conforms_to_the_schema_rules() {
+    let tools = core_served_tools();
+    assert!(tools.len() > 40, "the tools were gathered");
+    let report = pigeon_core::mcp::conformance(&tools);
+    assert_eq!(report["violations"], json!([]), "no tool breaks a rule");
+    assert_eq!(report["violation_count"], 0);
+    assert_eq!(report["tools_checked"], tools.len());
+    assert!(report["tools_list_bytes"].as_u64().unwrap() > 1000);
+}
+
+/// The lint catches an untyped property, an array with no items, a `$ref`, a bad name, an object
+/// that declares nothing, and a top level that is not an object.
+#[test]
+fn core_schema_lint_catches_a_bad_schema() {
+    use pigeon_core::mcp::lint_tool;
+    let rules = |name: &str, schema: Value| -> Vec<(String, &'static str)> {
+        lint_tool(name, &schema)
+            .into_iter()
+            .map(|v| (v.path, v.rule))
+            .collect()
+    };
+    let good = json!({
+        "type": "object",
+        "properties": {
+            "a": { "type": "string" },
+            "b": { "anyOf": [{ "type": "boolean" }, { "type": "string" }] },
+            "c": { "type": "array", "items": { "type": "object", "additionalProperties": true } }
+        }
+    });
+    assert!(rules("good-tool_1", good).is_empty());
+    let bad = json!({
+        "type": "object",
+        "properties": {
+            "untyped": { "description": "no type" },
+            "list": { "type": "array" },
+            "link": { "$ref": "#/defs/x" },
+            "empty": { "type": "object" },
+            "mixed": { "anyOf": [{ "type": "string" }, { "description": "no type" }] }
+        }
+    });
+    let mut found = rules("bad name", bad);
+    found.sort();
+    assert_eq!(
+        found,
+        [
+            ("".to_string(), "name"),
+            ("/properties/empty".to_string(), "shape"),
+            ("/properties/link".to_string(), "ref"),
+            ("/properties/list".to_string(), "items"),
+            ("/properties/mixed/anyOf/1".to_string(), "type"),
+            ("/properties/untyped".to_string(), "type"),
+        ]
+    );
+    // The top level must be an object, and may not be an anyOf.
+    assert_eq!(
+        rules("t", json!({ "type": "string" })),
+        [("".into(), "top-type")]
+    );
+    let top_any = json!({ "anyOf": [{ "type": "object", "properties": {} }] });
+    assert_eq!(rules("t", top_any), [("".to_string(), "top-type")]);
+    assert_eq!(
+        rules(
+            &"x".repeat(65),
+            json!({ "type": "object", "properties": {} })
+        )
+        .len(),
+        1
+    );
+}
