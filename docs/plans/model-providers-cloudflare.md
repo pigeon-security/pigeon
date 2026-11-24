@@ -1,6 +1,6 @@
 # Model providers, Part 3: models paid with Cloudflare credits
 
-Status: **Phase 1 landed** (2026-11-25, `934a532`). Phases 2 and 3 are not built: the sandbox time ran out. Phase 4 waits for the person's key (Open item 1). Planner run `WyHqF50UlP01`. Follows [model-providers.md](model-providers.md) (Parts 1 and 2).
+Status: **Phase 1 landed** (2026-11-25, `934a532`). Phases 2 and 3 in progress (planner run `A2apepRW1Vyb`). Open item 1 is done; phase 4 lands after phases 2 and 3. Follows [model-providers.md](model-providers.md) (Parts 1 and 2).
 
 ## Goal
 
@@ -113,7 +113,7 @@ phase 5: an executor run on a credits model after phases 1 and 2 are deployed.
 
 | Gateway | Route | `byok_only` | Stored keys | Other settings |
 | --- | --- | --- | --- | --- |
-| `pigeon` | credits (Unified Billing) | **false** | **none** | `authentication: true`, logs on, spend limit $20 a day (assumed, see Log), `zdr: true` |
+| `pigeon` | credits (Unified Billing) | **false** | **none** | `authentication: true`, logs on, `zdr: true`; no spend limit from pigeon (the person's decision) |
 | `pigeon-anthropic` (new) | Anthropic BYOK | true | `pigeon-anthropic_anthropic_default` | `authentication: true`, logs on, the account's store |
 
 No `pigeon-cloudflare` gateway is made.
@@ -129,7 +129,8 @@ loudly (2044) and never bills credits by accident.
   The parent token stays in core. The person's own dashboard tokens are the other holders.
 - `authentication` stays on for both gateways. It is required for Unified Billing anyway, and it
   cannot be turned off.
-- The spend limit on `pigeon` caps the damage of a leaked token or a runaway run.
+- Pigeon neither sets nor requires a spend limit (the person's decision). The person may set one
+  on `pigeon` in the dashboard to cap a leaked token or a runaway run; drift never reports it.
 - `zdr: true`: credits traffic goes only to provider endpoints that keep no prompts. Pigeon
   already keeps no payloads in its logs (`cf-aig-collect-log-payload: false`).
 - The account's auto-created `default` gateway is a risk once credits are loaded: a Workers AI
@@ -139,7 +140,7 @@ loudly (2044) and never bills credits by accident.
 **Spec and drift.** `spec` takes the gateway's kind (`Byok` or `Credits`). `drift()` compares
 the settings in the table, and it also reports:
 - for a credits gateway: any stored provider key ("holds a stored key for anthropic: credits
-  requests for it would bill that key instead"), and a spend limit that is off or missing;
+  requests for it would bill that key instead");
 - for a BYOK gateway: a missing key for a declared provider.
 
 `ensure` still creates a missing gateway from its spec and never changes one that exists. The
@@ -192,9 +193,9 @@ changes only the turns that start after it.
 | Step | Who | What | `anthropic` turns go to | Safe because |
 | --- | --- | --- | --- | --- |
 | A | phase 1 lands | Both gateways declared. `pigeon-anthropic` is made, and the slot `pigeon-anthropic_anthropic_default` is declared and handed to it when set. The Anthropic route stays on `pigeon`. Credits providers are declared but stopped by the guard while `pigeon` holds a key. | `pigeon` (its key) | nothing moves |
-| B | **the person** | Sets `pigeon-anthropic_anthropic_default` on the Access tab with their passkey (the same Anthropic key). `secret_set` adds it to `pigeon-anthropic`. | `pigeon` | both gateways now hold the key |
+| B | **the person** | Sets `pigeon-anthropic_anthropic_default` on the Access tab with their passkey (a new Anthropic key; done 2026-11-24). `secret_set` adds it to `pigeon-anthropic`. | `pigeon` (the old key) | both gateways hold a key: `pigeon` the old one, `pigeon-anthropic` the new one |
 | C | planner lands phase 4 | The Anthropic route points at `pigeon-anthropic`. `pigeon_anthropic_default` is no longer declared, so `models_setup` stops putting it back on `pigeon`. `CREDITS_SINCE` is set to this deploy's time. | `pigeon-anthropic` | a turn in flight finishes on `pigeon` with the old key; the next turn uses the new gateway, which has the key; if the key were missing, `byok_only` would refuse the turn, never bill credits |
-| D | **the person** | In the dashboard, on `pigeon`: deletes the stored Anthropic key, turns off "Require provider credentials", sets the spend limit and ZDR. Deletes the secret `pigeon_anthropic_default`. | `pigeon-anthropic` | no Anthropic BYOK traffic uses `pigeon` any more; the guard frees the credits route only now |
+| D | **the person** | In the dashboard, on `pigeon`: deletes the stored Anthropic key, turns off "Require provider credentials", turns on ZDR. Deletes the secret `pigeon_anthropic_default`. | `pigeon-anthropic` | no Anthropic BYOK traffic uses `pigeon` any more; the guard frees the credits route only now |
 | E | person, then planner | Buys credits, then the planner runs the live check (phase 5). | | |
 
 The OpenAI key slot `pigeon_openai_default` is no longer declared from step A. **No key is ever
@@ -254,8 +255,9 @@ takes:
 - `workers_ai_billing_mode: "unified"` on `pigeon`;
 - tier models chosen by the person.
 
-It is phase 6, built only when phase 5 passes and budget remains. Until then, `workers-ai/…` is
-refused with "not yet".
+It is phase 6, approved by the person (2026-11-25) with the tiers above. It is built in
+parallel once phase 2 has landed and lands after phase 4; it stays off until its token slot is
+set. Until then, `workers-ai/…` is refused with "not yet".
 
 ## Phases and branches
 
@@ -285,28 +287,29 @@ trivial rebase.
 
 ## Open items (for the person)
 
-1. **Set the Anthropic key for the new gateway** (step B, after phase 1 is deployed). On the
-   Access tab, under Credentials, find `pigeon-anthropic_anthropic_default`, paste the same
-   Anthropic API key as `pigeon_anthropic_default`, and confirm with your passkey. Then tell the
-   planner, or reply in the inbox, so phase 4 can land.
+1. **Done (2026-11-24).** The person set `pigeon-anthropic_anthropic_default` on the Access tab:
+   a NEW Anthropic key, not the one in `pigeon_anthropic_default`. So until phase 4 deploys,
+   Anthropic BYOK turns still use the old key on `pigeon`; from then on they use the new key on
+   `pigeon-anthropic`.
 2. **Make `pigeon` the credits gateway** (step D, after phase 4 is deployed). Cloudflare dashboard,
    AI, AI Gateway, gateway `pigeon`:
-   1. Provider keys (BYOK): delete the Anthropic key (alias `default`). Also delete an OpenAI key
-      if one is listed.
+   1. Provider keys (BYOK): delete the Anthropic key (alias `default`; the OLD key). Also delete
+      an OpenAI key if one is listed.
    2. Settings: turn off **Require provider credentials**. Leave **Authenticated Gateway** on.
-   3. Settings, Spend limits: add a rule with a $20 limit, a 1-day window, technique fixed, and no
-      dimensions. Turn spend limits on.
-   4. Settings: turn on **Zero Data Retention** if it is offered.
-   5. Secrets Store (Account, Secrets Store): delete the secret `pigeon_anthropic_default`. Delete
+   3. Settings: turn on **Zero Data Retention** if it is offered.
+   4. Secrets Store (Account, Secrets Store): delete the secret `pigeon_anthropic_default` (the
+      old key; revoke it in the Anthropic console too if it is not used elsewhere). Delete
       `pigeon_openai_default` if it exists.
+
+   Pigeon sets no spend limit. You may add one under Settings, Spend limits, if you want a cap.
 3. **Buy credits.** AI Gateway page, **Credits Available**, **Manage**, **Top-up credits**: enter
    the amount and confirm (5% fee; a credit or debit card set as the primary payment method, not
    PayPal or Apple Pay). Auto top-up is optional, from the same card.
 4. **Optional:** on the account's auto-made `default` gateway, if it exists, turn on **Require
    provider credentials**, so nothing can spend credits through it.
-5. **To decide:** the spend limit (assumed $20 a day), OpenAI on credits only (assumed), and the
-   Workers AI tier models if phase 6 is built (suggested: top `@cf/zai-org/glm-5.3`, middle
-   `@cf/moonshotai/kimi-k2.7-code`, small none).
+5. **Decided (2026-11-25):** no spend limit in pigeon; OpenAI on credits only (`cf-openai/…`;
+   `openai/…` is refused and points there); Workers AI yes, as phase 6, with tiers top
+   `@cf/zai-org/glm-5.3`, middle `@cf/moonshotai/kimi-k2.7-code`, small none.
 
 ## Log
 
@@ -347,3 +350,8 @@ trivial rebase.
 - **Next run:** finish phase 2 from its branch (start with `cargo check -p pigeon-ai-agents`).
   Build phase 3 from its brief in this plan. Then phase 4 after Open item 1, and phase 5 after
   Open items 2 and 3. Give it at least 60 sandbox minutes.
+- 2026-11-25: planner run `A2apepRW1Vyb`. The person's decisions: no spend limit in pigeon
+  (removed from the credits gateway's spec, from drift and from Open item 2); OpenAI on credits
+  only; Workers AI yes (phase 6). Open item 1 is done with a new Anthropic key. Phase 2
+  (executor `xXp120MbTCD2`) and phase 3 (executor `s26pnPrL6YvC`) run in parallel, 70 sandbox
+  minutes each.

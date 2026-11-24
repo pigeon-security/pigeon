@@ -1281,18 +1281,18 @@ fn models_two_gateways_specs_guard_routes_and_daily() {
     assert_eq!(credits["authentication"], true);
     assert_eq!(credits["zdr"], true);
     assert!(credits.get("store_id").is_none());
-    assert_eq!(credits["spend_limits"]["enabled"], true);
-    assert_eq!(credits["spend_limits"]["rules"][0]["limit"], 20);
-    assert_eq!(credits["spend_limits"]["rules"][0]["window"], 86400);
+    // Pigeon neither sets nor requires a spend limit (the person's decision).
+    assert!(credits.get("spend_limits").is_none());
 
-    // Drift: none for a gateway as wanted; lines for one that is not.
+    // Drift: none for a gateway as wanted; lines for one that is not. A spend limit, on or off,
+    // is the person's own and never drift.
     assert!(drift(&credits, &credits, GatewayKind::Credits).is_empty());
     assert!(drift(&byok, &byok, GatewayKind::Byok).is_empty());
     let found = json!({ "authentication": true, "byok_only": true, "collect_logs": true,
-        "zdr": true, "spend_limits": { "enabled": true, "rules": [] } });
+        "zdr": true, "spend_limits": { "enabled": false, "rules": [] } });
     let lines = drift(&credits, &found, GatewayKind::Credits);
-    assert!(lines.iter().any(|l| l.starts_with("byok_only")));
-    assert!(lines.iter().any(|l| l.starts_with("spend_limits")));
+    assert_eq!(lines.len(), 1);
+    assert!(lines[0].starts_with("byok_only"));
 
     // Stored keys.
     let config = |slug: &str| ProviderConfig {

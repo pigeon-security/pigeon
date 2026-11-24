@@ -122,16 +122,6 @@ pub fn spec(id: &str, store_id: &str, kind: GatewayKind) -> Value {
             "authentication": true,
             "byok_only": false,
             "zdr": true,
-            // `window` is assumed to be in seconds (86400 = one day); the docs do not say.
-            "spend_limits": {
-                "enabled": true,
-                "rules": [{
-                    "limit": 20,
-                    "limitType": "cost",
-                    "window": 86400,
-                    "technique": "fixed",
-                }],
-            },
         }),
     }
 }
@@ -194,20 +184,10 @@ pub fn drift(want: &Value, found: &Value, kind: GatewayKind) -> Vec<String> {
         GatewayKind::Byok => "store_id",
         GatewayKind::Credits => "zdr",
     });
-    let mut out: Vec<String> = keys
-        .iter()
+    keys.iter()
         .filter(|k| want[**k] != found[**k])
         .map(|k| format!("{k} is {}, not {}", found[*k], want[*k]))
-        .collect();
-    if kind == GatewayKind::Credits {
-        let limits = &found["spend_limits"];
-        let on = limits["enabled"].as_bool() == Some(true)
-            && limits["rules"].as_array().is_some_and(|r| !r.is_empty());
-        if !on {
-            out.push("spend_limits is not enabled with at least one rule".into());
-        }
-    }
-    out
+        .collect()
 }
 
 /// Drift in the keys a gateway of `kind` holds. A credits gateway must hold none: one stored for
