@@ -2917,3 +2917,70 @@ fn ai_agents_preflight_answer_shape() {
     assert!(missing_from(1, "", &paths).is_err());
     assert_eq!(missing_from(0, "", &paths).unwrap(), Vec::<String>::new());
 }
+
+/// The committed repo map is what `ci/repo-map.sh` writes now.
+#[test]
+fn ai_agents_repo_map_current() {
+    let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
+    let out = std::env::temp_dir().join(format!("pigeon-repo-map-{}.md", std::process::id()));
+    let run = std::process::Command::new("sh")
+        .arg(format!("{root}/ci/repo-map.sh"))
+        .arg(&out)
+        .output()
+        .expect("sh runs");
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let fresh = std::fs::read_to_string(&out).expect("map written");
+    let _ = std::fs::remove_file(&out);
+    assert!(
+        fresh == pigeon_ai_agents::prompts::REPO_MAP,
+        "src/ai-agents/repo-map.md is stale: run `sh ci/repo-map.sh` and commit it"
+    );
+}
+
+/// The system blocks, with the map, are the same for two briefs; only the messages differ.
+#[test]
+fn ai_agents_repo_map_prefix_is_stable() {
+    use pigeon_ai_agents::transcript::{self, Spec};
+    use pigeon_ai_agents::{Role, prompts};
+    let tools =
+        vec![json!({ "name": "report", "description": "r", "input_schema": { "type": "object" } })];
+    let system = prompts::system(Role::Executor, "claude/x");
+    let spec = Spec {
+        role: Role::Executor,
+        model: "claude-opus-4-5",
+        system: &system,
+        tools: &tools,
+    };
+    let ask = |brief: &str| {
+        let start = json!({ "brief": brief, "base": "main", "branch": "claude/x" });
+        let first = json!({ "role": "user", "content": prompts::first_message(&start) });
+        transcript::request(&spec, &[first])
+    };
+    let (a, b) = (ask("build one thing"), ask("fix another"));
+    assert_ne!(a["messages"], b["messages"]);
+    for key in ["system", "tools", "model"] {
+        assert_eq!(
+            serde_json::to_vec(&a[key]).unwrap(),
+            serde_json::to_vec(&b[key]).unwrap(),
+            "{key} changed"
+        );
+    }
+    let blocks = a["system"].as_array().unwrap();
+    assert_eq!(blocks.len(), 2);
+    assert_eq!(blocks[1]["text"], prompts::REPO_MAP);
+    assert!(blocks[1]["cache_control"].is_object());
+    assert!(!a["messages"].to_string().contains("# Repo map"));
+}
+
+/// The map stays short and holds no `{` template text.
+#[test]
+fn ai_agents_repo_map_is_small_and_plain() {
+    let map = pigeon_ai_agents::prompts::REPO_MAP;
+    assert!(map.lines().count() < 160, "map too long");
+    assert!(!map.contains('{'), "map has template text");
+    assert!(map.starts_with("# Repo map"));
+}

@@ -1060,3 +1060,12 @@ executors through it. Each item: state, next step, who it waits on.
   checkout ready. It adds `missing_paths` and `preflight` to the answer, and passes the note in
   the create call, where `begin` queues it as an `ai_agents_note` would. A failed check is logged
   and left out. Cost: start now waits for the container and clone when the brief names paths.
+- 2026-11-27: **Repo map (8b).** `ci/repo-map.sh [out]` writes `src/ai-agents/repo-map.md`
+  (crates, Workers and what they link, where tools, plans, tests, CI and deploy live). It is
+  compiled in as `prompts::REPO_MAP`. The gateway request has a `system` array, so
+  `transcript::request` sends the map as a second system block after the system prompt, with its
+  own cache marker; the messages, and so the brief, come after it. The system prompt text still
+  holds the branch name, so the cached prefix is shared only by runs with the same branch; the
+  map block itself is the same bytes every turn. Smoke: `ai_agents_repo_map_current` (script
+  output equals the committed file), `ai_agents_repo_map_prefix_is_stable`,
+  `ai_agents_repo_map_is_small_and_plain`. `ci/` is a gate change for landing.

@@ -49,7 +49,8 @@ pub fn thinks(model: &str) -> bool {
 /// Builds the Messages API request body for the next turn.
 ///
 /// The system prompt and the last tool carry a cache marker. Together they form one cached
-/// prefix. A top-level marker caches the growing conversation.
+/// prefix. The repo map is a second system block with its own marker, the same bytes every turn.
+/// A top-level marker caches the growing conversation.
 pub fn request(spec: &Spec, messages: &[Value]) -> Value {
     let cc = match spec.role {
         Role::Planner => json!({"type": "ephemeral", "ttl": "1h"}),
@@ -62,7 +63,10 @@ pub fn request(spec: &Spec, messages: &[Value]) -> Value {
     body.insert("messages".to_string(), Value::Array(messages.to_vec()));
     body.insert(
         "system".to_string(),
-        json!([{"type": "text", "text": spec.system, "cache_control": cc.clone()}]),
+        json!([
+            {"type": "text", "text": spec.system, "cache_control": cc.clone()},
+            {"type": "text", "text": crate::prompts::REPO_MAP, "cache_control": cc.clone()},
+        ]),
     );
 
     if !spec.tools.is_empty() {
