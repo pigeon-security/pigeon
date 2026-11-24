@@ -133,6 +133,7 @@ impl Agents {
         let (role, brief, base, budget) = start_args(args)?;
         let name = crate::tools::check_run_name(args.get("name"))?;
         let (model, child_models) = crate::models::start_models(role, args)?;
+        let kind = crate::models::start_kind(role, args)?;
         let id = run_id().map_err(|e| e.to_string())?;
         // The run acts as its role's service user, linked to the person; as its starter until
         // that link is made. Marked with the run's id for the audit either way.
@@ -169,7 +170,7 @@ impl Agents {
                 "caller": as_caller,
                 "brief": brief,
                 "name": name,
-                "base": base,
+                "kind": kind.map(|k| k.name()),
                 "branch": branch(&id),
                 "budget": budget,
                 "estimate": estimate,
@@ -446,6 +447,7 @@ impl Service for Agents {
                                 "role": { "type": "string", "enum": ["planner", "executor", "mechanical"], "description": "`executor` by default; `mechanical` for moves, renames and docs; `planner` to plan a piece of work, spawn executors, review their branches, run CI and land phase by phase. Models by default (see ai_agents_models, which can store others): planner Claude Opus, executor Claude Sonnet, mechanical Claude Haiku. To choose, give `model` (`provider/model`, a `claude-…` name, or `anthropic` or `openai` (your key), `cf-anthropic`, `cf-openai` or `workers-ai` (Cloudflare credits; workers-ai has no small model, so name one: workers-ai/@cf/…) for that provider's model for the role), and for a planner `models` for its executors. E.g. a planner on OpenAI with executors on Claude: {role: \"planner\", model: \"cf-openai\", models: {executor: \"anthropic\"}}." },
                                 "model": { "type": "string", "description": "This run's model: `provider/model` (cf-openai/gpt-6.2-sol), a `claude-…` name, or `anthropic`, `cf-anthropic`, `openai`, `cf-openai` or `workers-ai`. Else the stored default for its role." },
                                 "models": { "type": "object", "description": "Planners only: what its executors use unless a spawn says otherwise.", "properties": { "executor": { "type": "string" }, "mechanical": { "type": "string" } } },
+                                "kind": { "type": "string", "enum": ["integrate", "docs", "fix", "design"], "description": "Planners only (refused for other roles): a hint of what the planner is for. It is kept on the run and shown in status, the listing and ai_agents_compare. With no `model`, the run uses the stored model for its kind (ai_agents_models slot `planner_<kind>`) if one is set, else the stored planner default." },
                                 "brief": { "type": "string", "description": "What to build, standing alone: the run sees nothing else." },
                                 "name": { "type": "string", "minLength": 1, "maxLength": 60, "description": "A short name for the run, one line, 1 to 60 characters. Else it is made from the brief." },
                                 "base": { "type": "string", "description": "The branch or commit to start from; main by default." },
@@ -639,7 +641,10 @@ impl Service for Agents {
                          checked and stored. A choice is `provider/model` (cf-openai/gpt-6.2-sol), a \
                          bare `claude-…` name (Anthropic), or a bare provider name for its model \
                          in the slot's tier. A run can override its default with `model` in \
-                         ai_agents_start.",
+                         ai_agents_start. Planner kinds (integrate, docs, fix, design) have slots \
+                         `planner_integrate`, `planner_docs`, `planner_fix` and `planner_design`, \
+                         marked `unset` until set; a planner started with that `kind` uses its \
+                         slot, else the planner default.",
                         json!({
                             "type": "object",
                             "properties": {
@@ -650,7 +655,11 @@ impl Service for Agents {
                                         "planner": { "type": "string" },
                                         "executor": { "type": "string" },
                                         "mechanical": { "type": "string" },
-                                        "summary": { "type": "string" }
+                                        "summary": { "type": "string" },
+                                        "planner_integrate": { "type": "string" },
+                                        "planner_docs": { "type": "string" },
+                                        "planner_fix": { "type": "string" },
+                                        "planner_design": { "type": "string" }
                                     }
                                 }
                             }
@@ -679,7 +688,8 @@ impl Service for Agents {
                         "Compare ended runs (done, failed, over_budget, stopped) by role and model \
                          over the last `days`: runs, how each ended, cost in dollars (total, \
                          median, high = 90th percentile), median turns and median minutes. A run \
-                         with no stored model counts as its role's built-in default.",
+                         with no stored model counts as its role's built-in default. A planner's \
+                         `kind` is part of the group.",
                         json!({
                             "type": "object",
                             "properties": {

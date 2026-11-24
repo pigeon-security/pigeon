@@ -2534,3 +2534,127 @@ fn ai_agents_handoff_section_from_children() {
     assert_eq!(handoff::append(&report, &text), report);
     assert_eq!(handoff::append("", &text), text);
 }
+
+/// The model of a planner: its own, else its kind's stored model, else the stored planner
+/// default, else the built-in. No kind behaves as before.
+#[test]
+fn ai_agents_kind_model_resolution() {
+    use pigeon_ai_agents::Role;
+    use pigeon_ai_agents::models::{Choice, Defaults, Kind, Slot, merge, resolve};
+    let p = |t: &str| Choice::parse(t, Slot::Planner).unwrap();
+    let mut d = Defaults::default();
+    let fix = Some(Kind::Fix);
+    // Nothing stored: the built-in, with or without a kind.
+    assert_eq!(
+        resolve(Role::Planner, None, None, fix, &d).text(),
+        "anthropic/claude-opus-5-5"
+    );
+    // A stored planner default applies to every kind.
+    d.put(Slot::Planner, p("cf-openai/gpt-6.2-astra"));
+    assert_eq!(
+        resolve(Role::Planner, None, None, fix, &d).text(),
+        "cf-openai/gpt-6.2-astra"
+    );
+    // The kind's slot beats the planner default; other kinds fall through.
+    d.put(Slot::Kind(Kind::Fix), p("cf-anthropic/claude-sonnet-5-5"));
+    assert_eq!(
+        resolve(Role::Planner, None, None, fix, &d).text(),
+        "cf-anthropic/claude-sonnet-5-5"
+    );
+    assert_eq!(
+        resolve(Role::Planner, None, None, Some(Kind::Docs), &d).text(),
+        "cf-openai/gpt-6.2-astra"
+    );
+    // No kind: exactly `merge`.
+    assert_eq!(
+        resolve(Role::Planner, None, None, None, &d),
+        merge(Role::Planner, None, None, &d)
+    );
+    assert_eq!(
+        resolve(Role::Planner, None, None, None, &d).text(),
+        "cf-openai/gpt-6.2-astra"
+    );
+    // The run's own model wins.
+    let own = p("cf-openai/gpt-6-luna");
+    assert_eq!(
+        resolve(Role::Planner, Some(&own), None, fix, &d).text(),
+        "cf-openai/gpt-6-luna"
+    );
+    // A kind never touches another role.
+    assert_eq!(
+        resolve(Role::Executor, None, None, fix, &d).text(),
+        "anthropic/claude-sonnet-5-5"
+    );
+}
+
+/// `kind` is checked at start; the kind slots are checked like the others and shown unset.
+#[test]
+fn ai_agents_kind_arg_and_slots() {
+    use pigeon_ai_agents::Role;
+    use pigeon_ai_agents::models::{Defaults, Kind, Slot, check_set, defaults_answer, start_kind};
+    assert_eq!(start_kind(Role::Planner, &json!({})).unwrap(), None);
+    for k in ["integrate", "docs", "fix", "design"] {
+        let got = start_kind(Role::Planner, &json!({ "kind": k })).unwrap();
+        assert_eq!(got.map(Kind::name), Some(k));
+    }
+    assert!(start_kind(Role::Planner, &json!({ "kind": "other" })).is_err());
+    assert!(start_kind(Role::Planner, &json!({ "kind": 3 })).is_err());
+    assert!(start_kind(Role::Executor, &json!({ "kind": "fix" })).is_err());
+    assert!(start_kind(Role::Mechanical, &json!({ "kind": "docs" })).is_err());
+    assert_eq!(start_kind(Role::Executor, &json!({})).unwrap(), None);
+    // Slots: same checks as the others.
+    let set = check_set(&json!({ "planner_docs": "cf-openai" })).unwrap();
+    assert_eq!(set[0].0, Slot::Kind(Kind::Docs));
+    assert_eq!(set[0].1.text(), "cf-openai/gpt-6.2-astra");
+    assert!(check_set(&json!({ "planner_docs": "nope/x" })).is_err());
+    assert!(check_set(&json!({ "planner_other": "cf-openai" })).is_err());
+    // Shown unset by default; stored and read back once set.
+    let a = defaults_answer(&Defaults::default(), &[]);
+    for k in ["integrate", "docs", "fix", "design"] {
+        let slot = &a["defaults"][format!("planner_{k}")];
+        assert_eq!(slot["source"], "unset");
+        assert!(slot["model"].is_null());
+    }
+    let d = Defaults::from_json(&json!({ "planner_fix": "cf-openai/gpt-6.2-astra" }));
+    assert_eq!(Defaults::from_json(&d.to_json()), d);
+    let a = defaults_answer(&d, &[]);
+    assert_eq!(a["defaults"]["planner_fix"]["source"], "stored");
+}
+
+/// With nothing stored, every role's resolved model is its built-in default, as before kinds.
+#[test]
+fn ai_agents_kind_defaults_unchanged() {
+    use pigeon_ai_agents::Role;
+    use pigeon_ai_agents::models::{Defaults, KINDS, merge, resolve};
+    let d = Defaults::default();
+    for (role, want) in [
+        (Role::Planner, "anthropic/claude-opus-5-5"),
+        (Role::Executor, "anthropic/claude-sonnet-5-5"),
+        (Role::Mechanical, "anthropic/claude-haiku-5-5"),
+    ] {
+        assert_eq!(merge(role, None, None, &d).text(), want);
+        assert_eq!(resolve(role, None, None, None, &d).text(), want);
+        for k in KINDS {
+            assert_eq!(resolve(role, None, None, Some(k), &d).text(), want);
+        }
+    }
+    assert_eq!(d.to_json(), json!({}));
+}
+
+/// The compare groups carry a planner's kind, and runs of different kinds are separate groups.
+#[test]
+fn ai_agents_kind_in_compare() {
+    use pigeon_ai_agents::compare::groups;
+    let row = |kind: Value| {
+        json!({ "role": "planner", "model": "anthropic/claude-opus-5-5", "kind": kind,
+                "state": "done", "spent": { "cost_micros": 1000000, "turns": 3 },
+                "created_at": 0, "started_at": 0, "ended_at": 60000 })
+    };
+    let g = groups(
+        &[row(json!("fix")), row(json!("docs")), row(Value::Null)],
+        None,
+    );
+    assert_eq!(g.len(), 3);
+    let kinds: Vec<&Value> = g.iter().map(|x| &x["kind"]).collect();
+    assert!(kinds.contains(&&json!("fix")) && kinds.contains(&&Value::Null));
+}

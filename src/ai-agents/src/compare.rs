@@ -35,6 +35,7 @@ pub fn groups(rows: &[Value], role: Option<Role>) -> Vec<Value> {
     struct G {
         role: &'static str,
         model: String,
+        kind: Option<String>,
         runs: u64,
         states: [u64; 4],
         costs: Vec<f64>,
@@ -63,19 +64,24 @@ pub fn groups(rows: &[Value], role: Option<Role>) -> Vec<Value> {
             .filter(|m| !m.is_empty())
             .map(str::to_string)
             .unwrap_or_else(|| builtin(Slot::of(run_role)).text());
+        let kind = r["kind"]
+            .as_str()
+            .filter(|k| !k.is_empty())
+            .map(str::to_string);
         let begun = r["started_at"]
             .as_i64()
             .or_else(|| r["created_at"].as_i64())
             .unwrap_or(ended);
         let i = match out
             .iter()
-            .position(|g| g.role == run_role.name() && g.model == model)
+            .position(|g| g.role == run_role.name() && g.model == model && g.kind == kind)
         {
             Some(i) => i,
             None => {
                 out.push(G {
                     role: run_role.name(),
                     model,
+                    kind,
                     runs: 0,
                     states: [0; 4],
                     costs: Vec::new(),
@@ -95,12 +101,13 @@ pub fn groups(rows: &[Value], role: Option<Role>) -> Vec<Value> {
         g.minutes
             .push(((ended - begun).max(0) as f64 / 60_000.0 * 10.0).round() / 10.0);
     }
-    out.sort_by(|a, b| (a.role, &a.model).cmp(&(b.role, &b.model)));
+    out.sort_by(|a, b| (a.role, &a.model, &a.kind).cmp(&(b.role, &b.model, &b.kind)));
     out.iter()
         .map(|g| {
             json!({
                 "role": g.role,
                 "model": g.model,
+                "kind": g.kind,
                 "route": crate::models::route(g.model.split('/').next().unwrap_or_default()),
                 "runs": g.runs,
                 "done": g.states[0],

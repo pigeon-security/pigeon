@@ -982,3 +982,10 @@ executors through it. Each item: state, next step, who it waits on.
   appends "## Unlanded branches" to its report (`handoff.rs`): one row per executor not shown as
   landed by `land_list`. The index keeps no tip, so the tip is the last 40-character commit id in
   the executor's report; CI comes from `ci_commit` for that tip, else `unknown`.
+- 6e built: `ai_agents_start {kind?}` (`integrate`, `docs`, `fix`, `design`). Other roles are
+  refused with a plain message, not ignored. The kind is a nullable `kind` column on the index
+  `runs` table (last migration), shown in status, the listing and `ai_agents_compare` (a group
+  per kind). `ai_agents_models` has slots `planner_integrate`, `planner_docs`, `planner_fix`,
+  `planner_design`, checked like the others and shown `unset` by default. `models::resolve`:
+  own model, else the kind's slot, else the stored planner default, else the built-in. No stored
+  or built-in default changed; nothing per-kind is stored.

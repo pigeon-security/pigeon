@@ -51,6 +51,75 @@ pub enum Slot {
     Mechanical,
     /// The summary that compacts a long context.
     Summary,
+    /// A planner run of one kind: its own stored model, beside the planner's.
+    Kind(Kind),
+}
+
+/// What a planner run is for, as a hint given at its start.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    /// Combining and landing branches.
+    Integrate,
+    /// Writing or changing docs.
+    Docs,
+    /// Fixing a bug.
+    Fix,
+    /// Designing a change.
+    Design,
+}
+
+/// Every kind, in the order shown.
+pub const KINDS: [Kind; 4] = [Kind::Integrate, Kind::Docs, Kind::Fix, Kind::Design];
+
+impl Kind {
+    /// Its name, as given to `ai_agents_start` and shown.
+    pub fn name(self) -> &'static str {
+        match self {
+            Kind::Integrate => "integrate",
+            Kind::Docs => "docs",
+            Kind::Fix => "fix",
+            Kind::Design => "design",
+        }
+    }
+
+    /// The name of its model slot in `ai_agents_models`.
+    pub fn slot_name(self) -> &'static str {
+        match self {
+            Kind::Integrate => "planner_integrate",
+            Kind::Docs => "planner_docs",
+            Kind::Fix => "planner_fix",
+            Kind::Design => "planner_design",
+        }
+    }
+
+    /// Reads a kind name; `None` for any other text.
+    pub fn parse(text: &str) -> Option<Kind> {
+        KINDS.into_iter().find(|k| k.name() == text)
+    }
+}
+
+/// Every slot a model can be stored for: the four base slots, then one per planner kind.
+pub fn all_slots() -> Vec<Slot> {
+    SLOTS
+        .into_iter()
+        .chain(KINDS.into_iter().map(Slot::Kind))
+        .collect()
+}
+
+/// Checks the `kind` of `ai_agents_start` for a run of `role`. Only a planner may give one;
+/// any other role is refused, not ignored.
+pub fn start_kind(role: Role, args: &Value) -> Result<Option<Kind>, String> {
+    let text = match &args["kind"] {
+        Value::Null => return Ok(None),
+        Value::String(s) => s.trim(),
+        _ => return Err("`kind` must be one of: integrate, docs, fix, design".into()),
+    };
+    if role != Role::Planner {
+        return Err("`kind` is for a planner: it hints what the planner is for".into());
+    }
+    Kind::parse(text)
+        .map(Some)
+        .ok_or_else(|| format!("`{text}` is not a kind: use integrate, docs, fix or design"))
 }
 
 /// Every slot, in the order shown.
@@ -78,13 +147,14 @@ impl Slot {
             Slot::Executor => "executor",
             Slot::Mechanical => "mechanical",
             Slot::Summary => "summary",
+            Slot::Kind(k) => k.slot_name(),
         }
     }
 
     /// The tier its model belongs to: planner top, executor middle, mechanical and summary small.
     pub fn tier(self) -> Tier {
         match self {
-            Slot::Planner => Tier::Top,
+            Slot::Planner | Slot::Kind(_) => Tier::Top,
             Slot::Executor => Tier::Middle,
             Slot::Mechanical | Slot::Summary => Tier::Small,
         }
@@ -278,6 +348,13 @@ pub struct Defaults {
     pub mechanical: Option<Choice>,
     /// The compaction summary's model.
     pub summary: Option<Choice>,
+    /// A planner's model for each kind, in `KINDS` order.
+    pub kinds: [Option<Choice>; 4],
+}
+
+/// The place of `kind` in `KINDS`.
+fn kind_index(kind: Kind) -> usize {
+    KINDS.iter().position(|k| *k == kind).unwrap_or(0)
 }
 
 impl Defaults {
@@ -288,6 +365,7 @@ impl Defaults {
             Slot::Executor => self.executor.as_ref(),
             Slot::Mechanical => self.mechanical.as_ref(),
             Slot::Summary => self.summary.as_ref(),
+            Slot::Kind(k) => self.kinds[kind_index(k)].as_ref(),
         }
     }
 
@@ -298,6 +376,7 @@ impl Defaults {
             Slot::Executor => &mut self.executor,
             Slot::Mechanical => &mut self.mechanical,
             Slot::Summary => &mut self.summary,
+            Slot::Kind(k) => &mut self.kinds[kind_index(k)],
         };
         *place = Some(choice);
     }
@@ -317,13 +396,14 @@ impl Defaults {
             executor: get("executor"),
             mechanical: get("mechanical"),
             summary: get("summary"),
+            kinds: KINDS.map(|k| get(k.slot_name())),
         }
     }
 
     /// The JSON to store: each choice set, as `provider/model`.
     pub fn to_json(&self) -> Value {
         let mut m = Map::new();
-        for slot in SLOTS {
+        for slot in all_slots() {
             if let Some(c) = self.stored_for(slot) {
                 m.insert(slot.name().into(), json!(c.text()));
             }
@@ -339,15 +419,21 @@ pub fn check_set(set: &Value) -> Result<Vec<(Slot, Choice)>, String> {
     };
     let mut out = Vec::new();
     for (k, v) in obj {
-        let slot = SLOTS.iter().find(|s| s.name() == k).ok_or_else(|| {
-            format!("`set.{k}` is not a slot: planner, executor, mechanical or summary")
-        })?;
+        let slot = all_slots()
+            .into_iter()
+            .find(|s| s.name() == k)
+            .ok_or_else(|| {
+                format!(
+                    "`set.{k}` is not a slot: planner, executor, mechanical, summary, \
+                     planner_integrate, planner_docs, planner_fix or planner_design"
+                )
+            })?;
         let text = v
             .as_str()
             .ok_or_else(|| format!("`set.{k}` must be a model choice string"))?;
         out.push((
-            *slot,
-            Choice::parse(text, *slot).map_err(|e| format!("`set.{k}`: {e}"))?,
+            slot,
+            Choice::parse(text, slot).map_err(|e| format!("`set.{k}`: {e}"))?,
         ));
     }
     Ok(out)
@@ -356,7 +442,7 @@ pub fn check_set(set: &Value) -> Result<Vec<(Slot, Choice)>, String> {
 /// Notes for stored default entries that cannot be read (such as an old `mistral/…`): the built-in
 /// default applies to that slot instead.
 pub fn ignored_notes(raw: &Value) -> Vec<String> {
-    SLOTS
+    all_slots()
         .iter()
         .filter_map(|slot| {
             let text = raw[slot.name()].as_str()?;
@@ -385,6 +471,21 @@ pub fn defaults_answer(d: &Defaults, notes: &[String]) -> Value {
                 "route": route(&choice.provider),
                 "source": if stored { "stored" } else { "built_in" },
             }),
+        );
+    }
+    // A kind slot has no built-in value: it is unset until a person sets it.
+    for k in KINDS {
+        let slot = Slot::Kind(k);
+        eff.insert(
+            slot.name().into(),
+            match d.stored_for(slot) {
+                Some(c) => json!({
+                    "model": c.text(),
+                    "route": route(&c.provider),
+                    "source": "stored",
+                }),
+                None => json!({ "model": null, "route": null, "source": "unset" }),
+            },
         );
     }
     let mut tiers = Map::new();
@@ -500,7 +601,25 @@ pub fn merge(
     parent: Option<&ChildModels>,
     defaults: &Defaults,
 ) -> Choice {
+    resolve(role, own, parent, None, defaults)
+}
+
+/// The model of a run, as `merge`, with a planner's `kind`: the run's own choice; else the stored
+/// model for its kind; else the stored planner default; else the built-in default. With no kind,
+/// or for a role that is not a planner, the kind is not looked at.
+pub fn resolve(
+    role: Role,
+    own: Option<&Choice>,
+    parent: Option<&ChildModels>,
+    kind: Option<Kind>,
+    defaults: &Defaults,
+) -> Choice {
+    let by_kind = || {
+        kind.filter(|_| role == Role::Planner)
+            .and_then(|k| defaults.stored_for(Slot::Kind(k)))
+    };
     own.or_else(|| parent.and_then(|p| p.for_role(role)))
+        .or_else(by_kind)
         .cloned()
         .unwrap_or_else(|| defaults.effective(Slot::of(role)))
 }

@@ -40,7 +40,7 @@ pub const MAX_QUEUED: u32 = 20;
 
 /// Each object's schema, one statement per migration, applied in order and never edited. The
 /// index uses `runs` and `flags`; a run object uses `run`, `messages` and `calls`.
-const MIGRATIONS: [&str; 18] = [
+const MIGRATIONS: [&str; 19] = [
     "CREATE TABLE runs (id TEXT PRIMARY KEY, role TEXT NOT NULL, runtime TEXT NOT NULL, state TEXT NOT NULL, parent_run TEXT, session_id TEXT, caller TEXT NOT NULL, by_id TEXT, for_id TEXT, brief TEXT NOT NULL, base TEXT, branch TEXT, budget TEXT NOT NULL, spent TEXT NOT NULL, step TEXT, waiting TEXT, report TEXT, created_at INTEGER NOT NULL, started_at INTEGER, ended_at INTEGER, stop_asked INTEGER NOT NULL DEFAULT 0)",
     "CREATE TABLE flags (k TEXT PRIMARY KEY, v TEXT NOT NULL)",
     "CREATE TABLE run (id TEXT PRIMARY KEY, role TEXT NOT NULL, caller TEXT NOT NULL, brief TEXT NOT NULL, base TEXT NOT NULL, branch TEXT NOT NULL, budget TEXT NOT NULL, spent TEXT NOT NULL, state TEXT NOT NULL, started_at INTEGER NOT NULL, model_index INTEGER NOT NULL DEFAULT 0, fallback_left INTEGER NOT NULL DEFAULT 0, failures INTEGER NOT NULL DEFAULT 0, job_id TEXT, job_kind TEXT, job_state TEXT, job_at INTEGER, job_error TEXT, last_usage TEXT, stop_reason TEXT, reported TEXT, report TEXT, nudges INTEGER NOT NULL DEFAULT 0, waiting TEXT, prepare_tries INTEGER NOT NULL DEFAULT 0)",
@@ -66,6 +66,8 @@ const MIGRATIONS: [&str; 18] = [
     "ALTER TABLE runs ADD COLUMN child_models TEXT",
     // A short human name for a run, as given at its start (null: derive it from the brief).
     "ALTER TABLE runs ADD COLUMN name TEXT",
+    // A planner's kind hint: integrate, docs, fix or design (null: none given).
+    "ALTER TABLE runs ADD COLUMN kind TEXT",
 ];
 
 fn now() -> i64 {
@@ -147,6 +149,7 @@ struct Row {
     model: Option<String>,
     child_models: Option<String>,
     name: Option<String>,
+    kind: Option<String>,
 }
 
 /// Adds a planner's executor money to its `spent` JSON: the hold (`executors_cost`, kept for
@@ -299,6 +302,7 @@ impl Row {
                 models::route(m.split('/').next().unwrap_or_default())
             }),
             "models": parsed(&self.child_models),
+            "kind": self.kind,
         })
     }
 }
@@ -725,6 +729,7 @@ impl AiAgentRuns {
                 json!({
                     "role": r.role,
                     "model": r.model,
+                    "kind": r.kind,
                     "state": r.state,
                     "spent": serde_json::from_str::<Value>(&r.spent).unwrap_or(Value::Null),
                     "created_at": r.created_at,
@@ -815,13 +820,18 @@ impl AiAgentRuns {
                 .as_str()
                 .and_then(|m| Choice::parse(m, Slot::of(role)).ok());
             let parent = ChildModels::from_json(&a["parent_models"]);
-            Some(models::merge(role, own.as_ref(), Some(&parent), &self.defaults()?).text())
+            let kind = a["kind"].as_str().and_then(models::Kind::parse);
+            Some(models::resolve(role, own.as_ref(), Some(&parent), kind, &self.defaults()?).text())
         } else {
             None
         };
+        // Only a planner has a kind.
+        let kind = a["kind"]
+            .as_str()
+            .filter(|k| role == Role::Planner && models::Kind::parse(k).is_some());
         let child_json = (!child_models.is_empty()).then(|| child_models.to_json().to_string());
         self.db.exec(
-            "INSERT INTO runs (id, role, runtime, state, parent_run, session_id, caller, by_id, for_id, brief, base, branch, budget, spent, created_at, estimate, model, child_models, name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO runs (id, role, runtime, state, parent_run, session_id, caller, by_id, for_id, brief, base, branch, budget, spent, created_at, estimate, model, child_models, name, kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             vec![
                 id.into(),
                 a["role"].as_str().unwrap_or("executor").into(),
@@ -846,6 +856,7 @@ impl AiAgentRuns {
                 opt(model.as_deref()),
                 opt(child_json.as_deref()),
                 opt(a["name"].as_str()),
+                opt(kind),
             ],
         )?;
         if runtime == "gateway" {
