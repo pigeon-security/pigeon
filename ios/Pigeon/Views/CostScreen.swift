@@ -1,21 +1,11 @@
 import SwiftUI
-import UIKit
 
-// The Cost tab, from the confirmed mockup (docs/plans/ios-app-next.md). A range control, then a grid
-// of equal squares: the total and a details box, a Cloudflare chart and an AI Gateway chart, and
-// an Anthropic card with what Anthropic itself billed (docs/plans/model-providers.md). The total
-// counts Anthropic's billed amount in place of the gateway's Anthropic estimate.
-// Everything here is private except the screen itself.
-
-/// The time ranges the person can choose; the raw value is what `cost_daily` takes.
 private enum CostRange: String, CaseIterable, Identifiable {
     case today
     case week = "7d"
     case all
 
     var id: String { rawValue }
-
-    /// The text on the segmented control.
     var title: String {
         switch self {
         case .today: return "Today"
@@ -25,798 +15,580 @@ private enum CostRange: String, CaseIterable, Identifiable {
     }
 }
 
-/// Which chart a bar belongs to.
-private enum CostSource {
-    case cloudflare
-    case aiGateway
-    case anthropic
+// Cost's palette is local to this screen, not part of the generated app tokens.
+private enum CostPalette {
+    static let background = color(0x14121A)
+    static let card = color(0x201E26)
+    static let border = color(0x2A2830)
+    static let text = color(0xF4EEE3)
+    static let muted = color(0xA9A39A)
+    static let accent = color(0xE07AA6)
+    static let warning = color(0xF0A17E)
+    static let success = color(0x7FCF9A)
+    static let urgent = color(0xFF8A8A)
 
-    /// The source's name as shown.
-    var title: String {
-        switch self {
-        case .cloudflare: return "Cloudflare"
-        case .aiGateway: return "AI Gateway"
-        case .anthropic: return "Anthropic"
-        }
+    static func color(_ hex: UInt32) -> Color {
+        Color(red: Double(hex >> 16) / 255, green: Double((hex >> 8) & 255) / 255,
+              blue: Double(hex & 255) / 255)
     }
 }
 
-/// One line or model: a name, a total and its amount for each day.
+private enum CostFamily {
+    case byok, unified, cloudflare
+
+    func color(at index: Int) -> Color {
+        // Space neighbouring entries apart in hue and alternate their lightness.
+        let step = (Double(index) * 0.618_033_988_75).truncatingRemainder(dividingBy: 1)
+        let hue: Double
+        switch self {
+        case .byok: hue = 0.05 + 0.05 * step
+        case .unified: hue = 0.15 + 0.23 * step
+        case .cloudflare: hue = 0.55 + 0.10 * step
+        }
+        return Color(hue: hue, saturation: index.isMultiple(of: 2) ? 0.48 : 0.70,
+                     brightness: index.isMultiple(of: 2) ? 0.96 : 0.80)
+    }
+}
+
 private struct CostSeries {
     let name: String
-    let total: Double
-    let byDay: [String: Double]
-    let perPeriod: Bool
-    /// How many requests it made, when the server says.
-    let requests: Double?
-}
+    let total: Double?
+    let byDay: [String: Double]?
+    let color: Color
 
-/// How one source (Cloudflare or the gateway) answered: its status and a reason when not ok.
-private struct CostSourceState {
-    /// "ok", "empty" or "unavailable"; nil when the server sent none.
-    var status: String?
-    /// A short sentence saying why the source has no figure.
-    var why: String?
-
-    /// Reads the source's object. Without a status, a matching entry in the `unavailable`
-    /// list makes the source unavailable. `name` is the list's source name, any letter case.
-    init(object: [String: Any], name: String, unavailable: [Any]) {
-        status = object["status"] as? String
-        why = object["why"] as? String
-        let entry = unavailable.compactMap { $0 as? [String: Any] }.first {
-            ($0["source"] as? String)?.lowercased() == name.lowercased()
-        }
-        if status == nil, entry != nil {
-            status = "unavailable"
-        }
-        if (why ?? "").isEmpty, status == "unavailable" {
-            why = entry?["why"] as? String
-        }
-    }
-
-    /// Whether the source failed or timed out.
-    var isUnavailable: Bool { status == "unavailable" }
-    /// Whether the source answered with no cost for the range.
-    var isEmpty: Bool { status == "empty" }
-    /// The reason to show beneath the amount, if any.
-    var reason: String? {
-        guard isUnavailable || isEmpty, let why, !why.isEmpty else { return nil }
-        return why
-    }
-
-    /// The text for the source's total: "No data", "No cost in this range" or the money.
-    func money(_ value: Double) -> String {
-        if isUnavailable { return "No data" }
-        if isEmpty { return "No cost in this range" }
-        return CostText.money(value)
+    init?(row: CostObject, color: Color) {
+        guard let name = row["name"] as? String, !name.isEmpty else { return nil }
+        self.name = name
+        self.color = color
+        total = costNumber(row["total"])
+        byDay = (row["by_day"] as? CostObject)?.compactMapValues(costNumber)
     }
 }
 
-/// The parts of a `cost_daily` answer the screen uses. Every field is read as optional.
+private struct CostGateway: Identifiable {
+    let id: String
+    let label: String?
+    let total: Double?
+    let models: [CostSeries]?
+    let isAnthropicBYOK: Bool
+}
+
+private struct CostGrant {
+    let name: String
+    let amount: Double?
+    let used: Double?
+    let remaining: Double?
+    let expiry: Date?
+
+    init?(row: CostObject) {
+        guard let name = row["name"] as? String, !name.isEmpty else { return nil }
+        self.name = name
+        amount = costNumber(row["amount"])
+        used = costNumber(row["used"])
+        remaining = costNumber(row["remaining"])
+        expiry = (row["expiry"] as? String).flatMap(CostText.date)
+    }
+}
+
+private typealias CostObject = [String: Any]
+
+private func costNumber(_ value: Any?) -> Double? {
+    guard let value = (value as? NSNumber)?.doubleValue, value.isFinite else { return nil }
+    return value
+}
+
+private enum CostAvailability: Equatable {
+    case available, empty, unavailable
+
+    init(_ source: CostObject?, unavailable: [CostObject], name: String) {
+        if source == nil || source?["status"] as? String == "unavailable"
+            || unavailable.contains(where: { ($0["source"] as? String)?.lowercased() == name }) {
+            self = .unavailable
+        } else if source?["status"] as? String == "empty" {
+            self = .empty
+        } else {
+            self = .available
+        }
+    }
+}
+
 private struct CostData {
-    /// How Cloudflare answered.
-    var cloudflareState = CostSourceState(object: [:], name: "billable usage", unavailable: [])
-    /// How the AI Gateway answered.
-    var gatewayState = CostSourceState(object: [:], name: "AI Gateway", unavailable: [])
-    var range = ""
-    var days: [String] = []
-    var total = 0.0
-    var cloudflareTotal = 0.0
-    var lines: [CostSeries] = []
-    var aiTotal = 0.0
-    var models: [CostSeries] = []
-    var unavailable = false
-    var storedFrom: String?
-    /// Whether Anthropic's own report answered (`anthropic` is not null).
-    var anthropicConnected = false
-    /// What Anthropic billed over the range.
-    var anthropicTotal = 0.0
-    /// Anthropic's billed cost by model family.
-    var anthropicModels: [CostSeries] = []
-    /// What the gateway recorded for Anthropic requests over the range.
-    var gatewayAnthropic = 0.0
-    /// Anthropic's figure less the gateway's.
-    var anthropicDifference = 0.0
-    /// Whether any day of the range does not match (beyond a day Anthropic has not reported).
-    var reconciliationWarns = false
+    let days: [String]
+    let gross: Double?
+    let net: Double?
+    let cloudflareTotal: Double?
+    let cloudflareState: CostAvailability
+    let gatewayState: CostAvailability
+    let products: [CostSeries]?
+    let gateways: [CostGateway]?
+    let grants: [CostGrant]?
 
-    /// Reads a decoded JSON answer. Missing or odd fields become empty or zero.
     init(json: Any) {
-        let root = json as? [String: Any] ?? [:]
-        range = root["range"] as? String ?? ""
-        days = (root["days"] as? [Any] ?? []).compactMap { $0 as? String }
-        total = Self.number(root["total"])
-        let cloudflare = root["cloudflare"] as? [String: Any] ?? [:]
-        cloudflareTotal = Self.number(cloudflare["total"])
-        lines = Self.series(
-            cloudflare["lines"], order: ["CI Containers", "Workers", "D1", "R2", "Other"])
-        let gateway = root["ai_gateway"] as? [String: Any] ?? [:]
-        aiTotal = Self.number(gateway["total"])
-        models = Self.series(
-            gateway["by_model"], order: ["Opus", "Sonnet", "Haiku", "OpenAI", "Other"])
-        // Anthropic not connected is shown on its own card, not as billing unavailable.
-        unavailable = (root["unavailable"] as? [Any] ?? []).contains { entry in
-            ((entry as? [String: Any])?["source"] as? String) != "Anthropic"
+        let root = json as? CostObject ?? [:]
+        days = Set(root["days"] as? [String] ?? []).sorted()
+        gross = costNumber(root["total"])
+        net = costNumber(root["net_total"])
+        let unavailable = root["unavailable"] as? [CostObject] ?? []
+        let cloudflare = root["cloudflare"] as? CostObject
+        let gateway = root["ai_gateway"] as? CostObject
+        cloudflareState = CostAvailability(cloudflare, unavailable: unavailable, name: "billable usage")
+        gatewayState = CostAvailability(gateway, unavailable: unavailable, name: "ai gateway")
+        cloudflareTotal = costNumber(cloudflare?["total"])
+        products = (cloudflare?["lines"] as? [CostObject])?.enumerated().compactMap { index, row in
+            CostSeries(row: row, color: CostFamily.cloudflare.color(at: index))
         }
-        let unavailableList = root["unavailable"] as? [Any] ?? []
-        cloudflareState = CostSourceState(
-            object: cloudflare, name: "billable usage", unavailable: unavailableList)
-        gatewayState = CostSourceState(
-            object: gateway, name: "AI Gateway", unavailable: unavailableList)
-        storedFrom = root["stored_from"] as? String
-        if let anthropic = root["anthropic"] as? [String: Any] {
-            anthropicConnected = true
-            anthropicTotal = Self.number(anthropic["total"])
-            anthropicModels = Self.series(
-                anthropic["by_model"], order: ["Opus", "Sonnet", "Haiku", "Other"],
-                label: Self.family)
-            let reconciliation = anthropic["reconciliation"] as? [String: Any] ?? [:]
-            gatewayAnthropic = Self.number(reconciliation["gateway_usd"])
-            anthropicDifference = Self.number(reconciliation["difference_usd"])
-            let quiet: Set<String> = ["match", "anthropic_pending"]
-            reconciliationWarns = (reconciliation["days"] as? [Any] ?? []).contains { day in
-                guard let status = (day as? [String: Any])?["status"] as? String else {
-                    return false
+        var byokIndex = 0
+        var unifiedIndex = 0
+        gateways = (gateway?["by_gateway"] as? [CostObject])?.compactMap { row in
+            guard let id = row["id"] as? String, let billing = row["billing"] as? String,
+                  billing == "byok" || billing == "unified" else { return nil }
+            let byok = billing == "byok"
+            let models = (row["by_model"] as? [CostObject])?.compactMap { model -> CostSeries? in
+                let color: Color
+                if byok {
+                    color = CostFamily.byok.color(at: byokIndex)
+                    byokIndex += 1
+                } else {
+                    color = CostFamily.unified.color(at: unifiedIndex)
+                    unifiedIndex += 1
                 }
-                return !quiet.contains(status)
+                return CostSeries(row: model, color: color)
             }
+            return CostGateway(id: id, label: row["label"] as? String,
+                               total: costNumber(row["total"]), models: models,
+                               isAnthropicBYOK: byok && row["provider"] as? String == "anthropic")
+        }
+        if let rows = (root["credits"] as? CostObject)?["grants"] as? [CostObject] {
+            let decoded = rows.compactMap(CostGrant.init(row:))
+            grants = decoded.count == rows.count ? decoded.sorted {
+                ($0.expiry ?? .distantFuture, $0.name) < ($1.expiry ?? .distantFuture, $1.name)
+            } : nil
+        } else {
+            grants = nil
         }
     }
 
-    /// A model id's short name: Opus, Sonnet or Haiku when the id holds it, else the id.
-    static func family(_ model: String) -> String {
-        let id = model.lowercased()
-        for name in ["Opus", "Sonnet", "Haiku"] where id.contains(name.lowercased()) {
-            return name
-        }
-        return model
+    var chartSeries: [CostSeries] {
+        let cloudflare = cloudflareState == .unavailable ? [] : products ?? []
+        let ai = gatewayState == .unavailable ? [] : (gateways ?? []).flatMap { $0.models ?? [] }
+        return ai + cloudflare
     }
 
-    /// A number that may arrive as an Int or a Double; anything else is 0.
-    static func number(_ value: Any?) -> Double {
-        (value as? NSNumber)?.doubleValue ?? 0
-    }
-
-    /// Reads a list of series, names them by `label` (rows with the same label are added
-    /// together) and puts them in `order`; unknown names go last, in given order.
-    private static func series(
-        _ value: Any?, order: [String], label: (String) -> String = { $0 }
-    ) -> [CostSeries] {
-        let rows = (value as? [Any] ?? []).compactMap { $0 as? [String: Any] }
-        var list: [CostSeries] = []
-        for row in rows {
-            let name = label(row["name"] as? String ?? "Other")
-            var byDay: [String: Double] = [:]
-            for (day, amount) in row["by_day"] as? [String: Any] ?? [:] {
-                byDay[day] = number(amount)
-            }
-            let next = CostSeries(
-                name: name, total: number(row["total"]),
-                byDay: byDay, perPeriod: (row["granularity"] as? String) == "period",
-                requests: (row["requests"] as? NSNumber)?.doubleValue)
-            if let i = list.firstIndex(where: { $0.name == name }) {
-                let old = list[i]
-                let requests: Double? =
-                    old.requests == nil && next.requests == nil
-                    ? nil : (old.requests ?? 0) + (next.requests ?? 0)
-                list[i] = CostSeries(
-                    name: name, total: old.total + next.total,
-                    byDay: old.byDay.merging(next.byDay, uniquingKeysWith: +),
-                    perPeriod: old.perPeriod || next.perPeriod, requests: requests)
-            } else {
-                list.append(next)
-            }
-        }
-        func rank(_ s: CostSeries) -> Int { order.firstIndex(of: s.name) ?? order.count }
-        return list.enumerated()
-            .sorted { (rank($0.element), $0.offset) < (rank($1.element), $1.offset) }
-            .map { $0.element }
+    var hasMissingDailyDetail: Bool {
+        cloudflareState == .unavailable || gatewayState == .unavailable
+            || (cloudflareState == .available && products == nil)
+            || (gatewayState == .available && ((gateways ?? []).isEmpty
+                || (gateways ?? []).contains { $0.models == nil }))
+            || chartSeries.contains { $0.byDay == nil }
     }
 }
 
-/// One part of a stacked bar.
-private struct CostPart {
-    let name: String
-    let value: Double
-}
-
-/// One bar: a day, a week, or (for today) one item.
-private struct CostBar: Identifiable {
-    let id: Int
-    /// The label under the bar.
-    let axis: String
-    /// The first day of the bar, as YYYY-MM-DD.
-    let date: String
-    let isWeek: Bool
-    let parts: [CostPart]
-
-    /// The height of the whole stack.
-    var total: Double { parts.reduce(0) { $0 + max($1.value, 0) } }
-}
-
-/// The selected bar: which chart and which bar in it.
-private struct CostSelection: Equatable {
-    let source: CostSource
-    let bar: Int
-}
-
-/// Date and money text helpers.
 private enum CostText {
-    /// A UTC date from "YYYY-MM-DD".
-    static func date(_ day: String) -> Date? {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = TimeZone(identifier: "UTC")
-        f.dateFormat = "yyyy-MM-dd"
-        return f.date(from: day)
+    static let calendar: Calendar = {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0) ?? .gmt
+        return calendar
+    }()
+
+    private static func formatter(_ pattern: String) -> DateFormatter {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = calendar
+        formatter.timeZone = calendar.timeZone
+        formatter.dateFormat = pattern
+        return formatter
     }
 
-    /// A "YYYY-MM-DD" day in another format, in UTC; the input itself if it does not parse.
-    static func day(_ day: String, _ format: String) -> String {
-        guard let d = date(day) else { return day }
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = TimeZone(identifier: "UTC")
-        f.dateFormat = format
-        return f.string(from: d)
+    private static let iso = formatter("yyyy-MM-dd")
+    private static let shortDate = formatter("d MMM")
+    private static let datedYear = formatter("d MMM yyyy")
+    private static let dayNumber = formatter("d")
+
+    static func date(_ text: String) -> Date? {
+        guard let date = iso.date(from: text), iso.string(from: date) == text else { return nil }
+        return date
     }
 
-    /// The short x label for a today bar: CI, Wkrs, D1, R2, or the first five letters.
-    static func shortName(_ name: String) -> String {
-        switch name {
-        case "CI Containers": return "CI"
-        case "Workers": return "Wkrs"
-        default: return String(name.prefix(5))
+    static func day(_ date: Date) -> String { shortDate.string(from: date) }
+
+    static func period(_ days: [String]) -> String? {
+        guard let first = days.first.flatMap(date), let last = days.last.flatMap(date) else { return nil }
+        if first == last { return day(first) }
+        if calendar.isDate(first, equalTo: last, toGranularity: .month) {
+            return "\(dayNumber.string(from: first))–\(day(last))"
         }
+        let format = calendar.isDate(first, equalTo: last, toGranularity: .year) ? shortDate : datedYear
+        return "\(format.string(from: first))–\(format.string(from: last))"
     }
 
-    /// The amount above a today bar: "$5.40", or "$12" from ten dollars up.
-    static func shortMoney(_ v: Double) -> String {
-        v >= 10 ? String(format: "$%.0f", v) : money(v)
-    }
-
-    /// Money as "$12.34"; a positive amount under a cent is "<$0.01".
-    static func money(_ v: Double) -> String {
-        if v > 0 && v < 0.01 { return "<$0.01" }
-        return String(format: "$%.2f", max(v, 0))
+    static func money(_ amount: Double) -> String {
+        let rounded = (amount * 100).rounded() / 100
+        return String(format: "%@$%.2f", rounded < 0 ? "−" : "", abs(rounded))
     }
 }
 
-/// Builds the bars of one chart for a range.
-private func costBars(_ series: [CostSeries], days: [String], range: CostRange) -> [CostBar] {
-    if range == .today {
-        let day = days.first ?? ""
-        return series.enumerated().map { i, s in
-            CostBar(
-                id: i, axis: CostText.shortName(s.name), date: day, isWeek: false,
-                parts: [CostPart(name: s.name, value: s.byDay[day] ?? s.total)])
-        }
-    }
-    if range == .week || days.count <= 31 {
-        return days.enumerated().map { i, day in
-            let initial =
-                range == .week
-                ? CostText.day(day, "EEEEE") : (i % 7 == 0 ? String(Int(day.suffix(2)) ?? 0) : "")
-            return CostBar(
-                id: i, axis: initial, date: day, isWeek: false,
-                parts: series.map { CostPart(name: $0.name, value: $0.byDay[day] ?? 0) })
-        }
-    }
-    var bars: [CostBar] = []
-    var start = 0
-    while start < days.count {
-        let week = Array(days[start..<min(start + 7, days.count)])
-        let first = week.first ?? ""
-        bars.append(
-            CostBar(
-                id: bars.count, axis: String(Int(first.suffix(2)) ?? 0), date: first,
-                isWeek: true,
-                parts: series.map { s in
-                    CostPart(name: s.name, value: week.reduce(0) { $0 + (s.byDay[$1] ?? 0) })
-                }))
-        start += 7
-    }
-    return bars
-}
-
-/// One row of the details box: a swatch, a name and an amount.
-private struct DetailRow {
-    let name: String
-    let amount: Double
-    /// The swatch colour; nil for the "+N more" row, which has none and is muted.
-    let colour: Color?
-    /// Text shown in place of the amount (for a source with no data), if any.
-    var text: String? = nil
-}
-
-/// What the details box shows: a source line, a head line, then rows or note lines.
-private struct Details {
-    var source: String
-    var head: String
-    var rows: [DetailRow] = []
-    var notes: [String] = []
-
-    /// One sentence for VoiceOver.
-    var summary: String {
-        let parts = [source, head] + notes + rows.map {
-            "\($0.name) \($0.text ?? CostText.money($0.amount))"
-        }
-        return parts.joined(separator: ", ")
-    }
-}
-
-/// The Cost tab: the range control, then the grid of squares.
+/// Cost by day and billing source, using the selected range of `cost_daily`.
 struct CostScreen: View {
     let session: Session
 
+    @Environment(\.displayScale) private var displayScale
     @State private var range = CostRange.week
+    @State private var loadedRange: CostRange?
     @State private var data: CostData?
-    @State private var error: String?
-    @State private var selection: CostSelection?
-    @State private var side: CGFloat = 173
+    @State private var failed = false
+    @State private var request = UUID()
 
-    private let gap: CGFloat = 12
+    private var pixel: CGFloat { 1 / displayScale }
 
     var body: some View {
-        Screen(title: "Cost", root: true, errors: error.map { [$0] } ?? [], refresh: { await load() }) {
-            VStack(alignment: .leading, spacing: gap) {
-                HStack {
-                    Spacer(minLength: 0)
-                    Picker("Range", selection: $range) {
-                        ForEach(CostRange.allCases) { Text($0.title).tag($0) }
-                    }
-                    .pickerStyle(.segmented)
-                    .frame(width: side)
-                }
-                HStack(spacing: gap) {
-                    totalCard.frame(width: side, height: side)
-                    detailsCard.frame(width: side, height: side)
-                }
-                HStack(spacing: gap) {
-                    chartCard(.cloudflare).frame(width: side, height: side)
-                    chartCard(.aiGateway).frame(width: side, height: side)
-                }
-                HStack(spacing: gap) {
-                    anthropicCard.frame(width: side, height: side)
-                    Spacer(minLength: 0)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                header
+                if loadedRange == range, let data {
+                    hero(data)
+                    daily(data)
+                    Text("By billing").font(.headline).accessibilityAddTraits(.isHeader)
+                    billing(data)
+                } else if loadedRange == range && failed {
+                    card { Text("Cost unavailable. Pull to refresh.").foregroundStyle(CostPalette.warning) }
+                } else {
+                    ProgressView("Loading cost…").tint(CostPalette.accent)
                 }
             }
-            .padding(.top, 2)
-            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width in
-                side = max((width - gap) / 2, 80)
-            }
+            .padding(.horizontal, Metrics.side)
+            .padding(.top, 4)
+            .padding(.bottom, 80)
         }
+        .foregroundStyle(CostPalette.text)
+        .background(CostPalette.background.ignoresSafeArea())
+        .toolbar(.hidden, for: .navigationBar)
+        .refreshable { await load() }
         .task(id: range) { await load() }
-        .onChange(of: range) { selection = nil }
-        .onChange(of: selection) { announce() }
     }
 
-    /// Says the details box's new text to VoiceOver.
-    private func announce() {
-        UIAccessibility.post(notification: .announcement, argument: details.summary)
+    private var header: some View {
+        HStack(spacing: 8) {
+            Text("Cost").font(AppFont.largeTitle).accessibilityAddTraits(.isHeader)
+                .lineLimit(1).minimumScaleFactor(0.7)
+            Spacer(minLength: 0)
+            HStack(spacing: 2) {
+                ForEach(CostRange.allCases) { choice in
+                    Button {
+                        range = choice
+                    } label: {
+                        Text(choice.title).font(.subheadline.weight(.semibold))
+                            .lineLimit(1).minimumScaleFactor(0.7)
+                            .padding(.horizontal, 8).frame(minHeight: 44)
+                            .foregroundStyle(range == choice ? CostPalette.accent : CostPalette.muted)
+                            .background(range == choice ? CostPalette.background : .clear,
+                                        in: RoundedRectangle(cornerRadius: 7))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityAddTraits(range == choice ? [.isSelected] : [])
+                }
+            }
+            .padding(2)
+            .background(CostPalette.card, in: RoundedRectangle(cornerRadius: 9))
+            .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(CostPalette.border, lineWidth: pixel))
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel("Cost period")
+        }
     }
 
-    /// Loads the chosen range. On failure the error shows and the grid is empty.
     private func load() async {
         let asked = range
+        let token = UUID()
+        request = token
         do {
             let json = try await session.client.call("cost_daily", ["range": asked.rawValue])
-            guard asked == range else { return }
+            guard !Task.isCancelled, asked == range, request == token else { return }
             data = CostData(json: json)
-            error = nil
+            failed = false
+            loadedRange = asked
         } catch PlatformError.signedOut {
             // The session has already signed out.
         } catch is CancellationError {
-            // A newer load replaced this one.
-        } catch let e as URLError where e.code == .cancelled {
-            // A newer load replaced this one.
+        } catch let error as URLError where error.code == .cancelled {
         } catch {
-            guard asked == range else { return }
+            guard !Task.isCancelled, asked == range, request == token else { return }
             data = nil
-            self.error = "cost_daily failed: \(error.localizedDescription)"
+            failed = true
+            loadedRange = asked
         }
     }
 
-    // MARK: Bars
-
-    private var cloudflareBars: [CostBar] {
-        costBars(data?.lines ?? [], days: data?.days ?? [], range: range)
-    }
-
-    private var gatewayBars: [CostBar] {
-        costBars(data?.models ?? [], days: data?.days ?? [], range: range)
-    }
-
-    private var anthropicBars: [CostBar] {
-        costBars(data?.anthropicModels ?? [], days: data?.days ?? [], range: range)
-    }
-
-    private func bars(_ source: CostSource) -> [CostBar] {
-        switch source {
-        case .cloudflare: return cloudflareBars
-        case .aiGateway: return gatewayBars
-        case .anthropic: return anthropicBars
+    private func hero(_ data: CostData) -> some View {
+        card {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Net cost").font(.subheadline.weight(.semibold))
+                Spacer()
+                if let period = CostText.period(data.days) {
+                    Text(period).font(.subheadline).foregroundStyle(CostPalette.muted)
+                }
+            }
+            if let net = data.net {
+                Text(CostText.money(net)).font(.largeTitle.bold()).monospacedDigit()
+            } else {
+                Text("Net cost unavailable").font(.headline).foregroundStyle(CostPalette.muted)
+            }
+            if let gross = data.gross, let net = data.net {
+                Text("\(CostText.money(gross)) gross · \(CostText.money(gross - net)) promotional credits")
+                    .font(.subheadline).foregroundStyle(CostPalette.muted)
+            } else if let gross = data.gross {
+                Text("\(CostText.money(gross)) gross").font(.subheadline).foregroundStyle(CostPalette.muted)
+            }
+            if data.cloudflareState == .unavailable || data.gatewayState == .unavailable {
+                Text("Totals exclude unavailable billing data.").font(.caption)
+                    .foregroundStyle(CostPalette.warning)
+            }
         }
     }
 
-    /// The selected bar and its source, if the selection still points at a bar.
-    private var selectedBar: (CostSource, CostBar)? {
-        guard let selection else { return nil }
-        guard let bar = bars(selection.source).first(where: { $0.id == selection.bar }) else {
-            return nil
+    @ViewBuilder private func billing(_ data: CostData) -> some View {
+        let promoGateway = data.gateways?.first(where: \.isAnthropicBYOK)?.id
+        if let gateways = data.gateways, !gateways.isEmpty {
+            ForEach(gateways) { gateway in
+                card {
+                    billingHeader("Cloudflare AI Gateway", subtitle: gateway.label,
+                                  total: gateway.total, state: data.gatewayState)
+                    if data.gatewayState != .unavailable {
+                        seriesRows("By model", gateway.models,
+                                   empty: gateway.total == 0 ? "No spend in this period" : "Model detail unavailable")
+                    }
+                    if gateway.id == promoGateway { promotionalCredits(data.grants) }
+                }
+            }
+        } else {
+            card {
+                billingHeader("Cloudflare AI Gateway", subtitle: nil, total: nil,
+                              state: data.gatewayState == .empty ? .empty : .unavailable)
+            }
         }
-        return (selection.source, bar)
-    }
-
-    /// Selects a bar, or clears the selection when it is already selected.
-    private func tap(_ source: CostSource, _ bar: Int) {
-        let next = CostSelection(source: source, bar: bar)
-        selection = selection == next ? nil : next
-    }
-
-    // MARK: Total
-
-    /// The range in the total's label: "today", "7 days" or "31 days".
-    private var rangeWords: String {
-        switch range {
-        case .today: return "today"
-        case .week: return "7 days"
-        case .all: return "\(data?.days.count ?? 0) days"
+        card {
+            billingHeader("Cloudflare", subtitle: "Workers, Containers, storage",
+                          total: data.cloudflareTotal, state: data.cloudflareState)
+            if data.cloudflareState != .unavailable {
+                seriesRows("By product", data.products,
+                           empty: data.cloudflareState == .empty ? "No spend in this period" : "Product detail unavailable")
+            }
         }
     }
 
-    private var totalCard: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Text("Total · \(rangeWords)").font(AppFont.label).foregroundStyle(Tokens.muted)
-                .lineLimit(1)
+    private func billingHeader(_ title: String, subtitle: String?, total: Double?,
+                               state: CostAvailability) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title).font(.headline).accessibilityAddTraits(.isHeader)
+                if let subtitle { Text(subtitle).font(.subheadline).foregroundStyle(CostPalette.muted) }
+            }
             Spacer(minLength: 0)
-            Text(CostText.money(data?.total ?? 0))
-                .font(AppFont.largeTitle).tracking(-0.8).monospacedDigit()
-                .foregroundStyle(Tokens.ink)
-                .lineLimit(1).minimumScaleFactor(0.5)
-            if let partial = partialNote {
-                Text(partial).font(.system(size: 13)).foregroundStyle(Tokens.muted)
-                    .lineLimit(2)
+            if state == .unavailable {
+                Text("Unavailable").foregroundStyle(CostPalette.warning)
+            } else if let total {
+                money(total)
+            } else {
+                Text(state == .empty ? "No spend" : "Unavailable").foregroundStyle(CostPalette.muted)
+            }
+        }
+    }
+
+    private func seriesRows(_ title: String, _ series: [CostSeries]?, empty: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Rectangle().fill(CostPalette.border).frame(height: pixel)
+            Text(title).font(.caption.weight(.semibold)).foregroundStyle(CostPalette.muted)
+            if let series, !series.isEmpty {
+                ForEach(Array(series.enumerated()), id: \.offset) { _, item in
+                    HStack(spacing: 8) {
+                        RoundedRectangle(cornerRadius: 2).fill(item.color).frame(width: 10, height: 10)
+                            .accessibilityHidden(true)
+                        Text(item.name)
+                        Spacer(minLength: 4)
+                        money(item.total)
+                    }
+                    .font(.subheadline)
+                    .accessibilityElement(children: .combine)
+                }
+            } else {
+                Text(series == nil ? "Unavailable" : empty).font(.subheadline)
+                    .foregroundStyle(CostPalette.muted)
+            }
+        }
+    }
+
+    private func promotionalCredits(_ grants: [CostGrant]?) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Promotional credits").font(.subheadline.bold()).accessibilityAddTraits(.isHeader)
+            if let grants, !grants.isEmpty {
+                let amounts = grants.compactMap(\.amount)
+                let balances = grants.compactMap(\.remaining)
+                if amounts.count == grants.count, balances.count == grants.count {
+                    Text("\(CostText.money(balances.reduce(0, +))) left of \(CostText.money(amounts.reduce(0, +)))")
+                        .font(.subheadline.weight(.semibold)).monospacedDigit().foregroundStyle(CostPalette.success)
+                } else {
+                    Text("Balance unavailable").font(.subheadline).foregroundStyle(CostPalette.muted)
+                }
+                ForEach(Array(grants.enumerated()), id: \.offset) { _, grant in
+                    Rectangle().fill(CostPalette.border).frame(height: pixel)
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text(grant.name)
+                            Spacer(minLength: 4)
+                            money(grant.amount)
+                        }
+                        if let used = grant.used {
+                            Text("\(CostText.money(used)) used").monospacedDigit()
+                                .foregroundStyle(CostPalette.muted)
+                        }
+                        if let remaining = grant.remaining {
+                            Text("\(CostText.money(remaining)) left").monospacedDigit()
+                                .foregroundStyle(CostPalette.success)
+                        } else {
+                            Text("Balance unavailable").foregroundStyle(CostPalette.muted)
+                        }
+                        expiry(grant.expiry)
+                    }
+                    .font(.subheadline)
+                    .accessibilityElement(children: .combine)
+                }
+            } else {
+                Text(grants == nil ? "Unavailable" : "Unconfigured")
+                    .font(.subheadline).foregroundStyle(CostPalette.muted)
             }
         }
         .padding(12)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .block()
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(CostPalette.border, lineWidth: pixel))
     }
 
-    /// A line saying the total leaves out a source with no data, or nil when it is whole.
-    private var partialNote: String? {
-        var missing: [String] = []
-        if data?.cloudflareState.isUnavailable == true { missing.append("Cloudflare") }
-        if data?.gatewayState.isUnavailable == true { missing.append("AI Gateway") }
-        if missing.isEmpty { return nil }
-        return "Without \(missing.joined(separator: " and ")): no data"
+    private func expiry(_ date: Date?) -> Text {
+        guard let date else { return Text("Expiry unavailable").foregroundStyle(CostPalette.muted) }
+        let calendar = CostText.calendar
+        let days = calendar.dateComponents([.day], from: calendar.startOfDay(for: .now), to: date).day ?? 0
+        let day = CostText.day(date)
+        if days < 0 { return Text("Expired \(day)").bold().foregroundStyle(CostPalette.urgent) }
+        if days <= 7 {
+            let when = days == 0 ? "today" : (days == 1 ? "in 1 day" : "in \(days) days")
+            return Text("Expires \(day) · \(when)").bold()
+                .foregroundStyle(days <= 3 ? CostPalette.urgent : CostPalette.warning)
+        }
+        return Text("Expires \(day)").foregroundStyle(CostPalette.muted)
     }
 
-    // MARK: Details
-
-    /// The head of the box with nothing selected: "Last 7 days · $12.00".
-    private var rangeHead: String {
-        let name: String
-        switch range {
-        case .today: name = "Today"
-        case .week: name = "Last 7 days"
-        case .all: name = "All"
-        }
-        return "\(name) · \(CostText.money(data?.total ?? 0))"
+    private func money(_ amount: Double?) -> some View {
+        Text(amount.map(CostText.money) ?? "Unavailable").monospacedDigit()
+            .foregroundStyle(amount == nil ? CostPalette.muted : CostPalette.text)
+            .fixedSize(horizontal: true, vertical: false)
     }
 
-    /// The total by source, adding up to the total. With Anthropic connected, the gateway's
-    /// Anthropic part leaves the gateway's row, and Anthropic's row is what the total counts for
-    /// Anthropic (its billed amount, the gateway's estimate on days it has not reported yet).
-    private var sourceRows: [DetailRow] {
-        let cf = data?.cloudflareState
-        let gw = data?.gatewayState
-        func text(_ s: CostSourceState?) -> String? {
-            guard let s, s.isUnavailable || s.isEmpty else { return nil }
-            return s.money(0)
-        }
-        var rows = [
-            DetailRow(
-                name: "Cloudflare", amount: data?.cloudflareTotal ?? 0,
-                colour: ChartColour.workers, text: text(cf))
-        ]
-        if let d = data, d.anthropicConnected {
-            let others = max(d.aiTotal - d.gatewayAnthropic, 0)
-            rows.append(
-                DetailRow(
-                    name: "Other models", amount: others, colour: Tokens.accent, text: text(gw)))
-            rows.append(
-                DetailRow(
-                    name: "Anthropic", amount: max(d.total - d.cloudflareTotal - others, 0),
-                    colour: ChartColour.opus))
-        } else {
-            rows.append(
-                DetailRow(
-                    name: "AI Gateway", amount: data?.aiTotal ?? 0, colour: Tokens.accent,
-                    text: text(gw)))
-        }
-        return rows.sorted { $0.amount > $1.amount }
+    private func card<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 10, content: content)
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(CostPalette.card, in: RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(CostPalette.border, lineWidth: pixel))
     }
 
-    /// The reasons, one line per source with no figure, for the details box.
-    private var sourceReasons: [String] {
-        var out: [String] = []
-        if let why = data?.cloudflareState.reason { out.append("Cloudflare: \(why)") }
-        if let why = data?.gatewayState.reason { out.append("AI Gateway: \(why)") }
-        return out
-    }
-
-    /// What the details box shows now.
-    private var details: Details {
-        guard let (source, bar) = selectedBar else {
-            return Details(
-                source: "By source", head: rangeHead, rows: sourceRows, notes: sourceReasons)
-        }
-        let items = bar.parts.filter { $0.value > 0 }.sorted { $0.value > $1.value }
-        if range == .today {
-            return todayDetails(source, bar)
-        }
-        let day = CostText.day(bar.date, "EEE d MMM")
-        var out = Details(
-            source: source.title, head: "\(bar.isWeek ? "Week of " : "")\(day) · \(CostText.money(bar.total))")
-        func row(_ p: CostPart) -> DetailRow {
-            DetailRow(name: p.name, amount: p.value, colour: ChartColour.of(p.name))
-        }
-        if items.count > 4 {
-            out.rows = items.prefix(3).map(row)
-            let rest = items.dropFirst(3)
-            out.rows.append(
-                DetailRow(
-                    name: "+\(rest.count) more", amount: rest.reduce(0) { $0 + $1.value },
-                    colour: nil))
-        } else {
-            out.rows = items.map(row)
-        }
-        return out
-    }
-
-    /// The details of one item of today: its amount, its share of the day and a note.
-    private func todayDetails(_ source: CostSource, _ bar: CostBar) -> Details {
-        let part = bar.parts.first
-        let name = part?.name ?? source.title
-        let amount = part?.value ?? 0
-        var out = Details(source: source.title, head: "\(name) · \(CostText.money(amount))")
-        let total = data?.total ?? 0
-        let share = total > 0 ? Int((amount / total * 100).rounded()) : 0
-        out.notes.append("\(share)% of today")
-        let list: [CostSeries]?
-        switch source {
-        case .cloudflare: list = data?.lines
-        case .aiGateway: list = data?.models
-        case .anthropic: list = data?.anthropicModels
-        }
-        let series = list?.first { $0.name == name }
-        if source == .cloudflare {
-            out.notes.append(series?.perPeriod == true ? "Billed" : "Estimated")
-        } else if source == .anthropic {
-            out.notes.append("Billed by Anthropic")
-        } else if let n = series?.requests {
-            out.notes.append("\(Int(n)) requests")
-        } else {
-            out.notes.append("Estimated")
-        }
-        return out
-    }
-
-    private var detailsCard: some View {
-        let d = details
-        return VStack(alignment: .leading, spacing: 5) {
-            Text(d.source).font(AppFont.label).foregroundStyle(Tokens.muted).lineLimit(1)
-            Text(d.head).font(AppFont.button).monospacedDigit().foregroundStyle(Tokens.ink)
-                .lineLimit(1).minimumScaleFactor(0.7)
-            VStack(alignment: .leading, spacing: 0) {
-                ForEach(Array(d.rows.prefix(4).enumerated()), id: \.offset) { _, row in
-                    detailRow(row)
+    private func daily(_ data: CostData) -> some View {
+        let series = data.chartSeries
+        let bars = data.days.map { CostBar(day: $0, series: series) }
+        let positive = bars.map(\.positive).max() ?? 0
+        let negative = bars.map(\.negative).max() ?? 0
+        return card {
+            Text("Daily spend").font(.headline).accessibilityAddTraits(.isHeader)
+            if positive + negative > 0 {
+                chart(bars, positive: positive, negative: negative)
+                if data.hasMissingDailyDetail {
+                    Text("Some daily detail is unavailable.").font(.caption).foregroundStyle(CostPalette.muted)
                 }
-                ForEach(d.notes, id: \.self) { note in
-                    Text(note).font(.system(size: 13)).foregroundStyle(Tokens.muted)
-                        .lineLimit(3)
-                        .frame(minHeight: 17, alignment: .leading)
-                }
-            }
-            .padding(.top, 0)
-            Spacer(minLength: 0)
-        }
-        .padding(EdgeInsets(top: 12, leading: 12, bottom: 14, trailing: 12))
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .contentShape(Rectangle())
-        .onTapGesture { selection = nil }
-        .block()
-        .accessibilityElement(children: .combine)
-    }
-
-    /// One row of the details box.
-    private func detailRow(_ row: DetailRow) -> some View {
-        HStack(spacing: 6) {
-            if let colour = row.colour {
-                RoundedRectangle(cornerRadius: 2).fill(colour).frame(width: 8, height: 8)
-            }
-            Text(row.name).font(.system(size: 13))
-                .foregroundStyle(row.colour == nil ? Tokens.muted : Tokens.ink)
-                .lineLimit(1).truncationMode(.tail)
-            Spacer(minLength: 2)
-            Text(row.text ?? CostText.money(row.amount)).font(.system(size: 13)).monospacedDigit()
-                .foregroundStyle(row.colour == nil ? Tokens.muted : Tokens.ink)
-                .lineLimit(1).minimumScaleFactor(0.6)
-        }
-        .frame(height: 17)
-    }
-
-    // MARK: Charts
-
-    private func chartCard(_ source: CostSource) -> some View {
-        let isCloudflare = source == .cloudflare
-        let label = isCloudflare && range == .all ? "Cloudflare · period" : source.title
-        let state = isCloudflare ? data?.cloudflareState : data?.gatewayState
-        let noFigure = state?.isUnavailable == true || state?.isEmpty == true
-        return VStack(alignment: .leading, spacing: 6) {
-            Text(label).font(AppFont.label).foregroundStyle(Tokens.muted)
-                .lineLimit(1).minimumScaleFactor(0.7)
-            if let state, noFigure {
-                Text(state.money(0))
-                    .font(AppFont.sourceTotal).tracking(-0.3)
-                    .foregroundStyle(Tokens.ink)
-                    .lineLimit(1).minimumScaleFactor(0.5)
-                if let why = state.reason {
-                    Text(why).font(.system(size: 13)).foregroundStyle(Tokens.muted)
-                        .lineLimit(3)
-                }
-                Spacer(minLength: 0)
             } else {
-                Text(CostText.money(isCloudflare ? data?.cloudflareTotal ?? 0 : data?.aiTotal ?? 0))
-                    .font(AppFont.sourceTotal).tracking(-0.3).monospacedDigit()
-                    .foregroundStyle(Tokens.ink)
-                    .lineLimit(1).minimumScaleFactor(0.5)
-                chart(source)
+                Text(data.hasMissingDailyDetail || bars.isEmpty ? "Daily detail unavailable" : "No daily spend in this period")
+                    .font(.subheadline).foregroundStyle(CostPalette.muted)
             }
         }
-        .padding(EdgeInsets(top: 10, leading: 10, bottom: 8, trailing: 10))
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .block()
     }
 
-    /// The Anthropic card: what Anthropic itself billed, by model, and how far the gateway's
-    /// figure for the same days is from it. Not connected until ANTHROPIC_ADMIN_KEY is set.
-    private var anthropicCard: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(CostSource.anthropic.title).font(AppFont.label).foregroundStyle(Tokens.muted)
-                .lineLimit(1).minimumScaleFactor(0.7)
-            if data?.anthropicConnected == true {
-                HStack(alignment: .firstTextBaseline, spacing: 4) {
-                    Text(CostText.money(data?.anthropicTotal ?? 0))
-                        .font(AppFont.sourceTotal).tracking(-0.3).monospacedDigit()
-                        .foregroundStyle(Tokens.ink)
-                        .lineLimit(1).minimumScaleFactor(0.5)
-                    Spacer(minLength: 2)
-                    Text(differenceText).font(AppFont.chart).monospacedDigit()
-                        .foregroundStyle(
-                            data?.reconciliationWarns == true ? Tokens.warn : Tokens.muted)
-                        .lineLimit(1).minimumScaleFactor(0.6)
-                }
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel(reconciliationText)
-                chart(.anthropic)
-            } else {
-                Text("Not connected").font(AppFont.meta).foregroundStyle(Tokens.ink)
-                Text("Set ANTHROPIC_ADMIN_KEY on the console's Access tab.")
-                    .font(AppFont.chart).foregroundStyle(Tokens.muted)
-                    .lineLimit(4)
-                Spacer(minLength: 0)
-            }
-        }
-        .padding(EdgeInsets(top: 10, leading: 10, bottom: 8, trailing: 10))
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .block()
-    }
-
-    /// The difference beside the total: "±$Y vs gateway", marked when a day does not match.
-    private var differenceText: String {
-        let difference = data?.anthropicDifference ?? 0
-        let sign = difference < 0 ? "−" : "+"
-        let mark = data?.reconciliationWarns == true ? "⚠ " : ""
-        return "\(mark)\(sign)\(CostText.money(abs(difference))) vs gateway"
-    }
-
-    /// For VoiceOver: Anthropic's total, the gateway's figure and the difference.
-    private var reconciliationText: String {
-        let difference = data?.anthropicDifference ?? 0
-        let sign = difference < 0 ? "minus " : "plus "
-        let warn = data?.reconciliationWarns == true ? ", some days do not match" : ""
-        let billed = CostText.money(data?.anthropicTotal ?? 0)
-        let gateway = CostText.money(data?.gatewayAnthropic ?? 0)
-        return "Anthropic billed \(billed), the gateway recorded \(gateway), difference \(sign)"
-            + "\(CostText.money(abs(difference)))\(warn)"
-    }
-
-    /// The space between bars: 6 for today, 5 for 7 days, 1 for All.
-    private var barGap: CGFloat {
-        switch range {
-        case .today: return 6
-        case .week: return 5
-        case .all: return 1
-        }
-    }
-
-    /// The plot and its x labels. The plot is 86 pt high with a 1 pt baseline.
-    private func chart(_ source: CostSource) -> some View {
-        let list = bars(source)
-        let peak = list.map(\.total).max() ?? 0
-        let valueHeight: CGFloat = range == .today ? 14 : 0
-        let plot: CGFloat = 86
-        return VStack(spacing: 0) {
-            HStack(alignment: .bottom, spacing: barGap) {
-                ForEach(list) { bar in
-                    let faded = selection != nil && selection != CostSelection(
-                        source: source, bar: bar.id)
-                    VStack(spacing: 0) {
-                        Spacer(minLength: 0)
-                        if range == .today {
-                            Text(CostText.shortMoney(bar.total))
-                                .font(.system(size: 11, weight: .semibold)).monospacedDigit()
-                                .foregroundStyle(Tokens.ink)
-                                .lineLimit(1).minimumScaleFactor(0.5)
-                                .frame(height: valueHeight)
+    private func chart(_ bars: [CostBar], positive: Double, negative: Double) -> some View {
+        let plotHeight: CGFloat = 104
+        let barWidth: CGFloat = 16
+        let above = CGFloat(positive / (positive + negative)) * plotHeight
+        let below = plotHeight - above
+        return GeometryReader { area in
+            ScrollView(.horizontal) {
+                HStack(spacing: pixel) {
+                    ForEach(Array(bars.enumerated()), id: \.offset) { index, bar in
+                        VStack(spacing: 0) {
+                            stack(bar.charges.reversed(), sum: bar.positive, maximum: positive, height: above)
+                                .frame(height: above, alignment: .bottom)
+                            Rectangle().fill(CostPalette.border).frame(height: pixel)
+                            stack(bar.adjustments, sum: bar.negative, maximum: negative, height: below)
+                                .frame(height: below, alignment: .top)
+                            if range != .all || bars.count <= 7 || index.isMultiple(of: 7) {
+                                Text(bar.axis).font(.caption2).foregroundStyle(CostPalette.muted)
+                                    .lineLimit(1).minimumScaleFactor(0.7).padding(.top, 4)
+                            } else {
+                                Color.clear.frame(height: 0)
+                            }
                         }
-                        stack(bar, peak: peak, height: plot - valueHeight)
+                        .frame(minWidth: barWidth, maxWidth: range == .today ? 40 : .infinity,
+                               alignment: .top)
+                        .frame(height: plotHeight + 22, alignment: .top)
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel(bar.label)
                     }
-                    .opacity(faded ? 0.4 : 1)
-                    .frame(maxWidth: .infinity)
-                    .contentShape(Rectangle())
-                    .onTapGesture { tap(source, bar.id) }
-                    .accessibilityElement(children: .ignore)
-                    .accessibilityLabel(accessibility(source, bar))
-                    .accessibilityAddTraits(.isButton)
                 }
+                .frame(width: max(area.size.width,
+                                  CGFloat(bars.count) * (barWidth + pixel) - pixel))
             }
-            .frame(height: plot)
-            Rectangle().fill(Tokens.line).frame(height: 1)
-            HStack(spacing: barGap) {
-                ForEach(list) { bar in
-                    Color.clear.frame(maxWidth: .infinity).frame(height: 14)
-                        .overlay(
-                            Text(bar.axis).font(AppFont.chart).foregroundStyle(Tokens.muted)
-                                .lineLimit(1).fixedSize())
-                }
-            }
-            .padding(.top, 3)
+            .scrollBounceBehavior(.basedOnSize)
         }
+        .frame(height: plotHeight + 30)
     }
 
-    /// The VoiceOver label of a bar: date, source and amount.
-    private func accessibility(_ source: CostSource, _ bar: CostBar) -> String {
-        var name = source.title
-        if range == .today, let item = bar.parts.first?.name { name += ", \(item)" }
-        let day = CostText.day(bar.date, "EEE d MMM")
-        return "\(bar.isWeek ? "Week of " : "")\(day), \(name), \(CostText.money(bar.total))"
-    }
-
-    /// One bar's stack, the first part at the bottom, 2 pt between parts and rounded top
-    /// corners. A zero bar is a 1 pt tick.
-    private func stack(_ bar: CostBar, peak: Double, height: CGFloat) -> some View {
-        let parts = bar.parts.filter { $0.value > 0 }
-        let gaps = CGFloat(max(parts.count - 1, 0)) * 2
-        let whole = peak > 0 ? CGFloat(bar.total / peak) * height : 0
-        let usable = max(whole - gaps, 0)
-        return VStack(spacing: 2) {
-            if bar.total <= 0 || peak <= 0 {
-                Rectangle().fill(Tokens.muted).frame(height: 1)
-            } else {
-                ForEach(Array(parts.enumerated().reversed()), id: \.offset) { i, part in
-                    let h = max(CGFloat(part.value / bar.total) * usable, 1)
-                    UnevenRoundedRectangle(
-                        topLeadingRadius: i == parts.count - 1 ? 3 : 0,
-                        topTrailingRadius: i == parts.count - 1 ? 3 : 0
-                    )
-                    .fill(ChartColour.of(part.name))
-                    .frame(height: h)
-                }
+    private func stack<S: Collection>(_ parts: S, sum: Double, maximum: Double,
+                                      height: CGFloat) -> some View where S.Element == CostBar.Part {
+        let totalHeight = maximum > 0 ? CGFloat(sum / maximum) * height : 0
+        let gaps = CGFloat(max(parts.count - 1, 0))
+        let gap = min(pixel, totalHeight / max(gaps * 2, 1))
+        let fill = max(0, totalHeight - gap * gaps)
+        return VStack(spacing: gap) {
+            ForEach(Array(parts)) { part in
+                Rectangle().fill(part.color).frame(height: fill * CGFloat(abs(part.amount) / sum))
             }
         }
+        .frame(maxWidth: .infinity)
+    }
+}
+
+private struct CostBar {
+    struct Part: Identifiable {
+        let id: Int
+        let amount: Double
+        let color: Color
+    }
+
+    let day: String
+    let charges: [Part]
+    let adjustments: [Part]
+    let hasDailyDetail: Bool
+    let positive: Double
+    let negative: Double
+
+    init(day: String, series: [CostSeries]) {
+        self.day = day
+        let parts = series.enumerated().compactMap { index, item -> Part? in
+            guard let amount = item.byDay?[day] else { return nil }
+            return Part(id: index, amount: amount, color: item.color)
+        }
+        hasDailyDetail = !parts.isEmpty
+        charges = parts.filter { $0.amount > 0 }
+        adjustments = parts.filter { $0.amount < 0 }
+        positive = charges.reduce(0) { $0 + $1.amount }
+        negative = adjustments.reduce(0) { $0 - $1.amount }
+    }
+
+    var axis: String { String(Int(day.suffix(2)) ?? 0) }
+    var label: String {
+        let date = CostText.date(day).map(CostText.day) ?? day
+        return "\(date), \(hasDailyDetail ? CostText.money(positive - negative) : "daily detail unavailable")"
     }
 }

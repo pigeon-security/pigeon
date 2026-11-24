@@ -16,4 +16,10 @@ This iteration follows [the app plan](ios-app-sessions.md), [gateway accounting]
 
 Declare the additive `models` and `observability` answers as 1.1.0, still compatible with 1.0.0 callers.
 
+## Phase 2 design
+
+- Replace the square cards with one net-cost hero, one daily stack chart and always-open billing cells. Put the range control beside Cost and show the dates returned by `cost_daily` in the hero. All keeps daily bars and scrolls when they don't fit. Pull-to-refresh remains; day selection and range persistence wait for phase 5.
+- Use the server's gross and net as-is. The difference is promotional credits applied in the period, not the lifetime grant balance. Use `cloudflare.lines` and `ai_gateway.by_gateway[].by_model` for both the chart and the rows. The chart shows reported daily detail, which need not add up to gross when older spend has no attribution or gross includes billing adjustments. Do not spread period totals across days or guess missing gateway detail. Keep source failures, missing detail and no spend distinct.
+- Give each series its own colour within its billing family (BYOK orange, Unified Billing yellow/green, Cloudflare products blue). Keep the supplied palette local to Cost. Show gateway labels and model names, not gateway IDs. Put lifetime grant balances in the Anthropic BYOK cell, sorted by expiry, then name. Use UTC calendar days for expiry warnings and distinguish an empty grant list from a missing one.
+
 Release via `ios-release` at main HEAD; the release service assigns the next build number and submits to TestFlight. Do not submit to App Review or alter approval policy.
