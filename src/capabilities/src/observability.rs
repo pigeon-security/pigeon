@@ -289,6 +289,108 @@ pub fn fold_services(result: &Value) -> std::collections::BTreeSet<String> {
 /// Folds the logs query's result into the top five messages per Worker, each redacted
 /// ([`redact`]) and cut to 200 characters. Groups are read as `{key, value}` pairs next to a `count`.
 pub fn fold_errors(result: &Value) -> BTreeMap<String, Vec<Value>> {
+    fold_errors_top(result, TOP_ERRORS)
+}
+
+/// The most error messages `observability_errors` keeps per Worker.
+const ERRORS_MAX_LIMIT: usize = 20;
+/// The longest Worker name `observability_errors` accepts, in bytes.
+const ERRORS_MAX_WORKER: usize = 100;
+/// What `observability_errors` says about its missing `run` filter.
+const NO_RUN_FILTER: &str = "no run filter exists: log lines carry no run tag, so errors cannot \
+                             be narrowed to one AI agent run";
+
+/// The checked arguments of `observability_errors`: the Worker script to keep, the window in
+/// hours and the most messages per Worker.
+#[derive(Debug, PartialEq)]
+pub struct ErrorsArgs {
+    /// One script name, or `None` for every Worker.
+    pub worker: Option<String>,
+    /// The window, 1 to 168 hours.
+    pub hours: u64,
+    /// The most messages kept per Worker, 1 to 20.
+    pub limit: usize,
+}
+
+/// Checks `observability_errors`'s arguments. `hours` is capped like the summary's (1 to 168,
+/// 24 by default) and `limit` is 1 to 20 (5 by default). A value of the wrong type is refused.
+pub fn errors_args(args: &Value) -> std::result::Result<ErrorsArgs, String> {
+    let worker = match &args["worker"] {
+        Value::Null => None,
+        Value::String(s) if !s.trim().is_empty() && s.len() <= ERRORS_MAX_WORKER => {
+            Some(s.trim().to_string())
+        }
+        _ => {
+            return Err(format!(
+                "`worker` must be a script name of 1 to {ERRORS_MAX_WORKER} bytes"
+            ));
+        }
+    };
+    let whole = |key: &str, default: u64| -> std::result::Result<u64, String> {
+        match &args[key] {
+            Value::Null => Ok(default),
+            v => v
+                .as_u64()
+                .ok_or_else(|| format!("`{key}` must be a whole number, 1 or more")),
+        }
+    };
+    Ok(ErrorsArgs {
+        worker,
+        hours: whole("hours", 24)?.clamp(1, 168),
+        limit: (whole("limit", TOP_ERRORS as u64)?.clamp(1, ERRORS_MAX_LIMIT as u64)) as usize,
+    })
+}
+
+/// The answer of `observability_errors` from folded data. `scripts` is the metrics fold (counts
+/// and `by_status`), `messages` the log fold, `known` the platform's script names. A `worker`
+/// that is not known answers no Workers and lists the known names.
+pub fn errors_answer(
+    scripts: &BTreeMap<String, Script>,
+    messages: &BTreeMap<String, Vec<Value>>,
+    known: &[String],
+    ask: &ErrorsArgs,
+) -> Value {
+    let mut names: std::collections::BTreeSet<String> = known.iter().cloned().collect();
+    names.extend(scripts.keys().cloned());
+    names.extend(messages.keys().cloned());
+    let listed: Vec<String> = names.iter().cloned().collect();
+    let chosen: Vec<&String> = match &ask.worker {
+        Some(w) => names.get(w).into_iter().collect(),
+        None => names.iter().collect(),
+    };
+    let workers: Vec<Value> = chosen
+        .into_iter()
+        .map(|name| {
+            let s = scripts.get(name).cloned().unwrap_or_default();
+            let top: Vec<Value> = messages
+                .get(name)
+                .map(|m| m.iter().take(ask.limit).cloned().collect())
+                .unwrap_or_default();
+            json!({
+                "script": name, "requests": s.requests, "errors": s.errors,
+                "by_status": s.by_status, "top_errors": top,
+            })
+        })
+        .collect();
+    let mut out = json!({
+        "window_hours": ask.hours,
+        "workers": workers,
+        "run_filter": NO_RUN_FILTER,
+    });
+    if ask.worker.is_some() && workers_empty(&out) {
+        out["known_workers"] = json!(listed);
+        out["note"] = json!("no Worker has that script name; known names are listed");
+    }
+    out
+}
+
+/// Whether `answer` lists no Workers.
+fn workers_empty(answer: &Value) -> bool {
+    answer["workers"].as_array().is_none_or(Vec::is_empty)
+}
+
+/// [`fold_errors`] keeping `keep` messages per Worker.
+pub fn fold_errors_top(result: &Value, keep: usize) -> BTreeMap<String, Vec<Value>> {
     let rows = result["calculations"][0]["aggregates"]
         .as_array()
         .cloned()
@@ -315,7 +417,7 @@ pub fn fold_errors(result: &Value) -> BTreeMap<String, Vec<Value>> {
             v.sort_by(|a, b| b.0.total_cmp(&a.0));
             let top = v
                 .into_iter()
-                .take(TOP_ERRORS)
+                .take(keep)
                 .map(|(count, m)| json!({ "count": count, "message": cut(&redact(&m)) }))
                 .collect();
             (service, top)
@@ -596,6 +698,22 @@ impl Capability for Observability {
                 }),
             },
             Tool {
+                name: "observability_errors",
+                description: "Read-only. Recent errors per Worker (script name): requests, error \
+                              count, `by_status`, and the top error messages with counts, each \
+                              redacted and cut short. An unknown `worker` answers no Workers and \
+                              lists the known names. There is no run filter: log lines carry no \
+                              run tag.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "worker": { "type": "string", "description": "One Worker's script name; every Worker by default." },
+                        "hours": { "type": "integer", "description": "Window, 1 to 168; 24 by default." },
+                        "limit": { "type": "integer", "description": "Most messages per Worker, 1 to 20; 5 by default." }
+                    }
+                }),
+            },
+            Tool {
                 name: "tokens_status",
                 description: "Cloudflare API tokens pigeon minted that are live now (`live`), the \
                               soft ceiling above which new agent runs queue (`soft_ceiling`, 300 \
@@ -625,6 +743,7 @@ impl Capability for Observability {
             match tool {
                 "cost_daily" => return crate::cost::cost_daily(cx, args).await,
                 "tokens_status" => return tokens_status(cx, args).await,
+                "observability_errors" => return errors(self, cx, args).await,
                 "observability_monitors_plan" if args["check"] == true => {
                     return monitors_check(cx).await;
                 }
@@ -2073,6 +2192,43 @@ pub(crate) fn gauge_view(g: &crate::ledger::Gauge) -> Value {
         "as_of": iso(g.as_of_ms as f64),
         "source": g.source,
     })
+}
+
+/// `observability_errors`: the summary's metrics and error-log sources, folded the same way,
+/// for one Worker or all. A source that cannot be read goes to `unavailable`.
+async fn errors(this: &Observability, cx: &Context<'_>, args: &Value) -> Result<Value> {
+    let ask = errors_args(args).map_err(Error::RustError)?;
+    let to = Date::now();
+    let from = to - ask.hours as f64 * 3_600_000.0;
+    let id = cx.account.id.as_str();
+    let metrics_work = with_token(cx, ANALYTICS_PERMISSION, |t| async move {
+        graphql(&t, &graphql_query(id, &iso(from), &iso(to))).await
+    });
+    let logs_work = with_token(cx, OBSERVABILITY_PERMISSION, |t| async move {
+        let path = format!("/accounts/{id}/workers/observability/telemetry/query");
+        let body = telemetry_query(&format!("pigeon-e-{}", to as i64), from as i64, to as i64);
+        pigeon_core::cloudflare::call_fresh(&t, Method::Post, &path, Some(&body)).await
+    });
+    let (metrics_v, logs_v) = futures_util::future::join(metrics_work, logs_work).await;
+    let mut unavailable = Vec::new();
+    let scripts = match metrics_v {
+        Ok(v) => fold_invocations(&v),
+        Err(why) => {
+            unavailable.push(missing("metrics", &why));
+            BTreeMap::new()
+        }
+    };
+    let messages = match logs_v {
+        Ok(v) => fold_errors_top(&v, ask.limit),
+        Err(why) => {
+            unavailable.push(missing("logs", &why));
+            BTreeMap::new()
+        }
+    };
+    let known: Vec<String> = this.map.workers.iter().map(|w| w.script.clone()).collect();
+    let mut out = errors_answer(&scripts, &messages, &known, &ask);
+    out["unavailable"] = json!(unavailable);
+    Ok(out)
 }
 
 /// Builds the answer for the last `hours`. The sources run together, each within

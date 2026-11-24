@@ -937,3 +937,10 @@ executors through it. Each item: state, next step, who it waits on.
   `wait_executors` and `wait_events` already exist, so `executors_wait` is not built. Compaction
   never fires in a tool loop because `cut_point` wants a user message without a tool result; 6a
   fixes that. Per-kind planner models are stored but unset, and no default changes.
+- 2026-11-26: **Read-only observability tools for runs.** `cost_daily`, `mcp_conformance` and the
+  new `observability_errors {worker?, hours?, limit?}` join `EXECUTOR_PIGEON` (now 10) and
+  `PLANNER_PIGEON` (now 15), their schemas sit in `prompts::pigeon_tools`, and all three are
+  idempotent. Core's dispatch has no per-tool list for callers, so nothing else was needed.
+  `observability_errors` reuses the summary's metrics and log folds; log lines carry no run tag, so
+  there is no `run` filter and the answer says so. An unknown `worker` answers an empty list and
+  the known script names.

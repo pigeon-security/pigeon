@@ -950,3 +950,78 @@ fn core_observability_monitors_billing() {
     // Absent without `billing` is no error.
     assert!(validate_billing(&absent, &json!(null)).unwrap().is_empty());
 }
+
+#[test]
+fn core_observability_errors_args_and_folding() {
+    use pigeon_capabilities::observability::*;
+    use serde_json::json;
+
+    // Arguments: defaults, caps and refusals.
+    let a = errors_args(&json!({})).unwrap();
+    assert_eq!((a.worker.clone(), a.hours, a.limit), (None, 24, 5));
+    let a = errors_args(&json!({ "worker": "core", "hours": 9999, "limit": 99 })).unwrap();
+    assert_eq!(
+        (a.worker.as_deref(), a.hours, a.limit),
+        (Some("core"), 168, 20)
+    );
+    assert_eq!(
+        errors_args(&json!({ "hours": 0, "limit": 0 }))
+            .unwrap()
+            .hours,
+        1
+    );
+    for bad in [
+        json!({ "worker": 3 }),
+        json!({ "worker": "" }),
+        json!({ "hours": "x" }),
+        json!({ "limit": -1 }),
+    ] {
+        assert!(errors_args(&bad).is_err(), "{bad}");
+    }
+
+    // Folding: counts, by_status and capped messages, per Worker.
+    let metrics = fold_invocations(
+        &json!({ "data": { "viewer": { "accounts": [{ "workersInvocationsAdaptive": [
+        { "sum": { "requests": 10.0, "errors": 2.0 }, "quantiles": {},
+          "dimensions": { "scriptName": "core", "status": "exception" } } ] }] } } }),
+    );
+    let rows: Vec<_> = (0..4)
+        .map(|i| {
+            json!({ "count": i as f64, "groups": [
+            { "key": "$metadata.service", "value": "core" },
+            { "key": "$metadata.message", "value": format!("m{i} {}", "x".repeat(300)) } ] })
+        })
+        .collect();
+    let messages = fold_errors_top(&json!({ "calculations": [{ "aggregates": rows }] }), 2);
+    let known = vec!["core".to_string(), "pigeon-proxy".to_string()];
+    let ask = errors_args(&json!({ "worker": "core", "limit": 2 })).unwrap();
+    let out = errors_answer(&metrics, &messages, &known, &ask);
+    assert_eq!(out["workers"].as_array().unwrap().len(), 1);
+    assert_eq!(out["workers"][0]["errors"], 2.0);
+    assert_eq!(out["workers"][0]["by_status"]["exception"], 10.0);
+    let top = out["workers"][0]["top_errors"].as_array().unwrap();
+    assert_eq!(top.len(), 2);
+    assert!(top[0]["message"].as_str().unwrap().chars().count() <= 200);
+    assert!(
+        out["run_filter"]
+            .as_str()
+            .unwrap()
+            .contains("no run filter")
+    );
+    assert!(out.get("known_workers").is_none());
+
+    // An unknown Worker is an empty result that lists the known names, not an error.
+    let ask = errors_args(&json!({ "worker": "nope" })).unwrap();
+    let out = errors_answer(&metrics, &messages, &known, &ask);
+    assert!(out["workers"].as_array().unwrap().is_empty());
+    assert_eq!(out["known_workers"], json!(["core", "pigeon-proxy"]));
+
+    // No worker: every known Worker, quiet ones included.
+    let all = errors_answer(
+        &metrics,
+        &messages,
+        &known,
+        &errors_args(&json!({})).unwrap(),
+    );
+    assert_eq!(all["workers"].as_array().unwrap().len(), 2);
+}

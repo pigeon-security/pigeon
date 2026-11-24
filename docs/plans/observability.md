@@ -484,3 +484,6 @@ Open items:
   of `limit` is Cloudflare's per product and not documented
   (developers.cloudflare.com/notifications/notification-available/: "Thresholds depend on the
   product chosen"). Not run live: the first billing apply shows whether Cloudflare accepts a limit.
+- 2026-11-26: `observability_errors {worker?, hours?, limit?}`: the summary's error folds per
+  Worker (counts, `by_status`, top messages), read only. Log lines carry no run tag, so it has no
+  `run` filter. AI agent runs may call it.

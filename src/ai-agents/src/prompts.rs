@@ -233,6 +233,34 @@ pub fn pigeon_tools() -> Vec<(String, String, Value)> {
             "The platform's architecture as data: Workers, capabilities, tools, resources.",
             json!({ "type": "object", "properties": {} }),
         ),
+        t(
+            "cost_daily",
+            "Read-only. Daily cost buckets in US dollars: Cloudflare lines and AI gateway cost \
+             by model and role; `range` is today, 7d or all.",
+            json!({
+                "type": "object",
+                "properties": { "range": { "type": "string", "enum": ["today", "7d", "all"], "description": "7d by default." } }
+            }),
+        ),
+        t(
+            "mcp_conformance",
+            "Read-only. Checks every tool the server lists against the schema rules MCP clients \
+             enforce; answers the violations and the counts.",
+            json!({ "type": "object", "properties": {} }),
+        ),
+        t(
+            "observability_errors",
+            "Read-only. Recent errors per Worker (script name): counts, `by_status` and the top \
+             error messages. Unknown `worker` lists the known names. No run filter exists.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "worker": { "type": "string", "description": "One Worker's script name; every Worker by default." },
+                    "hours": { "type": "integer", "description": "Window, 1 to 168; 24 by default." },
+                    "limit": { "type": "integer", "description": "Most messages per Worker, 1 to 20; 5 by default." }
+                }
+            }),
+        ),
     ]
 }
 

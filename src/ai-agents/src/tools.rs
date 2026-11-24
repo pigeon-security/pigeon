@@ -18,7 +18,7 @@ pub enum Kind {
 }
 
 /// Pigeon tools an executor (or mechanical run) may call.
-pub const EXECUTOR_PIGEON: [&str; 7] = [
+pub const EXECUTOR_PIGEON: [&str; 10] = [
     "policy_check",
     "ci_submit",
     "ci_status",
@@ -26,10 +26,13 @@ pub const EXECUTOR_PIGEON: [&str; 7] = [
     "land_status",
     "work_status",
     "land_list",
+    "cost_daily",
+    "mcp_conformance",
+    "observability_errors",
 ];
 
 /// Pigeon tools a planner may call. Executors never land: the person's rule.
-pub const PLANNER_PIGEON: [&str; 12] = [
+pub const PLANNER_PIGEON: [&str; 15] = [
     "policy_check",
     "ci_submit",
     "ci_status",
@@ -42,6 +45,9 @@ pub const PLANNER_PIGEON: [&str; 12] = [
     "land_list",
     "land_watch",
     "work_status",
+    "cost_daily",
+    "mcp_conformance",
+    "observability_errors",
 ];
 
 /// Files that only the person may change.
@@ -128,6 +134,9 @@ pub fn idempotent(name: &str) -> bool {
             | "work_status"
             | "models_usage"
             | "architecture_describe"
+            | "cost_daily"
+            | "mcp_conformance"
+            | "observability_errors"
             | "executor_status"
             | "executor_result"
     )

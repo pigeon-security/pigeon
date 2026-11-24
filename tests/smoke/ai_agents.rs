@@ -1931,3 +1931,26 @@ fn ai_agents_refused_turn_fails_at_once() {
     assert!(!run::refused_turn("the model gateway is full: try later"));
     assert!(!run::refused_turn("anthropic answered 529: overloaded"));
 }
+
+#[test]
+fn ai_agents_read_only_observability_tools_offered() {
+    use pigeon_ai_agents::tools::{self, Kind};
+    use pigeon_ai_agents::{Role, prompts};
+    let new = ["cost_daily", "mcp_conformance", "observability_errors"];
+    assert_eq!(tools::EXECUTOR_PIGEON.len(), 10);
+    assert_eq!(tools::PLANNER_PIGEON.len(), 15);
+    let offered = prompts::pigeon_tools();
+    for t in new {
+        assert!(tools::EXECUTOR_PIGEON.contains(&t), "{t}");
+        assert!(tools::PLANNER_PIGEON.contains(&t), "{t}");
+        assert!(offered.iter().any(|(n, _, _)| n == t), "{t} has a schema");
+        assert!(tools::idempotent(t), "{t}");
+        for role in [Role::Planner, Role::Executor, Role::Mechanical] {
+            assert_eq!(tools::kind(role, t), Some(Kind::Pigeon), "{t}");
+        }
+    }
+    for list in [&tools::EXECUTOR_PIGEON[..], &tools::PLANNER_PIGEON[..]] {
+        let mut seen = std::collections::BTreeSet::new();
+        assert!(list.iter().all(|t| seen.insert(*t)), "no name twice");
+    }
+}
