@@ -19,10 +19,13 @@ pub fn family(model: &str) -> &'static str {
         .unwrap_or("Other")
 }
 
-/// The family of a log: `OpenAI` when its provider is `openai` or `cf-openai`, else [`family`] of its model.
+/// The family of a log: `OpenAI` when its provider is `openai` or `cf-openai`, `Workers AI` when
+/// it is `workers-ai`, else [`family`] of its model.
 pub fn family_of(provider: &str, model: &str) -> &'static str {
     if provider == "openai" || provider == "cf-openai" {
         "OpenAI"
+    } else if provider == "workers-ai" {
+        "Workers AI"
     } else {
         family(model)
     }

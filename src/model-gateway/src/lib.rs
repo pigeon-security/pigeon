@@ -97,6 +97,19 @@ fn gateway() -> ModelGateway {
                     key_help: "",
                     billing: None,
                 },
+                // Workers AI: the REST API, paid with credits through `pigeon-cloudflare`. Off until the
+                // person sets the `pigeon_workers_ai_token` slot. It holds no gateway key.
+                Provider {
+                    name: "workers-ai",
+                    gateway: CREDITS_GATEWAY,
+                    route: Route::Credits,
+                    slug: "workers-ai",
+                    alias: "default",
+                    dialect: Dialect::OpenAi,
+                    default_model: "@cf/zai-org/glm-5.3",
+                    key_help: "",
+                    billing: None,
+                },
             ],
             staged: Vec::new(),
             secrets_page: format!("https://{HOST}/access#credentials"),

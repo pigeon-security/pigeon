@@ -183,9 +183,13 @@ impl Route {
 
 /// How a log is labelled: the provider name and route it counts under. A log of a credits gateway
 /// is `cf-{provider}` by credits. A log of a BYOK or retired gateway is the log's own provider,
-/// by key. Pure, and not dependent on time.
+/// by key. Workers AI is the exception: its log is named `workers-ai`, by credits. Pure, and not
+/// dependent on time.
 pub fn route_of(kind: GatewayKind, log_provider: &str) -> (String, Route) {
     match kind {
+        GatewayKind::Credits if log_provider == ai_gateway::WORKERS_AI => {
+            (log_provider.to_string(), Route::Credits)
+        }
         GatewayKind::Credits => (format!("cf-{log_provider}"), Route::Credits),
         GatewayKind::Byok | GatewayKind::Retired => (log_provider.to_string(), Route::Byok),
     }
@@ -561,12 +565,18 @@ fn kind_rank(kind: GatewayKind) -> u8 {
     }
 }
 
+/// Whether a Cloudflare API error text says the gateway does not exist: a 404, or a body with
+/// Cloudflare's "not found" message (the API's exact answer for a missing gateway is not verified).
+pub fn is_missing(error: &str) -> bool {
+    error.contains(": 404:") || error.to_lowercase().contains("not found")
+}
+
 /// Reads gateway `gateway`'s settings and keys; `None` when it does not exist (the API's 404).
 async fn read_gateway(
     account: &Account,
     gateway: &str,
 ) -> Result<Option<(Value, Vec<ai_gateway::ProviderConfig>)>> {
-    let not_found = |e: &worker::Error| e.to_string().contains(": 404:");
+    let not_found = |e: &worker::Error| is_missing(&e.to_string());
     let settings = match ai_gateway::gateway_settings(account, gateway).await {
         Ok(s) => s,
         Err(e) if not_found(&e) => return Ok(None),
@@ -604,6 +614,22 @@ pub async fn guard_credits(account: &Account, gateway: &str) -> Result<()> {
         }
     };
     ai_gateway::credits_guard(gateway, &settings, &configs).map_err(|e| bad(&e))
+}
+
+/// [`guard_credits`] for a request to `provider`: for Workers AI it also checks the gateway bills
+/// Workers AI as Unified Billing ([`ai_gateway::workers_ai_guard`]).
+pub async fn guard_credits_for(account: &Account, gateway: &str, provider: &str) -> Result<()> {
+    guard_credits(account, gateway).await?;
+    if provider != ai_gateway::WORKERS_AI {
+        return Ok(());
+    }
+    let settings = GUARDED.with(|g| g.borrow().get(gateway).map(|(_, s, _)| s.clone()));
+    match settings {
+        Some(s) => ai_gateway::workers_ai_guard(gateway, &s).map_err(|e| bad(&e)),
+        None => Err(bad(&format!(
+            "the credits gateway `{gateway}` was not read: try again"
+        ))),
+    }
 }
 
 thread_local! {
@@ -752,7 +778,15 @@ impl Models {
                 let verdict = match p.route {
                     Route::Byok => ai_gateway::byok_ready(settings, configs, p.gateway, p.slug),
                     Route::Credits => match settings {
-                        Some(s) => ai_gateway::credits_guard(p.gateway, s, configs),
+                        Some(s) => {
+                            ai_gateway::credits_guard(p.gateway, s, configs).and_then(|()| {
+                                if p.slug == ai_gateway::WORKERS_AI {
+                                    ai_gateway::workers_ai_guard(p.gateway, s)
+                                } else {
+                                    Ok(())
+                                }
+                            })
+                        }
                         None => Err(format!(
                             "the credits gateway `{}` does not exist: run models_setup",
                             p.gateway
@@ -814,10 +848,17 @@ impl Models {
         Ok(json!({ "gateways": gateways, "providers": providers }))
     }
 
-    async fn run(&self, account: &Account, caller: &Value, args: &Value) -> Result<Value> {
+    async fn run(
+        &self,
+        env: &Env,
+        account: &Account,
+        caller: &Value,
+        args: &Value,
+    ) -> Result<Value> {
         let p = self.provider(args["provider"].as_str())?;
+        let extra = provider_headers(env, p.gateway, p.slug).await?;
         match p.route {
-            Route::Credits => guard_credits(account, p.gateway).await?,
+            Route::Credits => guard_credits_for(account, p.gateway, p.slug).await?,
             Route::Byok => guard_byok(account, p.gateway, p.slug).await?,
         }
         let raw = args.get("raw").filter(|r| r.is_object());
@@ -827,12 +868,14 @@ impl Models {
         };
         let tags = tags(caller, args["task"].as_str());
         let tags: Vec<(&str, &str)> = tags.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let mut headers = p.dialect.headers().to_vec();
+        headers.extend(extra.iter().map(|(k, v)| (k.as_str(), v.as_str())));
         let ran = ai_gateway::run(
             account,
             p.gateway,
             p.slug,
             p.dialect.path(),
-            p.dialect.headers(),
+            &headers,
             &tags,
             &body,
         )
@@ -926,6 +969,8 @@ impl Models {
         let caller = who(caller_json)
             .ok_or_else(|| bad("a job needs a caller, who alone can read its result"))?;
         let p = self.provider(args["provider"].as_str())?;
+        // Refused here too, so a job is not queued only to fail. The token is not stored.
+        provider_headers(env, p.gateway, p.slug).await?;
         let mut headers = own(p.dialect.headers());
         let (model, body) = match args.get("request").filter(|r| !r.is_null()) {
             // An AI agent's turn: a whole Messages body, checked.
@@ -1127,6 +1172,39 @@ impl Models {
         answer["truncated"] = json!(truncated);
         Ok(answer)
     }
+}
+
+/// The Secrets Store slot and binding of the Workers AI token. The person sets it; it is not a
+/// gateway provider key, so it is never handed to a gateway.
+pub const WORKERS_AI_TOKEN: &str = "pigeon_workers_ai_token";
+
+/// What a Workers AI token slot set on the Access tab does: nothing is handed to a gateway.
+const WORKERS_AI_SET_NOTE: &str = "the model gateway reads the token through its binding";
+
+/// The Workers AI token, from its Secrets Store binding: `None` while the slot is unset or
+/// unbound. It is never logged or returned.
+async fn workers_ai_token(env: &Env) -> Option<String> {
+    let store = env.secret_store(WORKERS_AI_TOKEN).ok()?;
+    secrets_store::read(&store)
+        .await
+        .ok()
+        .flatten()
+        .filter(|t| !t.is_empty())
+}
+
+/// The extra headers a request to `provider` needs: none, except for Workers AI, which needs
+/// its gateway named and the person's token ([`ai_gateway::workers_ai_headers`]). Refused, before
+/// any call, while the token is unset.
+pub async fn provider_headers(
+    env: &Env,
+    gateway: &str,
+    provider: &str,
+) -> Result<Vec<(String, String)>> {
+    if provider != ai_gateway::WORKERS_AI {
+        return Ok(Vec::new());
+    }
+    let token = workers_ai_token(env).await;
+    ai_gateway::workers_ai_headers(gateway, token.as_deref()).map_err(|e| bad(&e))
 }
 
 /// What the admin key's `Set` answers: nothing is handed to the AI gateway.
@@ -1520,6 +1598,19 @@ impl Models {
                 scopes: vec![secrets_store::WORKERS.to_string()],
             });
         }
+        if self
+            .providers
+            .iter()
+            .any(|p| p.slug == ai_gateway::WORKERS_AI)
+        {
+            out.push(SlotSpec {
+                name: WORKERS_AI_TOKEN.into(),
+                purpose: "A Cloudflare API token with Workers AI Read for this account, used to \
+                          call Workers AI models."
+                    .into(),
+                scopes: vec![secrets_store::WORKERS.to_string()],
+            });
+        }
         out
     }
 
@@ -1570,7 +1661,7 @@ impl Models {
         Ok(match tool {
             "models_setup" => self.setup(account()?).await?,
             "models_providers" => self.providers_view(account()?).await?,
-            "models_run" => self.run(account()?, caller, args).await?,
+            "models_run" => self.run(env, account()?, caller, args).await?,
             "models_usage" => self.usage(env, account()?, args).await?,
             "models_cost" => self.cost(account()?, args).await?,
             "models_daily" => self.daily_by_run(account()?, args).await?,
@@ -1612,6 +1703,11 @@ impl Models {
 
     /// Checks `value` as secret `name` with its provider, before it is written.
     pub async fn check_secret(&self, name: &str, value: &str) -> Result<String> {
+        if name == WORKERS_AI_TOKEN {
+            return Ok(
+                "not checked here: the token is tried on the first Workers AI request".into(),
+            );
+        }
         if name == billing::ADMIN_KEY {
             if !value.starts_with("sk-ant-admin") {
                 return Err(bad("an Anthropic Admin API key starts with `sk-ant-admin`"));
@@ -1628,6 +1724,11 @@ impl Models {
     /// expiry, and the key is readable only by the AI gateway, so there is nothing to ask. The
     /// admin key is read through the binding and tried on a one-row report.
     pub async fn secret_expiry(&self, env: &Env, name: &str) -> Expiry {
+        if name == WORKERS_AI_TOKEN {
+            return Expiry::Unknown {
+                why: "Cloudflare reports no expiry through the binding".into(),
+            };
+        }
         if name != billing::ADMIN_KEY {
             return Expiry::Unknown {
                 why: "the provider's API reports no key expiry".into(),
@@ -1663,6 +1764,9 @@ impl Models {
     pub async fn secret_set(&self, account: &Account, name: &str, id: &str) -> Result<String> {
         if name == billing::ADMIN_KEY {
             return Ok(ADMIN_SET_NOTE.into());
+        }
+        if name == WORKERS_AI_TOKEN {
+            return Ok(WORKERS_AI_SET_NOTE.into());
         }
         let p = self.keyed(name)?;
         let kind = self.kind_of(p.gateway);
@@ -1795,6 +1899,9 @@ impl ModelGateway {
             }
             SecretOp::Set if req.name == billing::ADMIN_KEY => {
                 Answer::Ok(Value::String(ADMIN_SET_NOTE.into()))
+            }
+            SecretOp::Set if req.name == WORKERS_AI_TOKEN => {
+                Answer::Ok(Value::String(WORKERS_AI_SET_NOTE.into()))
             }
             SecretOp::Set => {
                 let id = req.id.as_deref().unwrap_or_default();

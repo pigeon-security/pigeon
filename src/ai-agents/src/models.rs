@@ -6,11 +6,11 @@ use serde_json::{Map, Value, json};
 use crate::Role;
 
 /// The providers a run may use.
-pub const PROVIDERS: [&str; 3] = ["anthropic", "cf-anthropic", "cf-openai"];
+pub const PROVIDERS: [&str; 4] = ["anthropic", "cf-anthropic", "cf-openai", "workers-ai"];
 
 /// Who pays for a provider: `byok` (the person's own key) or `credits` (Cloudflare credits).
 pub fn route(provider: &str) -> &'static str {
-    if provider.starts_with("cf-") {
+    if provider.starts_with("cf-") || provider == "workers-ai" {
         "credits"
     } else {
         "byok"
@@ -19,6 +19,9 @@ pub fn route(provider: &str) -> &'static str {
 
 /// The text shown when a choice names OpenAI without Cloudflare credits.
 const OPENAI_REFUSED: &str = "OpenAI is paid with Cloudflare credits: use cf-openai/… (docs/plans/model-providers-cloudflare.md)";
+
+/// The text shown when a bare `workers-ai` names a slot that has no Workers AI model.
+const WORKERS_AI_NO_SMALL: &str = "Workers AI has no small model: name one (workers-ai/@cf/…) or choose another provider for this slot";
 
 /// The longest model id, in characters.
 pub const MAX_MODEL_LEN: usize = 100;
@@ -94,12 +97,17 @@ pub fn tier_model(provider: &str, tier: Tier) -> Option<&'static str> {
         ("cf-openai", Tier::Top) => Some("gpt-6.2-astra"),
         ("cf-openai", Tier::Middle) => Some("gpt-6.2-sol"),
         ("cf-openai", Tier::Small) => Some("gpt-6.1-terra"),
+        ("workers-ai", Tier::Top) => Some("@cf/zai-org/glm-5.3"),
+        ("workers-ai", Tier::Middle) => Some("@cf/moonshotai/kimi-k2.7-code"),
         _ => None,
     }
 }
 
 /// Models that are known but sit in no tier.
-const EXTRA_KNOWN: [(&str, &str); 1] = [("cf-openai", "gpt-6-luna")];
+const EXTRA_KNOWN: [(&str, &str); 2] = [
+    ("cf-openai", "gpt-6-luna"),
+    ("workers-ai", "@cf/deepseek-ai/deepseek-v4-pro-0813"),
+];
 
 /// Whether `model` is one this code knows for `provider` (a tier model or a listed extra).
 pub fn known(provider: &str, model: &str) -> bool {
@@ -112,14 +120,20 @@ pub fn known(provider: &str, model: &str) -> bool {
 /// One model of one provider.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Choice {
-    /// The provider: `anthropic`, `cf-anthropic` or `cf-openai`.
+    /// The provider: `anthropic`, `cf-anthropic`, `cf-openai` or `workers-ai`.
     pub provider: String,
     /// The model id the provider knows.
     pub model: String,
 }
 
-/// Checks a model id: letters, digits and `. - _ :`, at most 100 characters.
-fn check_model(model: &str) -> Result<(), String> {
+/// Checks a model id: letters, digits and `. - _ :`, at most 100 characters. A Workers AI id
+/// (`@cf/vendor/name`) may also hold `@` and `/`.
+fn check_model(provider: &str, model: &str) -> Result<(), String> {
+    let extra = if provider == "workers-ai" {
+        ".-_:@/"
+    } else {
+        ".-_:"
+    };
     if model.is_empty() {
         return Err("the model id is empty".into());
     }
@@ -130,7 +144,7 @@ fn check_model(model: &str) -> Result<(), String> {
     }
     if !model
         .chars()
-        .all(|c| c.is_ascii_alphanumeric() || ".-_:".contains(c))
+        .all(|c| c.is_ascii_alphanumeric() || extra.contains(c))
     {
         return Err(format!(
             "`{model}` is not a model id: use letters, digits and `. - _ :`"
@@ -147,23 +161,23 @@ impl Choice {
         if text == "openai" {
             return Err(OPENAI_REFUSED.into());
         }
-        if text == "workers-ai" {
-            return Err("Workers AI models are not available yet".into());
-        }
         if let Some((provider, model)) = text.split_once('/') {
             if provider == "openai" {
                 return Err(OPENAI_REFUSED.into());
             }
-            if provider == "workers-ai" {
-                return Err("Workers AI models are not available yet".into());
-            }
             if !PROVIDERS.contains(&provider) {
                 return Err(format!(
-                    "unknown provider `{provider}`: use `anthropic`, `cf-anthropic` or `cf-openai`"
+                    "unknown provider `{provider}`: use `anthropic`, `cf-anthropic`, `cf-openai` or `workers-ai`"
                 ));
             }
-            check_model(model)?;
-            if provider != "cf-openai" && !model.starts_with("claude-") {
+            check_model(provider, model)?;
+            if provider == "workers-ai" {
+                if !model.starts_with("@cf/") {
+                    return Err(format!(
+                        "`{model}` is not a Workers AI model: `workers-ai` models start with `@cf/`"
+                    ));
+                }
+            } else if provider != "cf-openai" && !model.starts_with("claude-") {
                 return Err(format!(
                     "`{model}` is not a Claude model: `{provider}` models start with `claude-`"
                 ));
@@ -180,22 +194,25 @@ impl Choice {
             });
         }
         if text.starts_with("claude-") {
-            check_model(text)?;
+            check_model("anthropic", text)?;
             return Ok(Choice {
                 provider: "anthropic".into(),
                 model: text.into(),
             });
         }
+        if text == "workers-ai" {
+            return Err(WORKERS_AI_NO_SMALL.into());
+        }
         Err(format!(
             "`{text}` is not a model choice: use `provider/model` (e.g. cf-openai/gpt-6.2-sol), \
-             a `claude-…` name, or `anthropic`, `cf-anthropic` or `cf-openai`"
+             a `claude-…` name, or `anthropic`, `cf-anthropic`, `cf-openai` or `workers-ai`"
         ))
     }
 
     /// Reads a stored `provider/model` string; no shorthand.
     pub fn stored(text: &str) -> Option<Choice> {
         let (provider, model) = text.split_once('/')?;
-        (PROVIDERS.contains(&provider) && check_model(model).is_ok()).then(|| Choice {
+        (PROVIDERS.contains(&provider) && check_model(provider, model).is_ok()).then(|| Choice {
             provider: provider.into(),
             model: model.into(),
         })

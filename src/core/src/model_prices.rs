@@ -101,6 +101,13 @@ const LUNA: Price = openai(100_000, 10_000, 500_000);
 /// The price of `gpt-6-luna`, long context.
 const LUNA_LONG: Price = openai(200_000, 20_000, 750_000);
 
+/// The price of Workers AI `@cf/zai-org/glm-5.3` (Cloudflare's model catalog, 2026-11-25).
+const GLM: Price = openai(1_400_000, 260_000, 4_400_000);
+/// The price of Workers AI `@cf/moonshotai/kimi-k2.7-code`.
+const KIMI: Price = openai(950_000, 190_000, 4_000_000);
+/// The price of Workers AI `@cf/deepseek-ai/deepseek-v4-pro-0813`.
+const DEEPSEEK: Price = openai(1_320_000, 44_000, 3_960_000);
+
 /// True when `model` is `name` or is `name` followed by a dash and a suffix.
 fn is_model(model: &str, name: &str) -> bool {
     match model.strip_prefix(name) {
@@ -126,6 +133,12 @@ fn lookup(model: &str) -> (Price, Option<Price>) {
         (TERRA, Some(TERRA_LONG))
     } else if is_model(&model, "gpt-6-luna") {
         (LUNA, Some(LUNA_LONG))
+    } else if is_model(&model, "glm-5.3") {
+        (GLM, None)
+    } else if is_model(&model, "kimi-k2.7-code") {
+        (KIMI, None)
+    } else if is_model(&model, "deepseek-v4-pro-0813") {
+        (DEEPSEEK, None)
     } else {
         (FABLE, None)
     }

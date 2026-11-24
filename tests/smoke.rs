@@ -1298,7 +1298,7 @@ fn models_two_gateways_specs_guard_routes_and_daily() {
     assert!(drift(&credits, &credits, GatewayKind::Credits).is_empty());
     assert!(drift(&byok, &byok, GatewayKind::Byok).is_empty());
     let found = json!({ "authentication": true, "byok_only": true, "collect_logs": true,
-        "zdr": true, "spend_limits": { "enabled": false, "rules": [] } });
+        "zdr": true, "workers_ai_billing_mode": "unified", "spend_limits": { "enabled": false, "rules": [] } });
     let lines = drift(&credits, &found, GatewayKind::Credits);
     assert_eq!(lines.len(), 1);
     assert!(lines[0].starts_with("byok_only"));
@@ -1468,7 +1468,7 @@ fn models_two_gateways_specs_guard_routes_and_daily() {
 }
 
 /// Models by who pays: cf-anthropic and cf-openai tiers, the route on models and compare, the
-/// refusal of `openai/…`, Workers AI not yet, a stored openai default read as unset, and a
+/// refusal of `openai/…`, a stored openai default read as unset, and a
 /// fallback that stays within its provider.
 #[test]
 fn ai_agents_models_credits_routes_and_openai_refused() {
@@ -1513,10 +1513,12 @@ fn ai_agents_models_credits_routes_and_openai_refused() {
             "{e}"
         );
     }
-    for t in ["workers-ai/x", "workers-ai"] {
-        let e = Choice::parse(t, Slot::Executor).unwrap_err();
-        assert!(e.contains("not available yet"), "{e}");
-    }
+    // Workers AI is built (phase 6); its choices are checked in
+    // ai_agents_workers_ai_choices.
+    assert_eq!(
+        p("workers-ai", Slot::Executor).text(),
+        "workers-ai/@cf/moonshotai/kimi-k2.7-code"
+    );
     // A stored openai default reads as unset, and the answer says so.
     let raw = json!({ "executor": "openai/gpt-6.2-sol", "planner": "cf-openai/gpt-6.2-astra" });
     let d = Defaults::from_json(&raw);
@@ -1808,4 +1810,199 @@ fn model_gateway_byok_readiness() {
         e.contains("pigeon-anthropic_anthropic_default on the Access tab, then run models_setup")
     );
     assert!(byok_ready(Some(&strict), &[config("anthropic")], g, "anthropic").is_ok());
+}
+
+/// Workers AI through `pigeon-cloudflare`: the REST request and its headers, the unset-token
+/// refusal, the billing-mode guard, the spec and its drift, log labelling, family, prices and
+/// the missing-gateway test. Pure.
+#[test]
+fn model_gateway_workers_ai() {
+    use pigeon_core::ai_gateway::{
+        GatewayKind, WORKERS_AI, WORKERS_AI_UNSET, credits_guard, drift, endpoint, spec,
+        workers_ai_guard, workers_ai_headers,
+    };
+    use pigeon_core::model_prices::price;
+    use pigeon_models::daily::family_of;
+    use pigeon_models::{Route, route_of};
+
+    let gw = "pigeon-cloudflare";
+    assert_eq!(
+        endpoint("acct", gw, WORKERS_AI, "chat/completions"),
+        "https://api.cloudflare.com/client/v4/accounts/acct/ai/v1/chat/completions"
+    );
+    assert_eq!(
+        endpoint("acct", gw, "openai", "chat/completions"),
+        "https://gateway.ai.cloudflare.com/v1/acct/pigeon-cloudflare/openai/chat/completions"
+    );
+    let h = workers_ai_headers(gw, Some("tok")).unwrap();
+    assert!(h.contains(&("cf-aig-gateway-id".into(), "pigeon-cloudflare".into())));
+    assert!(h.contains(&("Authorization".into(), "Bearer tok".into())));
+    for none in [None, Some("")] {
+        let e = workers_ai_headers(gw, none).unwrap_err();
+        assert_eq!(e, WORKERS_AI_UNSET);
+        assert!(e.contains("pigeon_workers_ai_token"));
+    }
+
+    // The declaration: provider `workers-ai` on the credits gateway, never a stored key.
+    let src = include_str!("../src/model-gateway/src/lib.rs");
+    let at = src.find("name: \"workers-ai\"").expect("declared");
+    let decl = &src[at..src[at..]
+        .find("billing: None")
+        .map_or(src.len(), |n| at + n)];
+    assert!(decl.contains("gateway: CREDITS_GATEWAY"));
+    assert!(decl.contains("route: Route::Credits"));
+    assert!(decl.contains("default_model: \"@cf/zai-org/glm-5.3\""));
+
+    // The spec, its drift and the guard.
+    let credits = spec(gw, "store", GatewayKind::Credits);
+    assert_eq!(credits["workers_ai_billing_mode"], "unified");
+    assert!(spec(gw, "store", GatewayKind::Byok)["workers_ai_billing_mode"].is_null());
+    let mut found = credits.clone();
+    found["workers_ai_billing_mode"] = json!("postpaid");
+    let lines = drift(&credits, &found, GatewayKind::Credits);
+    assert_eq!(lines.len(), 1);
+    assert!(lines[0].starts_with("workers_ai_billing_mode"));
+    assert!(workers_ai_guard(gw, &credits).is_ok());
+    for bad in [json!({ "workers_ai_billing_mode": "postpaid" }), json!({})] {
+        let e = workers_ai_guard(gw, &bad).unwrap_err();
+        assert!(
+            e.contains("`pigeon-cloudflare`") && e.contains("Unified Billing"),
+            "{e}"
+        );
+    }
+    // credits_guard itself does not look at the billing mode.
+    assert!(credits_guard(gw, &json!({ "byok_only": false }), &[]).is_ok());
+
+    // Labelling: the log is `workers-ai`, by credits, with family `Workers AI`.
+    assert_eq!(
+        route_of(GatewayKind::Credits, "workers-ai"),
+        ("workers-ai".to_string(), Route::Credits)
+    );
+    assert_eq!(route_of(GatewayKind::Credits, "openai").0, "cf-openai");
+    assert_eq!(family_of("workers-ai", "@cf/zai-org/glm-5.3"), "Workers AI");
+
+    // A missing gateway: a 404, or Cloudflare's "not found" in the body.
+    assert!(pigeon_models::is_missing("call: 404: x"));
+    assert!(pigeon_models::is_missing(
+        "call: 400: {\"errors\":[{\"message\":\"Gateway Not Found\"}]}"
+    ));
+    assert!(!pigeon_models::is_missing("call: 500: boom"));
+
+    for (model, input, cached, output) in [
+        ("@cf/zai-org/glm-5.3", 1_400_000, 260_000, 4_400_000),
+        ("@cf/moonshotai/kimi-k2.7-code", 950_000, 190_000, 4_000_000),
+        (
+            "@cf/deepseek-ai/deepseek-v4-pro-0813",
+            1_320_000,
+            44_000,
+            3_960_000,
+        ),
+    ] {
+        let p = price(model);
+        assert_eq!(
+            (p.input, p.cache_read, p.output),
+            (input, cached, output),
+            "{model}"
+        );
+    }
+}
+
+/// AI agent choices for Workers AI: tiers, the small-slot refusal, `@cf/` names only, the route
+/// and a fallback within the provider.
+#[test]
+fn ai_agents_workers_ai_choices() {
+    use pigeon_ai_agents::Role;
+    use pigeon_ai_agents::models::{Choice, Slot, Tier, chain, route, tier_model};
+
+    assert_eq!(
+        tier_model("workers-ai", Tier::Top),
+        Some("@cf/zai-org/glm-5.3")
+    );
+    assert_eq!(
+        tier_model("workers-ai", Tier::Middle),
+        Some("@cf/moonshotai/kimi-k2.7-code")
+    );
+    assert_eq!(tier_model("workers-ai", Tier::Small), None);
+    assert_eq!(
+        Choice::parse("workers-ai", Slot::Planner).unwrap().text(),
+        "workers-ai/@cf/zai-org/glm-5.3"
+    );
+    for slot in [Slot::Mechanical, Slot::Summary] {
+        let e = Choice::parse("workers-ai", slot).unwrap_err();
+        assert!(e.contains("no small model"), "{e}");
+    }
+    let named = "workers-ai/@cf/deepseek-ai/deepseek-v4-pro-0813";
+    assert_eq!(Choice::parse(named, Slot::Summary).unwrap().text(), named);
+    assert!(Choice::stored(named).is_some());
+    assert!(Choice::parse("workers-ai/claude-opus-5-5", Slot::Executor).is_err());
+    assert!(Choice::parse("anthropic/@cf/zai-org/glm-5.3", Slot::Executor).is_err());
+    assert_eq!(route("workers-ai"), "credits");
+    let kimi = Choice::parse("workers-ai", Slot::Executor).unwrap();
+    let ids: Vec<String> = chain(&kimi, Role::Executor)
+        .iter()
+        .map(Choice::text)
+        .collect();
+    assert_eq!(
+        ids,
+        [kimi.text(), "workers-ai/@cf/zai-org/glm-5.3".to_string()]
+    );
+}
+
+/// `cost_daily` counts Workers AI once: the Cloudflare "Workers AI" line is billing minus the
+/// gateway's workers-ai cost for the day, never below 0, and the amount taken off is
+/// `credits.workers_ai_billing_usd`.
+#[test]
+fn platform_cost_daily_workers_ai_once() {
+    use pigeon_capabilities::cost::{assemble, billing_days, live_days};
+    use std::collections::BTreeMap;
+    let today = "2026-03-10";
+    let row = |name: &str, usd: f64, d: &str| {
+        json!({ "ServiceName": name, "BilledCost": usd,
+            "ChargePeriodStart": format!("{d}T00:00:00Z"), "ChargePeriodEnd": format!("{d}T23:59:59Z") })
+    };
+    // 03-09: billing Workers AI $1.00. 03-10: no Workers AI row, only Workers $0.50.
+    let billing = billing_days(
+        &json!([
+            row("Workers AI", 1.0, "2026-03-09"),
+            row("Workers Paid", 0.5, "2026-03-10")
+        ]),
+        today,
+    );
+    // The gateway logged $0.80 of workers-ai on 03-09 and $0.30 on 03-10.
+    let models = json!({
+        "days": ["2026-03-09", "2026-03-10"],
+        "by_family": { "Workers AI": { "2026-03-09": 0.8, "2026-03-10": 0.3 } },
+        "by_run": {}, "unattributed": { "2026-03-09": 0.8, "2026-03-10": 0.3 },
+        "by_provider": { "workers-ai": { "2026-03-09": 0.8, "2026-03-10": 0.3 } },
+        "by_route": { "byok": {}, "credits": { "2026-03-09": 0.8, "2026-03-10": 0.3 } },
+    });
+    let roles = BTreeMap::new();
+    let live = live_days(Some(&billing), Some(&models), Some(&roles), None);
+    let a = assemble(
+        "7d",
+        today,
+        &BTreeMap::new(),
+        &live,
+        false,
+        true,
+        vec![],
+        vec![],
+    );
+    let line = a["cloudflare"]["lines"]
+        .as_array()
+        .and_then(|l| l.iter().find(|x| x["name"] == "Workers AI"))
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(num_of(&line["total"]), 0.2);
+    assert_eq!(num_of(&line["by_day"]["2026-03-09"]), 0.2);
+    assert!(line["by_day"].get("2026-03-10").is_none());
+    assert_eq!(num_of(&a["credits"]["workers_ai_billing_usd"]), 0.8);
+    assert_eq!(num_of(&a["credits"]["usage_usd"]), 1.1);
+    // Cloudflare 0.2 + 0.5, gateway logs 1.1, fee 0.055: Workers AI's $1.00 counts once.
+    assert_eq!(num_of(&a["cloudflare"]["total"]), 0.7);
+    assert_eq!(num_of(&a["ai_gateway"]["total"]), 1.1);
+    assert_eq!(num_of(&a["total"]), 1.855);
+    let cp = &a["credits"]["by_provider"];
+    assert_eq!(cp[0]["name"], "Workers AI");
+    assert_eq!(num_of(&cp[0]["total"]), 1.1);
 }

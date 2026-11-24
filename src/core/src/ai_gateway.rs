@@ -36,6 +36,12 @@ pub const SECRET_SCOPE: &str = "ai_gateway";
 
 const GATEWAY: &str = "https://gateway.ai.cloudflare.com/v1";
 
+/// The Cloudflare REST API, which is the only way to Workers AI models through a gateway.
+const REST_API: &str = "https://api.cloudflare.com/client/v4/accounts";
+
+/// The provider name and slug of Workers AI.
+pub const WORKERS_AI: &str = "workers-ai";
+
 /// The header a request's tags go in, as a JSON object
 /// (<https://developers.cloudflare.com/ai-gateway/observability/custom-metadata/>).
 pub const METADATA_HEADER: &str = "cf-aig-metadata";
@@ -125,6 +131,7 @@ pub fn spec(id: &str, store_id: &str, kind: GatewayKind) -> Value {
             "authentication": true,
             "byok_only": false,
             "zdr": true,
+            "workers_ai_billing_mode": "unified",
         }),
     }
 }
@@ -190,7 +197,10 @@ pub fn drift(want: &Value, found: &Value, kind: GatewayKind) -> Vec<String> {
     let mut keys = vec!["authentication", "byok_only", "collect_logs"];
     match kind {
         GatewayKind::Byok => keys.push("store_id"),
-        GatewayKind::Credits => keys.push("zdr"),
+        GatewayKind::Credits => {
+            keys.push("zdr");
+            keys.push("workers_ai_billing_mode");
+        }
         GatewayKind::Retired => {}
     }
     keys.iter()
@@ -282,6 +292,48 @@ pub fn byok_ready(
         ));
     }
     Ok(())
+}
+
+/// Whether a Workers AI request may go ahead through credits gateway `gateway_id`: the gateway
+/// must bill Workers AI as Unified Billing. Called only for the `workers-ai` provider, beside
+/// [`credits_guard`]. Pure.
+pub fn workers_ai_guard(gateway_id: &str, gateway: &Value) -> std::result::Result<(), String> {
+    if gateway["workers_ai_billing_mode"].as_str() != Some("unified") {
+        return Err(format!(
+            "the credits gateway `{gateway_id}` does not bill Workers AI as Unified Billing (workers_ai_billing_mode is not \"unified\")"
+        ));
+    }
+    Ok(())
+}
+
+/// The refusal for a Workers AI request while its token slot is unset.
+pub const WORKERS_AI_UNSET: &str =
+    "Workers AI needs a token: set `pigeon_workers_ai_token` on the Access tab";
+
+/// The URL of a request to `provider`'s `path` through `gateway`. Workers AI goes to the REST
+/// API; the gateway is then named by a header ([`workers_ai_headers`]), not by the URL.
+pub fn endpoint(account_id: &str, gateway: &str, provider: &str, path: &str) -> String {
+    if provider == WORKERS_AI {
+        format!("{REST_API}/{account_id}/ai/v1/{path}")
+    } else {
+        format!("{GATEWAY}/{account_id}/{gateway}/{provider}/{path}")
+    }
+}
+
+/// The headers a Workers AI request needs beside the gateway's own: the gateway, always named so
+/// the account's `default` gateway never serves it, and the person's token. Refused when `token`
+/// is unset. Pure.
+pub fn workers_ai_headers(
+    gateway: &str,
+    token: Option<&str>,
+) -> std::result::Result<Vec<(String, String)>, String> {
+    let token = token
+        .filter(|t| !t.is_empty())
+        .ok_or_else(|| WORKERS_AI_UNSET.to_string())?;
+    Ok(vec![
+        ("cf-aig-gateway-id".into(), gateway.into()),
+        ("Authorization".into(), format!("Bearer {token}")),
+    ])
 }
 
 /// A plain message for a credits error `status` and `code`, or `None` for any other.
@@ -445,7 +497,7 @@ pub async fn run(
         vec![Policy::new(Scope::Account, &RUN_PERMISSIONS)],
     )
     .await?;
-    let url = format!("{GATEWAY}/{}/{gateway}/{provider}/{path}", account.id);
+    let url = endpoint(&account.id, gateway, provider, path);
     let ran = send(token.value(), &url, &headers, body).await;
     token.finish(ran).await
 }
@@ -495,7 +547,7 @@ pub async fn stream<T>(
         STREAM_TOKEN_TTL,
     )
     .await?;
-    let url = format!("{GATEWAY}/{}/{gateway}/{provider}/{path}", account.id);
+    let url = endpoint(&account.id, gateway, provider, path);
     let streamed = async {
         let mut response = open(token.value(), &url, &headers, body).await?;
         let status = response.status_code();

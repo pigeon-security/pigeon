@@ -19,6 +19,8 @@ const LINES: [&str; 5] = ["CI Containers", "Workers", "Workers AI", "D1", "R2"];
 /// The line name that stands for Cloudflare AI Gateway billing rows. They never reach the answer's
 /// Cloudflare lines: the gateway's logs already count the same spend.
 const AI_GATEWAY_LINE: &str = "AI Gateway";
+/// The gateway provider name of Workers AI calls, as `models_daily` keys `by_provider`.
+const WORKERS_AI: &str = "workers-ai";
 /// The estimated purchase fee on credits usage, as a share of that usage.
 const CREDITS_FEE: f64 = 0.05;
 /// The model families that are always answered, in order. `Other` follows when it cost something.
@@ -467,6 +469,38 @@ fn entries(
     (out, round6(sum))
 }
 
+/// Counts Workers AI once. Workers AI calls go through the credits gateway, so the gateway's
+/// logs carry their cost, and they are counted there, in the credits route. Cloudflare billing
+/// may show the same calls on its "Workers AI" line. For each day the line becomes
+/// `max(0, billing Workers AI - gateway workers-ai log cost)`: the part of the billing the logs
+/// already count is taken off. Pigeon has no other Workers AI use, so what is left is spend the
+/// logs do not show. Returns the amount taken off, over all `days` and rounded to a millionth; the
+/// answer gives it as `credits.workers_ai_billing_usd`, so a person can check it. The total
+/// follows from the reduced line. AI Gateway billing rows stay out of the total (see
+/// [`AI_GATEWAY_LINE`]).
+fn take_gateway_workers_ai(
+    cloudflare: &mut BTreeMap<String, BTreeMap<String, f64>>,
+    days: &[String],
+    merged: &BTreeMap<String, Value>,
+) -> f64 {
+    let mut taken = 0.0;
+    let Some(line) = cloudflare.get_mut("Workers AI") else {
+        return 0.0;
+    };
+    for day in days {
+        let Some(billed) = line.get_mut(day) else {
+            continue;
+        };
+        let logged = merged
+            .get(day)
+            .map_or(0.0, |r| num(&r["gateway_providers"][WORKERS_AI]));
+        let kept = (*billed - logged).max(0.0);
+        taken += *billed - kept;
+        *billed = kept;
+    }
+    round6(taken)
+}
+
 /// The answer for `range` (`today`, `7d` or `all`; anything else is `7d`) on `today`: the
 /// `stored` months (month to `{day: record}`) with the `live` days laid over them, the live
 /// ones winning (see [`merge_day`] for a `truncated` listing). Pure.
@@ -512,7 +546,8 @@ pub fn assemble(
         _ => week,
     };
 
-    let cloudflare = series(&days, &merged, "cloudflare", &LINES, "Other");
+    let mut cloudflare = series(&days, &merged, "cloudflare", &LINES, "Other");
+    let workers_ai_billing_usd = take_gateway_workers_ai(&mut cloudflare, &days, &merged);
     let (mut lines, cf_total) = entries(&LINES, "Other", &cloudflare);
     let mut periodic = Vec::new();
     for line in &mut lines {
@@ -561,7 +596,10 @@ pub fn assemble(
                 "cf-openai" => "OpenAI (credits)",
                 _ => "Other",
             };
-            if let Some(provider) = slug.strip_prefix("cf-") {
+            if let Some(provider) = slug
+                .strip_prefix("cf-")
+                .or((slug == WORKERS_AI).then_some(WORKERS_AI))
+            {
                 *credit_providers
                     .entry(provider.to_string())
                     .or_default()
@@ -614,6 +652,7 @@ pub fn assemble(
             let name = match provider.as_str() {
                 "anthropic" => "Anthropic",
                 "openai" => "OpenAI",
+                "workers-ai" => "Workers AI",
                 other => other,
             };
             entry(name, Some(by_day)).0
@@ -623,6 +662,7 @@ pub fn assemble(
         "usage_usd": usage_usd,
         "fee_usd": fee_usd,
         "billing_usd": round6(billing_usd),
+        "workers_ai_billing_usd": workers_ai_billing_usd,
         "by_provider": credit_entries,
     });
 

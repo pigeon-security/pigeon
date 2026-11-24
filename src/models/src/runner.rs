@@ -801,8 +801,14 @@ impl ModelJobs {
             Ok(a) => a,
             Err(e) => return json!({ "id": id, "state": "failed", "error": e.to_string() }),
         };
-        let headers: Vec<(&str, &str)> = ask
-            .headers
+        let gateway = ask.gateway.as_deref().unwrap_or(&self.settings.gateway);
+        // Workers AI's token is read now and never stored with the job.
+        let mut owned = ask.headers.clone();
+        match super::provider_headers(&self.env, gateway, &ask.provider).await {
+            Ok(extra) => owned.extend(extra),
+            Err(e) => return json!({ "id": id, "state": "failed", "error": e.to_string() }),
+        }
+        let headers: Vec<(&str, &str)> = owned
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
@@ -811,9 +817,8 @@ impl ModelJobs {
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
-        let gateway = ask.gateway.as_deref().unwrap_or(&self.settings.gateway);
         let guarded = if ask.credits {
-            super::guard_credits(&account, gateway).await
+            super::guard_credits_for(&account, gateway, &ask.provider).await
         } else {
             super::guard_byok(&account, gateway, &ask.provider).await
         };
