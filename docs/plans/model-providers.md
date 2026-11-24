@@ -325,3 +325,68 @@ estimate. Org-wide Anthropic spend counts in the total (confirmed).
   `ours` merge parent, because the push of the rewritten branch was refused.
 - 2026-11-24: Part 1 landed as one linear commit (claude/ai-agent-qX99nrI8eQRn, the tree of the planner's tested tip), because the planner's sandbox could not force-push its rebased branch.
 - 2026-11-24: phases 4 (jX4T2h1nihxH) and 5 (G2YZBsyBTIkW) put together on one branch for one landing. Phase 4 also changed canonical_model to keep the dots of non-Claude names (gpt-6.2-sol) and added price_at for OpenAI's long-context price. Phase 5 stores defaults in the index's flags (models.defaults) and adds runs.child_models so status shows a planner's models.
+
+## Part 4: fixes from production telemetry, and OpenAI on the person's own key (planner run `vnr3cWzWC3aX`, 2026-11-25)
+
+Facts read from production telemetry (2026-11-23/24):
+
+- **A. Workers AI ids were refused.** Run `hpp2GGS4L1Xb` on
+  `workers-ai/@cf/moonshotai/kimi-k2.7-code` never ran a turn. The model gateway refused the
+  model 20 times: "`model` must be a plain model id: letters, digits, `.`, `-`, `_` and `:`".
+  That rule is `resolve_model` in `src/models/src/turn.rs`. It is one rule for the whole OpenAI
+  dialect, and a Workers AI id (`@cf/<org>/<model>`) has an `@` and `/`. It was not a hang (the
+  Log above said "not yet diagnosed"). The run kept retrying until its wall time ran out.
+- **B. Per-model special cases.** `gpt-6-luna` rejects function tools with `reasoning_effort` on
+  Chat Completions (fixed with a one-name list in `openai.rs`). Anthropic runs also saw two 400s:
+  "tool_choice: type tool and any are not supported for this model" and "The final block in an
+  assistant message cannot be `thinking`".
+- **C. 401s.** `pigeon-model-gateway` answered 401 737 times in 24 hours.
+- **D.** The person will soon have their own OpenAI API Platform credits.
+
+### Decisions
+
+1. **One model id rule per provider.** Each `Provider` says what a model id looks like. Anthropic:
+   `claude-…`. OpenAI dialect on OpenAI (`cf-openai`, `openai`): a plain id (letters, digits,
+   `.`, `-`, `_`, `:`; 100 characters). Workers AI: exactly `@cf/<org>/<model>`, each part of
+   letters, digits, `.`, `-`, `_`. Anything else is still refused, and the refusal names the rule
+   for that provider. A refused turn is not retried: the runner ends the run `failed` with the
+   gateway's words as the reason.
+2. **One capability table.** `src/models/src/capabilities.rs` (new) holds, per model family:
+   endpoint (`chat` or `responses`), whether function tools and reasoning effort go together,
+   which `tool_choice` kinds it takes (`auto`, `any`, `tool`, `none`), and the largest output.
+   Every OpenAI and Anthropic request is shaped by it. The `NO_EFFORT_WITH_TOOLS` list goes. An
+   unknown model gets the safe row (chat, tools without effort, `auto` and `none` only).
+   Anthropic: a `tool_choice` of kind `tool` or `any` the table does not allow is downgraded to
+   `auto`. A trailing `thinking` block in an assistant message is dropped when history is replayed,
+   and is not persisted as the last block.
+3. **401s.** Found from code (Log), then fixed at the caller, or the error says who and why.
+   Auth is never weakened.
+4. **`openai/…` on the person's key, latent.** A BYOK gateway `pigeon-openai` (kind BYOK,
+   `byok_only` on, so a missing key never falls back to credits) and a provider `openai` on it.
+   Its key slot is declared; the person sets it later with their passkey. Until then `openai/…`
+   answers "OpenAI key not set: set `<slot>` on the Access tab", and `models_providers` shows it
+   not ready with that reason. `cf-openai/…` is unchanged. Tiers mirror `cf-openai`: top
+   `gpt-6.2-astra`, middle `gpt-6.2-sol`, small `gpt-6.1-terra`. Where the table says tools and
+   reasoning need the Responses API, `openai` uses it. This supersedes "`openai/…` is retired" in
+   `model-providers-cloudflare.md` for the BYOK route only.
+5. **ChatGPT as an MCP client** is [chatgpt-mcp.md](chatgpt-mcp.md).
+
+Stored default models do not change. No secret or key id goes into a commit.
+
+### Phases
+
+| Phase | What | Touches |
+| --- | --- | --- |
+| 12 | This plan, and `chatgpt-mcp.md` | `docs/plans/*` |
+| 13 (A) | Per-provider id rule; the runner fails the run with the refusal; smoke scenario | `src/models/src/turn.rs`, `src/ai-agents/src/*`, smoke |
+| 14 (B) | The capability table; Anthropic `tool_choice` and trailing-thinking fixes; smoke scenarios | `src/models/src/*`, `src/ai-agents/src/transcript.rs`, smoke |
+| 15 (C) | The 401s | by the finding |
+| 16 (D) | `pigeon-openai`, `openai` provider, latent | `src/model-gateway/src/lib.rs`, `src/models/src/*`, `src/core/src/ai_gateway.rs`, smoke |
+| 17 (E) | MCP conformance | `src/core/src/mcp.rs` and the tools' schemas, smoke |
+
+Phases 13, 15 and 17 touch different code and run together. 14 builds on 13, and 16 on 14, because
+they share `src/models`.
+
+### Log (Part 4)
+
+- 2026-11-25: plan written from main at `efb7964`. Facts A to D are from the person's telemetry.
