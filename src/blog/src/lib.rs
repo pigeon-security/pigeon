@@ -221,6 +221,24 @@ pub fn template_digest(t: &Template) -> String {
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Fingerprint the renderer sources separately from the selected template's assets.
+pub fn renderer_digest() -> String {
+    let mut h = Sha256::new();
+    for source in [
+        include_str!("lib.rs"),
+        include_str!("pages.rs"),
+        include_str!("feeds.rs"),
+        include_str!("site.rs"),
+        include_str!("content.rs"),
+        include_str!("markdown.rs"),
+        include_str!("repo.rs"),
+    ] {
+        h.update((source.len() as u64).to_be_bytes());
+        h.update(source.as_bytes());
+    }
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// Everything the templates read: the settings, the features and the content, resolved.
 #[derive(Clone, Debug)]
 pub struct Site {

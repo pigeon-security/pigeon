@@ -154,6 +154,15 @@ impl Service for Sites {
                             "required": ["instance"]
                         }),
                     },
+                    ToolSpec {
+                        name: "site_rollback".into(),
+                        description: "Activate a previously published immutable release of an instance's site.".into(),
+                        input_schema: json!({
+                            "type": "object",
+                            "properties": {"instance": {"type": "string"}, "release": {"type": "string"}},
+                            "required": ["instance", "release"]
+                        }),
+                    },
                 ],
                 versions: versions::declared(),
                 ..CapabilityManifest::default()
@@ -169,7 +178,7 @@ impl Service for Sites {
     ) -> pigeon_contract::serve::Answering<'a> {
         Box::pin(async move {
             match req.tool.as_str() {
-                "site_deploy" => {
+                "site_deploy" | "site_rollback" => {
                     let Some(instance) = req.args["instance"].as_str() else {
                         return Answer::error(FailureKind::BadRequest, "`instance` is required");
                     };
@@ -191,7 +200,15 @@ impl Service for Sites {
                     let Some(key) = key else {
                         return Answer::error(FailureKind::Failed, "CALLER_KEY is not set");
                     };
-                    match deploy::deploy(env, key.as_bytes(), caller, instance, rev).await {
+                    let result = if req.tool == "site_rollback" {
+                        let Some(release) = req.args["release"].as_str() else {
+                            return Answer::error(FailureKind::BadRequest, "`release` is required");
+                        };
+                        deploy::rollback(env, key.as_bytes(), caller, instance, release).await
+                    } else {
+                        deploy::deploy(env, key.as_bytes(), caller, instance, rev).await
+                    };
+                    match result {
                         Ok(v) => Answer::Ok(v),
                         Err(e) => Answer::error(FailureKind::Failed, e.to_string()),
                     }

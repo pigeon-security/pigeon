@@ -1,22 +1,27 @@
 // pigeon's site Worker: serves the deploy that `live` names from the bucket bound as SITE.
-// Layout: `live` holds a commit; `deploys/{commit}.json` maps "/path" to {blob, content_type,
+// Layout: `live` holds a release ID or a legacy commit; `deploys/{id}.json` maps "/path" to {blob, content_type,
 // size}; `blobs/{sha256}` holds each file. Until the first deploy it answers 503.
 const RECHECK_MS = 30_000;
-let state = null; // { commit, manifest, checked }
+let state = null; // { release, commit, manifest, checked }
 
 async function current(env) {
   const now = Date.now();
   if (state && now - state.checked < RECHECK_MS) return state;
   const live = await env.SITE.get("live");
   if (!live) return (state = { commit: null, manifest: null, checked: now });
-  const commit = (await live.text()).trim();
-  if (state && state.commit === commit && state.manifest) {
+  const release = (await live.text()).trim();
+  if (state && state.release === release && state.manifest) {
     state.checked = now;
     return state;
   }
-  const m = await env.SITE.get(`deploys/${commit}.json`);
+  const m = await env.SITE.get(`deploys/${release}.json`);
   if (!m) return (state = { commit: null, manifest: null, checked: now });
-  return (state = { commit, manifest: await m.json(), checked: now });
+  let commit = release;
+  if (release.startsWith("release-")) {
+    const meta = await env.SITE.get(`release-meta/${release}.json`);
+    commit = meta ? (await meta.json()).commit : null;
+  }
+  return (state = { release, commit, manifest: await m.json(), checked: now });
 }
 
 function resolve(manifest, path) {
@@ -68,7 +73,8 @@ export default {
       "cache-control": key.endsWith(".html") || key.endsWith(".xml")
         ? "public, max-age=60"
         : "public, max-age=3600",
-      "x-pigeon-commit": s.commit,
+      "x-pigeon-release": s.release,
+      ...(s.commit ? { "x-pigeon-commit": s.commit } : {}),
     };
     if (status === 200 && request.headers.get("if-none-match") === etag) {
       return new Response(null, { status: 304, headers });

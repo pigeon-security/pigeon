@@ -309,3 +309,25 @@ Zola rule it follows. I read every line, run fmt, clippy and the smoke suite, an
     Worker, the tree and blobs are read through the GitHub App, and there is no record change.
     They move the content into noisypigeon/noisypigeon with the `site.toml` schema above.
     `/pages/names/` stays an alias on `lineage.md`.
+
+## Instance publishing profiles and immutable releases
+
+An approved instance may set `publishing: {"state":"enabled","site":"blog"}` to select a
+site by name or `{"state":"disabled"}` to turn publishing off. Records without the field
+keep their first-site behavior and continue writing the legacy commit pointer. The regular platform MCP endpoint keeps its tool inventory.
+`POST /mcp?instance=<id>` exposes that instance's publishing tools and binds their instance
+argument. Generic and unrelated tools are unavailable on the scoped endpoint. Direct and
+scheduled publishing both enter the Sites Worker and check the approved profile before
+requesting credentials, and Sites verifies that the linked credential matches the account
+in the approved instance record. Public site reads use the existing serving path.
+
+The Rust renderer remains in `src/blog/`. A release records the content commit, exact
+template version, template asset digest, renderer source digest, and base URL. The release
+ID hashes those inputs and the output manifest. Sites writes blobs, then the manifest and
+release metadata, and only then switches `live`. Manifest key structure is unchanged and
+serving Workers already treat the pointer as an opaque string, so old commit pointers
+continue to serve. Upgrade the generated site Worker before approving an immutable publisher
+profile so its `x-pigeon-commit` header keeps reporting the underlying content commit.
+The upgraded reader also reports `x-pigeon-release`. `site_rollback` verifies an immutable release belongs to the same
+instance and target before switching the pointer. Publishing and rollback use the current
+last-successful-pointer-write behavior.

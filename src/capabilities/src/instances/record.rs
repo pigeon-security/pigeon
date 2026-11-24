@@ -42,6 +42,9 @@ pub struct Instance {
     /// `{"blog": "^1"}`. Set only by the person approving the record. Absent when empty.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub pins: std::collections::BTreeMap<String, String>,
+    /// Explicit publishing selection. Missing preserves the first site's legacy behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publishing: Option<pigeon_core::site_publish::Profile>,
     /// The record version, which is not part of a diff.
     #[serde(default)]
     pub version: u64,
@@ -595,6 +598,22 @@ pub fn validate(instance: &Instance, others: &[Instance], rules: &Rules) -> Vec<
     check_repo(instance, &mut problems);
     check_sites(instance, others, rules, &mut problems);
     check_worker(instance, others, rules, &mut problems);
+    if let Some(pigeon_core::site_publish::Profile::Enabled { site }) = &instance.publishing {
+        if !instance.sites.iter().any(|record| record.name == *site) {
+            problems.push(format!("Publishing names an unknown site: {site}."));
+        }
+        if !matches!(instance.repo, Some(RepoRef::Github { .. }))
+            || !matches!(
+                instance.account,
+                AccountRef::Linked {
+                    account_id: Some(_)
+                }
+            )
+        {
+            problems.push("Publishing needs a GitHub repository and a linked account.".into());
+        }
+    }
+
     if others.iter().any(|o| o.id == instance.id) {
         problems.push(format!(
             "An instance with id {} already exists.",

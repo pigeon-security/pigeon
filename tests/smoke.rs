@@ -2384,3 +2384,45 @@ fn platform_cost_daily_promotional_grants() {
         assert_eq!(answer["net_total"], gross);
     }
 }
+
+#[test]
+fn sites_publishing_profile_binds_the_scope_and_preserves_legacy_records() {
+    use pigeon_core::site_publish::{scoped_args, site};
+    let mut record = json!({"sites": [{"name":"first"}, {"name":"second"}]});
+    assert_eq!(site(&record).unwrap()["name"], "first");
+    record["publishing"] = json!({"state":"enabled", "site":"second"});
+    assert_eq!(site(&record).unwrap()["name"], "second");
+    record["publishing"]["site"] = json!("unknown");
+    assert!(site(&record).is_err());
+    record["publishing"] = json!({"state":"disabled"});
+    assert!(site(&record).is_err());
+    assert_eq!(
+        scoped_args("one", "site_deploy", &json!({"rev":"main"})).unwrap(),
+        json!({"instance":"one","rev":"main"})
+    );
+    assert!(scoped_args("one", "site_deploy", &json!({"instance":"two"})).is_err());
+    assert!(scoped_args("one", "land", &json!({})).is_err());
+    assert!(scoped_args("one", "call", &json!({"tool":"land"})).is_err());
+}
+
+#[test]
+fn sites_release_identity_changes_with_theme_and_manifest_at_the_same_commit() {
+    use pigeon_core::{r2, site_publish};
+    let mut release = json!({"commit":"same", "template_version":"1.0.0", "renderer_digest": pigeon_blog::renderer_digest()});
+    let manifest = r2::manifest_of(&[("/index.html".into(), b"page".to_vec())]);
+    let original = site_publish::release_id(&release, &manifest);
+    assert!(site_publish::is_release_id(&original));
+    assert_eq!(site_publish::release_id(&release, &manifest), original);
+    release["template_version"] = json!("1.1.0");
+    let upgraded = site_publish::release_id(&release, &manifest);
+    assert_ne!(upgraded, original);
+    assert_ne!(r2::manifest_key(&upgraded), r2::manifest_key(&original));
+    assert_ne!(
+        upgraded,
+        site_publish::release_id(&release, &r2::Manifest::new())
+    );
+    assert_eq!(
+        r2::manifest_key("legacy-commit"),
+        "deploys/legacy-commit.json"
+    );
+}

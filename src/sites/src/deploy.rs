@@ -4,7 +4,7 @@
 //! linked account's token (`linked`). The repository is read as one tarball
 //! ([`pigeon_core::tarball`]), sorted ([`pigeon_blog::repo`]), rendered ([`pigeon_blog`]), and
 //! written to the record's bucket in the layout the site Worker serves: the blobs it lacks, then
-//! `deploys/{commit}.json`, then `live`. It only adds objects and moves `live`, so the previous
+//! `deploys/{release}.json` and release metadata, then `live`. It only adds objects and moves `live`, so the previous
 //! deploy stays whole until the last write.
 
 use std::collections::BTreeSet;
@@ -12,7 +12,7 @@ use std::collections::BTreeSet;
 use pigeon_contract::{Answer, Signed};
 use pigeon_core::r2::{self, Bucket, Manifest};
 use pigeon_core::versions::{Requirement, Version};
-use pigeon_core::{Account, tarball};
+use pigeon_core::{Account, site_publish, tarball};
 use serde_json::{Value, json};
 use worker::{Env, Error, Fetch, Headers, Method, Request, RequestInit, Result};
 
@@ -44,6 +44,8 @@ pub struct Target {
     pub repo: String,
     pub bucket: Bucket,
     pub base_url: String,
+    pub site: String,
+    pub account_id: String,
 }
 
 /// Reads [`Target`] from a record as core's `instances_list` answers it. Pure.
@@ -56,7 +58,11 @@ pub fn target(record: &Value) -> std::result::Result<Target, String> {
         .as_str()
         .ok_or_else(|| format!("instance {id} names no repository"))?
         .to_string();
-    let site = &record["sites"][0];
+    let site = site_publish::site(record)?;
+    let account_id = record["account"]["account_id"]
+        .as_str()
+        .filter(|_| record["account"]["kind"] == "linked")
+        .ok_or_else(|| format!("instance {id} has no linked account"))?;
     let bucket = site["bucket"]
         .as_str()
         .ok_or_else(|| format!("instance {id} has no site"))?;
@@ -69,11 +75,16 @@ pub fn target(record: &Value) -> std::result::Result<Target, String> {
         .ok_or_else(|| format!("instance {id}'s site has no domain to be served at"))?;
     Ok(Target {
         repo,
+        account_id: account_id.into(),
         bucket: Bucket {
             name: bucket.to_string(),
             jurisdiction: site["jurisdiction"].as_str().map(str::to_string),
         },
         base_url: format!("https://{host}"),
+        site: site["name"]
+            .as_str()
+            .ok_or_else(|| format!("instance {id}'s site has no name"))?
+            .into(),
     })
 }
 
@@ -149,14 +160,7 @@ async fn tarball_of(repo: &str, rev: &str, token: Option<&str>) -> Result<Vec<u8
     res.bytes().await
 }
 
-/// Deploys `instance` at `rev`.
-pub async fn deploy(
-    env: &Env,
-    key: &[u8],
-    caller: &Signed,
-    instance: &str,
-    rev: &str,
-) -> Result<Value> {
+async fn approved_record(env: &Env, key: &[u8], caller: &Signed, instance: &str) -> Result<Value> {
     let records = core(
         env,
         key,
@@ -165,12 +169,125 @@ pub async fn deploy(
         &json!({ "tool": "instances_list" }),
     )
     .await?;
-    let record = records
+    records
         .as_array()
         .into_iter()
         .flatten()
         .find(|r| r["id"] == instance)
-        .ok_or_else(|| bad(format!("there is no instance {instance}")))?;
+        .cloned()
+        .ok_or_else(|| bad(format!("there is no instance {instance}")))
+}
+
+async fn ensure_current(
+    env: &Env,
+    key: &[u8],
+    caller: &Signed,
+    instance: &str,
+    expected: &Value,
+) -> Result<()> {
+    if approved_record(env, key, caller, instance).await? != *expected {
+        return Err(bad(
+            "the approved publishing record changed; retry with the current configuration",
+        ));
+    }
+    Ok(())
+}
+
+async fn linked_account(
+    env: &Env,
+    key: &[u8],
+    caller: &Signed,
+    instance: &str,
+    target: &Target,
+) -> Result<Account> {
+    let linked = core(
+        env,
+        key,
+        caller,
+        "credential",
+        &json!({"kind": "linked", "instance": instance}),
+    )
+    .await?;
+    let account = Account {
+        id: linked["account_id"]
+            .as_str()
+            .ok_or_else(|| bad("core's linked credential has no account"))?
+            .to_string(),
+        parent: String::new(),
+        secrets_store: String::new(),
+        bearer: Some(
+            linked["token"]
+                .as_str()
+                .ok_or_else(|| bad("core's linked credential has no token"))?
+                .to_string(),
+        ),
+        token_ledger: None,
+    };
+    if account.id != target.account_id {
+        return Err(bad("linked credential belongs to a different account"));
+    }
+    Ok(account)
+}
+
+/// Reactivates a previously staged release within the same approved publishing target.
+pub async fn rollback(
+    env: &Env,
+    key: &[u8],
+    caller: &Signed,
+    instance: &str,
+    release: &str,
+) -> Result<Value> {
+    if !site_publish::is_release_id(release) {
+        return Err(bad("expected a site release ID"));
+    }
+    let record = approved_record(env, key, caller, instance).await?;
+    let target = target(&record).map_err(bad)?;
+    let account = linked_account(env, key, caller, instance, &target).await?;
+    let provenance = r2::get(
+        &account,
+        &target.bucket,
+        &site_publish::release_key(release),
+    )
+    .await?
+    .ok_or_else(|| bad("unknown site release"))?;
+    let provenance: Value = serde_json::from_slice(&provenance)?;
+    if provenance["instance"] != instance
+        || provenance["base_url"] != target.base_url
+        || provenance["site"] != target.site
+    {
+        return Err(bad("release belongs to a different publishing target"));
+    }
+    let manifest = r2::get(&account, &target.bucket, &r2::manifest_key(release))
+        .await?
+        .ok_or_else(|| bad("site release is missing its manifest"))?;
+    let manifest: Manifest = serde_json::from_slice(&manifest)?;
+    if site_publish::release_id(&provenance, &manifest) != release {
+        return Err(bad("site release manifest does not match its identity"));
+    }
+    ensure_current(env, key, caller, instance, &record).await?;
+    r2::put(
+        &account,
+        &target.bucket,
+        r2::LIVE,
+        "text/plain",
+        release.as_bytes().to_vec(),
+    )
+    .await?;
+    Ok(
+        json!({"instance": instance, "release": release, "commit": provenance["commit"], "deployed": true}),
+    )
+}
+
+/// Deploys `instance` at `rev`.
+pub async fn deploy(
+    env: &Env,
+    key: &[u8],
+    caller: &Signed,
+    instance: &str,
+    rev: &str,
+) -> Result<Value> {
+    let record = approved_record(env, key, caller, instance).await?;
+    let record = &record;
     let pins = pins(record);
     check_sites_pin(
         pins.sites.as_deref(),
@@ -215,22 +332,8 @@ pub async fn deploy(
         }
     };
 
-    let linked = core(env, key, caller, "credential", &ask("linked")).await?;
-    let account = Account {
-        id: linked["account_id"]
-            .as_str()
-            .ok_or_else(|| bad("core's linked credential has no account"))?
-            .to_string(),
-        parent: String::new(),
-        secrets_store: String::new(),
-        bearer: Some(
-            linked["token"]
-                .as_str()
-                .ok_or_else(|| bad("core's linked credential has no token"))?
-                .to_string(),
-        ),
-        token_ledger: None,
-    };
+    ensure_current(env, key, caller, instance, record).await?;
+    let account = linked_account(env, key, caller, instance, &t).await?;
     let present: BTreeSet<String> = r2::list(&account, &t.bucket, "blobs/")
         .await?
         .iter()
@@ -265,20 +368,45 @@ pub async fn deploy(
         r2::put(&account, &t.bucket, &r2::blob_key(&blob), &ctype, bytes).await?;
     }
     let files = manifest.len();
+    let provenance = json!({
+        "commit": commit,
+        "instance": instance,
+        "site": t.site,
+        "template": out.template,
+        "template_version": out.version,
+        "template_digest": out.digest,
+        "renderer_digest": pigeon_blog::renderer_digest(),
+        "base_url": t.base_url,
+    });
+    // A legacy instance keeps its existing serving contract until the owner opts in.
+    let release =
+        (!record["publishing"].is_null()).then(|| site_publish::release_id(&provenance, &manifest));
+    let pointer = release.as_deref().unwrap_or(&commit);
     r2::put(
         &account,
         &t.bucket,
-        &r2::manifest_key(&commit),
+        &r2::manifest_key(pointer),
         "application/json",
         serde_json::to_vec(&manifest).map_err(|e| bad(e.to_string()))?,
     )
     .await?;
+    if let Some(release) = &release {
+        r2::put(
+            &account,
+            &t.bucket,
+            &site_publish::release_key(release),
+            "application/json",
+            serde_json::to_vec(&provenance)?,
+        )
+        .await?;
+    }
+    ensure_current(env, key, caller, instance, record).await?;
     r2::put(
         &account,
         &t.bucket,
         r2::LIVE,
         "text/plain",
-        commit.clone().into_bytes(),
+        pointer.as_bytes().to_vec(),
     )
     .await?;
     Ok(json!({
@@ -287,6 +415,7 @@ pub async fn deploy(
         "deployed": true,
         "files": files,
         "uploaded": uploaded,
+        "release": release,
         "read_with": if gh_token.is_some() { "the GitHub App" } else { "codeload (public)" },
         "template": out.template,
         "template_version": out.version,

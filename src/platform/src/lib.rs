@@ -347,6 +347,21 @@ async fn mcp_post(mut req: Request, env: &Env) -> Result<Response> {
                 .with_headers(headers));
         }
     };
+    let url = req.url()?;
+    let mut targets = url.query_pairs().filter(|(key, _)| key == "instance");
+    let instance = targets.next().map(|(_, value)| value.into_owned());
+    if targets.next().is_some() {
+        return Response::error("specify one target instance", 400);
+    }
+    if let Some(id) = &instance {
+        let records = pigeon_capabilities::instances::all(env).await?;
+        let Some(record) = records.iter().find(|record| record.id == *id) else {
+            return Response::error("unknown instance", 404);
+        };
+        if pigeon_core::site_publish::site(&serde_json::to_value(record)?).is_err() {
+            return Response::error("site publishing is unavailable for this instance", 403);
+        }
+    }
     let message: Value = match req.json().await {
         Ok(v) => v,
         Err(e) => return Response::error(format!("not JSON: {e}"), 400),
@@ -354,6 +369,17 @@ async fn mcp_post(mut req: Request, env: &Env) -> Result<Response> {
     let caps = split::all(env, settings::capabilities(), settings::BINDINGS).await;
     let hosted = hosted(&caps);
     let mut tools: Vec<mcp::Tool> = caps.iter().flat_map(|c| c.tools()).collect();
+    if instance.is_some() {
+        tools.retain(|tool| pigeon_core::site_publish::scoped_tool(tool.name));
+        for tool in &mut tools {
+            if let Some(properties) = tool.input_schema["properties"].as_object_mut() {
+                properties.remove("instance");
+            }
+            if let Some(required) = tool.input_schema["required"].as_array_mut() {
+                required.retain(|name| name != "instance");
+            }
+        }
+    }
     pigeon_capabilities::approvals::annotate(&mut tools);
     let server = Server {
         name: settings::WORKER,
@@ -378,6 +404,12 @@ async fn mcp_post(mut req: Request, env: &Env) -> Result<Response> {
                        without the proxy credential.",
     };
     let call = async |name: &str, args: &Value| -> Result<Value> {
+        let bound = instance
+            .as_ref()
+            .map(|id| pigeon_core::site_publish::scoped_args(id, name, args))
+            .transpose()
+            .map_err(Error::RustError)?;
+        let args = bound.as_ref().unwrap_or(args);
         let cx = Context {
             account: &account,
             env,
