@@ -1378,7 +1378,7 @@ fn ai_agents_cost_reconcile() {
     let (same, none) = budget::reconcile(spent, &rows(&[(1, "a", 1)]), &json!({}));
     assert_eq!((same, none.len()), (spent, 0));
 
-    // A live child holds the larger of budget and spend; an ended child holds its spend.
+    // A live child holds its spend plus a small reserve; an ended child holds its spend.
     let kids = json!([
         {"ended_at": null, "spent": {"cost": "$1", "cost_usd": 1.0}, "budget": {"cost": "$5", "budget_cost_usd": 5.0}},
         {"ended_at": null, "spent": {"cost": "$7", "cost_usd": 7.0}, "budget": {"cost": "$5", "budget_cost_usd": 5.0}},
@@ -1386,7 +1386,7 @@ fn ai_agents_cost_reconcile() {
     ]);
     assert_eq!(
         budget::executors_committed(&kids),
-        5_000_000 + 7_000_000 + 1_250_000
+        (1_000_000 + 500_000) + 7_000_000 + 1_250_000
     );
     assert_eq!(budget::executors_committed(&json!([])), 0);
     assert_eq!(budget::executors_committed(&json!(null)), 0);
@@ -1996,7 +1996,7 @@ fn ai_agents_probe_and_spend_check_their_input() {
     );
     assert!(probe_err(json!({})).contains("`model` is required"));
     assert!(probe_err(json!({ "model": 3 })).contains("string"));
-    assert!(probe_err(json!({ "model": "openai/gpt-5" })).contains("OpenAI"));
+    assert!(probe_err(json!({ "model": "mistral/large" })).contains("mistral"));
     assert!(probe_err(json!({ "model": "anthropic/bad name" })).contains("`model`"));
     assert!(probe_err(json!({ "model": "anthropic", "max_tokens": 65 })).contains("64"));
     assert!(probe_err(json!({ "model": "anthropic", "max_tokens": 0 })).contains("between"));
@@ -2136,5 +2136,115 @@ fn ai_agents_run_spend_answers_from_what_the_run_keeps() {
     assert_eq!(
         probe::spend_answer(&b, &est, 0, 0, 0)["cost_source"],
         "estimate"
+    );
+}
+
+/// A planner's executors hold only a small reserve, so the planner can still take a turn
+/// (the incident: cap $15, own $0.32, two live executors with $7.25 budgets).
+#[test]
+fn ai_agents_executor_reserve_leaves_planner_room() {
+    use pigeon_ai_agents::Role;
+    use pigeon_ai_agents::budget::{self, Budget, Next, Over, Spent};
+
+    let kids = json!([
+        {"ended_at": null, "spent": {"cost_usd": 0.1}, "budget": {"budget_cost_usd": 7.25}},
+        {"ended_at": null, "spent": {"cost_usd": 0.2}, "budget": {"budget_cost_usd": 7.25}},
+    ]);
+    assert_eq!(budget::executors_split(&kids), (300_000, 1_000_000));
+    let b = Budget {
+        cost_micros: 15_000_000,
+        executors: 5,
+        ..Budget::default_for(Role::Planner)
+    };
+    let planner = budget::with_executors(
+        Spent {
+            cost_micros: 320_000,
+            executors: 2,
+            v: 1,
+            ..Spent::default()
+        },
+        &kids,
+    );
+    assert_eq!(planner.executors_micros, 1_300_000);
+    let turn = Next::Turn {
+        estimate_micros: 200_000,
+    };
+    assert_eq!(budget::check(&b, &planner, 0, 1, turn), Ok(()));
+    assert!(!budget::last_turn_due(&b, &planner, 0));
+
+    // An ended child releases its reserve and keeps only its spend.
+    let ended = json!([
+        {"ended_at": 5, "spent": {"cost_usd": 0.1}, "budget": {"budget_cost_usd": 7.25}},
+    ]);
+    assert_eq!(budget::executors_split(&ended), (100_000, 0));
+    // A live child near its budget reserves only what is unspent.
+    let near = json!([
+        {"ended_at": null, "spent": {"cost_usd": 7.0}, "budget": {"budget_cost_usd": 7.25}},
+    ]);
+    assert_eq!(budget::executors_split(&near), (7_000_000, 250_000));
+
+    // The status JSON shows spent and reserved apart; old rows still parse.
+    let mut sj = json!({"cost": "$0.32"});
+    pigeon_ai_agents::object::add_planner_cost(&mut sj, &planner);
+    assert_eq!(sj["executors_reserved_usd"], 1.0);
+    assert_eq!(sj["executors_spent_usd"], 0.3);
+    assert_eq!(sj["executors_cost_usd"], 1.3);
+    assert_eq!(sj["total_cost"], "$1.62");
+    let old: Spent =
+        serde_json::from_str(r#"{"turns":1,"cost_micros":2,"sandbox_ms":0,"executors":0}"#)
+            .unwrap();
+    assert_eq!(old.executors_reserved_micros, 0);
+    assert_eq!(old.executors_spent_micros, 0);
+
+    // A spawn needs the planner's remaining cost to cover only the reserve.
+    let spawn = Next::Spawn {
+        cost_micros: budget::EXECUTOR_RESERVE_MICROS,
+    };
+    assert_eq!(budget::check(&b, &planner, 0, 1, spawn), Ok(()));
+    let broke = Spent {
+        cost_micros: 14_000_000,
+        executors_micros: 600_000,
+        ..planner
+    };
+    assert_eq!(budget::check(&b, &broke, 0, 1, spawn), Err(Over::Cost));
+}
+/// An `openai/...` choice is accepted: it names the gateway's BYOK provider `openai`, it takes the
+/// gateway's plain model-id rule, it is paid by the person's own key, and no text says Cloudflare
+/// credits pay for it. The bare word `openai` picks the tier model, as `anthropic` does.
+#[test]
+fn ai_agents_openai_choice_routes_to_byok_provider() {
+    use pigeon_ai_agents::models::{Choice, Defaults, Slot, defaults_answer, route};
+    let c = Choice::parse("openai/gpt-6.2-sol", Slot::Executor).unwrap();
+    assert_eq!(
+        (c.provider.as_str(), c.model.as_str()),
+        ("openai", "gpt-6.2-sol")
+    );
+    assert_eq!(c.text(), "openai/gpt-6.2-sol");
+    // The provider name is the one the model gateway declares.
+    let src = include_str!("../../src/model-gateway/src/lib.rs");
+    assert!(src.contains("name: \"openai\","));
+    assert_eq!(
+        Choice::parse("openai", Slot::Planner).unwrap().text(),
+        "openai/gpt-6.2-astra"
+    );
+    assert_eq!(
+        Choice::parse("openai", Slot::Summary).unwrap().text(),
+        "openai/gpt-6.1-terra"
+    );
+    // The gateway's id rule decides which ids are taken.
+    assert!(Choice::parse("openai/gpt 6", Slot::Executor).is_err());
+    assert!(Choice::parse("openai/", Slot::Executor).is_err());
+    assert!(Choice::parse("openai/@cf/x/y", Slot::Executor).is_err());
+    // It is on the person's own key, not credits.
+    assert_eq!(route("openai"), "byok");
+    assert_eq!(route("cf-openai"), "credits");
+    let raw = json!({ "executor": "openai/gpt-6.2-sol" });
+    let a = defaults_answer(&Defaults::from_json(&raw), &[]);
+    assert_eq!(a["defaults"]["executor"]["model"], "openai/gpt-6.2-sol");
+    assert_eq!(a["defaults"]["executor"]["route"], "byok");
+    let shown = a.to_string();
+    assert!(
+        !shown.contains("OpenAI is paid with Cloudflare credits"),
+        "{shown}"
     );
 }

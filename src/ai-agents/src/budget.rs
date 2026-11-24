@@ -351,6 +351,14 @@ pub struct Spent {
     /// For planners: what their executors hold against the budget, in micro-dollars.
     #[serde(default)]
     pub executors_micros: u64,
+    /// For planners: the money its executors have actually spent, in micro-dollars. Part of
+    /// `executors_micros`. Old rows lack it and read as 0 until the next refresh.
+    #[serde(default)]
+    pub executors_spent_micros: u64,
+    /// For planners: the reserve held for live executors, in micro-dollars. Part of
+    /// `executors_micros`. Old rows lack it and read as 0 until the next refresh.
+    #[serde(default)]
+    pub executors_reserved_micros: u64,
     /// The format. 0 is old (cost holds executor reservations); 1 is current.
     #[serde(default)]
     pub v: u32,
@@ -597,20 +605,33 @@ fn parse_money(text: &str) -> Option<u64> {
         .and_then(usd_to_micros)
 }
 
-/// What the executors of a planner hold against its budget, from the index's `children` answer.
+/// The most a live executor holds beyond its own spend, in micro-dollars ($0.50).
+pub const EXECUTOR_RESERVE_MICROS: u64 = 500_000;
+
+/// The reserve a live executor holds: what it has not spent of its budget, up to
+/// [`EXECUTOR_RESERVE_MICROS`].
+pub fn executor_reserve(budget_micros: u64, spent_micros: u64) -> u64 {
+    budget_micros
+        .saturating_sub(spent_micros)
+        .min(EXECUTOR_RESERVE_MICROS)
+}
+
+/// What the executors of a planner spent and reserve, as `(spent, reserved)` micro-dollars,
+/// from the index's `children` answer.
 ///
-/// A live child holds the larger of its cost budget and its own spend. An ended child holds
-/// its own spend. Children are read from the `children` array (or the value itself if it is
-/// an array). Numeric `cost_usd` fields are preferred; money strings are the fallback.
-pub fn executors_committed(children: &Value) -> u64 {
+/// Every child counts its own spend. A live child also reserves [`executor_reserve`]; an
+/// ended child reserves nothing. Children are read from the `children` array (or the value
+/// itself if it is an array). Numeric `cost_usd` fields are preferred; money strings are the
+/// fallback.
+pub fn executors_split(children: &Value) -> (u64, u64) {
     let list = children
         .get("children")
         .and_then(Value::as_array)
         .or_else(|| children.as_array());
     let Some(list) = list else {
-        return 0;
+        return (0, 0);
     };
-    let mut total: u64 = 0;
+    let (mut spent_total, mut reserved_total) = (0u64, 0u64);
     for child in list {
         let spent = child
             .pointer("/spent/cost_usd")
@@ -623,10 +644,9 @@ pub fn executors_committed(children: &Value) -> u64 {
                     .and_then(parse_money)
             })
             .unwrap_or(0);
+        spent_total = spent_total.saturating_add(spent);
         let ended = child.get("ended_at").is_some_and(|v| !v.is_null());
-        let held = if ended {
-            spent
-        } else {
+        if !ended {
             let budget = child
                 .pointer("/budget/budget_cost_usd")
                 .and_then(Value::as_f64)
@@ -638,11 +658,27 @@ pub fn executors_committed(children: &Value) -> u64 {
                         .and_then(parse_money)
                 })
                 .unwrap_or(0);
-            budget.max(spent)
-        };
-        total = total.saturating_add(held);
+            reserved_total = reserved_total.saturating_add(executor_reserve(budget, spent));
+        }
     }
-    total
+    (spent_total, reserved_total)
+}
+
+/// What the executors of a planner hold against its budget: their spend plus the live reserve.
+pub fn executors_committed(children: &Value) -> u64 {
+    let (spent, reserved) = executors_split(children);
+    spent.saturating_add(reserved)
+}
+
+/// Sets all three executor money fields of `spent` from the index's `children` answer.
+pub fn with_executors(spent: Spent, children: &Value) -> Spent {
+    let (s, r) = executors_split(children);
+    Spent {
+        executors_micros: s.saturating_add(r),
+        executors_spent_micros: s,
+        executors_reserved_micros: r,
+        ..spent
+    }
 }
 
 /// Applies the gateway's `models_cost` answer to a run's spend.

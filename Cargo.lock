@@ -866,6 +866,7 @@ dependencies = [
  "futures-util",
  "pigeon-contract",
  "pigeon-core",
+ "pigeon-models",
  "serde",
  "serde_json",
  "worker",

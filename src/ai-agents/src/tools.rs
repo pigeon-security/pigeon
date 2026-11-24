@@ -340,7 +340,7 @@ fn agent_definitions(role: Role) -> Vec<Value> {
                     "brief": {"type": "string", "description": "A complete task description for the executor."},
                     "name": {"type": "string", "minLength": 1, "maxLength": 60, "description": "A 2 to 5 word name for the executor, such as \"Cost tab fix\"."},
                     "kind": {"type": "string", "enum": ["code", "mechanical"], "default": "code", "description": "`code` for ordinary work, `mechanical` for simple repetitive edits."},
-                    "model": {"type": "string", "description": "The executor's model: `provider/model` (cf-openai/gpt-6.2-sol), a `claude-…` name, or `anthropic`, `cf-anthropic`, `cf-openai` or `workers-ai` for that provider's model for its kind. Leave out to use what you were started with for executors, else the stored default."},
+                    "model": {"type": "string", "description": "The executor's model: `provider/model` (cf-openai/gpt-6.2-sol), a `claude-…` name, or `anthropic`, `cf-anthropic`, `openai`, `cf-openai` or `workers-ai` for that provider's model for its kind. Leave out to use what you were started with for executors, else the stored default."},
                     "base": {"type": "string", "description": "The branch or commit it starts from; main by default. Name another executor's branch to build on its work."},
                     "budget": {
                         "type": "object",

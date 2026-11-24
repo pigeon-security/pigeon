@@ -26,9 +26,13 @@ pub fn last_turn(over: Over, budget: &Budget, spent: &Spent, wall_used_ms: i64) 
             budget::duration(budget.wall_ms)
         ),
         _ => format!(
-            "You have used {} of your {} cost budget (90% or more).",
+            "You have used {} of your {} cost budget (90% or more): {} spent by you, {} spent \
+             by your executors and {} reserved for live executors.",
             budget::money(spent.committed_micros()),
-            budget::money(budget.cost_micros)
+            budget::money(budget.cost_micros),
+            budget::money(spent.cost_micros),
+            budget::money(spent.executors_spent_micros),
+            budget::money(spent.executors_reserved_micros)
         ),
     };
     format!(
