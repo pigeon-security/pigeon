@@ -1069,3 +1069,10 @@ executors through it. Each item: state, next step, who it waits on.
   map block itself is the same bytes every turn. Smoke: `ai_agents_repo_map_current` (script
   output equals the committed file), `ai_agents_repo_map_prefix_is_stable`,
   `ai_agents_repo_map_is_small_and_plain`. `ci/` is a gate change for landing.
+
+- 2026-11-27: **Estimator kinds (8c).** The kinds are `live check`, `integrate`, `fix`, `design`,
+  `docs`, `build`; `test` and `mechanical` are gone. `ai_agents_start {kind}` (planners only) and
+  `ai_agents_estimate {kind}` (any role) take one; with none, the brief is classified by keyword
+  in that order, and `docs` needs the brief's first sentence or line, or `docs-only`, not a stray
+  `plan`. `Past.kind` is the stored run kind, else classified. The estimate shows `kind` and
+  `kind_source`. `build` and `live check` have no model slot: they use the planner default.

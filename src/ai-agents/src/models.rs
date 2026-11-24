@@ -106,20 +106,25 @@ pub fn all_slots() -> Vec<Slot> {
         .collect()
 }
 
-/// Checks the `kind` of `ai_agents_start` for a run of `role`. Only a planner may give one;
-/// any other role is refused, not ignored.
-pub fn start_kind(role: Role, args: &Value) -> Result<Option<Kind>, String> {
+/// Checks the `kind` of `ai_agents_start` for a run of `role`: one of the estimator kinds
+/// (integrate, docs, fix, design, build, live check). Only a planner may give one; any other
+/// role is refused, not ignored. Build and live check have no model slot.
+pub fn start_kind(role: Role, args: &Value) -> Result<Option<&'static str>, String> {
     let text = match &args["kind"] {
         Value::Null => return Ok(None),
         Value::String(s) => s.trim(),
-        _ => return Err("`kind` must be one of: integrate, docs, fix, design".into()),
+        _ => {
+            return Err(
+                "`kind` must be one of: integrate, docs, fix, design, build, live check".into(),
+            );
+        }
     };
     if role != Role::Planner {
         return Err("`kind` is for a planner: it hints what the planner is for".into());
     }
-    Kind::parse(text)
-        .map(Some)
-        .ok_or_else(|| format!("`{text}` is not a kind: use integrate, docs, fix or design"))
+    crate::estimate::parse_kind(text).map(Some).ok_or_else(|| {
+        format!("`{text}` is not a kind: use integrate, docs, fix, design, build or live check")
+    })
 }
 
 /// Every slot, in the order shown.

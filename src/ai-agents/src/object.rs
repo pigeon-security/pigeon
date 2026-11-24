@@ -768,6 +768,7 @@ impl AiAgentRuns {
         let role: Role = serde_json::from_value(a["role"].clone())
             .map_err(|_| bad("`role` must be planner, executor or mechanical"))?;
         let brief = a["brief"].as_str().unwrap_or_default();
+        let given = a["kind"].as_str();
         let mut rows: Vec<Row> = self.db.rows(
             "SELECT * FROM runs WHERE ended_at IS NOT NULL AND runtime = 'gateway' ORDER BY ended_at DESC LIMIT 500",
             vec![],
@@ -791,6 +792,7 @@ impl AiAgentRuns {
                     "state": r.state,
                     "parent_run": r.parent_run,
                     "brief": r.brief,
+                    "kind": r.kind,
                     "budget": obj(&r.budget),
                     "spent": obj(&r.spent),
                     "ended_at": r.ended_at,
@@ -798,7 +800,7 @@ impl AiAgentRuns {
             })
             .collect();
         let past = estimate::actual_costs(&values);
-        Ok(estimate::estimate(role, brief, &past).to_json())
+        Ok(estimate::estimate(role, brief, given, &past).to_json())
     }
 
     /// Records a new run, queued, and starts its object.
@@ -828,7 +830,7 @@ impl AiAgentRuns {
         // Only a planner has a kind.
         let kind = a["kind"]
             .as_str()
-            .filter(|k| role == Role::Planner && models::Kind::parse(k).is_some());
+            .filter(|k| role == Role::Planner && estimate::parse_kind(k).is_some());
         let child_json = (!child_models.is_empty()).then(|| child_models.to_json().to_string());
         self.db.exec(
             "INSERT INTO runs (id, role, runtime, state, parent_run, session_id, caller, by_id, for_id, brief, base, branch, budget, spent, created_at, estimate, model, child_models, name, kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",

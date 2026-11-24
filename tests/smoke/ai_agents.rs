@@ -1153,14 +1153,38 @@ fn ai_agents_cost_estimate() {
     // Kinds: first match wins, case does not matter.
     assert_eq!(estimate::kind("Update the README"), "docs");
     assert_eq!(estimate::kind("Fix the broken build"), "fix");
-    assert_eq!(estimate::kind("add a smoke scenario"), "test");
-    assert_eq!(estimate::kind("Rename the module"), "mechanical");
     assert_eq!(estimate::kind("Add a new tool"), "build");
+    assert_eq!(estimate::kind("Run a LIVE CHECK of the fix"), "live check");
+    assert_eq!(estimate::kind("Integrate the branches"), "integrate");
+    assert_eq!(estimate::kind("Design the cache"), "design");
+    assert_eq!(estimate::kind("fix the docs-only plan"), "fix", "fix first");
+    // A stray `plan` is not docs; a planner brief about a fix is a fix.
     assert_eq!(
-        estimate::kind("fix the docs-only plan"),
-        "docs",
-        "docs first"
+        estimate::kind("Read docs/plans/x.md, the plan. Fix the retry bug."),
+        "fix"
     );
+    assert_eq!(estimate::kind("Add a tool described in the plan."), "build");
+    // Docs need the first sentence or line, or `docs-only`.
+    assert_eq!(estimate::kind("Update the docs. Then add a tool."), "docs");
+    assert_eq!(estimate::kind("Add a tool.\nThis is docs-only."), "docs");
+    assert_eq!(estimate::kind("Add a tool.\nAlso the README."), "build");
+    // A given kind wins over keywords, and is shown as given.
+    let given = estimate::estimate(Role::Executor, "Fix the bug", Some("design"), &[]);
+    assert_eq!((given.kind, given.kind_source), ("design", "given"));
+    let classified = estimate::estimate(Role::Executor, "Fix the bug", None, &[]);
+    assert_eq!(
+        (classified.kind, classified.kind_source),
+        ("fix", "classified")
+    );
+    assert_eq!(classified.to_json()["kind_source"], "classified");
+    // Past uses the stored kind, else classifies its brief.
+    let stored = json!({ "id": "a", "role": "executor", "state": "done", "parent_run": null,
+        "brief": "Fix the bug", "kind": "live check", "budget": {}, "spent": { "turns": 1 },
+        "ended_at": 1 });
+    let mut unstored = stored.clone();
+    unstored["kind"] = Value::Null;
+    let past = estimate::actual_costs(&[stored, unstored]);
+    assert_eq!((past[0].kind, past[1].kind), ("live check", "fix"));
 
     // Fake index rows.
     let row = |id: &str, role: &str, state: &str, parent: Value, budget: u64, spent: Value| {
@@ -1269,7 +1293,12 @@ fn ai_agents_cost_estimate() {
             .collect()
     };
     let brief = "x".repeat(100);
-    let few = estimate::estimate(Role::Executor, &brief, &samples(&[(100, 1), (100, 2)]));
+    let few = estimate::estimate(
+        Role::Executor,
+        &brief,
+        None,
+        &samples(&[(100, 1), (100, 2)]),
+    );
     assert_eq!(few.samples, 2);
     assert_eq!(
         few.suggested.cost_micros,
@@ -1280,7 +1309,7 @@ fn ai_agents_cost_estimate() {
             .contains("not enough similar past runs (2); the role's default")
     );
     // Other roles' runs do not count.
-    let none = estimate::estimate(Role::Planner, &brief, &samples(&[(100, 1); 5]));
+    let none = estimate::estimate(Role::Planner, &brief, None, &samples(&[(100, 1); 5]));
     assert_eq!(none.samples, 0);
     assert_eq!(
         none.suggested.executors,
@@ -1289,7 +1318,7 @@ fn ai_agents_cost_estimate() {
 
     // Ten runs of $1 to $10: median rank 5, low rank 1, high rank 9. 9 * 1.25 = 11.25, up to 11.5.
     let ten: Vec<(usize, u64)> = (1..=10).map(|i| (100, i * 1_000_000)).collect();
-    let e = estimate::estimate(Role::Executor, &brief, &samples(&ten));
+    let e = estimate::estimate(Role::Executor, &brief, None, &samples(&ten));
     assert_eq!(
         (e.samples, e.median_micros, e.low_micros, e.high_micros),
         (10, 5_000_000, 1_000_000, 9_000_000)
@@ -1300,15 +1329,20 @@ fn ai_agents_cost_estimate() {
     assert_eq!(j["suggested_budget"]["cost_usd"], 11.5);
     assert_eq!(j["kind"], "build");
     // The minimum is $0.50 and the cap is the hard cap.
-    let cheap = estimate::estimate(Role::Executor, &brief, &samples(&[(100, 10); 3]));
+    let cheap = estimate::estimate(Role::Executor, &brief, None, &samples(&[(100, 10); 3]));
     assert_eq!(cheap.suggested.cost_micros, 500_000);
-    let dear = estimate::estimate(Role::Executor, &brief, &samples(&[(100, 90_000_000); 3]));
+    let dear = estimate::estimate(
+        Role::Executor,
+        &brief,
+        None,
+        &samples(&[(100, 90_000_000); 3]),
+    );
     assert_eq!(dear.suggested.cost_micros, Budget::HARD.cost_micros);
 
     // The nearest ten by size win over farther ones.
     let mut mixed: Vec<(usize, u64)> = vec![(100_000, 50_000_000); 10];
     mixed.extend(vec![(120, 1_000_000); 10]);
-    let near = estimate::estimate(Role::Executor, &brief, &samples(&mixed));
+    let near = estimate::estimate(Role::Executor, &brief, None, &samples(&mixed));
     assert_eq!(near.samples, 10);
     assert_eq!(near.high_micros, 1_000_000);
 }
@@ -2647,9 +2681,9 @@ fn ai_agents_kind_arg_and_slots() {
     use pigeon_ai_agents::Role;
     use pigeon_ai_agents::models::{Defaults, Kind, Slot, check_set, defaults_answer, start_kind};
     assert_eq!(start_kind(Role::Planner, &json!({})).unwrap(), None);
-    for k in ["integrate", "docs", "fix", "design"] {
+    for k in ["integrate", "docs", "fix", "design", "build", "live check"] {
         let got = start_kind(Role::Planner, &json!({ "kind": k })).unwrap();
-        assert_eq!(got.map(Kind::name), Some(k));
+        assert_eq!(got, Some(k));
     }
     assert!(start_kind(Role::Planner, &json!({ "kind": "other" })).is_err());
     assert!(start_kind(Role::Planner, &json!({ "kind": 3 })).is_err());

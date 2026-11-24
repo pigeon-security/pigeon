@@ -5,6 +5,7 @@
 //!
 //! A past run is "similar" when it has the same role. Among those, the ten nearest by brief
 //! size and kind are used. The distance is `|ln(size ratio)|`, plus 0.5 when the kinds differ.
+//! A past run's kind is the one it was started with, else classified from its brief.
 //! Ties keep the order the runs were given in.
 //!
 //! Percentiles use the nearest-rank method: sort the `n` values, take the value at rank
@@ -22,28 +23,36 @@ const MIN_SAMPLES: usize = 3;
 /// The suggested cost is rounded up to a multiple of this, in micro-dollars ($0.50).
 const STEP_MICROS: u64 = 500_000;
 
-/// Words that mark a brief as documentation work.
-const DOCS_WORDS: [&str; 4] = ["docs-only", "plan", "readme", "documentation"];
+/// The kinds an estimate knows, in the order a brief is classified.
+pub const KINDS: [&str; 6] = ["live check", "integrate", "fix", "design", "docs", "build"];
 /// Words that mark a brief as a fix.
 const FIX_WORDS: [&str; 4] = ["fix", "bug", "broken", "regression"];
-/// Words that mark a brief as test work.
-const TEST_WORDS: [&str; 2] = ["smoke", "test scenario"];
-/// Words that mark a brief as a mechanical change.
-const MECHANICAL_WORDS: [&str; 4] = ["rename", "move", "mechanical", "bump"];
+/// Words that mark a brief's first sentence or line as docs work.
+const DOCS_WORDS: [&str; 4] = ["docs", "documentation", "readme", "plan doc"];
 
-/// The kind of work a brief asks for: `docs`, `fix`, `test`, `mechanical`, else `build`. The
-/// match is by keyword, ignores case, and the first class (in that order) that matches wins.
+/// The kind named by `text` (trimmed, any case), or `None` if it is not one of [`KINDS`].
+pub fn parse_kind(text: &str) -> Option<&'static str> {
+    let t = text.trim().to_lowercase();
+    KINDS.into_iter().find(|k| *k == t)
+}
+
+/// The kind of work a brief asks for, by keyword, ignoring case. The first class in the order
+/// `live check`, `integrate`, `fix`, `design`, `docs` that matches wins, else `build`. `docs`
+/// needs a docs word in the brief's first sentence or first line, or the words `docs-only`.
 pub fn kind(brief: &str) -> &'static str {
-    let b = brief.to_lowercase();
-    let has = |words: &[&str]| words.iter().any(|w| b.contains(w));
-    if has(&DOCS_WORDS) {
-        "docs"
-    } else if has(&FIX_WORDS) {
+    let b = brief.trim().to_lowercase();
+    let has = |text: &str, words: &[&str]| words.iter().any(|w| text.contains(w));
+    let first = b.split(['.', '!', '?', '\n']).next().unwrap_or_default();
+    if b.contains("live check") {
+        "live check"
+    } else if b.contains("integrate") {
+        "integrate"
+    } else if has(&b, &FIX_WORDS) {
         "fix"
-    } else if has(&TEST_WORDS) {
-        "test"
-    } else if has(&MECHANICAL_WORDS) {
-        "mechanical"
+    } else if b.contains("design") {
+        "design"
+    } else if b.contains("docs-only") || has(first, &DOCS_WORDS) {
+        "docs"
     } else {
         "build"
     }
@@ -56,7 +65,7 @@ pub struct Past {
     pub role: Role,
     /// The size of its brief, in bytes.
     pub brief_bytes: usize,
-    /// Its brief's kind, from [`kind`].
+    /// Its kind: the one it was started with, else its brief's, from [`kind`].
     pub kind: &'static str,
     /// How many executors it spawned (a planner's children).
     pub executors: u32,
@@ -96,6 +105,10 @@ pub fn actual_costs(rows: &[Value]) -> Vec<Past> {
             continue;
         };
         let brief = row["brief"].as_str().unwrap_or_default();
+        let past_kind = row["kind"]
+            .as_str()
+            .and_then(parse_kind)
+            .unwrap_or_else(|| kind(brief));
         let mut cost = own_cost(&row["spent"]);
         let mut executors = 0u32;
         if role == Role::Planner {
@@ -117,7 +130,7 @@ pub fn actual_costs(rows: &[Value]) -> Vec<Past> {
         out.push(Past {
             role,
             brief_bytes: brief.len(),
-            kind: kind(brief),
+            kind: past_kind,
             executors,
             cost_micros: cost,
         });
@@ -141,8 +154,10 @@ pub struct Suggested {
 pub struct Estimate {
     /// How many past runs it rests on.
     pub samples: usize,
-    /// The brief's kind.
+    /// The run's kind.
     pub kind: &'static str,
+    /// Where the kind came from: `given` or `classified`.
+    pub kind_source: &'static str,
     /// The median cost of those runs, in micro-dollars.
     pub median_micros: u64,
     /// Their 10th percentile cost.
@@ -178,11 +193,13 @@ fn suggest_cost(high: u64) -> u64 {
     u64::try_from(rounded.min(cap)).unwrap_or(Budget::HARD.cost_micros)
 }
 
-/// Estimates a run of `role` with `brief` from `past` runs. See the module docs for the method.
+/// Estimates a run of `role` with `brief` from `past` runs. `given` is the run's kind, if it has
+/// one; else the brief is classified. See the module docs for the method.
 /// The suggested cost is the 90th percentile times 1.25, rounded up to $0.50. With fewer than
 /// three similar runs it is the role's default.
-pub fn estimate(role: Role, brief: &str, past: &[Past]) -> Estimate {
-    let k = kind(brief);
+pub fn estimate(role: Role, brief: &str, given: Option<&str>, past: &[Past]) -> Estimate {
+    let given = given.and_then(parse_kind);
+    let k = given.unwrap_or_else(|| kind(brief));
     let size = brief.len().max(1) as f64;
     let mut near: Vec<(f64, &Past)> = past
         .iter()
@@ -231,6 +248,11 @@ pub fn estimate(role: Role, brief: &str, past: &[Past]) -> Estimate {
     Estimate {
         samples: n,
         kind: k,
+        kind_source: if given.is_some() {
+            "given"
+        } else {
+            "classified"
+        },
         median_micros: percentile(&costs, 50),
         low_micros: percentile(&costs, 10),
         high_micros: high,
@@ -259,6 +281,7 @@ impl Estimate {
         let mut v = json!({
             "samples": self.samples,
             "kind": self.kind,
+            "kind_source": self.kind_source,
             "median_usd": usd(self.median_micros),
             "low_usd": usd(self.low_micros),
             "high_usd": usd(self.high_micros),
