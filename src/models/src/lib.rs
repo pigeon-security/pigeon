@@ -1527,6 +1527,13 @@ impl Models {
     /// The MCP tools the capability offers.
     pub fn tools(&self) -> Vec<Tool> {
         let slugs: Vec<&str> = self.providers.iter().map(|p| p.name).collect();
+        // Only a provider with a billing source can answer `models_billing`.
+        let billed: Vec<&str> = self
+            .providers
+            .iter()
+            .filter(|p| p.billing.is_some())
+            .map(|p| p.name)
+            .collect();
         vec![
             Tool::bare(
                 "models_setup",
@@ -1689,7 +1696,7 @@ impl Models {
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "provider": { "type": "string", "enum": slugs, "description": "The first provider with billing when omitted." },
+                        "provider": { "type": "string", "enum": billed, "description": "The first provider with billing when omitted." },
                         "days": { "type": "integer", "description": "1 to 31; 7 by default." }
                     }
                 }),

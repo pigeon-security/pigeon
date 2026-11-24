@@ -898,6 +898,12 @@ fn models_openai_provider_declared_with_secret() {
             json!(["anthropic", "cf-openai"])
         );
     }
+    // `models_billing` offers only a provider that has a billing source.
+    let billing = tools.iter().find(|t| t.name == "models_billing").unwrap();
+    assert_eq!(
+        billing.input_schema["properties"]["provider"]["enum"],
+        json!(["anthropic"])
+    );
 }
 
 // ---- AI agents: model choice per run (docs/plans/model-providers.md, phase 5) ----

@@ -328,7 +328,7 @@ impl Agents {
                 let role = match a["role"].as_str().unwrap_or("executor") {
                     r @ ("planner" | "executor" | "mechanical") => r,
                     other => {
-                        return Err(format!("`role` must be planner or executor, not `{other}`"));
+                        return Err(format!("`role` must be planner, executor or mechanical, not `{other}`"));
                     }
                 };
                 let brief = a["brief"].as_str().unwrap_or_default();
