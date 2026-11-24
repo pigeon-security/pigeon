@@ -96,12 +96,15 @@ pub enum GatewayKind {
     Byok,
     /// Cloudflare AI Gateway Unified Billing: Cloudflare credits pay for the requests.
     Credits,
+    /// A gateway no provider routes to any more. Its logs are still read, and always count as
+    /// BYOK. It is never created, and should hold no stored key.
+    Retired,
 }
 
-/// A gateway as pigeon wants it, by `kind`. Both are authenticated and keep logs.
+/// A gateway as pigeon wants it, by `kind`. All are authenticated and keep logs.
 pub fn spec(id: &str, store_id: &str, kind: GatewayKind) -> Value {
     match kind {
-        GatewayKind::Byok => json!({
+        GatewayKind::Byok | GatewayKind::Retired => json!({
             "id": id,
             "cache_ttl": 0,
             "cache_invalidate_on_update": false,
@@ -166,6 +169,11 @@ async fn ensure_with(
             created: false,
             drift: drift(&want, &found, kind),
         }),
+        None if kind == GatewayKind::Retired => Ok(Ensured {
+            id: id.into(),
+            created: false,
+            drift: vec!["does not exist (retired; nothing to do)".into()],
+        }),
         None => {
             call(token, Method::Post, &base, Some(&want)).await?;
             Ok(Ensured {
@@ -180,10 +188,11 @@ async fn ensure_with(
 /// The settings in `want` that `found` holds otherwise, for a gateway of `kind`.
 pub fn drift(want: &Value, found: &Value, kind: GatewayKind) -> Vec<String> {
     let mut keys = vec!["authentication", "byok_only", "collect_logs"];
-    keys.push(match kind {
-        GatewayKind::Byok => "store_id",
-        GatewayKind::Credits => "zdr",
-    });
+    match kind {
+        GatewayKind::Byok => keys.push("store_id"),
+        GatewayKind::Credits => keys.push("zdr"),
+        GatewayKind::Retired => {}
+    }
     keys.iter()
         .filter(|k| want[**k] != found[**k])
         .map(|k| format!("{k} is {}, not {}", found[*k], want[*k]))
@@ -199,6 +208,15 @@ pub fn stored_key_drift(
     declared_slugs: &[&str],
 ) -> Vec<String> {
     match kind {
+        GatewayKind::Retired => configs
+            .iter()
+            .map(|c| {
+                format!(
+                    "holds a stored key for {}: delete it to retire this gateway",
+                    c.provider_slug
+                )
+            })
+            .collect(),
         GatewayKind::Credits => configs
             .iter()
             .map(|c| {
@@ -216,20 +234,51 @@ pub fn stored_key_drift(
     }
 }
 
-/// Whether a credits request to `slug` may go ahead, given the gateway as the API reads it and
-/// its stored keys. It refuses while the gateway needs provider keys, or holds one for `slug`.
-/// Pure.
+/// Whether a credits request through gateway `gateway_id` may go ahead, given the gateway as the
+/// API reads it and its stored keys. It refuses while the gateway needs provider keys, or holds
+/// any stored key: a key would be billed instead of credits. Pure.
 pub fn credits_guard(
+    gateway_id: &str,
     gateway: &Value,
     configs: &[ProviderConfig],
-    slug: &str,
 ) -> std::result::Result<(), String> {
     if gateway["byok_only"].as_bool() == Some(true) {
-        return Err("the credits gateway `pigeon` still requires provider keys: see Open item 2 of docs/plans/model-providers-cloudflare.md".into());
-    }
-    if configs.iter().any(|c| c.provider_slug == slug) {
         return Err(format!(
-            "the credits gateway `pigeon` still holds a stored {slug} key, which would be billed instead of credits"
+            "the credits gateway `{gateway_id}` still requires provider keys (byok_only is on): turn it off in the dashboard"
+        ));
+    }
+    if let Some(c) = configs.first() {
+        return Err(format!(
+            "the credits gateway `{gateway_id}` holds a stored {} key, which would be billed instead of credits: delete it in the dashboard",
+            c.provider_slug
+        ));
+    }
+    Ok(())
+}
+
+/// Whether a BYOK request for `slug` may go ahead through `gateway_id`: the gateway must exist,
+/// accept only stored keys, and hold one for `slug`. `gateway` is `None` when it does not exist.
+/// Pure.
+pub fn byok_ready(
+    gateway: Option<&Value>,
+    configs: &[ProviderConfig],
+    gateway_id: &str,
+    slug: &str,
+) -> std::result::Result<(), String> {
+    let Some(gateway) = gateway else {
+        return Err(format!(
+            "the BYOK gateway `{gateway_id}` does not exist: run models_setup"
+        ));
+    };
+    if gateway["byok_only"].as_bool() != Some(true) {
+        return Err(format!(
+            "the BYOK gateway `{gateway_id}` does not require stored keys (byok_only is not on): run models_setup"
+        ));
+    }
+    if !configs.iter().any(|c| c.provider_slug == slug) {
+        return Err(format!(
+            "the BYOK gateway `{gateway_id}` holds no key for {slug}: set {} on the Access tab, then run models_setup",
+            secret_name(gateway_id, slug, "default")
         ));
     }
     Ok(())

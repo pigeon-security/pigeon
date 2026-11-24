@@ -838,7 +838,6 @@ fn models_openai_provider_declared_with_secret() {
             provider("cf-openai", "openai", Route::Credits, Dialect::OpenAi, None),
         ],
         staged: Vec::new(),
-        credits_since: "9999-12-31T00:00:00Z".into(),
         secrets_page: "https://x/secrets".into(),
         host: "h".into(),
         proxy_host: "p".into(),
@@ -1328,35 +1327,31 @@ fn models_two_gateways_specs_guard_routes_and_daily() {
     );
     assert!(stored_key_drift(GatewayKind::Byok, &[config("anthropic")], &["anthropic"]).is_empty());
 
-    // The credits guard.
+    // The credits guard names the gateway it was given and refuses any stored key.
     let open = json!({ "byok_only": false });
-    assert!(credits_guard(&open, &[], "anthropic").is_ok());
-    assert!(
-        credits_guard(&json!({ "byok_only": true }), &[], "anthropic")
-            .unwrap_err()
-            .contains("Open item 2")
-    );
-    assert!(
-        credits_guard(&open, &[config("anthropic")], "anthropic")
-            .unwrap_err()
-            .contains("stored anthropic key")
-    );
-    assert!(credits_guard(&open, &[config("anthropic")], "openai").is_ok());
+    assert!(credits_guard("pigeon-cloudflare", &open, &[]).is_ok());
+    let e = credits_guard("pigeon-cloudflare", &json!({ "byok_only": true }), &[]).unwrap_err();
+    assert!(e.contains("`pigeon-cloudflare`") && e.contains("requires provider keys"));
+    let e = credits_guard("pigeon-cloudflare", &open, &[config("openai")]).unwrap_err();
+    assert!(e.contains("`pigeon-cloudflare`") && e.contains("stored openai key"));
+    assert!(e.contains("delete it in the dashboard"));
 
-    // Routes.
-    let since = "2026-06-01T00:00:00Z";
-    let before = "2026-05-31T23:59:59Z";
+    // Routes do not depend on time.
     assert_eq!(
-        route_of(GatewayKind::Credits, "anthropic", before, since),
-        ("anthropic".to_string(), Route::Byok)
+        route_of(GatewayKind::Credits, "anthropic"),
+        ("cf-anthropic".to_string(), Route::Credits)
     );
     assert_eq!(
-        route_of(GatewayKind::Credits, "openai", since, since),
+        route_of(GatewayKind::Credits, "openai"),
         ("cf-openai".to_string(), Route::Credits)
     );
     assert_eq!(
-        route_of(GatewayKind::Byok, "anthropic", since, since),
+        route_of(GatewayKind::Byok, "anthropic"),
         ("anthropic".to_string(), Route::Byok)
+    );
+    assert_eq!(
+        route_of(GatewayKind::Retired, "openai"),
+        ("openai".to_string(), Route::Byok)
     );
     assert_eq!(family_of("cf-openai", "gpt-6.2-sol"), "OpenAI");
     assert_eq!(family_of("cf-anthropic", "claude-opus-5-5"), "Opus");
@@ -1411,7 +1406,6 @@ fn models_two_gateways_specs_guard_routes_and_daily() {
             ),
         ],
         staged: vec![("pigeon-anthropic", "anthropic", "default")],
-        credits_since: since.into(),
         secrets_page: "https://x/secrets".into(),
         host: "h".into(),
         proxy_host: "p".into(),
@@ -1461,9 +1455,9 @@ fn models_two_gateways_specs_guard_routes_and_daily() {
             truncated: true,
         },
     ];
-    let out = daily_by_gateways(&gateways, "2026-06-02", 4, since);
+    let out = daily_by_gateways(&gateways, "2026-06-02", 4);
     assert_eq!(out.by_route["byok"]["2026-06-02"], 1.0);
-    assert_eq!(out.by_route["byok"]["2026-05-31"], 0.5);
+    assert_eq!(out.by_route["credits"]["2026-05-31"], 0.5);
     assert_eq!(out.by_route["credits"]["2026-06-02"], 0.25);
     assert_eq!(out.by_provider["cf-openai"]["2026-06-02"], 0.25);
     assert_eq!(out.by_provider["anthropic"]["2026-06-02"], 1.0);
@@ -1689,4 +1683,129 @@ fn platform_cost_daily_credits_route_and_ai_gateway_rows() {
     assert_eq!(num_of(&a["credits"]["fee_usd"]), 0.0);
     assert_eq!(num_of(&a["ai_gateway"]["by_route"][0]["total"]), 15.0);
     assert_eq!(num_of(&a["total"]), 15.0);
+}
+
+/// The three gateways of option B: the spec of the credits gateway, Retired's spec, drift and
+/// stored keys, the routes of every kind, and the daily answer with a retired gateway's logs
+/// counted as BYOK (docs/plans/model-providers-cloudflare.md, phase 8).
+#[test]
+fn model_gateway_option_b_gateways() {
+    use pigeon_core::ai_gateway::{GatewayKind, ProviderConfig, drift, spec, stored_key_drift};
+    use pigeon_models::daily::{GatewayLogs, daily_by_gateways};
+    use pigeon_models::{Route, route_of};
+
+    let credits = spec("pigeon-cloudflare", "store", GatewayKind::Credits);
+    assert_eq!(credits["id"], "pigeon-cloudflare");
+    assert_eq!(credits["authentication"], true);
+    assert_eq!(credits["byok_only"], false);
+    assert_eq!(credits["collect_logs"], true);
+    assert_eq!(credits["zdr"], true);
+    assert!(credits.get("store_id").is_none() && credits.get("spend_limits").is_none());
+
+    let retired = spec("pigeon", "store", GatewayKind::Retired);
+    assert_eq!(retired["authentication"], true);
+    assert_eq!(retired["byok_only"], true);
+    assert_eq!(retired["collect_logs"], true);
+    assert_eq!(retired["store_id"], "store");
+    assert!(drift(&retired, &retired, GatewayKind::Retired).is_empty());
+    // Retired never compares zdr or store_id, and never asks for credits.
+    let found = json!({ "authentication": true, "byok_only": true, "collect_logs": true,
+        "zdr": false, "store_id": "other" });
+    assert!(drift(&retired, &found, GatewayKind::Retired).is_empty());
+    let found = json!({ "authentication": false, "byok_only": false, "collect_logs": true });
+    let lines = drift(&retired, &found, GatewayKind::Retired);
+    assert_eq!(lines.len(), 2);
+    assert!(!lines.iter().any(|l| l.contains("credits")));
+
+    let config = |slug: &str| ProviderConfig {
+        id: "i".into(),
+        provider_slug: slug.into(),
+        alias: "default".into(),
+        default_config: true,
+        secret_id: None,
+        secret_preview: None,
+        last_used_at: None,
+        modified_at: None,
+    };
+    assert_eq!(
+        stored_key_drift(
+            GatewayKind::Retired,
+            &[config("anthropic"), config("openai")],
+            &[]
+        ),
+        vec![
+            "holds a stored key for anthropic: delete it to retire this gateway",
+            "holds a stored key for openai: delete it to retire this gateway",
+        ]
+    );
+    assert!(stored_key_drift(GatewayKind::Retired, &[], &["anthropic"]).is_empty());
+
+    assert_eq!(
+        route_of(GatewayKind::Credits, "anthropic"),
+        ("cf-anthropic".into(), Route::Credits)
+    );
+    assert_eq!(
+        route_of(GatewayKind::Byok, "anthropic"),
+        ("anthropic".into(), Route::Byok)
+    );
+    assert_eq!(
+        route_of(GatewayKind::Retired, "openai"),
+        ("openai".into(), Route::Byok)
+    );
+
+    let log = |at: &str, provider: &str, cost: f64| -> pigeon_core::ai_gateway::Log {
+        serde_json::from_value(json!({
+            "created_at": at, "provider": provider, "model": "gpt-6.2-sol", "cost": cost,
+        }))
+        .unwrap_or_default()
+    };
+    let gateways = vec![
+        GatewayLogs {
+            id: "pigeon".into(),
+            kind: GatewayKind::Retired,
+            logs: vec![log("2026-06-02T01:00:00Z", "openai", 2.0)],
+            truncated: false,
+        },
+        GatewayLogs {
+            id: "pigeon-cloudflare".into(),
+            kind: GatewayKind::Credits,
+            logs: vec![log("2026-06-02T02:00:00Z", "openai", 0.25)],
+            truncated: false,
+        },
+    ];
+    let out = daily_by_gateways(&gateways, "2026-06-02", 2);
+    assert_eq!(out.by_route["byok"]["2026-06-02"], 2.0);
+    assert_eq!(out.by_route["credits"]["2026-06-02"], 0.25);
+    assert_eq!(out.by_provider["openai"]["2026-06-02"], 2.0);
+    assert_eq!(out.by_provider["cf-openai"]["2026-06-02"], 0.25);
+}
+
+/// BYOK readiness: a gateway that does not exist, one that is not byok_only, one with no key for
+/// the slug, and one that is ready.
+#[test]
+fn model_gateway_byok_readiness() {
+    use pigeon_core::ai_gateway::{ProviderConfig, byok_ready};
+    let config = |slug: &str| ProviderConfig {
+        id: "i".into(),
+        provider_slug: slug.into(),
+        alias: "default".into(),
+        default_config: true,
+        secret_id: None,
+        secret_preview: None,
+        last_used_at: None,
+        modified_at: None,
+    };
+    let g = "pigeon-anthropic";
+    let e = byok_ready(None, &[], g, "anthropic").unwrap_err();
+    assert!(e.contains("`pigeon-anthropic` does not exist: run models_setup"));
+    let open = json!({ "byok_only": false });
+    let e = byok_ready(Some(&open), &[config("anthropic")], g, "anthropic").unwrap_err();
+    assert!(e.contains("byok_only"));
+    let strict = json!({ "byok_only": true });
+    let e = byok_ready(Some(&strict), &[config("openai")], g, "anthropic").unwrap_err();
+    assert!(e.contains("holds no key for anthropic"));
+    assert!(
+        e.contains("pigeon-anthropic_anthropic_default on the Access tab, then run models_setup")
+    );
+    assert!(byok_ready(Some(&strict), &[config("anthropic")], g, "anthropic").is_ok());
 }

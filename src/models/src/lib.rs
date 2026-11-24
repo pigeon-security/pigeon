@@ -145,9 +145,6 @@ pub struct Models {
     /// Extra key slots, as (gateway, slug, alias): declared and handed to their gateway by setup
     /// and when set, though no provider routes there yet.
     pub staged: Vec<(&'static str, &'static str, &'static str)>,
-    /// When requests on a credits gateway start to be credits (RFC 3339); its earlier logs were
-    /// paid with stored keys.
-    pub credits_since: String,
     /// Where a person sets a key, such as `https://platform.pigeon.dev/secrets`.
     pub secrets_page: String,
     /// The platform's hostname, which a job's notify may not point at.
@@ -184,19 +181,13 @@ impl Route {
     }
 }
 
-/// How a log is labelled: the provider name and route it counts under. A log of a BYOK gateway,
-/// or of a credits gateway before `credits_since` (RFC 3339, compared as text), is the log's
-/// provider by key; a credits log from then on is `cf-{provider}` by credits. Pure.
-pub fn route_of(
-    kind: GatewayKind,
-    log_provider: &str,
-    created_at: &str,
-    credits_since: &str,
-) -> (String, Route) {
-    if kind == GatewayKind::Credits && created_at >= credits_since {
-        (format!("cf-{log_provider}"), Route::Credits)
-    } else {
-        (log_provider.to_string(), Route::Byok)
+/// How a log is labelled: the provider name and route it counts under. A log of a credits gateway
+/// is `cf-{provider}` by credits. A log of a BYOK or retired gateway is the log's own provider,
+/// by key. Pure, and not dependent on time.
+pub fn route_of(kind: GatewayKind, log_provider: &str) -> (String, Route) {
+    match kind {
+        GatewayKind::Credits => (format!("cf-{log_provider}"), Route::Credits),
+        GatewayKind::Byok | GatewayKind::Retired => (log_provider.to_string(), Route::Byok),
     }
 }
 
@@ -561,10 +552,38 @@ thread_local! {
         std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
-/// Refuses a credits request to `slug` on `gateway` unless the gateway would really bill credits:
-/// see [`ai_gateway::credits_guard`]. The gateway and its keys are read at most every 5 minutes
-/// per isolate.
-pub async fn guard_credits(account: &Account, gateway: &str, slug: &str) -> Result<()> {
+/// The order gateways are read in: Byok, then Retired, then Credits.
+fn kind_rank(kind: GatewayKind) -> u8 {
+    match kind {
+        GatewayKind::Byok => 0,
+        GatewayKind::Retired => 1,
+        GatewayKind::Credits => 2,
+    }
+}
+
+/// Reads gateway `gateway`'s settings and keys; `None` when it does not exist (the API's 404).
+async fn read_gateway(
+    account: &Account,
+    gateway: &str,
+) -> Result<Option<(Value, Vec<ai_gateway::ProviderConfig>)>> {
+    let not_found = |e: &worker::Error| e.to_string().contains(": 404:");
+    let settings = match ai_gateway::gateway_settings(account, gateway).await {
+        Ok(s) => s,
+        Err(e) if not_found(&e) => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let configs = match ai_gateway::provider_configs(account, gateway).await {
+        Ok(c) => c,
+        Err(e) if not_found(&e) => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    Ok(Some((settings, configs)))
+}
+
+/// Refuses a credits request on `gateway` unless the gateway would really bill credits: see
+/// [`ai_gateway::credits_guard`]. A gateway that does not exist is refused. The gateway and its
+/// keys are read at most every 5 minutes per isolate.
+pub async fn guard_credits(account: &Account, gateway: &str) -> Result<()> {
     let fresh = GUARDED.with(|g| {
         g.borrow()
             .get(gateway)
@@ -574,14 +593,74 @@ pub async fn guard_credits(account: &Account, gateway: &str, slug: &str) -> Resu
     let (_, settings, configs) = match fresh {
         Some(g) => g,
         None => {
-            let settings = ai_gateway::gateway_settings(account, gateway).await?;
-            let configs = ai_gateway::provider_configs(account, gateway).await?;
+            let Some((settings, configs)) = read_gateway(account, gateway).await? else {
+                return Err(bad(&format!(
+                    "the credits gateway `{gateway}` does not exist: run models_setup"
+                )));
+            };
             let read = (Date::now(), settings, configs);
             GUARDED.with(|g| g.borrow_mut().insert(gateway.to_string(), read.clone()));
             read
         }
     };
-    ai_gateway::credits_guard(&settings, &configs, slug).map_err(|e| bad(&e))
+    ai_gateway::credits_guard(gateway, &settings, &configs).map_err(|e| bad(&e))
+}
+
+thread_local! {
+    /// When each BYOK (gateway, slug) last passed [`guard_byok`]. Only successes are kept.
+    static BYOK_READY: std::cell::RefCell<std::collections::HashMap<String, f64>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Refuses a BYOK request for `slug` on `gateway` unless it is ready: see
+/// [`ai_gateway::byok_ready`]. Only a success is kept, for 5 minutes per isolate. When the
+/// gateway cannot be read for a reason other than not existing, it logs a warning and lets the
+/// request go ahead, so a Cloudflare API error does not stop every turn.
+pub async fn guard_byok(account: &Account, gateway: &str, slug: &str) -> Result<()> {
+    let key = format!("{gateway}/{slug}");
+    let fresh = BYOK_READY.with(|g| {
+        g.borrow()
+            .get(&key)
+            .is_some_and(|at| Date::now() - at < GUARD_TTL_MS)
+    });
+    if fresh {
+        return Ok(());
+    }
+    let read = match read_gateway(account, gateway).await {
+        Ok(r) => r,
+        Err(e) => {
+            worker::console_warn!("BYOK readiness of `{gateway}` could not be read: {e}");
+            return Ok(());
+        }
+    };
+    let (settings, configs) = match &read {
+        Some((s, c)) => (Some(s), c.as_slice()),
+        None => (None, &[][..]),
+    };
+    ai_gateway::byok_ready(settings, configs, gateway, slug).map_err(|e| bad(&e))?;
+    BYOK_READY.with(|g| g.borrow_mut().insert(key, Date::now()));
+    Ok(())
+}
+
+/// Hands a key to `gateway` as `provider`'s, only when the gateway is declared Byok. Never to a
+/// credits or retired gateway, whatever is declared or staged.
+async fn hand_key(
+    kinds: &[Gateway],
+    account: &Account,
+    gateway: &str,
+    provider: &str,
+    alias: &str,
+    secret_id: &str,
+) -> Result<bool> {
+    let byok = kinds
+        .iter()
+        .any(|g| g.id == gateway && g.kind == GatewayKind::Byok);
+    if !byok {
+        return Err(bad(&format!(
+            "gateway `{gateway}` is not a BYOK gateway: keys are never handed to it"
+        )));
+    }
+    ai_gateway::ensure_provider(account, gateway, provider, alias, secret_id).await
 }
 
 impl Models {
@@ -640,6 +719,58 @@ impl Models {
         }
     }
 
+    /// `models_providers`: each gateway with its kind, whether it exists and the keys it holds,
+    /// and each provider with its gateway, route and whether it is ready to use, and why not.
+    async fn providers_view(&self, account: &Account) -> Result<Value> {
+        let mut read = Vec::new();
+        for g in &self.gateways {
+            read.push((g, read_gateway(account, &g.id).await?));
+        }
+        let gateways: Vec<Value> = read
+            .iter()
+            .map(|(g, r)| {
+                json!({
+                    "id": g.id,
+                    "kind": g.kind,
+                    "exists": r.is_some(),
+                    "keys": r.as_ref().map(|(_, c)| to_value(c)).unwrap_or_else(|| json!([])),
+                })
+            })
+            .collect();
+        let providers: Vec<Value> = self
+            .providers
+            .iter()
+            .map(|p| {
+                let found = read
+                    .iter()
+                    .find(|(g, _)| g.id == p.gateway)
+                    .and_then(|(_, r)| r.as_ref());
+                let (settings, configs) = match found {
+                    Some((s, c)) => (Some(s), c.as_slice()),
+                    None => (None, &[][..]),
+                };
+                let verdict = match p.route {
+                    Route::Byok => ai_gateway::byok_ready(settings, configs, p.gateway, p.slug),
+                    Route::Credits => match settings {
+                        Some(s) => ai_gateway::credits_guard(p.gateway, s, configs),
+                        None => Err(format!(
+                            "the credits gateway `{}` does not exist: run models_setup",
+                            p.gateway
+                        )),
+                    },
+                };
+                json!({
+                    "name": p.name,
+                    "gateway": p.gateway,
+                    "route": p.route.name(),
+                    "ready": verdict.is_ok(),
+                    "why": verdict.err(),
+                })
+            })
+            .collect();
+        Ok(json!({ "gateways": gateways, "providers": providers }))
+    }
+
     /// Every gateway, and every key slot's key handed to its gateway where the key is set.
     async fn setup(&self, account: &Account) -> Result<Value> {
         let mut ensured = Vec::new();
@@ -655,7 +786,7 @@ impl Models {
             let state = match stored.iter().find(|s| s.name == name) {
                 Some(s) => {
                     let added =
-                        ai_gateway::ensure_provider(account, p.gateway, p.slug, p.alias, &s.id)
+                        hand_key(&self.gateways, account, p.gateway, p.slug, p.alias, &s.id)
                             .await?;
                     json!({ "gateway": p.gateway, "provider": p.slug, "alias": p.alias, "key": "set", "added_to_gateway": added })
                 }
@@ -685,8 +816,9 @@ impl Models {
 
     async fn run(&self, account: &Account, caller: &Value, args: &Value) -> Result<Value> {
         let p = self.provider(args["provider"].as_str())?;
-        if p.route == Route::Credits {
-            guard_credits(account, p.gateway, p.slug).await?;
+        match p.route {
+            Route::Credits => guard_credits(account, p.gateway).await?,
+            Route::Byok => guard_byok(account, p.gateway, p.slug).await?,
         }
         let raw = args.get("raw").filter(|r| r.is_object());
         let body = match raw {
@@ -735,7 +867,7 @@ impl Models {
         max: usize,
     ) -> Result<Vec<daily::GatewayLogs>> {
         let mut order: Vec<&Gateway> = self.gateways.iter().collect();
-        order.sort_by_key(|g| g.kind == GatewayKind::Credits);
+        order.sort_by_key(|g| kind_rank(g.kind));
         let mut out = Vec::new();
         for g in order {
             let logs = ai_gateway::logs(account, &g.id, since_ms, filter, max).await?;
@@ -761,8 +893,7 @@ impl Models {
         let mut all = Vec::new();
         for g in self.gateway_logs(account, since_ms, filter, max).await? {
             for mut log in g.logs {
-                log.provider =
-                    route_of(g.kind, &log.provider, &log.created_at, &self.credits_since).0;
+                log.provider = route_of(g.kind, &log.provider).0;
                 all.push(log);
             }
         }
@@ -895,7 +1026,7 @@ impl Models {
     async fn cost(&self, account: &Account, args: &Value) -> Result<Value> {
         let ids = log_ids(args)?;
         let mut order: Vec<&Gateway> = self.gateways.iter().collect();
-        order.sort_by_key(|g| g.kind == GatewayKind::Credits);
+        order.sort_by_key(|g| kind_rank(g.kind));
         let mut merged: Vec<ai_gateway::LogLookup> =
             vec![ai_gateway::LogLookup::NotFound; ids.len()];
         for g in order {
@@ -992,12 +1123,7 @@ impl Models {
             .gateway_logs(account, since, &Filter::default(), CHART_LOGS)
             .await?;
         let truncated = gateways.iter().any(|g| g.truncated);
-        let mut answer = to_value(daily::daily_by_gateways(
-            &gateways,
-            &today,
-            days,
-            &self.credits_since,
-        ));
+        let mut answer = to_value(daily::daily_by_gateways(&gateways, &today, days));
         answer["truncated"] = json!(truncated);
         Ok(answer)
     }
@@ -1174,7 +1300,7 @@ impl Models {
             ),
             Tool::bare(
                 "models_providers",
-                "The provider keys the AI gateway holds: provider, alias, a preview of the key \
+                "The AI gateways (kind, whether they exist, the provider keys they hold: provider, alias, a preview of the key) and each provider with its gateway, route and whether it is ready, and why not. \
                  and when it was last used. Never the key.",
             ),
             Tool {
@@ -1443,14 +1569,7 @@ impl Models {
         let account = || account.ok_or_else(|| bad(&format!("{tool} needs an account")));
         Ok(match tool {
             "models_setup" => self.setup(account()?).await?,
-            "models_providers" => {
-                let mut out = serde_json::Map::new();
-                for g in &self.gateways {
-                    let configs = ai_gateway::provider_configs(account()?, &g.id).await?;
-                    out.insert(g.id.clone(), to_value(configs));
-                }
-                Value::Object(out)
-            }
+            "models_providers" => self.providers_view(account()?).await?,
             "models_run" => self.run(account()?, caller, args).await?,
             "models_usage" => self.usage(env, account()?, args).await?,
             "models_cost" => self.cost(account()?, args).await?,
@@ -1546,8 +1665,15 @@ impl Models {
             return Ok(ADMIN_SET_NOTE.into());
         }
         let p = self.keyed(name)?;
-        ai_gateway::ensure(account, p.gateway, self.kind_of(p.gateway)).await?;
-        let added = ai_gateway::ensure_provider(account, p.gateway, p.slug, p.alias, id).await?;
+        let kind = self.kind_of(p.gateway);
+        if kind != GatewayKind::Byok {
+            return Err(bad(&format!(
+                "gateway `{}` is not a BYOK gateway: keys are never handed to it",
+                p.gateway
+            )));
+        }
+        ai_gateway::ensure(account, p.gateway, kind).await?;
+        let added = hand_key(&self.gateways, account, p.gateway, p.slug, p.alias, id).await?;
         Ok(if added {
             format!("the gateway `{}` now uses it for {}", p.gateway, p.slug)
         } else {

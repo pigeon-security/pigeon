@@ -812,9 +812,12 @@ impl ModelJobs {
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
         let gateway = ask.gateway.as_deref().unwrap_or(&self.settings.gateway);
-        if ask.credits
-            && let Err(e) = super::guard_credits(&account, gateway, &ask.provider).await
-        {
+        let guarded = if ask.credits {
+            super::guard_credits(&account, gateway).await
+        } else {
+            super::guard_byok(&account, gateway, &ask.provider).await
+        };
+        if let Err(e) = guarded {
             return json!({ "id": id, "state": "failed", "error": e.to_string() });
         }
         let mut reading = Reading::default();

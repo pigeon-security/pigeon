@@ -249,18 +249,13 @@ pub fn daily_by_run(logs: &[Log], today: &str, n: usize) -> ByRun {
         logs: logs.to_vec(),
         truncated: false,
     };
-    daily_by_gateways(&[one], today, n, "")
+    daily_by_gateways(&[one], today, n)
 }
 
 /// Every gateway's logs summed by day, family, run, provider name and route over the `n` days
 /// ending `today`. A log outside the window, or with no cost, adds nothing. Sums are rounded to
 /// a millionth. Each log is named and routed by [`route_of`].
-pub fn daily_by_gateways(
-    gateways: &[GatewayLogs],
-    today: &str,
-    n: usize,
-    credits_since: &str,
-) -> ByRun {
+pub fn daily_by_gateways(gateways: &[GatewayLogs], today: &str, n: usize) -> ByRun {
     let days = days_ending(today, n);
     let mut out = ByRun {
         days,
@@ -278,7 +273,7 @@ pub fn daily_by_gateways(
             },
         );
         for log in &g.logs {
-            add(&mut out, log, g.kind, credits_since);
+            add(&mut out, log, g.kind);
         }
     }
     for m in out
@@ -303,7 +298,7 @@ pub fn daily_by_gateways(
 }
 
 /// Adds one log to `out`, when it falls in the window.
-fn add(out: &mut ByRun, log: &Log, kind: GatewayKind, credits_since: &str) {
+fn add(out: &mut ByRun, log: &Log, kind: GatewayKind) {
     let Some(day) = day_of(&log.created_at).filter(|d| out.days.iter().any(|x| x == d)) else {
         return;
     };
@@ -313,7 +308,7 @@ fn add(out: &mut ByRun, log: &Log, kind: GatewayKind, credits_since: &str) {
     } else {
         &log.provider
     };
-    let (provider, route) = route_of(kind, base, &log.created_at, credits_since);
+    let (provider, route) = route_of(kind, base);
     let cost = log.cost.filter(|c| c.is_finite());
     let m = out
         .by_provider_model

@@ -27,15 +27,13 @@ use worker::wasm_bindgen;
 
 /// This Worker's script name: the service it signs as when no one is calling.
 const WORKER: &str = "pigeon-model-gateway";
-/// The AI Gateway's ID, as core's settings name it.
-const AI_GATEWAY: &str = "pigeon";
-/// The BYOK gateway for Anthropic keys.
+/// The Cloudflare AI Gateways this platform declares, each with one payer.
 const BYOK_GATEWAY: &str = "pigeon-anthropic";
-/// When `pigeon` starts to bill credits; its logs before then were paid with stored keys. Set by
-/// phase 4 (step C), a little after its deploy, so that Anthropic turns still in flight on the
-/// old key count as BYOK. Credits cannot flow before the person's step D anyway: the credits
-/// guard refuses while `pigeon` holds a key.
-pub const CREDITS_SINCE: &str = "2026-11-24T01:45:00Z";
+/// The credits gateway: `cf-anthropic` and `cf-openai` go through it. It never holds a key.
+const CREDITS_GATEWAY: &str = "pigeon-cloudflare";
+/// The retired gateway: no provider routes to it. Its logs are still read, as BYOK, under the
+/// log's own provider.
+const RETIRED_GATEWAY: &str = "pigeon";
 
 /// The Secrets Store binding of the key core signs callers with.
 const CALLER_KEY: &str = "CALLER_KEY";
@@ -44,24 +42,28 @@ const HOST: &str = "platform.pigeon.dev";
 /// The proxies' hostname, as core's settings name it.
 const PROXY_HOST: &str = "proxy.pigeon.dev";
 
-/// The models capability as this platform declares it: two gateways, three providers.
+/// The models capability as this platform declares it: three gateways, three providers.
 fn gateway() -> ModelGateway {
     ModelGateway {
         models: Models {
             gateways: vec![
                 Gateway {
-                    id: AI_GATEWAY.into(),
+                    id: BYOK_GATEWAY.into(),
+                    kind: GatewayKind::Byok,
+                },
+                Gateway {
+                    id: CREDITS_GATEWAY.into(),
                     kind: GatewayKind::Credits,
                 },
                 Gateway {
-                    id: BYOK_GATEWAY.into(),
-                    kind: GatewayKind::Byok,
+                    id: RETIRED_GATEWAY.into(),
+                    kind: GatewayKind::Retired,
                 },
             ],
             providers: vec![
                 // Anthropic BYOK goes through `pigeon-anthropic` and its key slot
                 // `pigeon-anthropic_anthropic_default` (docs/plans/model-providers-cloudflare.md,
-                // decision 3, step C). The old slot on `pigeon` is no longer declared.
+                // decision 3).
                 Provider {
                     name: "anthropic",
                     gateway: BYOK_GATEWAY,
@@ -75,7 +77,7 @@ fn gateway() -> ModelGateway {
                 },
                 Provider {
                     name: "cf-anthropic",
-                    gateway: AI_GATEWAY,
+                    gateway: CREDITS_GATEWAY,
                     route: Route::Credits,
                     slug: "anthropic",
                     alias: "default",
@@ -86,7 +88,7 @@ fn gateway() -> ModelGateway {
                 },
                 Provider {
                     name: "cf-openai",
-                    gateway: AI_GATEWAY,
+                    gateway: CREDITS_GATEWAY,
                     route: Route::Credits,
                     slug: "openai",
                     alias: "default",
@@ -97,7 +99,6 @@ fn gateway() -> ModelGateway {
                 },
             ],
             staged: Vec::new(),
-            credits_since: CREDITS_SINCE.into(),
             secrets_page: format!("https://{HOST}/access#credentials"),
             host: HOST.into(),
             proxy_host: PROXY_HOST.into(),
@@ -131,7 +132,7 @@ pub struct ModelJobs {
 impl worker::DurableObject for ModelJobs {
     fn new(state: worker::State, env: Env) -> Self {
         let settings = runner::Settings {
-            gateway: AI_GATEWAY.into(),
+            gateway: BYOK_GATEWAY.into(),
             token: Token::Scoped(itself()),
         };
         let inner =
