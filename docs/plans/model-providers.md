@@ -65,14 +65,16 @@ source on a provider: `Provider` gains `billing: Option<Billing>`, with one vari
 not built now.
 
 **Credential.** A new declared secret, `ANTHROPIC_ADMIN_KEY`, scope `workers`. It is an Anthropic
-Admin API key (`sk-ant-admin…`), made by an organization admin in the Claude Console. Admin keys
-exist only for organizations, not individual accounts. Handled like any declared secret:
+Admin API key, made by an organization admin in the Claude Console (API keys, Create API key,
+Scope Organization): it starts `sk-ant-usr-`, or `sk-ant-admin` for older admin keys, and expires
+on the date chosen there (Log, 2026-11-24). Admin keys exist only for organizations, not
+individual accounts. Handled like any declared secret:
 - set only on the Access tab with the person's passkey, never shown, logged or kept;
-- `Check` before writing: the value must start `sk-ant-admin`, and a one-row usage report read
-  must answer 200;
+- `Check` before writing: the value must start `sk-ant-usr-` or `sk-ant-admin`
+  (`billing::admin_key_shape`), and a one-row usage report read must answer 200;
 - `Expiry`: read through the binding, then the same one-row read. 401 or 403 is
-  `Refused { why }`. 200 is `Unknown { why: "Anthropic reports no expiry for admin keys; the key
-  works" }`. No binding, or no value, is `Unknown { why: "not bound yet" }`.
+  `Refused { why }`. 200 is `Unknown { why: "the key works; Anthropic does not report this
+  key's expiry here: it expires on the date chosen in the Claude Console" }`. No binding, or no value, is `Unknown { why: "not bound yet" }`.
 - The Worker reads it through a `[[secrets_store_secrets]]` binding named `ANTHROPIC_ADMIN_KEY` in
   `src/model-gateway/wrangler.toml`. **That one binding lands in its own step, after the person
   has set the secret** (phase 1b).
