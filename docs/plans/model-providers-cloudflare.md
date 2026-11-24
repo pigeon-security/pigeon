@@ -290,7 +290,7 @@ whose billing rows are AI Gateway rows and already left out. But Cloudflare's bi
 list it under `ServiceName` "Workers AI" (postpaid mode, or if Cloudflare books it that way),
 and that is not verified. So `cost_daily` takes, per day, the gateway's `workers-ai` log cost off
 the Cloudflare "Workers AI" line, never below zero, and shows what it took off as
-`credits.workers_ai_overlap_usd`. Whichever way Cloudflare books it, each dollar counts once:
+`credits.workers_ai_billing_usd`. Whichever way Cloudflare books it, each dollar counts once:
 under credits, from the gateway's log. Pigeon makes no other Workers AI calls, so the rest of
 the "Workers AI" line is other use of the account.
 
@@ -304,12 +304,12 @@ the "Workers AI" line is other use of the account.
 | 3 | `cost_daily`: AI Gateway billing rows out, Workers AI line, `credits`, `by_route`, reconciliation on BYOK Anthropic only | executor, **landed** `2ba4b42` | `src/capabilities/src/cost.rs` |
 | 4 | The Anthropic route to `pigeon-anthropic`; `CREDITS_SINCE` set | planner, **landed** `03b263b` (too early: Log) | `src/model-gateway/src/lib.rs` |
 | 8 | **Option B**: kinds BYOK / Credits / Retired; `pigeon-cloudflare` created and used by the credits providers; `pigeon` retired; `CREDITS_SINCE` and all time-based labelling removed; the BYOK readiness check; `models_providers` readiness | executor `aIy09VcWZV1t` | `src/core/src/ai_gateway.rs`, `src/models/src/*`, `src/model-gateway/src/lib.rs`, smoke |
-| 6 | Workers AI (decision 5), rebased onto phase 8: through `pigeon-cloudflare`, counted once in `cost_daily` | executor, after phase 8 | `src/core/src/ai_gateway.rs`, `src/models/src/*`, `src/model-gateway/*`, `src/ai-agents/src/models.rs`, `src/capabilities/src/cost.rs`, smoke |
+| 6 | Workers AI (decision 5), rebased onto phase 8: through `pigeon-cloudflare`, counted once in `cost_daily` | executor `y3NjXGDYiDD7` | `src/core/src/ai_gateway.rs`, `src/models/src/*`, `src/model-gateway/*`, `src/ai-agents/src/models.rs`, `src/capabilities/src/cost.rs`, smoke |
 | 9 | Docs: this plan for option B | planner | `docs/plans/model-providers-cloudflare.md` |
 | 5 | Live check: an executor turn on `cf-anthropic/claude-haiku-5-5`; read its log on `pigeon-cloudflare` and its cost under credits | planner, **after Open items 1 to 3** | none |
 
-The landing order is 9 (or with 8), 8, 6, then 5. Phase 6 starts from phase 8's branch once it
-is green, and is rebased onto main before it lands.
+The landing order was 8, 6, then 9 (this plan), then 5. Phase 6 started from phase 8's branch
+once it was green.
 
 ## How to use it (once deployed)
 
@@ -337,9 +337,12 @@ is green, and is rebased onto main before it lands.
       exists.
 
    `models_setup` then reports no drift for `pigeon`.
-2. **Confirm `pigeon-cloudflare`'s settings** (`models_setup` creates it): **Require provider
+2. **Create and confirm `pigeon-cloudflare`.** Run `models_setup` once: it creates the gateway
+   from its spec (nothing runs it on deploy). Then check its settings: **Require provider
    credentials** OFF, **Authenticated Gateway** ON, **Zero Data Retention** ON, no provider keys.
-   Pigeon sets no spend limit; you may add one under Settings, Spend limits.
+   Pigeon sets no spend limit; you may add one under Settings, Spend limits. For Workers AI,
+   its Workers AI billing should be Unified Billing (`workers_ai_billing_mode: "unified"`);
+   `models_setup` drift says so if it is not.
 3. **Buy credits.** AI Gateway page, **Credits Available**, **Manage**, **Top-up credits**: enter
    the amount and confirm (5% fee; a credit or debit card set as the primary payment method, not
    PayPal or Apple Pay). Auto top-up is optional, from the same card.
@@ -436,3 +439,15 @@ Decided before (2026-11-25): no spend limit in pigeon; OpenAI on credits only (`
   - A job stored without a gateway now uses `pigeon-anthropic`.
   - `models_providers` answers `{gateways: [{id, kind, exists, keys}], providers: [{name,
     gateway, route, ready, why}]}`.
+
+  It landed as `a91eda5` (landing `VEMxFsHXwjWyRcnz`) and deployed. Nothing creates
+  `pigeon-cloudflare` until someone runs `models_setup`; until then the credits guard refuses
+  credits turns with "does not exist: run models_setup".
+- 2026-11-24: phase 6 ported onto option B by executor `y3NjXGDYiDD7` (CI `test` green, job
+  `-x17msxu9Pjfbt6ktuiLu2`), from `8bb35bf`. Workers AI goes through `pigeon-cloudflare`; its
+  logs count as provider `workers-ai` (not `cf-workers-ai`), route credits. A separate
+  `workers_ai_guard` checks `workers_ai_billing_mode` for `workers-ai` only. `cost_daily` counts
+  it once (decision 5): each day the Cloudflare "Workers AI" line loses the gateway's logged
+  `workers-ai` cost, never below zero, and the amount taken off is `credits.workers_ai_billing_usd`.
+  In `ai_gateway.by_provider`, `workers-ai` still falls under Other. A missing gateway is now
+  also recognised by a "not found" error text, not only a 404.

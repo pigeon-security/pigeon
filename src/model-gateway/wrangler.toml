@@ -38,7 +38,7 @@ secret_name = "CALLER_KEY"
 
 # The Workers AI token, set by the person on the Access tab (slot `pigeon_workers_ai_token`). Not
 # bound yet: a binding to a secret that does not exist fails the deploy, so uncomment this once
-# the slot is set (docs/plans/model-providers-cloudflare.md, Open item 6). Until then the code
+# the slot is set (docs/plans/model-providers-cloudflare.md, Open item 5). Until then the code
 # finds no binding and refuses `workers-ai` requests with a message naming the slot.
 # [[secrets_store_secrets]]
 # binding = "pigeon_workers_ai_token"
