@@ -26,17 +26,26 @@ struct SecretsView: View {
     @State private var saved = false
     @State private var refreshAfterWrite = false
 
+    private var rows: [[String: Any]]? { secrets.data as? [[String: Any]] }
+
+    private var slots: [SecretSlot] {
+        (rows ?? []).compactMap { SecretSlot($0) }.sorted { $0.name < $1.name }
+    }
+
+    private var missing: [SecretSlot] { slots.filter { !$0.isSet } }
+
+    private var groups: [String: [SecretSlot]] {
+        Dictionary(grouping: slots.filter { $0.isSet }) { $0.service }
+    }
+
     var body: some View {
         Screen(
             title: "Secrets", errors: [secrets.error].compactMap { $0 },
             refresh: { await secrets.load(session.client) }
         ) {
             if saved { Toast(text: "Secret set.") }
-            if let raw = secrets.data as? [[String: Any]] {
-                let slots = raw.compactMap(SecretSlot.init).sorted { $0.name < $1.name }
-                let missing = slots.filter { !$0.isSet }
-                let groups = Dictionary(grouping: slots.filter(\.isSet), by: \.service)
-                if slots.count != raw.count {
+            if let rows {
+                if slots.count != rows.count {
                     ErrorBanner(text: "Some secret slots couldn't be read.")
                 } else {
                     Footnote("\(slots.count - missing.count) of \(slots.count) set")
