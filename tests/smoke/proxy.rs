@@ -795,6 +795,7 @@ fn proxy_worker_caches_and_core_ops() {
         token: token.into(),
         account_id: "acct".into(),
         expires_at,
+        token_id: None,
     };
     creds.put(Purpose::Git, minted("git-1", 900_000));
     assert_eq!(creds.get(Purpose::Git, 0).unwrap().token, "git-1");

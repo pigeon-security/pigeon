@@ -226,6 +226,10 @@ pub struct Credential {
     pub account_id: String,
     /// When the token expires, in milliseconds since the epoch.
     pub expires_at: i64,
+    /// The id of the token core minted, for a `scoped` credential: what `credential_revoke`
+    /// takes to end it. Absent for other kinds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_id: Option<String>,
 }
 
 /// An answer: `{"ok": value}` or `{"error": {"message": .., "kind": ..}}`.

@@ -1829,14 +1829,14 @@ fn model_gateway_byok_readiness() {
     assert!(byok_ready(Some(&strict), &[config("anthropic")], g, "anthropic").is_ok());
 }
 
-/// Workers AI through `pigeon-cloudflare`: the REST request and its headers, the unset-token
-/// refusal, the billing-mode guard, the spec and its drift, log labelling, family, prices and
+/// Workers AI through `pigeon-cloudflare`: the REST request and its headers, the billing-mode
+/// guard, the spec and its drift, log labelling, family, prices and
 /// the missing-gateway test. Pure.
 #[test]
 fn model_gateway_workers_ai() {
     use pigeon_core::ai_gateway::{
-        GatewayKind, WORKERS_AI, WORKERS_AI_UNSET, credits_guard, drift, endpoint, spec,
-        workers_ai_guard, workers_ai_headers,
+        GatewayKind, WORKERS_AI, credits_guard, drift, endpoint, spec, workers_ai_guard,
+        workers_ai_headers,
     };
     use pigeon_core::model_prices::price;
     use pigeon_models::daily::family_of;
@@ -1851,14 +1851,9 @@ fn model_gateway_workers_ai() {
         endpoint("acct", gw, "openai", "chat/completions"),
         "https://gateway.ai.cloudflare.com/v1/acct/pigeon-cloudflare/openai/chat/completions"
     );
-    let h = workers_ai_headers(gw, Some("tok")).unwrap();
+    let h = workers_ai_headers(gw, "tok");
     assert!(h.contains(&("cf-aig-gateway-id".into(), "pigeon-cloudflare".into())));
     assert!(h.contains(&("Authorization".into(), "Bearer tok".into())));
-    for none in [None, Some("")] {
-        let e = workers_ai_headers(gw, none).unwrap_err();
-        assert_eq!(e, WORKERS_AI_UNSET);
-        assert!(e.contains("pigeon_workers_ai_token"));
-    }
 
     // The declaration: provider `workers-ai` on the credits gateway, never a stored key.
     let src = include_str!("../src/model-gateway/src/lib.rs");
@@ -2022,4 +2017,45 @@ fn platform_cost_daily_workers_ai_once() {
     let cp = &a["credits"]["by_provider"];
     assert_eq!(cp[0]["name"], "Workers AI");
     assert_eq!(num_of(&cp[0]["total"]), 1.1);
+}
+
+/// Workers AI holds no stored token: core's `workers_ai` purpose is Workers AI Read only, the
+/// call's headers carry the minted token, no slot or binding is left, and core revokes only a
+/// token it minted for a capability Worker. Pure.
+#[test]
+fn model_gateway_workers_ai_minted_token() {
+    use pigeon_capabilities::split::{purpose_permissions, scoped_token_revocable};
+    use pigeon_core::ai_gateway::workers_ai_headers;
+
+    assert_eq!(
+        purpose_permissions("workers_ai"),
+        Some(&["Workers AI Read"][..])
+    );
+    let h = workers_ai_headers("pigeon-cloudflare", "minted");
+    assert!(h.contains(&("cf-aig-gateway-id".into(), "pigeon-cloudflare".into())));
+    assert!(h.contains(&("Authorization".into(), "Bearer minted".into())));
+
+    for src in [
+        include_str!("../src/models/src/lib.rs"),
+        include_str!("../src/models/src/runner.rs"),
+        include_str!("../src/model-gateway/src/lib.rs"),
+        include_str!("../src/model-gateway/wrangler.toml"),
+        include_str!("../src/core/src/ai_gateway.rs"),
+    ] {
+        assert!(!src.contains("pigeon_workers_ai_token"));
+        assert!(!src.contains("WORKERS_AI_TOKEN"));
+    }
+
+    // A token minted for a capability Worker is revocable; no other is.
+    assert!(scoped_token_revocable(
+        "pigeon:worker-workers_ai:2026-01-01T00:00:00Z"
+    ));
+    for name in [
+        "",
+        "pigeon:deploy:2026-01-01T00:00:00Z",
+        "worker-workers_ai",
+        "parent",
+    ] {
+        assert!(!scoped_token_revocable(name), "{name}");
+    }
 }

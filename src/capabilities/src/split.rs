@@ -371,6 +371,7 @@ async fn credential(cx: &Context<'_>, r: &CredentialRequest) -> Result<Value> {
                 token,
                 account_id: account.id.clone(),
                 expires_at: now_ms() + LINKED_USE_MS,
+                token_id: None,
             })?)
         }
         "github" => {
@@ -385,6 +386,7 @@ async fn credential(cx: &Context<'_>, r: &CredentialRequest) -> Result<Value> {
                 token,
                 account_id: String::new(),
                 expires_at: now_ms() + LINKED_USE_MS,
+                token_id: None,
             })?)
         }
         "scoped" => scoped(cx, &r.scopes).await,
@@ -401,6 +403,7 @@ async fn credential(cx: &Context<'_>, r: &CredentialRequest) -> Result<Value> {
                 token,
                 account_id: String::new(),
                 expires_at,
+                token_id: None,
             })?)
         }
         other => Err(bad(&format!("no credential of kind `{other}`"))),
@@ -419,9 +422,42 @@ pub fn grant_person(caller: Option<&Caller>) -> std::result::Result<String, Stri
     }
 }
 
-/// `credential_revoke`: ends AI agent run `instance`'s git grant for the caller's person.
-/// Answers `{"revoked": n}`; a grant already gone is `0`, not an error.
+/// The name prefix of every token core mints for a capability Worker ([`scoped`]): the tokens
+/// API names a token `pigeon:<purpose>:<time>` and the purpose starts with `worker-`.
+const SCOPED_NAME_PREFIX: &str = "pigeon:worker-";
+
+/// Whether a token named `name` is one core minted for a capability Worker, and so one
+/// `credential_revoke` may end. Any other token (the parent, a person's, a job's) is refused.
+/// Pure.
+pub fn scoped_token_revocable(name: &str) -> bool {
+    name.starts_with(SCOPED_NAME_PREFIX)
+}
+
+/// `credential_revoke`: ends AI agent run `instance`'s git grant for the caller's person, or
+/// (kind `scoped`) the scoped token whose id is `instance`. A scoped token is read from
+/// Cloudflare first and revoked only when [`scoped_token_revocable`] accepts its name.
+/// Answers `{"revoked": n}`; a grant or token already gone is `0`, not an error.
 async fn credential_revoke(cx: &Context<'_>, r: &CredentialRequest) -> Result<Value> {
+    if r.kind == "scoped" {
+        let id = r
+            .instance
+            .as_deref()
+            .filter(|i| !i.is_empty() && i.chars().all(|c| c.is_ascii_alphanumeric()))
+            .ok_or_else(|| bad("a scoped revoke names the token's id"))?;
+        let path = format!("/accounts/{}/tokens/{id}", cx.account.id);
+        let read =
+            pigeon_core::cloudflare::call(&cx.account.parent, worker::Method::Get, &path, None)
+                .await;
+        let Ok(token) = read else {
+            // Not readable: already revoked or never ours.
+            return Ok(json!({ "revoked": 0 }));
+        };
+        if !scoped_token_revocable(token["name"].as_str().unwrap_or_default()) {
+            return Err(bad("that token was not minted for a capability Worker"));
+        }
+        pigeon_core::tokens::revoke(&cx.account.parent, &cx.account.id, id).await?;
+        return Ok(json!({ "revoked": 1 }));
+    }
     if r.kind != "run_grant" {
         return Err(bad(&format!(
             "no credential of kind `{}` to revoke",
@@ -456,6 +492,8 @@ pub fn purpose_permissions(purpose: &str) -> Option<&'static [&'static str]> {
         "artifacts" => &["Artifacts Read", "Artifacts Write"],
         // A capability's own secrets, set on the secrets page.
         "secrets_store" => &["Secrets Store Write"],
+        // The model gateway's Workers AI calls: one token per call, revoked after.
+        "workers_ai" => &["Workers AI Read"],
         // The MCP server portal, synced after a setup.
         "mcp_portal" => &["MCP Portals Write"],
         // The proxy Worker's `/cf/`: every call `wrangler deploy` of a platform Worker makes
@@ -504,6 +542,7 @@ async fn scoped(cx: &Context<'_>, purposes: &[String]) -> Result<Value> {
         token: minted.value,
         account_id: cx.account.id.clone(),
         expires_at: now_ms() + (SCOPED_TTL_SECS as i64) * 1000,
+        token_id: Some(minted.id),
     })?)
 }
 

@@ -97,8 +97,8 @@ fn gateway() -> ModelGateway {
                     key_help: "",
                     billing: None,
                 },
-                // Workers AI: the REST API, paid with credits through `pigeon-cloudflare`. Off until the
-                // person sets the `pigeon_workers_ai_token` slot. It holds no gateway key.
+                // Workers AI: the REST API, paid with credits through `pigeon-cloudflare`. Each
+                // call uses a token core mints for it and revokes after. It holds no gateway key.
                 Provider {
                     name: "workers-ai",
                     gateway: CREDITS_GATEWAY,

@@ -856,7 +856,6 @@ impl Models {
         args: &Value,
     ) -> Result<Value> {
         let p = self.provider(args["provider"].as_str())?;
-        let extra = provider_headers(env, p.gateway, p.slug).await?;
         match p.route {
             Route::Credits => guard_credits_for(account, p.gateway, p.slug).await?,
             Route::Byok => guard_byok(account, p.gateway, p.slug).await?,
@@ -868,7 +867,13 @@ impl Models {
         };
         let tags = tags(caller, args["task"].as_str());
         let tags: Vec<(&str, &str)> = tags.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        // Workers AI: a token for this call only, revoked whether the call worked or not.
+        let call_token = open_call_token(env, account, caller, p.slug).await?;
         let mut headers = p.dialect.headers().to_vec();
+        let extra = call_token
+            .as_ref()
+            .map(|t| t.headers(p.gateway))
+            .unwrap_or_default();
         headers.extend(extra.iter().map(|(k, v)| (k.as_str(), v.as_str())));
         let ran = ai_gateway::run(
             account,
@@ -879,7 +884,11 @@ impl Models {
             &tags,
             &body,
         )
-        .await?;
+        .await;
+        if let Some(t) = call_token {
+            close_call_token(env, account, caller, t).await;
+        }
+        let ran = ran?;
         if !(200..300).contains(&ran.status) {
             if p.route == Route::Credits
                 && let Some(plain) = ai_gateway::error_code(&ran.body)
@@ -969,8 +978,7 @@ impl Models {
         let caller = who(caller_json)
             .ok_or_else(|| bad("a job needs a caller, who alone can read its result"))?;
         let p = self.provider(args["provider"].as_str())?;
-        // Refused here too, so a job is not queued only to fail. The token is not stored.
-        provider_headers(env, p.gateway, p.slug).await?;
+        // The job's request is checked here, so a job is not queued only to fail.
         let mut headers = own(p.dialect.headers());
         let (model, body) = match args.get("request").filter(|r| !r.is_null()) {
             // An AI agent's turn: a whole Messages body, checked.
@@ -1174,37 +1182,75 @@ impl Models {
     }
 }
 
-/// The Secrets Store slot and binding of the Workers AI token. The person sets it; it is not a
-/// gateway provider key, so it is never handed to a gateway.
-pub const WORKERS_AI_TOKEN: &str = "pigeon_workers_ai_token";
+/// The credential purpose of a Workers AI call: core mints a token with Workers AI Read.
+const WORKERS_AI_PURPOSE: &str = "workers_ai";
 
-/// What a Workers AI token slot set on the Access tab does: nothing is handed to a gateway.
-const WORKERS_AI_SET_NOTE: &str = "the model gateway reads the token through its binding";
-
-/// The Workers AI token, from its Secrets Store binding: `None` while the slot is unset or
-/// unbound. It is never logged or returned.
-async fn workers_ai_token(env: &Env) -> Option<String> {
-    let store = env.secret_store(WORKERS_AI_TOKEN).ok()?;
-    secrets_store::read(&store)
-        .await
-        .ok()
-        .flatten()
-        .filter(|t| !t.is_empty())
+/// A token minted for one Workers AI call. It is never stored, logged or returned: use it for
+/// the call, then hand it to [`close_call_token`].
+pub struct CallToken {
+    /// The bearer value.
+    value: String,
+    /// The id Cloudflare knows the token by, to revoke it.
+    id: String,
 }
 
-/// The extra headers a request to `provider` needs: none, except for Workers AI, which needs
-/// its gateway named and the person's token ([`ai_gateway::workers_ai_headers`]). Refused, before
-/// any call, while the token is unset.
-pub async fn provider_headers(
-    env: &Env,
-    gateway: &str,
-    provider: &str,
-) -> Result<Vec<(String, String)>> {
-    if provider != ai_gateway::WORKERS_AI {
-        return Ok(Vec::new());
+impl CallToken {
+    /// The headers of the call: its gateway named and this token
+    /// ([`ai_gateway::workers_ai_headers`]).
+    pub fn headers(&self, gateway: &str) -> Vec<(String, String)> {
+        ai_gateway::workers_ai_headers(gateway, &self.value)
     }
-    let token = workers_ai_token(env).await;
-    ai_gateway::workers_ai_headers(gateway, token.as_deref()).map_err(|e| bad(&e))
+}
+
+/// Asks for a token for one call to `provider`: `None` unless it is Workers AI, which needs a
+/// token per call and holds none. With a parent token in `account` the token is minted here;
+/// otherwise core mints it for `caller`.
+pub async fn open_call_token(
+    env: &Env,
+    account: &Account,
+    caller: &Value,
+    provider: &str,
+) -> Result<Option<CallToken>> {
+    if provider != ai_gateway::WORKERS_AI {
+        return Ok(None);
+    }
+    if !account.parent.is_empty() {
+        let request = pigeon_core::tokens::MintRequest {
+            purpose: format!("worker-{WORKERS_AI_PURPOSE}"),
+            policies: vec![pigeon_core::tokens::Policy::new(
+                pigeon_core::tokens::Scope::Account,
+                &["Workers AI Read"],
+            )],
+            ttl_secs: 900,
+        };
+        let m = pigeon_core::tokens::mint(&account.parent, &account.id, &request).await?;
+        return Ok(Some(CallToken {
+            value: m.value,
+            id: m.id,
+        }));
+    }
+    let given = credential_given(env, caller, &[WORKERS_AI_PURPOSE]).await?;
+    let id = given
+        .token_id
+        .filter(|i| !i.is_empty())
+        .ok_or_else(|| bad("core gave no Workers AI credential: its answer had no token id"))?;
+    Ok(Some(CallToken {
+        value: given.token,
+        id,
+    }))
+}
+
+/// Revokes a call's token. A failure is logged as a warning and never fails the turn: the token
+/// expires on its own in minutes.
+pub async fn close_call_token(env: &Env, account: &Account, caller: &Value, token: CallToken) {
+    let revoked = if account.parent.is_empty() {
+        revoke_scoped(env, caller, &token.id).await
+    } else {
+        pigeon_core::tokens::revoke(&account.parent, &account.id, &token.id).await
+    };
+    if let Err(e) = revoked {
+        worker::console_warn!("a Workers AI call token could not be revoked: {e}");
+    }
 }
 
 /// What the admin key's `Set` answers: nothing is handed to the AI gateway.
@@ -1598,19 +1644,6 @@ impl Models {
                 scopes: vec![secrets_store::WORKERS.to_string()],
             });
         }
-        if self
-            .providers
-            .iter()
-            .any(|p| p.slug == ai_gateway::WORKERS_AI)
-        {
-            out.push(SlotSpec {
-                name: WORKERS_AI_TOKEN.into(),
-                purpose: "A Cloudflare API token with Workers AI Read for this account, used to \
-                          call Workers AI models."
-                    .into(),
-                scopes: vec![secrets_store::WORKERS.to_string()],
-            });
-        }
         out
     }
 
@@ -1703,11 +1736,6 @@ impl Models {
 
     /// Checks `value` as secret `name` with its provider, before it is written.
     pub async fn check_secret(&self, name: &str, value: &str) -> Result<String> {
-        if name == WORKERS_AI_TOKEN {
-            return Ok(
-                "not checked here: the token is tried on the first Workers AI request".into(),
-            );
-        }
         if name == billing::ADMIN_KEY {
             if !value.starts_with("sk-ant-admin") {
                 return Err(bad("an Anthropic Admin API key starts with `sk-ant-admin`"));
@@ -1724,11 +1752,6 @@ impl Models {
     /// expiry, and the key is readable only by the AI gateway, so there is nothing to ask. The
     /// admin key is read through the binding and tried on a one-row report.
     pub async fn secret_expiry(&self, env: &Env, name: &str) -> Expiry {
-        if name == WORKERS_AI_TOKEN {
-            return Expiry::Unknown {
-                why: "Cloudflare reports no expiry through the binding".into(),
-            };
-        }
         if name != billing::ADMIN_KEY {
             return Expiry::Unknown {
                 why: "the provider's API reports no key expiry".into(),
@@ -1764,9 +1787,6 @@ impl Models {
     pub async fn secret_set(&self, account: &Account, name: &str, id: &str) -> Result<String> {
         if name == billing::ADMIN_KEY {
             return Ok(ADMIN_SET_NOTE.into());
-        }
-        if name == WORKERS_AI_TOKEN {
-            return Ok(WORKERS_AI_SET_NOTE.into());
         }
         let p = self.keyed(name)?;
         let kind = self.kind_of(p.gateway);
@@ -1811,6 +1831,18 @@ pub async fn credential(env: &Env, caller: &Signed, purposes: &[&str]) -> Result
 /// core serializes it: a person, or this Worker as a service when no one is calling, such as a
 /// job object's alarm).
 pub async fn credential_as(env: &Env, caller: &Value, purposes: &[&str]) -> Result<Account> {
+    let given = credential_given(env, caller, purposes).await?;
+    Ok(Account {
+        id: given.account_id,
+        parent: String::new(),
+        secrets_store: env.var("CF_SECRETS_STORE_ID")?.to_string(),
+        bearer: Some(given.token),
+    })
+}
+
+/// Asks core for a `scoped` credential for `purposes`, as `caller`: the token, its account and
+/// its id.
+async fn credential_given(env: &Env, caller: &Value, purposes: &[&str]) -> Result<Credential> {
     let platform = env.service(PLATFORM)?;
     let key = caller_key(env).await?;
     let nonce = random()?;
@@ -1829,17 +1861,35 @@ pub async fn credential_as(env: &Env, caller: &Value, purposes: &[&str]) -> Resu
     )
     .await?;
     match answer {
-        Answer::Ok(value) => {
-            let given: Credential = serde_json::from_value(value)
-                .map_err(|e| bad(&format!("core's credential does not parse: {e}")))?;
-            Ok(Account {
-                id: given.account_id,
-                parent: String::new(),
-                secrets_store: env.var("CF_SECRETS_STORE_ID")?.to_string(),
-                bearer: Some(given.token),
-            })
-        }
+        Answer::Ok(value) => serde_json::from_value(value)
+            .map_err(|e| bad(&format!("core's credential does not parse: {e}"))),
         Answer::Error(f) => Err(bad(&format!("core gave no credential: {}", f.message))),
+    }
+}
+
+/// Asks core to revoke the scoped token `id` it minted for this Worker. Core refuses any token
+/// it did not mint for a capability Worker.
+async fn revoke_scoped(env: &Env, caller: &Value, id: &str) -> Result<()> {
+    let platform = env.service(PLATFORM)?;
+    let key = caller_key(env).await?;
+    let nonce = random()?;
+    let request = CredentialRequest {
+        kind: "scoped".into(),
+        instance: Some(id.to_string()),
+        scopes: Vec::new(),
+    };
+    let answer = pigeon_contract::ask(
+        &platform,
+        "https://core",
+        "credential_revoke",
+        &serde_json::to_value(&request)?,
+        Some((key.as_bytes(), caller)),
+        &nonce,
+    )
+    .await?;
+    match answer {
+        Answer::Ok(_) => Ok(()),
+        Answer::Error(f) => Err(bad(&format!("core did not revoke it: {}", f.message))),
     }
 }
 
@@ -1899,9 +1949,6 @@ impl ModelGateway {
             }
             SecretOp::Set if req.name == billing::ADMIN_KEY => {
                 Answer::Ok(Value::String(ADMIN_SET_NOTE.into()))
-            }
-            SecretOp::Set if req.name == WORKERS_AI_TOKEN => {
-                Answer::Ok(Value::String(WORKERS_AI_SET_NOTE.into()))
             }
             SecretOp::Set => {
                 let id = req.id.as_deref().unwrap_or_default();

@@ -306,10 +306,6 @@ pub fn workers_ai_guard(gateway_id: &str, gateway: &Value) -> std::result::Resul
     Ok(())
 }
 
-/// The refusal for a Workers AI request while its token slot is unset.
-pub const WORKERS_AI_UNSET: &str =
-    "Workers AI needs a token: set `pigeon_workers_ai_token` on the Access tab";
-
 /// The URL of a request to `provider`'s `path` through `gateway`. Workers AI goes to the REST
 /// API; the gateway is then named by a header ([`workers_ai_headers`]), not by the URL.
 pub fn endpoint(account_id: &str, gateway: &str, provider: &str, path: &str) -> String {
@@ -321,19 +317,13 @@ pub fn endpoint(account_id: &str, gateway: &str, provider: &str, path: &str) -> 
 }
 
 /// The headers a Workers AI request needs beside the gateway's own: the gateway, always named so
-/// the account's `default` gateway never serves it, and the person's token. Refused when `token`
-/// is unset. Pure.
-pub fn workers_ai_headers(
-    gateway: &str,
-    token: Option<&str>,
-) -> std::result::Result<Vec<(String, String)>, String> {
-    let token = token
-        .filter(|t| !t.is_empty())
-        .ok_or_else(|| WORKERS_AI_UNSET.to_string())?;
-    Ok(vec![
+/// the account's `default` gateway never serves it, and `token`, the short-lived token core
+/// minted for this one call. Pure.
+pub fn workers_ai_headers(gateway: &str, token: &str) -> Vec<(String, String)> {
+    vec![
         ("cf-aig-gateway-id".into(), gateway.into()),
         ("Authorization".into(), format!("Bearer {token}")),
-    ])
+    ]
 }
 
 /// A plain message for a credits error `status` and `code`, or `None` for any other.

@@ -802,21 +802,10 @@ impl ModelJobs {
             Err(e) => return json!({ "id": id, "state": "failed", "error": e.to_string() }),
         };
         let gateway = ask.gateway.as_deref().unwrap_or(&self.settings.gateway);
-        // Workers AI's token is read now and never stored with the job.
-        let mut owned = ask.headers.clone();
-        match super::provider_headers(&self.env, gateway, &ask.provider).await {
-            Ok(extra) => owned.extend(extra),
-            Err(e) => return json!({ "id": id, "state": "failed", "error": e.to_string() }),
-        }
-        let headers: Vec<(&str, &str)> = owned
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()))
-            .collect();
-        let tags: Vec<(&str, &str)> = ask
-            .tags
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()))
-            .collect();
+        let caller = match &self.settings.token {
+            Token::Scoped(c) => c.clone(),
+            Token::Parent(_) => Value::Null,
+        };
         let guarded = if ask.credits {
             super::guard_credits_for(&account, gateway, &ask.provider).await
         } else {
@@ -825,6 +814,11 @@ impl ModelJobs {
         if let Err(e) = guarded {
             return json!({ "id": id, "state": "failed", "error": e.to_string() });
         }
+        let tags: Vec<(&str, &str)> = ask
+            .tags
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
         let mut reading = Reading::default();
         let mut timed_out = false;
         let mut cancelled = false;
@@ -875,6 +869,21 @@ impl ModelJobs {
                     }
                 }
             };
+            // Workers AI: a token for this attempt only, never stored with the job, revoked as
+            // soon as the attempt ends, whatever its outcome.
+            let call_token =
+                match super::open_call_token(env, &account, &caller, &ask.provider).await {
+                    Ok(t) => t,
+                    Err(e) => break Err(e),
+                };
+            let mut owned = ask.headers.clone();
+            if let Some(t) = &call_token {
+                owned.extend(t.headers(gateway));
+            }
+            let headers: Vec<(&str, &str)> = owned
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
             let streamed = ai_gateway::stream(
                 &account,
                 gateway,
@@ -886,6 +895,9 @@ impl ModelJobs {
                 read,
             )
             .await;
+            if let Some(t) = call_token {
+                super::close_call_token(env, &account, &caller, t).await;
+            }
             // A refusal before any of the answer arrived is sent again, a few times, while
             // there is time: nothing was streamed, so nothing is paid for twice.
             if let Ok(Streamed::Refused(ran, opened)) = &streamed {
