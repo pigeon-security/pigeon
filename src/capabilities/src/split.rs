@@ -3,7 +3,7 @@
 //! `https://core/<op>` over its `PLATFORM` binding), and two tools: `workers_setup`, which makes
 //! the key that signs callers, and `manifest_refresh`.
 //!
-//! The ops: `credential` and `dispatch` for a signed caller; and the proxy Worker's checks,
+//! The ops: `credential`, `dispatch` and `approval` for a signed caller; and the proxy Worker's checks,
 //! `verify` (who holds a proxy credential), `grant` (a CI job token's grant) and `deploy_grant`
 //! (the caller a landing's deploy job token stands for), signed with `CALLER_KEY` but for no
 //! caller, since each carries the credential it asks about.
@@ -13,8 +13,8 @@
 //! `credential` is only for a signed caller, and only for the call in hand.
 
 use pigeon_contract::{
-    Answer, CALLERLESS_OPS, CORE_OPS, Credential, CredentialRequest, FailureKind, GrantRequest,
-    VerifyRequest,
+    Answer, ApprovalRequest, CALLERLESS_OPS, CORE_OPS, Credential, CredentialRequest, FailureKind,
+    GrantRequest, VerifyRequest,
 };
 use pigeon_core::mcp::Tool;
 use pigeon_core::secrets_store::{self, Writer};
@@ -124,12 +124,13 @@ pub const WORKER_HEADER: &str = "X-Pigeon-Worker";
 /// The capability Workers that may get a key of their own, by the name they claim in
 /// [`WORKER_HEADER`], with the Secrets Store name of that key. The names are the `name`s in
 /// ci/workers.toml.
-pub const WORKER_KEYS: [(&str, &str); 5] = [
+pub const WORKER_KEYS: [(&str, &str); 6] = [
     ("ci-gateway", "CALLER_KEY_CI_GATEWAY"),
     ("model-gateway", "CALLER_KEY_MODEL_GATEWAY"),
     ("sites", "CALLER_KEY_SITES"),
     ("proxy", "CALLER_KEY_PROXY"),
     ("ai-agents", "CALLER_KEY_AI_AGENTS"),
+    ("cloud-gateway", "CALLER_KEY_CLOUD_GATEWAY"),
 ];
 
 /// The Secrets Store name of `worker`'s own caller key; `None` for a name that is not a known
@@ -252,6 +253,10 @@ pub async fn serve(mut req: Request, cx: &Context<'_>) -> Result<Response> {
             let args = asked.get("args").cloned().unwrap_or_else(|| json!({}));
             crate::dispatch(&cx, tool, &args).await
         }
+        "approval" => match serde_json::from_slice::<ApprovalRequest>(&body) {
+            Ok(r) => remote_approval(&cx, &r).await,
+            Err(e) => return reply(Answer::error(FailureKind::BadRequest, e.to_string()), 400),
+        },
         _ => match serde_json::from_slice::<CredentialRequest>(&body) {
             Ok(r) if op == "credential_revoke" => credential_revoke(&cx, &r).await,
             Ok(r) if op == "credential_release" => credential_release(&cx, &r).await,
@@ -262,6 +267,203 @@ pub async fn serve(mut req: Request, cx: &Context<'_>) -> Result<Response> {
     match answer {
         Ok(v) => reply(Answer::Ok(v), 200),
         Err(e) => reply(Answer::error(FailureKind::Failed, e.to_string()), 200),
+    }
+}
+
+/// The approval kinds a capability Worker may create, read and spend through core's `approval`
+/// op: a fixed table, so a Worker never makes an approval that looks like a tool call, a draft
+/// or a plan of core's own.
+pub const REMOTE_APPROVAL_KINDS: [&str; 1] = ["cloud_change"];
+
+/// How long a capability Worker's plan waits for the person's passkey: 30 minutes.
+const REMOTE_PENDING_MS: i64 = 30 * 60_000;
+/// The longest subject, in characters.
+const REMOTE_SUBJECT_MAX: usize = 120;
+/// The most lines a plan shows the person, and the longest line, in characters.
+const REMOTE_LINES_MAX: usize = 20;
+const REMOTE_LINE_MAX: usize = 400;
+/// The largest payload, as canonical JSON, in bytes.
+const REMOTE_PAYLOAD_MAX: usize = 16 * 1024;
+
+/// What a `create` request becomes: its kind, subject, digest and the summary the person sees.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RemoteApproval {
+    /// The kind, from [`REMOTE_APPROVAL_KINDS`].
+    pub kind: pigeon_core::approval::Kind,
+    /// What the approval is for.
+    pub subject: String,
+    /// Core's digest of the kind, subject and payload.
+    pub digest: String,
+    /// `{plan: lines}`, as the Approvals tab shows it.
+    pub summary: Value,
+}
+
+/// The kind a request names, when it is in [`REMOTE_APPROVAL_KINDS`]. Pure.
+pub fn remote_kind(
+    r: &ApprovalRequest,
+) -> std::result::Result<pigeon_core::approval::Kind, String> {
+    let kind = r.kind.as_deref().unwrap_or_default();
+    if REMOTE_APPROVAL_KINDS.contains(&kind) {
+        Ok(pigeon_core::approval::Kind::named(kind))
+    } else {
+        Err(format!(
+            "`{kind}` is not an approval kind a capability Worker may ask for"
+        ))
+    }
+}
+
+/// The subject a request names, checked. Pure.
+fn remote_subject(r: &ApprovalRequest) -> std::result::Result<&str, String> {
+    let subject = r.subject.as_deref().unwrap_or_default();
+    if subject.is_empty()
+        || subject.chars().count() > REMOTE_SUBJECT_MAX
+        || subject.chars().any(char::is_control)
+    {
+        return Err(format!(
+            "an approval's subject is 1 to {REMOTE_SUBJECT_MAX} characters on one line"
+        ));
+    }
+    Ok(subject)
+}
+
+/// Checks a `create` request and works out its digest and summary: the kind must be in the
+/// table, the subject a short line, the payload an object of bounded size and the lines few and
+/// short. Core takes the digest itself, so a Worker cannot name one. Pure.
+pub fn remote_plan(r: &ApprovalRequest) -> std::result::Result<RemoteApproval, String> {
+    let kind = remote_kind(r)?;
+    let subject = remote_subject(r)?.to_string();
+    if !r.payload.is_object() {
+        return Err("an approval's payload is a JSON object".into());
+    }
+    if pigeon_core::approval::canonical(&r.payload).len() > REMOTE_PAYLOAD_MAX {
+        return Err(format!(
+            "an approval's payload is at most {REMOTE_PAYLOAD_MAX} bytes"
+        ));
+    }
+    if r.lines.is_empty() || r.lines.len() > REMOTE_LINES_MAX {
+        return Err(format!(
+            "an approval shows the person 1 to {REMOTE_LINES_MAX} lines"
+        ));
+    }
+    if r.lines
+        .iter()
+        .any(|l| l.trim().is_empty() || l.chars().count() > REMOTE_LINE_MAX)
+    {
+        return Err(format!(
+            "each line of an approval is 1 to {REMOTE_LINE_MAX} characters"
+        ));
+    }
+    let digest = pigeon_core::approval::payload_digest(&kind, &subject, &r.payload);
+    Ok(RemoteApproval {
+        kind,
+        subject,
+        digest,
+        summary: json!({ "plan": r.lines }),
+    })
+}
+
+/// The digest a `take` request stands for, from its kind, subject and payload. Pure.
+pub fn remote_digest(r: &ApprovalRequest) -> std::result::Result<String, String> {
+    let kind = remote_kind(r)?;
+    let subject = remote_subject(r)?;
+    Ok(pigeon_core::approval::payload_digest(
+        &kind, subject, &r.payload,
+    ))
+}
+
+/// What `get` answers for `record` to the caller `caller_id`: the record of a table kind the
+/// caller made, its state as of `now_ms` (a lapsed one reads `expired`); none for any other, so
+/// an id says nothing to anyone else. Pure.
+pub fn remote_view(
+    record: &pigeon_core::approval::Record,
+    caller_id: &str,
+    now_ms: i64,
+) -> Option<Value> {
+    if !REMOTE_APPROVAL_KINDS.contains(&record.kind.name()) || record.caller_id != caller_id {
+        return None;
+    }
+    let state = if pigeon_core::approval::is_stale(record, now_ms) {
+        pigeon_core::approval::State::Expired
+    } else {
+        record.state
+    };
+    Some(json!({
+        "id": record.id,
+        "kind": record.kind.name(),
+        "subject": record.subject,
+        "state": state.name(),
+        "payload": record.payload,
+        "expires_ms": record.expires_ms,
+    }))
+}
+
+/// Core's `approval` op: `create` makes a pending approval for the person the caller acts for,
+/// `get` reads one the caller made and `take` spends an approved one once, for the caller, for
+/// exactly this payload. The approver is never the Worker's choice.
+async fn remote_approval(cx: &Context<'_>, r: &ApprovalRequest) -> Result<Value> {
+    let caller = cx
+        .caller
+        .ok_or_else(|| bad("an approval is for a signed caller"))?;
+    let id = r.id.as_deref().unwrap_or_default();
+    match r.action.as_str() {
+        "create" => {
+            let person = caller
+                .acting_for
+                .as_ref()
+                .ok_or_else(|| bad("the caller acts for no person who could approve this"))?;
+            let planned = remote_plan(r).map_err(|e| bad(&e))?;
+            let made = crate::users::directory(
+                cx.env,
+                "approval.create",
+                json!({
+                    "kind": planned.kind.name(),
+                    "subject": planned.subject,
+                    "digest": planned.digest,
+                    "summary": planned.summary,
+                    "payload": r.payload,
+                    "caller_id": caller.user.id,
+                    "approver_id": person.id,
+                    "pending_ms": REMOTE_PENDING_MS,
+                }),
+            )
+            .await?;
+            Ok(json!({
+                "id": made["record"]["id"],
+                "expires_ms": made["record"]["expires_ms"],
+                "existing": made["existing"],
+            }))
+        }
+        "get" => {
+            let got = crate::users::directory(cx.env, "approval.get", json!({ "id": id })).await?;
+            let record: Option<pigeon_core::approval::Record> = serde_json::from_value(got)?;
+            record
+                .and_then(|rec| remote_view(&rec, &caller.user.id, now_ms()))
+                .ok_or_else(|| bad(&format!("there is no approval {id} for this caller")))
+        }
+        "take" => {
+            let digest = remote_digest(r).map_err(|e| bad(&e))?;
+            let got = crate::users::directory(cx.env, "approval.get", json!({ "id": id })).await?;
+            let record: Option<pigeon_core::approval::Record> = serde_json::from_value(got)?;
+            if record
+                .and_then(|rec| remote_view(&rec, &caller.user.id, now_ms()))
+                .is_none()
+            {
+                return Err(bad(&format!("there is no approval {id} for this caller")));
+            }
+            let taken = crate::users::directory(
+                cx.env,
+                "approval.take",
+                json!({ "id": id, "digest": digest, "caller_id": caller.user.id }),
+            )
+            .await?;
+            Ok(match taken["refused"].as_str() {
+                Some(why) => json!({ "taken": false, "refused": why }),
+                None => json!({ "taken": true }),
+            })
+        }
+        other => Err(bad(&format!(
+            "no approval action `{other}`: create, get or take"
+        ))),
     }
 }
 

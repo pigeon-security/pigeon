@@ -414,7 +414,9 @@ async fn apply_token_create(api: &Api<'_>, plan: &Plan) -> Result<Value> {
         });
     }
 
-    let seen = api.key(&access).await?;
+    // The change is made and the secret written: a failed look afterwards is a difference, not an
+    // error that hides the new key.
+    let seen = api.key(&access).await.ok().flatten();
     let expected = json!({ "application_id": app, "default_project_id": project });
     let found = seen.map_or(Value::Null, |k| {
         json!({ "application_id": k.application_id, "default_project_id": k.default_project_id })

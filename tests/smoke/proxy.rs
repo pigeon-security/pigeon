@@ -148,6 +148,10 @@ fn core_contract_per_worker_caller_keys() {
         Some("CALLER_KEY_MODEL_GATEWAY")
     );
     assert_eq!(worker_key_name("ci-gateway"), Some("CALLER_KEY_CI_GATEWAY"));
+    assert_eq!(
+        worker_key_name("cloud-gateway"),
+        Some("CALLER_KEY_CLOUD_GATEWAY")
+    );
     assert_eq!(worker_key_name("models"), None);
 }
 

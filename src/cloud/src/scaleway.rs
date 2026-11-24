@@ -107,10 +107,12 @@ pub struct Survey {
 
 impl Survey {
     /// Reads the four slots. A slot without a binding cannot be read, so the sink says whether
-    /// it holds a value; when the sink fails the slot counts as not set.
+    /// it holds a value: its names are listed once, and only when a slot needs it. When the sink
+    /// fails the slot counts as not set.
     pub async fn take(ports: &Ports<'_>) -> Result<Survey> {
         let mut slots = Vec::new();
-        let mut sink_works = true;
+        // None: not asked yet. Some(None): asked and failed.
+        let mut listed: Option<Option<Vec<String>>> = None;
         for name in SLOTS {
             let view = match ports.slots.read(name).await? {
                 SlotState::Set(v) => SlotView {
@@ -126,14 +128,13 @@ impl Survey {
                     value: None,
                 },
                 SlotState::Unbound => {
-                    let set = sink_works
-                        && match ports.sink.exists(name).await {
-                            Ok(found) => found,
-                            Err(_) => {
-                                sink_works = false;
-                                false
-                            }
-                        };
+                    if listed.is_none() {
+                        listed = Some(ports.sink.names().await.ok());
+                    }
+                    let set = listed
+                        .as_ref()
+                        .and_then(Option::as_ref)
+                        .is_some_and(|names| names.iter().any(|n| n == name));
                     SlotView {
                         name,
                         bound: false,

@@ -613,6 +613,13 @@ fn core_architecture_draws_every_worker_in_the_map() {
             "pigeon-ai-agents",
             json!({ "name": "ai_agents", "tools": [tool("ai_agents_start")], "footprint": null }),
         ),
+        // The cloud gateway: its real manifest entry, so its tools and outbound hosts are the ones
+        // the Worker serves.
+        remote(
+            "CLOUD",
+            "pigeon-cloud-gateway",
+            serde_json::to_value(pigeon_cloud::capability()).unwrap(),
+        ),
     ];
     let hosted = Hosted {
         worker: "pigeon-platform",
@@ -812,7 +819,23 @@ fn core_architecture_draws_every_worker_in_the_map() {
         .iter()
         .map(|e| e["name"].as_str().unwrap())
         .collect();
-    assert_eq!(externals, ["AI Gateway", "Buildkite"]);
+    assert_eq!(externals, ["AI Gateway", "Buildkite", "Scaleway"]);
+    // Scaleway is drawn with the four hosts the cloud gateway may call, and no others.
+    let scaleway = model["externals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["name"] == "Scaleway")
+        .unwrap();
+    assert_eq!(
+        scaleway["detail"],
+        "api.scaleway.com, s3.fr-par.scw.cloud, s3.nl-ams.scw.cloud, s3.pl-waw.scw.cloud"
+    );
+    assert_eq!(
+        strs(&worker("pigeon-cloud-gateway")["tools"]).len(),
+        pigeon_cloud::tools::TOOLS.len()
+    );
+    assert!(strs(&worker("pigeon-cloud-gateway")["tools"]).contains(&"cloud_apply".into()));
     assert!(drawing.contains("Buildkite"));
     // The drawing names every link's binding and every external, in both views.
     let public_drawing = render(&public(&described));
@@ -1702,5 +1725,130 @@ fn core_token_gauge_digest_entry_and_note() {
             .as_str()
             .unwrap()
             .contains("at or above the soft ceiling of 300")
+    );
+}
+
+/// Core's `approval` op for capability Workers: only kinds in the fixed table, the digest is
+/// core's own, a Worker's wording is bounded, and an approval is read back only by the caller who
+/// made it, as `expired` once it lapses.
+#[test]
+fn core_approval_op_for_capability_workers() {
+    use pigeon_capabilities::split::{
+        REMOTE_APPROVAL_KINDS, remote_digest, remote_kind, remote_plan, remote_view,
+    };
+    use pigeon_contract::{ApprovalRequest, CORE_OPS};
+    use pigeon_core::approval::{self, Kind, State};
+
+    assert!(CORE_OPS.contains(&"approval"));
+    assert_eq!(REMOTE_APPROVAL_KINDS, ["cloud_change"]);
+    assert!(!pigeon_capabilities::split::op_needs_bound("approval"));
+
+    let ask = |v: Value| -> ApprovalRequest { serde_json::from_value(v).unwrap() };
+    let create = ask(json!({
+        "action": "create",
+        "kind": "cloud_change",
+        "subject": "cloud:scaleway:buckets:create",
+        "payload": { "provider": "scaleway", "args": { "bucket": "b1" } },
+        "lines": ["Create bucket `b1` in fr-par."],
+    }));
+    let planned = remote_plan(&create).unwrap();
+    assert_eq!(planned.kind, Kind::Other("cloud_change".into()));
+    assert_eq!(
+        planned.summary,
+        json!({ "plan": ["Create bucket `b1` in fr-par."] })
+    );
+    // The digest is core's own formula over the kind, subject and payload.
+    let expected = approval::payload_digest(
+        &Kind::Other("cloud_change".into()),
+        "cloud:scaleway:buckets:create",
+        &create.payload,
+    );
+    assert_eq!(planned.digest, expected);
+    // `take` computes the same digest from the same plan, and another one from another plan.
+    assert_eq!(remote_digest(&create).unwrap(), expected);
+    let mut other = create.clone();
+    other.payload["args"]["bucket"] = json!("b2");
+    assert_ne!(remote_digest(&other).unwrap(), expected);
+
+    // Kinds outside the table are refused, whatever the action: a Worker cannot make a tool call,
+    // a draft, a plan of core's, or a kind nobody has heard of.
+    for kind in [
+        "tool_call",
+        "instance_draft",
+        "linked_plan",
+        "observability_monitors",
+        "",
+    ] {
+        let mut r = create.clone();
+        r.kind = Some(kind.into());
+        assert!(remote_kind(&r).is_err(), "{kind}");
+        assert!(remote_plan(&r).is_err(), "{kind}");
+        assert!(remote_digest(&r).is_err(), "{kind}");
+    }
+    let mut none = create.clone();
+    none.kind = None;
+    assert!(remote_plan(&none).is_err());
+
+    // Bounded wording and payload.
+    let broken = |edit: &dyn Fn(&mut ApprovalRequest)| {
+        let mut r = create.clone();
+        edit(&mut r);
+        remote_plan(&r).is_err()
+    };
+    assert!(broken(&|r| r.subject = None));
+    assert!(broken(&|r| r.subject = Some("two\nlines".into())));
+    assert!(broken(&|r| r.subject = Some("x".repeat(121))));
+    assert!(broken(&|r| r.lines.clear()));
+    assert!(broken(&|r| r.lines = vec!["x".into(); 21]));
+    assert!(broken(&|r| r.lines = vec!["  ".into()]));
+    assert!(broken(&|r| r.lines = vec!["x".repeat(401)]));
+    assert!(broken(&|r| r.payload = json!("a string")));
+    assert!(broken(
+        &|r| r.payload = json!({ "big": "x".repeat(17 * 1024) })
+    ));
+
+    // `get`: only the caller's own approval of a table kind, and a lapsed one reads expired.
+    let record = |kind: Kind, caller: &str| {
+        approval::new(
+            "id1".into(),
+            kind,
+            planned.subject.clone(),
+            planned.digest.clone(),
+            planned.summary.clone(),
+            create.payload.clone(),
+            caller.into(),
+            Some("person".into()),
+            1_000,
+        )
+    };
+    let mine = record(Kind::Other("cloud_change".into()), "u1");
+    let view = remote_view(&mine, "u1", 2_000).unwrap();
+    assert_eq!(view["state"], "pending");
+    assert_eq!(view["kind"], "cloud_change");
+    assert_eq!(view["payload"], create.payload);
+    assert!(
+        remote_view(&mine, "u2", 2_000).is_none(),
+        "another caller's id says nothing"
+    );
+    assert!(
+        remote_view(&record(Kind::ToolCall, "u1"), "u1", 2_000).is_none(),
+        "a tool call's approval is not readable through this op"
+    );
+    let mut approved = mine.clone();
+    approved.state = State::Approved;
+    assert_eq!(
+        remote_view(&approved, "u1", 2_000).unwrap()["state"],
+        "approved"
+    );
+    let later = approved.expires_ms + 1;
+    assert_eq!(
+        remote_view(&approved, "u1", later).unwrap()["state"],
+        "expired"
+    );
+
+    // The cloud gateway has its own caller key slot, as the other capability Workers do.
+    assert_eq!(
+        pigeon_capabilities::split::worker_key_name("cloud-gateway"),
+        Some("CALLER_KEY_CLOUD_GATEWAY")
     );
 }

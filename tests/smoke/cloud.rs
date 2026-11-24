@@ -95,14 +95,14 @@ struct Store {
 }
 
 impl Sink for Store {
-    fn exists<'a>(&'a self, slot: &'a str) -> Fut<'a, bool> {
+    fn names<'a>(&'a self) -> Fut<'a, Vec<String>> {
         Box::pin(async move {
             if self.fail_exists.get() {
                 return Err(worker::Error::RustError(
                     "no secrets_store credential".into(),
                 ));
             }
-            Ok(self.names.borrow().iter().any(|n| n == slot))
+            Ok(self.names.borrow().clone())
         })
     }
 

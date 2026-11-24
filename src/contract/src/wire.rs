@@ -14,8 +14,10 @@ pub const OPS: [&str; 6] = ["manifest", "call", "section", "fetch", "events", "s
 /// `CALLER_KEY` but for no caller. `credential_revoke` takes a [`CredentialRequest`] and ends a
 /// run's git grant; it is signed for the run's caller. `credential_release` takes a
 /// [`CredentialRequest`] of kind `scoped` and revokes every shared token leased to the signed
-/// caller, when its last live run ends.
-pub const CORE_OPS: [&str; 8] = [
+/// caller, when its last live run ends. `approval` takes an [`ApprovalRequest`]: a capability
+/// Worker plans a change and the person approves it; it is signed for the caller, and core fixes
+/// the kinds and the approver.
+pub const CORE_OPS: [&str; 9] = [
     "credential",
     "credential_revoke",
     "credential_release",
@@ -24,6 +26,7 @@ pub const CORE_OPS: [&str; 8] = [
     "grant",
     "deploy_grant",
     "service_user",
+    "approval",
 ];
 
 /// The core ops a request signed for no caller may ask: the proxy Worker's checks, which carry
@@ -199,6 +202,29 @@ pub struct CredentialRequest {
     /// The scopes wanted.
     #[serde(default)]
     pub scopes: Vec<String>,
+}
+
+/// A capability Worker's request to core's `approval` op: plan a change for the person's
+/// passkey, read a plan's approval, or spend it. Only kinds in core's fixed table are served.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ApprovalRequest {
+    /// `create`, `get` or `take`.
+    pub action: String,
+    /// The approval's id, for `get` and `take`.
+    #[serde(default)]
+    pub id: Option<String>,
+    /// The approval's kind, for `create` and `take`, such as `cloud_change`.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// What the approval is for, in a line, for `create` and `take`.
+    #[serde(default)]
+    pub subject: Option<String>,
+    /// The plan the approval holds, for `create` and `take`. Core takes its digest itself.
+    #[serde(default)]
+    pub payload: Value,
+    /// The plain lines the person reads before approving, for `create`.
+    #[serde(default)]
+    pub lines: Vec<String>,
 }
 
 /// The proxy Worker's `verify` request: who holds a proxy credential. Answered with the holder

@@ -19,9 +19,10 @@ pub use ask::{ask, manifest};
 pub use caller::{HEADER, MAX_AGE_MS, Refused, Signed, sign, verify};
 pub use serve::{Service, serve};
 pub use wire::{
-    Answer, CALLERLESS_OPS, CONTRACT, CORE_OPS, CallRequest, CapabilityManifest, Credential,
-    CredentialRequest, EventsRequest, Failure, FailureKind, GrantRequest, Manifest, OPS, SecretOp,
-    SecretRequest, SectionRequest, SectionSpec, SlotSpec, ToolSpec, VerifyRequest, accepts, wants,
+    Answer, ApprovalRequest, CALLERLESS_OPS, CONTRACT, CORE_OPS, CallRequest, CapabilityManifest,
+    Credential, CredentialRequest, EventsRequest, Failure, FailureKind, GrantRequest, Manifest,
+    OPS, SecretOp, SecretRequest, SectionRequest, SectionSpec, SlotSpec, ToolSpec, VerifyRequest,
+    accepts, wants,
 };
 
 /// The current time in milliseconds since the epoch; the one place that reads the clock.
