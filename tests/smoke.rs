@@ -873,8 +873,8 @@ fn ai_agents_models_choice_tiers_and_shorthand() {
         model: m.into(),
     };
     assert_eq!(
-        c("openai/gpt-6.2-sol", Slot::Executor),
-        Ok(ok("openai", "gpt-6.2-sol"))
+        c("cf-openai/gpt-6.2-sol", Slot::Executor),
+        Ok(ok("cf-openai", "gpt-6.2-sol"))
     );
     assert_eq!(
         c("anthropic/claude-opus-5-5", Slot::Planner),
@@ -885,25 +885,28 @@ fn ai_agents_models_choice_tiers_and_shorthand() {
         Ok(ok("anthropic", "claude-haiku-5-5"))
     );
     assert_eq!(
-        c("openai", Slot::Planner),
-        Ok(ok("openai", "gpt-6.2-astra"))
-    );
-    assert_eq!(c("openai", Slot::Executor), Ok(ok("openai", "gpt-6.2-sol")));
-    assert_eq!(
-        c("openai", Slot::Mechanical),
-        Ok(ok("openai", "gpt-6.1-terra"))
+        c("cf-openai", Slot::Planner),
+        Ok(ok("cf-openai", "gpt-6.2-astra"))
     );
     assert_eq!(
-        c("openai", Slot::Summary),
-        Ok(ok("openai", "gpt-6.1-terra"))
+        c("cf-openai", Slot::Executor),
+        Ok(ok("cf-openai", "gpt-6.2-sol"))
+    );
+    assert_eq!(
+        c("cf-openai", Slot::Mechanical),
+        Ok(ok("cf-openai", "gpt-6.1-terra"))
+    );
+    assert_eq!(
+        c("cf-openai", Slot::Summary),
+        Ok(ok("cf-openai", "gpt-6.1-terra"))
     );
     assert_eq!(
         c("anthropic", Slot::Mechanical),
         Ok(ok("anthropic", "claude-haiku-5-5"))
     );
     assert_eq!(
-        c("openai/gpt-6-luna", Slot::Mechanical),
-        Ok(ok("openai", "gpt-6-luna"))
+        c("cf-openai/gpt-6-luna", Slot::Mechanical),
+        Ok(ok("cf-openai", "gpt-6-luna"))
     );
     assert!(
         c("gemini/x", Slot::Executor)
@@ -911,15 +914,15 @@ fn ai_agents_models_choice_tiers_and_shorthand() {
             .contains("unknown provider")
     );
     assert!(c("gpt-6.2-sol", Slot::Executor).is_err());
-    assert!(c("openai/", Slot::Executor).is_err());
-    assert!(c("openai/gpt 6", Slot::Executor).is_err());
-    assert!(c(&format!("openai/{}", "a".repeat(101)), Slot::Executor).is_err());
-    assert!(c(&format!("openai/{}", "a".repeat(100)), Slot::Executor).is_ok());
+    assert!(c("cf-openai/", Slot::Executor).is_err());
+    assert!(c("cf-openai/gpt 6", Slot::Executor).is_err());
+    assert!(c(&format!("cf-openai/{}", "a".repeat(101)), Slot::Executor).is_err());
+    assert!(c(&format!("cf-openai/{}", "a".repeat(100)), Slot::Executor).is_ok());
     assert_eq!(
-        c("openai/ft:gpt_6.2-sol", Slot::Executor).unwrap().model,
+        c("cf-openai/ft:gpt_6.2-sol", Slot::Executor).unwrap().model,
         "ft:gpt_6.2-sol"
     );
-    assert_eq!(tier_model("openai", Tier::Top), Some("gpt-6.2-astra"));
+    assert_eq!(tier_model("cf-openai", Tier::Top), Some("gpt-6.2-astra"));
     assert_eq!(tier_model("mistral", Tier::Top), None);
     assert_eq!(builtin(Slot::Planner).text(), "anthropic/claude-opus-5-5");
     assert_eq!(
@@ -949,21 +952,21 @@ fn ai_agents_models_fallback_chains() {
     }
     let p = |t: &str, s| Choice::parse(t, s).unwrap();
     assert_eq!(
-        ids(chain(&p("openai", Slot::Planner), Role::Planner)),
-        ["openai/gpt-6.2-astra", "openai/gpt-6.2-sol"]
+        ids(chain(&p("cf-openai", Slot::Planner), Role::Planner)),
+        ["cf-openai/gpt-6.2-astra", "cf-openai/gpt-6.2-sol"]
     );
     assert_eq!(
-        ids(chain(&p("openai", Slot::Executor), Role::Executor)),
-        ["openai/gpt-6.2-sol", "openai/gpt-6.2-astra"]
+        ids(chain(&p("cf-openai", Slot::Executor), Role::Executor)),
+        ["cf-openai/gpt-6.2-sol", "cf-openai/gpt-6.2-astra"]
     );
     assert_eq!(
-        ids(chain(&p("openai", Slot::Mechanical), Role::Mechanical)),
-        ["openai/gpt-6.1-terra", "openai/gpt-6.2-sol"]
+        ids(chain(&p("cf-openai", Slot::Mechanical), Role::Mechanical)),
+        ["cf-openai/gpt-6.1-terra", "cf-openai/gpt-6.2-sol"]
     );
     // An unknown model has no fallback; a model that is its own fallback has none to add.
     assert_eq!(
-        ids(chain(&p("openai/gpt-9", Slot::Executor), Role::Executor)),
-        ["openai/gpt-9"]
+        ids(chain(&p("cf-openai/gpt-9", Slot::Executor), Role::Executor)),
+        ["cf-openai/gpt-9"]
     );
     assert_eq!(
         ids(chain(
@@ -974,10 +977,10 @@ fn ai_agents_models_fallback_chains() {
     );
     assert_eq!(
         ids(chain(
-            &p("openai/gpt-6.2-astra", Slot::Executor),
+            &p("cf-openai/gpt-6.2-astra", Slot::Executor),
             Role::Executor
         )),
-        ["openai/gpt-6.2-astra"]
+        ["cf-openai/gpt-6.2-astra"]
     );
     // A stored model that cannot be read behaves as no model.
     assert_eq!(
@@ -1000,25 +1003,25 @@ fn ai_agents_models_merge_and_stored_defaults() {
         merge(Role::Executor, None, None, &d).text(),
         "anthropic/claude-sonnet-5-5"
     );
-    d.put(Slot::Executor, p("openai/gpt-6.2-sol", Slot::Executor));
+    d.put(Slot::Executor, p("cf-openai/gpt-6.2-sol", Slot::Executor));
     assert_eq!(
         merge(Role::Executor, None, None, &d).text(),
-        "openai/gpt-6.2-sol"
+        "cf-openai/gpt-6.2-sol"
     );
     let kids =
-        ChildModels::parse(&json!({ "executor": "anthropic", "mechanical": "openai" })).unwrap();
+        ChildModels::parse(&json!({ "executor": "anthropic", "mechanical": "cf-openai" })).unwrap();
     assert_eq!(
         merge(Role::Executor, None, Some(&kids), &d).text(),
         "anthropic/claude-sonnet-5-5"
     );
     assert_eq!(
         merge(Role::Mechanical, None, Some(&kids), &d).text(),
-        "openai/gpt-6.1-terra"
+        "cf-openai/gpt-6.1-terra"
     );
-    let own = p("openai/gpt-6-luna", Slot::Executor);
+    let own = p("cf-openai/gpt-6-luna", Slot::Executor);
     assert_eq!(
         merge(Role::Executor, Some(&own), Some(&kids), &d).text(),
-        "openai/gpt-6-luna"
+        "cf-openai/gpt-6-luna"
     );
     // A planner ignores `models`.
     assert_eq!(
@@ -1027,28 +1030,28 @@ fn ai_agents_models_merge_and_stored_defaults() {
     );
 
     // What is set is checked.
-    let set = check_set(&json!({ "summary": "openai", "planner": "claude-opus-5-5" })).unwrap();
+    let set = check_set(&json!({ "summary": "cf-openai", "planner": "claude-opus-5-5" })).unwrap();
     assert_eq!(set.len(), 2);
-    assert!(check_set(&json!({ "boss": "openai" })).is_err());
+    assert!(check_set(&json!({ "boss": "cf-openai" })).is_err());
     assert!(check_set(&json!({ "executor": "nope/x" })).is_err());
     assert!(check_set(&json!({ "executor": 3 })).is_err());
-    assert!(check_set(&json!("openai")).is_err());
+    assert!(check_set(&json!("cf-openai")).is_err());
 
     // Stored as JSON and read back; the answer marks each default.
     assert_eq!(Defaults::from_json(&d.to_json()), d);
-    let a = defaults_answer(&d);
+    let a = defaults_answer(&d, &[]);
     assert_eq!(
         a["defaults"]["executor"],
-        json!({ "model": "openai/gpt-6.2-sol", "source": "stored" })
+        json!({ "model": "cf-openai/gpt-6.2-sol", "route": "credits", "source": "stored" })
     );
     assert_eq!(a["defaults"]["planner"]["source"], "built_in");
     assert_eq!(
         a["defaults"]["summary"]["model"],
         "anthropic/claude-haiku-5-5"
     );
-    assert_eq!(a["tiers"]["openai"]["middle"], "gpt-6.2-sol");
+    assert_eq!(a["tiers"]["cf-openai"]["middle"], "gpt-6.2-sol");
     assert_eq!(a["tiers"]["anthropic"]["small"], "claude-haiku-5-5");
-    assert_eq!(a["tiers"]["openai"]["other"], json!(["gpt-6-luna"]));
+    assert_eq!(a["tiers"]["cf-openai"]["other"], json!(["gpt-6-luna"]));
     assert!(a["example"]["args"]["set"].is_object());
 }
 
@@ -1060,34 +1063,40 @@ fn ai_agents_models_start_spawn_and_request() {
     use pigeon_ai_agents::transcript::{self, Spec};
     use pigeon_ai_agents::{Role, service, tools};
     // The old shape of start_args still works.
-    assert!(service::start_args(&json!({ "brief": "x", "model": "openai" })).is_ok());
+    assert!(service::start_args(&json!({ "brief": "x", "model": "cf-openai" })).is_ok());
     let (own, kids) = start_models(
         Role::Planner,
-        &json!({ "model": "openai", "models": { "executor": "anthropic" } }),
+        &json!({ "model": "cf-openai", "models": { "executor": "anthropic" } }),
     )
     .unwrap();
-    assert_eq!(own.unwrap().text(), "openai/gpt-6.2-astra");
+    assert_eq!(own.unwrap().text(), "cf-openai/gpt-6.2-astra");
     assert_eq!(kids.executor.unwrap().text(), "anthropic/claude-sonnet-5-5");
     let (own, kids) = start_models(Role::Executor, &json!({ "brief": "x" })).unwrap();
     assert!(own.is_none() && kids.is_empty());
     assert!(
         start_models(
             Role::Executor,
-            &json!({ "models": { "executor": "openai" } })
+            &json!({ "models": { "executor": "cf-openai" } })
         )
         .is_err()
     );
-    assert!(start_models(Role::Planner, &json!({ "models": { "planner": "openai" } })).is_err());
+    assert!(
+        start_models(
+            Role::Planner,
+            &json!({ "models": { "planner": "cf-openai" } })
+        )
+        .is_err()
+    );
     assert!(start_models(Role::Planner, &json!({ "model": "bogus/x" })).is_err());
     assert!(start_models(Role::Planner, &json!({ "model": 4 })).is_err());
 
     // spawn_executor.
     let spawn = |v: serde_json::Value| tools::check(Role::Planner, "spawn_executor", &v);
-    assert!(spawn(json!({ "brief": "b", "model": "openai/gpt-6.2-sol" })).is_ok());
-    assert!(spawn(json!({ "brief": "b", "model": "openai/bad model" })).is_err());
+    assert!(spawn(json!({ "brief": "b", "model": "cf-openai/gpt-6.2-sol" })).is_ok());
+    assert!(spawn(json!({ "brief": "b", "model": "cf-openai/bad model" })).is_err());
     assert!(spawn(json!({ "brief": "b", "model": 3 })).is_err());
     assert_eq!(
-        spawn_model(Role::Mechanical, &json!({ "model": "openai" }))
+        spawn_model(Role::Mechanical, &json!({ "model": "cf-openai" }))
             .unwrap()
             .unwrap()
             .model,
@@ -1132,7 +1141,7 @@ fn ai_agents_models_compare_grouping() {
         })
     };
     let sonnet = Some("anthropic/claude-sonnet-5-5");
-    let sol = Some("openai/gpt-6.2-sol");
+    let sol = Some("cf-openai/gpt-6.2-sol");
     let rows = vec![
         run("executor", None, "done", 1_000_000, 10, 5),
         run("executor", sonnet, "failed", 3_000_000, 30, 15),
@@ -1155,7 +1164,7 @@ fn ai_agents_models_compare_grouping() {
     assert_eq!(all[0]["cost_usd"]["high"], 3.0);
     assert_eq!(all[0]["turns"]["median"], 20.0);
     assert_eq!(all[0]["minutes"]["median"], 10.0);
-    assert_eq!(all[1]["model"], "openai/gpt-6.2-sol");
+    assert_eq!(all[1]["model"], "cf-openai/gpt-6.2-sol");
     assert_eq!(all[1]["runs"], 2);
     assert_eq!(all[1]["over_budget"], 1);
     assert_eq!(all[2]["role"], "mechanical");
@@ -1461,4 +1470,105 @@ fn models_two_gateways_specs_guard_routes_and_daily() {
     assert!(!out.gateways["pigeon-anthropic"].truncated);
     assert!(out.gateways["pigeon"].truncated);
     assert_eq!(out.gateways["pigeon"].logs, 2);
+}
+
+/// Models by who pays: cf-anthropic and cf-openai tiers, the route on models and compare, the
+/// refusal of `openai/…`, Workers AI not yet, a stored openai default read as unset, and a
+/// fallback that stays within its provider.
+#[test]
+fn ai_agents_models_credits_routes_and_openai_refused() {
+    use pigeon_ai_agents::Role;
+    use pigeon_ai_agents::compare::groups;
+    use pigeon_ai_agents::models::{
+        Choice, Defaults, Slot, Tier, chain, defaults_answer, ignored_notes, route, tier_model,
+    };
+    let p = |t: &str, s| Choice::parse(t, s).unwrap();
+    // Tiers of the two credits providers.
+    assert_eq!(
+        tier_model("cf-anthropic", Tier::Top),
+        Some("claude-opus-5-5")
+    );
+    assert_eq!(
+        tier_model("cf-anthropic", Tier::Middle),
+        Some("claude-sonnet-5-5")
+    );
+    assert_eq!(
+        tier_model("cf-anthropic", Tier::Small),
+        Some("claude-haiku-5-5")
+    );
+    assert_eq!(tier_model("cf-openai", Tier::Top), Some("gpt-6.2-astra"));
+    assert_eq!(tier_model("cf-openai", Tier::Middle), Some("gpt-6.2-sol"));
+    assert_eq!(tier_model("cf-openai", Tier::Small), Some("gpt-6.1-terra"));
+    assert_eq!(
+        p("cf-anthropic", Slot::Planner).text(),
+        "cf-anthropic/claude-opus-5-5"
+    );
+    assert_eq!(
+        p("claude-sonnet-5-5", Slot::Executor).text(),
+        "anthropic/claude-sonnet-5-5"
+    );
+    assert_eq!(route("anthropic"), "byok");
+    assert_eq!(route("cf-anthropic"), "credits");
+    assert_eq!(route("cf-openai"), "credits");
+    // OpenAI is credits only; Workers AI comes later.
+    for t in ["openai/gpt-6.2-sol", "openai"] {
+        let e = Choice::parse(t, Slot::Executor).unwrap_err();
+        assert!(
+            e.contains("OpenAI is paid with Cloudflare credits: use cf-openai/"),
+            "{e}"
+        );
+    }
+    for t in ["workers-ai/x", "workers-ai"] {
+        let e = Choice::parse(t, Slot::Executor).unwrap_err();
+        assert!(e.contains("not available yet"), "{e}");
+    }
+    // A stored openai default reads as unset, and the answer says so.
+    let raw = json!({ "executor": "openai/gpt-6.2-sol", "planner": "cf-openai/gpt-6.2-astra" });
+    let d = Defaults::from_json(&raw);
+    assert!(d.stored_for(Slot::Executor).is_none());
+    let notes = ignored_notes(&raw);
+    assert_eq!(notes.len(), 1);
+    assert!(notes[0].contains("openai/gpt-6.2-sol"));
+    let a = defaults_answer(&d, &notes);
+    assert_eq!(
+        a["defaults"]["executor"]["model"],
+        "anthropic/claude-sonnet-5-5"
+    );
+    assert_eq!(a["defaults"]["executor"]["source"], "built_in");
+    assert_eq!(a["defaults"]["executor"]["route"], "byok");
+    assert_eq!(a["defaults"]["planner"]["route"], "credits");
+    assert_eq!(a["notes"].as_array().unwrap().len(), 1);
+    // Fallback stays within the provider, so within the route.
+    for (text, want) in [
+        (
+            "cf-anthropic/claude-sonnet-5-5",
+            "cf-anthropic/claude-opus-5-5",
+        ),
+        ("anthropic/claude-sonnet-5-5", "anthropic/claude-opus-5-5"),
+        ("cf-openai/gpt-6.2-sol", "cf-openai/gpt-6.2-astra"),
+    ] {
+        let ids: Vec<String> = chain(&p(text, Slot::Executor), Role::Executor)
+            .iter()
+            .map(Choice::text)
+            .collect();
+        assert_eq!(ids, [text, want]);
+    }
+    // Compare: the two payers are two rows, each with its route.
+    let run = |m: &str| {
+        json!({
+            "role": "executor", "model": m, "state": "done",
+            "spent": { "cost_micros": 1, "turns": 1 },
+            "created_at": 0, "started_at": 0, "ended_at": 60_000,
+        })
+    };
+    let rows = vec![
+        run("cf-anthropic/claude-sonnet-5-5"),
+        run("anthropic/claude-sonnet-5-5"),
+    ];
+    let g = groups(&rows, None);
+    assert_eq!(g.len(), 2);
+    assert_eq!(g[0]["model"], "anthropic/claude-sonnet-5-5");
+    assert_eq!(g[0]["route"], "byok");
+    assert_eq!(g[1]["model"], "cf-anthropic/claude-sonnet-5-5");
+    assert_eq!(g[1]["route"], "credits");
 }

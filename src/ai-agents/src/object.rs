@@ -299,6 +299,9 @@ impl Row {
             "extended": parsed(&self.extended),
             "estimate": parsed(&self.estimate),
             "model": self.model,
+            "route": self.model.as_deref().map(|m| {
+                models::route(m.split('/').next().unwrap_or_default())
+            }),
             "models": parsed(&self.child_models),
         })
     }
