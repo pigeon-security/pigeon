@@ -149,6 +149,19 @@ struct Row {
     name: Option<String>,
 }
 
+/// Adds a planner's executor money to its `spent` JSON: the hold (`executors_cost`, kept for
+/// old readers), what the executors spent, what is reserved for live ones, and the total.
+pub fn add_planner_cost(spent_json: &mut Value, spent: &Spent) {
+    let usd = |m: u64| m as f64 / 1e6;
+    spent_json["executors_cost"] = json!(budget::money(spent.executors_micros));
+    spent_json["executors_cost_usd"] = json!(usd(spent.executors_micros));
+    spent_json["executors_spent"] = json!(budget::money(spent.executors_spent_micros));
+    spent_json["executors_spent_usd"] = json!(usd(spent.executors_spent_micros));
+    spent_json["executors_reserved"] = json!(budget::money(spent.executors_reserved_micros));
+    spent_json["executors_reserved_usd"] = json!(usd(spent.executors_reserved_micros));
+    spent_json["total_cost"] = json!(budget::money(spent.committed_micros()));
+}
+
 /// A short title for a run, from its brief's first non-empty line: leading `#`s, `Brief:` or
 /// `Task:` are dropped, and a long line is cut on a word boundary with `…`, at most 80 characters.
 pub fn run_title(brief: &str) -> String {
@@ -243,9 +256,7 @@ impl Row {
             "sandbox_min": spent.sandbox_ms / 60_000,
         });
         if self.role == "planner" {
-            spent_json["executors_cost"] = json!(budget::money(spent.executors_micros));
-            spent_json["executors_cost_usd"] = json!(spent.executors_micros as f64 / 1e6);
-            spent_json["total_cost"] = json!(budget::money(spent.committed_micros()));
+            add_planner_cost(&mut spent_json, &spent);
         }
         let title = run_title(&self.brief);
         let elapsed = elapsed_ms(self.created_at, self.started_at, self.ended_at, now());
@@ -2059,7 +2070,7 @@ impl AiAgentRuns {
             match children {
                 Ok(children) => {
                     s = budget::migrate_planner(s, children_budgets_micros(&children));
-                    s.executors_micros = budget::executors_committed(&children);
+                    s = budget::with_executors(s, &children);
                 }
                 Err(e) => worker::console_error!("agents: run {} listing executors: {e}", row.id),
             }
@@ -2201,8 +2212,7 @@ impl AiAgentRuns {
 
     /// While a planner waits: refreshes what its executors hold, and tells the index on change.
     async fn refresh_executors(&self, row: &RunRow, spent: &Spent, children: &Value) -> Result<()> {
-        let mut s = *spent;
-        s.executors_micros = budget::executors_committed(children);
+        let s = budget::with_executors(*spent, children);
         if s != *spent {
             let text = serde_json::to_string(&s)?;
             self.set("spent = ?", vec![text.clone().into()])?;
@@ -2536,21 +2546,28 @@ impl AiAgentRuns {
                 };
                 let child_budget = Budget::asked(role, &input["budget"])?;
                 // What the executors hold counts against the budget, so it is read fresh.
-                let mut spent = *spent;
+                let spent = *spent;
                 let listed = call(&self.env, INDEX, "children", &json!({ "run": row.id }))
                     .await
                     .map_err(e)?;
-                spent.executors_micros = budget::executors_committed(&listed);
+                let spent = budget::with_executors(spent, &listed);
                 let spent = &spent;
                 let left = Spent::left(budget, spent, row.started_at, now());
-                child_budget.within(&left)?;
+                // Only the reserve is held against the planner's cost, so the child's own
+                // cost budget is not compared with what the planner has left.
+                let reserve = budget::executor_reserve(child_budget.cost_micros, 0);
+                Budget {
+                    cost_micros: 0,
+                    ..child_budget
+                }
+                .within(&left)?;
                 budget::check(
                     budget,
                     spent,
                     row.started_at,
                     now(),
                     Next::Spawn {
-                        cost_micros: child_budget.cost_micros,
+                        cost_micros: reserve,
                     },
                 )
                 .map_err(|over| over.why(budget))?;
@@ -2589,10 +2606,11 @@ impl AiAgentRuns {
                 )
                 .await
                 .map_err(e)?;
-                // The child's budget is held against the planner's at once.
+                // The child's reserve is held against the planner's at once.
                 let mut s = *spent;
                 s.executors += 1;
-                s.executors_micros = s.executors_micros.saturating_add(child_budget.cost_micros);
+                s.executors_micros = s.executors_micros.saturating_add(reserve);
+                s.executors_reserved_micros = s.executors_reserved_micros.saturating_add(reserve);
                 self.set(
                     "spent = ?",
                     vec![serde_json::to_string(&s).map_err(|x| x.to_string())?.into()],

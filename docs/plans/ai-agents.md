@@ -616,6 +616,13 @@ because each adds a tool or a step; keep both sides. Smoke scenarios go in
 `tests/smoke/ai_agents.rs` (prefix `ai_agents_`) and, for the observability tool,
 `tests/smoke/observability.rs`.
 
+### Phase 7: planners that finish (2026-11-24)
+
+A planner's cap must not be eaten by what its executors might spend. A live executor holds its
+actual spend plus a reserve of at most $0.50; the unspent part of its budget is not held, and an
+ended executor holds only its spend. The child's own budget is still its own cap. At spawn the
+planner needs only the reserve left, plus turns, wall time and sandbox time for the child.
+
 ## The person's answers (2026-11-22, relayed by the parent)
 
 1. Runs push and run CI only; landing stays with the planner or the parent. Phase 2's `land` flag
@@ -937,3 +944,8 @@ executors through it. Each item: state, next step, who it waits on.
   `wait_executors` and `wait_events` already exist, so `executors_wait` is not built. Compaction
   never fires in a tool loop because `cut_point` wants a user message without a tool result; 6a
   fixes that. Per-kind planner models are stored but unset, and no default changes.
+- 2026-11-24: **Executor reservations are small.** A $15 planner spent $0.32, held $7.25 for each of
+  two executors and could not take a turn. A live executor now holds its spend plus at most
+  `EXECUTOR_RESERVE_MICROS` ($0.50) of its unspent budget; an ended one holds only its spend. A
+  spawn needs the planner's remaining cost to cover just that reserve. `spent` shows
+  `executors_spent` and `executors_reserved` next to `executors_cost` (the hold).
