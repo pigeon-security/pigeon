@@ -1,7 +1,10 @@
 //! Registration for the publishing tools served by pigeon-sites.
 use super::{record::Instance, tools::Registration};
 
-const TOOLS: &[Registration] = &[
+/// The capability pigeon-sites serves these tools under.
+pub const CAPABILITY: &str = "sites";
+
+pub const TOOLS: &[Registration] = &[
     Registration {
         name: "site_deploy",
         description: None,

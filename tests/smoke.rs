@@ -3006,11 +3006,13 @@ fn public_site_deploy_refuses_a_queued_publishing_binding() {
 
 #[test]
 fn ci_global_connector_only_attaches_context_to_explicit_instance_reads() {
-    use pigeon_capabilities::ci::connector_read_instance;
+    use pigeon_capabilities::instances::tools::global_target;
     use pigeon_ci::scope::read_context;
 
     let instance_read = json!({"instance": "pigeon-security/platform", "commit": "abc"});
-    let selected = connector_read_instance("ci_jobs", &instance_read).unwrap();
+    let selected = global_target("ci", "ci_jobs", &instance_read)
+        .unwrap()
+        .map(|(_, id)| id);
     assert_eq!(selected, Some("pigeon-security/platform"));
     let context = read_context("pigeon-security/platform", selected)
         .unwrap()
@@ -3018,22 +3020,17 @@ fn ci_global_connector_only_attaches_context_to_explicit_instance_reads() {
     assert_eq!(context.recipient, "pigeon-platform");
     assert_eq!(context.instance.as_deref(), selected);
 
-    assert_eq!(
-        connector_read_instance("ci_status", &json!({"id": "job"})).unwrap(),
-        None
-    );
-    assert_eq!(
-        connector_read_instance("ci_submit", &instance_read).unwrap(),
-        None
-    );
-    assert!(connector_read_instance("ci_jobs", &json!({"instance": null})).is_err());
     assert!(
-        connector_read_instance(
-            "ci_jobs",
-            &json!({"instance": "pigeon-security/platform", "repo": "other"})
-        )
-        .is_err()
+        global_target("ci", "ci_status", &json!({"id": "job"}))
+            .unwrap()
+            .is_none()
     );
+    assert!(
+        global_target("ci", "ci_submit", &instance_read)
+            .unwrap()
+            .is_none()
+    );
+    assert!(global_target("ci", "ci_jobs", &json!({"instance": null})).is_err());
     assert!(read_context("other", selected).is_err());
     assert!(
         read_context("pigeon-security/platform", None)

@@ -24,6 +24,79 @@ const CAPABILITIES: &[Register] = &[
     crate::ingest::instance_tools,
 ];
 
+/// What core does with an instance-targeted call from the global connector when the receiving
+/// Worker's manifest does not advertise signed instance context.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unsupported {
+    /// Keep the legacy envelope (CI reads, whose gateway may predate context).
+    Legacy,
+    /// Refuse before sending: the receiver never gets an unscoped copy of the call.
+    Refuse,
+}
+
+/// A capability Worker's tools that act on one approved instance. When the global connector
+/// (`/mcp` with no `instance`) names an instance in such a tool's arguments, core reads the
+/// approved record, binds the call as the instance endpoint would ([`Scope::bind`]), and signs it
+/// with that instance's context. The tools are the registrations the instance endpoint offers,
+/// so both routes share one declaration.
+pub struct Targeted {
+    /// The capability's name in its Worker's manifest.
+    pub capability: &'static str,
+    /// Its instance-targeted tools.
+    pub tools: &'static [Registration],
+    pub unsupported: Unsupported,
+}
+
+/// Every remote capability with instance-targeted tools.
+pub const TARGETED: &[Targeted] = &[
+    Targeted {
+        capability: super::publishing::CAPABILITY,
+        tools: super::publishing::TOOLS,
+        unsupported: Unsupported::Refuse,
+    },
+    Targeted {
+        capability: crate::ci::Ci::NAME,
+        tools: crate::ci::SCOPED_TOOLS,
+        unsupported: Unsupported::Legacy,
+    },
+];
+
+/// The declaration and instance a global-connector call targets: `None` for a tool that is not
+/// instance-targeted, or a call that names no instance, which stay on the platform path. Pure.
+pub fn global_target<'a>(
+    capability: &str,
+    tool: &str,
+    args: &'a Value,
+) -> Result<Option<(&'static Targeted, &'a str)>, String> {
+    let Some(target) = TARGETED.iter().find(|target| {
+        target.capability == capability && target.tools.iter().any(|t| t.name == tool)
+    }) else {
+        return Ok(None);
+    };
+    match args.get("instance") {
+        None => Ok(None),
+        Some(Value::String(id)) => Ok(Some((target, id.as_str()))),
+        Some(_) => Err("`instance` must be an instance id".into()),
+    }
+}
+
+/// Binds a global-connector call to the approved record `instance` names, with the instance
+/// endpoint's checks: the record exists and enables `tool`, and the arguments stay inside its
+/// registration. Answers the arguments to send. Pure.
+pub fn bind_global(
+    instance: &str,
+    record: Option<&Instance>,
+    tool: &str,
+    args: &Value,
+) -> Result<Value, String> {
+    let unknown = || format!("there is no approved instance `{instance}`");
+    let record = record.filter(|r| r.id == instance).ok_or_else(unknown)?;
+    let scope = Scope::new(record).map_err(|e| format!("instance `{instance}`: {e}"))?;
+    scope
+        .bind(tool, args)
+        .map_err(|why| format!("`{tool}` on instance `{instance}`: {why}"))
+}
+
 /// An approved instance's enabled capabilities. The request cannot supply a replacement scope.
 pub struct Scope {
     instance: String,

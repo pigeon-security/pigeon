@@ -821,3 +821,177 @@ fn site_object_staging_bounds_parallel_writes_and_drains_failed_batches() {
         assert_eq!(completed.get(), expected);
     }
 }
+
+/// The sender path `Remote::call` takes for a global-connector call (no instance endpoint): the
+/// targeted declaration, then the context, then the approved record's binding. `None` is the
+/// platform (legacy) envelope; an error is a refusal before any request is sent.
+fn global_send(
+    worker: &str,
+    capability: &str,
+    supported: bool,
+    tool: &str,
+    args: &Value,
+    record: Option<&pigeon_capabilities::instances::record::Instance>,
+) -> Result<Option<(pigeon_contract::WorkerContext, Value)>, String> {
+    use pigeon_capabilities::instances::tools::{bind_global, global_target};
+    use pigeon_capabilities::remote::global_context;
+    let Some((target, id)) = global_target(capability, tool, args)? else {
+        return Ok(None);
+    };
+    let Some(context) = global_context(worker, supported, target, id)? else {
+        return Ok(None);
+    };
+    Ok(Some((context, bind_global(id, record, tool, args)?)))
+}
+
+fn publishing_record(publishing: Value) -> pigeon_capabilities::instances::record::Instance {
+    serde_json::from_value(json!({
+        "id":"sandbox","title":"Sandbox","version":4,
+        "account":{"kind":"linked","account_id":"fixture"},
+        "repo":{"kind":"github","full_name":"example/sandbox","installation":12},
+        "sites":[{"name":"primary","bucket":"sandbox-site"}],
+        "publishing": publishing
+    }))
+    .unwrap()
+}
+
+/// A global-connector `site_deploy` or `site_rollback` naming an approved instance is signed
+/// for pigeon-sites and that instance, as the instance endpoint signs it, so Sites takes its
+/// typed `sites_scope` callbacks rather than the legacy ones.
+#[test]
+fn global_site_deploy_and_rollback_are_signed_for_the_approved_instance() {
+    let record = publishing_record(json!({"state":"enabled","site":"primary"}));
+    for (tool, args) in [
+        ("site_deploy", json!({"instance":"sandbox","rev":"main"})),
+        ("site_deploy", json!({"instance":"sandbox"})),
+        (
+            "site_rollback",
+            json!({"instance":"sandbox","release":"r1"}),
+        ),
+    ] {
+        let (context, bound) =
+            global_send("pigeon-sites", "sites", true, tool, &args, Some(&record))
+                .unwrap()
+                .unwrap_or_else(|| panic!("{tool} was sent legacy"));
+        assert_eq!(context.recipient, "pigeon-sites");
+        assert_eq!(context.instance.as_deref(), Some("sandbox"));
+        assert_eq!(bound, args, "{tool}");
+
+        // Nested `call` reaches the same path with the same arguments.
+        let outer = json!({"tool": tool, "args": args});
+        let (name, inner) = pigeon_capabilities::dispatch::requested(&outer).unwrap();
+        let nested = global_send("pigeon-sites", "sites", true, name, &inner, Some(&record))
+            .unwrap()
+            .unwrap();
+        assert_eq!(nested, (context, bound));
+    }
+}
+
+/// Unknown or unapproved instances, arguments outside the registration, and a Sites Worker
+/// without context support are refused before anything is sent, with no legacy fallback.
+#[test]
+fn global_site_calls_refuse_unapproved_targets_and_old_receivers_before_sending() {
+    let enabled = publishing_record(json!({"state":"enabled","site":"primary"}));
+    let disabled = publishing_record(json!({"state":"disabled"}));
+    let deploy = json!({"instance":"sandbox","rev":"main"});
+    let refused = |supported, tool, args: &Value, record| {
+        global_send("pigeon-sites", "sites", supported, tool, args, record).unwrap_err()
+    };
+
+    let why = refused(true, "site_deploy", &deploy, None);
+    assert!(why.contains("no approved instance `sandbox`"), "{why}");
+    let other = json!({"instance":"elsewhere","rev":"main"});
+    let why = refused(true, "site_deploy", &other, Some(&enabled));
+    assert!(why.contains("no approved instance `elsewhere`"), "{why}");
+    let rollback = json!({"instance":"sandbox","release":"r1"});
+    for (tool, args) in [("site_deploy", &deploy), ("site_rollback", &rollback)] {
+        let why = refused(true, tool, args, Some(&disabled));
+        assert!(why.contains("unavailable on this instance"), "{why}");
+        // An old Sites manifest is refused even for an approved instance.
+        let why = refused(false, tool, args, Some(&enabled));
+        assert!(why.contains("pigeon-sites does not advertise"), "{why}");
+    }
+    let wider = json!({"instance":"sandbox","rev":"main","bucket":"other"});
+    let why = refused(true, "site_deploy", &wider, Some(&enabled));
+    assert!(why.contains("`bucket`"), "{why}");
+    let why = refused(true, "site_deploy", &json!({"instance": 7}), Some(&enabled));
+    assert!(why.contains("`instance`"), "{why}");
+}
+
+/// Calls that name no instance, and tools that are not instance-targeted, keep the platform path.
+#[test]
+fn global_calls_without_an_instance_target_stay_on_the_platform_path() {
+    let enabled = publishing_record(json!({"state":"enabled","site":"primary"}));
+    for supported in [true, false] {
+        for (capability, tool, args) in [
+            ("sites", "site_deploy", json!({"rev":"main"})),
+            ("sites", "site_rollback", json!({"release":"r1"})),
+            ("sites", "site_render", json!({"instance":"sandbox"})),
+            ("models", "site_deploy", json!({"instance":"sandbox"})),
+        ] {
+            assert_eq!(
+                global_send(
+                    "pigeon-sites",
+                    capability,
+                    supported,
+                    tool,
+                    &args,
+                    Some(&enabled)
+                ),
+                Ok(None),
+                "{capability} {tool}"
+            );
+        }
+    }
+}
+
+/// CI keeps its behaviour: explicit instance reads are signed when the gateway supports context
+/// and the record enables CI; an older gateway keeps the legacy envelope.
+#[test]
+fn global_ci_reads_keep_their_instance_targeting() {
+    use pigeon_capabilities::instances::record::Instance;
+    let record: Instance = serde_json::from_value(json!({
+        "id":"platform","title":"CI","account":{"kind":"home"},
+        "repo":{"kind":"artifacts","namespace":"example","repo":"project"},
+        "ci":{"state":"enabled","jobs":["test"]}
+    }))
+    .unwrap();
+    let gateway = "pigeon-ci-gateway";
+    let read = json!({"instance":"platform","commit":"abc"});
+    let (context, bound) = global_send(gateway, "ci", true, "ci_jobs", &read, Some(&record))
+        .unwrap()
+        .unwrap();
+    assert_eq!(context.recipient, gateway);
+    assert_eq!(context.instance.as_deref(), Some("platform"));
+    assert_eq!(bound, read);
+    assert_eq!(
+        global_send(gateway, "ci", false, "ci_jobs", &read, Some(&record)),
+        Ok(None)
+    );
+    for (tool, args) in [
+        ("ci_status", json!({"id":"job"})),
+        ("ci_submit", read.clone()),
+    ] {
+        assert_eq!(
+            global_send(gateway, "ci", true, tool, &args, Some(&record)),
+            Ok(None)
+        );
+    }
+    assert!(
+        global_send(
+            gateway,
+            "ci",
+            true,
+            "ci_jobs",
+            &json!({"instance":null}),
+            None
+        )
+        .is_err()
+    );
+    let wider = json!({"instance":"platform","repo":"other"});
+    assert!(global_send(gateway, "ci", true, "ci_jobs", &wider, Some(&record)).is_err());
+    assert!(global_send(gateway, "ci", true, "ci_jobs", &read, None).is_err());
+    let mut disabled = record.clone();
+    disabled.ci = None;
+    assert!(global_send(gateway, "ci", true, "ci_jobs", &read, Some(&disabled)).is_err());
+}

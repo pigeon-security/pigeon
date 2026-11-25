@@ -19,6 +19,7 @@ use worker::{Env, Request, RequestInit, Result};
 
 use crate::console::sections::{Section, Tab};
 use crate::expiry::Expiry;
+use crate::instances::tools::{Targeted, Unsupported};
 use crate::{Call, Capability, Context, Expiring, Footprint, Serve, Slot, users};
 
 /// A capability Worker bound to this one: its Service Binding and its script name.
@@ -327,6 +328,21 @@ pub fn instance_context(
     Ok(WorkerContext::new(worker, Some(instance)))
 }
 
+/// The context for an instance-targeted call from the global connector, chosen before the
+/// record is read or anything is sent. `None` keeps the legacy envelope, only for a declaration
+/// that allows it ([`Unsupported::Legacy`]); otherwise an unsupported receiver is refused. Pure.
+pub fn global_context(
+    worker: &str,
+    supported: bool,
+    target: &Targeted,
+    instance: &str,
+) -> std::result::Result<Option<WorkerContext>, String> {
+    if !supported && target.unsupported == Unsupported::Legacy {
+        return Ok(None);
+    }
+    instance_context(worker, supported, instance).map(Some)
+}
+
 fn caller_json(cx: &Context<'_>) -> Value {
     serde_json::to_value(cx.caller).unwrap_or(Value::Null)
 }
@@ -378,26 +394,47 @@ impl Capability for Remote {
 
     fn call<'a>(&'a self, cx: &'a Context<'a>, tool: &'a str, args: &'a Value) -> Call<'a> {
         Box::pin(async move {
-            let body = json_of(&CallRequest {
-                capability: Some(self.name.to_string()),
-                tool: tool.to_string(),
-                args: args.clone(),
-            })?;
-            let caller = caller_json(cx);
+            let mut args = args.clone();
+            // Once selected, contextual transport never retries with a legacy envelope.
             let context = match cx.instance {
                 Some(scope) => Some(
                     instance_context(self.worker, self.contextual, scope.instance())
                         .map_err(failure)?,
                 ),
-                // A legacy receiver keeps its existing connector path. Once selected,
-                // contextual transport never retries with a legacy envelope.
-                None if self.contextual && self.name == crate::ci::Ci::NAME => {
-                    crate::ci::approved_connector_instance(cx.env, tool, args)
-                        .await?
-                        .map(|instance| WorkerContext::new(self.worker, Some(instance)))
-                }
-                None => None,
+                // The global connector naming an instance for an instance-targeted tool: the
+                // approved record binds it exactly as the instance endpoint would, before any
+                // request is sent. Direct calls and `call` both arrive here after the policy gate.
+                None => match crate::instances::tools::global_target(self.name, tool, &args)
+                    .map_err(failure)?
+                {
+                    None => None,
+                    Some((target, id)) => {
+                        let id = id.to_string();
+                        match global_context(self.worker, self.contextual, target, &id)
+                            .map_err(failure)?
+                        {
+                            None => None,
+                            Some(context) => {
+                                let record = crate::instances::one(cx.env, &id).await?;
+                                args = crate::instances::tools::bind_global(
+                                    &id,
+                                    record.as_ref(),
+                                    tool,
+                                    &args,
+                                )
+                                .map_err(failure)?;
+                                Some(context)
+                            }
+                        }
+                    }
+                },
             };
+            let body = json_of(&CallRequest {
+                capability: Some(self.name.to_string()),
+                tool: tool.to_string(),
+                args,
+            })?;
+            let caller = caller_json(cx);
             let answer = if let Some(context) = context {
                 let fetcher = cx.env.service(self.binding)?;
                 let nonce = webauthn::random()?;

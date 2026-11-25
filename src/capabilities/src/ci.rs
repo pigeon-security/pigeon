@@ -99,7 +99,9 @@ pub fn annotate_scoped_discovery(answer: &mut Value) {
     }
 }
 
-const SCOPED_TOOLS: &[crate::instances::tools::Registration] = &[
+/// CI's instance-targeted reads: offered by the instance endpoint, and signed with the named
+/// instance's context from the global connector ([`crate::instances::tools::TARGETED`]).
+pub const SCOPED_TOOLS: &[crate::instances::tools::Registration] = &[
     crate::instances::tools::Registration {
         name: "ci_jobs",
         description: Some("List recent CI jobs owned by this instance."),
@@ -111,34 +113,6 @@ const SCOPED_TOOLS: &[crate::instances::tools::Registration] = &[
         arguments: &["id"],
     },
 ];
-
-/// The explicit instance on a read from the global connector, when one was supplied.
-pub fn connector_read_instance<'a>(tool: &str, args: &'a Value) -> worker::Result<Option<&'a str>> {
-    if args.get("instance").is_none() || !SCOPED_TOOLS.iter().any(|entry| entry.name == tool) {
-        return Ok(None);
-    }
-    pigeon_ci::scope::read_args(tool, args)?;
-    crate::arg(args, "instance").map(Some)
-}
-
-/// Derive the callback boundary from an approved profile, using the same checks as CI discovery.
-pub(crate) async fn approved_connector_instance<'a>(
-    env: &worker::Env,
-    tool: &str,
-    args: &'a Value,
-) -> worker::Result<Option<&'a str>> {
-    let Some(id) = connector_read_instance(tool, args)? else {
-        return Ok(None);
-    };
-    let unavailable = || worker::Error::RustError("CI is unavailable on this instance".into());
-    let record = crate::instances::one(env, id)
-        .await?
-        .ok_or_else(unavailable)?;
-    if scope(&record).map_err(worker::Error::RustError)?.is_none() {
-        return Err(unavailable());
-    }
-    Ok(Some(id))
-}
 
 pub fn instance_tools(
     instance: &Record,
