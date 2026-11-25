@@ -1,7 +1,7 @@
 import SwiftUI
 import UIKit
 
-/// A tab of the app. The server names them in `instances_tabs`.
+/// A tab of the app, from the areas `console_manifest` lists for the selected instance.
 enum AppTab: String, CaseIterable {
     case sessions, cost, settings, home
 
@@ -25,20 +25,20 @@ enum AppTab: String, CaseIterable {
         }
     }
 
-    /// The tab a server tab name stands for: `approvals` and `status` are Sessions, `instances`
-    /// is Settings. Nil for a name this app does not know.
-    static func fromServer(_ name: String) -> AppTab? {
-        switch name {
-        case "approvals", "status", "sessions": return .sessions
-        case "instances", "settings": return .settings
+    /// The tab a console area stands for: Sessions and Cost as they are, and a linked
+    /// instance's Overview as Home. Nil for an area this app has no tab for; Settings is
+    /// always added.
+    static func fromArea(_ id: String, home: Bool) -> AppTab? {
+        switch id {
+        case "sessions": return .sessions
         case "cost": return .cost
-        case "home": return .home
+        case "overview": return home ? nil : .home
         default: return nil
         }
     }
 }
 
-/// One instance, as `instances_tabs` (or, failing that, `instances_list`) describes it.
+/// One instance, as `instances_list` and its `console_manifest` describe it.
 struct InstanceInfo: Identifiable {
     let id: String
     let title: String
@@ -82,66 +82,63 @@ final class InstanceStore {
         UserDefaults.standard.set(id, forKey: "selectedInstance")
     }
 
-    /// Loads the instances with `instances_tabs`; if that tool is missing, with `instances_list`.
+    /// Loads the instances with `instances_list`, then each one's tabs from its console
+    /// navigation (`console_manifest`), the same data the web console builds its own from.
     func load(_ client: MCPClient) async {
-        do {
-            let data = try await client.call("instances_tabs")
-            let rows = (data as? [String: Any])?["instances"] as? [[String: Any]] ?? []
-            instances = rows.compactMap { Self.parse($0, fallback: false) }
-            error = nil
-        } catch PlatformError.signedOut {
-            // The session has already signed out.
-        } catch {
-            await loadFallback(client)
-        }
-    }
-
-    /// Reads `instances_list` and gives each instance the tabs its account kind implies.
-    private func loadFallback(_ client: MCPClient) async {
         do {
             let data = try await client.call("instances_list")
             let rows =
                 data as? [[String: Any]]
                 ?? (data as? [String: Any])?["instances"] as? [[String: Any]] ?? []
-            instances = rows.compactMap { Self.parse($0, fallback: true) }
+            var loaded: [InstanceInfo] = []
+            for row in rows {
+                guard let id = row["id"] as? String else { continue }
+                let areas = await Self.areas(client, instance: id)
+                if let info = Self.parse(row, areas: areas) { loaded.append(info) }
+            }
+            instances = loaded
             error = nil
         } catch PlatformError.signedOut {
             // The session has already signed out.
         } catch {
-            self.error = "instances_tabs failed: \(error.localizedDescription)"
+            self.error = "instances_list failed: \(error.localizedDescription)"
         }
     }
 
-    /// Reads one instance object; nil when it has no id.
-    private static func parse(_ row: [String: Any], fallback: Bool) -> InstanceInfo? {
+    /// The ids of the areas `console_manifest` lists for `instance`, in order; nil when it
+    /// cannot be read, so the tabs fall back to the account kind's.
+    private static func areas(_ client: MCPClient, instance: String) async -> [String]? {
+        guard let data = try? await client.call("console_manifest", ["instance": instance]),
+            let areas = (data as? [String: Any])?["areas"] as? [[String: Any]]
+        else { return nil }
+        return areas.compactMap { $0["id"] as? String }
+    }
+
+    /// Reads one `instances_list` row and its manifest's `areas`; nil when it has no id.
+    private static func parse(_ row: [String: Any], areas: [String]?) -> InstanceInfo? {
         guard let id = row["id"] as? String else { return nil }
-        var kind = row["account_kind"] as? String ?? ""
-        if kind.isEmpty { kind = (row["account"] as? [String: Any])?["kind"] as? String ?? "linked" }
+        let kind = (row["account"] as? [String: Any])?["kind"] as? String ?? "linked"
+        let home = kind == "home"
         let zones = row["zones"] as? [String] ?? []
         var tabs: [AppTab] = []
-        for tab in (row["tabs"] as? [String] ?? []).compactMap({ AppTab.fromServer($0) })
+        for tab in (areas ?? []).compactMap({ AppTab.fromArea($0, home: home) })
         where !tabs.contains(tab) {
             tabs.append(tab)
         }
         if tabs.isEmpty {
-            tabs = kind == "home" ? [.sessions, .cost, .settings] : [.home, .settings]
+            tabs = home ? [.sessions, .cost] : [.home]
         }
         // Settings always stays, so the person can always switch back.
-        if !tabs.contains(.settings) { tabs.append(.settings) }
-        let facts = row["facts"] as? [String: Any] ?? [:]
-        var website = facts["website"] as? String
-        var site = facts["site"] as? String
-        var repository = facts["repository"] as? String
-        if fallback {
-            if let zone = zones.first { website = "https://\(zone)" }
-            site = (row["sites"] as? [[String: Any]])?.first?["name"] as? String
-            if let repo = row["repo"] as? [String: Any],
-                let owner = repo["owner"] as? String, let name = repo["name"] as? String
-            {
-                repository = "\(owner)/\(name)"
-            } else if let repo = row["repo"] as? String {
-                repository = repo
-            }
+        tabs.append(.settings)
+        let website = zones.first.map { "https://\($0)" }
+        let site = (row["sites"] as? [[String: Any]])?.first?["name"] as? String
+        var repository: String?
+        if let repo = row["repo"] as? [String: Any],
+            let owner = repo["owner"] as? String, let name = repo["name"] as? String
+        {
+            repository = "\(owner)/\(name)"
+        } else if let repo = row["repo"] as? String {
+            repository = repo
         }
         return InstanceInfo(
             id: id, title: row["title"] as? String ?? id, accountKind: kind, zones: zones,

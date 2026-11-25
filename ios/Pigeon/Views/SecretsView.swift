@@ -62,7 +62,7 @@ struct SecretsView: View {
         }
         .task(id: refreshAfterWrite) { await secrets.load(session.client) }
         .sheet(item: $selected) { slot in
-            SecretEntrySheet(slot: slot) {
+            SecretEntrySheet(slot: slot, client: session.client) {
                 saved = true
                 selected = nil
                 refreshAfterWrite.toggle()
@@ -106,6 +106,7 @@ struct SecretsView: View {
 /// A write-only field for a new value. Every submission requires a fresh passkey assertion.
 private struct SecretEntrySheet: View {
     let slot: SecretSlot
+    let client: MCPClient
     let onSaved: () -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var value = ""
@@ -153,7 +154,7 @@ private struct SecretEntrySheet: View {
         Task {
             defer { saving = false }
             do {
-                try await Approver().putSecret(name: slot.name, value: submitted)
+                try await Approver().putSecret(name: slot.name, value: submitted, client: client)
                 onSaved()
             } catch {
                 // Do not display or log a response that might echo the input.

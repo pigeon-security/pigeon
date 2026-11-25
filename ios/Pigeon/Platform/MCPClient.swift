@@ -137,7 +137,11 @@ final class MCPClient {
     /// POSTs `body` as JSON to `path` on the platform (such as `/console/write/x/begin`) with
     /// the bearer token, and answers the JSON object. A 401 refreshes the tokens once and
     /// retries. Any other failure is thrown with `step` and the platform's own `error` text.
-    func post(_ path: String, _ body: [String: Any], step: String) async throws -> [String: Any] {
+    /// `session` is the shared one unless the caller needs another, such as a secret write's,
+    /// which never follows a redirect.
+    func post(
+        _ path: String, _ body: [String: Any], step: String, session: URLSession = .shared
+    ) async throws -> [String: Any] {
         guard let url = URL(string: OAuth.base.absoluteString + path) else {
             throw PlatformError.badResponse("\(step): URL")
         }
@@ -150,7 +154,7 @@ final class MCPClient {
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
             req.setValue("application/json", forHTTPHeaderField: "Accept")
             req.setValue("Bearer \(pair.access)", forHTTPHeaderField: "Authorization")
-            let (data, response) = try await URLSession.shared.data(for: req)
+            let (data, response) = try await session.data(for: req)
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
             if status == 401 {
                 if attempt == 0 {

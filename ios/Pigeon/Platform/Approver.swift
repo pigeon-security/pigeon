@@ -47,38 +47,38 @@ final class Approver: NSObject, ASAuthorizationControllerDelegate,
         return message
     }
 
-    /// Writes one secret using the console's name-and-digest passkey challenge, not MCP.
-    func putSecret(name: String, value: String) async throws {
+    /// Sets secret `name` through the console's `secret-set` write, for the person the app acts
+    /// for: `begin` binds the passkey to the name and the value's digest, so the value itself is
+    /// sent once, at `finish`, over a session that never follows a redirect. Errors never carry
+    /// the platform's text, which could echo the input.
+    func putSecret(name: String, value: String, client: MCPClient) async throws {
         let value = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { throw PlatformError.badResponse("empty secret") }
         let digest = Base64URL.encode(Data(SHA256.hash(data: Data(value.utf8))))
         let session = URLSession(configuration: .ephemeral, delegate: SecretRedirectGuard(), delegateQueue: nil)
         defer { session.finishTasksAndInvalidate() }
-        let begin = try await secretPost("begin", ["name": name, "digest": digest], session: session)
+        let base = "/console/write/secret-set"
+        let begin: [String: Any]
+        do {
+            begin = try await client.post(
+                "\(base)/begin", ["target": name, "change": ["digest": digest]],
+                step: "secret begin", session: session)
+        } catch { throw PlatformError.badResponse("secret begin") }
         let (challengeId, assertion) = try await answer(begin, step: "secret begin")
         try Task.checkCancellation()
-        let finish = try await secretPost(
-            "finish",
-            ["name": name, "value": value, "challenge_id": challengeId, "assertion": assertion],
-            session: session)
+        let finish: [String: Any]
+        do {
+            finish = try await client.post(
+                "\(base)/finish",
+                [
+                    "target": name, "change": ["value": value],
+                    "challenge_id": challengeId, "assertion": assertion,
+                ],
+                step: "secret finish", session: session)
+        } catch { throw PlatformError.badResponse("secret finish") }
         guard finish["message"] is String else {
             throw PlatformError.badResponse("secret write confirmation")
         }
-    }
-
-    /// The passkey authenticates the write. Do not send a bearer or report response bodies.
-    private func secretPost(_ step: String, _ body: [String: Any], session: URLSession) async throws
-        -> [String: Any]
-    {
-        var request = URLRequest(url: OAuth.base.appendingPathComponent("secrets/put/\(step)"))
-        request.httpMethod = "POST"
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
-            let result = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-        else { throw PlatformError.badResponse("secret \(step)") }
-        return result
     }
 
     private func answer(_ begin: [String: Any], step: String) async throws -> (String, [String: Any]) {
