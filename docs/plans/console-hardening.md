@@ -1,5 +1,9 @@
 # Console hardening
 
+Superseded by [console-redesign.md](console-redesign.md) (2026-11-25): section snapshots and
+`/console/api/section` give way to `/app/op` reads, and the panels named here are deleted. This
+file is the record of what was built.
+
 Status: deployed 2026-11-21 (landing `slWijyeD5dnMaimB`, main `2038674`). Branch `claude/console-hardening`.
 Since `53a0068` the console is the `/app` shell (`src/capabilities/src/console/web/`) and the
 root-path tabs redirect into it ([console.md](console.md), "App cutover"); `console/app.js` and

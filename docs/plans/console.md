@@ -1,5 +1,8 @@
 # The console
 
+Superseded by [console-redesign.md](console-redesign.md) (2026-11-25), which replaces this
+console and deletes its code; this file is the record of what was built.
+
 Superseded in part by [console-hardening.md](console-hardening.md), which narrowed the tabs to
 Approvals, Architecture, Access and Cost, and then by the app cutover (`53a0068`, "App cutover"
 at the end): the console is served only at `/app`, from the shell in
