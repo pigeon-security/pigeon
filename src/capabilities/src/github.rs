@@ -1,8 +1,9 @@
 //! The GitHub App: pigeon reads an instance's repository and hears its pushes as one App
 //! (`GITHUB_APP_ID` and `GITHUB_APP_CLIENT_ID` in the Worker's vars name it; its private key and
-//! webhook secret are Secrets Store secrets the person sets in the console's Management tab,
-//! `/app?tab=management`). The key never leaves core: other Workers get a short-lived
-//! installation token, narrowed to one instance's repository, through [`installation_token`].
+//! webhook secret are Secrets Store secrets the person sets on the app's Access page
+//! (Credentials, `/app?tab=management&subtab=credentials`). The key never leaves core: other
+//! Workers get a short-lived installation token, narrowed to one instance's repository, through
+//! [`installation_token`].
 //! `/github/hook` checks each delivery's `X-Hub-Signature-256` before reading it, accepts pushes
 //! only from the installation an instance's record names, and records the latest push per
 //! instance. A push to `main` is kept as a pending deploy, bound to the approved publishing

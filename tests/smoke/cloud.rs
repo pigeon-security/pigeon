@@ -272,7 +272,7 @@ fn cloud_gateway_latent_until_scaleway_is_set_up() {
     // Nothing is bound and the sink holds nothing: the person sets all four.
     fx.slots.0.borrow_mut().clear();
     let all = "Scaleway is not set up: set SCW_ACCESS_KEY, SCW_SECRET_KEY, \
-               SCW_DEFAULT_ORGANIZATION_ID, SCW_DEFAULT_PROJECT_ID on the Access tab";
+               SCW_DEFAULT_ORGANIZATION_ID, SCW_DEFAULT_PROJECT_ID on the app's Access page (Credentials)";
     let calls: [(&str, Value); 9] = [
         ("cloud_tokens_list", json!({})),
         ("cloud_tokens_plan_create", json!({ "name": "a" })),
@@ -353,7 +353,7 @@ fn cloud_gateway_latent_until_scaleway_is_set_up() {
         .insert(scaleway::SECRET_KEY.into(), SlotState::Unset);
     assert_eq!(
         fx.run("cloud_buckets_list", json!({})).unwrap_err(),
-        "Scaleway is not set up: set SCW_SECRET_KEY on the Access tab"
+        "Scaleway is not set up: set SCW_SECRET_KEY on the app's Access page (Credentials)"
     );
     // A sink that fails counts a slot it cannot see as not set.
     fx.slots.0.borrow_mut().clear();

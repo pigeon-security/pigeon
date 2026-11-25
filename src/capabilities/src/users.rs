@@ -155,27 +155,6 @@ pub const SITE_VISITORS_SQL: &str = "SELECT name,
     EXISTS(SELECT 1 FROM passkeys WHERE user_id = users.id) AS enrolled
     FROM users WHERE kind = ? AND site_scope = ? ORDER BY created_at, id";
 
-/// The largest profile picture kept, as a `data:` URL: a 128 px square the browser made.
-const AVATAR_MAX: usize = 65_536;
-
-/// Whether `avatar` is a picture the console made: a PNG, JPEG or WebP `data:` URL in base64,
-/// no larger than [`AVATAR_MAX`].
-pub fn avatar_ok(avatar: &str) -> bool {
-    let body = [
-        "data:image/png;base64,",
-        "data:image/jpeg;base64,",
-        "data:image/webp;base64,",
-    ]
-    .iter()
-    .find_map(|p| avatar.strip_prefix(p));
-    avatar.len() <= AVATAR_MAX
-        && body.is_some_and(|b| {
-            !b.is_empty()
-                && b.bytes()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'/' | b'='))
-        })
-}
-
 /// The users, their passkeys and links: one Durable Object.
 #[durable_object]
 pub struct Directory {
@@ -433,30 +412,6 @@ impl Directory {
                     vec![s("name").into(), s("id").into()],
                 )?;
                 to_value(self.user(s("id"))?)
-            }
-            "user.avatar_set" => {
-                let avatar = s("avatar");
-                if !avatar.is_empty() && !avatar_ok(avatar) {
-                    return Err(bad(
-                        "a picture is a PNG, JPEG or WebP data URL of at most 64 KiB",
-                    ));
-                }
-                self.db.exec(
-                    "UPDATE users SET avatar = ? WHERE id = ?",
-                    vec![opt(Some(avatar).filter(|a| !a.is_empty())), s("id").into()],
-                )?;
-                json!({ "ok": true })
-            }
-            "user.avatar" => {
-                #[derive(Deserialize)]
-                struct Row {
-                    avatar: Option<String>,
-                }
-                let row: Option<Row> = self.db.row(
-                    "SELECT avatar FROM users WHERE id = ?",
-                    vec![s("id").into()],
-                )?;
-                json!(row.and_then(|r| r.avatar))
             }
             "session.create" => {
                 self.user(s("user_id"))?

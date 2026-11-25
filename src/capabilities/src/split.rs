@@ -77,30 +77,71 @@ pub async fn for_op(
     }
 }
 
+/// How a remote capability meets the ones already in the list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Clash {
+    /// One already in the list has its name, exactly its tools and exactly its routes, and no
+    /// other overlaps it: the hosting Worker serves that capability itself on purpose (the
+    /// Lander's CI, [`crate::ci::Local`], so landing never waits on pigeon-ci-gateway).
+    StandIn,
+    /// Its name, a tool or a route is taken in any other way: a capability Worker would shadow
+    /// core.
+    Shadow,
+}
+
+/// How `remote` clashes with `list`, if it does.
+pub fn clash(list: &[Box<dyn Capability>], remote: &dyn Capability) -> Option<Clash> {
+    let tools_of = |c: &dyn Capability| {
+        let mut t: Vec<&'static str> = c.tools().iter().map(|t| t.name).collect();
+        t.sort_unstable();
+        t
+    };
+    let routes_of = |c: &dyn Capability| {
+        let mut r = c.routes();
+        r.sort_unstable();
+        r
+    };
+    let (tools, routes) = (tools_of(remote), routes_of(remote));
+    let overlapping: Vec<&dyn Capability> = list
+        .iter()
+        .map(|c| c.as_ref())
+        .filter(|c| {
+            c.name() == remote.name()
+                || c.tools().iter().any(|t| tools.contains(&t.name))
+                || c.routes().iter().any(|x| routes.contains(x))
+        })
+        .collect();
+    match overlapping[..] {
+        [] => None,
+        [c] if c.name() == remote.name() && tools_of(c) == tools && routes_of(c) == routes => {
+            Some(Clash::StandIn)
+        }
+        _ => Some(Clash::Shadow),
+    }
+}
+
 /// `local` with `remote` added after it. A remote capability whose name, a tool or a route is
-/// already taken by one in the list is left out, and logged.
+/// already taken by one in the list is left out. Only a [`Clash::Shadow`] is logged: a
+/// [`Clash::StandIn`] is the hosting Worker serving that capability itself, as meant.
 pub fn merge(
     local: Vec<Box<dyn Capability>>,
     remote: Vec<Box<dyn Capability>>,
 ) -> Vec<Box<dyn Capability>> {
     let mut out = local;
     for r in remote {
-        let tools: Vec<&str> = r.tools().iter().map(|t| t.name).collect();
-        let taken = out.iter().any(|c| {
-            c.name() == r.name()
-                || c.tools().iter().any(|t| tools.contains(&t.name))
-                || c.routes().iter().any(|x| r.routes().contains(x))
-        });
-        if taken {
-            // The console exists only in a Worker; a native caller (the smoke suite) gets no line.
-            #[cfg(target_arch = "wasm32")]
-            worker::console_error!(
-                "split: remote capability {} clashes with a local one; left out",
-                r.name()
-            );
-            continue;
+        match clash(&out, r.as_ref()) {
+            None => out.push(r),
+            Some(Clash::StandIn) => {}
+            Some(Clash::Shadow) => {
+                // The console exists only in a Worker; a native caller (the smoke suite) gets
+                // no line.
+                #[cfg(target_arch = "wasm32")]
+                worker::console_error!(
+                    "split: remote capability {} clashes with a local one; left out",
+                    r.name()
+                );
+            }
         }
-        out.push(r);
     }
     out
 }

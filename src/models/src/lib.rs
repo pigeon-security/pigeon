@@ -1366,14 +1366,11 @@ pub async fn close_call_token(_env: &Env, account: &Account, _caller: &Value, to
 /// What the admin key's `Set` answers: nothing is handed to the AI gateway.
 const ADMIN_SET_NOTE: &str = "the model gateway reads the key through its binding";
 
-/// The admin key, from its Secrets Store binding. The error names the Access tab and never a
+/// The admin key, from its Secrets Store binding. The error names the app's Access page and never a
 /// value.
 async fn admin_key(env: &Env) -> Result<String> {
-    let missing = || {
-        bad(
-            "ANTHROPIC_ADMIN_KEY is not set: set it on the console's Access tab (Secrets and credentials)",
-        )
-    };
+    let missing =
+        || bad("ANTHROPIC_ADMIN_KEY is not set: set it on the app's Access page (Credentials)");
     let store = env
         .secret_store(billing::ADMIN_KEY)
         .map_err(|_| missing())?;

@@ -161,7 +161,7 @@ impl Survey {
         let missing = list(&|s| !s.set);
         if !missing.is_empty() {
             return Some(format!(
-                "Scaleway is not set up: set {missing} on the Access tab"
+                "Scaleway is not set up: set {missing} on the app's Access page (Credentials)"
             ));
         }
         let unbound = list(&|s| !s.bound);

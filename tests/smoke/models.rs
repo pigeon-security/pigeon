@@ -896,7 +896,12 @@ fn models_openai_byok_latent() {
     };
     let strict = json!({ "byok_only": true });
     let e = byok_ready(Some(&strict), &[], "pigeon-openai", "openai").unwrap_err();
-    assert!(e.contains(&format!("set {slot} on the Access tab")), "{e}");
+    assert!(
+        e.contains(&format!(
+            "set {slot} on the app's Access page (Credentials)"
+        )),
+        "{e}"
+    );
     let e = byok_ready(
         Some(&strict),
         &[config("anthropic")],

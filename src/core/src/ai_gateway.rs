@@ -287,7 +287,7 @@ pub fn byok_ready(
     }
     if !configs.iter().any(|c| c.provider_slug == slug) {
         return Err(format!(
-            "the BYOK gateway `{gateway_id}` holds no key for {slug}: set {} on the Access tab, then run models_setup",
+            "the BYOK gateway `{gateway_id}` holds no key for {slug}: set {} on the app's Access page (Credentials), then run models_setup",
             secret_name(gateway_id, slug, "default")
         ));
     }

@@ -223,6 +223,61 @@ fn ci_route_and_run_on_a_fake_connector() {
     assert_eq!(cap.secrets[0].scopes, ["workers"]);
 }
 
+/// The Lander runs CI's tools through core's own `ci` ([`pigeon_capabilities::ci::Local`]) and
+/// merges the bound Workers' after it, so pigeon-ci-gateway's `ci` is left out there. That is a
+/// stand-in, meant and not logged: the same name, tools and routes. A remote capability that
+/// takes a local name, tool or route any other way is a shadow, left out and logged.
+#[test]
+fn ci_gateway_beside_core_ci_is_a_stand_in() {
+    use pigeon_capabilities::remote::{Binding, Remote};
+    use pigeon_capabilities::split::{Clash, clash, merge};
+    use pigeon_capabilities::{Capability, ci};
+    use pigeon_contract::{CapabilityManifest, Service};
+
+    let local = || -> Vec<Box<dyn Capability>> {
+        vec![Box::new(ci::Local {
+            ci: pigeon_ci::Ci {
+                settings: pigeon_ci::pigeon::settings(pigeon_ci::Accounts::Parent("P".into())),
+            },
+        })]
+    };
+    let gateway = pigeon_ci::CiGateway::new(
+        pigeon_ci::pigeon::settings(pigeon_ci::Accounts::Scoped),
+        b"key".to_vec(),
+    );
+    let spec = gateway.manifest().capabilities.remove(0);
+    let remote = |spec: CapabilityManifest| -> Box<dyn Capability> {
+        Box::new(Remote::new(
+            &Binding {
+                binding: "CI",
+                worker: "pigeon-ci-gateway",
+            },
+            spec,
+        ))
+    };
+
+    let gateway_ci = remote(spec.clone());
+    assert_eq!(clash(&local(), gateway_ci.as_ref()), Some(Clash::StandIn));
+    let merged = merge(local(), vec![gateway_ci]);
+    assert_eq!(merged.len(), 1, "core's own ci serves the Lander");
+    let tools: Vec<&str> = merged[0].tools().iter().map(|t| t.name).collect();
+    assert!(tools.contains(&"ci_submit") && tools.contains(&"ci_status"));
+
+    // A gateway `ci` that drifted from core's (one tool fewer) is a shadow, as is another
+    // capability taking a CI tool or `/ci/`.
+    let mut fewer = spec.clone();
+    fewer.tools.pop();
+    assert_eq!(clash(&local(), remote(fewer).as_ref()), Some(Clash::Shadow));
+    let mut other = spec.clone();
+    other.name = "other".into();
+    assert_eq!(clash(&local(), remote(other).as_ref()), Some(Clash::Shadow));
+    let mut apart = spec;
+    apart.name = "apart".into();
+    apart.tools.clear();
+    apart.routes.clear();
+    assert_eq!(clash(&local(), remote(apart).as_ref()), None);
+}
+
 #[test]
 fn ci_buildkite_ios_pipelines() {
     use pigeon_ci::buildkite::ios::{Ios, Pipeline, off_note, pipelines, shape, validate, yaml};

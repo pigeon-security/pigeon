@@ -2451,19 +2451,54 @@ fn ai_agents_branch_combine_plan_and_scripts() {
 
 /// The list and combine scripts run in a real git repository with branch names that have `/` in
 /// them: the listing is read back, and a commit main already holds is left out.
+///
+/// git runs without the machine's config: a global `commit.gpgsign` would start the signing
+/// program for every commit and cherry-pick (under the parallel suite one was killed), and auto
+/// gc or maintenance would fork more work. `HOME` is the test's own directory, which is removed
+/// afterwards, even when an assertion fails.
 #[test]
 fn ai_agents_branch_combine_scripts_run_in_git() {
     use pigeon_ai_agents::branches::{combine_script, list_script, parse_listing, plan};
     use std::process::Command;
-    let dir = std::env::temp_dir().join(format!("pigeon-combine-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    struct Removed(std::path::PathBuf);
+    impl Drop for Removed {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let base = Removed(std::env::temp_dir().join(format!(
+        "pigeon-smoke-combine-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    )));
+    let (home, dir) = (base.0.join("home"), base.0.join("repo"));
+    std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&dir).unwrap();
+    let config = [
+        ("commit.gpgsign", "false"),
+        ("tag.gpgsign", "false"),
+        ("gc.auto", "0"),
+        ("maintenance.auto", "false"),
+        ("core.hooksPath", "/dev/null"),
+    ];
     let sh = |script: &str| -> String {
-        let out = Command::new("sh")
-            .args(["-c", script])
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", script])
             .current_dir(&dir)
-            .output()
-            .unwrap();
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", &home)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_CONFIG_COUNT", config.len().to_string());
+        for (i, (k, v)) in config.iter().enumerate() {
+            cmd.env(format!("GIT_CONFIG_KEY_{i}"), k)
+                .env(format!("GIT_CONFIG_VALUE_{i}"), v);
+        }
+        let out = cmd.output().unwrap();
         assert!(
             out.status.success(),
             "{script}: {}",
@@ -2496,7 +2531,6 @@ fn ai_agents_branch_combine_scripts_run_in_git() {
     let p = plan(own, &names, &listing).unwrap();
     sh(&combine_script(&p));
     assert!(dir.join("c").exists() && dir.join("b").exists());
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Builds a tool-loop transcript: the brief, then `pairs` of assistant tool_use and user result.

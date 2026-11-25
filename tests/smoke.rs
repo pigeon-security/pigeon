@@ -1850,7 +1850,7 @@ fn model_gateway_byok_readiness() {
     let e = byok_ready(Some(&strict), &[config("openai")], g, "anthropic").unwrap_err();
     assert!(e.contains("holds no key for anthropic"));
     assert!(
-        e.contains("pigeon-anthropic_anthropic_default on the Access tab, then run models_setup")
+        e.contains("pigeon-anthropic_anthropic_default on the app's Access page (Credentials), then run models_setup")
     );
     assert!(byok_ready(Some(&strict), &[config("anthropic")], g, "anthropic").is_ok());
 }

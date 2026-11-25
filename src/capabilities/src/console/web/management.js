@@ -6,7 +6,7 @@
 
   function element(tag, attrs = {}, ...children) {
     const { onclick, onkeydown, style, maxlength, ...safe } = attrs;
-    // Uploaded avatars are limited to the same raster formats as the Directory.
+    // A stored avatar is a PNG, JPEG or WebP data: URL (all a person could once upload).
     const avatar = tag === "img" && /^data:image\/(?:png|jpeg|webp);base64,/.test(safe.src);
     const node = el(tag, avatar ? { ...safe, src: null } : safe, children);
     if (avatar) node.src = safe.src;

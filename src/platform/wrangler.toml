@@ -107,7 +107,7 @@ binding = "CLOUD"
 service = "pigeon-cloud-gateway"
 
 # The GitHub App (src/capabilities/src/github.rs): its private key and webhook secret, set by the
-# person on the Access tab; bound once they exist, since a binding to a missing secret fails the
+# person on the app's Access page (Credentials); bound once they exist, since a binding to a missing secret fails the
 # deploy.
 [[secrets_store_secrets]]
 binding = "GITHUB_APP_PRIVATE_KEY"
