@@ -40,7 +40,7 @@ macro_rules! app_assets {
     };
 }
 app_assets!(
-    "shell",
+    "legacy-shell",
     "sessions",
     "cost",
     "settings",
@@ -48,6 +48,74 @@ app_assets!(
     "architecture",
     "management"
 );
+
+/// Where the redesigned console's shell is served while the views are ported, beside the current
+/// console at `/app`: its pages are `/app/next/<instance>/<area>/<view>`.
+///
+/// At cutover (docs/plans/console-redesign.md, "Decommission checklist"), [`next_shell`] moves
+/// to `/app` with `data-base="/app"`, `/app/next/*` redirects there in one hop, and
+/// [`app_shell`], `APP_ASSETS` and `web/legacy-shell.{js,css}` are deleted.
+pub const NEXT_BASE: &str = "/app/next";
+
+/// The redesigned shell's assets, in load order: one stylesheet and its scripts. Its fixtures
+/// (`web/fixtures/`, `web/fixtures.html`) are never among them, so fixture mode cannot run on a
+/// deployed host.
+pub const NEXT_ASSETS: &[(&str, &str, &str)] = &[
+    (
+        "/app/next/shell.css",
+        "text/css; charset=utf-8",
+        include_str!("web/shell.css"),
+    ),
+    (
+        "/app/next/shell.js",
+        "text/javascript; charset=utf-8",
+        include_str!("web/shell.js"),
+    ),
+    (
+        "/app/next/views.js",
+        "text/javascript; charset=utf-8",
+        include_str!("web/views.js"),
+    ),
+];
+
+/// Whether `path` is one of the redesigned shell's pages, `/app/next` or below it, rather than
+/// an asset: no segment holds a dot.
+pub fn is_next_page(path: &str) -> bool {
+    let path = path.trim_end_matches('/');
+    path == NEXT_BASE
+        || path
+            .strip_prefix(NEXT_BASE)
+            .is_some_and(|rest| rest.starts_with('/') && !rest.contains('.'))
+}
+
+/// The redesigned shell, with the signed-in person's display name if the session is fresh. It
+/// never carries `data-fixtures`, so `?fixtures=1` does nothing on a deployed host.
+pub fn next_shell(site_name: &str, person: Option<&str>) -> String {
+    let mut assets = String::from("<link rel=\"icon\" href=\"/console/icon.png\">\n");
+    for (path, kind, _) in NEXT_ASSETS {
+        if kind.starts_with("text/css") {
+            assets.push_str(&format!("<link rel=\"stylesheet\" href=\"{path}\">\n"));
+        }
+    }
+    assets.push_str("<script src=\"/auth/passkey.js\" defer></script>\n");
+    for (path, kind, _) in NEXT_ASSETS {
+        if kind.starts_with("text/javascript") {
+            assets.push_str(&format!("<script src=\"{path}\" defer></script>\n"));
+        }
+    }
+    let person = person.map_or_else(String::new, |name| {
+        format!(" data-person=\"{}\"", escape(name))
+    });
+    format!(
+        "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\n\
+         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
+         <title>{site} · Console</title>\n{assets}</head><body>\n\
+         <div id=\"pigeon-shell\" data-site=\"{site}\" data-base=\"{NEXT_BASE}\"{person}></div>\n\
+         <noscript><p>The console needs JavaScript.</p></noscript>\n\
+         </body></html>",
+        site = escape(site_name),
+    )
+}
 
 /// The app shell, with the signed-in person's display name if the session is fresh.
 pub(super) fn app_shell(site_name: &str, person: Option<&str>) -> String {
@@ -94,6 +162,7 @@ pub(super) fn app_shell(site_name: &str, person: Option<&str>) -> String {
 pub fn app_asset(path: &str) -> Option<(&'static str, &'static str)> {
     APP_ASSETS
         .iter()
+        .chain(NEXT_ASSETS)
         .find(|(url, _, _)| *url == path)
         .map(|(_, kind, body)| (*body, *kind))
 }

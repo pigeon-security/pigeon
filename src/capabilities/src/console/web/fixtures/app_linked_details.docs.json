@@ -1,0 +1,14 @@
+{
+  "_recorded_ms": 1795600000000,
+  "id": "docs",
+  "worker": "docs-site",
+  "link": {
+    "status": "linked",
+    "account_name": "Example Docs",
+    "account_id": "a1b2c3d4e5f60718293a4b5c6d7e77f0",
+    "linked_ms": 1790934400000,
+    "scope": "workers:write zone:read r2:write",
+    "access_expires_ms": 1795618000000,
+    "fresh": true
+  }
+}

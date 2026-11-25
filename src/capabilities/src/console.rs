@@ -140,6 +140,8 @@ pub enum Get<'a> {
     Bookmark(&'static str),
     /// The app's shell.
     App,
+    /// The redesigned console's shell, at `/app/next` and its pages below it.
+    AppNext,
     /// A script or stylesheet: its body and Content-Type.
     Asset(&'static str, &'static str),
     /// The console's icon.
@@ -156,6 +158,7 @@ impl<'a> Get<'a> {
         const JS: &str = "text/javascript; charset=utf-8";
         Some(match path {
             "/app" | "/app/" => Self::App,
+            p if page::is_next_page(p) => Self::AppNext,
             "/console/keys.js" => Self::Asset(KEYS, JS),
             "/console/users.js" => Self::Asset(USERS, JS),
             "/console/approvals.js" => Self::Asset(APPROVALS, JS),
@@ -326,6 +329,13 @@ impl Console {
                 Get::App => {
                     let signed = self.signed(cx.env, &req).await?;
                     page::html(&page::app_shell(
+                        &self.passkeys.site_name,
+                        signed.as_ref().map(|s| s.user.name.as_str()),
+                    ))
+                }
+                Get::AppNext => {
+                    let signed = self.signed(cx.env, &req).await?;
+                    page::html(&page::next_shell(
                         &self.passkeys.site_name,
                         signed.as_ref().map(|s| s.user.name.as_str()),
                     ))

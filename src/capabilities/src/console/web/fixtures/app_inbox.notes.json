@@ -1,0 +1,27 @@
+{
+  "_recorded_ms": 1795600000000,
+  "calls": [],
+  "drafts": [],
+  "plans": [
+    {
+      "id": "apv_c7f530",
+      "instance": "notes",
+      "caller": "Claude Code",
+      "acting_for": "Rowan Hale",
+      "created_ms": 1795592800000,
+      "expires_ms": 1795603480000,
+      "digest": "sha256:77d0e19b",
+      "summary": {
+        "account_id": "a91f00000000000000000000000d3d20",
+        "version": 2,
+        "plan": [
+          "Create R2 bucket notes-site",
+          "Add route notes.example.net/* to notes-worker",
+          "Store the site's publish token in the instance's secrets"
+        ]
+      }
+    }
+  ],
+  "other": [],
+  "landings": []
+}

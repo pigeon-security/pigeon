@@ -1,0 +1,18 @@
+<!doctype html>
+<!-- Fixture mode (P14): the console shell rendered from the recorded JSON in fixtures/, with no
+     sign-in and no request to the platform. The Worker never serves this page or fixtures/:
+     open it from a local static server rooted at this directory, as
+     fixtures.html?fixtures=1#/home/inbox (add &state=loading|empty|error for views' reads).
+     The policy below is the console's own (page.rs CSP), less frame-ancestors, which a meta
+     element cannot carry. -->
+<html lang="en"><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; form-action 'none'">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pigeon · Console fixtures</title>
+<link rel="stylesheet" href="shell.css">
+<script src="shell.js" defer></script>
+<script src="views.js" defer></script>
+</head><body>
+<div id="pigeon-shell" data-site="pigeon" data-base="" data-fixtures="fixtures/"></div>
+<noscript><p>The console needs JavaScript.</p></noscript>
+</body></html>

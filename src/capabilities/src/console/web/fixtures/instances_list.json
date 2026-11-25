@@ -1,0 +1,101 @@
+[
+  {
+    "id": "home",
+    "title": "Pigeon Platform",
+    "account": {
+      "kind": "home"
+    },
+    "zones": [
+      "platform.example.dev"
+    ],
+    "repo": "example-org/pigeon",
+    "worker": "pigeon-core",
+    "version": 12,
+    "publishing": {
+      "sites": [
+        "apex"
+      ]
+    },
+    "site_passkeys": {
+      "hosts": [
+        "preview.example.dev"
+      ]
+    },
+    "ci": {
+      "repo": "example-org/pigeon",
+      "jobs": [
+        "test",
+        "land"
+      ]
+    },
+    "observability": {
+      "workers": [
+        "pigeon-core",
+        "pigeon-sites"
+      ]
+    }
+  },
+  {
+    "id": "docs",
+    "title": "Docs site",
+    "account": {
+      "kind": "linked",
+      "account_id": "a1b2c3d4e5f60718293a4b5c6d7e77f0"
+    },
+    "zones": [
+      "docs.example.org"
+    ],
+    "repo": "example-org/docs",
+    "worker": "docs-site",
+    "version": 4,
+    "publishing": {
+      "sites": [
+        "docs"
+      ]
+    },
+    "site_passkeys": {
+      "hosts": [
+        "staging.docs.example.org"
+      ]
+    },
+    "storage": {
+      "buckets": [
+        "docs-assets",
+        "docs-uploads"
+      ]
+    },
+    "ci": {
+      "repo": "example-org/docs",
+      "jobs": [
+        "build"
+      ]
+    },
+    "observability": {
+      "workers": [
+        "docs-site"
+      ]
+    }
+  },
+  {
+    "id": "notes",
+    "title": "Field notes",
+    "account": {
+      "kind": "linked",
+      "account_id": "a91f00000000000000000000000d3d20"
+    },
+    "zones": [
+      "notes.example.net"
+    ],
+    "repo": "notes/site",
+    "version": 2,
+    "source": {
+      "repo": "notes/site",
+      "refs": [
+        "main"
+      ]
+    },
+    "ingest": {
+      "source": "https://notes.example.net"
+    }
+  }
+]

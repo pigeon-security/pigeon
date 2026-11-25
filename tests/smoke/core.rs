@@ -1009,8 +1009,11 @@ fn core_console_routes_only_the_app() {
         "/console/approvals.js",
         "/console/instances.js",
         "/console/console.css",
-        "/app/shell.js",
-        "/app/shell.css",
+        "/app/legacy-shell.js",
+        "/app/legacy-shell.css",
+        "/app/next/shell.js",
+        "/app/next/shell.css",
+        "/app/next/views.js",
         "/app/visitor.js",
     ] {
         assert!(

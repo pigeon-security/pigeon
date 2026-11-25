@@ -255,6 +255,8 @@ its name finds nothing but this plan's record.
 | `src/capabilities/src/console/web/connections.js`, `connections.css` (Settings › Connections and Capabilities, `linked-home`, `linked-settings`) | Overview, Capabilities, Platform › Endpoints |
 | `src/capabilities/src/console/web/{sessions,cost,architecture}.{js,css}` in their current form | the phase 4 views on the new components (no per-view stylesheets, P13) |
 | `src/capabilities/src/site_passkeys/visitor.js` and its `ASSET` entry | Site › Visitors |
+| `src/capabilities/src/console/web/legacy-shell.{js,css}` (the old `shell.js`, served at `/app/legacy-shell.*` while the new shell is at `/app/next`) | `shell.{js,css}` and `views.js` served at `/app` |
+| `todo(...)` placeholders in `web/views.js`, `legacyLink` and the TODO-port renderer in `shell.js`, and `CONSOLE_TODO_PORT` in `tests/smoke/console.rs` | ported renderers; the list is empty |
 | `src/capabilities/src/console/snapshot.rs` (snapshots keyed by legacy section ids), unless a phase 4 view keeps snapshots per op | op-level caching where a view needs it |
 
 ### Rust
@@ -271,6 +273,7 @@ its name finds nothing but this plan's record.
 | Old write routes: `/secrets/put/*`, `/tokens/issue/*`, `/tokens/revoke/*`, `/linked/unlink/*`, `/instance/put/*`, `/console/site-access/{invite/*,hosts,list}` and `site_passkeys::console::Action` | `/console/write/<action>/*`, `/app/op` |
 | `Get::Asset` entries for `/console/{keys,users,approvals,instances}.js`, `/console/console.css`; `app_shell`'s legacy `<link>`/`<script>` tags and the `app_assets!` entries of deleted views | the new shell's asset list |
 | `page::CREDENTIALS` and `GET /secrets`, `GET /tokens` redirects to it | redirects below |
+| `page::app_shell`, `APP_ASSETS` and `Get::App`'s legacy page; then `page::NEXT_BASE`, with `/app/next/*` redirected to `/app/*` in one hop, `next_shell` served at `/app` with `data-base="/app"`, its assets at `/app/{shell.css,shell.js,views.js}` | the new shell at `/app` |
 | `instances_section`'s legacy anchor and `keys_section` | view sections |
 
 The `Tab` enum and `sections::moved` were removed in phase 1.
@@ -312,3 +315,16 @@ carry-over once `/app?instance=` is the only form. Keep the console's routes lis
   Errors is not declared (no instance-scoped read yet); Site lists Sites before Deployments and
   Visitors; Access › Apps is a view over the users section's data, which the legacy Delegation
   panel also reads; no view declares `since` yet, as every component is at 1.0.0.
+- 2026-11-25: phase 3 built on `claude/console-shell`: the new shell is served at `/app/next`
+  beside the old one (moved to `web/legacy-shell.{js,css}`), so the current views keep working
+  untouched until they are ported and no adapter between two component sets is written and
+  thrown away. Departure from the spec: URLs are paths, `/app/next/<instance>/<area>/<view>`
+  (`/app/<instance>/<area>/<view>` after cutover), with old `?tab=&subtab=` and `#hash` links
+  rewritten in one hop by the shell's `LEGACY` table. Inbox (on `app_inbox`), Overview and
+  Instances › All instances are ported as proofs of the shell; every other view registers an
+  explicit TODO-port placeholder linking to the same page at `/app`. Writes go only through
+  `/console/write/<action>/{begin,finish}` with `{target, change}`, from the confirm dialog.
+  Fixture mode runs from `web/fixtures.html?fixtures=1` on a local static server; the Worker
+  never serves it or `web/fixtures/`. `console_shell_contract` (P15) derives every view from
+  `console_manifest` for a fully enabled home instance and checks renderers, `ops::READS`,
+  `write::ACTIONS` and the stylesheet's tokens.

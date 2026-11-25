@@ -1,0 +1,111 @@
+{
+  "instance": {
+    "id": "docs",
+    "title": "Docs site",
+    "home": false,
+    "host": "docs.example.org"
+  },
+  "areas": [
+    {
+      "id": "inbox",
+      "title": "Inbox",
+      "group": "top",
+      "key": "i",
+      "views": []
+    },
+    {
+      "id": "overview",
+      "title": "Overview",
+      "group": "instance",
+      "key": "v",
+      "views": []
+    },
+    {
+      "id": "site",
+      "title": "Site",
+      "group": "instance",
+      "key": "w",
+      "views": [
+        {
+          "id": "sites",
+          "title": "Sites",
+          "order": 10,
+          "capability": "publishing",
+          "upgrade": null
+        },
+        {
+          "id": "deployments",
+          "title": "Deployments",
+          "order": 20,
+          "capability": "publishing",
+          "upgrade": null
+        },
+        {
+          "id": "visitors",
+          "title": "Visitors",
+          "order": 30,
+          "capability": "site_passkeys",
+          "upgrade": {
+            "selected": "1.3.2",
+            "since": "1.4.0"
+          }
+        }
+      ]
+    },
+    {
+      "id": "storage",
+      "title": "Storage",
+      "group": "instance",
+      "key": "b",
+      "views": [
+        {
+          "id": "buckets",
+          "title": "Buckets",
+          "order": 10,
+          "capability": "storage",
+          "upgrade": null
+        }
+      ]
+    },
+    {
+      "id": "ci",
+      "title": "CI",
+      "group": "instance",
+      "key": "k",
+      "views": [
+        {
+          "id": "jobs",
+          "title": "Jobs",
+          "order": 10,
+          "capability": "ci",
+          "upgrade": null
+        }
+      ]
+    },
+    {
+      "id": "metrics",
+      "title": "Metrics",
+      "group": "instance",
+      "key": "m",
+      "views": [
+        {
+          "id": "workers",
+          "title": "Workers",
+          "order": 10,
+          "capability": "observability",
+          "upgrade": null
+        }
+      ]
+    },
+    {
+      "id": "capabilities",
+      "title": "Capabilities",
+      "group": "instance",
+      "key": "x",
+      "views": []
+    }
+  ],
+  "inbox": {
+    "count": 1
+  }
+}

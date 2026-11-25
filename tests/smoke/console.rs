@@ -1,4 +1,5 @@
-//! The console's one write path (`console::write`) and one read path (`/app/op`'s allowlist).
+//! The console's one write path (`console::write`), its one read path (`/app/op`'s allowlist), and
+//! the new shell's contract with both and with `console_manifest` (P15).
 
 use super::*;
 
@@ -570,4 +571,434 @@ fn console_ops_allow_the_reads_the_console_needs_and_nothing_else() {
     assert_eq!(ids(&blog, "other"), ["o1"]);
     assert!(ids(&blog, "landings").is_empty());
     assert_eq!(ids(&inbox_for(listing, "home", true), "landings"), ["l1"]);
+}
+
+// ---- P15: the new console shell's contract (`console/web/shell.js`, `views.js`) ----
+
+/// The views the new console shell still renders with an explicit TODO-port placeholder, which
+/// links to the same page in the current console. Shrinks to nothing as views are ported.
+const CONSOLE_TODO_PORT: &[&str] = &[
+    "site/sites",
+    "site/deployments",
+    "site/visitors",
+    "storage/buckets",
+    "source/repository",
+    "ci/jobs",
+    "metrics/workers",
+    "ingest/runs",
+    "capabilities/*",
+    "sessions/live",
+    "sessions/compare",
+    "cost/*",
+    "access/secrets",
+    "access/tokens",
+    "access/people",
+    "access/apps",
+    "platform/architecture",
+    "platform/models",
+    "platform/endpoints",
+];
+
+/// Every area and view `console_manifest` can send: its answer for a home instance with every
+/// instance capability enabled, given every platform capability's sections (core's own, and
+/// the AI Agents Worker's, which core reads from its manifest as `remote.rs` does).
+fn console_every_view() -> std::collections::BTreeMap<String, Vec<String>> {
+    use pigeon_capabilities::Capability;
+    use pigeon_capabilities::console::sections::{Section, area_of_tab};
+    use pigeon_capabilities::instances::{manifest::manifest, record::Instance, tools::Scope};
+    use pigeon_capabilities::passkeys::Passkeys;
+    use pigeon_contract::Service;
+
+    let record: Instance = serde_json::from_value(json!({
+        "id": "all", "title": "All", "account": { "kind": "home" },
+        "zones": ["example.com"], "worker": "all-worker",
+        "repo": { "kind": "artifacts", "namespace": "example", "repo": "all" },
+        "sites": [{ "name": "blog", "bucket": "all-site", "auth": "passkey", "targets": [] }],
+        "publishing": { "state": "enabled", "site": "blog" },
+        "storage": { "state": "enabled", "store": "s", "bucket": "b", "prefix": "p/" },
+        "source": { "state": "enabled" },
+        "ci": { "state": "enabled", "jobs": ["test"] },
+        "observability": { "state": "enabled" },
+        "ingest": { "state": "enabled", "source": "r2:all", "bucket": "src",
+            "destination_bucket": "all-site" }
+    }))
+    .unwrap();
+    let passkeys = || Passkeys {
+        host: "h".into(),
+        site_name: "s".into(),
+    };
+    let caps: Vec<Box<dyn Capability>> = vec![
+        Box::new(pigeon_capabilities::architecture::Architecture),
+        Box::new(pigeon_capabilities::users::Users { host: "h".into() }),
+        Box::new(pigeon_capabilities::secrets::Secrets {
+            host: "h".into(),
+            passkeys: passkeys(),
+            parent: "p".into(),
+        }),
+        Box::new(pigeon_capabilities::proxy::Tokens {
+            proxy_host: "p".into(),
+            passkeys: passkeys(),
+        }),
+        Box::new(pigeon_capabilities::observability::Observability {
+            map: pigeon_core::lanes::Map {
+                docs: vec![],
+                shared: vec![],
+                checks: vec![],
+                core_first: None,
+                workers: vec![],
+            },
+        }),
+        Box::new(pigeon_models::Models {
+            gateways: Vec::new(),
+            providers: Vec::new(),
+            staged: Vec::new(),
+            secrets_page: "https://x/secrets".into(),
+            host: "h".into(),
+            proxy_host: "p".into(),
+        }),
+    ];
+    let leak = |s: &str| -> &'static str { Box::leak(s.to_string().into_boxed_str()) };
+    let mut platform: Vec<(&'static str, Section)> = caps
+        .iter()
+        .flat_map(|c| c.sections().into_iter().map(|s| (c.name(), s)))
+        .chain(
+            pigeon_capabilities::instances::instances_sections()
+                .into_iter()
+                .map(|s| ("instances", s)),
+        )
+        .collect();
+    for cap in pigeon_ai_agents::service::Agents.manifest().capabilities {
+        for s in cap.sections {
+            let area = area_of_tab(&s.tab).unwrap().id;
+            platform.push((
+                "ai_agents",
+                Section {
+                    area,
+                    id: leak(&s.id),
+                    title: leak(&s.title),
+                    description: "",
+                    order: s.order,
+                    cost: None,
+                    view: s.view,
+                },
+            ));
+        }
+    }
+    let scope = Scope::new(&record).unwrap();
+    let m = manifest(&record, &scope, &platform, &[], Some(0));
+    m["areas"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| {
+            let views = a["views"].as_array().unwrap();
+            (
+                a["id"].as_str().unwrap().to_string(),
+                views
+                    .iter()
+                    .map(|v| v["id"].as_str().unwrap().to_string())
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+/// The double-quoted string literals in `src`, each with the text that follows it.
+fn js_literals(src: &str) -> Vec<(String, &str)> {
+    let mut out = Vec::new();
+    let mut rest = src;
+    while let Some(start) = rest.find('"') {
+        let body = &rest[start + 1..];
+        let mut end = None;
+        let mut escaped = false;
+        for (i, c) in body.char_indices() {
+            match c {
+                '\\' if !escaped => escaped = true,
+                '"' if !escaped => {
+                    end = Some(i);
+                    break;
+                }
+                '\n' => break,
+                _ => escaped = false,
+            }
+        }
+        let Some(end) = end else {
+            rest = body;
+            continue;
+        };
+        out.push((body[..end].to_string(), &body[end + 1..]));
+        rest = &body[end + 1..];
+    }
+    out
+}
+
+/// The literal arguments of every call of `func` in `src` (not a method of another name): the
+/// first, and the second when it is a literal (`None` for `null` or anything else).
+fn js_calls(src: &str, func: &str) -> Vec<(String, Option<String>)> {
+    let pat = format!("{func}(");
+    let mut out = Vec::new();
+    for (at, _) in src.match_indices(&pat) {
+        if src[..at]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            continue;
+        }
+        let args = src[at + pat.len()..].trim_start();
+        if !args.starts_with('"') {
+            continue;
+        }
+        let lits = js_literals(args);
+        let (first, after) = &lits[0];
+        let after = after.trim_start();
+        let second = after
+            .strip_prefix(',')
+            .map(str::trim_start)
+            .filter(|a| a.starts_with('"'))
+            .map(|_| lits[1].0.clone());
+        out.push((first.clone(), second));
+    }
+    out
+}
+
+/// The literals in the array `decl` declares in `src`: `const NAME = Object.freeze([...])`.
+fn js_array(src: &str, decl: &str) -> Vec<String> {
+    let at = src
+        .find(decl)
+        .unwrap_or_else(|| panic!("{decl} not in shell.js"));
+    let rest = &src[at..];
+    let open = rest.find('[').unwrap();
+    let close = rest.find(']').unwrap();
+    js_literals(&rest[open..close])
+        .into_iter()
+        .map(|(s, _)| s)
+        .collect()
+}
+
+/// P15, the console contract: every area and view `console_manifest` can send has a renderer in
+/// the new shell (or an explicit TODO-port placeholder, listed above), and the shell registers
+/// none it cannot send; every op the shell reads is in `/app/op`'s `READS`; every write it makes
+/// is an action of the one write path; the shell's one stylesheet keeps colours in tokens and no
+/// script sets an inline style or HTML; and fixture mode is never served.
+#[test]
+fn console_shell_contract() {
+    use pigeon_capabilities::console::sections::{AREAS, area_named};
+    use pigeon_capabilities::console::{Get, page};
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let scripts: Vec<(&str, &str)> = page::NEXT_ASSETS
+        .iter()
+        .filter(|(path, ..)| path.ends_with(".js"))
+        .map(|(path, _, body)| (*path, *body))
+        .collect();
+    let shell = scripts
+        .iter()
+        .find(|(path, _)| path.ends_with("/shell.js"))
+        .unwrap()
+        .1;
+    let all: String = scripts.iter().map(|(_, body)| *body).collect();
+
+    // What the manifest can send: every area, on a fully enabled home instance.
+    let every = console_every_view();
+    let ids: Vec<&str> = every.keys().map(String::as_str).collect();
+    let mut stable: Vec<&str> = AREAS.iter().map(|a| a.id).collect();
+    stable.sort_unstable();
+    assert_eq!(
+        ids, stable,
+        "a fully enabled home instance shows every area"
+    );
+
+    // Renderers: register(area, view|null, render) and todo(area, view|null).
+    let mut renderers = BTreeMap::new();
+    for (kind, func) in [("view", "register"), ("todo", "todo")] {
+        for (area, view) in js_calls(&all, func) {
+            let key = format!("{area}/{}", view.as_deref().unwrap_or("*"));
+            assert!(
+                renderers.insert(key.clone(), kind).is_none(),
+                "{key} has two renderers"
+            );
+        }
+    }
+    let rendered = |area: &str, view: Option<&str>| {
+        view.is_some_and(|v| renderers.contains_key(&format!("{area}/{v}")))
+            || renderers.contains_key(&format!("{area}/*"))
+    };
+    for (area, views) in &every {
+        if views.is_empty() {
+            assert!(rendered(area, None), "{area} has no renderer");
+        }
+        for view in views {
+            assert!(rendered(area, Some(view)), "{area}/{view} has no renderer");
+        }
+    }
+    for key in renderers.keys() {
+        let (area, view) = key.split_once('/').unwrap();
+        let known = every
+            .get(area)
+            .is_some_and(|views| view == "*" || views.iter().any(|v| v == view));
+        assert!(known, "{key} is registered but no manifest sends it");
+    }
+    let todos: BTreeSet<&str> = renderers
+        .iter()
+        .filter(|(_, kind)| **kind == "todo")
+        .map(|(key, _)| key.as_str())
+        .collect();
+    assert_eq!(
+        todos,
+        CONSOLE_TODO_PORT.iter().copied().collect::<BTreeSet<_>>(),
+        "the TODO-port placeholders changed: update CONSOLE_TODO_PORT"
+    );
+
+    // The recorded manifests: areas as AREAS declares them, Inbox first, platform areas only
+    // on home, and only views the manifest can send.
+    for (name, body) in [
+        (
+            "home",
+            include_str!(
+                "../../src/capabilities/src/console/web/fixtures/console_manifest.home.json"
+            ),
+        ),
+        (
+            "docs",
+            include_str!(
+                "../../src/capabilities/src/console/web/fixtures/console_manifest.docs.json"
+            ),
+        ),
+        (
+            "notes",
+            include_str!(
+                "../../src/capabilities/src/console/web/fixtures/console_manifest.notes.json"
+            ),
+        ),
+    ] {
+        let m: Value = serde_json::from_str(body).unwrap();
+        assert_eq!(m["instance"]["id"], name);
+        assert!(m["inbox"]["count"].is_u64(), "{name}: inbox.count");
+        let home = m["instance"]["home"].as_bool().unwrap();
+        let areas = m["areas"].as_array().unwrap();
+        assert_eq!(areas[0]["id"], "inbox", "{name}: Inbox comes first");
+        for a in areas {
+            let id = a["id"].as_str().unwrap();
+            let declared = area_named(id).unwrap_or_else(|| panic!("{name}: no area {id}"));
+            assert_eq!(
+                a,
+                &json!({ "id": id, "title": declared.title, "group": declared.group,
+                "key": declared.key, "views": a["views"] }),
+                "{name}: {id}"
+            );
+            assert!(
+                a["group"] != "platform" || home,
+                "{name}: {id} is platform-wide"
+            );
+            for v in a["views"].as_array().unwrap() {
+                let view = v["id"].as_str().unwrap();
+                assert!(
+                    every[id].iter().any(|w| w == view),
+                    "{name}: {id}/{view} is not sent"
+                );
+                assert!(v["upgrade"].is_null() || v["upgrade"]["since"].is_string());
+            }
+        }
+    }
+
+    // Reads: what the shell declares covers every literal op call, and is in READS.
+    let reads = js_array(shell, "const READS");
+    for (name, _) in js_calls(&all, "op") {
+        assert!(
+            reads.contains(&name),
+            "op {name} is not in the shell's READS"
+        );
+    }
+    for name in &reads {
+        assert!(
+            read_keys(name).is_some(),
+            "{name} is read by the shell but not allowed by /app/op"
+        );
+    }
+
+    // Writes: every action the views name is declared, and is an action of the write path.
+    let writes = js_array(shell, "const WRITES");
+    for at in all
+        .match_indices("action: ")
+        .map(|(at, _)| at + "action: ".len())
+    {
+        let segment = all[at..].split([',', '}', '\n']).next().unwrap();
+        for (name, _) in js_literals(segment) {
+            assert!(writes.contains(&name), "write {name} is not in WRITES");
+        }
+    }
+    for name in &writes {
+        assert!(
+            action(name).is_some(),
+            "{name} is not a /console/write action"
+        );
+    }
+
+    // P13: colours only in the stylesheet's tokens; no inline styles or HTML from scripts.
+    let css = page::NEXT_ASSETS
+        .iter()
+        .find(|(path, ..)| path.ends_with("/shell.css"))
+        .unwrap()
+        .2;
+    let has_colour = |line: &str| {
+        line.contains("rgb(")
+            || line.contains("rgba(")
+            || line.match_indices('#').any(|(at, _)| {
+                let hex = line[at + 1..]
+                    .chars()
+                    .take_while(char::is_ascii_hexdigit)
+                    .count();
+                matches!(hex, 3 | 4 | 6 | 8)
+                    && !line[at + 1 + hex..]
+                        .starts_with(|c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            })
+    };
+    for line in css.lines() {
+        assert!(
+            !has_colour(line) || line.trim_start().starts_with("--"),
+            "a literal colour outside the tokens: {line}"
+        );
+    }
+    for (path, body) in &scripts {
+        for line in body.lines() {
+            assert!(!has_colour(line), "{path}: a literal colour: {line}");
+        }
+        for banned in [
+            ".style",
+            "style:",
+            "\"style\"",
+            "innerHTML",
+            "outerHTML",
+            "insertAdjacentHTML",
+        ] {
+            assert!(!body.contains(banned), "{path} uses {banned}");
+        }
+    }
+
+    // Served at /app/next beside /app; fixture mode never.
+    for path in [
+        "/app/next",
+        "/app/next/",
+        "/app/next/home/inbox",
+        "/app/next/docs/site/visitors",
+    ] {
+        assert_eq!(Get::route(path), Some(Get::AppNext), "GET {path}");
+    }
+    assert_eq!(Get::route("/app"), Some(Get::App));
+    for path in [
+        "/app/next/fixtures.html",
+        "/app/next/fixtures/console_manifest.json",
+        "/app/fixtures.html",
+        "/app/next/nope.js",
+    ] {
+        assert_eq!(Get::route(path), None, "GET {path}");
+    }
+    let page = page::next_shell("Site <x>", Some("Ada"));
+    assert!(!page.contains("data-fixtures"));
+    assert!(page.contains("data-base=\"/app/next\"") && page.contains("data-person=\"Ada\""));
+    assert!(page.contains("Site &lt;x&gt;") && !page.contains("<script>"));
+    for (path, ..) in page::NEXT_ASSETS {
+        assert!(page.contains(path), "the page loads {path}");
+    }
 }

@@ -1,0 +1,224 @@
+{
+  "instance": {
+    "id": "home",
+    "title": "Pigeon Platform",
+    "home": true,
+    "host": "platform.example.dev"
+  },
+  "areas": [
+    {
+      "id": "inbox",
+      "title": "Inbox",
+      "group": "top",
+      "key": "i",
+      "views": []
+    },
+    {
+      "id": "overview",
+      "title": "Overview",
+      "group": "instance",
+      "key": "v",
+      "views": []
+    },
+    {
+      "id": "site",
+      "title": "Site",
+      "group": "instance",
+      "key": "w",
+      "views": [
+        {
+          "id": "sites",
+          "title": "Sites",
+          "order": 10,
+          "capability": "publishing",
+          "upgrade": null
+        },
+        {
+          "id": "deployments",
+          "title": "Deployments",
+          "order": 20,
+          "capability": "publishing",
+          "upgrade": null
+        },
+        {
+          "id": "visitors",
+          "title": "Visitors",
+          "order": 30,
+          "capability": "site_passkeys",
+          "upgrade": null
+        }
+      ]
+    },
+    {
+      "id": "ci",
+      "title": "CI",
+      "group": "instance",
+      "key": "k",
+      "views": [
+        {
+          "id": "jobs",
+          "title": "Jobs",
+          "order": 10,
+          "capability": "ci",
+          "upgrade": null
+        }
+      ]
+    },
+    {
+      "id": "metrics",
+      "title": "Metrics",
+      "group": "instance",
+      "key": "m",
+      "views": [
+        {
+          "id": "workers",
+          "title": "Workers",
+          "order": 10,
+          "capability": "observability",
+          "upgrade": null
+        }
+      ]
+    },
+    {
+      "id": "capabilities",
+      "title": "Capabilities",
+      "group": "instance",
+      "key": "x",
+      "views": []
+    },
+    {
+      "id": "sessions",
+      "title": "Sessions",
+      "group": "platform",
+      "key": "s",
+      "views": [
+        {
+          "id": "live",
+          "title": "Live",
+          "order": 10,
+          "capability": "ai_agents",
+          "upgrade": null
+        },
+        {
+          "id": "compare",
+          "title": "Compare",
+          "order": 20,
+          "capability": "ai_agents",
+          "upgrade": null
+        }
+      ]
+    },
+    {
+      "id": "cost",
+      "title": "Cost",
+      "group": "platform",
+      "key": "c",
+      "views": [
+        {
+          "id": "7d",
+          "title": "7 days",
+          "order": 10,
+          "capability": "cost",
+          "upgrade": null
+        },
+        {
+          "id": "today",
+          "title": "Today",
+          "order": 20,
+          "capability": "cost",
+          "upgrade": null
+        },
+        {
+          "id": "all",
+          "title": "30 days",
+          "order": 30,
+          "capability": "cost",
+          "upgrade": null
+        }
+      ]
+    },
+    {
+      "id": "access",
+      "title": "Access",
+      "group": "platform",
+      "key": "a",
+      "views": [
+        {
+          "id": "secrets",
+          "title": "Secrets",
+          "order": 10,
+          "capability": "secrets",
+          "upgrade": null
+        },
+        {
+          "id": "tokens",
+          "title": "Tokens",
+          "order": 20,
+          "capability": "proxy",
+          "upgrade": null
+        },
+        {
+          "id": "people",
+          "title": "People",
+          "order": 30,
+          "capability": "users",
+          "upgrade": null
+        },
+        {
+          "id": "apps",
+          "title": "Apps",
+          "order": 40,
+          "capability": "users",
+          "upgrade": null
+        }
+      ]
+    },
+    {
+      "id": "instances",
+      "title": "Instances",
+      "group": "platform",
+      "key": "n",
+      "views": [
+        {
+          "id": "list",
+          "title": "All instances",
+          "order": 10,
+          "capability": "instances",
+          "upgrade": null
+        }
+      ]
+    },
+    {
+      "id": "platform",
+      "title": "Platform",
+      "group": "platform",
+      "key": "p",
+      "views": [
+        {
+          "id": "architecture",
+          "title": "Architecture",
+          "order": 10,
+          "capability": "architecture",
+          "upgrade": null
+        },
+        {
+          "id": "models",
+          "title": "Models",
+          "order": 20,
+          "capability": "models",
+          "upgrade": null
+        },
+        {
+          "id": "endpoints",
+          "title": "Endpoints",
+          "order": 30,
+          "capability": "instances",
+          "upgrade": null
+        }
+      ]
+    }
+  ],
+  "inbox": {
+    "count": 5
+  }
+}

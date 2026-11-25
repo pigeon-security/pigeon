@@ -1,0 +1,104 @@
+{
+  "_recorded_ms": 1795600000000,
+  "calls": [
+    {
+      "id": "apv_9c1e04",
+      "tool": "deploy_token",
+      "caller": "Claude Code",
+      "acting_for": "Rowan Hale",
+      "run": "r_7f3a2c",
+      "created_ms": 1795599640000,
+      "expires_ms": 1795600240000,
+      "digest": "sha256:4e1b9a00c2",
+      "args": {
+        "account": "docs",
+        "permissions": [
+          "workers:write",
+          "r2:read"
+        ],
+        "ttl_secs": 3600
+      },
+      "grants": {
+        "permissions": [
+          "workers:write",
+          "r2:read"
+        ],
+        "ttl_secs": 3600
+      }
+    }
+  ],
+  "drafts": [
+    {
+      "id": "apv_b20d71",
+      "instance": "docs",
+      "caller": "Claude Code",
+      "acting_for": "Sam Ito",
+      "created_ms": 1795598140000,
+      "expires_ms": 1795601740000,
+      "summary": {
+        "version_from": 4,
+        "changes": [
+          {
+            "path": "source",
+            "from": null,
+            "to": {
+              "repo": "example-org/docs",
+              "refs": [
+                "main"
+              ]
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "plans": [
+    {
+      "id": "apv_c7f530",
+      "instance": "notes",
+      "caller": "Claude Code",
+      "acting_for": "Rowan Hale",
+      "created_ms": 1795592800000,
+      "expires_ms": 1795603480000,
+      "digest": "sha256:77d0e19b",
+      "summary": {
+        "account_id": "a91f00000000000000000000000d3d20",
+        "version": 2,
+        "plan": [
+          "Create R2 bucket notes-site",
+          "Add route notes.example.net/* to notes-worker",
+          "Store the site's publish token in the instance's secrets"
+        ]
+      }
+    }
+  ],
+  "other": [
+    {
+      "id": "apv_d02a11",
+      "kind": "Monitors plan",
+      "title": "Apply 3 monitors",
+      "caller": "observability",
+      "created_ms": 1795589200000,
+      "expires_ms": 1795621600000,
+      "digest": "sha256:5a10c3e2",
+      "summary": {
+        "plan": [
+          "Create monitor core-5xx-rate (5xx above 2% for 5 min)",
+          "Create monitor land-queue-stuck (no progress 30 min)",
+          "Update monitor cost-daily-spike threshold $25 to $40"
+        ]
+      }
+    }
+  ],
+  "landings": [
+    {
+      "id": "land_31",
+      "branch": "refs/heads/feature/cost-table",
+      "commit": "3fa91c2e7b10aa",
+      "by": "planner r_7f3a2c",
+      "needs_approval": "changes src/core/src/policy.rs, which needs a person's approval",
+      "created_at": 1795598800000,
+      "awaiting_since": 1795598920000
+    }
+  ]
+}

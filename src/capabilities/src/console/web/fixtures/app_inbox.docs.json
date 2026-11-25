@@ -1,0 +1,32 @@
+{
+  "_recorded_ms": 1795600000000,
+  "calls": [],
+  "drafts": [
+    {
+      "id": "apv_b20d71",
+      "instance": "docs",
+      "caller": "Claude Code",
+      "acting_for": "Sam Ito",
+      "created_ms": 1795598140000,
+      "expires_ms": 1795601740000,
+      "summary": {
+        "version_from": 4,
+        "changes": [
+          {
+            "path": "source",
+            "from": null,
+            "to": {
+              "repo": "example-org/docs",
+              "refs": [
+                "main"
+              ]
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "plans": [],
+  "other": [],
+  "landings": []
+}

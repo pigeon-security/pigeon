@@ -1,0 +1,64 @@
+{
+  "instance": {
+    "id": "notes",
+    "title": "Field notes",
+    "home": false,
+    "host": "notes.example.net"
+  },
+  "areas": [
+    {
+      "id": "inbox",
+      "title": "Inbox",
+      "group": "top",
+      "key": "i",
+      "views": []
+    },
+    {
+      "id": "overview",
+      "title": "Overview",
+      "group": "instance",
+      "key": "v",
+      "views": []
+    },
+    {
+      "id": "source",
+      "title": "Source",
+      "group": "instance",
+      "key": "r",
+      "views": [
+        {
+          "id": "repository",
+          "title": "Repository",
+          "order": 10,
+          "capability": "source",
+          "upgrade": null
+        }
+      ]
+    },
+    {
+      "id": "ingest",
+      "title": "Ingest",
+      "group": "instance",
+      "key": "e",
+      "views": [
+        {
+          "id": "runs",
+          "title": "Runs",
+          "order": 10,
+          "capability": "ingest",
+          "upgrade": null
+        }
+      ]
+    },
+    {
+      "id": "capabilities",
+      "title": "Capabilities",
+      "group": "instance",
+      "key": "x",
+      "views": []
+    }
+  ],
+  "inbox": {
+    "count": 1
+  }
+}
