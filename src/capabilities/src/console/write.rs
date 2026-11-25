@@ -144,14 +144,18 @@ use Handler::{Capability as Cap, Tool};
 
 /// Every write the console makes.
 pub const ACTIONS: &[Action] = &[
-    act(
-        "secret-set",
-        "Set a secret",
-        Cap("secrets"),
-        false,
-        Target::Secret,
-        Change::Secret,
-    ),
+    // The iOS app sets secrets by bearer for the person it acts for (SecretsView).
+    Action {
+        by_bearer: true,
+        ..act(
+            "secret-set",
+            "Set a secret",
+            Cap("secrets"),
+            false,
+            Target::Secret,
+            Change::Secret,
+        )
+    },
     act(
         "token-issue",
         "Issue a proxy token",

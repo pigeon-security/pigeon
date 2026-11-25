@@ -139,7 +139,8 @@ fn console_write_actions_each_have_a_handler_and_policy() {
     ] {
         assert!(!destructive.contains(&id), "{id} is not destructive");
     }
-    // Only deciding approvals and approving a landing may come from the app by bearer.
+    // Only what the iOS app makes may come from it by bearer: setting a secret, deciding
+    // approvals and approving a landing.
     let bearer: Vec<&str> = ACTIONS
         .iter()
         .filter(|a| a.by_bearer)
@@ -147,8 +148,90 @@ fn console_write_actions_each_have_a_handler_and_policy() {
         .collect();
     assert_eq!(
         bearer,
-        ["land-approve", "approval-approve", "approval-deny"]
+        [
+            "secret-set",
+            "land-approve",
+            "approval-approve",
+            "approval-deny"
+        ]
     );
+}
+
+/// The iOS app's `secret-set` by bearer: `/console/write/secret-set/{begin,finish}` with
+/// `{target, change: {digest | value}}` binds begin and finish to one purpose for the person the
+/// app acts for, and to nobody else's passkey or another value; writes outside the bearer
+/// allowance are refused by bearer at their own route.
+#[test]
+fn console_bearer_secret_set_binds_the_person_and_value() {
+    let (a, step) = route("/console/write/secret-set/begin").unwrap();
+    assert_eq!((a.id, step), ("secret-set", Step::Begin));
+    assert!(a.by_bearer);
+    let (a, step) = route("/console/write/secret-set/finish").unwrap();
+    assert_eq!((a.id, step), ("secret-set", Step::Finish));
+
+    let begin = |caller: &str, value: &str| {
+        bound_purpose(
+            "secret-set",
+            caller,
+            json!("X"),
+            json!({ "digest": hash(value) }),
+            Step::Begin,
+        )
+        .unwrap()
+    };
+    let finish = |caller: &str, value: &str| {
+        bound_purpose(
+            "secret-set",
+            caller,
+            json!("X"),
+            json!({ "value": value }),
+            Step::Finish,
+        )
+        .unwrap()
+    };
+    assert_eq!(begin("willow", "v"), finish("willow", "v"));
+    assert!(begin("willow", "v").starts_with("console:write:secret-set:"));
+    assert_ne!(begin("willow", "v"), finish("alex", "v"), "another person");
+    assert_ne!(begin("willow", "v"), finish("willow", "w"), "another value");
+    assert_ne!(
+        begin("willow", "v"),
+        finish(ANY_PASSKEY, "v"),
+        "the old route's binding"
+    );
+    assert_ne!(
+        begin("willow", "v"),
+        bound_purpose(
+            "secret-set",
+            "willow",
+            json!("Y"),
+            json!({ "value": "v" }),
+            Step::Finish
+        )
+        .unwrap(),
+        "another secret"
+    );
+
+    // Every other write keeps needing the console's own session.
+    for id in [
+        "token-issue",
+        "token-revoke",
+        "passkey-remove",
+        "app-disconnect",
+        "instance-put",
+        "land-approval",
+    ] {
+        let (a, _) = route(&format!("/console/write/{id}/begin")).unwrap();
+        assert!(!a.by_bearer, "{id} is not allowed by bearer");
+    }
+    // The old secret route is untouched: still an adapter onto `secret-set`, by any passkey.
+    let old = legacy(
+        "/secrets/put/begin",
+        &json!({ "name": "X", "digest": hash("v") }),
+    )
+    .unwrap();
+    assert_eq!((old.action.id, old.any_passkey), ("secret-set", true));
+    let old = legacy("/secrets/put/finish", &json!({ "name": "X", "value": "v" })).unwrap();
+    assert_eq!((old.action.id, old.step), ("secret-set", Step::Finish));
 }
 
 #[test]
