@@ -18,6 +18,15 @@ use pigeon_ai_agents::service::Agents;
 use pigeon_contract::{Answer, FailureKind};
 use worker::{Context, Env, Request, Response, Result, event, wasm_bindgen};
 
+/// Names this Worker (`ai-agents` in ci/workers.toml) on every request it signs to core, before any
+/// fetch or Durable Object code runs, so core checks it with CALLER_KEY_AI_AGENTS first
+/// (docs/plans/caller-keys.md, step 2). worker-build also exposes it as an entrypoint method of
+/// this name, reachable only over a service binding; calling it again changes nothing.
+#[event(start)]
+fn identify_worker() {
+    pigeon_contract::identify("ai-agents");
+}
+
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     let key = match pigeon_ai_agents::object::caller_key(&env).await {
