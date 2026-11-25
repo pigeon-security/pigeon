@@ -3036,3 +3036,109 @@ fn sites_scoped_callbacks_bind_credential_requests_to_the_approved_record() {
         );
     }
 }
+
+fn queued_publish_fixture() -> (pigeon_capabilities::instances::record::Instance, Value) {
+    use pigeon_capabilities::github::publishing_binding;
+    let record = serde_json::from_value(json!({
+        "id":"test-site", "title":"Test Site", "version":1,
+        "account":{"kind":"linked","account_id":"test-account"},
+        "repo":{"kind":"github","full_name":"fixture/blog","installation":42},
+        "sites":[{"name":"primary","bucket":"test-site"}],
+        "publishing":{"state":"enabled","site":"primary"}
+    }))
+    .unwrap();
+    let row = json!({
+        "state":"pending", "attempts":0, "commit":"a".repeat(40),
+        "repo":"fixture/blog", "installation":42, "binding":publishing_binding(&record).unwrap()
+    });
+    (record, row)
+}
+
+#[test]
+fn queued_publish_retries_transient_failure_and_recovers_an_expired_claim() {
+    use pigeon_capabilities::github::{due, finish_publish, prepare_publish};
+
+    let (record, mut row) = queued_publish_fixture();
+    let start = 1_000.0;
+    assert!(due(&row, start));
+    assert!(prepare_publish(&mut row, Some(record.clone()), start).is_some());
+    assert_eq!(row["attempts"], 1);
+    finish_publish(
+        &mut row,
+        Err(worker::Error::RustError("temporary provider outage".into())),
+        2_000,
+    );
+    assert_eq!(row["state"], "pending");
+    assert!(due(&row, 3_000.0));
+
+    assert!(prepare_publish(&mut row, Some(record.clone()), 3_000.0).is_some());
+    assert_eq!(row["attempts"], 2);
+    assert!(!due(&row, 183_000.0));
+    assert!(due(&row, 183_001.0));
+
+    assert!(prepare_publish(&mut row, Some(record.clone()), 183_001.0).is_some());
+    assert_eq!(row["attempts"], 3);
+    finish_publish(&mut row, Ok(json!({"deployed":true})), 184_000);
+    assert_eq!(row["state"], "done");
+    assert!(!due(&row, 200_000.0));
+
+    let (_, mut exhausted) = queued_publish_fixture();
+    for attempt in 1..=5 {
+        assert!(due(&exhausted, 200_000.0));
+        assert!(prepare_publish(&mut exhausted, Some(record.clone()), 200_000.0).is_some());
+        finish_publish(
+            &mut exhausted,
+            Err(worker::Error::RustError("provider unavailable".into())),
+            200_001,
+        );
+        assert_eq!(exhausted["attempts"], attempt);
+    }
+    assert_eq!(exhausted["state"], "failed");
+    assert!(!due(&exhausted, 400_000.0));
+}
+
+#[test]
+fn queued_publish_refuses_changed_grant_before_claiming_a_retry() {
+    use pigeon_capabilities::github::{due, finish_publish, prepare_publish};
+    use pigeon_capabilities::instances::record::{AccountRef, RepoRef};
+
+    let (record, mut row) = queued_publish_fixture();
+    assert!(prepare_publish(&mut row, Some(record.clone()), 1_000.0).is_some());
+    finish_publish(
+        &mut row,
+        Err(worker::Error::RustError("temporary provider outage".into())),
+        2_000,
+    );
+
+    let mut account_changed = record.clone();
+    account_changed.account = AccountRef::Linked {
+        account_id: Some("other-account".into()),
+    };
+    let mut installation_changed = record.clone();
+    installation_changed.repo = Some(RepoRef::Github {
+        full_name: "fixture/blog".into(),
+        installation: Some(43),
+    });
+    let mut publisher_disabled = record;
+    publisher_disabled.publishing = Some(pigeon_core::site_publish::Profile::Disabled);
+
+    for changed_grant in [
+        None,
+        Some(account_changed),
+        Some(installation_changed),
+        Some(publisher_disabled),
+    ] {
+        let mut retry = row.clone();
+        assert!(due(&retry, 3_000.0));
+        assert!(prepare_publish(&mut retry, changed_grant, 3_000.0).is_none());
+        assert_eq!(retry["attempts"], 1);
+        assert_eq!(retry["state"], "failed");
+        assert!(
+            retry["error"]
+                .as_str()
+                .unwrap()
+                .contains("configuration changed")
+        );
+        assert!(!due(&retry, 400_000.0));
+    }
+}

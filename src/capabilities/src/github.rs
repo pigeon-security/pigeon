@@ -211,6 +211,49 @@ async fn run_publish(
     .await
 }
 
+/// Recheck the approved grant before acquiring a lease for a due publication.
+pub fn prepare_publish(
+    kept: &mut Value,
+    current: Option<Instance>,
+    now_ms: f64,
+) -> Option<Instance> {
+    let Some(current) = current.filter(|record| allows_queued_publish(record, kept)) else {
+        kept["state"] = json!("failed");
+        kept["error"] = json!(
+            "publishing configuration changed or was never bound; a new GitHub push is required"
+        );
+        kept["finished_ms"] = json!(now_ms);
+        return None;
+    };
+    kept["state"] = json!("running");
+    kept["started_ms"] = json!(now_ms);
+    kept["attempts"] = json!(kept["attempts"].as_u64().unwrap_or(0) + 1);
+    Some(current)
+}
+
+/// Settle one claimed attempt. A provider error retries, while a rejected deployment is final.
+pub fn finish_publish(kept: &mut Value, outcome: Result<Value>, done_ms: u64) {
+    match outcome {
+        Ok(result) => {
+            kept["state"] = json!(if result["deployed"] == true {
+                "done"
+            } else {
+                "failed"
+            });
+            kept["result"] = result;
+        }
+        Err(error) => {
+            kept["state"] = json!(if kept["attempts"].as_u64().unwrap_or(0) >= MAX_ATTEMPTS {
+                "failed"
+            } else {
+                "pending"
+            });
+            kept["error"] = json!(error.to_string());
+        }
+    }
+    kept["finished_ms"] = json!(done_ms);
+}
+
 /// Runs every due push-started deploy, one instance at a time: from the platform's
 /// minute cron. Each is marked running before it starts and done or failed after, so one cut
 /// off is tried again once its lease runs out.
@@ -228,47 +271,19 @@ pub async fn run_pending(env: &Env) -> Result<Vec<Value>> {
             continue;
         }
         let current = instances::one(env, &i.id).await?;
-        let Some(current) = current.filter(|record| allows_queued_publish(record, &kept)) else {
-            kept["state"] = json!("failed");
-            kept["error"] = json!(
-                "publishing configuration changed or was never bound; a new GitHub push is required"
-            );
-            kept["finished_ms"] = json!(now);
+        let Some(current) = prepare_publish(&mut kept, current, now) else {
             if replace(env, &key, &previous, &kept).await? {
                 ran.push(json!({ "instance": i.id, "state": kept["state"] }));
             }
             continue;
         };
         let commit = kept["commit"].as_str().unwrap_or_default().to_string();
-        kept["state"] = json!("running");
-        kept["started_ms"] = json!(now);
-        kept["attempts"] = json!(kept["attempts"].as_u64().unwrap_or(0) + 1);
         if !replace(env, &key, &previous, &kept).await? {
             continue;
         }
         let claimed = kept.to_string();
         let outcome = run_publish(env, &current, &commit, &kept["binding"]).await;
-        let done_ms = worker::Date::now().as_millis();
-        match outcome {
-            Ok(v) if v["deployed"] == true => {
-                kept["state"] = json!("done");
-                kept["result"] = v;
-            }
-            Ok(v) => {
-                // The content has problems: trying again gives the same answer.
-                kept["state"] = json!("failed");
-                kept["result"] = v;
-            }
-            Err(e) => {
-                kept["state"] = json!(if kept["attempts"].as_u64().unwrap_or(0) >= MAX_ATTEMPTS {
-                    "failed"
-                } else {
-                    "pending"
-                });
-                kept["error"] = json!(e.to_string());
-            }
-        }
-        kept["finished_ms"] = json!(done_ms);
+        finish_publish(&mut kept, outcome, worker::Date::now().as_millis());
         if replace(env, &key, &claimed, &kept).await? {
             ran.push(json!({ "instance": i.id, "state": kept["state"] }));
         }
