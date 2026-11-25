@@ -2,7 +2,7 @@
 //! `/cf/`, and nothing else. A proxy credential is a bearer token of its own kind, so the MCP
 //! endpoint, which looks up only access tokens, never accepts one; and the proxies accept
 //! nothing else. Its value is shown once, when it is issued, and kept only as a hash; its id is
-//! the first characters of that hash. The console's Access tab lists, issues and revokes them
+//! the first characters of that hash. The app's Access page lists, issues and revokes them
 //! (the old `/tokens` page redirects there): seeing the list takes the console's session, and
 //! issuing or revoking takes a passkey of its own whose challenge
 //! is bound to that one credential's label and lifetime, or id. Every proxied request is logged
@@ -235,7 +235,7 @@ impl Tokens {
     async fn serve(&self, cx: &Context<'_>, mut req: Request) -> Result<Response> {
         let path = req.path();
         match (req.method(), path.as_str()) {
-            (Method::Get, "/tokens") => page::redirect("/access#credentials"),
+            (Method::Get, "/tokens") => page::redirect(page::CREDENTIALS),
             (
                 Method::Post,
                 "/tokens/issue/begin"

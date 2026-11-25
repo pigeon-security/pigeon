@@ -1,4 +1,4 @@
-// The Access tab of the console has two sections. People lists each person and their passkeys, and
+// The app's Access page has two sections. People lists each person and their passkeys, and
 // lets you invite someone new. Delegation lists the apps (MCP clients and agents) acting for each
 // person, and any that act for no one. Every write (removing a passkey, disconnecting an app,
 // inviting a person) is one passkey ceremony bound to what it changes.

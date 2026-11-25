@@ -1,4 +1,4 @@
-// The Secrets and credentials section of the console's Access tab: the platform's secrets (set or replaced, each
+// The Credentials section of the app's Access page: the platform's secrets (set or replaced, each
 // approved with a passkey bound to that name and value) and the proxy credentials cloud sessions
 // hold (issued once, revoked). A secret's value is never shown, logged or kept: inputs are
 // cleared after a write, and an issued credential stays on the page only until "Done".

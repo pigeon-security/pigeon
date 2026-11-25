@@ -974,6 +974,11 @@ fn core_console_platform_section() {
     assert_eq!(page::app_redirect("/approvals"), Some("/app?tab=approvals"));
     assert_eq!(page::app_redirect("/"), Some("/app"));
     assert_eq!(page::app_redirect("/auth/enrol"), None);
+    assert_eq!(page::app_redirect("/access"), Some("/app?tab=management"));
+    // `/secrets` and `/tokens` redirect straight to the credentials, which redirect no further.
+    assert_eq!(page::CREDENTIALS, "/app?tab=management&subtab=credentials");
+    let (path, _) = page::CREDENTIALS.split_once('?').unwrap();
+    assert_eq!(page::app_redirect(path), None);
 }
 
 /// 2026-11-24T06:00:00Z in milliseconds since the epoch.

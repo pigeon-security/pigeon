@@ -477,7 +477,7 @@ impl Ingest {
             match secret_value(env, &a.binding()).await {
                 Some(v) => source_keys = s3::parse_keys(&v).ok(),
                 None => missing.push(format!(
-                    "Secret `{}` is not bound. Create a read-only key on {}'s console, set it on the console's Access tab, then ask an agent to bind it in src/platform/wrangler.toml.",
+                    "Secret `{}` is not bound. Create a read-only key on {}'s console, set it on the app's Access page (Credentials), then ask an agent to bind it in src/platform/wrangler.toml.",
                     a.binding(),
                     a.provider.slug()
                 )),
@@ -486,7 +486,7 @@ impl Ingest {
                 && secret_value(env, &slot).await.is_none()
             {
                 missing.push(format!(
-                    "Secret `{slot}` is not bound. Create the API key for starting a VM on {} (decision 13.9 step 3), set it on the Access tab, then ask an agent to bind it.",
+                    "Secret `{slot}` is not bound. Create the API key for starting a VM on {} (decision 13.9 step 3), set it on the app's Access page (Credentials), then ask an agent to bind it.",
                     a.provider.slug()
                 ));
             }
@@ -502,7 +502,7 @@ impl Ingest {
         }
         if secret_value(env, &hosts::r2_slot(instance)).await.is_none() {
             missing.push(format!(
-                "Secret `{}` is not bound. In {}'s Cloudflare dashboard make an R2 API token for bucket `{}` only, Object Read & Write, set it on the Access tab, then ask an agent to bind it.",
+                "Secret `{}` is not bound. In {}'s Cloudflare dashboard make an R2 API token for bucket `{}` only, Object Read & Write, set it on the app's Access page (Credentials), then ask an agent to bind it.",
                 hosts::r2_slot(instance),
                 instance,
                 destination_bucket

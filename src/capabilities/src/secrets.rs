@@ -1,7 +1,7 @@
 //! Secrets: the one way a value gets into the platform, so no one has to open Cloudflare's
 //! dashboard and no value passes through a chat. Each capability declares the secrets it needs;
-//! the console's Access tab lists them, set or missing, and lets a person replace one (the old
-//! `/secrets` page redirects there). Seeing the list takes the console's session, and each write
+//! the app's Access page lists them under Credentials, set or missing, and lets a person replace
+//! one (the old `/secrets` page redirects there). Seeing the list takes the console's session, and each write
 //! takes a passkey of its own whose challenge is bound to the
 //! secret's name and a hash of the new value, so an approval covers that one value. Before it is
 //! written, the owning capability checks the value works. Values are never shown, logged or kept
@@ -41,8 +41,7 @@ fn bad(why: &str) -> Error {
     Error::RustError(why.to_string())
 }
 
-/// The Credentials section of the console's Access tab, which secrets and proxy credentials
-/// share.
+/// The Credentials section of the app's Access page, which secrets and proxy credentials share.
 pub fn keys_section() -> Section {
     Section {
         tab: Tab::Access,
@@ -151,8 +150,8 @@ impl Secrets {
 
     fn url(&self, name: Option<&str>) -> String {
         match name {
-            Some(n) => format!("https://{}/access#{n}", self.host),
-            None => format!("https://{}/access#credentials", self.host),
+            Some(n) => format!("https://{}{}#{n}", self.host, page::CREDENTIALS),
+            None => format!("https://{}{}", self.host, page::CREDENTIALS),
         }
     }
 
@@ -167,7 +166,7 @@ impl Secrets {
     async fn serve(&self, cx: &Context<'_>, mut req: Request) -> Result<Response> {
         let path = req.path();
         match (req.method(), path.as_str()) {
-            (Method::Get, "/secrets") => page::redirect("/access"),
+            (Method::Get, "/secrets") => page::redirect(page::CREDENTIALS),
             (Method::Post, p) => {
                 let body: Value = req.json().await.unwrap_or(Value::Null);
                 let answer = match p {

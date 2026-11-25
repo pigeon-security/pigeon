@@ -10,6 +10,10 @@ use worker::{Headers, Response, Result};
 /// system; images also from `data:` URLs, for profile pictures.
 pub const CSP: &str = "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
+/// The app's Credentials page, under Access: where secrets and proxy credentials are listed and
+/// set. A fragment naming a secret, `#NAME`, scrolls to it.
+pub const CREDENTIALS: &str = "/app?tab=management&subtab=credentials";
+
 /// Routes from old console bookmarks into the app.
 pub fn app_redirect(path: &str) -> Option<&'static str> {
     match path.trim_end_matches('/') {
@@ -115,7 +119,7 @@ pub fn asset(body: &str, content_type: &str) -> Result<Response> {
 }
 
 /// A redirect to `location`, a path on this host; a browser keeps the request's fragment, so
-/// `/secrets#NAME` lands on `/access#NAME`.
+/// `/secrets#NAME` lands on [`CREDENTIALS`]`#NAME`.
 pub fn redirect(location: &str) -> Result<Response> {
     let headers = Headers::new();
     headers.set("Location", location)?;

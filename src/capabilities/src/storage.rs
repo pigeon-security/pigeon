@@ -69,9 +69,9 @@ pub fn scoped_instance<'a>(tool: &str, args: &'a Value) -> Result<&'a str> {
 
 /// How to set an account up, for the person.
 pub const SETUP: &str = "No storage account is set up. To set one up: create a least-privilege \
-key in the provider's console (read-only for DigitalOcean). Store it on the console's Access tab \
-as secret `STORAGE_<PROVIDER>_<NAME>` in the form `ACCESS_KEY_ID:SECRET_ACCESS_KEY`. Bind it in \
-src/platform/wrangler.toml. Declare the account in `storage_accounts()` in \
+key in the provider's console (read-only for DigitalOcean). Store it on the app's Access page \
+(Credentials) as secret `STORAGE_<PROVIDER>_<NAME>` in the form `ACCESS_KEY_ID:SECRET_ACCESS_KEY`. \
+Bind it in src/platform/wrangler.toml. Declare the account in `storage_accounts()` in \
 src/platform/src/settings.rs. See docs/plans/storage-providers.md.";
 
 /// The largest object `storage_get_object` answers inline, in bytes.
