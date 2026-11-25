@@ -2264,3 +2264,88 @@ fn scoped_mcp_discovery_marks_only_ci_reads() {
     assert_eq!(tools[1]["annotations"]["readOnlyHint"], true);
     assert!(tools[2].get("annotations").is_none());
 }
+
+#[test]
+fn global_mcp_discovery_is_not_annotated_read_only() {
+    use pigeon_capabilities::ci::annotate_discovery;
+    use pigeon_core::mcp::{Server, Tool, answer};
+
+    let server = Server {
+        name: "fixture",
+        version: "1",
+        instructions: "",
+    };
+    let tools = [Tool::bare("ci_status", "Read a CI job")];
+    let list = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"});
+    let discover = || {
+        token_block_on(answer(&server, &tools, &list, async |_, _| {
+            unreachable!("discovery must not execute a tool")
+        }))
+        .unwrap()
+    };
+    let annotated = |reply: &Value| -> bool {
+        let wire: Value = serde_json::from_slice(&serde_json::to_vec(reply).unwrap()).unwrap();
+        wire["result"]["tools"][0]["annotations"]["readOnlyHint"] == true
+    };
+
+    // The global endpoint leaves discovery as the tools declare it.
+    let mut global = discover();
+    annotate_discovery(false, &list, &mut global);
+    assert!(!annotated(&global));
+
+    // A scoped endpoint marks the CI reads, but only when answering tools/list.
+    let mut scoped = discover();
+    annotate_discovery(true, &list, &mut scoped);
+    assert!(annotated(&scoped));
+    let mut other = discover();
+    let call = json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call"});
+    annotate_discovery(true, &call, &mut other);
+    assert!(!annotated(&other));
+}
+
+#[test]
+fn contextual_ci_callbacks_read_only_their_own_instance() {
+    use pigeon_capabilities::ci::ScopeRequest;
+    use pigeon_capabilities::split::verify_ci_scope;
+    use pigeon_contract::{Refused, Signed, WorkerContext};
+
+    let signed = |context: Option<WorkerContext>| Signed {
+        caller: json!({"user": {"kind": "standard", "id": "owner"}}),
+        iat: 0,
+        exp: 1,
+        nonce: String::new(),
+        context,
+    };
+    let read = |instance: &str| ScopeRequest::Read {
+        instance: instance.into(),
+    };
+    let attribute = ScopeRequest::Attribute {
+        repo: "example/project".into(),
+        job: "test".into(),
+    };
+
+    let bound = signed(Some(WorkerContext::new("pigeon-ci-gateway", Some("one"))));
+    assert_eq!(verify_ci_scope(&bound, &read("one")), Ok(()));
+    assert_eq!(
+        verify_ci_scope(&bound, &read("two")),
+        Err(Refused::InstanceMismatch)
+    );
+    assert_eq!(
+        verify_ci_scope(&bound, &attribute),
+        Err(Refused::InstanceMismatch)
+    );
+    // A context bound to no instance reads nothing and attributes nothing.
+    let unbound = signed(Some(WorkerContext::new("pigeon-ci-gateway", None)));
+    assert_eq!(
+        verify_ci_scope(&unbound, &read("one")),
+        Err(Refused::InstanceMismatch)
+    );
+    assert_eq!(
+        verify_ci_scope(&unbound, &attribute),
+        Err(Refused::InstanceMismatch)
+    );
+    // Legacy envelopes carry no context and keep their earlier behavior.
+    let legacy = signed(None);
+    assert_eq!(verify_ci_scope(&legacy, &read("two")), Ok(()));
+    assert_eq!(verify_ci_scope(&legacy, &attribute), Ok(()));
+}

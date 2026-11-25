@@ -120,7 +120,9 @@ fn bad(why: impl Into<String>) -> Error {
     Error::RustError(why.into())
 }
 
-pub(super) async fn metrics(cx: &Context<'_>, args: &Value) -> Result<Value> {
+/// The instance and window of a metrics call whose arguments are only `instance` and `hours`:
+/// a caller cannot name a `worker`, account or other workload.
+pub fn metrics_arguments(args: &Value) -> Result<(&str, u64)> {
     if !args.as_object().is_some_and(|fields| {
         fields
             .keys()
@@ -136,6 +138,11 @@ pub(super) async fn metrics(cx: &Context<'_>, args: &Value) -> Result<Value> {
             .filter(|hours| (1..=168).contains(hours))
             .ok_or_else(|| bad("hours must be an integer from 1 to 168"))?,
     };
+    Ok((instance, hours))
+}
+
+pub(super) async fn metrics(cx: &Context<'_>, args: &Value) -> Result<Value> {
+    let (instance, hours) = metrics_arguments(args)?;
     let record = crate::instances::one(cx.env, instance)
         .await?
         .ok_or_else(|| bad("unknown observability instance"))?;

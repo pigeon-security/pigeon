@@ -1223,3 +1223,94 @@ fn protected_origins_require_dedicated_resources_and_bind_to_the_site_bucket() {
     ));
     assert!(!private_domains(&json!({}), &json!({"domains":[]})));
 }
+
+#[test]
+fn scoped_storage_and_metrics_calls_refuse_raw_targets() {
+    use pigeon_capabilities::observability::instance::metrics_arguments;
+    use pigeon_capabilities::storage::scoped_instance;
+
+    // Storage: the instance and relative object arguments only.
+    assert_eq!(
+        scoped_instance(
+            "storage_get_object",
+            &json!({"instance":"archive","key":"a"})
+        )
+        .unwrap(),
+        "archive"
+    );
+    assert_eq!(
+        scoped_instance(
+            "storage_list_objects",
+            &json!({"instance":"archive","prefix":"p/","delimiter":"/","max_keys":5,"token":"t"})
+        )
+        .unwrap(),
+        "archive"
+    );
+    for tool in ["storage_get_object", "storage_list_objects"] {
+        for raw in ["account", "bucket"] {
+            let mut args = json!({"instance":"archive","key":"a"});
+            if tool == "storage_list_objects" {
+                args = json!({"instance":"archive"});
+            }
+            args[raw] = json!("elsewhere");
+            assert!(scoped_instance(tool, &args).is_err(), "{tool} {raw}");
+        }
+    }
+    assert!(scoped_instance("storage_get_object", &json!({"key":"a"})).is_err());
+    assert!(scoped_instance("storage_head_object", &json!({"instance":"archive"})).is_err());
+
+    // Metrics: the instance and the window only.
+    assert_eq!(
+        metrics_arguments(&json!({"instance":"blog"})).unwrap(),
+        ("blog", 24)
+    );
+    assert_eq!(
+        metrics_arguments(&json!({"instance":"blog","hours":168})).unwrap(),
+        ("blog", 168)
+    );
+    for extra in ["worker", "account", "account_id", "script"] {
+        let mut args = json!({"instance":"blog"});
+        args[extra] = json!("other");
+        assert!(metrics_arguments(&args).is_err(), "{extra}");
+    }
+    for hours in [json!(0), json!(169), json!("24")] {
+        assert!(metrics_arguments(&json!({"instance":"blog","hours":hours})).is_err());
+    }
+    assert!(metrics_arguments(&json!({"hours":1})).is_err());
+}
+
+#[test]
+fn disabled_publishing_hides_deploy_and_rollback_from_scoped_discovery() {
+    use pigeon_capabilities::instances::{record::Instance, tools::Scope};
+    use pigeon_core::mcp::Tool;
+
+    let mut record = json!({
+        "id": "blog", "title": "Blog", "account": {"kind":"home"},
+        "sites": [{"name":"blog", "bucket":"site", "targets":[]}],
+        "publishing": {"state":"enabled", "site":"blog"}
+    });
+    let listed = |record: &Value| {
+        let instance: Instance = serde_json::from_value(record.clone()).unwrap();
+        let scope = Scope::new(&instance).unwrap();
+        let mut tools: Vec<Tool> = ["site_deploy", "site_rollback", "call"]
+            .into_iter()
+            .map(|name| Tool {
+                name,
+                description: "",
+                input_schema: json!({"properties": {"instance": {}}, "required": ["instance"]}),
+            })
+            .collect();
+        scope.restrict_tools(&mut tools);
+        let names: Vec<&str> = tools.iter().map(|tool| tool.name).collect();
+        (
+            names,
+            scope.bind("site_deploy", &json!({"rev":"main"})).is_ok(),
+        )
+    };
+    assert_eq!(
+        listed(&record),
+        (vec!["site_deploy", "site_rollback", "call"], true)
+    );
+    record["publishing"] = json!({"state":"disabled"});
+    assert_eq!(listed(&record), (Vec::<&str>::new(), false));
+}

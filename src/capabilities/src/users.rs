@@ -1388,6 +1388,16 @@ pub struct Users {
     pub host: String,
 }
 
+/// Who a site enrolment is for, which decides the allowlist check it needs.
+enum Visitor<'a> {
+    /// A standard user: the site's allowlist is not asked.
+    Standard,
+    /// A site user about to be created.
+    New,
+    /// An existing site user, admitted as sign-in would admit them.
+    Existing(&'a User),
+}
+
 impl Users {
     /// The enrolment link: on `site` when given (so the passkey is made for that host), else
     /// on the platform's own host.
@@ -1398,7 +1408,15 @@ impl Users {
         }
     }
 
-    async fn site_scope(&self, env: &Env, host: Option<&str>) -> Result<Option<String>> {
+    /// The approved binding of `host`, when given, checked against the site's allowlist for
+    /// the visitor about to be enrolled: a new site user needs the allowlist to admit new site
+    /// visitors (the rule the console enforces); an existing user needs what sign-in needs.
+    async fn site_scope(
+        &self,
+        env: &Env,
+        host: Option<&str>,
+        visitor: Visitor<'_>,
+    ) -> Result<Option<String>> {
         let Some(host) = host else {
             return Ok(None);
         };
@@ -1406,14 +1424,23 @@ impl Users {
             .host
             .split_once('.')
             .ok_or_else(|| bad("platform host has no zone"))?;
-        let (scope, _) = crate::site_passkeys::approved(env, zone, host).await?;
+        let (scope, config) = crate::site_passkeys::approved(env, zone, host).await?;
+        match visitor {
+            Visitor::Standard => {}
+            Visitor::New => crate::site_passkeys::admit_new_visitors(&config)?,
+            Visitor::Existing(user) => {
+                if !pigeon_core::site_auth::allowed(&config, host, &user.id, &user.kind) {
+                    return Err(bad("the site's allowlist does not admit this user"));
+                }
+            }
+        }
         Ok(Some(scope))
     }
 
     /// Creates a user, a standard one or a site user when `site` is given, and answers them
     /// with a single-use enrolment link.
     async fn standard_with_link(&self, env: &Env, name: &str, site: Option<&str>) -> Result<Value> {
-        let scope = self.site_scope(env, site).await?;
+        let scope = self.site_scope(env, site, Visitor::New).await?;
         self.enrol_new_user(env, name, site, scope.as_deref()).await
     }
 
@@ -1506,7 +1533,12 @@ impl Users {
                             || site.is_some_and(|host| u.kind == format!("site:{host}"))
                     })
                     .ok_or_else(|| bad("no such standard user, or user of that site"))?;
-                let scope = self.site_scope(env, site).await?;
+                let visitor = if user.kind == "standard" {
+                    Visitor::Standard
+                } else {
+                    Visitor::Existing(&user)
+                };
+                let scope = self.site_scope(env, site, visitor).await?;
                 if user.kind != "standard"
                     && directory(env, "users.site_scope", json!({ "id": user.id })).await?
                         != to_value(&scope)

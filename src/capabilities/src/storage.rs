@@ -49,6 +49,26 @@ pub fn instance_tools(instance: &Instance) -> serde_json::Result<&'static [Regis
     )
 }
 
+/// The instance a scoped storage call names, once its arguments are only that instance and
+/// relative object arguments: a raw `account` or `bucket` never reaches the provider.
+pub fn scoped_instance<'a>(tool: &str, args: &'a Value) -> Result<&'a str> {
+    let instance = arg(args, "instance")?;
+    let allowed: &[&str] = match tool {
+        "storage_list_objects" => &["instance", "prefix", "delimiter", "max_keys", "token"],
+        "storage_get_object" => &["instance", "key"],
+        _ => return Err(unknown(tool)),
+    };
+    if !args
+        .as_object()
+        .is_some_and(|fields| fields.keys().all(|field| allowed.contains(&field.as_str())))
+    {
+        return Err(Error::RustError(
+            "instance storage accepts only relative object arguments".into(),
+        ));
+    }
+    Ok(instance)
+}
+
 /// How to set an account up, for the person.
 pub const SETUP: &str = "No storage account is set up. To set one up: create a least-privilege \
 key in the provider's console (read-only for DigitalOcean). Store it on the console's Access tab \
@@ -342,20 +362,7 @@ impl Storage {
 
     async fn scoped(&self, cx: &Context<'_>, tool: &str, args: &Value) -> Result<Value> {
         let bad = Error::RustError;
-        let instance = arg(args, "instance")?;
-        let allowed: &[&str] = match tool {
-            "storage_list_objects" => &["instance", "prefix", "delimiter", "max_keys", "token"],
-            "storage_get_object" => &["instance", "key"],
-            _ => return Err(unknown(tool)),
-        };
-        if !args
-            .as_object()
-            .is_some_and(|fields| fields.keys().all(|field| allowed.contains(&field.as_str())))
-        {
-            return Err(bad(
-                "instance storage accepts only relative object arguments".into(),
-            ));
-        }
+        let instance = scoped_instance(tool, args)?;
 
         let record = crate::instances::one(cx.env, instance)
             .await?

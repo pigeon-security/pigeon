@@ -1563,3 +1563,36 @@ fn console_site_access_binds_visitor_list_and_invite_to_exact_selection() {
         .unwrap();
     assert_eq!(visitors, [("Alex".into(), true), ("Sam".into(), false)]);
 }
+
+#[test]
+fn site_visitor_invites_and_enrolments_need_the_site_allowlist() {
+    // The console and the MCP `users_invite` / `users_enrol` tools share this rule before any
+    // site user is created or enrolled: the site's allowlist must list "site".
+    use pigeon_capabilities::site_passkeys::{admit_new_visitors, allows_new_visitors};
+    use pigeon_core::site_auth::{Config, allowed};
+
+    let config = |allow: &[&str]| Config {
+        allow: allow.iter().map(|entry| entry.to_string()).collect(),
+    };
+    let host = "preview.example.test";
+    let visitor = format!("site:{host}");
+    for closed in [config(&[]), config(&["owner"]), config(&["Site", "sites"])] {
+        assert!(!allows_new_visitors(&closed));
+        let refused = admit_new_visitors(&closed).unwrap_err().to_string();
+        assert!(
+            refused.contains("does not admit new site visitors"),
+            "{refused}"
+        );
+        // Sign-in agrees: a new site user of this host would not get in either.
+        assert!(!allowed(&closed, host, "new", &visitor));
+    }
+    for open in [config(&["site"]), config(&["owner", "site"])] {
+        assert!(allows_new_visitors(&open));
+        admit_new_visitors(&open).unwrap();
+        assert!(allowed(&open, host, "new", &visitor));
+        assert!(!allowed(&open, host, "new", "site:other.example.test"));
+    }
+    // Standard users are listed by id; "site" alone does not let them in.
+    assert!(allowed(&config(&["owner"]), host, "owner", "standard"));
+    assert!(!allowed(&config(&["site"]), host, "owner", "standard"));
+}

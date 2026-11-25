@@ -77,6 +77,14 @@ pub async fn instance_scope(env: &worker::Env, request: &ScopeRequest) -> worker
     Ok(resolve_scope(&crate::instances::all(env).await?, request))
 }
 
+/// Marks the CI reads in `answer` only when it answers a tools/list on an instance-scoped
+/// endpoint; global discovery is left unannotated.
+pub fn annotate_discovery(scoped: bool, message: &Value, answer: &mut Value) {
+    if scoped && message["method"] == "tools/list" {
+        annotate_scoped_discovery(answer);
+    }
+}
+
 /// Marks the instance-owned CI reads in an MCP tools/list response.
 pub fn annotate_scoped_discovery(answer: &mut Value) {
     if let Some(tools) = answer

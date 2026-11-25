@@ -4,7 +4,7 @@ use pigeon_core::{oauth::hash, site_auth};
 use serde_json::{Value, json};
 use worker::{Env, Result};
 
-use super::{applied, approved, bad};
+use super::{admit_new_visitors, allows_new_visitors, applied, approved, bad};
 use crate::instances::{self, record};
 use crate::passkeys::Passkeys;
 use crate::users::{User, Users, directory, invite_name};
@@ -80,9 +80,7 @@ pub(crate) async fn serve(
         .await?;
         return Ok(json!({ "visitors": visitors, "can_invite": can_invite }));
     }
-    if !can_invite {
-        return Err(bad("the site's allowlist does not admit new site visitors"));
-    }
+    admit_new_visitors(&config)?;
 
     let name = invite_name(crate::arg(body, "name")?).map_err(|why| bad(&why))?;
     let purpose = invite_purpose(&scope, &name, &person.id);
@@ -112,10 +110,6 @@ pub(crate) async fn serve(
         }
         _ => Err(bad("not found")),
     }
-}
-
-fn allows_new_visitors(config: &site_auth::Config) -> bool {
-    config.allow.iter().any(|entry| entry == "site")
 }
 
 async fn hosts(env: &Env, zone: &str, instance: &str) -> Result<Vec<Value>> {

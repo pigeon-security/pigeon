@@ -27,6 +27,22 @@ fn bad(why: &str) -> Error {
     Error::RustError(why.to_string())
 }
 
+/// Whether a site's allowlist admits new site visitors: it lists "site". The console and the
+/// MCP `users_invite` and `users_enrol` tools share this rule before creating or enrolling a
+/// site user.
+pub fn allows_new_visitors(config: &site_auth::Config) -> bool {
+    config.allow.iter().any(|entry| entry == "site")
+}
+
+/// [`allows_new_visitors`] as a refusal, for a path about to create or enrol a site user.
+pub fn admit_new_visitors(config: &site_auth::Config) -> Result<()> {
+    if allows_new_visitors(config) {
+        Ok(())
+    } else {
+        Err(bad("the site's allowlist does not admit new site visitors"))
+    }
+}
+
 /// The approved and applied binding, as seen by core at ceremony time.
 pub(crate) async fn approved(
     env: &worker::Env,
