@@ -36,6 +36,14 @@ binding = "CALLER_KEY"
 store_id = "5185c227b9f34b4291045175695b78ec"
 secret_name = "CALLER_KEY"
 
+# This Worker's own caller key, CALLER_KEY_MODEL_GATEWAY, made by core's `workers_setup`
+# (docs/plans/caller-keys.md, step 2). Bound now and not yet read: this Worker still signs with
+# CALLER_KEY until step 3.
+[[secrets_store_secrets]]
+binding = "CALLER_KEY_OWN"
+store_id = "5185c227b9f34b4291045175695b78ec"
+secret_name = "CALLER_KEY_MODEL_GATEWAY"
+
 # Core: short-lived Cloudflare credentials for the call in hand, and its tools through its gate.
 [[services]]
 binding = "PLATFORM"

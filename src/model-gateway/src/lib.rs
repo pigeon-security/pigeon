@@ -118,6 +118,15 @@ fn gateway() -> ModelGateway {
     }
 }
 
+/// Names this Worker (`model-gateway` in ci/workers.toml) on every request it signs to core, before any
+/// fetch or Durable Object code runs, so core checks it with CALLER_KEY_MODEL_GATEWAY first
+/// (docs/plans/caller-keys.md, step 2). worker-build also exposes it as an entrypoint method of
+/// this name, reachable only over a service binding; calling it again changes nothing.
+#[event(start)]
+fn identify_worker() {
+    pigeon_contract::identify("model-gateway");
+}
+
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     let key = match env.secret_store(CALLER_KEY) {
