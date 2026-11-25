@@ -1,12 +1,16 @@
 //! `site_deploy`: an instance's site, deployed from its GitHub repository at a commit. What it
 //! must not hold itself comes from core, as the caller it was called for: the instance's
-//! record, an installation token for the repository, and the linked account's token. Instance
-//! calls use core's scoped publishing callback. Legacy platform calls use the existing core ops.
-//! The repository is read as one tarball ([`pigeon_core::tarball`]), sorted ([`pigeon_blog::repo`]),
-//! rendered ([`pigeon_blog`]), and
-//! written to the record's bucket in the layout the site Worker serves: the blobs it lacks, then
-//! `deploys/{release}.json` and release metadata, then `live`. It only adds objects and moves `live`, so the previous
-//! deploy stays whole until the last write.
+//! approved record, an installation token for the repository, and the linked account's token.
+//! A call signed with instance context gets each through core's `sites_scope` callback
+//! ([`SitesScopeRequest`]), which answers only for that instance and, for credentials, only
+//! while the record still hashes to the binding the deploy read. A call without instance context
+//! (the legacy platform path) still reads them through core's `dispatch` (`instances_list`) and
+//! `credential` ops. Either way only a record whose `publishing` profile is enabled deploys.
+//! The repository is read as one tarball ([`pigeon_core::tarball`]), sorted
+//! ([`pigeon_blog::repo`]), rendered ([`pigeon_blog`]), and written to the profile's site bucket
+//! as an immutable release in the layout the site Worker serves: the blobs it lacks, then
+//! `deploys/{release}.json` and `release-meta/{release}.json`, then `live`. It only adds objects
+//! and moves `live`, so the previous release stays whole until the last write.
 
 use std::collections::BTreeSet;
 
@@ -88,7 +92,8 @@ pub struct Target {
     pub protected: bool,
 }
 
-/// Reads [`Target`] from a record as core's `instances_list` answers it. Pure.
+/// Reads [`Target`] from an approved record, as core's `sites_scope` (or, on the legacy path,
+/// `instances_list`) answers it: the site its `publishing` profile names. Pure.
 pub fn target(record: &Value, platform_zone: &str) -> std::result::Result<Target, String> {
     let id = record["id"].as_str().unwrap_or("?");
     if record["repo"]["kind"] != "github" {
@@ -133,7 +138,8 @@ pub struct Pins {
     pub blog: Option<String>,
 }
 
-/// Reads [`Pins`] from a record as core's `instances_list` answers it. Pure.
+/// Reads [`Pins`] from an approved record, as core's `sites_scope` (or, on the legacy path,
+/// `instances_list`) answers it. Pure.
 pub fn pins(record: &Value) -> Pins {
     let get = |k: &str| record["pins"][k].as_str().map(str::to_string);
     Pins {

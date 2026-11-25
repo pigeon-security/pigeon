@@ -118,7 +118,11 @@ pub async fn caller_key(env: &Env) -> Result<Vec<u8>> {
 
 /// The header a capability Worker may send to say which Worker it is, so core checks its
 /// signature with that Worker's own key. The claim proves nothing alone: only a signature made
-/// with that Worker's key passes. No Worker sends it yet (docs/plans/caller-keys.md, step 2).
+/// with that Worker's key passes.
+///
+/// Per-Worker keys are not yet active: no Worker sends this header and core binds none of the
+/// [`WORKER_KEYS`], so every call is still checked with the shared [`CALLER_KEY`]. The plan to
+/// turn them on is docs/plans/caller-keys.md.
 pub const WORKER_HEADER: &str = "X-Pigeon-Worker";
 
 /// The capability Workers that may get a key of their own, by the name they claim in

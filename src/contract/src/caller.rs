@@ -73,7 +73,13 @@ pub struct Signed {
     pub iat: i64,
     /// When it stops being good, in milliseconds since the epoch.
     pub exp: i64,
-    /// A value that differs for every signature.
+    /// A random value that makes each signature unique, so two calls signed in the same
+    /// millisecond for the same caller still differ.
+    ///
+    /// It is not a replay defence, and nothing records seen nonces. Signed calls travel only
+    /// over private service bindings (core accepts them only on `split::CORE_HOST`, never from
+    /// the internet) and expire [`MAX_AGE_MS`] (60 s) after signing. A party able to replay
+    /// one within that window already holds the caller key and could sign a fresh call.
     pub nonce: String,
     /// The Worker context, absent in legacy envelopes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
