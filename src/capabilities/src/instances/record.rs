@@ -51,6 +51,9 @@ pub struct Instance {
     /// Opt in to read-only tools for this record's approved repository.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<crate::source::read::Profile>,
+    /// Optional read-only CI visibility for this instance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ci: Option<crate::ci::Profile>,
     /// The record version, which is not part of a diff.
     #[serde(default)]
     pub version: u64,
@@ -635,6 +638,21 @@ pub fn validate(instance: &Instance, others: &[Instance], rules: &Rules) -> Vec<
         && let Err(problem) = crate::source::read::approved_repo(instance)
     {
         problems.push(problem);
+    }
+
+    match crate::ci::scope(instance) {
+        Ok(Some((repo, jobs))) => {
+            for other in others.iter().filter(|other| other.id != instance.id) {
+                if let Ok(Some((other_repo, other_jobs))) = crate::ci::scope(other)
+                    && repo == other_repo
+                    && jobs.iter().any(|job| other_jobs.contains(job))
+                {
+                    problems.push(format!("CI ownership overlaps with instance {}.", other.id));
+                }
+            }
+        }
+        Ok(None) => {}
+        Err(problem) => problems.push(problem),
     }
 
     if others.iter().any(|o| o.id == instance.id) {

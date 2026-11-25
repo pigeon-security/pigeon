@@ -17,10 +17,11 @@ pub const OPS: [&str; 6] = ["manifest", "call", "section", "fetch", "events", "s
 /// caller, when its last live run ends. `approval` takes an [`ApprovalRequest`]: a capability
 /// Worker plans a change and the person approves it; it is signed for the caller, and core fixes
 /// the kinds and the approver.
-pub const CORE_OPS: [&str; 9] = [
+pub const CORE_OPS: [&str; 10] = [
     "credential",
     "credential_revoke",
     "credential_release",
+    "ci_scope",
     "dispatch",
     "verify",
     "grant",

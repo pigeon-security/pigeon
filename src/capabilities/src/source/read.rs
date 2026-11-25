@@ -134,3 +134,29 @@ pub async fn run(cx: &Context<'_>, tool: &str, args: &Value) -> Result<Value> {
     }
     Ok(result)
 }
+
+/// Read-only tools available with an approved repository binding.
+pub fn instance_tools(
+    instance: &Instance,
+) -> serde_json::Result<&'static [crate::instances::tools::Registration]> {
+    use crate::instances::tools::Registration;
+    const TOOLS: &[Registration] = &[
+        Registration {
+            name: RESOLVE,
+            description: None,
+            hidden: &[],
+            arguments: &["revision"],
+        },
+        Registration {
+            name: FILE,
+            description: None,
+            hidden: &[],
+            arguments: &["revision", "path"],
+        },
+    ];
+    Ok(if approved_repo(instance).is_ok() {
+        TOOLS
+    } else {
+        &[]
+    })
+}

@@ -5,54 +5,58 @@ use serde_json::{Value, json};
 
 use super::record::Instance;
 
+/// One tool's instance-specific contract, declared by the owning capability.
 #[derive(Clone, Copy)]
-enum Capability {
-    Publishing,
-    Storage,
-    Source,
+pub struct Registration {
+    pub name: &'static str,
+    pub description: Option<&'static str>,
+    pub hidden: &'static [&'static str],
+    pub arguments: &'static [&'static str],
 }
 
-const TOOLS: &[(&str, Capability)] = &[
-    ("site_deploy", Capability::Publishing),
-    ("site_rollback", Capability::Publishing),
-    ("storage_list_objects", Capability::Storage),
-    ("storage_get_object", Capability::Storage),
-    (crate::source::read::RESOLVE, Capability::Source),
-    (crate::source::read::FILE, Capability::Source),
-];
+type Register = fn(&Instance) -> serde_json::Result<&'static [Registration]>;
 
-const STORAGE_BINDINGS: &[&str] = &["account", "bucket", "presign", "expires_s"];
+const CAPABILITIES: &[Register] = &[
+    super::publishing::instance_tools,
+    crate::storage::instance_tools,
+    crate::source::read::instance_tools,
+    crate::ci::instance_tools,
+];
 
 /// An approved instance's enabled capabilities. The request cannot supply a replacement scope.
 pub struct Scope {
     instance: String,
-    publishing: bool,
-    storage: bool,
-    source: bool,
+    registrations: Vec<&'static Registration>,
 }
 
 impl Scope {
     pub fn new(instance: &Instance) -> serde_json::Result<Self> {
+        let mut registrations: Vec<&'static Registration> = Vec::new();
+        for register in CAPABILITIES {
+            for registration in register(instance)? {
+                if registrations
+                    .iter()
+                    .any(|known| known.name == registration.name)
+                {
+                    return Err(serde::de::Error::custom(format!(
+                        "duplicate instance tool registration: {}",
+                        registration.name,
+                    )));
+                }
+                registrations.push(registration);
+            }
+        }
         Ok(Self {
             instance: instance.id.clone(),
-            publishing: pigeon_core::site_publish::site(&serde_json::to_value(instance)?).is_ok(),
-            storage: instance
-                .storage
-                .as_ref()
-                .is_some_and(|profile| profile.enabled()),
-            source: crate::source::read::approved_repo(instance).is_ok(),
+            registrations,
         })
     }
 
-    fn capability(&self, tool: &str) -> Option<Capability> {
-        TOOLS.iter().find_map(|(name, capability)| {
-            let enabled = match capability {
-                Capability::Publishing => self.publishing,
-                Capability::Storage => self.storage,
-                Capability::Source => self.source,
-            };
-            (*name == tool && enabled).then_some(*capability)
-        })
+    fn registration(&self, tool: &str) -> Option<&Registration> {
+        self.registrations
+            .iter()
+            .copied()
+            .find(|registration| registration.name == tool)
     }
 
     /// Keep the tools available to this instance and hide arguments supplied by the profile.
@@ -60,25 +64,24 @@ impl Scope {
         tools.retain_mut(|tool| {
             if tool.name == crate::dispatch::CALL {
                 tool.description = "Run an enabled tool of this instance by name.";
-                return self.publishing || self.storage || self.source;
+                return !self.registrations.is_empty();
             }
-            let Some(capability) = self.capability(tool.name) else {
+            let Some(registration) = self.registration(tool.name) else {
                 return false;
             };
-            let hidden = |name: &str| {
-                name == "instance"
-                    || (matches!(capability, Capability::Storage) && STORAGE_BINDINGS.contains(&name))
+            let visible = |name: &str| {
+                name != "instance"
+                    && !registration.hidden.contains(&name)
+                    && registration.arguments.contains(&name)
             };
             if let Some(properties) = tool.input_schema["properties"].as_object_mut() {
-                properties.retain(|name, _| !hidden(name));
+                properties.retain(|name, _| visible(name));
             }
             if let Some(required) = tool.input_schema["required"].as_array_mut() {
-                required.retain(|name| name.as_str().is_none_or(|name| !hidden(name)));
+                required.retain(|name| name.as_str().is_some_and(visible));
             }
-            match tool.name {
-                "storage_list_objects" => tool.description = "List objects in the instance’s approved storage location. Supply a relative prefix or the continuation token from the preceding page.",
-                "storage_get_object" => tool.description = "Read a small object from the instance’s approved storage location. Supply a relative key.",
-                _ => {}
+            if let Some(description) = registration.description {
+                tool.description = description;
             }
             true
         });
@@ -96,8 +99,8 @@ impl Scope {
     }
 
     fn bind_tool(&self, tool: &str, args: &Value) -> Result<Value, String> {
-        let capability = self
-            .capability(tool)
+        let registration = self
+            .registration(tool)
             .ok_or("tool is unavailable on this instance")?;
         let mut bound = args.clone();
         let parameters = bound.as_object_mut().ok_or("expected tool arguments")?;
@@ -107,20 +110,14 @@ impl Scope {
         {
             return Err("tool arguments cannot change the target instance".into());
         }
-        if matches!(capability, Capability::Source)
-            && parameters.keys().any(|name| {
-                !matches!(name.as_str(), "instance" | "revision")
-                    && !(tool == crate::source::read::FILE && name == "path")
-            })
-        {
-            return Err("source repository and provider are fixed by the instance".into());
-        }
-        if matches!(capability, Capability::Storage)
-            && STORAGE_BINDINGS
-                .iter()
-                .any(|name| parameters.contains_key(*name))
-        {
-            return Err("storage scope and download settings are fixed by the instance".into());
+        if let Some(argument) = parameters.keys().find(|name| {
+            name.as_str() != "instance"
+                && !registration.arguments.contains(&name.as_str())
+                && !(name.as_str() == crate::approvals::ARG && crate::approvals::gated(tool))
+        }) {
+            return Err(format!(
+                "argument `{argument}` is unavailable for this instance tool"
+            ));
         }
         parameters.insert("instance".into(), json!(&self.instance));
         Ok(bound)

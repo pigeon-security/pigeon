@@ -2672,3 +2672,40 @@ fn repository_read_arguments_are_safe_for_provider_requests() {
         "docs/Notes à lire.md"
     );
 }
+
+#[test]
+fn ci_instance_scope_fails_closed_on_ambiguous_jobs_and_foreign_owners() {
+    use pigeon_capabilities::ci::{ScopeRequest, resolve_scope};
+    use pigeon_capabilities::instances::{record::Instance, tools::Scope};
+    let instance = |id: &str| -> Instance {
+        serde_json::from_value(json!({
+            "id":id,"title":"CI","account":{"kind":"home"},
+            "repo":{"kind":"artifacts","namespace":"example","repo":"project"},
+            "ci":{"state":"enabled","jobs":["test"]}
+        }))
+        .unwrap()
+    };
+    let first = instance("one");
+    let request = ScopeRequest::Attribute {
+        repo: "example/project".into(),
+        job: "test".into(),
+    };
+    let resolved = resolve_scope(std::slice::from_ref(&first), &request);
+    let job_scope: pigeon_ci::scope::Scope = serde_json::from_value(resolved).unwrap();
+    assert!(job_scope.allows(Some("one"), "example/project", "test"));
+    assert!(!job_scope.allows(Some("two"), "example/project", "test"));
+    assert!(!job_scope.allows(None, "example/project", "test"));
+    assert!(!job_scope.allows(Some("one"), "example/project", "deploy"));
+    assert!(resolve_scope(&[first.clone(), instance("two")], &request).is_null());
+    let scope = Scope::new(&first).unwrap();
+    assert_eq!(
+        scope.bind("ci_status", &json!({"id":"job"})).unwrap(),
+        json!({"instance":"one","id":"job"})
+    );
+    assert!(scope.bind("ci_jobs", &json!({"repo":"other"})).is_err());
+    assert!(
+        scope
+            .bind("call", &json!({"tool":"ci_cancel","args":{"id":"job"}}))
+            .is_err()
+    );
+}

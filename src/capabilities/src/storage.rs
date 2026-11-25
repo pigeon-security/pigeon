@@ -13,6 +13,42 @@ use worker::{Error, Method, Result};
 
 use crate::{Call, Capability, Context, Slot, arg, to_value, unknown};
 
+use crate::instances::{record::Instance, tools::Registration};
+
+const INSTANCE_TOOLS: &[Registration] = &[
+    Registration {
+        name: "storage_list_objects",
+        description: Some(
+            "List objects in the instance’s approved storage location. Supply a relative prefix or the continuation token from the preceding page.",
+        ),
+        hidden: &["account", "bucket"],
+        arguments: &["prefix", "delimiter", "max_keys", "token"],
+    },
+    Registration {
+        name: "storage_get_object",
+        description: Some(
+            "Read a small object from the instance’s approved storage location. Supply a relative key.",
+        ),
+        hidden: &["account", "bucket", "presign", "expires_s"],
+        arguments: &["key"],
+    },
+];
+
+/// Storage declares the subset of its tools exposed on enabled instance profiles.
+pub fn instance_tools(instance: &Instance) -> serde_json::Result<&'static [Registration]> {
+    Ok(
+        if instance
+            .storage
+            .as_ref()
+            .is_some_and(|profile| profile.enabled())
+        {
+            INSTANCE_TOOLS
+        } else {
+            &[]
+        },
+    )
+}
+
 /// How to set an account up, for the person.
 pub const SETUP: &str = "No storage account is set up. To set one up: create a least-privilege \
 key in the provider's console (read-only for DigitalOcean). Store it on the console's Access tab \

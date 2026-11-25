@@ -34,6 +34,7 @@ pub mod pigeon;
 pub mod reuse;
 pub mod route;
 pub mod scheduler;
+pub mod scope;
 pub mod state;
 /// CI job tokens, in pigeon-core so the proxies and capability Workers share them.
 pub use pigeon_core::job_token as token;
@@ -462,6 +463,8 @@ fn is_commit(s: &str) -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewJob {
     pub id: String,
+    #[serde(default)]
+    pub instance: Option<String>,
     pub repo: String,
     pub commit: String,
     pub name: String,
@@ -755,6 +758,7 @@ impl Ci {
             None => None,
         };
         let job = self.job(cx, repo, &commit, name).await?;
+        let instance = scope::owner_for(cx, repo, name).await;
         // With `reuse`: a green job of the same commit on the same runner image stands in for a
         // new one. Never for a job that takes the job token, and never when the job is pinned
         // to a connector that does not record an image.
@@ -766,7 +770,7 @@ impl Ci {
             let found = scheduler(
                 cx.env,
                 "reusable",
-                json!({ "repo": repo, "commit": commit, "name": name, "image": image }),
+                json!({ "repo": repo, "commit": commit, "name": name, "image": image, "instance": instance }),
             )
             .await?;
             if found["id"].is_string() {
@@ -794,6 +798,7 @@ impl Ci {
         let (caller, caller_name, task) = tags(cx.caller, args["task"].as_str());
         let new = NewJob {
             id: random()?[..22].to_string(),
+            instance,
             repo: repo.into(),
             commit,
             name: name.into(),
@@ -1128,6 +1133,17 @@ impl Ci {
 
     /// Runs `tool`, one of CI's own, as `cx`'s caller.
     pub async fn call(&self, cx: &Cx<'_>, tool: &str, args: &Value) -> Result<Value> {
+        if args.get("instance").is_some() {
+            let query = scope::read_args(tool, args)?;
+            let scope = scope::for_read(cx, arg(args, "instance")?).await?;
+            let op = if tool == "ci_status" {
+                "instance_status"
+            } else {
+                "instance_jobs"
+            };
+            return scheduler(cx.env, op, json!({ "scope": scope, "query": query })).await;
+        }
+
         Ok(match tool {
             "ci_pool" => {
                 let pool = self.pool(cx.env).await?;

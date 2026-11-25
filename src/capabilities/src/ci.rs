@@ -15,6 +15,93 @@ use worker::Request;
 use crate::expiry::Expiry;
 use crate::{Call, Capability, Context, Expiring, Footprint, Serve, Slot};
 
+/// Approved job names for read-only CI on the instance's home Artifacts repository.
+#[derive(Clone, Debug, serde::Deserialize, PartialEq, serde::Serialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Profile {
+    Enabled { jobs: Vec<String> },
+    Disabled,
+}
+
+type Record = crate::instances::record::Instance;
+
+pub fn scope(instance: &Record) -> std::result::Result<Option<(String, &[String])>, String> {
+    use crate::instances::record::{AccountRef, RepoRef};
+    let Some(Profile::Enabled { jobs }) = &instance.ci else {
+        return Ok(None);
+    };
+    let (AccountRef::Home, Some(RepoRef::Artifacts { namespace, repo })) =
+        (&instance.account, &instance.repo)
+    else {
+        return Err("CI requires a home-account Artifacts repository".into());
+    };
+    if jobs.is_empty() || jobs.len() > 64 {
+        return Err("CI requires between 1 and 64 approved job names".into());
+    }
+    let mut unique = std::collections::BTreeSet::new();
+    for job in jobs {
+        pigeon_ci::config::job_name(job)?;
+        if !unique.insert(job) {
+            return Err("CI job names must be unique".into());
+        }
+    }
+    Ok(Some((format!("{namespace}/{repo}"), jobs)))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum ScopeRequest {
+    Read { instance: String },
+    Attribute { repo: String, job: String },
+}
+
+pub fn resolve_scope(records: &[Record], request: &ScopeRequest) -> Value {
+    let mut resolved = records.iter().filter_map(|record| {
+        let (repo, jobs) = scope(record).ok().flatten()?;
+        let matches = match request {
+            ScopeRequest::Read { instance } => &record.id == instance,
+            ScopeRequest::Attribute {
+                repo: requested,
+                job,
+            } => &repo == requested && jobs.contains(job),
+        };
+        matches.then(|| serde_json::json!({ "instance": record.id, "repo": repo, "jobs": jobs }))
+    });
+    match (resolved.next(), resolved.next()) {
+        (Some(scope), None) => scope,
+        _ => Value::Null,
+    }
+}
+
+pub async fn instance_scope(env: &worker::Env, request: &ScopeRequest) -> worker::Result<Value> {
+    Ok(resolve_scope(&crate::instances::all(env).await?, request))
+}
+
+const SCOPED_TOOLS: &[crate::instances::tools::Registration] = &[
+    crate::instances::tools::Registration {
+        name: "ci_jobs",
+        description: Some("List recent CI jobs owned by this instance."),
+        hidden: &["repo"],
+        arguments: &["commit", "state", "task", "caller", "limit"],
+    },
+    crate::instances::tools::Registration {
+        name: "ci_status",
+        description: Some("Read the status and results of a CI job owned by this instance."),
+        hidden: &[],
+        arguments: &["id"],
+    },
+];
+
+pub fn instance_tools(
+    instance: &Record,
+) -> serde_json::Result<&'static [crate::instances::tools::Registration]> {
+    Ok(if scope(instance).ok().flatten().is_some() {
+        SCOPED_TOOLS
+    } else {
+        &[]
+    })
+}
+
 /// CI as one of core's capabilities.
 pub struct Local {
     pub ci: Ci,

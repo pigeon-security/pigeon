@@ -242,6 +242,10 @@ pub async fn serve(mut req: Request, cx: &Context<'_>) -> Result<Response> {
             let asked: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
             service_user(&cx, &asked).await
         }
+        "ci_scope" => match serde_json::from_slice::<crate::ci::ScopeRequest>(&body) {
+            Ok(request) => crate::ci::instance_scope(cx.env, &request).await,
+            Err(e) => return reply(Answer::error(FailureKind::BadRequest, e.to_string()), 400),
+        },
         "dispatch" => {
             let asked: Value = match serde_json::from_slice(&body) {
                 Ok(v) => v,

@@ -7,6 +7,7 @@
 //! can only be listed.
 
 pub mod plan;
+mod publishing;
 pub mod record;
 pub mod tools;
 

@@ -33,7 +33,7 @@ use super::{
 use pigeon_core::buildkite_setup::{Kind, Owned};
 
 /// The scheduler's schema, one statement per migration, applied in order and never edited.
-const MIGRATIONS: [&str; 16] = [
+const MIGRATIONS: [&str; 17] = [
     "CREATE TABLE jobs (id TEXT PRIMARY KEY, repo TEXT NOT NULL, commit_sha TEXT NOT NULL, name TEXT NOT NULL, job TEXT NOT NULL, class TEXT NOT NULL, pin TEXT, task TEXT, caller TEXT, caller_name TEXT, notify_url TEXT, notify_key TEXT, state TEXT NOT NULL, attempt INTEGER NOT NULL, connector TEXT, handle TEXT, url TEXT, excluded TEXT NOT NULL, token_hash TEXT, token_expires_at INTEGER, deadline_at INTEGER, claimed_at INTEGER, next_poll_at INTEGER, created_at INTEGER NOT NULL, queued_at INTEGER NOT NULL, dispatched_at INTEGER, started_at INTEGER, finished_at INTEGER, detail TEXT)",
     "CREATE INDEX jobs_state ON jobs (state)",
     "CREATE INDEX jobs_commit ON jobs (repo, commit_sha)",
@@ -50,6 +50,7 @@ const MIGRATIONS: [&str; 16] = [
     "CREATE TABLE setup_runs (connector TEXT PRIMARY KEY, at INTEGER NOT NULL, applied INTEGER NOT NULL, report TEXT NOT NULL)",
     "CREATE TABLE setup_builds (build TEXT PRIMARY KEY, at INTEGER NOT NULL)",
     "ALTER TABLE jobs ADD COLUMN image TEXT",
+    "ALTER TABLE jobs ADD COLUMN instance TEXT",
 ];
 
 /// How long the pool's availability is trusted.
@@ -88,6 +89,7 @@ fn opt_i(v: Option<i64>) -> SqlStorageValue {
 #[derive(Deserialize, Debug, Clone)]
 struct Row {
     id: String,
+    instance: Option<String>,
     repo: String,
     commit_sha: String,
     name: String,
@@ -484,17 +486,17 @@ impl Scheduler {
                 .map(|(name, a)| (name, json!(a)))
                 .collect::<serde_json::Map<_, _>>()
                 .into()),
-            "status" => {
-                let row = self.row(s("id"))?.ok_or_else(|| bad("no such job"))?;
-                let events: Vec<Value> = self.db.rows(
-                    "SELECT at, state, detail FROM events WHERE job = ? ORDER BY at, rowid",
-                    vec![s("id").into()],
-                )?;
-                let mut out = row.public();
-                out["output"] = json!(row.output);
-                out["excluded"] = json!(row.excluded());
-                out["events"] = json!(events);
-                Ok(out)
+            "status" => self.status(s("id"), None),
+            "instance_status" => {
+                let scope = serde_json::from_value(a["scope"].clone())?;
+                let id = a["query"]["id"]
+                    .as_str()
+                    .ok_or_else(|| bad("`id` is required"))?;
+                self.status(id, Some(&scope))
+            }
+            "instance_jobs" => {
+                let scope = serde_json::from_value(a["scope"].clone())?;
+                self.jobs(&a["query"], Some(&scope))
             }
             "setup" => {
                 // A caller of another build (the old Lander, or a new one meeting this old
@@ -531,7 +533,7 @@ impl Scheduler {
             }
             "setup_key" => Ok(json!(self.held(s("connector"))?.hook_key)),
             "reusable" => self.reusable(a),
-            "jobs" => self.jobs(a),
+            "jobs" => self.jobs(a, None),
             "cancel" => self.cancel(s("id")).await,
             "commit" => {
                 self.heal()?;
@@ -627,9 +629,10 @@ impl Scheduler {
     fn insert(&self, new: &NewJob) -> Result<()> {
         let t = now();
         self.db.exec(
-            "INSERT INTO jobs (id, repo, commit_sha, name, job, class, pin, task, caller, caller_name, notify_url, notify_key, state, attempt, excluded, created_at, queued_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 1, '[]', ?, ?)",
+            "INSERT INTO jobs (id, instance, repo, commit_sha, name, job, class, pin, task, caller, caller_name, notify_url, notify_key, state, attempt, excluded, created_at, queued_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 1, '[]', ?, ?)",
             vec![
                 new.id.as_str().into(),
+                opt(new.instance.as_deref()),
                 new.repo.as_str().into(),
                 new.commit.as_str().into(),
                 new.name.as_str().into(),
@@ -1304,9 +1307,36 @@ impl Scheduler {
         Ok(())
     }
 
-    fn jobs(&self, a: &Value) -> Result<Value> {
+    fn status(&self, id: &str, scope: Option<&super::scope::Scope>) -> Result<Value> {
+        let row = self
+            .row(id)?
+            .filter(|row| {
+                scope
+                    .is_none_or(|scope| scope.allows(row.instance.as_deref(), &row.repo, &row.name))
+            })
+            .ok_or_else(|| bad("no such job"))?;
+        let events: Vec<Value> = self.db.rows(
+            "SELECT at, state, detail FROM events WHERE job = ? ORDER BY at, rowid",
+            vec![id.into()],
+        )?;
+        let mut out = row.public();
+        out["output"] = json!(row.output);
+        out["excluded"] = json!(row.excluded());
+        out["events"] = json!(events);
+        Ok(out)
+    }
+
+    fn jobs(&self, a: &Value, scope: Option<&super::scope::Scope>) -> Result<Value> {
         let mut q = String::from("SELECT * FROM jobs WHERE 1 = 1");
         let mut args: Vec<SqlStorageValue> = Vec::new();
+        if let Some(scope) = scope {
+            q.push_str(
+                " AND instance = ? AND repo = ? AND name IN (SELECT value FROM json_each(?))",
+            );
+            args.push(scope.instance.as_str().into());
+            args.push(scope.repo.as_str().into());
+            args.push(serde_json::to_string(&scope.jobs)?.into());
+        }
         for (key, column) in [
             ("repo", "repo"),
             ("commit", "commit_sha"),
@@ -1339,11 +1369,12 @@ impl Scheduler {
             image: text("image"),
         };
         let rows: Vec<Row> = self.db.rows(
-            "SELECT * FROM jobs WHERE repo = ? AND commit_sha = ? AND name = ? AND state = 'succeeded' AND image IS NOT NULL ORDER BY finished_at DESC, created_at DESC LIMIT 50",
+            "SELECT * FROM jobs WHERE repo = ? AND commit_sha = ? AND name = ? AND instance IS ? AND state = 'succeeded' AND image IS NOT NULL ORDER BY finished_at DESC, created_at DESC LIMIT 50",
             vec![
                 want.repo.as_str().into(),
                 want.commit.as_str().into(),
                 want.name.as_str().into(),
+                opt(a["instance"].as_str()),
             ],
         )?;
         let candidates: Vec<super::reuse::Candidate> = rows

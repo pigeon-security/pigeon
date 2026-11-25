@@ -7,6 +7,8 @@
 //! - the capabilities the Worker hosts: their MCP tools and their footprints, the hostnames,
 //!   Workers and resources each brings.
 
+mod inventory;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Mutex, PoisonError};
 
@@ -72,6 +74,10 @@ impl Capability for Architecture {
                             "type": "boolean",
                             "description": "Answer the public view: commit, digest, model, drawing."
                         },
+                        "instance": {
+                            "type": "string",
+                            "description": "Include the tool names exposed by this approved instance's scoped MCP endpoint."
+                        },
                         "svg": {
                             "type": "boolean",
                             "description": "Include the diagram as an SVG image in drawing, instead of public HTML or a model alone."
@@ -115,6 +121,23 @@ impl Capability for Architecture {
                 }));
             }
             let mut model = built.model.clone();
+            if let Some(id) = args["instance"].as_str() {
+                let record = crate::instances::one(cx.env, id)
+                    .await?
+                    .ok_or_else(|| worker::Error::RustError("unknown instance".into()))?;
+                let scope = crate::instances::tools::Scope::new(&record)?;
+                let mut tools: Vec<Tool> = cx
+                    .hosted
+                    .capabilities
+                    .iter()
+                    .flat_map(|c| c.tools())
+                    .collect();
+                scope.restrict_tools(&mut tools);
+                model["instance_tools"] = serde_json::json!({
+                    "instance": id,
+                    "tools": tools.into_iter().map(|tool| tool.name).collect::<Vec<_>>(),
+                });
+            }
             if svg {
                 model["drawing"] = Value::String(built.drawing.clone());
             }
@@ -186,7 +209,7 @@ pub fn built(hosted: &Hosted) -> &'static Built {
     built
 }
 
-/// What the model depends on besides the sources: each capability, its Worker and its tools.
+/// What the model depends on besides the sources: each capability manifest and its Worker.
 fn signature(hosted: &Hosted) -> String {
     let mut out = hosted.worker.to_string();
     for c in hosted.capabilities {
@@ -197,6 +220,16 @@ fn signature(hosted: &Hosted) -> String {
         for t in c.tools() {
             out.push(',');
             out.push_str(t.name);
+        }
+        for route in c.routes() {
+            out.push_str(";route=");
+            out.push_str(route);
+        }
+        for version in c.versions() {
+            out.push_str(";version=");
+            out.push_str(&version.name);
+            out.push('=');
+            out.push_str(&version.version);
         }
     }
     out
@@ -213,6 +246,9 @@ pub struct Source<'a> {
 pub struct Model {
     /// The capabilities, then the building blocks.
     pub parts: Vec<Part>,
+    /// Source modules and their live hosting, for the authenticated inventory.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub inventory: Vec<inventory::Module>,
     pub workers: Vec<Worker>,
     pub hostnames: Vec<Hostname>,
     /// How the Workers reach each other: service bindings, and Durable Objects another Worker
@@ -455,6 +491,7 @@ pub fn public(m: &Model) -> Model {
             permissions: Vec::new(),
             unused: Vec::new(),
         },
+        inventory: Vec::new(),
         versions: m.versions.clone(),
         files: m.files,
         digest: m.digest.clone(),
@@ -487,7 +524,8 @@ pub fn describe(sources: &[Source], hosted: &Hosted) -> Model {
     // The Workers: one for each entry of ci/workers.toml, drawn from its own wrangler.toml and
     // the Rust beside it. Core's embedded copy is what is read, so a card says where it came from.
     let mut links: Vec<Link> = Vec::new();
-    for entry in entries(&sorted, hosted) {
+    let entries = entries(&sorted, hosted);
+    for entry in &entries {
         let is_core = entry.script == hosted.worker;
         let toml = sorted
             .iter()
@@ -508,7 +546,7 @@ pub fn describe(sources: &[Source], hosted: &Hosted) -> Model {
         // the crates every Worker links. Its routes and handlers stay its own crate's.
         let built: String = sorted
             .iter()
-            .filter(|s| s.path.ends_with(".rs") && built_from(&entry, s.path))
+            .filter(|s| s.path.ends_with(".rs") && built_from(entry, s.path))
             .map(|s| code(s.text))
             .collect::<Vec<_>>()
             .join("\n");
@@ -728,10 +766,12 @@ pub fn describe(sources: &[Source], hosted: &Hosted) -> Model {
     }
     version_rows.sort_by(|a, b| a.name.cmp(&b.name));
 
+    let inventory = inventory::collect(&sorted, &caps, &blocks, &entries, hosted);
     let mut parts = caps;
     parts.extend(blocks);
     Model {
         parts,
+        inventory,
         versions: version_rows,
         workers,
         hostnames,
@@ -2393,6 +2433,22 @@ fn render_around(m: &Model, drawing: &str) -> String {
             )
         })
         .collect();
+    let inventory: String = m.inventory.iter().map(|module| {
+        let facts: String = [
+            ("Hosted by", &module.hosted_by),
+            ("Built into", &module.built_into),
+            ("Tools", &module.tools),
+            ("Routes", &module.routes),
+            ("Versions", &module.versions),
+            ("Code references", &module.dependencies),
+        ].into_iter().filter(|(_, items)| !items.is_empty()).map(|(label, items)| {
+            format!(r#"<span class="eyebrow">{label}</span>{}"#, pills(items, ""))
+        }).collect();
+        format!(
+            r#"<article class="card"><div class="card-h"><h3>{}</h3></div><p>{} · <code>{}</code></p>{facts}</article>"#,
+            escape(&module.name), module.scope.label(), escape(&module.source)
+        )
+    }).collect();
     let section = |eyebrow: &str, title: &str, cards: &str| {
         if cards.is_empty() {
             String::new()
@@ -2407,10 +2463,11 @@ fn render_around(m: &Model, drawing: &str) -> String {
 <header>
   <span class="eyebrow">pigeon · architecture</span>
   <h1>pigeon, layer by layer</h1>
-  <p>Read from the platform's own source and wrangler.toml each time it is deployed, and drawn top to bottom in the order a request travels. Nothing here is written by hand.</p>
+  <p>Read from the platform's source, deployment configuration and registered Worker manifests. The diagram follows the order a request travels.</p>
   <div class="pills"><span class="pill">{} Workers</span><span class="pill">{} capabilities</span><span class="pill">{} core blocks</span><span class="pill">{tool_count} MCP tools</span><span class="pill">digest {}</span></div>
 </header>
 <section aria-label="Diagram" style="margin-top:24px"><div class="dg-canvas" tabindex="0" role="region" aria-label="Platform diagram">{drawing}</div></section>
+{}
 {}
 {}
 {}
@@ -2427,6 +2484,7 @@ fn render_around(m: &Model, drawing: &str) -> String {
         section("Foundation", "Core building blocks", &internal),
         section("Definitions", "Account resources", &resources),
         section("Definitions", "External services", &externals),
+        section("Inventory", "Source modules and scope", &inventory),
         m.files,
         if m.commit.is_empty() {
             String::new()
