@@ -132,10 +132,11 @@ rate_limited_before_upload() {
     awk -v service="/accounts/$account/workers/services/$script" '
         /^Uploaded / { uploaded = 1 }
         /A request to the Cloudflare API \(/ {
+            api_errors++
             reading = index($0, "(" service ") failed.") > 0
         }
         reading && /\[code: 10429\]/ { limited = 1 }
-        END { exit !(limited && !uploaded) }
+        END { exit !(api_errors == 1 && limited && !uploaded) }
     ' "$log"
 }
 

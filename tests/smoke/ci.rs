@@ -895,6 +895,7 @@ exit "$FAKE_SECOND_EXIT"
         10429,
     );
     let wrong_code = error(target, 104290);
+    let ambiguous = format!("{matching}\n{wrong_path}");
     let post_upload = format!("Uploaded fixture-worker (1 sec)\n{matching}");
     let old_retry = format!("Uploaded fixture-worker (1 sec)\n{}", error(target, 10007));
     let refusal = "pigeon's proxy does not allow the requested call";
@@ -914,6 +915,7 @@ exit "$FAKE_SECOND_EXIT"
         (wrong_path.as_str(), "1", "", "0", "200", 1, 1, false),
         (wrong_worker.as_str(), "1", "", "0", "200", 1, 1, false),
         (wrong_code.as_str(), "1", "", "0", "200", 1, 1, false),
+        (ambiguous.as_str(), "1", "", "0", "200", 1, 1, false),
         (post_upload.as_str(), "1", "", "0", "200", 1, 1, false),
         (old_retry.as_str(), "1", "", "0", "200", 0, 2, true),
         (refusal, "1", "", "0", "200", 1, 1, false),
