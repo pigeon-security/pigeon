@@ -115,7 +115,10 @@ pictures; the app draws the initials).
 `kind` is `app` for a service user with an OAuth client, else `service`. `unlinked` counts
 service users acting for no one; they are not listed. Times are milliseconds.
 
-**`instances_tabs`**, the app's view of each instance:
+**`instances_tabs`**, the app's view of each instance. Removed by the console decommission
+([console-redesign.md](console-redesign.md), 2026-11-25): the app now reads `instances_list`
+and, per instance, `console_manifest`, whose areas give its tabs (`TabBar.swift`). The record of
+what it answered:
 
 ```json
 {

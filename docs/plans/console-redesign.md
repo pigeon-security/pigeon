@@ -1,17 +1,17 @@
 # Console redesign
 
-Status: planned 2026-11-25. Phase 1 (the manifest contract) is on branch
-`claude/console-manifest`; phases 2 and 3 are being built in parallel on their own branches;
-phases 4 and 5 not started. Nothing is deployed.
+Status: phases 1 to 5 built (2026-11-25). Phases 1 to 4 landed on main; phase 5, the
+decommission, is on `claude/console-decommission`, done pending deploy verification (the live
+checks are in the Log). The console is the shell at `/app/<instance>/<area>/<view>`.
 
 Design: the approved prototype and spec, revision r5 (`console-redesign-r5.html`, a static page
 made in a session; its "Spec & decisions" section is the source of the decisions below). Once
 this plan exists it wins where the two differ ([README](README.md)).
 
-This plan replaces [console.md](console.md) and [console-hardening.md](console-hardening.md),
-which stay as the record of what they built. When it is done, no code from the old console
-remains in the repository or in any deployed Worker: the [decommission checklist](#decommission-checklist)
-names every piece and what replaces it.
+This plan replaces the first console's two plans, `console.md` and `console-hardening.md`,
+deleted with its code ([Archive](#archive) keeps their record). When it is done, no code from
+the old console remains in the repository or in any deployed Worker: the
+[decommission checklist](#decommission-checklist) names every piece and what replaces it.
 
 ## Why
 
@@ -233,79 +233,97 @@ endpoint.
    People, Apps; Instances › All instances; Platform › Architecture, Models (with N1's Edit),
    Endpoints. The iOS app moves from `instances_tabs` to `console_manifest`. Q4's profile field
    and its migration land here, and `site_passkeys::instance_views` reads it.
-5. **Delete the legacy console**: the checklist below, in one landing per row group, each with
-   its replacement already live.
+5. **Delete the legacy console**: the checklist below, each row with its replacement already
+   live. Done on `claude/console-decommission`, pending deploy verification.
 
 ## Decommission checklist
 
 Done means each row is gone from the repository and from every deployed Worker, and a search for
-its name finds nothing but this plan's record.
+its name finds nothing but this plan's record. Every row is done on `claude/console-decommission`
+(repository side); `console_decommissioned` in `tests/smoke/console.rs` fails if a deleted file
+comes back, if a source under `src/` or `ios/` names a removed route, panel or tool, or if an old
+bookmark is anything but one redirect to a console page or a 404. The deployed side is checked
+after deploy (Log).
 
 ### Files
 
-| Delete | Replaced by |
-| --- | --- |
-| `src/capabilities/src/console/approvals.js` | Inbox view |
-| `src/capabilities/src/console/instances.js` | Overview and Capabilities views, Instances › All instances |
-| `src/capabilities/src/console/keys.js` | Access › Secrets and Tokens views |
-| `src/capabilities/src/console/users.js` | Access › People and Apps views |
-| `src/capabilities/src/console/console.css` | `shell.css` tokens and components |
-| `src/capabilities/src/console/web/management.js` and `management.css` (with the `window.pigeonConsole` shim it defines) | the views above; `window.pigeonApp` components |
-| `src/capabilities/src/console/web/settings.js`, `settings.css` (read-only Settings: Access, Models, People panels) | Access views, Platform › Models |
-| `src/capabilities/src/console/web/connections.js`, `connections.css` (Settings › Connections and Capabilities, `linked-home`, `linked-settings`) | Overview, Capabilities, Platform › Endpoints |
-| `src/capabilities/src/console/web/{sessions,cost,architecture}.{js,css}` in their current form | the phase 4 views on the new components (no per-view stylesheets, P13) |
-| `src/capabilities/src/site_passkeys/visitor.js` and its `ASSET` entry | Site › Visitors |
-| `src/capabilities/src/console/web/legacy-shell.{js,css}` (the old `shell.js`, served at `/app/legacy-shell.*` while the new shell is at `/app/next`) | `shell.{js,css}` and `views.js` served at `/app` |
-| `todo(...)` placeholders in `web/views.js`, `legacyLink` and the TODO-port renderer in `shell.js`, and `CONSOLE_TODO_PORT` in `tests/smoke/console.rs` | ported renderers; the list is empty |
-| `src/capabilities/src/console/snapshot.rs` (snapshots keyed by legacy section ids), unless a phase 4 view keeps snapshots per op | op-level caching where a view needs it |
+| Delete | Replaced by | Status |
+| --- | --- | --- |
+| `src/capabilities/src/console/approvals.js` | Inbox view | Done |
+| `src/capabilities/src/console/instances.js` | Overview and Capabilities views, Instances › All instances | Done |
+| `src/capabilities/src/console/keys.js` | Access › Secrets and Tokens views | Done |
+| `src/capabilities/src/console/users.js` | Access › People and Apps views | Done |
+| `src/capabilities/src/console/console.css` | `shell.css` tokens and components | Done |
+| `src/capabilities/src/console/web/management.js` and `management.css` (with the `window.pigeonConsole` shim it defines) | the views above; `window.pigeonApp` components | Done |
+| `src/capabilities/src/console/web/settings.js`, `settings.css` (read-only Settings: Access, Models, People panels) | Access views, Platform › Models | Done |
+| `src/capabilities/src/console/web/connections.js`, `connections.css` (Settings › Connections and Capabilities, `linked-home`, `linked-settings`) | Overview, Capabilities, Platform › Endpoints | Done |
+| `src/capabilities/src/console/web/{sessions,cost,architecture}.{js,css}` in their current form | the phase 4 views on the new components (no per-view stylesheets, P13) | Done |
+| `src/capabilities/src/site_passkeys/visitor.js` and its `ASSET` entry | Site › Visitors | Done |
+| `src/capabilities/src/console/web/legacy-shell.{js,css}` (the old `shell.js`, served at `/app/legacy-shell.*` while the new shell is at `/app/next`) | `shell.{js,css}` and `views.js` served at `/app` | Done |
+| `todo(...)` placeholders in `web/views.js`, `legacyLink` and the TODO-port renderer in `shell.js`, and `CONSOLE_TODO_PORT` in `tests/smoke/console.rs` | ported renderers; the list is empty | Done |
+| `src/capabilities/src/console/snapshot.rs` (snapshots keyed by legacy section ids), unless a phase 4 view keeps snapshots per op | op-level caching where a view needs it | Done |
 
 ### Rust
 
-| Delete | Replaced by |
-| --- | --- |
-| `GET /console/api/section/{id}` (`Get::Section`, `Console::section`, `Console::snapshot`, `stamped`, `SECTION_MS` users outside ops) | `/app/op` reads |
-| `Capability::section_data` and every implementation (approvals, land, users, instances, secrets, proxy, models, observability, remote) | the tools the views call through `/app/op` |
-| Sections with `view: false` (`approvals`, `delegation`, `credentials`, `instances`, `cost`, `platform`, `ai-agents`) | the view sections |
-| The `section` contract op (`OPS`), `SectionRequest`, and the ai-agents and models `section` handlers (the ai-agents one answers HTML, `page::section`) | ops; data only (P16) |
-| `SectionSpec.tab` read as an old tab name (`sections::area_of_tab`'s mapping); then rename the field to `area` in a contract version | area ids only |
-| `console/sections.rs` `anchor` once sections are only views (keep the id check in the P15 test) | `AREAS` and view ids |
-| `instances_tabs` tool and `instances::tabs` (after the iOS app moves) | `console_manifest` |
-| Old write routes: `/secrets/put/*`, `/tokens/issue/*`, `/tokens/revoke/*`, `/linked/unlink/*`, `/instance/put/*`, `/console/site-access/{invite/*,hosts,list}` and `site_passkeys::console::Action` | `/console/write/<action>/*`, `/app/op` |
-| `Get::Asset` entries for `/console/{keys,users,approvals,instances}.js`, `/console/console.css`; `app_shell`'s legacy `<link>`/`<script>` tags and the `app_assets!` entries of deleted views | the new shell's asset list |
-| `page::CREDENTIALS` and `GET /secrets`, `GET /tokens` redirects to it | redirects below |
-| `page::app_shell`, `APP_ASSETS` and `Get::App`'s legacy page; then `page::NEXT_BASE`, with `/app/next/*` redirected to `/app/*` in one hop, `next_shell` served at `/app` with `data-base="/app"`, its assets at `/app/{shell.css,shell.js,views.js}` | the new shell at `/app` |
-| `instances_section`'s legacy anchor and `keys_section` | view sections |
+| Delete | Replaced by | Status |
+| --- | --- | --- |
+| `GET /console/api/section/{id}` (`Get::Section`, `Console::section`, `Console::snapshot`, `stamped`, `SECTION_MS` users outside ops) | `/app/op` reads | Done |
+| `Capability::section_data` and every implementation (approvals, land, users, instances, secrets, proxy, models, observability, remote) | the tools the views call through `/app/op` | Done |
+| Sections with `view: false` (`approvals`, `delegation`, `credentials`, `instances`, `cost`, `platform`, `ai-agents`) | the view sections | Done |
+| The `section` contract op (`OPS`), `SectionRequest`, and the ai-agents and models `section` handlers (the ai-agents one answers HTML, `page::section`) | ops; data only (P16) | Done |
+| `SectionSpec.tab` read as an old tab name (`sections::area_of_tab`'s mapping); then rename the field to `area` in a contract version | area ids only | Done in core: only area ids are read, and only sections with `view` set. The wire fields `tab`, `cost` and `view` stay until a contract version renames or drops them |
+| `console/sections.rs` `anchor` once sections are only views (keep the id check in the P15 test) | `AREAS` and view ids | Done |
+| `instances_tabs` tool and `instances::tabs` (after the iOS app moves) | `console_manifest` | Done |
+| Old write routes: `/secrets/put/*`, `/tokens/issue/*`, `/tokens/revoke/*`, `/linked/unlink/*`, `/instance/put/*`, `/console/site-access/{invite/*,hosts,list}` and `site_passkeys::console::Action` | `/console/write/<action>/*`, `/app/op` | Done |
+| `Get::Asset` entries for `/console/{keys,users,approvals,instances}.js`, `/console/console.css`; `app_shell`'s legacy `<link>`/`<script>` tags and the `app_assets!` entries of deleted views | the new shell's asset list | Done |
+| `page::CREDENTIALS` and `GET /secrets`, `GET /tokens` redirects to it | redirects below | Done |
+| `page::app_shell`, `APP_ASSETS` and `Get::App`'s legacy page; then `page::NEXT_BASE`, with `/app/next/*` redirected to `/app/*` in one hop, `next_shell` served at `/app` with `data-base="/app"`, its assets at `/app/{shell.css,shell.js,views.js}` | the new shell at `/app` | Done; `/app/next` was never deployed, so it is not redirected |
+| `instances_section`'s legacy anchor and `keys_section` | view sections | Done |
 
 The `Tab` enum and `sections::moved` were removed in phase 1.
 
 ### Shell
 
-| Delete | Replaced by |
-| --- | --- |
-| `coreTabs`, `linkedTabs`, `settingsTabs`, `workspaceTabs` and `register`/`registerSettingsPanel` keyed by tab in `shell.js` | navigation from `console_manifest`; renderers keyed by `area:view` |
-| `tab`/`subtab` URL parameters and the `#hash` → subtab mapping | `area`/`view` (P12), with a one-time mapping of old `/app?tab=…` links |
-| The `pigeon.cost.period` local key tied to `subtab` | the Cost view's own state |
+| Delete | Replaced by | Status |
+| --- | --- | --- |
+| `coreTabs`, `linkedTabs`, `settingsTabs`, `workspaceTabs` and `register`/`registerSettingsPanel` keyed by tab in `shell.js` | navigation from `console_manifest`; renderers keyed by `area:view` | Done |
+| `tab`/`subtab` URL parameters and the `#hash` → subtab mapping | `area`/`view` (P12), with a one-time mapping of old `/app?tab=…` links | Done |
+| The `pigeon.cost.period` local key tied to `subtab` | the Cost view's own state | Done |
 
 ### Redirects
 
-Keep, retargeted to one hop (C7): `/` → `/app`; `/approvals` → `/app?area=inbox`;
-`/instances` → `/app?area=instances`; `/architecture` → `/app?area=platform&view=architecture`;
-`/access`, `/settings` → `/app?area=access`; `/secrets[#NAME]` →
-`/app?area=access&view=secrets[#NAME]`; `/tokens` → `/app?area=access&view=tokens`; `/cost`,
-`/gateways` → `/app?area=cost`; old `/app?tab=…&subtab=…` links → their area and view.
-Remove: `/app?tab=management&subtab=credentials` as a target, and the `/instances?i=` query
-carry-over once `/app?instance=` is the only form. Keep the console's routes list
-(`Console::routes`) to exactly the paths above.
+Kept, each one 302 to `/app/<home>/<area>[/<view>]`, the home instance read from the instance
+records (`page::BOOKMARKS`, `page::OLD_TABS`, `Console::routes`; the console's root `/app` when
+no home instance can be read). A browser keeps the fragment, so `/secrets#NAME` lands on
+Access › Secrets with `#NAME`.
+
+| Old URL | Goes to |
+| --- | --- |
+| `/` | `/app` (the shell opens the home instance's Inbox) |
+| `/approvals` | `inbox` |
+| `/instances` | `instances/list` |
+| `/architecture` | `platform/architecture` |
+| `/access`, `/settings` | `access` |
+| `/secrets[#NAME]` | `access/secrets[#NAME]` |
+| `/tokens` | `access/tokens` |
+| `/cost`, `/gateways` | `cost` |
+| `/app?tab=…&subtab=…[&instance=…]` | its area and view (`OLD_TABS`), on that instance when named |
+| `/app?instance=…` | that instance's `overview` |
+
+Removed: `/app?tab=management&subtab=credentials` as a target (`page::CREDENTIALS`), the
+`/instances?i=` carry-over, the shell's client-side `?tab=`/`#hash` rewriting (`/app#people`
+now opens the console's default page), and `/app/next/*` (never deployed). Everything else of
+the first console answers 404.
 
 ### Tools, tests and docs
 
-| Item | Action |
-| --- | --- |
-| `instances_tabs` | delete with the tool (above); remove from `docs/plans/mcp-tool-audit.md` and `ios-app-next.md`'s current-state text |
-| iOS `ios/Pigeon/Views/TabBar.swift` (`instances_tabs`) | call `console_manifest` |
-| `tests/smoke/instances.rs` `instances_tabs_for_the_app`; `tests/smoke/core.rs` `core_console_platform_section` assertions on legacy anchors and `?tab=` redirects | replaced by the manifest, contract (P15) and redirect tests |
-| [console.md](console.md), [console-hardening.md](console-hardening.md) | marked superseded by this plan (done in phase 1); kept as the record |
-| [README.md](README.md) | this plan's row updated as phases land |
+| Item | Action | Status |
+| --- | --- | --- |
+| `instances_tabs` | delete with the tool (above); remove from `docs/plans/mcp-tool-audit.md` and `ios-app-next.md`'s current-state text | Done |
+| iOS `ios/Pigeon/Views/TabBar.swift` (`instances_tabs`) | call `console_manifest` | Done |
+| `tests/smoke/instances.rs` `instances_tabs_for_the_app`; `tests/smoke/core.rs` `core_console_platform_section` assertions on legacy anchors and `?tab=` redirects | replaced by the manifest, contract (P15) and redirect tests | Done |
+| `console.md`, `console-hardening.md` | marked superseded by this plan (done in phase 1); kept as the record | Deleted; their record is under [Archive](#archive) |
+| [README.md](README.md) | this plan's row updated as phases land | Done |
 
 ## Log
 
@@ -345,3 +363,35 @@ carry-over once `/app?instance=` is the only form. Keep the console's routes lis
   `invite` answer `reveal` for ShowOnce. ConfirmDialog takes `form` and `prepare`, so a secret's
   value is typed in the dialog and only its digest reaches `begin`. Endpoints stays read-only
   (no write exists); its portal URL is `mcp.` plus the platform host's parent domain.
+- 2026-11-25: phase 5, the decommission, on `claude/console-decommission`. The shell is served at
+  `/app/<instance>/<area>/<view>` (`page::shell`, assets at `/app/{shell.css,shell.js,views.js,
+  views/*.js}`); the first console's panels, shell, per-view scripts and styles, `visitor.js`,
+  `/console/api/section` with section snapshots, `section_data`, the sections that were only
+  data anchors, the `section` contract op with the models and ai-agents handlers (and
+  ai-agents' HTML `page.rs`), the old write routes and their adapters (`write::LEGACY`,
+  `adapt`, `Who::AnyPasskey`: every write is now bound to one person), `/apple/{adopt,identity}`,
+  `/console/site-access/*`, `instances_tabs`, and `/app/op`'s run writes are deleted. Old
+  bookmarks redirect in one hop on the server (above). The iOS app moved: `instances_tabs` to
+  `instances_list` plus `console_manifest` per instance (`TabBar.swift`), and `/secrets/put` to
+  `/console/write/secret-set/{begin,finish}` by bearer (`Approver.swift`); `secret-set` is the
+  one action added to the bearer allowance, bound to the person the app acts for like the
+  others. Departure: released app builds older than this change cannot set secrets (their
+  route is gone) and fall back from `instances_tabs` to `instances_list`. Guarded by
+  `console_decommissioned`. Live checks after deploy: `/app` serves the shell and every view
+  opens; `/`, `/approvals`, `/instances`, `/architecture`, `/access`, `/settings`, `/secrets`,
+  `/tokens`, `/cost`, `/gateways` and `/app?tab=…` answer one 302 to `/app/<home>/…`; the old
+  assets (`/console/keys.js`, `/console/console.css`, `/app/legacy-shell.js`,
+  `/app/visitor.js`), `GET /console/api/section/credentials` and `POST /secrets/put/begin`,
+  `/tokens/issue/begin`, `/console/site-access/list` answer 404; `instances_tabs` is not in the
+  MCP tool list.
+
+## Archive
+
+`console.md` (the first console: tabs, sections, passkey sign-in and passkey-bound writes,
+first at the platform's root, from `53a0068` at `/app`) and `console-hardening.md` (sections
+loading on their own with snapshots, timeouts and retry; the tabs narrowed to Approvals,
+Architecture, Access and Cost; landing `slWijyeD5dnMaimB`) were deleted with the code they
+describe. Both are in git history before `claude/console-decommission`. What they established and
+this console keeps: the passkey session cookie (`__Host-pigeon_session`, SameSite Strict, 30
+minutes idle, 8 hours at most), same-origin JSON POSTs only, writes bound to the exact change by
+a passkey of their own, and a read that times out at 10 seconds with a retry.

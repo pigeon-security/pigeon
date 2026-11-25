@@ -38,7 +38,7 @@ and the app reads it as optional.
   5 minutes (`run::ANSWER_PATIENCE_MS`) the index's `assume` stores `{question, at}` on the run and
   the model is told to pick the conventional option. `ai_agents_inbox` answers `assumed` as
   `{run, question, at}`: what the run chose is only in its report.
-- `instances_tabs` names the tabs `approvals`, `status`, `cost`, `instances` (home) and `home`,
+- `instances_tabs` (since removed: the app reads `console_manifest`) named the tabs `approvals`, `status`, `cost`, `instances` (home) and `home`,
   `instances` (linked). The released app (build 42) reads those names, so the server keeps them;
   the new app maps them (below).
 - **Cost.** `cost_daily` joins billable usage, `models_daily` (AI Gateway logs), `models_billing`

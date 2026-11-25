@@ -88,7 +88,7 @@ is the person's decision.
 | 1 | Diagnose the 503; wrangler.toml as the authority (containers, objects with classes, queues, hosts); footprint clean-up; proxy hostname; `CfProxy` reads wrangler.toml; memo per isolate; commit provenance | `architecture.rs`, `lib.rs` (Footprint), the footprints, `settings.rs`, `platform/build.rs`, `platform/src/lib.rs` | one landing |
 | 2 | Draw what is new: grouped Durable Objects, the container, the AI gateway, the proxy host, unused bindings | `architecture.rs` (render) | with phase 1 |
 | 3 | `deploy.sh` checks that the live `/architecture.json` names the deployed commit. Serving the apex from the platform is the one-worker plan's (`docs/plans/one-worker.md`): `site::render` reads this plan's memo | `ci/deploy/deploy.sh` | one landing, after the cutover |
-| 4 | Docs: this plan's status, the README table, `console.md` and `site.rs` wording, the `docs/proxies.md` link | docs | with phase 3 |
+| 4 | Docs: this plan's status, the README table, `console.md` (since deleted) and `site.rs` wording, the `docs/proxies.md` link | docs | with phase 3 |
 
 Each phase passes `ci/runner/test.sh` locally before it lands. After each landing, I check
 `architecture_describe`, the console tab, and (from phase 3) `https://pigeon.dev/architecture.json`.

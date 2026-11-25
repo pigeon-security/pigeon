@@ -167,8 +167,8 @@ Rules:
 
 `pigeon-capabilities` gains `remote::Remote`, a `Capability` built from a manifest entry and a
 binding. With it, `dispatch`, `owner`, the console and the architecture stay one code path.
-Capability Workers implement `pigeon_contract::Service` (manifest, call, section, fetch, events,
-secret) with a `serve(req, env, service)` entry that does the routing and signature check.
+Capability Workers implement `pigeon_contract::Service` (manifest, call, fetch, events,
+secret; `section` went with the first console) with a `serve(req, env, service)` entry that does the routing and signature check.
 
 ## Repository layout and the path map
 

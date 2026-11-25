@@ -104,7 +104,7 @@ Evidence is the line that declares the tool. "none met" means none of (a), (b), 
 | `github_status` | keep | none met | `src/capabilities/src/github.rs:343` | none |
 | `containers_images` | keep | none met | `src/capabilities/src/images.rs:28` | none |
 | `instances_list` | keep | none met | `src/capabilities/src/instances.rs:738` | none |
-| `instances_tabs` | keep | none met | `instances.rs:743` | none |
+| `instances_tabs` | deleted (console decommission, 2026-11-25) | replaced by `console_manifest` | none | none |
 | `instance_plan` | keep | none met | `instances.rs:747` | none |
 | `instance_apply` | keep | none met | `instances.rs:761` | none |
 | `instance_subdomains` | keep | none met | `instances.rs:773` | none |

@@ -55,7 +55,7 @@ feel. The mobile app should be a 1-to-1 contract to platform.pigeon.dev but desi
   values.
 - **Sign-in and the API.**
   - The console uses passkeys and a session cookie (`__Host-pigeon_session`, SameSite=Strict,
-    30 min idle, 8 h at most; [console.md](console.md)).
+    30 min idle, 8 h at most; [console-redesign.md](console-redesign.md)).
   - `/mcp` takes OAuth bearer tokens (`src/capabilities/src/oauth.rs`). A client registers
     itself (RFC 7591) and sends the person to `/oauth/authorize`, where they allow it with their
     passkey. It then exchanges the code with PKCE S256 for a 1 h access token and a 30 d refresh
