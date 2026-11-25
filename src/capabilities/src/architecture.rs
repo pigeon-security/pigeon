@@ -17,8 +17,6 @@ use pigeon_core::mcp::Tool;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::console::sections::{Section, Tab};
-use crate::users::User;
 use crate::{Call, Capability, Context, Footprint, Hosted, to_value, unknown};
 
 /// The architecture as a capability: its model, on demand.
@@ -32,31 +30,6 @@ impl Capability for Architecture {
     fn versions(&self) -> Vec<pigeon_core::versions::Component> {
         use pigeon_core::versions::{Component, Kind};
         vec![Component::began("architecture", Kind::Capability)]
-    }
-
-    fn sections(&self) -> Vec<Section> {
-        vec![Section {
-            tab: Tab::Architecture,
-            id: "architecture",
-            title: "Architecture",
-            description: "Drawn from the code and the capabilities' footprints.",
-            order: 1,
-            cost: None,
-        }]
-    }
-
-    /// The drawing, as HTML the console places as it is.
-    fn section_data<'a>(
-        &'a self,
-        cx: &'a Context<'a>,
-        _id: &'a str,
-        _person: &'a User,
-        _query: &'a Value,
-    ) -> Call<'a> {
-        Box::pin(async move {
-            let built = built(cx.hosted);
-            Ok(serde_json::json!({ "html": built.html, "built_from": built.commit }))
-        })
     }
 
     fn tools(&self) -> Vec<Tool> {
@@ -156,8 +129,6 @@ pub struct Built {
     drawing: String,
     /// The SVG drawn only from the public model.
     public_svg: String,
-    /// The HTML for the legacy console's architecture tab.
-    pub html: String,
     /// The whole page, as the site serves it.
     pub page: String,
     /// The public view of the model: what the apex serves and `architecture_describe` answers
@@ -197,7 +168,6 @@ pub fn built(hosted: &Hosted) -> &'static Built {
     let built: &'static Built = Box::leak(Box::new(Built {
         model: to_value(&model),
         page: page_around(&html),
-        html,
         public_model: to_value(&shown),
         public_drawing: render_around(&shown, &public_svg),
         drawing,
@@ -857,11 +827,6 @@ fn after_name(step: pigeon_core::lanes::After) -> &'static str {
         After::PortalSync => "portal_sync",
         After::ConnectorsSetup => "connectors_setup",
     }
-}
-
-/// The architecture page of `model`.
-pub fn page(model: &Model) -> String {
-    page_around(&render(model))
 }
 
 /// The architecture page around a drawing already rendered, such as the public one.
@@ -2287,11 +2252,7 @@ fn pills(items: &[String], class: &str) -> String {
     format!(r#"<div class="pills">{inner}</div>"#)
 }
 
-/// The legacy architecture view, with definitions below the diagram.
-pub fn render(m: &Model) -> String {
-    render_around(m, &diagram(m))
-}
-
+/// The architecture view around `drawing`, with definitions below it.
 fn render_around(m: &Model, drawing: &str) -> String {
     let tool_count: usize = m.workers.iter().map(|w| w.tools.len()).sum();
     // Who uses each capability: Workers and other capabilities.

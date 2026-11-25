@@ -499,7 +499,7 @@ fn core_changelog_from_history() {
 #[test]
 fn core_architecture_draws_every_worker_in_the_map() {
     use pigeon_capabilities::architecture::{
-        Architecture, Source, Wrangler, built, describe, public, render,
+        Architecture, Source, Wrangler, built, describe, public,
     };
     use pigeon_capabilities::public_host::{PublicHost, Retire};
     use pigeon_capabilities::remote::{Binding, Remote};
@@ -627,7 +627,7 @@ fn core_architecture_draws_every_worker_in_the_map() {
         sources: &paths,
     };
     let described = describe(&sources, &hosted);
-    let drawing = render(&described);
+    let drawing = &built(&hosted).page;
     let model = serde_json::to_value(&described).unwrap();
 
     // One Worker per entry of the map, in its order, each in the drawing.
@@ -840,8 +840,8 @@ fn core_architecture_draws_every_worker_in_the_map() {
     assert!(strs(&worker("pigeon-cloud-gateway")["tools"]).contains(&"cloud_apply".into()));
     assert!(drawing.contains("Buildkite"));
     // The drawing names every link's binding and every external, in both views.
-    let public_drawing = render(&public(&described));
-    for view in [&drawing, &public_drawing] {
+    let public_drawing = &built(&hosted).public_drawing;
+    for view in [drawing, public_drawing] {
         for binding in ["SITES", "MODELS", "CI", "AI_AGENTS", "CLOUD", "PLATFORM"] {
             assert!(view.contains(binding), "{binding} labels an arrow");
         }
@@ -872,7 +872,7 @@ fn core_architecture_draws_every_worker_in_the_map() {
     let shown_text = format!(
         "{}{}",
         serde_json::to_string(&shown).unwrap(),
-        render(&shown)
+        built(&hosted).public_drawing
     );
     let mut secret: Vec<String> = vec!["fake-token".into(), "secret-detail".into()];
     for w in &map.workers {
@@ -942,7 +942,7 @@ fn core_architecture_draws_every_worker_in_the_map() {
         !std::ptr::eq(first, second),
         "rebuilt for other capabilities"
     );
-    assert!(first.html.contains("ci_status") || first.model.to_string().contains("ci_status"));
+    assert!(first.page.contains("ci_status") || first.model.to_string().contains("ci_status"));
     assert!(!second.model.to_string().contains("ci_status"));
 }
 
