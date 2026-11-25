@@ -384,18 +384,21 @@ impl Capability for Remote {
                 args: args.clone(),
             })?;
             let caller = caller_json(cx);
-            let instance = match cx.instance {
-                Some(scope) => Some(scope.instance()),
+            let context = match cx.instance {
+                Some(scope) => Some(
+                    instance_context(self.worker, self.contextual, scope.instance())
+                        .map_err(failure)?,
+                ),
                 // A legacy receiver keeps its existing connector path. Once selected,
                 // contextual transport never retries with a legacy envelope.
                 None if self.contextual && self.name == crate::ci::Ci::NAME => {
-                    crate::ci::approved_connector_instance(cx.env, tool, args).await?
+                    crate::ci::approved_connector_instance(cx.env, tool, args)
+                        .await?
+                        .map(|instance| WorkerContext::new(self.worker, Some(instance)))
                 }
                 None => None,
             };
-            let answer = if let Some(instance) = instance {
-                let context =
-                    instance_context(self.worker, self.contextual, instance).map_err(failure)?;
+            let answer = if let Some(context) = context {
                 let fetcher = cx.env.service(self.binding)?;
                 let nonce = webauthn::random()?;
                 let key = caller_key(cx.env).await?;
