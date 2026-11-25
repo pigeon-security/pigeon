@@ -261,3 +261,9 @@ identities with no recorded binding require a new site invitation, and older
 site enrollment links must be reissued. Gated host serving requires both the
 platform and Sites Workers to support the new binding. The direct upstream
 access limitation still applies.
+
+A subdomain-only publishing target uses its approved label and the Sites Worker's
+platform zone for the canonical URL. A direct domain or zone hostname keeps
+precedence when present. Publishing and rollback use the same URL in release
+provenance. Choosing a canonical URL does not provision or authenticate the
+linked Worker's origin.

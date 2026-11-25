@@ -2386,6 +2386,32 @@ fn platform_cost_daily_promotional_grants() {
 }
 
 #[test]
+fn sites_publish_to_approved_platform_subdomain_without_preview_target() {
+    use pigeon_core::site_publish::base_url;
+    let mut site = json!({
+        "auth": "passkey",
+        "targets": [{"kind": "subdomain", "label": "bound-preview"}]
+    });
+    assert_eq!(
+        base_url(&site, "example.net").as_deref(),
+        Some("https://bound-preview.example.net")
+    );
+    assert!(base_url(&site, "example.net/path").is_none());
+    site["targets"][0]["label"] = json!("bad.label");
+    assert!(base_url(&site, "example.net").is_none());
+    site["targets"][0] = json!({"kind": "preview"});
+    assert!(base_url(&site, "example.net").is_none());
+    site["targets"] = json!([
+        {"kind": "subdomain", "label": "bound-preview"},
+        {"kind": "domain", "hostname": "existing.example"}
+    ]);
+    assert_eq!(
+        base_url(&site, "example.net").as_deref(),
+        Some("https://existing.example")
+    );
+}
+
+#[test]
 fn sites_publishing_profile_binds_the_scope_and_preserves_legacy_records() {
     use pigeon_core::site_publish::site;
     let mut record = json!({"sites": [{"name":"first"}, {"name":"second"}]});

@@ -49,7 +49,7 @@ pub struct Target {
 }
 
 /// Reads [`Target`] from a record as core's `instances_list` answers it. Pure.
-pub fn target(record: &Value) -> std::result::Result<Target, String> {
+pub fn target(record: &Value, platform_zone: &str) -> std::result::Result<Target, String> {
     let id = record["id"].as_str().unwrap_or("?");
     if record["repo"]["kind"] != "github" {
         return Err(format!("instance {id}'s repository is not on GitHub"));
@@ -66,13 +66,8 @@ pub fn target(record: &Value) -> std::result::Result<Target, String> {
     let bucket = site["bucket"]
         .as_str()
         .ok_or_else(|| format!("instance {id} has no site"))?;
-    let host = site["targets"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|t| t["kind"] == "domain" || t["kind"] == "zone")
-        .and_then(|t| t["hostname"].as_str())
-        .ok_or_else(|| format!("instance {id}'s site has no domain to be served at"))?;
+    let base_url = site_publish::base_url(site, platform_zone)
+        .ok_or_else(|| format!("instance {id}'s site has no hostname to be served at"))?;
     Ok(Target {
         repo,
         account_id: account_id.into(),
@@ -80,7 +75,7 @@ pub fn target(record: &Value) -> std::result::Result<Target, String> {
             name: bucket.to_string(),
             jurisdiction: site["jurisdiction"].as_str().map(str::to_string),
         },
-        base_url: format!("https://{host}"),
+        base_url,
         site: site["name"]
             .as_str()
             .ok_or_else(|| format!("instance {id}'s site has no name"))?
@@ -214,7 +209,7 @@ pub async fn rollback(
         return Err(bad("expected a site release ID"));
     }
     let record = approved_record(env, key, caller, instance).await?;
-    let target = target(&record).map_err(bad)?;
+    let target = target(&record, &env.var("ZONE")?.to_string()).map_err(bad)?;
     let account = linked_account(env, key, caller, instance, &target).await?;
     let provenance = r2::get(
         &account,
@@ -276,7 +271,7 @@ pub async fn deploy(
     )
     .map_err(bad)?;
     let blog_pin = blog_requirement(pins.blog.as_deref()).map_err(bad)?;
-    let t = target(record).map_err(bad)?;
+    let t = target(record, &env.var("ZONE")?.to_string()).map_err(bad)?;
 
     let ask = |kind: &str| json!({ "kind": kind, "instance": instance });
     let gh = core(env, key, caller, "credential", &ask("github"))
