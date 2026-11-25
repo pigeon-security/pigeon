@@ -203,7 +203,7 @@
         if (id && !approval) {
           pending = true;
           const resume = button("Confirm approved request", () => write(tool, args, message, id));
-          const approvalsLink = el("a", { href: "/approvals", text: "Open Approvals in another tab" });
+          const approvalsLink = el("a", { href: "/app?tab=approvals", text: "Open Approvals in another tab" });
           approvalsLink.target = "_blank";
           approvalsLink.rel = "noopener";
           approvalPanel.replaceChildren(card(heading("Passkey approval needed"),
@@ -275,7 +275,7 @@
       const caughtUp = activeRows?.length === 0 && historyRows && !historyRows.some((r) => !ended(r)) &&
         active.data?.paused === false && queue.data?.length === 0;
       const incomplete = !historyRows || historyRows.length === runLimit || activeRows?.length === runLimit;
-      const approvals = el("a", { href: "/approvals", text: "Open Approvals" });
+      const approvals = el("a", { href: "/app?tab=approvals", text: "Open Approvals" });
       content.replaceChildren(
         card(heading(caughtUp ? "You’re all caught up" : attention ? "Needs your attention" : "Session activity"),
           copy(caughtUp ? "No live sessions or queued landings. Check Approvals for other requests." :

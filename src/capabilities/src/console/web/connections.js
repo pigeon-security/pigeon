@@ -21,7 +21,7 @@
   };
   const date = (ms) => Number.isFinite(ms) && Number.isFinite(new Date(ms).getTime())
     ? new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(ms) : "Unavailable";
-  const manageInstance = (id) => `/instances?i=${encodeURIComponent(id)}`;
+  const manageInstance = (id) => `/app?tab=instances&i=${encodeURIComponent(id)}`;
   const isLinked = (record) => record?.account?.kind === "linked" && typeof record.id === "string";
   const asArray = (value) => Array.isArray(value) ? value : [];
 
@@ -61,11 +61,11 @@
           muted(asArray(i.zones).join(", ") || "No zone recorded")),
           link("Manage", url({ instance: i.id, tab: "settings", subtab: "access" }))))) :
           muted(accounts ? "No linked instances." : "Linked instances unavailable."),
-        link("Open Instances", "/instances")),
+        link("Open Instances", "/app?tab=instances")),
       section("Acting for you", "Connections assigned to the signed-in person.",
         el("h3", { text: "OAuth apps" }), delegates("app"),
         el("h3", { text: "Service users" }), delegates("service"),
-        link("Manage delegation in Access", "/access#delegation")));
+        link("Manage delegation in Access", "/app?tab=management#delegation")));
   }
 
   async function linkedAccess({ instance, op }) {

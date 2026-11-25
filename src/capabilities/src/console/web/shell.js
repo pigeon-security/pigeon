@@ -34,8 +34,8 @@
   views.set("settings", { subtabs: settingsTabs, render: (ctx) => settingsPanels.get(ctx.subtab)(ctx) });
   const coreTabs = { sessions: "Sessions", cost: "Cost", architecture: "Architecture", settings: "Settings" };
   const linkedTabs = { home: "Home", settings: "Settings" };
-  const tags = new Set("a article aside b button caption code dd details div dl dt em fieldset footer form h1 h2 h3 header hr img input label legend li main nav ol option p pre section select small span strong summary table tbody td textarea th thead time tr ul".split(" "));
-  const attrsAllowed = /^(?:aria-[\w-]+|data-[\w-]+|id|class|role|tabindex|title|href|src|alt|width|height|type|name|value|placeholder|disabled|open|selected|checked|for|autocomplete|rows|scope|datetime|min|max|step)$/;
+  const tags = new Set("a article aside b button caption code dd details div dl dt em fieldset footer form h1 h2 h3 h4 header hr img input label legend li main nav ol option p pre section select small span strong summary table tbody td textarea th thead time tr ul".split(" "));
+  const attrsAllowed = /^(?:aria-[\w-]+|data-[\w-]+|id|class|role|tabindex|title|href|src|alt|width|height|type|name|value|placeholder|disabled|open|hidden|spellcheck|selected|checked|for|autocomplete|rows|scope|datetime|min|max|step)$/;
   function el(tag, attrs = {}, ...children) {
     if (!tags.has(tag)) throw new TypeError(`Unsupported tag: ${tag}`);
     const node = document.createElement(tag);
@@ -102,6 +102,7 @@
     settingsPanels.set(key, render);
   }
   window.pigeonApp = Object.freeze({ register, registerSettingsPanel, op, url, nav, el, card, pill,
+    refresh: () => render(),
     get selectedInstance() { return selected; },
   });
 
@@ -151,8 +152,7 @@
       }
     }, "app-button app-primary");
     root.replaceChildren(el("main", { class: "app-sign-in" }, card(
-      brand(), el("h1", { text: "Sign in" }), notice("Use your passkey to open the app.", null), login, status,
-      el("a", { href: "/", text: "Open the legacy console" }))));
+      brand(), el("h1", { text: "Sign in" }), notice("Use your passkey to open the app.", null), login, status)));
   }
 
   function chrome() {
@@ -192,8 +192,8 @@
     });
     sidebar.replaceChildren(brand(), switcher, label("Workspace"), links,
       el("footer", { class: "app-side-footer" },
-        el("a", { href: "/approvals", text: "Approvals" }),
-        el("a", { href: "/", text: "Legacy console" }),
+        routeLink("Approvals", { tab: "approvals" }, tab === "approvals"),
+        routeLink("Instances", { tab: "instances" }, tab === "instances"),
         el("p", { class: "app-muted", text: person }), logout, status));
   }
 
@@ -206,11 +206,17 @@
       instances.find((i) => i.account?.kind === "home") || null;
     const linked = isLinked(selected);
     const tabs = linked ? linkedTabs : coreTabs;
+    const management = { approvals: "Approvals", instances: "Instances", management: "Access" };
+    const titles = { ...tabs, ...management };
     const asked = query.get("tab");
-    const tab = Object.hasOwn(tabs, asked) ? asked : Object.keys(tabs)[0];
-    const view = views.get(linked ? `linked-${tab}` : tab);
+    const tab = Object.hasOwn(titles, asked) ? asked : Object.keys(tabs)[0];
+    const view = views.get(linked && !Object.hasOwn(management, tab) ? `linked-${tab}` : tab);
     const subtabs = view?.subtabs || {};
     let sub = query.get("subtab");
+    if (!sub && tab === "management" && location.hash) {
+      sub = location.hash === "#people" ? "people" :
+        location.hash === "#delegation" ? "delegation" : "credentials";
+    }
     if (tab === "cost") {
       try {
         if (!sub) sub = localStorage.getItem("pigeon.cost.period");
@@ -219,10 +225,10 @@
     }
     const subtab = Object.hasOwn(subtabs, sub) ? sub : Object.keys(subtabs)[0] || null;
     side(tabs, tab);
-    const heading = el("h1", { tabindex: "-1", text: tabs[tab] });
+    const heading = el("h1", { tabindex: "-1", text: titles[tab] });
     const outlet = el("div", { class: "app-view" });
     main.replaceChildren(label(selected?.title || site), heading);
-    if (subtab) main.append(el("nav", { class: "app-subtabs", "aria-label": `${tabs[tab]} sections` },
+    if (subtab) main.append(el("nav", { class: "app-subtabs", "aria-label": `${titles[tab]} sections` },
       ...Object.entries(subtabs).map(([key, title]) => routeLink(title, { tab, subtab: key }, key === subtab))));
     main.append(outlet);
     if (focus) heading.focus();

@@ -171,6 +171,6 @@
     body.append(el("div", { class: "layer", style: "gap:16px" },
       cards.length
         ? el("div", { class: "layer", style: "gap:12px" }, ...cards)
-        : el("p", { class: "muted", text: "Nothing waits for you. Landings and tool calls that need your passkey appear here, and this tab disappears when none do." })));
+        : el("p", { class: "muted", text: "Nothing waits for you. Landings and tool calls that need your passkey appear here." })));
   });
 })();

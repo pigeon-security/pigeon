@@ -49,7 +49,7 @@
           item(el("div", { class: "settings-copy" }, code(r.name), muted(text(r.purpose, "No declared purpose."))),
             pill(r.set ? "Set" : r.owner ? "Missing" : "Not set", r.set ? "running" : r.owner ? "failed" : null),
             r.owner ? el("div", { class: "settings-slot-action" }, locked(r.set ? "Replace" : "Set", r.name),
-              link("Open in Access", `/access#${encodeURIComponent(r.name)}`)) : muted("Unmanaged slot"))))));
+              link("Open in Access", `/app?tab=management#${encodeURIComponent(r.name)}`)) : muted("Unmanaged slot"))))));
   }
 
   function defaultRows(defaults, keys, byKind) {
@@ -134,7 +134,7 @@
     const unlinked = Number.isSafeInteger(data?.unlinked) && data.unlinked >= 0 ? data.unlinked : null;
     const apps = Array.isArray(clients) ? clients.filter((c) => text(c?.service_user_id, "") && c.standard_user_id === null) : null;
     return page(section("People", "Who can sign in to the platform, and who acts for them.",
-      locked("Invite someone", "to the platform"), link("Invite in Access", "/access#people")),
+      locked("Invite someone", "to the platform"), link("Invite in Access", "/app?tab=management#people")),
       persons === null ? card(unavailable("People")) : persons.length === 0 ? card(muted("No people to display.")) :
         [signedIn, ...persons.filter((p) => p !== signedIn)].filter(Boolean).map((p) => personCard(p, p === signedIn)),
       section("Unlinked service users", "These accounts act for no one.",
@@ -143,7 +143,7 @@
         apps === null ? unavailable("Unlinked OAuth apps") : apps.length > 0 ?
           details("Unlinked OAuth apps", muted("This list covers OAuth apps only."),
             list(apps.map((app) => item(text(app.name, "Unnamed OAuth app"))))) : null,
-        link("Review delegation in Access", "/access#delegation")));
+        link("Review delegation in Access", "/app?tab=management#delegation")));
   }
 
   for (const [key, panel] of Object.entries({ access, models, people })) {

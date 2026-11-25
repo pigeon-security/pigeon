@@ -40,10 +40,7 @@ pub struct Console {
 /// The challenge purpose for signing in.
 const SIGN_IN: &str = "console:sign-in";
 
-const APP: &str = include_str!("console/app.js");
-const CHART: &str = include_str!("console/chart.js");
 const KEYS: &str = include_str!("console/keys.js");
-const PLATFORM: &str = include_str!("console/platform.js");
 const USERS: &str = include_str!("console/users.js");
 const APPROVALS: &str = include_str!("console/approvals.js");
 const INSTANCES: &str = include_str!("console/instances.js");
@@ -298,8 +295,19 @@ impl Console {
         let method = req.method();
         if method == Method::Get {
             return match path.as_str() {
-                p if p == "/" || Tab::from_path(p).is_some() => {
-                    page::html(&page::shell(&self.passkeys.site_name))
+                p if page::app_redirect(p).is_some() => {
+                    let mut target = url
+                        .join(page::app_redirect(p).unwrap())
+                        .map_err(|e| worker::Error::RustError(e.to_string()))?;
+                    if p == "/instances"
+                        && let Some((_, value)) = url.query_pairs().find(|(key, _)| key == "i")
+                    {
+                        target.query_pairs_mut().append_pair("i", &value);
+                    }
+                    page::redirect(
+                        &format!("{}?{}", target.path(), target.query().unwrap_or_default())
+                            .trim_end_matches('?'),
+                    )
                 }
                 "/app" | "/app/" => {
                     let signed = self.signed(cx.env, &req).await?;
@@ -309,16 +317,10 @@ impl Console {
                     ))
                 }
                 p if p.starts_with("/app/") => page::app_asset(p),
-                "/console/app.js" => page::asset(APP, "text/javascript; charset=utf-8"),
-                "/console/chart.js" => page::asset(CHART, "text/javascript; charset=utf-8"),
-                "/console/platform.js" => page::asset(PLATFORM, "text/javascript; charset=utf-8"),
                 "/console/keys.js" => page::asset(KEYS, "text/javascript; charset=utf-8"),
                 "/console/users.js" => page::asset(USERS, "text/javascript; charset=utf-8"),
                 "/console/approvals.js" => page::asset(APPROVALS, "text/javascript; charset=utf-8"),
                 "/console/instances.js" => page::asset(INSTANCES, "text/javascript; charset=utf-8"),
-                p if sections::moved(p).is_some() => {
-                    page::redirect(sections::moved(p).unwrap_or("/"))
-                }
                 "/console/console.css" => page::asset(STYLES, "text/css; charset=utf-8"),
                 "/console/icon.png" => page::image(ICON, "image/png"),
                 p if p.starts_with("/console/api/") => {

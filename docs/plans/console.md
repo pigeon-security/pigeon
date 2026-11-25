@@ -205,3 +205,11 @@ The cookie's flags as the browser stores them; that a second browser without the
 the sign-in panel; idle expiry; a passkey sign-in and a bound write end to end; the redirects
 from `/secrets#NAME` and `/tokens`; the Models chart against the gateway's own logs; the CSP
 header on every console response.
+
+## App cutover
+
+The platform serves the console UI at `/app`. Old console page URLs redirect
+to matching views in the app, preserving the instance selector and bookmark
+fragments. Approvals, instance management, credentials, people, and delegation
+use the existing section and passkey-approved write handlers under the app
+shell. Those API routes remain available for the app and native clients.

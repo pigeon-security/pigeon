@@ -1,0 +1,30 @@
+.app-management { --muted: var(--app-muted, #aaa7b2); }
+.app-management .layer { display: grid; }
+.app-management .card { display: grid; overflow-wrap: anywhere; }
+.app-management pre { white-space: pre-wrap; }
+.app-management {
+  --ink: var(--app-ink);
+  --line: var(--app-divider);
+  --chip: var(--app-pill);
+  --warn: var(--app-failed);
+}
+.app-management .card {
+  padding: 18px;
+  background: var(--app-card);
+  border: 1px solid var(--app-divider);
+  border-radius: 16px;
+}
+.app-management .button {
+  font: inherit;
+  color: var(--app-ink);
+  background: var(--app-pill);
+  border: 1px solid var(--app-divider);
+  border-radius: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+.app-management :is(input, select, textarea) {
+  color: var(--app-ink);
+  background: var(--app-bg);
+}
+.app-management [hidden] { display: none; }

@@ -970,7 +970,10 @@ fn core_console_platform_section() {
     assert!(s[0].tab == Tab::Cost);
     assert!(s[0].cost.is_none());
     assert_eq!(snapshot::fresh_ms("platform"), Some(600_000));
-    assert!(page::SCRIPTS.contains(&"/console/platform.js"));
+    assert_eq!(page::app_redirect("/cost"), Some("/app?tab=cost"));
+    assert_eq!(page::app_redirect("/approvals"), Some("/app?tab=approvals"));
+    assert_eq!(page::app_redirect("/"), Some("/app"));
+    assert_eq!(page::app_redirect("/auth/enrol"), None);
 }
 
 /// 2026-11-24T06:00:00Z in milliseconds since the epoch.
