@@ -576,6 +576,52 @@ pub async fn delete(account: &Account, bucket: &Bucket, key: &str) -> Result<()>
     token.finish(result).await
 }
 
+/// Deletes every object in the bucket, four at a time with one token. Answers how many were
+/// deleted; a missing bucket has none. Only for a bucket pigeon's ledger says pigeon created.
+pub async fn empty_bucket(account: &Account, bucket: &Bucket) -> Result<usize> {
+    let token = open(account, "r2 empty bucket").await?;
+    let bearer = token.value();
+    let result = async {
+        let headers = bucket_headers(bucket);
+        let path = bucket_path(&account.id, bucket);
+        match call_with(bearer, Method::Get, &path, &headers, None).await {
+            Err(error) if has_status(&error, 404) => return Ok(0),
+            Err(error) => return Err(error),
+            Ok(_) => {}
+        }
+        let keys = list_with(bearer, &account.id, bucket, "").await?;
+        let count = keys.len();
+        put_in_batches(keys, |key| async move {
+            delete_with(bearer, &account.id, bucket, &key).await
+        })
+        .await?;
+        Ok(count)
+    }
+    .await;
+    token.finish(result).await
+}
+
+/// Deletes an empty bucket. Answers false when it was already gone. Only for a bucket pigeon's
+/// ledger says pigeon created; Cloudflare refuses one that still holds objects.
+pub async fn delete_bucket(account: &Account, bucket: &Bucket) -> Result<bool> {
+    let token = open(account, "r2 delete bucket").await?;
+    let path = bucket_path(&account.id, bucket);
+    let r = match call_with(
+        token.value(),
+        Method::Delete,
+        &path,
+        &bucket_headers(bucket),
+        None,
+    )
+    .await
+    {
+        Ok(_) => Ok(true),
+        Err(error) if has_status(&error, 404) => Ok(false),
+        Err(error) => Err(error),
+    };
+    token.finish(r).await
+}
+
 /// Lists the keys that start with a prefix, using an open token. It follows the cursor to the end.
 pub async fn list_with(
     token: &str,

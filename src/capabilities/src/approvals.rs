@@ -591,7 +591,16 @@ pub fn listing(open: &[Record]) -> Value {
         .map(|r| item(r, format!("Save the changes to instance {}", r.subject)))
         .collect();
     let plans: Vec<Value> = pending(ApprovalKind::LinkedPlan)
-        .map(|r| item(r, format!("Apply the plan for {}", r.subject)))
+        .map(|r| {
+            item(
+                r,
+                if r.summary["retire"] == true {
+                    format!("Retire {}: remove what pigeon made for it", r.subject)
+                } else {
+                    format!("Apply the plan for {}", r.subject)
+                },
+            )
+        })
         .collect();
     // Any other kind (such as `observability_monitors`) is listed under `other`, so it can
     // be approved. The first three lists keep their fields.

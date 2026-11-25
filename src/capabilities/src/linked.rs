@@ -205,6 +205,46 @@ pub async fn link(env: &Env, instance: &str) -> Result<Option<Link>> {
     })
 }
 
+/// Revokes `instance`'s grant, best effort, and forgets its link: the console's unlink after
+/// the person's passkey, and an approved retire plan's step. Answers what happened.
+/// Forgets `instance`'s link without revoking its grant, for an account other instances are
+/// linked to as well.
+pub(crate) async fn forget_link_only(env: &Env, instance: &str) -> Result<String> {
+    if link(env, instance).await?.is_none() {
+        return Ok(format!("{instance} was not linked."));
+    }
+    keep(env, &key(instance), "", 1).await?;
+    Ok(format!(
+        "{instance}'s link is forgotten; its grant is kept because other instances use the same account."
+    ))
+}
+
+pub(crate) async fn forget(env: &Env, host: &str, instance: &str) -> Result<String> {
+    let Some(l) = link(env, instance).await? else {
+        return Ok(format!("{instance} was not linked."));
+    };
+    let revoked = async {
+        let k = sealing_key(env).await?;
+        let tokens: Tokens =
+            serde_json::from_slice(&crypto::open(&k, &l.sealed, instance.as_bytes()).await?)?;
+        let (c, secret) = client(env, host).await?;
+        if let Some(r) = tokens.refresh {
+            oauth::revoke(&c.client_id, &secret, &r).await?;
+        }
+        Ok::<_, Error>(())
+    }
+    .await;
+    keep(env, &key(instance), "", 1).await?;
+    Ok(match revoked {
+        Ok(()) => format!(
+            "{instance} is unlinked and its grant revoked. What pigeon made in that account stays until you remove it."
+        ),
+        Err(e) => format!(
+            "{instance} is unlinked, but the grant could not be revoked ({e}): revoke pigeon under Profile → Access Management → Connected Applications in Cloudflare."
+        ),
+    })
+}
+
 /// A secret this capability keeps, through its binding; `None` until the binding exists.
 async fn secret(env: &Env, name: &str) -> Option<String> {
     let binding = env.secret_store(name).ok()?;
@@ -484,25 +524,7 @@ impl Linked {
         self.passkeys
             .sign_in_finish(cx.env, &purpose, body, None)
             .await?;
-        let Some(l) = link(cx.env, instance).await? else {
-            return Ok(json!({ "message": format!("{instance} was not linked.") }));
-        };
-        let revoked = async {
-            let k = sealing_key(cx.env).await?;
-            let tokens: Tokens =
-                serde_json::from_slice(&crypto::open(&k, &l.sealed, instance.as_bytes()).await?)?;
-            let (c, secret) = client(cx.env, &self.host).await?;
-            if let Some(r) = tokens.refresh {
-                oauth::revoke(&c.client_id, &secret, &r).await?;
-            }
-            Ok::<_, Error>(())
-        }
-        .await;
-        keep(cx.env, &key(instance), "", 1).await?;
-        Ok(json!({ "message": match revoked {
-            Ok(()) => format!("{instance} is unlinked and its grant revoked. What pigeon made in that account stays until you remove it."),
-            Err(e) => format!("{instance} is unlinked, but the grant could not be revoked ({e}): revoke pigeon under Profile → Access Management → Connected Applications in Cloudflare."),
-        } }))
+        Ok(json!({ "message": forget(cx.env, &self.host, instance).await? }))
     }
 
     async fn serve(&self, cx: &Context<'_>, mut req: Request) -> Result<Response> {

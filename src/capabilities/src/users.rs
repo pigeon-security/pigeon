@@ -399,6 +399,7 @@ impl Directory {
                     "DELETE FROM oauth_tokens WHERE service_user_id = ?",
                     "DELETE FROM oauth_clients WHERE service_user_id = ?",
                     "DELETE FROM sessions WHERE user_id = ?",
+                    "DELETE FROM enrolments WHERE user_id = ?",
                     "DELETE FROM users WHERE id = ?",
                 ] {
                     let args = vec![id.into(); q.matches('?').count()];

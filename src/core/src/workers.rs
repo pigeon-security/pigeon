@@ -291,6 +291,37 @@ pub async fn enable_workers_dev(account: &Account, script: &str) -> Result<Strin
     token.finish(r).await
 }
 
+/// Turns off the workers.dev address of a script. A missing script is not an error.
+pub async fn disable_workers_dev(account: &Account, script: &str) -> Result<()> {
+    require(valid_segment(script), "the script name")?;
+    let token = Scoped::open(account, "disable workers.dev", account_policy()).await?;
+    let path = format!(
+        "/accounts/{}/workers/scripts/{script}/subdomain",
+        account.id
+    );
+    let body = json!({"enabled": false, "previews_enabled": false});
+    let r = match call(token.value(), Method::Post, &path, Some(&body)).await {
+        Ok(_) => Ok(()),
+        Err(e) if is_not_found(&e.to_string()) => Ok(()),
+        Err(e) => Err(e),
+    };
+    token.finish(r).await
+}
+
+/// Deletes a script. Answers false when it was already gone. Only for a Worker pigeon's ledger
+/// says pigeon uploaded.
+pub async fn delete(account: &Account, script: &str) -> Result<bool> {
+    require(valid_segment(script), "the script name")?;
+    let token = Scoped::open(account, "delete worker", account_policy()).await?;
+    let path = format!("/accounts/{}/workers/scripts/{script}", account.id);
+    let r = match call(token.value(), Method::Delete, &path, None).await {
+        Ok(_) => Ok(true),
+        Err(e) if is_not_found(&e.to_string()) => Ok(false),
+        Err(e) => Err(e),
+    };
+    token.finish(r).await
+}
+
 /// Enables workers.dev, then reads the account subdomain, using an existing token.
 async fn enable_with(token: &str, account_id: &str, script: &str) -> Result<String> {
     let path = format!("/accounts/{account_id}/workers/scripts/{script}/subdomain");

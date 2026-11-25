@@ -1323,3 +1323,300 @@ fn disabled_publishing_hides_deploy_and_rollback_from_scoped_discovery() {
     record["publishing"] = json!({"state":"disabled"});
     assert_eq!(listed(&record), (Vec::<&str>::new(), false));
 }
+
+/// `instance_retire_plan` and `instance_retire_apply`: only what pigeon's ledger says pigeon
+/// made is removed, in order (stop serving, Worker, bucket, pigeon's state, record last); what
+/// pigeon did not make is kept; the home instance and a depended-on instance are refused; the
+/// digest binds the steps; and a run that stopped resumes at the failed step.
+#[test]
+fn instance_retire_removes_only_what_pigeon_made() {
+    use pigeon_capabilities::instances::plan::{
+        Ledger, SeenDomain, SeenSubdomain, Step as ApplyStep, record,
+    };
+    use pigeon_capabilities::instances::record::Instance;
+    use pigeon_capabilities::instances::retire::{
+        Journal, Seen, SeenBucket, SeenWorker, SiteUser, Step, describe, digest, hosts, plan,
+        refusal, state_keys, unrecord,
+    };
+
+    let account = "a".repeat(32);
+    let inst: Instance = serde_json::from_value(json!({
+        "id": "canary", "title": "canary",
+        "account": { "kind": "linked", "account_id": account },
+        "zones": ["canary.example"], "worker": "canary",
+        "sites": [{ "name": "blog", "bucket": "canary-site", "jurisdiction": "eu",
+            "targets": [{ "kind": "preview" },
+                { "kind": "domain", "hostname": "canary.example" },
+                { "kind": "subdomain", "label": "canary" },
+                { "kind": "zone", "hostname": "www.canary.example", "route": "www.canary.example/*" }] }],
+        "version": 3
+    }))
+    .unwrap();
+    assert_eq!(
+        hosts(&inst, "pigeon.dev"),
+        ["canary.example", "canary.pigeon.dev", "www.canary.example"]
+    );
+
+    // The ledger as instance_apply leaves it: the bucket, the Worker, the domain and subdomain.
+    let mut l = Ledger::default();
+    for s in [
+        ApplyStep::CreateBucket {
+            name: "canary-site".into(),
+            jurisdiction: Some("eu".into()),
+            protected: false,
+        },
+        ApplyStep::UploadWorker {
+            name: "canary".into(),
+            bucket: "canary-site".into(),
+            jurisdiction: Some("eu".into()),
+            module: "m".into(),
+            replaces: false,
+            origin: None,
+        },
+        ApplyStep::AttachDomain {
+            hostname: "canary.example".into(),
+            zone_id: "z".into(),
+            worker: "canary".into(),
+        },
+        ApplyStep::AttachSubdomain {
+            hostname: "canary.pigeon.dev".into(),
+            zone_id: "zp".into(),
+            worker: "pigeon-sites".into(),
+            upstream: "https://canary.np.workers.dev".into(),
+        },
+    ] {
+        record(&mut l, &s);
+    }
+    assert_eq!(l.domains, ["canary.example"]);
+    assert_eq!(l.subdomains, ["canary.pigeon.dev"]);
+
+    let seen = Seen {
+        account_id: Some(account.clone()),
+        workers: vec![SeenWorker {
+            name: "canary".into(),
+            exists: true,
+            workers_dev: Some(true),
+        }],
+        buckets: vec![SeenBucket {
+            name: "canary-site".into(),
+            jurisdiction: Some("eu".into()),
+            exists: true,
+            objects: 12,
+        }],
+        domains: vec![SeenDomain {
+            hostname: "canary.example".into(),
+            zone_id: None,
+            service: Some("canary".into()),
+        }],
+        subdomains: vec![SeenSubdomain {
+            hostname: "canary.pigeon.dev".into(),
+            zone_id: Some("zp".into()),
+            worker: "pigeon-sites".into(),
+            service: Some("pigeon-sites".into()),
+            upstream: Some("https://canary.np.workers.dev".into()),
+        }],
+        site_users: vec![SiteUser {
+            id: "u1".into(),
+            host: "canary.pigeon.dev".into(),
+        }],
+        settings: state_keys("canary"),
+        linked: true,
+    };
+    let tag = |s: &Step| {
+        serde_json::to_value(s).unwrap()["step"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let removing =
+        |steps: &[Step]| -> Vec<String> { steps.iter().filter(|s| s.removes()).map(tag).collect() };
+
+    // Everything pigeon made goes, in order; the route it never made is kept.
+    let steps = plan(&inst, &seen, &l, &[], false);
+    assert!(!steps.iter().any(Step::stops));
+    assert_eq!(
+        removing(&steps),
+        [
+            "detach_subdomain",
+            "detach_domain",
+            "disable_workers_dev",
+            "delete_worker",
+            "empty_bucket",
+            "delete_bucket",
+            "remove_site_user",
+            "forget",
+            "forget",
+            "forget",
+            "forget",
+            "forget",
+            "forget",
+            "unlink",
+            "remove_record",
+        ]
+    );
+    assert!(matches!(steps.last(), Some(Step::RemoveRecord { id }) if id == "canary"));
+    assert!(steps.iter().any(|s| matches!(s,
+        Step::Keep { what, name, .. } if what == "route" && name == "www.canary.example/*")));
+    assert!(steps.iter().any(|s| matches!(s,
+        Step::RemoveSiteUser { id, host } if id == "u1" && host == "canary.pigeon.dev")));
+    // The publishing queue row is forgotten, and the ledger after the rest.
+    let forgets: Vec<&str> = steps
+        .iter()
+        .filter_map(|s| match s {
+            Step::Forget { key } => Some(key.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(forgets[0], "github:deploy:canary");
+    assert_eq!(forgets.last(), Some(&"ledger:canary"));
+    assert_eq!(describe(&steps).len(), steps.len());
+    // Keeping the link, for a reset.
+    let kept = plan(&inst, &seen, &l, &[], true);
+    assert!(!kept.iter().any(|s| matches!(s, Step::Unlink)));
+    // Another instance linked to the same account: forget this link, keep the grant.
+    let mut sibling = inst.clone();
+    sibling.id = "prod".into();
+    sibling.worker = None;
+    sibling.sites.clear();
+    let shared = plan(&inst, &seen, &l, std::slice::from_ref(&sibling), false);
+    assert!(!shared.iter().any(|s| matches!(s, Step::Unlink)));
+    assert!(shared.iter().any(|s| matches!(s,
+        Step::ForgetLink { shared_with } if shared_with == &vec!["prod".to_string()])));
+
+    // Same names, not in the ledger: kept, and nothing in the account is removed.
+    let theirs = plan(&inst, &seen, &Ledger::default(), &[], false);
+    assert!(!theirs.iter().any(Step::in_linked_account));
+    let keeps: Vec<String> = theirs
+        .iter()
+        .filter_map(|s| match s {
+            Step::Keep { what, .. } => Some(what.clone()),
+            _ => None,
+        })
+        .collect();
+    for what in ["Worker", "bucket", "custom domain"] {
+        assert!(keeps.iter().any(|k| k == what), "{what} kept");
+    }
+    // A subdomain served by another Worker is kept; only pigeon's upstream for it is forgotten.
+    let mut other_sub = seen.clone();
+    other_sub.subdomains[0].service = Some("someone-else".into());
+    let o = plan(&inst, &other_sub, &l, &[], false);
+    assert!(
+        o.iter()
+            .any(|s| matches!(s, Step::Keep { what, .. } if what == "subdomain"))
+    );
+    assert!(
+        o.iter()
+            .any(|s| matches!(s, Step::DetachSubdomain { worker: None, .. }))
+    );
+    // A custom domain served by a Worker pigeon did not upload is kept.
+    let mut foreign = seen.clone();
+    foreign.domains[0].service = Some("someone-else".into());
+    assert!(
+        !plan(&inst, &foreign, &l, &[], false)
+            .iter()
+            .any(|s| matches!(s, Step::DetachDomain { .. }))
+    );
+    // An empty bucket is deleted with no emptying step; a Worker already gone is not touched.
+    let mut bare = seen.clone();
+    bare.buckets[0].objects = 0;
+    bare.workers[0] = SeenWorker {
+        name: "canary".into(),
+        exists: false,
+        workers_dev: None,
+    };
+    let b = removing(&plan(&inst, &bare, &l, &[], false));
+    assert!(
+        !b.iter()
+            .any(|s| s == "empty_bucket" || s == "delete_worker")
+    );
+    assert!(b.iter().any(|s| s == "delete_bucket"));
+
+    // The home instance is refused.
+    let mut home = inst.clone();
+    home.account = serde_json::from_value(json!({ "kind": "home" })).unwrap();
+    assert!(refusal(&home).is_some());
+    assert!(plan(&home, &seen, &l, &[], false).iter().all(Step::stops));
+    assert!(refusal(&inst).is_none());
+
+    // Another instance reading pigeon's bucket, or ingesting into it, stops the plan.
+    let mut reader = inst.clone();
+    reader.id = "reader".into();
+    reader.worker = Some("reader".into());
+    reader.sites[0].targets.clear();
+    let stops = |others: &[Instance]| {
+        plan(&inst, &seen, &l, others, false)
+            .iter()
+            .any(Step::stops)
+    };
+    assert!(stops(std::slice::from_ref(&reader)));
+    reader.sites[0].bucket = "reader-site".into();
+    assert!(!stops(std::slice::from_ref(&reader)));
+    reader.ingest = Some(
+        serde_json::from_value(json!({ "state": "enabled", "source": "r2:fixture",
+            "bucket": "src", "destination_bucket": "canary-site" }))
+        .unwrap(),
+    );
+    assert!(stops(std::slice::from_ref(&reader)));
+
+    // Account resources in the ledger but no link to reach them: stopped, not forgotten.
+    let mut unlinked = seen.clone();
+    unlinked.account_id = None;
+    assert!(
+        plan(&inst, &unlinked, &l, &[], false)
+            .iter()
+            .any(Step::stops)
+    );
+
+    // The digest binds the steps, the account and the version: a changed plan is refused.
+    let d = digest(&inst, Some(&account), &steps);
+    assert_eq!(d, digest(&inst, Some(&account), &steps));
+    let mut more = seen.clone();
+    more.buckets[0].objects = 13;
+    assert_ne!(
+        d,
+        digest(&inst, Some(&account), &plan(&inst, &more, &l, &[], false))
+    );
+    assert_ne!(d, digest(&inst, Some(&"b".repeat(32)), &steps));
+    let mut newer = inst.clone();
+    newer.version += 1;
+    assert_ne!(d, digest(&newer, Some(&account), &steps));
+    assert_ne!(
+        d,
+        pigeon_capabilities::instances::plan::digest(&inst, &account, &[])
+    );
+
+    // The journal holds only removing steps, runs them in order and resumes at a failed step.
+    let mut ledger = l.clone();
+    let mut ran: Vec<String> = Vec::new();
+    let mut fail_once = true;
+    let mut run = |j: &mut Journal| {
+        while let Some(i) = j.next() {
+            let step = j.steps[i].clone();
+            if matches!(step, Step::DeleteBucket { .. }) && fail_once {
+                fail_once = false;
+                j.fail(i, "bucket not empty");
+                return false;
+            }
+            ran.push(tag(&step));
+            unrecord(&mut ledger, &step);
+            j.finish(i);
+        }
+        true
+    };
+    let mut j = Journal::new("canary", Some(&account), "caller", &steps);
+    assert_eq!(j.steps.len(), removing(&steps).len());
+    assert!(j.needs_account());
+    assert!(!run(&mut j));
+    assert!(j.failed.as_deref().unwrap().contains("bucket not empty"));
+    assert!(!j.complete());
+    // Kept and read back as the Directory would, then resumed: the failed step runs again.
+    let mut j: Journal = serde_json::from_str(&serde_json::to_string(&j).unwrap()).unwrap();
+    assert!(run(&mut j));
+    assert!(j.complete() && j.failed.is_none() && !j.needs_account());
+    // Once done, nothing runs again.
+    assert!(run(&mut j));
+    let expected: Vec<String> = removing(&steps);
+    assert_eq!(ran, expected);
+    assert!(ledger.workers.is_empty() && ledger.buckets.is_empty());
+    assert!(ledger.domains.is_empty() && ledger.subdomains.is_empty());
+}

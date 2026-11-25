@@ -39,6 +39,12 @@ pub struct Ledger {
     /// Buckets that were first created for a protected site.
     #[serde(default)]
     pub protected_buckets: Vec<String>,
+    /// Hostnames pigeon attached to its Worker as custom domains in the linked account.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub domains: Vec<String>,
+    /// Platform subdomains pigeon attached to the sites Worker for this instance.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subdomains: Vec<String>,
 }
 
 /// The Directory key of instance `id`'s ledger.
@@ -417,6 +423,12 @@ pub fn record(ledger: &mut Ledger, step: &Step) {
             }
             ledger.workers.retain(|(n, _)| n != name);
             ledger.workers.push((name.clone(), module.clone()));
+        }
+        Step::AttachDomain { hostname, .. } if !ledger.domains.contains(hostname) => {
+            ledger.domains.push(hostname.clone());
+        }
+        Step::AttachSubdomain { hostname, .. } if !ledger.subdomains.contains(hostname) => {
+            ledger.subdomains.push(hostname.clone());
         }
         _ => {}
     }

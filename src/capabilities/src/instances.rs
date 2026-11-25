@@ -9,6 +9,8 @@
 pub mod plan;
 mod publishing;
 pub mod record;
+pub mod retire;
+mod retiring;
 pub mod tools;
 
 use pigeon_core::mcp::Tool;
@@ -627,7 +629,7 @@ impl Instances {
         let got = directory(cx.env, "approval.get", json!({ "id": approval_id })).await?;
         let id = got["subject"]
             .as_str()
-            .filter(|_| got["kind"] == "linked_plan")
+            .filter(|_| got["kind"] == "linked_plan" && !retiring::is_retire(&got))
             .ok_or_else(|| bad(&format!("there is no plan approval {approval_id}")))?
             .to_string();
         let (instance, account, steps, digest) = self.planned(cx, &id).await?;
@@ -785,6 +787,43 @@ impl Capability for Instances {
                     "required": ["plan"]
                 }),
             },
+            Tool {
+                name: "instance_retire_plan",
+                description: "Dry run of retiring a linked instance: lists exactly what would be \
+                              removed, only what pigeon's ledger says pigeon made for it (its \
+                              platform subdomains and custom domains, its Worker and workers.dev \
+                              address, its R2 bucket after emptying it) and pigeon's own state \
+                              for it (site users of its hosts with their passkeys and sessions, \
+                              publishing queue rows, ledger, link, and last the record), and \
+                              what is kept because pigeon did not make it. Removes nothing. \
+                              Refuses the home instance; stops when another instance depends on \
+                              its Worker or buckets. Otherwise the plan waits on the console's \
+                              Approvals tab for the person's passkey; `instance_retire_apply` \
+                              then runs exactly that plan. `keep_link` keeps the account link, \
+                              to propose and apply the instance again.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "instance": { "type": "string" },
+                        "keep_link": { "type": "boolean", "description": "Keep the account link (default false: revoke and forget it)." }
+                    },
+                    "required": ["instance"]
+                }),
+            },
+            Tool {
+                name: "instance_retire_apply",
+                description: "Run a retire plan the person approved: reads everything again and \
+                              refuses if it no longer gives the same plan, then stops serving \
+                              (subdomains, custom domains, workers.dev), deletes the Worker, \
+                              empties and deletes the bucket, removes pigeon's state for the \
+                              instance and last its record, recording each step. If a step \
+                              fails, call it again with the same plan to resume from that step.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": { "plan": { "type": "string", "description": "The retire plan's approval id, from instance_retire_plan." } },
+                    "required": ["plan"]
+                }),
+            },
             Tool::bare(
                 "instance_subdomains",
                 "The platform subdomains approved plans attached, each with the instance \
@@ -815,6 +854,8 @@ impl Capability for Instances {
                 "instance_plan" => self.plan(cx, args).await,
                 "instance_subdomains" => subdomains(cx.env, &self.zone).await,
                 "instance_apply" => self.apply(cx, args).await,
+                "instance_retire_plan" => self.retire_plan(cx, args).await,
+                "instance_retire_apply" => self.retire_apply(cx, args).await,
                 other => Err(unknown(other)),
             }
         })

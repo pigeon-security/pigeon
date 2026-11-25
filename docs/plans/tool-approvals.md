@@ -198,7 +198,9 @@ with the linked-accounts planner on 21 November, with these additions from them:
 - **A third kind, `linked_plan` (linked-accounts phase 4).** It is a dry-run plan of changes in a
   linked account. It behaves like `tool_call`: approval marks it `approved`, then `instance_apply
   {id}` takes the row, plans again, and refuses if the new plan's digest differs. Its TTL is 30
-  minutes and `payload` holds the plan.
+  minutes and `payload` holds the plan. A retire plan (`instance_retire_plan`, linked-accounts
+  section 10) is the same kind with `retire: true` in its summary and payload; only
+  `instance_retire_apply` takes it, and the Approvals tab reads it as "Retire {instance}".
 - `Kind` in `pigeon_core::approval` is a serde enum with an `Other(String)` fallback, so a row of
   a newer kind never breaks an older reader. The purpose builder (`console:approval:{id}:{digest}`)
   and the state transitions are pure functions there, so either planner can add a smoke case,

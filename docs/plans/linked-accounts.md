@@ -574,9 +574,54 @@ Speed, as in console-hardening:
 - Creating the Worker, enabling its workers.dev preview, the route (cutover) and its removal
   (rollback) are console actions with a passkey bound to the plan digest, done only with the
   person's go-ahead in the session.
-- Nothing ever deletes or edits DNS records, R2 buckets, R2 custom domains or rules in a linked
-  account. The core blocks for them are read-only by type: no write function exists for a
-  linked `Account`.
+- Nothing ever deletes or edits DNS records, R2 custom domains or rules in a linked account,
+  and nothing deletes anything pigeon did not make. The one removal path is retiring an
+  instance (section 10), which removes only what pigeon's ledger says pigeon made, behind the
+  person's passkey on the exact plan.
+
+### 10. Retiring an instance
+
+`instance_retire_plan {instance, keep_link?}` is a dry run, like `instance_plan`. It reads the
+linked account, the platform's own account and the Directory, and lists every step:
+
+- removed, and only when pigeon's ledger (`ledger:{id}`) says pigeon made it: the platform
+  subdomains attached for the instance (their custom domain on `pigeon-sites` and their
+  `subdomain:{host}` upstream), the custom domains attached to pigeon's Worker, the Worker's
+  workers.dev address, the Worker, and the R2 bucket after deleting its objects. A custom
+  domain counts as pigeon's when it serves a Worker in the ledger; a subdomain when the ledger
+  or its kept upstream names it. The ledger records domains and subdomains from now on;
+- pigeon's own state for the instance: Directory site users `site:{host}` of its hosts with
+  their passkeys, sessions and enrolment codes (which also ends its site-passkey binding),
+  the publishing queue rows `github:deploy:{id}` and `github:push:{id}`, `ingest:runs:{id}`,
+  `data_url:{id}`, `data_key:{id}`, the ledger, the account link (its grant revoked, unless
+  `keep_link`), and last the record and its place in `instances:index`;
+- kept: anything with the instance's names that pigeon did not make, and every Zone target's
+  route (pigeon never creates routes).
+
+It refuses the home instance, and stops (asks nothing) when another instance's site, ingest
+or storage binding uses the bucket, or another instance is served by the Worker, or the ledger
+lists account resources but the account is no longer linked. Otherwise it waits on the
+Approvals tab as a `linked_plan` approval marked `retire`, bound to the digest of the steps,
+the account and the record version.
+
+`instance_retire_apply {plan}` plans again and refuses unless the digest is the approved one,
+then runs the steps in order: stop serving (subdomains, custom domains, workers.dev), delete
+the Worker, empty and delete the bucket, then pigeon's state, the record last. Each step is
+idempotent (a thing already gone is not an error) and is recorded in a journal
+(`retire:{approval}`, kept 30 days); after a failure, calling it again with the same plan
+resumes at the failed step, against the same account. `instance_apply` refuses a retire
+approval, and `instance_retire_apply` an apply one.
+
+The Cloudflare calls go straight from core: in the linked account with the link's OAuth grant,
+whose scopes (`linked::PERMISSIONS`: Workers Scripts Write, Workers R2 Storage Write) cover
+deleting a script, its workers.dev address, a custom domain, objects and a bucket; in the
+platform's account with a token minted for the same permissions `custom_domain::attach` uses.
+The deploy proxy's allowlist (`cf_proxy::ALLOWED`, checked by `ci/deploy/allowlist.sh`)
+governs only `wrangler deploy` of platform Workers and is unchanged.
+
+Runbook, reset the sandbox: `instance_retire_plan {instance: "sandbox", keep_link: true}`,
+approve it, `instance_retire_apply {plan}` until `complete`; then `instance_propose` the record
+again (from version 0), approve it, `instance_plan`, approve, `instance_apply`.
 
 ## Phases
 
