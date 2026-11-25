@@ -14,7 +14,7 @@
 //! Webhooks (`build.running`, `build.finished`) are verified with their HMAC signature before
 //! anything in them is read, and only builds the gateway started, matched by handle, are acted
 //! on. A build that ends without its runner having reported is an infrastructure failure, which
-//! the gateway retries elsewhere once.
+//! the gateway retries once, on Buildkite again.
 
 use pigeon_contract::SlotSpec;
 use pigeon_core::buildkite::{self as api, Pipeline};

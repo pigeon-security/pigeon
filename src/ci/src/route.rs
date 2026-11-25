@@ -3,6 +3,12 @@
 //! alone, else the operator's order, ties to the shorter queue. A job waits for the first-ranked
 //! connector while it is full, and past a wait limit goes to any ranked one with room. A job
 //! nothing can run is refused at once, with every connector's reason.
+//!
+//! A retry after an infrastructure loss stays on the connector that lost the attempt
+//! ([`Ask::retry_on`]): classes say what hardware a connector has, not what its runners carry
+//! (pigeon's base image, with the Rust toolchain, is on Containers only), so the connector
+//! routing first chose is the only one known to suit the job. The retry waits for it while it
+//! is full, and is refused when it cannot take the job at all.
 
 use serde::{Deserialize, Serialize};
 
@@ -37,8 +43,12 @@ pub struct Ask<'a> {
     pub timeout_min: u32,
     /// The connector the caller pinned, if any.
     pub pin: Option<&'a str>,
-    /// Connectors that already failed this job with an infrastructure error.
+    /// Connectors excluded from the job: kept for jobs queued before retries stayed on their
+    /// connector; the scheduler no longer adds to it.
     pub exclude: &'a [String],
+    /// The connector a retry stays on: the one that lost the job's last attempt. Every other
+    /// connector is ruled out, even past the wait limit.
+    pub retry_on: Option<&'a str>,
 }
 
 /// A connector that can run the job, the class it would use, and whether it has room now.
@@ -64,6 +74,14 @@ pub fn route(ask: &Ask, candidates: &[Candidate]) -> Result<Routed, Vec<(String,
     {
         return Err(vec![(pin.to_string(), "no such connector".to_string())]);
     }
+    if let Some(on) = ask.retry_on
+        && !candidates.iter().any(|c| c.name == on)
+    {
+        return Err(vec![(
+            on.to_string(),
+            "the retry stays on this connector, which is gone".to_string(),
+        )]);
+    }
     let mut ruled_out: Vec<(String, String)> = Vec::new();
     let mut kept: Vec<(Pick, u32, u32)> = Vec::new();
     for c in candidates {
@@ -81,6 +99,13 @@ pub fn route(ask: &Ask, candidates: &[Candidate]) -> Result<Routed, Vec<(String,
         };
         if ask.pin.is_some_and(|p| p != c.name) {
             ruled_out.push((name, "not the pinned connector".to_string()));
+            continue;
+        }
+        if let Some(on) = ask.retry_on.filter(|on| *on != c.name) {
+            ruled_out.push((
+                name,
+                format!("the retry stays on {on}, which lost the last attempt"),
+            ));
             continue;
         }
         let a = c.availability;

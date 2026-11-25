@@ -102,7 +102,7 @@ pub enum Report {
 pub enum Next {
     /// Move the job to this state.
     Move(State),
-    /// Queue the job again, on another connector, as its next attempt.
+    /// Queue the job again, on the connector that lost it, as its next attempt.
     Retry,
     /// Leave the job as it is.
     Ignore,

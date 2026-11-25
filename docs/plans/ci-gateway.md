@@ -119,7 +119,7 @@ disk, timeout, and `network = "none"` only where the connector can enforce it.
 pub struct Candidate<'a> { pub name: &'a str, pub rank: u32, pub offers: &'a [Offered], pub availability: Availability }
 pub struct Availability { pub configured: bool, pub healthy: bool, pub free: Option<u32>, pub queued: u32 }
 pub struct Ask<'a> { pub needs: &'a Needs, pub timeout_min: u32, pub pin: Option<&'a str>,
-                     pub exclude: &'a [String] }
+                     pub exclude: &'a [String], pub retry_on: Option<&'a str> }
 pub struct Routed { pub ranked: Vec<Pick>, pub ruled_out: Vec<(String, String)> }
 pub struct Pick { pub connector: String, pub class: Class, pub ready: bool }
 pub fn route(ask: &Ask, candidates: &[Candidate]) -> Result<Routed, Vec<(String, String)>>;
@@ -135,7 +135,11 @@ pub fn fallback_due(queued_at_ms: i64, now_ms: i64, wait_limit_ms: i64) -> bool;
   unavailable is a refusal naming why). Otherwise the operator's order from settings (each
   candidate has a `rank`; equal ranks tie), ties to the shorter `queued`. Room does not reorder:
   a job waits for its first-ranked connector. Cost and limits are later sort keys here.
-- **Exclude:** connectors that already failed this job with an infrastructure error.
+- **Exclude:** connectors excluded from the job; only jobs queued before 2026-11-25 have any
+  (see Retry).
+- **Retry on:** a retry stays on the connector that lost the attempt; every other connector is
+  ruled out, even once the fallback is due. The retry waits while that connector is full, and
+  is refused (`error`, detail `infrastructure: …`) when it cannot take the job at all.
 - **Queue fallback:** a queued job is dispatched to the first ready pick; when no pick is ready
   it stays on the first one; once `fallback_due` it goes to any ready pick.
 - **Retry:** see the state machine.
@@ -163,7 +167,18 @@ pub fn on_deadline(state: State, attempt: u32, now_ms: i64, deadline_ms: i64) ->
 - Moves only forward; a terminal state never changes; a duplicate or late report is ignored.
 - `Finished { passed: false }` is `failed`: a result, never retried.
 - `Infra` (dispatch refused, runner lost, container exited without a result) on attempt 1 is a
-  retry on another matching connector, excluding this one; on attempt 2 it is `error`.
+  retry on the same connector, a fresh runner (`retry_on`); on attempt 2 it is `error`.
+  **Changed 2026-11-25.** It used to retry on another matching connector, excluding this one.
+  But a class says what hardware a connector has, not what its runners carry: `test` (Linux,
+  medium) matches Buildkite's hosted `pigeon-linux-medium` queue, whose agents have neither the
+  Rust toolchain nor pigeon's base image. So a container that stopped before reporting became a
+  certain `cargo: not found`, exit 127, on Buildkite (four landings on 2026-11-24, e.g. job
+  `WKMLiZEleEWgpFxCZfxlie`). Now an infrastructure loss never moves a job between connectors;
+  Buildkite still runs what routes there first (macOS for `ios-check`, `-docker` classes, a
+  pin). Not yet covered: a job that waits past the wait limit for a full Containers still falls
+  back to any connector with room. Closing that needs the job to declare its runner image
+  (`needs.image` in `.pigeon/ci.toml`, matched against an image each class declares), which is
+  the person's file.
 - Deadline: `timeout_min` after dispatch plus a 10-minute allowance for queueing at the
   connector. Past it the connector's `status` is polled once more; with no final answer the job
   is cancelled at the connector and becomes `timed_out`.
@@ -396,7 +411,7 @@ until the image is ready, up to 15 min); `GET containers/applications/{namespace
 `containers` entry (class name and images). The cf_proxy allowlist needs the `containers/`
 calls.
 Live checks: a job that passes, one that fails, one that times out, one whose container is
-killed (retried elsewhere or `error`), the note on the commit.
+killed (retried on Containers or `error`), the note on the commit.
 
 **As built.** The base image is `pigeon-ci-base` (debian bookworm-slim with git, curl, coreutils, build-essential, pkg-config and Rust stable with the wasm target, clippy and rustfmt), digest-pinned in wrangler.toml as `[containers.images.base]`.
 - Confirmed from the docs: under `durable_object` each `start()` names the image (a key of
@@ -469,7 +484,7 @@ kept by the scheduler, not a secret on the page.
   that connector. A later exchange for the same build replaces the token.
 - Webhooks: verified first (core `buildkite_hook.rs`); a ping answers 200 and does nothing;
   `build.running` is the start; `build.finished` without the runner having reported is a lost
-  runner (retried once elsewhere), `canceled` is cancelled; builds without the gateway's
+  runner (retried once on Buildkite), `canceled` is cancelled; builds without the gateway's
   `pigeon_job` meta-data, or not matching a live job's handle, are ignored.
 - Queues: `pigeon-linux-small` and `pigeon-linux-medium`, each offering its class with and
   without docker, as rows of `BUILDKITE_QUEUES` in settings.rs. Linux only, by the person's

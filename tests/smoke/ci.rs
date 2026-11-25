@@ -3,24 +3,185 @@
 use super::*;
 
 #[test]
-fn ci_retries_a_pinned_job_on_its_connector() {
-    use pigeon_ci::scheduler::retry_away;
+fn ci_retries_an_infrastructure_loss_on_the_same_connector() {
+    use pigeon_ci::scheduler::retry_on;
     // A deploy job pinned to containers whose container stopped before reporting retries on
     // containers (incident 6 failed it: "no connector can run it").
-    let (excluded, said) = retry_away(
-        Vec::new(),
+    let (on, said) = retry_on(
         "containers",
         Some("containers"),
         "the container stopped before reporting",
     );
-    assert!(excluded.is_empty());
+    assert_eq!(on.as_deref(), Some("containers"));
     assert!(said.starts_with("retrying on containers"));
-    // Unpinned, the connector that lost it is excluded once, and the retry goes elsewhere.
-    let (excluded, said) = retry_away(vec!["buildkite".into()], "containers", None, "lost");
-    assert_eq!(excluded, ["buildkite", "containers"]);
-    assert_eq!(said, "retrying elsewhere: lost");
-    let (excluded, _) = retry_away(excluded, "containers", Some("buildkite"), "lost");
-    assert_eq!(excluded, ["buildkite", "containers"]);
+    // Unpinned too: `test` lost on containers retries on containers, a fresh container, not on
+    // Buildkite (job WKMLiZEleEWgpFxCZfxlie: `cargo: not found`, exit 127, there).
+    let (on, said) = retry_on("containers", None, "the container stopped before reporting");
+    assert_eq!(on.as_deref(), Some("containers"));
+    assert_eq!(
+        said,
+        "retrying on containers, a fresh runner: the container stopped before reporting"
+    );
+    // A loss with no connector recorded holds the retry nowhere.
+    assert_eq!(retry_on("", None, "lost").0, None);
+}
+
+#[test]
+fn ci_retry_of_test_never_goes_to_buildkite() {
+    use pigeon_ci::route::{Ask, Availability, Candidate, choose, route};
+    use pigeon_ci::scheduler::{self, Outcome};
+    use pigeon_ci::state::{self, Next, Report, State};
+    let cfg = pigeon_ci::config::parse(include_str!("../../.pigeon/ci.toml")).unwrap();
+    let test = &cfg.jobs["test"];
+    // pigeon's own connectors, in the operator's order: containers, then buildkite.
+    let settings = pigeon_ci::pigeon::settings(pigeon_ci::Accounts::Scoped);
+    let offers: Vec<_> = settings.connectors.iter().map(|c| c.offers()).collect();
+    let names: Vec<&str> = settings.connectors.iter().map(|c| c.name()).collect();
+    assert_eq!(names, ["containers", "buildkite"]);
+    let cands = |containers: Availability| -> Vec<Candidate> {
+        let up = Availability {
+            configured: true,
+            healthy: true,
+            free: None,
+            queued: 0,
+        };
+        names
+            .iter()
+            .zip(&offers)
+            .enumerate()
+            .map(|(i, (name, offers))| Candidate {
+                name,
+                rank: i as u32,
+                offers,
+                availability: if *name == "containers" {
+                    containers
+                } else {
+                    up
+                },
+            })
+            .collect()
+    };
+    let room = Availability {
+        configured: true,
+        healthy: true,
+        free: Some(1),
+        queued: 0,
+    };
+    let first = Ask {
+        needs: &test.needs,
+        timeout_min: test.timeout_min,
+        pin: None,
+        exclude: &[],
+        retry_on: None,
+    };
+    // Buildkite's hosted Linux medium queue matches `test`'s class: that is the hole.
+    let routed = route(&first, &cands(room)).unwrap();
+    let ranked: Vec<&str> = routed.ranked.iter().map(|p| p.connector.as_str()).collect();
+    assert_eq!(ranked, ["containers", "buildkite"]);
+    assert_eq!(choose(&routed, false).unwrap().connector, "containers");
+
+    // The container stopped before reporting: attempt 1 is retried, on containers.
+    assert_eq!(
+        state::on_report(
+            State::Running,
+            1,
+            &Report::Infra {
+                why: "the container stopped before reporting".into()
+            }
+        ),
+        Next::Retry
+    );
+    let (on, _) = scheduler::retry_on("containers", None, "lost");
+    let retry = Ask {
+        retry_on: on.as_deref(),
+        ..first
+    };
+    let routed = route(&retry, &cands(room)).unwrap();
+    assert_eq!(routed.ranked.len(), 1);
+    assert_eq!(choose(&routed, true).unwrap().connector, "containers");
+    let (_, why) = routed
+        .ruled_out
+        .iter()
+        .find(|(n, _)| n == "buildkite")
+        .unwrap();
+    assert!(why.contains("the retry stays on containers"), "{why}");
+    // Containers full: the retry waits for it, even past the wait limit, rather than run on
+    // Buildkite.
+    let full = Availability {
+        free: Some(0),
+        ..room
+    };
+    let routed = route(&retry, &cands(full)).unwrap();
+    assert!(choose(&routed, false).is_none());
+    assert!(choose(&routed, true).is_none());
+    // Containers unhealthy: refused, which the scheduler records as an infrastructure error.
+    let down = Availability {
+        healthy: false,
+        ..room
+    };
+    let refused = route(&retry, &cands(down)).unwrap_err();
+    assert!(
+        refused
+            .iter()
+            .any(|(n, r)| n == "buildkite" && r.contains("the retry stays on"))
+    );
+    assert!(
+        refused
+            .iter()
+            .any(|(n, r)| n == "containers" && r == "unhealthy")
+    );
+    // A connector the retry stays on that is gone is refused, not routed around.
+    let gone = Ask {
+        retry_on: Some("nowhere"),
+        ..first
+    };
+    assert!(route(&gone, &cands(room)).is_err());
+
+    // A dispatch refusal is an infrastructure failure too: the retry stays on the connector
+    // that refused it.
+    assert_eq!(
+        scheduler::after_dispatch(1, "containers", Err("no capacity".into())),
+        Outcome::Requeue {
+            failed: "containers".into(),
+            why: "containers: no capacity".into()
+        }
+    );
+
+    // A job that failed after reporting is a result, as before: never retried, anywhere.
+    assert_eq!(
+        state::on_report(State::Running, 1, &Report::Finished { passed: false }),
+        Next::Move(State::Failed)
+    );
+    assert_eq!(
+        state::on_report(State::Dispatched, 1, &Report::Finished { passed: false }),
+        Next::Move(State::Failed)
+    );
+
+    // Deliberate Buildkite routing is untouched: `ios-check` (macOS) goes to Buildkite, and a
+    // pin to it still routes there.
+    let ios = &cfg.jobs["ios-check"];
+    let routed = route(
+        &Ask {
+            needs: &ios.needs,
+            timeout_min: ios.timeout_min,
+            ..first
+        },
+        &cands(room),
+    )
+    .unwrap();
+    assert_eq!(choose(&routed, false).unwrap().connector, "buildkite");
+    let smoke = &cfg.jobs["smoke"];
+    let routed = route(
+        &Ask {
+            needs: &smoke.needs,
+            timeout_min: smoke.timeout_min,
+            pin: Some("buildkite"),
+            ..first
+        },
+        &cands(room),
+    )
+    .unwrap();
+    assert_eq!(choose(&routed, false).unwrap().connector, "buildkite");
 }
 
 #[test]
@@ -93,6 +254,7 @@ fn ci_route_and_run_on_a_fake_connector() {
         timeout_min: test.timeout_min,
         pin: None,
         exclude: &[],
+        retry_on: None,
     };
     let routed = route(&ask, &cands).unwrap();
     assert!(routed.ruled_out.iter().any(|(n, _)| n == "tiny"));

@@ -335,7 +335,7 @@ pub trait Connector {
     /// Whether it is configured (its secrets set) and healthy, and how much room it has.
     fn available<'a>(&'a self, cx: &'a Cx<'a>) -> Pending<'a, Availability>;
 
-    /// Starts `run`. An error is an infrastructure failure: the job may go elsewhere.
+    /// Starts `run`. An error is an infrastructure failure: the job retries here once.
     fn dispatch<'a>(&'a self, cx: &'a Cx<'a>, run: &'a Run) -> Pending<'a, Dispatched>;
 
     /// What it knows of run `handle`, if anything has happened.
@@ -692,6 +692,7 @@ impl Ci {
             timeout_min,
             pin,
             exclude: &[],
+            retry_on: None,
         };
         Ok(route::route(&ask, &candidates))
     }

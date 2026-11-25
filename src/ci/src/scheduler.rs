@@ -2,7 +2,7 @@
 //! alarm loop that moves jobs along. It dispatches queued jobs to the connector routing picks
 //! (waiting for the first-ranked one until the wait limit), applies what runners and webhooks
 //! report through the state machine, polls jobs as a fallback and enforces deadlines, retries an
-//! infrastructure failure once elsewhere, and fans each change out: the `pigeon-ci-events`
+//! infrastructure failure once on the same connector, and fans each change out: the `pigeon-ci-events`
 //! queue, the job's signed `notify` POST, and for a final result the commit's git note.
 //!
 //! Its class is exported by the hosting Worker, which builds it with the connectors from its
@@ -33,7 +33,7 @@ use super::{
 use pigeon_core::buildkite_setup::{Kind, Owned};
 
 /// The scheduler's schema, one statement per migration, applied in order and never edited.
-const MIGRATIONS: [&str; 17] = [
+const MIGRATIONS: [&str; 18] = [
     "CREATE TABLE jobs (id TEXT PRIMARY KEY, repo TEXT NOT NULL, commit_sha TEXT NOT NULL, name TEXT NOT NULL, job TEXT NOT NULL, class TEXT NOT NULL, pin TEXT, task TEXT, caller TEXT, caller_name TEXT, notify_url TEXT, notify_key TEXT, state TEXT NOT NULL, attempt INTEGER NOT NULL, connector TEXT, handle TEXT, url TEXT, excluded TEXT NOT NULL, token_hash TEXT, token_expires_at INTEGER, deadline_at INTEGER, claimed_at INTEGER, next_poll_at INTEGER, created_at INTEGER NOT NULL, queued_at INTEGER NOT NULL, dispatched_at INTEGER, started_at INTEGER, finished_at INTEGER, detail TEXT)",
     "CREATE INDEX jobs_state ON jobs (state)",
     "CREATE INDEX jobs_commit ON jobs (repo, commit_sha)",
@@ -51,6 +51,7 @@ const MIGRATIONS: [&str; 17] = [
     "CREATE TABLE setup_builds (build TEXT PRIMARY KEY, at INTEGER NOT NULL)",
     "ALTER TABLE jobs ADD COLUMN image TEXT",
     "ALTER TABLE jobs ADD COLUMN instance TEXT",
+    "ALTER TABLE jobs ADD COLUMN retry_on TEXT",
 ];
 
 /// How long the pool's availability is trusted.
@@ -120,6 +121,8 @@ struct Row {
     output: Option<String>,
     /// The runner image recorded at dispatch; `None` where the connector records none.
     image: Option<String>,
+    /// The connector a retry stays on ([`retry_on`]); `None` on a first attempt.
+    retry_on: Option<String>,
 }
 
 impl Row {
@@ -158,7 +161,7 @@ impl Row {
             "dispatched_at": self.dispatched_at, "started_at": self.started_at,
             "finished_at": self.finished_at, "deadline_at": self.deadline_at,
             "exit_code": self.exit_code, "duration_ms": self.duration_ms(),
-            "image": self.image,
+            "image": self.image, "retry_on": self.retry_on,
         })
     }
 }
@@ -168,14 +171,15 @@ impl Row {
 pub enum Outcome {
     /// The connector took it.
     Dispatched(Dispatched),
-    /// It goes back in the queue, `exclude`d from the connector that failed it.
-    Requeue { exclude: String, why: String },
+    /// It goes back in the queue, to retry on `failed`, the connector that refused it
+    /// ([`retry_on`]).
+    Requeue { failed: String, why: String },
     /// It ends as an error.
     Fail { why: String },
 }
 
 /// What a dispatch's result does to a job on `attempt`, sent to `connector`: a refusal is an
-/// infrastructure failure, retried once elsewhere.
+/// infrastructure failure, retried once on the same connector.
 pub fn after_dispatch(
     attempt: u32,
     connector: &str,
@@ -187,7 +191,7 @@ pub fn after_dispatch(
             let report = Report::Infra { why: why.clone() };
             match state::on_report(JobState::Dispatched, attempt, &report) {
                 Next::Retry => Outcome::Requeue {
-                    exclude: connector.to_string(),
+                    failed: connector.to_string(),
                     why: format!("{connector}: {why}"),
                 },
                 _ => Outcome::Fail {
@@ -198,27 +202,23 @@ pub fn after_dispatch(
     }
 }
 
-/// A retry's exclusions after connector `failed` lost an attempt, and what the job says: the
-/// connector is excluded, so the retry goes elsewhere, unless the job is pinned to it. A pinned
-/// job has nowhere else to go, and an infrastructure loss (a container that stopped before
-/// reporting) is no reason to fail it: it retries on the same connector, a fresh instance, within
-/// [`state::MAX_ATTEMPTS`].
-pub fn retry_away(
-    mut excluded: Vec<String>,
-    failed: &str,
-    pin: Option<&str>,
-    why: &str,
-) -> (Vec<String>, String) {
-    if pin == Some(failed) {
-        return (
-            excluded,
-            format!("retrying on {failed}, which it is pinned to: {why}"),
-        );
+/// Where a retry goes after connector `failed` lost an attempt to an infrastructure failure (a
+/// refused dispatch, a container that stopped before reporting), and what the job says: back
+/// to `failed`, a fresh runner there, within [`state::MAX_ATTEMPTS`]. Never elsewhere: routing
+/// matches hardware, not what a connector's runners carry, so another connector that covers the
+/// class may still lack what the job needs (Buildkite's hosted agents have no Rust toolchain
+/// and no pigeon base image, so `test` sent there exits 127 at `cargo: not found`). A job that
+/// fails (a result, after reporting) is never retried at all.
+pub fn retry_on(failed: &str, pin: Option<&str>, why: &str) -> (Option<String>, String) {
+    if failed.is_empty() {
+        return (None, format!("retrying: {why}"));
     }
-    if !excluded.iter().any(|e| e == failed) {
-        excluded.push(failed.to_string());
-    }
-    (excluded, format!("retrying elsewhere: {why}"))
+    let said = if pin == Some(failed) {
+        format!("retrying on {failed}, which it is pinned to: {why}")
+    } else {
+        format!("retrying on {failed}, a fresh runner: {why}")
+    };
+    (Some(failed.to_string()), said)
 }
 
 /// A commit's note lines from its finished jobs, oldest first: the latest result per job name,
@@ -733,6 +733,7 @@ impl Scheduler {
             }
             let job = row.job()?;
             let excluded = row.excluded();
+            let retry_on = row.retry_on.as_deref().filter(|c| !c.is_empty());
             let offers: Vec<_> = self
                 .settings
                 .connectors
@@ -758,6 +759,7 @@ impl Scheduler {
                 timeout_min: job.timeout_min,
                 pin: row.pin.as_deref(),
                 exclude: &excluded,
+                retry_on,
             };
             let routed = match route::route(&ask, &candidates) {
                 Ok(r) => r,
@@ -767,11 +769,16 @@ impl Scheduler {
                         .map(|(c, r)| format!("{c}: {r}"))
                         .collect::<Vec<_>>()
                         .join("; ");
-                    self.finish(
-                        &row,
-                        JobState::Error,
-                        Some(&format!("no connector can run it: {why}")),
-                    )?;
+                    let detail = match retry_on {
+                        // An infrastructure failure, said as one: the retry has nowhere it is
+                        // known to suit.
+                        Some(on) => format!(
+                            "infrastructure: {on} lost the last attempt and cannot take the \
+                             retry, and no other connector is known to suit the job: {why}"
+                        ),
+                        None => format!("no connector can run it: {why}"),
+                    };
+                    self.finish(&row, JobState::Error, Some(&detail))?;
                     continue;
                 }
             };
@@ -864,21 +871,20 @@ impl Scheduler {
                         a.free = a.free.map(|f| f.saturating_sub(1));
                     }
                 }
-                Outcome::Requeue { exclude, why } => self.requeue(&row, &exclude, &why)?,
+                Outcome::Requeue { failed, why } => self.requeue(&row, &failed, &why)?,
                 Outcome::Fail { why } => self.finish(&row, JobState::Error, Some(&why))?,
             }
         }
         Ok(())
     }
 
-    /// Puts a job back in the queue as its next attempt, away from `exclude`, or on it again
-    /// when the job is pinned there ([`retry_away`]).
-    fn requeue(&self, row: &Row, exclude: &str, why: &str) -> Result<()> {
-        let (excluded, said) = retry_away(row.excluded(), exclude, row.pin.as_deref(), why);
+    /// Puts a job back in the queue as its next attempt, on `failed` again ([`retry_on`]).
+    fn requeue(&self, row: &Row, failed: &str, why: &str) -> Result<()> {
+        let (on, said) = retry_on(failed, row.pin.as_deref(), why);
         self.db.exec(
-            "UPDATE jobs SET state = 'queued', attempt = attempt + 1, excluded = ?, connector = NULL, handle = NULL, url = NULL, token_hash = NULL, token_expires_at = NULL, deadline_at = NULL, claimed_at = NULL, next_poll_at = NULL, dispatched_at = NULL, started_at = NULL, image = NULL, queued_at = ?, detail = ? WHERE id = ?",
+            "UPDATE jobs SET state = 'queued', attempt = attempt + 1, retry_on = ?, connector = NULL, handle = NULL, url = NULL, token_hash = NULL, token_expires_at = NULL, deadline_at = NULL, claimed_at = NULL, next_poll_at = NULL, dispatched_at = NULL, started_at = NULL, image = NULL, queued_at = ?, detail = ? WHERE id = ?",
             vec![
-                serde_json::to_string(&excluded)?.into(),
+                opt(on.as_deref()),
                 now().into(),
                 said.as_str().into(),
                 row.id.as_str().into(),
