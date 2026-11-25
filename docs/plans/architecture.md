@@ -111,7 +111,9 @@ I check each result, apply it, and run fmt, clippy and the smoke suite myself.
 - Merge planner (pigeon.dev into the platform): agreed. `site` serves the apex by host, from
   `architecture::built`, and owns `site.rs`, Site's settings and its footprint.
 - Console planner: agreed. The tab answers `{html, built_from}`, and I don't touch `console.rs`,
-  `sections.rs` or `app.js`.
+  `sections.rs` or `app.js`. (Later: `app.js` is deleted and the console is the `/app` shell;
+  its Architecture view, `src/capabilities/src/console/web/architecture.js`, reads
+  `architecture_describe` through `/app/op`.)
 - Policy planner: no overlap expected. I add no policy rules.
 
 ## Open items

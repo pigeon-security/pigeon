@@ -412,9 +412,11 @@ refused caller gets HTTP 401. `manifest`, `events` and `fetch` carry no caller a
 through without auth.
 
 **Callers.**
-- Core's `Remote` (`src/capabilities/src/remote.rs`): `call`, `section`, `secret`, and
-  `call_owned`. It signs with the shared `CALLER_KEY` just before each send, so the signature is
-  fresh. This is the only caller of the gateway.
+- Core's `Remote` (`src/capabilities/src/remote.rs`): `call`, `section` and `secret`. It signs
+  with the shared `CALLER_KEY` just before each send, so the signature is fresh. This is the only
+  caller of the gateway. (`call_owned`, listed here before, is gone; its replacement
+  `call_owned_instance` is used only for queued publishes to `pigeon-sites`, from
+  `src/capabilities/src/github.rs`.)
 - The AI agents Worker, the proxy and the CI code reach core, not the gateway. The model job
   objects live in the gateway and ask core (`PLATFORM`) for a credential: a refusal there is
   core's 401, not the gateway's.

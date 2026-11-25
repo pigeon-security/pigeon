@@ -1,10 +1,16 @@
 # The console
 
-Superseded in part by [console-hardening.md](console-hardening.md): the tabs are now Approvals,
-Architecture, Access and Cost.
+Superseded in part by [console-hardening.md](console-hardening.md), which narrowed the tabs to
+Approvals, Architecture, Access and Cost, and then by the app cutover (`53a0068`, "App cutover"
+at the end): the console is served only at `/app`, from the shell in
+`src/capabilities/src/console/web/` (`shell.js` and one script and stylesheet per view). The old
+page paths (`/`, `/approvals`, `/instances`, `/architecture`, `/access`, `/settings`, `/cost`,
+`/gateways`) redirect into it (`app_redirect` in `src/capabilities/src/console/page.rs`).
+`console/app.js`, `console/chart.js`, `console/overview.js` and `console/platform.js` no longer
+exist. The sections below are the record of what was built first.
 
-Status: all three phases built and handed back together, at the person's request, awaiting
-deploy. Departures from the plan: the three passkey-bound writes live in `console/writes.rs`
+Status: deployed (all three phases), then narrowed by console-hardening.md and replaced by the
+`/app` shell. Departures from the plan: the three passkey-bound writes live in `console/writes.rs`
 (pure: names, targets, purposes) with their handlers in `console.rs`, written by this session;
 the writes' routes are `POST /console/write/{passkey-remove|app-disconnect|invite}/{begin|finish}`
 with `{target}`; the Architecture tab and the CI section answer `{html}`, which the shell places
@@ -71,8 +77,10 @@ src/capabilities/src/
   console/page.rs         pure: the page's HTML shell and its CSP
   console/console.css     header, tabs, stat cards, pills, chart, sign-in panel
   console/app.js          shell: sign-in, header, tabs, routing, account card, section loader
+                          (deleted; the shell is now console/web/shell.js)
   console/chart.js        the stacked daily bar chart, its tooltip, keyboard and table view
-  console/overview.js     the Overview: needs-you alert and the cost stat cards
+                          (deleted; cost is now console/web/cost.js)
+  console/overview.js     the Overview: needs-you alert and the cost stat cards (deleted)
   console/keys.js         Settings › Keys: secrets and proxy credentials
   console/users.js        Settings › Users: people, passkeys, apps, invite, avatar
   console/icon.png        the pigeon icon, 144 px
@@ -162,7 +170,7 @@ and are now gone, with the old pages' scripts `secrets.js` and `tokens.js`.
 | p1-2 | `console/sections.rs` | sonnet | `Tab`, `Section`, ordering of tabs and sections, grouping several capabilities under one id, overview totals; tests. |
 | p1-3 | `console/page.rs` | sonnet | the HTML shell via `Page::render` (no inline script), `CSP`, `html(page)` with the headers of `passkeys::html` plus the CSP above; tests that the shell holds no inline script and links every asset. |
 | p1-4 | `console/console.css` | sonnet | the mockup's header, tabs, stat cards, pills, chart, sign-in panel and account card in the design system's tokens, with the series colours above; phone layout at 640 px. |
-| p1-5 | `console/app.js` | opus | sign-in panel, header, tabs on paths with `pushState`, account card (sign out, set picture), section loader with a registry other scripts fill (`window.pigeonConsole.section(id, render)`), anchors, 401 → sign-in panel. |
+| p1-5 | `console/app.js` (since deleted; see the top) | opus | sign-in panel, header, tabs on paths with `pushState`, account card (sign out, set picture), section loader with a registry other scripts fill (`window.pigeonConsole.section(id, render)`), anchors, 401 → sign-in panel. |
 | p1-6 | `passkeys/passkey.js` | sonnet | `say(text, bad, el = status)`; nothing else changes. |
 | — | `lib.rs`, `users.rs`, `console.rs`, `settings.rs`, platform `lib.rs` | this session | the trait methods, migrations and operations, routes, registration, `GET /`. |
 
@@ -175,7 +183,7 @@ stubbed signs in, switches tabs, keeps the path, opens the account card and sign
 | Step | File | Model | Brief |
 |---|---|---|---|
 | p2-1 | `models/daily.rs` | sonnet | logs → `[{day, family, cost}]` for the last `days` UTC days, families Opus/Sonnet/Haiku from the model name, others as "Other"; zero-filled days; tests, including the truncated flag. |
-| p2-2 | `console/chart.js` | opus | the stacked bars: fixed order from the baseline, 2 px gaps, rounded tops, one hit column per day, tooltip with every family and the total, ←/→/Esc, the table view, the 7/30 toggle and the pills with each family's cost over the range. |
+| p2-2 | `console/chart.js` (since deleted; see the top) | opus | the stacked bars: fixed order from the baseline, 2 px gaps, rounded tops, one hit column per day, tooltip with every family and the total, ←/→/Esc, the table view, the 7/30 toggle and the pills with each family's cost over the range. |
 | p2-3 | `console/overview.js` | sonnet | the needs-you alert and the stat cards (Total cost, then one per cost section) linking to their sections. |
 | — | `models.rs`, `ci.rs`, `architecture.rs` | this session | the Models section and its data; the CI section's "no cost yet" text; the Architecture tab from `render(model)`. |
 

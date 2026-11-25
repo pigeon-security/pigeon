@@ -1,6 +1,10 @@
 # Console hardening
 
 Status: deployed 2026-11-21 (landing `slWijyeD5dnMaimB`, main `2038674`). Branch `claude/console-hardening`.
+Since `53a0068` the console is the `/app` shell (`src/capabilities/src/console/web/`) and the
+root-path tabs redirect into it ([console.md](console.md), "App cutover"); `console/app.js` and
+`console/chart.js`, named in the phases below, are deleted. The phases are the record of what
+this plan built.
 Mockup: [pigeon Console, focused](https://claude.ai/artifact/BLdr2D7rGU344aqP5KcYhv).
 
 The console at `platform.pigeon.dev` is slow to load and sometimes shows a network error. This
@@ -91,7 +95,7 @@ Architecture answers at all.
 | 2c | `users.rs` | Sections `people` and `delegation` split from `users`: people with passkeys and invite; each service account acting for the person, linked when, its tokens, disconnect. |
 | 2d | `secrets.rs`, `proxy.rs` | Section `credentials` (tab Access) keeps Keys's data, expiry first. |
 | 2e | `models.rs`, `ci.rs` | `models` moves to tab Cost; the CI section goes. |
-| 2f | `console/*.js` | `approvals.js`, `access.js` (from `keys.js` and `users.js`), `cost.js` (from `overview.js` and `chart.js`); `overview.js` and `land.js` go. |
+| 2f | `console/*.js` | `approvals.js`, `access.js` (from `keys.js` and `users.js`), `cost.js` (from `overview.js` and `chart.js`); `overview.js` and `land.js` go. (Now: the `/app` views in `console/web/`, which mount `approvals.js`, `instances.js`, `keys.js` and `users.js` through `management.js`; Cost is `web/cost.js`.) |
 
 Done when: as phase 1, plus Playwright on the shell with the API stubbed, at 1000 px and 390 px.
 
@@ -99,7 +103,7 @@ Done when: as phase 1, plus Playwright on the shell with the API stubbed, at 100
 
 | Step | Where | What |
 | --- | --- | --- |
-| 3a | `console/app.js` | `/me` and `/tabs` in parallel; per-section skeleton, `AbortController` timeout of 12 s, one silent retry on a network error, then the message and a Retry button; "updated … ago" from the snapshot's `at_ms`; the Approvals tab polled every 30 s while open. |
+| 3a | `console/app.js` (deleted; now `console/web/shell.js`) | `/me` and `/tabs` in parallel; per-section skeleton, `AbortController` timeout of 12 s, one silent retry on a network error, then the message and a Retry button; "updated … ago" from the snapshot's `at_ms`; the Approvals tab polled every 30 s while open. |
 | 3b | `console/console.css` | Skeleton, retry row, the Approvals dot on the tab. |
 
 Done when: live, with one section's source failing, the others still render and the failed one

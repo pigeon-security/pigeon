@@ -38,7 +38,7 @@ MCP refuses it, because MCP looks up only its own token kind. The proxies refuse
 
 ### Issue
 
-Open the console's Access → Secrets and credentials → Proxy credentials (https://platform.pigeon.dev/access#credentials; the old `/tokens` and `/settings` pages redirect there).
+Open the console's Access → Credentials → Proxy credentials (https://platform.pigeon.dev/app?tab=management&subtab=credentials). The old `/access`, `/settings` and `/tokens` pages redirect there.
 
 - Seeing the list takes the console's sign-in.
 - Issuing takes a passkey approval bound to the label and the lifetime.
