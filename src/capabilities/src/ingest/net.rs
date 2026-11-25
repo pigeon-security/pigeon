@@ -28,7 +28,8 @@ async fn http(
         h.set(k, v)?;
     }
     let mut init = RequestInit::new();
-    init.with_method(method);
+    init.with_method(method)
+        .with_redirect(worker::RequestRedirect::Manual);
     if let Some((content_type, text)) = body {
         h.set("content-type", content_type)?;
         init.with_body(Some(JsValue::from_str(&text)));
@@ -253,7 +254,7 @@ pub async fn data_post(
     if (200..300).contains(&s) {
         Ok(t)
     } else {
-        Err(failed("the data Worker's answer", s, &t))
+        Err(bad(format!("the data Worker rejected the request ({s})")))
     }
 }
 

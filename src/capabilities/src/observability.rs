@@ -3,6 +3,8 @@
 //! model cost and deploys. The folding is plain functions with no Worker types, so the smoke
 //! suite runs them on fixtures. See docs/plans/observability.md.
 
+pub mod instance;
+
 use std::collections::BTreeMap;
 
 use pigeon_core::lanes::Map;
@@ -654,6 +656,7 @@ impl Capability for Observability {
 
     fn tools(&self) -> Vec<Tool> {
         vec![
+            instance::tool(),
             Tool {
                 name: "observability_monitors_plan",
                 description: "Dry run of the notification policies pigeon wants (Workers \
@@ -742,6 +745,7 @@ impl Capability for Observability {
     fn call<'a>(&'a self, cx: &'a Context<'a>, tool: &'a str, args: &'a Value) -> Call<'a> {
         Box::pin(async move {
             match tool {
+                instance::METRICS => return instance::metrics(cx, args).await,
                 "cost_daily" => return crate::cost::cost_daily(cx, args).await,
                 "tokens_status" => return tokens_status(cx, args).await,
                 "observability_errors" => return errors(self, cx, args).await,

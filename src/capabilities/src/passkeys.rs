@@ -51,6 +51,13 @@ async fn standard_code(cx: &Context<'_>, body: &Value) -> Result<()> {
     }
 }
 
+fn enrol_purpose(code: &str, scope: Option<&str>) -> String {
+    match scope {
+        Some(binding) => format!("site-enrol:{binding}:{code}"),
+        None => format!("enrol:{code}"),
+    }
+}
+
 impl Passkeys {
     fn rp(&self) -> (String, String) {
         (self.host.clone(), format!("https://{}", self.host))
@@ -147,15 +154,29 @@ impl Passkeys {
     }
 
     /// Starts registering a passkey for the enrolment code's user.
-    pub(crate) async fn enrol_begin(&self, cx: &Context<'_>, body: &Value) -> Result<Value> {
+    async fn enrol_begin(&self, cx: &Context<'_>, body: &Value) -> Result<Value> {
+        self.enrol_begin_for(cx, body, None).await
+    }
+
+    pub(crate) async fn enrol_begin_for(
+        &self,
+        cx: &Context<'_>,
+        body: &Value,
+        scope: Option<&str>,
+    ) -> Result<Value> {
         let code = arg(body, "code")?;
         let user: User = serde_json::from_value(
-            directory(cx.env, "enrol.peek", json!({ "code": code })).await?,
+            directory(
+                cx.env,
+                "enrol.peek",
+                json!({ "code": code, "site_scope": scope }),
+            )
+            .await?,
         )?;
         let c = directory(
             cx.env,
             "challenge.create",
-            json!({ "purpose": format!("enrol:{code}") }),
+            json!({ "purpose": enrol_purpose(code, scope) }),
         )
         .await?;
         Ok(json!({
@@ -169,12 +190,21 @@ impl Passkeys {
     }
 
     /// Checks the new passkey and keeps it for the enrolment code's user; the code is used up.
-    pub(crate) async fn enrol_finish(&self, cx: &Context<'_>, body: &Value) -> Result<Value> {
+    async fn enrol_finish(&self, cx: &Context<'_>, body: &Value) -> Result<Value> {
+        self.enrol_finish_for(cx, body, None).await
+    }
+
+    pub(crate) async fn enrol_finish_for(
+        &self,
+        cx: &Context<'_>,
+        body: &Value,
+        scope: Option<&str>,
+    ) -> Result<Value> {
         let code = arg(body, "code")?;
         let challenge = directory(
             cx.env,
             "challenge.take",
-            json!({ "id": arg(body, "challenge_id")?, "purpose": format!("enrol:{code}") }),
+            json!({ "id": arg(body, "challenge_id")?, "purpose": enrol_purpose(code, scope) }),
         )
         .await?;
         let registration: Registration = serde_json::from_value(body["credential"].clone())?;
@@ -186,7 +216,12 @@ impl Passkeys {
         let credential =
             webauthn::register(&registration, challenge.as_str().unwrap_or_default(), &rp)?;
         let user: User = serde_json::from_value(
-            directory(cx.env, "enrol.take", json!({ "code": code })).await?,
+            directory(
+                cx.env,
+                "enrol.take",
+                json!({ "code": code, "site_scope": scope }),
+            )
+            .await?,
         )?;
         directory(
             cx.env,

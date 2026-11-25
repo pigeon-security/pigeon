@@ -244,3 +244,20 @@ this. The instances layer is never on the public page.
    with no pre-flight.
 5. Before any real site sets `auth`, make its instance Worker's workers.dev address private
    (Known limit, part A).
+
+### Approved site access bindings
+
+A gated site's access binding includes its instance ID, site name and hostname.
+Core checks the approved passkey setting and applied hostname before it starts
+or finishes a ceremony. A signed-in session uses a key derived for that binding,
+and the serving Worker checks the host allowlist on each request. Host and
+allowlist changes remain subject to the existing host map cache lifetime.
+
+Site visitor identities and site enrollment links record the binding at issue.
+A standard user can still enroll for a site when an enrollment link explicitly
+names that site. Existing standard platform enrollment links are unaffected.
+Existing host-only site cookies require signing in again. Legacy site visitor
+identities with no recorded binding require a new site invitation, and older
+site enrollment links must be reissued. Gated host serving requires both the
+platform and Sites Workers to support the new binding. The direct upstream
+access limitation still applies.

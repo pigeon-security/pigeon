@@ -368,7 +368,7 @@ async fn subdomains(env: &Env, zone: &str) -> Result<Value> {
             if let Value::String(upstream) =
                 directory(env, "setting.get", json!({ "key": key })).await?
             {
-                let mut entry = json!({ "host": host, "instance": i.id, "upstream": upstream });
+                let mut entry = json!({ "host": host, "instance": i.id, "site": site.name, "upstream": upstream });
                 if let Some(auth) = &site.auth {
                     entry["auth"] = json!(auth);
                     entry["allow"] = json!(site.allow);

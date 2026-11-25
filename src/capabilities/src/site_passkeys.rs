@@ -3,7 +3,7 @@
 //! decides for itself who may come in. The relying party is the site's own host, so a passkey
 //! made for one host cannot sign in on another.
 
-use pigeon_core::mcp::Tool;
+use pigeon_core::{mcp::Tool, site_auth};
 use serde_json::{Value, json};
 use worker::{Error, Result};
 
@@ -25,23 +25,55 @@ fn bad(why: &str) -> Error {
     Error::RustError(why.to_string())
 }
 
-impl SitePasskeys {
-    /// `host` when it is one label under the platform zone.
-    fn host<'a>(&self, host: &'a str) -> Result<&'a str> {
-        let label = host
-            .strip_suffix(&format!(".{}", self.zone))
-            .filter(|l| record::label(l));
-        label
-            .map(|_| host)
-            .ok_or_else(|| bad("`host` must be a subdomain of the platform zone"))
+/// The approved and applied binding, as seen by core at ceremony time.
+pub(crate) async fn approved(
+    env: &worker::Env,
+    zone: &str,
+    host: &str,
+) -> Result<(String, site_auth::Config)> {
+    if !host
+        .strip_suffix(&format!(".{zone}"))
+        .is_some_and(record::label)
+    {
+        return Err(bad("`host` must be a subdomain of the platform zone"));
     }
+    let instances = crate::instances::all(env).await?;
+    let (instance, site) = record::site_for_host(&instances, host, zone)
+        .filter(|(_, site)| site.auth.as_deref() == Some("passkey"))
+        .ok_or_else(|| bad("passkey access is not enabled for this site"))?;
+    let key = crate::instances::plan::subdomain_key(host);
+    if !directory(env, "setting.get", json!({ "key": key }))
+        .await?
+        .is_string()
+    {
+        return Err(bad("this site's hostname has not been applied"));
+    }
+    Ok((
+        site_auth::binding(&instance.id, &site.name, host),
+        site_auth::Config {
+            allow: site.allow.clone(),
+        },
+    ))
+}
 
+impl SitePasskeys {
     /// The user an enrolment code is for, when they may register a passkey on `host`: a
     /// standard user, or a site user of that same host. Another host's site user and service
     /// users are refused.
-    async fn enrolling(&self, cx: &Context<'_>, host: &str, code: &str) -> Result<User> {
+    async fn enrolling(
+        &self,
+        cx: &Context<'_>,
+        host: &str,
+        scope: &str,
+        code: &str,
+    ) -> Result<User> {
         let user: User = serde_json::from_value(
-            directory(cx.env, "enrol.peek", json!({ "code": code })).await?,
+            directory(
+                cx.env,
+                "enrol.peek",
+                json!({ "code": code, "site_scope": scope }),
+            )
+            .await?,
         )?;
         if user.kind == "standard" || user.kind == format!("site:{host}") {
             Ok(user)
@@ -54,12 +86,19 @@ impl SitePasskeys {
         if cx.caller.is_none_or(|c| c.user.id != CALLER) {
             return Err(bad("only pigeon-sites may use site_passkey"));
         }
-        let host = self.host(arg(args, "host")?)?;
+        let host = arg(args, "host")?;
+        let (scope, config) = approved(cx.env, &self.zone, host).await?;
+        if args
+            .get("site_scope")
+            .is_some_and(|provided| provided != &scope)
+        {
+            return Err(bad("the site's approved binding changed; reload the page"));
+        }
         let passkeys = Passkeys {
             host: host.to_string(),
             site_name: host.to_string(),
         };
-        let purpose = format!("site:{host}");
+        let purpose = format!("site:{scope}");
         Ok(match arg(args, "step")? {
             "sign_in_begin" => passkeys.sign_in_begin(cx.env, &purpose, None).await?,
             "sign_in_finish" => {
@@ -70,19 +109,26 @@ impl SitePasskeys {
                     directory(cx.env, "users.get", json!({ "id": key.user_id })).await?,
                 )
                 .map_err(|_| bad("this passkey has no user"))?;
-                json!({ "user": { "id": user.id, "kind": user.kind, "name": user.name } })
+                if !site_auth::allowed(&config, host, &user.id, &user.kind)
+                    || (user.kind != "standard"
+                        && directory(cx.env, "users.site_scope", json!({ "id": user.id })).await?
+                            != scope)
+                {
+                    return Err(bad("this passkey is not allowed here"));
+                }
+                json!({ "user": { "id": user.id, "kind": user.kind, "name": user.name }, "site_scope": scope })
             }
             "enrol_peek" => {
-                let user = self.enrolling(cx, host, arg(args, "code")?).await?;
+                let user = self.enrolling(cx, host, &scope, arg(args, "code")?).await?;
                 json!({ "name": user.name })
             }
             "enrol_begin" => {
-                self.enrolling(cx, host, arg(args, "code")?).await?;
-                passkeys.enrol_begin(cx, args).await?
+                self.enrolling(cx, host, &scope, arg(args, "code")?).await?;
+                passkeys.enrol_begin_for(cx, args, Some(&scope)).await?
             }
             "enrol_finish" => {
-                self.enrolling(cx, host, arg(args, "code")?).await?;
-                passkeys.enrol_finish(cx, args).await?
+                self.enrolling(cx, host, &scope, arg(args, "code")?).await?;
+                passkeys.enrol_finish_for(cx, args, Some(&scope)).await?
             }
             other => return Err(bad(&format!("no step `{other}`"))),
         })
@@ -112,6 +158,7 @@ impl Capability for SitePasskeys {
                 "properties": {
                     "step": { "type": "string" },
                     "host": { "type": "string", "description": "The site's host, such as notes.pigeon.dev." },
+                    "site_scope": { "type": "string", "description": "The site binding from the serving Worker's approved host map." },
                     "code": { "type": "string" },
                     "challenge_id": { "type": "string" },
                     "assertion": { "type": "object", "additionalProperties": true },

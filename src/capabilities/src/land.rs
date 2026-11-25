@@ -19,10 +19,10 @@ pub mod merge;
 pub mod state;
 pub mod watch;
 
-use pigeon_core::artifacts::{self, Access};
+use pigeon_core::artifacts::Access;
 use pigeon_core::attribution;
 use pigeon_core::durable::{self, Db, opt};
-use pigeon_core::git::{self, Remote, Update, ZERO};
+use pigeon_core::git::{self, Update, ZERO};
 use pigeon_core::gitobj::{self, Object};
 use pigeon_core::lanes::After;
 use pigeon_core::mcp::Tool;
@@ -56,9 +56,6 @@ const NOTE_TRIES: i64 = 10;
 const TEST_REF_BATCH: usize = 5;
 /// How many refused deletes of one test ref before it is left alone.
 const TEST_REF_TRIES: i64 = 3;
-/// The CI scheduler, whose job states the Lander follows.
-const CI_BINDING: &str = "CI_SCHEDULER";
-const CI_OBJECT: &str = "scheduler";
 /// The Worker the map requires, deployed before any other a landing affects.
 const CORE_WORKER: &str = "core";
 
@@ -748,6 +745,11 @@ impl Row {
     fn needs_approval(&self) -> bool {
         self.approval_reason.is_some() && self.approved_by.is_none()
     }
+}
+
+struct SubmittedJob {
+    id: String,
+    reused: bool,
 }
 
 /// A CI deploy job that has ended, as the Lander keeps it.
@@ -1989,10 +1991,8 @@ impl Lander {
             if let Some(c) = &s.deploy_connector {
                 submit["connector"] = json!(c);
             }
-            let job = self.dispatch(&landing, "ci_submit", &submit).await?;
-            let job = job["id"]
-                .as_str()
-                .ok_or_else(|| bad("CI answered no job id"))?;
+            let submitted = self.submit_ci(&landing, &submit).await?;
+            let job = submitted.id.as_str();
             self.db.exec(
                 "UPDATE deploys SET job = ?, script = ?, tries = 0, detail = ?, updated_at = ? WHERE id = ? AND state = 'running' AND job IS NULL",
                 vec![
@@ -2351,14 +2351,7 @@ impl Lander {
     /// deploy's detail as `(exit code N)`). The exit code is returned only when the job's state
     /// is exactly `failed`; for `timed_out`, `cancelled` and `error` it is `None`.
     async fn job_ended_code(&self, job: &str) -> Result<Option<JobEnd>> {
-        let status = durable::call(
-            &self.env,
-            CI_BINDING,
-            CI_OBJECT,
-            "status",
-            &json!({ "id": job }),
-        )
-        .await?;
+        let status = crate::ci::job_status(&self.env, job).await?;
         let state = status["state"].as_str().unwrap_or_default().to_string();
         let ended = matches!(
             state.as_str(),
@@ -2390,9 +2383,16 @@ impl Lander {
         }))
     }
 
-    /// Runs `tool` as the landing's caller, through the same dispatch as `/mcp`.
-    async fn dispatch(&self, row: &Row, tool: &str, args: &Value) -> Result<Value> {
-        self.dispatch_as(&row.caller, tool, args).await
+    /// Submit through the existing CI capability and approval gate as the landing's caller.
+    async fn submit_ci(&self, row: &Row, args: &Value) -> Result<SubmittedJob> {
+        let answer = self.dispatch_as(&row.caller, "ci_submit", args).await?;
+        let id = answer["id"]
+            .as_str()
+            .ok_or_else(|| bad("CI answered no job id"))?;
+        Ok(SubmittedJob {
+            id: id.to_string(),
+            reused: answer["reused"].as_bool() == Some(true),
+        })
     }
 
     /// Runs `tool` as the caller kept as JSON in `caller_json`, through the same dispatch as `/mcp`.
@@ -2689,10 +2689,9 @@ impl Lander {
             }
             State::Testing => {
                 let Some(job) = &row.test_job else {
-                    let job = self
-                        .dispatch(
+                    let submitted = self
+                        .submit_ci(
                             &row,
-                            "ci_submit",
                             &json!({
                                 "repo": s.repo_name(), "commit": row.commit_sha,
                                 "job": s.test_job, "task": format!("land {} test", row.id),
@@ -2700,11 +2699,8 @@ impl Lander {
                             }),
                         )
                         .await?;
-                    let reused = job["reused"].as_bool() == Some(true);
-                    let job = job["id"]
-                        .as_str()
-                        .ok_or_else(|| bad("CI answered no job id"))?;
-                    let detail = if reused {
+                    let job = submitted.id.as_str();
+                    let detail = if submitted.reused {
                         format!("reused test job {job}")
                     } else {
                         format!("test job {job} submitted")
@@ -2791,18 +2787,13 @@ impl Lander {
         )?;
         let s = &self.settings;
         let account = pigeon_core::account_from_env(&self.env, &s.parent).await?;
-        let found = artifacts::repo(&account, &s.namespace, &s.repo)
-            .await?
-            .ok_or_else(|| bad("no repository to note"))?;
-        let minted = artifacts::mint(&account, &s.namespace, &s.repo, Access::Write, 300).await?;
-        let remote = Remote {
-            url: found.remote.trim_end_matches('/').to_string(),
-            authorization: format!("Bearer {}", minted.value),
-        };
+        let session =
+            merge::Session::open_for(&account, &s.namespace, &s.repo, Access::Write, 300).await?;
+        let remote = &session.remote;
         let pairs: Vec<(String, String)> =
             notes.into_iter().map(|n| (n.commit_sha, n.text)).collect();
         let pushed = async {
-            let refs = git::refs(&remote, "git-receive-pack").await?;
+            let refs = git::refs(remote, "git-receive-pack").await?;
             let tip = refs.refs.get(NOTES_REF).cloned();
             let (objects, id) =
                 notes_commit(&pairs, tip.as_deref(), now() / 1000).map_err(|e| bad(&e))?;
@@ -2811,7 +2802,7 @@ impl Lander {
                 old: tip.unwrap_or_else(|| ZERO.to_string()),
                 new: id,
             };
-            let status = git::push(&remote, &refs.caps, &[update], &gitobj::pack(&objects)).await?;
+            let status = git::push(remote, &refs.caps, &[update], &gitobj::pack(&objects)).await?;
             if status.iter().any(|x| x == &format!("ok {NOTES_REF}")) {
                 Ok(())
             } else {
@@ -2819,11 +2810,7 @@ impl Lander {
             }
         }
         .await;
-        if let Some(id) = &minted.id
-            && let Err(e) = artifacts::revoke(&account, &s.namespace, &s.repo, id).await
-        {
-            console_error!("land: revoking the notes push token: {e}");
-        }
+        session.close().await;
         let column = if pushed.is_ok() {
             "note_pushed = 1"
         } else {

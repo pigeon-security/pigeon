@@ -206,7 +206,16 @@ impl Service for Sites {
                         };
                         deploy::rollback(env, key.as_bytes(), caller, instance, release).await
                     } else {
-                        deploy::deploy(env, key.as_bytes(), caller, instance, rev).await
+                        let publishing_binding = req.args["publishing_binding"].as_str();
+                        deploy::deploy(
+                            env,
+                            key.as_bytes(),
+                            caller,
+                            instance,
+                            rev,
+                            publishing_binding,
+                        )
+                        .await
                     };
                     match result {
                         Ok(v) => Answer::Ok(v),

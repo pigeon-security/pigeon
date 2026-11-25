@@ -11,13 +11,52 @@
 
 pub mod hosts;
 pub mod net;
+mod profile;
+const SCOPED_TOOLS: &[crate::instances::tools::Registration] = &[
+    crate::instances::tools::Registration {
+        name: "ingest_plan",
+        description: Some("Plan ingestion using this instance's approved source and destination."),
+        hidden: &["source", "bucket", "prefix"],
+        arguments: &[
+            "dry_run",
+            "keep_archives",
+            "fingerprints",
+            "size_bytes",
+            "commit",
+        ],
+    },
+    crate::instances::tools::Registration {
+        name: "ingest_start",
+        description: Some("Start an approved ingestion plan for this instance."),
+        hidden: &[],
+        arguments: &["plan"],
+    },
+    crate::instances::tools::Registration {
+        name: "ingest_report",
+        description: Some("Read an ingestion report owned by this instance."),
+        hidden: &[],
+        arguments: &["run"],
+    },
+];
+
+pub fn instance_tools(
+    instance: &crate::instances::record::Instance,
+) -> serde_json::Result<&'static [crate::instances::tools::Registration]> {
+    Ok(if instance.ingest.as_ref().is_some_and(Profile::enabled) {
+        SCOPED_TOOLS
+    } else {
+        &[]
+    })
+}
+
+pub use profile::{Bindings, Profile};
 
 use pigeon_core::mcp::Tool;
 use pigeon_core::r2::{self, Bucket};
 use pigeon_core::s3::{self, Endpoint};
 use pigeon_core::secrets_store;
 use pigeon_ingest::estimate::{self, Host};
-use pigeon_ingest::manifest::{self, JobSpec, SourceSpec};
+use pigeon_ingest::manifest::{self, DestSpec, JobSpec, SourceSpec};
 use pigeon_ingest::protocol::{self, StartRequest, StopRequest};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -89,6 +128,12 @@ pub struct RunRecord {
     pub vm: Option<String>,
     /// Whether the VM was deleted (or the Container stopped).
     pub vm_deleted: bool,
+    /// The bound R2 destination for new runs. Legacy rows have no snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination: Option<DestSpec>,
+    /// The data Worker used for this run, for safe cleanup of Cloudflare runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_worker: Option<String>,
     /// The approval that allowed it.
     pub approval: String,
     /// The commit the runner was built from.
@@ -97,6 +142,38 @@ pub struct RunRecord {
     pub dry_run: bool,
     /// When it was started, in unix milliseconds.
     pub started_ms: i64,
+}
+
+/// Runtime provisioner values that must remain the same from plan to start.
+fn execution_binding(host: Host, worker: Option<&str>, host_key: Option<&str>) -> Result<Value> {
+    match host {
+        Host::Cloudflare => {
+            let url = worker.ok_or_else(|| bad("the data Worker's URL is not in the Directory"))?;
+            let parsed = worker::Url::parse(url)
+                .map_err(|_| bad("the data Worker has no valid HTTPS origin"))?;
+            if parsed.scheme() != "https"
+                || parsed.host_str().is_none()
+                || !parsed.username().is_empty()
+                || parsed.password().is_some()
+                || parsed.path() != "/"
+                || parsed.query().is_some()
+                || parsed.fragment().is_some()
+                || url.ends_with('/')
+            {
+                return Err(bad(
+                    "the data Worker must have an HTTPS origin with no trailing slash",
+                ));
+            }
+            Ok(json!({ "data_worker": url }))
+        }
+        Host::Scaleway => {
+            let key = host_key.ok_or_else(|| bad("the Scaleway provisioning key is missing"))?;
+            let (project, _) = hosts::scaleway_parts(key).map_err(bad)?;
+            Ok(json!({ "project": project }))
+        }
+        Host::DigitalOcean => Ok(json!({ "host": "digitalocean" })),
+        Host::Local => Err(bad("a local run is not started from here")),
+    }
 }
 
 fn bad(why: impl Into<String>) -> Error {
@@ -210,6 +287,26 @@ fn linked_id(i: &instances::record::Instance) -> Option<String> {
     }
 }
 
+/// The plan is usable only while its stored destination and source match today's bindings.
+pub fn check_job_binding(
+    job: &JobSpec,
+    account_id: &str,
+    destination_bucket: &str,
+    source: &Account,
+) -> std::result::Result<(), String> {
+    if job.dest.endpoint != hosts::r2_endpoint(account_id) || job.dest.bucket != destination_bucket
+    {
+        return Err("the ingest destination changed since planning; plan again".into());
+    }
+    if !matches!(&job.source, SourceSpec::S3 { account, endpoint, region, bucket, .. }
+        if account == &source.id() && endpoint == &source.endpoint && region == &source.region
+            && bucket_ok(bucket) && storage::bucket_allowed(source, bucket))
+    {
+        return Err("the ingest source is no longer approved; plan again".into());
+    }
+    Ok(())
+}
+
 /// Caps every list of a report at [`REPORT_ROWS`] rows, noting the real counts.
 pub fn cap_report(report: &mut Value) {
     let Some(map) = report.as_object_mut() else {
@@ -243,6 +340,65 @@ impl Ingest {
             })
     }
 
+    fn bindings<'a>(
+        &'a self,
+        record: &'a instances::record::Instance,
+        args: &'a Value,
+    ) -> std::result::Result<Bindings<'a>, String> {
+        match &record.ingest {
+            Some(profile) => profile.bind(args),
+            None => {
+                let target = self.target(&record.id).map_err(|error| error.to_string())?;
+                Ok(Bindings {
+                    source: arg(args, "source").map_err(|error| error.to_string())?,
+                    bucket: arg(args, "bucket").map_err(|error| error.to_string())?,
+                    prefix: args["prefix"].as_str().unwrap_or(""),
+                    destination_bucket: &target.bucket,
+                })
+            }
+        }
+    }
+
+    fn destination<'a>(&'a self, record: &'a instances::record::Instance) -> Result<&'a str> {
+        match &record.ingest {
+            Some(profile) => {
+                profile.validate().map_err(bad)?;
+                match profile {
+                    Profile::Enabled {
+                        destination_bucket, ..
+                    } => Ok(destination_bucket),
+                    Profile::Disabled => Err(bad("ingest is disabled for this instance")),
+                }
+            }
+            None => Ok(&self.target(&record.id)?.bucket),
+        }
+    }
+
+    async fn checked_link(
+        &self,
+        env: &Env,
+        record: &instances::record::Instance,
+    ) -> Result<pigeon_core::Account> {
+        let id =
+            linked_id(record).ok_or_else(|| bad("the approved instance has no linked account"))?;
+        let linked = crate::linked::account_for(env, self.host_name(), &record.id).await?;
+        if linked.id != id {
+            return Err(bad(
+                "the linked account does not match the approved ingest account",
+            ));
+        }
+        Ok(linked)
+    }
+
+    async fn check_current(env: &Env, record: &instances::record::Instance) -> Result<()> {
+        if instances::one(env, &record.id).await?.as_ref() != Some(record) {
+            return Err(bad(
+                "the approved ingest settings changed while starting; plan again",
+            ));
+        }
+        Ok(())
+    }
+
     fn host_name(&self) -> &str {
         &self.passkeys.host
     }
@@ -270,44 +426,38 @@ impl Ingest {
             .as_ref()
             .ok_or_else(|| bad("the caller acts for no person who could approve this"))?;
         let instance = arg(args, "instance")?;
-        let source = arg(args, "source")?;
-        let bucket = arg(args, "bucket")?;
-        let prefix = args["prefix"].as_str().unwrap_or("");
+        let env = cx.env;
+        let Some(record) = instances::one(env, instance).await? else {
+            return Ok(unready(
+                vec![format!(
+                    "There is no approved record for instance `{instance}`."
+                )],
+                Value::Null,
+                Value::Null,
+            ));
+        };
+        let bindings = match self.bindings(&record, args) {
+            Ok(bindings) => bindings,
+            Err(error) => return Ok(unready(vec![error], Value::Null, Value::Null)),
+        };
+        let linked = match self.checked_link(env, &record).await {
+            Ok(linked) => linked,
+            Err(error) => return Ok(unready(vec![error.to_string()], Value::Null, Value::Null)),
+        };
+        let Bindings {
+            source,
+            bucket,
+            prefix,
+            destination_bucket,
+        } = bindings;
         let flag = |name: &str, default: bool| args[name].as_bool().unwrap_or(default);
         let (dry_run, keep_archives, fingerprints) = (
             flag("dry_run", true),
             flag("keep_archives", true),
             flag("fingerprints", false),
         );
-        let env = cx.env;
-        let mut missing: Vec<String> = Vec::new();
+        let mut missing = Vec::new();
 
-        let target = self.target(instance);
-        if let Err(e) = &target {
-            missing.push(format!(
-                "{e}. Ask an agent to declare it in `ingest_instances()` in src/platform/src/settings.rs."
-            ));
-        }
-        // The instance record, and whether it is linked.
-        let mut account_id = None;
-        match instances::one(env, instance).await? {
-            None => missing.push(format!(
-                "There is no record for instance `{instance}`. Propose it on the console's Instances tab and approve it."
-            )),
-            Some(rec) => match linked_id(&rec) {
-                None => missing.push(format!(
-                    "Instance `{instance}` is not linked yet. On the console's Instances tab, press Link Cloudflare account and approve the consent screen."
-                )),
-                Some(id) => {
-                    match crate::linked::account_for(env, self.host_name(), instance).await {
-                        Ok(_) => account_id = Some(id),
-                        Err(e) => missing.push(format!(
-                            "The link to `{instance}` cannot be used: {e}. Link it again on the Instances tab."
-                        )),
-                    }
-                }
-            },
-        }
         // The source account and its keys.
         let account = match storage::find(&self.accounts, source) {
             Ok(a) if bucket_ok(bucket) && storage::bucket_allowed(a, bucket) => Some(a),
@@ -353,16 +503,12 @@ impl Ingest {
                 ));
             }
         }
-        if let Ok(t) = &target
-            && secret_value(env, &hosts::r2_slot(&t.instance))
-                .await
-                .is_none()
-        {
+        if secret_value(env, &hosts::r2_slot(instance)).await.is_none() {
             missing.push(format!(
                 "Secret `{}` is not bound. In {}'s Cloudflare dashboard make an R2 API token for bucket `{}` only, Object Read & Write, set it on the Access tab, then ask an agent to bind it.",
-                hosts::r2_slot(&t.instance),
+                hosts::r2_slot(instance),
                 instance,
-                t.bucket
+                destination_bucket
             ));
         }
         let commit = match Self::commit(args) {
@@ -422,9 +568,7 @@ impl Ingest {
             }
         }
 
-        let (Some(a), Some(t), Some(account_id), Some(commit)) =
-            (account, target.ok(), account_id.as_ref(), commit.as_ref())
-        else {
+        let (Some(a), Some(commit)) = (account, commit.as_ref()) else {
             return Ok(unready(missing, est, sample));
         };
         if !missing.is_empty() {
@@ -435,8 +579,8 @@ impl Ingest {
             account: a,
             bucket,
             prefix,
-            dest_bucket: &t.bucket,
-            account_id,
+            dest_bucket: destination_bucket,
+            account_id: &linked.id,
             dry_run,
             keep_archives,
             fingerprints,
@@ -445,12 +589,29 @@ impl Ingest {
             nonce: nonce(),
         });
         let host = hosts::host_for(a.provider);
+        let data_worker = if host == Host::Cloudflare {
+            setting(env, &format!("data_url:{instance}")).await?
+        } else {
+            None
+        };
+        let host_key = if host == Host::Scaleway {
+            if let Some(slot) = hosts::host_slot(a) {
+                secret_value(env, &slot).await
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let execution = match execution_binding(host, data_worker.as_deref(), host_key.as_deref()) {
+            Ok(execution) => execution,
+            Err(error) => return Ok(unready(vec![error.to_string()], est, sample)),
+        };
         let request = hosts::host_request(host, &job, &a.region);
-        let linked = crate::linked::account_for(env, self.host_name(), instance).await?;
         let bucket_here = r2::bucket_exists(
             &linked,
             &Bucket {
-                name: t.bucket.clone(),
+                name: destination_bucket.to_string(),
                 jurisdiction: None,
             },
         )
@@ -459,10 +620,13 @@ impl Ingest {
         lines.push(if bucket_here {
             format!(
                 "R2 bucket `{}` already exists in `{instance}`'s account.",
-                t.bucket
+                destination_bucket
             )
         } else {
-            format!("Create R2 bucket `{}` in `{instance}`'s account.", t.bucket)
+            format!(
+                "Create R2 bucket `{}` in `{instance}`'s account.",
+                destination_bucket
+            )
         });
         lines.push(format!(
             "Write `{}` to the bucket.",
@@ -485,7 +649,8 @@ impl Ingest {
         } else {
             "Real run: files R2 does not hold are copied into the bucket.".to_string()
         });
-        let payload = hosts::approval_payload(&job, &request);
+        let mut payload = hosts::approval_payload(&job, &request);
+        payload["execution"] = execution.clone();
         let kind = pigeon_core::approval::Kind::Other(KIND.into());
         let digest = pigeon_core::approval::payload_digest(&kind, &job.run, &payload);
         let made = directory(
@@ -495,7 +660,7 @@ impl Ingest {
                 "kind": kind.name(),
                 "subject": job.run,
                 "digest": digest,
-                "summary": { "plan": lines, "estimate": est },
+                "summary": { "plan": lines, "estimate": est, "execution": execution },
                 "payload": payload,
                 "caller_id": caller.user.id,
                 "approver_id": person.id,
@@ -509,6 +674,7 @@ impl Ingest {
             "plan": lines,
             "job": job,
             "host_request": request,
+            "execution": execution,
             "estimate": est,
             "sample": sample,
             "approval": made["record"]["id"],
@@ -530,20 +696,35 @@ impl Ingest {
         }
         let job: JobSpec = serde_json::from_value(got["payload"]["job"].clone())
             .map_err(|_| bad("the approval holds no readable job"))?;
+        if args
+            .get("instance")
+            .is_some_and(|value| value.as_str() != Some(&job.instance))
+        {
+            return Err(bad("the ingest approval belongs to a different instance"));
+        }
         if got["subject"].as_str().is_some_and(|s| s != job.run) {
             return Err(bad("the approval's run does not match its job"));
         }
-        let target = self.target(&job.instance)?;
         let SourceSpec::S3 {
             account: source_id,
             region,
             bucket: source_bucket,
+            prefix,
             ..
         } = &job.source
         else {
             return Err(bad("only S3 sources start from here"));
         };
+        let record = instances::one(env, &job.instance)
+            .await?
+            .ok_or_else(|| bad("the approved ingest instance no longer exists"))?;
+        let source_args = json!({ "source": source_id, "bucket": source_bucket, "prefix": prefix });
+        let bindings = self.bindings(&record, &source_args).map_err(bad)?;
         let account = storage::find(&self.accounts, source_id)?;
+        let account_id =
+            linked_id(&record).ok_or_else(|| bad("the approved instance has no linked account"))?;
+        check_job_binding(&job, &account_id, bindings.destination_bucket, account).map_err(bad)?;
+        let linked = self.checked_link(env, &record).await?;
         let host = hosts::host_for(account.provider);
         // Read every key before the approval is spent, so a missing one costs nothing.
         let unbound = |name: &str| bad(format!("secret `{name}` is not bound"));
@@ -551,7 +732,7 @@ impl Ingest {
             .await
             .ok_or_else(|| unbound(&account.binding()))?;
         s3::parse_keys(&source_keys)?;
-        let r2_slot = hosts::r2_slot(&target.instance);
+        let r2_slot = hosts::r2_slot(&job.instance);
         let dest_keys = secret_value(env, &r2_slot)
             .await
             .ok_or_else(|| unbound(&r2_slot))?;
@@ -582,11 +763,24 @@ impl Ingest {
         // Rebuild what was approved; the digest must still match.
         let request = hosts::host_request(host, &job, region);
         let kind = pigeon_core::approval::Kind::Other(KIND.into());
-        let digest = pigeon_core::approval::payload_digest(
-            &kind,
-            &job.run,
-            &hosts::approval_payload(&job, &request),
-        );
+        let execution = execution_binding(
+            host,
+            data.as_ref().map(|(url, _)| url.as_str()),
+            host_key.as_deref(),
+        )?;
+        let mut payload = hosts::approval_payload(&job, &request);
+        // Earlier DigitalOcean plans already named their fixed API destination. Other
+        // providers need a new plan if they did not record their configurable target.
+        if !got["payload"]["execution"].is_null() || host != Host::DigitalOcean {
+            if got["payload"]["execution"] != execution {
+                return Err(bad(
+                    "the ingest execution target changed or was never bound; plan again",
+                ));
+            }
+            payload["execution"] = execution;
+        }
+        let digest = pigeon_core::approval::payload_digest(&kind, &job.run, &payload);
+        Self::check_current(env, &record).await?;
         let taken = directory(
             env,
             "approval.take",
@@ -598,9 +792,9 @@ impl Ingest {
                 "the plan does not run: {why}. If anything changed since it was approved, plan again."
             )));
         }
-        let linked = crate::linked::account_for(env, self.host_name(), &job.instance).await?;
+        Self::check_current(env, &record).await?;
         let dest = Bucket {
-            name: target.bucket.clone(),
+            name: bindings.destination_bucket.to_string(),
             jurisdiction: None,
         };
         let ensured = r2::ensure_bucket(&linked, &dest).await?;
@@ -621,6 +815,8 @@ impl Ingest {
             region: region.clone(),
             vm: None,
             vm_deleted: false,
+            destination: Some(job.dest.clone()),
+            data_worker: data.as_ref().map(|(url, _)| url.clone()),
             approval: approval_id.to_string(),
             commit: job.commit.clone(),
             dry_run: job.dry_run,
@@ -635,6 +831,7 @@ impl Ingest {
         )
         .await?;
         save_run(env, &rec).await?;
+        Self::check_current(env, &record).await?;
         match host {
             Host::DigitalOcean => {
                 let token = host_key.as_deref().unwrap_or_default();
@@ -724,6 +921,15 @@ impl Ingest {
                 let url = setting(env, &format!("data_url:{}", rec.instance))
                     .await?
                     .ok_or_else(|| bad("the data Worker's URL is not in the Directory"))?;
+                if rec
+                    .data_worker
+                    .as_ref()
+                    .is_some_and(|original| original != &url)
+                {
+                    return Err(bad(
+                        "the data Worker changed; stop this run on its original Worker",
+                    ));
+                }
                 let body = serde_json::to_value(StopRequest {
                     run: rec.run.clone(),
                 })?;
@@ -754,14 +960,22 @@ impl Ingest {
     async fn linked_for(
         &self,
         cx: &Context<'_>,
-        instance: &str,
+        run: &RunRecord,
     ) -> Result<(pigeon_core::Account, Bucket)> {
-        let t = self.target(instance)?;
-        let account = crate::linked::account_for(cx.env, self.host_name(), instance).await?;
+        let record = instances::one(cx.env, &run.instance)
+            .await?
+            .ok_or_else(|| bad("unknown ingest instance"))?;
+        let bucket = self.destination(&record)?.to_string();
+        let account = self.checked_link(cx.env, &record).await?;
+        if run.destination.as_ref().is_some_and(|bound| {
+            bound.bucket != bucket || bound.endpoint != hosts::r2_endpoint(&account.id)
+        }) {
+            return Err(bad("the run belongs to a different ingest destination"));
+        }
         Ok((
             account,
             Bucket {
-                name: t.bucket.clone(),
+                name: bucket,
                 jurisdiction: None,
             },
         ))
@@ -771,18 +985,20 @@ impl Ingest {
     async fn status(&self, cx: &Context<'_>, args: &Value) -> Result<Value> {
         let env = cx.env;
         let instance = arg(args, "instance")?;
-        self.target(instance)?;
         let Some(run) = args["run"].as_str() else {
             let mut out = Vec::new();
             for id in runs_of(env, instance).await? {
                 if let Some(text) = setting(env, &run_key(&id)).await? {
-                    out.push(serde_json::from_str::<Value>(&text)?);
+                    let record: RunRecord = serde_json::from_str(&text)?;
+                    if record.instance == instance {
+                        out.push(record);
+                    }
                 }
             }
             return Ok(json!({ "instance": instance, "runs": out }));
         };
         let mut rec = run_of(env, instance, run).await?;
-        let (account, bucket) = self.linked_for(cx, instance).await?;
+        let (account, bucket) = self.linked_for(cx, &rec).await?;
         let status: Value = match r2::get(&account, &bucket, &manifest::status_key(run)).await? {
             Some(bytes) => serde_json::from_slice(&bytes)?,
             None => Value::Null,
@@ -808,8 +1024,8 @@ impl Ingest {
     async fn report(&self, cx: &Context<'_>, args: &Value) -> Result<Value> {
         let instance = arg(args, "instance")?;
         let run = arg(args, "run")?;
-        run_of(cx.env, instance, run).await?;
-        let (account, bucket) = self.linked_for(cx, instance).await?;
+        let rec = run_of(cx.env, instance, run).await?;
+        let (account, bucket) = self.linked_for(cx, &rec).await?;
         match r2::get(&account, &bucket, &manifest::report_key(run)).await? {
             Some(bytes) => {
                 let mut report: Value = serde_json::from_slice(&bytes)?;
@@ -845,6 +1061,7 @@ impl Ingest {
                 t.instance
             ))
         })?;
+        let bucket = self.destination(&rec)?;
         let id = linked_id(&rec).ok_or_else(|| {
             bad(format!("instance `{}` is not linked yet: press Link Cloudflare account on the Instances tab first", t.instance))
         })?;
@@ -852,12 +1069,12 @@ impl Ingest {
             base: hosts::r2_endpoint(&id),
             region: "auto".into(),
         };
-        s3::send(Method::Head, &endpoint, &s3::object_path(&t.bucket, ""), &[], &[], &keys)
+        s3::send(Method::Head, &endpoint, &s3::object_path(bucket, ""), &[], &[], &keys)
             .await
-            .map_err(|e| bad(format!("R2 refused this key on bucket `{}`: {e}. Make sure the bucket exists and the key covers it.", t.bucket)))?;
+            .map_err(|e| bad(format!("R2 refused this key on bucket `{}`: {e}. Make sure the bucket exists and the key covers it.", bucket)))?;
         Ok(Value::String(format!(
             "the key reaches bucket `{}`",
-            t.bucket
+            bucket
         )))
     }
 }
@@ -907,8 +1124,8 @@ impl Capability for Ingest {
                  Anything missing comes back as `missing`.",
                 json!({
                     "instance": instance,
-                    "source": { "type": "string", "description": "A storage account id, such as digitalocean:legacy." },
-                    "bucket": { "type": "string", "description": "The source bucket." },
+                    "source": { "type": "string", "description": "A storage account id (required for legacy instances; a profile fixes the source)." },
+                    "bucket": { "type": "string", "description": "The source bucket (required for legacy instances; a profile fixes the bucket)." },
                     "prefix": { "type": "string" },
                     "dry_run": { "type": "boolean", "description": "Default true: decide and record, copy nothing." },
                     "keep_archives": { "type": "boolean", "description": "Default true." },
@@ -916,7 +1133,7 @@ impl Capability for Ingest {
                     "size_bytes": { "type": "integer", "description": "The source's whole size, for the estimate." },
                     "commit": { "type": "string", "description": "A full commit id to build the runner from; default this Worker's own." },
                 }),
-                &["instance", "source", "bucket"],
+                &["instance"],
             ),
             tool(
                 "ingest_start",

@@ -258,9 +258,17 @@ pub async fn deploy(
     caller: &Signed,
     instance: &str,
     rev: &str,
+    publishing_binding: Option<&str>,
 ) -> Result<Value> {
     let record = approved_record(env, key, caller, instance).await?;
     let record = &record;
+    if publishing_binding
+        .is_some_and(|approved| pigeon_core::oauth::hash(&record.to_string()) != approved)
+    {
+        return Err(bad(
+            "the queued push no longer matches the approved publishing record",
+        ));
+    }
     let pins = pins(record);
     check_sites_pin(
         pins.sites.as_deref(),

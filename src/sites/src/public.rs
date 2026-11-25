@@ -36,6 +36,7 @@ pub struct Host {
     pub upstream: String,
     /// Set when the site opts in to passkey sign-in; `None` leaves the host public.
     pub config: Option<Config>,
+    pub scope: Option<String>,
 }
 
 thread_local! {
@@ -61,11 +62,16 @@ pub fn map_of(listed: &Value) -> BTreeMap<String, Host> {
             let host = e["host"].as_str()?.to_ascii_lowercase();
             let up = e["upstream"].as_str()?;
             (up.starts_with("https://") && up.ends_with(".workers.dev")).then(|| {
+                let scope = e["instance"]
+                    .as_str()
+                    .zip(e["site"].as_str())
+                    .map(|(instance, site)| site_auth::binding(instance, site, &host));
                 (
                     host,
                     Host {
                         upstream: up.to_string(),
                         config: site_auth::config_of(e),
+                        scope,
                     },
                 )
             })
@@ -134,7 +140,13 @@ pub async fn serve(
         Method::Post => "POST",
         _ => "OTHER",
     };
-    let skey = site_auth::session_key(key, &host);
+    let Some(scope) = entry.scope.as_deref() else {
+        return no_store(Response::error(
+            "site access configuration unavailable",
+            503,
+        )?);
+    };
+    let skey = site_auth::session_key(key, scope);
     let now = i64::try_from(worker::Date::now().as_millis()).unwrap_or(0);
     let signed_in = signed_in(&req, &skey, &host, config, now);
     match site_auth::gate(Some(config), method, url.path(), signed_in) {
@@ -153,7 +165,10 @@ pub async fn serve(
             } else {
                 Value::Null
             };
-            reserved(r, env, key, worker, &host, &skey, config, &url, &body, now).await
+            reserved(
+                r, env, key, worker, &host, scope, &skey, config, &url, &body, now,
+            )
+            .await
         }
     }
 }
@@ -295,6 +310,7 @@ async fn reserved(
     key: &[u8],
     worker: &str,
     host: &str,
+    scope: &str,
     skey: &[u8; 32],
     config: &Config,
     url: &worker::Url,
@@ -309,6 +325,7 @@ async fn reserved(
         }
         args["step"] = json!(name);
         args["host"] = json!(host);
+        args["site_scope"] = json!(scope);
         args
     };
     let core = async |name: &'static str| ask(env, key, worker, "site_passkey", &step(name)).await;
@@ -327,7 +344,10 @@ async fn reserved(
         Reserved::SignInBegin => json_answer(core("sign_in_begin").await),
         Reserved::SignInFinish => {
             let user = match core("sign_in_finish").await {
-                Ok(v) => v["user"].clone(),
+                Ok(v) if v["site_scope"] == scope => v["user"].clone(),
+                Ok(_) => {
+                    return no_store(Response::error("site access configuration changed", 503)?);
+                }
                 Err(e) => return json_answer(Err(e)),
             };
             let (id, kind) = (
@@ -355,7 +375,7 @@ async fn reserved(
                 key,
                 worker,
                 "site_passkey",
-                &json!({ "step": "enrol_peek", "host": host, "code": code }),
+                &json!({ "step": "enrol_peek", "host": host, "site_scope": scope, "code": code }),
             )
             .await
             {

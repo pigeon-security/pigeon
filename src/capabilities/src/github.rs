@@ -16,7 +16,10 @@ use serde_json::{Value, json};
 use worker::{Env, Error, Method, Request, Response, Result};
 
 use crate::expiry::Expiry;
-use crate::instances::{self, record::RepoRef};
+use crate::instances::{
+    self,
+    record::{Instance, RepoRef},
+};
 use crate::users::directory;
 use crate::{Call, Capability, Context, Expiring, Serve, Slot};
 
@@ -119,6 +122,20 @@ async fn keep(env: &Env, key: &str, value: &Value) -> Result<()> {
     Ok(())
 }
 
+/// Changes a queue row only if no webhook or other cron has replaced that row.
+async fn replace(env: &Env, key: &str, previous: &str, value: &Value) -> Result<bool> {
+    Ok(directory(
+        env,
+        "setting.replace",
+        json!({
+            "key": key, "previous": previous, "value": value.to_string(), "ttl_ms": PUSH_KEPT_MS
+        }),
+    )
+    .await?
+    .as_bool()
+    .unwrap_or(false))
+}
+
 /// Whether a kept deploy should run now: pending, or started longer ago than its lease (a
 /// redeploy or a limit cut it off), and not tried too often. Pure.
 pub fn due(kept: &Value, now_ms: f64) -> bool {
@@ -133,6 +150,73 @@ pub fn due(kept: &Value, now_ms: f64) -> bool {
     }
 }
 
+/// The approved snapshot a webhook can bind. No job is queued for a disabled publisher.
+pub fn publishing_binding(instance: &Instance) -> Option<String> {
+    let record = serde_json::to_value(instance).ok()?;
+    pigeon_core::site_publish::site(&record).ok()?;
+    record["account"]["account_id"].as_str()?;
+    Some(pigeon_core::oauth::hash(&record.to_string()))
+}
+
+/// A queued push can start only while the approved publishing snapshot still matches.
+pub fn allows_queued_publish(instance: &Instance, queued: &Value) -> bool {
+    let revision = queued["commit"].as_str().unwrap_or_default();
+    revision.len() == 40
+        && revision.bytes().all(|b| b.is_ascii_hexdigit())
+        && queued["binding"]
+            .as_str()
+            .is_some_and(|binding| publishing_binding(instance).as_deref() == Some(binding))
+        && matches!(&instance.repo,
+            Some(RepoRef::Github { full_name, installation: Some(installation) })
+                if queued["installation"].as_u64() == Some(*installation)
+                    && queued["repo"].as_str().is_some_and(|repo| repo.eq_ignore_ascii_case(full_name))
+        )
+}
+
+/// A scheduled publish cannot obtain a passkey. Evaluate the same tool policy as MCP.
+async fn publish_allowed(env: &Env, actor: &str) -> Result<bool> {
+    use pigeon_core::policy::{Decision, Kind, Vars};
+    if !crate::approvals::asked() {
+        return Ok(true);
+    }
+    let request = crate::policy::request(actor, Kind::CallTool, "site_deploy");
+    let answer = crate::policy::decide(
+        &Vars {
+            session_prefix: String::new(),
+            main: String::new(),
+        },
+        &request,
+    );
+    if answer.decision == Decision::Allow && answer.needs.is_none() {
+        Ok(true)
+    } else {
+        crate::policy::record(env, "github", &request, &answer, None).await?;
+        Ok(false)
+    }
+}
+
+async fn run_publish(
+    env: &Env,
+    instance: &Instance,
+    commit: &str,
+    binding: &Value,
+) -> Result<Value> {
+    let person = deployer(env, &instance.id, &instance.account).await?;
+    let actor = person["user"]["name"].as_str().unwrap_or_default();
+    if !publish_allowed(env, actor).await? {
+        return Ok(json!({ "deployed": false, "problems": ["policy requires manual publishing"] }));
+    }
+    crate::remote::call_owned(
+        env.clone(),
+        SITES_BINDING,
+        "sites",
+        "site_deploy",
+        json!({ "instance": instance.id, "rev": commit, "publishing_binding": binding }),
+        person,
+    )
+    .await
+}
+
 /// Runs every due push-started deploy, one instance at a time: from the platform's
 /// minute cron. Each is marked running before it starts and done or failed after, so one cut
 /// off is tried again once its lease runs out.
@@ -140,33 +224,36 @@ pub async fn run_pending(env: &Env) -> Result<Vec<Value>> {
     let mut ran = Vec::new();
     for i in instances::all(env).await? {
         let key = deploy_key(&i.id);
-        let mut kept = match directory(env, "setting.get", json!({ "key": key })).await? {
-            Value::String(t) => serde_json::from_str::<Value>(&t).unwrap_or(Value::Null),
-            _ => continue,
+        let Value::String(previous) = directory(env, "setting.get", json!({ "key": key })).await?
+        else {
+            continue;
         };
+        let mut kept = serde_json::from_str::<Value>(&previous).unwrap_or(Value::Null);
         let now = worker::Date::now().as_millis() as f64;
         if !due(&kept, now) {
             continue;
         }
+        let current = instances::one(env, &i.id).await?;
+        let Some(current) = current.filter(|record| allows_queued_publish(record, &kept)) else {
+            kept["state"] = json!("failed");
+            kept["error"] = json!(
+                "publishing configuration changed or was never bound; a new GitHub push is required"
+            );
+            kept["finished_ms"] = json!(now);
+            if replace(env, &key, &previous, &kept).await? {
+                ran.push(json!({ "instance": i.id, "state": kept["state"] }));
+            }
+            continue;
+        };
         let commit = kept["commit"].as_str().unwrap_or_default().to_string();
         kept["state"] = json!("running");
         kept["started_ms"] = json!(now);
         kept["attempts"] = json!(kept["attempts"].as_u64().unwrap_or(0) + 1);
-        keep(env, &key, &kept).await?;
-        let outcome = match deployer(env, &i.id).await {
-            Ok(person) => {
-                crate::remote::call_owned(
-                    env.clone(),
-                    SITES_BINDING,
-                    "sites",
-                    "site_deploy",
-                    json!({ "instance": i.id, "rev": commit }),
-                    person,
-                )
-                .await
-            }
-            Err(e) => Err(e),
-        };
+        if !replace(env, &key, &previous, &kept).await? {
+            continue;
+        }
+        let claimed = kept.to_string();
+        let outcome = run_publish(env, &current, &commit, &kept["binding"]).await;
         let done_ms = worker::Date::now().as_millis();
         match outcome {
             Ok(v) if v["deployed"] == true => {
@@ -188,18 +275,29 @@ pub async fn run_pending(env: &Env) -> Result<Vec<Value>> {
             }
         }
         kept["finished_ms"] = json!(done_ms);
-        keep(env, &key, &kept).await?;
-        ran.push(json!({ "instance": i.id, "state": kept["state"] }));
+        if replace(env, &key, &claimed, &kept).await? {
+            ran.push(json!({ "instance": i.id, "state": kept["state"] }));
+        }
     }
     Ok(ran)
 }
 
 /// Who a push-started deploy acts for: the person who linked the instance's account. A webhook
 /// has no caller of its own, and the sites Worker and core's credentials serve only a person's.
-async fn deployer(env: &Env, instance: &str) -> Result<Value> {
+async fn deployer(
+    env: &Env,
+    instance: &str,
+    account: &instances::record::AccountRef,
+) -> Result<Value> {
     let link = crate::linked::link(env, instance)
         .await?
         .ok_or_else(|| bad(&format!("instance {instance} is not linked")))?;
+    if !matches!(account, instances::record::AccountRef::Linked { account_id: Some(id) } if id == &link.account_id)
+    {
+        return Err(bad(
+            "the linked account does not match the approved publishing account",
+        ));
+    }
     let listed = directory(env, "users.list", json!({})).await?;
     let person = listed["users"]
         .as_array()
@@ -222,10 +320,16 @@ pub fn instance_for<'a>(
     repo: &str,
     installation: u64,
 ) -> Option<&'a instances::record::Instance> {
-    records.iter().find(|i| {
+    let mut matches = records.iter().filter(|i| {
         matches!(&i.repo, Some(RepoRef::Github { full_name, installation: Some(n) })
             if full_name.eq_ignore_ascii_case(repo) && *n == installation)
-    })
+    });
+    let first = matches.next()?;
+    if matches.next().is_some() {
+        None
+    } else {
+        Some(first)
+    }
 }
 
 fn answer(status: u16, body: Value) -> Result<Response> {
@@ -258,7 +362,7 @@ impl Github {
         let Some(instance) = instance_for(&records, &push.repo, push.installation) else {
             return answer(
                 202,
-                json!({ "ignored": "no instance names this repository and installation" }),
+                json!({ "ignored": "no unique instance names this repository and installation" }),
             );
         };
         let at = worker::Date::now().as_millis();
@@ -272,12 +376,14 @@ impl Github {
             json!({ "key": push_key(&instance.id), "value": kept.to_string(), "ttl_ms": PUSH_KEPT_MS }),
         )
         .await?;
-        let deploying = push.git_ref == DEPLOY_REF && !push.deleted;
-        if deploying {
-            // Kept, not run here: the minute's cron runs it (run_pending), so a deploy survives
-            // the webhook's time limit and a redeploy of this Worker.
+        let binding = (push.git_ref == DEPLOY_REF && !push.deleted)
+            .then(|| publishing_binding(instance))
+            .flatten();
+        if let Some(binding) = &binding {
+            // The cron must still see this exact approved target when it starts the deploy.
             let pending = json!({
                 "state": "pending", "commit": push.after, "at_ms": at, "attempts": 0,
+                "repo": push.repo, "installation": push.installation, "binding": binding,
             });
             keep(cx.env, &deploy_key(&instance.id), &pending).await?;
         }
@@ -286,7 +392,7 @@ impl Github {
             json!({
                 "recorded": instance.id,
                 "commit": push.after,
-                "deploy": if deploying { "queued: runs within a minute" } else { "not for this ref" },
+                "deploy": if binding.is_some() { "queued: runs within a minute" } else { "not publishable for this ref and profile" },
             }),
         )
     }

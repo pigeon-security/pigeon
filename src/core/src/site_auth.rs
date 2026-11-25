@@ -78,12 +78,17 @@ pub fn config_of(entry: &Value) -> Option<Config> {
     Some(Config { allow })
 }
 
-/// The key a host's sessions are signed with: derived from the caller key, so no new secret
-/// exists and a cookie of one host never verifies on another.
-pub fn session_key(caller_key: &[u8], host: &str) -> [u8; 32] {
+/// Derive the signing key for one site binding from the shared caller key.
+pub fn session_key(caller_key: &[u8], binding: &str) -> [u8; 32] {
     let mut message = b"pigeon-site-session\0".to_vec();
-    message.extend_from_slice(host.as_bytes());
+    message.extend_from_slice(binding.as_bytes());
     hmac_sha256(caller_key, &message)
+}
+
+/// Stable identity of an approved site on one hostname. Changing the owning instance or
+/// site invalidates cookies, challenges and enrollment links for the previous binding.
+pub fn binding(instance: &str, site: &str, host: &str) -> String {
+    crate::oauth::hash(&serde_json::json!([instance, site, host]).to_string())
 }
 
 /// The text a session's signature covers. Each field is hex, so no separator can be inside one.

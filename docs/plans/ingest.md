@@ -967,3 +967,28 @@ opened": the report says how many; a VM run can open them later).
   are read as one (the `zip` crate keeps one entry per name); the data Worker and the container
   start were built for WASM and never run; a CI job that builds the image needs `.pigeon/ci.toml`
   (the person's file). Next: 13.9.
+
+## Approved instance bindings
+
+The optional `ingest` instance profile can explicitly disable ingestion or bind a
+declared storage account, source bucket, exact prefix, and destination R2 bucket.
+An enabled profile requires a linked account ID in the approved record. The
+declared account's bucket allowlist still applies. The plan takes its source
+settings from that profile and rejects conflicting tool arguments. Existing
+records without a profile retain their code-declared target setup.
+
+Start validates the approved job against the current profile, account link and
+storage declaration before consuming the passkey approval. The plan additionally
+binds the configured Cloudflare data Worker origin or Scaleway project; an old
+plan without one of these configurable destinations requires a fresh approval.
+Workers URLs use HTTPS, and provider calls do not automatically follow redirects.
+A disabled or changed profile prevents new starts. Started runs retain the
+destination and data Worker they used, so later status, report, and stop calls
+cannot silently use a replacement destination.
+
+GitHub main-branch pushes now bind the queue to the repository, App installation,
+and digest of the approved instance record. The cron and Sites Worker recheck
+that binding before dispatch and publishing. A stale or legacy unbound queue
+entry requires a new push. The cron evaluates `site_deploy` policy as the linked
+person and defers denied or approval-gated publishes to the manual path. It
+changes queue state only while the claimed entry is still current.

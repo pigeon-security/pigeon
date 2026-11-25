@@ -89,7 +89,7 @@ fn bad(why: &str) -> Error {
 // ---- the Directory ----
 
 /// The Directory's schema, one statement per migration, applied in order and never edited.
-const MIGRATIONS: [&str; 19] = [
+const MIGRATIONS: [&str; 21] = [
     "CREATE TABLE users (id TEXT PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL, created_at INTEGER NOT NULL)",
     "CREATE TABLE service_ids (access_client_id TEXT PRIMARY KEY, user_id TEXT NOT NULL)",
     "CREATE TABLE passkeys (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, point TEXT NOT NULL, sign_count INTEGER NOT NULL, name TEXT NOT NULL, created_at INTEGER NOT NULL, last_used_at INTEGER)",
@@ -113,6 +113,8 @@ const MIGRATIONS: [&str; 19] = [
     "ALTER TABLE oauth_tokens ADD COLUMN scope TEXT",
     // iOS push registrations (docs/plans/ios.md, phase 6): one device token per app and client.
     "CREATE TABLE apns_devices (id TEXT PRIMARY KEY, app TEXT NOT NULL, person_id TEXT NOT NULL, service_user_id TEXT NOT NULL, token TEXT NOT NULL, environment TEXT NOT NULL, created_at INTEGER NOT NULL, last_ok_at INTEGER, last_error TEXT, UNIQUE(app, token))",
+    "ALTER TABLE users ADD COLUMN site_scope TEXT",
+    "ALTER TABLE enrolments ADD COLUMN site_scope TEXT",
 ];
 
 /// A day, in milliseconds: how long an ended approval is kept.
@@ -165,7 +167,7 @@ impl Directory {
             .row("SELECT * FROM users WHERE id = ?", vec![id.into()])
     }
 
-    fn create(&self, kind: &str, name: &str) -> Result<User> {
+    fn create(&self, kind: &str, name: &str, site_scope: Option<&str>) -> Result<User> {
         let user = User {
             id: random()?[..22].to_string(),
             kind: kind.into(),
@@ -173,12 +175,13 @@ impl Directory {
             created_at: now(),
         };
         self.db.exec(
-            "INSERT INTO users (id, kind, name, created_at) VALUES (?, ?, ?, ?)",
+            "INSERT INTO users (id, kind, name, created_at, site_scope) VALUES (?, ?, ?, ?, ?)",
             vec![
                 user.id.as_str().into(),
                 kind.into(),
                 name.into(),
                 user.created_at.into(),
+                site_scope.map_or(worker::SqlStorageValue::Null, Into::into),
             ],
         )?;
         Ok(user)
@@ -341,6 +344,17 @@ impl Directory {
                 json!({ "users": users, "links": links, "passkeys": passkeys, "clients": clients })
             }
             "users.get" => to_value(self.user(s("id"))?),
+            "users.site_scope" => {
+                #[derive(Deserialize)]
+                struct SiteScope {
+                    site_scope: Option<String>,
+                }
+                let row: Option<SiteScope> = self.db.row(
+                    "SELECT site_scope FROM users WHERE id = ?",
+                    vec![s("id").into()],
+                )?;
+                to_value(row.and_then(|row| row.site_scope))
+            }
             "users.create" => {
                 let site_host = s("kind")
                     .strip_prefix("site:")
@@ -350,7 +364,11 @@ impl Directory {
                         "a user is standard, service, or site:{host} for a valid hostname",
                     ));
                 }
-                to_value(self.create(s("kind"), s("name"))?)
+                let scope = a["site_scope"].as_str();
+                if site_host != scope.is_some() {
+                    return Err(bad("only site users need an approved site binding"));
+                }
+                to_value(self.create(s("kind"), s("name"), scope)?)
             }
             "users.remove" => {
                 let user = self.user(s("id"))?.ok_or_else(|| bad("no such user"))?;
@@ -589,7 +607,7 @@ impl Directory {
                 }
             }
             "service.add" => {
-                let user = self.create("service", s("name"))?;
+                let user = self.create("service", s("name"), None)?;
                 self.db.exec(
                     "INSERT INTO service_ids (access_client_id, user_id) VALUES (?, ?)",
                     vec![s("access_client_id").into(), user.id.as_str().into()],
@@ -603,11 +621,12 @@ impl Directory {
             "enrol.create" => {
                 let code = random()?;
                 self.db.exec(
-                    "INSERT INTO enrolments (code, user_id, expires_at) VALUES (?, ?, ?)",
+                    "INSERT INTO enrolments (code, user_id, expires_at, site_scope) VALUES (?, ?, ?, ?)",
                     vec![
                         code.as_str().into(),
                         s("user_id").into(),
                         (t + ENROL_TTL_MS).into(),
+                        a["site_scope"].as_str().map_or(worker::SqlStorageValue::Null, Into::into),
                     ],
                 )?;
                 json!(code)
@@ -618,8 +637,8 @@ impl Directory {
                     user_id: String,
                 }
                 let row: Option<Row> = self.db.row(
-                    "SELECT user_id FROM enrolments WHERE code = ? AND expires_at > ?",
-                    vec![s("code").into(), t.into()],
+                    "SELECT user_id FROM enrolments WHERE code = ? AND expires_at > ? AND site_scope IS ?",
+                    vec![s("code").into(), t.into(), a["site_scope"].as_str().map_or(worker::SqlStorageValue::Null, Into::into)],
                 )?;
                 let row = row.ok_or_else(|| bad("this enrolment link is used or has expired"))?;
                 if op == "enrol.take" {
@@ -829,6 +848,24 @@ impl Directory {
                 )?;
                 Value::Null
             }
+            "setting.replace" => {
+                let key = s("key");
+                let previous = a["previous"]
+                    .as_str()
+                    .ok_or_else(|| bad("expected previous setting"))?;
+                let value = a["value"]
+                    .as_str()
+                    .ok_or_else(|| bad("expected new setting"))?;
+                let matches = self.setting_value(key, t)?.as_deref() == Some(previous);
+                if matches {
+                    self.setting_keep(
+                        key,
+                        value,
+                        t + a["ttl_ms"].as_i64().unwrap_or(EXPECTED_TTL_MS),
+                    )?;
+                }
+                json!(matches)
+            }
             "link.set" => {
                 self.db.exec(
                     "INSERT OR REPLACE INTO links (service_user_id, standard_user_id, approved_at, approved_with) VALUES (?, ?, ?, ?)",
@@ -850,7 +887,7 @@ impl Directory {
                 None => Value::Null,
             },
             "oauth.client_add" => {
-                let user = self.create("service", s("name"))?;
+                let user = self.create("service", s("name"), None)?;
                 let id = random()?[..22].to_string();
                 self.db.exec(
                     "INSERT INTO oauth_clients (id, name, redirect_uris, service_user_id, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -1268,6 +1305,18 @@ impl Users {
         }
     }
 
+    async fn site_scope(&self, env: &Env, host: Option<&str>) -> Result<Option<String>> {
+        let Some(host) = host else {
+            return Ok(None);
+        };
+        let (_, zone) = self
+            .host
+            .split_once('.')
+            .ok_or_else(|| bad("platform host has no zone"))?;
+        let (scope, _) = crate::site_passkeys::approved(env, zone, host).await?;
+        Ok(Some(scope))
+    }
+
     /// Creates a user, a standard one or a site user when `site` is given, and answers them
     /// with a single-use enrolment link.
     async fn standard_with_link(&self, env: &Env, name: &str, site: Option<&str>) -> Result<Value> {
@@ -1275,9 +1324,20 @@ impl Users {
             Some(host) => format!("site:{host}"),
             None => "standard".to_string(),
         };
-        let user = directory(env, "users.create", json!({ "kind": kind, "name": name })).await?;
+        let scope = self.site_scope(env, site).await?;
+        let user = directory(
+            env,
+            "users.create",
+            json!({ "kind": kind, "name": name, "site_scope": scope }),
+        )
+        .await?;
         let id = user["id"].as_str().unwrap_or_default();
-        let code = directory(env, "enrol.create", json!({ "user_id": id })).await?;
+        let code = directory(
+            env,
+            "enrol.create",
+            json!({ "user_id": id, "site_scope": scope }),
+        )
+        .await?;
         Ok(json!({
             "user": user,
             "enrol": self.enrol_url(code.as_str().unwrap_or_default(), site),
@@ -1342,7 +1402,21 @@ impl Users {
                             || site.is_some_and(|host| u.kind == format!("site:{host}"))
                     })
                     .ok_or_else(|| bad("no such standard user, or user of that site"))?;
-                let code = directory(env, "enrol.create", json!({ "user_id": user.id })).await?;
+                let scope = self.site_scope(env, site).await?;
+                if user.kind != "standard"
+                    && directory(env, "users.site_scope", json!({ "id": user.id })).await?
+                        != to_value(&scope)
+                {
+                    return Err(bad(
+                        "user belongs to a previous site binding; invite them again",
+                    ));
+                }
+                let code = directory(
+                    env,
+                    "enrol.create",
+                    json!({ "user_id": user.id, "site_scope": scope }),
+                )
+                .await?;
                 json!({ "user": user, "enrol": self.enrol_url(code.as_str().unwrap_or_default(), site) })
             }
             "users_link" => {

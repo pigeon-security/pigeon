@@ -21,6 +21,8 @@ const CAPABILITIES: &[Register] = &[
     crate::storage::instance_tools,
     crate::source::read::instance_tools,
     crate::ci::instance_tools,
+    crate::observability::instance::instance_tools,
+    crate::ingest::instance_tools,
 ];
 
 /// An approved instance's enabled capabilities. The request cannot supply a replacement scope.

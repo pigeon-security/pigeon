@@ -54,6 +54,12 @@ pub struct Instance {
     /// Optional read-only CI visibility for this instance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ci: Option<crate::ci::Profile>,
+    /// Optional read-only metrics for the approved Worker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observability: Option<crate::observability::instance::Profile>,
+    /// Optional approved ingestion source and destination.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ingest: Option<crate::ingest::Profile>,
     /// The record version, which is not part of a diff.
     #[serde(default)]
     pub version: u64,
@@ -653,6 +659,25 @@ pub fn validate(instance: &Instance, others: &[Instance], rules: &Rules) -> Vec<
         }
         Ok(None) => {}
         Err(problem) => problems.push(problem),
+    }
+
+    if let Err(problem) = crate::observability::instance::validate(instance) {
+        problems.push(problem);
+    }
+    if let Some(profile) = &instance.ingest {
+        if let Err(problem) = profile.validate() {
+            problems.push(problem);
+        }
+        if profile.enabled()
+            && !matches!(
+                instance.account,
+                AccountRef::Linked {
+                    account_id: Some(_)
+                }
+            )
+        {
+            problems.push("Ingest requires an approved linked account.".into());
+        }
     }
 
     if others.iter().any(|o| o.id == instance.id) {

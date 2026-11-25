@@ -82,8 +82,18 @@ impl<'a> Session<'a> {
         repo: &'a str,
         access: Access,
     ) -> Result<Session<'a>> {
-        let (found, token) =
-            artifacts::session(account, namespace, repo, access, TOKEN_TTL).await?;
+        Self::open_for(account, namespace, repo, access, TOKEN_TTL).await
+    }
+
+    /// Opens a session with a shorter deadline for a bounded Git operation.
+    pub(super) async fn open_for(
+        account: &'a Account,
+        namespace: &'a str,
+        repo: &'a str,
+        access: Access,
+        ttl: u64,
+    ) -> Result<Session<'a>> {
+        let (found, token) = artifacts::session(account, namespace, repo, access, ttl).await?;
         Ok(Session {
             remote: Remote {
                 url: found.remote.trim_end_matches('/').to_string(),

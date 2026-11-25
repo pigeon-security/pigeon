@@ -42,3 +42,21 @@ approved instance. Legacy or unattributed jobs remain visible through the
 main-platform tools. Scoped listing filters before applying its limit. Scoped
 status checks ownership before reading job output or events. Job submission and
 cancellation remain main-platform operations.
+
+## Scoped visitor access, queued execution, and Worker metrics
+
+Site visitor sessions and enrollment are bound to the applied site, instance
+and hostname. Unscoped legacy site visitor identities require a fresh invite.
+This boundary applies on the Pigeon-served hostname and does not change direct
+access to a linked Worker's public origin.
+
+An explicitly enabled ingest profile fixes the source and destination.
+GitHub-triggered publishing rechecks the approved binding and current policy
+before queued executions. See [entry points](instance-entrypoints.md)
+for the controls that remain shared.
+
+Worker metrics may be enabled by an approved `observability` profile for the
+record's Worker. The query and summarized results are both limited to that
+script. The cost figure is an estimate from its usage, and billing, logs, and
+token capacity remain platform tools. A linked account requires an analytics
+grant; enabling the profile does not extend the account's OAuth permissions.

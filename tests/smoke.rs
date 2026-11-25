@@ -2709,3 +2709,114 @@ fn ci_instance_scope_fails_closed_on_ambiguous_jobs_and_foreign_owners() {
             .is_err()
     );
 }
+
+#[test]
+fn instance_site_sessions_cannot_follow_a_reassigned_hostname() {
+    use pigeon_core::site_auth::{binding, issue, session_key, verify};
+    let host = "blog.example.test";
+    let secret = b"fixture";
+    let now = 1_000;
+    let old = session_key(secret, &binding("first", "blog", host));
+    let cookie = issue(&old, host, "visitor", now);
+    assert!(verify(&old, host, &cookie, now).is_some());
+    for (instance, site) in [("second", "blog"), ("first", "different")] {
+        let key = session_key(secret, &binding(instance, site, host));
+        assert!(verify(&key, host, &cookie, now).is_none());
+    }
+    assert!(verify(&session_key(secret, host), host, &cookie, now).is_none());
+}
+
+#[test]
+fn instance_worker_metrics_ignore_other_workloads_even_if_returned_by_the_provider() {
+    use pigeon_capabilities::observability::instance::{query, worker_result};
+    let rows = |foreign_requests: u32| {
+        json!({
+            "data":{"viewer":{"accounts":[{"workersInvocationsAdaptive":[
+                {"sum":{"requests":1},"dimensions":{"scriptName":"allowed","status":"ok"}},
+                {"sum":{"requests":foreign_requests},"dimensions":{"scriptName":"foreign","status":"ok"}}
+            ]}]}}
+        })
+    };
+    assert_eq!(
+        query("account", "allowed", "from", "to")["variables"]["script"],
+        "allowed"
+    );
+    let result = worker_result(&rows(50), "allowed").unwrap();
+    assert_eq!(result, worker_result(&rows(5_000), "allowed").unwrap());
+    assert_eq!(result["metrics"]["requests"].as_f64(), Some(1.0));
+    assert!(worker_result(&json!({}), "allowed").is_err());
+}
+
+#[test]
+fn instances_bind_background_publishing_and_ingest_to_approved_targets() {
+    use pigeon_capabilities::github::{allows_queued_publish, instance_for, publishing_binding};
+    use pigeon_capabilities::ingest::{Profile, check_job_binding, hosts};
+    use pigeon_capabilities::instances::record::{AccountRef, Instance};
+    use pigeon_capabilities::storage::Account;
+
+    let record: Instance = serde_json::from_value(json!({
+        "id": "blog", "title": "Blog", "version": 4,
+        "account": {"kind":"linked", "account_id":"fictional-account"},
+        "repo": {"kind":"github", "full_name":"willow/blog", "installation":12},
+        "sites":[{"name":"primary","bucket":"blog-site"}],
+        "publishing":{"state":"enabled","site":"primary"},
+        "ingest":{"state":"enabled","source":"scaleway:archive","bucket":"archive",
+                  "prefix":"approved/","destination_bucket":"blog-data"}
+    }))
+    .unwrap();
+    let queued = json!({
+        "commit": "a".repeat(40), "repo": "Willow/Blog", "installation":12,
+        "binding": publishing_binding(&record).unwrap()
+    });
+    assert!(allows_queued_publish(&record, &queued));
+    assert!(!allows_queued_publish(
+        &record,
+        &json!({"commit":"a".repeat(40)})
+    ));
+    assert!(instance_for(&[record.clone(), record.clone()], "willow/blog", 12).is_none());
+    let mut changed = record.clone();
+    changed.account = AccountRef::Linked {
+        account_id: Some("another-account".into()),
+    };
+    assert!(!allows_queued_publish(&changed, &queued));
+    changed = record.clone();
+    changed.publishing = Some(pigeon_core::site_publish::Profile::Disabled);
+    assert!(publishing_binding(&changed).is_none());
+    assert!(!allows_queued_publish(&changed, &queued));
+
+    let profile = record.ingest.as_ref().unwrap();
+    let args = json!({});
+    let binding = profile.bind(&args).unwrap();
+    assert_eq!(binding.destination_bucket, "blog-data");
+    for args in [
+        json!({"source":"scaleway:other"}),
+        json!({"bucket":"private"}),
+        json!({"prefix":""}),
+    ] {
+        assert!(profile.bind(&args).is_err());
+    }
+    assert!(Profile::Disabled.bind(&args).is_err());
+    let mut source = Account::scaleway("archive", "fr-par");
+    let mut job = hosts::job_spec(&hosts::JobInputs {
+        instance: &record.id,
+        account: &source,
+        bucket: binding.bucket,
+        prefix: binding.prefix,
+        dest_bucket: binding.destination_bucket,
+        account_id: "fictional-account",
+        dry_run: true,
+        keep_archives: true,
+        fingerprints: false,
+        commit: &"a".repeat(40),
+        day: "20261125",
+        nonce: 0,
+    });
+    assert!(check_job_binding(&job, "fictional-account", "blog-data", &source).is_ok());
+    assert!(check_job_binding(&job, "new-account", "blog-data", &source).is_err());
+    assert!(check_job_binding(&job, "fictional-account", "new-bucket", &source).is_err());
+    job.dest.bucket = "another-bucket".into();
+    assert!(check_job_binding(&job, "fictional-account", "blog-data", &source).is_err());
+    job.dest.bucket = "blog-data".into();
+    source.buckets = vec!["different-source".into()];
+    assert!(check_job_binding(&job, "fictional-account", "blog-data", &source).is_err());
+}
