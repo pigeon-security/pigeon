@@ -28,12 +28,13 @@
   const root = document.getElementById("pigeon-app");
   const passkey = window.pigeonPasskey;
   const views = new Map();
+  const workspaceTabs = new Map();
   const settingsPanels = new Map();
   const settingsTabs = { access: "Access", models: "Models", connections: "Connections",
     people: "People", capabilities: "Capabilities" };
   views.set("settings", { subtabs: settingsTabs, render: (ctx) => settingsPanels.get(ctx.subtab)(ctx) });
-  const coreTabs = { sessions: "Sessions", cost: "Cost", architecture: "Architecture", "site-access": "Site Access", settings: "Settings" };
-  const linkedTabs = { home: "Home", "site-access": "Site Access", settings: "Settings" };
+  const coreTabs = { sessions: "Sessions", cost: "Cost", architecture: "Architecture" };
+  const linkedTabs = { home: "Home" };
   const tags = new Set("a article aside b button caption code dd details div dl dt em fieldset footer form h1 h2 h3 h4 header hr img input label legend li main nav ol option p pre section select small span strong summary table tbody td textarea th thead time tr ul".split(" "));
   const attrsAllowed = /^(?:aria-[\w-]+|data-[\w-]+|id|class|role|tabindex|title|href|src|alt|width|height|type|name|value|placeholder|disabled|open|hidden|spellcheck|selected|checked|for|autocomplete|rows|scope|datetime|min|max|step)$/;
   function el(tag, attrs = {}, ...children) {
@@ -97,11 +98,15 @@
     if (views.has(tab)) throw new Error(`Duplicate app view: ${tab}`);
     views.set(tab, typeof view === "function" ? { render: view } : view);
   }
+  function registerWorkspaceTab(key, title, render) {
+    register(key, render);
+    workspaceTabs.set(key, title);
+  }
   function registerSettingsPanel(key, render) {
     if (!Object.hasOwn(settingsTabs, key) || settingsPanels.has(key)) throw new Error(`Invalid settings panel: ${key}`);
     settingsPanels.set(key, render);
   }
-  window.pigeonApp = Object.freeze({ register, registerSettingsPanel, op, url, nav, el, card, pill,
+  window.pigeonApp = Object.freeze({ register, registerWorkspaceTab, registerSettingsPanel, op, url, nav, el, card, pill,
     refresh: () => render(),
     get selectedInstance() { return selected; },
   });
@@ -205,12 +210,12 @@
     selected = instances.find((i) => i.id === query.get("instance")) ||
       instances.find((i) => i.account?.kind === "home") || null;
     const linked = isLinked(selected);
-    const tabs = linked ? linkedTabs : coreTabs;
+    const tabs = { ...(linked ? linkedTabs : coreTabs), ...Object.fromEntries(workspaceTabs), settings: "Settings" };
     const management = { approvals: "Approvals", instances: "Instances", management: "Access" };
     const titles = { ...tabs, ...management };
     const asked = query.get("tab");
     const tab = Object.hasOwn(titles, asked) ? asked : Object.keys(tabs)[0];
-    const view = views.get(linked && !Object.hasOwn(management, tab) ? `linked-${tab}` : tab);
+    const view = views.get(linked && !Object.hasOwn(management, tab) && !workspaceTabs.has(tab) ? `linked-${tab}` : tab);
     const subtabs = view?.subtabs || {};
     let sub = query.get("subtab");
     if (!sub && tab === "management" && location.hash) {

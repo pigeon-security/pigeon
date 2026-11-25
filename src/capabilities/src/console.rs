@@ -12,7 +12,6 @@ mod ops;
 pub mod page;
 pub mod sections;
 pub mod session;
-pub mod site_access;
 pub mod snapshot;
 pub mod writes;
 
@@ -26,6 +25,7 @@ use std::time::Duration;
 use worker::{Env, Error, Headers, Method, Request, Response, Result};
 
 use crate::passkeys::Passkeys;
+use crate::site_passkeys::console as site_access;
 use crate::users::{Passkey, User, directory};
 use crate::{Call, Capability, Context, Serve, arg, unknown};
 use sections::{Section, Tab};
@@ -374,25 +374,30 @@ impl Console {
             );
         }
         let body: Value = req.json().await.unwrap_or(Value::Null);
+        if let Some(action) = site_access::Action::from_path(&path) {
+            let Some(signed) = self.signed(cx.env, &req).await? else {
+                return answer(&json!({ "error": "sign in first" }), 401);
+            };
+            return match site_access::serve(
+                &self.host,
+                &self.passkeys,
+                cx.env,
+                action,
+                &signed.user,
+                &body,
+            )
+            .await
+            {
+                Ok(v) => answer(&v, 200),
+                Err(e) => answer(&json!({ "error": e.to_string() }), 400),
+            };
+        }
         match path.as_str() {
             "/app/op" => {
                 let Some(signed) = self.signed(cx.env, &req).await? else {
                     return answer(&json!({ "error": "sign in first" }), 401);
                 };
                 ops::serve(cx, signed.user, &body).await
-            }
-            "/console/site-access/hosts"
-            | "/console/site-access/list"
-            | "/console/site-access/invite/begin"
-            | "/console/site-access/invite/finish" => {
-                let Some(signed) = self.signed(cx.env, &req).await? else {
-                    return answer(&json!({ "error": "sign in first" }), 401);
-                };
-                let action = path.trim_start_matches("/console/site-access/");
-                match self.site_access(cx.env, action, &signed.user, &body).await {
-                    Ok(v) => answer(&v, 200),
-                    Err(e) => answer(&json!({ "error": e.to_string() }), 400),
-                }
             }
             "/console/sign-in/begin" => {
                 match self.passkeys.sign_in_begin(cx.env, SIGN_IN, None).await {

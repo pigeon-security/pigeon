@@ -47,14 +47,7 @@ impl Write {
     pub fn target(self, target: &str) -> Result<String, String> {
         let t = target.trim();
         match self {
-            Write::Invite => {
-                let n = t.chars().count();
-                if n == 0 || n > 64 || t.chars().any(char::is_control) {
-                    Err("a name is 1 to 64 characters, none of them control characters".into())
-                } else {
-                    Ok(t.to_string())
-                }
-            }
+            Write::Invite => crate::users::invite_name(t),
             Write::LandApproval => match t {
                 "on" | "off" => Ok(t.to_string()),
                 _ => Err("on or off".into()),

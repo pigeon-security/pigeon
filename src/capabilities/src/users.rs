@@ -1371,6 +1371,17 @@ async fn expected(env: &Env, account: &Account, host: &str) -> Result<Expected> 
 
 // ---- the capability ----
 
+/// The normalized display name accepted by the console invitation forms.
+pub(crate) fn invite_name(name: &str) -> std::result::Result<String, String> {
+    let name = name.trim();
+    let len = name.chars().count();
+    if len == 0 || len > 64 || name.chars().any(char::is_control) {
+        Err("a name is 1 to 64 characters, none of them control characters".into())
+    } else {
+        Ok(name.to_string())
+    }
+}
+
 /// Users, on the hostname whose Access tokens say who calls and whose `/auth` pages take
 /// passkeys.
 pub struct Users {

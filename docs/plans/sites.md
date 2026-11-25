@@ -285,6 +285,12 @@ New site visitors can be invited when the allowlist contains `site`. The
 15-minute single-use enrollment link opens on the selected hostname. Platform
 People continues to manage platform identities and their passkeys.
 
+The [Site Passkeys capability](../../src/capabilities/src/site_passkeys.rs)
+owns [the visitor operations](../../src/capabilities/src/site_passkeys/console.rs)
+and [the Site Access tab](../../src/capabilities/src/site_passkeys/visitor.js).
+The console mounts the tab and supplies its same-origin session checks. Users
+provides visitor identity and enrollment storage through the Directory.
+
 A subdomain-only publishing target uses its approved label and the Sites Worker's
 platform zone for the canonical URL. A direct domain or zone hostname keeps
 precedence when present. Publishing and rollback use the same URL in release

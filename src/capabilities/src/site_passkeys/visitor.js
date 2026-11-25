@@ -1,14 +1,14 @@
 // Visitor management follows the app's selected instance.
 (() => {
   "use strict";
-  const { register, el, card } = window.pigeonApp;
+  const { registerWorkspaceTab, el, card } = window.pigeonApp;
   const { post, approve, say } = window.pigeonPasskey;
 
   function visitorPanel(selection) {
     const status = el("p", { "data-status": "", role: "status" });
     const visitors = el("div", {});
     const input = el("input", {
-      class: "c-input", maxlength: "64", "aria-label": `Visitor name for ${selection.host}`,
+      class: "c-input", "aria-label": `Visitor name for ${selection.host}`,
       placeholder: "Visitor name",
     });
     input.maxLength = 64;
@@ -99,6 +99,5 @@
     return el("div", { class: "layer" },
       ...hosts.map(({ host, site }) => visitorPanel({ instance: instance.id, host, site })));
   }
-  register("site-access", renderSiteAccess);
-  register("linked-site-access", renderSiteAccess);
+  registerWorkspaceTab("site-access", "Site Access", renderSiteAccess);
 })();

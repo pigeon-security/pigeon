@@ -3,6 +3,8 @@
 //! decides for itself who may come in. The relying party is the site's own host, so a passkey
 //! made for one host cannot sign in on another.
 
+pub mod console;
+
 use pigeon_core::{mcp::Tool, site_auth};
 use serde_json::{Value, json};
 use worker::{Error, Result};

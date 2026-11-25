@@ -31,7 +31,7 @@ macro_rules! app_assets {
                 include_str!(concat!("web/", $view, ".css"))),)+
             $((concat!("/app/", $view, ".js"), "text/javascript; charset=utf-8",
                 include_str!(concat!("web/", $view, ".js"))),)+
-            ("/app/site_access.js", "text/javascript; charset=utf-8", include_str!("web/site_access.js")),
+            crate::site_passkeys::console::ASSET,
         ];
     };
 }
