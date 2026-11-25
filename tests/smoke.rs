@@ -2412,10 +2412,11 @@ fn sites_publish_to_approved_platform_subdomain_without_preview_target() {
 }
 
 #[test]
-fn sites_publishing_profile_binds_the_scope_and_preserves_legacy_records() {
+fn sites_publishing_profile_binds_the_scope_and_refuses_records_without_one() {
     use pigeon_core::site_publish::site;
     let mut record = json!({"sites": [{"name":"first"}, {"name":"second"}]});
-    assert_eq!(site(&record).unwrap()["name"], "first");
+    // No profile: nothing is publishable, not even the first site.
+    assert!(site(&record).is_err());
     record["publishing"] = json!({"state":"enabled", "site":"second"});
     assert_eq!(site(&record).unwrap()["name"], "second");
     record["publishing"]["site"] = json!("unknown");
@@ -2431,7 +2432,8 @@ fn instance_tool_profiles_share_discovery_and_binding() {
 
     let site: Instance = serde_json::from_value(json!({
         "id": "blog", "title": "Blog", "account": {"kind":"home"},
-        "sites": [{"name":"blog", "bucket":"site", "targets":[]}]
+        "sites": [{"name":"blog", "bucket":"site", "targets":[]}],
+        "publishing": {"state":"enabled", "site":"blog"}
     }))
     .unwrap();
     let archive: Instance = serde_json::from_value(json!({
@@ -2807,6 +2809,10 @@ fn instances_bind_background_publishing_and_ingest_to_approved_targets() {
     assert!(!allows_queued_publish(&changed, &queued));
     changed = record.clone();
     changed.publishing = Some(pigeon_core::site_publish::Profile::Disabled);
+    assert!(publishing_binding(&changed).is_none());
+    assert!(!allows_queued_publish(&changed, &queued));
+    // A record without a profile is not publishable: the webhook binds nothing.
+    changed.publishing = None;
     assert!(publishing_binding(&changed).is_none());
     assert!(!allows_queued_publish(&changed, &queued));
 

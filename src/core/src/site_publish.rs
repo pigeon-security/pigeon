@@ -9,11 +9,12 @@ pub enum Profile {
     Disabled,
 }
 
-/// Resolve an approved site. Legacy records published the first site.
+/// Resolve the site an approved `publishing` profile names. A record without a profile, or
+/// with a disabled one, publishes nothing.
 pub fn site(record: &Value) -> Result<&Value, String> {
     let sites = record["sites"].as_array().ok_or("instance has no sites")?;
     if record["publishing"].is_null() {
-        return sites.first().ok_or_else(|| "instance has no site".into());
+        return Err("instance has no publishing profile".into());
     }
     match serde_json::from_value::<Profile>(record["publishing"].clone())
         .map_err(|_| "invalid publishing profile".to_string())?

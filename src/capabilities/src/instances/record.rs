@@ -42,7 +42,7 @@ pub struct Instance {
     /// `{"blog": "^1"}`. Set only by the person approving the record. Absent when empty.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub pins: std::collections::BTreeMap<String, String>,
-    /// Explicit publishing selection. Missing preserves the first site's legacy behavior.
+    /// The site that `site_deploy` and `site_rollback` publish. Absent: nothing is publishable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publishing: Option<pigeon_core::site_publish::Profile>,
     /// Optional read-only access to a declared object storage account.

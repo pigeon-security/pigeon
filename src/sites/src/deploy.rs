@@ -498,28 +498,24 @@ pub async fn deploy(
         "renderer_digest": pigeon_blog::renderer_digest(),
         "base_url": t.base_url,
     });
-    // A legacy instance keeps its existing serving contract until the owner opts in.
-    let release =
-        (!record["publishing"].is_null()).then(|| site_publish::release_id(&provenance, &manifest));
-    let pointer = release.as_deref().unwrap_or(&commit);
+    // Every deploy is an immutable release; `target` refused a record without a profile.
+    let release = site_publish::release_id(&provenance, &manifest);
     r2::put(
         &account,
         &t.bucket,
-        &r2::manifest_key(pointer),
+        &r2::manifest_key(&release),
         "application/json",
         serde_json::to_vec(&manifest).map_err(|e| bad(e.to_string()))?,
     )
     .await?;
-    if let Some(release) = &release {
-        r2::put(
-            &account,
-            &t.bucket,
-            &site_publish::release_key(release),
-            "application/json",
-            serde_json::to_vec(&provenance)?,
-        )
-        .await?;
-    }
+    r2::put(
+        &account,
+        &t.bucket,
+        &site_publish::release_key(&release),
+        "application/json",
+        serde_json::to_vec(&provenance)?,
+    )
+    .await?;
     publish_stage(&mut started, "manifest_staged");
     ensure_current(env, key, caller, instance, record).await?;
     r2::put(
@@ -527,7 +523,7 @@ pub async fn deploy(
         &t.bucket,
         r2::LIVE,
         "text/plain",
-        pointer.as_bytes().to_vec(),
+        release.as_bytes().to_vec(),
     )
     .await?;
     publish_stage(&mut started, "activated");
