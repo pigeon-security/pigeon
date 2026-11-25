@@ -9,6 +9,7 @@
 mod apex;
 mod deploy;
 pub mod public;
+mod queued;
 mod versions;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -178,6 +179,29 @@ impl Service for Sites {
     ) -> pigeon_contract::serve::Answering<'a> {
         Box::pin(async move {
             match req.tool.as_str() {
+                queued::TOOL => {
+                    let receipt = match queued::Receipt::read(caller, &req.args) {
+                        Ok(receipt) => receipt,
+                        Err(why) => return Answer::error(FailureKind::Unauthorized, why),
+                    };
+                    let key = call_key(env).await;
+                    let Some(key) = key else {
+                        return Answer::error(FailureKind::Failed, "CALLER_KEY is not set");
+                    };
+                    match deploy::deploy(
+                        env,
+                        key.as_bytes(),
+                        caller,
+                        receipt.instance,
+                        receipt.revision,
+                        Some(receipt.binding),
+                    )
+                    .await
+                    {
+                        Ok(value) => Answer::Ok(value),
+                        Err(error) => Answer::error(FailureKind::Failed, error.to_string()),
+                    }
+                }
                 "site_deploy" | "site_rollback" => {
                     let Some(instance) = req.args["instance"].as_str() else {
                         return Answer::error(FailureKind::BadRequest, "`instance` is required");
@@ -193,10 +217,7 @@ impl Service for Sites {
                             "`rev` must be a commit or branch",
                         );
                     }
-                    let key = match env.secret_store(CALLER_KEY) {
-                        Ok(b) => secrets_store::read(&b).await.ok().flatten(),
-                        Err(_) => None,
-                    };
+                    let key = call_key(env).await;
                     let Some(key) = key else {
                         return Answer::error(FailureKind::Failed, "CALLER_KEY is not set");
                     };
@@ -230,6 +251,11 @@ impl Service for Sites {
             }
         })
     }
+}
+
+async fn call_key(env: &Env) -> Option<String> {
+    let binding = env.secret_store(CALLER_KEY).ok()?;
+    secrets_store::read(&binding).await.ok().flatten()
 }
 
 #[event(fetch)]

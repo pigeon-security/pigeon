@@ -290,6 +290,9 @@ pub async fn deploy(
         .commit
         .clone()
         .ok_or_else(|| bad("GitHub's archive does not name its commit"))?;
+    if publishing_binding.is_some() && !commit.eq_ignore_ascii_case(rev) {
+        return Err(bad("GitHub's archive does not match the queued commit"));
+    }
     let year = tarball::year_of(archive.mtime);
     let s = pigeon_blog::repo::split(archive.files).map_err(bad)?;
     let input = pigeon_blog::Input {

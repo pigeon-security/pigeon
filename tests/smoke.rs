@@ -2874,3 +2874,43 @@ fn scoped_worker_sender_requires_the_configured_receiver_to_support_context() {
     assert_eq!(scope.recipient, "pigeon-sites");
     assert_eq!(scope.instance.as_deref(), Some("site"));
 }
+
+#[path = "../src/sites/src/queued.rs"]
+mod queued_site_receipt;
+
+#[test]
+fn queued_site_receipt_checks_scope_actor_and_immutable_inputs() {
+    use pigeon_contract::{Signed, WorkerContext};
+    let mut signed = Signed {
+        caller: json!({"user": {"kind": "standard", "id": "owner"}}),
+        iat: 0,
+        exp: 1,
+        nonce: String::new(),
+        context: Some(WorkerContext::new("pigeon-sites", Some("blog"))),
+    };
+    let args = json!({
+        "instance": "blog",
+        "rev": "a".repeat(40),
+        "publishing_binding": "A".repeat(43),
+    });
+    let receipt = queued_site_receipt::Receipt::read(&signed, &args).unwrap();
+    assert_eq!(queued_site_receipt::TOOL, "site_deploy_queued");
+    assert_eq!(receipt.instance, "blog");
+    assert_eq!(receipt.revision, "a".repeat(40));
+    assert_eq!(receipt.binding, "A".repeat(43));
+    for (key, value) in [
+        ("instance", json!("elsewhere")),
+        ("rev", json!("main")),
+        ("publishing_binding", Value::Null),
+        ("bucket", json!("elsewhere")),
+    ] {
+        let mut bad = args.clone();
+        bad[key] = value;
+        assert!(queued_site_receipt::Receipt::read(&signed, &bad).is_err());
+    }
+    signed.caller["acting_for"] = json!({"id": "owner"});
+    assert!(queued_site_receipt::Receipt::read(&signed, &args).is_err());
+    signed.caller["acting_for"] = Value::Null;
+    signed.context = None;
+    assert!(queued_site_receipt::Receipt::read(&signed, &args).is_err());
+}
