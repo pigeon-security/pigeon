@@ -164,9 +164,10 @@ pub async fn caller_key(env: &Env) -> Result<Vec<u8>> {
 /// signature with that Worker's own key. The claim proves nothing alone: only a signature made
 /// with that Worker's key passes.
 ///
-/// Per-Worker keys are not yet active: no Worker sends this header and core binds none of the
-/// [`WORKER_KEYS`], so every call is still checked with the shared [`CALLER_KEY`] and
-/// [`WORKER_OPS`] bounds nothing yet. The plan to turn them on is docs/plans/caller-keys.md.
+/// Per-Worker keys are not yet active: core binds the [`WORKER_KEYS`] and Workers send this
+/// header (step 2 of docs/plans/caller-keys.md), but every Worker still signs with the shared
+/// [`CALLER_KEY`], so its own key fails with a bad signature, the shared key passes
+/// ([`KeyUsed::Shared`]) and [`WORKER_OPS`] bounds nothing until step 3.
 pub const WORKER_HEADER: &str = "X-Pigeon-Worker";
 
 /// The capability Workers that may get a key of their own, by the name they claim in
@@ -191,7 +192,7 @@ pub fn worker_key_name(worker: &str) -> Option<&'static str> {
 }
 
 /// `worker`'s own caller key from the Secrets Store, when core binds it and it is set; `None`
-/// otherwise, so the shared key is used. Core binds none yet.
+/// otherwise, so the shared key is used.
 async fn worker_key(env: &Env, worker: &str) -> Option<Vec<u8>> {
     let name = worker_key_name(worker)?;
     let binding = env.secret_store(name).ok()?;
@@ -236,6 +237,22 @@ pub fn verify_caller_keyed(
 ) -> std::result::Result<(pigeon_contract::Signed, KeyUsed), pigeon_contract::Refused> {
     verify_with_keys(own, shared, |key| {
         pigeon_contract::verify(key, header, op, body, now_ms)
+    })
+}
+
+/// [`verify_caller_keyed`] as core's signed endpoint runs it ([`serve`]): with the recipient
+/// check of [`pigeon_contract::verify_for`] for `recipient`, core's own Worker name.
+pub fn verify_request(
+    own: Option<&[u8]>,
+    shared: &[u8],
+    header: Option<&str>,
+    op: &str,
+    body: &[u8],
+    now_ms: i64,
+    recipient: &str,
+) -> std::result::Result<(pigeon_contract::Signed, KeyUsed), pigeon_contract::Refused> {
+    verify_with_keys(own, shared, |key| {
+        pigeon_contract::verify_for(key, header, op, body, now_ms, recipient)
     })
 }
 
@@ -397,16 +414,15 @@ pub async fn serve(mut req: Request, cx: &Context<'_>) -> Result<Response> {
         Some(w) => worker_key(cx.env, w).await,
         None => None,
     };
-    let (signed, used) = match verify_with_keys(own.as_deref(), &key, |key| {
-        pigeon_contract::verify_for(
-            key,
-            header.as_deref(),
-            &op,
-            &body,
-            now_ms(),
-            cx.hosted.worker,
-        )
-    }) {
+    let (signed, used) = match verify_request(
+        own.as_deref(),
+        &key,
+        header.as_deref(),
+        &op,
+        &body,
+        now_ms(),
+        cx.hosted.worker,
+    ) {
         Ok(s) => s,
         Err(why) => {
             return reply(

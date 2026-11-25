@@ -286,6 +286,51 @@ fn core_bounds_each_workers_ops_with_its_own_key() {
     assert_eq!(check(Some(ci), &by(sites)), Err(Refused::BadSignature));
 }
 
+/// Step 2 of docs/plans/caller-keys.md: core binds every Worker's key and each Worker sends
+/// `X-Pigeon-Worker`, but still signs with the shared key. Core's signed endpoint, as it runs
+/// (`verify_request`, with the recipient check), tries the named Worker's key, gets a bad
+/// signature, falls back to the shared key and accepts the request as `Shared`, so no
+/// Worker's table applies and nothing is refused that was accepted before.
+#[test]
+fn core_accepts_a_named_worker_signing_with_the_shared_key() {
+    use pigeon_capabilities::split::{KeyUsed, verify_request, worker_may};
+    use pigeon_contract::{Refused, WorkerContext, sign, sign_with_context};
+
+    let (shared, sites) = (&b"shared"[..], &b"sites key"[..]);
+    let now = 1_800_000_000_000;
+    let core = "pigeon-platform";
+    let check = |header: &str, op: &str, body: &[u8], at: i64, recipient: &str| {
+        verify_request(Some(sites), shared, Some(header), op, body, at, recipient)
+    };
+    // An op outside sites' table: accepted all the same, since the shared key verified it.
+    let body = br#"{"action":"create"}"#;
+    assert!(worker_may("sites", "approval", body).is_err());
+    let header = sign(shared, &json!(null), "approval", body, now, "n");
+    let (_, used) = check(&header, "approval", body, now, core).unwrap();
+    assert_eq!(used, KeyUsed::Shared);
+
+    // A contextual callback (sites_scope), signed with the shared key for core.
+    let body = br#"{"instance":"willow"}"#;
+    let who = json!({ "user": { "name": "willow" } });
+    let context = WorkerContext::new(core, Some("willow"));
+    let header = sign_with_context(shared, &who, "sites_scope", body, now, "n", &context);
+    let (signed, used) = check(&header, "sites_scope", body, now, core).unwrap();
+    assert_eq!(used, KeyUsed::Shared);
+    assert_eq!(signed.instance(), Some("willow"));
+    // The recipient and age checks still apply after the fall-back.
+    let used = |at: i64, recipient: &str| {
+        check(&header, "sites_scope", body, at, recipient).map(|(_, k)| k)
+    };
+    assert_eq!(used(now, "other"), Err(Refused::WrongRecipient));
+    assert_eq!(used(now + 61_000, core), Err(Refused::Expired));
+    // Once sites signs with its own key (step 3), the same request is `Own`.
+    let header = sign_with_context(sites, &who, "sites_scope", body, now, "n", &context);
+    assert_eq!(
+        check(&header, "sites_scope", body, now, core).map(|(_, k)| k),
+        Ok(KeyUsed::Own)
+    );
+}
+
 /// `workers_setup` makes exactly the caller keys the store lacks, and keeps the rest.
 #[test]
 fn workers_setup_plans_only_missing_caller_keys() {

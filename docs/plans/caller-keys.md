@@ -1,12 +1,11 @@
 # Per-Worker caller keys
 
-Status: **step 1 landed** (`a8363fe`, on main). Step 0's code (`workers_setup` makes the six
-keys) and step 5's enforcement (`split::WORKER_OPS`, `worker_may`) are **built** on branch
-`claude/caller-keys-step0-ops`, not yet landed; both are inert until the keys exist and core
-binds them. Step 0's person action and steps 2, 3 and 4 are not started. Checked against main
-at `327553c` (2026-11-25): per-Worker keys are not active. No Worker sends `X-Pigeon-Worker`, no `src/*/wrangler.toml`
-binds a `CALLER_KEY_*` secret, and all seven Workers bind the shared `CALLER_KEY`. Task K1 of the
-clean-up.
+Status: **steps 0, 1 and 5 done; step 2 built, not landed.** Steps 1 and 5 are on main
+(`a8363fe`, `57e270d`). Step 0 is done live: `workers_setup` reported all seven caller keys
+"already there; kept" (2026-11-25). Step 2 is built on seven branches (see step 2 below), based
+on main at `9d0df43`. Steps 3 and 4 are not started. Until step 2 lands, per-Worker keys are not
+active: no Worker sends `X-Pigeon-Worker`, no `src/*/wrangler.toml` binds a `CALLER_KEY_*`
+secret, and all seven Workers bind the shared `CALLER_KEY`. Task K1 of the clean-up.
 
 ## Goal
 
@@ -58,7 +57,8 @@ capability Worker binds only its own. The shared `CALLER_KEY` is dropped at the 
 
 Each step is safe alone. Landing order is the order below.
 
-0. **Person action: make the secrets.** Code built on `claude/caller-keys-step0-ops`:
+0. **Person action: make the secrets.** Done: landed in `57e270d`, and `workers_setup` run live
+   on 2026-11-25 answered "already there; kept" for all seven names. The code:
    `Split::setup` makes each of `split::caller_key_names()` (the shared `CALLER_KEY` and the six
    `CALLER_KEY_*`) that `split::keys_to_make` finds missing, readable by Workers, keeps existing
    ones and answers only `made` or `already there; kept` per name, never a value. It adds no
@@ -75,27 +75,51 @@ Each step is safe alone. Landing order is the order below.
    while core has no such binding, so every check uses the shared key as today. No Worker sends
    `X-Pigeon-Worker` yet, so the new path is not reached. Deploys core's lane only
    (src/capabilities is core's; it deploys `pigeon-platform`).
-2. **Each Worker binds its own key and verifies either, still signing with the shared one.**
-   Not started. Needs step 0 done first: a binding to a missing secret fails the deploy. Core
-   also binds the six keys in this step (the same rule). One wrangler.toml change per Worker, one landing per
-   Worker, so a failure shows which one. Workers also begin to send `X-Pigeon-Worker`.
+2. **Each Worker binds its own key and names itself, still signing with the shared one.**
+   Built, not landed, on seven branches. Each lands alone, so a failed deploy shows which
+   Worker. Land them in this order:
+   1. `claude/caller-keys-step2-header` (shared lane: every Worker deploys). Adds
+      `pigeon_contract::identify(name)` and `WORKER_HEADER`; `ask` sends `X-Pigeon-Worker`
+      on every signed request once a Worker has named itself. Inert: nothing calls `identify`.
+   2. `claude/caller-keys-step2-core`. src/platform/wrangler.toml binds the six
+      `CALLER_KEY_<WORKER>` under their own names (the names `split::worker_key` reads). That
+      file is also in the ci-gateway and proxy lanes, so those two redeploy too. `serve`'s
+      check is now `split::verify_request` (the same check, with the recipient check), so the
+      smoke test `proxy::core_accepts_a_named_worker_signing_with_the_shared_key` runs
+      the exact path. Based on main; it does not need the header branch.
+   3. One branch per Worker, each based on the header branch, in any order:
+      `claude/caller-keys-step2-sites`, `-ci-gateway`, `-model-gateway`, `-cloud-gateway`,
+      `-ai-agents`, `-proxy`. Each binds its own key as `CALLER_KEY_OWN` (not read yet) and
+      names itself from `#[event(start)]` (`identify_worker`), which runs when the module loads,
+      so Durable Object code also sends the name. worker-build also exposes that function as
+      an entrypoint method; it takes nothing and only re-sets the same name.
+
+   What core does then: it reads the named Worker's key, the Worker's signature (still the
+   shared key) fails it as a bad signature, core falls back to `CALLER_KEY` and accepts the
+   request as `KeyUsed::Shared`, so `WORKER_OPS` does not apply and nothing that passed before
+   is refused. A Worker branch landing before core's only means core has no key for the name
+   and checks the shared key alone. Each wrangler change was checked with
+   `ci/deploy/allowlist.sh` (all calls on the allowlist; see "Checking each wrangler binding
+   change").
 3. **Each side signs with the per-Worker key.** Not started. Core signs for Worker X with `CALLER_KEY_X`;
-   Worker X signs with its own. Needs step 2 landed and deployed in all six capability Workers, since an
-   old Worker would refuse the new signature only if it lacked the key; none does by then.
+   Worker X signs with its own. Must wait until all seven step 2 branches have landed and their
+   deploys are live (core and the six Workers). Within step 3, first make each Worker verify
+   core's calls with `CALLER_KEY_OWN` and then `CALLER_KEY` (step 2 does not: Workers still
+   verify with the shared key only), and deploy that everywhere; only then switch the signers.
 4. **Drop the shared key.** Not started. Remove the `CALLER_KEY` bindings and the fallback code. Delete the
    secret from the Secrets Store last, by the person.
-5. **Bind each Worker to the core operations it may call.** Enforcement built on
-   `claude/caller-keys-step0-ops`; see the next section. It takes effect only for requests
+5. **Bind each Worker to the core operations it may call.** Enforcement landed in `57e270d`;
+   see the next section. It takes effect only for requests
    signed with a Worker's own key, so it bounds nothing until step 2 (core binds the keys,
    Workers send the header) and step 3 (Workers sign with their own key). It bounds everything
    only after step 4, while the shared key still verifies unbounded requests.
 
-**Next agent task: step 2**, once the person has done step 0's two actions: bind
-`CALLER_KEY_OWN` (its own `CALLER_KEY_<NAME>`) in each capability Worker's wrangler.toml, bind
-all six in src/platform/wrangler.toml under their own names, and make each Worker send
-`X-Pigeon-Worker: <name>`, one Worker per landing, each checked with `ci/deploy/allowlist.sh`.
+**Next: land step 2** in the order above (header, then core, then each Worker). **Then step 3**,
+only once all seven step 2 deploys are live: Workers verify core's calls with
+`CALLER_KEY_OWN` then `CALLER_KEY`, deployed everywhere, and only after that each side signs
+with the per-Worker key, one Worker per landing.
 
-## Step 5: per-Worker allowed core operations (built, inert until steps 2 and 3)
+## Step 5: per-Worker allowed core operations (landed, inert until steps 2 and 3)
 
 Per-Worker keys alone stop one Worker from signing as another. They do not bound what a
 compromised Worker can do to core, because the signer chooses the caller inside the envelope,
@@ -173,9 +197,8 @@ step 0 check by the person.
 
 ## Follow-ups for the person
 
-1. After step 0's code lands and `pigeon-platform` deploys, run `workers_setup` live and
-   confirm the six `CALLER_KEY_*` secrets exist (the answer's `keys`, and the Secrets Store).
-2. Decide the binding name in each Worker (`CALLER_KEY_OWN` is proposed).
+1. Done (2026-11-25): `workers_setup` live reported all seven caller keys present.
+2. The binding name in each Worker is `CALLER_KEY_OWN` (used by the step 2 branches).
 3. After step 4, delete `CALLER_KEY` from the Secrets Store.
 4. `docs/plans/workers-split.md`, `architecture.md` and `proxies.md` mention the one shared
    `CALLER_KEY`; update them once step 4 lands.
