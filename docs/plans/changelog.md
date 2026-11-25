@@ -1,6 +1,8 @@
 # Changelog of main: by date, one bullet per commit
 
-Status: **designed; built on a branch, not landed** (planner run `fHVIjaxK6nJZ`).
+Status: **landed and live** (`1f2a65c`, 2026-11-22; planner run `fHVIjaxK6nJZ`). The code is
+`pigeon_core::changelog` and `src/capabilities/src/changelog.rs`, registered in
+`src/platform/src/settings.rs`. The follow-up landing and the first live backfill are in the Log.
 
 ## Goal
 

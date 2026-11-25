@@ -1,6 +1,6 @@
 # Routing cloud sessions' traffic through pigeon's platform
 
-Status: phases 1 to 3 deployed; phase 4 built, awaiting merge. Operator docs: `docs/proxies.md`. Phases are handed back one at a time; each is merged and deployed before the
+Status: phases 1 to 5 deployed; phase 6 (container deploys through `/cf/`) is in the code (`src/proxies/src/cf_proxy.rs`). Operator docs: `docs/proxies.md`. Phases are handed back one at a time; each is merged and deployed before the
 next starts.
 
 ## Why

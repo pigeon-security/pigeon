@@ -1,9 +1,14 @@
 # Sites: passkey sign-in for a site, and pigeon.dev on pigeon-sites
 
-Status: planned 2026-11-23 (overnight). Branches below; nothing landed yet.
-Status: B2 landed (`Z1YCPDSwx_kjMf2P`, deployed). A and B1 are built and green, but not
-landed: since B2, the Lander refuses every branch ("the pack is malformed: it inflates too
-large"; see the Log). The apex is still served by core.
+Status: **A, B1 and B2 landed; B3 not done** (checked against main at `a4bb475`, 2026-11-25).
+A, passkey sign-in for a site, is `5d49282` (`src/capabilities/src/site_passkeys.rs`,
+`src/core/src/site_auth.rs`, the gate in `src/sites/src/public.rs`), off unless a record opts
+in. B1, the public architecture view and `site_publish {worker}`, is `36ef801`. B2, the apex
+pages on pigeon-sites, is `a7d8adf` (`src/sites/src/apex.rs`, landing `Z1YCPDSwx_kjMf2P`). B3 is
+not built: `settings::site()` still names `pigeon-platform` as the apex Worker, with
+`pigeon-sites` as the allowed alternative (`src/platform/src/settings.rs`). Which Worker serves
+the apex now is a live setting (`site_publish`) this file does not record. Site access bindings,
+protected previews and visitor management in `/app` landed later (sections after the Log).
 
 Two features of `pigeon-sites` (`src/sites`):
 
@@ -244,6 +249,8 @@ this. The instances layer is never on the public page.
   total at 48 MiB, counting deltas too. A pack of main's last 500 commits fails locally with the
   same error; 200 commits pass. A fix, a history parse that keeps only commits, is on an executor
   branch for the person. It cannot land through the Lander it fixes.
+- 2026-11-23: B1 reapplied onto main (`36ef801`), then A (`5d49282`).
+- 2026-11-25: status corrected from the code; B3 is still open.
 
 ### Morning, in order
 

@@ -1,5 +1,8 @@
 # Cost and instance settings
 
+Status: phases 1 to 5 landed on main (among them `7c3cd41`, `d796d7e` and `27a47c5`). Whether the
+TestFlight release has run is not recorded here.
+
 This iteration follows [the app plan](ios-app-sessions.md), [gateway accounting](model-providers-cloudflare.md), [instance pins](versioning.md) and [the release process](ios.md). Each numbered phase is reviewed and lands on its own; the app ships only after the server and detail screens land.
 
 1. Extend `models_daily` and the closed-day cost rollups without changing the meaning of existing fields. Group actual model names by the configured gateway, including active gateways without spend; do not infer the gateway from a model name. Do not invent attribution for old totals. Keep using the existing gross total (Anthropic reconciliation and estimated Unified Billing fee included). A public config lists promotional grants, their expiries and dated applications. The grant balance is lifetime; only applications in the requested period reduce that period's gross. No purchased balance is a discount. No credentials, private identifiers or illustrative grants in the live config.

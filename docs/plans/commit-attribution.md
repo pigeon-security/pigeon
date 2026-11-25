@@ -1,6 +1,8 @@
 # Commit attribution: new commits name the person on GitHub
 
-Status: **designed; built on a branch, not landed** (planner run `fHVIjaxK6nJZ`).
+Status: **landed** (`3234439`, 2026-11-22; planner run `fHVIjaxK6nJZ`). The identities are in
+`src/core/src/attribution.rs`; the Lander (`src/capabilities/src/land.rs`), CI notes
+(`src/ci/src/notes.rs`) and the AI agents sandbox (`src/ai-agents/src/sandbox.rs`) use them.
 
 ## Goal
 

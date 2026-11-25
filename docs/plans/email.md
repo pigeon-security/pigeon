@@ -1,6 +1,6 @@
 # Email capture: Cloudflare Email Routing into the data pipeline
 
-Status: **designed; phase 1 (the message schema and its parser, crate `pigeon-email`) built
+Status: **designed; phase 1 (the message schema and its parser, crate `pigeon-email`) on main,
 off by default** (2026-11-22). Nothing is deployed, routed or enabled. Code branch:
 `claude/ai-agent-NVhZ3wCsS5dT`; this plan: `claude/ai-agent-AFc1coPrsJTT`.
 

@@ -1,7 +1,14 @@
 # The data Worker: one per instance, in the instance's own account, reached through pigeon
 
-Status: **designed** (2026-11-22). Nothing is built, deployed or enabled. Branch
-`claude/ai-agent-AFc1coPrsJTT` (docs only). Instances and linked accounts belong to another
+Status: **designed; only the ingest parts built, latent** (2026-11-22; checked against main at
+`a4bb475`, 2026-11-25). The crate `src/data-worker` (`pigeon-data-worker`) landed in `3283c87`
+with ingest.md's decision 13 parts only: signed `/ingest/start` and `/ingest/stop` (key
+`DATA_KEY`), the `IngestJob` container object and the manifest queue consumer for the D1 index.
+It is not a platform Worker: `ci/workers.toml` lists it under `[checks]`, it has only
+`wrangler.example.toml`, and nothing deploys it. Phase 1 below (`data_status`, the signed contract
+ops) and the `data_*` tools are not built. `willowgraysen` is named as an ingest target in
+`src/platform/src/settings.rs`, but it is not onboarded: no account is linked and no data Worker
+is deployed (Follow-ups 1 and 2). Design branch `claude/ai-agent-AFc1coPrsJTT` (docs only). Instances and linked accounts belong to another
 planner ([linked-accounts.md](linked-accounts.md)); this plan changes none of their code and
 lists what it needs from them.
 

@@ -1,5 +1,8 @@
 # Sandbox image v2 (2026-11-22)
 
+Status: landed (`23afd44`, the `pigeon-sandboxd` v2 source). The AI agents Worker has since
+pinned image v3 (`eb06cad`).
+
 Fixes the three sandbox bugs of the overnight run (`docs/plans/overnight-2026-11-22.md`, "What
 broke", items 1–3) in `pigeon-sandboxd`, and closes a credential leak found while fixing them.
 

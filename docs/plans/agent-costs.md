@@ -1,7 +1,7 @@
 # AI agent costs: the gateway's cost as the truth for runs, budgets, estimates and reports
 
-Status: **planned** (2026-11-23). Planner run `HbZw1oGgUpTn`, overnight. Phases and branches are
-listed below; the Log says what landed.
+Status: **landed** (phases A to D, reapplied onto main as `9c1e4e4`, 2026-11-23). Planner run
+`HbZw1oGgUpTn`, overnight. Phases and branches are listed below; the Log says what landed.
 
 ## Goal
 

@@ -1,6 +1,6 @@
 # Linked accounts, instances and sites: noisypigeon.com through pigeon
 
-Status: **phase 1 deployed; phase 2a (instance records and the Instances tab) built** (2026-11-21). Nothing is built. Branch
+Status: **phase 1 deployed; phase 2a (instance records and the Instances tab) landed** (2026-11-21); instance records are in use (`src/capabilities/src/instances/`). Branch
 `claude/linked-accounts`. Phase 0 has tests only the person can run.
 
 ## Goal

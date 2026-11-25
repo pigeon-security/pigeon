@@ -1,6 +1,6 @@
 # The CI gateway
 
-Status: phases 1 and 2 deployed; phase 3 built, its setup redesigned in [buildkite-mcp.md](buildkite-mcp.md) (pigeon sets Buildkite up; awaiting the person's token and deploy). Phases are handed back one at a time; each is merged and
+Status: phases 1 and 2 deployed; phase 3 (Buildkite) done as redesigned in [buildkite-mcp.md](buildkite-mcp.md), deployed 2026-11-22; phase 4 (GitHub Actions) to come. Phases are handed back one at a time; each is merged and
 deployed by the parent session before the next starts.
 
 Design: [CI gateway design](https://claude.ai/artifact/M5zwjixxfKwJn9PYUf9tcj). This plan turns

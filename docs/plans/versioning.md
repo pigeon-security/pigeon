@@ -1,6 +1,6 @@
 # Versions of every capability, connector and template, and pins per instance
 
-Status: **phase 1 built (1a to 1d), landing as one change** (2026-11-23, overnight). Branch
+Status: **phase 1 landed** (1a to 1d, as one change: `e98c428`, 2026-11-23, overnight). Branch
 `claude/ai-agent-Xtnf1hGsI6gk`. Nothing here changes a live instance: pins are set only by the
 person approving an instance record, as every record change is today.
 

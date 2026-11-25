@@ -1,5 +1,7 @@
 # iOS billing and upgrade notices (phase 5)
 
+Status: landed (`27a47c5`, with the follow-up `ab69007`). Phase 5 of [ios-billing-settings.md](ios-billing-settings.md).
+
 Needs you remains the place for questions, decisions and passkey approvals. Add two read-only sections, with no approval, dismissal or upgrade action. Count one notice per grant or per instance/component update in the shared detail, Sessions card and tab badge. Before the first detail visit those counts cover only the ordinary inbox; opening the detail discovers notices. Keep the notice counts on return to Sessions. Do not say everything is caught up while a section is loading or failed.
 
 - **Grants expiring soon.** Read only `cost_daily.credits.grants`, the promotional ledger, never purchased credit totals. Use the returned name and positive `remaining` in USD; do not calculate a balance. `expiry` is a UTC calendar date, inclusive. Show day 0 through day 7 inclusive, warning on days 0 through 3. An empty configured list is valid; missing or invalid grant data is unavailable.

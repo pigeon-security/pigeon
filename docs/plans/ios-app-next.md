@@ -1,7 +1,7 @@
 # iOS app, next iteration: the confirmed mockup
 
-Status: **planned** (2026-11-24, overnight planner run `claude/ai-agent-Hb0AUUN62vc9`). Built by
-four executor branches, landed one at a time. The Log at the end says what landed.
+Status: **landed** (merged onto main as `9782aa2`; overnight planner run
+`claude/ai-agent-Hb0AUUN62vc9`). Built by four executor branches, landed one at a time. The Log at the end says what landed.
 
 The person's brief: build the next iteration of the iOS app (`ios/Pigeon`, SwiftUI) from their
 confirmed mockup. Every data operation goes through MCP tools. Where data is missing, add new MCP

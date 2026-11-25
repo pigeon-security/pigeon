@@ -1,6 +1,6 @@
 # Friction: what got in the way, removed
 
-Status: built on `claude/friction` (commits 0 to 7), awaiting deploy.
+Status: deployed: `call`, the land flow and async model jobs are live. Built on `claude/friction` (commits 0 to 7).
 Branch `claude/friction`, from `origin/claude/gracious-ride-526fue`. One hand-back
 to the parent session (`session_015XFA1jgveJDEE8NJjTaHKg`), which merges and deploys it. It is
 meant to be the last hand-merged deploy: after it, work lands through `land`.
