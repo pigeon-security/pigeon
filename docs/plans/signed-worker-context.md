@@ -1,5 +1,26 @@
 # Signed instance context across Worker bindings
 
+Status: the context format, the contextual senders for instance MCP calls and queued publishing,
+and the Sites and CI callbacks are on main (checked at `a4bb475`, 2026-11-25). What is done per
+operation is in [legacy-worker-cutover.md](legacy-worker-cutover.md); which compatibility paths
+remain, with live evidence, is in [legacy-worker-retirement-status.md](legacy-worker-retirement-status.md).
+
+## The signed envelope: expiry and nonce
+
+The envelope (`Signed` in `src/contract/src/caller.rs`) carries the caller, `iat`, `exp`, a
+`nonce` and, in the contextual format, the `WorkerContext` (recipient and optional instance).
+The signature covers it with the operation and the body digest. The receiver refuses a signature
+older than `MAX_AGE_MS` (60 s) or dated more than 5 s ahead.
+
+The nonce is a fresh random value per signature (`pigeon_core::webauthn::random`), so two
+signatures over the same caller, operation and body differ. It is **not a replay defence**: no
+receiver keeps seen nonces, so the same header and body are accepted again until `exp`. That is
+accepted because these calls travel only over private service bindings. Core answers capability
+Workers only on the host `split::CORE_HOST` (`core`), which a request reaches over a `PLATFORM`
+binding and never from the internet (`src/platform/src/lib.rs`, `fetch`). Bounding what a
+replayed or forged call can do is the job of per-Worker keys and per-Worker operations
+([caller-keys.md](caller-keys.md)).
+
 ## Rollout
 
 1. Deploy the receiver support first. Its manifest advertises the context
@@ -45,7 +66,7 @@ protocol until they have an operation-specific bound scope.
 
 ## Legacy call inventory and migration decisions
 
-This inventory records the sender cutover baseline at `d1d2ec8`. “Legacy signed”
+This inventory records the sender cutover baseline at `d1d2ec8`. Several rows have moved since (for example `remote::call_owned` is gone, replaced by `remote::call_owned_instance` in `745c2bf`); the current status per operation is in [legacy-worker-cutover.md](legacy-worker-cutover.md). “Legacy signed”
 means the operation, body, and caller are signed, with no separately signed
 recipient or instance. It does not imply a missing caller check.
 

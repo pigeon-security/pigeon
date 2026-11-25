@@ -138,6 +138,8 @@ Rules:
   `{user, acting_for, approval?, iat, exp(≤60 s), nonce}`, HMAC-SHA256 signed with `CALLER_KEY`.
   This is a Secrets Store secret bound to every platform Worker, made by core's setup like
   `LINK_KEY`. The receiver checks the signature and expiry and refuses otherwise.
+  The nonce makes each signature unique; no receiver records it, so it is not a replay defence
+  (see [signed-worker-context.md](signed-worker-context.md#the-signed-envelope-expiry-and-nonce)).
   - Service bindings are already private. The signature is the second wall: a route added by
     mistake to a capability Worker still serves nobody.
   - Webhooks (Buildkite's) are forwarded with no caller. They check their own HMAC, as today.
