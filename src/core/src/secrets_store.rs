@@ -38,6 +38,16 @@ pub struct Writer<'a> {
     token: Scoped<'a>,
 }
 
+/// Secrets asked for per page when listing the store.
+pub const PER_PAGE: usize = 100;
+/// A bound on how many pages [`Writer::list`] reads.
+const MAX_PAGES: usize = 20;
+
+/// Whether a listing page holding `n` secrets may have a page after it.
+pub fn more_pages(n: usize) -> bool {
+    n >= PER_PAGE
+}
+
 impl<'a> Writer<'a> {
     /// Mints a [`WRITE_PERMISSION`] token for writing to `account`'s store.
     pub async fn open(account: &'a Account) -> Result<Self> {
@@ -53,11 +63,25 @@ impl<'a> Writer<'a> {
         )
     }
 
-    /// Every secret in the store.
+    /// Every secret in the store, across all of the API's pages (it answers 20 per page by
+    /// default, so a single read misses secrets once the store holds more).
     pub async fn list(&self) -> Result<Vec<Secret>> {
-        // The token was minted moments ago; the store may not know it yet.
-        let v = call_fresh(self.token.value(), Method::Get, &self.path(), None).await?;
-        Ok(serde_json::from_value(v)?)
+        let mut all = Vec::new();
+        for page in 1..=MAX_PAGES {
+            let path = format!("{}?per_page={PER_PAGE}&page={page}", self.path());
+            // The token was minted moments ago; the store may not know it yet.
+            let v = call_fresh(self.token.value(), Method::Get, &path, None).await?;
+            let batch: Vec<Secret> = serde_json::from_value(v)?;
+            let n = batch.len();
+            all.extend(batch);
+            if !more_pages(n) {
+                return Ok(all);
+            }
+        }
+        Err(Error::RustError(format!(
+            "the Secrets Store holds more than {} secrets",
+            MAX_PAGES * PER_PAGE
+        )))
     }
 
     /// Creates secret `name`, readable by the services in `scopes`; answers its id.

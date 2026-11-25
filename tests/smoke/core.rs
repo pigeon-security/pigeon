@@ -2425,3 +2425,13 @@ fn contextual_ci_callbacks_read_only_their_own_instance() {
     assert_eq!(verify_ci_scope(&legacy, &read("two")), Ok(()));
     assert_eq!(verify_ci_scope(&legacy, &attribute), Ok(()));
 }
+
+/// The Secrets Store listing keeps reading pages while a page comes back full, so a store with
+/// more than one page of secrets is listed whole.
+#[test]
+fn secrets_store_listing_reads_every_full_page() {
+    use pigeon_core::secrets_store::{PER_PAGE, more_pages};
+    assert!(more_pages(PER_PAGE));
+    assert!(!more_pages(PER_PAGE - 1));
+    assert!(!more_pages(0));
+}
