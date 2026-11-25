@@ -414,7 +414,12 @@ async fn mcp_post(mut req: Request, env: &Env) -> Result<Response> {
         pigeon_capabilities::dispatch(&cx, name, args).await
     };
     match mcp::answer(&server, &tools, &message, call).await {
-        Some(answer) => Response::from_json(&answer),
+        Some(mut answer) => {
+            if scope.is_some() && message["method"] == "tools/list" {
+                pigeon_capabilities::ci::annotate_scoped_discovery(&mut answer);
+            }
+            Response::from_json(&answer)
+        }
         None => Ok(Response::empty()?.with_status(202)),
     }
 }

@@ -77,6 +77,20 @@ pub async fn instance_scope(env: &worker::Env, request: &ScopeRequest) -> worker
     Ok(resolve_scope(&crate::instances::all(env).await?, request))
 }
 
+/// Marks the instance-owned CI reads in an MCP tools/list response.
+pub fn annotate_scoped_discovery(answer: &mut Value) {
+    if let Some(tools) = answer
+        .pointer_mut("/result/tools")
+        .and_then(Value::as_array_mut)
+    {
+        for tool in tools {
+            if SCOPED_TOOLS.iter().any(|entry| tool["name"] == entry.name) {
+                tool["annotations"]["readOnlyHint"] = Value::Bool(true);
+            }
+        }
+    }
+}
+
 const SCOPED_TOOLS: &[crate::instances::tools::Registration] = &[
     crate::instances::tools::Registration {
         name: "ci_jobs",

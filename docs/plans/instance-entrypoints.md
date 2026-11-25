@@ -87,3 +87,10 @@ approval. An explicit Cloudflare 1010 denial ends that client attempt.
    global Pigeon Access connector verifies that ingress only. Before removing
    legacy CI callback support, also confirm contextual handling using the
    receiver's deployment or trace evidence.
+
+### Scoped CI tool annotations
+
+Instance-scoped MCP discovery marks CI job list and status as read-only
+using the MCP `annotations.readOnlyHint` field. This advertises the semantics
+of those two operations to clients. The generic dispatcher carries no such
+hint and tool execution still uses the approved instance and caller policy.

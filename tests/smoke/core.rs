@@ -2236,3 +2236,31 @@ fn core_artifacts_token_is_minted_once_and_a_401_mints_at_most_once_more() {
     let d = token_block_on(with_cached_token(&cache, "acc", expires - 60_000, mint, ok)).unwrap();
     assert_eq!((d.as_str(), mints.get()), ("token-4", 4));
 }
+
+#[test]
+fn scoped_mcp_discovery_marks_only_ci_reads() {
+    use pigeon_core::mcp::{Server, Tool, answer};
+
+    let server = Server {
+        name: "fixture",
+        version: "1",
+        instructions: "",
+    };
+    let tools = [
+        Tool::bare("ci_status", "Read a CI job"),
+        Tool::bare("ci_jobs", "List CI jobs"),
+        Tool::bare("call", "Dispatch a tool"),
+    ];
+    let request = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"});
+    let mut reply = token_block_on(answer(&server, &tools, &request, async |_, _| {
+        unreachable!("discovery must not execute a tool")
+    }))
+    .unwrap();
+    pigeon_capabilities::ci::annotate_scoped_discovery(&mut reply);
+    let wire: serde_json::Value =
+        serde_json::from_slice(&serde_json::to_vec(&reply).unwrap()).unwrap();
+    let tools = &wire["result"]["tools"];
+    assert_eq!(tools[0]["annotations"]["readOnlyHint"], true);
+    assert_eq!(tools[1]["annotations"]["readOnlyHint"], true);
+    assert!(tools[2].get("annotations").is_none());
+}
