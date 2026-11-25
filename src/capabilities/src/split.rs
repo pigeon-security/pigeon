@@ -163,14 +163,23 @@ pub fn verify_caller(
     body: &[u8],
     now_ms: i64,
 ) -> std::result::Result<pigeon_contract::Signed, pigeon_contract::Refused> {
+    verify_with_keys(own, shared, |key| {
+        pigeon_contract::verify(key, header, op, body, now_ms)
+    })
+}
+
+fn verify_with_keys(
+    own: Option<&[u8]>,
+    shared: &[u8],
+    verify: impl Fn(&[u8]) -> std::result::Result<pigeon_contract::Signed, pigeon_contract::Refused>,
+) -> std::result::Result<pigeon_contract::Signed, pigeon_contract::Refused> {
     if let Some(own) = own {
-        match pigeon_contract::verify(own, header, op, body, now_ms) {
+        match verify(own) {
             Err(pigeon_contract::Refused::BadSignature) => {}
-            // Good signature (or a header that cannot be read at all): that is the answer.
             done => return done,
         }
     }
-    pigeon_contract::verify(shared, header, op, body, now_ms)
+    verify(shared)
 }
 
 /// Serves one op a capability Worker asks core: `credential` or `dispatch`, with the caller
@@ -194,14 +203,16 @@ pub async fn serve(mut req: Request, cx: &Context<'_>) -> Result<Response> {
         Some(w) => worker_key(cx.env, &w).await,
         None => None,
     };
-    let signed = match verify_caller(
-        own.as_deref(),
-        &key,
-        header.as_deref(),
-        &op,
-        &body,
-        now_ms(),
-    ) {
+    let signed = match verify_with_keys(own.as_deref(), &key, |key| {
+        pigeon_contract::verify_for(
+            key,
+            header.as_deref(),
+            &op,
+            &body,
+            now_ms(),
+            cx.hosted.worker,
+        )
+    }) {
         Ok(s) => s,
         Err(why) => {
             return reply(
@@ -210,6 +221,15 @@ pub async fn serve(mut req: Request, cx: &Context<'_>) -> Result<Response> {
             );
         }
     };
+    if signed.instance().is_some() && !matches!(op.as_str(), "dispatch" | "ci_scope") {
+        return reply(
+            Answer::error(
+                FailureKind::Unauthorized,
+                "core operation does not accept instance context",
+            ),
+            401,
+        );
+    }
     if CALLERLESS_OPS.contains(&op.as_str()) {
         let answer = match proxy_check(cx.env, &op, &body).await {
             Ok(Some(v)) => v,
@@ -232,8 +252,20 @@ pub async fn serve(mut req: Request, cx: &Context<'_>) -> Result<Response> {
             401,
         );
     };
+    let scope = if let Some(instance) = signed.instance() {
+        let Some(record) = crate::instances::one(cx.env, instance).await? else {
+            return reply(
+                Answer::error(FailureKind::Unauthorized, "unknown signed instance"),
+                401,
+            );
+        };
+        Some(crate::instances::tools::Scope::new(&record)?)
+    } else {
+        None
+    };
     let cx = Context {
         caller: Some(&caller),
+        instance: scope.as_ref(),
         caller_note: None,
         ..*cx
     };
@@ -243,7 +275,19 @@ pub async fn serve(mut req: Request, cx: &Context<'_>) -> Result<Response> {
             service_user(&cx, &asked).await
         }
         "ci_scope" => match serde_json::from_slice::<crate::ci::ScopeRequest>(&body) {
-            Ok(request) => crate::ci::instance_scope(cx.env, &request).await,
+            Ok(request) => {
+                let requested = match &request {
+                    crate::ci::ScopeRequest::Read { instance } => Some(instance.as_str()),
+                    crate::ci::ScopeRequest::Attribute { .. } => None,
+                };
+                if let Err(why) = signed.check_instance(requested) {
+                    return reply(
+                        Answer::error(FailureKind::Unauthorized, why.to_string()),
+                        401,
+                    );
+                }
+                crate::ci::instance_scope(cx.env, &request).await
+            }
             Err(e) => return reply(Answer::error(FailureKind::BadRequest, e.to_string()), 400),
         },
         "dispatch" => {

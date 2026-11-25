@@ -70,6 +70,8 @@ pub struct Context<'a> {
     pub hosted: &'a Hosted<'a>,
     /// Who is calling, when the request says: a service user through an Access service token.
     pub caller: Option<&'a users::Caller>,
+    /// Scope selected by an authenticated boundary after reading the approved instance record.
+    pub instance: Option<&'a instances::tools::Scope>,
     /// Why there is no caller, when there is none.
     pub caller_note: Option<&'a str>,
     /// The Worker's context for the request being served, to finish work after the answer
@@ -274,6 +276,12 @@ pub fn owner<'a>(
 /// the same way. The person's policy is asked first ([`approvals::gate`]): a tool it gates runs
 /// only with the person's passkey approval of that exact call, used once.
 pub async fn dispatch(cx: &Context<'_>, name: &str, args: &Value) -> Result<Value> {
+    let bound = cx
+        .instance
+        .map(|scope| scope.bind(name, args))
+        .transpose()
+        .map_err(Error::RustError)?;
+    let args = bound.as_ref().unwrap_or(args);
     let owner = owner(cx.hosted.capabilities, name)
         .ok_or_else(|| Error::RustError(pigeon_core::mcp::unknown_tool(name)))?;
     match approvals::gate(cx, name, args).await? {

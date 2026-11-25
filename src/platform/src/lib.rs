@@ -173,6 +173,7 @@ async fn fetch(req: Request, env: Env, ctx: WorkerContext) -> Result<Response> {
             hosted: &hosted,
             caller: None,
             caller_note: None,
+            instance: None,
             worker: Some(&ctx),
         };
         return split::serve(req, &cx).await;
@@ -202,6 +203,7 @@ async fn fetch(req: Request, env: Env, ctx: WorkerContext) -> Result<Response> {
             hosted: &hosted,
             caller: None,
             caller_note: None,
+            instance: None,
             worker: Some(&ctx),
         };
         return c.fetch(&cx, req).await;
@@ -262,6 +264,7 @@ async fn queue(batch: MessageBatch<Value>, env: Env, _ctx: WorkerContext) -> Res
         hosted: &hosted,
         caller: None,
         caller_note: None,
+        instance: None,
         worker: None,
     };
     for c in wanting {
@@ -399,18 +402,13 @@ async fn mcp_post(mut req: Request, env: &Env) -> Result<Response> {
         },
     };
     let call = async |name: &str, args: &Value| -> Result<Value> {
-        let bound = scope
-            .as_ref()
-            .map(|scope| scope.bind(name, args))
-            .transpose()
-            .map_err(Error::RustError)?;
-        let args = bound.as_ref().unwrap_or(args);
         let cx = Context {
             account: &account,
             env,
             hosted: &hosted,
             caller: Some(&caller),
             caller_note: None,
+            instance: scope.as_ref(),
             worker: None,
         };
         pigeon_capabilities::dispatch(&cx, name, args).await

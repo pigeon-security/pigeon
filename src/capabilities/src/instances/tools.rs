@@ -54,6 +54,11 @@ impl Scope {
         })
     }
 
+    /// The approved target identifier, used when core signs a call to another Worker.
+    pub fn instance(&self) -> &str {
+        &self.instance
+    }
+
     fn registration(&self, tool: &str) -> Option<&Registration> {
         self.registrations
             .iter()

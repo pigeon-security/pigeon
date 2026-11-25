@@ -9,8 +9,8 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 use pigeon_contract::{
-    Answer, CallRequest, CapabilityManifest, EventsRequest, FailureKind, Manifest, SecretOp,
-    SecretRequest, SectionRequest,
+    Answer, CallRequest, CapabilityManifest, EventsRequest, FailureKind, SecretOp, SecretRequest,
+    SectionRequest, WorkerContext, WorkerManifest,
 };
 use pigeon_core::mcp::Tool;
 use pigeon_core::{secrets_store, webauthn};
@@ -43,7 +43,7 @@ const BASE: &str = "https://capability";
 struct Kept {
     at_ms: i64,
     worker: &'static str,
-    manifest: std::result::Result<Manifest, String>,
+    manifest: std::result::Result<WorkerManifest, String>,
 }
 
 thread_local! {
@@ -92,10 +92,7 @@ fn json_of<T: serde::Serialize>(value: &T) -> Result<Value> {
 
 /// The capabilities of one binding's manifest, kept or asked for. A failure is kept a sixth as
 /// long, so a Worker that is down does not slow every request.
-async fn manifest_of(
-    env: &Env,
-    binding: &Binding,
-) -> std::result::Result<Vec<CapabilityManifest>, String> {
+async fn manifest_of(env: &Env, binding: &Binding) -> std::result::Result<WorkerManifest, String> {
     let now = now_ms();
     let fresh = KEPT.with(|kept| {
         let kept = kept.borrow();
@@ -105,10 +102,7 @@ async fn manifest_of(
             Err(_) => MANIFEST_TTL_MS / 6,
         };
         if now - entry.at_ms < ttl {
-            Some(match &entry.manifest {
-                Ok(m) => Ok(m.capabilities.clone()),
-                Err(why) => Err(why.clone()),
-            })
+            Some(entry.manifest.clone())
         } else {
             None
         }
@@ -117,14 +111,10 @@ async fn manifest_of(
         return fresh;
     }
     let asked = match env.service(binding.binding) {
-        Ok(fetcher) => pigeon_contract::manifest(&fetcher)
+        Ok(fetcher) => pigeon_contract::manifest_with_context(&fetcher)
             .await
             .map_err(|e| e.to_string()),
         Err(e) => Err(e.to_string()),
-    };
-    let capabilities = match &asked {
-        Ok(m) => Ok(m.capabilities.clone()),
-        Err(why) => Err(why.clone()),
     };
     KEPT.with(|kept| {
         kept.borrow_mut().insert(
@@ -132,11 +122,11 @@ async fn manifest_of(
             Kept {
                 at_ms: now_ms(),
                 worker: binding.worker,
-                manifest: asked,
+                manifest: asked.clone(),
             },
         );
     });
-    capabilities
+    asked
 }
 
 /// The capabilities behind `bindings`, from their manifests, each kept [`MANIFEST_TTL_MS`] in
@@ -145,9 +135,13 @@ async fn manifest_of(
 pub async fn capabilities(env: &Env, bindings: &[Binding]) -> Vec<Box<dyn Capability>> {
     let mut out: Vec<Box<dyn Capability>> = Vec::new();
     for binding in bindings {
-        if let Ok(specs) = manifest_of(env, binding).await {
-            for spec in specs {
-                out.push(Box::new(Remote::new(binding, spec)));
+        if let Ok(offer) = manifest_of(env, binding).await {
+            let contextual =
+                offer.supports_worker_context() && offer.manifest.worker == binding.worker;
+            for spec in offer.manifest.capabilities {
+                let mut remote = Remote::new(binding, spec);
+                remote.contextual = contextual;
+                out.push(Box::new(remote));
             }
         }
     }
@@ -183,6 +177,7 @@ pub struct Remote {
     spec: CapabilityManifest,
     tools: Vec<Tool>,
     routes: Vec<&'static str>,
+    contextual: bool,
 }
 
 impl Remote {
@@ -205,6 +200,7 @@ impl Remote {
             spec,
             tools,
             routes,
+            contextual: false,
         }
     }
 
@@ -303,6 +299,21 @@ pub async fn call_owned(
     }
 }
 
+/// Select the scoped transport before sending. An unsupported receiver never gets a
+/// legacy copy of an instance-bound call.
+pub fn instance_context(
+    worker: &str,
+    supported: bool,
+    instance: &str,
+) -> std::result::Result<WorkerContext, String> {
+    if !supported {
+        return Err(format!(
+            "{worker} does not advertise signed instance context"
+        ));
+    }
+    Ok(WorkerContext::new(worker, Some(instance)))
+}
+
 fn caller_json(cx: &Context<'_>) -> Value {
     serde_json::to_value(cx.caller).unwrap_or(Value::Null)
 }
@@ -359,10 +370,28 @@ impl Capability for Remote {
                 tool: tool.to_string(),
                 args: args.clone(),
             })?;
-            match self
-                .ask(cx.env, "call", &body, Some(&caller_json(cx)))
+            let caller = caller_json(cx);
+            let answer = if let Some(scope) = cx.instance {
+                let context = instance_context(self.worker, self.contextual, scope.instance())
+                    .map_err(failure)?;
+                let fetcher = cx.env.service(self.binding)?;
+                let nonce = webauthn::random()?;
+                let key = caller_key(cx.env).await?;
+                pigeon_contract::ask_with_context(
+                    &fetcher,
+                    BASE,
+                    "call",
+                    &body,
+                    (key.as_bytes(), &caller),
+                    &nonce,
+                    &context,
+                )
                 .await?
-            {
+            } else {
+                // Platform calls stay compatible with peers running the older envelope.
+                self.ask(cx.env, "call", &body, Some(&caller)).await?
+            };
+            match answer {
                 Answer::Error(f) if matches!(f.kind, FailureKind::UnknownTool) => {
                     Err(crate::unknown(tool))
                 }

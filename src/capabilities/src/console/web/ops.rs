@@ -149,6 +149,7 @@ pub(super) async fn serve(cx: &Context<'_>, person: User, body: &Value) -> Resul
         hosted: cx.hosted,
         caller: Some(&caller),
         caller_note: None,
+        instance: None,
         worker: cx.worker,
     };
     let call = async {

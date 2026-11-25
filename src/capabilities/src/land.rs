@@ -2416,6 +2416,7 @@ impl Lander {
             hosted: &hosted,
             caller: Some(&caller),
             caller_note: None,
+            instance: None,
             worker: None,
         };
         crate::dispatch(&cx, tool, args).await

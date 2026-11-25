@@ -2865,3 +2865,12 @@ fn worker_context_verifies_recipient_instance_and_legacy_compatibility() {
     assert!(legacy.context.is_none());
     assert!(legacy.require_instance("sample").is_err());
 }
+
+#[test]
+fn scoped_worker_sender_requires_the_configured_receiver_to_support_context() {
+    use pigeon_capabilities::remote::instance_context;
+    assert!(instance_context("pigeon-sites", false, "site").is_err());
+    let scope = instance_context("pigeon-sites", true, "site").unwrap();
+    assert_eq!(scope.recipient, "pigeon-sites");
+    assert_eq!(scope.instance.as_deref(), Some("site"));
+}
