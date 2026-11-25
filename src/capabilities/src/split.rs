@@ -282,18 +282,17 @@ const fn only(op: &'static str, which: &'static [&'static str]) -> Allowed {
 /// ([`KeyUsed::Own`]); one signed with the shared key is not bounded until step 4.
 ///
 /// `ai-agents` runs whatever tools a run's model chooses, so its `dispatch` is bounded by the
-/// signed caller and core's gate, not a tool list. `sites` dispatches four tools only.
+/// signed caller and core's gate, not a tool list. `sites` dispatches three tools only, for its
+/// apex and public routes; its deploys reach core only through `sites_scope`.
 pub const WORKER_OPS: [(&str, &[Allowed]); 6] = [
-    // src/sites/src/deploy.rs (legacy publishing and sites_scope), apex.rs, public.rs.
+    // src/sites/src/deploy.rs (sites_scope), apex.rs, public.rs (dispatch).
     (
         "sites",
         &[
             any("sites_scope"),
-            only("credential", &["linked", "github"]),
             only(
                 "dispatch",
                 &[
-                    "instances_list",
                     "architecture_describe",
                     "instance_subdomains",
                     "site_passkey",
@@ -822,18 +821,11 @@ async fn proxy_check(env: &Env, op: &str, body: &[u8]) -> Result<Option<Value>> 
     }))
 }
 
-/// Return the existing linked-account grant. For contextual publishing, check the
-/// account selected by the approved record as part of the same link lookup.
-pub(crate) async fn linked_credential(
-    env: &Env,
-    instance: &str,
-    expected_account: Option<&str>,
-) -> Result<Value> {
+/// The linked-account grant for `sites_scope`'s contextual publishing: the account the approved
+/// record selects is checked as part of the same link lookup.
+pub(crate) async fn linked_credential(env: &Env, instance: &str, account: &str) -> Result<Value> {
     let host = env.var("PLATFORM_HOST")?.to_string();
-    let account = match expected_account {
-        Some(account) => crate::linked::account_for_bound(env, &host, instance, account).await?,
-        None => crate::linked::account_for(env, &host, instance).await?,
-    };
+    let account = crate::linked::account_for_bound(env, &host, instance, account).await?;
     let token = account
         .bearer
         .ok_or_else(|| bad("the linked account came back without its access token"))?;
@@ -845,32 +837,12 @@ pub(crate) async fn linked_credential(
     })?)
 }
 
-/// A short-lived credential for the call in hand. `linked`: the instance's linked-account
-/// access token, refreshed first when due, with the account it acts on.
+/// A short-lived credential for the call in hand: `scoped` (a minted Cloudflare token) or
+/// `run_grant` (an AI agent run's git grant). An instance's linked-account and GitHub tokens are
+/// no kinds here: Sites, their only user, gets them through the instance-scoped `sites_scope`
+/// callback, which a call signed for that instance alone may ask.
 async fn credential(cx: &Context<'_>, r: &CredentialRequest) -> Result<Value> {
     match r.kind.as_str() {
-        "linked" => {
-            let instance = r
-                .instance
-                .as_deref()
-                .ok_or_else(|| bad("a linked credential names its instance"))?;
-            linked_credential(cx.env, instance, None).await
-        }
-        "github" => {
-            let instance = r
-                .instance
-                .as_deref()
-                .ok_or_else(|| bad("a github credential names its instance"))?;
-            // GitHub's own expiry (an hour) is later; the token is used for one call, as a
-            // linked one is.
-            let (token, _) = crate::github::installation_token(cx.env, instance).await?;
-            Ok(serde_json::to_value(Credential {
-                token,
-                account_id: String::new(),
-                expires_at: now_ms() + LINKED_USE_MS,
-                token_id: None,
-            })?)
-        }
         "scoped" => scoped(cx, &r.scopes).await,
         // An AI agent run's git grant (docs/plans/ai-agents.md): for a caller acting for a
         // person, pushing only the run's own branches.

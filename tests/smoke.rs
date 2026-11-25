@@ -3004,6 +3004,47 @@ fn public_site_deploy_refuses_a_queued_publishing_binding() {
     }
 }
 
+#[path = "../src/sites/src/context.rs"]
+mod site_call_context;
+
+/// `site_deploy` and `site_rollback` require signed instance context naming their `instance`:
+/// a legacy envelope (no context) and a call signed for another instance are refused before any
+/// core callback; a call signed for the named instance goes on to the deploy unchanged.
+#[test]
+fn site_deploy_and_rollback_require_matching_signed_instance_context() {
+    use pigeon_contract::{Signed, WorkerContext};
+    use site_call_context::{MISMATCH, MISSING, require};
+    let signed = |instance: Option<&str>| Signed {
+        caller: json!({"user": {"kind": "standard", "id": "owner"}}),
+        iat: 0,
+        exp: 1,
+        nonce: String::new(),
+        context: instance.map(|i| WorkerContext::new("pigeon-sites", Some(i))),
+    };
+    let deploy = json!({"instance": "sandbox", "rev": "main"});
+    let rollback = json!({"instance": "sandbox", "release": "r1"});
+    for args in [&deploy, &rollback] {
+        // Contextual, matching: accepted, for the named instance.
+        assert_eq!(require(&signed(Some("sandbox")), args), Ok("sandbox"));
+        // Legacy envelope: refused, however the arguments read.
+        assert_eq!(require(&signed(None), args), Err(MISSING));
+        // Contextual for another instance: refused.
+        assert_eq!(require(&signed(Some("elsewhere")), args), Err(MISMATCH));
+    }
+    // Context with no instance in it is no instance context.
+    let mut platform = signed(None);
+    platform.context = Some(WorkerContext::new("pigeon-sites", None));
+    assert_eq!(require(&platform, &deploy), Err(MISSING));
+    // An absent or non-string `instance` is a bad request, not a context check.
+    for args in [json!({"rev": "main"}), json!({"instance": 7})] {
+        assert_eq!(
+            require(&signed(Some("sandbox")), &args),
+            Err("`instance` is required")
+        );
+    }
+    assert!(MISSING.contains("legacy envelope"));
+}
+
 #[test]
 fn ci_global_connector_only_attaches_context_to_explicit_instance_reads() {
     use pigeon_capabilities::instances::tools::global_target;

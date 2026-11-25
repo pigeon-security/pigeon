@@ -2,11 +2,15 @@
 //! repositories with the blog template ([`pigeon_blog`], the version an instance's pin selects) and deploys instance sites
 //! ([`deploy`]).
 //! A capability Worker: it has no public surface, and answers only core over a Service Binding,
-//! through [`pigeon_contract::serve`], which checks the caller core signed. It asks core for
-//! what it must not hold itself (a linked account's token) over its `PLATFORM` binding. Built
+//! through [`pigeon_contract::serve`], which checks the caller core signed. `site_deploy` and
+//! `site_rollback` require signed instance context matching their `instance` ([`context`]); a
+//! deploy asks core for what it must not hold itself (the approved record, a linked account's
+//! token, a GitHub installation token) only through the instance-scoped `sites_scope` callback
+//! over its `PLATFORM` binding. Built
 //! for `wasm32-unknown-unknown` only.
 
 mod apex;
+mod context;
 mod deploy;
 pub mod public;
 mod queued;
@@ -199,8 +203,12 @@ impl Service for Sites {
                     {
                         return Answer::error(FailureKind::BadRequest, why);
                     }
-                    let Some(instance) = req.args["instance"].as_str() else {
+                    if req.args["instance"].as_str().is_none() {
                         return Answer::error(FailureKind::BadRequest, "`instance` is required");
+                    }
+                    let instance = match context::require(caller, &req.args) {
+                        Ok(instance) => instance,
+                        Err(why) => return Answer::error(FailureKind::Unauthorized, why),
                     };
                     let rev = req.args["rev"].as_str().unwrap_or("main");
                     if rev.is_empty()

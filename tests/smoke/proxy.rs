@@ -169,9 +169,6 @@ fn core_bounds_each_workers_ops_with_its_own_key() {
     // Each Worker's real calls pass.
     let real = [
         ("sites", "sites_scope", json!({"action": "record"})),
-        ("sites", "credential", json!({"kind": "linked"})),
-        ("sites", "credential", json!({"kind": "github"})),
-        ("sites", "dispatch", json!({"tool": "instances_list"})),
         (
             "sites",
             "dispatch",
@@ -214,6 +211,10 @@ fn core_bounds_each_workers_ops_with_its_own_key() {
     let refused = [
         ("sites", "approval", json!({})),
         ("sites", "credential", json!({"kind": "scoped"})),
+        // The retired legacy deploy callbacks: Sites reaches them only through sites_scope.
+        ("sites", "credential", json!({"kind": "linked"})),
+        ("sites", "credential", json!({"kind": "github"})),
+        ("sites", "dispatch", json!({"tool": "instances_list"})),
         ("sites", "dispatch", json!({"tool": "land"})),
         ("sites", "dispatch", json!({})),
         (

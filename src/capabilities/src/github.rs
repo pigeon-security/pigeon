@@ -1,9 +1,10 @@
 //! The GitHub App: pigeon reads an instance's repository and hears its pushes as one App
 //! (`GITHUB_APP_ID` and `GITHUB_APP_CLIENT_ID` in the Worker's vars name it; its private key and
 //! webhook secret are Secrets Store secrets the person sets on the app's Access page
-//! (Credentials, `/app?tab=management&subtab=credentials`). The key never leaves core: other
-//! Workers get a short-lived installation token, narrowed to one instance's repository, through
-//! [`installation_token`].
+//! (Credentials, `/app?tab=management&subtab=credentials`). The key never leaves core: core mints
+//! short-lived installation tokens, narrowed to one approved instance's repository and read
+//! access, through [`installation_token_for`]; the sites Worker gets one only through the
+//! instance-scoped `sites_scope` callback.
 //! `/github/hook` checks each delivery's `X-Hub-Signature-256` before reading it, accepts pushes
 //! only from the installation an instance's record names, and records the latest push per
 //! instance. A push to `main` is kept as a pending deploy, bound to the approved publishing
@@ -29,8 +30,6 @@ use crate::{Call, Capability, Context, Expiring, Serve, Slot};
 pub const PRIVATE_KEY: &str = "GITHUB_APP_PRIVATE_KEY";
 /// The App's webhook secret.
 pub const WEBHOOK_SECRET: &str = "GITHUB_APP_WEBHOOK_SECRET";
-/// What an installation token may do: read the repository, and record deployments.
-pub const PERMISSIONS: [(&str, &str); 2] = [("contents", "read"), ("deployments", "write")];
 /// How long a recorded push is kept.
 pub(crate) const PUSH_KEPT_MS: i64 = 90 * 24 * 3_600_000;
 
@@ -64,25 +63,8 @@ async fn jwt(pem: &str, client_id: &str) -> Result<String> {
     app::sign_jwt(&der, client_id, worker::Date::now().as_millis() / 1000).await
 }
 
-/// An installation token for `instance`'s repository: at most an hour, that repository only,
-/// with [`PERMISSIONS`]. Answers the token and its expiry (ISO 8601).
-pub async fn installation_token(env: &Env, instance: &str) -> Result<(String, String)> {
-    let record = instances::one(env, instance)
-        .await?
-        .ok_or_else(|| bad(&format!("there is no instance {instance}")))?;
-    let Some(RepoRef::Github {
-        full_name,
-        installation: Some(installation),
-    }) = &record.repo
-    else {
-        return Err(bad(&format!(
-            "instance {instance} names no GitHub repository with an App installation"
-        )));
-    };
-    installation_token_for(env, full_name, *installation, &PERMISSIONS).await
-}
-
-/// Mint for a repository from an already selected approved record.
+/// An installation token for one repository from an already selected approved record: at most
+/// an hour, that repository only, with `permissions`. Answers the token and its expiry (ISO 8601).
 pub(crate) async fn installation_token_for(
     env: &Env,
     full_name: &str,

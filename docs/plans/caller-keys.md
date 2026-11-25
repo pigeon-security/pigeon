@@ -103,9 +103,10 @@ and core's signed endpoint (`split::serve`, src/capabilities/src/split.rs) accep
 operations from any holder of a valid key:
 
 - `dispatch` runs any tool as the signed caller, through the usual `dispatch` and its gate.
-- `credential` hands out a `linked` account token or a `github` installation token for a named
-  instance, a `scoped` Cloudflare token for any purpose in `purpose_permissions` (including
-  `cf_deploy`), or a `run_grant` (`credential` in split.rs).
+- `credential` hands out a `scoped` Cloudflare token for any purpose in `purpose_permissions`
+  (including `cf_deploy`), or a `run_grant` (`credential` in split.rs). Its former `linked` and
+  `github` kinds are gone: Sites gets those only through the instance-scoped `sites_scope`
+  (`claude/sites-require-instance-context`).
 - `approval` creates and reads `cloud_change` approvals; `credential_revoke`,
   `credential_release` and `service_user` act on tokens and service users.
 
@@ -130,7 +131,7 @@ credential). No crate sends `credential_revoke` of kind `scoped`, so no Worker m
 
 | Worker (name in ci/workers.toml) | Ops it sends to core | Where |
 | --- | --- | --- |
-| `sites` | `sites_scope` (`Record`, `Linked`, `Github`); `credential` kinds `linked` and `github` (legacy publishing path); `dispatch` of `instances_list` (legacy publishing), `architecture_describe` (apex), `instance_subdomains` and `site_passkey` (public routes) | src/sites/src/deploy.rs, apex.rs, public.rs |
+| `sites` | `sites_scope` (`Record`, `Linked`, `Github`); `dispatch` of `architecture_describe` (apex), `instance_subdomains` and `site_passkey` (public routes) | src/sites/src/deploy.rs, apex.rs, public.rs |
 | `ci-gateway` | `credential` kind `scoped`; `ci_scope` | src/ci/src/lib.rs, src/ci/src/scope.rs |
 | `model-gateway` | `credential` kind `scoped` | src/models/src/lib.rs (`credential_given`) |
 | `cloud-gateway` | `credential` kind `scoped`; `approval` | src/cloud/src/link.rs, src/cloud/src/approvals.rs |

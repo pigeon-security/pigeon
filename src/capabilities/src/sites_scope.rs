@@ -60,7 +60,7 @@ pub(crate) async fn handle(env: &Env, request: &SitesScopeRequest) -> Result<Val
             else {
                 unreachable!("approved_record checked the account kind")
             };
-            crate::split::linked_credential(env, instance, Some(&account)).await?
+            crate::split::linked_credential(env, instance, &account).await?
         }
         SitesScopeRequest::Github { .. } => {
             let Some(RepoRef::Github {

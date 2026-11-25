@@ -78,7 +78,7 @@ recipient or instance. It does not imply a missing caller check.
 | Path | Authority and target at the baseline | Migration |
 | --- | --- | --- |
 | [GitHub cron → Sites `site_deploy`](../../src/capabilities/src/github.rs) via [`remote::call_owned`](../../src/capabilities/src/remote.rs) | Legacy signed as the approved publishing delegate for the linked account. Only an authenticated push matching the approved repository and installation queues a publish. Before dispatch, cron rechecks the pending record binding and evaluates tool policy without a passkey. The call body carries the target instance, commit, and approved binding digest. Sites compares that digest with its current record. | Once the Sites manifest advertises support, sign the recipient and the same instance resolved from the approved queued record. Keep the saved binding and policy checks. A compatibility path may cover an older Worker before any scoped request is sent. A contextual error must never start a legacy retry. |
-| [Sites → core during `site_deploy` or `site_rollback`](../../src/sites/src/deploy.rs) | The incoming `Signed` caller is forwarded in a legacy signed envelope, even if the incoming call had context. Core dispatch returns approved records via `instances_list`. Sites selects the requested record, then requests a GitHub installation credential or linked account credential by instance as applicable. Sites checks the account against the publishing target and rechecks the record before activation. | Separate record lookup and credential requests by operation. For an inbound contextual call, callbacks should use its verified instance and sign core as the recipient. Core must bind each callback to the same approved publishing record and allow only the corresponding credentials. Keep the explicit global platform path until it uses the corresponding scoped adapter. |
+| [Sites → core during `site_deploy` or `site_rollback`](../../src/sites/src/deploy.rs) | **Retired** (`claude/sites-require-instance-context`). Sites accepts these calls only with signed instance context matching `instance` ([`context.rs`](../../src/sites/src/context.rs)), and asks core only through the typed `sites_scope` callback (Record, Linked, Github), signed for core and that instance. The legacy `instances_list` lookup and `credential` `linked`/`github` requests are deleted, from Sites and from core. | Done. Core binds each callback to the same approved publishing record and allows only the corresponding credentials. |
 | [CI gateway → core `ci_scope` read](../../src/ci/src/scope.rs) | Legacy signed as the caller that requested the CI read. The body names the instance. Core resolves the approved CI profile and the gateway checks persisted job ownership, repository, and job type. | Deploy core support for contextual reads first. The gateway uses the incoming verified signed instance and signs the callback for core. The body instance must match. Keep deliberately legacy connector reads during rollout. A contextual read never falls back to legacy. |
 | [Core → a capability Worker for instance MCP tools](../../src/capabilities/src/remote.rs) | Already contextual at this baseline. Core derives scope from the approved record, gates the tool, negotiates the receiver's advertised version, and signs its Worker name and the bound instance. The receiving contract checks the recipient and body instance. | Require signed instance on a receiving tool only once all supported entries to it can provide that context, including internal workflow and global connector entries for an instance target. |
 
@@ -170,5 +170,12 @@ approved account before using its credentials. These callbacks inherit
 the existing trusted Worker caller-key boundary. Dedicated sender
 authentication would require independent keys and rotation.
 
-Keep the manual platform paths during rollout. Remove legacy publishing
-callbacks only after a live scoped publish has exercised the new receiver.
+The legacy publishing callbacks are removed (`claude/sites-require-instance-context`), after
+live scoped publishes and rollbacks on `sandbox` through the global connector (2026-11-25):
+`site_deploy` succeeded under `Unsupported::Refuse`, `site_rollback` succeeded, a rollback to
+another instance's release was refused by Sites, an unknown instance and an extra `bucket`
+argument were refused in core, and pigeon-sites logged 0 errors in 205 requests over the hour.
+Sites' `site_deploy` and `site_rollback` now require signed instance context matching
+`instance` and refuse a legacy envelope before any callback; core's `credential` kinds
+`linked` and `github`, and Sites' `dispatch` `instances_list`, are gone from
+`split::WORKER_OPS`.

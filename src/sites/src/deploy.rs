@@ -1,11 +1,12 @@
 //! `site_deploy`: an instance's site, deployed from its GitHub repository at a commit. What it
 //! must not hold itself comes from core, as the caller it was called for: the instance's
 //! approved record, an installation token for the repository, and the linked account's token.
-//! A call signed with instance context gets each through core's `sites_scope` callback
-//! ([`SitesScopeRequest`]), which answers only for that instance and, for credentials, only
-//! while the record still hashes to the binding the deploy read. A call without instance context
-//! (the legacy platform path) still reads them through core's `dispatch` (`instances_list`) and
-//! `credential` ops. Either way only a record whose `publishing` profile is enabled deploys.
+//! Every call is signed with instance context ([`crate::context`] refused any other before this
+//! module runs), and gets each through core's `sites_scope` callback ([`SitesScopeRequest`]),
+//! which answers only for that instance and, for credentials, only while the record still
+//! hashes to the binding the deploy read. There is no other path: the legacy platform callbacks
+//! (core's `dispatch` `instances_list` and `credential` kinds `linked` and `github`) are retired.
+//! Only a record whose `publishing` profile is enabled deploys.
 //! The repository is read as one tarball ([`pigeon_core::tarball`]), sorted
 //! ([`pigeon_blog::repo`]), rendered ([`pigeon_blog`]), and written to the profile's site bucket
 //! as an immutable release in the layout the site Worker serves: the blobs it lacks, then
@@ -27,31 +28,6 @@ fn bad(why: impl Into<String>) -> Error {
     Error::RustError(why.into())
 }
 
-/// Asks core on the legacy platform path using the original caller.
-async fn legacy_core(
-    env: &Env,
-    key: &[u8],
-    caller: &Signed,
-    op: &str,
-    body: &Value,
-) -> Result<Value> {
-    let nonce = pigeon_core::webauthn::random()?;
-    let platform = env.service("PLATFORM")?;
-    match pigeon_contract::ask(
-        &platform,
-        "https://core",
-        op,
-        body,
-        Some((key, &caller.caller)),
-        &nonce,
-    )
-    .await?
-    {
-        Answer::Ok(v) => Ok(v),
-        Answer::Error(f) => Err(bad(format!("core's {op}: {}", f.message))),
-    }
-}
-
 /// A scoped Sites call may only request authority for its authenticated instance.
 async fn scoped_core(
     env: &Env,
@@ -67,7 +43,6 @@ async fn scoped_core(
     let args = serde_json::to_value(request)?;
     let nonce = pigeon_core::webauthn::random()?;
     let platform = env.service("PLATFORM")?;
-    // A failed contextual callback is never retried with a legacy envelope.
     match pigeon_contract::ask_with_context(
         &platform,
         "https://core",
@@ -94,8 +69,7 @@ pub struct Target {
     pub protected: bool,
 }
 
-/// Reads [`Target`] from an approved record, as core's `sites_scope` (or, on the legacy path,
-/// `instances_list`) answers it: the site its `publishing` profile names. Pure.
+/// Reads [`Target`] from an approved record, as core's `sites_scope` answers it: the site its `publishing` profile names. Pure.
 pub fn target(record: &Value, platform_zone: &str) -> std::result::Result<Target, String> {
     let id = record["id"].as_str().unwrap_or("?");
     if record["repo"]["kind"] != "github" {
@@ -140,8 +114,7 @@ pub struct Pins {
     pub blog: Option<String>,
 }
 
-/// Reads [`Pins`] from an approved record, as core's `sites_scope` (or, on the legacy path,
-/// `instances_list`) answers it. Pure.
+/// Reads [`Pins`] from an approved record, as core's `sites_scope` answers it. Pure.
 pub fn pins(record: &Value) -> Pins {
     let get = |k: &str| record["pins"][k].as_str().map(str::to_string);
     Pins {
@@ -178,36 +151,19 @@ pub fn allows(req: Option<&Requirement>, v: &str) -> bool {
 }
 
 async fn approved_record(env: &Env, key: &[u8], caller: &Signed, instance: &str) -> Result<Value> {
-    if caller.instance().is_some() {
-        let record = scoped_core(
-            env,
-            key,
-            caller,
-            &SitesScopeRequest::Record {
-                instance: instance.to_owned(),
-            },
-        )
-        .await?;
-        if record["id"].as_str() != Some(instance) {
-            return Err(bad("core returned a different approved publishing record"));
-        }
-        return Ok(record);
-    }
-    let records = legacy_core(
+    let record = scoped_core(
         env,
         key,
         caller,
-        "dispatch",
-        &json!({ "tool": "instances_list" }),
+        &SitesScopeRequest::Record {
+            instance: instance.to_owned(),
+        },
     )
     .await?;
-    records
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|r| r["id"] == instance)
-        .cloned()
-        .ok_or_else(|| bad(format!("there is no instance {instance}")))
+    if record["id"].as_str() != Some(instance) {
+        return Err(bad("core returned a different approved publishing record"));
+    }
+    Ok(record)
 }
 
 async fn ensure_current(
@@ -233,27 +189,16 @@ async fn linked_account(
     target: &Target,
     record: &Value,
 ) -> Result<Account> {
-    let linked = if caller.instance().is_some() {
-        scoped_core(
-            env,
-            key,
-            caller,
-            &SitesScopeRequest::Linked {
-                instance: instance.to_owned(),
-                binding: pigeon_core::oauth::hash(&record.to_string()),
-            },
-        )
-        .await?
-    } else {
-        legacy_core(
-            env,
-            key,
-            caller,
-            "credential",
-            &json!({"kind": "linked", "instance": instance}),
-        )
-        .await?
-    };
+    let linked = scoped_core(
+        env,
+        key,
+        caller,
+        &SitesScopeRequest::Linked {
+            instance: instance.to_owned(),
+            binding: pigeon_core::oauth::hash(&record.to_string()),
+        },
+    )
+    .await?;
     let account = Account {
         id: linked["account_id"]
             .as_str()
@@ -391,38 +336,25 @@ async fn publish(
     let blog_pin = blog_requirement(pins.blog.as_deref()).map_err(bad)?;
     let t = target(record, &env.var("ZONE")?.to_string()).map_err(bad)?;
 
-    let gh = if caller.instance().is_some() {
-        let credential = scoped_core(
-            env,
-            key,
-            caller,
-            &SitesScopeRequest::Github {
-                instance: instance.to_owned(),
-                binding: pigeon_core::oauth::hash(&record.to_string()),
-            },
-        )
-        .await?;
-        if credential.is_null() {
-            // Core explicitly resolved an approved record with no GitHub installation.
-            None
-        } else {
-            let token = credential["token"]
-                .as_str()
-                .filter(|token| !token.is_empty())
-                .ok_or_else(|| bad("core returned a malformed GitHub credential"))?;
-            Some(token.to_string())
-        }
+    let credential = scoped_core(
+        env,
+        key,
+        caller,
+        &SitesScopeRequest::Github {
+            instance: instance.to_owned(),
+            binding: pigeon_core::oauth::hash(&record.to_string()),
+        },
+    )
+    .await?;
+    let gh = if credential.is_null() {
+        // Core explicitly resolved an approved record with no GitHub installation.
+        None
     } else {
-        legacy_core(
-            env,
-            key,
-            caller,
-            "credential",
-            &json!({"kind": "github", "instance": instance}),
-        )
-        .await
-        .ok()
-        .and_then(|credential| credential["token"].as_str().map(str::to_string))
+        let token = credential["token"]
+            .as_str()
+            .filter(|token| !token.is_empty())
+            .ok_or_else(|| bad("core returned a malformed GitHub credential"))?;
+        Some(token.to_string())
     };
     publish_stage(&mut started, "source_grant");
     let gh_token = gh.as_deref();
