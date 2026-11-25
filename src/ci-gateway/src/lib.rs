@@ -26,6 +26,15 @@ use worker::wasm_bindgen;
 /// The Secrets Store binding of the key core signs callers with.
 const CALLER_KEY: &str = "CALLER_KEY";
 
+/// Names this Worker (`ci-gateway` in ci/workers.toml) on every request it signs to core, before any
+/// fetch or Durable Object code runs, so core checks it with CALLER_KEY_CI_GATEWAY first
+/// (docs/plans/caller-keys.md, step 2). worker-build also exposes it as an entrypoint method of
+/// this name, reachable only over a service binding; calling it again changes nothing.
+#[event(start)]
+fn identify_worker() {
+    pigeon_contract::identify("ci-gateway");
+}
+
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     let key = match env.secret_store(CALLER_KEY) {
