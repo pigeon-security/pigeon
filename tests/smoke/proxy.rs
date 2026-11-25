@@ -804,19 +804,6 @@ fn proxy_and_job_tokens() {
     ] {
         assert!(!proxy::host_serves(h, px, p), "{h} {p}");
     }
-    // Issuing and revoking one are approved for that one credential.
-    assert_ne!(
-        proxy::issue_purpose("h1", 30),
-        proxy::issue_purpose("h2", 30)
-    );
-    assert_ne!(
-        proxy::issue_purpose("h1", 30),
-        proxy::issue_purpose("h1", 31)
-    );
-    assert_ne!(
-        proxy::revoke_purpose("aaaaaaaaaaaa"),
-        proxy::revoke_purpose("aaaaaaaaaaab")
-    );
     for bad in [
         String::new(),
         "   ".into(),

@@ -50,6 +50,63 @@ pub fn gated(tool: &str) -> bool {
     asked() && answer("", tool).1.needs == Some(Approval::Passkey)
 }
 
+/// Why the policy refuses `actor` calling `tool` outright, if it does: asked before a console
+/// write's passkey, so a call that could never run is not approved.
+pub fn refused(actor: &str, tool: &str) -> Option<String> {
+    if !asked() {
+        return None;
+    }
+    let (_, a) = answer(actor, tool);
+    (a.decision == Decision::Deny && a.needs.is_none()).then(|| {
+        format!(
+            "the person's policy refuses `{tool}`: {} ({})",
+            a.reason,
+            a.rule.as_deref().unwrap_or("no rule")
+        )
+    })
+}
+
+/// For a console write of `tool` with `args`, made by `person` with a passkey just checked for
+/// exactly this call: when the policy gates the call on the passkey, records an approval of it,
+/// approved by `person` at once, and answers its id for the call to use once (as [`gate`]
+/// takes it). `None` when the call needs no approval.
+pub async fn approve_own(
+    env: &Env,
+    person: &User,
+    tool: &str,
+    args: &Value,
+) -> Result<Option<String>> {
+    if !asked() {
+        return Ok(None);
+    }
+    let (_, a) = answer(&person.name, tool);
+    if a.decision == Decision::Allow || a.needs.is_none() {
+        return Ok(None);
+    }
+    let digest = approval::call_digest(tool, args, &person.id);
+    let made = directory(
+        env,
+        "approval.create",
+        json!({
+            "kind": ApprovalKind::ToolCall.name(),
+            "subject": tool,
+            "digest": digest,
+            "summary": {
+                "tool": tool, "args": args, "caller": person.name, "acting_for": person.name,
+                "rule": a.rule, "grants": Value::Null, "via": "console",
+            },
+            "payload": Value::Null,
+            "caller_id": person.id,
+            "approver_id": person.id,
+        }),
+    )
+    .await?;
+    expired(env, &made).await?;
+    let r: Record = serde_json::from_value(made["record"].clone())?;
+    decide(env, &r.id, true, person).await?;
+    Ok(Some(r.id))
+}
+
 /// What [`gate`] lets run.
 pub enum Gate {
     /// The call runs as asked; the policy allows it with no approval.

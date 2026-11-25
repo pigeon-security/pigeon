@@ -1,30 +1,120 @@
-//! The app's browser-facing tool subset. Do not accept tool schemas as an allowlist: some
-//! tools that list data also change settings when given optional arguments.
+//! The app's one read path, `/app/op`: the browser-facing tool subset. Do not accept tool
+//! schemas as an allowlist: some tools that list data also change settings when given optional
+//! arguments (`ai_agents_config`, `ai_agents_models`), or clean up as they read
+//! (`ingest_status`), so each read lists the arguments it may take. Every op runs through
+//! `dispatch` as the signed-in person, under the same scope and policy as MCP; the `app_*` ops
+//! are the console's own reads. Writes go through the console's write path
+//! (`console::write`); the three run writes below are the old way, kept until phase 5.
 
 use serde_json::{Value, json};
 use worker::{Response, Result};
 
 use super::{SECTION_MS, answer, bad, failed, timed};
+use crate::site_passkeys::console as site_access;
 use crate::users::{Caller, User};
 use crate::{Context, approvals, dispatch};
 
-// Keys for read operations only. The called tools still check their own types and ranges.
-fn read_keys(name: &str) -> Option<&'static [&'static str]> {
-    Some(match name {
-        "ai_agents_status" => &["run", "limit", "live", "turns", "brief", "report", "fields"],
-        "land_list" => &["limit", "state"],
-        "cost_daily" => &["range"],
-        "capabilities_versions" => &["instance", "changelog"],
-        "capabilities_upgrade_plan" | "app_linked_details" | "console_manifest" => &["instance"],
-        "architecture_describe" => &["public", "svg"],
-        "ai_agents_compare" => &["days", "role"],
-        "tokens_status" | "oauth_clients" | "users_people" | "secrets_list" | "instances_list"
-        | "ai_agents_models" | "users_whoami" => &[],
-        _ => return None,
-    })
+/// The reads the console may make, each with the only arguments it may be given. The called
+/// tools still check their own types and ranges.
+pub const READS: &[(&str, &[&str])] = &[
+    // Inbox (P5): what waits, filtered by instance, and landings.
+    ("app_inbox", &["instance"]),
+    ("approvals_list", &[]),
+    ("land_list", &["limit", "state"]),
+    ("ai_agents_inbox", &["since", "brief", "report", "fields"]),
+    // Instances: the list, a record's overview, its link, its capabilities.
+    ("instances_list", &[]),
+    ("console_manifest", &["instance"]),
+    ("app_linked_details", &["instance"]),
+    ("capabilities_versions", &["instance", "changelog"]),
+    ("capabilities_upgrade_plan", &["instance"]),
+    // Site: deployments (immutable releases and the live pointer) and visitors.
+    ("site_releases", &["instance", "limit"]),
+    ("app_site_hosts", &["instance"]),
+    ("app_site_visitors", &["instance", "site", "host"]),
+    // Storage, source, CI, metrics and ingest, scoped by their own arguments.
+    ("storage_accounts", &[]),
+    ("storage_list_buckets", &["account"]),
+    (
+        "storage_list_objects",
+        &[
+            "account",
+            "bucket",
+            "delimiter",
+            "max_keys",
+            "prefix",
+            "token",
+        ],
+    ),
+    ("storage_head_object", &["account", "bucket", "key"]),
+    ("source_resolve_revision", &["instance", "revision"]),
+    ("source_read_file", &["instance", "path", "revision"]),
+    ("source_tokens", &[]),
+    (
+        "ci_jobs",
+        &["caller", "commit", "limit", "repo", "state", "task"],
+    ),
+    ("ci_status", &["id"]),
+    ("ci_pool", &[]),
+    ("observability_summary", &["hours"]),
+    ("observability_errors", &["hours", "limit", "worker"]),
+    ("observability_worker_metrics", &["instance", "hours"]),
+    ("ingest_report", &["instance", "run"]),
+    // Sessions, cost and compare.
+    (
+        "ai_agents_status",
+        &["run", "limit", "live", "turns", "brief", "report", "fields"],
+    ),
+    ("ai_agents_compare", &["days", "role"]),
+    ("cost_daily", &["range"]),
+    // Access: secrets (names and state only), tokens, people, passkeys, apps.
+    ("secrets_list", &[]),
+    ("tokens_status", &[]),
+    ("users_people", &[]),
+    ("users_list", &[]),
+    ("passkeys_list", &["user_id"]),
+    ("oauth_clients", &[]),
+    ("users_whoami", &[]),
+    // Platform: architecture, models (read with no `set`), limits (read with no arguments).
+    ("architecture_describe", &["public", "svg"]),
+    ("ai_agents_models", &[]),
+    ("ai_agents_config", &[]),
+];
+
+/// The arguments read `name` may take, when it is one.
+pub fn read_keys(name: &str) -> Option<&'static [&'static str]> {
+    READS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, keys)| *keys)
 }
 
-fn allowed(name: &str, args: &Value) -> bool {
+/// The pending items of an `approvals_list` answer that concern `instance`; landings only when
+/// `home` (the instance the platform runs in), since only it lands.
+pub fn inbox_for(mut listing: Value, instance: &str, home: bool) -> Value {
+    let of = |v: &Value| {
+        [
+            &v["args"]["instance"],
+            &v["instance"],
+            &v["summary"]["instance"],
+            &v["summary"]["args"]["instance"],
+        ]
+        .into_iter()
+        .any(|i| i.as_str() == Some(instance))
+    };
+    for list in ["calls", "drafts", "plans", "other"] {
+        if let Some(items) = listing[list].as_array_mut() {
+            items.retain(of);
+        }
+    }
+    if !home && let Some(items) = listing["landings"].as_array_mut() {
+        items.clear();
+    }
+    listing
+}
+
+/// The op allowlist: whether `/app/op` runs `name` with `args`.
+pub fn allowed(name: &str, args: &Value) -> bool {
     let Some(object) = args.as_object() else {
         return false;
     };
@@ -123,8 +213,25 @@ async fn linked_details(cx: &Context<'_>, args: &Value) -> Result<Value> {
     }))
 }
 
+/// The inbox for `args.instance`, or all of it.
+async fn inbox(cx: &Context<'_>, args: &Value) -> Result<Value> {
+    let listing = dispatch(cx, "approvals_list", &serde_json::json!({})).await?;
+    let Some(id) = args["instance"].as_str().filter(|id| !id.is_empty()) else {
+        return Ok(listing);
+    };
+    let home = crate::instances::one(cx.env, id)
+        .await?
+        .is_some_and(|r| r.account == crate::instances::record::AccountRef::Home);
+    Ok(inbox_for(listing, id, home))
+}
+
 /// Called after the console's same-origin JSON and standard-person session checks.
-pub(super) async fn serve(cx: &Context<'_>, person: User, body: &Value) -> Result<Response> {
+pub(super) async fn serve(
+    cx: &Context<'_>,
+    host: &str,
+    person: User,
+    body: &Value,
+) -> Result<Response> {
     let Some(name) = body["name"].as_str().filter(|_| {
         body.as_object()
             .is_some_and(|o| o.len() == 2 && o.contains_key("args"))
@@ -155,6 +262,11 @@ pub(super) async fn serve(cx: &Context<'_>, person: User, body: &Value) -> Resul
     let call = async {
         match name {
             "app_linked_details" => linked_details(&person_cx, args).await,
+            "app_inbox" => inbox(&person_cx, args).await,
+            "app_site_hosts" => {
+                site_access::serve(host, cx.env, site_access::Action::Hosts, args).await
+            }
+            "app_site_visitors" => site_access::visitors(host, cx.env, args).await,
             _ => dispatch(&person_cx, name, args).await,
         }
     };

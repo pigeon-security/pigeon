@@ -109,6 +109,9 @@ mod ci;
 #[path = "smoke/cloud.rs"]
 mod cloud;
 /// The console, mail, changelog and architecture views of the core Worker.
+#[path = "smoke/console.rs"]
+mod console;
+
 #[path = "smoke/core.rs"]
 mod core;
 /// Instances and versions: pins, plans and upgrades.

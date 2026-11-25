@@ -34,17 +34,6 @@ pub const DEFAULT_DAYS: i64 = 30;
 /// The longest a credential may live, in days.
 pub const MAX_DAYS: i64 = 90;
 
-/// The challenge purpose for issuing a credential labelled with hash `label_hash`, living
-/// `days`.
-pub fn issue_purpose(label_hash: &str, days: i64) -> String {
-    format!("proxy-token:issue:{label_hash}:{days}")
-}
-
-/// The challenge purpose for revoking credential `id`.
-pub fn revoke_purpose(id: &str) -> String {
-    format!("proxy-token:revoke:{id}")
-}
-
 /// A credential's label, trimmed: 1 to 64 characters, none of them control characters.
 pub fn label(raw: &str) -> std::result::Result<String, String> {
     let trimmed = raw.trim();
@@ -207,44 +196,21 @@ pub struct Tokens {
 }
 
 impl Tokens {
-    /// The passkey's user, who must be a person.
-    async fn person(env: &Env, user_id: &str) -> Result<User> {
-        let user: Option<User> =
-            serde_json::from_value(directory(env, "users.get", json!({ "id": user_id })).await?)?;
-        user.filter(|u| u.kind == "standard")
-            .ok_or_else(|| bad("only a person can see or change proxy credentials"))
-    }
-
-    /// The label, lifetime and challenge purpose an issue call asks for.
-    fn issue_input(body: &Value) -> Result<(String, i64, String)> {
-        let label = label(body["label"].as_str().unwrap_or("")).map_err(|e| bad(&e))?;
-        let days = days(&body["days"]).map_err(|e| bad(&e))?;
-        let purpose = issue_purpose(&hash(&label), days);
-        Ok((label, days, purpose))
-    }
-
-    /// The id and challenge purpose a revoke call asks for.
-    fn revoke_input(body: &Value) -> Result<(String, String)> {
-        let id = id(body["id"].as_str().unwrap_or(""))
-            .map_err(|e| bad(&e))?
-            .to_string();
-        let purpose = revoke_purpose(&id);
-        Ok((id, purpose))
-    }
-
     async fn serve(&self, cx: &Context<'_>, mut req: Request) -> Result<Response> {
         let path = req.path();
         match (req.method(), path.as_str()) {
             (Method::Get, "/tokens") => page::redirect(page::CREDENTIALS),
             (
                 Method::Post,
-                "/tokens/issue/begin"
+                p @ ("/tokens/issue/begin"
                 | "/tokens/issue/finish"
                 | "/tokens/revoke/begin"
-                | "/tokens/revoke/finish",
+                | "/tokens/revoke/finish"),
             ) => {
+                // The old routes: adapters onto the console's `token-issue` and `token-revoke`
+                // writes, approved by any person's passkey as they always were.
                 let body: Value = req.json().await.unwrap_or(Value::Null);
-                match self.post(cx.env, &path, &body).await {
+                match crate::console::write::adapt(cx, &self.passkeys, p, &body, None).await {
                     Ok(v) => answer(&v, 200),
                     Err(e) => answer(&json!({ "error": e.to_string() }), 400),
                 }
@@ -253,59 +219,30 @@ impl Tokens {
         }
     }
 
-    async fn post(&self, env: &Env, path: &str, body: &Value) -> Result<Value> {
-        match path {
-            "/tokens/issue/begin" => {
-                let (_, _, purpose) = Self::issue_input(body)?;
-                self.passkeys.sign_in_begin(env, &purpose, None).await
-            }
-            "/tokens/issue/finish" => {
-                // The purpose is worked out again from what is posted now, so the passkey
-                // approved this label and lifetime.
-                let (label, days, purpose) = Self::issue_input(body)?;
-                let key = self
-                    .passkeys
-                    .sign_in_finish(env, &purpose, body, None)
-                    .await?;
-                let person = Self::person(env, &key.user_id).await?;
-                let (secret, secret_hash) = token(PREFIX)?;
-                directory(
-                    env,
-                    "proxy.token_add",
-                    json!({
-                        "hash": secret_hash, "label": label, "user_id": person.id,
-                        "ttl_ms": days * 86_400_000,
-                    }),
-                )
-                .await?;
-                Ok(json!({
-                    "token": secret,
-                    "id": &secret_hash[..ID_LEN],
-                    "label": label,
-                    "expires_in_days": days,
-                    "message": format!(
-                        "Shown once. Save it as the cloud environment's network secret for {}: \
-                         header Authorization, prefix Bearer.",
-                        self.proxy_host
-                    ),
-                }))
-            }
-            "/tokens/revoke/begin" => {
-                let (_, purpose) = Self::revoke_input(body)?;
-                self.passkeys.sign_in_begin(env, &purpose, None).await
-            }
-            "/tokens/revoke/finish" => {
-                let (id, purpose) = Self::revoke_input(body)?;
-                let key = self
-                    .passkeys
-                    .sign_in_finish(env, &purpose, body, None)
-                    .await?;
-                Self::person(env, &key.user_id).await?;
-                directory(env, "proxy.token_remove", json!({ "id": id })).await?;
-                Ok(json!({ "message": format!("{id} is revoked.") }))
-            }
-            _ => Err(bad("not found")),
-        }
+    /// `token-issue`: a credential labelled `label` for `person`, living `days`; its secret is
+    /// answered once.
+    async fn issue(&self, env: &Env, label: &str, days: i64, person: &User) -> Result<Value> {
+        let (secret, secret_hash) = token(PREFIX)?;
+        directory(
+            env,
+            "proxy.token_add",
+            json!({
+                "hash": secret_hash, "label": label, "user_id": person.id,
+                "ttl_ms": days * 86_400_000,
+            }),
+        )
+        .await?;
+        Ok(json!({
+            "token": secret,
+            "id": &secret_hash[..ID_LEN],
+            "label": label,
+            "expires_in_days": days,
+            "message": format!(
+                "Shown once. Save it as the cloud environment's network secret for {}: \
+                 header Authorization, prefix Bearer.",
+                self.proxy_host
+            ),
+        }))
     }
 }
 
@@ -334,6 +271,28 @@ impl Capability for Tokens {
                 view: true,
             },
         ]
+    }
+
+    fn write_make<'a>(
+        &'a self,
+        cx: &'a Context<'a>,
+        w: &'a crate::console::write::Write<'a>,
+    ) -> Call<'a> {
+        Box::pin(async move {
+            let person = w.person.ok_or_else(|| bad("no person"))?;
+            match w.action.id {
+                "token-issue" => {
+                    let days = w.change["days"].as_i64().unwrap_or(DEFAULT_DAYS);
+                    self.issue(cx.env, w.text(), days, person).await
+                }
+                "token-revoke" => {
+                    let id = w.text();
+                    directory(cx.env, "proxy.token_remove", json!({ "id": id })).await?;
+                    Ok(json!({ "message": format!("{id} is revoked.") }))
+                }
+                other => Err(bad(&format!("the proxy makes no write `{other}`"))),
+            }
+        })
     }
 
     /// The live proxy credentials: id, label, who issued each, when, and when it ends; and

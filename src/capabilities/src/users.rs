@@ -151,7 +151,7 @@ const POLICY_KEPT: i64 = 200;
 
 /// Site visitor list, excluding other hostnames and all previous bindings of this hostname.
 #[doc(hidden)]
-pub const SITE_VISITORS_SQL: &str = "SELECT name,
+pub const SITE_VISITORS_SQL: &str = "SELECT id, name,
     EXISTS(SELECT 1 FROM passkeys WHERE user_id = users.id) AS enrolled
     FROM users WHERE kind = ? AND site_scope = ? ORDER BY created_at, id";
 
@@ -660,20 +660,25 @@ impl Directory {
             "challenge.take" => {
                 #[derive(Deserialize)]
                 struct Row {
+                    purpose: String,
                     challenge: String,
+                    expires_at: i64,
                 }
                 let row: Option<Row> = self.db.row(
-                    "SELECT challenge FROM challenges WHERE id = ? AND purpose = ? AND expires_at > ?",
-                    vec![s("id").into(), s("purpose").into(), t.into()],
+                    "SELECT purpose, challenge, expires_at FROM challenges WHERE id = ?",
+                    vec![s("id").into()],
                 )?;
+                // Gone once asked for, answered or not: each challenge is used once.
                 self.db.exec(
                     "DELETE FROM challenges WHERE id = ? OR expires_at <= ?",
                     vec![s("id").into(), t.into()],
                 )?;
-                json!(
-                    row.ok_or_else(|| bad("this challenge is used or has expired"))?
-                        .challenge
-                )
+                let mut stored = row.map(|r| crate::console::write::Stored {
+                    purpose: r.purpose,
+                    challenge: r.challenge,
+                    expires_ms: r.expires_at,
+                });
+                json!(crate::console::write::redeem(&mut stored, s("purpose"), t).map_err(bad)?)
             }
             "passkey.add" => {
                 self.db.exec(

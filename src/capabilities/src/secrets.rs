@@ -9,19 +9,19 @@
 //! to set one handed out, but never set.
 
 use pigeon_core::mcp::Tool;
-use pigeon_core::oauth::hash;
+
 use pigeon_core::secrets_store::{self, Writer};
 use pigeon_core::tokens::{self, MintRequest, Policy, Scope};
 use serde::Serialize;
 use serde_json::{Value, json};
-use worker::{Env, Error, Headers, Method, Request, Response, Result};
+use worker::{Error, Headers, Method, Request, Response, Result};
 
 use crate::console::page;
 use crate::console::sections::Section;
 use crate::expiry::{self, Expiry};
 use crate::passkeys::Passkeys;
-use crate::users::{User, directory};
-use crate::{Call, Capability, Context, Expiring, Serve, Slot, arg, to_value, unknown};
+use crate::users::User;
+use crate::{Call, Capability, Context, Expiring, Serve, Slot, to_value, unknown};
 
 /// The secrets page and its tools.
 pub struct Secrets {
@@ -30,11 +30,6 @@ pub struct Secrets {
     pub passkeys: Passkeys,
     /// The Secrets Store binding holding the parent token, which this capability owns.
     pub parent: String,
-}
-
-/// The challenge purpose for writing `name` with a value whose hash is `digest`.
-pub fn write_purpose(name: &str, digest: &str) -> String {
-    format!("secret:{name}:{digest}")
 }
 
 fn bad(why: &str) -> Error {
@@ -169,23 +164,18 @@ impl Secrets {
         }
     }
 
-    /// The passkey's user, who must be a person.
-    async fn person(env: &Env, user_id: &str) -> Result<User> {
-        let user: Option<User> =
-            serde_json::from_value(directory(env, "users.get", json!({ "id": user_id })).await?)?;
-        user.filter(|u| u.kind == "standard")
-            .ok_or_else(|| bad("only a person can see or change secrets"))
-    }
-
     async fn serve(&self, cx: &Context<'_>, mut req: Request) -> Result<Response> {
         let path = req.path();
         match (req.method(), path.as_str()) {
             (Method::Get, "/secrets") => page::redirect(page::CREDENTIALS),
             (Method::Post, p) => {
                 let body: Value = req.json().await.unwrap_or(Value::Null);
+                // The old route: an adapter onto the console's `secret-set` write, approved by
+                // any person's passkey as it always was (the iOS app writes here).
                 let answer = match p {
-                    "/secrets/put/begin" => self.put_begin(cx, &body).await,
-                    "/secrets/put/finish" => self.put_finish(cx, &body).await,
+                    "/secrets/put/begin" | "/secrets/put/finish" => {
+                        crate::console::write::adapt(cx, &self.passkeys, p, &body, None).await
+                    }
                     _ => return Response::error("not found", 404),
                 };
                 let headers = Headers::new();
@@ -201,33 +191,14 @@ impl Secrets {
         }
     }
 
-    /// Starts approving one write: `name` must be a declared slot, `digest` the new value's
-    /// base64url SHA-256, which the browser works out so the value itself is sent only once.
-    async fn put_begin(&self, cx: &Context<'_>, body: &Value) -> Result<Value> {
-        let name = arg(body, "name")?;
-        let digest = arg(body, "digest")?;
-        self.owner(cx, name)?;
-        self.passkeys
-            .sign_in_begin(cx.env, &write_purpose(name, digest), None)
-            .await
-    }
-
-    /// Checks the passkey approved this name and this value, has the owner check the value,
-    /// then writes it.
-    async fn put_finish(&self, cx: &Context<'_>, body: &Value) -> Result<Value> {
-        let name = arg(body, "name")?;
-        let value = arg(body, "value")?.trim();
+    /// The `secret-set` write, approved by `person`'s passkey for this name and this value: has
+    /// the owner check the value, then writes it.
+    async fn put(&self, cx: &Context<'_>, name: &str, value: &str, person: &User) -> Result<Value> {
+        let value = value.trim();
         if value.is_empty() {
             return Err(bad("the value is empty"));
         }
         let owner = self.owner(cx, name)?;
-        // The challenge was issued for the hash of the value as typed; the browser trims too.
-        let purpose = write_purpose(name, &hash(value));
-        let key = self
-            .passkeys
-            .sign_in_finish(cx.env, &purpose, body, None)
-            .await?;
-        let person = Self::person(cx.env, &key.user_id).await?;
         let (checked, scopes) = match owner {
             Some(c) => {
                 let slot = c.secrets().into_iter().find(|s| s.name == name);
@@ -326,6 +297,30 @@ impl Capability for Secrets {
 
     fn sections(&self) -> Vec<Section> {
         vec![keys_section(), secrets_view()]
+    }
+
+    /// `secret-set`: only a name some capability declares (or the parent token's).
+    fn write_check<'a>(
+        &'a self,
+        cx: &'a Context<'a>,
+        w: &'a crate::console::write::Write<'a>,
+    ) -> Call<'a> {
+        Box::pin(async move {
+            self.owner(cx, w.text())?;
+            Ok(Value::Null)
+        })
+    }
+
+    fn write_make<'a>(
+        &'a self,
+        cx: &'a Context<'a>,
+        w: &'a crate::console::write::Write<'a>,
+    ) -> Call<'a> {
+        Box::pin(async move {
+            let person = w.person.ok_or_else(|| bad("no person"))?;
+            let value = w.change["value"].as_str().unwrap_or_default();
+            self.put(cx, w.text(), value, person).await
+        })
     }
 
     /// Every declared secret and the store's others, set or missing, never a value; the

@@ -15,7 +15,7 @@ mod retiring;
 pub mod tools;
 
 use pigeon_core::mcp::Tool;
-use pigeon_core::oauth::hash;
+
 use serde_json::{Value, json};
 use worker::{Env, Error, Headers, Method, Request, Response, Result};
 
@@ -45,11 +45,6 @@ pub struct Instances {
 /// The Directory key of instance `id`'s record.
 pub fn key(id: &str) -> String {
     format!("instance:{id}")
-}
-
-/// The challenge purpose binding an approval to record `id` with text hash `digest`.
-pub fn write_purpose(id: &str, digest: &str) -> String {
-    format!("instance:{id}:{digest}")
 }
 
 /// A record to start from on the console, with every kind of target.
@@ -193,48 +188,38 @@ impl Instances {
         })
     }
 
-    /// Validates a record and starts its approval: the problems, or the passkey options with the
-    /// changes it makes. `digest` is the base64url SHA-256 of `record` as sent.
-    async fn put_begin(&self, cx: &Context<'_>, body: &Value) -> Result<Value> {
-        let text = arg(body, "record")?;
-        let digest = arg(body, "digest")?;
-        if hash(text) != digest {
-            return Err(bad("the digest is not the record's"));
-        }
+    /// The `instance-put` write's check: the problems, or the changes the record makes.
+    async fn put_check(&self, cx: &Context<'_>, id: &str, text: &str) -> Result<Value> {
         let (record, current) = match self.check(cx, text).await? {
             Ok(pair) => pair,
             Err(errors) => return Ok(json!({ "errors": errors })),
         };
+        if record.id != id {
+            return Ok(json!({ "errors": ["the record's id is not the target"] }));
+        }
         let changes = record::diff(current.as_ref(), &record);
         if changes.is_empty() {
             return Ok(json!({ "errors": ["nothing changes"] }));
         }
-        let mut begin = self
-            .passkeys
-            .sign_in_begin(cx.env, &write_purpose(&record.id, digest), None)
-            .await?;
-        begin["changes"] = to_value(changes);
-        Ok(begin)
+        Ok(json!({ "changes": to_value(changes) }))
     }
 
-    /// Checks the passkey approved this record, checks it again, and stores it a version on.
-    async fn put_finish(&self, cx: &Context<'_>, body: &Value) -> Result<Value> {
-        let text = arg(body, "record")?;
+    /// The `instance-put` write, approved by `person`'s passkey for this record: checks it
+    /// again and stores it a version on.
+    async fn put_record(
+        &self,
+        cx: &Context<'_>,
+        id: &str,
+        text: &str,
+        person: &User,
+    ) -> Result<Value> {
         let (mut record, _) = match self.check(cx, text).await? {
             Ok(pair) => pair,
             Err(errors) => return Err(bad(&errors.join("; "))),
         };
-        let purpose = write_purpose(&record.id, &hash(text));
-        let key_used = self
-            .passkeys
-            .sign_in_finish(cx.env, &purpose, body, None)
-            .await?;
-        let person: Option<User> = serde_json::from_value(
-            directory(cx.env, "users.get", json!({ "id": key_used.user_id })).await?,
-        )?;
-        let person = person
-            .filter(|u| u.kind == "standard")
-            .ok_or_else(|| bad("only a person can change an instance"))?;
+        if record.id != id {
+            return Err(bad("the record's id is not the target"));
+        }
         record.version += 1;
         put(cx.env, &key(&record.id), &serde_json::to_string(&record)?).await?;
         let mut index = ids(cx.env).await?;
@@ -258,14 +243,16 @@ impl Instances {
         if !crate::console::session::same_origin(origin.as_deref(), &host) {
             return Response::error("forbidden", 403);
         }
-        if crate::console::signed_person(cx.env, &req).await?.is_none() {
+        let Some(person) = crate::console::signed_person(cx.env, &req).await? else {
             return Response::error("sign in to the console first", 401);
-        }
+        };
         let path = req.path();
         let body: Value = req.json().await.unwrap_or(Value::Null);
+        // The old routes: adapters onto the console's `instance-put` write.
         let answer = match path.as_str() {
-            "/instance/put/begin" => self.put_begin(cx, &body).await,
-            "/instance/put/finish" => self.put_finish(cx, &body).await,
+            p @ ("/instance/put/begin" | "/instance/put/finish") => {
+                crate::console::write::adapt(cx, &self.passkeys, p, &body, Some(&person)).await
+            }
             _ => return Response::error("not found", 404),
         };
         let headers = Headers::new();
@@ -908,6 +895,29 @@ impl Capability for Instances {
         _query: &'a Value,
     ) -> Call<'a> {
         Box::pin(self.listed(cx.env))
+    }
+
+    fn write_check<'a>(
+        &'a self,
+        cx: &'a Context<'a>,
+        w: &'a crate::console::write::Write<'a>,
+    ) -> Call<'a> {
+        Box::pin(async move {
+            let text = w.change["record"].as_str().unwrap_or_default();
+            self.put_check(cx, w.text(), text).await
+        })
+    }
+
+    fn write_make<'a>(
+        &'a self,
+        cx: &'a Context<'a>,
+        w: &'a crate::console::write::Write<'a>,
+    ) -> Call<'a> {
+        Box::pin(async move {
+            let person = w.person.ok_or_else(|| bad("no person"))?;
+            let text = w.change["record"].as_str().unwrap_or_default();
+            self.put_record(cx, w.text(), text, person).await
+        })
     }
 
     fn routes(&self) -> Vec<&'static str> {

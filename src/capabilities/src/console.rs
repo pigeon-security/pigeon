@@ -9,12 +9,12 @@
 //! pages, in JSON.
 
 #[path = "console/web/ops.rs"]
-mod ops;
+pub mod ops;
 pub mod page;
 pub mod sections;
 pub mod session;
 pub mod snapshot;
-pub mod writes;
+pub mod write;
 
 use futures_util::future::{Either, join_all, select};
 use pigeon_core::mcp::Tool;
@@ -29,7 +29,7 @@ use crate::passkeys::Passkeys;
 use crate::site_passkeys::console as site_access;
 use crate::users::{User, directory};
 use crate::{Call, Capability, Context, Serve, arg, unknown};
-use writes::Write;
+use write::{Step, Who};
 
 /// The console page and its API.
 pub struct Console {
@@ -197,7 +197,7 @@ impl Post {
             "/console/sign-in/begin" => Self::SignInBegin,
             "/console/sign-in/finish" => Self::SignInFinish,
             "/console/sign-out" => Self::SignOut,
-            p if p.starts_with("/console/write/") => Self::Write,
+            p if write::route(p).is_some() => Self::Write,
             _ => return None,
         })
     }
@@ -377,10 +377,13 @@ impl Console {
                 let Some(signed) = self.signed(cx.env, &req).await? else {
                     return answer(&json!({ "error": "sign in first" }), 401);
                 };
-                let host = &self.host;
-                match site_access::serve(host, &self.passkeys, cx.env, action, &signed.user, &body)
-                    .await
-                {
+                let done = match action {
+                    site_access::Action::InviteBegin | site_access::Action::InviteFinish => {
+                        write::adapt(cx, &self.passkeys, &path, &body, Some(&signed.user)).await
+                    }
+                    _ => site_access::serve(&self.host, cx.env, action, &body).await,
+                };
+                match done {
                     Ok(v) => answer(&v, 200),
                     Err(e) => answer(&json!({ "error": e.to_string() }), 400),
                 }
@@ -389,7 +392,7 @@ impl Console {
                 let Some(signed) = self.signed(cx.env, &req).await? else {
                     return answer(&json!({ "error": "sign in first" }), 401);
                 };
-                ops::serve(cx, signed.user, &body).await
+                ops::serve(cx, &self.host, signed.user, &body).await
             }
             Post::SignInBegin => match self.passkeys.sign_in_begin(cx.env, SIGN_IN, None).await {
                 Ok(v) => answer(&v, 200),
@@ -413,14 +416,11 @@ impl Console {
                 Ok(res)
             }
             Post::Write => {
-                let p = path.as_str();
-                if let Some(token) = bearer {
-                    let allowed = p
-                        .trim_start_matches("/console/write/")
-                        .split_once('/')
-                        .and_then(|(a, _)| Write::named(a))
-                        .is_some_and(Write::by_bearer);
-                    if !allowed {
+                let Some((action, step)) = write::route(&path) else {
+                    return Response::error("not found", 404);
+                };
+                let person = if let Some(token) = bearer {
+                    if !action.by_bearer {
                         return answer(
                             &json!({ "error": "this write needs the console, not an app" }),
                             403,
@@ -433,15 +433,24 @@ impl Console {
                     let Some(person) = caller.acting_for.filter(|u| u.kind == "standard") else {
                         return answer(&json!({ "error": "the app acts for no person" }), 403);
                     };
-                    return match self.write(cx.env, p, &person, &body).await {
-                        Ok(v) => answer(&v, 200),
-                        Err(e) => answer(&json!({ "error": e.to_string() }), 400),
+                    person
+                } else {
+                    let Some(signed) = self.signed(cx.env, &req).await? else {
+                        return answer(&json!({ "error": "sign in first" }), 401);
                     };
-                }
-                let Some(signed) = self.signed(cx.env, &req).await? else {
-                    return answer(&json!({ "error": "sign in first" }), 401);
+                    signed.user
                 };
-                match self.write(cx.env, p, &signed.user, &body).await {
+                let who = Who::Person(&person);
+                let (target, change) = (&body["target"], &body["change"]);
+                let done = match step {
+                    Step::Begin => {
+                        write::begin(cx, &self.passkeys, action, who, target, change).await
+                    }
+                    Step::Finish => {
+                        write::finish(cx, &self.passkeys, action, who, target, change, &body).await
+                    }
+                };
+                match done {
                     Ok(v) => answer(&v, 200),
                     Err(e) => answer(&json!({ "error": e.to_string() }), 400),
                 }
@@ -449,56 +458,29 @@ impl Console {
         }
     }
 
-    /// One of the console's writes, at `/console/write/{action}/{begin|finish}`: `begin` starts a
-    /// passkey approval by `person`, bound to the write and its target; `finish` checks it and
-    /// makes the change.
-    async fn write(&self, env: &Env, path: &str, person: &User, body: &Value) -> Result<Value> {
-        let rest = path.trim_start_matches("/console/write/");
-        let (action, step) = rest.split_once('/').ok_or_else(|| bad("not found"))?;
-        let write = Write::named(action).ok_or_else(|| bad("no such write"))?;
-        let target = write.target(arg(body, "target")?).map_err(|e| bad(&e))?;
-        let purpose = if write.bound_to_digest() {
-            crate::approvals::purpose(env, &target).await?
-        } else {
-            write.purpose(&target)
-        };
-        match step {
-            "begin" => {
-                self.passkeys
-                    .sign_in_begin(env, &purpose, Some(&person.id))
-                    .await
-            }
-            "finish" => {
-                self.passkeys
-                    .sign_in_finish(env, &purpose, body, Some(&person.id))
-                    .await?;
-                self.act(env, write, &target, person).await
-            }
-            _ => Err(bad("not found")),
-        }
-    }
-
-    /// Makes an approved write.
-    async fn act(&self, env: &Env, write: Write, target: &str, person: &User) -> Result<Value> {
-        Ok(match write {
-            Write::RemovePasskey => {
+    /// Makes one of the console's own approved writes ([`write::ACTIONS`] handled by
+    /// `console`).
+    async fn make(&self, cx: &Context<'_>, w: &write::Write<'_>) -> Result<Value> {
+        let person = w.person.ok_or_else(|| bad("no person"))?;
+        let env = cx.env;
+        let target = w.text();
+        Ok(match w.action.id {
+            "passkey-remove" => {
                 directory(env, "passkey.remove", json!({ "id": target })).await?;
                 json!({ "message": "The passkey is removed." })
             }
-            Write::DisconnectApp => {
+            "app-disconnect" => {
                 let gone = directory(env, "app.disconnect", json!({ "id": target })).await?;
                 json!({ "message": format!(
                     "{} is disconnected: its tokens are revoked and it acts for no one.",
                     gone["name"].as_str().unwrap_or("The app")
                 ) })
             }
-            Write::LandApprove => crate::land::approve(env, target, &person.name).await?,
-            Write::LandApproval => {
-                crate::land::set_approval(env, target == "on", &person.name).await?
-            }
-            Write::ApprovalApprove => crate::approvals::decide(env, target, true, person).await?,
-            Write::ApprovalDeny => crate::approvals::decide(env, target, false, person).await?,
-            Write::Invite => {
+            "land-approve" => crate::land::approve(env, target, &person.name).await?,
+            "land-approval" => crate::land::set_approval(env, target == "on", &person.name).await?,
+            "approval-approve" => crate::approvals::decide(env, target, true, person).await?,
+            "approval-deny" => crate::approvals::decide(env, target, false, person).await?,
+            "invite" => {
                 let user = directory(
                     env,
                     "users.create",
@@ -512,6 +494,15 @@ impl Console {
                     "link": format!("https://{}/auth/enrol?code={}", self.host, code.as_str().unwrap_or_default()),
                 })
             }
+            "visitor-invite" => {
+                let name = w.change["name"].as_str().unwrap_or_default();
+                site_access::invite(&self.host, env, &w.target, name).await?
+            }
+            "visitor-revoke" => {
+                let user = w.change["user"].as_str().unwrap_or_default();
+                site_access::revoke(&self.host, env, &w.target, user).await?
+            }
+            other => return Err(bad(&format!("the console makes no write `{other}`"))),
         })
     }
 
@@ -578,5 +569,24 @@ impl Capability for Console {
 
     fn fetch<'a>(&'a self, cx: &'a Context<'a>, req: Request) -> Serve<'a> {
         Box::pin(self.serve(cx, req))
+    }
+
+    fn write_check<'a>(&'a self, cx: &'a Context<'a>, w: &'a write::Write<'a>) -> Call<'a> {
+        Box::pin(async move {
+            match w.action.id {
+                "visitor-invite" => {
+                    site_access::invite_check(&self.host, cx.env, &w.target).await?;
+                }
+                "visitor-revoke" => {
+                    site_access::selection(&self.host, cx.env, &w.target).await?;
+                }
+                _ => {}
+            }
+            Ok(Value::Null)
+        })
+    }
+
+    fn write_make<'a>(&'a self, cx: &'a Context<'a>, w: &'a write::Write<'a>) -> Call<'a> {
+        Box::pin(self.make(cx, w))
     }
 }

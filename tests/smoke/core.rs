@@ -33,7 +33,6 @@ fn console_sign_in_and_a_write_assertion(
 fn console_sign_in_and_a_write() {
     use p256::ecdsa::SigningKey;
     use pigeon_capabilities::console::session::*;
-    use pigeon_capabilities::console::writes::Write;
     use pigeon_core::webauthn::{Credential, RelyingParty, assert as verify, b64url};
 
     // Sign-in: the passkey's assertion verifies; a forged one does not.
@@ -122,39 +121,19 @@ fn console_sign_in_and_a_write() {
     assert!(json_content(Some("Application/JSON; charset=utf-8")));
     assert!(!json_content(Some("application/jsonp")) && !json_content(None));
 
-    // The write: approved by a passkey over its own purpose, bound to one write and one target.
-    assert_eq!(Write::named("land-approve"), Some(Write::LandApprove));
-    assert_eq!(Write::named("users-remove"), None);
+    // A write's passkey signs the challenge kept for its own purpose; another one's fails.
+    use pigeon_capabilities::console::write::{action, digest, purpose};
+    let a = action("land-approve").unwrap();
     let (p1, p2) = (
-        Write::LandApprove.purpose("L1"),
-        Write::LandApprove.purpose("L2"),
+        purpose(a, &digest(a, "u1", &json!("L1"), &json!({}), None)),
+        purpose(a, &digest(a, "u1", &json!("L2"), &json!({}), None)),
     );
     assert_ne!(p1, p2);
-    assert_ne!(p1, Write::DisconnectApp.purpose("L1"));
-    assert!(!Write::Invite.purpose("Ada").contains("Ada"));
     let signed = b64url(p1.as_bytes());
     assert_eq!(attempt(&key, &signed, good, false, &signed), Some(1));
     assert_eq!(
         attempt(&key, &signed, good, false, &b64url(p2.as_bytes())),
         None
-    );
-    assert_eq!(
-        Write::DisconnectApp.target(" a_B-9 "),
-        Ok("a_B-9".to_string())
-    );
-    assert!(
-        Write::RemovePasskey.target("a/b").is_err() && Write::RemovePasskey.target("").is_err()
-    );
-    assert_eq!(
-        Write::Invite.target("  Ada Lovelace "),
-        Ok("Ada Lovelace".to_string())
-    );
-    assert!(
-        Write::Invite.target("a\nb").is_err() && Write::Invite.target(&"x".repeat(65)).is_err()
-    );
-    assert_eq!(Write::LandApproval.target(" on "), Ok("on".to_string()));
-    assert!(
-        Write::LandApproval.target("yes").is_err() && Write::LandApprove.target("L1/../x").is_err()
     );
 }
 
@@ -1046,7 +1025,7 @@ fn core_console_routes_only_the_app() {
     assert_eq!(Post::route("/console/sign-out"), Some(Post::SignOut));
     assert_eq!(Post::route("/app/op"), Some(Post::AppOp));
     assert_eq!(
-        Post::route("/console/write/remove-passkey/begin"),
+        Post::route("/console/write/passkey-remove/begin"),
         Some(Post::Write)
     );
     assert!(matches!(

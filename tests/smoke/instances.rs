@@ -7,7 +7,7 @@ fn instances_are_data_a_person_approves() {
     use pigeon_capabilities::instances::record::{
         self, AccountRef, Instance, Rules, Target, diff, reserved_labels, site_for_host, validate,
     };
-    use pigeon_capabilities::instances::{template, write_purpose};
+    use pigeon_capabilities::instances::template;
 
     // The noisypigeon record as the person will approve it: a linked account, its zone, and the
     // blog with a preview, the zone (off until the cutover) and the subdomain `noisypigeon`.
@@ -199,10 +199,6 @@ fn instances_are_data_a_person_approves() {
         "a new record lists every value"
     );
     assert_ne!(record::digest(&noisy), record::digest(&on));
-    assert_eq!(
-        write_purpose("noisypigeon", "abc"),
-        "instance:noisypigeon:abc"
-    );
 
     // An agent's proposal is a draft bound to the record and the version it was made from;
     // approving applies it only while the instance is still at that version.

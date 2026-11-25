@@ -514,16 +514,9 @@ impl Linked {
         ))
     }
 
-    /// Unlinks `instance` with the person's passkey: revokes the grant and forgets the tokens.
-    async fn unlink(&self, cx: &Context<'_>, body: &Value, begin: bool) -> Result<Value> {
-        let instance = arg(body, "instance")?;
-        let purpose = format!("linked:unlink:{instance}");
-        if begin {
-            return self.passkeys.sign_in_begin(cx.env, &purpose, None).await;
-        }
-        self.passkeys
-            .sign_in_finish(cx.env, &purpose, body, None)
-            .await?;
+    /// The `linked-unlink` write, approved by the person's passkey: revokes `instance`'s grant
+    /// and forgets the tokens ([`forget`]).
+    async fn unlink(&self, cx: &Context<'_>, instance: &str) -> Result<Value> {
         Ok(json!({ "message": forget(cx.env, &self.host, instance).await? }))
     }
 
@@ -554,8 +547,10 @@ impl Linked {
         let body: Value = req.json().await.unwrap_or(Value::Null);
         let answer = match path.as_str() {
             "/linked/begin" => self.begin(cx.env, &body, &person.name).await,
-            "/linked/unlink/begin" => self.unlink(cx, &body, true).await,
-            "/linked/unlink/finish" => self.unlink(cx, &body, false).await,
+            // The old routes: adapters onto the console's `linked-unlink` write.
+            p @ ("/linked/unlink/begin" | "/linked/unlink/finish") => {
+                crate::console::write::adapt(cx, &self.passkeys, p, &body, Some(&person)).await
+            }
             _ => return Response::error("not found", 404),
         };
         let headers = Headers::new();
@@ -738,6 +733,19 @@ impl Capability for Linked {
                     Ok(Value::Object(out))
                 }
                 other => Err(unknown(other)),
+            }
+        })
+    }
+
+    fn write_make<'a>(
+        &'a self,
+        cx: &'a Context<'a>,
+        w: &'a crate::console::write::Write<'a>,
+    ) -> Call<'a> {
+        Box::pin(async move {
+            match w.action.id {
+                "linked-unlink" => self.unlink(cx, w.text()).await,
+                other => Err(bad(&format!("linked makes no write `{other}`"))),
             }
         })
     }

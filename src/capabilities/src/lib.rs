@@ -183,6 +183,33 @@ pub trait Capability {
             })
         })
     }
+
+    /// Checks a console write it makes ([`console::write::ACTIONS`]) at `begin`, before the
+    /// passkey: an error refuses it; `{errors}` is answered to the page as it is; any other
+    /// object's fields are added to what the page shows, such as an instance record's changes.
+    fn write_check<'a>(
+        &'a self,
+        _cx: &'a Context<'a>,
+        _write: &'a console::write::Write<'a>,
+    ) -> Call<'a> {
+        Box::pin(async { Ok(Value::Null) })
+    }
+
+    /// Makes a console write it makes, approved by the person's passkey for exactly this target
+    /// and change.
+    fn write_make<'a>(
+        &'a self,
+        _cx: &'a Context<'a>,
+        write: &'a console::write::Write<'a>,
+    ) -> Call<'a> {
+        Box::pin(async move {
+            Err(Error::RustError(format!(
+                "{} makes no write `{}`",
+                self.name(),
+                write.action.id
+            )))
+        })
+    }
 }
 
 /// A secret a capability needs: a Secrets Store secret, bound to Workers by its name.

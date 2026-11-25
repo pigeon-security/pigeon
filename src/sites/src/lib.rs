@@ -160,6 +160,21 @@ impl Service for Sites {
                         }),
                     },
                     ToolSpec {
+                        name: "site_releases".into(),
+                        description: "Read-only. An instance's immutable site releases and the \
+                                      one live: each one's commit and template, live first. \
+                                      Roll back to one with site_rollback."
+                            .into(),
+                        input_schema: json!({
+                            "type": "object",
+                            "properties": {
+                                "instance": { "type": "string" },
+                                "limit": { "type": "integer", "description": "20 by default, at most 50." }
+                            },
+                            "required": ["instance"]
+                        }),
+                    },
+                    ToolSpec {
                         name: "site_rollback".into(),
                         description: "Activate a previously published immutable release of an instance's site.".into(),
                         input_schema: json!({
@@ -234,6 +249,25 @@ impl Service for Sites {
                         deploy::deploy(env, key.as_bytes(), caller, instance, rev).await
                     };
                     match result {
+                        Ok(v) => Answer::Ok(v),
+                        Err(e) => Answer::error(FailureKind::Failed, e.to_string()),
+                    }
+                }
+                "site_releases" => {
+                    if req.args["instance"].as_str().is_none() {
+                        return Answer::error(FailureKind::BadRequest, "`instance` is required");
+                    }
+                    // Like deploy and rollback: only for the instance the call is signed for,
+                    // reading through the typed sites_scope callbacks.
+                    let instance = match context::require(caller, &req.args) {
+                        Ok(instance) => instance,
+                        Err(why) => return Answer::error(FailureKind::Unauthorized, why),
+                    };
+                    let limit = req.args["limit"].as_u64().unwrap_or(20) as usize;
+                    let Some(key) = call_key(env).await else {
+                        return Answer::error(FailureKind::Failed, "CALLER_KEY is not set");
+                    };
+                    match deploy::releases(env, key.as_bytes(), caller, instance, limit).await {
                         Ok(v) => Answer::Ok(v),
                         Err(e) => Answer::error(FailureKind::Failed, e.to_string()),
                     }

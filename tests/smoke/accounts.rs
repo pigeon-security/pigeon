@@ -7,8 +7,7 @@ use super::*;
 fn secrets_write_and_check() {
     use pigeon_capabilities::Slot;
     use pigeon_capabilities::expiry::Expiry;
-    use pigeon_capabilities::secrets::{cloudflare_expiry, listing, write_purpose};
-    use pigeon_core::oauth::hash;
+    use pigeon_capabilities::secrets::{cloudflare_expiry, listing};
     let slot = |name: &str| Slot {
         name: name.into(),
         purpose: format!("{name} purpose"),
@@ -35,14 +34,6 @@ fn secrets_write_and_check() {
     );
     assert!(listed[0].set && !listed[1].set);
     assert_eq!(listed[1].owner, "mirror");
-    // A write is approved by a passkey bound to its name and the value's hash, never the value.
-    let approval = write_purpose("GITHUB_MIRROR_TOKEN", &hash("ghp_new"));
-    assert!(!approval.contains("ghp_new"));
-    assert_ne!(
-        approval,
-        write_purpose("GITHUB_MIRROR_TOKEN", &hash("ghp_other"))
-    );
-    assert_ne!(approval, write_purpose("CF_PARENT_TOKEN", &hash("ghp_new")));
     // The check before it is written: the issuer's answer (stubbed Cloudflare verify).
     assert_eq!(
         cloudflare_expiry(&json!({ "status": "active", "expires_on": "2026-12-21T00:00:00Z" })),
@@ -1485,7 +1476,7 @@ fn github_delivery_records_queue_and_replay_marker_atomically() {
 
 #[test]
 fn console_site_access_binds_visitor_list_and_invite_to_exact_selection() {
-    use pigeon_capabilities::site_passkeys::console::{Action, invite_purpose, matches_selection};
+    use pigeon_capabilities::site_passkeys::console::{Action, matches_selection};
     use pigeon_capabilities::users::SITE_VISITORS_SQL;
     use pigeon_core::site_auth::binding;
     use rusqlite::{Connection, params};
@@ -1515,12 +1506,8 @@ fn console_site_access_binds_visitor_list_and_invite_to_exact_selection() {
         "other.example.test"
     ));
 
-    let purpose = invite_purpose(&scope, "Alex", "owner");
-    assert_ne!(purpose, invite_purpose(&moved, "Alex", "owner"));
-    assert_ne!(purpose, invite_purpose(&other_host, "Alex", "owner"));
-    assert_ne!(purpose, invite_purpose(&scope, "Sam", "owner"));
-    assert_ne!(purpose, invite_purpose(&scope, "Alex", "another-person"));
-    assert!(!purpose.contains("Alex"));
+    // An invitation is the console's `visitor-invite` write: bound to the exact selection,
+    // the name and the person (console::write tests).
 
     let db = Connection::open_in_memory().unwrap();
     db.execute_batch(

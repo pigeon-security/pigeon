@@ -382,7 +382,7 @@ const GATED: [&str; 6] = [
 #[test]
 fn tool_call_approvals() {
     use pigeon_capabilities::approvals;
-    use pigeon_capabilities::console::writes::Write;
+    use pigeon_capabilities::console::write::{Policy, action};
     use pigeon_core::approval::{self, Kind, Refusal, State};
     use pigeon_core::policy::{self, Approval, Decision};
 
@@ -561,19 +561,16 @@ fn tool_call_approvals() {
     assert_eq!(serde_json::to_value(&k).unwrap(), json!("later_kind"));
 
     // The console's write is bound to the digest; a deny is its own write.
-    assert_eq!(
-        Write::named("approval-approve"),
-        Some(Write::ApprovalApprove)
-    );
-    assert!(Write::ApprovalApprove.bound_to_digest());
-    assert!(!Write::ApprovalDeny.bound_to_digest());
-    assert!(Write::ApprovalApprove.target("not an id!").is_err());
+    let approve = action("approval-approve").unwrap();
+    assert_eq!(approve.policy, Policy::Approval);
+    assert_ne!(action("approval-deny").unwrap().policy, Policy::Approval);
+    assert!(approve.target(&json!("not an id!")).is_err());
 }
 
 #[test]
 fn platform_approvals_list_and_bearer_writes() {
     use pigeon_capabilities::approvals::listing;
-    use pigeon_capabilities::console::writes::Write;
+    use pigeon_capabilities::console::write::action;
     use pigeon_core::approval::{self, Kind, State};
 
     for (name, yes) in [
@@ -585,14 +582,14 @@ fn platform_approvals_list_and_bearer_writes() {
         ("remove-passkey", false),
         ("disconnect-app", false),
     ] {
-        if let Some(w) = Write::named(name) {
-            assert_eq!(w.by_bearer(), yes, "{name}");
+        if let Some(w) = action(name) {
+            assert_eq!(w.by_bearer, yes, "{name}");
         }
     }
-    assert!(Write::ApprovalApprove.by_bearer() && Write::ApprovalDeny.by_bearer());
-    assert!(Write::LandApprove.by_bearer());
-    assert!(!Write::LandApproval.by_bearer() && !Write::Invite.by_bearer());
-    assert!(!Write::RemovePasskey.by_bearer() && !Write::DisconnectApp.by_bearer());
+    assert!(action("approval-approve").unwrap().by_bearer);
+    assert!(action("land-approve").unwrap().by_bearer);
+    assert!(!action("passkey-remove").unwrap().by_bearer);
+    assert!(!action("app-disconnect").unwrap().by_bearer);
 
     let make = |id: &str, kind: Kind, subject: &str| {
         approval::new(

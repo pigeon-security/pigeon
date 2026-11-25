@@ -1,12 +1,11 @@
 //! Cookie-authenticated visitor management for one approved and applied site hostname.
 
-use pigeon_core::{oauth::hash, site_auth};
+use pigeon_core::site_auth;
 use serde_json::{Value, json};
 use worker::{Env, Result};
 
 use super::{admit_new_visitors, allows_new_visitors, applied, approved, bad};
 use crate::instances::{self, record};
-use crate::passkeys::Passkeys;
 use crate::users::{User, Users, directory, invite_name};
 
 /// The visitor UI asset mounted after the console shell.
@@ -21,6 +20,7 @@ pub(crate) const ASSET: (&str, &str, &str) = (
 pub enum Action {
     Hosts,
     List,
+    /// The old invitation route, an adapter onto the `visitor-invite` write.
     InviteBegin,
     InviteFinish,
 }
@@ -42,74 +42,109 @@ pub fn matches_selection(scope: &str, instance: &str, site: &str, host: &str) ->
     scope == site_auth::binding(instance, site, host)
 }
 
-/// Bind a visitor invitation approval to the approved site scope and normalized name.
-pub fn invite_purpose(scope: &str, name: &str, person: &str) -> String {
-    format!("console:site-invite:{scope}:{person}:{}", hash(name))
-}
-
-/// Runs after the console authenticates a same-origin request by a signed-in person.
+/// Runs after the console authenticates a same-origin request by a signed-in person: the
+/// reads. Inviting and removing a visitor are console writes ([`invite`], [`revoke`]).
 pub(crate) async fn serve(
     platform_host: &str,
-    passkeys: &Passkeys,
     env: &Env,
     action: Action,
-    person: &User,
     body: &Value,
 ) -> Result<Value> {
     let instance = crate::arg(body, "instance")?;
-    let (_, zone) = platform_host
-        .split_once('.')
-        .ok_or_else(|| bad("platform host has no zone"))?;
+    let zone = zone(platform_host)?;
     if action == Action::Hosts {
         return Ok(json!({ "hosts": hosts(env, zone, instance).await? }));
     }
-    let site = crate::arg(body, "site")?;
-    let host = crate::arg(body, "host")?;
-    let (scope, config) = approved(env, zone, host).await?;
-    if !matches_selection(&scope, instance, site, host) {
+    let target = json!({ "instance": instance, "site": crate::arg(body, "site")?, "host": crate::arg(body, "host")? });
+    visitors(platform_host, env, &target).await
+}
+
+fn zone(platform_host: &str) -> Result<&str> {
+    platform_host
+        .split_once('.')
+        .map(|(_, zone)| zone)
+        .ok_or_else(|| bad("platform host has no zone"))
+}
+
+/// The approved scope and config of a selection `{instance, site, host}`, which must name the
+/// site its hostname is approved for.
+pub(crate) async fn selection(
+    platform_host: &str,
+    env: &Env,
+    target: &Value,
+) -> Result<(String, site_auth::Config)> {
+    let field = |k: &str| target[k].as_str().unwrap_or_default();
+    let (scope, config) = approved(env, zone(platform_host)?, field("host")).await?;
+    if !matches_selection(&scope, field("instance"), field("site"), field("host")) {
         return Err(bad("the hostname does not belong to the selected site"));
     }
+    Ok((scope, config))
+}
 
-    let can_invite = allows_new_visitors(&config);
-    if action == Action::List {
-        let visitors = directory(
-            env,
-            "users.site_visitors",
-            json!({ "kind": format!("site:{host}"), "site_scope": scope }),
-        )
-        .await?;
-        return Ok(json!({ "visitors": visitors, "can_invite": can_invite }));
-    }
-    admit_new_visitors(&config)?;
+/// The visitors of a selection, and whether new ones may be invited.
+pub(crate) async fn visitors(platform_host: &str, env: &Env, target: &Value) -> Result<Value> {
+    let (scope, config) = selection(platform_host, env, target).await?;
+    let host = target["host"].as_str().unwrap_or_default();
+    let visitors = directory(
+        env,
+        "users.site_visitors",
+        json!({ "kind": format!("site:{host}"), "site_scope": scope }),
+    )
+    .await?;
+    Ok(json!({ "visitors": visitors, "can_invite": allows_new_visitors(&config) }))
+}
 
-    let name = invite_name(crate::arg(body, "name")?).map_err(|why| bad(&why))?;
-    let purpose = invite_purpose(&scope, &name, &person.id);
-    match action {
-        Action::InviteBegin => {
-            passkeys
-                .sign_in_begin(env, &purpose, Some(&person.id))
-                .await
-        }
-        Action::InviteFinish => {
-            passkeys
-                .sign_in_finish(env, &purpose, body, Some(&person.id))
-                .await?;
-            let (current_scope, current_config) = approved(env, zone, host).await?;
-            if current_scope != scope || !allows_new_visitors(&current_config) {
-                return Err(bad("site access changed; start the invitation again"));
-            }
-            let invite = Users {
-                host: platform_host.to_owned(),
-            }
-            .enrol_new_user(env, &name, Some(host), Some(&scope))
-            .await?;
-            Ok(json!({
-                "enrol": invite["enrol"],
-                "expires_in_minutes": invite["expires_in_minutes"],
-            }))
-        }
-        _ => Err(bad("not found")),
+/// Checks a visitor invitation can be made, before the passkey.
+pub(crate) async fn invite_check(platform_host: &str, env: &Env, target: &Value) -> Result<()> {
+    let (_, config) = selection(platform_host, env, target).await?;
+    admit_new_visitors(&config)
+}
+
+/// Invites visitor `name` to a selection, approved by a passkey bound to both: the selection
+/// is checked again, in case it changed since the write began.
+pub(crate) async fn invite(
+    platform_host: &str,
+    env: &Env,
+    target: &Value,
+    name: &str,
+) -> Result<Value> {
+    let (scope, config) = selection(platform_host, env, target).await?;
+    if !allows_new_visitors(&config) {
+        return Err(bad("site access changed; start the invitation again"));
     }
+    let name = invite_name(name).map_err(|why| bad(&why))?;
+    let host = target["host"].as_str().unwrap_or_default();
+    let invite = Users {
+        host: platform_host.to_owned(),
+    }
+    .enrol_new_user(env, &name, Some(host), Some(&scope))
+    .await?;
+    Ok(json!({
+        "message": format!("{name} is invited. Send them the link: it works once."),
+        "enrol": invite["enrol"],
+        "expires_in_minutes": invite["expires_in_minutes"],
+    }))
+}
+
+/// Removes visitor `user` of a selection, with their passkeys: only a visitor of exactly this
+/// hostname and approved scope.
+pub(crate) async fn revoke(
+    platform_host: &str,
+    env: &Env,
+    target: &Value,
+    user: &str,
+) -> Result<Value> {
+    let (scope, _) = selection(platform_host, env, target).await?;
+    let host = target["host"].as_str().unwrap_or_default();
+    let found: Option<User> =
+        serde_json::from_value(directory(env, "users.get", json!({ "id": user })).await?)?;
+    let found = found.ok_or_else(|| bad("no such visitor"))?;
+    let visitor_scope = directory(env, "users.site_scope", json!({ "id": user })).await?;
+    if found.kind != format!("site:{host}") || visitor_scope.as_str() != Some(scope.as_str()) {
+        return Err(bad("this user is not a visitor of the selected site"));
+    }
+    directory(env, "users.remove", json!({ "id": user })).await?;
+    Ok(json!({ "message": format!("{} can no longer sign in to {host}.", found.name) }))
 }
 
 async fn hosts(env: &Env, zone: &str, instance: &str) -> Result<Vec<Value>> {

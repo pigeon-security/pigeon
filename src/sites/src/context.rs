@@ -1,4 +1,4 @@
-//! The signed instance context `site_deploy` and `site_rollback` require.
+//! The signed instance context `site_deploy`, `site_rollback` and `site_releases` require.
 //!
 //! Every core sender (the scoped MCP route, the global connector and the GitHub scheduler's
 //! private `site_deploy_queued`) signs these calls with a [`pigeon_contract::WorkerContext`]
@@ -10,7 +10,7 @@ use pigeon_contract::Signed;
 use serde_json::Value;
 
 /// Why a call without signed instance context is refused.
-pub const MISSING: &str = "site_deploy and site_rollback need signed instance context; this call carries none (a legacy envelope), so nothing was read or written";
+pub const MISSING: &str = "site_deploy, site_rollback and site_releases need signed instance context; this call carries none (a legacy envelope), so nothing was read or written";
 
 /// Why a call signed for another instance is refused.
 pub const MISMATCH: &str =

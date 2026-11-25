@@ -281,6 +281,58 @@ pub async fn rollback(
     )
 }
 
+/// The most releases [`releases`] answers.
+pub const MAX_RELEASES: usize = 50;
+
+/// The immutable releases of an instance's site and the one `live` points at: each release's
+/// provenance (commit, template, base URL), live first, then by id. Reads only.
+pub async fn releases(
+    env: &Env,
+    key: &[u8],
+    caller: &Signed,
+    instance: &str,
+    limit: usize,
+) -> Result<Value> {
+    let record = approved_record(env, key, caller, instance).await?;
+    let target = target(&record, &env.var("ZONE")?.to_string()).map_err(bad)?;
+    let account = linked_account(env, key, caller, instance, &target, &record).await?;
+    let live = r2::get(&account, &target.bucket, r2::LIVE)
+        .await?
+        .map(|b| String::from_utf8_lossy(&b).trim().to_string());
+    let mut ids: Vec<String> = r2::list(&account, &target.bucket, "release-meta/")
+        .await?
+        .iter()
+        .filter_map(|k| {
+            k.strip_prefix("release-meta/")?
+                .strip_suffix(".json")
+                .filter(|id| site_publish::is_release_id(id))
+                .map(str::to_string)
+        })
+        .collect();
+    let total = ids.len();
+    ids.sort_by_key(|id| (Some(id) != live.as_ref(), id.clone()));
+    ids.truncate(limit.clamp(1, MAX_RELEASES));
+    let mut out = Vec::new();
+    for id in ids {
+        let provenance: Value =
+            match r2::get(&account, &target.bucket, &site_publish::release_key(&id)).await? {
+                Some(b) => serde_json::from_slice(&b).unwrap_or(Value::Null),
+                None => Value::Null,
+            };
+        out.push(json!({
+            "release": id,
+            "live": Some(&id) == live.as_ref(),
+            "commit": provenance["commit"],
+            "template": provenance["template"],
+            "template_version": provenance["template_version"],
+            "base_url": provenance["base_url"],
+        }));
+    }
+    Ok(
+        json!({ "instance": instance, "site": target.site, "live": live, "total": total, "releases": out }),
+    )
+}
+
 fn publish_stage(started: &mut u64, stage: &str) {
     let now = worker::Date::now().as_millis();
     worker::console_log!(

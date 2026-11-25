@@ -14,6 +14,11 @@ pub const TOOLS: &[Registration] = &[
         arguments: &["rev"],
     },
     Registration {
+        name: "site_releases",
+        description: None,
+        arguments: &["limit"],
+    },
+    Registration {
         name: "site_rollback",
         description: None,
         arguments: &["release"],
