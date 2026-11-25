@@ -182,6 +182,22 @@ fn verify_with_keys(
     verify(shared)
 }
 
+/// Contextual callbacks are read-only and name the authenticated instance.
+pub fn verify_ci_scope(
+    signed: &pigeon_contract::Signed,
+    request: &crate::ci::ScopeRequest,
+) -> std::result::Result<(), pigeon_contract::Refused> {
+    if signed.context.is_none() {
+        return Ok(());
+    }
+    match request {
+        crate::ci::ScopeRequest::Read { instance } => signed.require_instance(instance),
+        crate::ci::ScopeRequest::Attribute { .. } => {
+            Err(pigeon_contract::Refused::InstanceMismatch)
+        }
+    }
+}
+
 /// Serves one op a capability Worker asks core: `credential` or `dispatch`, with the caller
 /// core signed for it; or one of the proxy Worker's checks, signed for no caller. Every answer
 /// is JSON, as [`pigeon_contract::serve`] answers.
@@ -276,11 +292,7 @@ pub async fn serve(mut req: Request, cx: &Context<'_>) -> Result<Response> {
         }
         "ci_scope" => match serde_json::from_slice::<crate::ci::ScopeRequest>(&body) {
             Ok(request) => {
-                let requested = match &request {
-                    crate::ci::ScopeRequest::Read { instance } => Some(instance.as_str()),
-                    crate::ci::ScopeRequest::Attribute { .. } => None,
-                };
-                if let Err(why) = signed.check_instance(requested) {
+                if let Err(why) = verify_ci_scope(&signed, &request) {
                     return reply(
                         Answer::error(FailureKind::Unauthorized, why.to_string()),
                         401,
