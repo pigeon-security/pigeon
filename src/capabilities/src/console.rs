@@ -1,11 +1,12 @@
-//! The console: one page at the platform's root, with a tab for each part of the platform the
-//! person looks after (Approvals while something waits for them, Architecture, Access, Cost) and
-//! a section for each capability that declares one. Each section loads on its own, within
-//! [`SECTION_MS`]; the slow ones answer a snapshot at once ([`snapshot`]). A person signs in once with a passkey and gets a session cookie: HttpOnly, SameSite
-//! Strict, kept only as a hash in the Directory, ending after 30 minutes idle or 8 hours. The
-//! session lets them read; every write that changes a secret, a credential, a passkey or a link
-//! still takes a passkey of its own, bound to what it changes. Every POST must come from this
-//! host's own pages, in JSON.
+//! The console: the app at `/app`, the platform's one console, with its assets, the panels it
+//! mounts and their sections' data under `/console/api/section/`, and redirects from the old
+//! console's bookmarks (`/`, `/approvals`, `/access`, ...) into it. Each section loads on its
+//! own, within [`SECTION_MS`]; the slow ones answer a snapshot at once ([`snapshot`]). A person
+//! signs in once with a passkey and gets a session cookie: HttpOnly, SameSite Strict, kept only
+//! as a hash in the Directory, ending after 30 minutes idle or 8 hours. The session lets them
+//! read; every write that changes a secret, a credential, a passkey or a link still takes a
+//! passkey of its own, bound to what it changes. Every POST must come from this host's own
+//! pages, in JSON.
 
 #[path = "console/web/ops.rs"]
 mod ops;

@@ -1,7 +1,7 @@
-//! The console page's HTML shell and its response headers. The shell holds no content of its
-//! own, because the console's scripts build everything; it carries no inline script and no
-//! inline event handler, so the policy can forbid both. The console's static assets are served
-//! with the same care.
+//! The app's HTML shell (`/app`), its response headers and the redirects from old console
+//! bookmarks. The shell holds no content of its own, because the app's scripts build
+//! everything; it carries no inline script and no inline event handler, so the policy can forbid
+//! both. The console's static assets are served with the same care.
 
 use pigeon_core::design::escape;
 use worker::{Headers, Response, Result};
