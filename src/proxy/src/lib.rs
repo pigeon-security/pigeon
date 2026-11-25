@@ -203,6 +203,15 @@ impl Host for Core<'_> {
     }
 }
 
+/// Names this Worker (`proxy` in ci/workers.toml) on every request it signs to core, before any
+/// fetch or Durable Object code runs, so core checks it with CALLER_KEY_PROXY first
+/// (docs/plans/caller-keys.md, step 2). worker-build also exposes it as an entrypoint method of
+/// this name, reachable only over a service binding; calling it again changes nothing.
+#[event(start)]
+fn identify_worker() {
+    pigeon_contract::identify("proxy");
+}
+
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
     let proxy_host = env.var("PROXY_HOST")?.to_string();
