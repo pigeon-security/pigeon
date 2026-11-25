@@ -15,7 +15,9 @@ pub mod caller;
 pub mod serve;
 pub mod wire;
 
-pub use ask::{ask, ask_with_context, manifest, manifest_with_context};
+pub use ask::{
+    WORKER_HEADER, ask, ask_with_context, identify, identity, manifest, manifest_with_context,
+};
 pub use caller::{
     HEADER, MAX_AGE_MS, Refused, Signed, WORKER_CONTEXT_VERSION, WorkerContext, sign,
     sign_with_context, verify, verify_for,

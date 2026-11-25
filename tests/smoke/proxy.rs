@@ -155,6 +155,25 @@ fn core_contract_per_worker_caller_keys() {
     assert_eq!(worker_key_name("models"), None);
 }
 
+/// A capability Worker names itself once, and that name is what core looks its key up by
+/// (docs/plans/caller-keys.md, step 2). Nothing in this suite names itself before this test,
+/// and core never does, so core's requests send no header.
+#[test]
+fn contract_worker_names_itself() {
+    use pigeon_capabilities::split::{WORKER_HEADER, worker_key_name};
+
+    assert_eq!(pigeon_contract::WORKER_HEADER, WORKER_HEADER);
+    assert_eq!(pigeon_contract::identity(), None);
+    pigeon_contract::identify("sites");
+    // The first name stays.
+    pigeon_contract::identify("proxy");
+    assert_eq!(pigeon_contract::identity(), Some("sites"));
+    assert_eq!(
+        worker_key_name(pigeon_contract::identity().unwrap()),
+        Some("CALLER_KEY_SITES")
+    );
+}
+
 /// Core bounds what each capability Worker may ask once its own key signed the request
 /// (docs/plans/caller-keys.md, step 5); the shared key keeps today's behaviour, and a Worker
 /// claiming another's name never gets that Worker's table.

@@ -1,6 +1,8 @@
 //! The core side: asking a capability Worker, through its service binding, and a capability
 //! Worker asking core, through its `PLATFORM` binding.
 
+use std::sync::OnceLock;
+
 use serde_json::Value;
 use worker::wasm_bindgen::JsValue;
 use worker::{Fetcher, Headers, Method, Request, RequestInit};
@@ -8,6 +10,27 @@ use worker::{Fetcher, Headers, Method, Request, RequestInit};
 use crate::caller::{HEADER, WorkerContext, sign, sign_with_context};
 use crate::now_ms;
 use crate::wire::{Answer, FailureKind, Manifest, WorkerManifest, accepts};
+
+/// The header a capability Worker sends on each request it signs, naming itself, so core checks
+/// the signature with that Worker's own key first (docs/plans/caller-keys.md). The name is a
+/// claim only: a signature made with another key does not pass as that Worker's.
+pub const WORKER_HEADER: &str = "X-Pigeon-Worker";
+
+/// This Worker's name, once [`identify`] has set it.
+static WORKER: OnceLock<&'static str> = OnceLock::new();
+
+/// Names this Worker, by its `name` in ci/workers.toml, so every request it signs also sends
+/// [`WORKER_HEADER`]. A capability Worker calls it once from its `#[event(start)]`, which runs
+/// before any fetch or Durable Object code. Core never calls it, so core sends no header. The
+/// first name set stays.
+pub fn identify(name: &'static str) {
+    let _ = WORKER.set(name);
+}
+
+/// The name [`identify`] set; `None` until then.
+pub fn identity() -> Option<&'static str> {
+    WORKER.get().copied()
+}
 
 /// Asks `fetcher` (a service binding) op `op` with `body` as JSON, signed for `caller` when
 /// given as (key, who). `base` is `https://capability`, or `https://core` for core. A peer that
@@ -58,6 +81,9 @@ async fn ask_inner(
             None => sign(key, who, op, text.as_bytes(), at, nonce),
         };
         headers.set(HEADER, &value)?;
+        if let Some(name) = identity() {
+            headers.set(WORKER_HEADER, name)?;
+        }
     }
     let url = format!("{}/{op}", base.trim_end_matches('/'));
     let mut init = RequestInit::new();
