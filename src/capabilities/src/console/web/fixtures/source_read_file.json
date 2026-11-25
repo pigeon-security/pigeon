@@ -1,0 +1,9 @@
+{
+  "instance": "notes",
+  "revision": "9e41c07a21bf3d55e0c4a8b1f2d3e4f5a6b7c8d9",
+  "commit": "9e41c07a21bf3d55e0c4a8b1f2d3e4f5a6b7c8d9",
+  "path": "README.md",
+  "size": 412,
+  "encoding": "utf-8",
+  "content": "# Field notes\n\nA small static site of walking notes, built with the blog template.\n\n## Layout\n\n- `posts/` holds one Markdown file per note.\n- `static/` holds images and the stylesheet.\n- `site.toml` names the site and its host.\n\n## Publishing\n\nEvery merge to main is published by the platform. Nothing here holds a secret.\n"
+}

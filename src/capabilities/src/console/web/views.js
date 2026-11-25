@@ -1,5 +1,6 @@
 /* The views of the console shell at /app/next. Each area/view id console_manifest can send has
- * a renderer here: a real one, or todo(area, view) for a view not yet ported, which links to the
+ * a renderer here or in views/*.js (views/data.js: Storage, Source, CI, Metrics, Ingest): a real
+ * one, or todo(area, view) for a view not yet ported, which links to the
  * same page in the current console (TODO-port). tests/smoke/console.rs (P15) reads every register
  * and todo call below and checks them against the manifest's ids; port a view by replacing its
  * todo line with a register line. */
@@ -209,15 +210,7 @@
   todo("site", "sites");
   todo("site", "deployments");
   todo("site", "visitors");
-  todo("storage", "buckets");
-  todo("source", "repository");
-  todo("ci", "jobs");
-  todo("metrics", "workers");
-  todo("ingest", "runs");
   todo("capabilities", null);
-  todo("sessions", "live");
-  todo("sessions", "compare");
-  todo("cost", null);
   todo("access", "secrets");
   todo("access", "tokens");
   todo("access", "people");

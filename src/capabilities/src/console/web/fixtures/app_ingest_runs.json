@@ -1,0 +1,48 @@
+{
+  "_recorded_ms": 1795600000000,
+  "instance": "notes",
+  "runs": [
+    {
+      "run": "run-20261125-03a91f",
+      "instance": "notes",
+      "host": "digitalocean",
+      "source": "do-8812",
+      "bucket": "notes-archive",
+      "region": "ams3",
+      "vm": "do-vm-1188",
+      "vm_deleted": true,
+      "approval": "appr-239903",
+      "commit": "50a15bc9e41c07a21bf3d55e0c4a8b1f2d3e4f5a",
+      "dry_run": true,
+      "started_ms": 1795426000000
+    },
+    {
+      "run": "run-20261125-077d0e",
+      "instance": "notes",
+      "host": "digitalocean",
+      "source": "do-8812",
+      "bucket": "notes-archive",
+      "region": "ams3",
+      "vm": "do-vm-1204",
+      "vm_deleted": true,
+      "approval": "appr-490766",
+      "commit": "50a15bc9e41c07a21bf3d55e0c4a8b1f2d3e4f5a",
+      "dry_run": false,
+      "started_ms": 1795510000000
+    },
+    {
+      "run": "run-20261125-09e41c",
+      "instance": "notes",
+      "host": "cloudflare",
+      "source": "do-8812",
+      "bucket": "notes-archive",
+      "region": "auto",
+      "vm": null,
+      "vm_deleted": false,
+      "approval": "appr-648220",
+      "commit": "50a15bc9e41c07a21bf3d55e0c4a8b1f2d3e4f5a",
+      "dry_run": false,
+      "started_ms": 1795598500000
+    }
+  ]
+}

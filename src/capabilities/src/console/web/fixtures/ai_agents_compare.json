@@ -1,0 +1,182 @@
+{
+  "days": 7,
+  "role": null,
+  "groups": [
+    {
+      "role": "planner",
+      "model": "anthropic/claude-opus-5-5",
+      "kind": "design",
+      "route": "byok",
+      "runs": 14,
+      "done": 11,
+      "failed": 2,
+      "over_budget": 0,
+      "stopped": 1,
+      "cost_usd": {
+        "total": 53.76,
+        "median": 3.84,
+        "high": 7.1
+      },
+      "turns": {
+        "median": 41
+      },
+      "minutes": {
+        "median": 52
+      }
+    },
+    {
+      "role": "planner",
+      "model": "anthropic/claude-opus-5-5",
+      "kind": "fix",
+      "route": "byok",
+      "runs": 22,
+      "done": 20,
+      "failed": 1,
+      "over_budget": 0,
+      "stopped": 1,
+      "cost_usd": {
+        "total": 46.64,
+        "median": 2.12,
+        "high": 4.4
+      },
+      "turns": {
+        "median": 27
+      },
+      "minutes": {
+        "median": 31
+      }
+    },
+    {
+      "role": "planner",
+      "model": "anthropic/claude-opus-5-5",
+      "kind": "integrate",
+      "route": "byok",
+      "runs": 6,
+      "done": 5,
+      "failed": 0,
+      "over_budget": 1,
+      "stopped": 0,
+      "cost_usd": {
+        "total": 18.2,
+        "median": 2.95,
+        "high": 5.02
+      },
+      "turns": {
+        "median": 33
+      },
+      "minutes": {
+        "median": 40
+      }
+    },
+    {
+      "role": "planner",
+      "model": "anthropic/claude-sonnet-5-5",
+      "kind": "docs",
+      "route": "byok",
+      "runs": 5,
+      "done": 5,
+      "failed": 0,
+      "over_budget": 0,
+      "stopped": 0,
+      "cost_usd": {
+        "total": 4.61,
+        "median": 0.88,
+        "high": 1.21
+      },
+      "turns": {
+        "median": 19
+      },
+      "minutes": {
+        "median": 14
+      }
+    },
+    {
+      "role": "executor",
+      "model": "anthropic/claude-sonnet-5-5",
+      "kind": null,
+      "route": "byok",
+      "runs": 61,
+      "done": 52,
+      "failed": 4,
+      "over_budget": 2,
+      "stopped": 3,
+      "cost_usd": {
+        "total": 45.14,
+        "median": 0.74,
+        "high": 1.62
+      },
+      "turns": {
+        "median": 34
+      },
+      "minutes": {
+        "median": 18
+      }
+    },
+    {
+      "role": "executor",
+      "model": "cf-unified/claude-sonnet-5-5",
+      "kind": null,
+      "route": "credits",
+      "runs": 18,
+      "done": 15,
+      "failed": 2,
+      "over_budget": 1,
+      "stopped": 0,
+      "cost_usd": {
+        "total": 14.58,
+        "median": 0.81,
+        "high": 1.9
+      },
+      "turns": {
+        "median": 36
+      },
+      "minutes": {
+        "median": 20
+      }
+    },
+    {
+      "role": "executor",
+      "model": "openai/gpt-5.1",
+      "kind": null,
+      "route": "byok",
+      "runs": 9,
+      "done": 6,
+      "failed": 3,
+      "over_budget": 0,
+      "stopped": 0,
+      "cost_usd": {
+        "total": 8.28,
+        "median": 0.92,
+        "high": 2.05
+      },
+      "turns": {
+        "median": 40
+      },
+      "minutes": {
+        "median": 23
+      }
+    },
+    {
+      "role": "mechanical",
+      "model": "cf-unified/claude-haiku-5-5",
+      "kind": null,
+      "route": "credits",
+      "runs": 47,
+      "done": 46,
+      "failed": 1,
+      "over_budget": 0,
+      "stopped": 0,
+      "cost_usd": {
+        "total": 2.35,
+        "median": 0.05,
+        "high": 0.11
+      },
+      "turns": {
+        "median": 6
+      },
+      "minutes": {
+        "median": 2
+      }
+    }
+  ]
+}

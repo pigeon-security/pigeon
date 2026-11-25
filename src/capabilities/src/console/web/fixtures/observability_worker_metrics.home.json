@@ -1,0 +1,24 @@
+{
+  "instance": "home",
+  "worker": "pigeon-core",
+  "from": "2026-11-24T10:00:00.000Z",
+  "to": "2026-11-25T10:00:00.000Z",
+  "metrics": {
+    "requests": 48210,
+    "errors": 37,
+    "error_rate": 0.0007674756274631819,
+    "by_status": {
+      "success": 48173,
+      "scriptThrewException": 29,
+      "exceededCpu": 8
+    },
+    "cpu_ms_p50": 2.4,
+    "cpu_ms_p99": 18.7,
+    "wall_ms_p50": 41.2,
+    "wall_ms_p99": 612.0
+  },
+  "estimated_cost": {
+    "usd": 0.0156,
+    "basis": "Workers list price before included usage, with CPU estimated from the request-weighted median"
+  }
+}

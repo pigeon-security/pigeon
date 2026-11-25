@@ -1,0 +1,50 @@
+{
+  "id": "job-0481-7f3a",
+  "repo": "example/pigeon",
+  "commit": "3fa91c2b7d10e4c5a6b7c8d9e0f1a2b3c4d5e6f7",
+  "job": "land",
+  "class": "standard",
+  "state": "failed",
+  "attempt": 1,
+  "connector": "buildkite",
+  "url": "https://ci.example.dev/jobs/481",
+  "pin": null,
+  "task": "land claude/site-rollback",
+  "caller": "u-ada",
+  "caller_name": "Ada",
+  "notify": false,
+  "detail": "2 tests failed",
+  "created_at": 1795597120000,
+  "queued_at": 1795597120000,
+  "dispatched_at": 1795597122000,
+  "started_at": 1795597129000,
+  "finished_at": 1795597541000,
+  "deadline_at": 1795600720000,
+  "exit_code": 101,
+  "duration_ms": 412000,
+  "image": "runner:2026.11",
+  "excluded": [],
+  "output": "test smoke::sites::site_rollback_names_a_release ... FAILED\ntest smoke::sites::site_rollback_refuses_main ... FAILED\n\ntest result: FAILED. 288 passed; 2 failed",
+  "events": [
+    {
+      "at": 1795597120000,
+      "state": "queued",
+      "detail": null
+    },
+    {
+      "at": 1795597122000,
+      "state": "dispatched",
+      "detail": "buildkite"
+    },
+    {
+      "at": 1795597129000,
+      "state": "running",
+      "detail": null
+    },
+    {
+      "at": 1795597541000,
+      "state": "failed",
+      "detail": "exit 101"
+    }
+  ]
+}

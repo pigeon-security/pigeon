@@ -193,6 +193,7 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: var(--fs-md); }
 .tbl .chev { width: 22px; padding-right: 0; color: var(--muted); }
 .tbl .chev svg.icon { width: 12px; height: 12px; transition: transform .12s; }
 .tbl tr[aria-expanded="true"] .chev svg.icon { transform: rotate(90deg); }
+.tbl td.wide { min-width: 12em; overflow-wrap: normal; }
 .tbl .sub { display: block; color: var(--muted); font-size: var(--fs-sm); }
 .tbl .sub.mono { font-size: var(--fs-xs); white-space: nowrap; }
 .tbl tr.empty td, .tbl tr.err td { height: 64px; text-align: center; color: var(--muted); }
@@ -202,6 +203,25 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: var(--fs-md); }
 .skel.w1 { width: 42%; } .skel.w2 { width: 66%; } .skel.w3 { width: 54%; } .skel.w4 { width: 80%; }
 @keyframes skel { from { background-position: 200% 0; } to { background-position: -200% 0; } }
 @media (prefers-reduced-motion: reduce) { .skel { animation: none; } .tbl .chev svg.icon { transition: none; } }
+
+/* Bar and meter: inline bars in table cells (spend against budget, outcome mixes, shares) */
+svg.bar { display: block; width: 72px; height: 6px; flex: none; border-radius: 3px; background: var(--line); overflow: hidden; }
+svg.bar .fill { fill: var(--accent); }
+svg.bar .fill.ok { fill: var(--ok); }
+svg.bar .fill.warn { fill: var(--warn); }
+svg.bar .fill.bad, svg.bar .fill.hot { fill: var(--bad); }
+svg.bar .fill.info { fill: var(--info); }
+svg.bar .fill.muted { fill: var(--line-strong); }
+.bar-none { display: block; width: 72px; height: 6px; flex: none; border-radius: 3px; border: 1px dashed var(--line-strong); }
+.meter { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; }
+.meter .num { text-align: left; }
+.tbl .sub svg.bar { margin-top: 4px; }
+
+/* Figures: a row of headline numbers above a table */
+.figs { display: flex; flex-wrap: wrap; gap: var(--sp-2) var(--sp-5); }
+.fig { display: grid; gap: 2px; min-width: 0; }
+.fig strong { font-size: var(--fs-xl); font-weight: 600; font-variant-numeric: tabular-nums; }
+.fig small { color: var(--muted); font-size: var(--fs-xs); }
 
 /* Facts, code, diffs */
 .facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 20px; margin: 0; }

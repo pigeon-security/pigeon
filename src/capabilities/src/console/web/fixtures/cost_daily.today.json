@@ -1,0 +1,177 @@
+{
+  "range": "today",
+  "days": [
+    "2026-11-25"
+  ],
+  "total": 8.34387,
+  "net_total": 5.84387,
+  "cloudflare": {
+    "total": 0.933511,
+    "lines": [
+      {
+        "name": "CI Containers",
+        "total": 0.476667,
+        "by_day": {
+          "2026-11-25": 0.476667
+        }
+      },
+      {
+        "name": "Workers",
+        "total": 0.210137,
+        "by_day": {
+          "2026-11-25": 0.210137
+        }
+      },
+      {
+        "name": "R2",
+        "total": 0.106629,
+        "by_day": {
+          "2026-11-25": 0.106629
+        }
+      },
+      {
+        "name": "Artifacts",
+        "total": 0.066099,
+        "by_day": {
+          "2026-11-25": 0.066099
+        }
+      },
+      {
+        "name": "Workers AI",
+        "total": 0.041621,
+        "by_day": {
+          "2026-11-25": 0.041621
+        }
+      },
+      {
+        "name": "D1",
+        "total": 0.032358,
+        "by_day": {
+          "2026-11-25": 0.032358
+        }
+      }
+    ]
+  },
+  "ai_gateway": {
+    "total": 7.370269,
+    "by_route": [
+      {
+        "name": "BYOK",
+        "total": 6.568469,
+        "by_day": {
+          "2026-11-25": 6.568469
+        }
+      },
+      {
+        "name": "Credits",
+        "total": 0.8018,
+        "by_day": {
+          "2026-11-25": 0.8018
+        }
+      }
+    ],
+    "by_gateway": [
+      {
+        "id": "anthropic-byok",
+        "billing": "byok",
+        "provider": "anthropic",
+        "label": "Anthropic BYOK",
+        "total": 6.329041,
+        "by_day": {
+          "2026-11-25": 6.329041
+        },
+        "by_model": [
+          {
+            "name": "claude-opus-5-5",
+            "total": 5.34418,
+            "by_day": {
+              "2026-11-25": 5.34418
+            },
+            "provider": "anthropic"
+          },
+          {
+            "name": "claude-sonnet-5-5",
+            "total": 0.984861,
+            "by_day": {
+              "2026-11-25": 0.984861
+            },
+            "provider": "anthropic"
+          }
+        ]
+      },
+      {
+        "id": "openai-byok",
+        "billing": "byok",
+        "provider": "openai",
+        "label": "OpenAI BYOK",
+        "total": 0.239428,
+        "by_day": {
+          "2026-11-25": 0.239428
+        },
+        "by_model": [
+          {
+            "name": "gpt-5.1",
+            "total": 0.239428,
+            "by_day": {
+              "2026-11-25": 0.239428
+            },
+            "provider": "openai"
+          }
+        ]
+      },
+      {
+        "id": "cf-unified",
+        "billing": "unified",
+        "provider": null,
+        "label": "Cloudflare Models",
+        "total": 0.8018,
+        "by_day": {
+          "2026-11-25": 0.8018
+        },
+        "by_model": [
+          {
+            "name": "claude-haiku-5-5",
+            "total": 0.529401,
+            "by_day": {
+              "2026-11-25": 0.529401
+            },
+            "provider": "anthropic"
+          },
+          {
+            "name": "llama-4-scout",
+            "total": 0.272399,
+            "by_day": {
+              "2026-11-25": 0.272399
+            },
+            "provider": "workers-ai"
+          }
+        ]
+      }
+    ]
+  },
+  "credits": {
+    "usage_usd": 0.8018,
+    "fee_usd": 0.04009,
+    "grants": [
+      {
+        "name": "Startup programme credit",
+        "amount": 250.0,
+        "used": 212.4,
+        "remaining": 37.6,
+        "expiry": "2027-01-31"
+      },
+      {
+        "name": "Workers AI launch credit",
+        "amount": 100.0,
+        "used": 18.25,
+        "remaining": 81.75,
+        "expiry": "2027-03-31"
+      }
+    ]
+  },
+  "anthropic": null,
+  "notes": [],
+  "unavailable": [],
+  "truncated": false,
+  "stored_from": "2026-09-01"
+}

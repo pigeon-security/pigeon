@@ -5,7 +5,7 @@ use super::*;
 
 use pigeon_core::oauth::hash;
 
-use pigeon_capabilities::console::ops::{READS, allowed, inbox_for, read_keys};
+use pigeon_capabilities::console::ops::{INSTANCE_OPS, READS, allowed, inbox_for, read_keys};
 use pigeon_capabilities::console::write::{
     ACTIONS, ANY_PASSKEY, Handler, LEGACY, Policy, Step, Stored, action, digest, legacy, purpose,
     redeem, route,
@@ -517,6 +517,66 @@ fn console_ops_allow_the_reads_the_console_needs_and_nothing_else() {
     ));
     assert!(allowed("app_inbox", &json!({ "instance": "blog" })));
     assert_eq!(read_keys("console_manifest"), Some(&["instance"][..]));
+    // The instance areas' reads take the instance, and are bound to its record when they do.
+    for (op, args) in [
+        (
+            "storage_list_objects",
+            json!({ "instance": "blog", "prefix": "img/", "delimiter": "/", "max_keys": 100, "token": "t" }),
+        ),
+        (
+            "ci_jobs",
+            json!({ "instance": "blog", "state": "failed", "limit": 50 }),
+        ),
+        ("ci_status", json!({ "instance": "blog", "id": "j1" })),
+        (
+            "observability_worker_metrics",
+            json!({ "instance": "blog", "hours": 24 }),
+        ),
+        ("ingest_report", json!({ "instance": "blog", "run": "r1" })),
+        ("app_ingest_runs", json!({ "instance": "blog" })),
+    ] {
+        assert!(allowed(op, &args), "{op} {args}");
+    }
+    assert!(
+        !allowed(
+            "app_ingest_runs",
+            &json!({ "instance": "blog", "run": "r1" })
+        ),
+        "listing runs never names one"
+    );
+    for op in INSTANCE_OPS {
+        assert!(
+            read_keys(op).is_some_and(|keys| keys.contains(&"instance")),
+            "{op}"
+        );
+    }
+    // A bound storage read cannot also name a raw account or bucket.
+    let record: pigeon_capabilities::instances::record::Instance = serde_json::from_value(json!({
+        "id": "blog", "title": "Blog", "account": { "kind": "home" },
+        "storage": { "state": "enabled", "store": "scaleway:archive", "bucket": "blog-assets" },
+    }))
+    .unwrap();
+    let bind = |tool: &str, args: Value| {
+        pigeon_capabilities::instances::tools::bind_global("blog", Some(&record), tool, &args)
+    };
+    assert_eq!(
+        bind(
+            "storage_list_objects",
+            json!({ "instance": "blog", "prefix": "img/" })
+        ),
+        Ok(json!({ "instance": "blog", "prefix": "img/" }))
+    );
+    assert!(
+        bind(
+            "storage_list_objects",
+            json!({ "instance": "blog", "bucket": "other" })
+        )
+        .is_err()
+    );
+    assert!(
+        bind("ci_jobs", json!({ "instance": "blog" })).is_err(),
+        "CI is off"
+    );
     // site_releases is instance-targeted like deploy and rollback, so a global call is bound to
     // the approved record and signed with its instance context.
     assert!(
@@ -581,15 +641,7 @@ const CONSOLE_TODO_PORT: &[&str] = &[
     "site/sites",
     "site/deployments",
     "site/visitors",
-    "storage/buckets",
-    "source/repository",
-    "ci/jobs",
-    "metrics/workers",
-    "ingest/runs",
     "capabilities/*",
-    "sessions/live",
-    "sessions/compare",
-    "cost/*",
     "access/secrets",
     "access/tokens",
     "access/people",

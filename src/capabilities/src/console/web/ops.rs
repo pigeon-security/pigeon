@@ -32,7 +32,8 @@ pub const READS: &[(&str, &[&str])] = &[
     ("site_releases", &["instance", "limit"]),
     ("app_site_hosts", &["instance"]),
     ("app_site_visitors", &["instance", "site", "host"]),
-    // Storage, source, CI, metrics and ingest, scoped by their own arguments.
+    // Storage, source, CI, metrics and ingest, scoped by their own arguments. With `instance`,
+    // an op in `INSTANCE_OPS` is bound to that instance's approved record first.
     ("storage_accounts", &[]),
     ("storage_list_buckets", &["account"]),
     (
@@ -41,6 +42,7 @@ pub const READS: &[(&str, &[&str])] = &[
             "account",
             "bucket",
             "delimiter",
+            "instance",
             "max_keys",
             "prefix",
             "token",
@@ -52,14 +54,19 @@ pub const READS: &[(&str, &[&str])] = &[
     ("source_tokens", &[]),
     (
         "ci_jobs",
-        &["caller", "commit", "limit", "repo", "state", "task"],
+        &[
+            "caller", "commit", "instance", "limit", "repo", "state", "task",
+        ],
     ),
-    ("ci_status", &["id"]),
+    ("ci_status", &["id", "instance"]),
     ("ci_pool", &[]),
     ("observability_summary", &["hours"]),
     ("observability_errors", &["hours", "limit", "worker"]),
     ("observability_worker_metrics", &["instance", "hours"]),
     ("ingest_report", &["instance", "run"]),
+    // Ingest › Runs lists an instance's runs here: `ingest_status` would also delete the VM of
+    // a run that has ended, so the console never calls it.
+    ("app_ingest_runs", &["instance"]),
     // Sessions, cost and compare.
     (
         "ai_agents_status",
@@ -79,6 +86,21 @@ pub const READS: &[(&str, &[&str])] = &[
     ("architecture_describe", &["public", "svg"]),
     ("ai_agents_models", &[]),
     ("ai_agents_config", &[]),
+];
+
+/// The reads that are an instance tool's registration (`instances::tools`). Called with an
+/// `instance`, each is bound to that instance's approved record as the instance MCP endpoint
+/// binds it ([`bind_global`](crate::instances::tools::bind_global)): refused when the record
+/// does not enable it or an argument falls outside its registration, such as a raw storage
+/// `account` or a CI `repo`.
+pub const INSTANCE_OPS: &[&str] = &[
+    "storage_list_objects",
+    "source_resolve_revision",
+    "source_read_file",
+    "ci_jobs",
+    "ci_status",
+    "observability_worker_metrics",
+    "ingest_report",
 ];
 
 /// The arguments read `name` may take, when it is one.
@@ -213,6 +235,36 @@ async fn linked_details(cx: &Context<'_>, args: &Value) -> Result<Value> {
     }))
 }
 
+/// `args` bound to the approved record of the instance they name, for an op in
+/// [`INSTANCE_OPS`]; any other call's arguments unchanged.
+async fn bound(cx: &Context<'_>, name: &str, args: &Value) -> Result<Value> {
+    let Some(id) = args
+        .get("instance")
+        .filter(|_| INSTANCE_OPS.contains(&name))
+    else {
+        return Ok(args.clone());
+    };
+    let id = id
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| bad("`instance` must be an instance id"))?;
+    let record = crate::instances::one(cx.env, id).await?;
+    crate::instances::tools::bind_global(id, record.as_ref(), name, args).map_err(|why| bad(&why))
+}
+
+/// Ingest › Runs: the runs of one instance whose record enables ingest. Reads only.
+async fn ingest_runs(cx: &Context<'_>, args: &Value) -> Result<Value> {
+    let id = args["instance"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| bad("expected an instance ID"))?;
+    let record = crate::instances::one(cx.env, id).await?;
+    // The instance's own ingest_report must be available to it, as on its MCP endpoint.
+    crate::instances::tools::bind_global(id, record.as_ref(), "ingest_report", &json!({}))
+        .map_err(|why| bad(&why))?;
+    Ok(json!({ "instance": id, "runs": crate::ingest::runs(cx.env, id).await? }))
+}
+
 /// The inbox for `args.instance`, or all of it.
 async fn inbox(cx: &Context<'_>, args: &Value) -> Result<Value> {
     let listing = dispatch(cx, "approvals_list", &serde_json::json!({})).await?;
@@ -267,7 +319,11 @@ pub(super) async fn serve(
                 site_access::serve(host, cx.env, site_access::Action::Hosts, args).await
             }
             "app_site_visitors" => site_access::visitors(host, cx.env, args).await,
-            _ => dispatch(&person_cx, name, args).await,
+            "app_ingest_runs" => ingest_runs(&person_cx, args).await,
+            _ => {
+                let args = bound(&person_cx, name, args).await?;
+                dispatch(&person_cx, name, &args).await
+            }
         }
     };
     // A read can time out. Do not put a local timeout around a write that might still commit.

@@ -31,8 +31,11 @@
   if (!root) return;
 
   // ---- Contract (P15): every op the shell and its views read, and every write they make.
-  const READS = Object.freeze(["console_manifest", "instances_list", "app_inbox", "app_linked_details"]);
-  const WRITES = Object.freeze(["approval-approve", "approval-deny", "land-approve"]);
+  const READS = Object.freeze(["console_manifest", "instances_list", "app_inbox", "app_linked_details",
+    "storage_list_objects", "source_resolve_revision", "source_read_file", "ci_jobs", "ci_status",
+    "observability_worker_metrics", "app_ingest_runs", "ingest_report",
+    "ai_agents_status", "ai_agents_compare", "cost_daily", "land_list"]);
+  const WRITES = Object.freeze(["approval-approve", "approval-deny", "land-approve", "run-stop", "run-note", "run-extend"]);
 
   // ---- Fixture mode (P14) and routing base.
   const query = new URLSearchParams(location.search);
@@ -124,6 +127,32 @@
   }
   const panel = (title, ...children) => el("section", { class: "panel" }, title && el("h2", { text: title }), ...children);
   const strip = (tone, ...children) => el("div", { class: tone ? `strip ${tone}` : "strip" }, ...children);
+  // Bar: an inline bar of stacked parts, each { value: a fraction of the track, tone }, drawn as
+  // SVG rects sized by attribute (no inline style). Meter: a bar and its figure, such as spend
+  // against a budget; at 80% or more it turns hot.
+  const BAR_TONES = new Set(["ok", "warn", "bad", "info", "muted", "hot"]);
+  function bar(parts, { label } = {}) {
+    const svg = document.createElementNS(SVG, "svg");
+    svg.setAttribute("class", "bar");
+    svg.setAttribute("preserveAspectRatio", "none");
+    if (label) { svg.setAttribute("role", "img"); svg.setAttribute("aria-label", label); } else svg.setAttribute("aria-hidden", "true");
+    let at = 0;
+    for (const { value, tone } of parts) {
+      const w = Math.min(Math.max(Number(value) || 0, 0), 1 - at);
+      if (w <= 0) continue;
+      const rect = document.createElementNS(SVG, "rect");
+      for (const [k, v] of Object.entries({ x: `${at * 100}%`, y: "0", width: `${w * 100}%`, height: "100%",
+        class: BAR_TONES.has(tone) ? `fill ${tone}` : "fill" })) rect.setAttribute(k, v);
+      svg.append(rect);
+      at += w;
+    }
+    return svg;
+  }
+  function meter(value, max, text, { tone } = {}) {
+    const f = max > 0 && Number.isFinite(value) ? value / max : null;
+    return el("span", { class: "meter" }, f === null ? el("span", { class: "bar-none" }) : bar([{ value: f, tone: tone || (f >= 0.8 ? "hot" : null) }]),
+      el("span", { class: "num" }, text));
+  }
   function diffBlock(lines) {
     return el("div", { class: "diff changes" }, lines.map((l) =>
       el("span", { class: l.op === "add" ? "add" : l.op === "del" ? "del" : "note", text: `${l.op === "add" ? "+ " : l.op === "del" ? "- " : ""}${l.text}` })));
@@ -377,8 +406,9 @@
     }
     return body.data;
   }
-  // A recorded answer: fixtures/<name>.<instance>.json, else fixtures/<name>.json. Times in a
-  // recording that names _recorded_ms move with the clock, so "waiting 6 min" stays true.
+  // A recorded answer: fixtures/<name>.<arg>.json for a string argument (an instance, a range),
+  // else fixtures/<name>.json. Times in a recording that names _recorded_ms move with the
+  // clock, so "waiting 6 min" stays true.
   async function fixture(name, args, signal, forView) {
     const wait = (ms) => new Promise((resolve, reject) => {
       const t = setTimeout(resolve, ms);
@@ -392,7 +422,13 @@
       if (!res.ok) throw new Error(`No fixture ${file}.`);
       return res.json();
     };
-    let data = args?.instance ? await read(`${name}.${args.instance}`).catch(() => null) : null;
+    // The most specific recording first: one named by the instance, then by another string
+    // argument (a range).
+    let data = null;
+    const named = [args?.instance, ...Object.entries(args || {}).filter(([k]) => k !== "instance").map(([, v]) => v)];
+    for (const v of named) {
+      if (data == null && typeof v === "string" && /^[\w-]+$/.test(v)) data = await read(`${name}.${v}`).catch(() => null);
+    }
     data ??= await read(name);
     if (data && typeof data === "object" && typeof data._recorded_ms === "number") data = shiftTimes(data, Date.now() - data._recorded_ms);
     if (forView && fixtureState === "empty") data = emptied(data);
@@ -866,7 +902,7 @@
 
   window.pigeonShell = Object.freeze({
     register, todo, op: (name, args) => op(name, args), el, icon, pill, tag, code, button, facts, segmented, input, field,
-    panel, strip, diffBlock, dataTable, toast, dialog, confirm, showOnce, copyField, href, legacyLink,
+    panel, strip, bar, meter, diffBlock, dataTable, toast, dialog, confirm, showOnce, copyField, href, legacyLink,
     get fixtures() { return Boolean(FIXTURES); },
     get todos() { return [...todos]; },
   });

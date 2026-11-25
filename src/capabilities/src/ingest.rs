@@ -248,6 +248,21 @@ async fn runs_of(env: &Env, instance: &str) -> Result<Vec<String>> {
     })
 }
 
+/// The records of `instance`'s runs, oldest first. It only reads: unlike `ingest_status` for
+/// one run, it never deletes a VM, so the console lists runs with it (`app_ingest_runs`).
+pub async fn runs(env: &Env, instance: &str) -> Result<Vec<RunRecord>> {
+    let mut out = Vec::new();
+    for id in runs_of(env, instance).await? {
+        if let Some(text) = setting(env, &run_key(&id)).await? {
+            let record: RunRecord = serde_json::from_str(&text)?;
+            if record.instance == instance {
+                out.push(record);
+            }
+        }
+    }
+    Ok(out)
+}
+
 async fn run_of(env: &Env, instance: &str, run: &str) -> Result<RunRecord> {
     let text = setting(env, &run_key(run)).await?.ok_or_else(|| {
         bad(format!(
@@ -990,16 +1005,7 @@ impl Ingest {
         let env = cx.env;
         let instance = arg(args, "instance")?;
         let Some(run) = args["run"].as_str() else {
-            let mut out = Vec::new();
-            for id in runs_of(env, instance).await? {
-                if let Some(text) = setting(env, &run_key(&id)).await? {
-                    let record: RunRecord = serde_json::from_str(&text)?;
-                    if record.instance == instance {
-                        out.push(record);
-                    }
-                }
-            }
-            return Ok(json!({ "instance": instance, "runs": out }));
+            return Ok(json!({ "instance": instance, "runs": runs(env, instance).await? }));
         };
         let mut rec = run_of(env, instance, run).await?;
         let (account, bucket) = self.linked_for(cx, &rec).await?;

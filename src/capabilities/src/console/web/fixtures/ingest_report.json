@@ -1,0 +1,120 @@
+{
+  "_recorded_ms": 1795600000000,
+  "run": "run-20261125-077d0e",
+  "state": "done",
+  "dry_run": false,
+  "counters": {
+    "listed": 12840,
+    "listed_bytes": 18400000000,
+    "files": 12840,
+    "members": 3110,
+    "bytes_read": 18900000000,
+    "uploaded": 4211,
+    "uploaded_bytes": 6100000000,
+    "would_upload": 0,
+    "would_upload_bytes": 0,
+    "duplicates": 11702,
+    "duplicate_bytes": 12300000000,
+    "conflicts": 2,
+    "failed": 1,
+    "skipped": 34,
+    "archives_opened": 61,
+    "archives_not_opened": 3
+  },
+  "flags": [
+    [
+      "encrypted",
+      2
+    ],
+    [
+      "not_opened_type",
+      3
+    ]
+  ],
+  "conflicts": [
+    {
+      "id": "ln-51408",
+      "origin": {
+        "account": "do-8812",
+        "bucket": "notes-archive",
+        "key": "photos/2019/harbour.jpg",
+        "etag": null,
+        "listed_size": 2381001,
+        "modified": null
+      },
+      "member": null,
+      "sha256": "",
+      "blake3": "",
+      "size": 2381001,
+      "mime": "application/octet-stream",
+      "kind": "other",
+      "norm_name": "photos/2019/harbour.jpg",
+      "simhash": null,
+      "verdict": "conflict",
+      "reason": "mismatch",
+      "flags": [],
+      "hints": [],
+      "r2_key": null,
+      "error": null,
+      "at_ms": 1795516000000
+    },
+    {
+      "id": "ln-15816",
+      "origin": {
+        "account": "do-8812",
+        "bucket": "notes-archive",
+        "key": "notes/old/index.md",
+        "etag": null,
+        "listed_size": 4410,
+        "modified": null
+      },
+      "member": null,
+      "sha256": "",
+      "blake3": "",
+      "size": 4410,
+      "mime": "application/octet-stream",
+      "kind": "other",
+      "norm_name": "notes/old/index.md",
+      "simhash": null,
+      "verdict": "conflict",
+      "reason": "mismatch",
+      "flags": [],
+      "hints": [],
+      "r2_key": null,
+      "error": null,
+      "at_ms": 1795516000000
+    }
+  ],
+  "failures": [
+    {
+      "id": "ln-9902",
+      "origin": {
+        "account": "do-8812",
+        "bucket": "notes-archive",
+        "key": "video/walk-0412.mov",
+        "etag": null,
+        "listed_size": 912003114,
+        "modified": null
+      },
+      "member": null,
+      "sha256": "",
+      "blake3": "",
+      "size": 912003114,
+      "mime": "application/octet-stream",
+      "kind": "other",
+      "norm_name": "video/walk-0412.mov",
+      "simhash": null,
+      "verdict": "failed",
+      "reason": "new",
+      "flags": [],
+      "hints": [],
+      "r2_key": null,
+      "error": "read timed out after 3 attempts",
+      "at_ms": 1795516000000
+    }
+  ],
+  "not_opened": [],
+  "top_duplicates": [],
+  "started_ms": 1795510000000,
+  "finished_ms": 1795516720000
+}
