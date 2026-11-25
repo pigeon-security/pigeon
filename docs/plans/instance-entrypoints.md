@@ -58,3 +58,32 @@ Deploy receivers before switching senders. Receivers advertise support through
 the manifest. Legacy platform-wide and maintenance operations retain their
 explicit path. An older or wrong recipient refuses contextual calls, and
 contextual calls are never retried with a legacy envelope.
+
+### Scoped MCP CI verification
+
+Use a separate remote MCP connection in the approved ChatGPT workspace. In the
+custom connector settings, add a clearly named connection such as **Pigeon
+Platform · scoped CI** with the exact server URL
+`https://platform.pigeon.dev/mcp?instance=pigeon-security%2Fplatform`. Complete
+Pigeon's OAuth consent with the owner's passkey, then attach that connection to
+a verification session. Leave the existing Pigeon Access connection in place.
+If the custom connector is unavailable, drops the query, or is denied, record
+that blocker. Adding a scoped Cloudflare Portal upstream requires its own
+approval. An explicit Cloudflare 1010 denial ends that client attempt.
+
+1. Check `tools/list` on the scoped connection. It should expose the approved
+   instance tools, including `ci_jobs` and `ci_status` for a profile with CI
+   enabled. Confirm a platform-only tool such as `ci_submit` is absent.
+2. Run `ci_jobs` with `{"limit":10}`. Run `ci_status` with
+   `{"id":"<known owned canary job id>"}` using an existing read-only canary.
+   The query string binds the instance, so omit `instance` from both bodies.
+   Compare the returned job ID and state with the approved fixture.
+3. Run `ci_status` with a synthetic unknown job ID. It must be unavailable.
+   Run `ci_jobs` with an extra `repo` argument. It must reject the override.
+   If the client rejects the argument locally, record that separately from a
+   server-side rejection.
+4. Record the deployment revision, time, scoped discovery result, and outcomes
+   without recording credentials. A successful instance argument through the
+   global Pigeon Access connector verifies that ingress only. Before removing
+   legacy CI callback support, also confirm contextual handling using the
+   receiver's deployment or trace evidence.
