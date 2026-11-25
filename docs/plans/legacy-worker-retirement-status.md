@@ -1,11 +1,13 @@
 # Legacy Worker retirements after the queued publishing cutover
 
-This status check applies the [signed Worker design](signed-worker-context.md) to
-main at `745c2bf`, the queued publishing sender cutover. A successful queued
-publication on `noisypigeon` has been reported. The adverse-path and authenticated
-scoped-endpoint live checks are still pending. That success verifies one guarded
-queue route through its private receiver. It does not verify every reverse call
-or manual publishing path.
+This status check applies the [signed Worker design](signed-worker-context.md)
+to the deployed core revision `6bed797`. A queued publication on `noisypigeon`
+succeeded. The isolated `sandbox` instance completed the GitHub-triggered
+publication of `noisypigeon/sandbox` commit `b9f3c97` in one attempt.
+The owner reported redelivery, and the current queue row still shows the same
+commit and one attempt. The delivery response and independent release-activation
+history are still needed to close the replay check. The live adverse-path and
+authenticated scoped-endpoint checks remain open.
 
 | Compatibility path | Status on main | Retirement decision |
 | --- | --- | --- |
@@ -13,8 +15,8 @@ or manual publishing path.
 | Private Sites `site_deploy_queued` receipt | Already checks signed context, instance, standard caller, exact commit, and publishing record digest. The deploy workflow checks the approved digest again and verifies the rendered archive's commit. | **Already enforced.** Preserve the private route and its independent checks. |
 | Public Sites `site_deploy` compatibility for the scheduled-only `publishing_binding` argument | Main's new scheduler no longer sends this argument through the public tool. The older scheduler does. Ordinary manual `site_deploy` does not advertise or require it. | **Keep for rollback.** This is the next removable receiver branch after the stale-binding and unsupported-receiver checks, evidence that every active scheduler uses the private call, and an agreed rollback procedure that pauses queued publishes or retains a compatible receiver. Removing the argument must leave regular manual publication and rollback behavior intact. |
 | Public Sites `site_deploy` and `site_rollback` legacy envelopes | Global/manual entry points still need the established transport. An authenticated instance MCP request has a contextual path. | **Keep.** Scoped endpoint validation and migration of all instance-targeted ingress must precede receiver enforcement. A successful cron receipt does not validate those ingress paths. |
-| Sites → core `instances_list`, GitHub installation, and linked-account callbacks | Sites still formats its publishing callbacks as legacy requests. The approved record and account are validated in the workflow. The queued sender change did not replace these reverse calls. | **Keep until operation-specific callbacks are deployed.** Verify scoped record and credential selection for publish and rollback, including a stale approved binding. Keep the platform administration versions of the tools available. |
-| CI gateway → core legacy `ci_scope` read | The contextual read path exists, and the core verifier checks its instance. The global connector can still supply an instance through its legacy ingress. | **Keep.** Verify a contextual read and migrate every remaining instance-targeted sender before tightening the callback. Platform attribution by repository and job stays separate. |
+| Sites → core `instances_list`, GitHub installation, and linked-account callbacks | Scoped publishing already uses the typed, signed `sites_scope` callback for the record and credentials. Platform/manual routes still use the existing core operations. | **Verify the deployed scoped path.** Check record and credential selection for publish and rollback, including a stale binding, before removing any instance-specific fallback. Keep the platform administration versions of the tools available. |
+| CI gateway → core legacy `ci_scope` read | The contextual sender and core receiver are on main. The core verifier checks its instance. The global connector can still supply an instance through its legacy ingress. | **Keep.** Verify a contextual read and migrate every remaining instance-targeted sender before tightening the callback. Platform attribution by repository and job stays separate. |
 | Shared legacy verification and platform operations | CI submissions and attribution, platform credentials, console and passkeys callbacks, proxy checks, agent and model calls, and other platform operations still have supported paths. | **Keep.** Enforcement applies to one instance-bound operation after its senders migrate. There is no shared envelope removal in this cutover. |
 
 No runtime cleanup is independent of these remaining gates. The sender-side dead
