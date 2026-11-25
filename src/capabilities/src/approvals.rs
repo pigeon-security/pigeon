@@ -351,14 +351,6 @@ pub async fn open_for(env: &Env, person: &User) -> Result<Vec<Record>> {
         .collect())
 }
 
-/// How many approvals wait for a person, for the Approvals tab's count.
-pub async fn waiting(env: &Env) -> Result<usize> {
-    let listed = directory(env, "approval.list", json!({})).await?;
-    expired(env, &listed).await?;
-    let open: Vec<Record> = serde_json::from_value(listed["open"].clone())?;
-    Ok(open.iter().filter(|r| r.state == State::Pending).count())
-}
-
 /// The passkey purpose for approving `id`, from its kept digest; an error when there is no
 /// such approval.
 pub async fn purpose(env: &Env, id: &str) -> Result<String> {

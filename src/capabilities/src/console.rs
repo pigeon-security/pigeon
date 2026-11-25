@@ -26,9 +26,8 @@ use worker::{Env, Error, Headers, Method, Request, Response, Result};
 
 use crate::passkeys::Passkeys;
 use crate::site_passkeys::console as site_access;
-use crate::users::{Passkey, User, directory};
+use crate::users::{User, directory};
 use crate::{Call, Capability, Context, Serve, arg, unknown};
-use sections::{Section, Tab};
 use writes::Write;
 
 /// The console page and its API.
@@ -52,12 +51,10 @@ fn bad(why: &str) -> Error {
     Error::RustError(why.to_string())
 }
 
-/// A signed-in person and their session's times, in ms since the epoch.
+/// A signed-in person, as the Directory answers their session.
 #[derive(Deserialize)]
 struct Signed {
     user: User,
-    created_at: i64,
-    last_seen_at: i64,
 }
 
 /// `value` as a JSON response that is never cached, with `status`.
@@ -149,15 +146,6 @@ impl Console {
         Ok(signed.filter(|s| s.user.kind == "standard"))
     }
 
-    /// Every hosted capability's sections, with the capability's name.
-    fn declared(cx: &Context<'_>) -> Vec<(String, Section)> {
-        cx.hosted
-            .capabilities
-            .iter()
-            .flat_map(|c| c.sections().into_iter().map(|s| (c.name().to_string(), s)))
-            .collect()
-    }
-
     /// Section `id`'s data from each capability that fills it: one owner's data as it is,
     /// several owners' by name.
     async fn section(cx: &Context<'_>, id: &str, person: &User, query: &Value) -> Result<Value> {
@@ -182,55 +170,6 @@ impl Console {
                 Ok(Value::Object(all))
             }
         }
-    }
-
-    /// The tabs and their sections, with how many landings and tool calls wait for the person on
-    /// Approvals. One that does not answer in time counts 0; both so, the tab is hidden.
-    async fn tabs(cx: &Context<'_>) -> Result<Value> {
-        let mut listing = sections::tabs(&Self::declared(cx));
-        let (landings, calls) = futures_util::future::join(
-            timed(SECTION_MS / 2, crate::land::awaiting(cx.env)),
-            timed(SECTION_MS / 2, crate::approvals::waiting(cx.env)),
-        )
-        .await;
-        let waiting = landings.map_or(0, |w| w.len()) + calls.unwrap_or(0);
-        for t in &mut listing {
-            if t.tab == Tab::Approvals {
-                t.waiting = Some(waiting);
-            }
-        }
-        Ok(serde_json::to_value(listing)?)
-    }
-
-    /// The signed-in person, their picture and passkeys, how many apps act for them, and when
-    /// their session ends: after idling, and at the latest.
-    async fn me(env: &Env, signed: &Signed) -> Result<Value> {
-        let user = &signed.user;
-        let (avatar, keys, listed) = futures_util::future::join3(
-            directory(env, "user.avatar", json!({ "id": user.id })),
-            directory(env, "passkey.list", json!({ "user_id": user.id })),
-            directory(env, "users.list", json!({})),
-        )
-        .await;
-        let (avatar, listed) = (avatar?, listed?);
-        let keys: Vec<Passkey> = serde_json::from_value(keys?)?;
-        let apps = listed["links"].as_array().map_or(0, |l| {
-            l.iter()
-                .filter(|x| x["standard_user_id"] == user.id.as_str())
-                .count()
-        });
-        let ends_at = signed.created_at + session::MAX_MS;
-        Ok(json!({
-            "id": user.id,
-            "name": user.name,
-            "initials": initials(&user.name),
-            "kind": user.kind,
-            "avatar": avatar,
-            "passkeys": keys.iter().map(|k| k.name.as_str()).collect::<Vec<_>>(),
-            "apps": apps,
-            "expires_at": (signed.last_seen_at + session::IDLE_MS).min(ends_at),
-            "ends_at": ends_at,
-        }))
     }
 
     /// Section `id`'s data over `days` days, within [`SECTION_MS`]. A section that keeps a
@@ -333,20 +272,12 @@ impl Console {
                         .find(|(k, _)| k == "days")
                         .map(|(_, v)| v.into_owned());
                     let fresh = url.query_pairs().any(|(k, v)| k == "fresh" && v == "1");
-                    let data = match p {
-                        "/console/api/me" => Self::me(cx.env, &signed).await,
-                        "/console/api/tabs" => Self::tabs(cx).await,
-                        p => match p.strip_prefix("/console/api/section/") {
-                            Some(id) if sections::anchor(id) => {
-                                let days = days(query.as_deref());
-                                return Self::snapshot(cx, id, &signed.user, days, fresh).await;
-                            }
-                            _ => return answer(&json!({ "error": "not found" }), 404),
-                        },
-                    };
-                    match data {
-                        Ok(v) => answer(&v, 200),
-                        Err(e) => failed(&e),
+                    match p.strip_prefix("/console/api/section/") {
+                        Some(id) if sections::anchor(id) => {
+                            let days = days(query.as_deref());
+                            Self::snapshot(cx, id, &signed.user, days, fresh).await
+                        }
+                        _ => answer(&json!({ "error": "not found" }), 404),
                     }
                 }
                 _ => Response::error("not found", 404),
@@ -451,22 +382,6 @@ impl Console {
                     return answer(&json!({ "error": "sign in first" }), 401);
                 };
                 match self.write(cx.env, p, &signed.user, &body).await {
-                    Ok(v) => answer(&v, 200),
-                    Err(e) => answer(&json!({ "error": e.to_string() }), 400),
-                }
-            }
-            "/console/api/avatar" => {
-                let Some(signed) = self.signed(cx.env, &req).await? else {
-                    return answer(&json!({ "error": "sign in first" }), 401);
-                };
-                let avatar = body["avatar"].as_str().unwrap_or_default();
-                let set = directory(
-                    cx.env,
-                    "user.avatar_set",
-                    json!({ "id": signed.user.id, "avatar": avatar }),
-                )
-                .await;
-                match set {
                     Ok(v) => answer(&v, 200),
                     Err(e) => answer(&json!({ "error": e.to_string() }), 400),
                 }
