@@ -78,6 +78,30 @@ pub fn config_of(entry: &Value) -> Option<Config> {
     Some(Config { allow })
 }
 
+/// The header sent only by pigeon-sites to a protected upstream.
+pub const ORIGIN_AUTH: &str = "Authorization";
+/// The response marker emitted only after a protected origin authenticates the request.
+pub const ORIGIN_PROTECTED: &str = "X-Pigeon-Origin-Protected";
+/// Reserved upstream-only readiness endpoint.
+pub const ORIGIN_CHECK: &str = "/_pigeon/origin-check";
+
+/// Derive a per-site upstream credential without sharing the platform key with the origin.
+pub fn origin_key(
+    caller_key: &[u8],
+    instance: &str,
+    site: &str,
+    bucket: &str,
+    upstream: &str,
+) -> String {
+    let mut payload = b"pigeon-site-origin-v1\0".to_vec();
+    payload.extend_from_slice(
+        serde_json::json!([instance, site, bucket, upstream])
+            .to_string()
+            .as_bytes(),
+    );
+    hex(&hmac_sha256(caller_key, &payload))
+}
+
 /// Derive the signing key for one site binding from the shared caller key.
 pub fn session_key(caller_key: &[u8], binding: &str) -> [u8; 32] {
     let mut message = b"pigeon-site-session\0".to_vec();

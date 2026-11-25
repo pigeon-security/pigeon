@@ -16,8 +16,10 @@ use serde_json::{Value, json};
 use worker::{Error, Method, Result};
 
 /// A binding that a Worker receives at runtime.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum Binding {
+    /// A write-only secret binding.
+    Secret { name: String, text: String },
     /// An R2 bucket, optionally in a jurisdiction such as `eu`.
     R2 {
         /// The name the Worker sees on `env`.
@@ -98,6 +100,9 @@ fn binding_json(binding: &Binding) -> Value {
                 map.insert("jurisdiction".to_string(), Value::String(j.clone()));
             }
             v
+        }
+        Binding::Secret { name, text } => {
+            json!({"type": "secret_text", "name": name, "text": text})
         }
         Binding::Text { name, text } => json!({"type": "plain_text", "name": name, "text": text}),
     }
@@ -255,7 +260,14 @@ pub async fn upload(
     let path = format!("/accounts/{}/workers/scripts/{script}", account.id);
     let token = Scoped::open(account, "upload worker", account_policy()).await?;
     let r = call_raw(token.value(), Method::Put, &path, Some((&ctype, body))).await;
-    token.finish(r).await
+    let result = token.finish(r).await;
+    if bindings
+        .iter()
+        .any(|binding| matches!(binding, Binding::Secret { .. }))
+    {
+        return result.map_err(|_| Error::RustError("protected origin upload failed".into()));
+    }
+    result
 }
 
 /// Tells whether a script exists in the account.

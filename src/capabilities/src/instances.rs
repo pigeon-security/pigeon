@@ -371,6 +371,7 @@ async fn subdomains(env: &Env, zone: &str) -> Result<Value> {
                 let mut entry = json!({ "host": host, "instance": i.id, "site": site.name, "upstream": upstream });
                 if let Some(auth) = &site.auth {
                     entry["auth"] = json!(auth);
+                    entry["bucket"] = json!(site.bucket);
                     entry["allow"] = json!(site.allow);
                 }
                 out.push(entry);
@@ -629,7 +630,7 @@ impl Instances {
             .filter(|_| got["kind"] == "linked_plan")
             .ok_or_else(|| bad(&format!("there is no plan approval {approval_id}")))?
             .to_string();
-        let (_, account, steps, digest) = self.planned(cx, &id).await?;
+        let (instance, account, steps, digest) = self.planned(cx, &id).await?;
         let taken = directory(
             cx.env,
             "approval.take",
@@ -646,7 +647,9 @@ impl Instances {
         let mut done = Vec::new();
         for step in steps.iter().filter(|s| s.changes()) {
             let outcome = match step {
-                plan::Step::CreateBucket { name, jurisdiction } => {
+                plan::Step::CreateBucket {
+                    name, jurisdiction, ..
+                } => {
                     let b = r2::Bucket {
                         name: name.clone(),
                         jurisdiction: jurisdiction.clone(),
@@ -664,21 +667,32 @@ impl Instances {
                     name,
                     bucket,
                     jurisdiction,
+                    origin,
                     ..
                 } => {
-                    let binding = workers::Binding::R2 {
+                    let mut bindings = vec![workers::Binding::R2 {
                         name: plan::SITE_BINDING.into(),
                         bucket: bucket.clone(),
                         jurisdiction: jurisdiction.clone(),
+                    }];
+                    let module = if let Some(upstream) = origin.as_deref() {
+                        let site = instance
+                            .sites
+                            .first()
+                            .ok_or_else(|| bad("missing protected site"))?;
+                        let key = crate::split::caller_key(cx.env).await?;
+                        bindings.push(workers::Binding::Secret {
+                            name: plan::ORIGIN_KEY_BINDING.into(),
+                            text: pigeon_core::site_auth::origin_key(
+                                &key, &id, &site.name, bucket, upstream,
+                            ),
+                        });
+                        plan::protected_site_worker()
+                    } else {
+                        plan::SITE_WORKER.to_string()
                     };
-                    workers::upload(
-                        &account,
-                        name,
-                        plan::COMPATIBILITY_DATE,
-                        &[binding],
-                        plan::SITE_WORKER,
-                    )
-                    .await?;
+                    workers::upload(&account, name, plan::COMPATIBILITY_DATE, &bindings, &module)
+                        .await?;
                     format!("uploaded Worker {name}")
                 }
                 plan::Step::EnableWorkersDev { name } => {

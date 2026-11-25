@@ -3,7 +3,7 @@
 //! passed through, GET and HEAD only, to the instance Worker's workers.dev address, and its answer
 //! kept in the edge cache under the instance Worker's own Cache-Control. Which hosts exist, their
 //! upstreams and their sign-in config come from core (`instance_subdomains`), asked as this Worker
-//! itself and kept for five minutes per isolate. No credential is on this path. Any other public
+//! itself and kept for five minutes per isolate. Public origins need no credential. Any other public
 //! host is 404.
 //!
 //! A site that sets `auth: "passkey"` on its record is gated (docs/plans/sites.md, part A): see
@@ -37,6 +37,9 @@ pub struct Host {
     /// Set when the site opts in to passkey sign-in; `None` leaves the host public.
     pub config: Option<Config>,
     pub scope: Option<String>,
+    pub instance: Option<String>,
+    pub site: Option<String>,
+    pub bucket: Option<String>,
 }
 
 thread_local! {
@@ -61,7 +64,18 @@ pub fn map_of(listed: &Value) -> BTreeMap<String, Host> {
         .filter_map(|e| {
             let host = e["host"].as_str()?.to_ascii_lowercase();
             let up = e["upstream"].as_str()?;
-            (up.starts_with("https://") && up.ends_with(".workers.dev")).then(|| {
+            let parsed = worker::Url::parse(up).ok()?;
+            let is_workers_dev = parsed.scheme() == "https"
+                && parsed
+                    .host_str()
+                    .is_some_and(|h| h.ends_with(".workers.dev"))
+                && parsed.path() == "/"
+                && parsed.username().is_empty()
+                && parsed.password().is_none()
+                && parsed.port().is_none()
+                && parsed.query().is_none()
+                && parsed.fragment().is_none();
+            is_workers_dev.then(|| {
                 let scope = e["instance"]
                     .as_str()
                     .zip(e["site"].as_str())
@@ -69,9 +83,12 @@ pub fn map_of(listed: &Value) -> BTreeMap<String, Host> {
                 (
                     host,
                     Host {
-                        upstream: up.to_string(),
+                        upstream: up.trim_end_matches('/').to_string(),
                         config: site_auth::config_of(e),
                         scope,
+                        instance: e["instance"].as_str().map(str::to_owned),
+                        site: e["site"].as_str().map(str::to_owned),
+                        bucket: e["bucket"].as_str().map(str::to_owned),
                     },
                 )
             })
@@ -131,7 +148,7 @@ pub async fn serve(
         return Response::error("not found", 404);
     };
     let Some(config) = entry.config.as_ref() else {
-        return pass(req, &entry.upstream, false).await;
+        return pass_public(req, &entry.upstream).await;
     };
     let url = req.url()?;
     let method = match req.method() {
@@ -150,7 +167,24 @@ pub async fn serve(
     let now = i64::try_from(worker::Date::now().as_millis()).unwrap_or(0);
     let signed_in = signed_in(&req, &skey, &host, config, now);
     match site_auth::gate(Some(config), method, url.path(), signed_in) {
-        Gate::Pass => pass(req, &entry.upstream, true).await,
+        Gate::Pass => {
+            let Some(credential) = entry.credential(key) else {
+                return no_store(Response::error("protected origin unavailable", 503)?);
+            };
+            let answer = fetch_protected(
+                &entry.upstream,
+                &path_and_query(&url),
+                req.method(),
+                Some(&credential),
+            )
+            .await?;
+            if !protected_response(&answer)? || (300..400).contains(&answer.status_code()) {
+                return no_store(Response::error("protected origin unavailable", 503)?);
+            }
+            let headers = answer.headers().clone();
+            headers.delete(site_auth::ORIGIN_PROTECTED)?;
+            no_store(answer.with_headers(headers))
+        }
         Gate::SignIn => {
             let next = match url.query() {
                 Some(q) => format!("{}?{q}", url.path()),
@@ -200,9 +234,104 @@ fn no_store(answer: Response) -> Result<Response> {
     Ok(answer.with_headers(headers))
 }
 
-/// Passes a GET or HEAD to the upstream, through the edge cache; anything else is 405. A gated
-/// host's answers are marked private and no-store.
-async fn pass(req: Request, upstream: &str, gated: bool) -> Result<Response> {
+impl Host {
+    fn credential(&self, key: &[u8]) -> Option<String> {
+        Some(site_auth::origin_key(
+            key,
+            self.instance.as_deref()?,
+            self.site.as_deref()?,
+            self.bucket.as_deref()?,
+            &self.upstream,
+        ))
+    }
+}
+
+fn path_and_query(url: &worker::Url) -> String {
+    match url.query() {
+        Some(q) => format!("{}?{q}", url.path()),
+        None => url.path().to_string(),
+    }
+}
+
+fn protected_unavailable() -> worker::Error {
+    worker::Error::RustError(
+        "protected origin unavailable; apply the approved site plan and verify the origin".into(),
+    )
+}
+
+fn protected_response(answer: &Response) -> Result<bool> {
+    Ok(answer
+        .headers()
+        .get(site_auth::ORIGIN_PROTECTED)?
+        .as_deref()
+        == Some("1"))
+}
+
+async fn fetch_protected(
+    upstream: &str,
+    path: &str,
+    method: Method,
+    credential: Option<&str>,
+) -> Result<Response> {
+    let headers = Headers::new();
+    if let Some(credential) = credential {
+        headers.set(site_auth::ORIGIN_AUTH, &format!("Bearer {credential}"))?;
+    }
+    let mut init = RequestInit::new();
+    init.with_method(method)
+        .with_headers(headers)
+        .with_cache(worker::CacheMode::NoStore)
+        .with_redirect(worker::RequestRedirect::Manual);
+    Fetch::Request(Request::new_with_init(&format!("{upstream}{path}"), &init)?)
+        .send()
+        .await
+        .map_err(|_| protected_unavailable())
+}
+
+/// Check the applied, approved upstream before a gated publish or rollback writes to R2.
+pub(crate) async fn require_protected_origin(
+    env: &Env,
+    key: &[u8],
+    base_url: &str,
+    instance: &str,
+    site: &str,
+    bucket: &str,
+) -> Result<()> {
+    let url = worker::Url::parse(base_url).map_err(|_| protected_unavailable())?;
+    let host = url.host_str().ok_or_else(protected_unavailable)?;
+    // Fetch the current map instead of relying on a five-minute isolate cache.
+    let listed = ask(env, key, crate::WORKER, "instance_subdomains", &json!({})).await?;
+    let map = map_of(&listed);
+    let entry = map
+        .get(host)
+        .filter(|entry| {
+            entry.config.is_some()
+                && entry.instance.as_deref() == Some(instance)
+                && entry.site.as_deref() == Some(site)
+                && entry.bucket.as_deref() == Some(bucket)
+        })
+        .ok_or_else(protected_unavailable)?;
+    let anonymous =
+        fetch_protected(&entry.upstream, site_auth::ORIGIN_CHECK, Method::Get, None).await?;
+    if anonymous.status_code() != 401 || protected_response(&anonymous)? {
+        return Err(protected_unavailable());
+    }
+    let credential = entry.credential(key).ok_or_else(protected_unavailable)?;
+    let authorized = fetch_protected(
+        &entry.upstream,
+        site_auth::ORIGIN_CHECK,
+        Method::Get,
+        Some(&credential),
+    )
+    .await?;
+    if authorized.status_code() != 204 || !protected_response(&authorized)? {
+        return Err(protected_unavailable());
+    }
+    Ok(())
+}
+
+/// Passes a public GET or HEAD to the upstream through the edge cache.
+async fn pass_public(req: Request, upstream: &str) -> Result<Response> {
     let method = req.method();
     if method != Method::Get && method != Method::Head {
         return Response::error("method not allowed", 405);
@@ -213,7 +342,7 @@ async fn pass(req: Request, upstream: &str, gated: bool) -> Result<Response> {
     if method == Method::Get
         && let Some(hit) = cache.get(&cache_key, false).await?
     {
-        return if gated { no_store(hit) } else { Ok(hit) };
+        return Ok(hit);
     }
     let target = match url.query() {
         Some(q) => format!("{upstream}{}?{q}", url.path()),
@@ -233,7 +362,7 @@ async fn pass(req: Request, upstream: &str, gated: bool) -> Result<Response> {
     if method == Method::Get && answer.status_code() == 200 {
         cache.put(&cache_key, answer.cloned()?).await?;
     }
-    if gated { no_store(answer) } else { Ok(answer) }
+    Ok(answer)
 }
 
 /// A gated host's page as a response, under the pages' security headers.

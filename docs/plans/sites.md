@@ -126,13 +126,25 @@ pigeon-sites checks the allow list itself against the config it read.
   `allow` ends their access when the host map refreshes (5 minutes). Removing a user ends it at
   expiry at the latest.
 
-### Known limit (not built tonight)
+### Protected origin
 
-The instance Worker's workers.dev address, which pigeon-sites fetches from, is itself public.
-A gated subdomain therefore does not hide content that is also reachable there. Before a real
-site opts in, the upstream must accept only pigeon-sites: for example, a per-instance key that
-pigeon-sites signs upstream requests with. That needs the linked account's Worker changed, so
-it is listed for the person, not done.
+A gated preview uses a dedicated linked instance, one site and an R2
+bucket provisioned for protected content. The approved instance plan uploads
+the authenticated origin before turning on its workers.dev address or attaching
+the platform subdomain. That address accepts only the per-site bearer derived
+from the platform caller key, the instance, site, bucket and origin URL. The linked Worker
+receives only the derived key in a write-only secret binding.
+
+After visitor authentication, `pigeon-sites` forwards a GET or HEAD with
+the origin credential and requires the protected origin's response marker.
+It skips the shared cache, refuses to follow redirects with the credential and
+returns private, no-store responses. Existing public Worker modules and cached
+public forwarding keep their existing behavior.
+
+The publisher checks the current approved host mapping, probes that the origin
+denies an anonymous request and accepts the matching credential, and checks
+that the bucket has no managed public URL or custom domains. A failed check
+blocks both publishing and rollback before either can write content.
 
 ### Smoke scenarios (pure parts in `pigeon_core::site_auth`)
 
@@ -242,8 +254,9 @@ this. The instances layer is never on the public page.
 4. B3: `settings::site()` should show pigeon.dev on `pigeon-sites` in the footprint. Add a
    `serving` field to `Site` for the footprint; `worker` stays this Worker, the rollback target
    with no pre-flight.
-5. Before any real site sets `auth`, make its instance Worker's workers.dev address private
-   (Known limit, part A).
+5. Deploy compatible core and Sites components, then use a separately approved
+   instance plan for a fresh gated fixture. Check the direct origin anonymously
+   before publishing synthetic content. See the protected preview rollout below.
 
 ### Approved site access bindings
 
@@ -259,11 +272,38 @@ names that site. Existing standard platform enrollment links are unaffected.
 Existing host-only site cookies require signing in again. Legacy site visitor
 identities with no recorded binding require a new site invitation, and older
 site enrollment links must be reissued. Gated host serving requires both the
-platform and Sites Workers to support the new binding. The direct upstream
-access limitation still applies.
+platform and Sites Workers to support the new binding and protected upstream.
 
 A subdomain-only publishing target uses its approved label and the Sites Worker's
 platform zone for the canonical URL. A direct domain or zone hostname keeps
 precedence when present. Publishing and rollback use the same URL in release
 provenance. Choosing a canonical URL does not provision or authenticate the
 linked Worker's origin.
+
+
+### Protected preview rollout
+
+1. Ship the core and Sites code first. Existing public instances need no
+   plan or release change. Keep gated fixture creation behind the normal
+   instance record and apply approvals.
+2. Choose a fresh linked instance, Worker, R2 bucket and passkey subdomain.
+   Keep the bucket dedicated and disable public R2 access, including
+   independent bucket routes or publishing integrations controlled outside
+   Pigeon. The plan refuses to reuse an existing public Worker or bucket
+   as a protected origin, or to convert a protected origin to public.
+3. Apply the approved plan. Before writing a release, request the direct
+   origin and public hostname anonymously. Confirm the origin refuses the
+   request and the platform hostname presents the sign-in flow.
+4. Enroll the fixture visitor and publish synthetic release A, publish B,
+   and roll back to A. Check that anonymous requests still cannot read
+   either URL after the authorized reads. Verify a previously public site
+   continues to serve unauthenticated. Keep any protected fixture disabled
+   if the provider response, direct-origin check or rollback fails.
+5. If the shared caller key rotates, provision a protected origin using an approved
+   site plan with fresh resources before resuming gated publication.
+   The credential mismatch fails closed. During a rollback of platform
+   code, keep the protected Worker and bucket in place.
+
+The worker and bucket privacy probes cover provider-managed direct access.
+The linked account owner still controls its resources and can create other
+routes or Workers that serve the same bucket independently.

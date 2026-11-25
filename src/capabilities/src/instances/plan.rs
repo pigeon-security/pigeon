@@ -14,6 +14,15 @@ pub const SITE_BINDING: &str = "SITE";
 pub const COMPATIBILITY_DATE: &str = "2026-11-01";
 /// The site Worker: serves `live`'s manifest from the bucket.
 pub const SITE_WORKER: &str = include_str!("site_worker.js");
+pub const ORIGIN_KEY_BINDING: &str = "PIGEON_ORIGIN_KEY";
+
+pub fn protected_site_worker() -> String {
+    format!(
+        "{}\n{}",
+        SITE_WORKER.replacen("export default {", "const site = {", 1),
+        include_str!("site_origin.js")
+    )
+}
 
 /// What pigeon made in an instance's account, kept in the Directory under [`ledger_key`].
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -24,6 +33,12 @@ pub struct Ledger {
     /// Workers pigeon uploaded, with the digest of what it last uploaded.
     #[serde(default)]
     pub workers: Vec<(String, String)>,
+    /// Site Workers that were first installed as protected origins.
+    #[serde(default)]
+    pub protected_workers: Vec<String>,
+    /// Buckets that were first created for a protected site.
+    #[serde(default)]
+    pub protected_buckets: Vec<String>,
 }
 
 /// The Directory key of instance `id`'s ledger.
@@ -93,6 +108,8 @@ pub enum Step {
     CreateBucket {
         name: String,
         jurisdiction: Option<String>,
+        #[serde(default, skip_serializing_if = "is_public")]
+        protected: bool,
     },
     /// Upload the site Worker, bound to the bucket (a new Worker, or a new version of pigeon's).
     UploadWorker {
@@ -101,6 +118,9 @@ pub enum Step {
         jurisdiction: Option<String>,
         module: String,
         replaces: bool,
+        /// Used to bind the protected origin key to this specific endpoint.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<String>,
     },
     /// Turn on the Worker's workers.dev address, the preview.
     EnableWorkersDev { name: String },
@@ -127,6 +147,10 @@ pub enum Step {
     },
     /// Something only the person can do first.
     Blocked { why: String },
+}
+
+fn is_public(protected: &bool) -> bool {
+    !protected
 }
 
 impl Step {
@@ -168,6 +192,34 @@ pub fn plan(instance: &Instance, seen: &Observed, ledger: &Ledger) -> Vec<Step> 
     let (Some(site), Some(worker)) = (instance.sites.first(), instance.worker.as_deref()) else {
         return Vec::new();
     };
+    let protected = site.auth.as_deref() == Some("passkey");
+    if instance.sites.iter().any(|site| site.auth.is_some()) && instance.sites.len() != 1 {
+        return vec![Step::Blocked {
+            why: "a protected origin needs a dedicated instance with one site".into(),
+        }];
+    }
+    let protected_worker = ledger.protected_workers.iter().any(|name| name == worker);
+    let protected_bucket = ledger.protected_buckets.contains(&site.bucket);
+    if (protected
+        && ((seen.worker_exists && !protected_worker) || (seen.bucket_exists && !protected_bucket)))
+        || (!protected && (protected_worker || protected_bucket))
+    {
+        return vec![Step::Blocked {
+            why: "switching origin visibility needs a new Worker and a dedicated private bucket"
+                .into(),
+        }];
+    }
+    let origin = if protected {
+        let Some(subdomain) = seen.account_subdomain.as_deref() else {
+            return vec![Step::Blocked {
+                why: "the linked account needs a workers.dev subdomain for the protected origin"
+                    .into(),
+            }];
+        };
+        Some(upstream_for(worker, subdomain))
+    } else {
+        None
+    };
     let bucket = site.bucket.as_str();
     let jurisdiction = site.jurisdiction.clone();
     let mut steps = Vec::new();
@@ -177,6 +229,7 @@ pub fn plan(instance: &Instance, seen: &Observed, ledger: &Ledger) -> Vec<Step> 
         (false, _) => Step::CreateBucket {
             name: bucket.into(),
             jurisdiction: jurisdiction.clone(),
+            protected,
         },
         (true, true) => Step::Ok {
             what: "bucket".into(),
@@ -189,7 +242,21 @@ pub fn plan(instance: &Instance, seen: &Observed, ledger: &Ledger) -> Vec<Step> 
         },
     });
 
-    let module = module_digest(bucket, jurisdiction.as_deref());
+    let module = if let Some(upstream) = origin.as_deref() {
+        pigeon_core::oauth::hash(
+            &json!({
+                "public_module": module_digest(bucket, jurisdiction.as_deref()),
+                "protected_module": protected_site_worker(),
+                "origin_key": ORIGIN_KEY_BINDING,
+                "instance": instance.id,
+                "site": site.name,
+                "upstream": upstream,
+            })
+            .to_string(),
+        )
+    } else {
+        module_digest(bucket, jurisdiction.as_deref())
+    };
     let uploaded = ledger
         .workers
         .iter()
@@ -202,6 +269,7 @@ pub fn plan(instance: &Instance, seen: &Observed, ledger: &Ledger) -> Vec<Step> 
             jurisdiction: jurisdiction.clone(),
             module: module.clone(),
             replaces: false,
+            origin: origin.clone(),
         },
         (true, Some(d)) if d == module => Step::Ok {
             what: "worker".into(),
@@ -213,6 +281,7 @@ pub fn plan(instance: &Instance, seen: &Observed, ledger: &Ledger) -> Vec<Step> 
             jurisdiction: jurisdiction.clone(),
             module: module.clone(),
             replaces: true,
+            origin,
         },
         (true, None) => Step::Conflict {
             what: "worker".into(),
@@ -225,7 +294,7 @@ pub fn plan(instance: &Instance, seen: &Observed, ledger: &Ledger) -> Vec<Step> 
         .targets
         .iter()
         .any(|t| matches!(t, super::record::Target::Preview));
-    if previews {
+    if previews || protected {
         steps.push(match (&seen.account_subdomain, seen.workers_dev) {
             (None, _) => Step::Blocked {
                 why: "the account has no workers.dev subdomain yet: the person picks one in the \
@@ -327,10 +396,25 @@ pub fn digest(instance: &Instance, account_id: &str, steps: &[Step]) -> String {
 /// The ledger after `step` was applied.
 pub fn record(ledger: &mut Ledger, step: &Step) {
     match step {
-        Step::CreateBucket { name, .. } if !ledger.buckets.contains(name) => {
-            ledger.buckets.push(name.clone());
+        Step::CreateBucket {
+            name, protected, ..
+        } => {
+            if !ledger.buckets.contains(name) {
+                ledger.buckets.push(name.clone());
+            }
+            if *protected && !ledger.protected_buckets.contains(name) {
+                ledger.protected_buckets.push(name.clone());
+            }
         }
-        Step::UploadWorker { name, module, .. } => {
+        Step::UploadWorker {
+            name,
+            module,
+            origin,
+            ..
+        } => {
+            if origin.is_some() && !ledger.protected_workers.contains(name) {
+                ledger.protected_workers.push(name.clone());
+            }
             ledger.workers.retain(|(n, _)| n != name);
             ledger.workers.push((name.clone(), module.clone()));
         }
@@ -344,8 +428,13 @@ pub fn describe(steps: &[Step]) -> Vec<Value> {
         .iter()
         .map(|s| match s {
             Step::Ok { what, name } => json!(format!("{what} {name}: already there, unchanged")),
-            Step::CreateBucket { name, jurisdiction } => json!(format!(
-                "create R2 bucket {name}{}",
+            Step::CreateBucket {
+                name,
+                jurisdiction,
+                protected,
+            } => json!(format!(
+                "create {}R2 bucket {name}{}",
+                if *protected { "private " } else { "" },
                 jurisdiction
                     .as_deref()
                     .map(|j| format!(" (jurisdiction {j})"))
@@ -355,16 +444,20 @@ pub fn describe(steps: &[Step]) -> Vec<Value> {
                 name,
                 bucket,
                 replaces,
+                origin,
                 ..
             } => json!(format!(
-                "{} Worker {name}, reading bucket {bucket} as {SITE_BINDING}; it serves the live \
+                "{} {}Worker {name}, reading bucket {bucket} as {SITE_BINDING}; it serves the live \
                  deploy, or \"nothing deployed yet\" until the first",
-                if *replaces { "update" } else { "upload" }
+                if *replaces { "update" } else { "upload" },
+                if origin.is_some() {
+                    "authenticated origin "
+                } else {
+                    ""
+                }
             )),
             Step::EnableWorkersDev { name } => {
-                json!(format!(
-                    "turn on {name}'s workers.dev address (the preview)"
-                ))
+                json!(format!("turn on {name}'s workers.dev address"))
             }
             Step::AttachDomain {
                 hostname, worker, ..

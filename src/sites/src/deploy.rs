@@ -85,6 +85,7 @@ pub struct Target {
     pub base_url: String,
     pub site: String,
     pub account_id: String,
+    pub protected: bool,
 }
 
 /// Reads [`Target`] from a record as core's `instances_list` answers it. Pure.
@@ -110,6 +111,7 @@ pub fn target(record: &Value, platform_zone: &str) -> std::result::Result<Target
     Ok(Target {
         repo,
         account_id: account_id.into(),
+        protected: site["auth"] == "passkey",
         bucket: Bucket {
             name: bucket.to_string(),
             jurisdiction: site["jurisdiction"].as_str().map(str::to_string),
@@ -301,6 +303,18 @@ pub async fn rollback(
         return Err(bad("site release manifest does not match its identity"));
     }
     ensure_current(env, key, caller, instance, &record).await?;
+    if target.protected {
+        crate::public::require_protected_origin(
+            env,
+            key,
+            &target.base_url,
+            instance,
+            &target.site,
+            &target.bucket.name,
+        )
+        .await?;
+        r2::require_private_bucket(&account, &target.bucket).await?;
+    }
     r2::put(
         &account,
         &target.bucket,
@@ -410,6 +424,18 @@ pub async fn deploy(
 
     ensure_current(env, key, caller, instance, record).await?;
     let account = linked_account(env, key, caller, instance, &t, record).await?;
+    if t.protected {
+        crate::public::require_protected_origin(
+            env,
+            key,
+            &t.base_url,
+            instance,
+            &t.site,
+            &t.bucket.name,
+        )
+        .await?;
+        r2::require_private_bucket(&account, &t.bucket).await?;
+    }
     let present: BTreeSet<String> = r2::list(&account, &t.bucket, "blobs/")
         .await?
         .iter()

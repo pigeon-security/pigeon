@@ -1080,3 +1080,126 @@ fn core_ingest_plans_hosts_and_estimates() {
     assert_ne!(base, digest_of(&inputs(&do_acct, true, other_commit)));
     assert_ne!(base, digest_of(&inputs(&do_acct, false, commit)));
 }
+
+#[test]
+fn protected_origins_require_dedicated_resources_and_bind_to_the_site_bucket() {
+    use pigeon_capabilities::instances::{
+        plan::{Ledger, Observed, Step, plan, record},
+        record::Instance,
+    };
+    use pigeon_core::{r2::private_domains, site_auth::origin_key};
+
+    let mut instance: Instance = serde_json::from_value(json!({
+        "id": "fixture", "title": "Fixture", "worker": "fixture",
+        "account": {"kind":"linked","account_id":"fixture"}, "version": 1,
+        "sites": [{
+            "name": "preview", "bucket": "fixture-site", "auth": "passkey", "allow": ["site"],
+            "targets": [{"kind":"subdomain","label":"fixture"}]
+        }]
+    }))
+    .unwrap();
+    let mut observed = Observed {
+        account_id: "fixture".into(),
+        bucket_exists: false,
+        worker_exists: false,
+        workers_dev: None,
+        account_subdomain: Some("fixture".into()),
+        domains: vec![],
+        subdomains: vec![],
+    };
+    let mut ledger = Ledger::default();
+    let steps = plan(&instance, &observed, &ledger);
+    assert!(matches!(
+        steps.as_slice(),
+        [
+            Step::CreateBucket {
+                protected: true,
+                ..
+            },
+            Step::UploadWorker {
+                origin: Some(_),
+                ..
+            },
+            Step::EnableWorkersDev { .. }
+        ]
+    ));
+    observed.bucket_exists = true;
+    assert!(plan(&instance, &observed, &ledger).iter().any(Step::stops));
+    record(&mut ledger, &steps[0]);
+    assert!(!plan(&instance, &observed, &ledger).iter().any(Step::stops));
+    observed.worker_exists = true;
+    assert!(plan(&instance, &observed, &ledger).iter().any(Step::stops));
+    record(&mut ledger, &steps[1]);
+    observed.workers_dev = Some(true);
+    assert!(
+        !plan(&instance, &observed, &ledger)
+            .iter()
+            .any(Step::changes)
+    );
+
+    instance.sites[0].auth = None;
+    assert!(plan(&instance, &observed, &ledger).iter().any(Step::stops));
+    let upstream = "https://fixture.sandbox.workers.dev";
+    let key = origin_key(
+        b"fixture-only",
+        "fixture",
+        "preview",
+        "fixture-site",
+        upstream,
+    );
+    assert_ne!(
+        key,
+        origin_key(
+            b"fixture-only",
+            "other",
+            "preview",
+            "fixture-site",
+            upstream
+        )
+    );
+    assert_ne!(
+        key,
+        origin_key(
+            b"fixture-only",
+            "fixture",
+            "other",
+            "fixture-site",
+            upstream
+        )
+    );
+    assert_ne!(
+        key,
+        origin_key(
+            b"fixture-only",
+            "fixture",
+            "preview",
+            "other-site",
+            upstream
+        )
+    );
+
+    assert_ne!(
+        key,
+        origin_key(
+            b"fixture-only",
+            "fixture",
+            "preview",
+            "fixture-site",
+            "https://fixture.other.workers.dev"
+        )
+    );
+
+    assert!(private_domains(
+        &json!({"enabled":false}),
+        &json!({"domains":[]})
+    ));
+    assert!(!private_domains(
+        &json!({"enabled":true}),
+        &json!({"domains":[]})
+    ));
+    assert!(!private_domains(
+        &json!({"enabled":false}),
+        &json!({"domains":[{}]})
+    ));
+    assert!(!private_domains(&json!({}), &json!({"domains":[]})));
+}

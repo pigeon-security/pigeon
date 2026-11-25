@@ -416,6 +416,50 @@ pub async fn bucket_exists(account: &Account, bucket: &Bucket) -> Result<bool> {
     token.finish(r).await
 }
 
+/// Whether the provider reports the bucket's managed public URL disabled and no custom domains.
+pub fn private_domains(managed: &serde_json::Value, custom: &serde_json::Value) -> bool {
+    managed["enabled"].as_bool() == Some(false)
+        && custom["domains"].as_array().is_some_and(Vec::is_empty)
+}
+
+/// Verify a protected site's bucket has no independent provider-managed public routes.
+pub async fn require_private_bucket(account: &Account, bucket: &Bucket) -> Result<()> {
+    let unavailable = |_| Error::RustError("could not verify protected site bucket privacy".into());
+    let token = open(account, "verify protected site bucket")
+        .await
+        .map_err(unavailable)?;
+    let headers = bucket_headers(bucket);
+    let path = bucket_path(&account.id, bucket);
+    let check = async {
+        let managed = call_with(
+            token.value(),
+            Method::Get,
+            &format!("{path}/domains/managed"),
+            &headers,
+            None,
+        )
+        .await
+        .map_err(unavailable)?;
+        let custom = call_with(
+            token.value(),
+            Method::Get,
+            &format!("{path}/domains/custom"),
+            &headers,
+            None,
+        )
+        .await
+        .map_err(unavailable)?;
+        if !private_domains(&managed, &custom) {
+            return Err(Error::RustError(
+                "protected site bucket has public access or unknown status".into(),
+            ));
+        }
+        Ok(())
+    }
+    .await;
+    token.finish(check).await
+}
+
 /// Makes sure the bucket exists. It is safe to run twice.
 pub async fn ensure_bucket(account: &Account, bucket: &Bucket) -> Result<Ensured> {
     let token = open(account, "r2 ensure bucket").await?;
