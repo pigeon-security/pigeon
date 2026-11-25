@@ -2940,3 +2940,41 @@ fn queued_site_receipt_checks_scope_actor_and_immutable_inputs() {
     signed.context = None;
     assert!(queued_site_receipt::Receipt::read(&signed, &args).is_err());
 }
+
+#[test]
+fn ci_global_connector_only_attaches_context_to_explicit_instance_reads() {
+    use pigeon_capabilities::ci::connector_read_instance;
+    use pigeon_ci::scope::read_context;
+
+    let instance_read = json!({"instance": "pigeon-security/platform", "commit": "abc"});
+    let selected = connector_read_instance("ci_jobs", &instance_read).unwrap();
+    assert_eq!(selected, Some("pigeon-security/platform"));
+    let context = read_context("pigeon-security/platform", selected)
+        .unwrap()
+        .unwrap();
+    assert_eq!(context.recipient, "pigeon-platform");
+    assert_eq!(context.instance.as_deref(), selected);
+
+    assert_eq!(
+        connector_read_instance("ci_status", &json!({"id": "job"})).unwrap(),
+        None
+    );
+    assert_eq!(
+        connector_read_instance("ci_submit", &instance_read).unwrap(),
+        None
+    );
+    assert!(connector_read_instance("ci_jobs", &json!({"instance": null})).is_err());
+    assert!(
+        connector_read_instance(
+            "ci_jobs",
+            &json!({"instance": "pigeon-security/platform", "repo": "other"})
+        )
+        .is_err()
+    );
+    assert!(read_context("other", selected).is_err());
+    assert!(
+        read_context("pigeon-security/platform", None)
+            .unwrap()
+            .is_none()
+    );
+}
