@@ -90,3 +90,61 @@ verified-body fingerprint independently of the latest push and deploy settings.
   deduplication does not guarantee exactly-once publication if a Worker stops
   after publishing and before recording completion. That case needs a stable
   publication idempotency key or reconciliation at the Sites boundary.
+
+## Storage, Ingest, and Metrics canary runbook
+
+The live `noisypigeon-preview-canary` record is version 1 and has an approved
+linked Worker. Its Storage, Ingest, and Metrics profiles are absent.
+`storage_accounts` still reports zero declared stores. The canary is linked,
+but the latest status did not report a fresh grant or the
+`account-analytics.read` scope. These three checks can be tracked separately
+from the publishing and CI checks. Re-read the whole instance record before
+each proposal so a publishing or CI update is preserved. Use only the canary
+record and its resources.
+
+| Check | Owner input before a proposal |
+|---|---|
+| Storage | Select an owned source provider, account name, region or endpoint, bucket, and allowed prefix. Authorize a read-only key for the synthetic fixture bucket and install it through Access in the declared Storage slot. |
+| Ingest | Confirm the same source, a dedicated canary R2 destination bucket, its scoped R2 credential, a runner, and the maximum approved runtime or cost. Confirm authorization for cleanup if the runner needs it. |
+| Metrics | Authorize a canary-only linked grant with `account-analytics.read`, and confirm the approved Worker is present in that grant's account. |
+
+For Storage, add an allowlisted account to
+[`storage_accounts()`](../../src/platform/src/settings.rs) and bind its
+Access slot in the platform deployment. Keep the key value out of the
+declaration. Once `storage_accounts` lists the account with its key set,
+propose `storage: {state: "enabled", store: "<provider>:<name>", bucket:
+"<fixture-bucket>", prefix: "inside/"}`. Seed at least two small synthetic
+objects under `inside/` and one under `outside/`. On the canary MCP endpoint:
+
+1. Call `storage_list_objects` with `max_keys: 1` and no prefix. Follow
+   the returned continuation with the same listing arguments and confirm the
+   returned names are relative to `inside/`.
+2. Call `storage_get_object` with a returned relative name and compare its
+   content to the seeded fixture.
+3. Verify rejection of `key: "../outside/sample.txt"` and any supplied
+   `account` or `bucket`. Verify a continuation does not carry over to a
+   different requested prefix.
+
+For Ingest, confirm that the dedicated destination has no fixture objects.
+Propose `ingest: {state: "enabled", source: "<provider>:<name>", bucket:
+"<fixture-bucket>", prefix: "inside/", destination_bucket: "<fixture-r2>"}`.
+A scoped `ingest_plan` supplies the source, bucket, and prefix from this record.
+Confirm an explicit selector is rejected before approval creation. Then call
+`ingest_plan` with `dry_run: true` and a size estimate based on the fixture.
+A ready plan creates an approval request. Inspect its scope and estimate
+before approving. Once approved, call `ingest_start` with the approved `plan` ID. Read the terminal
+result using `ingest_report` with the returned `run` ID. Compare the destination
+before and after. Run metadata is expected, and destination blobs or quarantine
+copies should be absent. Use a separately authorized cleanup path if needed.
+The platform `ingest_status` tool can delete a finished VM.
+
+For Metrics, the current [OAuth setup](../../src/capabilities/src/linked.rs)
+keeps one shared client and scope vector, which omits Account Analytics Read.
+Running `linked_setup` again keeps the existing client. Approving the
+observability record alone cannot supply the Analytics permission to the
+[linked Metrics query](../../src/capabilities/src/observability/instance.rs).
+Set up a canary-only grant path before proposing `observability: {state:
+"enabled"}`. Once a fresh canary grant includes the exact scope, call
+`observability_worker_metrics` with `hours: 1`. Confirm the returned Worker
+matches the approved canary record, and confirm an alternate `worker`
+argument is rejected. A successful empty window is valid for an idle Worker.
