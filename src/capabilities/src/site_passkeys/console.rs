@@ -11,7 +11,7 @@ use crate::users::{User, Users, directory, invite_name};
 
 /// The visitor UI asset mounted after the console shell.
 pub(crate) const ASSET: (&str, &str, &str) = (
-    "/app/site_access.js",
+    "/app/visitor.js",
     "text/javascript; charset=utf-8",
     include_str!("visitor.js"),
 );
