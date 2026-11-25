@@ -1,5 +1,5 @@
 // pigeon's site Worker: serves the deploy that `live` names from the bucket bound as SITE.
-// Layout: `live` holds a release ID or a legacy commit; `deploys/{id}.json` maps "/path" to {blob, content_type,
+// Layout: `live` holds a release ID; `deploys/{id}.json` maps "/path" to {blob, content_type,
 // size}; `blobs/{sha256}` holds each file. Until the first deploy it answers 503.
 const RECHECK_MS = 30_000;
 let state = null; // { release, commit, manifest, checked }
@@ -10,17 +10,17 @@ async function current(env) {
   const live = await env.SITE.get("live");
   if (!live) return (state = { commit: null, manifest: null, checked: now });
   const release = (await live.text()).trim();
+  // Only immutable releases are served. A `live` that names anything else (such as a commit
+  // from before releases) serves nothing until the next publish moves it to a release.
+  if (!release.startsWith("release-")) return (state = { commit: null, manifest: null, checked: now });
   if (state && state.release === release && state.manifest) {
     state.checked = now;
     return state;
   }
   const m = await env.SITE.get(`deploys/${release}.json`);
   if (!m) return (state = { commit: null, manifest: null, checked: now });
-  let commit = release;
-  if (release.startsWith("release-")) {
-    const meta = await env.SITE.get(`release-meta/${release}.json`);
-    commit = meta ? (await meta.json()).commit : null;
-  }
+  const meta = await env.SITE.get(`release-meta/${release}.json`);
+  const commit = meta ? (await meta.json()).commit : null;
   return (state = { release, commit, manifest: await m.json(), checked: now });
 }
 
