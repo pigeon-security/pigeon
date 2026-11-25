@@ -1525,8 +1525,20 @@ fn merge_report(
     }
 }
 
-/// The tab the cost section sits on, as its path names it.
+/// The console area the cost section sits in. It is a legacy panel's data anchor only, not a
+/// view: the Cost area's views come from `cost_daily`.
 pub const SECTION_TAB: &str = "cost";
+/// The console view of the model providers and defaults: Platform › Models.
+pub const VIEW_AREA: &str = "platform";
+/// The models view's stable id within its area.
+pub const VIEW_ID: &str = "models";
+/// The models view's title.
+pub const VIEW_TITLE: &str = "Models";
+/// The models view's line under the title.
+pub const VIEW_DESCRIPTION: &str =
+    "Model providers, the gateways they go through and the defaults each role uses.";
+/// The models view's place within its area.
+pub const VIEW_ORDER: u16 = 20;
 /// The cost section's title.
 pub const SECTION_TITLE: &str = "Cost";
 /// The cost section's line under the title.
@@ -1800,14 +1812,26 @@ impl Models {
                     input_schema: t.input_schema,
                 })
                 .collect(),
-            sections: vec![SectionSpec {
-                tab: SECTION_TAB.into(),
-                id: SECTION.into(),
-                title: SECTION_TITLE.into(),
-                description: SECTION_DESCRIPTION.into(),
-                order: SECTION_ORDER,
-                cost: Some(SECTION_COST.into()),
-            }],
+            sections: vec![
+                SectionSpec {
+                    tab: SECTION_TAB.into(),
+                    id: SECTION.into(),
+                    title: SECTION_TITLE.into(),
+                    description: SECTION_DESCRIPTION.into(),
+                    order: SECTION_ORDER,
+                    cost: Some(SECTION_COST.into()),
+                    view: false,
+                },
+                SectionSpec {
+                    tab: VIEW_AREA.into(),
+                    id: VIEW_ID.into(),
+                    title: VIEW_TITLE.into(),
+                    description: VIEW_DESCRIPTION.into(),
+                    order: VIEW_ORDER,
+                    cost: None,
+                    view: true,
+                },
+            ],
             routes: Vec::new(),
             footprint: json!({
                 "gateways": self.gateways.iter().map(|g| g.id.clone()).collect::<Vec<_>>(),

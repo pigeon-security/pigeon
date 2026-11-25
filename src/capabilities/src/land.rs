@@ -35,7 +35,7 @@ use worker::{
     js_sys,
 };
 
-use crate::console::sections::{Section, Tab};
+use crate::console::sections::Section;
 use crate::git_proxy;
 use crate::proxy::ProxyCaller;
 use crate::users::{Caller, User};
@@ -561,12 +561,13 @@ impl Capability for Land {
 
     fn sections(&self) -> Vec<Section> {
         vec![Section {
-            tab: Tab::Approvals,
+            area: "inbox",
             id: "approvals",
             title: "Waiting for you",
             description: "Only what cannot go ahead without your passkey.",
             order: 1,
             cost: None,
+            view: false,
         }]
     }
 

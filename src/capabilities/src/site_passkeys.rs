@@ -27,6 +27,32 @@ fn bad(why: &str) -> Error {
     Error::RustError(why.to_string())
 }
 
+const INSTANCE_VIEWS: &[crate::instances::tools::View] = &[crate::instances::tools::View {
+    area: "site",
+    id: "visitors",
+    title: "Visitors",
+    order: 30,
+    since: None,
+}];
+
+/// Site › Visitors, while the instance publishes and gates a site with visitor passkeys. Today
+/// that is a site whose `auth` is `passkey`; a profile field of its own replaces it (Q4 in
+/// docs/plans/console-redesign.md). It adds no instance tools: `site_passkey` is for
+/// pigeon-sites alone.
+pub fn instance_views(
+    instance: &record::Instance,
+) -> serde_json::Result<crate::instances::tools::Enabled> {
+    let gated = instance
+        .sites
+        .iter()
+        .any(|site| site.auth.as_deref() == Some("passkey"));
+    Ok(crate::instances::tools::Enabled::when(
+        gated && crate::instances::publishing::enabled(instance)?,
+        &[],
+        INSTANCE_VIEWS,
+    ))
+}
+
 /// Whether a site's allowlist admits new site visitors: it lists "site". The console and the
 /// MCP `users_invite` and `users_enrol` tools share this rule before creating or enrolling a
 /// site user.

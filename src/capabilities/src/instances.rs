@@ -6,8 +6,9 @@
 //! person named. The console's Instances tab shows every instance and edits one; over MCP they
 //! can only be listed.
 
+pub mod manifest;
 pub mod plan;
-mod publishing;
+pub(crate) mod publishing;
 pub mod record;
 pub mod retire;
 mod retiring;
@@ -18,7 +19,7 @@ use pigeon_core::oauth::hash;
 use serde_json::{Value, json};
 use worker::{Env, Error, Headers, Method, Request, Response, Result};
 
-use crate::console::sections::{Section, Tab};
+use crate::console::sections::Section;
 use crate::passkeys::Passkeys;
 use crate::users::{User, directory};
 use crate::{Call, Capability, Context, Serve, arg, to_value, unknown};
@@ -341,16 +342,38 @@ impl Instances {
     }
 }
 
-/// The Instances section of the console's Instances tab.
-pub fn instances_section() -> Section {
-    Section {
-        tab: Tab::Instances,
-        id: "instances",
-        title: "Instances",
-        description: "What pigeon runs, here and in accounts you linked. Each is data: changing one asks for your passkey.",
-        order: 1,
-        cost: None,
-    }
+/// The legacy Instances panel's data anchor, then the views instances adds on the home
+/// instance: Instances › All instances and Platform › Endpoints.
+pub fn instances_sections() -> Vec<Section> {
+    vec![
+        Section {
+            area: "instances",
+            id: "instances",
+            title: "Instances",
+            description: "What pigeon runs, here and in accounts you linked. Each is data: changing one asks for your passkey.",
+            order: 1,
+            cost: None,
+            view: false,
+        },
+        Section {
+            area: "instances",
+            id: "list",
+            title: "All instances",
+            description: "Every instance, with its account, link and what waits for it.",
+            order: 10,
+            cost: None,
+            view: true,
+        },
+        Section {
+            area: "platform",
+            id: "endpoints",
+            title: "Endpoints",
+            description: "The platform's MCP endpoint and each instance's scoped one.",
+            order: 30,
+            cost: None,
+            view: true,
+        },
+    ]
 }
 
 /// `instance_subdomains`: each Subdomain target whose plan was applied, with its upstream.
@@ -762,6 +785,17 @@ impl Capability for Instances {
                 "For the app: each instance's tabs, whether it has settings, and a few facts. Read-only.",
             ),
             Tool {
+                name: manifest::TOOL,
+                description: "The console's navigation for one instance, as data: its areas in \
+                              order, each with its views, the capability that adds each view \
+                              and any upgrade it needs, and how many requests wait in its \
+                              Inbox. Computed from the approved record. Read-only.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": { "instance": { "type": "string", "description": "The instance's id; the home instance when absent." } }
+                }),
+            },
+            Tool {
                 name: "instance_plan",
                 description: "Dry run of what a linked instance needs in its account: its R2 \
                               bucket, its site Worker and the Worker's workers.dev preview, \
@@ -850,6 +884,7 @@ impl Capability for Instances {
             match tool {
                 "instances_list" => Ok(to_value(all(cx.env).await?)),
                 "instances_tabs" => Ok(tabs(&all(cx.env).await?)),
+                manifest::TOOL => manifest::console_manifest(cx, args).await,
                 "instance_propose" => self.propose(cx, args).await,
                 "instance_plan" => self.plan(cx, args).await,
                 "instance_subdomains" => subdomains(cx.env, &self.zone).await,
@@ -862,7 +897,7 @@ impl Capability for Instances {
     }
 
     fn sections(&self) -> Vec<Section> {
-        vec![instances_section()]
+        instances_sections()
     }
 
     fn section_data<'a>(

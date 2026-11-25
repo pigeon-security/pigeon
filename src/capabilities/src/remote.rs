@@ -17,7 +17,7 @@ use pigeon_core::{secrets_store, webauthn};
 use serde_json::{Value, json};
 use worker::{Env, Request, RequestInit, Result};
 
-use crate::console::sections::{Section, Tab};
+use crate::console::sections::Section;
 use crate::expiry::Expiry;
 use crate::instances::tools::{Targeted, Unsupported};
 use crate::{Call, Capability, Context, Expiring, Footprint, Serve, Slot, users};
@@ -519,17 +519,15 @@ impl Capability for Remote {
             .sections
             .iter()
             .filter_map(|s| {
-                let tab = Tab::ALL
-                    .iter()
-                    .copied()
-                    .find(|t| t.path().trim_start_matches('/') == s.tab)?;
+                let area = crate::console::sections::area_of_tab(&s.tab)?;
                 Some(Section {
-                    tab,
+                    area: area.id,
                     id: intern(&s.id),
                     title: intern(&s.title),
                     description: intern(&s.description),
                     order: s.order,
                     cost: s.cost.as_deref().map(intern),
+                    view: s.view,
                 })
             })
             .collect()

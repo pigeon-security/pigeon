@@ -41,14 +41,21 @@ const SCOPED_TOOLS: &[crate::instances::tools::Registration] =
         arguments: &["hours"],
     }];
 
-pub fn instance_tools(
-    instance: &Instance,
-) -> serde_json::Result<&'static [crate::instances::tools::Registration]> {
-    Ok(if approved_worker(instance).is_ok() {
-        SCOPED_TOOLS
-    } else {
-        &[]
-    })
+/// The Metrics area's views. Errors joins once an instance-scoped errors read exists.
+const VIEWS: &[crate::instances::tools::View] = &[crate::instances::tools::View {
+    area: "metrics",
+    id: "workers",
+    title: "Workers",
+    order: 10,
+    since: None,
+}];
+
+pub fn instance_tools(instance: &Instance) -> serde_json::Result<crate::instances::tools::Enabled> {
+    Ok(crate::instances::tools::Enabled::when(
+        approved_worker(instance).is_ok(),
+        SCOPED_TOOLS,
+        VIEWS,
+    ))
 }
 
 pub(super) fn tool() -> Tool {

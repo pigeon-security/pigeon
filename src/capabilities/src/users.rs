@@ -13,7 +13,7 @@ use pigeon_core::durable::{self, Db, opt};
 use pigeon_core::identity::{self, Expected};
 use pigeon_core::mcp::Tool;
 
-use crate::console::sections::{Section, Tab};
+use crate::console::sections::Section;
 use pigeon_core::webauthn::{CHALLENGE_TTL_MS, random};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -1587,20 +1587,31 @@ impl Capability for Users {
     fn sections(&self) -> Vec<Section> {
         vec![
             Section {
-                tab: Tab::Access,
+                area: "access",
                 id: "people",
                 title: "People",
                 description: "Who can sign in, with their passkeys. An invite is a one-time link to register a passkey.",
-                order: 2,
+                order: 30,
                 cost: None,
+                view: true,
             },
             Section {
-                tab: Tab::Access,
+                area: "access",
+                id: "apps",
+                title: "Apps",
+                description: "Apps that act for a person, and apps that act for no one. Disconnecting one asks for your passkey.",
+                order: 40,
+                cost: None,
+                view: true,
+            },
+            Section {
+                area: "access",
                 id: "delegation",
                 title: "Delegation",
                 description: "Service accounts that act for a person. Agents ask your policy before acting, as their account.",
                 order: 3,
                 cost: None,
+                view: false,
             },
         ]
     }

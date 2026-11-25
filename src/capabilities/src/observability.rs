@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use worker::js_sys::Date;
 use worker::{Error, Fetch, Headers, Method, Request, RequestInit, Result};
 
-use crate::console::sections::{Section, Tab};
+use crate::console::sections::Section;
 use crate::users::User;
 use crate::{Call, Capability, Context};
 
@@ -626,17 +626,34 @@ impl Capability for Observability {
     }
 
     fn sections(&self) -> Vec<Section> {
-        vec![Section {
-            tab: Tab::Cost,
-            id: "platform",
-            title: "Platform",
-            description: "Cloudflare metrics, logs and billable usage for pigeon's Workers; \
-                          estimated and billed cost kept apart.",
-            order: 2,
-            // Its Models line is already the Models section's cost, and its window is at most
-            // 7 days, so adding it to the overview total would double count and mix windows.
+        // The Cost area's views: `cost_daily` over each of its ranges.
+        let range = |id, title, order| Section {
+            area: "cost",
+            id,
+            title,
+            description: "Spend per day: Cloudflare usage, model cost and agent runs.",
+            order,
             cost: None,
-        }]
+            view: true,
+        };
+        vec![
+            Section {
+                area: "cost",
+                id: "platform",
+                title: "Platform",
+                description: "Cloudflare metrics, logs and billable usage for pigeon's Workers; \
+                              estimated and billed cost kept apart.",
+                order: 2,
+                // Its Models line is already the Models section's cost, and its window is at
+                // most 7 days, so adding it to the overview total would double count and mix
+                // windows.
+                cost: None,
+                view: false,
+            },
+            range("7d", "7 days", 10),
+            range("today", "Today", 20),
+            range("all", "30 days", 30),
+        ]
     }
 
     /// The same answer as `observability_summary`, over the last `days` days (at most 168

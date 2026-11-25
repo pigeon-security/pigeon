@@ -114,14 +114,19 @@ pub const SCOPED_TOOLS: &[crate::instances::tools::Registration] = &[
     },
 ];
 
-pub fn instance_tools(
-    instance: &Record,
-) -> serde_json::Result<&'static [crate::instances::tools::Registration]> {
-    Ok(if scope(instance).ok().flatten().is_some() {
-        SCOPED_TOOLS
-    } else {
-        &[]
-    })
+pub fn instance_tools(instance: &Record) -> serde_json::Result<crate::instances::tools::Enabled> {
+    const VIEWS: &[crate::instances::tools::View] = &[crate::instances::tools::View {
+        area: "ci",
+        id: "jobs",
+        title: "Jobs",
+        order: 10,
+        since: None,
+    }];
+    Ok(crate::instances::tools::Enabled::when(
+        scope(instance).ok().flatten().is_some(),
+        SCOPED_TOOLS,
+        VIEWS,
+    ))
 }
 
 /// CI as one of core's capabilities.

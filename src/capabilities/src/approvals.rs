@@ -11,7 +11,7 @@ use pigeon_core::policy::{Answer, Approval, Decision, Kind, Request, Vars};
 use serde_json::{Value, json};
 use worker::{Env, Error, Result};
 
-use crate::console::sections::{Section, Tab};
+use crate::console::sections::Section;
 use crate::users::{Caller, User, directory};
 use crate::{Call, Capability, Context, arg, unknown};
 
@@ -536,12 +536,13 @@ impl Capability for Approvals {
 
     fn sections(&self) -> Vec<Section> {
         vec![Section {
-            tab: Tab::Approvals,
+            area: "inbox",
             id: "approvals",
             title: "Waiting for you",
             description: "Only what cannot go ahead without your passkey.",
             order: 1,
             cost: None,
+            view: false,
         }]
     }
 

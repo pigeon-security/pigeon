@@ -122,10 +122,15 @@ pub async fn run(cx: &Context<'_>, tool: &str, args: &Value) -> Result<Value> {
 }
 
 /// Read-only tools available with an approved repository binding.
-pub fn instance_tools(
-    instance: &Instance,
-) -> serde_json::Result<&'static [crate::instances::tools::Registration]> {
-    use crate::instances::tools::Registration;
+pub fn instance_tools(instance: &Instance) -> serde_json::Result<crate::instances::tools::Enabled> {
+    use crate::instances::tools::{Enabled, Registration, View};
+    const VIEWS: &[View] = &[View {
+        area: "source",
+        id: "repository",
+        title: "Repository",
+        order: 10,
+        since: None,
+    }];
     const TOOLS: &[Registration] = &[
         Registration {
             name: RESOLVE,
@@ -138,9 +143,5 @@ pub fn instance_tools(
             arguments: &["revision", "path"],
         },
     ];
-    Ok(if approved_repo(instance).is_ok() {
-        TOOLS
-    } else {
-        &[]
-    })
+    Ok(Enabled::when(approved_repo(instance).is_ok(), TOOLS, VIEWS))
 }

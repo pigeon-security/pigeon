@@ -322,7 +322,18 @@ impl Capability for Tokens {
     }
 
     fn sections(&self) -> Vec<Section> {
-        vec![crate::secrets::keys_section()]
+        vec![
+            crate::secrets::keys_section(),
+            Section {
+                area: "access",
+                id: "tokens",
+                title: "Tokens",
+                description: "Live proxy credentials and when each ends. Issuing or revoking one asks for your passkey.",
+                order: 20,
+                cost: None,
+                view: true,
+            },
+        ]
     }
 
     /// The live proxy credentials: id, label, who issued each, when, and when it ends; and

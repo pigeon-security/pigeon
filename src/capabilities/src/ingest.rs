@@ -38,12 +38,19 @@ const SCOPED_TOOLS: &[crate::instances::tools::Registration] = &[
 
 pub fn instance_tools(
     instance: &crate::instances::record::Instance,
-) -> serde_json::Result<&'static [crate::instances::tools::Registration]> {
-    Ok(if instance.ingest.as_ref().is_some_and(Profile::enabled) {
-        SCOPED_TOOLS
-    } else {
-        &[]
-    })
+) -> serde_json::Result<crate::instances::tools::Enabled> {
+    const VIEWS: &[crate::instances::tools::View] = &[crate::instances::tools::View {
+        area: "ingest",
+        id: "runs",
+        title: "Runs",
+        order: 10,
+        since: None,
+    }];
+    Ok(crate::instances::tools::Enabled::when(
+        instance.ingest.as_ref().is_some_and(Profile::enabled),
+        SCOPED_TOOLS,
+        VIEWS,
+    ))
 }
 
 pub use profile::{Bindings, Profile};

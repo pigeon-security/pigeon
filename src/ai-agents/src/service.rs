@@ -792,16 +792,38 @@ impl Service for Agents {
                         }),
                     ),
                 ],
-                sections: vec![SectionSpec {
-                    tab: "instances".into(),
-                    id: SECTION.into(),
-                    title: "AI Agents".into(),
-                    description: "Planner and executor runs, through the model gateway or in \
-                                  external sessions, and what they wait for from you."
-                        .into(),
-                    order: 50,
-                    cost: None,
-                }],
+                // The legacy panel's data anchor, then Sessions › Live and Sessions › Compare.
+                sections: vec![
+                    SectionSpec {
+                        tab: "sessions".into(),
+                        id: SECTION.into(),
+                        title: "AI Agents".into(),
+                        description: "Planner and executor runs, through the model gateway or \
+                                      in external sessions, and what they wait for from you."
+                            .into(),
+                        order: 50,
+                        cost: None,
+                        view: false,
+                    },
+                    SectionSpec {
+                        tab: "sessions".into(),
+                        id: "live".into(),
+                        title: "Live".into(),
+                        description: "Runs going on now and what they wait for from you.".into(),
+                        order: 10,
+                        cost: None,
+                        view: true,
+                    },
+                    SectionSpec {
+                        tab: "sessions".into(),
+                        id: "compare".into(),
+                        title: "Compare".into(),
+                        description: "Models compared by cost, turns and outcome per role.".into(),
+                        order: 20,
+                        cost: None,
+                        view: true,
+                    },
+                ],
                 // Its objects and container come from its wrangler.toml, which the architecture reads.
                 footprint: Value::Null,
                 ..CapabilityManifest::default()

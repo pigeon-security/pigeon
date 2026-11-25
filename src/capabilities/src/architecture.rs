@@ -32,6 +32,18 @@ impl Capability for Architecture {
         vec![Component::began("architecture", Kind::Capability)]
     }
 
+    fn sections(&self) -> Vec<crate::console::sections::Section> {
+        vec![crate::console::sections::Section {
+            area: "platform",
+            id: "architecture",
+            title: "Architecture",
+            description: "Building blocks, capabilities, Workers, hostnames and resources.",
+            order: 10,
+            cost: None,
+            view: true,
+        }]
+    }
+
     fn tools(&self) -> Vec<Tool> {
         vec![
             Tool {

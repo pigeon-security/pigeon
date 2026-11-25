@@ -415,6 +415,351 @@ fn instances_tabs_for_the_app() {
     assert!(tabs(&[linked])["current"].is_null());
 }
 
+/// The platform capabilities' view sections, as `console_manifest` collects them.
+fn manifest_platform_views() -> Vec<(
+    &'static str,
+    pigeon_capabilities::console::sections::Section,
+)> {
+    use pigeon_capabilities::Capability;
+    use pigeon_capabilities::architecture::Architecture;
+    let mut out = Vec::new();
+    for (name, sections) in [
+        ("architecture", Architecture.sections()),
+        (
+            "instances",
+            pigeon_capabilities::instances::instances_sections(),
+        ),
+        (
+            "secrets",
+            vec![pigeon_capabilities::secrets::keys_section()],
+        ),
+    ] {
+        out.extend(sections.into_iter().map(|s| (name, s)));
+    }
+    out
+}
+
+fn manifest_of(record: &Value, inbox: Option<usize>) -> Value {
+    use pigeon_capabilities::instances::{manifest::manifest, record::Instance, tools::Scope};
+    let record: Instance = serde_json::from_value(record.clone()).unwrap();
+    let scope = Scope::new(&record).unwrap();
+    manifest(&record, &scope, &manifest_platform_views(), &[], inbox)
+}
+
+fn manifest_areas(m: &Value) -> Vec<&str> {
+    m["areas"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["id"].as_str().unwrap())
+        .collect()
+}
+
+fn manifest_views<'a>(m: &'a Value, area: &str) -> Vec<&'a str> {
+    let area = m["areas"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"] == area)
+        .unwrap();
+    area["views"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["id"].as_str().unwrap())
+        .collect()
+}
+
+/// `console_manifest` for the home instance: Inbox, its instance areas, then the platform
+/// areas the platform capabilities declare views in, each in the stable order with its key.
+#[test]
+fn console_manifest_for_the_home_instance() {
+    let m = manifest_of(
+        &json!({
+            "id": "example/platform", "title": "Example", "account": { "kind": "home" },
+            "zones": ["example.com"],
+            "observability": { "state": "enabled" }, "worker": "example-platform"
+        }),
+        Some(4),
+    );
+    assert_eq!(
+        m["instance"],
+        json!({ "id": "example/platform", "title": "Example", "home": true, "host": "example.com" })
+    );
+    assert_eq!(
+        manifest_areas(&m),
+        [
+            "inbox",
+            "overview",
+            "metrics",
+            "capabilities",
+            "instances",
+            "platform"
+        ]
+    );
+    assert_eq!(m["inbox"], json!({ "count": 4 }));
+    let inbox = &m["areas"][0];
+    assert_eq!(inbox["group"], "top");
+    assert_eq!(inbox["key"], "i");
+    assert_eq!(inbox["views"], json!([]));
+    assert_eq!(m["areas"][2]["group"], "instance");
+    assert_eq!(m["areas"][2]["key"], "m");
+    assert_eq!(
+        m["areas"][2]["views"][0],
+        json!({ "id": "workers", "title": "Workers", "order": 10,
+                "capability": "observability", "upgrade": null })
+    );
+    assert_eq!(m["areas"][4]["group"], "platform");
+    // A legacy data anchor (`credentials`, `instances`) is not a view, so `credentials` alone
+    // adds no Access area.
+    assert_eq!(manifest_views(&m, "instances"), ["list"]);
+    assert_eq!(
+        manifest_views(&m, "platform"),
+        ["architecture", "endpoints"]
+    );
+}
+
+/// A linked instance that publishes a passkey-gated site: Site with Sites, Deployments and
+/// Visitors, and no platform areas.
+#[test]
+fn console_manifest_for_a_linked_publishing_instance() {
+    let mut record = json!({
+        "id": "sample", "title": "Sample", "account": { "kind": "linked", "account_id": null },
+        "sites": [{ "name": "blog", "bucket": "sample-site", "auth": "passkey",
+            "targets": [{ "kind": "domain", "hostname": "blog.example.com" }] }],
+        "publishing": { "state": "enabled", "site": "blog" }
+    });
+    let m = manifest_of(&record, Some(1));
+    assert_eq!(m["instance"]["home"], false);
+    assert_eq!(m["instance"]["host"], "blog.example.com");
+    assert_eq!(
+        manifest_areas(&m),
+        ["inbox", "overview", "site", "capabilities"]
+    );
+    assert_eq!(
+        manifest_views(&m, "site"),
+        ["sites", "deployments", "visitors"]
+    );
+    assert_eq!(m["areas"][2]["views"][1]["capability"], "publishing");
+    assert_eq!(m["areas"][2]["views"][2]["capability"], "site_passkeys");
+
+    // Without passkeys the site has no Visitors; without publishing, no Site at all, even
+    // with a gated site.
+    record["sites"][0]["auth"] = Value::Null;
+    assert_eq!(
+        manifest_views(&manifest_of(&record, None), "site"),
+        ["sites", "deployments"]
+    );
+    record["sites"][0]["auth"] = json!("passkey");
+    record["publishing"] = json!({ "state": "disabled" });
+    let m = manifest_of(&record, None);
+    assert_eq!(manifest_areas(&m), ["inbox", "overview", "capabilities"]);
+    assert_eq!(m["inbox"], json!({ "count": null }));
+}
+
+/// A record with nothing enabled shows only Inbox, Overview and Capabilities; a disabled
+/// profile hides its area as an absent one does.
+#[test]
+fn console_manifest_with_nothing_enabled() {
+    let mut record = json!({ "id": "bare", "title": "Bare", "account": { "kind": "linked" } });
+    assert_eq!(
+        manifest_areas(&manifest_of(&record, Some(0))),
+        ["inbox", "overview", "capabilities"]
+    );
+    record["storage"] = json!({ "state": "enabled", "store": "archive-store", "bucket": "archive", "prefix": "p/" });
+    record["ingest"] = json!({ "state": "disabled" });
+    assert_eq!(
+        manifest_areas(&manifest_of(&record, Some(0))),
+        ["inbox", "overview", "storage", "capabilities"]
+    );
+    record["storage"] = json!({ "state": "disabled" });
+    assert_eq!(
+        manifest_areas(&manifest_of(&record, Some(0))),
+        ["inbox", "overview", "capabilities"]
+    );
+}
+
+/// A view newer than the version an instance's pin selects stays, flagged for an upgrade;
+/// with no pin the instance runs the newest version and needs none.
+#[test]
+fn console_manifest_flags_views_that_need_an_upgrade() {
+    use pigeon_capabilities::instances::manifest::{manifest, selected};
+    use pigeon_capabilities::instances::{record::Instance, tools::Scope};
+    use pigeon_core::versions::{Component, Kind, Version};
+
+    let sites = Component::began("sites", Kind::Capability)
+        .entry("1.1.0", "Deployments")
+        .serving(&["1.1.0", "1.0.0"]);
+    let mut record: Instance = serde_json::from_value(json!({
+        "id": "sample", "title": "Sample", "account": { "kind": "linked" },
+        "sites": [{ "name": "blog", "bucket": "sample-site", "targets": [] }],
+        "publishing": { "state": "enabled", "site": "blog" },
+        "pins": { "sites": "~1.0" }
+    }))
+    .unwrap();
+    let carried = [sites];
+    assert_eq!(
+        selected(&record, "sites", &carried),
+        Some(Version::new(1, 0, 0))
+    );
+    // Declared views carry no `since` today, so none needs an upgrade.
+    let scope = Scope::new(&record).unwrap();
+    let m = manifest(&record, &scope, &[], &carried, None);
+    assert!(m["areas"][2]["views"][1]["upgrade"].is_null());
+    // A view first served at 1.1.0 is flagged on an instance pinned to 1.0.
+    let view = pigeon_capabilities::instances::tools::View {
+        area: "site",
+        id: "deployments",
+        title: "Deployments",
+        order: 20,
+        since: Some("1.1.0"),
+    };
+    assert_eq!(
+        pigeon_capabilities::instances::manifest::upgrade(
+            view.since,
+            selected(&record, "sites", &carried)
+        ),
+        json!({ "selected": "1.0.0", "since": "1.1.0" })
+    );
+    record.pins.clear();
+    assert_eq!(
+        selected(&record, "sites", &carried),
+        Some(Version::new(1, 1, 0))
+    );
+    assert!(
+        pigeon_capabilities::instances::manifest::upgrade(
+            view.since,
+            selected(&record, "sites", &carried)
+        )
+        .is_null()
+    );
+    assert!(
+        pigeon_capabilities::instances::manifest::upgrade(
+            view.since,
+            selected(&record, "nothing", &carried)
+        )
+        .is_null()
+    );
+}
+
+/// Area ids and keys are stable (P12), every view id is an anchor-shaped id unique within its
+/// area, and the manifest is data only: no HTML anywhere in it (P16).
+#[test]
+fn console_manifest_ids_are_stable_and_data_only() {
+    use pigeon_capabilities::console::sections::{AREAS, anchor};
+    let ids: Vec<&str> = AREAS.iter().map(|a| a.id).collect();
+    assert_eq!(
+        ids,
+        [
+            "inbox",
+            "overview",
+            "site",
+            "storage",
+            "source",
+            "ci",
+            "metrics",
+            "ingest",
+            "capabilities",
+            "sessions",
+            "cost",
+            "access",
+            "instances",
+            "platform"
+        ]
+    );
+    let keys: Vec<&str> = AREAS.iter().map(|a| a.key).collect();
+    assert_eq!(
+        keys,
+        [
+            "i", "v", "w", "b", "r", "k", "m", "e", "x", "s", "c", "a", "n", "p"
+        ]
+    );
+    let every = json!({
+        "id": "all", "title": "All <b>", "account": { "kind": "home" },
+        "zones": ["example.com"], "worker": "all-worker",
+        "repo": { "kind": "github", "full_name": "example/all" },
+        "sites": [{ "name": "blog", "bucket": "all-site", "auth": "passkey", "targets": [] }],
+        "publishing": { "state": "enabled", "site": "blog" },
+        "storage": { "state": "enabled", "store": "s", "bucket": "b", "prefix": "p/" },
+        "source": { "state": "enabled" },
+        "observability": { "state": "enabled" },
+        "ingest": { "state": "disabled" }
+    });
+    let m = manifest_of(&every, Some(0));
+    assert_eq!(
+        manifest_areas(&m),
+        [
+            "inbox",
+            "overview",
+            "site",
+            "storage",
+            "source",
+            "metrics",
+            "capabilities",
+            "instances",
+            "platform"
+        ]
+    );
+    for area in m["areas"].as_array().unwrap() {
+        let views = area["views"].as_array().unwrap();
+        for (i, v) in views.iter().enumerate() {
+            assert!(anchor(v["id"].as_str().unwrap()), "{v}");
+            assert!(views[..i].iter().all(|w| w["id"] != v["id"]));
+        }
+    }
+    // The record's own title is data, passed through as it is; nothing else holds markup.
+    let mut text = m.clone();
+    text["instance"]["title"] = json!("All");
+    let text = text.to_string();
+    assert!(!text.contains('<') && !text.contains("html"), "{text}");
+}
+
+/// The Inbox counts every pending request on the home instance, landings included, and only
+/// its own requests on another.
+#[test]
+fn console_manifest_inbox_is_filtered_to_the_instance() {
+    use pigeon_capabilities::instances::manifest::inbox_count;
+    use pigeon_capabilities::instances::record::Instance;
+    use pigeon_core::approval::Record;
+
+    let approval = |kind: &str, subject: &str, summary: Value, state: &str| -> Record {
+        serde_json::from_value(json!({
+            "id": "a", "kind": kind, "subject": subject, "digest": "d", "summary": summary,
+            "caller_id": "c", "approver_id": null, "state": state,
+            "created_ms": 0, "expires_ms": 1, "decided_by": null, "decided_ms": null,
+            "used_ms": null
+        }))
+        .unwrap()
+    };
+    let open = [
+        approval("instance_draft", "sample", json!({}), "pending"),
+        approval("linked_plan", "other", json!({}), "pending"),
+        approval(
+            "tool_call",
+            "site_deploy",
+            json!({ "args": { "instance": "sample" } }),
+            "pending",
+        ),
+        approval(
+            "tool_call",
+            "deploy_token",
+            json!({ "args": {} }),
+            "pending",
+        ),
+        approval("instance_draft", "sample", json!({}), "denied"),
+    ];
+    let home: Instance = serde_json::from_value(
+        json!({ "id": "example/platform", "title": "Example", "account": { "kind": "home" } }),
+    )
+    .unwrap();
+    let sample: Instance = serde_json::from_value(
+        json!({ "id": "sample", "title": "Sample", "account": { "kind": "linked" } }),
+    )
+    .unwrap();
+    assert_eq!(inbox_count(&home, &open, 2), 6);
+    assert_eq!(inbox_count(&sample, &open, 2), 2);
+}
+
 /// A linked instance's plan: a first plan creates the bucket and uploads the Worker, then turns
 /// on its preview; what pigeon made reads back as unchanged; anything with pigeon's name that
 /// pigeon did not make is a conflict that stops the plan; a new Worker module is an update; no

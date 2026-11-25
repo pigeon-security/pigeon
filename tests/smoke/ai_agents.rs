@@ -800,7 +800,15 @@ fn ai_agents_loop_budgets_tools_and_turns() {
         .map(|t| t.name.as_str())
         .collect();
     assert_eq!(offered, service::TOOLS);
-    assert_eq!(manifest.capabilities[0].sections[0].tab, "instances");
+    let sections = &manifest.capabilities[0].sections;
+    assert_eq!(sections[0].tab, "sessions");
+    assert!(!sections[0].view);
+    let views: Vec<&str> = sections
+        .iter()
+        .filter(|s| s.view)
+        .map(|s| s.id.as_str())
+        .collect();
+    assert_eq!(views, ["live", "compare"]);
     assert_eq!(manifest.worker, "pigeon-ai-agents");
     // The section: what waits for the person first, every value escaped.
     use pigeon_ai_agents::page;

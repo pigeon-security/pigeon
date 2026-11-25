@@ -13,7 +13,10 @@ use worker::{Error, Method, Result};
 
 use crate::{Call, Capability, Context, Slot, arg, to_value, unknown};
 
-use crate::instances::{record::Instance, tools::Registration};
+use crate::instances::{
+    record::Instance,
+    tools::{Enabled, Registration, View},
+};
 
 const INSTANCE_TOOLS: &[Registration] = &[
     Registration {
@@ -32,19 +35,24 @@ const INSTANCE_TOOLS: &[Registration] = &[
     },
 ];
 
-/// Storage declares the subset of its tools exposed on enabled instance profiles.
-pub fn instance_tools(instance: &Instance) -> serde_json::Result<&'static [Registration]> {
-    Ok(
-        if instance
+const INSTANCE_VIEWS: &[View] = &[View {
+    area: "storage",
+    id: "buckets",
+    title: "Buckets",
+    order: 10,
+    since: None,
+}];
+
+/// Storage declares the subset of its tools, and its console view, on enabled instance profiles.
+pub fn instance_tools(instance: &Instance) -> serde_json::Result<Enabled> {
+    Ok(Enabled::when(
+        instance
             .storage
             .as_ref()
-            .is_some_and(|profile| profile.enabled())
-        {
-            INSTANCE_TOOLS
-        } else {
-            &[]
-        },
-    )
+            .is_some_and(|profile| profile.enabled()),
+        INSTANCE_TOOLS,
+        INSTANCE_VIEWS,
+    ))
 }
 
 /// The instance a scoped storage call names, once its arguments are only that instance and

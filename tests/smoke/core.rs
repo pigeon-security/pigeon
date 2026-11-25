@@ -951,7 +951,7 @@ fn core_architecture_draws_every_worker_in_the_map() {
 #[test]
 fn core_console_platform_section() {
     use pigeon_capabilities::Capability;
-    use pigeon_capabilities::console::{page, sections::Tab, snapshot};
+    use pigeon_capabilities::console::{page, snapshot};
     use pigeon_capabilities::observability::Observability;
     use pigeon_core::lanes::Map;
 
@@ -965,10 +965,13 @@ fn core_console_platform_section() {
         },
     };
     let s = o.sections();
-    assert_eq!(s.len(), 1);
     assert_eq!(s[0].id, "platform");
-    assert!(s[0].tab == Tab::Cost);
+    assert_eq!(s[0].area, "cost");
+    assert!(!s[0].view);
     assert!(s[0].cost.is_none());
+    // The Cost area's views are `cost_daily`'s ranges.
+    let views: Vec<&str> = s.iter().filter(|s| s.view).map(|s| s.id).collect();
+    assert_eq!(views, ["7d", "today", "all"]);
     assert_eq!(snapshot::fresh_ms("platform"), Some(600_000));
     assert_eq!(page::app_redirect("/cost"), Some("/app?tab=cost"));
     assert_eq!(page::app_redirect("/approvals"), Some("/app?tab=approvals"));

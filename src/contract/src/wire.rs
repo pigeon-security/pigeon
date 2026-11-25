@@ -112,12 +112,14 @@ pub struct ToolSpec {
     pub input_schema: Value,
 }
 
-/// A console section a capability fills.
+/// A console section a capability fills: a view of one of the console's platform areas, or,
+/// until the legacy panels go, only a data anchor (docs/plans/console-redesign.md).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SectionSpec {
-    /// The tab it sits on, such as `instances`.
+    /// The id of the console area it sits in, such as `sessions`. Core also reads the old tab
+    /// names (`approvals`, `architecture`) a Worker built before areas sends.
     pub tab: String,
-    /// Its anchor.
+    /// Its id: the view's stable id within the area when `view` is set, and its data anchor.
     pub id: String,
     /// Its title.
     #[serde(default)]
@@ -125,12 +127,15 @@ pub struct SectionSpec {
     /// One line under the title.
     #[serde(default)]
     pub description: String,
-    /// Its place within the tab, smallest first.
+    /// Its place within the area, smallest first.
     #[serde(default)]
     pub order: u16,
     /// The name it adds to the overview's total cost under, when it reports a cost.
     #[serde(default)]
     pub cost: Option<String>,
+    /// Whether `console_manifest` lists it as a view. False from a Worker built before views.
+    #[serde(default)]
+    pub view: bool,
 }
 
 /// A secret a capability needs set.

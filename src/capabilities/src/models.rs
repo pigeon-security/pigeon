@@ -12,7 +12,7 @@ pub use pigeon_models::{
     Ask, Dialect, Models, Provider, Reply, ask, daily, jobs, runner, stream, tags,
 };
 
-use crate::console::sections::{Section, Tab};
+use crate::console::sections::Section;
 use crate::users::User;
 use crate::{Call, Capability, Context, Expiring, External, Footprint, Slot, to_value};
 
@@ -31,14 +31,26 @@ impl Capability for Models {
     }
 
     fn sections(&self) -> Vec<Section> {
-        vec![Section {
-            tab: Tab::Cost,
-            id: self.section_id(),
-            title: pigeon_models::SECTION_TITLE,
-            description: pigeon_models::SECTION_DESCRIPTION,
-            order: pigeon_models::SECTION_ORDER,
-            cost: Some(pigeon_models::SECTION_COST),
-        }]
+        vec![
+            Section {
+                area: pigeon_models::SECTION_TAB,
+                id: self.section_id(),
+                title: pigeon_models::SECTION_TITLE,
+                description: pigeon_models::SECTION_DESCRIPTION,
+                order: pigeon_models::SECTION_ORDER,
+                cost: Some(pigeon_models::SECTION_COST),
+                view: false,
+            },
+            Section {
+                area: pigeon_models::VIEW_AREA,
+                id: pigeon_models::VIEW_ID,
+                title: pigeon_models::VIEW_TITLE,
+                description: pigeon_models::VIEW_DESCRIPTION,
+                order: pigeon_models::VIEW_ORDER,
+                cost: None,
+                view: true,
+            },
+        ]
     }
 
     /// Cost per day per model family over the last `days` days, from the gateway's logs.

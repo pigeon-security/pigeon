@@ -1,4 +1,6 @@
-//! Tool registration and target binding for the instance MCP endpoint.
+//! Tool and console-view registration, and target binding, for an approved instance. One
+//! [`Scope`] built from the record drives both the instance MCP endpoint's tools and the
+//! console's instance areas (`console_manifest`), so neither decides on its own.
 
 use pigeon_core::mcp::Tool;
 use serde_json::{Value, json};
@@ -13,15 +15,94 @@ pub struct Registration {
     pub arguments: &'static [&'static str],
 }
 
-type Register = fn(&Instance) -> serde_json::Result<&'static [Registration]>;
+/// One console view a capability adds to an instance while it is enabled: a page in one of the
+/// console's areas (`console::sections::AREAS`). Its area and id form the console's URL, so a
+/// shipped id never changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct View {
+    /// The area it sits in, such as `site`.
+    pub area: &'static str,
+    /// Its id within the area, such as `deployments`.
+    pub id: &'static str,
+    pub title: &'static str,
+    /// Its place within the area, smallest first.
+    pub order: u16,
+    /// The capability version that first serves it. An instance whose pin selects an older
+    /// version still lists it, flagged for an upgrade.
+    pub since: Option<&'static str>,
+}
 
-const CAPABILITIES: &[Register] = &[
-    super::publishing::instance_tools,
-    crate::storage::instance_tools,
-    crate::source::read::instance_tools,
-    crate::ci::instance_tools,
-    crate::observability::instance::instance_tools,
-    crate::ingest::instance_tools,
+/// What a capability adds to an instance: nothing while its profile is unset.
+#[derive(Clone, Copy)]
+pub struct Enabled {
+    pub tools: &'static [Registration],
+    pub views: &'static [View],
+}
+
+impl Enabled {
+    pub const NONE: Enabled = Enabled {
+        tools: &[],
+        views: &[],
+    };
+
+    /// `tools` and `views` when `on`, else nothing.
+    pub fn when(on: bool, tools: &'static [Registration], views: &'static [View]) -> Self {
+        if on {
+            Self { tools, views }
+        } else {
+            Self::NONE
+        }
+    }
+}
+
+type Register = fn(&Instance) -> serde_json::Result<Enabled>;
+
+/// A capability that an instance enables by a field on its approved record.
+pub struct Contributor {
+    /// Its name in the console manifest, such as `publishing`.
+    pub name: &'static str,
+    /// The versioned component its pin names, such as `sites`.
+    pub component: &'static str,
+    pub register: Register,
+}
+
+/// Every instance capability. The console lists an area's views by their order, not this one.
+pub const CAPABILITIES: &[Contributor] = &[
+    Contributor {
+        name: "publishing",
+        component: "sites",
+        register: super::publishing::instance_tools,
+    },
+    Contributor {
+        name: "site_passkeys",
+        component: "site_passkeys",
+        register: crate::site_passkeys::instance_views,
+    },
+    Contributor {
+        name: "storage",
+        component: "storage",
+        register: crate::storage::instance_tools,
+    },
+    Contributor {
+        name: "source",
+        component: "source",
+        register: crate::source::read::instance_tools,
+    },
+    Contributor {
+        name: "ci",
+        component: "ci",
+        register: crate::ci::instance_tools,
+    },
+    Contributor {
+        name: "observability",
+        component: "observability",
+        register: crate::observability::instance::instance_tools,
+    },
+    Contributor {
+        name: "ingest",
+        component: "ingest",
+        register: crate::ingest::instance_tools,
+    },
 ];
 
 /// What core does with an instance-targeted call from the global connector when the receiving
@@ -97,17 +178,44 @@ pub fn bind_global(
         .map_err(|why| format!("`{tool}` on instance `{instance}`: {why}"))
 }
 
+/// A view an instance's enabled capability adds, with that capability.
+#[derive(Clone, Copy, Debug)]
+pub struct ScopedView {
+    pub capability: &'static str,
+    pub component: &'static str,
+    pub view: &'static View,
+}
+
 /// An approved instance's enabled capabilities. The request cannot supply a replacement scope.
 pub struct Scope {
     instance: String,
     registrations: Vec<&'static Registration>,
+    views: Vec<ScopedView>,
 }
 
 impl Scope {
     pub fn new(instance: &Instance) -> serde_json::Result<Self> {
         let mut registrations: Vec<&'static Registration> = Vec::new();
-        for register in CAPABILITIES {
-            for registration in register(instance)? {
+        let mut views: Vec<ScopedView> = Vec::new();
+        for contributor in CAPABILITIES {
+            let enabled = (contributor.register)(instance)?;
+            for view in enabled.views {
+                if views
+                    .iter()
+                    .any(|known| known.view.area == view.area && known.view.id == view.id)
+                {
+                    return Err(serde::de::Error::custom(format!(
+                        "duplicate instance view registration: {}/{}",
+                        view.area, view.id,
+                    )));
+                }
+                views.push(ScopedView {
+                    capability: contributor.name,
+                    component: contributor.component,
+                    view,
+                });
+            }
+            for registration in enabled.tools {
                 if registrations
                     .iter()
                     .any(|known| known.name == registration.name)
@@ -123,7 +231,13 @@ impl Scope {
         Ok(Self {
             instance: instance.id.clone(),
             registrations,
+            views,
         })
+    }
+
+    /// The console views the instance's enabled capabilities add.
+    pub fn views(&self) -> &[ScopedView] {
+        &self.views
     }
 
     /// The approved target identifier, used when core signs a call to another Worker.

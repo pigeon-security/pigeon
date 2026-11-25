@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use worker::{Env, Error, Headers, Method, Request, Response, Result};
 
 use crate::console::page;
-use crate::console::sections::{Section, Tab};
+use crate::console::sections::Section;
 use crate::expiry::{self, Expiry};
 use crate::passkeys::Passkeys;
 use crate::users::{User, directory};
@@ -41,15 +41,29 @@ fn bad(why: &str) -> Error {
     Error::RustError(why.to_string())
 }
 
-/// The Credentials section of the app's Access page, which secrets and proxy credentials share.
+/// The legacy Credentials panel's data anchor, which secrets and proxy credentials share.
 pub fn keys_section() -> Section {
     Section {
-        tab: Tab::Access,
+        area: "access",
         id: "credentials",
         title: "Secrets and credentials",
         description: "Each with its expiry. Values are never shown; setting or replacing one asks for your passkey, bound to that name.",
         order: 1,
         cost: None,
+        view: false,
+    }
+}
+
+/// Access › Secrets.
+fn secrets_view() -> Section {
+    Section {
+        area: "access",
+        id: "secrets",
+        title: "Secrets",
+        description: "Each secret with its expiry. Values are never shown; setting or replacing one asks for your passkey, bound to that name.",
+        order: 10,
+        cost: None,
+        view: true,
     }
 }
 
@@ -311,7 +325,7 @@ impl Capability for Secrets {
     }
 
     fn sections(&self) -> Vec<Section> {
-        vec![keys_section()]
+        vec![keys_section(), secrets_view()]
     }
 
     /// Every declared secret and the store's others, set or missing, never a value; the

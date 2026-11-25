@@ -15,7 +15,7 @@ fn read_keys(name: &str) -> Option<&'static [&'static str]> {
         "land_list" => &["limit", "state"],
         "cost_daily" => &["range"],
         "capabilities_versions" => &["instance", "changelog"],
-        "capabilities_upgrade_plan" | "app_linked_details" => &["instance"],
+        "capabilities_upgrade_plan" | "app_linked_details" | "console_manifest" => &["instance"],
         "architecture_describe" => &["public", "svg"],
         "ai_agents_compare" => &["days", "role"],
         "tokens_status" | "oauth_clients" | "users_people" | "secrets_list" | "instances_list"
