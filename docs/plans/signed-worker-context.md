@@ -13,13 +13,25 @@
    receiver manifest and issues exactly one signed request for that
    Worker and instance. Unsupported receivers are refused before fetch.
    A rejection or transport error never triggers a legacy retry.
-3. Keep the platform-wide route and scheduled publishing on their current
-   transport during this migration. Scheduled publishing still checks its
-   queued binding and policy before dispatch, and Sites still checks the
-   approved publishing target. Convert scheduled publishing separately
-   by deriving the signed scope from the validated instance record and
-   negotiating support before sending.
-4. Once every entry point for a tool carries the scope, call
+3. Deploy the queued publishing receiver before switching its sender.
+   Sites accepts the private `site_deploy_queued` call only with matching
+   signed instance context, a standard caller, an exact commit, and the
+   approved publishing record digest. The existing receiver checks the
+   digest before it obtains credentials and rejects an archive whose
+   commit differs from the queued one. Existing manual publishing and
+   rollback stay on their established routes. The compatibility receiver
+   continues accepting the old scheduled call while older core Workers
+   are deployed.
+4. After that receiver deploys, switch the GitHub scheduler to the
+   contextual sender. The scheduler rechecks the queued binding, the
+   linked account and its owner, and the caller's publishing policy
+   before signing the request. Legacy account links identify the person
+   by name, so the scheduler requires a unique standard-user match.
+   A receiver without context support, an
+   older receiver that has no queued handler, or a contextual rejection
+   uses the existing bounded queue failure/retry behavior. No request
+   retries with a legacy envelope.
+5. Once every entry point for a tool carries the scope, call
    `Signed::require_instance` in that receiving tool before resolving its
    resources. Keep deliberate global operations on their own request path.
    This is the point at which the receiver can refuse legacy requests for
@@ -78,6 +90,9 @@ are outside the Worker binding envelope.
 3. Retain legacy global connector entry points until their instance-targeted tools use a bound
    adapter. Then require matching signed context on the receiving instance operations. Keep
    platform-only submissions, operator tooling, and protocol-specific callbacks available.
+Once all scheduler deployments are on the contextual sender, remove the
+old scheduled-only publishing binding argument from the general deploy
+call. Manual deploys and rollbacks retain their explicit platform path.
 
 ## Verification
 

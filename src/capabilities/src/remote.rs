@@ -265,18 +265,30 @@ async fn caller_key(env: &Env) -> Result<String> {
     secrets_store::read(&store).await?.ok_or_else(missing)
 }
 
-/// Calls `tool` of capability `capability` on the Worker bound as `binding`, as `caller`
-/// (a serialized [`crate::users::Caller`]), with owned inputs, so it can run after a request's
-/// answer has gone (`wait_until`). Answers the tool's result.
-pub async fn call_owned(
+/// Sends a background call after its workflow validated the current approved instance and
+/// selected its caller. This path has no legacy transport.
+pub async fn call_owned_instance(
     env: Env,
-    binding: &'static str,
+    binding: &Binding,
     capability: &str,
     tool: &str,
     args: Value,
     caller: Value,
+    instance: &crate::instances::record::Instance,
 ) -> Result<Value> {
-    let fetcher = env.service(binding)?;
+    if args["instance"].as_str() != Some(instance.id.as_str()) {
+        return Err(failure(
+            "background call arguments do not match the approved instance",
+        ));
+    }
+    let offer = manifest_of(&env, binding).await.map_err(failure)?;
+    let context = instance_context(
+        binding.worker,
+        offer.supports_worker_context() && offer.manifest.worker == binding.worker,
+        &instance.id,
+    )
+    .map_err(failure)?;
+    let fetcher = env.service(binding.binding)?;
     let key = caller_key(&env).await?;
     let nonce = webauthn::random()?;
     let body = json_of(&CallRequest {
@@ -284,18 +296,19 @@ pub async fn call_owned(
         tool: tool.to_string(),
         args,
     })?;
-    match pigeon_contract::ask(
+    match pigeon_contract::ask_with_context(
         &fetcher,
         BASE,
         "call",
         &body,
-        Some((key.as_bytes(), &caller)),
+        (key.as_bytes(), &caller),
         &nonce,
+        &context,
     )
     .await?
     {
-        Answer::Ok(v) => Ok(v),
-        Answer::Error(f) => Err(failure(format!("{binding}: {}", f.message))),
+        Answer::Ok(value) => Ok(value),
+        Answer::Error(error) => Err(failure(format!("{}: {}", binding.binding, error.message))),
     }
 }
 

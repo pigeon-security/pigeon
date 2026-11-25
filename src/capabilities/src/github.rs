@@ -100,7 +100,10 @@ pub(crate) async fn installation_token_for(
 /// The ref whose pushes deploy.
 pub const DEPLOY_REF: &str = "refs/heads/main";
 /// The capability Worker that deploys sites, as core binds it.
-const SITES_BINDING: &str = "SITES";
+const SITES_BINDING: crate::remote::Binding = crate::remote::Binding {
+    binding: "SITES",
+    worker: "pigeon-sites",
+};
 
 /// The Directory key of `instance`'s latest push-started deploy and how it went.
 pub fn deploy_key(instance: &str) -> String {
@@ -206,13 +209,14 @@ async fn run_publish(
     if !publish_allowed(env, actor).await? {
         return Ok(json!({ "deployed": false, "problems": ["policy requires manual publishing"] }));
     }
-    crate::remote::call_owned(
+    crate::remote::call_owned_instance(
         env.clone(),
-        SITES_BINDING,
+        &SITES_BINDING,
         "sites",
-        "site_deploy",
+        "site_deploy_queued",
         json!({ "instance": instance.id, "rev": commit, "publishing_binding": binding }),
         person,
+        instance,
     )
     .await
 }
@@ -299,13 +303,17 @@ async fn deployer(
         ));
     }
     let listed = directory(env, "users.list", json!({})).await?;
-    let person = listed["users"]
+    let mut matching = listed["users"]
         .as_array()
         .into_iter()
         .flatten()
-        .find(|u| u["kind"] == "standard" && u["name"] == link.linked_by.as_str())
-        .cloned()
-        .ok_or_else(|| bad(&format!("no person named {} linked it", link.linked_by)))?;
+        .filter(|user| user["kind"] == "standard" && user["name"] == link.linked_by.as_str());
+    let person = matching
+        .next()
+        .ok_or_else(|| bad("the person who linked this account no longer exists"))?;
+    if matching.next().is_some() {
+        return Err(bad("the linked account owner's name is ambiguous"));
+    }
     Ok(json!({ "user": person, "acting_for": null }))
 }
 
