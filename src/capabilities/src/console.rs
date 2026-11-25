@@ -499,9 +499,20 @@ impl Console {
                 .await?;
                 let id = user["id"].as_str().unwrap_or_default();
                 let code = directory(env, "enrol.create", json!({ "user_id": id })).await?;
+                let link = format!(
+                    "https://{}/auth/enrol?code={}",
+                    self.host,
+                    code.as_str().unwrap_or_default()
+                );
                 json!({
                     "message": format!("{target} is added. Send them this link to register a passkey: it works once, within 15 minutes."),
-                    "link": format!("https://{}/auth/enrol?code={}", self.host, code.as_str().unwrap_or_default()),
+                    "link": link,
+                    // The new console's ShowOnce (P3).
+                    "reveal": {
+                        "value": link,
+                        "note": format!("Send this link to {target}. They register their own passkey from it, within 15 minutes."),
+                        "kind": "invite",
+                    },
                 })
             }
             "visitor-invite" => {

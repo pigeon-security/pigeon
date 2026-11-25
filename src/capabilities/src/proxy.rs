@@ -232,16 +232,19 @@ impl Tokens {
             }),
         )
         .await?;
+        let message = format!(
+            "Shown once. Save it as the cloud environment's network secret for {}: \
+             header Authorization, prefix Bearer.",
+            self.proxy_host
+        );
         Ok(json!({
             "token": secret,
             "id": &secret_hash[..ID_LEN],
             "label": label,
             "expires_in_days": days,
-            "message": format!(
-                "Shown once. Save it as the cloud environment's network secret for {}: \
-                 header Authorization, prefix Bearer.",
-                self.proxy_host
-            ),
+            // The new console's ShowOnce (P3).
+            "reveal": { "value": secret, "note": message, "kind": "token" },
+            "message": message,
         }))
     }
 }

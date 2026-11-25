@@ -902,6 +902,28 @@ impl Capability for Apple {
         vec!["/apple/", "/app/oauth"]
     }
 
+    /// `apple-adopt` and `apple-identity`, through the console's one write path: the same
+    /// writes as `/apple/{adopt,identity}`, bound to the signed-in person's passkey.
+    fn write_make<'a>(
+        &'a self,
+        cx: &'a Context<'a>,
+        w: &'a crate::console::write::Write<'a>,
+    ) -> Call<'a> {
+        Box::pin(async move {
+            let person = w
+                .person
+                .ok_or_else(|| Error::RustError("no person".into()))?;
+            let message = match w.action.id {
+                "apple-adopt" => adopt(cx.env).await?,
+                "apple-identity" => create_identity(cx, &person.name).await?,
+                other => {
+                    return Err(Error::RustError(format!("apple makes no write `{other}`")));
+                }
+            };
+            Ok(json!({ "message": message }))
+        })
+    }
+
     fn fetch<'a>(&'a self, cx: &'a Context<'a>, req: Request) -> Serve<'a> {
         Box::pin(self.serve(cx, req))
     }

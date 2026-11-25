@@ -253,6 +253,21 @@ ol.steps { padding-left: 18px; display: grid; gap: 2px; }
 .toast.bad { border-left-color: var(--bad); }
 .help-grid { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; align-items: center; }
 
+/* More: a folded secondary list under a table */
+details.more { border: 1px solid var(--line); border-radius: var(--r-2); background: var(--surface); }
+details.more > summary { padding: 7px 10px; cursor: pointer; color: var(--ink-2); font-weight: 500; }
+details.more[open] > summary { border-bottom: 1px solid var(--line); }
+details.more > .section { padding: 8px; }
+.tbl ul.plain { list-style: none; padding: 0; display: grid; gap: 2px; }
+.tbl tr.detail .tbl-wrap { background: var(--surface); }
+.who-cell { display: inline-flex; align-items: center; gap: 8px; }
+.stats { display: flex; flex-wrap: wrap; gap: 4px 16px; color: var(--ink-2); }
+.stats strong { color: var(--ink); font-variant-numeric: tabular-nums; }
+
+/* A diagram the platform drew (an SVG in an img), scrolled sideways when narrow */
+.figure { border: 1px solid var(--line); border-radius: var(--r-2); background: var(--surface); padding: var(--sp-2); overflow-x: auto; }
+.figure img { display: block; width: 100%; min-width: 760px; height: auto; }
+
 /* Sign in and full-page states */
 .signin { min-height: 100vh; display: grid; place-items: center; padding: 16px; background: var(--sunk); }
 .signin .box { width: min(340px, 100%); border: 1px solid var(--line); background: var(--surface); border-radius: var(--r-2); padding: 20px; display: grid; gap: 12px; }
@@ -269,4 +284,9 @@ ol.steps { padding-left: 18px; display: grid; gap: 2px; }
   .nav kbd, .nav-label { display: none; }
   .main { padding-left: 16px; padding-right: 16px; }
   .input[type="search"] { width: 100%; }
+  /* Narrow: a table keeps its words whole and scrolls inside its frame instead. */
+  .tbl td { overflow-wrap: normal; }
+  .tbl td.mono { white-space: nowrap; }
+  .tbl td:not(.acts) { min-width: 88px; }
+  .tbl td.wide { min-width: 220px; }
 }

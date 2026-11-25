@@ -30,7 +30,14 @@ fn bound_purpose(
 
 #[test]
 fn console_write_actions_each_have_a_handler_and_policy() {
-    const OWNERS: &[&str] = &["secrets", "proxy", "linked", "instances", "console"];
+    const OWNERS: &[&str] = &[
+        "secrets",
+        "proxy",
+        "linked",
+        "instances",
+        "console",
+        "apple",
+    ];
     let mut ids = std::collections::BTreeSet::new();
     for a in ACTIONS {
         assert!(ids.insert(a.id), "{} twice", a.id);
@@ -87,6 +94,8 @@ fn console_write_actions_each_have_a_handler_and_policy() {
         "agents-config",
         "site-rollback",
         "site-deploy",
+        "apple-adopt",
+        "apple-identity",
     ] {
         assert!(action(id).is_some(), "{id}");
     }
@@ -501,6 +510,9 @@ fn console_ops_allow_the_reads_the_console_needs_and_nothing_else() {
         "ai_agents_compare",
         "cost_daily",
         "secrets_list",
+        "credentials_expiry",
+        "app_proxy_tokens",
+        "app_people",
         "tokens_status",
         "users_people",
         "oauth_clients",
@@ -602,6 +614,7 @@ fn console_ops_allow_the_reads_the_console_needs_and_nothing_else() {
         ("cost_daily", json!({ "range": "7d", "extra": 1 })),
         ("cost_daily", json!([])),
         ("ai_agents_stop", json!({})),
+        ("app_people", json!({ "user_id": "u1" })),
     ] {
         assert!(!allowed(op, &args), "{op} {args}");
     }
@@ -637,15 +650,7 @@ fn console_ops_allow_the_reads_the_console_needs_and_nothing_else() {
 
 /// The views the new console shell still renders with an explicit TODO-port placeholder, which
 /// links to the same page in the current console. Shrinks to nothing as views are ported.
-const CONSOLE_TODO_PORT: &[&str] = &[
-    "access/secrets",
-    "access/tokens",
-    "access/people",
-    "access/apps",
-    "platform/architecture",
-    "platform/models",
-    "platform/endpoints",
-];
+const CONSOLE_TODO_PORT: &[&str] = &[];
 
 /// Every area and view `console_manifest` can send: its answer for a home instance with every
 /// instance capability enabled, given every platform capability's sections (core's own, and

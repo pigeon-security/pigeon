@@ -266,6 +266,23 @@ pub const ACTIONS: &[Action] = &[
             Change::Nothing,
         )
     },
+    // Apple signing (P8): shown in Access › Secrets once APPLE_ASC_KEY is set.
+    act(
+        "apple-adopt",
+        "Adopt the app's bundle id",
+        Cap("apple"),
+        false,
+        Target::Fixed(pigeon_core::apple::BUNDLE_ID),
+        Change::Nothing,
+    ),
+    act(
+        "apple-identity",
+        "Create the app's signing identity",
+        Cap("apple"),
+        false,
+        Target::Fixed(pigeon_core::apple::BUNDLE_ID),
+        Change::Nothing,
+    ),
     act(
         "model-defaults",
         "Set model defaults",

@@ -11,7 +11,7 @@ use worker::{Response, Result};
 
 use super::{SECTION_MS, answer, bad, failed, timed};
 use crate::site_passkeys::console as site_access;
-use crate::users::{Caller, User};
+use crate::users::{Caller, User, directory};
 use crate::{Context, approvals, dispatch};
 
 /// The reads the console may make, each with the only arguments it may be given. The called
@@ -76,6 +76,9 @@ pub const READS: &[(&str, &[&str])] = &[
     ("cost_daily", &["range"]),
     // Access: secrets (names and state only), tokens, people, passkeys, apps.
     ("secrets_list", &[]),
+    ("credentials_expiry", &[]),
+    ("app_proxy_tokens", &[]),
+    ("app_people", &[]),
     ("tokens_status", &[]),
     ("users_people", &[]),
     ("users_list", &[]),
@@ -265,6 +268,56 @@ async fn ingest_runs(cx: &Context<'_>, args: &Value) -> Result<Value> {
     Ok(json!({ "instance": id, "runs": crate::ingest::runs(cx.env, id).await? }))
 }
 
+/// Access › Tokens: the live proxy credentials and those that ended in the last two weeks, by
+/// id, label, who issued each and when each ends. Never a value or a hash.
+async fn proxy_tokens(cx: &Context<'_>) -> Result<Value> {
+    let tokens = directory(
+        cx.env,
+        "proxy.tokens",
+        json!({ "expired_within_ms": crate::expiry::EXPIRED_SHOWN_MS }),
+    )
+    .await?;
+    Ok(json!({ "tokens": tokens }))
+}
+
+/// Access › People and Apps: each person with their passkeys (no key material), each app or
+/// service user with the person it acts for, its live token count and its kind, and who is
+/// asking.
+async fn people(cx: &Context<'_>, me: &str) -> Result<Value> {
+    let all = directory(cx.env, "people.list", json!({})).await?;
+    let clients = directory(cx.env, "oauth.clients", json!({})).await?;
+    let list = |v: &Value, k: &str| v[k].as_array().cloned().unwrap_or_default();
+    let oauth: Vec<&str> = clients
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|c| c["service_user_id"].as_str())
+        .collect();
+    let passkeys = list(&all, "passkeys");
+    let people: Vec<Value> = list(&all, "people")
+        .iter()
+        .map(|p| {
+            let name = p["name"].as_str().unwrap_or_default();
+            json!({
+                "id": p["id"],
+                "name": name,
+                "initials": crate::users::initials(name),
+                "created_at": p["created_at"],
+                "passkeys": passkeys.iter().filter(|k| k["user_id"] == p["id"]).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    let apps: Vec<Value> = list(&all, "apps")
+        .into_iter()
+        .map(|mut a| {
+            let app = a["id"].as_str().is_some_and(|id| oauth.contains(&id));
+            a["kind"] = json!(if app { "app" } else { "service" });
+            a
+        })
+        .collect();
+    Ok(json!({ "me": me, "people": people, "apps": apps }))
+}
+
 /// The inbox for `args.instance`, or all of it.
 async fn inbox(cx: &Context<'_>, args: &Value) -> Result<Value> {
     let listing = dispatch(cx, "approvals_list", &serde_json::json!({})).await?;
@@ -315,6 +368,8 @@ pub(super) async fn serve(
         match name {
             "app_linked_details" => linked_details(&person_cx, args).await,
             "app_inbox" => inbox(&person_cx, args).await,
+            "app_proxy_tokens" => proxy_tokens(&person_cx).await,
+            "app_people" => people(&person_cx, &caller.user.id).await,
             "app_site_hosts" => {
                 site_access::serve(host, cx.env, site_access::Action::Hosts, args).await
             }

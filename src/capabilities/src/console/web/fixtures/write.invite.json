@@ -1,0 +1,7 @@
+{
+  "reveal": {
+    "value": "https://platform.example.dev/auth/enrol?code=EXAMPLE_a41d9c",
+    "note": "Send this link to Lee Ortega. They register their own passkey from it, within 15 minutes.",
+    "kind": "invite"
+  }
+}

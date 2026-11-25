@@ -1,0 +1,33 @@
+{
+  "_recorded_ms": 1795000000000,
+  "tokens": [
+    {
+      "id": "4f0a9c1e7b2d",
+      "label": "ci-gateway session",
+      "person": "Rowan Hale",
+      "created_at": 1794654400000,
+      "expires_at": 1797250000000
+    },
+    {
+      "id": "39c27d0b5e11",
+      "label": "docs agent",
+      "person": "Sam Ito",
+      "created_at": 1792753600000,
+      "expires_at": 1795349200000
+    },
+    {
+      "id": "2b77e0a4c9f3",
+      "label": "release laptop",
+      "person": "Rowan Hale",
+      "created_at": 1793876800000,
+      "expires_at": 1801656400000
+    },
+    {
+      "id": "1a03b8d6f250",
+      "label": "nightly-bench",
+      "person": "Kai Moreno",
+      "created_at": 1791803200000,
+      "expires_at": 1794395200000
+    }
+  ]
+}

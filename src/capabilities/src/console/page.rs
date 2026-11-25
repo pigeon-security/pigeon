@@ -96,6 +96,16 @@ pub const NEXT_ASSETS: &[(&str, &str, &str)] = &[
         "text/javascript; charset=utf-8",
         include_str!("web/views/capabilities.js"),
     ),
+    (
+        "/app/next/views/access.js",
+        "text/javascript; charset=utf-8",
+        include_str!("web/views/access.js"),
+    ),
+    (
+        "/app/next/views/platform.js",
+        "text/javascript; charset=utf-8",
+        include_str!("web/views/platform.js"),
+    ),
 ];
 
 /// Whether `path` is one of the redesigned shell's pages, `/app/next` or below it, rather than

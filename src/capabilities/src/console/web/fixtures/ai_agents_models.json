@@ -1,0 +1,83 @@
+{
+  "defaults": {
+    "planner": {
+      "model": "anthropic/claude-opus-5-5",
+      "route": "byok",
+      "source": "stored",
+      "effort": "high"
+    },
+    "executor": {
+      "model": "anthropic/claude-sonnet-5-5",
+      "route": "byok",
+      "source": "built_in",
+      "effort": "medium"
+    },
+    "mechanical": {
+      "model": "anthropic/claude-haiku-5-5",
+      "route": "byok",
+      "source": "built_in",
+      "effort": "low"
+    },
+    "summary": {
+      "model": "anthropic/claude-haiku-5-5",
+      "route": "byok",
+      "source": "built_in",
+      "effort": "low"
+    },
+    "planner_integrate": {
+      "model": null,
+      "route": null,
+      "source": "unset"
+    },
+    "planner_docs": {
+      "model": "cf-anthropic/claude-sonnet-5-5",
+      "route": "credits",
+      "source": "stored"
+    },
+    "planner_fix": {
+      "model": null,
+      "route": null,
+      "source": "unset"
+    },
+    "planner_design": {
+      "model": null,
+      "route": null,
+      "source": "unset"
+    }
+  },
+  "tiers": {
+    "anthropic": {
+      "top": "claude-opus-5-5",
+      "middle": "claude-sonnet-5-5",
+      "small": "claude-haiku-5-5",
+      "other": []
+    },
+    "cf-anthropic": {
+      "top": "claude-opus-5-5",
+      "middle": "claude-sonnet-5-5",
+      "small": "claude-haiku-5-5",
+      "other": []
+    },
+    "openai": {
+      "top": "gpt-6.2-astra",
+      "middle": "gpt-6.2-sol",
+      "small": "gpt-6.1-terra",
+      "other": []
+    },
+    "cf-openai": {
+      "top": "gpt-6.2-astra",
+      "middle": "gpt-6.2-sol",
+      "small": "gpt-6.1-terra",
+      "other": [
+        "gpt-6-luna"
+      ]
+    },
+    "workers-ai": {
+      "top": "@cf/zai-org/glm-5.3",
+      "middle": "@cf/moonshotai/kimi-k2.7-code",
+      "small": null,
+      "other": []
+    }
+  },
+  "notes": []
+}

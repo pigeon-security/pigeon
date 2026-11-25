@@ -1,0 +1,99 @@
+{
+  "_recorded_ms": 1795000000000,
+  "me": "u_rowan",
+  "people": [
+    {
+      "id": "u_rowan",
+      "name": "Rowan Hale",
+      "initials": "RH",
+      "created_at": 1777720000000,
+      "passkeys": [
+        {
+          "id": "pk_mac_touch",
+          "user_id": "u_rowan",
+          "name": "MacBook Touch ID",
+          "created_at": 1777720000000,
+          "last_used_at": 1794996400000
+        },
+        {
+          "id": "pk_yubi_5c",
+          "user_id": "u_rowan",
+          "name": "YubiKey 5C",
+          "created_at": 1777720000000,
+          "last_used_at": 1793876800000
+        }
+      ]
+    },
+    {
+      "id": "u_sam",
+      "name": "Sam Ito",
+      "initials": "SI",
+      "created_at": 1781176000000,
+      "passkeys": [
+        {
+          "id": "pk_sam_phone",
+          "user_id": "u_sam",
+          "name": "iPhone",
+          "created_at": 1781176000000,
+          "last_used_at": 1794913600000
+        }
+      ]
+    },
+    {
+      "id": "u_kai",
+      "name": "Kai Moreno",
+      "initials": "KM",
+      "created_at": 1788088000000,
+      "passkeys": [
+        {
+          "id": "pk_kai_pixel",
+          "user_id": "u_kai",
+          "name": "Pixel 9",
+          "created_at": 1788088000000,
+          "last_used_at": 1794568000000
+        },
+        {
+          "id": "pk_kai_hello",
+          "user_id": "u_kai",
+          "name": "Windows Hello",
+          "created_at": 1788260800000,
+          "last_used_at": null
+        }
+      ]
+    }
+  ],
+  "apps": [
+    {
+      "id": "svc_claude_code",
+      "name": "Claude Code",
+      "person": "u_rowan",
+      "linked_at": 1777806400000,
+      "tokens": 3,
+      "kind": "app"
+    },
+    {
+      "id": "svc_claude_ai",
+      "name": "Claude (claude.ai)",
+      "person": "u_rowan",
+      "linked_at": 1780484800000,
+      "tokens": 1,
+      "kind": "app"
+    },
+    {
+      "id": "svc_docs_agent",
+      "name": "docs-agent",
+      "person": "u_sam",
+      "linked_at": 1791716800000,
+      "tokens": 1,
+      "kind": "service"
+    },
+    {
+      "id": "svc_old_client",
+      "name": "old-mcp-client",
+      "person": null,
+      "linked_at": null,
+      "tokens": 0,
+      "kind": "app"
+    }
+  ]
+}

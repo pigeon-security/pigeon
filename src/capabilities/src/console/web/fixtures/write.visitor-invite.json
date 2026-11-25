@@ -1,0 +1,7 @@
+{
+  "reveal": {
+    "value": "https://fixture.example.dev/auth/enrol?code=FIXTURE-NOT-A-REAL-CODE",
+    "note": "Send this link to the person you invited.",
+    "kind": "invite"
+  }
+}

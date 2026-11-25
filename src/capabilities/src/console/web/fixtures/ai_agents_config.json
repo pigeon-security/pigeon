@@ -1,0 +1,10 @@
+{
+  "max_live_runs": 8,
+  "max_executors_per_planner": 4,
+  "executor_reserve": 3,
+  "is_default": {
+    "max_live_runs": true,
+    "max_executors_per_planner": false,
+    "executor_reserve": true
+  }
+}

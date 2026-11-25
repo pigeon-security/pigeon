@@ -35,9 +35,15 @@
     "storage_list_objects", "source_resolve_revision", "source_read_file", "ci_jobs", "ci_status",
     "observability_worker_metrics", "app_ingest_runs", "ingest_report",
     "ai_agents_status", "ai_agents_compare", "cost_daily", "land_list",
-    "site_releases", "app_site_hosts", "app_site_visitors", "capabilities_versions", "capabilities_upgrade_plan"]);
+    "site_releases", "app_site_hosts", "app_site_visitors", "capabilities_versions", "capabilities_upgrade_plan",
+    // Access and Platform.
+    "secrets_list", "credentials_expiry", "app_proxy_tokens", "app_people", "architecture_describe",
+    "ai_agents_models", "ai_agents_config"]);
   const WRITES = Object.freeze(["approval-approve", "approval-deny", "land-approve", "run-stop", "run-note", "run-extend",
-    "instance-put", "linked-unlink", "site-deploy", "site-rollback", "visitor-invite", "visitor-revoke"]);
+    "instance-put", "linked-unlink", "site-deploy", "site-rollback", "visitor-invite", "visitor-revoke",
+    // Access and Platform.
+    "secret-set", "apple-adopt", "apple-identity", "token-issue", "token-revoke", "invite", "passkey-remove",
+    "app-disconnect", "model-defaults", "agents-config"]);
 
   // ---- Fixture mode (P14) and routing base.
   const query = new URLSearchParams(location.search);
@@ -48,8 +54,8 @@
   let person = FIXTURES ? "Fixture Person" : root.dataset.person;
 
   // ---- Elements: text only, never HTML.
-  const TAGS = new Set("a aside b button code dd div dl dt em footer form h1 h2 h3 header hr input kbd label li main nav ol option p pre section select small span strong table tbody td textarea th thead time tr ul".split(" "));
-  const ATTRS = /^(?:aria-[\w-]+|data-[\w-]+|id|class|role|tabindex|title|href|alt|type|name|value|placeholder|disabled|hidden|spellcheck|selected|checked|for|autocomplete|rows|colspan|scope|datetime|min|max|maxlength|step)$/;
+  const TAGS = new Set("a aside b button code dd details div dl dt em footer form h1 h2 h3 header hr img input kbd label li main nav ol option p pre section select small span strong summary table tbody td textarea th thead time tr ul".split(" "));
+  const ATTRS = /^(?:aria-[\w-]+|data-[\w-]+|id|class|role|tabindex|title|href|src|alt|type|name|value|placeholder|disabled|hidden|spellcheck|selected|checked|for|autocomplete|rows|colspan|scope|datetime|min|max|maxlength|step)$/;
   function el(tag, attrs = {}, ...children) {
     if (!TAGS.has(tag)) throw new TypeError(`Unsupported tag: ${tag}`);
     const node = document.createElement(tag);
@@ -58,7 +64,11 @@
       if (key === "text") node.textContent = value;
       else if (key === "on") for (const [type, fn] of Object.entries(value)) node.addEventListener(type, fn);
       else if (!ATTRS.test(key)) throw new TypeError(`Unsupported attribute: ${key}`);
-      else if (key === "href") {
+      else if (key === "src") {
+        // Only an image the platform drew, as a data URL: an SVG in an img runs no script.
+        if (tag !== "img" || !/^data:image\/svg\+xml;base64,[A-Za-z0-9+/=]+$/.test(value)) throw new TypeError("Unsupported image");
+        node.setAttribute(key, value);
+      } else if (key === "href") {
         const target = new URL(value, location.href);
         if (target.origin !== location.origin && target.protocol !== "https:") throw new TypeError("Unsupported URL");
         node.setAttribute(key, value);
@@ -252,12 +262,16 @@
   // ConfirmDialog (P2, P4): names the target and the exact change, then asks for the passkey in
   // place through the one write path. `danger` makes the confirm button the danger variant.
   // A write that answers { reveal: {value, note, kind} } turns the dialog into ShowOnce.
-  function confirm({ title, target = [], diff, effect, action, id, change, danger = false, confirmLabel, onDone }) {
+  // `form` adds fields to the dialog; `prepare()` reads them when the person confirms and
+  // answers { id, change, begin } for this write (`begin`: the change sent to begin, such as a
+  // secret's digest, when it differs), or throws an Error whose message the dialog shows.
+  function confirm({ title, target = [], diff, effect, form, prepare, action, id, change, danger = false, confirmLabel, onDone }) {
     if (!WRITES.includes(action)) throw new Error(`Unknown write: ${action}`);
     const summary = el("div", { class: "section", hidden: true });
     const body = [
       target.length ? el("div", { class: "changes" }, facts(target)) : null,
       diff?.length ? el("div", { class: "section" }, el("div", { class: "label", text: "Change" }), diffBlock(diff)) : null,
+      form || null,
       effect ? el("p", { class: "ink2", text: effect }) : null,
       summary,
     ];
@@ -265,11 +279,19 @@
     const ok = button(confirmLabel || "Confirm with passkey", run, { variant: danger ? "danger-primary" : "primary", icon: "key" });
     const d = dialog({ title, body, actions: [cancel, ok] });
     async function run() {
+      let ready = { id, change };
+      if (prepare) {
+        try {
+          ready = { id, change, ...(await prepare()) };
+        } catch (err) {
+          return d.say(err.message || String(err), true);
+        }
+      }
       ok.disabled = cancel.disabled = true;
       d.busy = true;
       d.say("Preparing…");
       try {
-        const done = await write(action, { target: id, change }, {
+        const done = await write(action, { target: ready.id, change: ready.change, begin: ready.begin }, {
           onSummary(s) {
             const node = summaryNode(s);
             if (node) summary.replaceChildren(el("div", { class: "label", text: "The platform will make this change" }), node);
@@ -448,7 +470,9 @@
   // ---- The write path (P10): /console/write/<action>/{begin,finish} with {target, change}.
   // begin answers the change summary and the WebAuthn challenge; finish carries the assertion
   // and makes the change once. Called only by ConfirmDialog.
-  async function write(action, { target, change }, { onSummary } = {}) {
+  const REVEALS = new Set(["token-issue", "invite", "visitor-invite"]);
+  // `begin`, when given, is the change sent to begin instead (a secret's digest for its value).
+  async function write(action, { target, change, begin: beginChange }, { onSummary } = {}) {
     if (!WRITES.includes(action)) throw new Error(`Unknown write: ${action}`);
     const body = { target, change: change ?? null };
     if (FIXTURES) {
@@ -456,11 +480,11 @@
       await new Promise((r) => setTimeout(r, 250));
       onSummary?.(`Recorded: ${action} on ${on}.`);
       await new Promise((r) => setTimeout(r, 450));
-      // An invite answers its one-time link, shown once (P3); this one is made up.
-      const reveal = /(^|-)invite$/.test(action)
-        ? { value: "https://fixture.example.dev/auth/enrol?code=FIXTURE-NOT-A-REAL-CODE", kind: "invite", note: "Send this link to the person you invited." }
-        : undefined;
-      return { message: `${action} on ${on}: done (fixture; nothing was sent).`, reveal };
+      // A write that reveals something once (P3: a token, a person or visitor invite) answers
+      // its made-up recording, fixtures/write.<action>.json.
+      const res = REVEALS.has(action) ? await fetch(new URL(`${FIXTURES}write.${action}.json`, location.href)).catch(() => null) : null;
+      const recorded = res?.ok ? await res.json().catch(() => ({})) : {};
+      return { message: `${action} on ${on}: done (fixture; nothing was sent).`, ...recorded };
     }
     const post = async (step, payload) => {
       const res = await fetch(`/console/write/${action}/${step}`, {
@@ -471,7 +495,7 @@
       if (!res.ok || json.error) throw new Error(json.error || `The platform answered ${res.status}.`);
       return json;
     };
-    const begin = await post("begin", body);
+    const begin = await post("begin", beginChange === undefined ? body : { target, change: beginChange });
     if (begin.errors) throw new Error([].concat(begin.errors).map((e) => e.message || e).join(" "));
     onSummary?.(begin.summary ?? null);
     const passkey = window.pigeonPasskey;

@@ -165,13 +165,4 @@
 
   register("inbox", null, inbox);
   register("instances", "list", instancesList);
-
-  // Not yet ported (TODO-port). Each opens its page in the current console, or says to use MCP.
-  todo("access", "secrets");
-  todo("access", "tokens");
-  todo("access", "people");
-  todo("access", "apps");
-  todo("platform", "architecture");
-  todo("platform", "models");
-  todo("platform", "endpoints");
 })();

@@ -1,0 +1,331 @@
+{
+  "parts": [
+    {
+      "name": "approvals",
+      "capability": true,
+      "summary": "",
+      "interface": [],
+      "calls": [],
+      "permissions": [],
+      "bindings": []
+    },
+    {
+      "name": "architecture",
+      "capability": true,
+      "summary": "",
+      "interface": [],
+      "calls": [],
+      "permissions": [],
+      "bindings": []
+    },
+    {
+      "name": "ci",
+      "capability": true,
+      "summary": "",
+      "interface": [],
+      "calls": [],
+      "permissions": [],
+      "bindings": []
+    },
+    {
+      "name": "console",
+      "capability": true,
+      "summary": "",
+      "interface": [],
+      "calls": [],
+      "permissions": [],
+      "bindings": []
+    },
+    {
+      "name": "instances",
+      "capability": true,
+      "summary": "",
+      "interface": [],
+      "calls": [],
+      "permissions": [],
+      "bindings": []
+    },
+    {
+      "name": "land",
+      "capability": true,
+      "summary": "",
+      "interface": [],
+      "calls": [],
+      "permissions": [],
+      "bindings": []
+    },
+    {
+      "name": "models",
+      "capability": true,
+      "summary": "",
+      "interface": [],
+      "calls": [],
+      "permissions": [],
+      "bindings": []
+    },
+    {
+      "name": "proxy",
+      "capability": true,
+      "summary": "",
+      "interface": [],
+      "calls": [],
+      "permissions": [],
+      "bindings": []
+    },
+    {
+      "name": "secrets",
+      "capability": true,
+      "summary": "",
+      "interface": [],
+      "calls": [],
+      "permissions": [],
+      "bindings": []
+    },
+    {
+      "name": "sites",
+      "capability": true,
+      "summary": "",
+      "interface": [],
+      "calls": [],
+      "permissions": [],
+      "bindings": []
+    },
+    {
+      "name": "users",
+      "capability": true,
+      "summary": "",
+      "interface": [],
+      "calls": [],
+      "permissions": [],
+      "bindings": []
+    },
+    {
+      "name": "core",
+      "capability": false,
+      "summary": "",
+      "interface": [],
+      "calls": [],
+      "permissions": [],
+      "bindings": []
+    }
+  ],
+  "workers": [
+    {
+      "name": "pigeon-core",
+      "lane": "core",
+      "deploy_job": "deploy-core",
+      "after": [],
+      "source": "wrangler.toml",
+      "workers_dev": false,
+      "routes": [
+        "platform.example.dev/*"
+      ],
+      "tools": [
+        "ai_agents_status",
+        "approvals_list",
+        "architecture_describe",
+        "cost_daily",
+        "instances_list",
+        "land",
+        "land_status",
+        "secrets_list",
+        "users_people",
+        "credentials_expiry",
+        "oauth_clients",
+        "passkeys_list"
+      ],
+      "handlers": [
+        "fetch"
+      ],
+      "secrets": [],
+      "crons": [],
+      "services": [],
+      "objects": [
+        {
+          "binding": "DIRECTORY",
+          "class": "Directory",
+          "owner": "pigeon-core"
+        },
+        {
+          "binding": "APPROVALS",
+          "class": "Approvals",
+          "owner": "pigeon-core"
+        },
+        {
+          "binding": "LAND",
+          "class": "Land",
+          "owner": "pigeon-core"
+        }
+      ],
+      "containers": [],
+      "queues": [],
+      "merged_into": null,
+      "uses": [],
+      "published_by": null
+    },
+    {
+      "name": "pigeon-sites",
+      "lane": "sites",
+      "deploy_job": "deploy-sites",
+      "after": [],
+      "source": "wrangler.toml",
+      "workers_dev": false,
+      "routes": [
+        "example.dev/*",
+        "*.example.dev/*"
+      ],
+      "tools": [
+        "site_publish",
+        "site_rollback",
+        "site_releases"
+      ],
+      "handlers": [
+        "fetch"
+      ],
+      "secrets": [],
+      "crons": [],
+      "services": [],
+      "objects": [
+        {
+          "binding": "SITEPASSKEYS",
+          "class": "SitePasskeys",
+          "owner": "pigeon-sites"
+        }
+      ],
+      "containers": [],
+      "queues": [],
+      "merged_into": null,
+      "uses": [],
+      "published_by": null
+    },
+    {
+      "name": "pigeon-ci",
+      "lane": "ci",
+      "deploy_job": "deploy-ci",
+      "after": [],
+      "source": "wrangler.toml",
+      "workers_dev": false,
+      "routes": [
+        "ci.example.dev/*"
+      ],
+      "tools": [
+        "ci_submit",
+        "ci_jobs",
+        "ci_status"
+      ],
+      "handlers": [
+        "fetch"
+      ],
+      "secrets": [],
+      "crons": [],
+      "services": [],
+      "objects": [
+        {
+          "binding": "CIQUEUE",
+          "class": "CiQueue",
+          "owner": "pigeon-core"
+        }
+      ],
+      "containers": [
+        "ci-runner"
+      ],
+      "queues": [],
+      "merged_into": null,
+      "uses": [],
+      "published_by": null
+    },
+    {
+      "name": "pigeon-models",
+      "lane": "models",
+      "deploy_job": "deploy-models",
+      "after": [],
+      "source": "wrangler.toml",
+      "workers_dev": false,
+      "routes": [],
+      "tools": [
+        "models_run",
+        "models_status"
+      ],
+      "handlers": [
+        "fetch"
+      ],
+      "secrets": [],
+      "crons": [],
+      "services": [],
+      "objects": [
+        {
+          "binding": "MODELJOBS",
+          "class": "ModelJobs",
+          "owner": "pigeon-models"
+        }
+      ],
+      "containers": [],
+      "queues": [],
+      "merged_into": null,
+      "uses": [],
+      "published_by": null
+    },
+    {
+      "name": "pigeon-proxy",
+      "lane": "proxy",
+      "deploy_job": "deploy-proxy",
+      "after": [],
+      "source": "wrangler.toml",
+      "workers_dev": false,
+      "routes": [
+        "proxy.example.dev/*"
+      ],
+      "tools": [],
+      "handlers": [
+        "fetch"
+      ],
+      "secrets": [],
+      "crons": [],
+      "services": [],
+      "objects": [],
+      "containers": [],
+      "queues": [],
+      "merged_into": null,
+      "uses": [],
+      "published_by": null
+    }
+  ],
+  "hostnames": [
+    {
+      "host": "platform.example.dev",
+      "worker": "pigeon-core",
+      "by": "",
+      "access": [],
+      "public_paths": []
+    },
+    {
+      "host": "example.dev",
+      "worker": "pigeon-sites",
+      "by": "",
+      "access": [],
+      "public_paths": []
+    },
+    {
+      "host": "ci.example.dev",
+      "worker": "pigeon-ci",
+      "by": "",
+      "access": [],
+      "public_paths": []
+    },
+    {
+      "host": "proxy.example.dev",
+      "worker": "pigeon-proxy",
+      "by": "",
+      "access": [],
+      "public_paths": []
+    }
+  ],
+  "links": [],
+  "externals": [],
+  "resources": {},
+  "versions": [],
+  "files": 412,
+  "digest": "sha256:0c7a5e19d2b4",
+  "commit": "9e41c07a21bf5d3e",
+  "drawing": "<svg xmlns=\"http://www.w3.org/2000/svg\" class=\"diagram\" viewBox=\"0 0 840 300\" role=\"img\" aria-label=\"Example architecture\"><style>.diagram{font:13px ui-monospace,monospace}.bg{fill:#17171C}.c{fill:#1F1F25;stroke:#3B3942}.wk{fill:#2B1821;stroke:#E07FA8}.l{stroke:#3B3942;stroke-width:1.5}text{fill:#ECEAE6}.a{fill:#E07FA8}.z{fill:#E9B587;font-weight:700;letter-spacing:.1em}</style><rect class=\"bg\" width=\"840\" height=\"300\" rx=\"6\"/><text x=\"20\" y=\"24\" class=\"z\">EXAMPLE.DEV</text><rect class=\"c\" x=\"20\" y=\"40\" width=\"200\" height=\"34\" rx=\"4\"/><text x=\"32\" y=\"62\">platform.example.dev</text><line x1=\"220\" y1=\"57\" x2=\"320\" y2=\"57\" class=\"l\"/><rect class=\"wk\" x=\"320\" y=\"40\" width=\"180\" height=\"34\" rx=\"4\"/><text x=\"334\" y=\"62\" class=\"a\">pigeon-core</text><line x1=\"500\" y1=\"57\" x2=\"580\" y2=\"57\" class=\"l\"/><rect class=\"c\" x=\"580\" y=\"40\" width=\"240\" height=\"34\" rx=\"4\"/><text x=\"592\" y=\"62\">Directory \u00b7 Approvals \u00b7 Land</text><rect class=\"c\" x=\"20\" y=\"100\" width=\"200\" height=\"34\" rx=\"4\"/><text x=\"32\" y=\"122\">example.dev</text><line x1=\"220\" y1=\"117\" x2=\"320\" y2=\"117\" class=\"l\"/><rect class=\"wk\" x=\"320\" y=\"100\" width=\"180\" height=\"34\" rx=\"4\"/><text x=\"334\" y=\"122\" class=\"a\">pigeon-sites</text><line x1=\"500\" y1=\"117\" x2=\"580\" y2=\"117\" class=\"l\"/><rect class=\"c\" x=\"580\" y=\"100\" width=\"240\" height=\"34\" rx=\"4\"/><text x=\"592\" y=\"122\">SitePasskeys</text><rect class=\"c\" x=\"20\" y=\"160\" width=\"200\" height=\"34\" rx=\"4\"/><text x=\"32\" y=\"182\">ci.example.dev</text><line x1=\"220\" y1=\"177\" x2=\"320\" y2=\"177\" class=\"l\"/><rect class=\"wk\" x=\"320\" y=\"160\" width=\"180\" height=\"34\" rx=\"4\"/><text x=\"334\" y=\"182\" class=\"a\">pigeon-ci</text><line x1=\"500\" y1=\"177\" x2=\"580\" y2=\"177\" class=\"l\"/><rect class=\"c\" x=\"580\" y=\"160\" width=\"240\" height=\"34\" rx=\"4\"/><text x=\"592\" y=\"182\">CiQueue \u00b7 ci-runner</text><rect class=\"c\" x=\"20\" y=\"220\" width=\"200\" height=\"34\" rx=\"4\"/><text x=\"32\" y=\"242\">proxy.example.dev</text><line x1=\"220\" y1=\"237\" x2=\"320\" y2=\"237\" class=\"l\"/><rect class=\"wk\" x=\"320\" y=\"220\" width=\"180\" height=\"34\" rx=\"4\"/><text x=\"334\" y=\"242\" class=\"a\">pigeon-proxy</text></svg>"
+}

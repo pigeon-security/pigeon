@@ -1,0 +1,7 @@
+{
+  "reveal": {
+    "value": "pgn_proxy_EXAMPLE_0b9f4d7e2a6c11e8",
+    "note": "Shown once. Save it as the cloud environment's network secret for proxy.example.dev: header Authorization, prefix Bearer.",
+    "kind": "token"
+  }
+}

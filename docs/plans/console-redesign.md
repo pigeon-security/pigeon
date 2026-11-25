@@ -337,3 +337,11 @@ carry-over once `/app?instance=` is the only form. Keep the console's routes lis
   `capabilities_upgrade_plan` suggests) and Disable each one `instance-put` diff; Overview edits
   the other fields as a form or JSON with a live diff, and links or unlinks (`linked-unlink`).
   Until Q4, site_passkeys is shown as `sites[].auth`. No new ops were needed.
+- 2026-11-25: phase 4, Access and Platform ported on `claude/console-port-access-platform`
+  (`web/views/access.js`, `web/views/platform.js`). New reads: `credentials_expiry`, and the
+  console's own `app_proxy_tokens` (live and recently expired proxy credentials) and
+  `app_people` (people with passkeys, apps with their person, kind and token count). New
+  writes: `apple-adopt` and `apple-identity` (P8) on the one write path. `token-issue` and
+  `invite` answer `reveal` for ShowOnce. ConfirmDialog takes `form` and `prepare`, so a secret's
+  value is typed in the dialog and only its digest reaches `begin`. Endpoints stays read-only
+  (no write exists); its portal URL is `mcp.` plus the platform host's parent domain.
