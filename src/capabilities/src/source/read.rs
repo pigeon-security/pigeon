@@ -1,29 +1,15 @@
 //! Instance-bound reads for the Source capability.
 
 use pigeon_core::{artifacts, git, repository};
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use worker::{Error, Result};
 
 use crate::Context;
-use crate::instances::record::{AccountRef, Instance, RepoRef};
-
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
-pub enum Profile {
-    Enabled,
-    Disabled,
-}
-
-impl Profile {
-    pub fn enabled(self) -> bool {
-        matches!(self, Self::Enabled)
-    }
-}
+use crate::instances::record::{AccountRef, Instance, RepoRef, Toggle};
 
 /// Check both the opt-in and the repository binding before any provider operation.
 pub fn approved_repo(instance: &Instance) -> std::result::Result<&RepoRef, String> {
-    if !instance.source.is_some_and(Profile::enabled) {
+    if !instance.source.is_some_and(Toggle::enabled) {
         return Err("source reads are disabled for this instance".into());
     }
     let repo = instance

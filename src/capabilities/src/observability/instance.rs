@@ -2,31 +2,17 @@
 
 use pigeon_core::mcp::Tool;
 use pigeon_core::tokens::{Policy, Scope, Scoped};
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use worker::{Error, Result};
 
 use crate::Context;
-use crate::instances::record::{AccountRef, Instance, label};
+use crate::instances::record::{AccountRef, Instance, Toggle, label};
 
 pub const METRICS: &str = "observability_worker_metrics";
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
-pub enum Profile {
-    Enabled,
-    Disabled,
-}
-
-impl Profile {
-    pub fn enabled(self) -> bool {
-        matches!(self, Self::Enabled)
-    }
-}
-
 /// The approved instance's Worker is the sole metrics workload.
 pub fn approved_worker(instance: &Instance) -> std::result::Result<&str, String> {
-    if !instance.observability.is_some_and(Profile::enabled) {
+    if !instance.observability.is_some_and(Toggle::enabled) {
         return Err("observability metrics are disabled for this instance".into());
     }
     let worker = instance
@@ -42,7 +28,7 @@ pub fn approved_worker(instance: &Instance) -> std::result::Result<&str, String>
 
 /// Record validation only requires a workload when the feature is enabled.
 pub fn validate(instance: &Instance) -> std::result::Result<(), String> {
-    if instance.observability.is_some_and(Profile::enabled) {
+    if instance.observability.is_some_and(Toggle::enabled) {
         approved_worker(instance)?;
     }
     Ok(())

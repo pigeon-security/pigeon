@@ -276,6 +276,15 @@ fn core_instances_pins_checked_and_planned() {
     assert!(!text.contains("pins"), "{text}");
     assert_eq!(record::digest(&plain), pigeon_core::oauth::hash(&text));
 
+    // `source` and `observability` share one opt-in type whose form record digests cover.
+    let mut toggled = serde_json::to_value(&plain).unwrap();
+    toggled["source"] = json!({"state": "enabled"});
+    toggled["observability"] = json!({"state": "disabled"});
+    let parsed: Instance = serde_json::from_value(toggled.clone()).unwrap();
+    assert_eq!(parsed.source, Some(record::Toggle::Enabled));
+    assert_eq!(parsed.observability, Some(record::Toggle::Disabled));
+    assert_eq!(serde_json::to_value(&parsed).unwrap(), toggled);
+
     // The diff shows the pin by itself.
     let changes = diff(Some(&plain), &pinned);
     let pin = changes.iter().find(|c| c.path == "pins.blog").unwrap();

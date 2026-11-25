@@ -50,19 +50,34 @@ pub struct Instance {
     pub storage: Option<crate::storage::scope::Profile>,
     /// Opt in to read-only tools for this record's approved repository.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<crate::source::read::Profile>,
+    pub source: Option<Toggle>,
     /// Optional read-only CI visibility for this instance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ci: Option<crate::ci::Profile>,
     /// Optional read-only metrics for the approved Worker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub observability: Option<crate::observability::instance::Profile>,
+    pub observability: Option<Toggle>,
     /// Optional approved ingestion source and destination.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ingest: Option<crate::ingest::Profile>,
     /// The record version, which is not part of a diff.
     #[serde(default)]
     pub version: u64,
+}
+
+/// An opt-in profile with no settings of its own, serialized as `{"state": "enabled"}` or
+/// `{"state": "disabled"}`. Record digests cover that form, so it must not change.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Toggle {
+    Enabled,
+    Disabled,
+}
+
+impl Toggle {
+    pub fn enabled(self) -> bool {
+        matches!(self, Self::Enabled)
+    }
 }
 
 /// Which Cloudflare account an instance lives in.
@@ -641,9 +656,7 @@ pub fn validate(instance: &Instance, others: &[Instance], rules: &Rules) -> Vec<
         problems.push(problem);
     }
 
-    if instance
-        .source
-        .is_some_and(crate::source::read::Profile::enabled)
+    if instance.source.is_some_and(Toggle::enabled)
         && let Err(problem) = crate::source::read::approved_repo(instance)
     {
         problems.push(problem);
