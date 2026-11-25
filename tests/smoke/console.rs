@@ -1276,3 +1276,19 @@ fn console_decommissioned() {
         ]
     );
 }
+
+/// An instance id with a `/`, such as the home instance `pigeon-security/platform`, stays one
+/// path segment in the console URLs the server redirects to, as the shell encodes it.
+#[test]
+fn console_urls_encode_an_instance_id_with_a_slash() {
+    use pigeon_capabilities::console::page;
+    assert_eq!(
+        page::url("pigeon-security/platform", "inbox", None),
+        "/app/pigeon-security%2Fplatform/inbox"
+    );
+    assert_eq!(
+        page::url("sandbox", "site", Some("deployments")),
+        "/app/sandbox/site/deployments"
+    );
+    assert_eq!(page::segment("a b/c?d"), "a%20b%2Fc%3Fd");
+}

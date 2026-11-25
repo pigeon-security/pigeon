@@ -146,7 +146,7 @@ fn instance_like(id: &str) -> bool {
     (1..=64).contains(&id.len())
         && id
             .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'/')
 }
 
 /// Where the old bookmark at `path` with `query` goes; none for anything else, including the
@@ -196,12 +196,28 @@ pub fn bookmark(path: &str, query: Option<&str>) -> Option<Bookmark> {
     })
 }
 
-/// The console's URL for `area`, and `view` when given, of instance `instance`.
+/// The console's URL for `area`, and `view` when given, of instance `instance`. Each segment is
+/// encoded as the shell's `encodeURIComponent` does, so an instance id such as
+/// `pigeon-security/platform` stays one segment.
 pub fn url(instance: &str, area: &str, view: Option<&str>) -> String {
+    let (instance, area) = (segment(instance), segment(area));
     match view {
-        Some(v) => format!("{BASE}/{instance}/{area}/{v}"),
+        Some(v) => format!("{BASE}/{instance}/{area}/{}", segment(v)),
         None => format!("{BASE}/{instance}/{area}"),
     }
+}
+
+/// `s` percent-encoded as one URL path segment, keeping what `encodeURIComponent` keeps.
+pub fn segment(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }
 
 /// The shell, with the signed-in person's display name if the session is fresh. It never
