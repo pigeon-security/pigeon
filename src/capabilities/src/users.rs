@@ -149,6 +149,12 @@ RETURNING key";
 /// How many policy decisions the Directory keeps.
 const POLICY_KEPT: i64 = 200;
 
+/// Site visitor list, excluding other hostnames and all previous bindings of this hostname.
+#[doc(hidden)]
+pub const SITE_VISITORS_SQL: &str = "SELECT name,
+    EXISTS(SELECT 1 FROM passkeys WHERE user_id = users.id) AS enrolled
+    FROM users WHERE kind = ? AND site_scope = ? ORDER BY created_at, id";
+
 /// The largest profile picture kept, as a `data:` URL: a 128 px square the browser made.
 const AVATAR_MAX: usize = 65_536;
 
@@ -370,6 +376,13 @@ impl Directory {
                 json!({ "users": users, "links": links, "passkeys": passkeys, "clients": clients })
             }
             "users.get" => to_value(self.user(s("id"))?),
+            "users.site_visitors" => {
+                let visitors: Vec<Value> = self.db.rows(
+                    SITE_VISITORS_SQL,
+                    vec![s("kind").into(), s("site_scope").into()],
+                )?;
+                to_value(visitors)
+            }
             "users.site_scope" => {
                 #[derive(Deserialize)]
                 struct SiteScope {
@@ -1389,11 +1402,22 @@ impl Users {
     /// Creates a user, a standard one or a site user when `site` is given, and answers them
     /// with a single-use enrolment link.
     async fn standard_with_link(&self, env: &Env, name: &str, site: Option<&str>) -> Result<Value> {
+        let scope = self.site_scope(env, site).await?;
+        self.enrol_new_user(env, name, site, scope.as_deref()).await
+    }
+
+    /// Issues an enrollment for a caller-validated site binding, or a platform enrollment.
+    pub(crate) async fn enrol_new_user(
+        &self,
+        env: &Env,
+        name: &str,
+        site: Option<&str>,
+        scope: Option<&str>,
+    ) -> Result<Value> {
         let kind = match site {
             Some(host) => format!("site:{host}"),
             None => "standard".to_string(),
         };
-        let scope = self.site_scope(env, site).await?;
         let user = directory(
             env,
             "users.create",

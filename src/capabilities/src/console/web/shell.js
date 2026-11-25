@@ -32,8 +32,8 @@
   const settingsTabs = { access: "Access", models: "Models", connections: "Connections",
     people: "People", capabilities: "Capabilities" };
   views.set("settings", { subtabs: settingsTabs, render: (ctx) => settingsPanels.get(ctx.subtab)(ctx) });
-  const coreTabs = { sessions: "Sessions", cost: "Cost", architecture: "Architecture", settings: "Settings" };
-  const linkedTabs = { home: "Home", settings: "Settings" };
+  const coreTabs = { sessions: "Sessions", cost: "Cost", architecture: "Architecture", "site-access": "Site Access", settings: "Settings" };
+  const linkedTabs = { home: "Home", "site-access": "Site Access", settings: "Settings" };
   const tags = new Set("a article aside b button caption code dd details div dl dt em fieldset footer form h1 h2 h3 h4 header hr img input label legend li main nav ol option p pre section select small span strong summary table tbody td textarea th thead time tr ul".split(" "));
   const attrsAllowed = /^(?:aria-[\w-]+|data-[\w-]+|id|class|role|tabindex|title|href|src|alt|width|height|type|name|value|placeholder|disabled|open|hidden|spellcheck|selected|checked|for|autocomplete|rows|scope|datetime|min|max|step)$/;
   function el(tag, attrs = {}, ...children) {

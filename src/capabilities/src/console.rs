@@ -12,6 +12,7 @@ mod ops;
 pub mod page;
 pub mod sections;
 pub mod session;
+pub mod site_access;
 pub mod snapshot;
 pub mod writes;
 
@@ -379,6 +380,19 @@ impl Console {
                     return answer(&json!({ "error": "sign in first" }), 401);
                 };
                 ops::serve(cx, signed.user, &body).await
+            }
+            "/console/site-access/hosts"
+            | "/console/site-access/list"
+            | "/console/site-access/invite/begin"
+            | "/console/site-access/invite/finish" => {
+                let Some(signed) = self.signed(cx.env, &req).await? else {
+                    return answer(&json!({ "error": "sign in first" }), 401);
+                };
+                let action = path.trim_start_matches("/console/site-access/");
+                match self.site_access(cx.env, action, &signed.user, &body).await {
+                    Ok(v) => answer(&v, 200),
+                    Err(e) => answer(&json!({ "error": e.to_string() }), 400),
+                }
             }
             "/console/sign-in/begin" => {
                 match self.passkeys.sign_in_begin(cx.env, SIGN_IN, None).await {

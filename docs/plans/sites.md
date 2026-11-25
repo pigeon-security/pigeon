@@ -275,6 +275,16 @@ identities with no recorded binding require a new site invitation, and older
 site enrollment links must be reissued. Gated host serving requires both the
 platform and Sites Workers to support the new binding and protected upstream.
 
+In `/app`, Site Access follows the workspace instance selector and shows only
+applied passkey-protected hostnames belonging to that instance. Listing one
+hostname reads visitor names and enrollment status for its exact current
+binding. Creating an enrollment link requires a console session and a passkey
+assertion for the same signed-in person, binding and visitor name. The console
+checks the applied binding and visitor allowlist again before issuing the link.
+New site visitors can be invited when the allowlist contains `site`. The
+15-minute single-use enrollment link opens on the selected hostname. Platform
+People continues to manage platform identities and their passkeys.
+
 A subdomain-only publishing target uses its approved label and the Sites Worker's
 platform zone for the canonical URL. A direct domain or zone hostname keeps
 precedence when present. Publishing and rollback use the same URL in release

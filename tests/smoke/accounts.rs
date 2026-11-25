@@ -1482,3 +1482,73 @@ fn github_delivery_records_queue_and_replay_marker_atomically() {
     drop(db);
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn console_site_access_binds_visitor_list_and_invite_to_exact_selection() {
+    use pigeon_capabilities::console::site_access::{invite_purpose, matches_selection};
+    use pigeon_capabilities::users::SITE_VISITORS_SQL;
+    use pigeon_core::site_auth::binding;
+    use rusqlite::{Connection, params};
+
+    let host = "preview.example.test";
+    let scope = binding("alpha", "blog", host);
+    let moved = binding("beta", "blog", host);
+    let other_host = binding("alpha", "blog", "other.example.test");
+    assert!(matches_selection(&scope, "alpha", "blog", host));
+    assert!(!matches_selection(&scope, "beta", "blog", host));
+    assert!(!matches_selection(&scope, "alpha", "docs", host));
+    assert!(!matches_selection(
+        &scope,
+        "alpha",
+        "blog",
+        "other.example.test"
+    ));
+
+    let purpose = invite_purpose(&scope, "Alex", "owner");
+    assert_ne!(purpose, invite_purpose(&moved, "Alex", "owner"));
+    assert_ne!(purpose, invite_purpose(&other_host, "Alex", "owner"));
+    assert_ne!(purpose, invite_purpose(&scope, "Sam", "owner"));
+    assert_ne!(purpose, invite_purpose(&scope, "Alex", "another-person"));
+    assert!(!purpose.contains("Alex"));
+
+    let db = Connection::open_in_memory().unwrap();
+    db.execute_batch(
+        "CREATE TABLE users (id TEXT PRIMARY KEY, kind TEXT, name TEXT, site_scope TEXT, created_at INTEGER);
+         CREATE TABLE passkeys (user_id TEXT);
+         INSERT INTO passkeys VALUES ('one');
+         INSERT INTO passkeys VALUES ('moved');",
+    )
+    .unwrap();
+    let kind = format!("site:{host}");
+    for (id, user_kind, name, binding) in [
+        ("one", kind.as_str(), "Alex", Some(scope.as_str())),
+        ("two", kind.as_str(), "Sam", Some(scope.as_str())),
+        ("moved", kind.as_str(), "Other owner", Some(moved.as_str())),
+        ("legacy", kind.as_str(), "Legacy visitor", None),
+        (
+            "other",
+            "site:other.example.test",
+            "Other host",
+            Some(other_host.as_str()),
+        ),
+        ("platform", "standard", "Platform person", None),
+    ] {
+        db.execute(
+            "INSERT INTO users VALUES (?, ?, ?, ?, 100)",
+            params![id, user_kind, name, binding],
+        )
+        .unwrap();
+    }
+    let mut statement = db.prepare(SITE_VISITORS_SQL).unwrap();
+    let visitors: Vec<_> = statement
+        .query_map(params![kind, scope], |row| {
+            Ok((
+                row.get::<_, String>("name")?,
+                row.get::<_, bool>("enrolled")?,
+            ))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(visitors, [("Alex".into(), true), ("Sam".into(), false)]);
+}

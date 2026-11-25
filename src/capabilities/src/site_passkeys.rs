@@ -41,11 +41,7 @@ pub(crate) async fn approved(
     let (instance, site) = record::site_for_host(&instances, host, zone)
         .filter(|(_, site)| site.auth.as_deref() == Some("passkey"))
         .ok_or_else(|| bad("passkey access is not enabled for this site"))?;
-    let key = crate::instances::plan::subdomain_key(host);
-    if !directory(env, "setting.get", json!({ "key": key }))
-        .await?
-        .is_string()
-    {
+    if !applied(env, host).await? {
         return Err(bad("this site's hostname has not been applied"));
     }
     Ok((
@@ -54,6 +50,13 @@ pub(crate) async fn approved(
             allow: site.allow.clone(),
         },
     ))
+}
+
+pub(crate) async fn applied(env: &worker::Env, host: &str) -> Result<bool> {
+    let key = crate::instances::plan::subdomain_key(host);
+    Ok(directory(env, "setting.get", json!({ "key": key }))
+        .await?
+        .is_string())
 }
 
 impl SitePasskeys {
