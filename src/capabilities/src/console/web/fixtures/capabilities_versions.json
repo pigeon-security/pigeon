@@ -1,0 +1,133 @@
+{
+  "components": [
+    {
+      "name": "sites",
+      "kind": "capability",
+      "version": "2.2.0",
+      "serves": [
+        "2.2.0",
+        "2.1.0",
+        "1.4.0"
+      ],
+      "worker": "pigeon-sites",
+      "problems": []
+    },
+    {
+      "name": "site_passkeys",
+      "kind": "capability",
+      "version": "2.0.0",
+      "serves": [
+        "2.0.0",
+        "1.4.0",
+        "1.3.2"
+      ],
+      "worker": "pigeon-core",
+      "problems": []
+    },
+    {
+      "name": "storage",
+      "kind": "capability",
+      "version": "1.0.0",
+      "serves": [],
+      "worker": "pigeon-core",
+      "problems": []
+    },
+    {
+      "name": "source",
+      "kind": "capability",
+      "version": "1.0.0",
+      "serves": [],
+      "worker": "pigeon-core",
+      "problems": []
+    },
+    {
+      "name": "ci",
+      "kind": "capability",
+      "version": "1.0.0",
+      "serves": [],
+      "worker": "pigeon-ci",
+      "problems": []
+    },
+    {
+      "name": "observability",
+      "kind": "capability",
+      "version": "1.0.0",
+      "serves": [],
+      "worker": "pigeon-core",
+      "problems": []
+    },
+    {
+      "name": "ingest",
+      "kind": "capability",
+      "version": "1.0.0",
+      "serves": [],
+      "worker": "pigeon-core",
+      "problems": []
+    },
+    {
+      "name": "approvals",
+      "kind": "capability",
+      "version": "1.0.0",
+      "serves": [],
+      "worker": "pigeon-core",
+      "problems": []
+    },
+    {
+      "name": "models",
+      "kind": "capability",
+      "version": "1.2.0",
+      "serves": [],
+      "worker": "pigeon-models",
+      "problems": []
+    },
+    {
+      "name": "blog",
+      "kind": "template",
+      "version": "2.2.0",
+      "serves": [],
+      "worker": "pigeon-sites",
+      "problems": []
+    }
+  ],
+  "undeclared": [],
+  "instances": [
+    {
+      "id": "home",
+      "pins": [
+        {
+          "component": "sites",
+          "requirement": "^2",
+          "state": "ok",
+          "selected": "2.2.0",
+          "current": "2.2.0",
+          "note": "selects 2.2.0, the newest"
+        }
+      ]
+    },
+    {
+      "id": "docs",
+      "pins": [
+        {
+          "component": "site_passkeys",
+          "requirement": "~1.3",
+          "state": "ok",
+          "selected": "1.3.2",
+          "current": "2.0.0",
+          "note": "selects 1.3.2; 2.0.0 is newer"
+        },
+        {
+          "component": "sites",
+          "requirement": "^2",
+          "state": "ok",
+          "selected": "2.2.0",
+          "current": "2.2.0",
+          "note": "selects 2.2.0, the newest"
+        }
+      ]
+    },
+    {
+      "id": "notes",
+      "pins": []
+    }
+  ]
+}

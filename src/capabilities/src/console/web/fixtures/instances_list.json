@@ -8,32 +8,74 @@
     "zones": [
       "platform.example.dev"
     ],
-    "repo": "example-org/pigeon",
-    "worker": "pigeon-core",
-    "version": 12,
-    "publishing": {
-      "sites": [
-        "apex"
-      ]
+    "repo": {
+      "kind": "artifacts",
+      "namespace": "example-org",
+      "repo": "pigeon"
     },
-    "site_passkeys": {
-      "hosts": [
-        "preview.example.dev"
-      ]
+    "sites": [
+      {
+        "name": "apex",
+        "bucket": "home-site",
+        "build": "workloads/example.dev/apex",
+        "targets": [
+          {
+            "kind": "subdomain",
+            "label": "preview"
+          }
+        ],
+        "auth": "passkey",
+        "allow": [
+          "site"
+        ]
+      },
+      {
+        "name": "handbook",
+        "bucket": "home-site",
+        "targets": [
+          {
+            "kind": "zone",
+            "hostname": "handbook.platform.example.dev",
+            "route": "handbook.platform.example.dev/*",
+            "enabled": false
+          }
+        ]
+      }
+    ],
+    "worker": "home",
+    "pins": {
+      "sites": "^2"
+    },
+    "publishing": {
+      "state": "enabled",
+      "site": "apex"
+    },
+    "storage": {
+      "state": "enabled",
+      "store": "scaleway:archive",
+      "bucket": "platform-assets",
+      "prefix": "public/"
+    },
+    "source": {
+      "state": "enabled"
     },
     "ci": {
-      "repo": "example-org/pigeon",
+      "state": "enabled",
       "jobs": [
         "test",
         "land"
       ]
     },
     "observability": {
-      "workers": [
-        "pigeon-core",
-        "pigeon-sites"
-      ]
-    }
+      "state": "enabled"
+    },
+    "ingest": {
+      "state": "enabled",
+      "source": "scaleway:field",
+      "bucket": "platform-raw",
+      "destination_bucket": "home-site"
+    },
+    "version": 12
   },
   {
     "id": "docs",
@@ -45,36 +87,63 @@
     "zones": [
       "docs.example.org"
     ],
-    "repo": "example-org/docs",
-    "worker": "docs-site",
-    "version": 4,
-    "publishing": {
-      "sites": [
-        "docs"
-      ]
+    "repo": {
+      "kind": "github",
+      "full_name": "example-org/docs",
+      "installation": 4242
     },
-    "site_passkeys": {
-      "hosts": [
-        "staging.docs.example.org"
-      ]
+    "sites": [
+      {
+        "name": "docs",
+        "bucket": "docs-site",
+        "jurisdiction": "eu",
+        "build": "site",
+        "targets": [
+          {
+            "kind": "domain",
+            "hostname": "docs.example.org"
+          }
+        ]
+      },
+      {
+        "name": "staging",
+        "bucket": "docs-site",
+        "targets": [
+          {
+            "kind": "subdomain",
+            "label": "docs-staging"
+          }
+        ],
+        "auth": "passkey",
+        "allow": [
+          "site"
+        ]
+      }
+    ],
+    "worker": "docs-site",
+    "pins": {
+      "sites": "^2",
+      "site_passkeys": "~1.3"
+    },
+    "publishing": {
+      "state": "enabled",
+      "site": "docs"
     },
     "storage": {
-      "buckets": [
-        "docs-assets",
-        "docs-uploads"
-      ]
+      "state": "enabled",
+      "store": "scaleway:archive",
+      "bucket": "docs-assets"
     },
     "ci": {
-      "repo": "example-org/docs",
+      "state": "enabled",
       "jobs": [
         "build"
       ]
     },
     "observability": {
-      "workers": [
-        "docs-site"
-      ]
-    }
+      "state": "enabled"
+    },
+    "version": 4
   },
   {
     "id": "notes",
@@ -86,16 +155,23 @@
     "zones": [
       "notes.example.net"
     ],
-    "repo": "notes/site",
-    "version": 2,
+    "repo": {
+      "kind": "github",
+      "full_name": "notes/site"
+    },
+    "sites": [],
+    "storage": {
+      "state": "disabled"
+    },
     "source": {
-      "repo": "notes/site",
-      "refs": [
-        "main"
-      ]
+      "state": "enabled"
     },
     "ingest": {
-      "source": "https://notes.example.net"
-    }
+      "state": "enabled",
+      "source": "scaleway:field",
+      "bucket": "notes-raw",
+      "destination_bucket": "notes-site"
+    },
+    "version": 2
   }
 ]

@@ -119,10 +119,20 @@ pub(crate) async fn invite(
     }
     .enrol_new_user(env, &name, Some(host), Some(&scope))
     .await?;
+    // `reveal` is what the console's confirm dialog shows once (P3); `enrol` is the old
+    // route's, until it goes.
     Ok(json!({
         "message": format!("{name} is invited. Send them the link: it works once."),
         "enrol": invite["enrol"],
         "expires_in_minutes": invite["expires_in_minutes"],
+        "reveal": {
+            "value": invite["enrol"],
+            "kind": "invite",
+            "note": format!(
+                "Send this link to {name}. It works once, within {} minutes.",
+                invite["expires_in_minutes"]
+            ),
+        },
     }))
 }
 

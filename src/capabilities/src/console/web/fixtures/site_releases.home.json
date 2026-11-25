@@ -1,0 +1,40 @@
+{
+  "instance": "home",
+  "site": "apex",
+  "live": "release-Kq7Kq7Kq7Kq7Kq7Kq7Kq7Kq7Kq7Kq7Kq7Kq7Kq7Kq7K",
+  "total": 23,
+  "releases": [
+    {
+      "release": "release-Kq7Kq7Kq7Kq7Kq7Kq7Kq7Kq7Kq7Kq7Kq7Kq7Kq7Kq7K",
+      "live": true,
+      "commit": "9e41c07a21bf5d0c3e8f1a2b4c6d8e0f1a2b3c4d",
+      "template": "blog",
+      "template_version": "2.2.0",
+      "base_url": "https://preview.example.dev"
+    },
+    {
+      "release": "release-A1bA1bA1bA1bA1bA1bA1bA1bA1bA1bA1bA1bA1bA1bA",
+      "live": false,
+      "commit": "3fa91c27d0e1b2c3d4e5f60718293a4b5c6d7e8f",
+      "template": "blog",
+      "template_version": "2.2.0",
+      "base_url": "https://preview.example.dev"
+    },
+    {
+      "release": "release-Zx9Zx9Zx9Zx9Zx9Zx9Zx9Zx9Zx9Zx9Zx9Zx9Zx9Zx9Z",
+      "live": false,
+      "commit": "77d0e12aa4b5c6d7e8f90a1b2c3d4e5f60718293",
+      "template": "blog",
+      "template_version": "2.1.0",
+      "base_url": "https://preview.example.dev"
+    },
+    {
+      "release": "release-m4Pm4Pm4Pm4Pm4Pm4Pm4Pm4Pm4Pm4Pm4Pm4Pm4Pm4Pm",
+      "live": false,
+      "commit": null,
+      "template": null,
+      "template_version": null,
+      "base_url": null
+    }
+  ]
+}

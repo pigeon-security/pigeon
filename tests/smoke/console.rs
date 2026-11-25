@@ -638,10 +638,6 @@ fn console_ops_allow_the_reads_the_console_needs_and_nothing_else() {
 /// The views the new console shell still renders with an explicit TODO-port placeholder, which
 /// links to the same page in the current console. Shrinks to nothing as views are ported.
 const CONSOLE_TODO_PORT: &[&str] = &[
-    "site/sites",
-    "site/deployments",
-    "site/visitors",
-    "capabilities/*",
     "access/secrets",
     "access/tokens",
     "access/people",

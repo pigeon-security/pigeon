@@ -1,0 +1,36 @@
+{
+  "instances": [
+    {
+      "id": "home",
+      "steps": [],
+      "held": []
+    },
+    {
+      "id": "docs",
+      "steps": [
+        {
+          "component": "site_passkeys",
+          "pin": "~1.3",
+          "from": "1.3.2",
+          "to": "2.0.0",
+          "suggested": "^2.0.0",
+          "work": [
+            {
+              "version": "2.0.0",
+              "breaking": true,
+              "summary": "Visitor allowlists name user ids, not names.",
+              "migration": "Nothing to do for allow = [\"site\"]."
+            }
+          ]
+        }
+      ],
+      "held": []
+    },
+    {
+      "id": "notes",
+      "steps": [],
+      "held": []
+    }
+  ],
+  "note": "This changes nothing."
+}

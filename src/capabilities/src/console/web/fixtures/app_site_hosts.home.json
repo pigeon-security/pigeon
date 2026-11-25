@@ -1,0 +1,12 @@
+{
+  "hosts": [
+    {
+      "host": "preview.example.dev",
+      "site": "apex"
+    },
+    {
+      "host": "beta.example.dev",
+      "site": "apex"
+    }
+  ]
+}

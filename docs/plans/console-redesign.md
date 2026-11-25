@@ -328,3 +328,12 @@ carry-over once `/app?instance=` is the only form. Keep the console's routes lis
   never serves it or `web/fixtures/`. `console_shell_contract` (P15) derives every view from
   `console_manifest` for a fully enabled home instance and checks renderers, `ops::READS`,
   `write::ACTIONS` and the stylesheet's tokens.
+- 2026-11-25: phase 4, Site, Overview and Capabilities ported on `claude/console-port-site`
+  (`web/views/site.js`, `web/views/capabilities.js`). Site › Sites reads the record; Deployments
+  lists `site_releases` live first, with Publish (`site-deploy`) and Rollback (`site-rollback`,
+  destructive); Visitors loads `app_site_hosts` and `app_site_visitors` with the view, invites
+  through `visitor-invite` (its answer now carries `reveal`, shown once) and removes through
+  `visitor-revoke`. Capabilities makes Enable, Configure, Upgrade (the pin
+  `capabilities_upgrade_plan` suggests) and Disable each one `instance-put` diff; Overview edits
+  the other fields as a form or JSON with a live diff, and links or unlinks (`linked-unlink`).
+  Until Q4, site_passkeys is shown as `sites[].auth`. No new ops were needed.

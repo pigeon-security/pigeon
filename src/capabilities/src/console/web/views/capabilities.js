@@ -1,0 +1,461 @@
+/* The instance record's two views (docs/plans/console-redesign.md, M1, M2, C2):
+ * - Overview: the record's facts, the Cloudflare link (Link, or Unlink through linked-unlink),
+ *   and an editor for the fields that are not capabilities (title, zones, repository, Worker,
+ *   sites), as a form or as JSON, which shows its diff and applies it through instance-put.
+ * - Capabilities: the one place capabilities change. Enable, Configure, Upgrade and Disable each
+ *   make one diff of the record, applied through instance-put with the passkey; Upgrade moves a
+ *   pin (Q2), as capabilities_upgrade_plan suggests.
+ * Both read the record fresh from instances_list, so the version they edit from is current. */
+(() => {
+  "use strict";
+  const shell = window.pigeonShell;
+  if (!shell) return;
+  const { register, el, pill, tag, code, button, facts, panel, segmented, input, field, diffBlock, dataTable, dialog, confirm, strip, toast } = shell;
+
+  const when = (ms) => (ms ? new Date(ms).toISOString().replace("T", " ").slice(0, 16) + " UTC" : "—");
+  const show = (v) => (v === undefined || v === null ? "none" : JSON.stringify(v));
+  const clone = (v) => JSON.parse(JSON.stringify(v));
+  const go = (ctx, to, text) => el("a", { href: shell.href(to), text, on: { click: (e) => {
+    if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    e.preventDefault();
+    ctx.nav(to);
+  } } });
+  async function recordOf(ctx) {
+    const list = await ctx.op("instances_list");
+    return (Array.isArray(list) ? list : []).find((r) => r.id === ctx.instance.id) || null;
+  }
+
+  // ---- The record diff: what the person approves, path by path, as the platform diffs it.
+  const plain = (v) => v && typeof v === "object" && !Array.isArray(v);
+  function changes(from, to, path = "") {
+    if (plain(from) && plain(to)) {
+      const keys = [...new Set([...Object.keys(from), ...Object.keys(to)])].filter((k) => path || k !== "version").sort();
+      return keys.flatMap((k) => changes(from[k], to[k], path ? `${path}.${k}` : k));
+    }
+    // Absent, null, false and empty are the same to the record (serde's defaults).
+    const none = (v) => v == null || v === false || (Array.isArray(v) && !v.length) || (plain(v) && !Object.keys(v).length);
+    const a = none(from) ? null : from;
+    const b = none(to) ? null : to;
+    return JSON.stringify(a) === JSON.stringify(b) ? [] : [{ path, from: a, to: b }];
+  }
+  function diffLines(record, list) {
+    return [{ op: "note", text: `record version ${record.version ?? 0} → ${(record.version ?? 0) + 1}` },
+      ...list.flatMap((c) => [c.from !== null && { op: "del", text: `${c.path}: ${show(c.from)}` },
+        c.to !== null && { op: "add", text: `${c.path}: ${show(c.to)}` }].filter(Boolean))];
+  }
+  // One record write: the exact diff, then the passkey, through instance-put.
+  function putRecord(ctx, { record, next, title, target = [], effect, danger = false, confirmLabel }) {
+    const list = changes(record, next);
+    if (!list.length) return toast("Nothing changes.", "info");
+    confirm({
+      title, danger, confirmLabel,
+      target: [["Instance", code(record.id)], ...target],
+      diff: diffLines(record, list), effect,
+      action: "instance-put", id: record.id, change: { record: JSON.stringify(next) },
+      onDone: () => setTimeout(ctx.refresh, 0),
+    });
+  }
+
+  // ---- Instance capabilities: the record field each one is enabled by, and what it adds.
+  const list = (s) => String(s || "").split(",").map((x) => x.trim()).filter(Boolean);
+  const passkeySites = (r) => (r.sites || []).filter((s) => s.auth === "passkey");
+  const on = (r, c) => (c.cap === "site_passkeys" ? passkeySites(r).length > 0 && on(r, CAPS[0]) : r[c.field]?.state === "enabled");
+  const CAPS = [
+    { cap: "publishing", field: "publishing", component: "sites", adds: ["Site › Sites", "Site › Deployments"],
+      what: "Publish one of the instance’s sites from its repository",
+      needs: (r) => ((r.sites || []).length ? null : "a site in the record"),
+      fields: (r) => [{ key: "site", label: "Site", options: (r.sites || []).map((s) => s.name), hint: "The site that Publish and Roll back act on." }] },
+    { cap: "site_passkeys", field: "sites[].auth", component: "site_passkeys", adds: ["Site › Visitors"],
+      what: "Gate a site’s platform subdomains behind visitor passkeys",
+      needs: (r) => (on(r, CAPS[0]) ? null : "publishing"),
+      fields: (r) => [
+        { key: "site", label: "Site", options: (r.sites || []).map((s) => s.name), hint: "Only a site on platform subdomains can be gated." },
+        { key: "allow", label: "Who may sign in", list: true, hint: "Comma-separated user ids, or site for every visitor you invite." },
+      ],
+      current: (r) => { const s = passkeySites(r)[0]; return s ? { site: s.name, allow: s.allow || [] } : { site: r.publishing?.site, allow: ["site"] }; },
+      apply: (r, v) => {
+        for (const s of r.sites || []) {
+          delete s.auth;
+          delete s.allow;
+          if (s.name === v.site) Object.assign(s, { auth: "passkey", allow: v.allow });
+        }
+      },
+      remove: (r) => { for (const s of r.sites || []) { delete s.auth; delete s.allow; } } },
+    { cap: "storage", field: "storage", component: "storage", adds: ["Storage › Buckets"],
+      what: "Read the objects of one approved bucket",
+      fields: () => [
+        { key: "store", label: "Storage account", mono: true, hint: "A declared account, such as scaleway:archive." },
+        { key: "bucket", label: "Bucket", mono: true },
+        { key: "prefix", label: "Prefix", mono: true, optional: true, hint: "Ends with /. Empty for the whole bucket." },
+      ] },
+    { cap: "source", field: "source", component: "source", adds: ["Source › Repository"],
+      what: "Read the record’s repository", needs: (r) => (r.repo ? null : "a repository in the record"), fields: () => [] },
+    { cap: "ci", field: "ci", component: "ci", adds: ["CI › Jobs"],
+      what: "See CI jobs of the record’s repository",
+      needs: (r) => (r.account?.kind === "home" && r.repo?.kind === "artifacts" ? null : "a home-account Artifacts repository"),
+      fields: () => [{ key: "jobs", label: "Job names", list: true, mono: true, hint: "Comma-separated, 1 to 64." }] },
+    { cap: "observability", field: "observability", component: "observability", adds: ["Metrics › Workers"],
+      what: "Read metrics of the instance’s Worker", needs: (r) => (r.worker ? null : "a Worker in the record"), fields: () => [] },
+    { cap: "ingest", field: "ingest", component: "ingest", adds: ["Ingest › Runs"],
+      what: "Ingest from a declared source into a destination bucket",
+      fields: () => [
+        { key: "source", label: "Source account", mono: true, hint: "A declared storage account, such as scaleway:field." },
+        { key: "bucket", label: "Source bucket", mono: true },
+        { key: "prefix", label: "Prefix", mono: true, optional: true },
+        { key: "destination_bucket", label: "Destination bucket", mono: true },
+      ] },
+  ];
+  const profileOf = (r, c) => (c.current ? c.current(r) : r[c.field] || {});
+  // The record with capability `c` set to `values`, or without it (and what needs it).
+  function withCap(r, c, values) {
+    const next = clone(r);
+    if (c.apply) c.apply(next, values);
+    else next[c.field] = { state: "enabled", ...Object.fromEntries(Object.entries(values).filter(([, v]) => v !== "" && !(Array.isArray(v) && !v.length))) };
+    return next;
+  }
+  function withoutCap(r, c) {
+    const next = clone(r);
+    for (const d of [c, ...dependents(r, c)]) {
+      if (d.remove) d.remove(next);
+      else delete next[d.field];
+    }
+    return next;
+  }
+  const dependents = (r, c) => (c.cap === "publishing" && on(r, CAPS[1]) ? [CAPS[1]] : []);
+
+  // ---- Capabilities (M2).
+  function capabilities(ctx) {
+    const inst = ctx.instance;
+    const gated = new Map();
+    for (const a of ctx.manifest.areas || []) {
+      for (const v of a.views || []) if (v.upgrade && !gated.has(v.capability)) gated.set(v.capability, v);
+    }
+    let state = null;
+    const table = dataTable({
+      label: "Capabilities", noun: "capabilities", signal: ctx.signal,
+      empty: "This instance has no record to change.",
+      columns: [
+        { label: "Capability", cell: (row) => [el("strong", { class: "mono", text: row.cap }), el("span", { class: "sub", text: row.what })] },
+        { label: "Adds to the console", cell: (row) => (row.adds?.length ? row.adds.map((t) => tag(t)) : el("span", { class: "muted", text: "—" })) },
+        { label: "Record field", cls: "mono", cell: (row) => row.field || "—" },
+        { label: "Pin → selected", cell: (row) => row.pinText },
+        { label: "Latest", cls: "mono", cell: (row) => row.latest || "—" },
+        { label: "Status", cell: (row) => row.status },
+        { label: "", cls: "acts", cell: (row) => row.acts },
+      ],
+      load: async () => {
+        const [record, versions, plan] = await Promise.all([
+          recordOf(ctx),
+          ctx.op("capabilities_versions", { instance: inst.id }).catch(() => null),
+          ctx.op("capabilities_upgrade_plan", { instance: inst.id }).catch(() => null),
+        ]);
+        if (!record) return [];
+        state = { record, versions, plan };
+        return rows(state);
+      },
+    });
+
+    function rows({ record, versions, plan }) {
+      const comps = new Map((versions?.components || []).map((c) => [c.name, c]));
+      const pins = new Map(((versions?.instances || []).find((i) => i.id === record.id)?.pins || []).map((p) => [p.component, p]));
+      const steps = new Map(((plan?.instances || []).find((i) => i.id === record.id)?.steps || []).map((s) => [s.component, s]));
+      const row = (c) => {
+        const enabled = on(record, c);
+        const latest = comps.get(c.component)?.version || null;
+        const pin = pins.get(c.component);
+        const step = steps.get(c.component);
+        const view = gated.get(c.cap);
+        const sm = { size: "sm" };
+        let status;
+        let acts;
+        if (enabled) {
+          const major = (v) => Number(String(v || "0").split(".")[0]);
+          status = view ? pill(`Upgrade to see ${view.title}`, "warn")
+            : pin?.state === "held" ? pill("Held by its pin", "bad")
+              : step ? pill(major(step.to) > major(step.from) ? "Major upgrade" : "Update available", "info") : pill("Current", "ok");
+          acts = [
+            step ? button("Upgrade", () => upgrade(c, step), { ...sm, variant: view ? "primary" : undefined }) : null,
+            c.fields(record).length ? button("Configure", () => configure(c, true), { ...sm, variant: "ghost" }) : null,
+            button("Disable", () => disable(c), { ...sm, variant: "danger" }),
+          ];
+        } else {
+          const need = c.needs?.(record);
+          status = pill(record[c.field]?.state === "disabled" ? "Disabled" : "Off", "plain");
+          acts = need ? el("span", { class: "muted", text: `Needs ${need}` }) : button("Enable", () => configure(c, false), sm);
+        }
+        const pinText = !enabled ? el("span", { class: "muted", text: "—" })
+          : pin ? [code(pin.requirement), " → ", code(pin.selected || "none")]
+            : [el("span", { class: "muted", text: "unpinned → " }), code(latest || "newest")];
+        return { ...c, enabled, latest, status, acts, pinText };
+      };
+      const all = CAPS.map(row);
+      const yes = all.filter((r) => r.enabled);
+      const no = all.filter((r) => !r.enabled);
+      const out = [{ group: `Enabled on ${inst.title} (${yes.length})` }, ...yes, { group: `Available (${no.length})` }, ...no];
+      if (inst.home) {
+        const ours = new Set(CAPS.map((c) => c.component));
+        const platform = (versions?.components || []).filter((c) => c.kind === "capability" && !ours.has(c.name));
+        if (platform.length) {
+          out.push({ group: "Platform capabilities · deployed with the platform" }, ...platform.map((c) => ({
+            cap: c.name, what: c.worker ? `Served by ${c.worker}` : "", adds: [], field: null, latest: c.version,
+            pinText: code(c.version), status: pill("Deployed", "ok"), acts: el("span", { class: "muted", text: "Changes land through code" }),
+          })));
+        }
+      }
+      return out;
+    }
+
+    // Enable or Configure: the capability's settings, its diff as they are typed, then the passkey.
+    function configure(c, editing) {
+      const r = state.record;
+      const now = profileOf(r, c);
+      const fields = c.fields(r);
+      const controls = fields.map((f) => {
+        const value = now[f.key] ?? (f.key === "site" ? r.publishing?.site : "");
+        const control = f.options
+          ? el("select", { class: "input", name: f.key }, f.options.map((o) => el("option", { value: o, text: o, selected: o === value })))
+          : input({ name: f.key, mono: f.mono, autocomplete: "off", spellcheck: "false", value: Array.isArray(value) ? value.join(", ") : String(value ?? "") });
+        return { f, control };
+      });
+      const read = () => Object.fromEntries(controls.map(({ f, control }) => [f.key, f.list ? list(control.value) : control.value.trim()]));
+      const verb = editing ? "Configure" : "Enable";
+      const preview = el("div", {});
+      const update = () => preview.replaceChildren(diffBlock(diffLines(r, changes(r, withCap(r, c, read())))));
+      const review = () => {
+        const values = read();
+        const missing = controls.find(({ f }) => !f.optional && (f.list ? !values[f.key].length : !values[f.key]));
+        if (missing) { missing.control.focus(); return d.say(`Fill in ${missing.f.label.toLowerCase()}.`, true); }
+        putRecord(ctx, {
+          record: r, next: withCap(r, c, values), title: `${verb} ${c.cap} on ${inst.title}`,
+          target: [["Capability", code(c.cap)]], confirmLabel: `${verb} with passkey`,
+          effect: editing ? `Changes how ${c.cap} is scoped. The console sections stay the same.`
+            : `Adds ${c.adds.join(", ")} to this instance’s console, and ${c.cap}’s tools to its MCP endpoint.`,
+        });
+      };
+      if (!fields.length) return review();
+      update();
+      const d = dialog({
+        title: `${verb} ${c.cap} on ${inst.title}`,
+        body: [...controls.map(({ f, control }) => field({ label: f.label, hint: f.hint, control })),
+          el("div", { class: "section" }, el("div", { class: "label", text: "Record diff" }), preview),
+          el("p", { class: "muted", text: "An agent proposing this with instance_propose would wait in Inbox with the same diff." })],
+        actions: [button("Cancel", () => d.close()), button("Review", review, { variant: "primary" })],
+      });
+      d.content.addEventListener("input", update);
+      d.content.addEventListener("change", update);
+    }
+
+    function upgrade(c, step) {
+      const r = state.record;
+      const next = clone(r);
+      next.pins = { ...(next.pins || {}), [c.component]: step.suggested };
+      const work = (step.work || []).map((w) => `${w.version}: ${w.summary}${w.migration ? ` Migration: ${w.migration}` : ""}`);
+      const view = gated.get(c.cap);
+      putRecord(ctx, {
+        record: r, next, title: `Upgrade ${c.cap} on ${inst.title}`, confirmLabel: "Upgrade with passkey",
+        target: [["Capability", code(c.cap)], ["Version", `${step.from || "held"} → ${step.to}`],
+          work.length && ["Breaking on the way", el("ol", { class: "steps" }, work.map((w) => el("li", { text: w })))]].filter(Boolean),
+        effect: `Moves the pin on ${c.component} to ${step.suggested}, which selects ${step.to}.${view ? ` It unlocks ${view.title}.` : ""}`,
+      });
+    }
+
+    function disable(c) {
+      const r = state.record;
+      const also = dependents(r, c);
+      putRecord(ctx, {
+        record: r, next: withoutCap(r, c), title: `Disable ${c.cap} on ${inst.title}`, danger: true, confirmLabel: "Disable with passkey",
+        target: [["Capability", code(c.cap)], also.length && ["Also disables", also.map((d) => d.cap).join(", ")]].filter(Boolean),
+        effect: `Removes ${[c, ...also].flatMap((d) => d.adds).join(", ")} from this instance’s console and ${[c, ...also].map((d) => d.cap).join(" and ")} from its MCP tools. Nothing in the account is deleted.`,
+      });
+    }
+
+    return el("div", { class: "view" },
+      strip("neutral", el("span", { class: "grow" }, "This is the only place capabilities change. Enable, Configure, Upgrade and Disable each make one diff of the instance record, which you approve with your passkey. Agents propose the same diff with ",
+        code("instance_propose"), ", and it waits in ", go(ctx, { instance: inst.id, area: "inbox" }, "Inbox"), ".")),
+      table);
+  }
+
+  // ---- Overview (C2): facts, the link, and the record's other fields as a form or JSON.
+  const CAP_FIELDS = new Set(["publishing", "storage", "source", "ci", "observability", "ingest", "pins"]);
+  const FIXED = new Set(["id", "account", "version"]);
+  const editable = (r) => Object.fromEntries(Object.entries(r).filter(([k]) => !CAP_FIELDS.has(k) && !FIXED.has(k)));
+  const repoText = (repo) => (!repo ? "" : repo.kind === "github" ? `github:${repo.full_name}` : repo.kind === "artifacts" ? `artifacts:${repo.namespace}/${repo.repo}` : JSON.stringify(repo));
+  function repoFrom(text, was) {
+    const t = text.trim();
+    if (!t) return null;
+    const [kind, rest = ""] = t.split(/:(.*)/s);
+    if (kind === "github" && /^[\w.-]+\/[\w.-]+$/.test(rest)) {
+      return { kind: "github", full_name: rest, installation: was?.kind === "github" && was.full_name === rest ? was.installation ?? null : null };
+    }
+    const parts = rest.split("/");
+    if (kind === "artifacts" && parts.length === 2 && parts.every(Boolean)) return { kind: "artifacts", namespace: parts[0], repo: parts[1] };
+    throw new Error("A repository is github:owner/name or artifacts:namespace/repo, or empty for none.");
+  }
+
+  function recordEditor(ctx, r) {
+    let mode = "form";
+    const title = input({ name: "title", value: r.title || "" });
+    const zones = input({ name: "zones", mono: true, value: (r.zones || []).join(", "), spellcheck: "false" });
+    const repo = input({ name: "repo", mono: true, value: repoText(r.repo), spellcheck: "false", placeholder: "github:owner/name" });
+    const worker = input({ name: "worker", mono: true, value: r.worker || "", spellcheck: "false" });
+    const override = el("input", { type: "checkbox", name: "worker_override", checked: Boolean(r.worker_override) });
+    const form = el("div", { class: "panel" },
+      field({ label: "Title", control: title }),
+      field({ label: "Zones", hint: "Comma-separated DNS zones this instance may serve hostnames in.", control: zones }),
+      field({ label: "Repository", hint: "github:owner/name or artifacts:namespace/repo; empty for none.", control: repo }),
+      field({ label: "Worker", hint: "The one Worker that serves the instance’s sites; empty for the default.", control: worker }),
+      el("label", { class: "toolbar" }, override, el("span", { class: "ink2", text: "The Worker’s name may differ from the default" })),
+      el("p", { class: "muted", text: `Sites (${(r.sites || []).length}) are edited as JSON.` }));
+    const json = el("textarea", { class: "input", rows: "14", spellcheck: "false", "aria-label": "Instance record JSON, without its capabilities" });
+    json.value = JSON.stringify(editable(r), null, 2);
+    json.hidden = true;
+    const preview = el("div", {});
+    const problem = el("p", { class: "bad-text", role: "status" });
+    function next() {
+      if (mode === "json") {
+        let edited;
+        try { edited = JSON.parse(json.value); } catch (err) { throw new Error(`The JSON doesn’t parse: ${err.message}`); }
+        if (!plain(edited)) throw new Error("The JSON is an object of the record’s fields.");
+        const bad = Object.keys(edited).find((k) => CAP_FIELDS.has(k) || FIXED.has(k));
+        if (bad) throw new Error(`${bad} is not edited here: ${CAP_FIELDS.has(bad) ? "change it in Capabilities" : "it can’t change"}.`);
+        const out = clone(r);
+        for (const k of Object.keys(editable(r))) delete out[k];
+        return { ...out, ...edited };
+      }
+      return { ...clone(r), title: title.value.trim(), zones: list(zones.value), repo: repoFrom(repo.value, r.repo),
+        worker: worker.value.trim() || null, worker_override: override.checked };
+    }
+    function update() {
+      try {
+        const found = changes(r, next());
+        problem.textContent = "";
+        preview.replaceChildren(found.length ? diffBlock(diffLines(r, found)) : el("p", { class: "muted", text: "No changes yet." }));
+      } catch (err) {
+        problem.textContent = err.message;
+        preview.replaceChildren();
+      }
+    }
+    const review = button("Review changes", () => {
+      let to;
+      try { to = next(); } catch (err) { problem.textContent = err.message; return; }
+      putRecord(ctx, {
+        record: r, next: to, title: `Save ${r.title || r.id}`, confirmLabel: "Save with passkey",
+        effect: "Saves the record a version on. Capabilities and pins stay as they are.",
+      });
+    }, { variant: "primary" });
+    const switcher = segmented({ label: "Editor", value: mode, options: [{ id: "form", title: "Form" }, { id: "json", title: "JSON" }],
+      onChange: (m) => {
+        // Carry what was typed across: the form's edits into the JSON, and back.
+        try {
+          const now = next();
+          if (m === "json") json.value = JSON.stringify(editable(now), null, 2);
+          else {
+            title.value = now.title || "";
+            zones.value = (now.zones || []).join(", ");
+            repo.value = repoText(now.repo);
+            worker.value = now.worker || "";
+            override.checked = Boolean(now.worker_override);
+          }
+        } catch { /* Kept as typed; the problem shows below. */ }
+        mode = m;
+        form.hidden = m !== "form";
+        json.hidden = m !== "json";
+        update();
+      } });
+    const node = el("section", { class: "section" },
+      el("div", { class: "section-head" }, el("h2", { text: "Record" }),
+        el("span", { class: "muted" }, "Everything but capabilities, which change in ", go(ctx, { instance: r.id, area: "capabilities" }, "Capabilities"), "."),
+        el("span", { class: "grow" }), switcher),
+      form, json,
+      el("div", { class: "label", text: "Diff" }), preview, problem,
+      el("div", { class: "toolbar" }, review));
+    node.addEventListener("input", update);
+    node.addEventListener("change", update);
+    update();
+    return node;
+  }
+
+  function linkPanel(ctx, inst, d) {
+    if (inst.home) return panel("Cloudflare link", el("p", { class: "muted", text: "The home account runs the platform itself. It needs no link." }));
+    const l = d?.link || {};
+    const tone = l.status === "linked" ? "ok" : l.status === "not linked" ? "warn" : "bad";
+    const linked = l.status && l.status !== "not linked" && !l.error;
+    const status = el("p", { class: "muted", role: "status" });
+    const link = button(linked ? "Link again" : "Link Cloudflare account", async () => {
+      if (shell.fixtures) return toast("Link opens Cloudflare’s consent screen (fixture; nothing was sent).", "info");
+      link.disabled = true;
+      status.textContent = "Opening Cloudflare…";
+      try {
+        const begin = await window.pigeonPasskey.post("/linked/begin", { instance: inst.id });
+        location.assign(begin.url);
+      } catch (err) {
+        status.textContent = err.message;
+        link.disabled = false;
+      }
+    }, { variant: l.status === "linked" ? undefined : "primary" });
+    const unlink = linked ? button("Unlink", () => confirm({
+      title: `Unlink ${inst.title}`,
+      target: [["Instance", code(inst.id)], l.account_name && ["Account", l.account_name], l.account_id && ["Account id", code(l.account_id)]].filter(Boolean),
+      diff: [{ op: "del", text: `link: ${l.account_name || "account"} ${l.account_id || ""}`.trim() }],
+      effect: "The platform forgets this account’s access. Nothing in the Cloudflare account is deleted, and its sites keep serving; the platform can’t deploy to it or read it until you link again.",
+      action: "linked-unlink", id: inst.id, danger: true, confirmLabel: "Unlink with passkey",
+      onDone: () => setTimeout(ctx.refresh, 0),
+    }), { variant: "danger" }) : null;
+    return el("section", { class: "panel" },
+      el("div", { class: "section-head" }, el("h2", { text: "Cloudflare link" }), el("span", { class: "grow" }), pill(l.status || "unknown", tone)),
+      facts([
+        l.account_name && ["Account", l.account_name],
+        l.account_id && ["Account id", code(l.account_id)],
+        l.linked_ms && ["Linked", when(l.linked_ms)],
+        l.access_expires_ms && ["Access expires", when(l.access_expires_ms)],
+        l.scope && ["Scopes", code(l.scope)],
+        d?.worker && ["Worker", code(d.worker)],
+      ]),
+      l.status === "refresh failed" ? el("p", { class: "bad-text", text: "The platform couldn’t refresh this account’s access. Link again to restore it." }) : null,
+      l.error ? el("p", { class: "bad-text", text: l.error }) : null,
+      el("div", { class: "toolbar" }, link, unlink), status);
+  }
+
+  function overview(ctx) {
+    const inst = ctx.instance;
+    const out = el("div", { class: "view" }, el("p", { class: "muted", role: "status", text: "Loading the record…" }));
+    const sections = (ctx.manifest.areas || []).filter((a) => a.group === "instance" && !["overview", "capabilities"].includes(a.id)).map((a) => a.title);
+    const caps = { instance: inst.id, area: "capabilities" };
+    const load = async () => {
+      try {
+        const [r, d] = await Promise.all([
+          recordOf(ctx),
+          inst.home ? null : ctx.op("app_linked_details", { instance: inst.id }).catch((err) => ({ link: { status: "unknown", error: `Couldn’t read the link: ${err.message}` } })),
+        ]);
+        if (ctx.signal.aborted) return;
+        if (!r) {
+          out.replaceChildren(el("div", { class: "notice" }, el("strong", { text: `No record for ${inst.title}.` }),
+            el("p", { class: "ink2", text: "The instance list doesn’t include it. It may have been retired." })));
+          return;
+        }
+        const enabled = CAPS.filter((c) => on(r, c));
+        const facts1 = panel("Instance", facts([
+          ["Id", code(r.id)],
+          ["Account", inst.home ? "Home account" : "Linked account"],
+          ["Host", code(inst.host || "—")],
+          ["Zones", (r.zones || []).length ? (r.zones || []).map((z) => code(z)).flatMap((z, i) => (i ? [", ", z] : [z])) : "none"],
+          ["Repository", r.repo ? code(repoText(r.repo)) : "none"],
+          ["Worker", r.worker ? code(r.worker) : "none (no sites yet)"],
+          ["Record", `v${r.version ?? 0}`],
+          ["Capabilities", [enabled.length ? enabled.flatMap((c, i) => (i ? [", ", code(c.cap)] : [code(c.cap)])) : "none", " · ", go(ctx, caps, enabled.length ? "Manage" : "Enable one")]],
+          ["Console sections", sections.length ? sections.join(", ") : "Only Overview and Capabilities"],
+        ]));
+        out.replaceChildren(el("div", { class: "cols" }, facts1, linkPanel(ctx, inst, d)), recordEditor(ctx, r));
+      } catch (err) {
+        if (ctx.signal.aborted) return;
+        out.replaceChildren(strip("bad", el("span", { class: "grow", text: `Couldn’t load the record: ${err.message || err}` }),
+          button("Retry", () => { out.replaceChildren(el("p", { class: "muted", role: "status", text: "Loading the record…" })); load(); }, { size: "sm" })));
+      }
+    };
+    load();
+    return out;
+  }
+
+  register("overview", null, overview);
+  register("capabilities", null, capabilities);
+})();

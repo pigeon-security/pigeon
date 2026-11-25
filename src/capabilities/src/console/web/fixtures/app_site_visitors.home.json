@@ -1,0 +1,15 @@
+{
+  "can_invite": true,
+  "visitors": [
+    {
+      "id": "u_7f3a9c21",
+      "name": "Jordan Park",
+      "enrolled": 1
+    },
+    {
+      "id": "u_b20d71e4",
+      "name": "Lee Ortega",
+      "enrolled": 0
+    }
+  ]
+}

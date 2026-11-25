@@ -1,6 +1,7 @@
 /* The views of the console shell at /app/next. Each area/view id console_manifest can send has
- * a renderer here or in views/*.js (views/data.js: Storage, Source, CI, Metrics, Ingest): a real
- * one, or todo(area, view) for a view not yet ported, which links to the
+ * a renderer here or in views/*.js (views/data.js: Storage, Source, CI, Metrics, Ingest;
+ * views/sessions.js: Sessions, Cost; views/site.js: Site; views/capabilities.js: Overview,
+ * Capabilities): a real one, or todo(area, view) for a view not yet ported, which links to the
  * same page in the current console (TODO-port). tests/smoke/console.rs (P15) reads every register
  * and todo call below and checks them against the manifest's ids; port a view by replacing its
  * todo line with a register line. */
@@ -8,7 +9,7 @@
   "use strict";
   const shell = window.pigeonShell;
   if (!shell) return;
-  const { register, todo, el, pill, tag, code, button, facts, panel, diffBlock, dataTable, confirm } = shell;
+  const { register, todo, el, pill, tag, code, button, facts, diffBlock, dataTable, confirm } = shell;
 
   const minutes = (ms) => Math.max(0, Math.round(ms / 60000));
   function ago(ms) {
@@ -133,46 +134,6 @@
       }));
   }
 
-  // ---- Overview: the instance's facts and its Cloudflare link. The record editor is TODO-port.
-  async function overview(ctx) {
-    const inst = ctx.instance;
-    const r = ctx.record || {};
-    const sections = ctx.manifest.areas.filter((a) => a.group === "instance" && !["overview", "capabilities"].includes(a.id)).map((a) => a.title);
-    const instancePanel = panel("Instance", facts([
-      ["Id", code(inst.id)],
-      ["Account", inst.home ? "Home account" : "Linked account"],
-      ["Host", code(inst.host || "—")],
-      r.repo && ["Repository", code(r.repo)],
-      r.worker && ["Worker", code(r.worker)],
-      r.version != null && ["Record", `v${r.version}`],
-      ["Console sections", sections.length ? sections.join(", ") : "Only Overview and Capabilities"],
-    ]));
-    let link;
-    if (inst.home) {
-      link = el("p", { class: "muted", text: "The home account runs the platform itself. It needs no link." });
-    } else {
-      let d;
-      try {
-        d = await ctx.op("app_linked_details", { instance: inst.id });
-      } catch (err) {
-        d = { link: { status: `couldn’t read the link: ${err.message}` } };
-      }
-      const l = d?.link || {};
-      const tone = l.status === "linked" ? "ok" : l.status === "not linked" ? "warn" : "bad";
-      link = [pill(l.status || "unknown", tone), facts([
-        l.account_name && ["Account", l.account_name],
-        l.account_id && ["Account id", code(l.account_id)],
-        l.linked_ms && ["Linked", when(l.linked_ms)],
-        l.access_expires_ms && ["Access expires", when(l.access_expires_ms)],
-        l.scope && ["Scopes", code(l.scope)],
-        d?.worker && ["Worker", code(d.worker)],
-      ])];
-    }
-    return el("div", { class: "view" },
-      el("div", { class: "cols" }, instancePanel, panel("Cloudflare link", link)),
-      el("p", { class: "muted", text: "Editing the record and linking move here when Overview is fully ported; until then they are in the current console." }));
-  }
-
   // ---- Instances › All instances: every instance, home first, as group rows.
   function instancesList(ctx) {
     const sections = (r) => {
@@ -203,14 +164,9 @@
   }
 
   register("inbox", null, inbox);
-  register("overview", null, overview);
   register("instances", "list", instancesList);
 
   // Not yet ported (TODO-port). Each opens its page in the current console, or says to use MCP.
-  todo("site", "sites");
-  todo("site", "deployments");
-  todo("site", "visitors");
-  todo("capabilities", null);
   todo("access", "secrets");
   todo("access", "tokens");
   todo("access", "people");

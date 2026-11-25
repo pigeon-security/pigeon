@@ -50,6 +50,36 @@
       ]
     },
     {
+      "id": "storage",
+      "title": "Storage",
+      "group": "instance",
+      "key": "b",
+      "views": [
+        {
+          "id": "buckets",
+          "title": "Buckets",
+          "order": 10,
+          "capability": "storage",
+          "upgrade": null
+        }
+      ]
+    },
+    {
+      "id": "source",
+      "title": "Source",
+      "group": "instance",
+      "key": "r",
+      "views": [
+        {
+          "id": "repository",
+          "title": "Repository",
+          "order": 10,
+          "capability": "source",
+          "upgrade": null
+        }
+      ]
+    },
+    {
       "id": "ci",
       "title": "CI",
       "group": "instance",
@@ -75,6 +105,21 @@
           "title": "Workers",
           "order": 10,
           "capability": "observability",
+          "upgrade": null
+        }
+      ]
+    },
+    {
+      "id": "ingest",
+      "title": "Ingest",
+      "group": "instance",
+      "key": "e",
+      "views": [
+        {
+          "id": "runs",
+          "title": "Runs",
+          "order": 10,
+          "capability": "ingest",
           "upgrade": null
         }
       ]
