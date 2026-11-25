@@ -1,15 +1,13 @@
-/* The views of the console shell at /app/next. Each area/view id console_manifest can send has
- * a renderer here or in views/*.js (views/data.js: Storage, Source, CI, Metrics, Ingest;
+/* The views of the console shell at /app. Each area/view id console_manifest can send has a
+ * renderer here or in views/*.js (views/data.js: Storage, Source, CI, Metrics, Ingest;
  * views/sessions.js: Sessions, Cost; views/site.js: Site; views/capabilities.js: Overview,
- * Capabilities): a real one, or todo(area, view) for a view not yet ported, which links to the
- * same page in the current console (TODO-port). tests/smoke/console.rs (P15) reads every register
- * and todo call below and checks them against the manifest's ids; port a view by replacing its
- * todo line with a register line. */
+ * Capabilities; views/access.js: Access; views/platform.js: Platform). tests/smoke/console.rs
+ * (P15) reads every register call and checks them against the manifest's ids. */
 (() => {
   "use strict";
   const shell = window.pigeonShell;
   if (!shell) return;
-  const { register, todo, el, pill, tag, code, button, facts, diffBlock, dataTable, confirm } = shell;
+  const { register, el, pill, tag, code, button, facts, diffBlock, dataTable, confirm } = shell;
 
   const minutes = (ms) => Math.max(0, Math.round(ms / 60000));
   function ago(ms) {

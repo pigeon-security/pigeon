@@ -1,4 +1,4 @@
-/* The console's one stylesheet (P13), for the shell at /app/next and every view in it.
+/* The console's one stylesheet (P13), for the shell at /app and every view in it.
  * Colours live only in the tokens below, for light and dark; nothing else names a colour, and
  * no view sets an inline style. Fonts are the system stacks: the console's policy loads no
  * fonts from elsewhere, so Inter and JetBrains Mono are used only where they are installed.

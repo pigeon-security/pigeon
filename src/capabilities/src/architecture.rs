@@ -39,8 +39,6 @@ impl Capability for Architecture {
             title: "Architecture",
             description: "Building blocks, capabilities, Workers, hostnames and resources.",
             order: 10,
-            cost: None,
-            view: true,
         }]
     }
 

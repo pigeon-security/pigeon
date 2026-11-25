@@ -29,7 +29,6 @@ use serde_json::{Value, json};
 use worker::{Env, Error, Headers, Method, Request, Response, Result};
 
 use crate::expiry::Expiry;
-use crate::passkeys::Passkeys;
 use crate::users::directory;
 use crate::{Call, Capability, Context, Expiring, Serve, Slot};
 
@@ -178,11 +177,6 @@ pub async fn aasa(env: &Env) -> Option<Value> {
 
 /// What `/app/oauth` shows when iOS did not hand the sign-in back to the app: never the code.
 pub const APP_RETURN_PAGE: &str = "<!doctype html><meta charset=utf-8><meta name=viewport content=\"width=device-width\"><title>Pigeon</title><body style=\"font:16px -apple-system,system-ui,sans-serif;margin:3rem 1.5rem;text-align:center\"><p>Sign-in is done here.</p><p>Return to the Pigeon app. If it still shows the sign-in screen, close this page and try again.</p></body>";
-
-/// The passkey purpose of each console write, naming the bundle id it acts on.
-pub fn purpose(write: &str) -> Option<String> {
-    matches!(write, "adopt" | "identity").then(|| format!("apple:{write}:{BUNDLE_ID}"))
-}
 
 /// The capabilities in `wanted` that `have` lacks, in `wanted`'s order.
 pub fn missing<'a>(wanted: &[&'a str], have: &[String]) -> Vec<&'a str> {
@@ -734,13 +728,10 @@ async fn create_identity(cx: &Context<'_>, person: &str) -> Result<String> {
 }
 
 /// The capability. Everything it knows is read from the slots, the Directory and Apple.
-pub struct Apple {
-    /// Approves the console writes.
-    pub passkeys: Passkeys,
-}
+pub struct Apple;
 
 impl Apple {
-    async fn serve(&self, cx: &Context<'_>, mut req: Request) -> Result<Response> {
+    async fn serve(&self, cx: &Context<'_>, req: Request) -> Result<Response> {
         if req.method() == Method::Get && req.path() == "/app/oauth" {
             let headers = Headers::new();
             headers.set("Content-Type", "text/html; charset=utf-8")?;
@@ -754,45 +745,7 @@ impl Apple {
         if req.path().starts_with("/apple/release/") {
             return release::serve(cx, req).await;
         }
-        let host = req.url()?.host_str().unwrap_or_default().to_string();
-        let origin = req.headers().get("Origin")?;
-        if !crate::console::session::same_origin(origin.as_deref(), &host) {
-            return Response::error("forbidden", 403);
-        }
-        let Some(person) = crate::console::signed_person(cx.env, &req).await? else {
-            return Response::error("sign in to the console first", 401);
-        };
-        let body: Value = req.json().await.unwrap_or(Value::Null);
-        let path = req.path();
-        let (write, step) = path
-            .strip_prefix("/apple/")
-            .and_then(|p| p.split_once('/'))
-            .unwrap_or_default();
-        let answer = match (purpose(write), step) {
-            (Some(p), "begin") => self.passkeys.sign_in_begin(cx.env, &p, None).await,
-            (Some(p), "finish") => {
-                async {
-                    self.passkeys
-                        .sign_in_finish(cx.env, &p, &body, None)
-                        .await?;
-                    let message = match write {
-                        "adopt" => adopt(cx.env).await?,
-                        _ => create_identity(cx, &person.name).await?,
-                    };
-                    Ok(json!({ "message": message }))
-                }
-                .await
-            }
-            _ => return Response::error("not found", 404),
-        };
-        let headers = Headers::new();
-        headers.set("Cache-Control", "no-store")?;
-        match answer {
-            Ok(v) => Ok(Response::from_json(&v)?.with_headers(headers)),
-            Err(e) => Ok(Response::from_json(&json!({ "error": e.to_string() }))?
-                .with_status(400)
-                .with_headers(headers)),
-        }
+        Response::error("not found", 404)
     }
 }
 
@@ -902,17 +855,15 @@ impl Capability for Apple {
         vec!["/apple/", "/app/oauth"]
     }
 
-    /// `apple-adopt` and `apple-identity`, through the console's one write path: the same
-    /// writes as `/apple/{adopt,identity}`, bound to the signed-in person's passkey.
+    /// `apple-adopt` and `apple-identity`, through the console's one write path, bound to the
+    /// signed-in person's passkey.
     fn write_make<'a>(
         &'a self,
         cx: &'a Context<'a>,
         w: &'a crate::console::write::Write<'a>,
     ) -> Call<'a> {
         Box::pin(async move {
-            let person = w
-                .person
-                .ok_or_else(|| Error::RustError("no person".into()))?;
+            let person = w.person;
             let message = match w.action.id {
                 "apple-adopt" => adopt(cx.env).await?,
                 "apple-identity" => create_identity(cx, &person.name).await?,

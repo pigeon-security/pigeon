@@ -13,7 +13,6 @@ pub use pigeon_models::{
 };
 
 use crate::console::sections::Section;
-use crate::users::User;
 use crate::{Call, Capability, Context, Expiring, External, Footprint, Slot, to_value};
 
 /// The caller in `cx` as JSON, as core signs it for a capability Worker; null for none.
@@ -31,37 +30,13 @@ impl Capability for Models {
     }
 
     fn sections(&self) -> Vec<Section> {
-        vec![
-            Section {
-                area: pigeon_models::SECTION_TAB,
-                id: self.section_id(),
-                title: pigeon_models::SECTION_TITLE,
-                description: pigeon_models::SECTION_DESCRIPTION,
-                order: pigeon_models::SECTION_ORDER,
-                cost: Some(pigeon_models::SECTION_COST),
-                view: false,
-            },
-            Section {
-                area: pigeon_models::VIEW_AREA,
-                id: pigeon_models::VIEW_ID,
-                title: pigeon_models::VIEW_TITLE,
-                description: pigeon_models::VIEW_DESCRIPTION,
-                order: pigeon_models::VIEW_ORDER,
-                cost: None,
-                view: true,
-            },
-        ]
-    }
-
-    /// Cost per day per model family over the last `days` days, from the gateway's logs.
-    fn section_data<'a>(
-        &'a self,
-        cx: &'a Context<'a>,
-        _id: &'a str,
-        _person: &'a User,
-        query: &'a Value,
-    ) -> Call<'a> {
-        Box::pin(async move { self.section(cx.account, query).await })
+        vec![Section {
+            area: pigeon_models::VIEW_AREA,
+            id: pigeon_models::VIEW_ID,
+            title: pigeon_models::VIEW_TITLE,
+            description: pigeon_models::VIEW_DESCRIPTION,
+            order: pigeon_models::VIEW_ORDER,
+        }]
     }
 
     fn tools(&self) -> Vec<Tool> {

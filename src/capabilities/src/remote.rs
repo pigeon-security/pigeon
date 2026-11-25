@@ -10,17 +10,17 @@ use std::collections::{HashMap, HashSet};
 
 use pigeon_contract::{
     Answer, CallRequest, CapabilityManifest, EventsRequest, FailureKind, SecretOp, SecretRequest,
-    SectionRequest, WorkerContext, WorkerManifest,
+    WorkerContext, WorkerManifest,
 };
 use pigeon_core::mcp::Tool;
 use pigeon_core::{secrets_store, webauthn};
-use serde_json::{Value, json};
+use serde_json::Value;
 use worker::{Env, Request, RequestInit, Result};
 
 use crate::console::sections::Section;
 use crate::expiry::Expiry;
 use crate::instances::tools::{Targeted, Unsupported};
-use crate::{Call, Capability, Context, Expiring, Footprint, Serve, Slot, users};
+use crate::{Call, Capability, Context, Expiring, Footprint, Serve, Slot};
 
 /// A capability Worker bound to this one: its Service Binding and its script name.
 #[derive(Clone, Copy, Debug)]
@@ -518,39 +518,19 @@ impl Capability for Remote {
         self.spec
             .sections
             .iter()
+            // A section that is not a view was an old console panel's data anchor: no longer read.
+            .filter(|s| s.view)
             .filter_map(|s| {
-                let area = crate::console::sections::area_of_tab(&s.tab)?;
+                let area = crate::console::sections::area_named(&s.tab)?;
                 Some(Section {
                     area: area.id,
                     id: intern(&s.id),
                     title: intern(&s.title),
                     description: intern(&s.description),
                     order: s.order,
-                    cost: s.cost.as_deref().map(intern),
-                    view: s.view,
                 })
             })
             .collect()
-    }
-
-    fn section_data<'a>(
-        &'a self,
-        cx: &'a Context<'a>,
-        id: &'a str,
-        person: &'a users::User,
-        query: &'a Value,
-    ) -> Call<'a> {
-        Box::pin(async move {
-            let body = json_of(&SectionRequest {
-                capability: self.name.to_string(),
-                id: id.to_string(),
-                query: query.clone(),
-            })?;
-            let user = serde_json::to_value(person).unwrap_or(Value::Null);
-            let caller = json!({ "user": user, "acting_for": null });
-            let answer = self.ask(cx.env, "section", &body, Some(&caller)).await?;
-            self.outcome(answer)
-        })
     }
 
     fn secrets(&self) -> Vec<Slot> {

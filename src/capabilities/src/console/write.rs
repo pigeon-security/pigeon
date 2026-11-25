@@ -9,8 +9,9 @@
 //! [`ACTIONS`] is the one table of writes: each action's handler (the capability that makes it,
 //! or the tool `dispatch` runs for it under the same policy gate as MCP), the policy its passkey
 //! answers, whether it is destructive, and how its target and change are read and summarised.
-//! The pure parts are here; [`begin`] and [`finish`] do the rest. The routes that came before
-//! it ([`LEGACY`]) are thin adapters onto the same actions until they are removed.
+//! The pure parts are here; [`begin`] and [`finish`] do the rest. A write is always bound to one
+//! person: the one signed in to the console, or the one an app acts for when the action allows
+//! a bearer ([`Action::by_bearer`]); only that person's passkey answers it.
 //!
 //! [`CHALLENGE_TTL_MS`]: pigeon_core::webauthn::CHALLENGE_TTL_MS
 
@@ -22,7 +23,7 @@ use worker::{Error, Result};
 
 use crate::Context;
 use crate::passkeys::Passkeys;
-use crate::users::{Caller, User, directory};
+use crate::users::{Caller, User};
 
 /// What makes an approved write.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -667,10 +668,6 @@ pub struct Summary {
     pub destructive: bool,
 }
 
-/// The caller a write is bound to when any registered person's passkey may approve it: only
-/// the old secret and proxy-token routes, which never needed a console session.
-pub const ANY_PASSKEY: &str = "*";
-
 /// The digest a write's passkey is bound to: the caller's id, the action, the target, the
 /// bound change, and for [`Policy::Approval`] the approval's own purpose.
 pub fn digest(
@@ -716,104 +713,15 @@ pub fn redeem(
     }
 }
 
-/// One of the routes before this path, as an adapter onto an action.
-#[derive(Debug, PartialEq)]
-pub struct Legacy {
-    pub action: &'static Action,
-    pub step: Step,
-    pub target: Value,
-    pub change: Value,
-    /// Whether any person's passkey approves it, as the route did.
-    pub any_passkey: bool,
-}
-
-/// The old write routes, adapters onto [`ACTIONS`] until phase 5 removes them.
-pub const LEGACY: &[(&str, &str)] = &[
-    ("/secrets/put/begin", "secret-set"),
-    ("/secrets/put/finish", "secret-set"),
-    ("/tokens/issue/begin", "token-issue"),
-    ("/tokens/issue/finish", "token-issue"),
-    ("/tokens/revoke/begin", "token-revoke"),
-    ("/tokens/revoke/finish", "token-revoke"),
-    ("/linked/unlink/begin", "linked-unlink"),
-    ("/linked/unlink/finish", "linked-unlink"),
-    ("/instance/put/begin", "instance-put"),
-    ("/instance/put/finish", "instance-put"),
-    ("/console/site-access/invite/begin", "visitor-invite"),
-    ("/console/site-access/invite/finish", "visitor-invite"),
-];
-
-/// The action, target and change an old route's `body` asks for at `path`.
-pub fn legacy(path: &str, body: &Value) -> Option<Legacy> {
-    let (_, id) = LEGACY.iter().find(|(p, _)| *p == path)?;
-    let step = if path.ends_with("/begin") {
-        Step::Begin
-    } else {
-        Step::Finish
-    };
-    let s = |k: &str| body[k].clone();
-    let (target, change, any_passkey) = match *id {
-        "secret-set" => {
-            let change = match step {
-                Step::Begin => json!({ "digest": s("digest") }),
-                Step::Finish => json!({ "value": s("value") }),
-            };
-            (s("name"), change, true)
-        }
-        "token-issue" => (s("label"), json!({ "days": s("days") }), true),
-        "token-revoke" => (s("id"), json!({}), true),
-        "linked-unlink" => (s("instance"), json!({}), false),
-        "instance-put" => {
-            let record = body["record"].as_str().unwrap_or_default();
-            let id = serde_json::from_str::<Value>(record).ok()?["id"].clone();
-            let mut change = json!({ "record": record });
-            if step == Step::Begin {
-                change["digest"] = s("digest");
-            }
-            (id, change, false)
-        }
-        "visitor-invite" => (
-            json!({ "instance": s("instance"), "site": s("site"), "host": s("host") }),
-            json!({ "name": s("name") }),
-            false,
-        ),
-        _ => return None,
-    };
-    let change = match change {
-        Value::Object(mut o) => {
-            o.retain(|_, v| !v.is_null());
-            Value::Object(o)
-        }
-        v => v,
-    };
-    Some(Legacy {
-        action: action(id)?,
-        step,
-        target,
-        change,
-        any_passkey,
-    })
-}
-
 // ---- the steps ----
-
-/// Who a write is bound to.
-#[derive(Clone, Copy)]
-pub enum Who<'a> {
-    /// The signed-in person (or the person an app acts for): only their passkey answers.
-    Person(&'a User),
-    /// Any person's passkey, who is then the person: only the old secret and token routes.
-    AnyPasskey,
-}
 
 /// A checked write, as its handler gets it.
 pub struct Write<'a> {
     pub action: &'static Action,
     pub target: Value,
     pub change: Value,
-    /// The person making it: always known at `finish`; at `begin` unknown for
-    /// [`Who::AnyPasskey`].
-    pub person: Option<&'a User>,
+    /// The person making it, whose passkey answers it.
+    pub person: &'a User,
 }
 
 impl Write<'_> {
@@ -845,7 +753,7 @@ fn owner<'a>(cx: &'a Context<'a>, name: &str) -> Result<&'a dyn crate::Capabilit
 async fn bind(
     cx: &Context<'_>,
     action: &'static Action,
-    who: Who<'_>,
+    person: &User,
     target: &Value,
     change: &Value,
     step: Step,
@@ -859,30 +767,22 @@ async fn bind(
         }
         _ => None,
     };
-    let caller = match who {
-        Who::Person(p) => p.id.as_str(),
-        Who::AnyPasskey => ANY_PASSKEY,
-    };
-    let d = digest(action, caller, &target, &bound, anchor.as_deref());
+    let d = digest(action, &person.id, &target, &bound, anchor.as_deref());
     Ok((target, change, bound, d))
 }
 
-/// Starts `action` for `who`: checks the target and change, asks its handler, and answers the
+/// Starts `action` for `person`: checks the target and change, asks its handler, and answers the
 /// change's summary and a passkey challenge bound to it. A handler's `errors` are answered as
 /// they are, with no challenge.
 pub async fn begin(
     cx: &Context<'_>,
     passkeys: &Passkeys,
     action: &'static Action,
-    who: Who<'_>,
+    person: &User,
     target: &Value,
     change: &Value,
 ) -> Result<Value> {
-    let (target, change, bound, d) = bind(cx, action, who, target, change, Step::Begin).await?;
-    let person = match who {
-        Who::Person(p) => Some(p),
-        Who::AnyPasskey => None,
-    };
+    let (target, change, bound, d) = bind(cx, action, person, target, change, Step::Begin).await?;
     let checked = match action.handler {
         Handler::Capability(name) => {
             let w = Write {
@@ -894,7 +794,6 @@ pub async fn begin(
             owner(cx, name)?.write_check(cx, &w).await?
         }
         Handler::Tool(tool) => {
-            let person = person.ok_or_else(|| bad("this write needs a signed-in person"))?;
             if let Some(why) = crate::approvals::refused(&person.name, tool) {
                 return Err(bad(why));
             }
@@ -905,7 +804,7 @@ pub async fn begin(
         return Ok(checked);
     }
     let mut out = passkeys
-        .sign_in_begin(cx.env, &purpose(action, &d), person.map(|p| p.id.as_str()))
+        .sign_in_begin(cx.env, &purpose(action, &d), Some(person.id.as_str()))
         .await?;
     let mut summary = crate::to_value(action.summary(&target, &bound));
     if let Value::Object(more) = checked {
@@ -919,47 +818,29 @@ pub async fn begin(
     Ok(out)
 }
 
-/// Finishes `action` for `who`: the passkey's answer in `body` must be to the challenge bound to
-/// this exact target and change, and for [`Who::Person`] from their passkey; then the write is
-/// made, once.
+/// Finishes `action` for `person`: the passkey's answer in `body` must be theirs, to the
+/// challenge bound to this exact target and change; then the write is made, once.
 #[allow(clippy::too_many_arguments)]
 pub async fn finish(
     cx: &Context<'_>,
     passkeys: &Passkeys,
     action: &'static Action,
-    who: Who<'_>,
+    person: &User,
     target: &Value,
     change: &Value,
     body: &Value,
 ) -> Result<Value> {
-    let (target, change, _, d) = bind(cx, action, who, target, change, Step::Finish).await?;
-    let only = match who {
-        Who::Person(p) => Some(p.id.as_str()),
-        Who::AnyPasskey => None,
-    };
-    let key = passkeys
-        .sign_in_finish(cx.env, &purpose(action, &d), body, only)
+    let (target, change, _, d) = bind(cx, action, person, target, change, Step::Finish).await?;
+    passkeys
+        .sign_in_finish(cx.env, &purpose(action, &d), body, Some(person.id.as_str()))
         .await?;
-    let owned;
-    let person = match who {
-        Who::Person(p) => p,
-        Who::AnyPasskey => {
-            let user: Option<User> = serde_json::from_value(
-                directory(cx.env, "users.get", json!({ "id": key.user_id })).await?,
-            )?;
-            owned = user
-                .filter(|u| u.kind == "standard")
-                .ok_or_else(|| bad("only a person can make this change"))?;
-            &owned
-        }
-    };
     match action.handler {
         Handler::Capability(name) => {
             let w = Write {
                 action,
                 target,
                 change,
-                person: Some(person),
+                person,
             };
             owner(cx, name)?.write_make(cx, &w).await
         }
@@ -985,26 +866,5 @@ pub async fn finish(
             let data = crate::dispatch(&person_cx, tool, &args).await?;
             Ok(json!({ "message": format!("{}: done.", action.title), "data": data }))
         }
-    }
-}
-
-/// An old route's write, made through [`begin`] or [`finish`]; `person` is the signed-in person
-/// for a route that needed one.
-pub async fn adapt(
-    cx: &Context<'_>,
-    passkeys: &Passkeys,
-    path: &str,
-    body: &Value,
-    person: Option<&User>,
-) -> Result<Value> {
-    let l = legacy(path, body).ok_or_else(|| bad("not found"))?;
-    let who = match (l.any_passkey, person) {
-        (true, _) => Who::AnyPasskey,
-        (false, Some(p)) => Who::Person(p),
-        (false, None) => return Err(bad("sign in to the console first")),
-    };
-    match l.step {
-        Step::Begin => begin(cx, passkeys, l.action, who, &l.target, &l.change).await,
-        Step::Finish => finish(cx, passkeys, l.action, who, &l.target, &l.change, body).await,
     }
 }

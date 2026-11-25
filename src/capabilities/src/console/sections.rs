@@ -1,10 +1,8 @@
-//! The console's areas and the sections platform capabilities put in them. An area is one item
-//! of the console's navigation, with a stable id ([`AREAS`]); `console_manifest` lists the
-//! areas an instance shows (docs/plans/console-redesign.md). A section is something a platform
-//! capability declares in an area: a view of it (`view`), or, until the legacy panels go, only
-//! a data anchor that `/console/api/section/{id}` answers. Several capabilities may fill the
-//! same anchor, as `secrets` and `proxy` both fill `credentials`, and the console answers it
-//! once with every owner. Pure: no I/O and no `worker` types.
+//! The console's areas and the views platform capabilities put in them. An area is one item of
+//! the console's navigation, with a stable id ([`AREAS`]); `console_manifest` lists the areas an
+//! instance shows (docs/plans/console-redesign.md). A section is a view a platform capability
+//! declares in one of the platform areas; its data comes from the tools the view reads through
+//! `/app/op`. Pure: no I/O and no `worker` types.
 
 use serde::Serialize;
 
@@ -63,39 +61,22 @@ pub fn area_named(id: &str) -> Option<&'static Area> {
     AREAS.iter().find(|a| a.id == id)
 }
 
-/// The area a capability Worker's `SectionSpec.tab` names: an area id, or one of the old tab
-/// names a Worker built before areas sends (`approvals`, `architecture`).
-pub fn area_of_tab(tab: &str) -> Option<&'static Area> {
-    let id = match tab {
-        "approvals" => "inbox",
-        "architecture" => "platform",
-        other => other,
-    };
-    area_named(id)
-}
-
-/// A part of an area that a platform capability fills.
+/// A view a platform capability adds to one of the platform areas.
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct Section {
     /// The id of the area it sits in, one of [`AREAS`].
     pub area: &'static str,
-    /// Its id: the view's id within the area when `view` is set, and the anchor
-    /// `/console/api/section/{id}` answers. Lowercase ASCII letters, digits and hyphens.
+    /// The view's stable id within the area: lowercase ASCII letters, digits and hyphens.
     pub id: &'static str,
     pub title: &'static str,
     /// One line under the title.
     pub description: &'static str,
     /// Its place within the area, smallest first.
     pub order: u16,
-    /// The name it adds to the overview's total cost under, when it reports a cost.
-    pub cost: Option<&'static str>,
-    /// Whether `console_manifest` lists it as a view. A section that is not a view is a legacy
-    /// panel's data anchor only, deleted with the legacy panels.
-    pub view: bool,
 }
 
-/// Whether `id` is a valid anchor: 1 to 32 characters of a-z, 0-9 and `-`.
-pub fn anchor(id: &str) -> bool {
+/// Whether `id` is a valid view id: 1 to 32 characters of a-z, 0-9 and `-`.
+pub fn view_id(id: &str) -> bool {
     (1..=32).contains(&id.len())
         && id
             .bytes()

@@ -1,9 +1,9 @@
 //! Secrets: the one way a value gets into the platform, so no one has to open Cloudflare's
 //! dashboard and no value passes through a chat. Each capability declares the secrets it needs;
-//! the app's Access page lists them under Credentials, set or missing, and lets a person replace
-//! one (the old `/secrets` page redirects there). Seeing the list takes the console's session, and each write
-//! takes a passkey of its own whose challenge is bound to the
-//! secret's name and a hash of the new value, so an approval covers that one value. Before it is
+//! the console's Access › Secrets lists them, set or missing, and lets a person replace one (the
+//! console's `secret-set` write). Seeing the list takes the console's session, and each write
+//! takes a passkey of its own whose challenge is bound to the person, the secret's name and a
+//! hash of the new value, so an approval covers that one value. Before it is
 //! written, the owning capability checks the value works. Values are never shown, logged or kept
 //! by pigeon: they go straight to the Secrets Store. Over MCP, secrets can be listed and a link
 //! to set one handed out, but never set.
@@ -14,39 +14,23 @@ use pigeon_core::secrets_store::{self, Writer};
 use pigeon_core::tokens::{self, MintRequest, Policy, Scope};
 use serde::Serialize;
 use serde_json::{Value, json};
-use worker::{Error, Headers, Method, Request, Response, Result};
+use worker::{Error, Result};
 
-use crate::console::page;
 use crate::console::sections::Section;
 use crate::expiry::{self, Expiry};
-use crate::passkeys::Passkeys;
 use crate::users::User;
-use crate::{Call, Capability, Context, Expiring, Serve, Slot, to_value, unknown};
+use crate::{Call, Capability, Context, Expiring, Slot, to_value, unknown};
 
-/// The secrets page and its tools.
+/// Secrets: the console's `secret-set` write and the secrets tools.
 pub struct Secrets {
-    /// The hostname the page is on, which is also the passkeys' relying party.
+    /// The console's hostname, which `secrets_request` links to.
     pub host: String,
-    pub passkeys: Passkeys,
     /// The Secrets Store binding holding the parent token, which this capability owns.
     pub parent: String,
 }
 
 fn bad(why: &str) -> Error {
     Error::RustError(why.to_string())
-}
-
-/// The legacy Credentials panel's data anchor, which secrets and proxy credentials share.
-pub fn keys_section() -> Section {
-    Section {
-        area: "access",
-        id: "credentials",
-        title: "Secrets and credentials",
-        description: "Each with its expiry. Values are never shown; setting or replacing one asks for your passkey, bound to that name.",
-        order: 1,
-        cost: None,
-        view: false,
-    }
 }
 
 /// Access › Secrets.
@@ -57,8 +41,6 @@ fn secrets_view() -> Section {
         title: "Secrets",
         description: "Each secret with its expiry. Values are never shown; setting or replacing one asks for your passkey, bound to that name.",
         order: 10,
-        cost: None,
-        view: true,
     }
 }
 
@@ -171,40 +153,6 @@ impl Secrets {
         Ok(json!({ "warn_days": expiry::WARN_DAYS, "credentials": rows }))
     }
 
-    fn url(&self, name: Option<&str>) -> String {
-        match name {
-            Some(n) => format!("https://{}{}#{n}", self.host, page::CREDENTIALS),
-            None => format!("https://{}{}", self.host, page::CREDENTIALS),
-        }
-    }
-
-    async fn serve(&self, cx: &Context<'_>, mut req: Request) -> Result<Response> {
-        let path = req.path();
-        match (req.method(), path.as_str()) {
-            (Method::Get, "/secrets") => page::redirect(page::CREDENTIALS),
-            (Method::Post, p) => {
-                let body: Value = req.json().await.unwrap_or(Value::Null);
-                // The old route: an adapter onto the console's `secret-set` write, approved by
-                // any person's passkey as it always was (the iOS app writes here).
-                let answer = match p {
-                    "/secrets/put/begin" | "/secrets/put/finish" => {
-                        crate::console::write::adapt(cx, &self.passkeys, p, &body, None).await
-                    }
-                    _ => return Response::error("not found", 404),
-                };
-                let headers = Headers::new();
-                headers.set("Cache-Control", "no-store")?;
-                match answer {
-                    Ok(v) => Ok(Response::from_json(&v)?.with_headers(headers)),
-                    Err(e) => Ok(Response::from_json(&json!({ "error": e.to_string() }))?
-                        .with_status(400)
-                        .with_headers(headers)),
-                }
-            }
-            _ => Response::error("not found", 404),
-        }
-    }
-
     /// The `secret-set` write, approved by `person`'s passkey for this name and this value: has
     /// the owner check the value, then writes it.
     async fn put(&self, cx: &Context<'_>, name: &str, value: &str, person: &User) -> Result<Value> {
@@ -310,7 +258,7 @@ impl Capability for Secrets {
     }
 
     fn sections(&self) -> Vec<Section> {
-        vec![keys_section(), secrets_view()]
+        vec![secrets_view()]
     }
 
     /// `secret-set`: only a name some capability declares (or the parent token's).
@@ -331,35 +279,9 @@ impl Capability for Secrets {
         w: &'a crate::console::write::Write<'a>,
     ) -> Call<'a> {
         Box::pin(async move {
-            let person = w.person.ok_or_else(|| bad("no person"))?;
+            let person = w.person;
             let value = w.change["value"].as_str().unwrap_or_default();
             self.put(cx, w.text(), value, person).await
-        })
-    }
-
-    /// Every declared secret and the store's others, set or missing, never a value; the
-    /// declared ones that are missing; and each declared one's expiry, with those expiring
-    /// within a week or expired, for the overview.
-    fn section_data<'a>(
-        &'a self,
-        cx: &'a Context<'a>,
-        _id: &'a str,
-        _person: &'a User,
-        _query: &'a Value,
-    ) -> Call<'a> {
-        Box::pin(async move {
-            let secrets = Self::list(cx).await?;
-            let missing: Vec<Value> = secrets
-                .iter()
-                .filter(|s| !s.set && !s.owner.is_empty())
-                .map(|s| json!({ "name": s.name, "owner": s.owner, "purpose": s.purpose }))
-                .collect();
-            let expiry = Self::expiry(cx, &secrets).await;
-            let expiring: Vec<&expiry::Row> = expiry.iter().filter(|r| r.needs_you()).collect();
-            Ok(json!({
-                "secrets": secrets, "missing": missing,
-                "expiry": expiry, "expiring": expiring,
-            }))
         })
     }
 
@@ -400,7 +322,12 @@ impl Capability for Secrets {
                     if let Some(n) = name {
                         self.owner(cx, n)?;
                     }
-                    json!({ "url": self.url(name) })
+                    let page = crate::console::home_url(cx.env, "access", Some("secrets")).await;
+                    let url = format!("https://{}{page}", self.host);
+                    json!({ "url": match name {
+                        Some(n) => format!("{url}#{n}"),
+                        None => url,
+                    } })
                 }
                 other => return Err(unknown(other)),
             })
@@ -428,13 +355,5 @@ impl Capability for Secrets {
                 Err(e) => Err(e),
             }
         })
-    }
-
-    fn routes(&self) -> Vec<&'static str> {
-        vec!["/secrets"]
-    }
-
-    fn fetch<'a>(&'a self, cx: &'a Context<'a>, req: Request) -> Serve<'a> {
-        Box::pin(self.serve(cx, req))
     }
 }

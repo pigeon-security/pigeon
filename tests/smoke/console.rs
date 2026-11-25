@@ -1,5 +1,6 @@
-//! The console's one write path (`console::write`), its one read path (`/app/op`'s allowlist), and
-//! the new shell's contract with both and with `console_manifest` (P15).
+//! The console's one write path (`console::write`), its one read path (`/app/op`'s allowlist),
+//! the shell's contract with both and with `console_manifest` (P15), and the guard that the
+//! first console is gone for good (`console_decommissioned`).
 
 use super::*;
 
@@ -7,8 +8,7 @@ use pigeon_core::oauth::hash;
 
 use pigeon_capabilities::console::ops::{INSTANCE_OPS, READS, allowed, inbox_for, read_keys};
 use pigeon_capabilities::console::write::{
-    ACTIONS, ANY_PASSKEY, Handler, LEGACY, Policy, Step, Stored, action, digest, legacy, purpose,
-    redeem, route,
+    ACTIONS, Handler, Policy, Step, Stored, action, digest, purpose, redeem, route,
 };
 
 /// The purpose `caller` gets for `id` with `target` and `change` at `step`, or why not.
@@ -195,11 +195,6 @@ fn console_bearer_secret_set_binds_the_person_and_value() {
     assert_ne!(begin("willow", "v"), finish("willow", "w"), "another value");
     assert_ne!(
         begin("willow", "v"),
-        finish(ANY_PASSKEY, "v"),
-        "the old route's binding"
-    );
-    assert_ne!(
-        begin("willow", "v"),
         bound_purpose(
             "secret-set",
             "willow",
@@ -223,15 +218,6 @@ fn console_bearer_secret_set_binds_the_person_and_value() {
         let (a, _) = route(&format!("/console/write/{id}/begin")).unwrap();
         assert!(!a.by_bearer, "{id} is not allowed by bearer");
     }
-    // The old secret route is untouched: still an adapter onto `secret-set`, by any passkey.
-    let old = legacy(
-        "/secrets/put/begin",
-        &json!({ "name": "X", "digest": hash("v") }),
-    )
-    .unwrap();
-    assert_eq!((old.action.id, old.any_passkey), ("secret-set", true));
-    let old = legacy("/secrets/put/finish", &json!({ "name": "X", "value": "v" })).unwrap();
-    assert_eq!((old.action.id, old.step), ("secret-set", Step::Finish));
 }
 
 #[test]
@@ -275,11 +261,6 @@ fn console_write_binds_the_exact_change_caller_and_action() {
         begun,
         p("u2", "blog", &release),
         "another caller is refused"
-    );
-    assert_ne!(
-        begun,
-        p(ANY_PASSKEY, "blog", &release),
-        "any passkey is not this person"
     );
     // Another action with the same target and change does not share it.
     let stop = bound_purpose("run-stop", "u1", json!("r1"), json!({}), Step::Begin).unwrap();
@@ -508,70 +489,6 @@ fn console_write_challenges_are_single_use_and_expire() {
 }
 
 #[test]
-fn console_old_write_routes_reach_the_same_actions() {
-    let expected = [
-        ("/secrets/put/begin", "secret-set", true),
-        ("/tokens/issue/begin", "token-issue", true),
-        ("/tokens/revoke/begin", "token-revoke", true),
-        ("/linked/unlink/begin", "linked-unlink", false),
-        ("/instance/put/begin", "instance-put", false),
-        ("/console/site-access/invite/begin", "visitor-invite", false),
-    ];
-    assert_eq!(LEGACY.len(), expected.len() * 2);
-    for (path, id) in LEGACY {
-        assert!(action(id).is_some(), "{path}");
-    }
-    let record = r#"{"id":"blog","version":3}"#;
-    let bodies = |id: &str| match id {
-        "secret-set" => (
-            json!({ "name": "X", "digest": hash("v") }),
-            json!({ "name": "X", "value": "v" }),
-        ),
-        "token-issue" => (
-            json!({ "label": "env", "days": 7 }),
-            json!({ "label": "env", "days": 7 }),
-        ),
-        "token-revoke" => (
-            json!({ "id": "aaaaaaaaaaaa" }),
-            json!({ "id": "aaaaaaaaaaaa" }),
-        ),
-        "linked-unlink" => (
-            json!({ "instance": "alpha" }),
-            json!({ "instance": "alpha" }),
-        ),
-        "instance-put" => (
-            json!({ "record": record, "digest": hash(record) }),
-            json!({ "record": record }),
-        ),
-        _ => {
-            let b = json!({ "instance": "alpha", "site": "blog", "host": "blog.example.test", "name": "Alex" });
-            (b.clone(), b)
-        }
-    };
-    for (begin, id, any) in expected {
-        let finish = begin.replace("/begin", "/finish");
-        let (b, f) = bodies(id);
-        let lb = legacy(begin, &b).unwrap();
-        let lf = legacy(&finish, &f).unwrap();
-        assert_eq!(
-            (lb.action.id, lb.step, lb.any_passkey),
-            (id, Step::Begin, any),
-            "{begin}"
-        );
-        assert_eq!((lf.action.id, lf.step), (id, Step::Finish), "{finish}");
-        assert_eq!(lb.action.handler, action(id).unwrap().handler);
-        // The old begin and finish bodies bind the same purpose as the new path does.
-        let caller = if any { ANY_PASSKEY } else { "u1" };
-        assert_eq!(
-            bound_purpose(id, caller, lb.target, lb.change, Step::Begin),
-            bound_purpose(id, caller, lf.target, lf.change, Step::Finish),
-            "{begin}"
-        );
-    }
-    assert!(legacy("/secrets/put/other", &json!({})).is_none());
-}
-
-#[test]
 fn console_ops_allow_the_reads_the_console_needs_and_nothing_else() {
     for op in [
         "app_inbox",
@@ -696,7 +613,10 @@ fn console_ops_allow_the_reads_the_console_needs_and_nothing_else() {
         ),
         ("cost_daily", json!({ "range": "7d", "extra": 1 })),
         ("cost_daily", json!([])),
-        ("ai_agents_stop", json!({})),
+        // A run's stop, note and extension are writes now (run-stop, run-note, run-extend).
+        ("ai_agents_stop", json!({ "run": "r1" })),
+        ("ai_agents_note", json!({ "run": "r1", "text": "hi" })),
+        ("ai_agents_extend", json!({ "run": "r1", "turns": 5 })),
         ("app_people", json!({ "user_id": "u1" })),
     ] {
         assert!(!allowed(op, &args), "{op} {args}");
@@ -731,18 +651,13 @@ fn console_ops_allow_the_reads_the_console_needs_and_nothing_else() {
 
 // ---- P15: the new console shell's contract (`console/web/shell.js`, `views.js`) ----
 
-/// The views the new console shell still renders with an explicit TODO-port placeholder, which
-/// links to the same page in the current console. Shrinks to nothing as views are ported.
-const CONSOLE_TODO_PORT: &[&str] = &[];
-
 /// Every area and view `console_manifest` can send: its answer for a home instance with every
 /// instance capability enabled, given every platform capability's sections (core's own, and
 /// the AI Agents Worker's, which core reads from its manifest as `remote.rs` does).
 fn console_every_view() -> std::collections::BTreeMap<String, Vec<String>> {
     use pigeon_capabilities::Capability;
-    use pigeon_capabilities::console::sections::{Section, area_of_tab};
+    use pigeon_capabilities::console::sections::{Section, area_named};
     use pigeon_capabilities::instances::{manifest::manifest, record::Instance, tools::Scope};
-    use pigeon_capabilities::passkeys::Passkeys;
     use pigeon_contract::Service;
 
     let record: Instance = serde_json::from_value(json!({
@@ -759,21 +674,15 @@ fn console_every_view() -> std::collections::BTreeMap<String, Vec<String>> {
             "destination_bucket": "all-site" }
     }))
     .unwrap();
-    let passkeys = || Passkeys {
-        host: "h".into(),
-        site_name: "s".into(),
-    };
     let caps: Vec<Box<dyn Capability>> = vec![
         Box::new(pigeon_capabilities::architecture::Architecture),
         Box::new(pigeon_capabilities::users::Users { host: "h".into() }),
         Box::new(pigeon_capabilities::secrets::Secrets {
             host: "h".into(),
-            passkeys: passkeys(),
             parent: "p".into(),
         }),
         Box::new(pigeon_capabilities::proxy::Tokens {
             proxy_host: "p".into(),
-            passkeys: passkeys(),
         }),
         Box::new(pigeon_capabilities::observability::Observability {
             map: pigeon_core::lanes::Map {
@@ -804,8 +713,8 @@ fn console_every_view() -> std::collections::BTreeMap<String, Vec<String>> {
         )
         .collect();
     for cap in pigeon_ai_agents::service::Agents.manifest().capabilities {
-        for s in cap.sections {
-            let area = area_of_tab(&s.tab).unwrap().id;
+        for s in cap.sections.into_iter().filter(|s| s.view) {
+            let area = area_named(&s.tab).unwrap().id;
             platform.push((
                 "ai_agents",
                 Section {
@@ -814,8 +723,6 @@ fn console_every_view() -> std::collections::BTreeMap<String, Vec<String>> {
                     title: leak(&s.title),
                     description: "",
                     order: s.order,
-                    cost: None,
-                    view: s.view,
                 },
             ));
         }
@@ -913,7 +820,7 @@ fn js_array(src: &str, decl: &str) -> Vec<String> {
 }
 
 /// P15, the console contract: every area and view `console_manifest` can send has a renderer in
-/// the new shell (or an explicit TODO-port placeholder, listed above), and the shell registers
+/// the shell, and the shell registers
 /// none it cannot send; every op the shell reads is in `/app/op`'s `READS`; every write it makes
 /// is an action of the one write path; the shell's one stylesheet keeps colours in tokens and no
 /// script sets an inline style or HTML; and fixture mode is never served.
@@ -921,9 +828,9 @@ fn js_array(src: &str, decl: &str) -> Vec<String> {
 fn console_shell_contract() {
     use pigeon_capabilities::console::sections::{AREAS, area_named};
     use pigeon_capabilities::console::{Get, page};
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeSet;
 
-    let scripts: Vec<(&str, &str)> = page::NEXT_ASSETS
+    let scripts: Vec<(&str, &str)> = page::ASSETS
         .iter()
         .filter(|(path, ..)| path.ends_with(".js"))
         .map(|(path, _, body)| (*path, *body))
@@ -945,20 +852,15 @@ fn console_shell_contract() {
         "a fully enabled home instance shows every area"
     );
 
-    // Renderers: register(area, view|null, render) and todo(area, view|null).
-    let mut renderers = BTreeMap::new();
-    for (kind, func) in [("view", "register"), ("todo", "todo")] {
-        for (area, view) in js_calls(&all, func) {
-            let key = format!("{area}/{}", view.as_deref().unwrap_or("*"));
-            assert!(
-                renderers.insert(key.clone(), kind).is_none(),
-                "{key} has two renderers"
-            );
-        }
+    // Renderers: register(area, view|null, render).
+    let mut renderers = BTreeSet::new();
+    for (area, view) in js_calls(&all, "register") {
+        let key = format!("{area}/{}", view.as_deref().unwrap_or("*"));
+        assert!(renderers.insert(key.clone()), "{key} has two renderers");
     }
     let rendered = |area: &str, view: Option<&str>| {
-        view.is_some_and(|v| renderers.contains_key(&format!("{area}/{v}")))
-            || renderers.contains_key(&format!("{area}/*"))
+        view.is_some_and(|v| renderers.contains(&format!("{area}/{v}")))
+            || renderers.contains(&format!("{area}/*"))
     };
     for (area, views) in &every {
         if views.is_empty() {
@@ -968,23 +870,13 @@ fn console_shell_contract() {
             assert!(rendered(area, Some(view)), "{area}/{view} has no renderer");
         }
     }
-    for key in renderers.keys() {
+    for key in &renderers {
         let (area, view) = key.split_once('/').unwrap();
         let known = every
             .get(area)
             .is_some_and(|views| view == "*" || views.iter().any(|v| v == view));
         assert!(known, "{key} is registered but no manifest sends it");
     }
-    let todos: BTreeSet<&str> = renderers
-        .iter()
-        .filter(|(_, kind)| **kind == "todo")
-        .map(|(key, _)| key.as_str())
-        .collect();
-    assert_eq!(
-        todos,
-        CONSOLE_TODO_PORT.iter().copied().collect::<BTreeSet<_>>(),
-        "the TODO-port placeholders changed: update CONSOLE_TODO_PORT"
-    );
 
     // The recorded manifests: areas as AREAS declares them, Inbox first, platform areas only
     // on home, and only views the manifest can send.
@@ -1072,7 +964,7 @@ fn console_shell_contract() {
     }
 
     // P13: colours only in the stylesheet's tokens; no inline styles or HTML from scripts.
-    let css = page::NEXT_ASSETS
+    let css = page::ASSETS
         .iter()
         .find(|(path, ..)| path.ends_with("/shell.css"))
         .unwrap()
@@ -1112,29 +1004,275 @@ fn console_shell_contract() {
         }
     }
 
-    // Served at /app/next beside /app; fixture mode never.
+    // Served at /app and every page below it; fixture mode never.
     for path in [
-        "/app/next",
-        "/app/next/",
-        "/app/next/home/inbox",
-        "/app/next/docs/site/visitors",
+        "/app",
+        "/app/",
+        "/app/home/inbox",
+        "/app/docs/site/visitors",
     ] {
-        assert_eq!(Get::route(path), Some(Get::AppNext), "GET {path}");
+        assert_eq!(Get::route(path, None), Some(Get::App), "GET {path}");
     }
-    assert_eq!(Get::route("/app"), Some(Get::App));
     for path in [
-        "/app/next/fixtures.html",
-        "/app/next/fixtures/console_manifest.json",
         "/app/fixtures.html",
-        "/app/next/nope.js",
+        "/app/fixtures/console_manifest.json",
+        "/app/views/nope.js",
+        "/app/op",
     ] {
-        assert_eq!(Get::route(path), None, "GET {path}");
+        assert_eq!(Get::route(path, None), None, "GET {path}");
     }
-    let page = page::next_shell("Site <x>", Some("Ada"));
+    let page = page::shell("Site <x>", Some("Ada"));
     assert!(!page.contains("data-fixtures"));
-    assert!(page.contains("data-base=\"/app/next\"") && page.contains("data-person=\"Ada\""));
+    assert!(page.contains("data-base=\"/app\"") && page.contains("data-person=\"Ada\""));
     assert!(page.contains("Site &lt;x&gt;") && !page.contains("<script>"));
-    for (path, ..) in page::NEXT_ASSETS {
+    for (path, ..) in page::ASSETS {
         assert!(page.contains(path), "the page loads {path}");
+        assert!(
+            matches!(Get::route(path, None), Some(Get::Asset(..))),
+            "GET {path}"
+        );
     }
+}
+
+/// The first console is gone for good (docs/plans/console-redesign.md, decommission
+/// checklist): none of its files comes back, no source names its routes, panels or tools, its
+/// assets and APIs answer 404, and each old bookmark is either one redirect to a page of the
+/// console at `/app/<instance>/<area>/<view>` or a 404.
+#[test]
+fn console_decommissioned() {
+    use pigeon_capabilities::Capability;
+    use pigeon_capabilities::console::page::{self, BOOKMARKS, Bookmark, OLD_TABS};
+    use pigeon_capabilities::console::sections::area_named;
+    use pigeon_capabilities::console::{Console, Get, Post};
+
+    let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+    for gone in [
+        "console/approvals.js",
+        "console/instances.js",
+        "console/keys.js",
+        "console/users.js",
+        "console/console.css",
+        "console/snapshot.rs",
+        "console/web/legacy-shell.js",
+        "console/web/legacy-shell.css",
+        "console/web/management.js",
+        "console/web/management.css",
+        "console/web/sessions.js",
+        "console/web/sessions.css",
+        "console/web/cost.js",
+        "console/web/cost.css",
+        "console/web/settings.js",
+        "console/web/settings.css",
+        "console/web/connections.js",
+        "console/web/connections.css",
+        "console/web/architecture.js",
+        "console/web/architecture.css",
+        "site_passkeys/visitor.js",
+    ] {
+        let path = root.join("src/capabilities/src").join(gone);
+        assert!(!path.exists(), "{gone} is back");
+    }
+    assert!(!root.join("src/ai-agents/src/page.rs").exists());
+
+    // No source names the first console's routes, panels, tools or shims.
+    const NAMES: &[&str] = &[
+        "/console/api/section",
+        "/console/site-access",
+        "/secrets/put",
+        "/tokens/issue",
+        "/tokens/revoke",
+        "/linked/unlink",
+        "/instance/put",
+        "/apple/adopt",
+        "/apple/identity",
+        "/app/next",
+        "pigeonConsole",
+        "legacy-shell",
+        "legacyLink",
+        "instances_tabs",
+        "section_data",
+        "SectionRequest",
+        "visitor.js",
+        "CONSOLE_TODO_PORT",
+        "tab=management",
+    ];
+    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.extension().is_some_and(|e| {
+                ["rs", "js", "css", "html", "json", "toml", "swift"]
+                    .contains(&e.to_str().unwrap_or(""))
+            }) {
+                out.push(path);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(&root.join("src"), &mut files);
+    walk(&root.join("ios"), &mut files);
+    assert!(files.len() > 100, "the walk found the sources");
+    for file in &files {
+        let text = std::fs::read_to_string(file).unwrap_or_default();
+        for name in NAMES {
+            assert!(!text.contains(name), "{} names {name}", file.display());
+        }
+    }
+
+    // Its assets and APIs answer 404.
+    for gone in [
+        "/console/api/section/credentials",
+        "/console/api/section/approvals",
+        "/console/keys.js",
+        "/console/users.js",
+        "/console/approvals.js",
+        "/console/instances.js",
+        "/console/console.css",
+        "/app/legacy-shell.js",
+        "/app/legacy-shell.css",
+        "/app/sessions.js",
+        "/app/cost.css",
+        "/app/settings.js",
+        "/app/connections.js",
+        "/app/architecture.js",
+        "/app/management.js",
+        "/app/visitor.js",
+        "/app/next/shell.js",
+        "/app/next/views.js",
+    ] {
+        assert_eq!(Get::route(gone, None), None, "GET {gone}");
+    }
+    for gone in [
+        "/console/site-access/hosts",
+        "/console/site-access/list",
+        "/console/site-access/invite/begin",
+        "/secrets/put/begin",
+        "/tokens/issue/begin",
+        "/tokens/revoke/finish",
+        "/linked/unlink/begin",
+        "/instance/put/finish",
+        "/apple/adopt/begin",
+        "/app",
+    ] {
+        assert_eq!(Post::route(gone), None, "POST {gone}");
+    }
+    assert!(
+        pigeon_capabilities::secrets::Secrets {
+            host: "h".into(),
+            parent: "p".into(),
+        }
+        .routes()
+        .is_empty()
+    );
+    assert!(
+        pigeon_capabilities::proxy::Tokens {
+            proxy_host: "p".into()
+        }
+        .routes()
+        .is_empty()
+    );
+
+    // Each old bookmark: one redirect to a page of the console, at a view the manifest sends.
+    let every = console_every_view();
+    let lands = |area: &str, view: Option<&str>| {
+        assert!(area_named(area).is_some(), "{area}");
+        if let Some(v) = view {
+            assert!(every[area].iter().any(|w| w == v), "{area}/{v}");
+        }
+        let to = page::url("home", area, view);
+        assert!(to.starts_with("/app/home/") && !to.contains('?'), "{to}");
+        // The page it lands on is the console's, not another bookmark.
+        assert_eq!(Get::route(&to, None), Some(Get::App), "{to}");
+    };
+    for (_, area, view) in BOOKMARKS {
+        lands(area, *view);
+    }
+    for (.., area, view) in OLD_TABS {
+        lands(area, *view);
+    }
+    let area = |path: &str, query: Option<&str>| match Get::route(path, query) {
+        Some(Get::Bookmark(Bookmark::Area {
+            instance,
+            area,
+            view,
+        })) => Some((instance, area, view)),
+        _ => None,
+    };
+    assert_eq!(Get::route("/", None), Some(Get::Bookmark(Bookmark::Root)));
+    for (path, to) in [
+        ("/approvals", ("inbox", None)),
+        ("/instances", ("instances", Some("list"))),
+        ("/architecture", ("platform", Some("architecture"))),
+        ("/access", ("access", None)),
+        ("/settings/", ("access", None)),
+        ("/secrets", ("access", Some("secrets"))),
+        ("/tokens", ("access", Some("tokens"))),
+        ("/cost", ("cost", None)),
+        ("/gateways", ("cost", None)),
+    ] {
+        assert_eq!(area(path, None), Some((None, to.0, to.1)), "{path}");
+    }
+    for (query, instance, to) in [
+        ("tab=approvals", None, ("inbox", None)),
+        (
+            "tab=management&subtab=credentials",
+            None,
+            ("access", Some("secrets")),
+        ),
+        ("tab=management", None, ("access", Some("secrets"))),
+        (
+            "tab=management&subtab=delegation",
+            None,
+            ("access", Some("apps")),
+        ),
+        ("tab=cost&subtab=today", None, ("cost", Some("today"))),
+        ("tab=cost&subtab=bogus", None, ("cost", None)),
+        ("tab=sessions&subtab=main", None, ("sessions", Some("live"))),
+        (
+            "instance=docs&tab=settings&subtab=site",
+            Some("docs"),
+            ("site", Some("sites")),
+        ),
+        ("instance=docs&tab=home", Some("docs"), ("overview", None)),
+        ("instance=docs", Some("docs"), ("overview", None)),
+        // An instance id that is not one is dropped, not carried into the Location.
+        ("instance=a%0d%0aX:1&tab=cost", None, ("cost", None)),
+    ] {
+        assert_eq!(
+            area("/app", Some(query)),
+            Some((instance.map(String::from), to.0, to.1)),
+            "/app?{query}"
+        );
+    }
+    // The console's own pages are no bookmark, with or without a query.
+    assert_eq!(Get::route("/app", Some("fixtures=1")), Some(Get::App));
+    assert_eq!(
+        Get::route("/app/home/inbox", Some("tab=cost")),
+        Some(Get::App)
+    );
+    // The console answers exactly these paths: its own, and the bookmarks.
+    let console = Console {
+        host: "h".into(),
+        passkeys: pigeon_capabilities::passkeys::Passkeys {
+            host: "h".into(),
+            site_name: "s".into(),
+        },
+    };
+    assert_eq!(
+        console.routes(),
+        [
+            "/console/",
+            "/app",
+            "/approvals",
+            "/instances",
+            "/architecture",
+            "/access",
+            "/settings",
+            "/secrets",
+            "/tokens",
+            "/cost",
+            "/gateways",
+        ]
+    );
 }

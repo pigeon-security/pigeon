@@ -7,7 +7,7 @@ use serde_json::Value;
 pub const CONTRACT: u32 = 1;
 
 /// The ops a capability Worker answers; the op is the request path.
-pub const OPS: [&str; 6] = ["manifest", "call", "section", "fetch", "events", "secret"];
+pub const OPS: [&str; 5] = ["manifest", "call", "fetch", "events", "secret"];
 
 /// The ops core answers for capability Workers. `verify`, `grant` and `deploy_grant` are the
 /// proxy Worker's checks: each carries the credential it asks about, so it is signed with
@@ -112,14 +112,14 @@ pub struct ToolSpec {
     pub input_schema: Value,
 }
 
-/// A console section a capability fills: a view of one of the console's platform areas, or,
-/// until the legacy panels go, only a data anchor (docs/plans/console-redesign.md).
+/// A console view a capability adds to one of the console's platform areas
+/// (docs/plans/console-redesign.md).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SectionSpec {
-    /// The id of the console area it sits in, such as `sessions`. Core also reads the old tab
-    /// names (`approvals`, `architecture`) a Worker built before areas sends.
+    /// The id of the console area it sits in, such as `sessions`. Named `tab` on the wire until
+    /// a contract version renames it.
     pub tab: String,
-    /// Its id: the view's stable id within the area when `view` is set, and its data anchor.
+    /// The view's stable id within the area.
     pub id: String,
     /// Its title.
     #[serde(default)]
@@ -130,10 +130,12 @@ pub struct SectionSpec {
     /// Its place within the area, smallest first.
     #[serde(default)]
     pub order: u16,
-    /// The name it adds to the overview's total cost under, when it reports a cost.
+    /// Unread since the first console's overview went; kept on the wire until a contract
+    /// version removes it.
     #[serde(default)]
     pub cost: Option<String>,
-    /// Whether `console_manifest` lists it as a view. False from a Worker built before views.
+    /// Whether it is a view: core lists only these. False from a Worker built before views,
+    /// whose sections were the first console's data anchors.
     #[serde(default)]
     pub view: bool,
 }
@@ -162,18 +164,6 @@ pub struct CallRequest {
     /// Its arguments.
     #[serde(default)]
     pub args: Value,
-}
-
-/// A request for a console section's data.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct SectionRequest {
-    /// The capability the section belongs to.
-    pub capability: String,
-    /// The section's anchor.
-    pub id: String,
-    /// The section's parameters, such as `days`.
-    #[serde(default)]
-    pub query: Value,
 }
 
 /// A batch of queue messages for the capabilities that want them.

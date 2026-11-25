@@ -450,10 +450,6 @@ impl AiAgentRuns {
             "models" => self.models_op(a),
             "config" => self.config_op(a),
             "compare" => self.compare(a),
-            "section" => Ok(json!({
-                "paused": self.flag("paused")?,
-                "runs": self.section_rows(&s("reader"))?,
-            })),
             "get" => self.get(&s("run"), &s("reader")),
             // For a run object, about itself: no reader check.
             "get_any" => Ok(self
@@ -936,15 +932,6 @@ impl AiAgentRuns {
             ],
         )?;
         Ok(self.row(id)?.map(|r| r.public()).unwrap_or(Value::Null))
-    }
-
-    /// The runs for the console's AI Agents section: live ones, then the last ended.
-    pub fn section_rows(&self, reader: &str) -> Result<Vec<Value>> {
-        let rows: Vec<Row> = self.db.rows(
-            "SELECT * FROM runs WHERE by_id = ? OR for_id = ? ORDER BY CASE WHEN ended_at IS NULL THEN 0 ELSE 1 END, created_at DESC LIMIT 30",
-            vec![reader.into(), reader.into()],
-        )?;
-        Ok(rows.iter().map(Row::public).collect())
     }
 
     /// Whether `reader` (a user id) may see or act on a run: the caller who started it, or the

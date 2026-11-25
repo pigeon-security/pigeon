@@ -38,7 +38,7 @@ fn contract_signed_callers_and_skew() {
         (
             &key[..],
             Some(header.as_str()),
-            "section",
+            "secret",
             &body[..],
             now,
             Refused::BadSignature,

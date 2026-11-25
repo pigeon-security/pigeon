@@ -2,10 +2,10 @@
 //! `/cf/`, and nothing else. A proxy credential is a bearer token of its own kind, so the MCP
 //! endpoint, which looks up only access tokens, never accepts one; and the proxies accept
 //! nothing else. Its value is shown once, when it is issued, and kept only as a hash; its id is
-//! the first characters of that hash. The app's Access page lists, issues and revokes them
-//! (the old `/tokens` page redirects there): seeing the list takes the console's session, and
-//! issuing or revoking takes a passkey of its own whose challenge
-//! is bound to that one credential's label and lifetime, or id. Every proxied request is logged
+//! the first characters of that hash. The console's Access › Tokens lists, issues and revokes
+//! them: seeing the list takes the console's session, and issuing or revoking takes a passkey of
+//! its own whose challenge is bound to the person and that one credential's label and lifetime,
+//! or id. Every proxied request is logged
 //! as one audit line: who, which route, and what came of it.
 //!
 //! The checks the proxies make at request time are in [`pigeon_proxies::proxy`], shared with
@@ -17,13 +17,11 @@ use pigeon_core::mcp::Tool;
 use pigeon_core::oauth::{hash, token};
 use pigeon_proxies::{Grant, Host, Pending, Purpose};
 use serde_json::{Value, json};
-use worker::{Env, Error, Method, Request, Response, Result};
+use worker::{Env, Error, Result};
 
-use crate::console::page;
 use crate::console::sections::Section;
-use crate::passkeys::Passkeys;
 use crate::users::{User, directory};
-use crate::{Call, Capability, Context, Serve, unknown};
+use crate::{Call, Capability, Context, unknown};
 
 pub use pigeon_proxies::proxy::{
     Audit, ID_LEN, Outcome, PREFIX, ProxyCaller, audit, audit_line, host_serves, reaches,
@@ -181,44 +179,13 @@ impl Host for Local<'_> {
     }
 }
 
-/// A JSON answer that is never cached.
-fn answer(value: &Value, status: u16) -> Result<Response> {
-    let mut res = Response::from_json(value)?.with_status(status);
-    res.headers_mut().set("Cache-Control", "no-store")?;
-    Ok(res)
-}
-
-/// The old `/tokens` page's redirect, and the console's issue and revoke calls.
+/// The console's `token-issue` and `token-revoke` writes.
 pub struct Tokens {
     /// The hostname the proxies are on, which a credential is saved for.
     pub proxy_host: String,
-    pub passkeys: Passkeys,
 }
 
 impl Tokens {
-    async fn serve(&self, cx: &Context<'_>, mut req: Request) -> Result<Response> {
-        let path = req.path();
-        match (req.method(), path.as_str()) {
-            (Method::Get, "/tokens") => page::redirect(page::CREDENTIALS),
-            (
-                Method::Post,
-                p @ ("/tokens/issue/begin"
-                | "/tokens/issue/finish"
-                | "/tokens/revoke/begin"
-                | "/tokens/revoke/finish"),
-            ) => {
-                // The old routes: adapters onto the console's `token-issue` and `token-revoke`
-                // writes, approved by any person's passkey as they always were.
-                let body: Value = req.json().await.unwrap_or(Value::Null);
-                match crate::console::write::adapt(cx, &self.passkeys, p, &body, None).await {
-                    Ok(v) => answer(&v, 200),
-                    Err(e) => answer(&json!({ "error": e.to_string() }), 400),
-                }
-            }
-            _ => Response::error("not found", 404),
-        }
-    }
-
     /// `token-issue`: a credential labelled `label` for `person`, living `days`; its secret is
     /// answered once.
     async fn issue(&self, env: &Env, label: &str, days: i64, person: &User) -> Result<Value> {
@@ -262,18 +229,13 @@ impl Capability for Tokens {
     }
 
     fn sections(&self) -> Vec<Section> {
-        vec![
-            crate::secrets::keys_section(),
-            Section {
-                area: "access",
-                id: "tokens",
-                title: "Tokens",
-                description: "Live proxy credentials and when each ends. Issuing or revoking one asks for your passkey.",
-                order: 20,
-                cost: None,
-                view: true,
-            },
-        ]
+        vec![Section {
+            area: "access",
+            id: "tokens",
+            title: "Tokens",
+            description: "Live proxy credentials and when each ends. Issuing or revoking one asks for your passkey.",
+            order: 20,
+        }]
     }
 
     fn write_make<'a>(
@@ -282,7 +244,7 @@ impl Capability for Tokens {
         w: &'a crate::console::write::Write<'a>,
     ) -> Call<'a> {
         Box::pin(async move {
-            let person = w.person.ok_or_else(|| bad("no person"))?;
+            let person = w.person;
             match w.action.id {
                 "token-issue" => {
                     let days = w.change["days"].as_i64().unwrap_or(DEFAULT_DAYS);
@@ -298,38 +260,11 @@ impl Capability for Tokens {
         })
     }
 
-    /// The live proxy credentials: id, label, who issued each, when, and when it ends; and
-    /// every one's expiry, with those ending within a week or ended in the last two, for the
-    /// overview.
-    fn section_data<'a>(
-        &'a self,
-        cx: &'a Context<'a>,
-        _id: &'a str,
-        _person: &'a User,
-        _query: &'a Value,
-    ) -> Call<'a> {
-        Box::pin(async move {
-            let tokens = directory(cx.env, "proxy.tokens", json!({})).await?;
-            let expiry = crate::expiry::proxy(cx.env).await?;
-            let expiring: Vec<&crate::expiry::Row> =
-                expiry.iter().filter(|r| r.needs_you()).collect();
-            Ok(json!({ "tokens": tokens, "expiry": expiry, "expiring": expiring }))
-        })
-    }
-
     fn tools(&self) -> Vec<Tool> {
         Vec::new()
     }
 
     fn call<'a>(&'a self, _cx: &'a Context<'a>, tool: &'a str, _args: &'a Value) -> Call<'a> {
         Box::pin(async move { Err(unknown(tool)) })
-    }
-
-    fn routes(&self) -> Vec<&'static str> {
-        vec!["/tokens"]
-    }
-
-    fn fetch<'a>(&'a self, cx: &'a Context<'a>, req: Request) -> Serve<'a> {
-        Box::pin(self.serve(cx, req))
     }
 }

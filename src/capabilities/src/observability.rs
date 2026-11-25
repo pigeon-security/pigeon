@@ -15,7 +15,6 @@ use worker::js_sys::Date;
 use worker::{Error, Fetch, Headers, Method, Request, RequestInit, Result};
 
 use crate::console::sections::Section;
-use crate::users::User;
 use crate::{Call, Capability, Context};
 
 /// The metrics permission: GraphQL `workersInvocationsAdaptive`.
@@ -633,42 +632,12 @@ impl Capability for Observability {
             title,
             description: "Spend per day: Cloudflare usage, model cost and agent runs.",
             order,
-            cost: None,
-            view: true,
         };
         vec![
-            Section {
-                area: "cost",
-                id: "platform",
-                title: "Platform",
-                description: "Cloudflare metrics, logs and billable usage for pigeon's Workers; \
-                              estimated and billed cost kept apart.",
-                order: 2,
-                // Its Models line is already the Models section's cost, and its window is at
-                // most 7 days, so adding it to the overview total would double count and mix
-                // windows.
-                cost: None,
-                view: false,
-            },
             range("7d", "7 days", 10),
             range("today", "Today", 20),
             range("all", "30 days", 30),
         ]
-    }
-
-    /// The same answer as `observability_summary`, over the last `days` days (at most 168
-    /// hours), for the console's Platform section.
-    fn section_data<'a>(
-        &'a self,
-        cx: &'a Context<'a>,
-        _id: &'a str,
-        _person: &'a User,
-        query: &'a Value,
-    ) -> Call<'a> {
-        Box::pin(async move {
-            let days = query["days"].as_u64().unwrap_or(7).clamp(1, 30);
-            summary(self, cx, (days * 24).min(168)).await
-        })
     }
 
     fn tools(&self) -> Vec<Tool> {

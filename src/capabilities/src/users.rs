@@ -1597,8 +1597,6 @@ impl Capability for Users {
                 title: "People",
                 description: "Who can sign in, with their passkeys. An invite is a one-time link to register a passkey.",
                 order: 30,
-                cost: None,
-                view: true,
             },
             Section {
                 area: "access",
@@ -1606,51 +1604,8 @@ impl Capability for Users {
                 title: "Apps",
                 description: "Apps that act for a person, and apps that act for no one. Disconnecting one asks for your passkey.",
                 order: 40,
-                cost: None,
-                view: true,
-            },
-            Section {
-                area: "access",
-                id: "delegation",
-                title: "Delegation",
-                description: "Service accounts that act for a person. Agents ask your policy before acting, as their account.",
-                order: 3,
-                cost: None,
-                view: false,
             },
         ]
-    }
-
-    /// Each person with their picture, passkeys and the apps acting for them; and apps acting
-    /// for no one. People and Delegation show the same data, each its own part.
-    fn section_data<'a>(
-        &'a self,
-        cx: &'a Context<'a>,
-        _id: &'a str,
-        _person: &'a User,
-        _query: &'a Value,
-    ) -> Call<'a> {
-        Box::pin(async move {
-            let all = directory(cx.env, "people.list", json!({})).await?;
-            let list = |k: &str| all[k].as_array().cloned().unwrap_or_default();
-            let (passkeys, apps) = (list("passkeys"), list("apps"));
-            let people: Vec<Value> = list("people")
-                .into_iter()
-                .map(|p| {
-                    let id = p["id"].clone();
-                    json!({
-                        "id": id,
-                        "name": p["name"],
-                        "initials": initials(p["name"].as_str().unwrap_or_default()),
-                        "avatar": p["avatar"],
-                        "passkeys": passkeys.iter().filter(|k| k["user_id"] == id).collect::<Vec<_>>(),
-                        "apps": apps.iter().filter(|a| a["person"] == id).collect::<Vec<_>>(),
-                    })
-                })
-                .collect();
-            let unlinked: Vec<&Value> = apps.iter().filter(|a| a["person"].is_null()).collect();
-            Ok(json!({ "people": people, "unlinked": unlinked }))
-        })
     }
 
     fn tools(&self) -> Vec<Tool> {

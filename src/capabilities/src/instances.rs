@@ -17,12 +17,12 @@ pub mod tools;
 use pigeon_core::mcp::Tool;
 
 use serde_json::{Value, json};
-use worker::{Env, Error, Headers, Method, Request, Response, Result};
+use worker::{Env, Error, Method, Result};
 
 use crate::console::sections::Section;
 use crate::passkeys::Passkeys;
 use crate::users::{User, directory};
-use crate::{Call, Capability, Context, Serve, arg, to_value, unknown};
+use crate::{Call, Capability, Context, arg, to_value, unknown};
 use record::{Instance, Rules};
 
 /// The Worker that serves instances' platform subdomains, by host.
@@ -233,38 +233,6 @@ impl Instances {
         }))
     }
 
-    async fn serve(&self, cx: &Context<'_>, mut req: Request) -> Result<Response> {
-        if req.method() != Method::Post {
-            return Response::error("not found", 404);
-        }
-        // A console write: from the console's own page, by the person signed in to it.
-        let host = req.url()?.host_str().unwrap_or_default().to_string();
-        let origin = req.headers().get("Origin")?;
-        if !crate::console::session::same_origin(origin.as_deref(), &host) {
-            return Response::error("forbidden", 403);
-        }
-        let Some(person) = crate::console::signed_person(cx.env, &req).await? else {
-            return Response::error("sign in to the console first", 401);
-        };
-        let path = req.path();
-        let body: Value = req.json().await.unwrap_or(Value::Null);
-        // The old routes: adapters onto the console's `instance-put` write.
-        let answer = match path.as_str() {
-            p @ ("/instance/put/begin" | "/instance/put/finish") => {
-                crate::console::write::adapt(cx, &self.passkeys, p, &body, Some(&person)).await
-            }
-            _ => return Response::error("not found", 404),
-        };
-        let headers = Headers::new();
-        headers.set("Cache-Control", "no-store")?;
-        match answer {
-            Ok(v) => Ok(Response::from_json(&v)?.with_headers(headers)),
-            Err(e) => Ok(Response::from_json(&json!({ "error": e.to_string() }))?
-                .with_status(400)
-                .with_headers(headers)),
-        }
-    }
-
     /// An agent's proposal: checked as an edit on the console is, then kept as an instance
     /// draft for the person the caller acts for to approve. Changes nothing itself.
     async fn propose(&self, cx: &Context<'_>, args: &Value) -> Result<Value> {
@@ -309,47 +277,18 @@ impl Instances {
             "note": "Nothing changes until the person approves this on the console's Approvals tab.",
         }))
     }
-
-    /// Every instance as the console shows it: its record and its link's state.
-    async fn listed(&self, env: &Env) -> Result<Value> {
-        let mut instances: Vec<Value> = Vec::new();
-        for i in all(env).await? {
-            let link = match i.account {
-                record::AccountRef::Home => json!({ "status": "this account" }),
-                record::AccountRef::Linked { .. } => {
-                    let l = crate::linked::link(env, &i.id).await?;
-                    crate::linked::status(l.as_ref(), worker::js_sys::Date::now())
-                }
-            };
-            let mut v = to_value(i);
-            v["link"] = link;
-            instances.push(v);
-        }
-        Ok(json!({ "zone": self.zone, "instances": instances, "template": template() }))
-    }
 }
 
-/// The legacy Instances panel's data anchor, then the views instances adds on the home
-/// instance: Instances › All instances and Platform › Endpoints.
+/// The views instances adds on the home instance: Instances › All instances and Platform ›
+/// Endpoints.
 pub fn instances_sections() -> Vec<Section> {
     vec![
-        Section {
-            area: "instances",
-            id: "instances",
-            title: "Instances",
-            description: "What pigeon runs, here and in accounts you linked. Each is data: changing one asks for your passkey.",
-            order: 1,
-            cost: None,
-            view: false,
-        },
         Section {
             area: "instances",
             id: "list",
             title: "All instances",
             description: "Every instance, with its account, link and what waits for it.",
             order: 10,
-            cost: None,
-            view: true,
         },
         Section {
             area: "platform",
@@ -357,8 +296,6 @@ pub fn instances_sections() -> Vec<Section> {
             title: "Endpoints",
             description: "The platform's MCP endpoint and each instance's scoped one.",
             order: 30,
-            cost: None,
-            view: true,
         },
     ]
 }
@@ -767,10 +704,6 @@ impl Capability for Instances {
                 "List the platform's instances: each one's account, zones, sites with their \
                  targets and subdomains, Worker, repository and version. Read-only.",
             ),
-            Tool::bare(
-                "instances_tabs",
-                "For the app: each instance's tabs, whether it has settings, and a few facts. Read-only.",
-            ),
             Tool {
                 name: manifest::TOOL,
                 description: "The console's navigation for one instance, as data: its areas in \
@@ -870,7 +803,6 @@ impl Capability for Instances {
         Box::pin(async move {
             match tool {
                 "instances_list" => Ok(to_value(all(cx.env).await?)),
-                "instances_tabs" => Ok(tabs(&all(cx.env).await?)),
                 manifest::TOOL => manifest::console_manifest(cx, args).await,
                 "instance_propose" => self.propose(cx, args).await,
                 "instance_plan" => self.plan(cx, args).await,
@@ -885,16 +817,6 @@ impl Capability for Instances {
 
     fn sections(&self) -> Vec<Section> {
         instances_sections()
-    }
-
-    fn section_data<'a>(
-        &'a self,
-        cx: &'a Context<'a>,
-        _id: &'a str,
-        _person: &'a User,
-        _query: &'a Value,
-    ) -> Call<'a> {
-        Box::pin(self.listed(cx.env))
     }
 
     fn write_check<'a>(
@@ -914,70 +836,9 @@ impl Capability for Instances {
         w: &'a crate::console::write::Write<'a>,
     ) -> Call<'a> {
         Box::pin(async move {
-            let person = w.person.ok_or_else(|| bad("no person"))?;
+            let person = w.person;
             let text = w.change["record"].as_str().unwrap_or_default();
             self.put_record(cx, w.text(), text, person).await
         })
     }
-
-    fn routes(&self) -> Vec<&'static str> {
-        vec!["/instance/"]
-    }
-
-    fn fetch<'a>(&'a self, cx: &'a Context<'a>, req: Request) -> Serve<'a> {
-        Box::pin(self.serve(cx, req))
-    }
-}
-
-/// The first hostname a site is published at: its first zone or domain target.
-fn first_hostname(i: &Instance) -> Option<&str> {
-    i.sites
-        .iter()
-        .flat_map(|s| s.targets.iter())
-        .find_map(|t| match t {
-            record::Target::Zone { hostname, .. } | record::Target::Domain { hostname } => {
-                Some(hostname.as_str())
-            }
-            _ => None,
-        })
-}
-
-/// The `instances_tabs` answer: which instance the app is on, and for each instance which tabs
-/// and settings it shows and a few facts to display. The home account's instance gets the
-/// full set of tabs; a linked one gets fewer.
-pub fn tabs(instances: &[Instance]) -> Value {
-    let home = |i: &Instance| i.account == record::AccountRef::Home;
-    let list: Vec<Value> = instances
-        .iter()
-        .map(|i| {
-            let is_home = home(i);
-            let host = first_hostname(i).or_else(|| i.zones.first().map(String::as_str));
-            let site = first_hostname(i).or_else(|| i.sites.first().map(|s| s.name.as_str()));
-            let repository = i.repo.as_ref().map(|r| match r {
-                record::RepoRef::Artifacts { namespace, repo } => format!("{namespace}/{repo}"),
-                record::RepoRef::Github { full_name, .. } => full_name.clone(),
-            });
-            json!({
-                "id": i.id, "title": i.title,
-                "account_kind": if is_home { "home" } else { "linked" },
-                "zones": i.zones,
-                "tabs": if is_home {
-                    json!(["approvals", "status", "cost", "instances"])
-                } else {
-                    json!(["home", "instances"])
-                },
-                "settings": is_home,
-                "facts": {
-                    "website": host.map(|h| format!("https://{h}")),
-                    "site": site,
-                    "repository": repository,
-                },
-            })
-        })
-        .collect();
-    json!({
-        "current": instances.iter().find(|i| home(i)).map(|i| i.id.as_str()),
-        "scoping": "app",
-        "instances": list,
-    })
 }

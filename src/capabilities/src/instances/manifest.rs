@@ -117,7 +117,7 @@ pub fn manifest(
             let known = views
                 .iter()
                 .any(|(a, _, v)| *a == s.area && v["id"] == s.id);
-            if !s.view || !platform_area || known {
+            if !platform_area || known {
                 continue;
             }
             views.push((

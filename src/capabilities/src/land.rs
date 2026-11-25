@@ -35,10 +35,9 @@ use worker::{
     js_sys,
 };
 
-use crate::console::sections::Section;
 use crate::git_proxy;
 use crate::proxy::ProxyCaller;
-use crate::users::{Caller, User};
+use crate::users::Caller;
 use crate::{Call, Capability, Context, External, Footprint, Hosted, arg, unknown};
 use state::{Seen, State};
 
@@ -557,29 +556,6 @@ impl Capability for Land {
                 other => Err(unknown(other)),
             }
         })
-    }
-
-    fn sections(&self) -> Vec<Section> {
-        vec![Section {
-            area: "inbox",
-            id: "approvals",
-            title: "Waiting for you",
-            description: "Only what cannot go ahead without your passkey.",
-            order: 1,
-            cost: None,
-            view: false,
-        }]
-    }
-
-    /// The landings waiting for a passkey.
-    fn section_data<'a>(
-        &'a self,
-        cx: &'a Context<'a>,
-        _id: &'a str,
-        _person: &'a User,
-        _query: &'a Value,
-    ) -> Call<'a> {
-        Box::pin(async move { Ok(json!({ "landings": awaiting(cx.env).await? })) })
     }
 
     fn footprint(&self) -> Footprint {

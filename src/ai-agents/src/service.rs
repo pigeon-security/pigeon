@@ -4,8 +4,8 @@
 //! so every model turn and pigeon call the run makes is theirs, through the same gate.
 
 use pigeon_contract::{
-    Answer, CONTRACT, CallRequest, CapabilityManifest, FailureKind, Manifest, SectionRequest,
-    SectionSpec, Service, Signed, ToolSpec,
+    Answer, CONTRACT, CallRequest, CapabilityManifest, FailureKind, Manifest, SectionSpec, Service,
+    Signed, ToolSpec,
 };
 use serde_json::{Value, json};
 use worker::Env;
@@ -39,9 +39,6 @@ pub const TOOLS: [&str; 17] = [
     "ai_agents_config",
     "ai_agents_compare",
 ];
-
-/// The console section's id; it sits on the Instances tab, with what else pigeon runs.
-pub const SECTION: &str = "ai-agents";
 
 /// The agents capability.
 pub struct Agents;
@@ -792,19 +789,8 @@ impl Service for Agents {
                         }),
                     ),
                 ],
-                // The legacy panel's data anchor, then Sessions › Live and Sessions › Compare.
+                // Sessions › Live and Sessions › Compare.
                 sections: vec![
-                    SectionSpec {
-                        tab: "sessions".into(),
-                        id: SECTION.into(),
-                        title: "AI Agents".into(),
-                        description: "Planner and executor runs, through the model gateway or \
-                                      in external sessions, and what they wait for from you."
-                            .into(),
-                        order: 50,
-                        cost: None,
-                        view: false,
-                    },
                     SectionSpec {
                         tab: "sessions".into(),
                         id: "live".into(),
@@ -829,24 +815,6 @@ impl Service for Agents {
                 ..CapabilityManifest::default()
             }],
         }
-    }
-
-    fn section<'a>(
-        &'a self,
-        env: &'a Env,
-        caller: &'a Signed,
-        req: SectionRequest,
-    ) -> pigeon_contract::serve::Answering<'a> {
-        Box::pin(async move {
-            if req.id != SECTION {
-                return Answer::error(FailureKind::BadRequest, format!("no section `{}`", req.id));
-            }
-            let reader = reader(caller);
-            match object::call(env, INDEX, "section", &json!({ "reader": reader })).await {
-                Ok(data) => Answer::Ok(json!({ "html": crate::page::section(&data) })),
-                Err(e) => Answer::error(FailureKind::Failed, e.to_string()),
-            }
-        })
     }
 
     fn call<'a>(

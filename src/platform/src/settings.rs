@@ -175,7 +175,7 @@ pub fn ingest_instances() -> Vec<ingest::Target> {
 pub fn capabilities() -> Vec<Box<dyn Capability>> {
     vec![
         // Every path on the platform checks its callers itself (/mcp and /oauth with OAuth,
-        // /auth, /secrets and /tokens with passkeys) or is open to all (/health), so no Access is in front of it.
+        // /auth and the console with passkeys) or is open to all (/health), so no Access is in front of it.
         Box::new(PublicHost {
             zone: ZONE.into(),
             host: HOST.into(),
@@ -217,12 +217,7 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
         }),
         // App Store Connect (docs/plans/ios.md): slots, a read-only status, and the console's
         // passkey-bound writes that adopt the bundle id and make pigeon's signing identity.
-        Box::new(Apple {
-            passkeys: Passkeys {
-                host: HOST.into(),
-                site_name: "pigeon".into(),
-            },
-        }),
+        Box::new(Apple),
         // Read-only object storage; with no accounts declared its tools only explain setup.
         Box::new(Storage {
             accounts: storage_accounts(),
@@ -241,23 +236,15 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
         }),
         Box::new(Secrets {
             host: HOST.into(),
-            passkeys: Passkeys {
-                host: HOST.into(),
-                site_name: "pigeon".into(),
-            },
             parent: PARENT_TOKEN.into(),
         }),
         // Proxy credentials: what a cloud session holds to reach /git/ and /cf/, issued on
-        // the console's Settings → Keys (the old /tokens page redirects there).
+        // the console's Access › Tokens.
         Box::new(Tokens {
             proxy_host: PROXY_HOST.into(),
-            passkeys: Passkeys {
-                host: HOST.into(),
-                site_name: "pigeon".into(),
-            },
         }),
         // Passkey approval of the tool calls the policy gates: `approvals_status`, and the calls
-        // waiting on the console's Approvals tab.
+        // waiting in the console's Inbox.
         Box::new(Approvals),
         // The person's policy, .pigeon/policy.toml: `policy_check`, as their delegate.
         Box::new(Policy {
@@ -319,13 +306,7 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
         // every value is data a person approves on the console with their passkey.
         // Linked accounts: another Cloudflare account linked to an instance with Cloudflare's
         // OAuth consent, its tokens sealed in the Directory.
-        Box::new(Linked {
-            host: HOST.into(),
-            passkeys: Passkeys {
-                host: HOST.into(),
-                site_name: "pigeon".into(),
-            },
-        }),
+        Box::new(Linked { host: HOST.into() }),
         // Ingest: copies a storage account's bucket into an instance's R2 bucket. Latent until
         // the person binds its keys; every run needs a passkey approval.
         Box::new(ingest::Ingest {

@@ -33,7 +33,6 @@ pub mod handoff;
 pub mod limits;
 pub mod models;
 pub mod object;
-pub mod page;
 pub mod preflight;
 pub mod probe;
 pub mod prompts;

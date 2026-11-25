@@ -60,12 +60,7 @@ fn apple_ids_token_and_slots() {
     assert_eq!(asc::api_error(500, "<html>"), "App Store Connect 500");
 
     // The console's slots: the four the person fills, in order, all for Workers.
-    let apple_cap = Apple {
-        passkeys: pigeon_capabilities::passkeys::Passkeys {
-            host: "platform.example.com".into(),
-            site_name: "pigeon".into(),
-        },
-    };
+    let apple_cap = Apple;
     let slots: Vec<String> = apple_cap.secrets().into_iter().map(|s| s.name).collect();
     assert_eq!(slots, apple::SLOTS.map(String::from).to_vec());
     assert_eq!(
@@ -186,16 +181,6 @@ fn apple_signing_identity_requests_and_records() {
         apple::missing(&apple::CAPABILITIES, &apple::CAPABILITIES.map(String::from)).is_empty()
     );
 
-    // Each write's passkey names it and the bundle id; nothing else is a write.
-    assert_eq!(
-        apple::purpose("adopt").unwrap(),
-        "apple:adopt:dev.pigeon.app"
-    );
-    assert_eq!(
-        apple::purpose("identity").unwrap(),
-        "apple:identity:dev.pigeon.app"
-    );
-    assert!(apple::purpose("revoke").is_none());
     assert_eq!(apple::seal_aad("CERT1"), "apple:identity:CERT1");
 
     // The record: the sealed key and the bytes round-trip, the expiry is the earlier of the

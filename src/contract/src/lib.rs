@@ -26,8 +26,8 @@ pub use serve::{Service, serve};
 pub use wire::{
     Answer, ApprovalRequest, CALLERLESS_OPS, CONTRACT, CORE_OPS, CallRequest, CapabilityManifest,
     Credential, CredentialRequest, EventsRequest, Failure, FailureKind, GrantRequest, Manifest,
-    OPS, SecretOp, SecretRequest, SectionRequest, SectionSpec, SitesScopeRequest, SlotSpec,
-    ToolSpec, VerifyRequest, WorkerManifest, accepts, wants,
+    OPS, SecretOp, SecretRequest, SectionSpec, SitesScopeRequest, SlotSpec, ToolSpec,
+    VerifyRequest, WorkerManifest, accepts, wants,
 };
 
 /// The current time in milliseconds since the epoch; the one place that reads the clock.

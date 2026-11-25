@@ -1,7 +1,6 @@
 /* Sessions › Live and Compare, and Cost (7 days, Today, 30 days): the platform group's views,
- * on the home instance only. Ported from the current console's sessions.js and cost.js onto the
- * shell's components: one DataTable per list, inline bars and meters in its cells (P6), no
- * per-view stylesheet (P13).
+ * on the home instance only, built on the shell's components: one DataTable per list, inline
+ * bars and meters in its cells (P6), no per-view stylesheet (P13).
  * Reads (P11): ai_agents_status, land_list, ai_agents_compare, cost_daily.
  * Writes (P2, P10): run-stop, run-note, run-extend, each through the shell's confirm dialog,
  * which asks for the passkey in place; there is no round trip through another tab.

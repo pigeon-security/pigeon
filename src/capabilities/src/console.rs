@@ -1,22 +1,21 @@
-//! The console: the app at `/app`, the platform's one console, with its assets, the panels it
-//! mounts and their sections' data under `/console/api/section/`, and redirects from the old
-//! console's bookmarks (`/`, `/approvals`, `/access`, ...) into it. Each section loads on its
-//! own, within [`SECTION_MS`]; the slow ones answer a snapshot at once ([`snapshot`]). A person
-//! signs in once with a passkey and gets a session cookie: HttpOnly, SameSite Strict, kept only
-//! as a hash in the Directory, ending after 30 minutes idle or 8 hours. The session lets them
-//! read; every write that changes a secret, a credential, a passkey or a link still takes a
-//! passkey of its own, bound to what it changes. Every POST must come from this host's own
-//! pages, in JSON.
+//! The console at `/app/<instance>/<area>/<view>` (docs/plans/console-redesign.md): its shell
+//! and assets, its one read path (`/app/op`, [`ops`]), its one write path
+//! (`/console/write/<action>/{begin,finish}`, [`write`]), and one-hop redirects from the old
+//! console's bookmarks (`/`, `/approvals`, `/secrets`, `/app?tab=…`, ...) into it
+//! ([`page::bookmark`]). A person signs in once with a passkey and gets a session cookie:
+//! HttpOnly, SameSite Strict, kept only as a hash in the Directory, ending after 30 minutes idle
+//! or 8 hours. The session lets them read; every write still takes a passkey of its own, bound
+//! to what it changes. Every POST must come from this host's own pages, in JSON, except a write
+//! an app makes by bearer for the person it acts for.
 
 #[path = "console/web/ops.rs"]
 pub mod ops;
 pub mod page;
 pub mod sections;
 pub mod session;
-pub mod snapshot;
 pub mod write;
 
-use futures_util::future::{Either, join_all, select};
+use futures_util::future::{Either, select};
 use pigeon_core::mcp::Tool;
 use pigeon_core::oauth::{hash, token};
 use serde::Deserialize;
@@ -29,7 +28,7 @@ use crate::passkeys::Passkeys;
 use crate::site_passkeys::console as site_access;
 use crate::users::{User, directory};
 use crate::{Call, Capability, Context, Serve, arg, unknown};
-use write::{Step, Who};
+use write::Step;
 
 /// The console page and its API.
 pub struct Console {
@@ -41,11 +40,6 @@ pub struct Console {
 /// The challenge purpose for signing in.
 const SIGN_IN: &str = "console:sign-in";
 
-const KEYS: &str = include_str!("console/keys.js");
-const USERS: &str = include_str!("console/users.js");
-const APPROVALS: &str = include_str!("console/approvals.js");
-const INSTANCES: &str = include_str!("console/instances.js");
-const STYLES: &str = include_str!("console/console.css");
 const ICON: &[u8] = include_bytes!("console/icon.png");
 
 fn bad(why: &str) -> Error {
@@ -67,12 +61,12 @@ fn answer(value: &Value, status: u16) -> Result<Response> {
         .with_headers(headers))
 }
 
-/// How long a section may take before the console answers that it timed out, in ms. Below the
+/// How long a read may take before the console answers that it timed out, in ms. Below the
 /// runtime's own limits, so the page gets an answer it can offer to retry, not a dropped
 /// connection.
-pub const SECTION_MS: u64 = 10_000;
+pub const READ_MS: u64 = 10_000;
 
-/// What a section that ran out of time answers.
+/// What a read that ran out of time answers.
 const TIMED_OUT: &str = "timed out: its source did not answer within 10 seconds";
 
 /// `work`, or the [`TIMED_OUT`] error once `ms` have passed.
@@ -95,18 +89,6 @@ fn failed(e: &Error) -> Result<Response> {
     } else {
         answer(&json!({ "error": why }), 400)
     }
-}
-
-fn now_ms() -> i64 {
-    worker::js_sys::Date::now() as i64
-}
-
-/// The number of days a section's data covers: `days` from the query, 1 to 30, 7 by default.
-pub fn days(query: Option<&str>) -> i64 {
-    query
-        .and_then(|q| q.parse::<i64>().ok())
-        .filter(|d| (1..=30).contains(d))
-        .unwrap_or(7)
 }
 
 /// A person's initials for their picture until they set one: the first letter of their first
@@ -135,43 +117,30 @@ pub async fn signed_person(env: &Env, req: &Request) -> Result<Option<User>> {
 
 /// What a GET to one of the console's paths reaches; any other path answers 404.
 #[derive(Debug, PartialEq)]
-pub enum Get<'a> {
-    /// An old console bookmark, redirected to this place in the app.
-    Bookmark(&'static str),
-    /// The app's shell.
+pub enum Get {
+    /// An old console bookmark, redirected in one hop to its place in the console.
+    Bookmark(page::Bookmark),
+    /// The console's shell, at `/app` and every page below it.
     App,
-    /// The redesigned console's shell, at `/app/next` and its pages below it.
-    AppNext,
     /// A script or stylesheet: its body and Content-Type.
     Asset(&'static str, &'static str),
     /// The console's icon.
     Icon,
-    /// A section's data, by its id, for a signed-in person.
-    Section(&'a str),
 }
 
-impl<'a> Get<'a> {
-    pub fn route(path: &'a str) -> Option<Self> {
-        if let Some(to) = page::app_redirect(path) {
+impl Get {
+    /// The route for a GET to `path` with `query`.
+    pub fn route(path: &str, query: Option<&str>) -> Option<Self> {
+        if let Some(to) = page::bookmark(path, query) {
             return Some(Self::Bookmark(to));
         }
-        const JS: &str = "text/javascript; charset=utf-8";
         Some(match path {
-            "/app" | "/app/" => Self::App,
-            p if page::is_next_page(p) => Self::AppNext,
-            "/console/keys.js" => Self::Asset(KEYS, JS),
-            "/console/users.js" => Self::Asset(USERS, JS),
-            "/console/approvals.js" => Self::Asset(APPROVALS, JS),
-            "/console/instances.js" => Self::Asset(INSTANCES, JS),
-            "/console/console.css" => Self::Asset(STYLES, "text/css; charset=utf-8"),
             "/console/icon.png" => Self::Icon,
-            p => match p.strip_prefix("/console/api/section/") {
-                Some(id) => sections::anchor(id).then_some(Self::Section(id))?,
-                None => {
-                    let (body, kind) = page::app_asset(p)?;
-                    Self::Asset(body, kind)
-                }
-            },
+            p if page::is_page(p) => Self::App,
+            p => {
+                let (body, kind) = page::asset_at(p)?;
+                Self::Asset(body, kind)
+            }
         })
     }
 }
@@ -179,9 +148,7 @@ impl<'a> Get<'a> {
 /// What a POST to one of the console's paths reaches; any other path answers 404.
 #[derive(Debug, PartialEq)]
 pub enum Post {
-    /// Visitor management for a site's hostname.
-    SiteAccess(site_access::Action),
-    /// One of the app's operations.
+    /// One of the console's reads.
     AppOp,
     SignInBegin,
     SignInFinish,
@@ -192,9 +159,6 @@ pub enum Post {
 
 impl Post {
     pub fn route(path: &str) -> Option<Self> {
-        if let Some(action) = site_access::Action::from_path(path) {
-            return Some(Self::SiteAccess(action));
-        }
         Some(match path {
             "/app/op" => Self::AppOp,
             "/console/sign-in/begin" => Self::SignInBegin,
@@ -203,6 +167,23 @@ impl Post {
             p if write::route(p).is_some() => Self::Write,
             _ => return None,
         })
+    }
+}
+
+/// The home instance's id, when it can be read.
+async fn home(env: &Env) -> Option<String> {
+    let all = crate::instances::all(env).await.ok()?;
+    all.into_iter()
+        .find(|i| i.account == crate::instances::record::AccountRef::Home)
+        .map(|i| i.id)
+}
+
+/// The console's URL for `area` (and `view`) of the home instance; the console's root when the
+/// home instance cannot be read.
+pub async fn home_url(env: &Env, area: &str, view: Option<&str>) -> String {
+    match home(env).await {
+        Some(id) => page::url(&id, area, view),
+        None => page::BASE.to_string(),
     }
 }
 
@@ -220,140 +201,36 @@ impl Console {
         Ok(signed.filter(|s| s.user.kind == "standard"))
     }
 
-    /// Section `id`'s data from each capability that fills it: one owner's data as it is,
-    /// several owners' by name.
-    async fn section(cx: &Context<'_>, id: &str, person: &User, query: &Value) -> Result<Value> {
-        let owners: Vec<&dyn Capability> = cx
-            .hosted
-            .capabilities
-            .iter()
-            .filter(|c| c.sections().iter().any(|s| s.id == id))
-            .map(|c| c.as_ref())
-            .collect();
-        match owners.as_slice() {
-            [] => Err(bad("no such section")),
-            [one] => one.section_data(cx, id, person, query).await,
-            many => {
-                // Every owner at once: the section takes as long as its slowest, not their sum.
-                let answers =
-                    join_all(many.iter().map(|c| c.section_data(cx, id, person, query))).await;
-                let mut all = serde_json::Map::new();
-                for (c, data) in many.iter().zip(answers) {
-                    all.insert(c.name().into(), data?);
-                }
-                Ok(Value::Object(all))
-            }
-        }
-    }
-
-    /// Section `id`'s data over `days` days, within [`SECTION_MS`]. A section that keeps a
-    /// snapshot answers it at once unless `fresh` asks otherwise, and keeps each fresh answer.
-    /// `X-Snapshot-At` says when the answer was made; `X-Snapshot-Stale: 1` that it is past its
-    /// freshness, so the page shows it and asks again with `fresh=1`.
-    async fn snapshot(
-        cx: &Context<'_>,
-        id: &str,
-        person: &User,
-        days: i64,
-        fresh: bool,
-    ) -> Result<Response> {
-        let kept_for = snapshot::fresh_ms(id);
-        let key = snapshot::key(id, days);
-        if let (Some(fresh_ms), false) = (kept_for, fresh) {
-            // A snapshot that cannot be read only means computing the answer.
-            if let Ok(Value::String(kept)) =
-                directory(cx.env, "setting.get", json!({ "key": key })).await
-                && let Ok(snap) = serde_json::from_str::<snapshot::Snapshot>(&kept)
-            {
-                let stale = snapshot::stale(snap.at_ms, fresh_ms, now_ms());
-                return Self::stamped(&snap.data, snap.at_ms, stale);
-            }
-        }
-        let query = json!({ "days": days });
-        let data = match timed(SECTION_MS, Self::section(cx, id, person, &query)).await {
-            Ok(data) => data,
-            Err(e) => return failed(&e),
-        };
-        let at_ms = now_ms();
-        if kept_for.is_some() {
-            let snap = snapshot::Snapshot {
-                at_ms,
-                data: data.clone(),
-            };
-            if let Ok(value) = serde_json::to_string(&snap) {
-                // A snapshot that cannot be written only means computing it next time.
-                let _ = directory(
-                    cx.env,
-                    "setting.put",
-                    json!({ "key": key, "value": value, "ttl_ms": snapshot::KEPT_MS }),
-                )
-                .await;
-            }
-        }
-        Self::stamped(&data, at_ms, false)
-    }
-
-    /// `data` with the time it was made and whether it is stale, in headers.
-    fn stamped(data: &Value, at_ms: i64, stale: bool) -> Result<Response> {
-        let res = answer(data, 200)?;
-        res.headers().set("X-Snapshot-At", &at_ms.to_string())?;
-        if stale {
-            res.headers().set("X-Snapshot-Stale", "1")?;
-        }
-        Ok(res)
-    }
-
     async fn serve(&self, cx: &Context<'_>, mut req: Request) -> Result<Response> {
         let url = req.url()?;
         let path = url.path().to_string();
         let method = req.method();
         if method == Method::Get {
-            let Some(route) = Get::route(&path) else {
+            let Some(route) = Get::route(&path, url.query()) else {
                 return Response::error("not found", 404);
             };
             return match route {
-                Get::Bookmark(to) => {
-                    let mut target = url
-                        .join(to)
-                        .map_err(|e| worker::Error::RustError(e.to_string()))?;
-                    if path.trim_end_matches('/') == "/instances"
-                        && let Some((_, value)) = url.query_pairs().find(|(key, _)| key == "i")
-                    {
-                        target.query_pairs_mut().append_pair("i", &value);
-                    }
-                    page::redirect(
-                        format!("{}?{}", target.path(), target.query().unwrap_or_default())
-                            .trim_end_matches('?'),
-                    )
+                Get::Bookmark(page::Bookmark::Root) => page::redirect(page::BASE),
+                Get::Bookmark(page::Bookmark::Area {
+                    instance,
+                    area,
+                    view,
+                }) => {
+                    let to = match instance {
+                        Some(id) => page::url(&id, area, view),
+                        None => home_url(cx.env, area, view).await,
+                    };
+                    page::redirect(&to)
                 }
                 Get::App => {
                     let signed = self.signed(cx.env, &req).await?;
-                    page::html(&page::app_shell(
-                        &self.passkeys.site_name,
-                        signed.as_ref().map(|s| s.user.name.as_str()),
-                    ))
-                }
-                Get::AppNext => {
-                    let signed = self.signed(cx.env, &req).await?;
-                    page::html(&page::next_shell(
+                    page::html(&page::shell(
                         &self.passkeys.site_name,
                         signed.as_ref().map(|s| s.user.name.as_str()),
                     ))
                 }
                 Get::Asset(body, kind) => page::asset(body, kind),
                 Get::Icon => page::image(ICON, "image/png"),
-                Get::Section(id) => {
-                    let Some(signed) = self.signed(cx.env, &req).await? else {
-                        return answer(&json!({ "error": "sign in first" }), 401);
-                    };
-                    let query = url
-                        .query_pairs()
-                        .find(|(k, _)| k == "days")
-                        .map(|(_, v)| v.into_owned());
-                    let fresh = url.query_pairs().any(|(k, v)| k == "fresh" && v == "1");
-                    let days = days(query.as_deref());
-                    Self::snapshot(cx, id, &signed.user, days, fresh).await
-                }
             };
         }
         let route = match method {
@@ -383,21 +260,6 @@ impl Console {
         }
         let body: Value = req.json().await.unwrap_or(Value::Null);
         match route {
-            Post::SiteAccess(action) => {
-                let Some(signed) = self.signed(cx.env, &req).await? else {
-                    return answer(&json!({ "error": "sign in first" }), 401);
-                };
-                let done = match action {
-                    site_access::Action::InviteBegin | site_access::Action::InviteFinish => {
-                        write::adapt(cx, &self.passkeys, &path, &body, Some(&signed.user)).await
-                    }
-                    _ => site_access::serve(&self.host, cx.env, action, &body).await,
-                };
-                match done {
-                    Ok(v) => answer(&v, 200),
-                    Err(e) => answer(&json!({ "error": e.to_string() }), 400),
-                }
-            }
             Post::AppOp => {
                 let Some(signed) = self.signed(cx.env, &req).await? else {
                     return answer(&json!({ "error": "sign in first" }), 401);
@@ -450,7 +312,7 @@ impl Console {
                     };
                     signed.user
                 };
-                let who = Who::Person(&person);
+                let who = &person;
                 let (target, change) = (&body["target"], &body["change"]);
                 let done = match step {
                     Step::Begin => {
@@ -471,7 +333,7 @@ impl Console {
     /// Makes one of the console's own approved writes ([`write::ACTIONS`] handled by
     /// `console`).
     async fn make(&self, cx: &Context<'_>, w: &write::Write<'_>) -> Result<Value> {
-        let person = w.person.ok_or_else(|| bad("no person"))?;
+        let person = w.person;
         let env = cx.env;
         let target = w.text();
         Ok(match w.action.id {
@@ -572,20 +434,12 @@ impl Capability for Console {
         Box::pin(async move { Err(unknown(tool)) })
     }
 
-    /// The tabs' paths and the console's own; `/` itself is handed over by the platform, since
-    /// a route is a prefix.
+    /// The console's own paths and its old bookmarks' ([`page::BOOKMARKS`]); `/` itself is
+    /// handed over by the platform, since a route is a prefix.
     fn routes(&self) -> Vec<&'static str> {
-        vec![
-            "/console/",
-            "/app",
-            "/approvals",
-            "/instances",
-            "/architecture",
-            "/access",
-            "/cost",
-            "/gateways",
-            "/settings",
-        ]
+        let mut routes = vec!["/console/", page::BASE];
+        routes.extend(page::BOOKMARKS.iter().map(|(path, ..)| *path));
+        routes
     }
 
     fn fetch<'a>(&'a self, cx: &'a Context<'a>, req: Request) -> Serve<'a> {

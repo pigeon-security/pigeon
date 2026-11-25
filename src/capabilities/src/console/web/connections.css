@@ -1,9 +1,0 @@
-.connection-actions, .connection-upgrade {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px 12px;
-}
-.connection-actions .settings-locked { margin-inline-end: 0; }
-.connection-status:empty { display: none; }
-.connection-status, .settings-copy > .settings-details { margin-top: 8px; }

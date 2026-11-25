@@ -363,54 +363,6 @@ fn core_instances_pins_checked_and_planned() {
     assert!(plan["note"].as_str().unwrap().contains("instance_propose"));
 }
 
-/// `instances_tabs` gives the home instance the full tabs and a linked one fewer.
-#[test]
-fn instances_tabs_for_the_app() {
-    use pigeon_capabilities::instances::record::Instance;
-    use pigeon_capabilities::instances::tabs;
-
-    let home: Instance = serde_json::from_value(json!({
-        "id": "example/platform", "title": "Example", "account": { "kind": "home" },
-        "zones": ["example.com"],
-        "repo": { "kind": "artifacts", "namespace": "example", "repo": "platform" }
-    }))
-    .unwrap();
-    let linked: Instance = serde_json::from_value(json!({
-        "id": "sample", "title": "Sample", "account": { "kind": "linked" },
-        "repo": { "kind": "github", "full_name": "sample/site" },
-        "sites": [{ "name": "blog", "bucket": "sample-site",
-            "targets": [{ "kind": "domain", "hostname": "blog.example.com" }] }]
-    }))
-    .unwrap();
-    let out = tabs(&[linked.clone(), home]);
-    assert_eq!(out["current"], "example/platform");
-    assert_eq!(out["scoping"], "app");
-    assert_eq!(out["instances"][0]["account_kind"], "linked");
-    assert_eq!(out["instances"][0]["tabs"], json!(["home", "instances"]));
-    assert_eq!(out["instances"][0]["settings"], false);
-    assert_eq!(
-        out["instances"][0]["facts"]["website"],
-        "https://blog.example.com"
-    );
-    assert_eq!(out["instances"][0]["facts"]["site"], "blog.example.com");
-    assert_eq!(out["instances"][0]["facts"]["repository"], "sample/site");
-    assert_eq!(
-        out["instances"][1]["tabs"],
-        json!(["approvals", "status", "cost", "instances"])
-    );
-    assert_eq!(out["instances"][1]["settings"], true);
-    assert_eq!(
-        out["instances"][1]["facts"]["website"],
-        "https://example.com"
-    );
-    assert!(out["instances"][1]["facts"]["site"].is_null());
-    assert_eq!(
-        out["instances"][1]["facts"]["repository"],
-        "example/platform"
-    );
-    assert!(tabs(&[linked])["current"].is_null());
-}
-
 /// The platform capabilities' view sections, as `console_manifest` collects them.
 fn manifest_platform_views() -> Vec<(
     &'static str,
@@ -424,10 +376,6 @@ fn manifest_platform_views() -> Vec<(
         (
             "instances",
             pigeon_capabilities::instances::instances_sections(),
-        ),
-        (
-            "secrets",
-            vec![pigeon_capabilities::secrets::keys_section()],
         ),
     ] {
         out.extend(sections.into_iter().map(|s| (name, s)));
@@ -506,8 +454,6 @@ fn console_manifest_for_the_home_instance() {
                 "capability": "observability", "upgrade": null })
     );
     assert_eq!(m["areas"][4]["group"], "platform");
-    // A legacy data anchor (`credentials`, `instances`) is not a view, so `credentials` alone
-    // adds no Access area.
     assert_eq!(manifest_views(&m, "instances"), ["list"]);
     assert_eq!(
         manifest_views(&m, "platform"),
@@ -642,7 +588,7 @@ fn console_manifest_flags_views_that_need_an_upgrade() {
 /// area, and the manifest is data only: no HTML anywhere in it (P16).
 #[test]
 fn console_manifest_ids_are_stable_and_data_only() {
-    use pigeon_capabilities::console::sections::{AREAS, anchor};
+    use pigeon_capabilities::console::sections::{AREAS, view_id};
     let ids: Vec<&str> = AREAS.iter().map(|a| a.id).collect();
     assert_eq!(
         ids,
@@ -699,7 +645,7 @@ fn console_manifest_ids_are_stable_and_data_only() {
     for area in m["areas"].as_array().unwrap() {
         let views = area["views"].as_array().unwrap();
         for (i, v) in views.iter().enumerate() {
-            assert!(anchor(v["id"].as_str().unwrap()), "{v}");
+            assert!(view_id(v["id"].as_str().unwrap()), "{v}");
             assert!(views[..i].iter().all(|w| w["id"] != v["id"]));
         }
     }
@@ -1218,10 +1164,6 @@ fn core_every_capability_declares_its_version() {
     let storage = Storage { accounts: vec![] };
     let linked = Linked {
         host: "example.test".into(),
-        passkeys: Passkeys {
-            host: "example.test".into(),
-            site_name: "pigeon".into(),
-        },
     };
     let instances = pigeon_capabilities::instances::Instances {
         zone: "example.test".into(),

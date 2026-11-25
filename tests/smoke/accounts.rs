@@ -1476,21 +1476,10 @@ fn github_delivery_records_queue_and_replay_marker_atomically() {
 
 #[test]
 fn console_site_access_binds_visitor_list_and_invite_to_exact_selection() {
-    use pigeon_capabilities::site_passkeys::console::{Action, matches_selection};
+    use pigeon_capabilities::site_passkeys::console::matches_selection;
     use pigeon_capabilities::users::SITE_VISITORS_SQL;
     use pigeon_core::site_auth::binding;
     use rusqlite::{Connection, params};
-
-    assert_eq!(
-        Action::from_path("/console/site-access/hosts"),
-        Some(Action::Hosts)
-    );
-    assert_eq!(
-        Action::from_path("/console/site-access/invite/finish"),
-        Some(Action::InviteFinish)
-    );
-    assert!(Action::from_path("/console/site-access/invite").is_none());
-    assert!(Action::from_path("/app/visitor.js").is_none());
 
     let host = "preview.example.test";
     let scope = binding("alpha", "blog", host);

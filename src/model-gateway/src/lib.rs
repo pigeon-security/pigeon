@@ -111,7 +111,7 @@ fn gateway() -> ModelGateway {
                 },
             ],
             staged: Vec::new(),
-            secrets_page: format!("https://{HOST}/app?tab=management&subtab=credentials"),
+            secrets_page: format!("https://{HOST}/secrets"),
             host: HOST.into(),
             proxy_host: PROXY_HOST.into(),
         },

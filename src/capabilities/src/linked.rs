@@ -23,7 +23,6 @@ use serde_json::{Value, json};
 use worker::{Env, Error, Headers, Method, Request, Response, Result};
 
 use crate::instances::{self, record::AccountRef};
-use crate::passkeys::Passkeys;
 use crate::users::directory;
 use crate::{Call, Capability, Context, Serve, arg, unknown};
 
@@ -52,7 +51,6 @@ pub const PERMISSIONS: [&str; 6] = [
 pub struct Linked {
     /// The platform's host, where the callback is.
     pub host: String,
-    pub passkeys: Passkeys,
 }
 
 /// A link as kept in the Directory: the account, who linked it, and the sealed tokens.
@@ -547,10 +545,6 @@ impl Linked {
         let body: Value = req.json().await.unwrap_or(Value::Null);
         let answer = match path.as_str() {
             "/linked/begin" => self.begin(cx.env, &body, &person.name).await,
-            // The old routes: adapters onto the console's `linked-unlink` write.
-            p @ ("/linked/unlink/begin" | "/linked/unlink/finish") => {
-                crate::console::write::adapt(cx, &self.passkeys, p, &body, Some(&person)).await
-            }
             _ => return Response::error("not found", 404),
         };
         let headers = Headers::new();

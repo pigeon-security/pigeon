@@ -22,8 +22,7 @@
 
 use pigeon_contract::{
     Answer, CONTRACT, CallRequest, CapabilityManifest, Credential, CredentialRequest, FailureKind,
-    Manifest, SecretOp, SecretRequest, SectionRequest, SectionSpec, Service, Signed, SlotSpec,
-    ToolSpec,
+    Manifest, SecretOp, SecretRequest, SectionSpec, Service, Signed, SlotSpec, ToolSpec,
 };
 use pigeon_core::Account;
 use pigeon_core::ai_gateway::{self, Dimension, Filter, GatewayKind, SECRET_SCOPE, tag};
@@ -84,9 +83,6 @@ const CALLER_KEY: &str = "CALLER_KEY";
 
 /// The Service Binding to core.
 const PLATFORM: &str = "PLATFORM";
-
-/// The console section the capability fills.
-const SECTION: &str = "cost";
 
 /// The error for a tool the capability does not have.
 pub fn unknown(tool: &str) -> Error {
@@ -1525,9 +1521,6 @@ fn merge_report(
     }
 }
 
-/// The console area the cost section sits in. It is a legacy panel's data anchor only, not a
-/// view: the Cost area's views come from `cost_daily`.
-pub const SECTION_TAB: &str = "cost";
 /// The console view of the model providers and defaults: Platform › Models.
 pub const VIEW_AREA: &str = "platform";
 /// The models view's stable id within its area.
@@ -1539,21 +1532,8 @@ pub const VIEW_DESCRIPTION: &str =
     "Model providers, the gateways they go through and the defaults each role uses.";
 /// The models view's place within its area.
 pub const VIEW_ORDER: u16 = 20;
-/// The cost section's title.
-pub const SECTION_TITLE: &str = "Cost";
-/// The cost section's line under the title.
-pub const SECTION_DESCRIPTION: &str = "Model cost through the AI Gateway, per UTC day. No prompts or answers are kept; CI reports no cost yet.";
-/// The cost section's place within its tab.
-pub const SECTION_ORDER: u16 = 1;
-/// The name the cost section adds to the overview's total under.
-pub const SECTION_COST: &str = "Model cost";
 
 impl Models {
-    /// The capability's anchor for its one console section.
-    pub fn section_id(&self) -> &'static str {
-        SECTION
-    }
-
     /// The MCP tools the capability offers.
     pub fn tools(&self) -> Vec<Tool> {
         let slugs: Vec<&str> = self.providers.iter().map(|p| p.name).collect();
@@ -1812,26 +1792,15 @@ impl Models {
                     input_schema: t.input_schema,
                 })
                 .collect(),
-            sections: vec![
-                SectionSpec {
-                    tab: SECTION_TAB.into(),
-                    id: SECTION.into(),
-                    title: SECTION_TITLE.into(),
-                    description: SECTION_DESCRIPTION.into(),
-                    order: SECTION_ORDER,
-                    cost: Some(SECTION_COST.into()),
-                    view: false,
-                },
-                SectionSpec {
-                    tab: VIEW_AREA.into(),
-                    id: VIEW_ID.into(),
-                    title: VIEW_TITLE.into(),
-                    description: VIEW_DESCRIPTION.into(),
-                    order: VIEW_ORDER,
-                    cost: None,
-                    view: true,
-                },
-            ],
+            sections: vec![SectionSpec {
+                tab: VIEW_AREA.into(),
+                id: VIEW_ID.into(),
+                title: VIEW_TITLE.into(),
+                description: VIEW_DESCRIPTION.into(),
+                order: VIEW_ORDER,
+                cost: None,
+                view: true,
+            }],
             routes: Vec::new(),
             footprint: json!({
                 "gateways": self.gateways.iter().map(|g| g.id.clone()).collect::<Vec<_>>(),
@@ -1869,24 +1838,6 @@ impl Models {
             "models_cancel" => self.job(env, caller, "cancel", args).await?,
             other => return Err(unknown(other)),
         })
-    }
-
-    /// The cost section's data: cost per day per model family over the last `days` days, from
-    /// the gateway's logs.
-    pub async fn section(&self, account: &Account, query: &Value) -> Result<Value> {
-        let days = query["days"].as_u64().unwrap_or(7).clamp(1, 30) as usize;
-        let now = Date::new_0();
-        let today = String::from(now.to_iso_string());
-        // Reaching back past the start of the window's first UTC day; daily() trims.
-        let since = now.get_time() - (days as f64) * 86_400_000.0;
-        let gateways = self
-            .gateway_logs(account, since, &Filter::default(), CHART_LOGS, false)
-            .await?;
-        let truncated = gateways.iter().any(|g| g.truncated);
-        let logs: Vec<ai_gateway::Log> = gateways.into_iter().flat_map(|g| g.logs).collect();
-        let mut answer = to_value(daily::daily(&logs, &today, days));
-        answer["truncated"] = json!(truncated);
-        Ok(answer)
     }
 
     /// The key slot for secret `name`.
@@ -2059,17 +2010,6 @@ impl ModelGateway {
         )
     }
 
-    /// The cost section's data for `caller`.
-    async fn cost(&self, env: &Env, caller: &Signed, req: &SectionRequest) -> Answer {
-        if req.id != SECTION {
-            return Answer::error(FailureKind::BadRequest, format!("no section `{}`", req.id));
-        }
-        match credential(env, caller, &["ai_gateway"]).await {
-            Ok(account) => answer(self.models.section(&account, &req.query).await),
-            Err(e) => answer(Err(e)),
-        }
-    }
-
     /// Checks, acts on or dates one of the providers' keys.
     async fn key(&self, env: &Env, caller: &Signed, req: &SecretRequest) -> Answer {
         match req.op {
@@ -2121,15 +2061,6 @@ impl Service for ModelGateway {
         req: CallRequest,
     ) -> pigeon_contract::serve::Answering<'a> {
         Box::pin(async move { self.run_tool(env, caller, &req).await })
-    }
-
-    fn section<'a>(
-        &'a self,
-        env: &'a Env,
-        caller: &'a Signed,
-        req: SectionRequest,
-    ) -> pigeon_contract::serve::Answering<'a> {
-        Box::pin(async move { self.cost(env, caller, &req).await })
     }
 
     fn secret<'a>(

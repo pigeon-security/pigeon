@@ -1,14 +1,12 @@
-/* The console shell at /app/next (phase 3 of the console redesign): the frame every view lives
- * in, and the one component set views build from (P13). It stays beside the current console at
- * /app (legacy-shell.js) until every view is ported; see the decommission checklist
- * in docs/plans/console-redesign.md.
+/* The console shell at /app (docs/plans/console-redesign.md): the frame every view lives in, and
+ * the one component set views build from (P13).
  *
  * What the shell owns:
  * - The sidebar: the instance switcher at the top, the only way to pick an instance (P1); the
  *   nav, built only from console_manifest(instance) (M3), Inbox first with its count (P5), the
  *   instance's areas, then the platform-wide group, which the manifest sends only for home.
- * - Routing: <base>/<instance>/<area>/<view>, from the manifest's stable ids (P12). Old
- *   ?tab=&subtab= and #hash URLs are rewritten in one hop (C7). Switching to an instance
+ * - Routing: <base>/<instance>/<area>/<view>, from the manifest's stable ids (P12). The
+ *   Worker redirects the first console's bookmarks here in one hop (C7). Switching to an instance
  *   without the current area opens its Overview and says why in a toast (M5). A view newer
  *   than the instance's selected capability version opens on an upgrade notice (M4).
  * - The read path (op → POST /app/op) and the write path (write → /console/write/<action>/
@@ -22,9 +20,8 @@
  * Views register a renderer with pigeonShell.register(area, view|null, render); null covers
  * every view of the area. render(ctx) returns a Node or a Promise of one; ctx is
  * { instance, record, area, view, manifest, signal, op, nav, refresh }. Return detached nodes
- * built with el(); never parse HTML or set inline styles. A view not yet ported registers
- * pigeonShell.todo(area, view) instead, which links to the same page in the current console.
- * tests/smoke/console.rs (P15) reads READS, WRITES and every register/todo call. */
+ * built with el(); never parse HTML or set inline styles. tests/smoke/console.rs (P15) reads
+ * READS, WRITES and every register call. */
 (() => {
   "use strict";
   const root = document.getElementById("pigeon-shell");
@@ -49,7 +46,7 @@
   const query = new URLSearchParams(location.search);
   const FIXTURES = root.dataset.fixtures && query.get("fixtures") === "1" ? root.dataset.fixtures : null;
   const fixtureState = FIXTURES ? query.get("state") || "loaded" : null;
-  const base = (root.dataset.base || "/app/next").replace(/\/+$/, "");
+  const base = (root.dataset.base ?? "/app").replace(/\/+$/, "");
   const site = root.dataset.site || "pigeon";
   let person = FIXTURES ? "Fixture Person" : root.dataset.person;
 
@@ -514,7 +511,7 @@
   }
   function cleanSearch() {
     const q = new URLSearchParams(location.search);
-    for (const k of ["tab", "subtab", "instance"]) q.delete(k);
+    q.delete("instance");
     return q.size ? `?${q}` : "";
   }
   // Where the browser is, as href() spells it: the hash is part of a route only in fixture mode.
@@ -524,67 +521,12 @@
     return FIXTURES ? `${location.pathname}${cleanSearch()}#/${path}` : `${base}/${path}`;
   }
 
-  // Old console URLs (C7): [old tab, old subtab or null, area, view or null]. The first match
-  // wins for a redirect; the reverse lookup sends a not-yet-ported view to its old page.
-  const LEGACY = [
-    ["approvals", null, "inbox", null],
-    ["instances", null, "instances", "list"],
-    ["architecture", null, "platform", "architecture"],
-    ["management", "credentials", "access", "secrets"],
-    ["management", "credentials", "access", "tokens"],
-    ["management", "people", "access", "people"],
-    ["management", "delegation", "access", "apps"],
-    ["management", null, "access", "secrets"],
-    ["cost", "7d", "cost", "7d"], ["cost", "today", "cost", "today"], ["cost", "all", "cost", "all"],
-    ["cost", null, "cost", null],
-    ["sessions", "main", "sessions", "live"], ["sessions", "compare", "sessions", "compare"],
-    ["sessions", null, "sessions", null],
-    ["settings", "models", "platform", "models"], ["settings", "connections", "platform", "endpoints"],
-    ["settings", "people", "access", "people"], ["settings", "access", "access", "secrets"],
-    ["settings", "capabilities", "capabilities", null], ["settings", "site", "site", "sites"],
-    ["settings", null, "overview", null],
-    ["home", null, "overview", null],
-  ];
-  function legacyRedirect() {
-    const q = new URLSearchParams(location.search);
-    const hash = FIXTURES ? "" : location.hash.slice(1);
-    const route = parseRoute();
-    if (!q.has("tab") && !q.has("instance") && !(hash && !route.instance)) return null;
-    const tab = q.get("tab") || (hash ? "management" : null);
-    let sub = q.get("subtab");
-    if (tab === "management" && !sub && hash) sub = hash === "people" ? "people" : hash === "delegation" ? "delegation" : "credentials";
-    const hit = LEGACY.find(([t, s]) => t === tab && s === sub) || LEGACY.find(([t, s]) => t === tab && s === null);
-    const keep = hash && !["people", "delegation"].includes(hash) ? `#${encodeURIComponent(hash)}` : "";
-    return { instance: q.get("instance") || route.instance, area: hit?.[2] || null, view: hit?.[3] || null, hash: keep };
-  }
-  function legacyLink(instance, area, view) {
-    const hit = LEGACY.find(([, , a, v]) => a === area && v === view) || LEGACY.find(([, , a]) => a === area);
-    if (!hit) return null;
-    const q = new URLSearchParams();
-    if (instance && !instance.home) q.set("instance", instance.id);
-    q.set("tab", hit[0]);
-    if (hit[1]) q.set("subtab", hit[1]);
-    return `/app?${q}`;
-  }
-
   // ---- Renderers.
   const renderers = new Map();
-  const todos = new Set();
   function register(area, view, render) {
     const key = `${area}/${view ?? "*"}`;
     if (renderers.has(key)) throw new Error(`Duplicate renderer: ${key}`);
     renderers.set(key, render);
-  }
-  // A view not yet ported (TODO-port): it says so and links to the same page in /app.
-  function todo(area, view) {
-    register(area, view, (ctx) => {
-      const old = legacyLink(ctx.instance, area, view);
-      return el("div", { class: "notice" },
-        el("strong", { text: `${ctx.areaTitle}${ctx.view && ctx.viewCount > 1 ? ` › ${ctx.view.title}` : ""} is not in the new console yet.` }),
-        el("p", { class: "ink2", text: old ? "It still works in the current console." : "Until it is ported, use the instance’s MCP tools." }),
-        old && el("div", { class: "toolbar" }, el("a", { class: "btn", href: old, text: "Open in the current console" })));
-    });
-    todos.add(`${area}/${view ?? "*"}`);
   }
 
   // ---- State.
@@ -632,13 +574,6 @@
     let list = [];
     try { list = await loadInstances(); } catch { /* The switcher shows only the current instance. */ }
     if (signal.aborted) return;
-    const legacy = legacyRedirect();
-    if (legacy) {
-      // An old URL without an instance meant the home instance; without one known, the default.
-      legacy.instance ||= list.find(isHome)?.id || null;
-      const to = legacy.instance ? legacy : {};
-      history.replaceState(null, "", href(to) + (legacy.hash || ""));
-    }
     const asked = parseRoute();
     const instanceId = asked.instance || list.find(isHome)?.id || null;
     let manifest;
@@ -934,10 +869,9 @@
   }
 
   window.pigeonShell = Object.freeze({
-    register, todo, op: (name, args) => op(name, args), el, icon, pill, tag, code, button, facts, segmented, input, field,
-    panel, strip, bar, meter, diffBlock, dataTable, toast, dialog, confirm, showOnce, copyField, href, legacyLink,
+    register, op: (name, args) => op(name, args), el, icon, pill, tag, code, button, facts, segmented, input, field,
+    panel, strip, bar, meter, diffBlock, dataTable, toast, dialog, confirm, showOnce, copyField, href,
     get fixtures() { return Boolean(FIXTURES); },
-    get todos() { return [...todos]; },
   });
 
   applyTheme(theme());

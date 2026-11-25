@@ -925,12 +925,11 @@ fn core_architecture_draws_every_worker_in_the_map() {
     assert!(!second.model.to_string().contains("ci_status"));
 }
 
-/// The Platform section sits on the Cost tab, adds nothing to the overview total, keeps a
-/// ten-minute snapshot, and its script is on the page.
+/// Observability's only console sections are the Cost area's views: `cost_daily`'s ranges. The
+/// console's routes and redirects are checked in `console_decommissioned` (console.rs).
 #[test]
-fn core_console_platform_section() {
+fn core_console_cost_views() {
     use pigeon_capabilities::Capability;
-    use pigeon_capabilities::console::{page, snapshot};
     use pigeon_capabilities::observability::Observability;
     use pigeon_core::lanes::Map;
 
@@ -944,97 +943,9 @@ fn core_console_platform_section() {
         },
     };
     let s = o.sections();
-    assert_eq!(s[0].id, "platform");
-    assert_eq!(s[0].area, "cost");
-    assert!(!s[0].view);
-    assert!(s[0].cost.is_none());
-    // The Cost area's views are `cost_daily`'s ranges.
-    let views: Vec<&str> = s.iter().filter(|s| s.view).map(|s| s.id).collect();
+    assert!(s.iter().all(|s| s.area == "cost"));
+    let views: Vec<&str> = s.iter().map(|s| s.id).collect();
     assert_eq!(views, ["7d", "today", "all"]);
-    assert_eq!(snapshot::fresh_ms("platform"), Some(600_000));
-    assert_eq!(page::app_redirect("/cost"), Some("/app?tab=cost"));
-    assert_eq!(page::app_redirect("/approvals"), Some("/app?tab=approvals"));
-    assert_eq!(page::app_redirect("/"), Some("/app"));
-    assert_eq!(page::app_redirect("/auth/enrol"), None);
-    assert_eq!(page::app_redirect("/access"), Some("/app?tab=management"));
-    // `/secrets` and `/tokens` redirect straight to the credentials, which redirect no further.
-    assert_eq!(page::CREDENTIALS, "/app?tab=management&subtab=credentials");
-    let (path, _) = page::CREDENTIALS.split_once('?').unwrap();
-    assert_eq!(page::app_redirect(path), None);
-}
-
-/// The old console's assets and API are gone: its scripts, `/console/api/me`, `/console/api/tabs`
-/// and `/console/api/avatar` answer 404, while the app, its panels, sections, sign-in and the
-/// bookmark redirects still route.
-#[test]
-fn core_console_routes_only_the_app() {
-    use pigeon_capabilities::console::{Get, Post};
-
-    for gone in [
-        "/console/app.js",
-        "/console/chart.js",
-        "/console/platform.js",
-        "/console/api/me",
-        "/console/api/tabs",
-        "/console/api/avatar",
-        "/console/api/section/",
-        "/console/api/section/Not_An_Anchor",
-        "/app/site_access.js",
-        "/app/nope.js",
-    ] {
-        assert_eq!(Get::route(gone), None, "GET {gone}");
-    }
-    for gone in [
-        "/console/api/avatar",
-        "/console/api/me",
-        "/console/sign-in",
-        "/app",
-    ] {
-        assert_eq!(Post::route(gone), None, "POST {gone}");
-    }
-
-    assert_eq!(Get::route("/app"), Some(Get::App));
-    assert_eq!(Get::route("/console/icon.png"), Some(Get::Icon));
-    assert_eq!(
-        Get::route("/console/api/section/credentials"),
-        Some(Get::Section("credentials"))
-    );
-    assert_eq!(
-        Get::route("/access"),
-        Some(Get::Bookmark("/app?tab=management"))
-    );
-    for asset in [
-        "/console/keys.js",
-        "/console/users.js",
-        "/console/approvals.js",
-        "/console/instances.js",
-        "/console/console.css",
-        "/app/legacy-shell.js",
-        "/app/legacy-shell.css",
-        "/app/next/shell.js",
-        "/app/next/shell.css",
-        "/app/next/views.js",
-        "/app/visitor.js",
-    ] {
-        assert!(
-            matches!(Get::route(asset), Some(Get::Asset(..))),
-            "GET {asset}"
-        );
-    }
-    assert_eq!(
-        Post::route("/console/sign-in/begin"),
-        Some(Post::SignInBegin)
-    );
-    assert_eq!(Post::route("/console/sign-out"), Some(Post::SignOut));
-    assert_eq!(Post::route("/app/op"), Some(Post::AppOp));
-    assert_eq!(
-        Post::route("/console/write/passkey-remove/begin"),
-        Some(Post::Write)
-    );
-    assert!(matches!(
-        Post::route("/console/site-access/list"),
-        Some(Post::SiteAccess(_))
-    ));
 }
 
 /// 2026-11-24T06:00:00Z in milliseconds since the epoch.

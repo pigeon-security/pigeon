@@ -11,8 +11,7 @@ use crate::caller::{
 };
 use crate::now_ms;
 use crate::wire::{
-    Answer, CallRequest, EventsRequest, FailureKind, Manifest, OPS, SecretRequest, SectionRequest,
-    WorkerManifest,
+    Answer, CallRequest, EventsRequest, FailureKind, Manifest, OPS, SecretRequest, WorkerManifest,
 };
 
 /// An answer in flight.
@@ -26,16 +25,6 @@ pub trait Service {
 
     /// Runs a tool for `caller`.
     fn call<'a>(&'a self, env: &'a Env, caller: &'a Signed, req: CallRequest) -> Answering<'a>;
-
-    /// A console section's data for `caller`; by default the op is unknown.
-    fn section<'a>(
-        &'a self,
-        _env: &'a Env,
-        _caller: &'a Signed,
-        _req: SectionRequest,
-    ) -> Answering<'a> {
-        Box::pin(std::future::ready(unknown_op("section")))
-    }
 
     /// Answers a forwarded request (a webhook or a page, which check their own callers); by
     /// default 404.
@@ -166,11 +155,6 @@ async fn run(
                 .check_instance(request.args["instance"].as_str())
                 .map_err(unauthorized)?;
             Ok(service.call(env, &caller, request).await)
-        }
-        "section" => {
-            let (caller, request) = signed_body::<SectionRequest>(key, header, op, body, service)?;
-            caller.check_instance(None).map_err(unauthorized)?;
-            Ok(service.section(env, &caller, request).await)
         }
         "secret" => {
             let (caller, request) = signed_body::<SecretRequest>(key, header, op, body, service)?;

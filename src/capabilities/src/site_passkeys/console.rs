@@ -1,4 +1,6 @@
-//! Cookie-authenticated visitor management for one approved and applied site hostname.
+//! Site › Visitors: the console's reads and writes for the visitors of one approved and applied
+//! site hostname. The reads are `/app/op` ops and the writes `/console/write` actions
+//! (`visitor-invite`, `visitor-revoke`); both run after the console's session checks.
 
 use pigeon_core::site_auth;
 use serde_json::{Value, json};
@@ -8,55 +10,17 @@ use super::{admit_new_visitors, allows_new_visitors, applied, approved, bad};
 use crate::instances::{self, record};
 use crate::users::{User, Users, directory, invite_name};
 
-/// The visitor UI asset mounted after the console shell.
-pub(crate) const ASSET: (&str, &str, &str) = (
-    "/app/visitor.js",
-    "text/javascript; charset=utf-8",
-    include_str!("visitor.js"),
-);
-
-/// Visitor management actions exposed to the signed console.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Action {
-    Hosts,
-    List,
-    /// The old invitation route, an adapter onto the `visitor-invite` write.
-    InviteBegin,
-    InviteFinish,
-}
-
-impl Action {
-    pub fn from_path(path: &str) -> Option<Self> {
-        match path.strip_prefix("/console/site-access/")? {
-            "hosts" => Some(Self::Hosts),
-            "list" => Some(Self::List),
-            "invite/begin" => Some(Self::InviteBegin),
-            "invite/finish" => Some(Self::InviteFinish),
-            _ => None,
-        }
-    }
-}
-
 /// Resolve the exact selected instance, site, and hostname.
 pub fn matches_selection(scope: &str, instance: &str, site: &str, host: &str) -> bool {
     scope == site_auth::binding(instance, site, host)
 }
 
-/// Runs after the console authenticates a same-origin request by a signed-in person: the
-/// reads. Inviting and removing a visitor are console writes ([`invite`], [`revoke`]).
-pub(crate) async fn serve(
-    platform_host: &str,
-    env: &Env,
-    action: Action,
-    body: &Value,
-) -> Result<Value> {
-    let instance = crate::arg(body, "instance")?;
-    let zone = zone(platform_host)?;
-    if action == Action::Hosts {
-        return Ok(json!({ "hosts": hosts(env, zone, instance).await? }));
-    }
-    let target = json!({ "instance": instance, "site": crate::arg(body, "site")?, "host": crate::arg(body, "host")? });
-    visitors(platform_host, env, &target).await
+/// Site › Visitors' hostnames: those of `args.instance`'s passkey sites that are approved and
+/// applied, each with its site. Called by `/app/op` (`app_site_hosts`) after the console's
+/// session checks.
+pub(crate) async fn site_hosts(platform_host: &str, env: &Env, args: &Value) -> Result<Value> {
+    let instance = crate::arg(args, "instance")?;
+    Ok(json!({ "hosts": hosts(env, zone(platform_host)?, instance).await? }))
 }
 
 fn zone(platform_host: &str) -> Result<&str> {
@@ -119,12 +83,9 @@ pub(crate) async fn invite(
     }
     .enrol_new_user(env, &name, Some(host), Some(&scope))
     .await?;
-    // `reveal` is what the console's confirm dialog shows once (P3); `enrol` is the old
-    // route's, until it goes.
+    // `reveal` is what the console's confirm dialog shows once (P3).
     Ok(json!({
         "message": format!("{name} is invited. Send them the link: it works once."),
-        "enrol": invite["enrol"],
-        "expires_in_minutes": invite["expires_in_minutes"],
         "reveal": {
             "value": invite["enrol"],
             "kind": "invite",

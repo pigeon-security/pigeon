@@ -3,13 +3,13 @@
 //! arguments (`ai_agents_config`, `ai_agents_models`), or clean up as they read
 //! (`ingest_status`), so each read lists the arguments it may take. Every op runs through
 //! `dispatch` as the signed-in person, under the same scope and policy as MCP; the `app_*` ops
-//! are the console's own reads. Writes go through the console's write path
-//! (`console::write`); the three run writes below are the old way, kept until phase 5.
+//! are the console's own reads. Nothing here writes: every write, a run's stop, note and
+//! extension included, goes through the console's write path (`console::write`).
 
 use serde_json::{Value, json};
 use worker::{Response, Result};
 
-use super::{SECTION_MS, answer, bad, failed, timed};
+use super::{READ_MS, answer, bad, failed, timed};
 use crate::site_passkeys::console as site_access;
 use crate::users::{Caller, User, directory};
 use crate::{Context, approvals, dispatch};
@@ -154,49 +154,7 @@ pub fn allowed(name: &str, args: &Value) -> bool {
             .keys()
             .all(|key| key == approvals::ARG || keys.contains(&key.as_str()))
     };
-    if let Some(keys) = read_keys(name) {
-        return only(keys);
-    }
-    // Only one run per write. No bulk stop, event impersonation, caller override or alias keys.
-    if !args["run"].as_str().is_some_and(|run| {
-        !run.is_empty()
-            && run.len() <= 64
-            && run
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-    }) {
-        return false;
-    }
-    match name {
-        "ai_agents_stop" => only(&["run"]),
-        "ai_agents_note" => {
-            only(&["run", "text"])
-                && args["text"]
-                    .as_str()
-                    .is_some_and(|text| !text.trim().is_empty() && text.len() <= 4000)
-        }
-        "ai_agents_extend" => {
-            const AMOUNTS: &[&str] = &["cost_usd", "turns", "wall_min", "sandbox_min", "executors"];
-            only(&[
-                "run",
-                "cost_usd",
-                "turns",
-                "wall_min",
-                "sandbox_min",
-                "executors",
-            ]) && AMOUNTS.iter().any(|key| object.contains_key(*key))
-                && AMOUNTS.iter().all(|key| {
-                    object.get(*key).is_none_or(|v| {
-                        if *key == "cost_usd" {
-                            v.as_f64().is_some_and(|n| n > 0.0)
-                        } else {
-                            v.as_u64().is_some_and(|n| n > 0)
-                        }
-                    })
-                })
-        }
-        _ => false,
-    }
+    read_keys(name).is_some_and(only)
 }
 
 // Read only this instance. Never fall back to a person's other link or the platform's stores.
@@ -370,9 +328,7 @@ pub(super) async fn serve(
             "app_inbox" => inbox(&person_cx, args).await,
             "app_proxy_tokens" => proxy_tokens(&person_cx).await,
             "app_people" => people(&person_cx, &caller.user.id).await,
-            "app_site_hosts" => {
-                site_access::serve(host, cx.env, site_access::Action::Hosts, args).await
-            }
+            "app_site_hosts" => site_access::site_hosts(host, cx.env, args).await,
             "app_site_visitors" => site_access::visitors(host, cx.env, args).await,
             "app_ingest_runs" => ingest_runs(&person_cx, args).await,
             _ => {
@@ -381,13 +337,7 @@ pub(super) async fn serve(
             }
         }
     };
-    // A read can time out. Do not put a local timeout around a write that might still commit.
-    let result = if read_keys(name).is_some() {
-        timed(SECTION_MS, call).await
-    } else {
-        call.await
-    };
-    match result {
+    match timed(READ_MS, call).await {
         Ok(data) => answer(&json!({ "data": data }), 200),
         Err(e) => failed(&e),
     }

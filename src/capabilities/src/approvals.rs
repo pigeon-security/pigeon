@@ -11,7 +11,6 @@ use pigeon_core::policy::{Answer, Approval, Decision, Kind, Request, Vars};
 use serde_json::{Value, json};
 use worker::{Env, Error, Result};
 
-use crate::console::sections::Section;
 use crate::users::{Caller, User, directory};
 use crate::{Call, Capability, Context, arg, unknown};
 
@@ -588,32 +587,6 @@ impl Capability for Approvals {
                 "approvals_list" => self.list(cx).await,
                 other => Err(unknown(other)),
             }
-        })
-    }
-
-    fn sections(&self) -> Vec<Section> {
-        vec![Section {
-            area: "inbox",
-            id: "approvals",
-            title: "Waiting for you",
-            description: "Only what cannot go ahead without your passkey.",
-            order: 1,
-            cost: None,
-            view: false,
-        }]
-    }
-
-    /// The tool calls waiting for this person's passkey.
-    fn section_data<'a>(
-        &'a self,
-        cx: &'a Context<'a>,
-        _id: &'a str,
-        person: &'a User,
-        _query: &'a Value,
-    ) -> Call<'a> {
-        Box::pin(async move {
-            let open = open_for(cx.env, person).await?;
-            Ok(listing(&open))
         })
     }
 }
