@@ -547,6 +547,9 @@ fn check_sites(
     rules: &Rules,
     problems: &mut Vec<String>,
 ) {
+    if instance.sites.len() > 1 && instance.sites.iter().any(|site| site.auth.is_some()) {
+        problems.push("A protected origin needs a dedicated instance with one site.".into());
+    }
     let mut names: BTreeSet<&str> = BTreeSet::new();
     let mut used_labels: Vec<String> = Vec::new();
     for (i, site) in instance.sites.iter().enumerate() {

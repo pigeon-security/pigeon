@@ -1085,19 +1085,39 @@ fn core_ingest_plans_hosts_and_estimates() {
 fn protected_origins_require_dedicated_resources_and_bind_to_the_site_bucket() {
     use pigeon_capabilities::instances::{
         plan::{Ledger, Observed, Step, plan, record},
-        record::Instance,
+        record::{Instance, Rules, validate},
     };
     use pigeon_core::{r2::private_domains, site_auth::origin_key};
 
     let mut instance: Instance = serde_json::from_value(json!({
         "id": "fixture", "title": "Fixture", "worker": "fixture",
-        "account": {"kind":"linked","account_id":"fixture"}, "version": 1,
+        "account": {"kind":"linked","account_id":"00000000000000000000000000000000"}, "version": 1,
         "sites": [{
             "name": "preview", "bucket": "fixture-site", "auth": "passkey", "allow": ["site"],
             "targets": [{"kind":"subdomain","label":"fixture"}]
         }]
     }))
     .unwrap();
+    let rules = Rules {
+        platform_zone: "pigeon.dev",
+        reserved_labels: &[],
+        reserved_workers: &[],
+    };
+    assert!(validate(&instance, &[], &rules).is_empty());
+    let mut shared = instance.clone();
+    let mut second = shared.sites[0].clone();
+    second.name = "second".into();
+    second.bucket = "fixture-second".into();
+    second.auth = None;
+    second.allow.clear();
+    second.targets.clear();
+    shared.sites.push(second);
+    assert!(
+        validate(&shared, &[], &rules)
+            .iter()
+            .any(|problem| problem.contains("dedicated instance with one site"))
+    );
+
     let mut observed = Observed {
         account_id: "fixture".into(),
         bucket_exists: false,

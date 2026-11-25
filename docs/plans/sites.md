@@ -129,7 +129,8 @@ pigeon-sites checks the allow list itself against the config it read.
 ### Protected origin
 
 A gated preview uses a dedicated linked instance, one site and an R2
-bucket provisioned for protected content. The approved instance plan uploads
+bucket provisioned for protected content. Instance record validation rejects a
+multi-site record that requests gated access before it can enter approval. The approved instance plan uploads
 the authenticated origin before turning on its workers.dev address or attaching
 the platform subdomain. That address accepts only the per-site bearer derived
 from the platform caller key, the instance, site, bucket and origin URL. The linked Worker
