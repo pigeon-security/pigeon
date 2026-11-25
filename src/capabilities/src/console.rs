@@ -133,6 +133,76 @@ pub async fn signed_person(env: &Env, req: &Request) -> Result<Option<User>> {
     Ok(signed.map(|s| s.user).filter(|u| u.kind == "standard"))
 }
 
+/// What a GET to one of the console's paths reaches; any other path answers 404.
+#[derive(Debug, PartialEq)]
+pub enum Get<'a> {
+    /// An old console bookmark, redirected to this place in the app.
+    Bookmark(&'static str),
+    /// The app's shell.
+    App,
+    /// A script or stylesheet: its body and Content-Type.
+    Asset(&'static str, &'static str),
+    /// The console's icon.
+    Icon,
+    /// A section's data, by its id, for a signed-in person.
+    Section(&'a str),
+}
+
+impl<'a> Get<'a> {
+    pub fn route(path: &'a str) -> Option<Self> {
+        if let Some(to) = page::app_redirect(path) {
+            return Some(Self::Bookmark(to));
+        }
+        const JS: &str = "text/javascript; charset=utf-8";
+        Some(match path {
+            "/app" | "/app/" => Self::App,
+            "/console/keys.js" => Self::Asset(KEYS, JS),
+            "/console/users.js" => Self::Asset(USERS, JS),
+            "/console/approvals.js" => Self::Asset(APPROVALS, JS),
+            "/console/instances.js" => Self::Asset(INSTANCES, JS),
+            "/console/console.css" => Self::Asset(STYLES, "text/css; charset=utf-8"),
+            "/console/icon.png" => Self::Icon,
+            p => match p.strip_prefix("/console/api/section/") {
+                Some(id) => sections::anchor(id).then_some(Self::Section(id))?,
+                None => {
+                    let (body, kind) = page::app_asset(p)?;
+                    Self::Asset(body, kind)
+                }
+            },
+        })
+    }
+}
+
+/// What a POST to one of the console's paths reaches; any other path answers 404.
+#[derive(Debug, PartialEq)]
+pub enum Post {
+    /// Visitor management for a site's hostname.
+    SiteAccess(site_access::Action),
+    /// One of the app's operations.
+    AppOp,
+    SignInBegin,
+    SignInFinish,
+    SignOut,
+    /// One of the console's writes, `/console/write/{action}/{step}`.
+    Write,
+}
+
+impl Post {
+    pub fn route(path: &str) -> Option<Self> {
+        if let Some(action) = site_access::Action::from_path(path) {
+            return Some(Self::SiteAccess(action));
+        }
+        Some(match path {
+            "/app/op" => Self::AppOp,
+            "/console/sign-in/begin" => Self::SignInBegin,
+            "/console/sign-in/finish" => Self::SignInFinish,
+            "/console/sign-out" => Self::SignOut,
+            p if p.starts_with("/console/write/") => Self::Write,
+            _ => return None,
+        })
+    }
+}
+
 impl Console {
     /// The person whose session cookie `req` carries, while it is fresh. The Directory answers a
     /// session only while its user exists and is a person, and removes it otherwise; the kind is
@@ -235,12 +305,15 @@ impl Console {
         let path = url.path().to_string();
         let method = req.method();
         if method == Method::Get {
-            return match path.as_str() {
-                p if page::app_redirect(p).is_some() => {
+            let Some(route) = Get::route(&path) else {
+                return Response::error("not found", 404);
+            };
+            return match route {
+                Get::Bookmark(to) => {
                     let mut target = url
-                        .join(page::app_redirect(p).unwrap())
+                        .join(to)
                         .map_err(|e| worker::Error::RustError(e.to_string()))?;
-                    if p == "/instances"
+                    if path.trim_end_matches('/') == "/instances"
                         && let Some((_, value)) = url.query_pairs().find(|(key, _)| key == "i")
                     {
                         target.query_pairs_mut().append_pair("i", &value);
@@ -250,21 +323,16 @@ impl Console {
                             .trim_end_matches('?'),
                     )
                 }
-                "/app" | "/app/" => {
+                Get::App => {
                     let signed = self.signed(cx.env, &req).await?;
                     page::html(&page::app_shell(
                         &self.passkeys.site_name,
                         signed.as_ref().map(|s| s.user.name.as_str()),
                     ))
                 }
-                p if p.starts_with("/app/") => page::app_asset(p),
-                "/console/keys.js" => page::asset(KEYS, "text/javascript; charset=utf-8"),
-                "/console/users.js" => page::asset(USERS, "text/javascript; charset=utf-8"),
-                "/console/approvals.js" => page::asset(APPROVALS, "text/javascript; charset=utf-8"),
-                "/console/instances.js" => page::asset(INSTANCES, "text/javascript; charset=utf-8"),
-                "/console/console.css" => page::asset(STYLES, "text/css; charset=utf-8"),
-                "/console/icon.png" => page::image(ICON, "image/png"),
-                p if p.starts_with("/console/api/") => {
+                Get::Asset(body, kind) => page::asset(body, kind),
+                Get::Icon => page::image(ICON, "image/png"),
+                Get::Section(id) => {
                     let Some(signed) = self.signed(cx.env, &req).await? else {
                         return answer(&json!({ "error": "sign in first" }), 401);
                     };
@@ -273,20 +341,18 @@ impl Console {
                         .find(|(k, _)| k == "days")
                         .map(|(_, v)| v.into_owned());
                     let fresh = url.query_pairs().any(|(k, v)| k == "fresh" && v == "1");
-                    match p.strip_prefix("/console/api/section/") {
-                        Some(id) if sections::anchor(id) => {
-                            let days = days(query.as_deref());
-                            Self::snapshot(cx, id, &signed.user, days, fresh).await
-                        }
-                        _ => answer(&json!({ "error": "not found" }), 404),
-                    }
+                    let days = days(query.as_deref());
+                    Self::snapshot(cx, id, &signed.user, days, fresh).await
                 }
-                _ => Response::error("not found", 404),
             };
         }
-        if method != Method::Post {
+        let route = match method {
+            Method::Post => Post::route(&path),
+            _ => None,
+        };
+        let Some(route) = route else {
             return Response::error("not found", 404);
-        }
+        };
         let origin = req.headers().get("Origin")?;
         let content = req.headers().get("Content-Type")?;
         let bearer = req
@@ -294,7 +360,7 @@ impl Console {
             .get("Authorization")?
             .and_then(|h| h.strip_prefix("Bearer ").map(|t| t.trim().to_string()))
             .filter(|t| !t.is_empty());
-        let is_write = path.starts_with("/console/write/");
+        let is_write = route == Post::Write;
         // A bearer is not ambient, so the Origin check that guards the cookie is skipped for it.
         let by_bearer = is_write && bearer.is_some();
         if (!by_bearer && !session::same_origin(origin.as_deref(), &self.host))
@@ -306,38 +372,30 @@ impl Console {
             );
         }
         let body: Value = req.json().await.unwrap_or(Value::Null);
-        if let Some(action) = site_access::Action::from_path(&path) {
-            let Some(signed) = self.signed(cx.env, &req).await? else {
-                return answer(&json!({ "error": "sign in first" }), 401);
-            };
-            return match site_access::serve(
-                &self.host,
-                &self.passkeys,
-                cx.env,
-                action,
-                &signed.user,
-                &body,
-            )
-            .await
-            {
-                Ok(v) => answer(&v, 200),
-                Err(e) => answer(&json!({ "error": e.to_string() }), 400),
-            };
-        }
-        match path.as_str() {
-            "/app/op" => {
+        match route {
+            Post::SiteAccess(action) => {
+                let Some(signed) = self.signed(cx.env, &req).await? else {
+                    return answer(&json!({ "error": "sign in first" }), 401);
+                };
+                let host = &self.host;
+                match site_access::serve(host, &self.passkeys, cx.env, action, &signed.user, &body)
+                    .await
+                {
+                    Ok(v) => answer(&v, 200),
+                    Err(e) => answer(&json!({ "error": e.to_string() }), 400),
+                }
+            }
+            Post::AppOp => {
                 let Some(signed) = self.signed(cx.env, &req).await? else {
                     return answer(&json!({ "error": "sign in first" }), 401);
                 };
                 ops::serve(cx, signed.user, &body).await
             }
-            "/console/sign-in/begin" => {
-                match self.passkeys.sign_in_begin(cx.env, SIGN_IN, None).await {
-                    Ok(v) => answer(&v, 200),
-                    Err(e) => answer(&json!({ "error": e.to_string() }), 400),
-                }
-            }
-            "/console/sign-in/finish" => match self.sign_in(cx.env, &body).await {
+            Post::SignInBegin => match self.passkeys.sign_in_begin(cx.env, SIGN_IN, None).await {
+                Ok(v) => answer(&v, 200),
+                Err(e) => answer(&json!({ "error": e.to_string() }), 400),
+            },
+            Post::SignInFinish => match self.sign_in(cx.env, &body).await {
                 Ok(token) => {
                     let res = answer(&json!({ "ok": true }), 200)?;
                     res.headers().set("Set-Cookie", &session::cookie(&token))?;
@@ -345,7 +403,7 @@ impl Console {
                 }
                 Err(e) => answer(&json!({ "error": e.to_string() }), 400),
             },
-            "/console/sign-out" => {
+            Post::SignOut => {
                 let header = req.headers().get("Cookie")?.unwrap_or_default();
                 if let Some(token) = session::token_from(&header) {
                     directory(cx.env, "session.remove", json!({ "hash": hash(token) })).await?;
@@ -354,7 +412,8 @@ impl Console {
                 res.headers().set("Set-Cookie", &session::clear())?;
                 Ok(res)
             }
-            p if p.starts_with("/console/write/") => {
+            Post::Write => {
+                let p = path.as_str();
                 if let Some(token) = bearer {
                     let allowed = p
                         .trim_start_matches("/console/write/")
@@ -387,7 +446,6 @@ impl Console {
                     Err(e) => answer(&json!({ "error": e.to_string() }), 400),
                 }
             }
-            _ => Response::error("not found", 404),
         }
     }
 

@@ -90,12 +90,12 @@ pub(super) fn app_shell(site_name: &str, person: Option<&str>) -> String {
     )
 }
 
-/// Serves only the app assets registered in the page.
-pub(super) fn app_asset(path: &str) -> Result<Response> {
-    match APP_ASSETS.iter().find(|(url, _, _)| *url == path) {
-        Some((_, kind, body)) => asset(body, kind),
-        None => Response::error("not found", 404),
-    }
+/// The body and Content-Type of the app asset at `path`: only those registered in the page.
+pub fn app_asset(path: &str) -> Option<(&'static str, &'static str)> {
+    APP_ASSETS
+        .iter()
+        .find(|(url, _, _)| *url == path)
+        .map(|(_, kind, body)| (*body, *kind))
 }
 
 /// The shell as a response, under the console's policy and the pages' other headers.

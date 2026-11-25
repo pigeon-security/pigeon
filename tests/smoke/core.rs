@@ -981,6 +981,77 @@ fn core_console_platform_section() {
     assert_eq!(page::app_redirect(path), None);
 }
 
+/// The old console's assets and API are gone: its scripts, `/console/api/me`, `/console/api/tabs`
+/// and `/console/api/avatar` answer 404, while the app, its panels, sections, sign-in and the
+/// bookmark redirects still route.
+#[test]
+fn core_console_routes_only_the_app() {
+    use pigeon_capabilities::console::{Get, Post};
+
+    for gone in [
+        "/console/app.js",
+        "/console/chart.js",
+        "/console/platform.js",
+        "/console/api/me",
+        "/console/api/tabs",
+        "/console/api/avatar",
+        "/console/api/section/",
+        "/console/api/section/Not_An_Anchor",
+        "/app/site_access.js",
+        "/app/nope.js",
+    ] {
+        assert_eq!(Get::route(gone), None, "GET {gone}");
+    }
+    for gone in [
+        "/console/api/avatar",
+        "/console/api/me",
+        "/console/sign-in",
+        "/app",
+    ] {
+        assert_eq!(Post::route(gone), None, "POST {gone}");
+    }
+
+    assert_eq!(Get::route("/app"), Some(Get::App));
+    assert_eq!(Get::route("/console/icon.png"), Some(Get::Icon));
+    assert_eq!(
+        Get::route("/console/api/section/credentials"),
+        Some(Get::Section("credentials"))
+    );
+    assert_eq!(
+        Get::route("/access"),
+        Some(Get::Bookmark("/app?tab=management"))
+    );
+    for asset in [
+        "/console/keys.js",
+        "/console/users.js",
+        "/console/approvals.js",
+        "/console/instances.js",
+        "/console/console.css",
+        "/app/shell.js",
+        "/app/shell.css",
+        "/app/visitor.js",
+    ] {
+        assert!(
+            matches!(Get::route(asset), Some(Get::Asset(..))),
+            "GET {asset}"
+        );
+    }
+    assert_eq!(
+        Post::route("/console/sign-in/begin"),
+        Some(Post::SignInBegin)
+    );
+    assert_eq!(Post::route("/console/sign-out"), Some(Post::SignOut));
+    assert_eq!(Post::route("/app/op"), Some(Post::AppOp));
+    assert_eq!(
+        Post::route("/console/write/remove-passkey/begin"),
+        Some(Post::Write)
+    );
+    assert!(matches!(
+        Post::route("/console/site-access/list"),
+        Some(Post::SiteAccess(_))
+    ));
+}
+
 /// 2026-11-24T06:00:00Z in milliseconds since the epoch.
 const TOKEN_NOW_MS: i64 = 1_795_500_000_000;
 
