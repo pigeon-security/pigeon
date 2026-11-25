@@ -1,8 +1,10 @@
 # Per-Worker caller keys
 
-Status: **step 1 landed** (`a8363fe`, on main); steps 0, 2, 3 and 4 not started, and step 5
-(per-Worker operations, below) is proposed. Checked against main at `a4bb475` (2026-11-25):
-per-Worker keys are not active. No Worker sends `X-Pigeon-Worker`, no `src/*/wrangler.toml`
+Status: **step 1 landed** (`a8363fe`, on main). Step 0's code (`workers_setup` makes the six
+keys) and step 5's enforcement (`split::WORKER_OPS`, `worker_may`) are **built** on branch
+`claude/caller-keys-step0-ops`, not yet landed; both are inert until the keys exist and core
+binds them. Step 0's person action and steps 2, 3 and 4 are not started. Checked against main
+at `327553c` (2026-11-25): per-Worker keys are not active. No Worker sends `X-Pigeon-Worker`, no `src/*/wrangler.toml`
 binds a `CALLER_KEY_*` secret, and all seven Workers bind the shared `CALLER_KEY`. Task K1 of the
 clean-up.
 
@@ -56,9 +58,17 @@ capability Worker binds only its own. The shared `CALLER_KEY` is dropped at the 
 
 Each step is safe alone. Landing order is the order below.
 
-0. **Person action: make the secrets.** Not started. Extend `workers_setup` to make the six
-   keys (a code change in core's lane), land it, then run `workers_setup` live. Check in the
-   Secrets Store that all six exist. No wrangler.toml binds them yet.
+0. **Person action: make the secrets.** Code built on `claude/caller-keys-step0-ops`:
+   `Split::setup` makes each of `split::caller_key_names()` (the shared `CALLER_KEY` and the six
+   `CALLER_KEY_*`) that `split::keys_to_make` finds missing, readable by Workers, keeps existing
+   ones and answers only `made` or `already there; kept` per name, never a value. It adds no
+   binding, so it deploys core's lane (`pigeon-platform`) only and is safe with no new secret.
+   Then the person:
+   1. After it lands and `pigeon-platform` deploys, runs `workers_setup` live once.
+   2. Checks its answer's `keys` lists all seven names, and in the Secrets Store that
+      `CALLER_KEY_SITES`, `CALLER_KEY_CI_GATEWAY`, `CALLER_KEY_MODEL_GATEWAY`,
+      `CALLER_KEY_CLOUD_GATEWAY`, `CALLER_KEY_AI_AGENTS` and `CALLER_KEY_PROXY` exist.
+   No wrangler.toml binds them until step 2.
 1. **Core verifies either key, signs with the shared one.** Landed in `a8363fe`
    (`split::verify_caller`, `worker_key`, `WORKER_HEADER`). It needs no
    person action and no binding: `worker_key` asks for `CALLER_KEY_<WORKER>` and gets nothing
@@ -74,10 +84,18 @@ Each step is safe alone. Landing order is the order below.
    old Worker would refuse the new signature only if it lacked the key; none does by then.
 4. **Drop the shared key.** Not started. Remove the `CALLER_KEY` bindings and the fallback code. Delete the
    secret from the Secrets Store last, by the person.
-5. **Bind each Worker to the core operations it may call.** Proposed; see the next section. It
-   needs steps 2 and 3, since core can only tell Workers apart once each signs with its own key.
+5. **Bind each Worker to the core operations it may call.** Enforcement built on
+   `claude/caller-keys-step0-ops`; see the next section. It takes effect only for requests
+   signed with a Worker's own key, so it bounds nothing until step 2 (core binds the keys,
+   Workers send the header) and step 3 (Workers sign with their own key). It bounds everything
+   only after step 4, while the shared key still verifies unbounded requests.
 
-## Step 5 (proposed): per-Worker allowed core operations
+**Next agent task: step 2**, once the person has done step 0's two actions: bind
+`CALLER_KEY_OWN` (its own `CALLER_KEY_<NAME>`) in each capability Worker's wrangler.toml, bind
+all six in src/platform/wrangler.toml under their own names, and make each Worker send
+`X-Pigeon-Worker: <name>`, one Worker per landing, each checked with `ci/deploy/allowlist.sh`.
+
+## Step 5: per-Worker allowed core operations (built, inert until steps 2 and 3)
 
 Per-Worker keys alone stop one Worker from signing as another. They do not bound what a
 compromised Worker can do to core, because the signer chooses the caller inside the envelope,
@@ -91,12 +109,24 @@ operations from any holder of a valid key:
 - `approval` creates and reads `cloud_change` approvals; `credential_revoke`,
   `credential_release` and `service_user` act on tokens and service users.
 
-So the proposal is that core keeps, per Worker name, the operations (and for `credential` the
-kinds) that Worker may ask, and refuses anything else once the signature checks out with that
-Worker's own key. A request signed with the shared key keeps today's behaviour until step 4.
+So core keeps, per Worker name, the operations (for the `credential*` ops the kinds, for
+`sites`' `dispatch` the tools) that Worker may ask, and refuses anything else once the signature
+checks out with that Worker's own key. A request signed with the shared key keeps today's
+behaviour until step 4.
 
-The table is derived from the code at `a4bb475`: every call each Worker's crates make over
-their `PLATFORM` binding. It is **proposed**; nothing enforces it.
+How it is built: `split::WORKER_OPS` is the one declarative table, `split::worker_may` checks a
+request against it, and `split::serve` applies it right after the signature check, answering
+HTTP 403 (`Unauthorized`, "Worker `x` may not ask core `op` …") and logging the refusal. The
+verifier now says which key passed (`split::KeyUsed`, `verify_caller_keyed`); the table applies
+only for `KeyUsed::Own`. A Worker that claims another's name holds neither that key nor (after
+step 4) the shared one, so its signature fails; while the shared key lives, a claim it verified
+is `KeyUsed::Shared` and gets no Worker's table, the same as today. The fall-back order matches
+the design above: only a bad signature with the own key tries the shared key.
+
+The table follows the code at `327553c`: every call each Worker's crates make over their
+`PLATFORM` binding (re-checked by grepping `pigeon_contract::ask` in each Worker's crates; the
+ai-agents crate depends on pigeon-models but uses only its pure parts, so asks no `scoped`
+credential). No crate sends `credential_revoke` of kind `scoped`, so no Worker may.
 
 | Worker (name in ci/workers.toml) | Ops it sends to core | Where |
 | --- | --- | --- |
@@ -105,18 +135,19 @@ their `PLATFORM` binding. It is **proposed**; nothing enforces it.
 | `model-gateway` | `credential` kind `scoped` | src/models/src/lib.rs (`credential_given`) |
 | `cloud-gateway` | `credential` kind `scoped`; `approval` | src/cloud/src/link.rs, src/cloud/src/approvals.rs |
 | `proxy` | `verify`, `grant`, `deploy_grant` (signed for no caller); `credential` kind `scoped` | src/proxy/src/lib.rs |
-| `ai-agents` | `dispatch` (the run's own calls such as `models_submit`, `models_status`, `approvals_status`, `land_list`, `ci_commit`, and the tools a run's model chooses); `credential` kind `run_grant`; `credential_revoke`; `credential_release`; `service_user` | src/ai-agents/src/object.rs |
+| `ai-agents` | `dispatch` of any tool (the run's own calls such as `models_submit`, `models_status`, `approvals_status`, `land_list`, `ci_commit`, and the tools a run's model chooses); `credential` kind `run_grant`; `credential_revoke` kind `run_grant`; `credential_release` kind `scoped`; `service_user` | src/ai-agents/src/object.rs |
 
-Notes for whoever builds it:
+Notes:
 
-- `ai-agents` needs `dispatch` of arbitrary tools, so for it the bound is the caller and the
-  gate, not a tool list. `sites` needs `dispatch` for four tools only, so a tool list for it is
-  cheap. Its legacy `instances_list` and `credential` uses go once its publishing callbacks are
-  all `sites_scope` ([legacy-worker-cutover.md](legacy-worker-cutover.md)).
-- `scoped` credentials could also be bound to the purposes each Worker asks for, as a later
-  refinement.
-- The table has to follow the code; a smoke scenario that checks each crate's `PLATFORM` calls
-  against it would keep it honest.
+- `ai-agents` needs `dispatch` of arbitrary tools (a run's model chooses them), so a tool list
+  is not feasible; its bound is the signed caller and core's gate. `sites` dispatches four tools
+  only, and the table lists them. Its legacy `instances_list` and `credential` uses go once its
+  publishing callbacks are all `sites_scope` ([legacy-worker-cutover.md](legacy-worker-cutover.md)).
+- Later refinement: bind `scoped` credentials to the purposes each Worker asks for (for
+  example only `proxy` asks `cf_deploy`).
+- The smoke scenario `proxy::core_bounds_each_workers_ops_with_its_own_key` checks each
+  Worker's real calls pass and others are refused. It does not read the crates' sources; a new
+  `PLATFORM` call needs a row here and in `WORKER_OPS`, or it is refused once step 3 lands.
 
 ### Checking each wrangler binding change
 
@@ -141,7 +172,8 @@ step 0 check by the person.
 
 ## Follow-ups for the person
 
-1. After step 0 lands, run `workers_setup` live and confirm the six secrets exist.
+1. After step 0's code lands and `pigeon-platform` deploys, run `workers_setup` live and
+   confirm the six `CALLER_KEY_*` secrets exist (the answer's `keys`, and the Secrets Store).
 2. Decide the binding name in each Worker (`CALLER_KEY_OWN` is proposed).
 3. After step 4, delete `CALLER_KEY` from the Secrets Store.
 4. `docs/plans/workers-split.md`, `architecture.md` and `proxies.md` mention the one shared

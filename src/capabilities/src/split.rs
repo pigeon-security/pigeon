@@ -1,7 +1,10 @@
 //! Core's side of the Workers split (docs/plans/workers-split.md): the capability Workers' tools
 //! merged with this Worker's own, the ops a capability Worker asks core (at
 //! `https://core/<op>` over its `PLATFORM` binding), and two tools: `workers_setup`, which makes
-//! the key that signs callers, and `manifest_refresh`.
+//! the keys that sign callers (the shared one and each Worker's own), and `manifest_refresh`.
+//!
+//! A request whose signature checks out with the calling Worker's own key may ask only the ops
+//! [`WORKER_OPS`] names for that Worker (docs/plans/caller-keys.md, step 5).
 //!
 //! The ops: `credential`, `dispatch` and `approval` for a signed caller; and the proxy Worker's checks,
 //! `verify` (who holds a proxy credential), `grant` (a CI job token's grant) and `deploy_grant`
@@ -162,8 +165,8 @@ pub async fn caller_key(env: &Env) -> Result<Vec<u8>> {
 /// with that Worker's key passes.
 ///
 /// Per-Worker keys are not yet active: no Worker sends this header and core binds none of the
-/// [`WORKER_KEYS`], so every call is still checked with the shared [`CALLER_KEY`]. The plan to
-/// turn them on is docs/plans/caller-keys.md.
+/// [`WORKER_KEYS`], so every call is still checked with the shared [`CALLER_KEY`] and
+/// [`WORKER_OPS`] bounds nothing yet. The plan to turn them on is docs/plans/caller-keys.md.
 pub const WORKER_HEADER: &str = "X-Pigeon-Worker";
 
 /// The capability Workers that may get a key of their own, by the name they claim in
@@ -196,6 +199,17 @@ async fn worker_key(env: &Env, worker: &str) -> Option<Vec<u8>> {
     Some(key.into_bytes())
 }
 
+/// Which key a caller's signature checked out with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyUsed {
+    /// The calling Worker's own key, named by [`WORKER_HEADER`]: core knows which Worker
+    /// signed, so [`worker_may`] bounds what it may ask.
+    Own,
+    /// The shared [`CALLER_KEY`]: any key holder could have signed, so the request keeps
+    /// today's behaviour until the shared key is dropped (docs/plans/caller-keys.md, step 4).
+    Shared,
+}
+
 /// The caller in `header`, checked with the calling Worker's own key when there is one, else
 /// with the shared key. A signature made with the shared key still passes; one made with
 /// another Worker's key, or a wrong key, does not. The skew checks are
@@ -208,23 +222,142 @@ pub fn verify_caller(
     body: &[u8],
     now_ms: i64,
 ) -> std::result::Result<pigeon_contract::Signed, pigeon_contract::Refused> {
+    verify_caller_keyed(own, shared, header, op, body, now_ms).map(|(signed, _)| signed)
+}
+
+/// [`verify_caller`], also saying which key the signature checked out with.
+pub fn verify_caller_keyed(
+    own: Option<&[u8]>,
+    shared: &[u8],
+    header: Option<&str>,
+    op: &str,
+    body: &[u8],
+    now_ms: i64,
+) -> std::result::Result<(pigeon_contract::Signed, KeyUsed), pigeon_contract::Refused> {
     verify_with_keys(own, shared, |key| {
         pigeon_contract::verify(key, header, op, body, now_ms)
     })
 }
 
+/// Tries `own` first, then `shared`. Only a bad signature with `own` falls back: a good one
+/// that fails the age, skew or context checks is refused for that reason.
 fn verify_with_keys(
     own: Option<&[u8]>,
     shared: &[u8],
     verify: impl Fn(&[u8]) -> std::result::Result<pigeon_contract::Signed, pigeon_contract::Refused>,
-) -> std::result::Result<pigeon_contract::Signed, pigeon_contract::Refused> {
+) -> std::result::Result<(pigeon_contract::Signed, KeyUsed), pigeon_contract::Refused> {
     if let Some(own) = own {
         match verify(own) {
             Err(pigeon_contract::Refused::BadSignature) => {}
-            done => return done,
+            done => return done.map(|s| (s, KeyUsed::Own)),
         }
     }
-    verify(shared)
+    verify(shared).map(|s| (s, KeyUsed::Shared))
+}
+
+/// One core op a capability Worker may ask, and for some ops which requests.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Allowed {
+    /// The op, from [`CORE_OPS`].
+    pub op: &'static str,
+    /// For `credential`, `credential_revoke` and `credential_release`: the kinds it may name;
+    /// for `dispatch`: the tools it may run. `None`: any.
+    pub only: Option<&'static [&'static str]>,
+}
+
+const fn any(op: &'static str) -> Allowed {
+    Allowed { op, only: None }
+}
+
+const fn only(op: &'static str, which: &'static [&'static str]) -> Allowed {
+    Allowed {
+        op,
+        only: Some(which),
+    }
+}
+
+/// What each capability Worker may ask core, by its name in [`WORKER_KEYS`]: every call its
+/// crates make over their `PLATFORM` binding (docs/plans/caller-keys.md, step 5). It applies
+/// only to a request whose signature checked out with that Worker's own key
+/// ([`KeyUsed::Own`]); one signed with the shared key is not bounded until step 4.
+///
+/// `ai-agents` runs whatever tools a run's model chooses, so its `dispatch` is bounded by the
+/// signed caller and core's gate, not a tool list. `sites` dispatches four tools only.
+pub const WORKER_OPS: [(&str, &[Allowed]); 6] = [
+    // src/sites/src/deploy.rs (legacy publishing and sites_scope), apex.rs, public.rs.
+    (
+        "sites",
+        &[
+            any("sites_scope"),
+            only("credential", &["linked", "github"]),
+            only(
+                "dispatch",
+                &[
+                    "instances_list",
+                    "architecture_describe",
+                    "instance_subdomains",
+                    "site_passkey",
+                ],
+            ),
+        ],
+    ),
+    // src/ci/src/lib.rs, src/ci/src/scope.rs.
+    (
+        "ci-gateway",
+        &[only("credential", &["scoped"]), any("ci_scope")],
+    ),
+    // src/models/src/lib.rs (`credential_given`).
+    ("model-gateway", &[only("credential", &["scoped"])]),
+    // src/cloud/src/link.rs, src/cloud/src/approvals.rs.
+    (
+        "cloud-gateway",
+        &[only("credential", &["scoped"]), any("approval")],
+    ),
+    // src/proxy/src/lib.rs.
+    (
+        "proxy",
+        &[
+            any("verify"),
+            any("grant"),
+            any("deploy_grant"),
+            only("credential", &["scoped"]),
+        ],
+    ),
+    // src/ai-agents/src/object.rs.
+    (
+        "ai-agents",
+        &[
+            any("dispatch"),
+            only("credential", &["run_grant"]),
+            only("credential_revoke", &["run_grant"]),
+            only("credential_release", &["scoped"]),
+            any("service_user"),
+        ],
+    ),
+];
+
+/// Whether Worker `worker`, verified with its own key, may ask core op `op` with `body`
+/// ([`WORKER_OPS`]); else why not. Pure.
+pub fn worker_may(worker: &str, op: &str, body: &[u8]) -> std::result::Result<(), String> {
+    let Some((_, allowed)) = WORKER_OPS.iter().find(|(w, _)| *w == worker) else {
+        return Err(format!("`{worker}` is not a capability Worker core knows"));
+    };
+    let Some(allowed) = allowed.iter().find(|a| a.op == op) else {
+        return Err(format!("Worker `{worker}` may not ask core `{op}`"));
+    };
+    let Some(which) = allowed.only else {
+        return Ok(());
+    };
+    let asked: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+    let field = if op == "dispatch" { "tool" } else { "kind" };
+    let named = asked[field].as_str().unwrap_or_default();
+    if which.contains(&named) {
+        Ok(())
+    } else {
+        Err(format!(
+            "Worker `{worker}` may not ask core `{op}` for {field} `{named}`"
+        ))
+    }
 }
 
 /// Contextual callbacks are read-only and name the authenticated instance.
@@ -260,11 +393,12 @@ pub async fn serve(mut req: Request, cx: &Context<'_>) -> Result<Response> {
     let header = req.headers().get(pigeon_contract::HEADER)?;
     let body = req.bytes().await?;
     let key = caller_key(cx.env).await?;
-    let own = match req.headers().get(WORKER_HEADER)? {
-        Some(w) => worker_key(cx.env, &w).await,
+    let worker_name = req.headers().get(WORKER_HEADER)?;
+    let own = match worker_name.as_deref() {
+        Some(w) => worker_key(cx.env, w).await,
         None => None,
     };
-    let signed = match verify_with_keys(own.as_deref(), &key, |key| {
+    let (signed, used) = match verify_with_keys(own.as_deref(), &key, |key| {
         pigeon_contract::verify_for(
             key,
             header.as_deref(),
@@ -282,6 +416,16 @@ pub async fn serve(mut req: Request, cx: &Context<'_>) -> Result<Response> {
             );
         }
     };
+    // Only a signature made with the Worker's own key says which Worker asked. A name the
+    // shared key verified is today's request, unbounded until the shared key goes.
+    if used == KeyUsed::Own {
+        let worker = worker_name.as_deref().unwrap_or_default();
+        if let Err(why) = worker_may(worker, &op, &body) {
+            #[cfg(target_arch = "wasm32")]
+            worker::console_error!("split: refused a Worker's core op: {why}");
+            return reply(Answer::error(FailureKind::Unauthorized, why), 403);
+        }
+    }
     if signed.instance().is_some()
         && !matches!(op.as_str(), "dispatch" | "ci_scope" | "sites_scope")
     {
@@ -919,32 +1063,67 @@ pub struct Split {
     pub bindings: &'static [Binding],
 }
 
+/// Every caller key `workers_setup` keeps in the Secrets Store: the shared [`CALLER_KEY`], then
+/// each capability Worker's own ([`WORKER_KEYS`]).
+pub fn caller_key_names() -> Vec<&'static str> {
+    std::iter::once(CALLER_KEY)
+        .chain(WORKER_KEYS.iter().map(|(_, k)| *k))
+        .collect()
+}
+
+/// The caller keys `workers_setup` makes, given the secrets the store already holds: each of
+/// [`caller_key_names`] not in `existing`, in that order. An existing key is never remade.
+/// Pure.
+pub fn keys_to_make(existing: &[&str]) -> Vec<&'static str> {
+    caller_key_names()
+        .into_iter()
+        .filter(|k| !existing.contains(k))
+        .collect()
+}
+
 impl Split {
-    /// Makes [`CALLER_KEY`] in the Secrets Store when it is not there, readable by Workers. An
-    /// existing key is kept: replacing it would refuse every call in flight.
+    /// Makes each caller key ([`caller_key_names`]) that is not in the Secrets Store, readable
+    /// by Workers. An existing key is kept: replacing it would refuse every call in flight. No
+    /// key's value is ever answered or logged.
     async fn setup(&self, cx: &Context<'_>) -> Result<Value> {
         let writer = Writer::open(cx.account).await?;
         let made = async {
-            if writer.list().await?.iter().any(|s| s.name == CALLER_KEY) {
-                return Ok(false);
+            let listed = writer.list().await?;
+            let existing: Vec<&str> = listed.iter().map(|s| s.name.as_str()).collect();
+            let missing = keys_to_make(&existing);
+            for name in &missing {
+                let key = pigeon_core::webauthn::random()?;
+                let comment = if *name == CALLER_KEY {
+                    "signs the caller core forwards to capability Workers, by workers_setup"
+                        .to_string()
+                } else {
+                    format!("{name}: one capability Worker's own caller key, by workers_setup")
+                };
+                writer
+                    .put_scoped(name, &key, &comment, &[secrets_store::WORKERS])
+                    .await?;
             }
-            let key = pigeon_core::webauthn::random()?;
-            writer
-                .put_scoped(
-                    CALLER_KEY,
-                    &key,
-                    "signs the caller core forwards to capability Workers, by workers_setup",
-                    &[secrets_store::WORKERS],
-                )
-                .await?;
-            Ok(true)
+            Ok(missing)
         }
         .await;
         let made = writer.finish(made).await?;
+        let keys: serde_json::Map<String, Value> = caller_key_names()
+            .into_iter()
+            .map(|k| {
+                let state = if made.contains(&k) {
+                    "made"
+                } else {
+                    "already there; kept"
+                };
+                (k.to_string(), json!(state))
+            })
+            .collect();
         Ok(json!({
-            "caller_key": if made { "made" } else { "already there; kept" },
-            "next": "bind CALLER_KEY in each platform Worker's wrangler.toml (a binding to a \
-                     missing secret fails the deploy, so it lands after this)",
+            "caller_key": keys[CALLER_KEY],
+            "keys": keys,
+            "next": "bind CALLER_KEY in each platform Worker's wrangler.toml; the per-Worker \
+                     CALLER_KEY_* keys are bound in step 2 of docs/plans/caller-keys.md (a \
+                     binding to a missing secret fails the deploy, so it lands after this)",
         }))
     }
 }
@@ -965,9 +1144,10 @@ impl Capability for Split {
         vec![
             Tool::bare(
                 "workers_setup",
-                "Make the key that signs the caller core forwards to its capability Workers \
-                 (CALLER_KEY, in the Secrets Store), when it is not there; an existing key is \
-                 kept. Run once before the first capability Worker is bound.",
+                "Make the keys that sign the caller core forwards to its capability Workers, \
+                 in the Secrets Store: the shared CALLER_KEY and each capability Worker's own \
+                 CALLER_KEY_<WORKER>, each when it is not there; an existing key is kept and no \
+                 value is shown. Run before a capability Worker binds a key.",
             ),
             Tool::bare(
                 "manifest_refresh",

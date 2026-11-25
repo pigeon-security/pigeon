@@ -155,6 +155,159 @@ fn core_contract_per_worker_caller_keys() {
     assert_eq!(worker_key_name("models"), None);
 }
 
+/// Core bounds what each capability Worker may ask once its own key signed the request
+/// (docs/plans/caller-keys.md, step 5); the shared key keeps today's behaviour, and a Worker
+/// claiming another's name never gets that Worker's table.
+#[test]
+fn core_bounds_each_workers_ops_with_its_own_key() {
+    use pigeon_capabilities::split::{
+        KeyUsed, WORKER_KEYS, WORKER_OPS, verify_caller_keyed, worker_may,
+    };
+    use pigeon_contract::{CORE_OPS, Refused, sign};
+
+    let may = |w: &str, op: &str, body: Value| worker_may(w, op, body.to_string().as_bytes());
+    // Each Worker's real calls pass.
+    let real = [
+        ("sites", "sites_scope", json!({"action": "record"})),
+        ("sites", "credential", json!({"kind": "linked"})),
+        ("sites", "credential", json!({"kind": "github"})),
+        ("sites", "dispatch", json!({"tool": "instances_list"})),
+        (
+            "sites",
+            "dispatch",
+            json!({"tool": "architecture_describe"}),
+        ),
+        ("sites", "dispatch", json!({"tool": "instance_subdomains"})),
+        ("sites", "dispatch", json!({"tool": "site_passkey"})),
+        ("ci-gateway", "credential", json!({"kind": "scoped"})),
+        ("ci-gateway", "ci_scope", json!({})),
+        ("model-gateway", "credential", json!({"kind": "scoped"})),
+        ("cloud-gateway", "credential", json!({"kind": "scoped"})),
+        ("cloud-gateway", "approval", json!({"action": "create"})),
+        ("proxy", "verify", json!({})),
+        ("proxy", "grant", json!({})),
+        ("proxy", "deploy_grant", json!({})),
+        ("proxy", "credential", json!({"kind": "scoped"})),
+        ("ai-agents", "dispatch", json!({"tool": "models_submit"})),
+        (
+            "ai-agents",
+            "dispatch",
+            json!({"tool": "anything_a_model_picks"}),
+        ),
+        ("ai-agents", "credential", json!({"kind": "run_grant"})),
+        (
+            "ai-agents",
+            "credential_revoke",
+            json!({"kind": "run_grant"}),
+        ),
+        ("ai-agents", "credential_release", json!({"kind": "scoped"})),
+        (
+            "ai-agents",
+            "service_user",
+            json!({"key": "ai-agent:planner"}),
+        ),
+    ];
+    for (w, op, body) in real {
+        assert_eq!(may(w, op, body.clone()), Ok(()), "{w} {op} {body}");
+    }
+    // Ops, kinds and tools outside a Worker's table are refused.
+    let refused = [
+        ("sites", "approval", json!({})),
+        ("sites", "credential", json!({"kind": "scoped"})),
+        ("sites", "dispatch", json!({"tool": "land"})),
+        ("sites", "dispatch", json!({})),
+        (
+            "model-gateway",
+            "dispatch",
+            json!({"tool": "models_submit"}),
+        ),
+        ("model-gateway", "credential", json!({"kind": "run_grant"})),
+        ("model-gateway", "credential", json!({})),
+        ("ci-gateway", "sites_scope", json!({})),
+        ("cloud-gateway", "service_user", json!({})),
+        ("proxy", "credential", json!({"kind": "github"})),
+        ("proxy", "dispatch", json!({"tool": "deploy_token"})),
+        ("ai-agents", "credential", json!({"kind": "scoped"})),
+        ("ai-agents", "credential", json!({"kind": "linked"})),
+        ("ai-agents", "credential_revoke", json!({"kind": "scoped"})),
+        ("ai-agents", "verify", json!({})),
+        ("root", "dispatch", json!({"tool": "land"})),
+    ];
+    for (w, op, body) in refused {
+        assert!(may(w, op, body.clone()).is_err(), "{w} {op} {body}");
+    }
+    assert_eq!(
+        may("sites", "dispatch", json!({"tool": "land"})),
+        Err("Worker `sites` may not ask core `dispatch` for tool `land`".into())
+    );
+    // The table names exactly the Workers with keys, and only core's ops.
+    let mut tabled: Vec<&str> = WORKER_OPS.iter().map(|(w, _)| *w).collect();
+    let mut keyed: Vec<&str> = WORKER_KEYS.iter().map(|(w, _)| *w).collect();
+    tabled.sort_unstable();
+    keyed.sort_unstable();
+    assert_eq!(tabled, keyed);
+    for (_, allowed) in WORKER_OPS {
+        assert!(allowed.iter().all(|a| CORE_OPS.contains(&a.op)));
+    }
+
+    // Which key verified decides whether the table applies.
+    let (shared, sites, ci) = (&b"shared"[..], &b"sites key"[..], &b"ci key"[..]);
+    let (body, now) = (&b"{}"[..], 1_800_000_000_000);
+    let by = |key: &[u8]| sign(key, &json!(null), "approval", body, now, "n");
+    let check = |own: Option<&[u8]>, header: &str| {
+        verify_caller_keyed(own, shared, Some(header), "approval", body, now).map(|(_, k)| k)
+    };
+    assert_eq!(check(Some(sites), &by(sites)), Ok(KeyUsed::Own));
+    // Signed with the shared key: today's behaviour, no table, whatever name was claimed.
+    assert_eq!(check(Some(sites), &by(shared)), Ok(KeyUsed::Shared));
+    assert_eq!(check(None, &by(shared)), Ok(KeyUsed::Shared));
+    // Sites claiming to be ci-gateway, signing with its own key: core checks ci-gateway's key,
+    // then the shared one, and both fail.
+    assert_eq!(check(Some(ci), &by(sites)), Err(Refused::BadSignature));
+}
+
+/// `workers_setup` makes exactly the caller keys the store lacks, and keeps the rest.
+#[test]
+fn workers_setup_plans_only_missing_caller_keys() {
+    use pigeon_capabilities::split::{caller_key_names, keys_to_make};
+
+    assert_eq!(
+        caller_key_names(),
+        [
+            "CALLER_KEY",
+            "CALLER_KEY_CI_GATEWAY",
+            "CALLER_KEY_MODEL_GATEWAY",
+            "CALLER_KEY_SITES",
+            "CALLER_KEY_PROXY",
+            "CALLER_KEY_AI_AGENTS",
+            "CALLER_KEY_CLOUD_GATEWAY",
+        ]
+    );
+    // Today's store: only the shared key, among unrelated secrets.
+    assert_eq!(
+        keys_to_make(&["CALLER_KEY", "GITHUB_APP_KEY"]),
+        [
+            "CALLER_KEY_CI_GATEWAY",
+            "CALLER_KEY_MODEL_GATEWAY",
+            "CALLER_KEY_SITES",
+            "CALLER_KEY_PROXY",
+            "CALLER_KEY_AI_AGENTS",
+            "CALLER_KEY_CLOUD_GATEWAY",
+        ]
+    );
+    assert_eq!(
+        keys_to_make(&["CALLER_KEY_SITES", "CALLER_KEY_PROXY"]),
+        [
+            "CALLER_KEY",
+            "CALLER_KEY_CI_GATEWAY",
+            "CALLER_KEY_MODEL_GATEWAY",
+            "CALLER_KEY_AI_AGENTS",
+            "CALLER_KEY_CLOUD_GATEWAY",
+        ]
+    );
+    assert!(keys_to_make(&caller_key_names()).is_empty());
+}
+
 /// Core's `dispatch` must see the bound Workers' tools (`models_submit` is the model gateway's),
 /// while a clashing remote tool is left out and the other ops use core's own capabilities.
 #[test]
