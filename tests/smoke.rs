@@ -3142,3 +3142,24 @@ fn queued_publish_refuses_changed_grant_before_claiming_a_retry() {
         assert!(!due(&retry, 400_000.0));
     }
 }
+
+#[test]
+fn queued_publish_terminalizes_an_expired_final_claim_without_attempting_again() {
+    use pigeon_capabilities::github::{due, prepare_publish};
+    let (record, mut row) = queued_publish_fixture();
+    row["attempts"] = json!(4);
+    assert!(due(&row, 1_000.0));
+    assert!(prepare_publish(&mut row, Some(record.clone()), 1_000.0).is_some());
+    assert_eq!(row["attempts"], 5);
+    assert!(!due(&row, 181_000.0));
+    assert!(due(&row, 181_001.0));
+    assert!(prepare_publish(&mut row, Some(record), 181_001.0).is_none());
+    assert_eq!(row["attempts"], 5);
+    assert_eq!(row["state"], "failed");
+    assert_eq!(row["finished_ms"], 181_001.0);
+    assert_eq!(
+        row["error"],
+        "final publishing attempt expired before reporting completion"
+    );
+    assert!(!due(&row, 400_000.0));
+}

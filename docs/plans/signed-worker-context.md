@@ -94,6 +94,14 @@ Once all scheduler deployments are on the contextual sender, remove the
 old scheduled-only publishing binding argument from the general deploy
 call. Manual deploys and rollbacks retain their explicit platform path.
 
+## Queued publishing attempt limit
+
+A provider error returns the same queue row to pending until the attempt limit.
+A changed approved publishing record fails the queued request before a new
+claim. An expired lease on the final attempt records a terminal failure with
+unknown completion and never starts another publish. The scheduler cannot
+infer whether Sites finished before the lease expired.
+
 ## Verification
 
 - An older receiver still handles a legacy platform request.

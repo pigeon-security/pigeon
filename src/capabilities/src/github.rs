@@ -130,14 +130,11 @@ async fn replace(env: &Env, key: &str, previous: &str, value: &Value) -> Result<
 }
 
 /// Whether a kept deploy should run now: pending, or started longer ago than its lease (a
-/// redeploy or a limit cut it off), and not tried too often. Pure.
+/// redeploy or a limit cut it off). An expired final attempt is due for terminal cleanup. Pure.
 pub fn due(kept: &Value, now_ms: f64) -> bool {
     let attempts = kept["attempts"].as_u64().unwrap_or(0);
-    if attempts >= MAX_ATTEMPTS {
-        return false;
-    }
     match kept["state"].as_str() {
-        Some("pending") => true,
+        Some("pending") => attempts < MAX_ATTEMPTS,
         Some("running") => now_ms - kept["started_ms"].as_f64().unwrap_or(0.0) > LEASE_MS,
         _ => false,
     }
@@ -217,6 +214,12 @@ pub fn prepare_publish(
     current: Option<Instance>,
     now_ms: f64,
 ) -> Option<Instance> {
+    if kept["attempts"].as_u64().unwrap_or(0) >= MAX_ATTEMPTS {
+        kept["state"] = json!("failed");
+        kept["error"] = json!("final publishing attempt expired before reporting completion");
+        kept["finished_ms"] = json!(now_ms);
+        return None;
+    }
     let Some(current) = current.filter(|record| allows_queued_publish(record, kept)) else {
         kept["state"] = json!("failed");
         kept["error"] = json!(
