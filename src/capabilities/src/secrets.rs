@@ -87,20 +87,6 @@ pub fn listing(declared: &[(String, Slot)], stored: &[(String, Option<String>)])
     out
 }
 
-/// A throwaway secret for testing the console's and the iOS app's secret-set path. Nothing
-/// reads it, it is not checked, and any value is safe. Remove it once the test is done.
-pub const SCRATCH: &str = "PIGEON_SCRATCH";
-
-fn scratch_slot() -> Slot {
-    Slot {
-        name: SCRATCH.into(),
-        purpose: "A throwaway value for testing how secrets are set from the console and the iOS \
-                  app. Nothing reads it and any value is safe; it will be removed after the test."
-            .into(),
-        scopes: &[secrets_store::WORKERS],
-    }
-}
-
 impl Secrets {
     fn own_slot(&self) -> Slot {
         Slot {
@@ -335,7 +321,7 @@ impl Capability for Secrets {
     }
 
     fn secrets(&self) -> Vec<Slot> {
-        vec![self.own_slot(), scratch_slot()]
+        vec![self.own_slot()]
     }
 
     /// Cloudflare's tokens/verify answers the parent token's `expires_on`, when it has one.
