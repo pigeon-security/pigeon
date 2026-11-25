@@ -3,7 +3,7 @@
 //! This block wraps three things. First, turning a downloaded GitHub App
 //! private key (PEM) into PKCS#8 DER and signing an app JWT with WebCrypto.
 //! Second, checking and reading webhook deliveries. Third, a small set of
-//! GitHub REST calls: installation tokens, deployments and deployment statuses.
+//! GitHub REST calls: installation tokens and the App itself.
 //! pigeon talks to GitHub over its MCP server everywhere else; these are what
 //! that server has no tool for.
 //!
@@ -11,7 +11,7 @@
 //! functions at the bottom are thin wrappers over those pure functions.
 
 use serde::Serialize;
-use serde_json::{Map, Value, json};
+use serde_json::{Map, Value};
 use worker::js_sys::{self, Array, Function, JSON, Promise, Reflect, Uint8Array};
 use worker::wasm_bindgen::{JsCast, JsValue};
 use worker::wasm_bindgen_futures::JsFuture;
@@ -81,14 +81,6 @@ fn pem_block(pem: &str) -> Option<(&str, &str)> {
     let end = after.find(END)?;
     let body = after.get(..end)?;
     Some((label.trim(), body))
-}
-
-/// Returns the DER bytes inside a PEM block of any label.
-///
-/// The body must be standard base64. Line breaks and spaces are ignored.
-pub fn pem_der(pem: &str) -> Option<Vec<u8>> {
-    let (_, body) = pem_block(pem)?;
-    base64_decode(body)
 }
 
 /// Encodes a DER length in short or long form.
@@ -284,20 +276,6 @@ pub fn token_request(repos: &[&str], permissions: &[(&str, &str)]) -> Value {
     Value::Object(body)
 }
 
-/// Builds the body for creating a deployment.
-///
-/// It never auto-merges and skips required status checks.
-pub fn deployment_body(git_ref: &str, environment: &str, description: &str) -> Value {
-    json!({
-        "ref": git_ref,
-        "environment": environment,
-        "description": description,
-        "auto_merge": false,
-        "required_contexts": [],
-        "production_environment": true,
-    })
-}
-
 /// Builds the body for a deployment status.
 ///
 /// The description is cut to 140 characters. Absent URLs are left out.
@@ -426,24 +404,4 @@ pub async fn installation_token(
 /// rest. A key that signs a JWT GitHub accepts here belongs to that App.
 pub async fn app(jwt: &str) -> Result<Value> {
     api("Bearer", jwt, Method::Get, "/app", None).await
-}
-
-/// Creates a deployment and answers its id.
-///
-/// GitHub answers 202 without an id when it merged the base branch instead
-/// of deploying. That case is an error.
-pub async fn create_deployment(token: &str, repo: &str, body: &Value) -> Result<u64> {
-    let path = format!("/repos/{repo}/deployments");
-    let answer = api("Bearer", token, Method::Post, &path, Some(body)).await?;
-    answer
-        .get("id")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| Error::RustError("GitHub merged instead of deploying".to_string()))
-}
-
-/// Sets the status of a deployment.
-pub async fn create_status(token: &str, repo: &str, deployment: u64, body: &Value) -> Result<()> {
-    let path = format!("/repos/{repo}/deployments/{deployment}/statuses");
-    api("Bearer", token, Method::Post, &path, Some(body)).await?;
-    Ok(())
 }

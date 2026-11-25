@@ -81,13 +81,6 @@ pub fn blob_of_key(key: &str) -> Option<&str> {
     key.strip_prefix("blobs/").filter(|rest| !rest.is_empty())
 }
 
-/// Answers the commit in a manifest key, or None if the key is not a manifest key.
-pub fn commit_of_key(key: &str) -> Option<&str> {
-    key.strip_prefix("deploys/")
-        .and_then(|rest| rest.strip_suffix(".json"))
-        .filter(|commit| !commit.is_empty())
-}
-
 /// Percent-encodes text. Slashes are kept when `keep_slash` is true.
 fn percent(input: &str, keep_slash: bool) -> String {
     let mut out = String::with_capacity(input.len());
@@ -333,20 +326,6 @@ pub fn prune(deploys: &[(String, u64)], live: &str, keep: usize) -> Vec<String> 
         .skip(keep)
         .filter(|(commit, _)| commit.as_str() != live)
         .map(|(commit, _)| commit.clone())
-        .collect()
-}
-
-/// Answers the blobs that none of the kept manifests use, sorted.
-pub fn unreferenced(all_blobs: &BTreeSet<String>, kept: &[&Manifest]) -> Vec<String> {
-    let used: BTreeSet<&str> = kept
-        .iter()
-        .flat_map(|manifest| manifest.values())
-        .map(|entry| entry.blob.as_str())
-        .collect();
-    all_blobs
-        .iter()
-        .filter(|blob| !used.contains(blob.as_str()))
-        .cloned()
         .collect()
 }
 
