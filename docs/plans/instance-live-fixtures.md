@@ -148,3 +148,49 @@ Set up a canary-only grant path before proposing `observability: {state:
 `observability_worker_metrics` with `hours: 1`. Confirm the returned Worker
 matches the approved canary record, and confirm an alternate `worker`
 argument is rejected. A successful empty window is valid for an idle Worker.
+
+### GitHub fixture run
+
+Use `instances_list` and `github_status` to verify the fixture's approved
+repository and App installation before any push. The existing preview canary
+shares the public repository and has no App installation. Its latest push and
+deploy are empty, as expected. Keep the production installation and repository
+routing in place.
+
+With a separately authorized, uniquely bound fixture installation and deploy
+ref, collect evidence from GitHub's delivery response, `github_status`, and
+the active release on the fixture hostname. Use short fixture commits and
+snapshot the push and deploy rows by commit, state, attempts, and timestamps.
+Omit provider identifiers and credential material from the report.
+
+1. Push fixture commit A. Expect HTTP 202 with `deploy` reporting queued.
+   Poll for A in `latest_deploy` and record its terminal result and active
+   release. A healthy first attempt ends in `done` with `attempts: 1`.
+2. Redeliver A from the fixture App's delivery history. Expect HTTP 202 and
+   `duplicate: true`. Compare both rows against their snapshots and confirm
+   the active release stays on A.
+3. Push a distinct fixture commit B and wait for B to finish. Redeliver A
+   within the fingerprint retention window. Expect HTTP 202 and
+   `duplicate: true` again, with B's rows and active release unchanged.
+
+The next checks require an isolated deployment with a controllable provider
+stub and a way to pause its scheduled publisher between attempts. The
+production publishing path has no failure-injection control.
+
+1. Make the stub reject the first provider operation before any release
+   writes. Let the fixture scheduler run one tick and verify the same commit
+   is `pending` with one attempt. Let the second tick reach the restored
+   provider. Expect exactly two attempts, a `done` row for the same commit,
+   and one release activation. GitHub redelivery is unnecessary.
+2. For a fresh commit, reproduce the first failure and pause before the retry.
+   Apply a separately authorized change to the fixture's approved publishing
+   profile and resume. Expect a terminal configuration-changed error, with
+   the original attempt count and zero new provider calls or release changes.
+3. With the provider stub, pause a running claim until its lease expires.
+   The next tick can reclaim it while attempts remain. After the fifth claim
+   expires, the next tick marks completion unknown and starts no sixth
+   attempt. Capture the provider call count and scheduler row separately.
+
+The native smoke suite exercises replay and atomicity with SQLite and runs
+the scheduler's retry, lease, and grant checks with synthetic outcomes. Use
+those checks until the corresponding isolated fixtures are available.
