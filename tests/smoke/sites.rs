@@ -771,3 +771,53 @@ fn sites_apex_pages() {
     assert!(!home::CSP.contains("script-src"));
     assert!(home::CSP.contains("frame-ancestors 'none'"));
 }
+
+#[test]
+fn site_object_staging_bounds_parallel_writes_and_drains_failed_batches() {
+    use pigeon_core::r2::put_in_batches;
+    use std::cell::Cell;
+    use std::future::{Future, poll_fn};
+    use std::task::{Context, Poll, Waker};
+
+    for failure in [None, Some(0)] {
+        let started = Cell::new(0);
+        let completed = Cell::new(0);
+        let release = Cell::new(false);
+        let mut context = Context::from_waker(Waker::noop());
+        let writes = put_in_batches(0..7, |index| {
+            let started = &started;
+            let completed = &completed;
+            let release = &release;
+            async move {
+                started.set(started.get() + 1);
+                poll_fn(|_| {
+                    if release.get() || failure == Some(index) {
+                        Poll::Ready(())
+                    } else {
+                        Poll::Pending
+                    }
+                })
+                .await;
+                completed.set(completed.get() + 1);
+                if failure == Some(index) {
+                    Err(index)
+                } else {
+                    Ok(())
+                }
+            }
+        });
+        let mut writes = std::pin::pin!(writes);
+        assert_eq!(writes.as_mut().poll(&mut context), Poll::Pending);
+        assert_eq!(started.get(), 4);
+        assert_eq!(completed.get(), usize::from(failure.is_some()));
+
+        release.set(true);
+        assert_eq!(
+            writes.as_mut().poll(&mut context),
+            Poll::Ready(failure.map_or(Ok(()), Err))
+        );
+        let expected = if failure.is_some() { 4 } else { 7 };
+        assert_eq!(started.get(), expected);
+        assert_eq!(completed.get(), expected);
+    }
+}

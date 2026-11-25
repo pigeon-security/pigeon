@@ -318,3 +318,17 @@ linked Worker's origin.
 The worker and bucket privacy probes cover provider-managed direct access.
 The linked account owner still controls its resources and can create other
 routes or Workers that serve the same bucket independently.
+
+### First publication to an empty bucket
+
+Stage missing content-addressed blobs in batches of up to four, using one R2
+credential for the batch sequence. If an upload fails, finish the in-flight
+batch and stop before writing the manifest or activating the release. A later
+attempt reuses blobs already present. Publishing checks the approved record
+again before changing `live`. Origin authorization and bucket privacy checks
+run before staging protected content.
+
+The Sites Worker logs phase durations and the number of staged blobs. The
+log fields contain no repository, origin, account, path, or credential
+values. Use the last completed phase to distinguish archive fetching and
+rendering, storage preflight, blob staging, and release activation.

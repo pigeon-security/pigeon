@@ -328,6 +328,15 @@ pub async fn rollback(
     )
 }
 
+fn publish_stage(started: &mut u64, stage: &str) {
+    let now = worker::Date::now().as_millis();
+    worker::console_log!(
+        "site_deploy stage={stage} elapsed_ms={}",
+        now.saturating_sub(*started)
+    );
+    *started = now;
+}
+
 /// Deploys `instance` at `rev`.
 pub async fn deploy(
     env: &Env,
@@ -337,6 +346,7 @@ pub async fn deploy(
     rev: &str,
     publishing_binding: Option<&str>,
 ) -> Result<Value> {
+    let mut started = worker::Date::now().as_millis();
     let record = approved_record(env, key, caller, instance).await?;
     let record = &record;
     if publishing_binding
@@ -388,8 +398,10 @@ pub async fn deploy(
         .ok()
         .and_then(|credential| credential["token"].as_str().map(str::to_string))
     };
+    publish_stage(&mut started, "source_grant");
     let gh_token = gh.as_deref();
     let gz = pigeon_core::repository::github_archive(&t.repo, rev, gh_token).await?;
+    publish_stage(&mut started, "archive_fetch");
     let archive = tarball::read(&gz).map_err(bad)?;
     drop(gz);
     let commit = archive
@@ -422,6 +434,7 @@ pub async fn deploy(
         }
     };
 
+    publish_stage(&mut started, "render");
     ensure_current(env, key, caller, instance, record).await?;
     let account = linked_account(env, key, caller, instance, &t, record).await?;
     if t.protected {
@@ -436,14 +449,15 @@ pub async fn deploy(
         .await?;
         r2::require_private_bucket(&account, &t.bucket).await?;
     }
-    let present: BTreeSet<String> = r2::list(&account, &t.bucket, "blobs/")
+    publish_stage(&mut started, "storage_preflight");
+    let mut present: BTreeSet<String> = r2::list(&account, &t.bucket, "blobs/")
         .await?
         .iter()
         .filter_map(|k| r2::blob_of_key(k).map(str::to_string))
         .collect();
 
     let mut manifest = Manifest::new();
-    let mut fresh: Vec<(String, String, Vec<u8>)> = Vec::new();
+    let mut fresh = Vec::new();
     let mut add = |path: String, bytes: Vec<u8>, ctype: String| {
         let pair = [(path, bytes)];
         let (p, mut e) = r2::manifest_of(&pair)
@@ -452,9 +466,12 @@ pub async fn deploy(
             .expect("one file gives one entry");
         let [(_, bytes)] = pair;
         e.content_type = ctype.clone();
-        let new = !present.contains(&e.blob) && !manifest.values().any(|x| x.blob == e.blob);
-        if new {
-            fresh.push((e.blob.clone(), ctype, bytes));
+        if present.insert(e.blob.clone()) {
+            fresh.push(r2::ObjectWrite {
+                key: r2::blob_key(&e.blob),
+                content_type: ctype,
+                body: bytes,
+            });
         }
         manifest.insert(p, e);
     };
@@ -466,9 +483,10 @@ pub async fn deploy(
         add(path, bytes, ctype);
     }
     let uploaded = fresh.len();
-    for (blob, ctype, bytes) in fresh {
-        r2::put(&account, &t.bucket, &r2::blob_key(&blob), &ctype, bytes).await?;
-    }
+    publish_stage(&mut started, "storage_plan");
+    worker::console_log!("site_deploy staging blobs={uploaded}");
+    r2::put_objects(&account, &t.bucket, fresh).await?;
+    publish_stage(&mut started, "blobs_staged");
     let files = manifest.len();
     let provenance = json!({
         "commit": commit,
@@ -502,6 +520,7 @@ pub async fn deploy(
         )
         .await?;
     }
+    publish_stage(&mut started, "manifest_staged");
     ensure_current(env, key, caller, instance, record).await?;
     r2::put(
         &account,
@@ -511,6 +530,7 @@ pub async fn deploy(
         pointer.as_bytes().to_vec(),
     )
     .await?;
+    publish_stage(&mut started, "activated");
     Ok(json!({
         "instance": instance,
         "commit": commit,

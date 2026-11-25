@@ -501,6 +501,62 @@ pub async fn put(
     token.finish(result).await
 }
 
+/// A single object to stage in an R2 bucket.
+pub struct ObjectWrite {
+    pub key: String,
+    pub content_type: String,
+    pub body: Vec<u8>,
+}
+
+/// Run writes four at a time. Finish the current batch before returning an error,
+/// and do not start another batch after any write fails.
+pub async fn put_in_batches<T, E, F>(
+    objects: impl IntoIterator<Item = T>,
+    mut put: impl FnMut(T) -> F,
+) -> std::result::Result<(), E>
+where
+    F: Future<Output = std::result::Result<(), E>>,
+{
+    // Workers cap concurrent outgoing connections. Leave room below that limit.
+    const CONCURRENT_WRITES: usize = 4;
+    let mut objects = objects.into_iter().peekable();
+    while objects.peek().is_some() {
+        for result in
+            futures_util::future::join_all(objects.by_ref().take(CONCURRENT_WRITES).map(&mut put))
+                .await
+        {
+            result?;
+        }
+    }
+    Ok(())
+}
+
+/// Stage independent objects using one scoped credential for all writes.
+pub async fn put_objects(
+    account: &Account,
+    bucket: &Bucket,
+    objects: Vec<ObjectWrite>,
+) -> Result<()> {
+    if objects.is_empty() {
+        return Ok(());
+    }
+    let token = open(account, "r2 stage objects").await?;
+    let bearer = token.value();
+    let result = put_in_batches(objects, |object| async move {
+        put_with(
+            bearer,
+            &account.id,
+            bucket,
+            &object.key,
+            &object.content_type,
+            object.body,
+        )
+        .await
+    })
+    .await;
+    token.finish(result).await
+}
+
 /// Reads an object, using an open token. Answers None when the object does not exist.
 pub async fn get_with(
     token: &str,
