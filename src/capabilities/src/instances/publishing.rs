@@ -5,13 +5,11 @@ const TOOLS: &[Registration] = &[
     Registration {
         name: "site_deploy",
         description: None,
-        hidden: &[],
         arguments: &["rev"],
     },
     Registration {
         name: "site_rollback",
         description: None,
-        hidden: &[],
         arguments: &["release"],
     },
 ];

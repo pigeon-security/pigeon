@@ -52,7 +52,6 @@ const SCOPED_TOOLS: &[crate::instances::tools::Registration] =
     &[crate::instances::tools::Registration {
         name: METRICS,
         description: None,
-        hidden: &[],
         arguments: &["hours"],
     }];
 

@@ -103,13 +103,11 @@ const SCOPED_TOOLS: &[crate::instances::tools::Registration] = &[
     crate::instances::tools::Registration {
         name: "ci_jobs",
         description: Some("List recent CI jobs owned by this instance."),
-        hidden: &["repo"],
         arguments: &["commit", "state", "task", "caller", "limit"],
     },
     crate::instances::tools::Registration {
         name: "ci_status",
         description: Some("Read the status and results of a CI job owned by this instance."),
-        hidden: &[],
         arguments: &["id"],
     },
 ];

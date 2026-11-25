@@ -144,13 +144,11 @@ pub fn instance_tools(
         Registration {
             name: RESOLVE,
             description: None,
-            hidden: &[],
             arguments: &["revision"],
         },
         Registration {
             name: FILE,
             description: None,
-            hidden: &[],
             arguments: &["revision", "path"],
         },
     ];

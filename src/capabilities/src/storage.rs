@@ -21,7 +21,6 @@ const INSTANCE_TOOLS: &[Registration] = &[
         description: Some(
             "List objects in the instance’s approved storage location. Supply a relative prefix or the continuation token from the preceding page.",
         ),
-        hidden: &["account", "bucket"],
         arguments: &["prefix", "delimiter", "max_keys", "token"],
     },
     Registration {
@@ -29,7 +28,6 @@ const INSTANCE_TOOLS: &[Registration] = &[
         description: Some(
             "Read a small object from the instance’s approved storage location. Supply a relative key.",
         ),
-        hidden: &["account", "bucket", "presign", "expires_s"],
         arguments: &["key"],
     },
 ];

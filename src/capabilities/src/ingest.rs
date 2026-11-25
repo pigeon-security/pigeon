@@ -16,7 +16,6 @@ const SCOPED_TOOLS: &[crate::instances::tools::Registration] = &[
     crate::instances::tools::Registration {
         name: "ingest_plan",
         description: Some("Plan ingestion using this instance's approved source and destination."),
-        hidden: &["source", "bucket", "prefix"],
         arguments: &[
             "dry_run",
             "keep_archives",
@@ -28,13 +27,11 @@ const SCOPED_TOOLS: &[crate::instances::tools::Registration] = &[
     crate::instances::tools::Registration {
         name: "ingest_start",
         description: Some("Start an approved ingestion plan for this instance."),
-        hidden: &[],
         arguments: &["plan"],
     },
     crate::instances::tools::Registration {
         name: "ingest_report",
         description: Some("Read an ingestion report owned by this instance."),
-        hidden: &[],
         arguments: &["run"],
     },
 ];

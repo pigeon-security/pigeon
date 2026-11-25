@@ -10,7 +10,6 @@ use super::record::Instance;
 pub struct Registration {
     pub name: &'static str,
     pub description: Option<&'static str>,
-    pub hidden: &'static [&'static str],
     pub arguments: &'static [&'static str],
 }
 
@@ -66,7 +65,8 @@ impl Scope {
             .find(|registration| registration.name == tool)
     }
 
-    /// Keep the tools available to this instance and hide arguments supplied by the profile.
+    /// Keep the tools available to this instance and show only the arguments each registration
+    /// accepts; the profile supplies the rest.
     pub fn restrict_tools(&self, tools: &mut Vec<Tool>) {
         tools.retain_mut(|tool| {
             if tool.name == crate::dispatch::CALL {
@@ -76,11 +76,7 @@ impl Scope {
             let Some(registration) = self.registration(tool.name) else {
                 return false;
             };
-            let visible = |name: &str| {
-                name != "instance"
-                    && !registration.hidden.contains(&name)
-                    && registration.arguments.contains(&name)
-            };
+            let visible = |name: &str| name != "instance" && registration.arguments.contains(&name);
             if let Some(properties) = tool.input_schema["properties"].as_object_mut() {
                 properties.retain(|name, _| visible(name));
             }
