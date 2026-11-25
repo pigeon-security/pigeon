@@ -1131,17 +1131,28 @@ impl Ci {
         ]
     }
 
+    /// Reads instance jobs, carrying a verified scope from the gateway when it has one.
+    async fn scoped_read(
+        &self,
+        cx: &Cx<'_>,
+        tool: &str,
+        args: &Value,
+        signed_instance: Option<&str>,
+    ) -> Result<Value> {
+        let query = scope::read_args(tool, args)?;
+        let scope = scope::for_read(cx, arg(args, "instance")?, signed_instance).await?;
+        let op = if tool == "ci_status" {
+            "instance_status"
+        } else {
+            "instance_jobs"
+        };
+        scheduler(cx.env, op, json!({ "scope": scope, "query": query })).await
+    }
+
     /// Runs `tool`, one of CI's own, as `cx`'s caller.
     pub async fn call(&self, cx: &Cx<'_>, tool: &str, args: &Value) -> Result<Value> {
         if args.get("instance").is_some() {
-            let query = scope::read_args(tool, args)?;
-            let scope = scope::for_read(cx, arg(args, "instance")?).await?;
-            let op = if tool == "ci_status" {
-                "instance_status"
-            } else {
-                "instance_jobs"
-            };
-            return scheduler(cx.env, op, json!({ "scope": scope, "query": query })).await;
+            return self.scoped_read(cx, tool, args, None).await;
         }
 
         Ok(match tool {

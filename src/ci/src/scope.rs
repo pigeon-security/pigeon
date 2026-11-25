@@ -1,5 +1,6 @@
 //! Read authority issued by core for one approved instance's CI jobs.
 
+use pigeon_contract::WorkerContext;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use worker::{Error, Result};
@@ -31,19 +32,35 @@ impl Scope {
     }
 }
 
-async fn lookup(cx: &Cx<'_>, body: Value) -> Result<Option<Scope>> {
+async fn lookup(cx: &Cx<'_>, body: Value, context: Option<WorkerContext>) -> Result<Option<Scope>> {
     let (Some(key), Some(caller)) = (cx.key, cx.caller) else {
         return Err(Error::RustError("CI scope requires a signed caller".into()));
     };
-    let answer = pigeon_contract::ask(
-        &cx.env.service(PLATFORM)?,
-        "https://core",
-        "ci_scope",
-        &body,
-        Some((key, caller)),
-        &random()?,
-    )
-    .await?;
+    let fetcher = cx.env.service(PLATFORM)?;
+    let nonce = random()?;
+    // A contextual rejection is final. Do not retry a scoped request with a legacy envelope.
+    let answer = if let Some(context) = context {
+        pigeon_contract::ask_with_context(
+            &fetcher,
+            "https://core",
+            "ci_scope",
+            &body,
+            (key, caller),
+            &nonce,
+            &context,
+        )
+        .await?
+    } else {
+        pigeon_contract::ask(
+            &fetcher,
+            "https://core",
+            "ci_scope",
+            &body,
+            Some((key, caller)),
+            &nonce,
+        )
+        .await?
+    };
     match answer {
         pigeon_contract::Answer::Ok(v) => {
             let scope: Option<Scope> = serde_json::from_value(v)?;
@@ -58,8 +75,20 @@ async fn lookup(cx: &Cx<'_>, body: Value) -> Result<Option<Scope>> {
     }
 }
 
-pub(crate) async fn for_read(cx: &Cx<'_>, instance: &str) -> Result<Scope> {
-    lookup(cx, json!({ "instance": instance }))
+/// Carry scope only when the inbound gateway request authenticated it.
+pub fn read_context(instance: &str, signed: Option<&str>) -> Result<Option<WorkerContext>> {
+    match signed {
+        Some(signed) if signed != instance => Err(Error::RustError(
+            "the CI request does not match its signed instance".into(),
+        )),
+        Some(signed) => Ok(Some(WorkerContext::new("pigeon-platform", Some(signed)))),
+        None => Ok(None),
+    }
+}
+
+pub(crate) async fn for_read(cx: &Cx<'_>, instance: &str, signed: Option<&str>) -> Result<Scope> {
+    let context = read_context(instance, signed)?;
+    lookup(cx, json!({ "instance": instance }), context)
         .await?
         .filter(|scope| scope.instance == instance)
         .ok_or_else(|| Error::RustError("CI is unavailable on this instance".into()))
@@ -67,7 +96,7 @@ pub(crate) async fn for_read(cx: &Cx<'_>, instance: &str) -> Result<Scope> {
 
 /// Existing main-platform submissions still run when attribution is unavailable.
 pub(crate) async fn owner_for(cx: &Cx<'_>, repo: &str, job: &str) -> Option<String> {
-    let scope = lookup(cx, json!({ "repo": repo, "job": job }))
+    let scope = lookup(cx, json!({ "repo": repo, "job": job }), None)
         .await
         .ok()??;
     scope

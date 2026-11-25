@@ -74,7 +74,14 @@ impl Service for CiGateway {
                 return Answer::error(FailureKind::UnknownTool, format!("no tool `{}`", req.tool));
             }
             let cx = self.ci.cx(env, caller_of(caller), Some(&self.key));
-            match self.ci.call(&cx, &req.tool, &req.args).await {
+            let answer = if let Some(instance) = caller.instance() {
+                self.ci
+                    .scoped_read(&cx, &req.tool, &req.args, Some(instance))
+                    .await
+            } else {
+                self.ci.call(&cx, &req.tool, &req.args).await
+            };
+            match answer {
                 Ok(v) => Answer::Ok(v),
                 Err(e) => Answer::error(FailureKind::Failed, e.to_string()),
             }
