@@ -305,7 +305,7 @@ impl Console {
                         target.query_pairs_mut().append_pair("i", &value);
                     }
                     page::redirect(
-                        &format!("{}?{}", target.path(), target.query().unwrap_or_default())
+                        format!("{}?{}", target.path(), target.query().unwrap_or_default())
                             .trim_end_matches('?'),
                     )
                 }
