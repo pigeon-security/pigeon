@@ -21,6 +21,8 @@ use pigeon_core::{Account, site_publish, tarball};
 use serde_json::{Value, json};
 use worker::{Env, Error, Result};
 
+use crate::queued::Receipt;
+
 fn bad(why: impl Into<String>) -> Error {
     Error::RustError(why.into())
 }
@@ -343,24 +345,42 @@ fn publish_stage(started: &mut u64, stage: &str) {
     *started = now;
 }
 
-/// Deploys `instance` at `rev`.
+/// Deploys `instance` at `rev`: the public, manual `site_deploy`.
 pub async fn deploy(
     env: &Env,
     key: &[u8],
     caller: &Signed,
     instance: &str,
     rev: &str,
-    publishing_binding: Option<&str>,
+) -> Result<Value> {
+    publish(env, key, caller, instance, rev, None).await
+}
+
+/// Deploys a push-started publish from core's private receipt: the approved record must still
+/// have the queued digest, and GitHub's archive must be the queued commit.
+pub async fn deploy_queued(
+    env: &Env,
+    key: &[u8],
+    caller: &Signed,
+    receipt: &Receipt<'_>,
+) -> Result<Value> {
+    let (instance, rev) = (receipt.instance(), receipt.revision());
+    publish(env, key, caller, instance, rev, Some(receipt)).await
+}
+
+async fn publish(
+    env: &Env,
+    key: &[u8],
+    caller: &Signed,
+    instance: &str,
+    rev: &str,
+    receipt: Option<&Receipt<'_>>,
 ) -> Result<Value> {
     let mut started = worker::Date::now().as_millis();
     let record = approved_record(env, key, caller, instance).await?;
     let record = &record;
-    if publishing_binding
-        .is_some_and(|approved| pigeon_core::oauth::hash(&record.to_string()) != approved)
-    {
-        return Err(bad(
-            "the queued push no longer matches the approved publishing record",
-        ));
+    if let Some(receipt) = receipt {
+        receipt.check_record(record).map_err(bad)?;
     }
     let pins = pins(record);
     check_sites_pin(
@@ -414,8 +434,8 @@ pub async fn deploy(
         .commit
         .clone()
         .ok_or_else(|| bad("GitHub's archive does not name its commit"))?;
-    if publishing_binding.is_some() && !commit.eq_ignore_ascii_case(rev) {
-        return Err(bad("GitHub's archive does not match the queued commit"));
+    if let Some(receipt) = receipt {
+        receipt.check_commit(&commit).map_err(bad)?;
     }
     let year = tarball::year_of(archive.mtime);
     let s = pigeon_blog::repo::split(archive.files).map_err(bad)?;

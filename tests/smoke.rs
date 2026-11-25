@@ -2927,9 +2927,8 @@ fn queued_site_receipt_checks_scope_actor_and_immutable_inputs() {
     });
     let receipt = queued_site_receipt::Receipt::read(&signed, &args).unwrap();
     assert_eq!(queued_site_receipt::TOOL, "site_deploy_queued");
-    assert_eq!(receipt.instance, "blog");
-    assert_eq!(receipt.revision, "a".repeat(40));
-    assert_eq!(receipt.binding, "A".repeat(43));
+    assert_eq!(receipt.instance(), "blog");
+    assert_eq!(receipt.revision(), "a".repeat(40));
     for (key, value) in [
         ("instance", json!("elsewhere")),
         ("rev", json!("main")),
@@ -2945,6 +2944,64 @@ fn queued_site_receipt_checks_scope_actor_and_immutable_inputs() {
     signed.caller["acting_for"] = Value::Null;
     signed.context = None;
     assert!(queued_site_receipt::Receipt::read(&signed, &args).is_err());
+}
+
+/// The deploy workflow enforces a queued receipt's binding: the approved record must still hash to
+/// the queued digest, and GitHub's archive must be exactly the queued commit, in any case.
+#[test]
+fn queued_site_receipt_enforces_the_record_digest_and_exact_commit() {
+    use pigeon_contract::{Signed, WorkerContext};
+    let signed = Signed {
+        caller: json!({"user": {"kind": "standard", "id": "owner"}}),
+        iat: 0,
+        exp: 1,
+        nonce: String::new(),
+        context: Some(WorkerContext::new("pigeon-sites", Some("blog"))),
+    };
+    let record = json!({
+        "id": "blog", "publishing": {"state": "enabled", "site": "blog"},
+        "sites": [{"name": "blog", "bucket": "site", "targets": []}],
+    });
+    let commit = "0123456789abcdef0123456789abcdef01234567";
+    let args = json!({
+        "instance": "blog",
+        "rev": commit,
+        "publishing_binding": pigeon_core::oauth::hash(&record.to_string()),
+    });
+    let receipt = queued_site_receipt::Receipt::read(&signed, &args).unwrap();
+    assert!(receipt.check_record(&record).is_ok());
+    let mut changed = record.clone();
+    changed["publishing"] = json!({"state": "disabled"});
+    assert_eq!(
+        receipt.check_record(&changed),
+        Err("the queued push no longer matches the approved publishing record")
+    );
+    assert!(receipt.check_commit(commit).is_ok());
+    assert!(receipt.check_commit(&commit.to_ascii_uppercase()).is_ok());
+    for other in ["main", "0123456", &"f".repeat(40)] {
+        assert_eq!(
+            receipt.check_commit(other),
+            Err("GitHub's archive does not match the queued commit")
+        );
+    }
+}
+
+/// The public `site_deploy` refuses the scheduled-only `publishing_binding` an older core
+/// scheduler sent: a scheduled publish cannot reach the public tool without its checks, and the
+/// misuse fails visibly. A manual request without it is untouched.
+#[test]
+fn public_site_deploy_refuses_a_queued_publishing_binding() {
+    use queued_site_receipt::{PUBLIC_BINDING_ARG, refuse_public_binding};
+    assert_eq!(PUBLIC_BINDING_ARG, "publishing_binding");
+    assert!(refuse_public_binding(&json!({"instance": "blog"})).is_ok());
+    assert!(refuse_public_binding(&json!({"instance": "blog", "rev": "main"})).is_ok());
+    for binding in [json!("A".repeat(43)), Value::Null, json!("")] {
+        let why = refuse_public_binding(&json!({
+            "instance": "blog", "rev": "a".repeat(40), "publishing_binding": binding,
+        }))
+        .unwrap_err();
+        assert!(why.contains("site_deploy_queued"), "{why}");
+    }
 }
 
 #[test]

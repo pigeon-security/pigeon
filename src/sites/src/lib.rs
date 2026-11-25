@@ -188,21 +188,17 @@ impl Service for Sites {
                     let Some(key) = key else {
                         return Answer::error(FailureKind::Failed, "CALLER_KEY is not set");
                     };
-                    match deploy::deploy(
-                        env,
-                        key.as_bytes(),
-                        caller,
-                        receipt.instance,
-                        receipt.revision,
-                        Some(receipt.binding),
-                    )
-                    .await
-                    {
+                    match deploy::deploy_queued(env, key.as_bytes(), caller, &receipt).await {
                         Ok(value) => Answer::Ok(value),
                         Err(error) => Answer::error(FailureKind::Failed, error.to_string()),
                     }
                 }
                 "site_deploy" | "site_rollback" => {
+                    if req.tool == "site_deploy"
+                        && let Err(why) = queued::refuse_public_binding(&req.args)
+                    {
+                        return Answer::error(FailureKind::BadRequest, why);
+                    }
                     let Some(instance) = req.args["instance"].as_str() else {
                         return Answer::error(FailureKind::BadRequest, "`instance` is required");
                     };
@@ -227,16 +223,7 @@ impl Service for Sites {
                         };
                         deploy::rollback(env, key.as_bytes(), caller, instance, release).await
                     } else {
-                        let publishing_binding = req.args["publishing_binding"].as_str();
-                        deploy::deploy(
-                            env,
-                            key.as_bytes(),
-                            caller,
-                            instance,
-                            rev,
-                            publishing_binding,
-                        )
-                        .await
+                        deploy::deploy(env, key.as_bytes(), caller, instance, rev).await
                     };
                     match result {
                         Ok(v) => Answer::Ok(v),

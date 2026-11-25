@@ -41,8 +41,11 @@ replayed or forged call can do is the job of per-Worker keys and per-Worker oper
    digest before it obtains credentials and rejects an archive whose
    commit differs from the queued one. Existing manual publishing and
    rollback stay on their established routes. The compatibility receiver
-   continues accepting the old scheduled call while older core Workers
-   are deployed.
+   that accepted the old scheduled call on public `site_deploy` is retired
+   by `claude/retire-public-publishing-binding`. Public `site_deploy` now
+   refuses `publishing_binding`. See the
+   [retirement status](legacy-worker-retirement-status.md#pausing-queued-publishing-for-a-rollback)
+   for pausing queued publishing during a core rollback.
 4. After that receiver deploys, switch the GitHub scheduler to the
    contextual sender. The scheduler rechecks the queued binding, the
    linked account and its owner, and the caller's publishing policy
