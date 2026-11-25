@@ -175,6 +175,13 @@ pub fn jwt_signing_input(client_id: &str, now_secs: u64) -> String {
     )
 }
 
+/// A SHA-256 fingerprint of the exact bytes authenticated by the webhook HMAC.
+pub fn delivery_fingerprint(body: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+
+    format!("{:x}", Sha256::digest(body))
+}
+
 /// Checks the `X-Hub-Signature-256` header of a webhook delivery.
 ///
 /// The header must look like `sha256=<hex>`. The comparison is constant time.

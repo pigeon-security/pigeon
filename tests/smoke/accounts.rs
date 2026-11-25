@@ -1340,3 +1340,145 @@ fn linking_a_cloudflare_account() {
     );
     assert_eq!(status(None, 0.0)["status"], "not linked");
 }
+
+#[test]
+fn github_delivery_records_queue_and_replay_marker_atomically() {
+    use std::sync::{Arc, Barrier};
+    use std::time::Duration;
+
+    use pigeon_capabilities::users::{PRUNE_DELIVERIES, RECORD_DELIVERY};
+    use pigeon_core::github_app::delivery_fingerprint;
+    use rusqlite::{Connection, params};
+
+    const START: &str = "github:delivery:";
+    const END: &str = "github:delivery;";
+    const PUSH: &str = "github:push:example";
+    const DEPLOY: &str = "github:deploy:example";
+
+    fn deliver(
+        db: &Connection,
+        fingerprint: &str,
+        push: &str,
+        pending: Option<&str>,
+        now: i64,
+        limit: i64,
+    ) -> rusqlite::Result<usize> {
+        db.execute(PRUNE_DELIVERIES, params![START, END, now])?;
+        let key = format!("{START}{fingerprint}");
+        let mut statement = db.prepare(RECORD_DELIVERY)?;
+        let rows = statement
+            .query_map(
+                params![
+                    key,
+                    now + 7,
+                    now + 90,
+                    PUSH,
+                    push,
+                    DEPLOY,
+                    pending,
+                    key,
+                    now,
+                    START,
+                    END,
+                    now,
+                    limit,
+                ],
+                |row| row.get::<_, String>(0),
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows.len())
+    }
+
+    fn value(db: &Connection, key: &str) -> String {
+        db.query_row("SELECT value FROM settings WHERE key = ?", [key], |row| {
+            row.get(0)
+        })
+        .unwrap()
+    }
+
+    let dir = super::repo("github-delivery-db");
+    let path = dir.join("directory.sqlite");
+    let db = Connection::open(&path).unwrap();
+    db.execute_batch(
+        "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, expires_at INTEGER NOT NULL);",
+    )
+    .unwrap();
+
+    let a = delivery_fingerprint(b"original authenticated body");
+    let same_body_different_header = delivery_fingerprint(b"original authenticated body");
+    let b = delivery_fingerprint(b"later authenticated body");
+    let c = delivery_fingerprint(b"authenticated body for a nonpublishing ref");
+    let barrier = Arc::new(Barrier::new(2));
+    let mut counts = std::thread::scope(|scope| {
+        let first = scope.spawn(|| {
+            let db = Connection::open(&path).unwrap();
+            db.busy_timeout(Duration::from_secs(3)).unwrap();
+            barrier.wait();
+            deliver(&db, &a, "push A", Some("pending A"), 0, 2).unwrap()
+        });
+        let second = scope.spawn(|| {
+            let db = Connection::open(&path).unwrap();
+            db.busy_timeout(Duration::from_secs(3)).unwrap();
+            barrier.wait();
+            deliver(
+                &db,
+                &same_body_different_header,
+                "push A",
+                Some("pending A"),
+                0,
+                2,
+            )
+            .unwrap()
+        });
+        [first.join().unwrap(), second.join().unwrap()]
+    });
+    counts.sort_unstable();
+    assert_eq!(counts, [0, 3]);
+    assert_eq!(value(&db, PUSH), "push A");
+
+    db.execute(
+        "UPDATE settings SET value = 'done A' WHERE key = ?",
+        [DEPLOY],
+    )
+    .unwrap();
+    assert_eq!(
+        deliver(&db, &a, "push A", Some("pending A"), 1, 2).unwrap(),
+        0
+    );
+    assert_eq!(value(&db, DEPLOY), "done A");
+
+    db.execute_batch(
+        "CREATE TRIGGER fail_deploy BEFORE INSERT ON settings
+         WHEN new.key = 'github:deploy:example'
+         BEGIN SELECT raise(ABORT, 'simulated queue failure'); END;",
+    )
+    .unwrap();
+    assert!(deliver(&db, &b, "push B", Some("pending B"), 2, 2).is_err());
+    assert_eq!(value(&db, PUSH), "push A");
+    assert_eq!(value(&db, DEPLOY), "done A");
+    db.execute_batch("DROP TRIGGER fail_deploy").unwrap();
+    assert_eq!(
+        deliver(&db, &b, "push B", Some("pending B"), 2, 2).unwrap(),
+        3
+    );
+
+    // Replay of A cannot overtake B, even when the cache is full.
+    assert_eq!(
+        deliver(&db, &a, "push A", Some("pending A"), 3, 2).unwrap(),
+        0
+    );
+    assert_eq!(deliver(&db, &c, "push C", None, 3, 2).unwrap(), 0);
+    assert_eq!(value(&db, PUSH), "push B");
+    assert_eq!(value(&db, DEPLOY), "pending B");
+
+    // Once A expires, a nonpublishing push records its fingerprint and leaves B queued.
+    assert_eq!(deliver(&db, &c, "push C", None, 7, 2).unwrap(), 2);
+    assert_eq!(
+        deliver(&db, &c, "push C", Some("pending C"), 8, 2).unwrap(),
+        0
+    );
+    assert_eq!(value(&db, PUSH), "push C");
+    assert_eq!(value(&db, DEPLOY), "pending B");
+    drop(db);
+    std::fs::remove_dir_all(dir).unwrap();
+}

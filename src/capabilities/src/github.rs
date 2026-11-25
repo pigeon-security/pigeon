@@ -30,7 +30,7 @@ pub const WEBHOOK_SECRET: &str = "GITHUB_APP_WEBHOOK_SECRET";
 /// What an installation token may do: read the repository, and record deployments.
 pub const PERMISSIONS: [(&str, &str); 2] = [("contents", "read"), ("deployments", "write")];
 /// How long a recorded push is kept.
-const PUSH_KEPT_MS: i64 = 90 * 24 * 3_600_000;
+pub(crate) const PUSH_KEPT_MS: i64 = 90 * 24 * 3_600_000;
 
 /// The GitHub App capability.
 pub struct Github;
@@ -114,16 +114,6 @@ pub fn deploy_key(instance: &str) -> String {
 const LEASE_MS: f64 = 3.0 * 60_000.0;
 /// How many times a deploy is tried before it is left failed.
 const MAX_ATTEMPTS: u64 = 5;
-
-async fn keep(env: &Env, key: &str, value: &Value) -> Result<()> {
-    directory(
-        env,
-        "setting.put",
-        json!({ "key": key, "value": value.to_string(), "ttl_ms": PUSH_KEPT_MS }),
-    )
-    .await?;
-    Ok(())
-}
 
 /// Changes a queue row only if no webhook or other cron has replaced that row.
 async fn replace(env: &Env, key: &str, previous: &str, value: &Value) -> Result<bool> {
@@ -378,22 +368,35 @@ impl Github {
             "commit": push.after, "ref": push.git_ref, "deleted": push.deleted,
             "message": push.head_message, "at_ms": at,
         });
-        directory(
-            cx.env,
-            "setting.put",
-            json!({ "key": push_key(&instance.id), "value": kept.to_string(), "ttl_ms": PUSH_KEPT_MS }),
-        )
-        .await?;
         let binding = (push.git_ref == DEPLOY_REF && !push.deleted)
             .then(|| publishing_binding(instance))
             .flatten();
-        if let Some(binding) = &binding {
-            // The cron must still see this exact approved target when it starts the deploy.
-            let pending = json!({
+        // The cron must still see this exact approved target when it starts the deploy.
+        let pending = binding.as_ref().map(|binding| {
+            json!({
                 "state": "pending", "commit": push.after, "at_ms": at, "attempts": 0,
                 "repo": push.repo, "installation": push.installation, "binding": binding,
-            });
-            keep(cx.env, &deploy_key(&instance.id), &pending).await?;
+            })
+        });
+        let recorded = directory(
+            cx.env,
+            "github.delivery",
+            json!({
+                "instance": instance.id, "fingerprint": app::delivery_fingerprint(&body),
+                "push": kept.to_string(), "pending": pending.map(|value| value.to_string()),
+            }),
+        )
+        .await?;
+        match recorded.as_str() {
+            Some("recorded") => {}
+            Some("duplicate") => return answer(202, json!({ "duplicate": true })),
+            Some("full") => {
+                return answer(
+                    503,
+                    json!({ "error": "webhook replay cache is full; retry later" }),
+                );
+            }
+            _ => return Err(bad("unexpected result recording the webhook delivery")),
         }
         answer(
             202,

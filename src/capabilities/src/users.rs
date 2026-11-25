@@ -120,6 +120,32 @@ const MIGRATIONS: [&str; 21] = [
 /// A day, in milliseconds: how long an ended approval is kept.
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 
+// These reserved setting keys are ordered between the two prefix bounds.
+const DELIVERY_PREFIX: &str = "github:delivery:";
+const DELIVERY_END: &str = "github:delivery;";
+const DELIVERY_TTL_MS: i64 = 7 * DAY_MS;
+const DELIVERY_LIMIT: i64 = 10_000;
+
+#[doc(hidden)]
+pub const PRUNE_DELIVERIES: &str =
+    "DELETE FROM settings WHERE key >= ? AND key < ? AND expires_at <= ?";
+
+// SQLite materializes the SELECT before replacing any rows. The fingerprint and
+// both publication rows are therefore committed together or all rolled back.
+#[doc(hidden)]
+pub const RECORD_DELIVERY: &str = "
+WITH delivery AS MATERIALIZED (
+    SELECT ? AS fingerprint, ? AS replay_until, ? AS publish_until,
+           ? AS push_key, ? AS push, ? AS deploy_key, ? AS pending
+    WHERE NOT EXISTS (SELECT 1 FROM settings WHERE key = ? AND expires_at > ?)
+      AND (SELECT count(*) FROM settings WHERE key >= ? AND key < ? AND expires_at > ?) < ?
+)
+INSERT OR REPLACE INTO settings (key, value, expires_at)
+    SELECT fingerprint, '', replay_until FROM delivery
+    UNION ALL SELECT push_key, push, publish_until FROM delivery
+    UNION ALL SELECT deploy_key, pending, publish_until FROM delivery WHERE pending IS NOT NULL
+RETURNING key";
+
 /// How many policy decisions the Directory keeps.
 const POLICY_KEPT: i64 = 200;
 
@@ -825,6 +851,49 @@ impl Directory {
                     vec![a["limit"].as_i64().unwrap_or(10).clamp(1, POLICY_KEPT).into()],
                 )?;
                 to_value(rows)
+            }
+            "github.delivery" => {
+                let instance = s("instance");
+                let fingerprint = s("fingerprint");
+                let push = a["push"]
+                    .as_str()
+                    .ok_or_else(|| bad("expected GitHub push"))?;
+                if instance.is_empty()
+                    || fingerprint.len() != 64
+                    || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit())
+                {
+                    return Err(bad("expected an instance and GitHub delivery fingerprint"));
+                }
+                let key = format!("{DELIVERY_PREFIX}{fingerprint}");
+                self.db.exec(
+                    PRUNE_DELIVERIES,
+                    vec![DELIVERY_PREFIX.into(), DELIVERY_END.into(), t.into()],
+                )?;
+                let rows: Vec<Value> = self.db.rows(
+                    RECORD_DELIVERY,
+                    vec![
+                        key.as_str().into(),
+                        (t + DELIVERY_TTL_MS).into(),
+                        (t + crate::github::PUSH_KEPT_MS).into(),
+                        crate::github::push_key(instance).as_str().into(),
+                        push.into(),
+                        crate::github::deploy_key(instance).as_str().into(),
+                        opt(a["pending"].as_str()),
+                        key.as_str().into(),
+                        t.into(),
+                        DELIVERY_PREFIX.into(),
+                        DELIVERY_END.into(),
+                        t.into(),
+                        DELIVERY_LIMIT.into(),
+                    ],
+                )?;
+                json!(if !rows.is_empty() {
+                    "recorded"
+                } else if self.setting_value(&key, t)?.is_some() {
+                    "duplicate"
+                } else {
+                    "full"
+                })
             }
             "setting.get" => {
                 #[derive(Deserialize)]

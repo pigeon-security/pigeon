@@ -64,20 +64,20 @@ the fixture.
 
 The [webhook and scheduler](../../src/capabilities/src/github.rs) verify the
 body signature, resolve the approved repository and installation, and bind
-scheduled publication to the approved profile. Every accepted eligible delivery
-currently replaces the pending deploy record. That lets redelivery reset a
-running or completed publication.
+scheduled publication to the approved profile. The Directory now keeps a
+verified-body fingerprint independently of the latest push and deploy settings.
 
-- Derive the delivery fingerprint from the exact HMAC-verified body. Use
-  `X-GitHub-Delivery` only for diagnostics. Keep a fingerprint record independent
-  of the latest-deploy slot so that redelivering A after B cannot replace B.
-- Use one Directory transaction for first-seen insertion, latest-push record,
-  and any pending deploy row. Store first-seen records for matched valid pushes
-  even when the ref or approved profile does not allow publishing. A duplicate
-  returns a successful acknowledgement without modifying push history, queue
-  state, attempts, or timing. A failed transaction leaves the push eligible for
-  redelivery. Choose and document the retention window and storage bound before
-  enabling the live replay check. Replay protection is limited to that window.
+- The fingerprint is SHA-256 of the exact HMAC-verified bytes. Changing
+  `X-GitHub-Delivery` does not change replay identity. Redelivering A after B
+  leaves B in the latest-deploy slot.
+- One atomic SQLite statement in the Directory inserts the fingerprint, sets
+  latest-push, and writes any pending deploy. This records matched valid pushes
+  even when their refs or approved profiles preclude publishing. A duplicate
+  returns 202 without modifying push history, queue state, attempts, or timing.
+  A failed statement leaves the push eligible for redelivery. Fingerprints
+  expire after seven days and the Directory prunes expired entries on delivery.
+  The global limit is 10,000 fingerprints. The hook acknowledges retained
+  duplicates at the limit and returns 503 for new pushes until entries expire.
 - Keep scheduler retries on the existing queue row. A transient publishing
   error returns the claimed job to pending with its attempt count preserved.
   An expired claim is recovered through the lease and compare-and-swap. All
