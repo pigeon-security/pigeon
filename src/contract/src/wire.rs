@@ -17,11 +17,12 @@ pub const OPS: [&str; 6] = ["manifest", "call", "section", "fetch", "events", "s
 /// caller, when its last live run ends. `approval` takes an [`ApprovalRequest`]: a capability
 /// Worker plans a change and the person approves it; it is signed for the caller, and core fixes
 /// the kinds and the approver.
-pub const CORE_OPS: [&str; 10] = [
+pub const CORE_OPS: [&str; 11] = [
     "credential",
     "credential_revoke",
     "credential_release",
     "ci_scope",
+    "sites_scope",
     "dispatch",
     "verify",
     "grant",
@@ -205,6 +206,33 @@ pub struct SecretRequest {
     /// The Secrets Store secret's id, for [`SecretOp::Set`].
     #[serde(default)]
     pub id: Option<String>,
+}
+
+/// A Sites callback bound to one approved publishing instance. Credentials also bind the
+/// exact record the publishing Worker used to select the repository and deployment target.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SitesScopeRequest {
+    Record { instance: String },
+    Github { instance: String, binding: String },
+    Linked { instance: String, binding: String },
+}
+
+impl SitesScopeRequest {
+    pub fn instance(&self) -> &str {
+        match self {
+            Self::Record { instance }
+            | Self::Github { instance, .. }
+            | Self::Linked { instance, .. } => instance,
+        }
+    }
+
+    pub fn binding(&self) -> Option<&str> {
+        match self {
+            Self::Record { .. } => None,
+            Self::Github { binding, .. } | Self::Linked { binding, .. } => Some(binding),
+        }
+    }
 }
 
 /// A capability Worker's request to core for a short-lived credential.

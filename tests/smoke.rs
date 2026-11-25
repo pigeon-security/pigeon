@@ -2978,3 +2978,61 @@ fn ci_global_connector_only_attaches_context_to_explicit_instance_reads() {
             .is_none()
     );
 }
+
+#[test]
+fn sites_scoped_callbacks_bind_credential_requests_to_the_approved_record() {
+    use pigeon_capabilities::instances::record::Instance;
+    use pigeon_capabilities::sites_scope::approved_record;
+    use pigeon_contract::SitesScopeRequest;
+
+    let config = json!({
+        "id":"blog","title":"Blog","version":4,
+        "account":{"kind":"linked","account_id":"fixture"},
+        "repo":{"kind":"github","full_name":"example/blog","installation":12},
+        "sites":[{"name":"primary","bucket":"blog-site"}],
+        "publishing":{"state":"enabled","site":"primary"}
+    });
+    let record: Instance = serde_json::from_value(config.clone()).unwrap();
+    let read = SitesScopeRequest::Record {
+        instance: "blog".into(),
+    };
+    let approval = approved_record(&record, &read).unwrap();
+    let binding = pigeon_core::oauth::hash(&approval.to_string());
+    for kind in ["linked", "github"] {
+        let request = serde_json::from_value(json!({
+            "kind":kind,"instance":"blog","binding":binding
+        }))
+        .unwrap();
+        assert_eq!(approved_record(&record, &request).unwrap(), approval);
+        for (field, value) in [
+            ("id", json!("other")),
+            (
+                "account",
+                json!({"kind":"linked","account_id":"replacement"}),
+            ),
+            (
+                "repo",
+                json!({"kind":"github","full_name":"example/different","installation":12}),
+            ),
+            ("publishing", json!({"state":"disabled"})),
+            ("version", json!(5)),
+        ] {
+            let mut changed = config.clone();
+            changed[field] = value;
+            let changed: Instance = serde_json::from_value(changed).unwrap();
+            assert!(approved_record(&changed, &request).is_err(), "{field}");
+        }
+        assert!(
+            serde_json::from_value::<SitesScopeRequest>(json!({
+                "kind":kind,"instance":"blog"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<SitesScopeRequest>(json!({
+                "kind":kind,"instance":"blog","binding":binding,"account_id":"replacement"
+            }))
+            .is_err()
+        );
+    }
+}

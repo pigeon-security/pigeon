@@ -120,3 +120,23 @@ call. Manual deploys and rollbacks retain their explicit platform path.
   separately for the signed-sender canary.
 - Storage/ingest require a declared fixture backend; the visitor-access
   canary needs an isolated gated hostname and a protected origin.
+
+## Scoped Sites publishing callbacks
+
+Core accepts the typed `sites_scope` callback for an authenticated caller
+with instance context addressed to core. The callback instance must match
+the signed instance. A record lookup returns the approved publishing
+record. Credential callbacks present the digest of that exact response.
+Core validates the active publishing target and rechecks the record after
+awaiting the provider.
+
+GitHub credentials are limited to reading contents of the approved
+repository. A repository without an approved App installation can use
+the existing public archive path. Cloudflare linked OAuth remains
+account-scoped at the provider. Core checks the current link against the
+approved account before using its credentials. These callbacks inherit
+the existing trusted Worker caller-key boundary. Dedicated sender
+authentication would require independent keys and rotation.
+
+Keep the manual platform paths during rollout. Remove legacy publishing
+callbacks only after a live scoped publish has exercised the new receiver.

@@ -14,7 +14,7 @@
 
 use pigeon_contract::{
     Answer, ApprovalRequest, CALLERLESS_OPS, CORE_OPS, Credential, CredentialRequest, FailureKind,
-    GrantRequest, VerifyRequest,
+    GrantRequest, SitesScopeRequest, VerifyRequest,
 };
 use pigeon_core::mcp::Tool;
 use pigeon_core::secrets_store::{self, Writer};
@@ -237,7 +237,9 @@ pub async fn serve(mut req: Request, cx: &Context<'_>) -> Result<Response> {
             );
         }
     };
-    if signed.instance().is_some() && !matches!(op.as_str(), "dispatch" | "ci_scope") {
+    if signed.instance().is_some()
+        && !matches!(op.as_str(), "dispatch" | "ci_scope" | "sites_scope")
+    {
         return reply(
             Answer::error(
                 FailureKind::Unauthorized,
@@ -268,6 +270,22 @@ pub async fn serve(mut req: Request, cx: &Context<'_>) -> Result<Response> {
             401,
         );
     };
+    if op == "sites_scope" {
+        let request = match serde_json::from_slice::<SitesScopeRequest>(&body) {
+            Ok(request) => request,
+            Err(e) => return reply(Answer::error(FailureKind::BadRequest, e.to_string()), 400),
+        };
+        if let Err(why) = signed.require_instance(request.instance()) {
+            return reply(
+                Answer::error(FailureKind::Unauthorized, why.to_string()),
+                401,
+            );
+        }
+        return match crate::sites_scope::handle(cx.env, &request).await {
+            Ok(v) => reply(Answer::Ok(v), 200),
+            Err(e) => reply(Answer::error(FailureKind::Failed, e.to_string()), 200),
+        };
+    }
     let scope = if let Some(instance) = signed.instance() {
         let Some(record) = crate::instances::one(cx.env, instance).await? else {
             return reply(
@@ -615,6 +633,29 @@ async fn proxy_check(env: &Env, op: &str, body: &[u8]) -> Result<Option<Value>> 
     }))
 }
 
+/// Return the existing linked-account grant. For contextual publishing, check the
+/// account selected by the approved record as part of the same link lookup.
+pub(crate) async fn linked_credential(
+    env: &Env,
+    instance: &str,
+    expected_account: Option<&str>,
+) -> Result<Value> {
+    let host = env.var("PLATFORM_HOST")?.to_string();
+    let account = match expected_account {
+        Some(account) => crate::linked::account_for_bound(env, &host, instance, account).await?,
+        None => crate::linked::account_for(env, &host, instance).await?,
+    };
+    let token = account
+        .bearer
+        .ok_or_else(|| bad("the linked account came back without its access token"))?;
+    Ok(serde_json::to_value(Credential {
+        token,
+        account_id: account.id,
+        expires_at: now_ms() + LINKED_USE_MS,
+        token_id: None,
+    })?)
+}
+
 /// A short-lived credential for the call in hand. `linked`: the instance's linked-account
 /// access token, refreshed first when due, with the account it acts on.
 async fn credential(cx: &Context<'_>, r: &CredentialRequest) -> Result<Value> {
@@ -624,18 +665,7 @@ async fn credential(cx: &Context<'_>, r: &CredentialRequest) -> Result<Value> {
                 .instance
                 .as_deref()
                 .ok_or_else(|| bad("a linked credential names its instance"))?;
-            let host = cx.env.var("PLATFORM_HOST")?.to_string();
-            let account = crate::linked::account_for(cx.env, &host, instance).await?;
-            let token = account
-                .bearer
-                .clone()
-                .ok_or_else(|| bad("the linked account came back without its access token"))?;
-            Ok(serde_json::to_value(Credential {
-                token,
-                account_id: account.id.clone(),
-                expires_at: now_ms() + LINKED_USE_MS,
-                token_id: None,
-            })?)
+            linked_credential(cx.env, instance, None).await
         }
         "github" => {
             let instance = r

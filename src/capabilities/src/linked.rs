@@ -244,9 +244,33 @@ async fn client(env: &Env, host: &str) -> Result<(Client, String)> {
 /// when under five minutes remain. The new tokens are kept before the access token is used,
 /// since a refresh token may work only once.
 pub async fn account_for(env: &Env, host: &str, instance: &str) -> Result<Account> {
+    account_for_checked(env, host, instance, None).await
+}
+
+/// The same existing linked grant, with its account matched before opening or refreshing it.
+pub(crate) async fn account_for_bound(
+    env: &Env,
+    host: &str,
+    instance: &str,
+    account: &str,
+) -> Result<Account> {
+    account_for_checked(env, host, instance, Some(account)).await
+}
+
+async fn account_for_checked(
+    env: &Env,
+    host: &str,
+    instance: &str,
+    account: Option<&str>,
+) -> Result<Account> {
     let mut l = link(env, instance)
         .await?
         .ok_or_else(|| bad(&format!("instance {instance} is not linked")))?;
+    if account.is_some_and(|id| id != l.account_id) {
+        return Err(bad(
+            "linked account differs from the approved publishing record",
+        ));
+    }
     let k = sealing_key(env).await?;
     let opened = crypto::open(&k, &l.sealed, instance.as_bytes()).await?;
     let mut tokens: Tokens = serde_json::from_slice(&opened)?;
