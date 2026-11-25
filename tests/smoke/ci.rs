@@ -820,3 +820,158 @@ fn ci_warm_image_cache_is_latent_and_keyed_by_cargo_lock() {
     assert!(said.contains("[warm] cold build"), "{said}");
     assert!(said.contains("target=unset"), "{said}");
 }
+
+#[test]
+fn deploy_runner_retries_only_the_pre_upload_service_rate_limit() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let fixture = repo("deploy-rate-limit");
+    let deploy_dir = fixture.join("ci/deploy");
+    let worker_dir = fixture.join("src/platform");
+    let bin = fixture.join("bin");
+    for dir in [&deploy_dir, &worker_dir.join("build"), &bin] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    let executable = |path: &Path, text: &str| {
+        std::fs::write(path, text).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    std::fs::copy(
+        root.join("ci/deploy/deploy.sh"),
+        deploy_dir.join("deploy.sh"),
+    )
+    .unwrap();
+    std::fs::write(deploy_dir.join("node.sh"), "").unwrap();
+    std::fs::write(worker_dir.join("build/worker"), "test build").unwrap();
+    std::fs::write(
+        worker_dir.join("wrangler.toml"),
+        "name = \"fixture-worker\"\naccount_id = \"fixture-account\"\nZONE = \"example.invalid\"\n",
+    )
+    .unwrap();
+    executable(
+        &deploy_dir.join("allowlist.sh"),
+        "#!/bin/sh\nset -eu\ncd src/platform\ncp wrangler.toml .wrangler.built.toml\n(cd build && find . -type f | LC_ALL=C sort | xargs sha256sum | sha256sum) > .wrangler.built.sha256\n",
+    );
+    executable(
+        &bin.join("curl"),
+        r#"#!/bin/sh
+case "$*" in
+    */cf/grant) printf '%s' "$FAKE_GRANT" ;;
+    */architecture.json) printf '{"commit":"%s"}' "$PIGEON_COMMIT" ;;
+    *) exit 99 ;;
+esac
+"#,
+    );
+    executable(
+        &bin.join("sleep"),
+        "#!/bin/sh\necho \"$1\" >> \"$FAKE_SLEEP\"\n",
+    );
+    executable(
+        &bin.join("npx"),
+        r#"#!/bin/sh
+printf '%s\n' invoked >> "$FAKE_CALLS"
+if [ "$(wc -l < "$FAKE_CALLS")" = 1 ]; then
+    printf '%s\n' "$FAKE_FIRST"
+    exit "$FAKE_FIRST_EXIT"
+fi
+printf '%s\n' "$FAKE_SECOND"
+exit "$FAKE_SECOND_EXIT"
+"#,
+    );
+    let target = "/accounts/fixture-account/workers/services/fixture-worker";
+    let error = |path: &str, code: u32| {
+        format!(
+            "✘ [ERROR] A request to the Cloudflare API ({path}) failed.\n\n  Test error [code: {code}]"
+        )
+    };
+    let matching = error(target, 10429);
+    let wrong_path = error(
+        "/accounts/fixture-account/workers/scripts/fixture-worker/versions",
+        10429,
+    );
+    let wrong_worker = error(
+        "/accounts/fixture-account/workers/services/another-worker",
+        10429,
+    );
+    let wrong_code = error(target, 104290);
+    let post_upload = format!("Uploaded fixture-worker (1 sec)\n{matching}");
+    let old_retry = format!("Uploaded fixture-worker (1 sec)\n{}", error(target, 10007));
+    let refusal = "pigeon's proxy does not allow the requested call";
+    let post_upload_refusal = format!("Uploaded fixture-worker (1 sec)\n{refusal}");
+    for (first, first_exit, second, second_exit, grant, expected, calls, waited) in [
+        (matching.as_str(), "1", "", "0", "200", 0, 2, true),
+        (
+            matching.as_str(),
+            "1",
+            matching.as_str(),
+            "3",
+            "200",
+            1,
+            2,
+            true,
+        ),
+        (wrong_path.as_str(), "1", "", "0", "200", 1, 1, false),
+        (wrong_worker.as_str(), "1", "", "0", "200", 1, 1, false),
+        (wrong_code.as_str(), "1", "", "0", "200", 1, 1, false),
+        (post_upload.as_str(), "1", "", "0", "200", 1, 1, false),
+        (old_retry.as_str(), "1", "", "0", "200", 0, 2, true),
+        (refusal, "1", "", "0", "200", 1, 1, false),
+        (
+            post_upload_refusal.as_str(),
+            "1",
+            "",
+            "0",
+            "200",
+            0,
+            2,
+            true,
+        ),
+        ("", "0", "", "0", "401", 3, 0, false),
+    ] {
+        let call_file = fixture.join("calls");
+        let sleep_file = fixture.join("sleeps");
+        std::fs::write(&call_file, "").unwrap();
+        std::fs::write(&sleep_file, "").unwrap();
+        let mut path = vec![bin.clone()];
+        path.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
+        let result = Command::new("sh")
+            .arg(deploy_dir.join("deploy.sh"))
+            .current_dir(&fixture)
+            .env("PATH", std::env::join_paths(path).unwrap())
+            .env_remove("PIGEON_WORKER_DIR")
+            .env("PIGEON_JOB_TOKEN", "fake-job-token")
+            .env(
+                "PIGEON_GIT_URL",
+                "https://proxy.example.invalid/git/fixture",
+            )
+            .env("PIGEON_COMMIT", "a".repeat(40))
+            .env("FAKE_GRANT", grant)
+            .env("FAKE_FIRST", first)
+            .env("FAKE_FIRST_EXIT", first_exit)
+            .env("FAKE_SECOND", second)
+            .env("FAKE_SECOND_EXIT", second_exit)
+            .env("FAKE_CALLS", &call_file)
+            .env("FAKE_SLEEP", &sleep_file)
+            .output()
+            .unwrap();
+        assert_eq!(
+            result.status.code(),
+            Some(expected),
+            "{first}\n{}\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(
+            std::fs::read_to_string(call_file).unwrap().lines().count(),
+            calls
+        );
+        let sleeps = std::fs::read_to_string(sleep_file).unwrap();
+        assert_eq!(sleeps.lines().count(), usize::from(waited), "{first}");
+        if waited {
+            let delay = sleeps.trim().parse::<u32>().unwrap();
+            assert!((30..=45).contains(&delay), "{first}: {delay}");
+        }
+    }
+    std::fs::remove_dir_all(fixture).unwrap();
+}

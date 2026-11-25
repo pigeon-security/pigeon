@@ -16,7 +16,8 @@
 # The proxy enforces the deployed platform's allowlist, not this commit's. When the commit adds
 # an entry for a call wrangler makes after the upload, the first deploy uploads the new Worker
 # and is then refused at that call; the deploy is made once more, through the new allowlist. A
-# refused call before the upload cannot be fixed that way, and is reported.
+# refused call before the upload cannot be fixed that way, and is reported. Cloudflare 10429
+# on the pre-upload Workers service lookup gets one separate retry of the same build.
 #
 # Once deployed, it checks the apex serves this commit's architecture page (see `published`).
 #
@@ -99,6 +100,7 @@ lap node
 
 dir=$root/${PIGEON_WORKER_DIR:-src/platform}
 account=$(sed -n 's/^account_id = "\(.*\)"$/\1/p' "$dir/wrangler.toml" | head -n 1)
+script=$(sed -n 's/^name = "\(.*\)"$/\1/p' "$dir/wrangler.toml" | head -n 1)
 cd "$dir"
 log=$(mktemp)
 
@@ -120,6 +122,21 @@ deploy() {
     cat "$log"
     lap deploy
     return "$rc"
+}
+
+# Wrangler 4.166.0 reads the Worker service and migration tag before uploading. The
+# proxy allows only GET on this exact path. A post-upload operation can also read it,
+# so require the service diagnostic and its own 10429 note before the upload marker.
+rate_limited_before_upload() {
+    [ -n "$account" ] && [ -n "$script" ] || return 1
+    awk -v service="/accounts/$account/workers/services/$script" '
+        /^Uploaded / { uploaded = 1 }
+        /A request to the Cloudflare API \(/ {
+            reading = index($0, "(" service ") failed.") > 0
+        }
+        reading && /\[code: 10429\]/ { limited = 1 }
+        END { exit !(limited && !uploaded) }
+    ' "$log"
 }
 
 # The architecture page is part of the Worker: built from its own sources and wrangler.toml, it
@@ -170,6 +187,15 @@ if grep -q "^Uploaded " "$log" && grep -q "code: 10007" "$log"; then
     exit
 fi
 if ! grep -q "pigeon's proxy does not allow" "$log"; then
+    if rate_limited_before_upload; then
+        sample=$(od -An -N1 -tu1 /dev/urandom) || sample=0
+        delay=$(( 30 + sample % 16 ))
+        echo "Cloudflare rate limited the pre-upload Worker lookup; retrying in ${delay}s" >&2
+        sleep "$delay"
+        deploy 2
+        check
+        exit
+    fi
     echo "the deploy failed; see above" >&2
     exit 1
 fi

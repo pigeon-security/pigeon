@@ -402,6 +402,12 @@ Waves: G1, L1, L2, L4, L5, L7, K1, R1, R2 together. Then L3 on L1, L6 on L4 + L5
   refusal before the upload counts as started, to stay conservative. The header comment lists
   the codes. No new API call, so no `standin.mjs` change. Checked by hand: no token gives 3; an
   unreachable proxy gives 3; a stub `npx` that prints `Uploaded` and exits 3 gives 1.
+- **Pre-upload rate limit.** The deploy runner retries the same built Worker once after 30–45 s
+  when Wrangler attributes Cloudflare code 10429 to the exact account and Worker service
+  lookup and its log has no upload marker. The pinned Wrangler performs that read for Worker
+  metadata and migrations before uploading. Later failures, other endpoints, and an exhausted
+  retry follow the existing started-deploy exit contract. The 10007 and post-upload proxy
+  retries keep their own path and cannot stack with the rate-limit retry.
 - **L1.** A pure `lanes` function: never uploaded = job state `failed` and `exit_code` 3.
   Anything else may have uploaded, including every job before G1 lands. When nothing
   uploaded *and* the Worker's newest earlier deploy (any purpose) is the succeeded one
