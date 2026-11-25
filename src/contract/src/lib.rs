@@ -15,14 +15,17 @@ pub mod caller;
 pub mod serve;
 pub mod wire;
 
-pub use ask::{ask, manifest};
-pub use caller::{HEADER, MAX_AGE_MS, Refused, Signed, sign, verify};
+pub use ask::{ask, ask_with_context, manifest, manifest_with_context};
+pub use caller::{
+    HEADER, MAX_AGE_MS, Refused, Signed, WORKER_CONTEXT_VERSION, WorkerContext, sign,
+    sign_with_context, verify, verify_for,
+};
 pub use serve::{Service, serve};
 pub use wire::{
     Answer, ApprovalRequest, CALLERLESS_OPS, CONTRACT, CORE_OPS, CallRequest, CapabilityManifest,
     Credential, CredentialRequest, EventsRequest, Failure, FailureKind, GrantRequest, Manifest,
     OPS, SecretOp, SecretRequest, SectionRequest, SectionSpec, SlotSpec, ToolSpec, VerifyRequest,
-    accepts, wants,
+    WorkerManifest, accepts, wants,
 };
 
 /// The current time in milliseconds since the epoch; the one place that reads the clock.

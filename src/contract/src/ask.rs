@@ -5,9 +5,9 @@ use serde_json::Value;
 use worker::wasm_bindgen::JsValue;
 use worker::{Fetcher, Headers, Method, Request, RequestInit};
 
-use crate::caller::{HEADER, sign};
+use crate::caller::{HEADER, WorkerContext, sign, sign_with_context};
 use crate::now_ms;
-use crate::wire::{Answer, FailureKind, Manifest, accepts};
+use crate::wire::{Answer, FailureKind, Manifest, WorkerManifest, accepts};
 
 /// Asks `fetcher` (a service binding) op `op` with `body` as JSON, signed for `caller` when
 /// given as (key, who). `base` is `https://capability`, or `https://core` for core. A peer that
@@ -21,11 +21,42 @@ pub async fn ask(
     caller: Option<(&[u8], &Value)>,
     nonce: &str,
 ) -> worker::Result<Answer> {
+    ask_inner(fetcher, base, op, body, caller, nonce, None).await
+}
+
+/// Asks a Worker with authenticated destination and scope.
+/// Callers should negotiate support before selecting this path and never retry a scoped request
+/// with a legacy envelope if the receiver rejects its context.
+pub async fn ask_with_context(
+    fetcher: &Fetcher,
+    base: &str,
+    op: &str,
+    body: &Value,
+    caller: (&[u8], &Value),
+    nonce: &str,
+    context: &WorkerContext,
+) -> worker::Result<Answer> {
+    ask_inner(fetcher, base, op, body, Some(caller), nonce, Some(context)).await
+}
+
+async fn ask_inner(
+    fetcher: &Fetcher,
+    base: &str,
+    op: &str,
+    body: &Value,
+    caller: Option<(&[u8], &Value)>,
+    nonce: &str,
+    context: Option<&WorkerContext>,
+) -> worker::Result<Answer> {
     let text = serde_json::to_string(body).map_err(|e| worker::Error::RustError(e.to_string()))?;
     let headers = Headers::new();
     headers.set("Content-Type", "application/json")?;
     if let Some((key, who)) = caller {
-        let value = sign(key, who, op, text.as_bytes(), now_ms(), nonce);
+        let at = now_ms();
+        let value = match context {
+            Some(context) => sign_with_context(key, who, op, text.as_bytes(), at, nonce, context),
+            None => sign(key, who, op, text.as_bytes(), at, nonce),
+        };
         headers.set(HEADER, &value)?;
     }
     let url = format!("{}/{op}", base.trim_end_matches('/'));
@@ -46,6 +77,11 @@ pub async fn ask(
 /// The manifest at `fetcher`, or why not: no answer, one that does not parse, or a contract
 /// this build does not understand.
 pub async fn manifest(fetcher: &Fetcher) -> worker::Result<Manifest> {
+    Ok(manifest_with_context(fetcher).await?.manifest)
+}
+
+/// The manifest including the transport extensions the receiver actually supports.
+pub async fn manifest_with_context(fetcher: &Fetcher) -> worker::Result<WorkerManifest> {
     let answer = ask(
         fetcher,
         "https://capability",
@@ -57,11 +93,12 @@ pub async fn manifest(fetcher: &Fetcher) -> worker::Result<Manifest> {
     .await?;
     match answer {
         Answer::Ok(value) => {
-            let manifest: Manifest = serde_json::from_value(value).map_err(|e| {
+            let described: WorkerManifest = serde_json::from_value(value).map_err(|e| {
                 worker::Error::RustError(format!("the manifest does not parse: {e}"))
             })?;
+            let manifest = &described.manifest;
             if accepts(manifest.contract) {
-                Ok(manifest)
+                Ok(described)
             } else {
                 Err(worker::Error::RustError(format!(
                     "{} speaks contract {}, which this build does not understand",

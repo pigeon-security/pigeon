@@ -2820,3 +2820,48 @@ fn instances_bind_background_publishing_and_ingest_to_approved_targets() {
     source.buckets = vec!["different-source".into()];
     assert!(check_job_binding(&job, "fictional-account", "blog-data", &source).is_err());
 }
+
+#[test]
+fn worker_context_verifies_recipient_instance_and_legacy_compatibility() {
+    use pigeon_contract::{Refused, WorkerContext, sign, sign_with_context, verify, verify_for};
+
+    let key = b"fixture worker key";
+    let caller = json!({"user":{"id":"fixture"}});
+    let body = br#"{"args":{"instance":"sample"}}"#;
+    let now = 10_000;
+    let context = WorkerContext::new("pigeon-sites", Some("sample"));
+    let header = sign_with_context(key, &caller, "call", body, now, "fixture-1", &context);
+    let verified = verify_for(key, Some(&header), "call", body, now, "pigeon-sites").unwrap();
+    assert_eq!(verified.context, Some(context));
+    assert!(verified.require_instance("sample").is_ok());
+    assert_eq!(
+        verified.require_instance("other"),
+        Err(Refused::InstanceMismatch)
+    );
+    assert_eq!(
+        verified.check_instance(None),
+        Err(Refused::InstanceMismatch)
+    );
+    assert_eq!(
+        verify_for(key, Some(&header), "call", body, now, "pigeon-ci-gateway"),
+        Err(Refused::WrongRecipient),
+    );
+    assert!(verify_for(key, Some(&header), "call", b"{}", now, "pigeon-sites").is_err());
+    assert!(
+        verify_for(
+            key,
+            Some(&header),
+            "call",
+            body,
+            now + 600_000,
+            "pigeon-sites"
+        )
+        .is_err()
+    );
+    assert!(verify(key, Some(&header), "call", body, now).is_err());
+
+    let old = sign(key, &caller, "call", body, now, "fixture-2");
+    let legacy = verify_for(key, Some(&old), "call", body, now, "pigeon-sites").unwrap();
+    assert!(legacy.context.is_none());
+    assert!(legacy.require_instance("sample").is_err());
+}

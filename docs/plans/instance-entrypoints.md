@@ -45,3 +45,16 @@ Baseline audited in the repository at `d75cf0c`. This records what the code enfo
 | Portal app changes between approval and apply | The stale plan is refused before mutation. The unchanged application can process the exact approved change once. |
 
 These checks describe the source-level rollout gates. Validate live service bindings, proxy paths, linked-account permissions, and Portal configuration separately when a rollout includes a change to them.
+
+## Signed Worker-context rollout
+
+The receiver accepts the original envelope and a domain-separated Worker-context
+envelope. The new envelope authenticates the deployed recipient and the optional
+bound instance along with the caller, operation and exact body. A contextual
+tool call's instance must match its arguments. The capability still checks
+the current approved record before accessing provider resources.
+
+Deploy receivers before switching senders. Receivers advertise support through
+the manifest. Legacy platform-wide and maintenance operations retain their
+explicit path. An older or wrong recipient refuses contextual calls, and
+contextual calls are never retried with a legacy envelope.

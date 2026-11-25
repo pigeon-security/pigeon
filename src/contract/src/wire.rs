@@ -54,6 +54,21 @@ pub struct Manifest {
     pub capabilities: Vec<CapabilityManifest>,
 }
 
+/// The manifest and any support for optional transport extensions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkerManifest {
+    #[serde(flatten)]
+    pub manifest: Manifest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_context_version: Option<u32>,
+}
+
+impl WorkerManifest {
+    pub fn supports_worker_context(&self) -> bool {
+        self.worker_context_version == Some(crate::caller::WORKER_CONTEXT_VERSION)
+    }
+}
+
 /// One capability: its tools, sections, routes, footprint, secrets and the events it wants.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CapabilityManifest {

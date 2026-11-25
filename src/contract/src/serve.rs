@@ -6,10 +6,13 @@ use serde::de::DeserializeOwned;
 use worker::js_sys::Uint8Array;
 use worker::{Env, Request, RequestInit, Response};
 
-use crate::caller::{HEADER, Signed, verify};
+use crate::caller::{
+    CONTEXT_PREFIX, HEADER, Refused, Signed, WORKER_CONTEXT_VERSION, verify, verify_for,
+};
 use crate::now_ms;
 use crate::wire::{
     Answer, CallRequest, EventsRequest, FailureKind, Manifest, OPS, SecretRequest, SectionRequest,
+    WorkerManifest,
 };
 
 /// An answer in flight.
@@ -145,25 +148,33 @@ async fn run(
     key: &[u8],
 ) -> Result<Answer, Rejection> {
     match op {
-        "manifest" => serde_json::to_value(service.manifest())
-            .map(Answer::Ok)
-            .map_err(|e| {
-                Rejection::new(
-                    FailureKind::Failed,
-                    format!("the manifest does not serialize: {e}"),
-                    500,
-                )
-            }),
+        "manifest" => serde_json::to_value(WorkerManifest {
+            manifest: service.manifest(),
+            worker_context_version: Some(WORKER_CONTEXT_VERSION),
+        })
+        .map(Answer::Ok)
+        .map_err(|e| {
+            Rejection::new(
+                FailureKind::Failed,
+                format!("the manifest does not serialize: {e}"),
+                500,
+            )
+        }),
         "call" => {
-            let (caller, request) = signed_body::<CallRequest>(key, header, op, body)?;
+            let (caller, request) = signed_body::<CallRequest>(key, header, op, body, service)?;
+            caller
+                .check_instance(request.args["instance"].as_str())
+                .map_err(unauthorized)?;
             Ok(service.call(env, &caller, request).await)
         }
         "section" => {
-            let (caller, request) = signed_body::<SectionRequest>(key, header, op, body)?;
+            let (caller, request) = signed_body::<SectionRequest>(key, header, op, body, service)?;
+            caller.check_instance(None).map_err(unauthorized)?;
             Ok(service.section(env, &caller, request).await)
         }
         "secret" => {
-            let (caller, request) = signed_body::<SecretRequest>(key, header, op, body)?;
+            let (caller, request) = signed_body::<SecretRequest>(key, header, op, body, service)?;
+            caller.check_instance(None).map_err(unauthorized)?;
             Ok(service.secret(env, &caller, request).await)
         }
         "events" => {
@@ -184,12 +195,23 @@ fn signed_body<T: DeserializeOwned>(
     header: Option<&str>,
     op: &str,
     body: &[u8],
+    service: &dyn Service,
 ) -> Result<(Signed, T), Rejection> {
-    let signed = verify(key, header, op, body, now_ms()).map_err(|r| Rejection {
+    let now = now_ms();
+    let signed = if header.is_some_and(|h| h.starts_with(CONTEXT_PREFIX)) {
+        verify_for(key, header, op, body, now, &service.manifest().worker)
+    } else {
+        verify(key, header, op, body, now)
+    }
+    .map_err(unauthorized)?;
+    Ok((signed, parse(body)?))
+}
+
+fn unauthorized(r: Refused) -> Rejection {
+    Rejection {
         reason: Some(r.reason()),
         ..Rejection::new(FailureKind::Unauthorized, r.to_string(), 401)
-    })?;
-    Ok((signed, parse(body)?))
+    }
 }
 
 /// Parses a JSON body.
