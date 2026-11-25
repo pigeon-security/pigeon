@@ -62,7 +62,6 @@ async fn jwt(pem: &str, client_id: &str) -> Result<String> {
 /// An installation token for `instance`'s repository: at most an hour, that repository only,
 /// with [`PERMISSIONS`]. Answers the token and its expiry (ISO 8601).
 pub async fn installation_token(env: &Env, instance: &str) -> Result<(String, String)> {
-    let (_, client_id) = ids(env)?;
     let record = instances::one(env, instance)
         .await?
         .ok_or_else(|| bad(&format!("there is no instance {instance}")))?;
@@ -75,12 +74,23 @@ pub async fn installation_token(env: &Env, instance: &str) -> Result<(String, St
             "instance {instance} names no GitHub repository with an App installation"
         )));
     };
+    installation_token_for(env, full_name, *installation, &PERMISSIONS).await
+}
+
+/// Mint for a repository from an already selected approved record.
+pub(crate) async fn installation_token_for(
+    env: &Env,
+    full_name: &str,
+    installation: u64,
+    permissions: &[(&str, &str)],
+) -> Result<(String, String)> {
+    let (_, client_id) = ids(env)?;
     let pem = secret(env, PRIVATE_KEY)
         .await
         .ok_or_else(|| bad("the GitHub App's private key is not set up yet"))?;
     let jwt = jwt(&pem, &client_id).await?;
-    let body = app::token_request(&[full_name.as_str()], &PERMISSIONS);
-    let t = app::installation_token(&jwt, *installation, &body).await?;
+    let body = app::token_request(&[full_name], permissions);
+    let t = app::installation_token(&jwt, installation, &body).await?;
     Ok((t.token, t.expires_at))
 }
 

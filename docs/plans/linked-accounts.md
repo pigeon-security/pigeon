@@ -884,3 +884,22 @@ Each item gives its state and the next step.
 - 2026-11-21: design. The noisypigeon repository and its live serving were read; the Cloudflare,
   Cloudflare OAuth and GitHub docs checked; the portal and Buildkite planners consulted. The
   parent session made OAuth the primary link.
+
+## Instance-scoped Source (read-only)
+
+An approved instance may enable Source with `"source":{"state":"enabled"}`. This exposes
+`source_resolve_revision` and `source_read_file` on its scoped MCP endpoint. An omitted or
+disabled profile disables these tools for that instance, including generic `call`. The
+existing `repo` binds the provider and repository. Calls take HEAD (the default), a branch,
+or a 40-digit commit SHA. File reads also take a repository-relative regular file path,
+resolve the commit first, and return at most 1 MiB inline as text or base64. Tags and revision
+expressions are outside this first scope.
+
+GitHub reads use a repository-limited, contents-read installation token when one is configured.
+A repository without an installation can use the public GitHub API. Artifacts reads use a
+temporary repository-specific read-only Git token and revoke it afterward. A linked Artifacts
+account must match the ID approved in the record and grant the necessary provider permissions.
+
+The shared repository module also provides Sites' existing GitHub archive flow. Publishing
+can use its approved repository without enabling the Source tools. Repository setup, branch
+writes, token issuance to callers, and landings keep their main-platform paths.

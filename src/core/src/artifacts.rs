@@ -586,3 +586,75 @@ pub async fn read_file(
     revoked?;
     Ok(file)
 }
+
+/// Resolve a revision and optionally read one file over one temporary read-only Git session.
+pub async fn read_revision(
+    account: &Account,
+    namespace: &str,
+    repo: &str,
+    revision: &str,
+    path: Option<&str>,
+) -> Result<(String, Option<Vec<u8>>)> {
+    let bad = Error::RustError;
+    let revision = crate::repository::revision(revision).map_err(bad)?;
+    if let Some(path) = path {
+        crate::repository::file_path(path).map_err(bad)?;
+    }
+    let (found, token) = session(account, namespace, repo, Access::Read, 900).await?;
+    let remote = crate::git::Remote {
+        url: found.remote.trim_end_matches('/').to_string(),
+        authorization: format!("Bearer {}", token.value),
+    };
+    let outcome = async {
+        let advertised = crate::git::refs(&remote, "git-upload-pack").await?;
+        let commit = if crate::git::is_id(revision) {
+            revision.to_ascii_lowercase()
+        } else {
+            let name = if revision == "HEAD" || revision.starts_with("refs/heads/") {
+                revision.to_string()
+            } else {
+                format!("refs/heads/{revision}")
+            };
+            advertised
+                .refs
+                .get(&name)
+                .filter(|sha| crate::git::is_id(sha))
+                .ok_or_else(|| bad("branch was not found in the approved repository".into()))?
+                .to_ascii_lowercase()
+        };
+        let file = if path.is_some() || crate::git::is_id(revision) {
+            let fetched = crate::git::fetch_with(
+                &remote,
+                &advertised.caps,
+                std::slice::from_ref(&commit),
+                &[],
+                None,
+                Some(1),
+            )
+            .await?;
+            let objects = crate::pack::objects(&fetched.pack).map_err(bad)?;
+            if !objects
+                .by_id
+                .get(&commit)
+                .is_some_and(|(kind, _)| *kind == 1)
+            {
+                return Err(bad("the resolved object is not a repository commit".into()));
+            }
+            path.map(|path| crate::pack::read_path(&objects, &commit, path))
+                .transpose()
+                .map_err(bad)?
+                .flatten()
+        } else {
+            None
+        };
+        Ok((commit, file))
+    }
+    .await;
+    let revoked = match &token.id {
+        Some(id) => revoke(account, namespace, repo, id).await,
+        None => Err(bad("the Git token came back without an id".into())),
+    };
+    let result = outcome?;
+    revoked?;
+    Ok(result)
+}

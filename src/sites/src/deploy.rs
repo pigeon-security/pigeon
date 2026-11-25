@@ -14,7 +14,7 @@ use pigeon_core::r2::{self, Bucket, Manifest};
 use pigeon_core::versions::{Requirement, Version};
 use pigeon_core::{Account, site_publish, tarball};
 use serde_json::{Value, json};
-use worker::{Env, Error, Fetch, Headers, Method, Request, RequestInit, Result};
+use worker::{Env, Error, Result};
 
 fn bad(why: impl Into<String>) -> Error {
     Error::RustError(why.into())
@@ -131,33 +131,6 @@ pub fn blog_requirement(pin: Option<&str>) -> std::result::Result<Option<Require
 /// Whether the requirement, when there is one, allows the template version `v`. Pure.
 pub fn allows(req: Option<&Requirement>, v: &str) -> bool {
     req.is_none_or(|r| Version::parse(v).is_ok_and(|v| r.matches(&v)))
-}
-
-/// The repository's tarball at `rev`: through the API with the App's token when there is one,
-/// else from codeload, which serves public repositories.
-async fn tarball_of(repo: &str, rev: &str, token: Option<&str>) -> Result<Vec<u8>> {
-    let headers = Headers::new();
-    headers.set("User-Agent", "pigeon")?;
-    let url = match token {
-        Some(t) => {
-            headers.set("Authorization", &format!("Bearer {t}"))?;
-            headers.set("Accept", "application/vnd.github+json")?;
-            format!("https://api.github.com/repos/{repo}/tarball/{rev}")
-        }
-        None => format!("https://codeload.github.com/{repo}/tar.gz/{rev}"),
-    };
-    let mut init = RequestInit::new();
-    init.with_method(Method::Get).with_headers(headers);
-    let mut res = Fetch::Request(Request::new_with_init(&url, &init)?)
-        .send()
-        .await?;
-    if res.status_code() != 200 {
-        return Err(bad(format!(
-            "GitHub answered {} for {repo} at {rev}",
-            res.status_code()
-        )));
-    }
-    res.bytes().await
 }
 
 async fn approved_record(env: &Env, key: &[u8], caller: &Signed, instance: &str) -> Result<Value> {
@@ -302,7 +275,7 @@ pub async fn deploy(
         .await
         .ok();
     let gh_token = gh.as_ref().and_then(|c| c["token"].as_str());
-    let gz = tarball_of(&t.repo, rev, gh_token).await?;
+    let gz = pigeon_core::repository::github_archive(&t.repo, rev, gh_token).await?;
     let archive = tarball::read(&gz).map_err(bad)?;
     drop(gz);
     let commit = archive

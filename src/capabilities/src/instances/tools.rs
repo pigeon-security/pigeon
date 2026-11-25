@@ -9,6 +9,7 @@ use super::record::Instance;
 enum Capability {
     Publishing,
     Storage,
+    Source,
 }
 
 const TOOLS: &[(&str, Capability)] = &[
@@ -16,6 +17,8 @@ const TOOLS: &[(&str, Capability)] = &[
     ("site_rollback", Capability::Publishing),
     ("storage_list_objects", Capability::Storage),
     ("storage_get_object", Capability::Storage),
+    (crate::source::read::RESOLVE, Capability::Source),
+    (crate::source::read::FILE, Capability::Source),
 ];
 
 const STORAGE_BINDINGS: &[&str] = &["account", "bucket", "presign", "expires_s"];
@@ -25,6 +28,7 @@ pub struct Scope {
     instance: String,
     publishing: bool,
     storage: bool,
+    source: bool,
 }
 
 impl Scope {
@@ -36,6 +40,7 @@ impl Scope {
                 .storage
                 .as_ref()
                 .is_some_and(|profile| profile.enabled()),
+            source: crate::source::read::approved_repo(instance).is_ok(),
         })
     }
 
@@ -44,6 +49,7 @@ impl Scope {
             let enabled = match capability {
                 Capability::Publishing => self.publishing,
                 Capability::Storage => self.storage,
+                Capability::Source => self.source,
             };
             (*name == tool && enabled).then_some(*capability)
         })
@@ -54,7 +60,7 @@ impl Scope {
         tools.retain_mut(|tool| {
             if tool.name == crate::dispatch::CALL {
                 tool.description = "Run an enabled tool of this instance by name.";
-                return self.publishing || self.storage;
+                return self.publishing || self.storage || self.source;
             }
             let Some(capability) = self.capability(tool.name) else {
                 return false;
@@ -100,6 +106,14 @@ impl Scope {
             .is_some_and(|target| target != &self.instance)
         {
             return Err("tool arguments cannot change the target instance".into());
+        }
+        if matches!(capability, Capability::Source)
+            && parameters.keys().any(|name| {
+                !matches!(name.as_str(), "instance" | "revision")
+                    && !(tool == crate::source::read::FILE && name == "path")
+            })
+        {
+            return Err("source repository and provider are fixed by the instance".into());
         }
         if matches!(capability, Capability::Storage)
             && STORAGE_BINDINGS

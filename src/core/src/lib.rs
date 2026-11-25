@@ -44,6 +44,7 @@ pub mod queues;
 pub mod r2;
 pub mod rebase;
 pub mod registry;
+pub mod repository;
 pub mod s3;
 pub mod secrets_store;
 pub mod sign;

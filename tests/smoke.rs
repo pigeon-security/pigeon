@@ -2568,3 +2568,107 @@ fn instance_storage_binds_keys_and_cursors_to_the_approved_scope() {
     scope.filter_listing(&prefix, &mut result);
     assert_eq!(result.prefixes, ["reports/2026/"]);
 }
+
+#[test]
+fn instance_source_requires_an_approved_binding_for_direct_and_generic_calls() {
+    use pigeon_capabilities::{
+        instances::{record::Instance, tools::Scope},
+        source::read::{FILE, RESOLVE, approved_repo},
+    };
+    use pigeon_core::mcp::Tool;
+
+    let mut record = json!({
+        "id": "project",
+        "title": "Project",
+        "account": {"kind": "home"},
+        "repo": {"kind": "github", "full_name": "owner/project"}
+    });
+    let parse = |record: &Value| serde_json::from_value::<Instance>(record.clone()).unwrap();
+    let scope = Scope::new(&parse(&record)).unwrap();
+    assert!(scope.bind(RESOLVE, &json!({})).is_err());
+    record["source"] = json!({"state":"enabled"});
+    let instance = parse(&record);
+    assert!(approved_repo(&instance).is_ok());
+    let scope = Scope::new(&instance).unwrap();
+    let mut tools: Vec<Tool> = [FILE, RESOLVE, "source_token", "site_deploy", "call"]
+        .into_iter()
+        .map(|name| Tool {
+            name,
+            description: "",
+            input_schema: json!({
+                "properties":{"instance": {}, "revision": {}},
+                "required":["instance"]
+            }),
+        })
+        .collect();
+    scope.restrict_tools(&mut tools);
+    assert_eq!(
+        tools.iter().map(|tool| tool.name).collect::<Vec<_>>(),
+        [FILE, RESOLVE, "call"]
+    );
+    assert_eq!(tools[0].input_schema["required"], json!([]));
+    assert_eq!(
+        scope.bind(FILE, &json!({"path":"README.md"})).unwrap(),
+        json!({"instance":"project","path":"README.md"})
+    );
+    assert_eq!(
+        scope.bind("call", &json!({"tool": RESOLVE})).unwrap(),
+        json!({"tool":RESOLVE,"args":{"instance":"project"}})
+    );
+    for args in [
+        json!({"instance":"other"}),
+        json!({"repo":"owner/other"}),
+        json!({"account":"other"}),
+        json!({"provider":"artifacts"}),
+    ] {
+        assert!(scope.bind(RESOLVE, &args).is_err());
+        assert!(
+            scope
+                .bind("call", &json!({"tool":RESOLVE,"args":args}))
+                .is_err()
+        );
+    }
+    assert!(scope.bind("call", &json!({"tool":"source_token"})).is_err());
+    record["repo"] = Value::Null;
+    assert!(approved_repo(&parse(&record)).is_err());
+    record["repo"] = json!({"kind":"artifacts","namespace":"owner","repo":"project"});
+    record["account"] = json!({"kind":"linked"});
+    assert!(approved_repo(&parse(&record)).is_err());
+}
+
+#[test]
+fn repository_read_arguments_are_safe_for_provider_requests() {
+    use pigeon_core::repository::{file_path, revision};
+    for value in [
+        "HEAD",
+        "feature/landing",
+        "refs/heads/feature/landing",
+        "0123456789abcdef0123456789abcdef01234567",
+    ] {
+        assert_eq!(revision(value).unwrap(), value);
+    }
+    for value in [
+        "../other",
+        "main?ref=x",
+        "refs/tags/one",
+        "main@{1}",
+        "refs/heads",
+        "",
+    ] {
+        assert!(revision(value).is_err());
+    }
+    for value in [
+        "/README.md",
+        "../README.md",
+        "src/../README.md",
+        "src\\README.md",
+        "src//README.md",
+        "src/",
+    ] {
+        assert!(file_path(value).is_err());
+    }
+    assert_eq!(
+        file_path("docs/Notes à lire.md").unwrap(),
+        "docs/Notes à lire.md"
+    );
+}

@@ -48,6 +48,9 @@ pub struct Instance {
     /// Optional read-only access to a declared object storage account.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage: Option<crate::storage::scope::Profile>,
+    /// Opt in to read-only tools for this record's approved repository.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<crate::source::read::Profile>,
     /// The record version, which is not part of a diff.
     #[serde(default)]
     pub version: u64,
@@ -622,6 +625,14 @@ pub fn validate(instance: &Instance, others: &[Instance], rules: &Rules) -> Vec<
         .as_ref()
         .filter(|profile| profile.enabled())
         && let Err(problem) = profile.scope()
+    {
+        problems.push(problem);
+    }
+
+    if instance
+        .source
+        .is_some_and(crate::source::read::Profile::enabled)
+        && let Err(problem) = crate::source::read::approved_repo(instance)
     {
         problems.push(problem);
     }

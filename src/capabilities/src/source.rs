@@ -2,6 +2,8 @@
 //! remote when created), the queue its push events go to with the hosting Worker as consumer,
 //! and short-lived git tokens on demand.
 
+pub mod read;
+
 use std::collections::BTreeSet;
 
 use pigeon_core::artifacts::{self, Access};
@@ -254,6 +256,26 @@ impl Capability for Source {
     fn tools(&self) -> Vec<Tool> {
         vec![
             Tool {
+                name: read::RESOLVE,
+                description: "Resolve HEAD, a branch or a commit in an instance's approved repository.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {"instance": {"type": "string"}, "revision": {"type": "string", "default": "HEAD"}},
+                    "required": ["instance"],
+                    "additionalProperties": false
+                }),
+            },
+            Tool {
+                name: read::FILE,
+                description: "Read a regular file up to 1 MiB from an instance's approved repository.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {"instance": {"type": "string"}, "revision": {"type": "string", "default": "HEAD"}, "path": {"type": "string"}},
+                    "required": ["instance", "path"],
+                    "additionalProperties": false
+                }),
+            },
+            Tool {
                 name: "source_token",
                 description: "Mint a git token for the source repository. Git sends it as \
                               `Authorization: Bearer <token>`. Answers the token, its id and the \
@@ -307,6 +329,7 @@ impl Capability for Source {
     fn call<'a>(&'a self, cx: &'a Context<'a>, tool: &'a str, args: &'a Value) -> Call<'a> {
         Box::pin(async move {
             Ok(match tool {
+                read::RESOLVE | read::FILE => read::run(cx, tool, args).await?,
                 "source_token" => to_value(self.token(cx, args).await?),
                 "source_tokens" => {
                     to_value(artifacts::tokens(cx.account, &self.namespace, &self.repo).await?)
