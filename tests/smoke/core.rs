@@ -2633,26 +2633,28 @@ fn arch_home_capabilities() -> Vec<Box<dyn pigeon_capabilities::Capability>> {
         }),
         Box::new(proxy::Tokens {
             proxy_host: proxy_host.into(),
+            backup: Some(proxy::Backup {
+                git: pigeon_proxies::git_proxy::GitProxy {
+                    host: proxy_host.into(),
+                    namespace: "pigeon".into(),
+                    repo: "pigeon".into(),
+                    protected: "refs/heads/main".into(),
+                    prefix: "refs/heads/claude/".into(),
+                },
+                cf: pigeon_proxies::cf_proxy::CfProxy {
+                    host: proxy_host.into(),
+                    script: "pigeon-platform".into(),
+                    others: Vec::new(),
+                    queues: Vec::new(),
+                    containers: Vec::new(),
+                    land_repo: "pigeon/pigeon".into(),
+                },
+            }),
         }),
         Box::new(approvals::Approvals),
         Box::new(policy::Policy {
             session_prefix: "claude/".into(),
             main: "main".into(),
-        }),
-        Box::new(git_proxy::GitProxy {
-            host: proxy_host.into(),
-            namespace: "pigeon".into(),
-            repo: "pigeon".into(),
-            protected: "refs/heads/main".into(),
-            prefix: "refs/heads/claude/".into(),
-        }),
-        Box::new(cf_proxy::CfProxy {
-            host: proxy_host.into(),
-            script: "pigeon-platform".into(),
-            others: Vec::new(),
-            queues: Vec::new(),
-            containers: Vec::new(),
-            land_repo: "pigeon/pigeon".into(),
         }),
         Box::new(land::Land {
             settings: land::Settings {

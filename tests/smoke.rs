@@ -73,7 +73,7 @@ fn pack(dir: &Path, new: &str, old: &str) -> Vec<u8> {
 
 /// The policy as the platform is configured: sessions push under `claude/`, main is protected.
 fn vars() -> pigeon_core::policy::Vars {
-    pigeon_capabilities::git_proxy::vars("refs/heads/main", "refs/heads/claude/")
+    pigeon_proxies::git_proxy::vars("refs/heads/main", "refs/heads/claude/")
 }
 
 fn request(action: &str, target: &str, approval: Option<&str>) -> pigeon_core::policy::Request {

@@ -28,6 +28,7 @@ use pigeon_core::lanes::After;
 use pigeon_core::mcp::Tool;
 use pigeon_core::policy::{Decision, Kind};
 use pigeon_core::webauthn::random;
+use pigeon_proxies::git_proxy;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use worker::{
@@ -35,7 +36,6 @@ use worker::{
     js_sys,
 };
 
-use crate::git_proxy;
 use crate::proxy::ProxyCaller;
 use crate::users::Caller;
 use crate::{Call, Capability, Context, External, Footprint, Hosted, arg, unknown};

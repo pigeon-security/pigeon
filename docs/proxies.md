@@ -8,11 +8,31 @@ Cloud coding sessions used to reach the Artifacts git host, `api.cloudflare.com`
 
 Now sessions reach git and the Cloudflare API only through pigeon's proxies on `proxy.pigeon.dev`. The proxies hold the real credentials and mint a short-lived one for each request. MCP stays on `platform.pigeon.dev`.
 
-Today `pigeon-platform` (core) serves both hosts, and the public site on the apex `pigeon.dev` (see `docs/plans/one-worker.md`). On `proxy.pigeon.dev` only `/git/`, `/cf/` and `/health` answer. On any other host, `/git/` and `/cf/` answer 404.
+`pigeon-platform` (core) serves `platform.pigeon.dev` and the public site on the apex `pigeon.dev` (see `docs/plans/one-worker.md`). `pigeon-proxy` serves `proxy.pigeon.dev`. On `proxy.pigeon.dev` only `/git/`, `/cf/` and `/health` answer. On any other host, `/git/` and `/cf/` answer 404.
 
-### The proxy Worker
+### The proxy Worker, and the backup in core
 
-`pigeon-proxy` (`src/proxy`) serves the same proxies with the same code (`src/proxies`), and takes `proxy.pigeon.dev` over at the cutover (`docs/plans/workers-split.md`, phase 6). Until then core serves the host. `pigeon-proxy` answers only `/git/`, `/cf/` and `/health` on `proxy.pigeon.dev`, and 404 to everything else.
+The primary is `pigeon-proxy` (`src/proxy`). It has served `proxy.pigeon.dev` since the cutover (`docs/plans/workers-split.md`, phase 6), with the proxies' code in `src/proxies`. It answers only `/git/`, `/cf/` and `/health` on `proxy.pigeon.dev`, and 404 to everything else.
+
+The backup is core. Core builds the same proxies from the same code (`src/proxies`): the same repository and push rules, the same allowlist and body rules, the same deploy grants, queues and container classes. They are not capabilities of their own: core serves them under the `proxy` capability (Access › Tokens, `src/capabilities/src/proxy.rs`, `Tokens.backup`), with no tools and no version of their own. Core answers `/git/` and `/cf/` only for requests to `proxy.pigeon.dev`, so the backup serves nothing until that hostname is attached to core.
+
+#### Switching to the backup
+
+Do this when `pigeon-proxy` cannot serve (a bad deploy, its `PLATFORM` binding failing). It needs no landing: a broken proxy would also block the landing that fixes it.
+
+1. Call `setup_proxy_host {"worker": "pigeon-platform"}`. The call goes through `/mcp` on `platform.pigeon.dev`, so it works while the proxy host is down. It attaches `proxy.pigeon.dev` to core.
+2. Check: `git ls-remote https://proxy.pigeon.dev/git/pigeon-security/pigeon.git`. Audit lines now come from `pigeon-platform`'s logs.
+3. Leave `PROXY_WORKER` in `src/platform/src/settings.rs` as it is. It is only the default when `setup_proxy_host` is called without `worker`.
+
+While core serves the host, revoking a credential takes effect at once, and each `/cf/` call gets a token minted for that call alone (below).
+
+#### Switching back to the proxy Worker
+
+1. Fix and deploy `pigeon-proxy`. Its deploy goes through core's deploy proxy, which allows it from the map.
+2. Call `setup_proxy_host {"worker": "pigeon-proxy"}`, or `setup_proxy_host {}`: `pigeon-proxy` is the default (`PROXY_WORKER`).
+3. Check as in step 2 above. Audit lines come from `pigeon-proxy`'s logs again.
+
+### How the proxy Worker reaches core
 
 It never holds the parent token. It asks core over its `PLATFORM` service binding, signing each request with `CALLER_KEY`:
 
@@ -25,7 +45,7 @@ It never holds the parent token. It asks core over its `PLATFORM` service bindin
 
 So once `pigeon-proxy` serves the host, **revoking a proxy credential takes up to 60 seconds** to reach it: an isolate that verified the credential in the last minute still accepts it. A new credential works at once (an unknown one is never kept). CI job grants and deploy grants are asked of core on every request.
 
-What else differs from core's proxies:
+What else differs from core's backup:
 
 - `/cf/` calls use the `cf_deploy` token core minted for the Worker, not one minted per call with only that call's permissions. `cf_deploy` is the union of the permissions in the table below. The allowlist and the body rules are the same.
 - `/git/` mints and revokes a git token per request as core does, through the `artifacts` token.
@@ -325,12 +345,12 @@ Remove `github.com` only after checking that the session's first clone does not 
 | Area | Files |
 | --- | --- |
 | Proxy credential checks, host routing rule, audit line | `src/proxies/src/proxy.rs` |
-| Issuing and revoking credentials; core's `Host` (`Local`) | `src/capabilities/src/proxy.rs` |
-| Git proxy | `src/proxies/src/git_proxy.rs` (core's wrapper: `src/capabilities/src/git_proxy.rs`) |
-| Cloudflare API proxy | `src/proxies/src/cf_proxy.rs` (core's wrapper: `src/capabilities/src/cf_proxy.rs`) |
+| Issuing and revoking credentials; core's `Host` (`Local`) and the backup proxies (`Backup`) | `src/capabilities/src/proxy.rs` |
+| Git proxy | `src/proxies/src/git_proxy.rs` |
+| Cloudflare API proxy | `src/proxies/src/cf_proxy.rs` |
 | The proxy Worker and its `Host` (asking core) | `src/proxy/src/lib.rs` |
 | What the proxy Worker keeps per isolate | `src/proxies/src/cache.rs` |
 | Core's `verify`, `grant`, `deploy_grant` ops and the `cf_deploy` purpose | `src/capabilities/src/split.rs` |
 | Git and pack handling | `src/core/src/git.rs`, `src/core/src/pack.rs` |
 | Host routing | `src/platform/src/lib.rs` |
-| Proxy host, the Worker serving it (`PROXY_WORKER`) and the mirrored branches | `src/platform/src/settings.rs` |
+| Proxy host, the Worker serving it (`PROXY_WORKER`), the backup as core builds it (`backup()`) and the mirrored branches | `src/platform/src/settings.rs` |

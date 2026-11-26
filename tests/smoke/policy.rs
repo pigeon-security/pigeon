@@ -162,10 +162,10 @@ fn policy_decisions() {
 
 #[test]
 fn git_proxy_push_rules() {
-    use pigeon_capabilities::git_proxy::{
+    use pigeon_core::git::{self, Command as Update, ZERO};
+    use pigeon_proxies::git_proxy::{
         Call, Rule, Service, check_all, moves_forward, refname_ok, route,
     };
-    use pigeon_core::git::{self, Command as Update, ZERO};
     const P: &str = "refs/heads/main";
     const X: &str = "refs/heads/claude/";
     // Only git's four calls on this one repository are routed, compared exactly.
@@ -282,10 +282,10 @@ fn git_proxy_push_rules() {
 /// force-push on the run's own branch.
 #[test]
 fn git_proxy_run_grant_rewrites_only_its_own_branch() {
-    use pigeon_capabilities::git_proxy::{Rule, check_all};
     use pigeon_capabilities::proxy::run_branch_prefix;
     use pigeon_core::git::{self, Command as Update, ZERO};
     use pigeon_core::proxy_caller::within_prefix;
+    use pigeon_proxies::git_proxy::{Rule, check_all};
     const P: &str = "refs/heads/main";
     const X: &str = "refs/heads/claude/";
     let prefix = run_branch_prefix("ab").unwrap();

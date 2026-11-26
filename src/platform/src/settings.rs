@@ -5,13 +5,11 @@ use pigeon_capabilities::Capability;
 use pigeon_capabilities::apple::Apple;
 use pigeon_capabilities::approvals::Approvals;
 use pigeon_capabilities::architecture::{Architecture, Wrangler};
-use pigeon_capabilities::cf_proxy::CfProxy;
 use pigeon_capabilities::changelog::Changelog;
 use pigeon_capabilities::ci;
 use pigeon_capabilities::console::Console;
 use pigeon_capabilities::deploys::Deploys;
 use pigeon_capabilities::dispatch::Dispatch;
-use pigeon_capabilities::git_proxy::GitProxy;
 use pigeon_capabilities::github::Github;
 use pigeon_capabilities::images::Images;
 use pigeon_capabilities::ingest;
@@ -23,7 +21,7 @@ use pigeon_capabilities::oauth::OAuth;
 use pigeon_capabilities::observability::Observability;
 use pigeon_capabilities::passkeys::Passkeys;
 use pigeon_capabilities::policy::Policy;
-use pigeon_capabilities::proxy::Tokens;
+use pigeon_capabilities::proxy::{Backup, CfProxy, GitProxy, Tokens, cf_proxy};
 use pigeon_capabilities::public_host::PublicHost;
 use pigeon_capabilities::remote::Binding;
 use pigeon_capabilities::secrets::Secrets;
@@ -64,8 +62,9 @@ pub const HOST: &str = "platform.pigeon.dev";
 /// for it never reaches `/mcp` or replaces the MCP connector's own token.
 pub const PROXY_HOST: &str = "proxy.pigeon.dev";
 /// The Worker `setup_proxy_host` attaches the proxy hostname to by default: the proxy Worker,
-/// which has served it since the cutover (docs/plans/workers-split.md, phase 6). Rolling back is
-/// one call, `setup_proxy_host {"worker": "pigeon-platform"}`.
+/// which has served it since the cutover (docs/plans/workers-split.md, phase 6). Core keeps the
+/// same proxies as a backup ([`backup`]); switching to it is one call,
+/// `setup_proxy_host {"worker": "pigeon-platform"}`, and back is `{"worker": "pigeon-proxy"}`.
 pub const PROXY_WORKER: &str = "pigeon-proxy";
 const NAMESPACE: &str = "pigeon-security";
 const REPO: &str = "pigeon";
@@ -160,6 +159,46 @@ pub const BINDINGS: &[Binding] = &[
     },
 ];
 
+/// The proxies core serves as the proxy Worker's backup, as that Worker builds them: the same
+/// repository and push rules, and the same deploy scope (this Worker's script, queues and
+/// container classes, and the other platform Workers').
+pub fn backup() -> Backup {
+    Backup {
+        // The git proxy: the source repository for cloud sessions holding a proxy credential.
+        // Its push rules are the policy's: session branches are pushed, rewritten and deleted;
+        // main moves only by a landing.
+        git: GitProxy {
+            host: PROXY_HOST.into(),
+            namespace: NAMESPACE.into(),
+            repo: REPO.into(),
+            protected: format!("refs/heads/{BRANCH}"),
+            prefix: format!("refs/heads/{SESSION_PREFIX}/"),
+        },
+        // The Cloudflare API proxy: the calls `wrangler deploy` of this Worker makes, for cloud
+        // sessions holding a proxy credential.
+        cf: CfProxy {
+            host: PROXY_HOST.into(),
+            script: WORKER.into(),
+            // The other platform Workers, from the map built into this Worker.
+            others: map()
+                .workers
+                .into_iter()
+                .filter(|w| w.script != WORKER)
+                .map(|w| cf_proxy::Other {
+                    script: w.script,
+                    queues: w.queues,
+                    containers: w.containers,
+                })
+                .collect(),
+            // The queues this Worker produces to and its container classes, as wrangler.toml
+            // declares them.
+            queues: wrangler().producers,
+            containers: wrangler().containers.into_iter().map(|c| c.class).collect(),
+            land_repo: format!("{NAMESPACE}/{REPO}"),
+        },
+    }
+}
+
 /// The object storage accounts. Empty on purpose: storage stays off until the person declares
 /// an account here (see docs/plans/storage-providers.md).
 pub fn storage_accounts() -> Vec<storage::Account> {
@@ -189,7 +228,8 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
             zone: ZONE.into(),
             host: PROXY_HOST.into(),
             worker: PROXY_WORKER.into(),
-            // Core serves the same proxies, so the rollback is one call, `setup_proxy_host {worker}`.
+            // Core keeps the same proxies as a backup (`backup()`), so switching to it and back
+            // is one call each, `setup_proxy_host {worker}`.
             also: vec![WORKER.into()],
             tool: "setup_proxy_host",
         }),
@@ -236,9 +276,12 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
             parent: PARENT_TOKEN.into(),
         }),
         // Proxy credentials: what a cloud session holds to reach /git/ and /cf/, issued on
-        // the console's Access › Tokens.
+        // the console's Access › Tokens; and the proxies themselves, as a backup to the proxy
+        // Worker. They answer only while the proxy hostname is attached to this Worker
+        // (`setup_proxy_host {"worker": "pigeon-platform"}`); docs/proxies.md.
         Box::new(Tokens {
             proxy_host: PROXY_HOST.into(),
+            backup: Some(backup()),
         }),
         // Passkey approval of the tool calls the policy gates: `approvals_status`, and the calls
         // waiting in the console's Inbox.
@@ -247,38 +290,6 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
         Box::new(Policy {
             session_prefix: format!("{SESSION_PREFIX}/"),
             main: BRANCH.into(),
-        }),
-        // The git proxy: the source repository for cloud sessions holding a proxy credential.
-        // Its push rules are the policy's: session branches are pushed, rewritten and deleted;
-        // main moves only by a landing.
-        Box::new(GitProxy {
-            host: PROXY_HOST.into(),
-            namespace: NAMESPACE.into(),
-            repo: REPO.into(),
-            protected: format!("refs/heads/{BRANCH}"),
-            prefix: format!("refs/heads/{SESSION_PREFIX}/"),
-        }),
-        // The Cloudflare API proxy: the calls `wrangler deploy` of this Worker makes, for cloud
-        // sessions holding a proxy credential.
-        Box::new(CfProxy {
-            host: PROXY_HOST.into(),
-            script: WORKER.into(),
-            // The other platform Workers, from the map built into this Worker.
-            others: map()
-                .workers
-                .into_iter()
-                .filter(|w| w.script != WORKER)
-                .map(|w| pigeon_capabilities::cf_proxy::Other {
-                    script: w.script,
-                    queues: w.queues,
-                    containers: w.containers,
-                })
-                .collect(),
-            // The queues this Worker produces to and its container classes, as wrangler.toml
-            // declares them.
-            queues: wrangler().producers,
-            containers: wrangler().containers.into_iter().map(|c| c.class).collect(),
-            land_repo: format!("{NAMESPACE}/{REPO}"),
         }),
         // Models: served by pigeon-model-gateway (BINDINGS); core hosts only its job objects.
         // CI: served by pigeon-ci-gateway (BINDINGS); core hosts only its scheduler and runners,

@@ -861,6 +861,7 @@ pub(super) fn hosted_views() -> Vec<(
         }),
         Box::new(pigeon_capabilities::proxy::Tokens {
             proxy_host: "p".into(),
+            backup: None,
         }),
         Box::new(pigeon_capabilities::observability::Observability {
             map: pigeon_core::lanes::Map {
@@ -1415,7 +1416,8 @@ fn console_decommissioned() {
     );
     assert!(
         pigeon_capabilities::proxy::Tokens {
-            proxy_host: "p".into()
+            proxy_host: "p".into(),
+            backup: None,
         }
         .routes()
         .is_empty()

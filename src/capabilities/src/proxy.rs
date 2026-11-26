@@ -11,17 +11,25 @@
 //! The checks the proxies make at request time are in [`pigeon_proxies::proxy`], shared with
 //! the proxy Worker, and re-exported here. [`Local`] is core's [`Host`] for them: its own
 //! Directory, CI scheduler and Lander, and the parent token.
+//!
+//! The proxy Worker (`pigeon-proxy`) serves the proxy hostname. Core keeps the same proxies as a
+//! [`Backup`], served under [`Tokens`] rather than as capabilities of their own: they answer only
+//! while the hostname is attached to core (`setup_proxy_host {"worker": "pigeon-platform"}`),
+//! since core's fetch handler routes `/git/` and `/cf/` on the proxy hostname alone.
 
 use pigeon_core::Account;
 use pigeon_core::mcp::Tool;
 use pigeon_core::oauth::{hash, token};
+// The proxies' modules, for the Worker that builds the backup.
+pub use pigeon_proxies::cf_proxy::{self, CfProxy};
+pub use pigeon_proxies::git_proxy::{self, GitProxy};
 use pigeon_proxies::{Grant, Host, Pending, Purpose};
 use serde_json::{Value, json};
-use worker::{Env, Error, Result};
+use worker::{Env, Error, Request, Response, Result};
 
 use crate::console::sections::Section;
 use crate::users::{User, directory};
-use crate::{Call, Capability, Context, unknown};
+use crate::{Call, Capability, Context, Footprint, HostFootprint, Serve, unknown};
 
 pub use pigeon_proxies::proxy::{
     Audit, ID_LEN, Outcome, PREFIX, ProxyCaller, audit, audit_line, host_serves, reaches,
@@ -179,10 +187,27 @@ impl Host for Local<'_> {
     }
 }
 
-/// The console's `token-issue` and `token-revoke` writes.
+/// The proxies as core serves them, the backup to the proxy Worker: the same
+/// [`pigeon_proxies`] request handling, behind [`Local`].
+pub struct Backup {
+    /// The git proxy, `/git/`.
+    pub git: GitProxy,
+    /// The Cloudflare API proxy, `/cf/`.
+    pub cf: CfProxy,
+}
+
+/// The routes the backup serves.
+pub const BACKUP_ROUTES: [&str; 2] = [
+    "/git/", // route: token
+    "/cf/",  // route: token
+];
+
+/// The console's `token-issue` and `token-revoke` writes, and the backup proxies.
 pub struct Tokens {
     /// The hostname the proxies are on, which a credential is saved for.
     pub proxy_host: String,
+    /// The proxies core serves while the proxy hostname is attached to it; `None` serves none.
+    pub backup: Option<Backup>,
 }
 
 impl Tokens {
@@ -266,5 +291,45 @@ impl Capability for Tokens {
 
     fn call<'a>(&'a self, _cx: &'a Context<'a>, tool: &'a str, _args: &'a Value) -> Call<'a> {
         Box::pin(async move { Err(unknown(tool)) })
+    }
+
+    fn routes(&self) -> Vec<&'static str> {
+        match self.backup {
+            Some(_) => BACKUP_ROUTES.to_vec(),
+            None => Vec::new(),
+        }
+    }
+
+    fn fetch<'a>(&'a self, cx: &'a Context<'a>, req: Request) -> Serve<'a> {
+        Box::pin(async move {
+            let Some(b) = &self.backup else {
+                return Response::error("not found", 404);
+            };
+            let path = req.path();
+            if path.starts_with("/git/") {
+                b.git.serve(&Local { cx }, cx.worker, req).await
+            } else if path.starts_with("/cf/") {
+                b.cf.serve(&Local { cx }, req).await
+            } else {
+                Response::error("not found", 404)
+            }
+        })
+    }
+
+    fn footprint(&self) -> Footprint {
+        let Some(b) = &self.backup else {
+            return Footprint::default();
+        };
+        Footprint {
+            hostnames: vec![HostFootprint {
+                host: b.git.host.clone(),
+                worker: String::new(),
+                by: self.name().into(),
+                access: Vec::new(),
+                public_paths: BACKUP_ROUTES.iter().map(|r| (*r).to_string()).collect(),
+            }],
+            repos: vec![format!("{}/{}", b.git.namespace, b.git.repo)],
+            ..Footprint::default()
+        }
     }
 }

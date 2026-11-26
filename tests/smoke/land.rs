@@ -133,11 +133,11 @@ fn land_from_check_to_landed() {
     // The merge: main moves only forward, judged from the pack (stubbed Artifacts).
     let pack_fwd = pack(&dir, &tip, &main_at);
     assert_eq!(
-        pigeon_capabilities::git_proxy::moves_forward(&main_at, &tip, &pack_fwd),
+        pigeon_proxies::git_proxy::moves_forward(&main_at, &tip, &pack_fwd),
         Ok(true)
     );
     assert_eq!(
-        pigeon_capabilities::git_proxy::moves_forward(&tip, &main_at, &pack(&dir, &main_at, &tip)),
+        pigeon_proxies::git_proxy::moves_forward(&tip, &main_at, &pack(&dir, &main_at, &tip)),
         Ok(false)
     );
 
@@ -1176,7 +1176,7 @@ fn land_rebases_disjoint_branches_and_lanes() {
             .retest
     );
     // The deploy proxy finds the Worker a call is for in its path.
-    use pigeon_capabilities::cf_proxy::target_script;
+    use pigeon_proxies::cf_proxy::target_script;
     assert_eq!(
         target_script("/cf/client/v4/accounts/a/workers/scripts/pigeon-sites/versions"),
         Some("pigeon-sites")

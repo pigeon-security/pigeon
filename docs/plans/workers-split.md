@@ -557,6 +557,11 @@ a public hostname, since the proxy credential is checked there). The proxies nee
   stays, but now only for `pigeon-proxy`'s own deploys.
 - Cutover: deploy `pigeon-proxy` with no domain, check it on its own, then move the custom
   domain in one call (`setup_proxy_host` names the new script). Rollback is moving it back.
+- Rollback (since 2026-11-26): core keeps the proxies as a backup, served under its `proxy`
+  capability rather than as the `git_proxy` and `cf_proxy` capabilities. Moving the host back
+  with `setup_proxy_host {"worker": "pigeon-platform"}` makes core answer `/git/` and `/cf/`
+  again, with no landing; `setup_proxy_host {"worker": "pigeon-proxy"}` (or no `worker`) moves it
+  forward. Steps: docs/proxies.md, "The proxy Worker, and the backup in core".
 
 ## Parallel work and landings
 
@@ -959,7 +964,8 @@ What only this session knew (lessons for whoever picks this up):
     4. Once it holds, land `PROXY_WORKER = PROXY_WORKER_NEXT` (one line, core), so the default
        names the Worker that serves the host and a later `setup_proxy_host` keeps it there.
   - **Rollback**: call `setup_proxy_host {"worker": "pigeon-platform"}`. Core never stopped
-    serving the proxies, and the call goes through `/mcp` on platform.pigeon.dev, so it works
+    serving the proxies (since 2026-11-26 as a backup under its `proxy` capability, no longer
+    as the `git_proxy` and `cf_proxy` capabilities; docs/proxies.md), and the call goes through `/mcp` on platform.pigeon.dev, so it works
     even when `pigeon-proxy` cannot serve git (and so nothing can land). If step 4 had landed,
     land it back afterwards.
 - 2026-11-22: phase 5 (track D) built on `claude/track-lanes`, on `claude/split-prep`.

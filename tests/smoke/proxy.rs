@@ -559,7 +559,7 @@ fn deploy_proxy_body_max_fits_core() {
 
 #[test]
 fn deploy_proxy_allowlist() {
-    use pigeon_capabilities::cf_proxy::{
+    use pigeon_proxies::cf_proxy::{
         ALLOWED, GRANT_PATH, PREFIX, Scope, allowed, body_ok, grant_answer, unlisted,
     };
     let (a, s) = ("4f94676cb2cbe46fd985b089ca97ea27", "pigeon-platform");
@@ -653,7 +653,7 @@ fn deploy_proxy_allowlist() {
     // Bodies a rule checks: junk is refused.
     for e in ALLOWED
         .iter()
-        .filter(|e| !matches!(e.body, pigeon_capabilities::cf_proxy::BodyRule::Any))
+        .filter(|e| !matches!(e.body, pigeon_proxies::cf_proxy::BodyRule::Any))
     {
         assert!(
             body_ok(e.body, b"not json", &scope(a, s)).is_err(),
@@ -1249,4 +1249,104 @@ fn proxy_worker_caches_and_core_ops() {
         host(Vec::new()).tools()[0].input_schema["properties"],
         json!({})
     );
+    // As settings.rs has it: the proxy Worker by default, core the one other choice.
+    let primary = PublicHost {
+        worker: "pigeon-proxy".into(),
+        also: vec!["pigeon-platform".into()],
+        ..host(Vec::new())
+    };
+    assert_eq!(primary.footprint().hostnames[0].worker, "pigeon-proxy");
+    assert_eq!(
+        primary.tools()[0].input_schema["properties"]["worker"]["enum"],
+        json!(["pigeon-proxy", "pigeon-platform"]),
+        "setup_proxy_host moves the host to core and back, with no landing"
+    );
+}
+
+/// Core's backup proxies: the proxy Worker's own `/git/` and `/cf/`, served under the `proxy`
+/// capability (Access › Tokens) and not as capabilities of their own; they answer only on the
+/// proxy hostname, so only while it is attached to core.
+#[test]
+fn core_backup_proxy() {
+    use pigeon_capabilities::Capability;
+    use pigeon_capabilities::proxy::{self, BACKUP_ROUTES, Backup, Tokens};
+    use pigeon_proxies::cf_proxy::CfProxy;
+    use pigeon_proxies::git_proxy::GitProxy;
+
+    let (px, pl) = ("proxy.pigeon.dev", "platform.pigeon.dev");
+    let backup = || Backup {
+        git: GitProxy {
+            host: px.into(),
+            namespace: "pigeon-security".into(),
+            repo: "pigeon".into(),
+            protected: "refs/heads/main".into(),
+            prefix: "refs/heads/claude/".into(),
+        },
+        // As core builds it, from the same files the proxy Worker reads.
+        cf: CfProxy::platform(
+            px,
+            "pigeon-platform",
+            include_str!("../../src/platform/wrangler.toml"),
+            include_str!("../../ci/workers.toml"),
+            "pigeon-security/pigeon",
+        ),
+    };
+    let with = Tokens {
+        proxy_host: px.into(),
+        backup: Some(backup()),
+    };
+    let without = Tokens {
+        proxy_host: px.into(),
+        backup: None,
+    };
+
+    // The routes are the backup's alone, and only with a backup.
+    assert_eq!(with.routes(), BACKUP_ROUTES.to_vec());
+    assert_eq!(BACKUP_ROUTES, ["/git/", "/cf/"]);
+    assert!(without.routes().is_empty());
+
+    // The one capability: `proxy`, with no tools; neither `git_proxy` nor `cf_proxy` is a
+    // capability, so `capabilities_versions` lists neither.
+    assert_eq!(with.name(), "proxy");
+    assert!(with.tools().is_empty());
+    let components: Vec<String> = with.versions().into_iter().map(|c| c.name).collect();
+    assert_eq!(components, ["proxy"]);
+    assert_eq!(
+        without
+            .versions()
+            .into_iter()
+            .map(|c| c.name)
+            .collect::<Vec<_>>(),
+        components
+    );
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../src/capabilities/src/console/web/fixtures/capabilities_versions.json"
+    ))
+    .unwrap();
+    let listed = fixture.to_string();
+    assert!(!listed.contains("git_proxy") && !listed.contains("cf_proxy"));
+    // Core registers no proxy capability of its own; the backup is built into `Tokens`.
+    let settings = include_str!("../../src/platform/src/settings.rs");
+    assert!(!settings.contains("Box::new(GitProxy") && !settings.contains("Box::new(CfProxy"));
+    assert!(settings.contains("backup: Some(backup())"));
+
+    // The architecture page still draws the proxy host's public paths and the repository.
+    let f = with.footprint();
+    assert_eq!(f.hostnames.len(), 1);
+    assert_eq!(f.hostnames[0].host, px);
+    assert_eq!(f.hostnames[0].by, "proxy");
+    assert_eq!(f.hostnames[0].public_paths, ["/git/", "/cf/"]);
+    assert_eq!(f.repos, ["pigeon-security/pigeon"]);
+    assert!(without.footprint().hostnames.is_empty());
+
+    // Core answers the proxies on the proxy hostname only: never on its own.
+    for path in [
+        "/git/pigeon-security/pigeon.git/info/refs",
+        "/cf/client/v4/accounts",
+    ] {
+        assert!(proxy::host_serves(px, px, path), "{path}");
+        assert!(!proxy::host_serves(pl, px, path), "{path}");
+        assert!(with.routes().iter().any(|r| path.starts_with(r)), "{path}");
+    }
+    assert!(!proxy::host_serves(px, px, "/mcp"));
 }

@@ -9,8 +9,8 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 
-use pigeon_capabilities::git_proxy::{Rule, check_all, not_forward};
 use pigeon_core::{git, pack};
+use pigeon_proxies::git_proxy::{Rule, check_all, not_forward};
 
 const PROTECTED: &str = "refs/heads/main";
 const PREFIX: &str = "refs/heads/claude/";

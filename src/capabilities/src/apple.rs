@@ -1590,7 +1590,7 @@ pub mod release {
             let Some((ns, name)) = repo.split_once('/') else {
                 return Response::error("not a repository", 403);
             };
-            head = match crate::git_proxy::tip(cx.account, ns, name, BRANCH).await {
+            head = match pigeon_proxies::git_proxy::tip(cx.account, ns, name, BRANCH).await {
                 Ok(h) => h,
                 Err(e) => return Response::error(e.to_string(), 500),
             };

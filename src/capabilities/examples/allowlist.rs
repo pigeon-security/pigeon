@@ -8,7 +8,7 @@
 
 use std::process::ExitCode;
 
-use pigeon_capabilities::cf_proxy::{Scope, unlisted};
+use pigeon_proxies::cf_proxy::{Scope, unlisted};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
