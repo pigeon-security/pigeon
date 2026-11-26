@@ -206,6 +206,12 @@ The container calls are limited to this Worker's own containers. `{namespace}` m
 
 Served by core, each call gets a Cloudflare token with only that call's permissions. The token lives 5 minutes and is revoked before the answer returns. Served by `pigeon-proxy`, each call uses its `cf_deploy` token (above).
 
+#### The Worker lookup, remembered
+
+Wrangler's first call, `GET services/{s}`, reads whether the Worker exists, its tag and its Durable Object migration tag. For a Worker deployed or rolled back many times in a day, Cloudflare can refuse that one call with `10429` (rate limited) for 12–15 minutes while the other calls and Workers go through. So the proxy remembers every successful answer to it, per account and Worker, for a day, keeping only the fields wrangler reads (`environment`, `tag`, `tags`, `migration_tag`, `last_deployed_from` and plain ids and dates). When Cloudflare answers the same lookup with `10429` and a remembered answer exists, the proxy answers with that instead, with the header `x-pigeon-served-from-cache: 10429`, and its audit line has outcome `replayed`. With nothing remembered, the `10429` passes through as it was. No other call is ever remembered or replayed. A successful upload (`PUT scripts/{s}` or `POST scripts/{s}/versions`) that carries Durable Object migrations forgets the Worker's lookup, since it moves the migration tag; an upload without migrations keeps it.
+
+The answers are kept in the Workers Cache API of whichever Worker serves the proxy (`pigeon-proxy`, or core as the backup), so no binding is needed. That cache outlives an isolate but is per Cloudflare data center and may evict early: a deploy that reaches another data center, or comes after an eviction, sees Cloudflare's `10429` as before. The code is `src/proxies/src/lookup.rs`.
+
 Outside `/cf/client/v4`, `GET /cf/grant` answers whether the bearer is a CI job token holding the deploy grant of the landing that is deploying its commit: 200 if so, 403 otherwise (a proxy credential included). It passes nothing on; the `deploy` job calls it before its build so a job submitted by hand stops at once.
 
 Anything else is refused in Cloudflare's error shape, with a message starting "pigeon's proxy does not allow ...".

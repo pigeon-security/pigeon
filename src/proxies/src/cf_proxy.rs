@@ -27,6 +27,7 @@ use serde_json::{Value, json};
 use worker::js_sys::Uint8Array;
 use worker::{Fetch, Headers, Method, Request, RequestInit, Response, Result, console_error};
 
+use crate::lookup;
 use crate::proxy::{self, Audit, Outcome, ProxyCaller, bearer};
 use crate::{Host, Purpose};
 
@@ -792,12 +793,23 @@ impl CfProxy {
         let (outcome, status, why) = match &answer {
             Ok((res, why)) => {
                 let status = res.status_code();
+                let replayed = res
+                    .headers()
+                    .get(lookup::SERVED_FROM_CACHE)
+                    .ok()
+                    .flatten()
+                    .is_some();
                 let outcome = match why {
                     Some(_) => Outcome::Refused,
+                    None if replayed => Outcome::Replayed,
                     None if (200..400).contains(&status) => Outcome::Forwarded,
                     None => Outcome::Failed,
                 };
-                (outcome, Some(status), why.clone())
+                let why = match outcome {
+                    Outcome::Replayed => Some(lookup::REPLAYED_WHY.to_string()),
+                    _ => why.clone(),
+                };
+                (outcome, Some(status), why)
             }
             Err(e) => (Outcome::Failed, Some(502), Some(e.to_string())),
         };
@@ -972,11 +984,31 @@ impl CfProxy {
             &body,
         )
         .await;
-        let (status, content_type, bytes) = token.finish(sent).await?;
+        let (status, answered_type, bytes) = token.finish(sent).await?;
+        if lookup::is_lookup(entry) {
+            let store = lookup::EdgeStore::new(&self.host, &account_id, target);
+            if let Some(kept) = remember(
+                &store,
+                &account_id,
+                target,
+                status,
+                answered_type.as_deref(),
+                &bytes,
+            )
+            .await
+            {
+                return Ok((lookup::replay(&kept)?, None));
+            }
+        } else if lookup::forgets(entry, status, content_type.as_deref(), &body) {
+            let store = lookup::EdgeStore::new(&self.host, &account_id, target);
+            if let Err(e) = store.forget().await {
+                console_error!("cf proxy: could not forget the lookup of {target}: {e}");
+            }
+        }
         let headers = Headers::new();
         headers.set(
             "Content-Type",
-            content_type.as_deref().unwrap_or("application/json"),
+            answered_type.as_deref().unwrap_or("application/json"),
         )?;
         Ok((
             Response::from_bytes(bytes)?
@@ -984,6 +1016,46 @@ impl CfProxy {
                 .with_headers(headers),
             None,
         ))
+    }
+}
+
+/// The time in milliseconds since the epoch.
+fn now_ms() -> i64 {
+    i64::try_from(worker::Date::now().as_millis()).unwrap_or(i64::MAX)
+}
+
+/// Remembers a successful lookup of `script`, or finds the one to answer a rate-limited lookup
+/// with ([`lookup::decide`]). The store failing never fails the call: it is logged, and
+/// Cloudflare's answer passes on as it is.
+async fn remember(
+    store: &lookup::EdgeStore,
+    account: &str,
+    script: &str,
+    status: u16,
+    content_type: Option<&str>,
+    body: &[u8],
+) -> Option<lookup::Remembered> {
+    let now = now_ms();
+    let kept = if lookup::rate_limited(status, body) {
+        match store.get().await {
+            Ok(k) => k,
+            Err(e) => {
+                console_error!("cf proxy: could not read the lookup of {script}: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    match lookup::decide(account, script, status, content_type, body, kept, now) {
+        lookup::Lookup::Fill(r) => {
+            if let Err(e) = store.put(&r, now).await {
+                console_error!("cf proxy: could not keep the lookup of {script}: {e}");
+            }
+            None
+        }
+        lookup::Lookup::Replay(r) => Some(r),
+        lookup::Lookup::Pass => None,
     }
 }
 

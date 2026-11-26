@@ -272,3 +272,11 @@ own traffic small:
 
 A transient token therefore costs one create and one delete; the account list is about three
 calls every five minutes rather than six a minute plus three before most mints.
+
+The `10429` on that lookup turned out to be per Worker as well: on 2026-11-26, for Workers
+deployed or rolled back many times that day (`pigeon-platform`, `pigeon-model-gateway`),
+Cloudflare refused `GET /workers/services/{script}` for 12–15 minutes straight while other
+Workers deployed (CI job `VLX0RWKanYN05cYfZiqqIq`, about 07:47–08:00 UTC), and deploy.sh's
+retries added to the count. The deploy proxy now remembers each successful answer to that
+lookup for a day and answers a `10429` on it with the remembered one, marked
+`x-pigeon-served-from-cache: 10429` (docs/proxies.md, "The Worker lookup, remembered").

@@ -50,6 +50,9 @@ pub enum Outcome {
     Refused,
     /// Sent on, or about to be, and it failed.
     Failed,
+    /// Sent on and refused as rate limited, and answered with the answer the proxy remembered
+    /// (`cf` only: the Worker lookup, [`crate::lookup`]).
+    Replayed,
 }
 
 /// One proxied request, for the audit line.

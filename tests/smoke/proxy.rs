@@ -1350,3 +1350,266 @@ fn core_backup_proxy() {
     }
     assert!(!proxy::host_serves(px, px, "/mcp"));
 }
+
+/// The deploy proxy remembers wrangler's pre-upload Worker lookup
+/// (`GET /accounts/{account}/workers/services/{script}`): a successful one is kept (only the
+/// fields wrangler reads), and a lookup Cloudflare refuses with 10429 is answered with it, marked,
+/// for a day. No other call is kept or replayed; an upload carrying migrations forgets it.
+#[test]
+fn deploy_proxy_replays_rate_limited_lookup() {
+    use pigeon_proxies::cf_proxy::{ALLOWED, Allowed};
+    use pigeon_proxies::lookup::{
+        KEEP_FOR_MS, LOOKUP_PATH, Lookup, Remembered, SERVED_FROM_CACHE, decide, forgets,
+        is_lookup, kept_body, key, rate_limited,
+    };
+    use pigeon_proxies::proxy::{Audit, Outcome, audit_line};
+
+    let entry = |method: &str, path: &str| -> &'static Allowed {
+        ALLOWED
+            .iter()
+            .find(|e| e.method == method && e.path == path)
+            .unwrap()
+    };
+    let (a, s) = ("4f94676cb2cbe46fd985b089ca97ea27", "pigeon-platform");
+    let ok = json!({
+        "success": true, "errors": [], "messages": [],
+        "result": {
+            "id": s, "created_on": "2026-01-01T00:00:00Z", "modified_on": "2026-11-26T07:40:00Z",
+            "default_environment": {
+                "environment": "production",
+                "created_on": "2026-01-01T00:00:00Z",
+                "modified_on": "2026-11-26T07:40:00Z",
+                "script": {
+                    "id": s, "tag": "abc123", "tags": ["t1"], "etag": "e1",
+                    "migration_tag": "v6", "last_deployed_from": "wrangler",
+                    "handlers": ["fetch"], "secret_note": "sk-should-not-be-kept",
+                    "tail_consumers": [{"service": "x"}],
+                },
+                "unexpected": {"token": "nope"},
+            },
+            "environments": [{"environment": "production"}],
+        },
+    })
+    .to_string();
+    let limited = json!({
+        "success": false, "messages": [], "result": null,
+        "errors": [{"code": 10429, "message": "Rate limited. Please wait and consider throttling your request speed"}],
+    })
+    .to_string();
+    let now = 1_800_000_000_000;
+
+    // Only the lookup's GET is the lookup; every other allowed call is not.
+    assert!(is_lookup(entry("GET", LOOKUP_PATH)));
+    assert_eq!(
+        ALLOWED.iter().filter(|e| is_lookup(e)).count(),
+        1,
+        "exactly one call is ever remembered"
+    );
+
+    // Fill on a 200: only the fields wrangler reads, never anything else the API answers.
+    let Lookup::Fill(kept) = decide(
+        a,
+        s,
+        200,
+        Some("application/json"),
+        ok.as_bytes(),
+        None,
+        now,
+    ) else {
+        panic!("a successful lookup fills")
+    };
+    assert_eq!((kept.account.as_str(), kept.script.as_str()), (a, s));
+    assert_eq!(kept.until_ms, now + KEEP_FOR_MS);
+    let body: Value = serde_json::from_str(&kept.body).unwrap();
+    let script = &body["result"]["default_environment"]["script"];
+    assert_eq!(script["migration_tag"], "v6");
+    assert_eq!(script["tag"], "abc123");
+    assert_eq!(script["tags"], json!(["t1"]));
+    assert_eq!(script["last_deployed_from"], "wrangler");
+    assert_eq!(
+        body["result"]["default_environment"]["environment"],
+        "production"
+    );
+    assert_eq!(body["success"], true);
+    for gone in [
+        "sk-should-not-be-kept",
+        "tail_consumers",
+        "unexpected",
+        "environments",
+        "nope",
+    ] {
+        assert!(!kept.body.contains(gone), "{gone} is not kept");
+    }
+    // A refusal or a body that is not a lookup fills nothing.
+    assert_eq!(kept_body(b"not json"), None);
+    assert_eq!(kept_body(br#"{"success":false,"result":null}"#), None);
+    assert_eq!(
+        decide(
+            a,
+            s,
+            404,
+            None,
+            br#"{"success":false,"errors":[{"code":10007}]}"#,
+            None,
+            now
+        ),
+        Lookup::Pass
+    );
+
+    // 10429 with a kept lookup: replayed, marked; the audit line says so.
+    assert!(rate_limited(429, limited.as_bytes()));
+    assert!(
+        rate_limited(400, limited.as_bytes()),
+        "by its code, whatever the status"
+    );
+    assert!(!rate_limited(200, limited.as_bytes()));
+    assert!(!rate_limited(429, br#"{"errors":[{"code":104290}]}"#));
+    let later = now + 60_000;
+    assert_eq!(
+        decide(
+            a,
+            s,
+            429,
+            None,
+            limited.as_bytes(),
+            Some(kept.clone()),
+            later
+        ),
+        Lookup::Replay(kept.clone())
+    );
+    assert_eq!(SERVED_FROM_CACHE, "x-pigeon-served-from-cache");
+    let line: Value = serde_json::from_str(&audit_line(
+        None,
+        &Audit {
+            route: "cf",
+            method: "GET",
+            path: "/cf/client/v4/accounts/a/workers/services/pigeon-platform",
+            outcome: Outcome::Replayed,
+            status: Some(200),
+            why: Some(pigeon_proxies::lookup::REPLAYED_WHY),
+        },
+    ))
+    .unwrap();
+    assert_eq!(line["outcome"], "replayed");
+    assert!(line["why"].as_str().unwrap().contains("10429"));
+
+    // 10429 with nothing kept, or kept for another Worker or account: passed through.
+    assert_eq!(
+        decide(a, s, 429, None, limited.as_bytes(), None, later),
+        Lookup::Pass
+    );
+    assert_eq!(
+        decide(
+            a,
+            "pigeon-sites",
+            429,
+            None,
+            limited.as_bytes(),
+            Some(kept.clone()),
+            later
+        ),
+        Lookup::Pass,
+        "bound to the script"
+    );
+    assert_eq!(
+        decide(
+            "other",
+            s,
+            429,
+            None,
+            limited.as_bytes(),
+            Some(kept.clone()),
+            later
+        ),
+        Lookup::Pass,
+        "bound to the account"
+    );
+    // Another error is never replayed over.
+    assert_eq!(
+        decide(
+            a,
+            s,
+            500,
+            None,
+            br#"{"errors":[{"code":10013}]}"#,
+            Some(kept.clone()),
+            later
+        ),
+        Lookup::Pass
+    );
+    // Keys are per account and script.
+    assert_ne!(key("h", a, s), key("h", a, "pigeon-sites"));
+    assert_ne!(key("h", a, s), key("h", "other", s));
+    assert!(
+        !key("proxy.pigeon.dev", a, s).contains("/cf/"),
+        "never a routed path"
+    );
+
+    // Expiry: a day, then passed through.
+    assert!(kept.answers(a, s, now + KEEP_FOR_MS - 1));
+    assert_eq!(
+        decide(
+            a,
+            s,
+            429,
+            None,
+            limited.as_bytes(),
+            Some(kept.clone()),
+            now + KEEP_FOR_MS
+        ),
+        Lookup::Pass
+    );
+    // A newer success replaces the one kept.
+    let Lookup::Fill(newer) = decide(a, s, 200, None, ok.as_bytes(), Some(kept.clone()), now + 10)
+    else {
+        panic!("every successful lookup fills")
+    };
+    assert_eq!(newer.kept_at_ms, now + 10);
+    let _: Remembered = serde_json::from_value(serde_json::to_value(&newer).unwrap()).unwrap();
+
+    // Invalidation: a successful upload carrying migrations forgets; one without does not;
+    // reads, failures and other writes never do.
+    let multipart = |meta: &Value| {
+        format!(
+            "--B\r\nContent-Disposition: form-data; name=\"metadata\"\r\n\r\n{meta}\r\n\
+             --B\r\nContent-Disposition: form-data; name=\"index.js\"; filename=\"index.js\"\r\n\
+             Content-Type: application/javascript+module\r\n\r\nexport default {{}}\r\n--B--\r\n"
+        )
+        .into_bytes()
+    };
+    let ct = Some("multipart/form-data; boundary=B");
+    let put = entry("PUT", "/accounts/{account}/workers/scripts/{script}");
+    let versions = entry(
+        "POST",
+        "/accounts/{account}/workers/scripts/{script}/versions",
+    );
+    let moving = multipart(
+        &json!({"main_module": "index.js", "migrations": {"old_tag": "v6", "new_tag": "v7", "steps": []}}),
+    );
+    let staying = multipart(&json!({"main_module": "index.js", "bindings": []}));
+    assert!(forgets(put, 200, ct, &moving));
+    assert!(forgets(versions, 200, ct, &moving));
+    assert!(!forgets(put, 200, ct, &staying));
+    assert!(!forgets(versions, 200, ct, &staying));
+    assert!(
+        !forgets(put, 400, ct, &moving),
+        "a refused upload moves nothing"
+    );
+    assert!(
+        forgets(put, 200, ct, b"unreadable"),
+        "unreadable metadata counts as moving"
+    );
+    assert!(forgets(put, 200, None, &staying));
+    for e in ALLOWED.iter().filter(|e| {
+        !matches!(
+            (e.method, e.path),
+            ("PUT", "/accounts/{account}/workers/scripts/{script}")
+                | (
+                    "POST",
+                    "/accounts/{account}/workers/scripts/{script}/versions"
+                )
+        )
+    }) {
+        assert!(!forgets(e, 200, ct, &moving), "{} {}", e.method, e.path);
+    }
+}

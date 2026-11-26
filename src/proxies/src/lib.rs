@@ -1,6 +1,7 @@
 //! pigeon's proxies on the proxy host: the git proxy (`/git/`, [`git_proxy`]) and the Cloudflare
 //! API proxy (`/cf/`, [`cf_proxy`]), with the proxy credential's checks and the audit line
-//! ([`proxy`]). Two Workers serve them: core (`pigeon-platform`), and the proxy Worker
+//! ([`proxy`]), and the deploy proxy's remembered Worker lookups ([`lookup`]). Two Workers
+//! serve them: core (`pigeon-platform`), and the proxy Worker
 //! (`pigeon-proxy`, docs/plans/workers-split.md, phase 6). The request handling is the same
 //! code in both; what differs is the [`Host`] each passes in, which answers who a credential
 //! belongs to and hands out the account to mint with. Core's host reads its own Directory,
@@ -13,6 +14,7 @@
 pub mod cache;
 pub mod cf_proxy;
 pub mod git_proxy;
+pub mod lookup;
 pub mod proxy;
 
 use std::future::Future;
