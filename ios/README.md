@@ -5,8 +5,9 @@ A SwiftUI app for platform.pigeon.dev, being rebuilt from the approved iPhone mo
 passkey step on the platform's own page). It reads through the console's `/app/op` and writes
 through `/console/write/<action>/{begin,finish}` with its OAuth bearer (`ConsoleAPI`), each write
 approved with the person's passkey in one confirm sheet. The tabs are the areas of the selected
-instance's `console_manifest`, in order (the system More tab takes the rest); the instance pill at
-the top left is the only instance picker, the avatar opens the account sheet. Areas not yet ported
+instance's `console_manifest`: up to three in the app's own tab bar and the rest in More, with a
+layout the person edits per instance (More › Edit). The switcher pinned at the leading edge of the
+bar is the only instance picker and opens one sheet for the instance and the account. Areas not yet ported
 show a placeholder that links to the same page on the web console. Colours are the console's tokens
 (`Assets.xcassets/Theme`, from `shell.css`, through `Theme`).
 
@@ -16,6 +17,12 @@ This code cannot be compiled on Linux. It is outside the Rust gate: `sh ci/runne
 compiles Swift. The gate checks one thing only: that `Pigeon/Design/Tokens.swift` has not drifted
 from the web design tokens (the smoke scenario `platform_design_tokens_for_ios`). The redesigned
 screens use `Theme` instead; `Tokens.swift` goes with its check at the redesign's release phase.
+
+## Tests
+
+`PigeonTests` covers the tab layout (`TabLayout`, `TabLayoutStore`). Run it with Product › Test in
+Xcode, or `xcodebuild test -project Pigeon.xcodeproj -scheme Pigeon -destination 'platform=iOS
+Simulator,name=iPhone 17'` after `xcodegen generate`.
 
 ## Build on a Mac
 

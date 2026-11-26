@@ -17,19 +17,19 @@ platform side of the app (OAuth, APNs, signing, release) stays as [ios.md](ios.m
 | Id | Decision |
 | --- | --- |
 | A1 | Scope: every page of the web console ([console-redesign.md](console-redesign.md)), simplified for a phone. iPhone only. |
-| A2 | Navigation is built only from `console_manifest` for the selected instance, tabs in strict manifest order; the system More tab takes the areas past the fourth. No pinning, no hard-coded tabs. |
-| A3 | One instance picker: the glass pill at the top left. Settings › Instances goes. |
+| A2 | Navigation is built only from `console_manifest` for the selected instance; no hard-coded tabs. Revised: each instance has its own tab layout. Up to three of its areas sit in the bar (the first three in manifest order until the person changes them), the rest in More, and the person pins, unpins and reorders them in More › Edit. Any area can leave the bar, Inbox included. |
+| A3 | One instance picker. Revised: the switcher pinned at the leading edge of the tab bar, which opens one sheet for the instance and the account (the separate avatar and account sheet go). Settings › Instances goes. |
 | A4 | Match the web: Inbox = approvals and landings; runs waiting on the person live in Sessions; grant expiry in Cost; breaking updates in Capabilities. "Answer a run's question" (`ai_agents_answer`) and "Pause all agents" are dropped (added to the web first if they come back). |
 | A5 | One confirm sheet (target, exact change, then the system passkey) for every write; danger actions use a red button. One show-once sheet for tokens and invites. |
 | A6 | Notifications open the confirm sheet for their request; they never approve or deny by themselves. |
-| A7 | Liquid Glass only on the bars, the tab bar, the instance pill, sheets and toasts; content is dense inset-grouped lists. |
+| A7 | Liquid Glass only on the bars, the tab bar, the switcher, sheets and toasts; content is dense inset-grouped lists. |
 | A8 | The same reads and writes, and the same passkey binding, as the web console: reads through `/app/op`, writes through `/console/write/<action>/{begin,finish}`, both with the app's OAuth bearer (a parallel server branch makes every op and action below accept it). |
 
 ## Screens (from the mock-up)
 
 | Batch | Screen | Reads | Writes |
 | --- | --- | --- | --- |
-| 1 | Navigation: tab bar, instance switcher, account sheet, More | `instances_list`, `console_manifest` | none |
+| 1 | Navigation: tab bar with the switcher, instance and account sheet, More, tab editor | `instances_list`, `console_manifest` | none |
 | 1 | Inbox: approvals and landings for the instance (all of them on home) | `app_inbox` | `approval-approve`, `approval-deny`, `land-approve` |
 | 2 | Overview: facts and the record | `instances_list`, `app_linked_details` | `instance-put`, `linked-unlink` |
 | 2 | Capabilities: enable, configure, upgrade, disable as one record diff | `capabilities_versions`, `capabilities_upgrade_plan` | `instance-put` |
@@ -46,26 +46,40 @@ platform side of the app (OAuth, APNs, signing, release) stays as [ios.md](ios.m
 
 - `ManifestStore` loads `instances_list`, then `console_manifest` for the selected instance (kept
   in `UserDefaults` under `selectedInstance`; the home instance otherwise). The manifest is the
-  only input: `AppShell` builds one `Tab` per area in manifest order, value = the area id; the
-  system More tab takes the overflow. The Inbox badge is `inbox.count`. The manifest is re-read
-  when the app comes to the foreground.
+  only input: `AppShell` splits its areas with the instance's `TabLayout` (`TabLayoutStore`,
+  `UserDefaults` key `tabLayouts`, by instance id) into up to three in the bar and the rest in
+  More. A stored layout is matched to the manifest each time: areas the instance no longer has
+  are dropped, new ones go to the end of More. The Inbox badge is `inbox.count`, on More while
+  Inbox is not in the bar. The manifest is re-read when the app comes to the foreground.
+- The system tab bar is hidden (`.toolbar(.hidden, for: .tabBar)` in each tab): it has no room
+  for the switcher and cannot be customized on iPhone. `ShellBar` draws the bar instead: the
+  switcher (the instance's letter, the person's initials on its corner) pinned at the leading
+  edge, then the pinned areas and More, in one glass container on iOS 26. Each tab's scroll
+  content keeps clear of it (`contentMargins`). The system bar's minimise-on-scroll is not kept.
+- More lists the other areas and pushes them (`MoreRoute.area`); its Edit pushes the tab editor
+  (`MoreRoute.editTabs`): the bar's areas and More's, each reordered by dragging, `−` and `+` to
+  move an area between them (the bar holds three and never fewer than one), and Reset.
 - `AreaSymbol` maps area ids to SF Symbols; an unknown id gets `square.dashed`, so a new area on
   the server still gets a tab.
-- Each tab is a `NavigationStack` whose root is `AreaRoot`: the area's large title, the
-  instance pill (`.topBarLeading`) and the avatar (`.topBarTrailing`). The stacks are keyed by
-  instance and area, so switching instance starts every tab afresh.
+- Each tab is a `NavigationStack` whose root is `AreaRoot`: the area's large title only. The
+  stacks are keyed by instance and area, so switching instance starts every tab afresh, and
+  More's pushed areas are cleared.
+- `openArea(id)` (and a tapped notification, for Inbox) selects the area's tab when it is in the
+  bar, else selects More with the area pushed.
 - An area's views (Site › Sites, Deployments, Visitors) are a segmented `Picker` (a menu for four
   or more), drawn by the screen as the first section of its list (`ViewPicker`).
-- The instance pill opens the switcher sheet, the only instance picker: every instance, its
-  waiting count (from its manifest's `inbox.count`), a tick on the current one, and All
-  instances when the manifest has the Instances area.
-- M5: switching to an instance without the open area opens Overview with a toast ("Docs site has
+- The switcher opens the instance and account sheet, the only instance picker: who is signed
+  in; every instance, its waiting count (from its manifest's `inbox.count`), a tick on the
+  current one, and All instances when the manifest has the Instances area; then settings and
+  sign out (below).
+- Switching keeps the open area when the new instance has it, in the bar or in More (by that
+  instance's layout). M5: switching to an instance without the open area opens Overview with a toast ("Docs site has
   no CI · showing Overview").
 - M4: a view whose manifest entry carries `upgrade` shows `UpgradeNotice`, whose button opens
   Capabilities.
-- The avatar opens the account sheet: who is signed in (`users_whoami`), notifications (opens
-  the system settings), theme (System, Light, Dark), passkeys (count from `app_people`; opens
-  Access), app version, sign out.
+- The same sheet's settings: notifications (opens the system settings), Tab bar (opens the tab
+  editor), theme (System, Light, Dark), passkeys (count from `app_people`; opens Access), app
+  version; then sign out. Who is signed in comes from `users_whoami`.
 
 ## API contract (what the client is coded against)
 

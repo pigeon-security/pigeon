@@ -2,13 +2,13 @@ import SwiftUI
 
 // The shared components of the redesigned app (docs/plans/ios-app-redesign.md). Content is dense
 // inset-grouped lists on the system background; glass is only for bars, the tab bar, the
-// instance pill, sheets and toasts.
+// switcher, sheets and toasts.
 
 // MARK: - Glass
 
 extension View {
     /// Liquid Glass in `shape` on iOS 26 and later; the ultra-thin material before. For the
-    /// instance pill, toasts and other floating chrome only, never for content.
+    /// switcher, the tab bar, toasts and other floating chrome only, never for content.
     @ViewBuilder
     func glass<S: Shape>(in shape: S, interactive: Bool = false) -> some View {
         if #available(iOS 26.0, *) {
@@ -20,7 +20,7 @@ extension View {
     }
 }
 
-/// A capsule of glass around `content`: the instance pill, a toast.
+/// A capsule of glass around `content`: a toast.
 struct GlassPill<Content: View>: View {
     var interactive = false
     @ViewBuilder let content: Content
@@ -284,7 +284,8 @@ struct UpgradeNotice: View {
 }
 
 extension EnvironmentValues {
-    /// Switches to the tab of area `id`, when the selected instance has it. Set by the root.
+    /// Opens area `id` of the selected instance, when it has it: its tab when the area is in the
+    /// bar, else pushed on More. Set by the root.
     @Entry var openArea: (String) -> Void = { _ in }
 }
 

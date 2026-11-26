@@ -125,7 +125,7 @@ struct InstancesScreen: View {
         return parts.joined(separator: " · ")
     }
 
-    /// Selects the instance (as the instance pill does) and opens its Overview.
+    /// Selects the instance (as the switcher does) and opens its Overview.
     private func open(_ r: Row) async {
         if r.id == store.selected?.id {
             openArea("overview")

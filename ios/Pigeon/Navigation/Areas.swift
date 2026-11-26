@@ -14,8 +14,8 @@ struct AreaContext {
 
 /// The screen for each area id. A screen agent ports an area by adding its case here; every
 /// other area shows `AreaPlaceholder`, so the app builds and runs between phases. Each screen
-/// is the root of its tab's `NavigationStack`, under the large title, the instance pill and the
-/// avatar that `AreaRoot` adds; it draws a `List` (`.insetGrouped`) whose first section holds
+/// is the root of its tab's `NavigationStack` (or pushed on More), under the large title that
+/// `AreaRoot` adds; it draws a `List` (`.insetGrouped`) whose first section holds
 /// `ViewPicker` when the area has views.
 enum AreaRegistry {
     @MainActor
@@ -42,7 +42,7 @@ enum AreaRegistry {
     }
 }
 
-/// The SF Symbol for an area's tab. Only this map is in the app; an area the app does not know
+/// The SF Symbol for an area, in the tab bar, More and the tab editor. Only this map is in the app; an area the app does not know
 /// gets the generic symbol, so a new area on the server still gets a tab.
 enum AreaSymbol {
     static func name(for id: String) -> String {
@@ -66,8 +66,9 @@ enum AreaSymbol {
     }
 }
 
-/// The root of one tab: the area's screen under its large title, with the instance pill and the
-/// avatar in the bar. Keeps which of the area's views is selected.
+/// The root of one area, in its own tab or pushed on More: the area's screen under its large
+/// title. The switcher is not here; it is pinned beside the tab bar (`ShellBar`). Keeps which of
+/// the area's views is selected.
 struct AreaRoot: View {
     let area: Area
     let instance: ConsoleManifest.Instance
@@ -83,10 +84,6 @@ struct AreaRoot: View {
         AreaRegistry.content(AreaContext(area: area, instance: instance, viewID: $viewID))
             .navigationTitle(area.title)
             .navigationBarTitleDisplayMode(.large)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) { InstancePill() }
-                ToolbarItem(placement: .topBarTrailing) { AvatarButton() }
-            }
             .onChange(of: area.views) { _, views in
                 if !views.contains(where: { $0.id == viewID }) { viewID = views.first?.id ?? "" }
             }

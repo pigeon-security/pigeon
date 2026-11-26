@@ -10,6 +10,8 @@ targets:
     type: application
     platform: iOS
     sources: [Pigeon]
+    scheme:
+      testTargets: [PigeonTests]
     # XcodeGen writes this file from `properties` on every run.
     entitlements:
       path: Pigeon/Pigeon.entitlements
@@ -38,3 +40,15 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         # The console's accent (Assets.xcassets/Theme/accent), for system controls.
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: accent
+  # Unit tests for logic that needs no UI (the tab layout). Run with Product › Test in Xcode.
+  PigeonTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources: [PigeonTests]
+    dependencies:
+      - target: Pigeon
+    settings:
+      base:
+        SWIFT_VERSION: "5.0"
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: dev.pigeon.app.tests
