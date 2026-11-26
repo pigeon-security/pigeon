@@ -1,0 +1,27 @@
+{
+  "_recorded_ms": 1795706800000,
+  "instance": "notes",
+  "job": {
+    "id": "00000000000000000000000000000001",
+    "state": "done",
+    "health": "passed",
+    "provider_state": "absent",
+    "stage": "version_check",
+    "estimated_usd": 0.02,
+    "started_ms": 1795705000000,
+    "deadline_ms": 1795706800000,
+    "audit_status": "stored",
+    "events": [
+      {
+        "at_ms": 1795705060000,
+        "stage": "cloud_init",
+        "outcome": "ok"
+      },
+      {
+        "at_ms": 1795705120000,
+        "stage": "version_check",
+        "outcome": "ok"
+      }
+    ]
+  }
+}

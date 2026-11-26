@@ -36,6 +36,21 @@
       ]
     },
     {
+      "id": "jobs",
+      "title": "Jobs",
+      "group": "instance",
+      "key": "j",
+      "views": [
+        {
+          "id": "runs",
+          "title": "Runs",
+          "order": 10,
+          "capability": "jobs",
+          "upgrade": null
+        }
+      ]
+    },
+    {
       "id": "ingest",
       "title": "Ingest",
       "group": "instance",

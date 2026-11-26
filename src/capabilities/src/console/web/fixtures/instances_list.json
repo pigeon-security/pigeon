@@ -172,6 +172,7 @@
       "bucket": "notes-raw",
       "destination_bucket": "notes-site"
     },
+    "capabilities": { "jobs": { "audit_bucket": "notes-audit" } },
     "version": 2
   }
 ]

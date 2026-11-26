@@ -1,0 +1,15 @@
+{
+  "_recorded_ms": 1795706800000,
+  "instance": "notes",
+  "job": {
+    "id": "00000000000000000000000000000002",
+    "state": "done",
+    "health": "passed",
+    "provider_state": "absent",
+    "stage": null,
+    "estimated_usd": null,
+    "started_ms": 1795701400000,
+    "deadline_ms": 1795703200000,
+    "events": []
+  }
+}
