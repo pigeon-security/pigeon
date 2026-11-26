@@ -82,10 +82,10 @@ reason = "what the gate runs changes with the approval of the person's delegate"
 [[rule]]
 id = "risky-tools-need-passkey"
 actions = ["call_tool"]
-targets = ["deploy_token", "source_token", "setup_platform", "users_remove", "users_admin", "passkeys_remove", "oauth_revoke"]
+targets = ["source_token", "setup_platform", "users_remove", "users_admin", "instance_member_set", "passkeys_remove", "oauth_revoke"]
 decision = "allow"
 approval = "passkey"
-reason = "break-glass tokens, platform setup, removals and admin changes run only once the person approves that exact call with their passkey"
+reason = "break-glass tokens, platform setup, removals, admin and membership changes run only once the person approves that exact call with their passkey"
 
 [[rule]]
 id = "tools-run"
