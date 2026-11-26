@@ -170,7 +170,7 @@ each taking `instance`:
   manifest lists the same tools, so the tool list stays in one place.
 - **Policy.** These tools read personal data. Whether any of them should need the person's
   passkey per call (`call_tool` in `.pigeon/policy.toml`, as tool-approvals.md does for
-  `deploy_token`) is the person's decision; this plan proposes none and changes no policy. A
+  `source_token`) is the person's decision; this plan proposes none and changes no policy. A
   follow-up lists the candidates.
 - **Results are bounded**: at most 200 items per page with a cursor, snippets not bodies, and
   originals only through `data_item`'s short-lived link, so a tool answer never carries a mailbox.

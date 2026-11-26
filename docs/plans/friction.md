@@ -219,11 +219,11 @@ the stand-in uses the commit's own allowlist, so it passes in both cases.
 ### Security model
 
 - **Who may call `land`.** An MCP caller with a person behind it: a person, or a service user
-  linked to one (`acting_for`). Every MCP caller can already mint a deploy token
-  (`deploy_token`), and every proxy-credential holder can already push `main` forward and run
-  `wrangler deploy` through `/cf/`; `land` adds no power to either, and puts tests, a record and
-  an optional approval in front of what they can already do. (Retiring `deploy_token` once
-  `land` works is a separate decision for the person.)
+  linked to one (`acting_for`). When this was written every MCP caller
+  could mint a deploy token (`deploy_token`, retired on 26 November), and every proxy-credential
+  holder can push `main` forward and run `wrangler deploy` through `/cf/`; `land` adds no power
+  to that, and puts tests, a record and an optional approval in front of what they can already
+  do.
 - **What stops a bad commit from deploying.** The commit must be on a `claude/` branch and a
   fast-forward of `main`; the `test` job must pass on exactly that commit; the `deploy` job builds
   exactly that commit (its job token fetches nothing else); the proxy allows only the allowlisted
@@ -330,7 +330,8 @@ deploy from a Container (time and memory of a release build on standard-4); the 
 1. Build and push base image v3 from `ci/image/Dockerfile`, and give the digest (it goes into
    `wrangler.toml` through a `land`).
 2. Say whether to require approval to land (off by default; the console's Settings → Landing).
-3. Optionally, decide whether `deploy_token` stays once `land` has worked.
+3. Optionally, decide whether `deploy_token` stays once `land` has worked. **Decided (26
+   November):** retired; see "Break-glass" in `tool-approvals.md`.
 
 ## As built
 

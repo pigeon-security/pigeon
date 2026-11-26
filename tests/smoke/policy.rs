@@ -369,9 +369,8 @@ fn core_run_grant_revoked_when_the_run_ends() {
     assert_ne!(run_branch_prefix("ab"), run_branch_prefix("abc"));
 }
 
-/// The seven tools the person gates with their passkey (docs/plans/tool-approvals.md).
-const GATED: [&str; 7] = [
-    "deploy_token",
+/// The six tools the person gates with their passkey (docs/plans/tool-approvals.md).
+const GATED: [&str; 6] = [
     "source_token",
     "setup_platform",
     "users_remove",
@@ -387,7 +386,7 @@ fn tool_call_approvals() {
     use pigeon_core::approval::{self, Kind, Refusal, State};
     use pigeon_core::policy::{self, Approval, Decision};
 
-    // The person's rules: each of the six needs the passkey; every other tool runs as before.
+    // The person's rules: each of the five needs the passkey; every other tool runs as before.
     let p = policy::parse(pigeon_capabilities::policy::TEXT).unwrap();
     for tool in GATED {
         let a = p.evaluate(&vars(), &request("call_tool", tool, None));
@@ -403,7 +402,7 @@ fn tool_call_approvals() {
         let a = p.evaluate(&vars(), &request("call_tool", tool, Some("passkey")));
         assert_eq!(a.decision, Decision::Allow, "{tool} with the passkey");
     }
-    for tool in ["land", "policy_check", "revoke_api_token", "call"] {
+    for tool in ["land", "policy_check", "source_revoke", "call"] {
         let a = p.evaluate(&vars(), &request("call_tool", tool, None));
         assert_eq!(
             (a.decision, a.rule.as_deref()),
@@ -413,14 +412,14 @@ fn tool_call_approvals() {
     }
 
     // The policy built into the Worker has the person's rules: every call is asked about, the
-    // six are gated, and only their schemas gain the approval argument.
+    // five are gated, and only their schemas gain the approval argument.
     assert!(approvals::asked());
     for tool in GATED {
         assert!(approvals::gated(tool), "{tool}");
     }
     assert!(!approvals::gated("land") && !approvals::gated("call"));
     let mut tools = vec![
-        pigeon_core::mcp::Tool::bare("deploy_token", "mint"),
+        pigeon_core::mcp::Tool::bare("source_token", "mint"),
         pigeon_core::mcp::Tool::bare("land", "land"),
     ];
     approvals::annotate(&mut tools);
@@ -436,20 +435,23 @@ fn tool_call_approvals() {
     );
 
     // A call's digest is of the call: key order does not matter; arguments and caller do.
-    let args = json!({ "ttl": 300, "permissions": ["Workers Scripts Write"] });
-    let digest = approval::call_digest("deploy_token", &args, "svc");
+    let args = json!({ "ttl": 300, "access": "write" });
+    let digest = approval::call_digest("source_token", &args, "svc");
     assert_eq!(
         digest,
         approval::call_digest(
-            "deploy_token",
-            &json!({ "permissions": ["Workers Scripts Write"], "ttl": 300 }),
+            "source_token",
+            &json!({ "access": "write", "ttl": 300 }),
             "svc"
         )
     );
-    let other_args = approval::call_digest("deploy_token", &json!({ "ttl": 301 }), "svc");
+    let other_args = approval::call_digest("source_token", &json!({ "ttl": 301 }), "svc");
     assert_ne!(digest, other_args);
-    assert_ne!(digest, approval::call_digest("deploy_token", &args, "svc2"));
-    assert_ne!(digest, approval::call_digest("source_token", &args, "svc"));
+    assert_ne!(digest, approval::call_digest("source_token", &args, "svc2"));
+    assert_ne!(
+        digest,
+        approval::call_digest("setup_platform", &args, "svc")
+    );
 
     // The person sees the call with secrets redacted; the digest is of the call as asked.
     let shown =
@@ -464,9 +466,9 @@ fn tool_call_approvals() {
         approval::new(
             "ap1".into(),
             Kind::ToolCall,
-            "deploy_token".into(),
+            "source_token".into(),
             digest.clone(),
-            json!({ "tool": "deploy_token", "args": args, "caller": "svc" }),
+            json!({ "tool": "source_token", "args": args, "caller": "svc" }),
             Value::Null,
             "svc".into(),
             Some("willow".into()),
@@ -630,7 +632,7 @@ fn platform_approvals_list_and_bearer_writes() {
     let mut used = make("u1", Kind::ToolCall, "old_tool");
     used.state = State::Used;
     let open = vec![
-        make("c1", Kind::ToolCall, "deploy_token"),
+        make("c1", Kind::ToolCall, "source_token"),
         make("d1", Kind::InstanceDraft, "noisypigeon"),
         make("p1", Kind::LinkedPlan, "noisypigeon"),
         used,
@@ -638,7 +640,7 @@ fn platform_approvals_list_and_bearer_writes() {
     let out = listing(&open);
     assert_eq!(out["calls"].as_array().unwrap().len(), 1);
     assert_eq!(out["calls"][0]["id"], "c1");
-    assert_eq!(out["calls"][0]["tool"], "deploy_token");
+    assert_eq!(out["calls"][0]["tool"], "source_token");
     assert_eq!(out["calls"][0]["digest"], "0123456789ab");
     assert_eq!(out["calls"][0]["acting_for"], "willow");
     assert_eq!(out["drafts"][0]["instance"], "noisypigeon");
@@ -656,7 +658,7 @@ fn platform_approvals_list_shows_run() {
         approval::new(
             id.into(),
             Kind::ToolCall,
-            "deploy_token".into(),
+            "source_token".into(),
             "0123456789abcdef0123".into(),
             summary,
             Value::Null,
@@ -960,85 +962,6 @@ fn platform_branch_patch() {
     }
 }
 
-/// Area: approvals / deploys. The `deploy` preset of `deploy_token` is the deploy proxy's
-/// permission table plus Account Settings Read, holds what a direct core deploy needed live, and
-/// shows on the approval card.
-#[test]
-fn platform_deploy_token_preset() {
-    use pigeon_capabilities::approvals::listing;
-    use pigeon_capabilities::deploys::{PERMISSIONS, grants, preset};
-    use pigeon_core::approval::{self, Kind};
-
-    let deploy = preset("deploy").unwrap();
-    let mut table: Vec<&str> = pigeon_proxies::cf_proxy::ALLOWED
-        .iter()
-        .flat_map(|a| a.permissions.iter().copied())
-        .chain(["Account Settings Read"])
-        .collect();
-    table.sort_unstable();
-    table.dedup();
-    let mut sorted = deploy.clone();
-    sorted.sort_unstable();
-    assert_eq!(sorted, table, "the preset is the proxy's table");
-    let mut scoped: Vec<&str> = pigeon_capabilities::split::purpose_permissions("cf_deploy")
-        .unwrap()
-        .iter()
-        .copied()
-        .chain(["Account Settings Read"])
-        .collect();
-    scoped.sort_unstable();
-    assert_eq!(
-        sorted, scoped,
-        "the preset is what the proxy Worker's cf_deploy holds"
-    );
-    // What a direct core deploy held when it worked (2026-11-23).
-    for p in PERMISSIONS
-        .iter()
-        .chain(&["Workers Containers Write", "Queues Read"])
-    {
-        assert!(deploy.contains(p), "{p}");
-    }
-    assert!(preset("core-deploy").is_none());
-
-    let (p, ttl) = grants(&json!({})).unwrap();
-    assert_eq!((p, ttl), (PERMISSIONS.map(String::from).to_vec(), 1_800));
-    let (p, ttl) = grants(&json!({ "preset": "deploy", "ttl": 9_999 })).unwrap();
-    assert_eq!(p.len(), deploy.len());
-    assert_eq!(ttl, 3_600);
-    let (p, _) = grants(&json!({ "permissions": ["Workers Scripts Read"] })).unwrap();
-    assert_eq!(p, vec!["Workers Scripts Read".to_string()]);
-    let both = grants(&json!({ "preset": "deploy", "permissions": ["Workers Scripts Read"] }));
-    assert!(both.unwrap_err().contains("not both"));
-    let unknown = grants(&json!({ "preset": "everything" })).unwrap_err();
-    assert!(unknown.contains("no preset `everything`") && unknown.contains("deploy"));
-
-    let card = approval::new(
-        "g1".into(),
-        Kind::ToolCall,
-        "deploy_token".into(),
-        "0123456789abcdef0123".into(),
-        json!({
-            "args": { "preset": "deploy", "ttl": 900 },
-            "caller": "svc",
-            "grants": { "permissions": deploy, "ttl_secs": 900 },
-        }),
-        Value::Null,
-        "svc".into(),
-        None,
-        1_000,
-    );
-    let out = listing(&[card]);
-    assert_eq!(out["calls"][0]["grants"]["ttl_secs"], 900);
-    assert_eq!(
-        out["calls"][0]["grants"]["permissions"]
-            .as_array()
-            .unwrap()
-            .len(),
-        deploy.len()
-    );
-    assert_eq!(out["calls"][0]["args"]["preset"], "deploy");
-}
-
 #[test]
 fn platform_approvals_list_shows_other_kinds() {
     use pigeon_capabilities::approvals::listing;
@@ -1091,8 +1014,8 @@ fn platform_approvals_list_plain_sentences() {
     };
     let who = json!("Sample Person");
     assert_eq!(
-        plain_call("deploy_token", &json!({}), &who),
-        "Give a deploy token to Sample Person"
+        plain_call("source_token", &json!({}), &who),
+        "Give a source token to Sample Person"
     );
     assert_eq!(
         plain_call("passkeys_remove", &json!({ "id": "pk1" }), &Value::Null),

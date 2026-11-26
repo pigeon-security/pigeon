@@ -419,7 +419,7 @@ fn ai_agents_loop_budgets_tools_and_turns() {
         tools::kind(Role::Planner, "spawn_executor"),
         Some(Kind::Agent)
     );
-    assert_eq!(tools::kind(Role::Planner, "deploy_token"), None);
+    assert_eq!(tools::kind(Role::Planner, "source_token"), None);
     let pigeon = vec![
         (
             "ci_submit".to_string(),
@@ -690,7 +690,7 @@ fn ai_agents_loop_budgets_tools_and_turns() {
     // ---- the Worker side's pure parts ----
     use pigeon_ai_agents::{object, prompts, sandbox, service};
     // A passkey wait, read from dispatch's own words.
-    let refusal = "`deploy_token` needs the person's passkey for this call: approval `aP3x_9-k` waits on the console's Approvals tab until 14:32 UTC. Once approved, call `deploy_token` again with the same arguments and \"approval\": \"aP3x_9-k\"; `approvals_status` says where it stands.";
+    let refusal = "`source_token` needs the person's passkey for this call: approval `aP3x_9-k` waits on the console's Approvals tab until 14:32 UTC. Once approved, call `source_token` again with the same arguments and \"approval\": \"aP3x_9-k\"; `approvals_status` says where it stands.";
     assert_eq!(object::approval_id(refusal).as_deref(), Some("aP3x_9-k"));
     assert_eq!(object::approval_id("ci_submit: no such job"), None);
     assert_eq!(object::role_named("mechanical"), Role::Mechanical);

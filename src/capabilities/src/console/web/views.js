@@ -38,8 +38,6 @@
         effect: "Approving lets this exact call run once, if its caller calls again within 10 minutes.",
         detail: () => el("div", { class: "cols" }, facts([
           c.run && ["Run", code(c.run)],
-          c.grants?.permissions && ["Token permissions", c.grants.permissions.join(", ")],
-          c.grants?.ttl_secs && ["Token lifetime", `${c.grants.ttl_secs} s`],
           ["Asked", when(c.created_ms)],
           ["Call digest", code(c.digest)],
         ]), el("pre", { class: "code", text: JSON.stringify(c.args || {}, null, 2) })),

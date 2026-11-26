@@ -37,7 +37,7 @@ TTL. A linked account (`account.bearer` set) never mints: it uses its granted be
 | `core/access.rs`, `custom_domain.rs`, `mcp_portal.rs`, `queues.rs`, `r2.rs`, `registry.rs`, `secrets_store.rs`, `zones.rs` | one purpose each | 3600 s | `finish` |
 | `capabilities/observability.rs` (2 sites) | `observability` | 300 s | `finish` |
 | `capabilities/secrets.rs` (check a pasted key) | a probe | 60 s | revoked at once |
-| `capabilities/deploys.rs` (`deploy_token`, for the person) | the person's purpose | the person's TTL | by the `deploy_token` revoke tool, or at TTL: the person's, never swept early |
+| `capabilities/deploys.rs` (`deploy_token`, for the person; retired 26 Nov) | the person's purpose | the person's TTL | by `revoke_api_token`, or at TTL: the person's, never swept early |
 | `capabilities/linked.rs` (2 sites) | linked-account work | 3600 s | `finish` (or none: a linked account's bearer) |
 | `models/lib.rs` `open_call_token` with a parent token | `worker-workers_ai` | 900 s | `close_call_token` after the call |
 

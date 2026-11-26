@@ -3,7 +3,7 @@
   "calls": [
     {
       "id": "apv_9c1e04",
-      "tool": "deploy_token",
+      "tool": "source_token",
       "caller": "Claude Code",
       "acting_for": "Rowan Hale",
       "run": "r_7f3a2c",
@@ -11,19 +11,8 @@
       "expires_ms": 1795600240000,
       "digest": "sha256:4e1b9a00c2",
       "args": {
-        "account": "docs",
-        "permissions": [
-          "workers:write",
-          "r2:read"
-        ],
-        "ttl_secs": 3600
-      },
-      "grants": {
-        "permissions": [
-          "workers:write",
-          "r2:read"
-        ],
-        "ttl_secs": 3600
+        "access": "write",
+        "ttl": 300
       }
     }
   ],

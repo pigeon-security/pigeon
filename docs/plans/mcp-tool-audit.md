@@ -20,6 +20,10 @@ tools.
 134 tools were read (the brief said about 133). Nothing meets (a), (b) or (c). Two tools have an
 argument or a message that is wrong. Both are small fixes.
 
+**Later (26 November):** the person retired the `deploys` capability (`deploy_token`,
+`revoke_api_token`) as superseded; see "Break-glass" in `tool-approvals.md`. The counts above are
+the audit's, as it was.
+
 ## How it was checked
 
 - Every `Tool` declaration in `src/capabilities/src`, and the tool lists of `src/ci`,
@@ -99,8 +103,8 @@ Evidence is the line that declares the tool. "none met" means none of (a), (b), 
 | `mcp_conformance` | keep | none met | `architecture.rs:79` | none |
 | `changelog` | keep | none met | `src/capabilities/src/changelog.rs:295` | none |
 | `changelog_update` | keep | none met | `changelog.rs:305` | none |
-| `deploy_token` | keep | passkey-gated | `src/capabilities/src/deploys.rs:120` | none |
-| `revoke_api_token` | keep | revoke tool | `deploys.rs:146` | none |
+| `deploy_token` | removed later (26 Nov) | (b): superseded by the proxy credential and `land`; break-glass is the person's own Cloudflare login | was `src/capabilities/src/deploys.rs` | none |
+| `revoke_api_token` | removed later (26 Nov) | revoked only `deploy_token`'s tokens | was `deploys.rs` | none |
 | `github_status` | keep | none met | `src/capabilities/src/github.rs:343` | none |
 | `containers_images` | keep | none met | `src/capabilities/src/images.rs:28` | none |
 | `instances_list` | keep | none met | `src/capabilities/src/instances.rs:738` | none |

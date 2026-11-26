@@ -247,7 +247,7 @@ fn core_bounds_each_workers_ops_with_its_own_key() {
         ("ci-gateway", "sites_scope", json!({})),
         ("cloud-gateway", "service_user", json!({})),
         ("proxy", "credential", json!({"kind": "github"})),
-        ("proxy", "dispatch", json!({"tool": "deploy_token"})),
+        ("proxy", "dispatch", json!({"tool": "source_token"})),
         ("ai-agents", "credential", json!({"kind": "scoped"})),
         ("ai-agents", "credential", json!({"kind": "linked"})),
         ("ai-agents", "credential_revoke", json!({"kind": "scoped"})),

@@ -7,7 +7,7 @@ tools are the ones listed as candidates to switch off at the MCP portal:
 
 | Tool | Capability | What it does | Arguments |
 | --- | --- | --- | --- |
-| `deploy_token` | `deploys` | Mints a Cloudflare API token (break-glass deploy) | `ttl`, `preset` or `permissions` |
+| `deploy_token` | `deploys` | Minted a Cloudflare API token (break-glass deploy). **Retired 26 November** (section 5) | `ttl`, `preset` or `permissions` |
 | `source_token` | `source` | Mints a git token for the source repository | `access`, `ttl` |
 | `setup_platform` | `public_host` | Sets up `platform.pigeon.dev`: DNS, route, Access state | none |
 | `users_remove` | `users` | Removes a user and all that is theirs | `id` |
@@ -57,6 +57,9 @@ decision = "allow"
 approval = "passkey"
 reason = "break-glass tokens, platform setup and removals run only once the person approves that exact call with their passkey"
 ```
+
+Since `deploy_token` was retired (26 November), its entry names a tool that no longer exists and
+gates nothing; the person removes it from `targets`.
 
 The engine already answers such a rule, without the passkey, as *deny, needs passkey*. That
 answer is what `dispatch` turns into a pending approval.
@@ -208,53 +211,33 @@ with the linked-accounts planner on 21 November, with these additions from them:
 
 ### 5. Break-glass
 
-`deploy_token` is for when the normal path is broken: the land flow, CI or the `/cf/` proxy's
-allowlist. Approving needs only what serves `deploy_token` itself: the `pigeon-platform` Worker,
-its Directory Durable Object and the person's passkey on the console. It does not need the
-Lander, CI, Containers, the proxies, Artifacts or the GitHub mirror. If the portal is down, the
-direct `platform.pigeon.dev/mcp` with an issued token reaches the same `dispatch` and the same
-approval.
+**`deploy_token` and `revoke_api_token` were retired on 26 November** (the `deploys`
+capability). They minted a raw Cloudflare API token from the parent, for when the normal path
+was broken. They were last used on 23 November, only by hand, and nothing called them: no
+console, iOS or CI code. Each case they served now has a path that does not need them:
 
-The allowed path does no I/O for the check (the policy is parsed once per isolate), so the
-gate adds no new way for `land` and the other tools to fail.
+| When | Deploy through | Needs |
+| --- | --- | --- |
+| The Lander, CI or the CI scheduler is down | `/cf/` with the proxy credential: the pinned wrangler with `CLOUDFLARE_API_BASE_URL=https://proxy.pigeon.dev/cf/client/v4`, from a pigeon session (`docs/proxies.md`) | core, to verify the credential and mint the call's token; not the Lander or CI |
+| `pigeon-proxy` is down | the same, served by core's own `/cf/` (the backup proxy) | core |
+| core is broken, or the deployed allowlist refuses a call wrangler makes before the upload | the person's own Cloudflare login on their machine: `npx wrangler login`, then `npx wrangler deploy` or `npx wrangler rollback` from the Worker's directory ("When the platform itself is down" in `docs/proxies.md`) | Cloudflare only, nothing of pigeon's |
 
-The steps that worked on 23 November are in "Break-glass: deploying directly" in
-`docs/proxies.md`. In short:
+The last row is the true break-glass, and it never needed `deploy_token`: with core broken there
+was no `deploy_token` to approve, and a pre-upload refusal is the allowlist's, which `/cf/`
+applies whichever Worker serves it. Where the person's machine is not at hand, a Cloudflare API
+token they create in the dashboard, with the permissions in the proxy's table
+(`docs/proxies.md`), does the same from a session on the `pigeon break-glass` environment; it is
+theirs to create and delete.
 
-1. **Environment.** A personal environment, `pigeon break-glass`. It allows only
-   `api.cloudflare.com`, the package registries and the Pigeon MCP host. The Default environment
-   no longer allows `api.cloudflare.com`.
-2. **Session.** The person starts it, with the Pigeon connector on. A session started by another
-   session does not always get the connector.
-3. **Code.** The checkout is main, from the mirror. A branch that has not landed comes from
-   `branch_patch` as a patch against its merge base. Apply it with `git apply --3way`. No
-   Artifacts access is needed.
-4. **Authorise in the session.** `deploy_token` is not in `.claude/settings.json`, so Claude Code
-   asks in the session, and may refuse on its own until the person says in that session that
-   they authorise the call. This is separate from the passkey, and both are needed.
-5. **Preset.** Call `deploy_token {"preset": "deploy", "ttl": 1800}`, have the person approve
-   with the passkey, and call again with the approval id.
-   - The preset is every permission the deploy proxy's allowlist names (`cf_proxy::ALLOWED`),
-     plus Account Settings Read.
-   - The default set (Workers Scripts Write, Account Settings Read, Secrets Store Write) fails a
-     core deploy at "Container image preparation is not enabled" (403).
-   - The card shows the token's permissions and lifetime as rows, resolved from the preset. A call
-     naming an unknown preset, or a preset and permissions together, is refused before any
-     approval is made.
-6. **Deploy**, with the pinned wrangler, straight to `api.cloudflare.com`.
-7. **Revoke** with `revoke_api_token`, whether or not the deploy worked, then land the branch.
-
-**If the platform itself is down** (a bad deploy, the Worker or its Directory failing), there is
-no `deploy_token` to approve, with or without this plan. The fallback is the person's own
-wrangler, with their own Cloudflare login and nothing of pigeon's: on their machine,
-`npx wrangler login`, then from `src/platform` of a good commit `npx wrangler deploy` (or
-`npx wrangler rollback` to the last good version). "When the platform itself is down" in
-`docs/proxies.md` has the commands.
+Until its retirement, `deploy_token {"preset": "deploy"}` (every permission `cf_proxy::ALLOWED`
+names, plus Account Settings Read) was the working form; its default set failed a core deploy
+at "Container image preparation is not enabled" (403). The approval card showed the token's
+permissions and lifetime as rows; that `grants` field went with it.
 
 ### 6. The MCP portal
 
-- The six tools stay listed and **on** at the portal, as `pigeon_deploy_token`,
-  `pigeon_source_token`, `pigeon_setup_platform`, `pigeon_users_remove`,
+- The six tools stay listed and **on** at the portal (five since `deploy_token` was retired), as
+  `pigeon_deploy_token`, `pigeon_source_token`, `pigeon_setup_platform`, `pigeon_users_remove`,
   `pigeon_passkeys_remove` and `pigeon_oauth_revoke`. They need to be on for the approval to be
   usable from a session; the passkey, not the switch, is now the control.
 - Each gated tool's schema gains an optional `approval` string, and its description a sentence:

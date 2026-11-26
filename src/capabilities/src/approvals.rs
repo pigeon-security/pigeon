@@ -92,7 +92,7 @@ pub async fn approve_own(
             "digest": digest,
             "summary": {
                 "tool": tool, "args": args, "caller": person.name, "acting_for": person.name,
-                "rule": a.rule, "grants": Value::Null, "via": "console",
+                "rule": a.rule, "via": "console",
             },
             "payload": Value::Null,
             "caller_id": person.id,
@@ -239,22 +239,12 @@ async fn ask(
     digest: String,
     a: Answer,
 ) -> Result<Gate> {
-    // A deploy token's card says what it would hold; a call that could never mint is refused
-    // before the person is asked.
-    let grants = if tool == "deploy_token" {
-        let (permissions, ttl_secs) = crate::deploys::grants(args)
-            .map_err(|why| Error::RustError(format!("`{tool}`: {why}")))?;
-        json!({ "permissions": permissions, "ttl_secs": ttl_secs })
-    } else {
-        Value::Null
-    };
     let mut summary = json!({
         "tool": tool,
         "args": args,
         "caller": caller.user.name,
         "acting_for": caller.acting_for.as_ref().map(|p| p.name.clone()),
         "rule": a.rule,
-        "grants": grants,
     });
     if let (Some(run), Some(o)) = (
         crate::policy::run_label(caller.run.as_deref()),
@@ -604,7 +594,7 @@ pub fn listing(open: &[Record]) -> Value {
             json!({
                 "id": r.id, "tool": r.subject, "args": r.summary["args"],
                 "caller": r.summary["caller"], "acting_for": r.summary["acting_for"],
-                "run": r.summary["run"], "grants": r.summary["grants"],
+                "run": r.summary["run"],
                 "created_ms": r.created_ms, "expires_ms": r.expires_ms,
                 "digest": short(r),
                 "plain": plain_call(&r.subject, &r.summary["args"], &r.summary["acting_for"]),
@@ -675,7 +665,6 @@ pub fn plain_call(tool: &str, args: &Value, acting_for: &Value) -> String {
         .unwrap_or("the caller");
     let text = |k: &str| args[k].as_str().unwrap_or("?").to_string();
     match tool {
-        "deploy_token" => format!("Give a deploy token to {who}"),
         "source_token" => format!("Give a source token to {who}"),
         "setup_platform" => "Set up the platform".to_string(),
         "users_remove" => format!("Remove user {}", text("id")),

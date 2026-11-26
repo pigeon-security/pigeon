@@ -8,7 +8,6 @@ use pigeon_capabilities::architecture::{Architecture, Wrangler};
 use pigeon_capabilities::changelog::Changelog;
 use pigeon_capabilities::ci;
 use pigeon_capabilities::console::Console;
-use pigeon_capabilities::deploys::Deploys;
 use pigeon_capabilities::dispatch::Dispatch;
 use pigeon_capabilities::github::Github;
 use pigeon_capabilities::images::Images;
@@ -296,7 +295,6 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
         // which the Lander and the proxies read through their bindings.
         // Landing: a session branch tested, moved into main and deployed, through `land`.
         Box::new(Land { settings: land() }),
-        Box::new(Deploys),
         // `observability_summary`: Worker metrics, error logs, deploys and cost, read only.
         Box::new(Observability { map: map() }),
         // What the container applications run and the registry holds, read only.

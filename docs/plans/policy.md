@@ -143,7 +143,7 @@ The list holds:
 
 Each pigeon tool is listed under `Pigeon_MCP`, the claude.ai connector to the MCP server portal, which prefixes pigeon's tools with `pigeon_` (`mcp__Pigeon_MCP__pigeon_land`; see `mcp-portal.md`). The connector straight to the platform (`Pigeon`, server id `71fdea92-23ad-47d5-a156-53f536f8b55a`) was removed at the cutover, and its names with it.
 
-`call` is never in the list: it reaches every pigeon tool, `deploy_token` and `source_token` included, so pre-approving it would go around the policy. Landing 1 generated it, with the names of the `pigeon-platform` server in `.mcp.json`, a duplicate connector that asks for sign-in; the third landing corrected both, with the person's passkey. The clean-up landing removed `.mcp.json` itself: its only entry was that duplicate.
+`call` is never in the list: it reaches every pigeon tool, `source_token` included, so pre-approving it would go around the policy. Landing 1 generated it, with the names of the `pigeon-platform` server in `.mcp.json`, a duplicate connector that asks for sign-in; the third landing corrected both, with the person's passkey. The clean-up landing removed `.mcp.json` itself: its only entry was that duplicate.
 
 The gate fails when `.claude/settings.json` differs from what the generator writes.
 

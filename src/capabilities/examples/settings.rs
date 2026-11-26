@@ -21,7 +21,7 @@ const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
 /// `pigeon_<tool>` (docs/plans/mcp-portal.md). The connector straight to
 /// `platform.pigeon.dev/mcp` was removed at the cutover. Rules name each tool one by one: a
 /// server-wide `mcp__<server>__*` would also allow every tool the policy does not name
-/// (`call`, `deploy_token`, `source_token`) and the portal's own `portal_*` tools.
+/// (`call`, `source_token`) and the portal's own `portal_*` tools.
 const PIGEON: [(&str, &str); 1] = [("Pigeon_MCP", "pigeon_")];
 
 /// A tool of claude-code-remote's, or of pigeon's (under each of [`PIGEON`]).

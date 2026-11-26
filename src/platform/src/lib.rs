@@ -397,8 +397,8 @@ async fn mcp_post(mut req: Request, env: &Env) -> Result<Response> {
                        standing instruction; on `deny`, stop and tell the person the rule and \
                        reason. Never propose new rules or loosen one; only the person changes \
                        the policy. `call {tool, args}` reaches any tool deployed after this \
-                       session started. source_token and deploy_token remain for callers \
-                       without the proxy credential."
+                       session started. source_token remains for callers without the proxy \
+                       credential."
         },
     };
     let call = async |name: &str, args: &Value| -> Result<Value> {

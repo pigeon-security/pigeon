@@ -2151,7 +2151,6 @@ fn core_served_tools() -> Vec<pigeon_core::mcp::Tool> {
     use pigeon_capabilities::Capability;
     use pigeon_capabilities::approvals::Approvals;
     use pigeon_capabilities::architecture::Architecture;
-    use pigeon_capabilities::deploys::Deploys;
     use pigeon_capabilities::dispatch::Dispatch;
     use pigeon_capabilities::github::Github;
     use pigeon_capabilities::images::Images;
@@ -2163,7 +2162,6 @@ fn core_served_tools() -> Vec<pigeon_core::mcp::Tool> {
     let caps: Vec<Box<dyn Capability>> = vec![
         Box::new(Approvals),
         Box::new(Architecture),
-        Box::new(Deploys),
         Box::new(Dispatch),
         Box::new(Github),
         Box::new(Images),
@@ -2759,7 +2757,6 @@ fn arch_home_capabilities() -> Vec<Box<dyn pigeon_capabilities::Capability>> {
                 map: map.clone(),
             },
         }),
-        Box::new(deploys::Deploys),
         Box::new(observability::Observability { map }),
         Box::new(images::Images),
         Box::new(dispatch::Dispatch),

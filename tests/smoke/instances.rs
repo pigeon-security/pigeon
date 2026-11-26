@@ -1246,7 +1246,7 @@ fn console_manifest_inbox_is_filtered_to_the_instance() {
         ),
         approval(
             "tool_call",
-            "deploy_token",
+            "source_token",
             json!({ "args": {} }),
             "pending",
         ),

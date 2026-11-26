@@ -309,6 +309,11 @@ token left live.
   page is drawn from them.
 - `source_token` and `deploy_token` stay for now (the parent session and people still use
   them); retiring them is a decision for after the proxies have run for a while.
+  **Decided (26 November):** `deploy_token` and `revoke_api_token` are retired. Deploys go
+  through `land` or `/cf/` with the proxy credential, and a deploy neither can make is done with
+  the person's own Cloudflare login (`tool-approvals.md`, "Break-glass"). `source_token` stays:
+  the git proxy refuses writes outside `claude/` (removing other branches by hand, for one), and
+  only a direct Artifacts token does those.
 
 Steps:
 | Step | Task tag | Model | Work |
