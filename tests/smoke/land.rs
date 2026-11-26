@@ -530,8 +530,25 @@ fn core_land_deploys_the_proxy_first_for_allowlist_changes() {
         ["core", "sites"]
     );
 
-    // Old rows (ordered 0 or 1, no proxy bit) are unchanged.
-    assert_eq!(go(&l(false, false), &[]), ["core", "proxy", "sites"]);
+    // Old rows (ordered 0 or 1, no proxy bit) are unchanged, but no more than
+    // MAX_PARALLEL_DEPLOYS start together: core first, then by name.
+    assert_eq!(lanes::MAX_PARALLEL_DEPLOYS, 2);
+    assert_eq!(go(&l(false, false), &[]), ["core", "proxy"]);
+    // A running deploy takes a slot; a finished one frees it.
+    assert_eq!(
+        go(&l(false, false), &[d("core", DeployState::Running)]),
+        ["proxy"]
+    );
+    assert_eq!(
+        go(
+            &l(false, false),
+            &[
+                d("core", DeployState::Succeeded),
+                d("proxy", DeployState::Succeeded)
+            ]
+        ),
+        ["sites"]
+    );
     assert_eq!(go(&l(true, false), &[]), ["core"]);
 }
 

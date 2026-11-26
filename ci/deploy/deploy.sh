@@ -17,7 +17,8 @@
 # an entry for a call wrangler makes after the upload, the first deploy uploads the new Worker
 # and is then refused at that call; the deploy is made once more, through the new allowlist. A
 # refused call before the upload cannot be fixed that way, and is reported. Cloudflare 10429
-# on the pre-upload Workers service lookup gets one separate retry of the same build.
+# on the pre-upload Workers service lookup is retried with the same build, up to five attempts in
+# all, with jittered, doubling waits.
 #
 # Once deployed, it checks the apex serves this commit's architecture page (see `published`).
 #
@@ -189,13 +190,27 @@ if grep -q "^Uploaded " "$log" && grep -q "code: 10007" "$log"; then
 fi
 if ! grep -q "pigeon's proxy does not allow" "$log"; then
     if rate_limited_before_upload; then
-        sample=$(od -An -N1 -tu1 /dev/urandom) || sample=0
-        delay=$(( 30 + sample % 16 ))
-        echo "Cloudflare rate limited the pre-upload Worker lookup; retrying in ${delay}s" >&2
-        sleep "$delay"
-        deploy 2
-        check
-        exit
+        # Several Workers deploying at once share the account's API rate limit. Back off with
+        # jitter, longer each time (about 30-45s, 60-90s, 120-180s, 240-360s), and give up after
+        # five attempts in all. Each retry is the same build; nothing was uploaded yet.
+        attempt=1
+        base=30
+        while :; do
+            sample=$(od -An -N1 -tu1 /dev/urandom) || sample=0
+            delay=$(( base + (base / 2) * sample / 255 ))
+            attempt=$(( attempt + 1 ))
+            echo "Cloudflare rate limited the pre-upload Worker lookup; attempt $attempt in ${delay}s" >&2
+            sleep "$delay"
+            if deploy "$attempt"; then
+                check
+                exit
+            fi
+            if [ "$attempt" -ge 5 ] || ! rate_limited_before_upload; then
+                echo "the deploy failed; see above" >&2
+                exit 1
+            fi
+            base=$(( base * 2 ))
+        done
     fi
     echo "the deploy failed; see above" >&2
     exit 1

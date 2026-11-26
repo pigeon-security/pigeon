@@ -1118,7 +1118,8 @@ exit "$FAKE_SECOND_EXIT"
     let refusal = "pigeon's proxy does not allow the requested call";
     let post_upload_refusal = format!("Uploaded fixture-worker (1 sec)\n{refusal}");
     for (first, first_exit, second, second_exit, grant, expected, calls, waited) in [
-        (matching.as_str(), "1", "", "0", "200", 0, 2, true),
+        (matching.as_str(), "1", "", "0", "200", 0, 2, 1),
+        // Rate limited every time: five attempts in all, with four doubling, jittered waits.
         (
             matching.as_str(),
             "1",
@@ -1126,27 +1127,18 @@ exit "$FAKE_SECOND_EXIT"
             "3",
             "200",
             1,
-            2,
-            true,
+            5,
+            4,
         ),
-        (wrong_path.as_str(), "1", "", "0", "200", 1, 1, false),
-        (wrong_worker.as_str(), "1", "", "0", "200", 1, 1, false),
-        (wrong_code.as_str(), "1", "", "0", "200", 1, 1, false),
-        (ambiguous.as_str(), "1", "", "0", "200", 1, 1, false),
-        (post_upload.as_str(), "1", "", "0", "200", 1, 1, false),
-        (old_retry.as_str(), "1", "", "0", "200", 0, 2, true),
-        (refusal, "1", "", "0", "200", 1, 1, false),
-        (
-            post_upload_refusal.as_str(),
-            "1",
-            "",
-            "0",
-            "200",
-            0,
-            2,
-            true,
-        ),
-        ("", "0", "", "0", "401", 3, 0, false),
+        (wrong_path.as_str(), "1", "", "0", "200", 1, 1, 0),
+        (wrong_worker.as_str(), "1", "", "0", "200", 1, 1, 0),
+        (wrong_code.as_str(), "1", "", "0", "200", 1, 1, 0),
+        (ambiguous.as_str(), "1", "", "0", "200", 1, 1, 0),
+        (post_upload.as_str(), "1", "", "0", "200", 1, 1, 0),
+        (old_retry.as_str(), "1", "", "0", "200", 0, 2, 1),
+        (refusal, "1", "", "0", "200", 1, 1, 0),
+        (post_upload_refusal.as_str(), "1", "", "0", "200", 0, 2, 1),
+        ("", "0", "", "0", "401", 3, 0, 0),
     ] {
         let call_file = fixture.join("calls");
         let sleep_file = fixture.join("sleeps");
@@ -1186,10 +1178,15 @@ exit "$FAKE_SECOND_EXIT"
             calls
         );
         let sleeps = std::fs::read_to_string(sleep_file).unwrap();
-        assert_eq!(sleeps.lines().count(), usize::from(waited), "{first}");
-        if waited {
-            let delay = sleeps.trim().parse::<u32>().unwrap();
-            assert!((30..=45).contains(&delay), "{first}: {delay}");
+        assert_eq!(sleeps.lines().count(), waited, "{first}");
+        // The rate-limit waits double from 30-45s; the other retries wait 30s.
+        for (i, line) in sleeps.lines().enumerate() {
+            let delay = line.trim().parse::<u32>().unwrap();
+            let base = 30u32 << i;
+            assert!(
+                (base..=base + base / 2).contains(&delay),
+                "{first}: wait {i} was {delay}"
+            );
         }
     }
     std::fs::remove_dir_all(fixture).unwrap();

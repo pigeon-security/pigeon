@@ -1,6 +1,7 @@
 //! Deploy lanes, one per Worker (docs/plans/workers-split.md, phase 5). Pure.
 //!
-//! Each Worker has a lane that runs at most one deploy at a time; lanes run in parallel. A lane
+//! Each Worker has a lane that runs at most one deploy at a time; lanes run in parallel, at most
+//! [`MAX_PARALLEL_DEPLOYS`] deploys at once (Cloudflare's API rate limit). A lane
 //! deploys the newest merged commit that affects its Worker ("deploy latest") and so carries
 //! every older merged landing for that Worker: main moves forward only, and landings merge one
 //! at a time with strictly increasing `merged_at`, so a deploy at the commit merged at `covers`
@@ -179,10 +180,21 @@ pub fn outcome(landing: &Merged, deploys: &[Deploy]) -> Option<Seen> {
     all.then_some(Seen::JobEnded { passed: true })
 }
 
+/// At most this many deploys run at once, across every lane, rollbacks included. Each deploy
+/// makes the same Cloudflare API calls at its start, and the account's API rate limit (10429)
+/// refused them when every lane started together; a lane waits for a free slot instead.
+pub const MAX_PARALLEL_DEPLOYS: usize = 2;
+
 /// The deploys the lanes start next, given the live merged landings (any order) and every
 /// deploy so far; `core` names the Worker that deploys first. A lane with a running deploy, or
-/// `held` by an open incident, starts nothing. Core first, then the other lanes by name.
+/// `held` by an open incident, starts nothing, and no more start than leave at most
+/// [`MAX_PARALLEL_DEPLOYS`] running. Core first, then the other lanes by name.
 pub fn starts(core: &str, landings: &[Merged], deploys: &[Deploy], held: &[&str]) -> Vec<Start> {
+    let running = deploys
+        .iter()
+        .filter(|d| d.state == DeployState::Running)
+        .count();
+    let mut slots = MAX_PARALLEL_DEPLOYS.saturating_sub(running);
     let mut sorted: Vec<&Merged> = landings.iter().collect();
     sorted.sort_by_key(|l| l.merged_at);
     // Still waiting for `w`: affects it, not deployed by it, and no deploy of it failed for it.
@@ -199,6 +211,9 @@ pub fn starts(core: &str, landings: &[Merged], deploys: &[Deploy], held: &[&str]
     lanes.dedup();
     let mut out = Vec::new();
     for w in lanes {
+        if slots == 0 {
+            break;
+        }
         let busy = deploys
             .iter()
             .any(|d| d.worker == w && d.state == DeployState::Running);
@@ -242,6 +257,7 @@ pub fn starts(core: &str, landings: &[Merged], deploys: &[Deploy], held: &[&str]
         let Some(target) = carried.last() else {
             continue;
         };
+        slots -= 1;
         out.push(Start {
             worker: w.to_string(),
             landing: target.id.clone(),
