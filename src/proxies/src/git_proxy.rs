@@ -246,6 +246,20 @@ pub fn check(c: &Command, protected: &str, prefix: &str) -> std::result::Result<
     }
 }
 
+/// Why a push outside a git-only credential's `prefix` is refused: an app's session credential
+/// pushes only under its namespace (`prefix` ends in `/`), an AI agent run's grant only its
+/// run's branches.
+pub fn outside_why(prefix: &str) -> String {
+    if prefix.ends_with('/') {
+        format!(
+            "this app's session credential pushes only branches under {prefix}, never main \
+             (docs/plans/agent-git.md)"
+        )
+    } else {
+        format!("this run's git grant pushes only {prefix} and {prefix}-…")
+    }
+}
+
 /// Writes the audit line of ref update `c`, asked of the policy as `kind` by `who`.
 fn audit_update(vars: &Vars, who: &str, kind: Kind, c: &Command) {
     let target = c.name.strip_prefix("refs/heads/").unwrap_or(&c.name);
@@ -664,7 +678,8 @@ impl GitProxy {
                     audit_update(&pv, &who, kind, c);
                 }
             }
-            // An AI agent run's git grant pushes only its own branches.
+            // A git-only credential pushes only its own branches: an AI agent run's grant, its
+            // run's; an app's session credential, its app's namespace.
             if let Some(prefix) = caller.as_ref().and_then(|c| c.branch_prefix.as_deref())
                 && let Err(outside) = pigeon_core::proxy_caller::within_prefix(
                     p.commands.commands.iter().map(|c| c.name.as_str()),
@@ -672,7 +687,7 @@ impl GitProxy {
                 )
             {
                 drain(&mut p.rest, BUFFERED_MAX).await;
-                let why = format!("this run's git grant pushes only {prefix} and {prefix}-…");
+                let why = outside_why(prefix);
                 let refused: Vec<(String, String)> =
                     outside.into_iter().map(|r| (r, why.clone())).collect();
                 return refusal(&p.commands, &refused);

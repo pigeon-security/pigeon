@@ -39,6 +39,9 @@ pub const PREFIX: &str = "/cf/client/v4";
 /// the API.
 pub const GRANT_PATH: &str = "/cf/grant";
 
+/// Why a git-only credential is refused here: an AI agent run's git grant, or an app's session
+/// credential (`session_credential`), reaches `/git/` and nothing else.
+pub const GIT_ONLY: &str = "a git-only credential (an AI agent run's grant, an app's session credential) reaches /git/ only";
 /// Why a job token is turned away from this proxy.
 const JOB_TOKEN_REFUSED: &str = "a job token reaches this proxy only as the deploy job of a landing that is deploying its commit";
 
@@ -884,9 +887,10 @@ impl CfProxy {
                 }
             }
             _ => match proxy::caller(host, &req).await {
-                // An AI agent run's git grant reaches /git/ only.
+                // A git-only credential (an AI agent run's grant, an app's session
+                // credential) reaches /git/ only.
                 Ok(c) if c.branch_prefix.is_some() => {
-                    return refuse(403, "an AI agent run's git grant reaches /git/ only");
+                    return refuse(403, GIT_ONLY);
                 }
                 Ok(c) => Some(c),
                 Err(e) => return refuse(403, &e.to_string()),
