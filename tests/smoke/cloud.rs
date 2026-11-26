@@ -68,7 +68,11 @@ struct Net {
 
 impl Transport for Net {
     fn send<'a>(&'a self, req: HttpRequest) -> Fut<'a, HttpResponse> {
-        assert!(transport::allowed(&req.url), "a call to {}", req.url);
+        assert!(
+            transport::allowed_request(&req.method, &req.url),
+            "a call to {}",
+            req.url
+        );
         self.log.borrow_mut().push(req.clone());
         let res = (self.handler)(&req);
         Box::pin(async move { Ok(res) })
@@ -1599,5 +1603,110 @@ fn digitalocean_spaces_verifies_team_key_grant_and_bounded_listing() {
         "https://elsewhere.digitaloceanspaces.com/a-bucket?list-type=2&max-keys=1",
     ] {
         assert!(!transport::allowed(prohibited));
+    }
+}
+
+#[test]
+fn digitalocean_droplet_reconciles_ambiguous_create_and_confirms_owned_delete() {
+    use pigeon_cloud::digitalocean_droplet::{Created, Removal, cleanup, create, reconcile};
+    let name = "pigeon-health-11111111111111111111111111111111";
+    let checks = Cell::new(0);
+    let net = Net {
+        log: RefCell::new(Vec::new()),
+        handler: Box::new(move |req| {
+            let (_, path, query) = split(&req.url);
+            assert_eq!(req.header("Authorization"), Some("Bearer fake-provision"));
+            let row = json!({"id":123,"name":name,"tags":["pigeon-health-check"]});
+            match (req.method.as_str(), path.as_str()) {
+                ("POST", "/v2/droplets") => {
+                    let body: Value = serde_json::from_str(&req.body).unwrap();
+                    assert_eq!(body["name"], name);
+                    assert_eq!(body["region"], "tor1");
+                    assert_eq!(body["size"], "s-2vcpu-4gb");
+                    assert_eq!(body["image"], "ubuntu-24-04-x64");
+                    assert_eq!(body["tags"], json!(["pigeon-health-check"]));
+                    assert!(!req.body.contains("fake-provision"));
+                    text_res(503, "ambiguous")
+                }
+                ("GET", "/v2/droplets") => {
+                    assert_eq!(
+                        query,
+                        format!("tag_name=pigeon-health-check&per_page=2&name={name}")
+                    );
+                    json_res(200, json!({"droplets":[row]}))
+                }
+                ("GET", "/v2/droplets/123") => {
+                    checks.set(checks.get() + 1);
+                    if checks.get() == 1 {
+                        json_res(200, json!({"droplet":row}))
+                    } else {
+                        text_res(404, "")
+                    }
+                }
+                ("DELETE", "/v2/droplets/123") => text_res(204, ""),
+                _ => panic!("unexpected request"),
+            }
+        }),
+    };
+    assert!(matches!(
+        block(create(
+            &net,
+            "fake-provision",
+            name,
+            "fixed health bootstrap"
+        )),
+        Created::Unknown
+    ));
+    let recovered = block(reconcile(&net, "fake-provision", name))
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        block(cleanup(&net, "fake-provision", name, recovered)).unwrap(),
+        Removal::Requested
+    ));
+    assert!(matches!(
+        block(cleanup(&net, "fake-provision", name, recovered)).unwrap(),
+        Removal::Absent
+    ));
+    assert_eq!(
+        net.log
+            .borrow()
+            .iter()
+            .filter(|req| req.method == "POST")
+            .count(),
+        1
+    );
+    assert_eq!(
+        net.log
+            .borrow()
+            .iter()
+            .filter(|req| req.method == "DELETE")
+            .count(),
+        1
+    );
+
+    let other = Net {
+        log: RefCell::new(Vec::new()),
+        handler: Box::new(|_| {
+            json_res(
+                200,
+                json!({"droplet":{"id":123,"name":"not-ours","tags":["pigeon-health-check"]}}),
+            )
+        }),
+    };
+    assert!(block(cleanup(&other, "fake-provision", name, 123)).is_err());
+    assert_eq!(other.log.borrow().len(), 1);
+
+    for (method, url) in [
+        (
+            "DELETE",
+            "https://api.digitalocean.com/v2/droplets?tag_name=pigeon-health-check",
+        ),
+        ("GET", "https://api.digitalocean.com/v2/droplets"),
+        ("PATCH", "https://api.digitalocean.com/v2/droplets/123"),
+        ("POST", "https://api.digitalocean.com/v2/account"),
+        ("DELETE", "https://api.digitalocean.com/v2/spaces/keys/fake"),
+    ] {
+        assert!(!transport::allowed_request(method, url));
     }
 }

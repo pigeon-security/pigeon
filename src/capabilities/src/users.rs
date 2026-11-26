@@ -1221,8 +1221,31 @@ impl Directory {
                 )?;
                 Value::Null
             }
-            "digitalocean.token.put" | "digitalocean.spaces.put" => {
-                let spaces = op == "digitalocean.spaces.put";
+            "digitalocean.health.pending" => {
+                #[derive(Deserialize)]
+                struct Row {
+                    value: String,
+                }
+                let rows: Vec<Row> = self.db.rows(
+                    "SELECT value FROM settings
+                     WHERE key >= 'digitalocean-droplet-job:' AND key < 'digitalocean-droplet-job;'
+                     AND expires_at > ? AND json_valid(value) AND json_extract(value, '$.next_ms') BETWEEN 1 AND ?
+                     AND json_extract(value, '$.lease_until_ms') <= ?
+                     ORDER BY json_extract(value, '$.next_ms') LIMIT 4",
+                    vec![t.into(), t.into(), t.into()],
+                )?;
+                json!(rows.into_iter().map(|row| row.value).collect::<Vec<_>>())
+            }
+            "digitalocean.token.put"
+            | "digitalocean.spaces.put"
+            | "digitalocean.health.token"
+            | "digitalocean.health.start" => {
+                use crate::digitalocean::{self, health, spaces};
+                let scoped_spaces = op == "digitalocean.spaces.put";
+                let scoped_health = matches!(
+                    op,
+                    "digitalocean.health.token" | "digitalocean.health.start"
+                );
                 let target = &a["target"];
                 let id = target["instance"]
                     .as_str()
@@ -1233,9 +1256,8 @@ impl Directory {
                         serde_json::from_str::<crate::instances::record::Instance>(&text).ok()
                     })
                     .filter(|record| crate::digitalocean::matches_target(record, target))
-                    .filter(|record| {
-                        !spaces || crate::digitalocean::spaces::binding(record).is_some()
-                    });
+                    .filter(|record| !scoped_spaces || spaces::binding(record).is_some())
+                    .filter(|record| !scoped_health || health::enabled(record));
                 if record.is_none() {
                     return Err(bad(
                         "the approved DigitalOcean configuration changed; review it again",
@@ -1244,10 +1266,28 @@ impl Directory {
                 let value = a["value"]
                     .as_str()
                     .ok_or_else(|| bad("expected a sealed token"))?;
-                let key = if spaces {
-                    crate::digitalocean::spaces::key(id)
-                } else {
-                    crate::digitalocean::token_key(id)
+                let key = match op {
+                    "digitalocean.spaces.put" => spaces::key(id),
+                    "digitalocean.health.token" => health::token_key(id),
+                    "digitalocean.health.start" => {
+                        let key = health::job_key(id);
+                        if let Some(prior) = self.setting_value(&key, t)? {
+                            let job: health::Job = serde_json::from_str(&prior)?;
+                            if !job.terminal() {
+                                return Err(bad("a previous Droplet job is still outstanding"));
+                            }
+                        }
+                        let configured = self.setting_value(&health::token_key(id), t)?;
+                        if configured.as_deref() != a["credential_before"].as_str()
+                            || configured.is_none()
+                        {
+                            return Err(bad(
+                                "the provisioning credential changed; review the plan again",
+                            ));
+                        }
+                        key
+                    }
+                    _ => digitalocean::token_key(id),
                 };
                 self.setting_keep(&key, value, t + crate::digitalocean::TOKEN_KEPT_MS)?;
                 Value::Null

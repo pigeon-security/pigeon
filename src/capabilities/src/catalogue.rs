@@ -408,6 +408,11 @@ pub fn problems(record: &Instance) -> Vec<String> {
                 out.push(why.into());
             }
         }
+        if name != crate::digitalocean::NAME && record.capabilities[name].droplet_health {
+            out.push(format!(
+                "The capability \"{name}\" does not accept Droplet health checks."
+            ));
+        }
         for r in e.requires {
             if !record.capabilities.contains_key(*r) {
                 out.push(format!(

@@ -22,6 +22,7 @@ use worker::{Date, Env};
 pub mod approvals;
 pub mod changes;
 pub mod compute;
+pub mod digitalocean_droplet;
 pub mod digitalocean_spaces;
 pub mod iam;
 pub mod link;

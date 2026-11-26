@@ -5687,3 +5687,57 @@ fn digitalocean_spaces_has_one_approved_instance_scope() {
     assert!(!problems(&record).is_empty());
     assert!(spaces::binding(&record).is_none());
 }
+
+#[test]
+fn digitalocean_droplet_plan_is_opted_in_and_passkey_bound() {
+    use pigeon_capabilities::console::write::{Step, action, digest};
+    use pigeon_capabilities::digitalocean::health;
+    use pigeon_capabilities::instances::{record::Instance, tools::Scope};
+
+    let mut record: Instance = serde_json::from_value(json!({
+        "id":"willowgraysen", "title":"Fixture", "account":{"kind":"linked"},
+        "capabilities":{"cloud":{}, "digitalocean":{"team_id":"approved-team"}},
+    }))
+    .unwrap();
+    assert!(
+        Scope::new(&record)
+            .unwrap()
+            .bind(health::STATUS, &json!({}))
+            .is_err()
+    );
+    record
+        .capabilities
+        .get_mut("digitalocean")
+        .unwrap()
+        .droplet_health = true;
+    let scope = Scope::new(&record).unwrap();
+    assert!(
+        scope
+            .bind(health::STATUS, &json!({"instance":"someone-else"}))
+            .is_err()
+    );
+    assert_eq!(
+        scope.bind(health::STATUS, &json!({})).unwrap()["instance"],
+        "willowgraysen"
+    );
+    let plan = health::plan();
+    assert_eq!(plan["region"], "tor1");
+    assert_eq!(plan["max_minutes"], 30);
+    assert_eq!(plan["commit"].as_str().unwrap().len(), 40);
+    let start = action(health::START).unwrap();
+    assert!(!start.by_bearer);
+    assert!(start.change(&json!({}), Step::Begin).is_err());
+    let target = start
+        .target(&json!({"instance":"willowgraysen","team_id":"approved-team","version":0}))
+        .unwrap();
+    let current = start
+        .change(&json!({"plan":plan["fingerprint"]}), Step::Finish)
+        .unwrap();
+    let stale = start
+        .change(&json!({"plan":"a".repeat(43)}), Step::Finish)
+        .unwrap();
+    assert_ne!(
+        digest(start, "operator", &target, &current, None),
+        digest(start, "operator", &target, &stale, None)
+    );
+}

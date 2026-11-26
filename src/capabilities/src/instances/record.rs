@@ -149,6 +149,9 @@ pub struct CapabilitySettings {
     /// The optional read-only DigitalOcean Spaces source binding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spaces: Option<pigeon_cloud::digitalocean_spaces::Binding>,
+    /// Whether this instance permits approved temporary Droplet health checks.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub droplet_health: bool,
 }
 
 /// Where the home instance's platform (console, MCP, OAuth) lives.

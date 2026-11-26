@@ -398,3 +398,39 @@ digest of the credential. The stored key is sealed against the instance,
 team and Spaces source. Changing the approved source requires verifying
 and saving the key for the new binding. This rollout does not grant
 DigitalOcean write permissions or provision compute.
+
+## DigitalOcean temporary Droplet health check, phase 3
+
+Enable `capabilities.digitalocean.droplet_health: true` in an approved instance
+record. Save a **separate** team PAT through the passkey-gated console write.
+DigitalOcean's [API specification](https://github.com/digitalocean/openapi/tree/main/specification/resources/droplets)
+requires `account:read` for the team check, `droplet:create`, `droplet:read`,
+`droplet:delete`, and `tag:create` for a tagged Droplet. Runtime checks the
+credential's team; the provider enforces its permissions on each action. The
+account and Spaces credentials remain separate and never enter the Droplet.
+
+The console shows the exact Toronto plan, source revision, and estimate before
+the operator uses their passkey. The challenge binds the instance, team, record
+version and plan fingerprint. The approved test builds the public ingest runner
+at the plan's immutable Git commit and runs `--version` with no container
+network or archive credentials. The builder images and package repositories
+are resolved at runtime. The instance receives a short-lived callback bearer
+only and reports startup and exact expected output to the platform over HTTPS.
+This verifies the script's own result, not VM attestation.
+
+The Directory persists one active job per instance before the only create POST.
+On an uncertain response the minute cron reconciles its exact generated name and
+`pigeon-health-check` tag; an unresolved job waits for cleanup and blocks another
+create. Before any delete, Pigeon reads the ID and verifies the name and tag.
+A later read must confirm absence before closing the job. The approved 30-minute
+deadline or result initiates cleanup, and failures stay pending for retry. If the
+provider delays cleanup or refuses a request, the estimated charge (about
+USD 0.02 for 30 minutes of the fixed size) is not a guaranteed billing cap. The
+sealed credential used to create a job is retained only until its cleanup is
+confirmed or the create was definitively refused.
+
+This phase uses no Spaces or R2 access. No system creates a Droplet merely
+because the capability was enabled. Live provisioning and end-to-end callback
+verification require a separate console passkey action; the native tests use a
+fake provider. Automatic cleanup is available; an explicit cancel action and
+operator resolution for an indefinitely ambiguous response are follow-up work.

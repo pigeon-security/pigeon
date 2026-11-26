@@ -128,6 +128,15 @@ pub fn allowed(url: &str) -> bool {
     !host.contains(['@', ':', '\\', '%']) && HOSTS.contains(&host)
 }
 
+/// The allowed method on a provider endpoint. Ordinary cloud resources use
+/// the host allowlist. DigitalOcean mutations are confined to Droplet paths.
+pub fn allowed_request(method: &str, url: &str) -> bool {
+    if digitalocean_read_url(url) {
+        return method == "GET";
+    }
+    crate::digitalocean_droplet::allowed(method, url) || allowed(url)
+}
+
 /// The host of `url` as an error message may name it: no scheme, no user name, no path.
 fn shown_host(url: &str) -> String {
     let rest = url.split_once("://").map_or(url, |(_, r)| r);
@@ -142,16 +151,11 @@ pub struct FetchTransport;
 impl Transport for FetchTransport {
     fn send<'a>(&'a self, req: HttpRequest) -> Fut<'a, HttpResponse> {
         Box::pin(async move {
-            if !allowed(&req.url) {
+            if !allowed_request(&req.method, &req.url) {
                 return Err(Error::RustError(format!(
                     "the cloud gateway does not call {}",
                     shown_host(&req.url)
                 )));
-            }
-            if digitalocean_read_url(&req.url) && req.method != "GET" {
-                return Err(Error::RustError(
-                    "the DigitalOcean probe is read-only".into(),
-                ));
             }
             let method = match req.method.as_str() {
                 "GET" => Method::Get,

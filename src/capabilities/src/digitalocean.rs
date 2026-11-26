@@ -14,6 +14,7 @@ use crate::instances::{
 };
 use crate::{Call, Capability, Context, catalogue, users::directory};
 
+pub mod health;
 pub mod spaces;
 
 pub const NAME: &str = "digitalocean";
@@ -50,11 +51,26 @@ const SPACES_TOOLS: &[Registration] = &[
     },
 ];
 
+const HEALTH_TOOL: Registration = Registration {
+    name: health::STATUS,
+    description: None,
+    arguments: &[],
+};
+const ACCOUNT_AND_HEALTH: &[Registration] = &[TOOLS[0], TOOLS[1], HEALTH_TOOL];
+const SPACES_AND_HEALTH: &[Registration] = &[
+    SPACES_TOOLS[0],
+    SPACES_TOOLS[1],
+    SPACES_TOOLS[2],
+    SPACES_TOOLS[3],
+    HEALTH_TOOL,
+];
+
 pub fn instance_tools(record: &Instance) -> serde_json::Result<Enabled> {
-    let tools = if spaces::binding(record).is_some() {
-        SPACES_TOOLS
-    } else {
-        &TOOLS
+    let tools = match (spaces::binding(record).is_some(), health::enabled(record)) {
+        (true, true) => SPACES_AND_HEALTH,
+        (true, false) => SPACES_TOOLS,
+        (false, true) => ACCOUNT_AND_HEALTH,
+        (false, false) => &TOOLS,
     };
     Ok(Enabled::when(team(record).is_some(), tools, &[]))
 }
@@ -229,6 +245,10 @@ impl Capability for DigitalOcean {
                 "Show status for the approved DigitalOcean Spaces binding.",
             ),
             Tool::bare(
+                health::STATUS,
+                "Show the approved temporary Droplet health plan and state.",
+            ),
+            Tool::bare(
                 spaces::VERIFY,
                 "Verify the approved DigitalOcean Spaces binding with one bounded read.",
             ),
@@ -246,6 +266,7 @@ impl Capability for DigitalOcean {
                 VERIFY => verify(&record, cx.env).await,
                 spaces::STATUS => spaces::status(&record, cx.env).await,
                 spaces::VERIFY => spaces::verify(&record, cx.env).await,
+                health::STATUS => health::status(cx.env, &record).await,
                 _ => Err(crate::unknown(tool)),
             }
         })
@@ -253,8 +274,10 @@ impl Capability for DigitalOcean {
 
     fn write_check<'a>(&'a self, cx: &'a Context<'a>, w: &'a Write<'a>) -> Call<'a> {
         Box::pin(async move {
-            if w.action.id == spaces::SET_KEY {
-                return spaces::check_write(cx, w).await;
+            match w.action.id {
+                spaces::SET_KEY => return spaces::check_write(cx, w).await,
+                health::START | health::SET_TOKEN => return health::check_write(cx, w).await,
+                _ => {}
             }
             for_write(cx.env, &w.target).await?;
             Ok(Value::Null)
@@ -263,10 +286,11 @@ impl Capability for DigitalOcean {
 
     fn write_make<'a>(&'a self, cx: &'a Context<'a>, w: &'a Write<'a>) -> Call<'a> {
         Box::pin(async move {
-            if w.action.id == spaces::SET_KEY {
-                spaces::save(cx, w).await
-            } else {
-                save(cx, w).await
+            match w.action.id {
+                spaces::SET_KEY => spaces::save(cx, w).await,
+                health::START => health::start(cx, w).await,
+                health::SET_TOKEN => health::save_token(cx, w).await,
+                _ => save(cx, w).await,
             }
         })
     }

@@ -82,6 +82,8 @@ pub enum Change {
     /// `{value}`, or at `begin` only `{digest}`: the value's base64url SHA-256, so the value is
     /// sent once. Bound by its digest.
     Secret,
+    /// The exact fingerprint of the current Droplet health check plan.
+    DropletHealthPlan,
     /// `{record}`: an instance record as JSON text, bound by its digest.
     Record,
     /// `{days}`: a proxy credential's lifetime.
@@ -190,6 +192,22 @@ pub const ACTIONS: &[Action] = &[
         false,
         Target::DigitalOceanTeam,
         Change::Secret,
+    ),
+    act(
+        crate::digitalocean::health::SET_TOKEN,
+        "Set a Droplet provisioning token",
+        Cap(crate::digitalocean::NAME),
+        false,
+        Target::DigitalOceanTeam,
+        Change::Secret,
+    ),
+    act(
+        crate::digitalocean::health::START,
+        "Run a temporary Droplet health check",
+        Cap(crate::digitalocean::NAME),
+        false,
+        Target::DigitalOceanTeam,
+        Change::DropletHealthPlan,
     ),
     app(act(
         "token-issue",
@@ -580,6 +598,13 @@ impl Action {
                     (None, Some(_), Step::Begin) => return Err("not a SHA-256 digest".into()),
                     _ => return Err("the change is {value}, or {digest} to begin".into()),
                 }
+            }
+            Change::DropletHealthPlan => {
+                only(&o, &["plan"], true)?;
+                let plan = s("plan")
+                    .filter(|value| digest_like(value))
+                    .ok_or("expected the current Droplet health plan fingerprint")?;
+                json!({"plan":plan})
             }
             Change::Record => {
                 only(&o, &["record", "digest"], true)?;

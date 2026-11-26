@@ -217,6 +217,12 @@ async fn route(req: Request, env: Env, ctx: &WorkerContext) -> Result<Response> 
     if !proxy::host_serves(&host, settings::PROXY_HOST, &path) {
         return Response::error("not found", 404);
     }
+    if host == settings::HOST && path == pigeon_capabilities::digitalocean::health::CALLBACK_PATH {
+        if req.method() != Method::Post {
+            return Response::error("method not allowed", 405);
+        }
+        return pigeon_capabilities::digitalocean::health::callback(&env, req).await;
+    }
     let caps = split::all(&env, settings::capabilities(), settings::BINDINGS).await;
     // The apex is the public site's alone: none of the platform's paths answer there.
     if site::is_apex(&host, settings::ZONE) {
@@ -264,6 +270,12 @@ async fn scheduled(_event: worker::ScheduledEvent, env: Env, _ctx: worker::Sched
         Ok(ran) if !ran.is_empty() => console_log!("github deploys: {ran:?}"),
         Ok(_) => {}
         Err(e) => console_error!("github deploys failed: {e}"),
+    }
+    if pigeon_capabilities::digitalocean::health::reap(&env)
+        .await
+        .is_err()
+    {
+        console_error!("Droplet health cleanup tick failed; check the instance's status");
     }
     pigeon_capabilities::ledger::flush_calls(&env, true).await;
 }
