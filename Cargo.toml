@@ -22,9 +22,6 @@ members = [
     "src/ingest",
     "src/ingest-runner",
     "src/data-worker",
-    # The Durable Object rehearsal's throwaway Workers (docs/plans/do-rehearsal.md).
-    "src/dotest-a",
-    "src/dotest-b",
 ]
 
 [workspace.package]

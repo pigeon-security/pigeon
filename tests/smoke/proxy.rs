@@ -1403,9 +1403,7 @@ fn proxy_worker_caches_and_core_ops() {
             "pigeon-model-gateway",
             "pigeon-ci-gateway",
             "pigeon-proxy",
-            "pigeon-ai-agents",
-            "pigeon-dotest-b",
-            "pigeon-dotest-a"
+            "pigeon-ai-agents"
         ]
     );
     let broken = pigeon_proxies::cf_proxy::CfProxy::platform("h", "s", "not toml [", "nope", "r");

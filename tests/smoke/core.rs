@@ -3190,13 +3190,7 @@ fn core_architecture_drawings_are_their_own() {
 fn core_architecture_check_is_clean_on_the_real_model() {
     use pigeon_capabilities::architecture::{Dependency, Worker, check};
     let home = arch_home_model();
-    // The DO rehearsal's throwaway Workers (docs/plans/do-rehearsal.md) answer on workers.dev
-    // only, which the model does not draw, and nothing binds them until the source's binding
-    // names the destination.
-    let findings: Vec<_> = check(&home)
-        .into_iter()
-        .filter(|f| !(f.rule == "worker_unreached" && f.subject.starts_with("pigeon-dotest-")))
-        .collect();
+    let findings = check(&home);
     assert!(findings.is_empty(), "{findings:#?}");
     assert!(!home.tool_calls.is_empty() && !home.route_kinds.is_empty());
     let mut broken = arch_bare_model();

@@ -1079,9 +1079,7 @@ fn land_rebases_disjoint_branches_and_lanes() {
             "pigeon-model-gateway",
             "pigeon-ci-gateway",
             "pigeon-proxy",
-            "pigeon-ai-agents",
-            "pigeon-dotest-b",
-            "pigeon-dotest-a"
+            "pigeon-ai-agents"
         ]
     );
     assert!(map.worker("cloud-gateway").is_none());
@@ -1134,9 +1132,7 @@ fn land_rebases_disjoint_branches_and_lanes() {
             "model-gateway",
             "ci-gateway",
             "proxy",
-            "ai-agents",
-            "dotest-b",
-            "dotest-a"
+            "ai-agents"
         ]
     );
     // CI's code deploys the two Workers built with it, core and the gateway, and no other; the

@@ -175,28 +175,3 @@ test_job = "test"
 deploy_job = "deploy-ai-agents"
 after = ["portal_sync"]
 containers = ["Sandbox"]
-
-# A throwaway Worker for the Durable Object rehearsals (docs/plans/do-rehearsal.md, "Second
-# rehearsal"): the transfer's destination. Its first deploy, in the landing that adds this entry,
-# is the transfer. Listed before dotest-a, whose binding names it, so a landing that deploys both
-# deploys it first. Its entry comes out once the rehearsal is done.
-[[worker]]
-name = "dotest-b"
-script = "pigeon-dotest-b"
-dir = "src/dotest-b"
-paths = ["src/dotest-b/*", "ci/deploy/deploy-dotest-b.sh"]
-test_job = "test"
-deploy_job = "deploy-dotest-b"
-after = []
-
-# A throwaway Worker for the Durable Object rehearsals (docs/plans/do-rehearsal.md, "Second
-# rehearsal"): the transfer's source, which later stops exporting the class. Its entry comes out
-# once the rehearsal is done.
-[[worker]]
-name = "dotest-a"
-script = "pigeon-dotest-a"
-dir = "src/dotest-a"
-paths = ["src/dotest-a/*", "ci/deploy/deploy-dotest-a.sh"]
-test_job = "test"
-deploy_job = "deploy-dotest-a"
-after = []

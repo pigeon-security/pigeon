@@ -27,8 +27,6 @@ Each crate lives in `src/<name>` (see `members` in `Cargo.toml`).
 - `src/ingest`: The ingest runner's shared library: decide, for each file, whether R2 already holds it with
 - `src/ingest-runner`: The ingest runner: the S3 source, the local-folder source, the R2 destination and the spool
 - `src/data-worker`: The instance's data Worker: for now, the ingest job runner for Backblaze B2 as a Cloudflare
-- `src/dotest-a`: pigeon-dotest-a: a throwaway Worker for the Durable Object transfer rehearsal
-- `src/dotest-b`: pigeon-dotest-b: a throwaway Worker for the Durable Object transfer rehearsal
 
 ## Workers
 
@@ -47,10 +45,6 @@ workspace crate the Worker crate pulls in, directly or not.
   - links: `src/contract`, `src/core`, `src/proxies`
 - `ai-agents`: script `pigeon-ai-agents`, crate `src/ai-agents-worker`, config `src/ai-agents-worker/wrangler.toml`
   - links: `src/ai-agents`, `src/contract`, `src/core`, `src/models`
-- `dotest-b`: script `pigeon-dotest-b`, crate `src/dotest-b`, config `src/dotest-b/wrangler.toml`
-  - links: 
-- `dotest-a`: script `pigeon-dotest-a`, crate `src/dotest-a`, config `src/dotest-a/wrangler.toml`
-  - links: 
 
 ## Where things live
 
@@ -65,10 +59,10 @@ workspace crate the Worker crate pulls in, directly or not.
   Modules:
   `accounts`, `ai_agents`, `apple`, `ci`, `cloud`, `console`, `core`, `federation`, `instances`, `jobs_audit`, `land`, `models`, `observability`, `policy`, `proxy`, `sites`
 - CI: `.pigeon/ci.toml` defines the jobs, `ci/runner` holds their scripts. Jobs:
-  `smoke`, `smoke-fail`, `test`, `allowlist`, `deploy`, `sleep`, `deploy-sites`, `deploy-model-gateway`, `deploy-cloud-gateway`, `deploy-ci-gateway`, `deploy-proxy`, `deploy-ai-agents`, `ios-check`, `ios-release`, `deploy-dotest-a`, `deploy-dotest-b`
+  `smoke`, `smoke-fail`, `test`, `allowlist`, `deploy`, `sleep`, `deploy-sites`, `deploy-model-gateway`, `deploy-cloud-gateway`, `deploy-ci-gateway`, `deploy-proxy`, `deploy-ai-agents`, `ios-check`, `ios-release`
   Run the gate with `sh ci/runner/test.sh`.
 - Deploy: `ci/deploy/deploy.sh` and one `ci/deploy/deploy-<worker>.sh` per capability
   Worker. Scripts in `ci/deploy`:
-  `allowlist.sh`, `deploy-ai-agents.sh`, `deploy-ci-gateway.sh`, `deploy-cloud-gateway.sh`, `deploy-dotest-a.sh`, `deploy-dotest-b.sh`, `deploy-model-gateway.sh`, `deploy-proxy.sh`, `deploy-sites.sh`, `deploy.sh`, `node.sh`, `standin.mjs`
+  `allowlist.sh`, `deploy-ai-agents.sh`, `deploy-ci-gateway.sh`, `deploy-cloud-gateway.sh`, `deploy-model-gateway.sh`, `deploy-proxy.sh`, `deploy-sites.sh`, `deploy.sh`, `node.sh`, `standin.mjs`
 - Worker ownership of paths (lanes): `ci/workers.toml`.
 - This map: `ci/repo-map.sh` writes `src/ai-agents/repo-map.md`.
