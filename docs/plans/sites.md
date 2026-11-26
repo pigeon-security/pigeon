@@ -124,9 +124,10 @@ pigeon-sites checks the allow list itself against the config it read.
 - A cookie `__Host-pigeon-site`. It is host-only, `Secure`, `HttpOnly`, `SameSite=Lax`,
   `Path=/`.
 - Its value is `{user}.{host}.{expires}` and an HMAC-SHA256 over it, keyed by
-  `HMAC(CALLER_KEY, "pigeon-site-session\0" + host)`. That key is derived from a key the Worker
-  already holds, so there is no new secret, and a cookie from one host never verifies on
-  another.
+  `HMAC(SITE_KEY, "pigeon-site-session\0" + binding)`, where the binding names the instance, site
+  and host. `SITE_KEY` is a Secrets Store secret bound by pigeon-sites and core only (it was
+  `CALLER_KEY` until step 4 of [caller-keys.md](caller-keys.md)); a cookie from one host never
+  verifies on another.
 - Sessions last 12 hours. Each request re-checks the allow list, so removing someone from
   `allow` ends their access when the host map refreshes (5 minutes). Removing a user ends it at
   expiry at the latest.

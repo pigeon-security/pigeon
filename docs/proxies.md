@@ -34,7 +34,7 @@ While core serves the host, revoking a credential takes effect at once, and each
 
 ### How the proxy Worker reaches core
 
-It never holds the parent token. It asks core over its `PLATFORM` service binding, signing each request with `CALLER_KEY`:
+It never holds the parent token. It asks core over its `PLATFORM` service binding, signing each request with its own caller key (`CALLER_KEY_OWN`, the secret `CALLER_KEY_PROXY`; see [plans/caller-keys.md](plans/caller-keys.md)):
 
 | Op | What | Kept |
 | --- | --- | --- |

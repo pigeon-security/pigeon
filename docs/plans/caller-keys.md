@@ -1,19 +1,18 @@
 # Per-Worker caller keys
 
-Status: **steps 0, 1, 2 and 5 done; step 3a landed (`950f461`), 3b and 3c landing one at a time; step 4 not started.** Steps 1,
-2 and 5 are on main (step 2 as of `57960d8`: core binds the six `CALLER_KEY_<WORKER>`, each
-Worker binds its own as `CALLER_KEY_OWN` and sends `X-Pigeon-Worker`). Step 0 is done live:
-`workers_setup` reported all seven caller keys "already there; kept" (2026-11-25). Step 3 is
-built on `claude/caller-keys-step3`: eight code commits on main at `57960d8`, then this doc's
-(see step 3 below). Until step 3 lands, every Worker and core still sign with the shared
-`CALLER_KEY`. Task K1 of the clean-up.
+Status: **steps 0 to 3 and 5 done; step 4 built on `claude/caller-keys-step4`, not landed.**
+Steps 1, 2, 3 and 5 are on main (step 3 as of `2856b5f`: every Worker signs with and checks its
+own `CALLER_KEY_OWN`, and core signs per Worker). Step 0 is done live: `workers_setup` reported
+all seven caller keys "already there; kept" (2026-11-25). Step 4 is four code commits, landed
+one per landing in order, with person steps between them (see step 4 below). Task K1 of the
+clean-up.
 
 ## Goal
 
 One key per capability Worker, so no Worker can sign as another. Core holds all the keys. Each
 capability Worker binds only its own. The shared `CALLER_KEY` is dropped at the end.
 
-## What is true today
+## What was true before this plan
 
 - One secret, `CALLER_KEY`, in the Secrets Store. `workers_setup` makes it once and keeps an
   existing one (`Split::setup`, src/capabilities/src/split.rs).
@@ -102,9 +101,10 @@ Each step is safe alone. Landing order is the order below.
    and checks the shared key alone. Each wrangler change was checked with
    `ci/deploy/allowlist.sh` (all calls on the allowlist; see "Checking each wrangler binding
    change").
-3. **Each side signs with the per-Worker key.** Built, not landed, on
-   `claude/caller-keys-step3` (based on main at `57960d8`, after all seven step 2 deploys).
-   Eight code commits, landed one per landing **in commit order** (the doc commit last):
+3. **Each side signs with the per-Worker key.** Landed (3a `950f461`, 3b `709459b`, the six 3c
+   commits through `2856b5f`). Built on `claude/caller-keys-step3` (based on main at `57960d8`,
+   after all seven step 2 deploys). Eight code commits, landed one per landing **in commit
+   order** (the doc commit last):
    1. **3a, receivers** (`K1 step 3a`, shared lane: src/contract, so every Worker deploys).
       `pigeon_contract::serve` takes `pigeon_contract::Keys` and checks core's call with
       `CALLER_KEY_OWN`, then `CALLER_KEY` (`Keys::verify`; only a bad signature falls back, as
@@ -140,24 +140,69 @@ Each step is safe alone. Landing order is the order below.
    (the key per script; every service core binds in src/platform/wrangler.toml has a key core
    binds; each Worker binds that same key as `CALLER_KEY_OWN`; a call core signs for one
    Worker verifies there and at no other).
-4. **Drop the shared key.** Not started. Remove the `CALLER_KEY` bindings and the fallback code. Delete the
-   secret from the Secrets Store last, by the person. Before that, move what is still derived
-   from `CALLER_KEY` off it: protected sites' origin keys (core's `instances.rs` apply and
-   sites' `public.rs`, which must agree, and changing the key means re-applying each protected
-   instance) and sites' sign-in session keys (changing it signs everyone out of protected
-   sites). Then the Workers' `Keys::shared` is `None` (`keys::shared_key` already reads an
-   unbound key as none) and core's `verify_with_keys` loses its shared fall-back.
+4. **Drop the shared key.** Built on `claude/caller-keys-step4` (based on main at `d9a33a8`).
+   Four code commits, landed one per landing **in this order**, each after the person step
+   before it:
+   1. **4a, make `SITE_KEY`** (`K1 step 4a`, core's lane; src/core changes by one constant, so
+      every Worker redeploys, unchanged). Protected sites' origin keys and visitor session keys
+      move off `CALLER_KEY` to a dedicated secret, `SITE_KEY`
+      (`pigeon_core::site_auth::SITE_KEY`). `workers_setup` now keeps
+      `split::setup_key_names()`: the caller keys, then `SITE_KEY`; it makes each that is
+      missing, readable by Workers, and answers only `made` or `already there; kept`. No binding.
+      **Person, after it deploys:** run `workers_setup` live once and check its `keys` shows
+      `SITE_KEY` (`made` the first time).
+   2. **4b, derive from `SITE_KEY`** (`K1 step 4b`; core's lane, which with
+      src/platform/wrangler.toml also redeploys ci-gateway and proxy; sites; every Worker for
+      src/core). src/platform/wrangler.toml and src/sites/wrangler.toml bind `SITE_KEY`; no other
+      Worker does. Core's instance apply and pigeon-sites read it through
+      `pigeon_core::secrets_store::site_key` and derive with `site_auth::origin_key` /
+      `session_key`, so they derive alike; neither falls back to another key. A binding to a
+      missing secret refuses the deploy, so this lands only after the person's 4a step.
+      The protected origin Worker's plan digest now names its key source
+      (`origin_key_from: SITE_KEY`, src/capabilities/src/instances/plan.rs), so every protected
+      origin uploaded before reads as changed: `instance_plan` shows its `UploadWorker`
+      (`replaces: true`, with its `origin`) and `instance_apply` uploads it with the new origin
+      key. Public sites' digests do not change. **Consequences:** from this deploy until each
+      protected instance is re-applied, its site answers "protected origin unavailable" (503);
+      every visitor of a protected site is signed out once (their session keys changed).
+      **Person, right after it deploys:** for each protected instance (sandbox and
+      willowgraysen), `instance_plan`, check the only change is the site Worker's upload, then
+      `instance_apply` with the passkey, and open the site to sign in again.
+   3. **4c, drop the shared key from the code** (`K1 step 4c`; shared lane: src/contract, so
+      every Worker; core's). `pigeon_contract::Keys` holds the own key only (no `shared`,
+      `SHARED_KEY` or `keys::shared_key`). Core's `split::verify_caller` / `verify_request` take
+      the Worker's own key alone; `KeyUsed` and the fall-back are gone. `split::serve` refuses
+      (401) a request naming no known Worker in `X-Pigeon-Worker`, or one whose key core does not
+      bind, and applies `WORKER_OPS` to every request it accepts. `split::caller_key` and
+      `remote::CALLER_KEY` are gone; `workers_setup` no longer makes `CALLER_KEY` and its answer
+      drops `caller_key`. Nothing reads the `CALLER_KEY` bindings after this. No person action.
+   4. **4d, unbind `CALLER_KEY`** (`K1 step 4d`; all seven Workers' lanes). Removes the
+      `CALLER_KEY` binding from every wrangler.toml; every `CALLER_KEY_OWN`, core's six
+      `CALLER_KEY_<WORKER>` and the `SITE_KEY` bindings stay. **Land after 4c has deployed to
+      core**: core's code before 4c read `CALLER_KEY` on every signed request. (Each Worker's code
+      and bindings deploy together, so 4d right after 4c is safe.) A binding removal adds no
+      Cloudflare API call. **Person, after all seven deploys:** delete `CALLER_KEY` from the
+      Secrets Store, and only then.
+
+   Tests: sites::sites_and_core_derive_protected_site_keys_from_site_key (both bind
+   `SITE_KEY`, no other Worker does, both read it the one way, pinned derivations),
+   instances::protected_origins_replan_once_their_key_moves_to_site_key, and in
+   tests/smoke/proxy.rs: `core_contract_per_worker_caller_keys`,
+   `core_bounds_each_workers_ops_with_its_own_key`,
+   `core_refuses_a_named_worker_signing_with_the_shared_key`,
+   `worker_checks_cores_calls_with_its_own_key_only`,
+   `core_signs_each_bound_workers_calls_with_that_workers_key`,
+   `no_worker_binds_the_shared_caller_key` and `workers_setup_plans_only_missing_caller_keys`.
 5. **Bind each Worker to the core operations it may call.** Enforcement landed in `57e270d`;
    see the next section. It takes effect only for requests
    signed with a Worker's own key, so it bounds nothing until step 2 (core binds the keys,
    Workers send the header) and step 3 (Workers sign with their own key). It bounds everything
-   only after step 4, while the shared key still verifies unbounded requests.
+   only after step 4, while the shared key still verifies unbounded requests. Since 4c it bounds
+   every request core accepts from a Worker.
 
-**Next: land step 3** from `claude/caller-keys-step3` in commit order, one per landing: 3a,
-then (once sites, model-gateway, ci-gateway, cloud-gateway and ai-agents have deployed it) 3b,
-then the six 3c commits. Watch core's logs for `split: refused a Worker's core op` after each
-3c: that is a `PLATFORM` call missing from `WORKER_OPS`. **Then step 4**, with the derivation
-work above.
+**Next: land step 4** from `claude/caller-keys-step4`, one commit per landing: 4a, then the
+person runs `workers_setup`; 4b, then the person re-applies sandbox and willowgraysen; 4c; 4d,
+then the person deletes `CALLER_KEY`.
 
 ## Step 5: per-Worker allowed core operations (landed, inert until steps 2 and 3)
 
@@ -176,8 +221,8 @@ operations from any holder of a valid key:
 
 So core keeps, per Worker name, the operations (for the `credential*` ops the kinds, for
 `sites`' `dispatch` the tools) that Worker may ask, and refuses anything else once the signature
-checks out with that Worker's own key. A request signed with the shared key keeps today's
-behaviour until step 4.
+checks out with that Worker's own key. Until step 4c a request signed with the shared key
+kept the old, unbounded behaviour; since then there is none.
 
 How it is built: `split::WORKER_OPS` is the one declarative table, `split::worker_may` checks a
 request against it, and `split::serve` applies it right after the signature check, answering
@@ -226,19 +271,26 @@ step 0 check by the person.
 
 ## Risks
 
-- A binding to a missing secret refuses the deploy. Step 0 is the guard.
+- A binding to a missing secret refuses the deploy. Step 0 is the guard, and for `SITE_KEY`
+  the person's `workers_setup` run between 4a and 4b.
 - A step 3 landing in one Worker before its partner would refuse every call between them. Land
   step 2 everywhere, wait for all six capability Workers' deploys, then step 3.
 - Core holds all six keys, so core can sign as any Worker. That is by design: core is the
   front door.
 - Rotating a key refuses calls in flight for up to a minute. Keep "an existing key is kept".
-- The header is a claim. If core had no per-Worker key for the name, it falls back to the
-  shared key, which is as strong as today and no stronger.
+- The header is a claim. Before step 4c, if core had no per-Worker key for the name, it fell
+  back to the shared key; since 4c such a request is refused.
+- Step 4b changes every protected origin's key: those sites answer 503 until re-applied, and
+  their visitors sign in again. Re-apply right after 4b deploys.
 
 ## Follow-ups for the person
 
 1. Done (2026-11-25): `workers_setup` live reported all seven caller keys present.
 2. The binding name in each Worker is `CALLER_KEY_OWN` (used by the step 2 branches).
-3. After step 4, delete `CALLER_KEY` from the Secrets Store.
-4. `docs/plans/workers-split.md`, `architecture.md` and `proxies.md` mention the one shared
-   `CALLER_KEY`; update them once step 4 lands.
+3. Step 4, in order: after 4a deploys, run `workers_setup` live (it makes `SITE_KEY`); after
+   4b deploys, re-apply each protected instance (sandbox, willowgraysen) with `instance_plan`
+   and `instance_apply` and a passkey; after 4d has deployed to all seven Workers, delete
+   `CALLER_KEY` from the Secrets Store. Deleting it earlier refuses the deploy of any Worker
+   that still binds it.
+4. `docs/plans/workers-split.md` and `architecture.md` still describe the one shared
+   `CALLER_KEY` as the plan was then; `proxies.md` and `sites.md` are updated in step 4.
