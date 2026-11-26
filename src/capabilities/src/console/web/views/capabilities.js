@@ -129,6 +129,30 @@
       },
       remove: (r) => { delete r.redirects; } },
   ];
+  // Catalogue capabilities a linked record enables by name in `capabilities` (capability scoping,
+  // M4): those whose catalogue entry is `linked`, one at a time as each is turned on. Enabling
+  // writes `capabilities.<name>: {}` (inline, the only placement a linked instance takes yet);
+  // disabling removes it and whatever requires it.
+  const CATALOGUE_ADDS = {
+    architecture: { adds: ["Platform › Architecture"], what: "Show this instance’s own setup: its Worker, bucket, hostnames and tools" },
+    secrets: { adds: ["Access › Secrets"], what: "List the secrets in this instance’s own Cloudflare account (its Secrets Store)" },
+  };
+  function catalogueCaps(versions) {
+    return (versions?.catalogue || []).filter((e) => e.linked && !e.always && e.name !== "redirects").map((e) => ({
+      cap: e.name, field: `capabilities.${e.name}`, component: e.name,
+      adds: CATALOGUE_ADDS[e.name]?.adds || [], what: CATALOGUE_ADDS[e.name]?.what || "",
+      on: (r) => Boolean(r.capabilities && r.capabilities[e.name]),
+      needs: (r) => { const lack = (e.requires || []).filter((q) => !(r.capabilities || {})[q]); return lack.length ? lack.join(", ") : null; },
+      fields: () => [],
+      apply: (r) => { r.capabilities = { ...(r.capabilities || {}), [e.name]: {} }; },
+      remove: (r) => {
+        const caps = { ...(r.capabilities || {}) };
+        delete caps[e.name];
+        for (const other of versions.catalogue) if ((other.requires || []).includes(e.name)) delete caps[other.name];
+        if (Object.keys(caps).length) r.capabilities = caps; else delete r.capabilities;
+      },
+    }));
+  }
   const profileOf = (r, c) => (c.current ? c.current(r) : r[c.field] || {});
   // The record with capability `c` set to `values`, or without it (and what needs it).
   function withCap(r, c, values) {
@@ -165,6 +189,7 @@
       columns: [
         { label: "Capability", cell: (row) => [el("strong", { class: "mono", text: row.cap }), el("span", { class: "sub", text: row.what })] },
         { label: "Adds to the console", cell: (row) => (row.adds?.length ? row.adds.map((t) => tag(t)) : el("span", { class: "muted", text: "—" })) },
+        { label: "Runs", cell: (row) => row.runs || el("span", { class: "muted", text: "—" }) },
         { label: "Record field", cls: "mono", cell: (row) => row.field || "—" },
         { label: "Pin → selected", cell: (row) => row.pinText },
         { label: "Latest", cls: "mono", cell: (row) => row.latest || "—" },
@@ -189,6 +214,16 @@
 
     function rows({ record, versions, plan }) {
       const comps = new Map((versions?.components || []).map((c) => [c.name, c]));
+      // Where each catalogue capability runs here (catalogue::placements, M3): on home what is
+      // deployed, read-only; on a linked instance inline, in the instance's own Worker.
+      const placed = (versions?.instances || []).find((i) => i.id === record.id)?.placements || {};
+      const runs = (name) => {
+        const p = placed[name];
+        if (!p) return null;
+        const where = p.placement === "own_worker" ? "Own Worker" : "Inline";
+        return [pill(where, p.placement === "own_worker" ? "info" : "plain"), p.worker ? el("span", { class: "sub mono", text: p.worker }) : null,
+          p.read_only ? el("span", { class: "sub muted", text: "read-only: moves land through code" }) : null];
+      };
       const pins = new Map(((versions?.instances || []).find((i) => i.id === record.id)?.pins || []).map((p) => [p.component, p]));
       const steps = new Map(((plan?.instances || []).find((i) => i.id === record.id)?.steps || []).map((s) => [s.component, s]));
       const row = (c) => {
@@ -218,9 +253,9 @@
         const pinText = !enabled ? el("span", { class: "muted", text: "—" })
           : pin ? [code(pin.requirement), " → ", code(pin.selected || "none")]
             : [el("span", { class: "muted", text: "unpinned → " }), code(latest || "newest")];
-        return { ...c, enabled, latest, status, acts, pinText };
+        return { ...c, enabled, latest, status, acts, pinText, runs: enabled ? runs(c.cap) : null };
       };
-      const all = CAPS.map(row);
+      const all = [...CAPS, ...(inst.home ? [] : catalogueCaps(versions))].map(row);
       const yes = all.filter((r) => r.enabled);
       const no = all.filter((r) => !r.enabled);
       const out = [{ group: `Enabled on ${inst.title} (${yes.length})` }, ...yes, { group: `Available (${no.length})` }, ...no];
@@ -228,7 +263,7 @@
         const ours = new Set(CAPS.map((c) => c.component));
         const deployed = (versions?.components || []).filter((c) => c.kind === "capability" && !ours.has(c.name));
         const platformRow = (c) => ({
-          cap: c.name, what: c.worker ? `Served by ${c.worker}` : "", adds: [], field: null, latest: c.version,
+          cap: c.name, what: c.worker ? `Served by ${c.worker}` : "", adds: [], field: null, latest: c.version, runs: runs(c.name),
           pinText: code(c.version), status: pill("Deployed", "ok"), acts: el("span", { class: "muted", text: "Changes land through code" }),
         });
         const platform = deployed.filter((c) => !c.plumbing);
@@ -315,7 +350,7 @@
   }
 
   // ---- Overview (C2): facts, the link, and the record's other fields as a form or JSON.
-  const CAP_FIELDS = new Set(["publishing", "storage", "source", "ci", "observability", "ingest", "redirects", "pins"]);
+  const CAP_FIELDS = new Set(["publishing", "storage", "source", "ci", "observability", "ingest", "redirects", "pins", "capabilities"]);
   const FIXED = new Set(["id", "account", "version"]);
   const editable = (r) => Object.fromEntries(Object.entries(r).filter(([k]) => !CAP_FIELDS.has(k) && !FIXED.has(k)));
   const repoText = (repo) => (!repo ? "" : repo.kind === "github" ? `github:${repo.full_name}` : repo.kind === "artifacts" ? `artifacts:${repo.namespace}/${repo.repo}` : JSON.stringify(repo));

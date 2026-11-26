@@ -45,6 +45,10 @@ pub struct Ledger {
     /// Platform subdomains pigeon attached to the sites Worker for this instance.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub subdomains: Vec<String>,
+    /// Secrets Stores pigeon created in the linked account for the `secrets` capability (M4).
+    /// Retire leaves them: they hold the person's secrets.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secrets_stores: Vec<String>,
 }
 
 /// The Directory key of instance `id`'s ledger.
@@ -158,6 +162,19 @@ pub enum Step {
         name: String,
         why: String,
     },
+    /// Upload a capability's own Worker into the linked account (capability scoping, M5):
+    /// `<instance>-<capability>`, which the instance Worker then reaches through a Service
+    /// Binding named `binding`. Recorded in the ledger as pigeon's, so retire removes it.
+    UploadCapabilityWorker {
+        capability: String,
+        name: String,
+        binding: String,
+        module: String,
+        replaces: bool,
+    },
+    /// Create the linked account's Secrets Store, for the `secrets` capability its record
+    /// enables (capability scoping, M4).
+    CreateSecretsStore { name: String },
     /// Something only the person can do first.
     Blocked { why: String },
     /// There, but not the plan's to change: a platform-owned Worker that the home instance
@@ -180,6 +197,8 @@ impl Step {
             self,
             Step::CreateBucket { .. }
                 | Step::UploadWorker { .. }
+                | Step::CreateSecretsStore { .. }
+                | Step::UploadCapabilityWorker { .. }
                 | Step::EnableWorkersDev { .. }
                 | Step::AttachDomain { .. }
                 | Step::AttachSubdomain { .. }
@@ -356,9 +375,9 @@ pub fn home_refusal(steps: &[Step], owned: Option<&PlatformOwned>) -> Option<Str
                 hostname, worker, ..
             } if owned.host(hostname) || owned.worker(worker) => Some(hostname.as_str()),
             Step::AttachDomain { .. } => None,
-            Step::UploadWorker { name, .. } | Step::EnableWorkersDev { name } => {
-                Some(name.as_str())
-            }
+            Step::UploadWorker { name, .. }
+            | Step::EnableWorkersDev { name }
+            | Step::UploadCapabilityWorker { name, .. } => Some(name.as_str()),
             Step::AttachSubdomain { hostname, .. } => Some(hostname.as_str()),
             _ => None,
         };
@@ -480,6 +499,7 @@ fn wanted(
         module_digest(bucket, jurisdiction.as_deref())
     };
     let module = with_redirects(Some(&module), redirects.as_deref());
+    let module = with_services(&module, &services(instance));
     let uploaded = ledger
         .workers
         .iter()
@@ -689,6 +709,7 @@ fn redirect_only(
         }];
     }
     let module = with_redirects(None, Some(&map));
+    let module = with_services(&module, &services(instance));
     let uploaded = ledger
         .workers
         .iter()
@@ -726,6 +747,189 @@ pub const REDIRECTS_NOTE: &str = "Removing a redirect detaches nothing: pigeon n
                                   then serves the site there, or answers 404 with no site) until \
                                   a person detaches it or the instance is retired.";
 
+/// What a linked account holds for the catalogue capabilities its record enables
+/// (docs/plans/capability-scoping.md, M4), read only for those it enables, so a record that
+/// enables none is observed, planned and digested as before.
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
+pub struct SeenCapabilities {
+    /// Whether the account has a Secrets Store: `None` when the record does not enable
+    /// `secrets`, or the link may not read it (see `refused`).
+    pub secrets_store: Option<bool>,
+    /// For each capability the link cannot serve, why: such as "re-link to enable secrets".
+    pub refused: Vec<(String, String)>,
+    /// The capability Workers (M5) that exist in the account, of those the record places
+    /// `own_worker` ([`own_workers`]).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub workers: Vec<String>,
+}
+
+/// The steps the record's catalogue capabilities need in its linked account, after the site's:
+/// a capability the link cannot serve is left alone with why (a person re-links first), so the
+/// site's steps still apply; `secrets` needs a Secrets Store, made when the account has none. A
+/// home record needs none here: the platform runs them.
+pub fn capability_steps(instance: &Instance, seen: &SeenCapabilities) -> Vec<Step> {
+    if instance.account == AccountRef::Home {
+        return Vec::new();
+    }
+    let mut steps: Vec<Step> = seen
+        .refused
+        .iter()
+        .map(|(name, why)| Step::Keep {
+            what: "capability".into(),
+            name: name.clone(),
+            why: why.clone(),
+        })
+        .collect();
+    match seen.secrets_store {
+        Some(true) => steps.push(Step::Ok {
+            what: "secrets store".into(),
+            name: "the account's".into(),
+        }),
+        Some(false) => steps.push(Step::CreateSecretsStore {
+            name: crate::secrets::LINKED_STORE.into(),
+        }),
+        None => {}
+    }
+    steps
+}
+
+/// A capability's own-Worker build for a linked account (capability scoping, M5): its one JS
+/// module and the Service Binding name the instance Worker reaches it by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LinkedWorker {
+    pub capability: &'static str,
+    pub binding: &'static str,
+    pub module: &'static str,
+}
+
+/// The capabilities with an own-Worker build for a linked account: none yet. `models` and
+/// `ai-agents` offer `own_worker`, but neither has a build fit for a linked account (M4 steps 5
+/// and 6), so `catalogue::linked_placements` offers `inline` alone for every entry until one is
+/// listed here.
+pub const LINKED_WORKERS: &[LinkedWorker] = &[];
+
+/// The digest of what is uploaded as capability Worker `w`: its module and compatibility date.
+pub fn capability_worker_digest(w: &LinkedWorker) -> String {
+    pigeon_core::oauth::hash(
+        &json!({
+            "capability": w.capability,
+            "module": w.module,
+            "compatibility_date": COMPATIBILITY_DATE,
+        })
+        .to_string(),
+    )
+}
+
+/// The record's capabilities placed `own_worker` that have a build in `builds`, as the instance
+/// Worker's Service Bindings: `(binding, worker)`, in the record's order.
+pub fn services_with(instance: &Instance, builds: &[LinkedWorker]) -> Vec<(String, String)> {
+    if instance.account == AccountRef::Home {
+        return Vec::new();
+    }
+    instance
+        .capabilities
+        .iter()
+        .filter(|(_, s)| s.placement == Some(crate::catalogue::Placement::OwnWorker))
+        .filter_map(|(name, _)| {
+            let w = builds.iter().find(|w| w.capability == name)?;
+            Some((
+                w.binding.to_string(),
+                crate::catalogue::own_worker_name(&instance.id, name),
+            ))
+        })
+        .collect()
+}
+
+/// [`services_with`] the builds there are ([`LINKED_WORKERS`]).
+pub fn services(instance: &Instance) -> Vec<(String, String)> {
+    services_with(instance, LINKED_WORKERS)
+}
+
+/// The instance Worker's digest once its Service Bindings are added: `module` as it is when
+/// there are none, so every instance without an own-Worker capability keeps its digest.
+pub fn with_services(module: &str, services: &[(String, String)]) -> String {
+    if services.is_empty() {
+        return module.to_string();
+    }
+    pigeon_core::oauth::hash(&json!({ "module": module, "services": services }).to_string())
+}
+
+/// The steps for the record's capabilities placed `own_worker` in its linked account, before
+/// the instance Worker's (which binds them): each Worker uploaded when missing or changed,
+/// unchanged when pigeon's last upload matches, a conflict when a Worker of that name is not
+/// pigeon's, and blocked when there is no build for it (`builds`). `seen` names the own Workers
+/// that exist. Nothing for home, or for a record with none.
+pub fn capability_workers_with(
+    instance: &Instance,
+    seen: &SeenCapabilities,
+    ledger: &Ledger,
+    builds: &[LinkedWorker],
+) -> Vec<Step> {
+    if instance.account == AccountRef::Home {
+        return Vec::new();
+    }
+    let mut steps = Vec::new();
+    for (cap, settings) in &instance.capabilities {
+        if settings.placement != Some(crate::catalogue::Placement::OwnWorker) {
+            continue;
+        }
+        let name = crate::catalogue::own_worker_name(&instance.id, cap);
+        let Some(build) = builds.iter().find(|w| w.capability == cap) else {
+            steps.push(Step::Blocked {
+                why: format!("{cap} has no Worker build for a linked account yet"),
+            });
+            continue;
+        };
+        let module = capability_worker_digest(build);
+        let uploaded = ledger
+            .workers
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, d)| d.as_str());
+        let upload = |replaces: bool| Step::UploadCapabilityWorker {
+            capability: cap.clone(),
+            name: name.clone(),
+            binding: build.binding.to_string(),
+            module: module.clone(),
+            replaces,
+        };
+        steps.push(match (seen.workers.contains(&name), uploaded) {
+            (false, _) => upload(false),
+            (true, Some(d)) if d == module => Step::Ok {
+                what: "worker".into(),
+                name,
+            },
+            (true, Some(_)) => upload(true),
+            (true, None) => Step::Conflict {
+                what: "worker".into(),
+                name,
+                why: "a Worker with this name exists, and pigeon did not upload it".into(),
+            },
+        });
+    }
+    steps
+}
+
+/// [`capability_workers_with`] the builds there are ([`LINKED_WORKERS`]).
+pub fn capability_workers(
+    instance: &Instance,
+    seen: &SeenCapabilities,
+    ledger: &Ledger,
+) -> Vec<Step> {
+    capability_workers_with(instance, seen, ledger, LINKED_WORKERS)
+}
+
+/// The names of the own Workers `instance`'s record places in its linked account, which
+/// [`SeenCapabilities::workers`] says exist or not.
+pub fn own_workers(instance: &Instance) -> Vec<String> {
+    instance
+        .capabilities
+        .iter()
+        .filter(|(_, s)| s.placement == Some(crate::catalogue::Placement::OwnWorker))
+        .map(|(name, _)| crate::catalogue::own_worker_name(&instance.id, name))
+        .collect()
+}
+
 /// The digest an approval binds: the instance, its version, the account and the steps.
 pub fn digest(instance: &Instance, account_id: &str, steps: &[Step]) -> String {
     pigeon_core::oauth::hash(
@@ -752,6 +956,10 @@ pub fn record(ledger: &mut Ledger, step: &Step) {
                 ledger.protected_buckets.push(name.clone());
             }
         }
+        Step::UploadCapabilityWorker { name, module, .. } => {
+            ledger.workers.retain(|(n, _)| n != name);
+            ledger.workers.push((name.clone(), module.clone()));
+        }
         Step::UploadWorker {
             name,
             module,
@@ -769,6 +977,9 @@ pub fn record(ledger: &mut Ledger, step: &Step) {
         }
         Step::AttachSubdomain { hostname, .. } if !ledger.subdomains.contains(hostname) => {
             ledger.subdomains.push(hostname.clone());
+        }
+        Step::CreateSecretsStore { name } if !ledger.secrets_stores.contains(name) => {
+            ledger.secrets_stores.push(name.clone());
         }
         _ => {}
     }
@@ -830,6 +1041,21 @@ pub fn describe(steps: &[Step]) -> Vec<Value> {
             Step::EnableWorkersDev { name } => {
                 json!(format!("turn on {name}'s workers.dev address"))
             }
+            Step::UploadCapabilityWorker {
+                capability,
+                name,
+                binding,
+                replaces,
+                ..
+            } => json!(format!(
+                "{} {capability}'s own Worker {name}; the instance's Worker reaches it as \
+                 {binding}, and retire removes it",
+                if *replaces { "update" } else { "upload" }
+            )),
+            Step::CreateSecretsStore { name } => json!(format!(
+                "create the account's Secrets Store, {name}, for the secrets capability; its \
+                 secrets are listed on Access › Secrets, and retire leaves it"
+            )),
             Step::AttachDomain {
                 hostname, worker, ..
             } => json!(format!(

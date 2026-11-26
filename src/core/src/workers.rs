@@ -29,6 +29,13 @@ pub enum Binding {
         /// The bucket's jurisdiction, if it has one.
         jurisdiction: Option<String>,
     },
+    /// A Service Binding to another Worker in the same account.
+    Service {
+        /// The name the Worker sees on `env`.
+        name: String,
+        /// The Worker it reaches.
+        service: String,
+    },
     /// A plain text variable.
     Text {
         /// The name the Worker sees on `env`.
@@ -105,6 +112,9 @@ fn binding_json(binding: &Binding) -> Value {
             json!({"type": "secret_text", "name": name, "text": text})
         }
         Binding::Text { name, text } => json!({"type": "plain_text", "name": name, "text": text}),
+        Binding::Service { name, service } => {
+            json!({"type": "service", "name": name, "service": service})
+        }
     }
 }
 

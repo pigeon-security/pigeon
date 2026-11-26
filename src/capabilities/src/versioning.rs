@@ -39,8 +39,8 @@ fn plain(components: &[Carried]) -> Vec<Component> {
 }
 
 /// The answer of `capabilities_versions`: each component once (the first declaration wins), the
-/// undeclared capabilities, each of `instances` with its pins checked, and the capability
-/// catalogue (placement, scope and availability; docs/plans/capability-scoping.md).
+/// undeclared capabilities, each of `instances` with its pins checked and where its catalogue
+/// capabilities run (`catalogue::placements`), and the capability catalogue (placement, scope and availability; docs/plans/capability-scoping.md).
 pub fn versions_view(
     components: &[Carried],
     undeclared: &[String],
@@ -72,7 +72,13 @@ pub fn versions_view(
     let carried = plain(components);
     let instances: Vec<Value> = instances
         .iter()
-        .map(|i| json!({ "id": i.id, "pins": to_value(pin_status(&i.pins, &carried)) }))
+        .map(|i| {
+            json!({
+                "id": i.id,
+                "pins": to_value(pin_status(&i.pins, &carried)),
+                "placements": crate::catalogue::placements(i),
+            })
+        })
         .collect();
     json!({
         "components": rows,

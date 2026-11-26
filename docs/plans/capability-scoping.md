@@ -1,6 +1,6 @@
 # Capability scoping: every console view comes from a capability on the instance
 
-Status: **decided** (2026-11-26); M1 and M2 built. Code references are to main at the time of writing.
+Status: **decided** (2026-11-26); M1, M2 and M3 built; M4 built for `architecture` and `secrets`, the rest deferred with plans (log); M5's mechanism built, with no capability placed in its own Worker on a linked instance yet. Code references are to main at the time of writing.
 
 ## Goal
 
@@ -111,6 +111,14 @@ reachable there only once architecture is enabled on it (see M4). The op answers
 - The Capabilities view lists the catalogue's capabilities with their placement, scope and
   availability, and Architecture draws the placement.
 
+Built: `CapabilitySettings.placement` (absent unless set, so `{}` and every stored record keep
+their digest); `catalogue::problems` refuses a placement the entry does not offer, any but the
+deployed one on home, and any but `linked_placements` (`inline`) off home; `catalogue::placement`
+and `placements` say where each runs (home: the catalogue's `home`/`home_worker`; a linked
+instance: inline in its own Worker); `capabilities_versions` answers them on each instance row,
+and the Capabilities view shows a Runs column (Inline / Own Worker, the Worker, "read-only" on
+home). Architecture does not draw the placement yet: the diagram is being redesigned separately.
+
 ### M4: per-capability enablement on linked instances, one at a time
 
 Each step turns the catalogue's `linked` flag on for one capability, adds what the instance's
@@ -121,6 +129,7 @@ account), so each step is its own landing with its own decision:
 1. `architecture` (needs no scope: it reads only the record) — can ride along with step 1.
 2. `secrets`: the instance's own Secrets Store (Secrets Store Write on the linked account).
 3. `observability` Cost: the instance account's usage (Account Analytics Read, Billing Read).
+   **Deferred** (log, 2026-11-26): Cloudflare's OAuth scopes include no Billing Read.
    Today Cost follows the record's own `observability` toggle, as Metrics does
    (`observability::instance::instance_tools`): its views show only on an instance whose record
    enables `observability`, and only on home, because `cost_daily` reads the platform's spend as
@@ -141,6 +150,26 @@ there with the instance's data only, and the ops refuse another instance's data.
 account (`<instance>-<capability>`), bind it to the instance Worker, and record it in the
 ledger as pigeon's, so retire removes it. Only capabilities whose catalogue entry offers the
 choice (`ai-agents`, `proxy`, `models`).
+
+Built (mechanism only):
+
+- `plan::LINKED_WORKERS` lists each capability's Worker build for a linked account: its module
+  and the Service Binding name. It is empty.
+- `catalogue::linked_placements` offers `own_worker` only where the entry offers it and a build
+  is listed, so every entry is `inline` on a linked instance.
+- Plan. For a record placing a capability `own_worker`, `capability_workers` plans the
+  `<instance>-<capability>` Worker (`catalogue::own_worker_name`) before the instance Worker:
+  `upload_capability_worker` when missing or changed, `ok` when pigeon's last upload matches,
+  a conflict when the name is not pigeon's, and blocked with no build.
+- Apply uploads it and records it in the ledger's `workers`, so retire deletes it as it does
+  the instance Worker. The instance Worker's upload binds it (`plan::services`,
+  `workers::Binding::Service`, new in core). Its digest changes only when it has one to bind
+  (`with_services`), so every current plan is as before.
+- Nothing is planned for home: its Workers are the platform's.
+
+Why no capability uses it yet: `models` and `ai-agents` need builds made for a linked account
+(M4 steps 5 and 6, in the log). `proxy` offers only `inline` in the catalogue: core serves
+Access › Tokens, and `pigeon-proxy` is not this capability.
 
 ### Platform admin (built 2026-11-26)
 
@@ -223,3 +252,107 @@ change on any instance.
 - 2026-11-26: platform admin built ("Platform admin", above): the Directory's `users.role`,
   Willow the first admin by migration, admin-only invites, removals, app disconnects, others'
   passkey links and passkeys, and role changes, at the MCP tools and the console's writes alike.
+- 2026-11-26: M3 built (above). The record's one setting is `placement`; there is no Worker
+  name in it: an `own_worker` placement on a linked instance would be `<instance>-<capability>`
+  (`catalogue::own_worker_name`, M5), and home's Workers are the catalogue's.
+- 2026-11-26: M4 step 1 built: `architecture` is `linked`. It needs no linked-account scope.
+  A linked record that lists `capabilities.architecture` shows Platform › Architecture (its own
+  `instance_model`). Without it, a linked record's areas are unchanged. The Capabilities view
+  on a linked instance lists the catalogue capabilities it may enable, with Enable (which
+  writes `capabilities.<name>: {}`) and Disable (which also removes what requires it). The
+  Overview editor no longer edits `capabilities`.
+- 2026-11-26: M4 step 2 built: `secrets` is `linked`.
+  - **Scope.** It needs the link's `secrets-store.write` ("Secrets Store Write"; Cloudflare's
+    OAuth list has it). `linked::CAPABILITY_SCOPES` names each capability's extra scope;
+    `requested_permissions` is `PERMISSIONS` plus those. The client asks for them as
+    `optional_scopes`, so a person may decline one at consent.
+  - **Rolling it out.** Run `linked_setup` once more. Seeing a scope the registered client
+    lacks (`scopes_to_add`), it PATCHes the client's `scopes` and `optional_scopes`, keeps the
+    new list for the consent URL, and says which instances to re-link.
+  - **Existing links.** They keep what they were granted. A link whose granted `scope` lacks
+    the scope is refused before any token is opened (`capability_refusal`, "re-link docs ...
+    and allow it, to enable secrets"). A Cloudflare 403 on a link that did not report its
+    scopes reads the same way (`explain`). `linked_status` lists `relink_for`. Today only
+    noisypigeon is linked, and it must be re-linked only if its record enables `secrets`.
+  - **Plan and apply.** `instance_plan` of a linked record enabling secrets reads the
+    account's Secrets Store (`plan::SeenCapabilities`, `observe_capabilities`). It adds
+    `create_secrets_store` (`pigeon`) when there is none, recorded in the ledger's
+    `secrets_stores`; retire leaves the store, since it holds the person's secrets. A link
+    without the scope adds a `keep` step with the refusal, which does not stop the site's
+    steps. A record without `secrets` plans and digests exactly as before.
+  - **Console.** Access › Secrets on a linked instance calls `secrets_list {instance}`, which
+    lists the names and change dates in its own store, never values and never the platform's.
+    It refuses a record that does not enable secrets. Nothing on a linked instance declares a
+    secret yet, so the view has no Set: setting one there waits for the first capability that
+    reads one (proxy or models).
+- 2026-11-26: M4 step 3, `observability` Cost on a linked instance: **deferred**.
+  - **What it would mean.** A linked instance's Cost would be its own account's Cloudflare
+    spend, not the platform's.
+  - **Why deferred.** Cloudflare's OAuth scope list (408 scopes, read with `linked_scopes`
+    today) has no Billing scope. It has `account-analytics.read` (usage), but usage alone is
+    not spend: the prices would be pigeon's guess.
+  - **Today.** A linked instance with `observability` keeps Metrics and shows no Cost, pinned
+    by `console_manifest_by_capability_per_instance_kind`.
+  - **Plan.** Add `account-analytics.read` as `observability`'s capability scope. Add
+    `cost_daily {instance}`, reading that account's Workers, R2 and DO usage by GraphQL and
+    pricing it with the table `cost.rs` uses for the platform. Label it an estimate. Show
+    Cost › 7 days/Today/30 days on linked records with `observability`. Revisit if Cloudflare
+    adds a Billing Read OAuth scope.
+- 2026-11-26: M4 step 4, `proxy` and Access › Tokens on a linked instance: **not yet**.
+  - **What a proxy credential is today.** It reaches the platform's own proxies: `/git/` (the
+    platform's repositories) and `/cf/` (the Cloudflare API, with the platform's minted
+    tokens), served by `pigeon-proxy`.
+  - **What it would be on a linked instance.** The same credential, bound to one instance:
+    `/cf/` calls only that instance's account and zones, with its link's token, and `/git/`
+    only its record's repository.
+  - **Why not yet.** That is a new cross-account credential path. It is not a view to turn
+    on: the credential rows and checks (`pigeon_proxies::proxy`, shared with `pigeon-proxy`)
+    and `pigeon-proxy`'s `credential` request to core both change. The caller-keys work is
+    changing that signing path now. Turning the catalogue flag on alone would show the
+    platform's tokens on a linked instance, so `proxy` stays not `linked`.
+  - **Plan.**
+    1. Credentials carry an optional `instance`. `token-issue` from a linked instance's
+       Access › Tokens sets it, and `app_proxy_tokens {instance}` lists only that
+       instance's.
+    2. The proxy's `credential` request names the instance. Core answers with
+       `linked::account_for_capability(.., "proxy")`, never the parent token.
+    3. `cf_proxy::ALLOWED` is checked against `/accounts/{linked id}/` and the record's
+       zones. `/git/` takes only `record.repo`.
+    4. No new OAuth scope: `/cf/` reaches only what the link already grants. `proxy` keeps
+       requiring `secrets`.
+    5. Tests: a credential for instance A is refused on B's account and repository, and on
+       the platform's.
+- 2026-11-26: M4 step 5, `models` on a linked instance: **not yet**.
+  - **What it would be.** An AI Gateway in the instance's own account, with its provider keys
+    in that account's Secrets Store (step 2). Cloudflare's OAuth list has the scopes:
+    `aig.write` and `aig.run`, and `aig.read` for the logs `cost_daily` reads.
+  - **Why not inline.** Inline would be the instance's own Worker, the static site Worker
+    (`site_worker.js`). It holds no model code, and putting the gateway client in it would put
+    provider calls in a Worker that serves visitors.
+  - **Why not yet.** `models` therefore needs `own_worker` on a linked account (M5 below)
+    with a model-gateway build fit to upload there, its keys declared as linked secrets, and
+    Platform › Models reading per instance. None of these exists yet, and a half-built gateway
+    would hold provider keys with no one using it. So `models` stays not `linked`.
+  - **Plan.**
+    1. Add `aig.write`, `aig.run` and `aig.read` as `models`' `CAPABILITY_SCOPES`.
+    2. Let `linked_placements(models)` offer `own_worker`.
+    3. Add a `LINKED_WORKERS` module for `models` (M5): a gateway Worker reading its keys
+       from the linked store.
+    4. Plan: a `CreateGateway` step and the Worker's upload and binding.
+    5. Add `ai_agents_models`/`models_*` `{instance}` reads.
+    6. Tests: the Worker binds only its own store and gateway, and another instance's
+       reads are refused.
+- 2026-11-26: M4 step 6, `ai-agents` on a linked instance: **not yet**.
+  - **What it needs.** Runs need the sandbox: containers (`containers.write`), Durable
+    Objects and Workflows in the instance's account. Model turns go through step 5's gateway.
+  - **Why not yet.** That is a second `pigeon-ai-agents`, with its container image built and
+    pushed into a linked account. It is large new infrastructure, and it depends on step 5.
+    `ai-agents` stays not `linked`.
+  - **Plan.** After step 5, a slim run Worker per linked account (M5's own Worker). Home's
+    `ai-agents` keeps the inbox, approvals and sessions list, and dispatches a run to the
+    instance's Worker over its workers.dev address with a signed caller context. The
+    container image comes from the platform's registry. Scopes: `containers.write`,
+    `workers-scripts.write` (held). Sessions › Live filters by instance.
+- 2026-11-26: M5 mechanism built (M5, above), with every catalogue entry still inline on linked
+  instances. The test drives it with a stand-in build. The first real use is `models` (M4
+  step 5): list its build in `LINKED_WORKERS`, and validation, plan, apply and retire follow.

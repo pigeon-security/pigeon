@@ -513,6 +513,39 @@ async fn observe(account: &pigeon_core::Account, instance: &Instance) -> Result<
     })
 }
 
+/// What a linked account holds for the catalogue capabilities `instance`'s record enables, for
+/// [`plan::capability_steps`]; reads only, and only for the capabilities it enables. A link
+/// without a capability's scope is refused for it, never read with.
+async fn observe_capabilities(
+    env: &Env,
+    account: &pigeon_core::Account,
+    instance: &Instance,
+) -> Result<plan::SeenCapabilities> {
+    let mut seen = plan::SeenCapabilities::default();
+    for name in plan::own_workers(instance) {
+        if pigeon_core::workers::exists(account, &name).await? {
+            seen.workers.push(name);
+        }
+    }
+    let granted = crate::linked::link(env, &instance.id)
+        .await?
+        .and_then(|l| l.scope);
+    if crate::catalogue::hosted_enabled(instance, "secrets") {
+        let id = instance.id.as_str();
+        match crate::linked::capability_refusal(id, "secrets", granted.as_deref()) {
+            Some(why) => seen.refused.push(("secrets".into(), why)),
+            None => match crate::secrets::linked_store(account).await {
+                Ok(store) => seen.secrets_store = Some(store.is_some()),
+                Err(e) => seen.refused.push((
+                    "secrets".into(),
+                    crate::linked::explain(id, "secrets", &e.to_string()),
+                )),
+            },
+        }
+    }
+    Ok(seen)
+}
+
 /// What the platform's own account holds for the home instance, read with the home token
 /// (`account`'s bearer) alone: whether its landing bucket exists. Its Worker is the platform's
 /// when it names it (deployed by the Lander, not read: the token holds no Workers-scripts
@@ -617,7 +650,12 @@ impl Instances {
         let mut seen = observe(&account, &instance).await?;
         seen.subdomains = self.observe_subdomains(cx, &instance).await?;
         let owned = self.owned(cx, &instance);
-        let steps = plan::plan(&instance, &seen, &ledger(env, id).await?, owned.as_ref());
+        let kept = ledger(env, id).await?;
+        let caps = observe_capabilities(env, &account, &instance).await?;
+        // A capability's own Worker first (M5), so the instance Worker can bind it.
+        let mut steps = plan::capability_workers(&instance, &caps, &kept);
+        steps.extend(plan::plan(&instance, &seen, &kept, owned.as_ref()));
+        steps.extend(plan::capability_steps(&instance, &caps));
         let digest = plan::digest(&instance, &account.id, &steps);
         Ok((instance, account, steps, digest))
     }
@@ -914,6 +952,13 @@ impl Instances {
                     } else {
                         plan::SITE_WORKER.to_string()
                     };
+                    // Each capability placed in its own Worker (M5), by Service Binding.
+                    for (binding, service) in plan::services(instance) {
+                        bindings.push(workers::Binding::Service {
+                            name: binding,
+                            service,
+                        });
+                    }
                     // The redirect hosts are answered first, by the script in front of the site.
                     let module = match redirects {
                         Some(map) => {
@@ -932,6 +977,33 @@ impl Instances {
                 plan::Step::EnableWorkersDev { name } => {
                     let url = workers::enable_workers_dev(account, name).await?;
                     format!("preview at {url}")
+                }
+                plan::Step::UploadCapabilityWorker {
+                    capability, name, ..
+                } => {
+                    let build = plan::LINKED_WORKERS
+                        .iter()
+                        .find(|w| w.capability == capability)
+                        .ok_or_else(|| {
+                            bad(&format!(
+                                "{capability} has no Worker build for a linked account"
+                            ))
+                        })?;
+                    workers::upload(account, name, plan::COMPATIBILITY_DATE, &[], build.module)
+                        .await?;
+                    format!("uploaded {capability}'s Worker {name}")
+                }
+                plan::Step::CreateSecretsStore { name } => {
+                    let token = account
+                        .bearer
+                        .as_deref()
+                        .ok_or_else(|| bad("the instance's account is not a linked one"))?;
+                    let path = format!("/accounts/{}/secrets_store/stores", account.id);
+                    let body = json!({ "name": name });
+                    pigeon_core::cloudflare::call(token, Method::Post, &path, Some(&body))
+                        .await
+                        .map_err(|e| bad(&crate::linked::explain(id, "secrets", &e.to_string())))?;
+                    format!("created the Secrets Store {name}")
                 }
                 plan::Step::AttachDomain {
                     hostname,

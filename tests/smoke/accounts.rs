@@ -1268,9 +1268,13 @@ fn linking_a_cloudflare_account() {
         assert_eq!(found["Workers AI"], json!([]));
     }
 
-    use pigeon_capabilities::linked::{Link, PERMISSIONS, choose_account, scope_ids, status};
+    use pigeon_capabilities::linked::{
+        CAPABILITY_SCOPES, Link, PERMISSIONS, choose_account, optional_scopes,
+        requested_permissions, scope_ids, scopes_to_add, status,
+    };
 
-    // The client asks for exactly the scopes pigeon needs, found by their permission names.
+    // The client asks for exactly the scopes pigeon needs, found by their permission names:
+    // the base ones every link needs, then each enabled-on-linked capability's (M4).
     let listed = json!([
         { "id": "account-settings.read", "name": "Account Settings Read" },
         { "id": "zone.read", "name": "Zone Read" },
@@ -1278,10 +1282,15 @@ fn linking_a_cloudflare_account() {
         { "id": "workers-scripts.write", "name": "Workers Scripts Write" },
         { "id": "workers-routes.write", "name": "Workers Routes Write" },
         { "id": "r2.write", "name": "Workers R2 Storage Write" },
+        { "id": "secrets-store.write", "name": "Secrets Store Write" },
         { "id": "zone.write", "name": "Zone Write" }
     ]);
+    assert_eq!(
+        requested_permissions(),
+        [&PERMISSIONS[..], &["Secrets Store Write"]].concat()
+    );
     let (ids, missing) = scope_ids(&listed);
-    assert_eq!(ids.len(), PERMISSIONS.len());
+    assert_eq!(ids.len(), requested_permissions().len());
     assert!(
         missing.is_empty() && !ids.contains(&"zone.write".to_string()),
         "nothing more"
@@ -1289,9 +1298,26 @@ fn linking_a_cloudflare_account() {
     let (_, missing) = scope_ids(&json!([]));
     assert_eq!(
         missing.len(),
-        PERMISSIONS.len(),
+        requested_permissions().len(),
         "a missing scope is named, not skipped"
     );
+    // Each capability's scope id is the one Cloudflare lists for its permission, and a person
+    // may decline it at consent; the base ones are required.
+    for c in CAPABILITY_SCOPES {
+        let (ids, _) = scope_ids(&listed);
+        assert!(ids.contains(&c.scope.to_string()), "{}", c.scope);
+    }
+    assert_eq!(optional_scopes(&ids), ["secrets-store.write"]);
+    // A client registered before the scope was added asks for it on the next linked_setup.
+    let before: Vec<String> = ids[..PERMISSIONS.len()].to_vec();
+    assert_eq!(
+        scopes_to_add(&before)
+            .iter()
+            .map(|c| c.capability)
+            .collect::<Vec<_>>(),
+        ["secrets"]
+    );
+    assert!(scopes_to_add(&ids).is_empty());
 
     // The account a link takes: the one the record names, or the only one granted.
     let granted = vec![

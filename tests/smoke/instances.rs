@@ -680,6 +680,10 @@ fn console_manifest_by_capability_per_instance_kind() {
     );
 }
 
+/// The catalogue capabilities a linked instance's record may enable so far (capability scoping,
+/// M4, one at a time), besides `instances`, which every instance has.
+const LINKED_SO_FAR: &[&str] = &["redirects", "architecture", "secrets"];
+
 /// The capability catalogue (docs/plans/capability-scoping.md): each capability's placement,
 /// scope and availability as decided, and every hosted capability that fills a console view
 /// is in it.
@@ -787,10 +791,16 @@ fn capability_catalogue_as_decided() {
         assert_eq!(e.availability, availability, "{name}");
         assert_eq!(e.requires, requires, "{name}");
     }
-    // Until M4, no catalogue capability may be enabled on a linked instance's record but
-    // `redirects` (set by the record's own `redirects` list); every instance has `instances`.
+    // The catalogue capabilities a linked instance's record may enable: `redirects` (set by the
+    // record's own `redirects` list) and those M4 turned on, one at a time; every instance has
+    // `instances`.
     for e in CATALOGUE {
-        assert_eq!(e.linked, e.always || e.name == "redirects", "{}", e.name);
+        assert_eq!(
+            e.linked,
+            e.always || LINKED_SO_FAR.contains(&e.name),
+            "{}",
+            e.name
+        );
         assert_eq!(e.always, e.name == "instances", "{}", e.name);
     }
     for e in CATALOGUE {
@@ -886,9 +896,9 @@ fn capability_scoping_enforces_home_only() {
     );
     let empty = with(&home_json, json!({}));
     assert_eq!(record::digest(&empty), record::digest(&plain));
-    // Settings are none yet: an unknown setting does not parse.
+    // An unknown setting does not parse (`placement` is the one setting, M3).
     let mut bad = home_json.clone();
-    bad["capabilities"] = json!({ "users": { "placement": "inline" } });
+    bad["capabilities"] = json!({ "users": { "worker": "pigeon-users" } });
     assert!(serde_json::from_value::<Instance>(bad).is_err());
 
     // Home may list the home-only ones, and the others with what they require.
@@ -921,13 +931,10 @@ fn capability_scoping_enforces_home_only() {
             )]
         );
     }
-    for name in [
-        "ai-agents",
-        "observability",
-        "secrets",
-        "models",
-        "architecture",
-    ] {
+    for name in ["ai-agents", "observability", "secrets", "models"]
+        .into_iter()
+        .filter(|n| !LINKED_SO_FAR.contains(n))
+    {
         assert_eq!(
             linked(json!({ name: {} })),
             [format!(
@@ -935,7 +942,10 @@ fn capability_scoping_enforces_home_only() {
             )]
         );
     }
-    assert_eq!(linked(json!({ "proxy": {}, "secrets": {} })).len(), 2);
+    assert_eq!(
+        linked(json!({ "proxy": {}, "secrets": {} })),
+        ["The capability \"proxy\" cannot be enabled on a linked instance yet."]
+    );
     assert!(linked(json!({})).is_empty());
 
     // Record validation carries them.
@@ -958,11 +968,12 @@ fn capability_scoping_enforces_home_only() {
             .any(|p| p.contains("capability"))
     );
 
-    // Which hosted capabilities are enabled where: every one on home; off home, only
-    // `instances`, whatever the record lists.
+    // Which hosted capabilities are enabled where: every one on home; off home, `instances`
+    // and those listed that M4 turned on for linked instances, never a home-only one, whatever
+    // the record lists.
     let listed = with(
         &linked_json,
-        json!({ "multi-instance": {}, "users": {}, "secrets": {}, "architecture": {} }),
+        json!({ "multi-instance": {}, "users": {}, "ai-agents": {}, "models": {} }),
     );
     for name in [
         "multi-instance",
@@ -970,6 +981,7 @@ fn capability_scoping_enforces_home_only() {
         "secrets",
         "architecture",
         "ai-agents",
+        "models",
         "approvals",
     ] {
         assert!(hosted_enabled(&plain, name), "{name} on home");
@@ -993,6 +1005,473 @@ fn capability_scoping_enforces_home_only() {
             .find(|a| a["id"] == "instances")
             .unwrap()["views"][0]["capability"],
         MULTI_INSTANCE
+    );
+}
+
+/// Capability scoping, M4 step 1: `architecture` on a linked instance. It needs no linked-account
+/// scope (it reads the record and what the platform serves for it), so a linked record may list
+/// it, and then, and only then, its console shows Platform › Architecture; every other area and
+/// view stays as it was.
+#[test]
+fn architecture_on_a_linked_instance() {
+    use pigeon_capabilities::catalogue::{hosted_enabled, problems};
+    use pigeon_capabilities::instances::{manifest::manifest, record::Instance, tools::Scope};
+    let hosted = crate::console::hosted_views();
+    let base = json!({
+        "id": "docs", "title": "Docs",
+        "account": { "kind": "linked", "account_id": "0123456789abcdef0123456789abcdef" },
+        "zones": ["example.org"], "worker": "example",
+        "storage": { "state": "enabled", "store": "s", "bucket": "b", "prefix": "p/" }
+    });
+    let of = |v: &Value| {
+        let record: Instance = serde_json::from_value(v.clone()).unwrap();
+        let scope = Scope::new(&record).unwrap();
+        (manifest(&record, &scope, &hosted, &[], None), record)
+    };
+    let (before, plain) = of(&base);
+    assert!(!hosted_enabled(&plain, "architecture"));
+    let mut with = base.clone();
+    with["capabilities"] = json!({ "architecture": {} });
+    let (after, record) = of(&with);
+    assert!(problems(&record).is_empty(), "{:?}", problems(&record));
+    assert!(hosted_enabled(&record, "architecture"));
+    assert_eq!(
+        manifest_by_capability(&after),
+        [
+            manifest_by_capability(&before),
+            vec![(
+                "platform".to_string(),
+                vec!["architecture@architecture".to_string()]
+            )]
+        ]
+        .concat()
+    );
+    // Inline only: it offers nothing else.
+    with["capabilities"] = json!({ "architecture": { "placement": "inline" } });
+    assert!(problems(&of(&with).1).is_empty());
+}
+
+/// Capability scoping, M4 step 2: `secrets` on a linked instance. Its record lists
+/// `capabilities.secrets`, and then Access › Secrets shows, and nothing else changes. The view
+/// reads that instance's own account's Secrets Store (`secrets_list {instance}`), never the
+/// platform's. The link needs `secrets-store.write`: a link without it is refused with "re-link
+/// to enable secrets", in the plan and the read alike. The plan creates the store when the
+/// account has none and records it in the ledger, and a record that does not enable secrets
+/// plans as before.
+#[test]
+fn secrets_on_a_linked_instance() {
+    use pigeon_capabilities::catalogue::{hosted_enabled, problems};
+    use pigeon_capabilities::instances::plan::{
+        Ledger, SeenCapabilities, Step, capability_steps, describe, record as ledger_record,
+    };
+    use pigeon_capabilities::instances::{manifest::manifest, record::Instance, tools::Scope};
+    use pigeon_capabilities::linked::{capability_refusal, explain, grants, relink_for};
+
+    let hosted = crate::console::hosted_views();
+    let base = json!({
+        "id": "docs", "title": "Docs",
+        "account": { "kind": "linked", "account_id": "0123456789abcdef0123456789abcdef" },
+        "zones": ["example.org"], "worker": "example"
+    });
+    let of = |v: &Value| {
+        let record: Instance = serde_json::from_value(v.clone()).unwrap();
+        let scope = Scope::new(&record).unwrap();
+        (manifest(&record, &scope, &hosted, &[], None), record)
+    };
+    let (before, plain) = of(&base);
+    let mut with = base.clone();
+    with["capabilities"] = json!({ "secrets": {} });
+    let (after, record) = of(&with);
+    assert!(problems(&record).is_empty(), "{:?}", problems(&record));
+    assert!(hosted_enabled(&record, "secrets") && !hosted_enabled(&plain, "secrets"));
+    // Only Access › Secrets is added; Tokens (proxy) and the home-only People and Apps are not.
+    assert_eq!(
+        manifest_by_capability(&after),
+        [
+            manifest_by_capability(&before),
+            vec![("access".to_string(), vec!["secrets@secrets".to_string()])]
+        ]
+        .concat()
+    );
+    // The view reads the selected instance's own secrets.
+    assert_eq!(
+        pigeon_capabilities::console::ops::read_keys("secrets_list"),
+        Some(&["instance"][..])
+    );
+    let js = include_str!("../../src/capabilities/src/console/web/views/access.js");
+    assert!(js.contains("ctx.op(\"secrets_list\", { instance: ctx.instance.id })"));
+
+    // The scope: granted, not granted, or not reported.
+    let full = "account-settings.read zone.read secrets-store.write offline_access";
+    let old = "account-settings.read zone.read dns.write offline_access";
+    assert_eq!(grants(Some(full), "secrets-store.write"), Some(true));
+    assert_eq!(grants(Some(old), "secrets-store.write"), Some(false));
+    assert_eq!(grants(None, "secrets-store.write"), None);
+    assert_eq!(capability_refusal("docs", "secrets", Some(full)), None);
+    assert_eq!(capability_refusal("docs", "secrets", None), None);
+    assert_eq!(capability_refusal("docs", "architecture", Some(old)), None);
+    let why = capability_refusal("docs", "secrets", Some(old)).unwrap();
+    assert_eq!(
+        why,
+        "The link to docs does not grant Secrets Store Write (secrets-store.write), which \
+         secrets needs: re-link docs (Instances › docs › Overview, Link) and allow it, to enable \
+         secrets."
+    );
+    assert_eq!(relink_for(Some(old)), ["secrets"]);
+    assert!(relink_for(Some(full)).is_empty() && relink_for(None).is_empty());
+    // Cloudflare's refusal of an older link reads as "re-link", never as a bare 403.
+    let refused = explain("docs", "secrets", "Cloudflare API: 403: Unauthorized");
+    assert!(refused.contains("re-link docs") && refused.contains("Secrets Store Write"));
+    assert_eq!(
+        explain("docs", "secrets", "Cloudflare API: 500: oops"),
+        "Cloudflare API: 500: oops"
+    );
+
+    // The plan: nothing for a record that does not enable it, nothing on home.
+    let none = SeenCapabilities::default();
+    assert!(capability_steps(&plain, &none).is_empty());
+    let home: Instance = serde_json::from_value(json!({
+        "id": "example/platform", "title": "Example", "account": { "kind": "home" },
+        "zones": ["example.com"], "capabilities": { "secrets": {} }
+    }))
+    .unwrap();
+    let missing = SeenCapabilities {
+        secrets_store: Some(false),
+        refused: vec![],
+        ..Default::default()
+    };
+    assert!(capability_steps(&home, &missing).is_empty());
+    // A store is made when there is none, once, and kept in the ledger.
+    let steps = capability_steps(&record, &missing);
+    assert_eq!(
+        steps,
+        [Step::CreateSecretsStore {
+            name: "pigeon".into()
+        }]
+    );
+    assert!(steps[0].changes() && !steps[0].stops());
+    assert!(
+        describe(&steps)[0]
+            .as_str()
+            .unwrap()
+            .contains("Secrets Store, pigeon")
+    );
+    let mut ledger = Ledger::default();
+    ledger_record(&mut ledger, &steps[0]);
+    ledger_record(&mut ledger, &steps[0]);
+    assert_eq!(ledger.secrets_stores, ["pigeon"]);
+    assert!(
+        serde_json::to_value(Ledger::default())
+            .unwrap()
+            .get("secrets_stores")
+            .is_none(),
+        "absent when empty"
+    );
+    let present = SeenCapabilities {
+        secrets_store: Some(true),
+        refused: vec![],
+        ..Default::default()
+    };
+    assert!(
+        !capability_steps(&record, &present)
+            .iter()
+            .any(Step::changes)
+    );
+    // A link without the scope: left alone with why, and the site's steps still apply.
+    let refused = SeenCapabilities {
+        secrets_store: None,
+        refused: vec![("secrets".into(), why.clone())],
+        ..Default::default()
+    };
+    let steps = capability_steps(&record, &refused);
+    assert_eq!(
+        steps,
+        [Step::Keep {
+            what: "capability".into(),
+            name: "secrets".into(),
+            why
+        }]
+    );
+    assert!(!steps[0].stops() && !steps[0].changes());
+
+    // The store's id from Cloudflare's list.
+    use pigeon_capabilities::secrets::store_of;
+    assert_eq!(
+        store_of(&json!([{ "id": "s1", "name": "default_secrets_store" }])).as_deref(),
+        Some("s1")
+    );
+    assert_eq!(store_of(&json!([])), None);
+}
+
+/// Capability scoping, M5: a capability placed `own_worker` on a linked instance is planned as
+/// its own Worker, `<instance>-<capability>`, uploaded before the instance Worker that binds it
+/// by Service Binding and kept in the ledger, so retire removes it. No capability has a build for
+/// a linked account yet (`LINKED_WORKERS` is empty), so every catalogue entry stays inline there
+/// and every plan is as before; the mechanism is pinned here with a stand-in build.
+#[test]
+fn own_worker_placement_on_a_linked_instance() {
+    use pigeon_capabilities::catalogue::{CATALOGUE, Placement, linked_placements, problems};
+    use pigeon_capabilities::instances::plan::{
+        LINKED_WORKERS, Ledger, LinkedWorker, SeenCapabilities, Step, capability_worker_digest,
+        capability_workers, capability_workers_with, describe, own_workers,
+        record as ledger_record, services, services_with, with_services,
+    };
+    use pigeon_capabilities::instances::record::Instance;
+
+    // Nothing has a linked build, so nothing may be placed in its own Worker off home.
+    assert!(LINKED_WORKERS.is_empty());
+    for e in CATALOGUE {
+        assert_eq!(linked_placements(e), [Placement::Inline], "{}", e.name);
+    }
+
+    // A record as validation would refuse today, to drive the mechanism.
+    let record: Instance = serde_json::from_value(json!({
+        "id": "docs", "title": "Docs",
+        "account": { "kind": "linked", "account_id": "0123456789abcdef0123456789abcdef" },
+        "worker": "docs", "capabilities": { "models": { "placement": "own_worker" } }
+    }))
+    .unwrap();
+    assert!(
+        problems(&record)
+            .iter()
+            .any(|p| p.contains("cannot run own_worker on a linked instance yet"))
+    );
+    let build = LinkedWorker {
+        capability: "models",
+        binding: "MODELS",
+        module: "export default { fetch() { return new Response('ok'); } };",
+    };
+    let builds = [build];
+    let none = SeenCapabilities::default();
+    let mut ledger = Ledger::default();
+    assert_eq!(own_workers(&record), ["docs-models"]);
+
+    // Missing: uploaded, before anything else, and recorded as pigeon's.
+    let steps = capability_workers_with(&record, &none, &ledger, &builds);
+    let digest = capability_worker_digest(&build);
+    assert_eq!(
+        steps,
+        [Step::UploadCapabilityWorker {
+            capability: "models".into(),
+            name: "docs-models".into(),
+            binding: "MODELS".into(),
+            module: digest.clone(),
+            replaces: false,
+        }]
+    );
+    assert!(steps[0].changes() && !steps[0].stops());
+    assert_eq!(
+        describe(&steps)[0],
+        "upload models's own Worker docs-models; the instance's Worker reaches it as MODELS, \
+         and retire removes it"
+    );
+    ledger_record(&mut ledger, &steps[0]);
+    assert_eq!(
+        ledger.workers,
+        [("docs-models".to_string(), digest.clone())]
+    );
+    // There and as uploaded: unchanged. Changed since: updated. Not pigeon's: left alone.
+    let seen = SeenCapabilities {
+        workers: vec!["docs-models".into()],
+        ..Default::default()
+    };
+    assert_eq!(
+        capability_workers_with(&record, &seen, &ledger, &builds),
+        [Step::Ok {
+            what: "worker".into(),
+            name: "docs-models".into()
+        }]
+    );
+    let older = Ledger {
+        workers: vec![("docs-models".into(), "old".into())],
+        ..Ledger::default()
+    };
+    assert!(matches!(
+        &capability_workers_with(&record, &seen, &older, &builds)[0],
+        Step::UploadCapabilityWorker { replaces: true, .. }
+    ));
+    let theirs = capability_workers_with(&record, &seen, &Ledger::default(), &builds);
+    assert!(matches!(&theirs[0], Step::Conflict { .. }) && theirs[0].stops());
+    // No build: blocked, never guessed at.
+    let unbuilt = capability_workers(&record, &none, &Ledger::default());
+    assert_eq!(
+        unbuilt,
+        [Step::Blocked {
+            why: "models has no Worker build for a linked account yet".into()
+        }]
+    );
+
+    // The instance Worker binds it, and its digest changes only when it has one to bind.
+    assert_eq!(
+        services_with(&record, &builds),
+        [("MODELS".to_string(), "docs-models".to_string())]
+    );
+    assert!(services(&record).is_empty());
+    assert_eq!(with_services("m", &[]), "m");
+    assert_ne!(with_services("m", &services_with(&record, &builds)), "m");
+
+    // Home and inline records get none of it.
+    let home: Instance = serde_json::from_value(json!({
+        "id": "example/platform", "title": "Example", "account": { "kind": "home" },
+        "zones": ["example.com"], "capabilities": { "models": { "placement": "own_worker" } }
+    }))
+    .unwrap();
+    assert!(capability_workers_with(&home, &none, &Ledger::default(), &builds).is_empty());
+    assert!(services_with(&home, &builds).is_empty());
+    let inline: Instance = serde_json::from_value(json!({
+        "id": "docs", "title": "Docs", "account": { "kind": "linked" },
+        "capabilities": { "secrets": {} }
+    }))
+    .unwrap();
+    assert!(own_workers(&inline).is_empty());
+    assert!(capability_workers_with(&inline, &none, &Ledger::default(), &builds).is_empty());
+
+    // The Service Binding as the upload metadata carries it.
+    use pigeon_core::workers::{Binding, metadata};
+    let m = metadata(
+        "2026-11-01",
+        &[Binding::Service {
+            name: "MODELS".into(),
+            service: "docs-models".into(),
+        }],
+    );
+    assert_eq!(
+        m["bindings"][0],
+        json!({ "type": "service", "name": "MODELS", "service": "docs-models" })
+    );
+}
+
+/// Capability scoping, M3: a record's `capabilities.<name>.placement`, `inline` or
+/// `own_worker`, checked against the catalogue. Home's is read-only and says what is deployed
+/// (ai-agents and models in their own Workers), so a home record may restate it but never move
+/// it; a linked record may give only `inline`; a placement the capability does not offer is
+/// refused everywhere. Records without one keep their digest, and `capabilities_versions`
+/// answers where each runs.
+#[test]
+fn capability_placement_in_the_record() {
+    use pigeon_capabilities::catalogue::{Placement, placement, placements, problems};
+    use pigeon_capabilities::instances::record::{self, Instance};
+
+    let home_json = json!({
+        "id": "example/platform", "title": "Example", "account": { "kind": "home" },
+        "zones": ["example.com"]
+    });
+    let linked_json = json!({ "id": "docs", "title": "Docs", "account": { "kind": "linked" },
+        "worker": "docs" });
+    let with = |base: &Value, caps: Value| -> Instance {
+        let mut v = base.clone();
+        v["capabilities"] = caps;
+        serde_json::from_value(v).unwrap()
+    };
+
+    // It parses as inline or own_worker, and nothing else.
+    let mut bad = home_json.clone();
+    bad["capabilities"] = json!({ "models": { "placement": "elsewhere" } });
+    assert!(serde_json::from_value::<Instance>(bad).is_err());
+    // Absent, it is absent: `{}` reads back as `{}`, and the digest is the one without it.
+    let bare = with(&home_json, json!({ "users": {} }));
+    assert_eq!(
+        serde_json::to_value(&bare).unwrap()["capabilities"],
+        json!({ "users": {} })
+    );
+    let placed = with(&home_json, json!({ "users": { "placement": "inline" } }));
+    assert_ne!(record::digest(&placed), record::digest(&bare));
+    assert_eq!(
+        serde_json::to_value(&placed).unwrap()["capabilities"]["users"],
+        json!({ "placement": "inline" })
+    );
+
+    // Home: restating what is deployed is fine; moving it is refused.
+    let home_ok = with(
+        &home_json,
+        json!({
+            "ai-agents": { "placement": "own_worker" },
+            "models": { "placement": "own_worker" },
+            "secrets": { "placement": "inline" },
+            "users": { "placement": "inline" }
+        }),
+    );
+    assert_eq!(problems(&home_ok), Vec::<String>::new());
+    assert_eq!(
+        problems(&with(
+            &home_json,
+            json!({ "ai-agents": { "placement": "inline" } })
+        )),
+        [
+            "The capability \"ai-agents\" runs in its own Worker, pigeon-ai-agents on the home \
+          instance; its placement there is read-only, and moving it is a code landing, not a \
+          record change."
+        ]
+    );
+    assert_eq!(
+        problems(&with(
+            &home_json,
+            json!({ "models": { "placement": "inline" } })
+        ))[0],
+        "The capability \"models\" runs in its own Worker, pigeon-model-gateway on the home \
+         instance; its placement there is read-only, and moving it is a code landing, not a \
+         record change."
+    );
+    // A placement the capability does not offer, anywhere.
+    assert_eq!(
+        problems(&with(
+            &home_json,
+            json!({ "secrets": { "placement": "own_worker" } })
+        )),
+        ["The capability \"secrets\" cannot run own_worker: it offers inline."]
+    );
+
+    // A linked record may give only inline, even where the catalogue offers more.
+    assert_eq!(
+        problems(&with(
+            &linked_json,
+            json!({ "ai-agents": { "placement": "own_worker" } })
+        )),
+        [
+            "The capability \"ai-agents\" cannot be enabled on a linked instance yet.",
+            "The capability \"ai-agents\" cannot run own_worker on a linked instance yet: only \
+             inline is accepted."
+        ]
+    );
+
+    // Where each runs: home's from the catalogue whatever the record says; a linked instance's
+    // inline, in its own Worker, unless its record says otherwise.
+    let plain_home: Instance = serde_json::from_value(home_json.clone()).unwrap();
+    for (name, p, w) in [
+        ("ai-agents", Placement::OwnWorker, Some("pigeon-ai-agents")),
+        ("models", Placement::OwnWorker, Some("pigeon-model-gateway")),
+        ("secrets", Placement::Inline, None),
+        ("proxy", Placement::Inline, None),
+    ] {
+        assert_eq!(
+            placement(&plain_home, name),
+            Some((p, w.map(str::to_string))),
+            "{name}"
+        );
+    }
+    let plain_linked: Instance = serde_json::from_value(linked_json.clone()).unwrap();
+    assert_eq!(
+        placement(&plain_linked, "secrets"),
+        Some((Placement::Inline, Some("docs".to_string())))
+    );
+    assert_eq!(placement(&plain_linked, "teleport"), None);
+    let shown = placements(&plain_home);
+    assert_eq!(
+        shown["ai-agents"],
+        json!({ "placement": "own_worker", "worker": "pigeon-ai-agents",
+                "read_only": true, "choices": [] })
+    );
+    assert_eq!(shown["secrets"]["placement"], "inline");
+    // A linked instance: only what it has, inline being the one choice.
+    assert_eq!(
+        placements(&plain_linked),
+        json!({ "instances": { "placement": "inline", "worker": "docs",
+                               "read_only": false, "choices": ["inline"] } })
+    );
+    let v = pigeon_capabilities::versioning::versions_view(&[], &[], &[plain_home], false);
+    assert_eq!(
+        v["instances"][0]["placements"]["models"]["worker"],
+        "pigeon-model-gateway"
     );
 }
 

@@ -47,6 +47,106 @@ pub const PERMISSIONS: [&str; 6] = [
     "Workers R2 Storage Write",
 ];
 
+/// A linked-account scope one catalogue capability needs beyond [`PERMISSIONS`]
+/// (docs/plans/capability-scoping.md, M4): the API token permission name the client asks for,
+/// and the OAuth scope id Cloudflare grants for it (from `linked_scopes`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CapabilityScope {
+    pub capability: &'static str,
+    pub permission: &'static str,
+    pub scope: &'static str,
+}
+
+/// The scopes the catalogue capabilities a linked instance may enable need, each its own
+/// decision (M4). The client asks for them as optional scopes, so a person may decline one at
+/// the consent screen; a link made before one was added, or that declined it, lacks it, and the
+/// capability then refuses with "re-link to enable" ([`capability_refusal`]) rather than fail
+/// inside Cloudflare.
+pub const CAPABILITY_SCOPES: &[CapabilityScope] = &[CapabilityScope {
+    capability: "secrets",
+    permission: "Secrets Store Write",
+    scope: "secrets-store.write",
+}];
+
+/// Every permission the client asks for: [`PERMISSIONS`], then each capability's
+/// ([`CAPABILITY_SCOPES`]).
+pub fn requested_permissions() -> Vec<&'static str> {
+    let mut out = PERMISSIONS.to_vec();
+    for c in CAPABILITY_SCOPES {
+        if !out.contains(&c.permission) {
+            out.push(c.permission);
+        }
+    }
+    out
+}
+
+/// Whether a link whose granted scopes are `granted` (Cloudflare's space-separated `scope`)
+/// holds `scope`: `None` when Cloudflare did not report the granted scopes.
+pub fn grants(granted: Option<&str>, scope: &str) -> Option<bool> {
+    granted.map(|g| g.split_whitespace().any(|s| s == scope))
+}
+
+/// Why `instance`'s link, granted `granted`, cannot serve `capability`: a scope the capability
+/// needs that the link was not granted. `None` when it holds them all, or when Cloudflare did not
+/// report what it granted (the call then speaks for itself, through [`explain`]).
+pub fn capability_refusal(
+    instance: &str,
+    capability: &str,
+    granted: Option<&str>,
+) -> Option<String> {
+    let lacking: Vec<&CapabilityScope> = CAPABILITY_SCOPES
+        .iter()
+        .filter(|c| c.capability == capability && grants(granted, c.scope) == Some(false))
+        .collect();
+    if lacking.is_empty() {
+        return None;
+    }
+    let names: Vec<String> = lacking
+        .iter()
+        .map(|c| format!("{} ({})", c.permission, c.scope))
+        .collect();
+    Some(format!(
+        "The link to {instance} does not grant {}, which {capability} needs: re-link {instance} \
+         (Instances › {instance} › Overview, Link) and allow it, to enable {capability}.",
+        names.join(", ")
+    ))
+}
+
+/// Every capability `granted` lacks a scope for, for `linked_status`: empty when it holds them
+/// all or Cloudflare did not say.
+pub fn relink_for(granted: Option<&str>) -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = CAPABILITY_SCOPES
+        .iter()
+        .filter(|c| grants(granted, c.scope) == Some(false))
+        .map(|c| c.capability)
+        .collect();
+    out.dedup();
+    out
+}
+
+/// A linked-account call's error, read for `capability`: Cloudflare's refusal of the link's
+/// token (403, or its authentication error 10000) becomes "re-link to enable", since a link made
+/// before the capability's scope was added fails that way when Cloudflare did not report what it
+/// granted. Any other error is kept as it is.
+pub fn explain(instance: &str, capability: &str, error: &str) -> String {
+    let refused = error.contains(": 403:") || error.contains("10000");
+    let needs: Vec<&str> = CAPABILITY_SCOPES
+        .iter()
+        .filter(|c| c.capability == capability)
+        .map(|c| c.permission)
+        .collect();
+    if refused && !needs.is_empty() {
+        format!(
+            "Cloudflare refused {instance}'s link for {capability} ({error}). The link may predate \
+             {}: re-link {instance} (Instances › {instance} › Overview, Link) and allow it, to \
+             enable {capability}.",
+            needs.join(", ")
+        )
+    } else {
+        error.to_string()
+    }
+}
+
 /// The capability.
 pub struct Linked {
     /// The platform's host, where the callback is.
@@ -77,21 +177,30 @@ pub fn status(link: Option<&Link>, now_ms: f64) -> Value {
         Some(l) if l.failed.is_some() => json!({
             "status": "refresh failed", "account_id": l.account_id, "why": l.failed,
         }),
-        Some(l) => json!({
-            "status": "linked", "account_id": l.account_id, "account_name": l.account_name,
-            "linked_by": l.linked_by, "linked_ms": l.linked_ms,
-            "access_expires_ms": l.expires_at_ms, "scope": l.scope,
-            "fresh": l.expires_at_ms > now_ms,
-        }),
+        Some(l) => {
+            let mut v = json!({
+                "status": "linked", "account_id": l.account_id, "account_name": l.account_name,
+                "linked_by": l.linked_by, "linked_ms": l.linked_ms,
+                "access_expires_ms": l.expires_at_ms, "scope": l.scope,
+                "fresh": l.expires_at_ms > now_ms,
+            });
+            // The capabilities this link cannot serve until it is linked again (M4).
+            let relink = relink_for(l.scope.as_deref());
+            if !relink.is_empty() {
+                v["relink_for"] = json!(relink);
+            }
+            v
+        }
     }
 }
 
-/// The scope IDs for [`PERMISSIONS`] in Cloudflare's scope list (`{id, name}` entries), and the
-/// names it does not have. Answers in the order of [`PERMISSIONS`].
+/// The scope IDs for every permission the client asks for ([`requested_permissions`]) in
+/// Cloudflare's scope list (`{id, name}` entries), and the names it does not have. Answers in
+/// that order.
 pub fn scope_ids(listed: &Value) -> (Vec<String>, Vec<String>) {
     let mut ids = Vec::new();
     let mut missing = Vec::new();
-    for want in PERMISSIONS {
+    for want in requested_permissions() {
         let found = listed.as_array().and_then(|all| {
             all.iter()
                 .find(|s| {
@@ -107,6 +216,23 @@ pub fn scope_ids(listed: &Value) -> (Vec<String>, Vec<String>) {
         }
     }
     (ids, missing)
+}
+
+/// The capability scopes the client registered as `registered` does not ask for yet.
+pub fn scopes_to_add(registered: &[String]) -> Vec<&'static CapabilityScope> {
+    CAPABILITY_SCOPES
+        .iter()
+        .filter(|c| !registered.iter().any(|r| r == c.scope))
+        .collect()
+}
+
+/// Of the scope ids the client asks for, those a person may decline at the consent screen:
+/// every capability's ([`CAPABILITY_SCOPES`]); the base ones every link needs are required.
+pub fn optional_scopes(ids: &[String]) -> Vec<String> {
+    ids.iter()
+        .filter(|id| CAPABILITY_SCOPES.iter().any(|c| c.scope == id.as_str()))
+        .cloned()
+        .collect()
 }
 
 /// What the planned per-instance data Worker (docs/plans/data-worker.md) would need a linked
@@ -285,6 +411,24 @@ pub async fn account_for(env: &Env, host: &str, instance: &str) -> Result<Accoun
     account_for_checked(env, host, instance, None).await
 }
 
+/// `instance`'s linked account for `capability`: refused with "re-link to enable" when its
+/// link was not granted a scope the capability needs ([`capability_refusal`]), before any
+/// token is opened or refreshed.
+pub async fn account_for_capability(
+    env: &Env,
+    host: &str,
+    instance: &str,
+    capability: &str,
+) -> Result<Account> {
+    let l = link(env, instance)
+        .await?
+        .ok_or_else(|| bad(&format!("instance {instance} is not linked")))?;
+    if let Some(why) = capability_refusal(instance, capability, l.scope.as_deref()) {
+        return Err(bad(&why));
+    }
+    account_for(env, host, instance).await
+}
+
 /// The same existing linked grant, with its account matched before opening or refreshing it.
 pub(crate) async fn account_for_bound(
     env: &Env,
@@ -349,9 +493,21 @@ async fn account_for_checked(
 impl Linked {
     /// Registers pigeon's OAuth client in the platform's own account, once, and keeps its secret
     /// and a fresh sealing key in the Secrets Store. Safe to run twice: an existing client is
-    /// kept, and the key is never replaced (that would make every link unreadable).
+    /// kept, and the key is never replaced (that would make every link unreadable). When a
+    /// capability's scope was added since ([`CAPABILITY_SCOPES`]), it updates the existing
+    /// client's scopes instead, so new links ask for it; existing links keep what they were
+    /// granted until a person links them again.
     async fn setup(&self, cx: &Context<'_>) -> Result<Value> {
-        if let Some(id) = setting(cx.env, CLIENT_KEY).await? {
+        let existing = setting(cx.env, CLIENT_KEY).await?;
+        let registered: Vec<String> = setting(cx.env, "linked:oauth_scopes")
+            .await?
+            .map(|s| serde_json::from_str(&s))
+            .transpose()?
+            .unwrap_or_default();
+        let adding = scopes_to_add(&registered);
+        if let Some(id) = &existing
+            && adding.is_empty()
+        {
             return Ok(json!({ "client_id": id, "done": "already set up" }));
         }
         let account = cx.account;
@@ -370,6 +526,13 @@ impl Linked {
                     missing.join(", ")
                 )));
             }
+            let optional = optional_scopes(&scopes);
+            if let Some(id) = &existing {
+                let body = json!({ "scopes": scopes, "optional_scopes": optional });
+                let path = format!("/accounts/{}/oauth_clients/{id}", account.id);
+                call(token.value(), Method::Patch, &path, Some(&body)).await?;
+                return Ok((Value::Null, scopes));
+            }
             let body = json!({
                 "client_name": "pigeon",
                 "redirect_uris": [format!("https://{}/linked/callback", self.host)],
@@ -377,6 +540,7 @@ impl Linked {
                 "response_types": ["code"],
                 "token_endpoint_auth_method": "client_secret_basic",
                 "scopes": scopes,
+                "optional_scopes": optional,
             });
             let path = format!("/accounts/{}/oauth_clients", account.id);
             let v = call(token.value(), Method::Post, &path, Some(&body)).await?;
@@ -384,6 +548,26 @@ impl Linked {
         }
         .await;
         let (made, scopes) = token.finish(made).await?;
+        if let Some(id) = existing {
+            keep(
+                cx.env,
+                "linked:oauth_scopes",
+                &serde_json::to_string(&scopes)?,
+                KEPT_MS,
+            )
+            .await?;
+            let capabilities: Vec<&str> = adding.iter().map(|c| c.capability).collect();
+            return Ok(json!({
+                "client_id": id,
+                "done": "scopes updated",
+                "added": adding.iter().map(|c| c.scope).collect::<Vec<_>>(),
+                "next": format!(
+                    "existing links keep what they were granted: re-link each instance that \
+                     enables {} to grant the new scopes",
+                    capabilities.join(", ")
+                ),
+            }));
+        }
         let id = made["client_id"]
             .as_str()
             .or_else(|| made["id"].as_str())
@@ -678,7 +862,9 @@ impl Capability for Linked {
                 "linked_setup",
                 "Register pigeon's OAuth client in the platform's own account, once, so a person \
                  can link another Cloudflare account from the console. Keeps the client secret \
-                 and the sealing key in the Secrets Store; safe to run twice.",
+                 and the sealing key in the Secrets Store; safe to run twice. When a capability's \
+                 linked-account scope was added since, it updates the client's scopes instead; \
+                 existing links must then be linked again to grant them.",
             ),
             Tool {
                 name: "linked_check",

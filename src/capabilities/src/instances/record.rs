@@ -131,10 +131,19 @@ pub const MAX_REDIRECTS: usize = 20;
 /// The statuses a redirect may answer with.
 pub const REDIRECT_STATUSES: [u16; 4] = [301, 302, 307, 308];
 
-/// One catalogue capability's settings on an instance record: none yet (its placement is M3).
+/// One catalogue capability's settings on an instance record (docs/plans/capability-scoping.md,
+/// M3): where it runs. Absent fields stay absent, so `{}` reads back as `{}` and a record's
+/// digest does not change.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub struct CapabilitySettings {}
+pub struct CapabilitySettings {
+    /// Where the capability runs for this instance: `inline` or `own_worker`, one of the
+    /// catalogue's offered placements. On home it is read-only and must say what is deployed
+    /// (`catalogue::Entry::home`); on a linked instance only `inline` is accepted for now.
+    /// Absent: the catalogue's default for the instance (`catalogue::placement`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<crate::catalogue::Placement>,
+}
 
 /// Where the home instance's platform (console, MCP, OAuth) lives.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]

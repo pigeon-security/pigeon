@@ -77,7 +77,7 @@ pub const READS: &[(&str, &[&str])] = &[
     ("ai_agents_compare", &["days", "role"]),
     ("cost_daily", &["range"]),
     // Access: secrets (names and state only), tokens, people, passkeys, apps.
-    ("secrets_list", &[]),
+    ("secrets_list", &["instance"]),
     ("credentials_expiry", &[]),
     ("app_proxy_tokens", &[]),
     ("app_people", &[]),

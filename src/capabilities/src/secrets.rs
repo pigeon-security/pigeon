@@ -18,6 +18,7 @@ use worker::{Error, Result};
 
 use crate::console::sections::Section;
 use crate::expiry::{self, Expiry};
+use crate::instances::record::Instance;
 use crate::users::User;
 use crate::{Call, Capability, Context, Expiring, Slot, to_value, unknown};
 
@@ -87,7 +88,83 @@ pub fn listing(declared: &[(String, Slot)], stored: &[(String, Option<String>)])
     out
 }
 
+/// The id of the first Secrets Store in Cloudflare's list of an account's stores (`[{id, name,
+/// ...}]`), if it has one. An account holds one store in practice. Pure.
+pub fn store_of(listed: &Value) -> Option<String> {
+    listed
+        .as_array()?
+        .iter()
+        .find_map(|s| s["id"].as_str().filter(|id| !id.is_empty()))
+        .map(str::to_string)
+}
+
+/// The name of the Secrets Store an instance plan creates in a linked account that has none
+/// (capability scoping, M4).
+pub const LINKED_STORE: &str = "pigeon";
+
+/// Why `instance` has no secrets to list yet: its account has no Secrets Store, which its plan
+/// creates.
+pub fn no_store(instance: &str) -> String {
+    format!(
+        "{instance}'s Cloudflare account has no Secrets Store yet: instance_plan {{instance: \
+         \"{instance}\"}} creates one, once the person approves it."
+    )
+}
+
+/// The Secrets Store of a linked account, read with its link's bearer: `None` when it has none.
+pub async fn linked_store(account: &pigeon_core::Account) -> Result<Option<String>> {
+    let token = account
+        .bearer
+        .as_deref()
+        .ok_or_else(|| bad("the instance's account is not a linked one"))?;
+    let path = format!("/accounts/{}/secrets_store/stores", account.id);
+    let listed = pigeon_core::cloudflare::call(token, worker::Method::Get, &path, None).await?;
+    Ok(store_of(&listed))
+}
+
 impl Secrets {
+    /// `secrets_list {instance}` for a linked instance whose record enables `secrets` (M4): the
+    /// names in its own account's Secrets Store and when each changed, never values. Nothing is
+    /// declared there yet, so each is listed with no owner. Refused when the record does not
+    /// enable secrets, and with "re-link to enable secrets" when its link lacks the scope.
+    async fn list_linked(&self, cx: &Context<'_>, record: &Instance) -> Result<Vec<Listed>> {
+        let id = record.id.as_str();
+        if !crate::catalogue::hosted_enabled(record, "secrets") {
+            return Err(bad(&format!(
+                "secrets is not enabled on {id}: enable it on the instance's Capabilities view"
+            )));
+        }
+        let explain = |e: Error| bad(&crate::linked::explain(id, "secrets", &e.to_string()));
+        let mut account =
+            crate::linked::account_for_capability(cx.env, &self.host, id, "secrets").await?;
+        let store = linked_store(&account)
+            .await
+            .map_err(explain)?
+            .ok_or_else(|| bad(&no_store(id)))?;
+        account.secrets_store = store;
+        let writer = Writer::open(&account).await?;
+        let stored = writer.list().await;
+        let stored = writer.finish(stored).await.map_err(explain)?;
+        let stored: Vec<(String, Option<String>)> =
+            stored.into_iter().map(|s| (s.name, s.modified)).collect();
+        Ok(listing(&[], &stored))
+    }
+
+    /// `secrets_list`: the platform's, or with `instance` that instance's: home's are the
+    /// platform's; a linked one's are in its own account ([`Self::list_linked`]).
+    async fn list_for(&self, cx: &Context<'_>, args: &Value) -> Result<Vec<Listed>> {
+        let Some(id) = args["instance"].as_str() else {
+            return Self::list(cx).await;
+        };
+        let record = crate::instances::one(cx.env, id)
+            .await?
+            .ok_or_else(|| bad(&format!("there is no instance {id}")))?;
+        if crate::catalogue::is_home(&record) {
+            return Self::list(cx).await;
+        }
+        self.list_linked(cx, &record).await
+    }
+
     fn own_slot(&self) -> Slot {
         Slot {
             name: self.parent.clone(),
@@ -273,12 +350,18 @@ impl Capability for Secrets {
 
     fn tools(&self) -> Vec<Tool> {
         vec![
-            Tool::bare(
-                "secrets_list",
-                "List the secrets the platform's capabilities need, and the store's others: \
-                 each one's owner, purpose, whether it is set and when it last changed. Never \
-                 values.",
-            ),
+            Tool {
+                name: "secrets_list",
+                description: "List the secrets the platform's capabilities need, and the store's \
+                              others: each one's owner, purpose, whether it is set and when it \
+                              last changed. Never values. With `instance`, a linked instance \
+                              whose record enables secrets lists its own account's Secrets \
+                              Store instead.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": { "instance": { "type": "string", "description": "An instance's id; omit for the platform's." } }
+                }),
+            },
             Tool::bare(
                 "credentials_expiry",
                 "List every credential the platform holds and when it expires: each declared \
@@ -301,7 +384,7 @@ impl Capability for Secrets {
     fn call<'a>(&'a self, cx: &'a Context<'a>, tool: &'a str, args: &'a Value) -> Call<'a> {
         Box::pin(async move {
             Ok(match tool {
-                "secrets_list" => to_value(Self::list(cx).await?),
+                "secrets_list" => to_value(self.list_for(cx, args).await?),
                 "credentials_expiry" => Self::credentials(cx).await?,
                 "secrets_request" => {
                     let name = args["name"].as_str();

@@ -7,18 +7,28 @@
 //! [`problems`]. The capabilities a record enables by its own profile fields (publishing,
 //! storage, source, CI, Metrics, ingest) are `instances::tools::CAPABILITIES`. Pure: no I/O.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::instances::record::{AccountRef, Instance};
 
 /// Where a capability runs for an instance.
-#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Placement {
     /// Inside the Worker that already serves the instance: `pigeon-platform` on home.
     Inline,
     /// In a Worker of its own, behind a Service Binding.
     OwnWorker,
+}
+
+impl Placement {
+    /// As a record and the console write it: `inline` or `own_worker`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Placement::Inline => "inline",
+            Placement::OwnWorker => "own_worker",
+        }
+    }
 }
 
 /// What a capability's data is about.
@@ -115,14 +125,18 @@ pub const CATALOGUE: &[Entry] = &[
     // Sessions › Live and Compare.
     own("ai-agents", "pigeon-ai-agents"),
     // Metrics › Workers, and on home Cost › 7 days, Today and 30 days: both shown only when the
-    // record's own `observability` is enabled.
+    // record's own `observability` is enabled. Not `linked`: a linked instance's Cost would be its
+    // own account's spend, and Cloudflare offers no Billing OAuth scope to read it (M4 step 3,
+    // deferred; docs/plans/capability-scoping.md says what would build it).
     Entry {
         name: "observability",
         ..BASE
     },
-    // Access › Secrets.
+    // Access › Secrets. On a linked instance (M4, step 2) its own account's Secrets Store,
+    // which needs the link's `secrets-store.write` (`linked::CAPABILITY_SCOPES`).
     Entry {
         name: "secrets",
+        linked: true,
         ..BASE
     },
     // Access › Tokens: issuing, listing and revoking proxy credentials, which core serves. The
@@ -140,9 +154,12 @@ pub const CATALOGUE: &[Entry] = &[
     // Access › People and Apps. Identity stays platform-level; per-instance membership is a
     // later phase.
     platform("users"),
-    // Platform › Architecture: the selected instance's own setup; on home the platform's.
+    // Platform › Architecture: the selected instance's own setup; on home the platform's. On a
+    // linked instance (M4, step 1) it reads only the record and what the platform serves for
+    // it, so it needs no linked-account scope.
     Entry {
         name: "architecture",
+        linked: true,
         ..BASE
     },
     // No views of its own: every instance's record, `console_manifest`, plan, apply and retire.
@@ -197,7 +214,7 @@ pub fn is_home(record: &Instance) -> bool {
 /// Whether hosted capability `name` is enabled on `record`, so its views show in that
 /// instance's console. The home instance runs the platform, so every hosted capability is
 /// enabled there. Another instance has the ones every instance has, and those its record lists
-/// that may be on a linked instance yet ([`Entry::linked`]; none until M4); never a home-only
+/// that may be on a linked instance yet ([`Entry::linked`], turned on one at a time in M4); never a home-only
 /// one, nor one the catalogue does not list, whatever its record says.
 pub fn hosted_enabled(record: &Instance, name: &str) -> bool {
     let home = is_home(record);
@@ -209,9 +226,109 @@ pub fn hosted_enabled(record: &Instance, name: &str) -> bool {
     }
 }
 
+/// The placements a linked instance's record may give a capability: `own_worker` beside
+/// `inline` only where the entry offers it and there is a build of its Worker for a linked
+/// account (`instances::plan::LINKED_WORKERS`, M5). There is none yet, so `inline` alone for
+/// every entry (docs/plans/capability-scoping.md, M5).
+pub fn linked_placements(entry: &Entry) -> &'static [Placement] {
+    let built = crate::instances::plan::LINKED_WORKERS
+        .iter()
+        .any(|w| w.capability == entry.name);
+    if built && entry.placements.contains(&Placement::OwnWorker) {
+        EITHER
+    } else {
+        INLINE
+    }
+}
+
+/// Where capability `name` runs for `record`, and in which Worker when that is one of its own:
+/// on home what is deployed (the catalogue's `home` and `home_worker`; the record cannot move
+/// it); on a linked instance what its record says, `inline` unless set, inside the instance's
+/// own Worker. `None` for a name the catalogue does not list.
+pub fn placement(record: &Instance, name: &str) -> Option<(Placement, Option<String>)> {
+    let e = find(name)?;
+    if is_home(record) {
+        return Some((e.home, e.home_worker.map(str::to_string)));
+    }
+    let p = record
+        .capabilities
+        .get(name)
+        .and_then(|s| s.placement)
+        .unwrap_or(Placement::Inline);
+    Some(match p {
+        Placement::Inline => (p, record.worker.clone()),
+        Placement::OwnWorker => (p, Some(own_worker_name(&record.id, name))),
+    })
+}
+
+/// Where each catalogue capability enabled on `record` runs, for the console's Capabilities
+/// view: `{name: {placement, worker, read_only, choices}}`. On home every entry, read-only
+/// (what is deployed); on a linked instance the ones every instance has and those its record
+/// lists, with the placements its record may give each (`inline` alone today).
+pub fn placements(record: &Instance) -> serde_json::Value {
+    let home = is_home(record);
+    let mut out = serde_json::Map::new();
+    for e in CATALOGUE {
+        if !(home || e.always || record.capabilities.contains_key(e.name)) {
+            continue;
+        }
+        if let Some((p, worker)) = placement(record, e.name) {
+            out.insert(
+                e.name.to_string(),
+                serde_json::json!({
+                    "placement": p,
+                    "worker": worker,
+                    "read_only": home,
+                    "choices": if home { &[][..] } else { linked_placements(e) },
+                }),
+            );
+        }
+    }
+    serde_json::Value::Object(out)
+}
+
+/// The name of capability `name`'s own Worker in instance `id`'s linked account:
+/// `<instance>-<capability>`, with any `/` of the id as `-` (M5).
+pub fn own_worker_name(id: &str, name: &str) -> String {
+    format!("{}-{name}", id.replace('/', "-"))
+}
+
+/// What is wrong with `name`'s `placement` on `record`: one the catalogue does not offer; on
+/// home, any but what is deployed (read-only); on a linked instance, any it may not take yet.
+fn placement_problem(record: &Instance, e: &Entry, placement: Placement) -> Option<String> {
+    let name = e.name;
+    let p = placement.as_str();
+    if !e.placements.contains(&placement) {
+        let offered: Vec<&str> = e.placements.iter().map(|p| p.as_str()).collect();
+        return Some(format!(
+            "The capability \"{name}\" cannot run {p}: it offers {}.",
+            offered.join(" or ")
+        ));
+    }
+    if is_home(record) {
+        return (placement != e.home).then(|| {
+            let runs = match e.home_worker {
+                Some(w) => format!("in its own Worker, {w}"),
+                None => "inline".to_string(),
+            };
+            format!(
+                "The capability \"{name}\" runs {runs} on the home instance; its placement there \
+                 is read-only, and moving it is a code landing, not a record change."
+            )
+        });
+    }
+    (!linked_placements(e).contains(&placement)).then(|| {
+        format!(
+            "The capability \"{name}\" cannot run {p} on a linked instance yet: only inline is \
+             accepted."
+        )
+    })
+}
+
 /// What is wrong with the catalogue capabilities `record` lists, for record validation: a name
 /// the catalogue does not know, one every instance has, a home-only one on a record that is not
-/// home, one a linked instance may not enable yet, or one without the capabilities it requires.
+/// home, one a linked instance may not enable yet, one without the capabilities it requires, or
+/// a placement it may not have ([`placement_problem`]).
 pub fn problems(record: &Instance) -> Vec<String> {
     let home = is_home(record);
     let mut out = Vec::new();
@@ -238,6 +355,11 @@ pub fn problems(record: &Instance) -> Vec<String> {
             out.push(format!(
                 "The capability \"{name}\" cannot be enabled on a linked instance yet."
             ));
+        }
+        if let Some(p) = record.capabilities[name].placement
+            && let Some(why) = placement_problem(record, e, p)
+        {
+            out.push(why);
         }
         for r in e.requires {
             if !record.capabilities.contains_key(*r) {

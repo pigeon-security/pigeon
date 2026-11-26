@@ -82,7 +82,30 @@
       }));
   }
 
+  // A linked instance's Access › Secrets (capability scoping, M4): the names in its own
+  // account's Secrets Store, listed only. Nothing on it declares a secret yet, so none is set
+  // here; a link without the Secrets Store scope says to re-link, in the table's error.
+  function linkedSecrets(ctx) {
+    const table = dataTable({
+      label: "Secrets", noun: "secrets", filter: "Filter secrets", signal: ctx.signal,
+      empty: "The instance’s Secrets Store holds no secrets.",
+      columns: [
+        { label: "Name", cls: "mono", cell: (s) => el("strong", { text: s.name }) },
+        { label: "Changed", cls: "num", cell: (s) => (s.modified ? String(s.modified).slice(0, 10) : "—") },
+        { label: "Note", cell: () => el("span", { class: "muted", text: "Listed only. No capability on this instance reads it yet." }) },
+      ],
+      load: async () => {
+        const list = await ctx.op("secrets_list", { instance: ctx.instance.id });
+        return Array.isArray(list) ? list : [];
+      },
+    });
+    return el("div", { class: "view" },
+      intro(`The secrets in ${ctx.instance.title}’s own Cloudflare account. Values are never shown.`),
+      table);
+  }
+
   function secrets(ctx) {
+    if (!ctx.instance.home) return linkedSecrets(ctx);
     const extras = el("div", { class: "view" });
     const table = dataTable({
       label: "Secrets", noun: "secrets", filter: "Filter secrets", signal: ctx.signal,

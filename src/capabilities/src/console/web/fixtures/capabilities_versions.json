@@ -139,7 +139,69 @@
           "current": "2.2.0",
           "note": "selects 2.2.0, the newest"
         }
-      ]
+      ],
+      "placements": {
+        "ai-agents": {
+          "placement": "own_worker",
+          "worker": "pigeon-ai-agents",
+          "read_only": true,
+          "choices": []
+        },
+        "observability": {
+          "placement": "inline",
+          "worker": null,
+          "read_only": true,
+          "choices": []
+        },
+        "secrets": {
+          "placement": "inline",
+          "worker": null,
+          "read_only": true,
+          "choices": []
+        },
+        "proxy": {
+          "placement": "inline",
+          "worker": null,
+          "read_only": true,
+          "choices": []
+        },
+        "models": {
+          "placement": "own_worker",
+          "worker": "pigeon-model-gateway",
+          "read_only": true,
+          "choices": []
+        },
+        "multi-instance": {
+          "placement": "inline",
+          "worker": null,
+          "read_only": true,
+          "choices": []
+        },
+        "users": {
+          "placement": "inline",
+          "worker": null,
+          "read_only": true,
+          "choices": []
+        },
+        "architecture": {
+          "placement": "inline",
+          "worker": null,
+          "read_only": true,
+          "choices": []
+        },
+        "instances": {
+          "placement": "inline",
+          "worker": null,
+          "read_only": true,
+          "choices": []
+        },
+        "redirects": {
+          "placement": "inline",
+          "worker": null,
+          "read_only": true,
+          "choices": []
+        }
+      }
     },
     {
       "id": "docs",
@@ -160,11 +222,31 @@
           "current": "2.2.0",
           "note": "selects 2.2.0, the newest"
         }
-      ]
+      ],
+      "placements": {
+        "instances": {
+          "placement": "inline",
+          "worker": null,
+          "read_only": false,
+          "choices": [
+            "inline"
+          ]
+        }
+      }
     },
     {
       "id": "notes",
-      "pins": []
+      "pins": [],
+      "placements": {
+        "instances": {
+          "placement": "inline",
+          "worker": null,
+          "read_only": false,
+          "choices": [
+            "inline"
+          ]
+        }
+      }
     }
   ],
   "catalogue": [
@@ -205,7 +287,7 @@
       "scope": "instance",
       "availability": "any",
       "requires": [],
-      "linked": false,
+      "linked": true,
       "always": false
     },
     {
@@ -273,7 +355,7 @@
       "scope": "instance",
       "availability": "any",
       "requires": [],
-      "linked": false,
+      "linked": true,
       "always": false
     },
     {
