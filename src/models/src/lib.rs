@@ -1409,8 +1409,8 @@ fn admin_refusal(status: u16, body: &Value) -> String {
     if status == 403 {
         format!(
             "Anthropic accepted the key but refused it on its usage report (403).{theirs} An \
-             `sk-ant-usr-` key has its linked account's permissions, so that account needs the \
-             admin role: an organization admin gives it in the Claude Console's organization \
+             `sk-ant-usr-` or `sk-ant-svc-` key has its account's permissions, so that account \
+             (a person or a service account) needs the admin role: an organization admin gives it in the Claude Console's organization \
              settings, where members' roles are set. Or use an admin key from Settings, Admin \
              keys (`sk-ant-admin01-`). The key must also have Scope Organization, not a \
              workspace"
@@ -1769,7 +1769,7 @@ impl Models {
                 purpose: "An Anthropic key for the Admin API, used to read Anthropic's usage \
                           and cost reports. An organization admin makes it in the Claude Console: \
                           API keys, Create API key, Scope Organization. It starts with \
-                          sk-ant-usr- (or sk-ant-admin for an older admin key). It expires on the \
+                          sk-ant-usr-, sk-ant-svc- for a service account with the admin role, or sk-ant-admin for an older admin key. It expires on the \
                           date chosen in the Console: set it again here before then."
                     .into(),
                 scopes: vec![secrets_store::WORKERS.to_string()],

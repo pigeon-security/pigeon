@@ -2101,8 +2101,16 @@ fn model_gateway_workers_ai_minted_token() {
 fn models_admin_key_prefixes() {
     use pigeon_models::billing::{ADMIN_KEY_PREFIXES, admin_key_shape};
 
-    assert_eq!(ADMIN_KEY_PREFIXES, ["sk-ant-usr-", "sk-ant-admin"]);
-    for ok in ["sk-ant-usr-abc123", "sk-ant-admin01-abc123", "sk-ant-admin"] {
+    assert_eq!(
+        ADMIN_KEY_PREFIXES,
+        ["sk-ant-usr-", "sk-ant-svc-", "sk-ant-admin"]
+    );
+    for ok in [
+        "sk-ant-usr-abc123",
+        "sk-ant-svc-1abc123",
+        "sk-ant-admin01-abc123",
+        "sk-ant-admin",
+    ] {
         assert_eq!(admin_key_shape(ok), Ok(()), "{ok}");
     }
     for no in [
@@ -2112,10 +2120,12 @@ fn models_admin_key_prefixes() {
         "sk-ant-oat01-abc",
         "SK-ANT-USR-abc",
         " sk-ant-usr-abc",
+        "sk-ant-svc",
     ] {
         let why = admin_key_shape(no).expect_err(no);
         assert!(why.contains("`sk-ant-usr-`"), "{why}");
         assert!(why.contains("`sk-ant-admin`"), "{why}");
+        assert!(why.contains("`sk-ant-svc-`"), "{why}");
     }
 
     let src = include_str!("../src/models/src/lib.rs");
