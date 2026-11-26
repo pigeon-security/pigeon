@@ -1,7 +1,10 @@
 /* The apex pages: the home page, the architecture page and its fallback. The tokens are the
  * console's (src/capabilities/src/console/web/shell.css), light and dark by the system theme
  * only: the apex policy runs no scripts, so there is no theme switch. Two additions: --fs-hero
- * and --sp-8. System fonts only, no shadows, radii 3 and 6px. One 1040px column. */
+ * and --sp-8. System fonts only, no shadows, radii 3 and 6px. One 1040px column.
+ * One source for two pages: home.rs inlines it, and the landing@1 template (src/landing) serves
+ * it as /assets/pigeon.css. A change here is a new landing version (the smoke suite pins its
+ * digest). */
 :root {
   --bg: #FFFFFF; --sunk: #F6F5F7; --surface: #FFFFFF; --raised: #FAF9FB; --hover: #F3F1F5;
   --line: #E4E2E8; --line-strong: #CFCCD6;
@@ -18,6 +21,7 @@
   --row: 32px; --ctl: 26px;
   --col: 1040px;
   --mark-ground: #F9E5EE; --mark-edge: #EEB9CF;
+  --dot: #D5D1DB;
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
@@ -29,12 +33,14 @@
     --ok: #6CCB93; --ok-soft: #13261B; --warn: #E8B04A; --warn-soft: #2A2112;
     --bad: #F08A7A; --bad-soft: #2E1815; --info: #8DB6F0; --info-soft: #15202F;
     --mark-ground: #3D2935; --mark-edge: #844F67;
+    --dot: #34333D;
     color-scheme: dark;
   }
 }
 
 *, *::before, *::after { box-sizing: border-box; }
 html { background: var(--bg); }
+html, body { overflow-x: clip; }
 body { margin: 0; min-height: 100vh; display: flex; flex-direction: column; background: var(--bg); color: var(--ink); font: 400 var(--fs-md)/1.5 var(--font-ui); -webkit-font-smoothing: antialiased; overflow-wrap: anywhere; }
 body > main { flex: 1 0 auto; }
 a { color: var(--accent); text-decoration: none; }
@@ -94,7 +100,12 @@ h1, h2, h3, p, ul, ol, dl, dd { margin: 0; }
   background: url("/mark/head.webp") center / cover no-repeat border-box, var(--mark-ground); }
 
 /* Hero */
-.hero { padding-block: var(--sp-8) var(--sp-6); display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr); gap: var(--sp-6); align-items: start; }
+.hero { padding-block: var(--sp-8) var(--sp-6); display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr); gap: var(--sp-6); align-items: start; position: relative; isolation: isolate; }
+/* The hero's dotted ground, the only one: full width from under the top bar (main has no top
+ * padding) to the hero's end, fading over its last third so the next section starts on --bg. */
+.hero::before { content: ""; position: absolute; z-index: -1; top: 0; bottom: 0; left: calc(50% - 50vw); right: calc(50% - 50vw);
+  background-image: radial-gradient(circle, var(--dot) 1.1px, transparent 1.5px); background-size: 16px 16px; background-position: 8px 8px;
+  -webkit-mask-image: linear-gradient(to bottom, #000 65%, transparent); mask-image: linear-gradient(to bottom, #000 65%, transparent); pointer-events: none; }
 .hero-copy { display: grid; gap: var(--sp-4); max-width: 34em; padding-top: var(--sp-2); }
 .hero h1 { font: 600 var(--fs-hero)/1.15 var(--font-ui); letter-spacing: -.02em; text-wrap: balance; }
 .lede { font-size: var(--fs-lg); line-height: 1.55; color: var(--ink-2); max-width: 32em; }

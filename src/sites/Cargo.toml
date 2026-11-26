@@ -11,7 +11,9 @@ crate-type = ["cdylib"]
 
 [dependencies]
 pigeon-blog = { path = "../blog" }
+pigeon-landing = { path = "../landing" }
 pigeon-contract = { path = "../contract" }
 pigeon-core = { path = "../core" }
 serde_json = "1"
+toml = { version = "0.8", default-features = false, features = ["parse"] }
 worker = "0.9.0"

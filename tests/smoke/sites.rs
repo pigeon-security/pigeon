@@ -845,7 +845,11 @@ fn sites_apex_pages() {
     assert!(h.contains("--accent: #B03A6A;") && h.contains("--accent: #E07FA8;"));
     assert!(h.contains("@media (prefers-color-scheme: dark)"));
     assert!(!h.contains("data-theme"));
-    assert!(!h.contains("radial-gradient") && !h.contains("Inter Tight"));
+    // One gradient: the hero's dotted ground, and nowhere else.
+    assert_eq!(h.matches("radial-gradient").count(), 1);
+    assert!(h.contains(".hero::before { content: \"\"; position: absolute; z-index: -1;"));
+    assert!(h.contains("--dot: #D5D1DB;") && h.contains("--dot: #34333D;"));
+    assert!(!h.contains("Inter Tight"));
     assert!(!h.contains("box-shadow") && !h.contains("color-mix"));
     assert!(!h.contains("data:image/svg+xml"));
     // Discreet: it reads as a money-records workspace and nothing more.
@@ -1104,4 +1108,429 @@ fn global_ci_reads_keep_their_instance_targeting() {
     let mut disabled = record.clone();
     disabled.ci = None;
     assert!(global_send(gateway, "ci", true, "ci_jobs", &read, Some(&disabled)).is_err());
+}
+
+/// The home landing's content (`site/`), as the landing renderer reads it.
+fn landing_site() -> pigeon_landing::Input {
+    pigeon_landing::Input {
+        site_toml: include_str!("../../site/.pigeon/site.toml").into(),
+        index: Some(include_str!("../../site/content/index.toml").into()),
+        commit: "abc1234".into(),
+        ..pigeon_landing::Input::default()
+    }
+}
+
+/// Every `on…=` attribute in an HTML text's tags: event handlers, which no landing page may
+/// carry.
+fn event_handlers(html: &str) -> Vec<String> {
+    let lower = html.to_ascii_lowercase();
+    let mut found = Vec::new();
+    for tag in lower.split('<').skip(1) {
+        let tag = tag.split('>').next().unwrap_or_default();
+        for word in tag.split(|c: char| c.is_whitespace() || c == '/' || c == '"' || c == '\'') {
+            if word.starts_with("on") && word.contains('=') {
+                found.push(word.to_string());
+            }
+        }
+    }
+    found
+}
+
+/// The pigeon.dev landing page as `landing@1` content (`site/`): it renders the shipped home
+/// page's copy, the same `<main>` as `pigeon_core::home` byte for byte, with the same
+/// stylesheet and images, no scripts and no event handlers, and nothing but a money-records
+/// workspace.
+#[test]
+fn landing_template_renders_the_home_landing() {
+    use pigeon_core::home;
+
+    let out = pigeon_landing::render(&landing_site()).expect("the home landing renders");
+    assert_eq!((out.template, out.version), ("landing@1", "1.1.0"));
+    assert_eq!(out.digest, pigeon_landing::digest());
+    assert_eq!(
+        out.files.keys().map(String::as_str).collect::<Vec<_>>(),
+        [
+            "404.html",
+            "apple-touch-icon.png",
+            "assets/pigeon.css",
+            "favicon-32.png",
+            "index.html",
+            "mark/head.webp"
+        ]
+    );
+    let text = |p: &str| String::from_utf8(out.files[p].0.clone()).unwrap();
+    let index = text("index.html");
+    for copy in [
+        "<h1>Find the pattern. Act with confidence.</h1>",
+        "<span class=\"pill accent\">Invite only</span>",
+        "<li><h3>Bring it in</h3>",
+        "<li><h3>See what repeats</h3>",
+        "<li><h3>Keep a clear record</h3>",
+        "<tr><th>Sign-in</th><td>Passkeys on your own device. No passwords to guess or reset.</td><td class=\"st\"><span class=\"pill ok\">Live</span></td></tr>",
+        "<tr><th>Originals</th><td>Files are stored by their content and never edited, so a record can always be traced back.</td><td class=\"st\"><span class=\"pill warn\">In testing</span></td></tr>",
+        "<tr><th>Email in</th><td>A private address per person for forwarding messages and receipts.</td><td class=\"st\"><span class=\"pill\">Planned</span></td></tr>",
+        "<span class=\"tag\">Example</span>",
+        "<td class=\"num muted\">—</td>",
+        "<a href=\"/\" aria-current=\"page\">Overview</a><a href=\"/architecture\">Architecture</a>",
+        "<a class=\"btn btn-primary\" href=\"https://platform.pigeon.dev/app\">Open console <span aria-hidden=\"true\">↗</span></a>",
+        "<link rel=\"stylesheet\" href=\"/assets/pigeon.css\">",
+        "<span>abc1234</span>",
+    ] {
+        assert!(index.contains(copy), "{copy}");
+    }
+    // The same page as the apex serves today: the content between the top bar and the footer,
+    // byte for byte, and one stylesheet and one set of images for both.
+    let main = |h: &str| {
+        let start = h.find("<main id=\"main\">").expect("a main");
+        let end = h.find("</main>").expect("a main's end");
+        h[start..end].to_string()
+    };
+    assert_eq!(main(&index), main(&home::home_html(None)));
+    assert_eq!(text("assets/pigeon.css"), pigeon_landing::CSS);
+    assert!(home::home_html(None).contains(pigeon_landing::CSS));
+    for (path, bytes, _) in pigeon_landing::ASSETS {
+        let home::Route::Asset(asset) = home::route("GET", &format!("/{path}")) else {
+            panic!("/{path} is an apex image");
+        };
+        assert_eq!(asset.bytes(), bytes, "{path}");
+        assert_eq!(out.files[path].0, bytes);
+    }
+    assert!(text("404.html").contains("Page not found"));
+    // No scripts, ever, in any page or the stylesheet; and discreet.
+    let words = ["abuse", "survivor", "safety", "victim", "domestic"];
+    for (path, (bytes, kind)) in &out.files {
+        if !kind.starts_with("text/") {
+            continue;
+        }
+        let body = String::from_utf8(bytes.clone()).unwrap();
+        let lower = body.to_lowercase();
+        assert!(!lower.contains("<script"), "{path}");
+        assert!(!lower.contains("javascript:"), "{path}");
+        assert_eq!(event_handlers(&body), Vec::<String>::new(), "{path}");
+        for word in words {
+            assert!(!lower.contains(word), "{path}: {word}");
+        }
+    }
+    for source in [
+        include_str!("../../site/.pigeon/site.toml"),
+        include_str!("../../site/content/index.toml"),
+    ] {
+        for word in words {
+            assert!(!source.to_lowercase().contains(word), "{word}");
+        }
+    }
+}
+
+/// `landing@1`'s digest covers its stylesheet (the console's tokens, from the apex's
+/// home.css) and its images, and is tied to its version here: a change to either is a new
+/// template version with a changelog line, then a new digest below.
+#[test]
+fn landing_template_digest_tied_to_version() {
+    use pigeon_core::versions::{Component, Entry, Kind};
+
+    let pinned = [(
+        "1.1.0",
+        "e07231b78d16fe66fcf6d3752491ef07ef635a4e58ca9c9ce08140e9f4857c55",
+    )];
+    assert_eq!(pigeon_landing::TEMPLATES.len(), pinned.len());
+    for (t, (version, digest)) in pigeon_landing::TEMPLATES.iter().zip(pinned) {
+        assert_eq!(t.version, version);
+        assert_eq!(
+            pigeon_landing::template_digest(t),
+            digest,
+            "landing@{} {version} changed its stylesheet or images: add a version and a \
+             CHANGELOG line in src/landing/src/lib.rs, then pin its digest here",
+            t.major
+        );
+    }
+    assert!(pigeon_landing::CSS.contains("--accent: #B03A6A;"));
+    assert_ne!(
+        pigeon_landing::renderer_digest(),
+        pigeon_blog::renderer_digest()
+    );
+
+    let serves: Vec<&str> = pigeon_landing::TEMPLATES
+        .iter()
+        .map(|t| t.version)
+        .collect();
+    let mut landing = Component::new("landing", Kind::Template, serves[0]).serving(&serves);
+    landing.changelog = pigeon_landing::CHANGELOG
+        .iter()
+        .map(|e| Entry {
+            version: e.version.into(),
+            breaking: e.breaking,
+            summary: e.summary.into(),
+            migration: e.migration.map(str::to_string),
+        })
+        .collect();
+    assert_eq!(landing.problems(), Vec::<String>::new());
+    assert_eq!(
+        landing.changelog.last().map(|e| e.summary.as_str()),
+        Some(pigeon_core::versions::BEGAN)
+    );
+    assert_eq!(landing.version.to_string(), pigeon_landing::VERSION);
+}
+
+/// What `landing` refuses: links that are not a site path, a fragment or an http(s) or mailto
+/// URL; unknown keys and tones; a missing home page; uncarried majors and pins that allow
+/// nothing; files under static/ the template generates. Markdown pages render with raw HTML
+/// shown as text.
+#[test]
+fn landing_template_problems_and_pages() {
+    use pigeon_landing::{Problem, render, render_pinned};
+
+    let has = |problems: &[Problem], file: &str, text: &str| {
+        problems
+            .iter()
+            .any(|p| p.file == file && p.message.contains(text))
+    };
+    let mut bad = landing_site();
+    bad.site_toml = bad.site_toml.replace(
+        "link = \"/architecture\"\n",
+        "link = \"javascript:alert(1)\"\n",
+    );
+    bad.index = bad
+        .index
+        .map(|i| i.replace("highlight = true\n", "highlight = true\ncolour = 1\n"));
+    let problems = render(&bad).expect_err("refused");
+    assert!(
+        has(&problems, ".pigeon/site.toml", "javascript:alert(1)"),
+        "{problems:#?}"
+    );
+    assert!(
+        has(&problems, "content/index.toml", "unknown field `colour`"),
+        "{problems:#?}"
+    );
+
+    let mut bad = landing_site();
+    bad.index = bad.index.map(|i| {
+        i.replace("link = \"#how\"", "link = \"data:text/html,x\"")
+            .replace("tone = \"warn\"", "tone = \"red\"")
+    });
+    bad.pages = vec![
+        (
+            "about.md".into(),
+            "+++\ntitle = \"About\"\n+++\n\n[x](javascript:alert(1))\n".into(),
+        ),
+        ("Bad Name.md".into(), "+++\ntitle = \"x\"\n+++\n".into()),
+    ];
+    let problems = render(&bad).expect_err("refused");
+    for (file, text) in [
+        ("content/index.toml", "data:text/html,x"),
+        ("content/index.toml", "tone `red`"),
+        ("content/pages/about.md", "javascript:alert(1)"),
+        ("content/pages/Bad Name.md", "lowercase"),
+    ] {
+        assert!(has(&problems, file, text), "{file}: {text}: {problems:#?}");
+    }
+
+    let mut no_index = landing_site();
+    no_index.index = None;
+    let problems = render(&no_index).expect_err("refused");
+    assert!(has(
+        &problems,
+        "content/index.toml",
+        "add content/index.toml"
+    ));
+    let mut clash = landing_site();
+    clash.statics = ["assets/pigeon.css".to_string(), "robots.txt".to_string()].into();
+    let problems = render(&clash).expect_err("refused");
+    assert!(has(
+        &problems,
+        "static/assets/pigeon.css",
+        "generated by landing@1"
+    ));
+    assert_eq!(problems.len(), 1);
+
+    let mut two = landing_site();
+    two.site_toml = two.site_toml.replace("landing@1", "landing@2");
+    let problems = render(&two).expect_err("landing@2 is not carried");
+    assert!(has(&problems, ".pigeon/site.toml", "carries no landing@2"));
+    let problems = render_pinned(&landing_site(), &|v| v == "1.0.1").expect_err("pinned away");
+    assert!(has(
+        &problems,
+        ".pigeon/site.toml",
+        "landing@1 versions 1.1.0"
+    ));
+    let mut blog = landing_site();
+    blog.site_toml = blog.site_toml.replace("landing@1", "blog@1");
+    let problems = render(&blog).expect_err("not a landing");
+    assert!(has(
+        &problems,
+        ".pigeon/site.toml",
+        "not a landing template"
+    ));
+
+    let mut paged = landing_site();
+    paged.pages = vec![(
+        "about.md".into(),
+        "+++\ntitle = \"About pigeon\"\n+++\n\nA <script>x</script> and <img src=x onerror=y>.\n\n- [Console](https://platform.pigeon.dev/app)\n".into(),
+    )];
+    paged.statics = ["robots.txt".to_string()].into();
+    let out = render(&paged).expect("renders");
+    let about = String::from_utf8(out.files["about/index.html"].0.clone()).unwrap();
+    assert!(about.contains("<title>About pigeon · pigeon</title>"));
+    assert!(about.contains("&lt;script&gt;x&lt;/script&gt;"));
+    assert!(!about.to_lowercase().contains("<script") && !about.contains("<img"));
+    assert_eq!(event_handlers(&about), Vec::<String>::new());
+    assert!(about.contains("<a href=\"https://platform.pigeon.dev/app\">Console</a>"));
+    assert_eq!(out.statics, ["robots.txt"]);
+    assert_eq!(render(&paged), render(&paged), "pure");
+}
+
+/// pigeon-sites dispatches on `site.toml`'s `template` prefix: `landing@…` to the landing
+/// renderer, everything else to the blog exactly as before, with each template's own pin and
+/// renderer digest.
+#[test]
+fn sites_template_dispatch() {
+    use crate::sites_templates::{Parts, Template, render, split};
+
+    assert_eq!(
+        Template::of("template = \"landing@1\"\n"),
+        Template::Landing
+    );
+    assert_eq!(
+        Template::of("template = \"landing@7\"\n"),
+        Template::Landing
+    );
+    for other in [
+        "template = \"blog@1\"\n",
+        "",
+        "not toml [",
+        "template = 3\n",
+    ] {
+        assert_eq!(Template::of(other), Template::Blog, "{other}");
+    }
+    assert_eq!(
+        (Template::Blog.component(), Template::Landing.component()),
+        ("blog", "landing")
+    );
+    assert_eq!(
+        Template::Blog.renderer_digest(),
+        pigeon_blog::renderer_digest()
+    );
+    assert_eq!(
+        Template::Landing.renderer_digest(),
+        pigeon_landing::renderer_digest()
+    );
+
+    // A blog renders byte for byte as the blog renderer alone renders it, problems included.
+    let blog = pigeon_blog::Input {
+        site_toml:
+            "template = \"blog@1\"\n\n[site]\ntitle = \"Example\"\ndescription = \"Notes.\"\n"
+                .into(),
+        posts: vec![(
+            "2025-01-02-a.md".into(),
+            "+++\ntitle = \"A\"\ndate = 2025-01-02\n+++\nHello.\n".into(),
+        )],
+        statics: ["apple-touch-icon", "favicon-16x16", "favicon-32x32"]
+            .iter()
+            .map(|f| format!("assets/images/site/{f}.png"))
+            .collect(),
+        base_url: "https://example.com".into(),
+        commit: "abc1234".into(),
+        commit_year: 2025,
+        ..pigeon_blog::Input::default()
+    };
+    let parts = Parts {
+        site_toml: blog.site_toml.clone(),
+        posts: blog.posts.clone(),
+        statics: blog.statics.clone(),
+        base_url: blog.base_url.clone(),
+        commit: blog.commit.clone(),
+        commit_year: blog.commit_year,
+        ..Parts::default()
+    };
+    let direct = pigeon_blog::render(&blog).expect("renders");
+    let via = render(&parts, &|_, _| true).expect("renders");
+    assert_eq!(via.kind, Template::Blog);
+    assert_eq!(via.files, direct.files);
+    assert_eq!(
+        (via.template, via.version),
+        (direct.template, direct.version)
+    );
+    assert_eq!(via.digest, direct.digest);
+    assert_eq!(via.renderer_digest, pigeon_blog::renderer_digest());
+    let broken = Parts {
+        site_toml: "template = \"blog@1\"\n".into(),
+        ..parts.clone()
+    };
+    let want: Vec<String> = pigeon_blog::render(&pigeon_blog::Input {
+        site_toml: broken.site_toml.clone(),
+        ..blog.clone()
+    })
+    .expect_err("no [site]")
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    let got: Vec<String> = render(&broken, &|_, _| true)
+        .expect_err("no [site]")
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(got, want);
+
+    // The landing, from a repository's files, under the landing pin.
+    let site = landing_site();
+    let files = vec![
+        (
+            ".pigeon/site.toml".to_string(),
+            site.site_toml.clone().into_bytes(),
+        ),
+        (
+            "content/index.toml".to_string(),
+            site.index.clone().unwrap().into_bytes(),
+        ),
+        (
+            "content/posts/2025-01-02-a.md".to_string(),
+            b"ignored".to_vec(),
+        ),
+        ("static/robots.txt".to_string(), b"User-agent: *\n".to_vec()),
+        ("README.md".to_string(), vec![0xff]),
+    ];
+    let s = split(files).expect("sorted");
+    assert!(s.has_site_toml);
+    assert!(s.parts.posts.is_empty() && s.parts.index.is_some());
+    assert_eq!(
+        s.statics,
+        [("robots.txt".to_string(), b"User-agent: *\n".to_vec())]
+    );
+    let parts = Parts {
+        commit: "abc1234".into(),
+        ..s.parts
+    };
+    let landing_only = |t: Template, v: &str| t == Template::Landing && v == "1.1.0";
+    let out = render(&parts, &landing_only).expect("renders");
+    assert_eq!((out.kind, out.template), (Template::Landing, "landing@1"));
+    assert_eq!(out.renderer_digest, pigeon_landing::renderer_digest());
+    assert_eq!(out.statics, ["robots.txt"]);
+    let alone = pigeon_landing::render(&pigeon_landing::Input {
+        statics: ["robots.txt".to_string()].into(),
+        ..landing_site()
+    })
+    .expect("renders");
+    assert_eq!(out.files, alone.files);
+    let problems =
+        render(&parts, &|t, _| t == Template::Blog).expect_err("the landing pin allows none");
+    assert!(
+        problems[0]
+            .to_string()
+            .starts_with(".pigeon/site.toml: this pigeon carries landing@1 versions 1.1.0"),
+        "{problems:?}"
+    );
+    // A repository with no site.toml is the blog's, as before; only the chosen template's files
+    // must be text.
+    let none = split(vec![("content/pages/a.md".into(), b"x".to_vec())]).unwrap();
+    assert!(!none.has_site_toml);
+    assert!(split(vec![("content/index.toml".into(), vec![0xff])]).is_ok());
+    assert!(
+        split(vec![
+            (
+                ".pigeon/site.toml".into(),
+                b"template = \"landing@1\"".to_vec()
+            ),
+            ("content/index.toml".into(), vec![0xff]),
+        ])
+        .is_err()
+    );
 }

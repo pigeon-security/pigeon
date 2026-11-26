@@ -1,0 +1,138 @@
+# The home page. The example record's figures are invented, and the panel says so.
+
+[hero]
+pill = { text = "Invite only", tone = "accent" }
+title = "Find the pattern. Act with confidence."
+lede = "pigeon is a private workspace for making sense of money records. Bring in statements, receipts and messages you already have. pigeon lines them up by date, shows what repeats, and keeps a record you can rely on."
+fine = "Sign in with a passkey. pigeon is in a small private test; there is no public sign-up yet."
+
+[[hero.actions]]
+title = "Open console"
+link = "https://platform.pigeon.dev/app"
+style = "primary"
+
+[[hero.actions]]
+title = "How it works"
+link = "#how"
+style = "ghost"
+
+[example]
+label = "Example of a pattern pigeon finds"
+title = "Transfers after each deposit"
+pill = { text = "Pattern", tone = "info" }
+tag = "Example"
+columns = ["Date", "What", "Source", "Amount"]
+foot = "Each row links to its original file, unchanged."
+count = "5 of 21 rows"
+
+[[example.facts]]
+term = "Times"
+value = "7"
+
+[[example.facts]]
+term = "Since"
+value = "Mar 2026"
+
+[[example.facts]]
+term = "Total"
+value = "$2,940.00"
+
+[[example.rows]]
+date = "2026-09-01"
+what = "Paycheck in"
+detail = "Checking ··4417"
+source = "statement"
+amount = "+$1,850.00"
+
+[[example.rows]]
+date = "2026-09-01"
+what = "Transfer out"
+detail = "to ··0932, same day"
+source = "statement"
+amount = "−$420.00"
+highlight = true
+
+[[example.rows]]
+date = "2026-10-01"
+what = "Paycheck in"
+detail = "Checking ··4417"
+source = "statement"
+amount = "+$1,850.00"
+
+[[example.rows]]
+date = "2026-10-02"
+what = "Transfer out"
+detail = "to ··0932, next day"
+source = "statement"
+amount = "−$420.00"
+highlight = true
+
+[[example.rows]]
+date = "2026-10-02"
+what = "Message mentions “the usual”"
+detail = "linked to the transfer above"
+source = "email"
+
+[[sections]]
+id = "how"
+label = "How it works"
+title = "Three steps, at your pace"
+
+[[sections.steps]]
+title = "Bring it in"
+text = "Add bank statements, card exports, receipts and emails. pigeon keeps each original exactly as it arrived, with the date it was added."
+
+[[sections.steps]]
+title = "See what repeats"
+text = "pigeon puts everything on one timeline and points out what recurs: the same payee, the same day, the same amount. You decide what matters."
+
+[[sections.steps]]
+title = "Keep a clear record"
+text = "Save what you find as a dated record with its sources attached, ready when you choose to share it with someone you trust."
+
+[[sections]]
+id = "private"
+heading_id = "priv-h"
+label = "Privacy"
+title = "Yours, and only yours"
+
+[[sections.rows]]
+name = "Sign-in"
+text = "Passkeys on your own device. No passwords to guess or reset."
+status = { text = "Live", tone = "ok" }
+
+[[sections.rows]]
+name = "Approvals"
+text = "Anything that changes or shares your data waits for your passkey on that exact action."
+status = { text = "Live", tone = "ok" }
+
+[[sections.rows]]
+name = "Your own space"
+text = "Each person gets a separate instance. Nothing is pooled with anyone else’s."
+status = { text = "Live", tone = "ok" }
+
+[[sections.rows]]
+name = "Originals"
+text = "Files are stored by their content and never edited, so a record can always be traced back."
+status = { text = "In testing", tone = "warn" }
+
+[[sections.rows]]
+name = "Email in"
+text = "A private address per person for forwarding messages and receipts."
+status = { text = "Planned" }
+
+[[sections]]
+id = "hood"
+label = "Under the hood"
+title = "Built in the open"
+text = "pigeon runs on Cloudflare Workers. Its architecture page is drawn from the deployed code on every release."
+
+[[sections.links]]
+title = "View architecture"
+link = "/architecture"
+
+[[sections.links]]
+title = "architecture.json"
+link = "/architecture.json"
+style = "ghost"
+mono = true

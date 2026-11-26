@@ -910,6 +910,7 @@ dependencies = [
  "pigeon-email",
  "pigeon-ingest",
  "pigeon-ingest-runner",
+ "pigeon-landing",
  "pigeon-models",
  "pigeon-proxies",
  "rand",
@@ -1043,6 +1044,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pigeon-landing"
+version = "0.1.0"
+dependencies = [
+ "pulldown-cmark",
+ "serde",
+ "sha2",
+ "toml",
+]
+
+[[package]]
 name = "pigeon-model-gateway"
 version = "0.1.0"
 dependencies = [
@@ -1110,7 +1121,9 @@ dependencies = [
  "pigeon-blog",
  "pigeon-contract",
  "pigeon-core",
+ "pigeon-landing",
  "serde_json",
+ "toml",
  "worker",
 ]
 

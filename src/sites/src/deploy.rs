@@ -7,8 +7,8 @@
 //! hashes to the binding the deploy read. There is no other path: the legacy platform callbacks
 //! (core's `dispatch` `instances_list` and `credential` kinds `linked` and `github`) are retired.
 //! Only a record whose `publishing` profile is enabled deploys.
-//! The repository is read as one tarball ([`pigeon_core::tarball`]), sorted
-//! ([`pigeon_blog::repo`]), rendered ([`pigeon_blog`]), and written to the profile's site bucket
+//! The repository is read as one tarball ([`pigeon_core::tarball`]), sorted and rendered by the
+//! template its `site.toml` names ([`crate::templates`]: `blog` or `landing`), and written to the profile's site bucket
 //! as an immutable release in the layout the site Worker serves: the blobs it lacks, then
 //! `deploys/{release}.json` and `release-meta/{release}.json`, then `live`. It only adds objects
 //! and moves `live`, so the previous release stays whole until the last write.
@@ -23,6 +23,7 @@ use serde_json::{Value, json};
 use worker::{Env, Error, Result};
 
 use crate::queued::Receipt;
+use crate::templates::{self, Template};
 
 fn bad(why: impl Into<String>) -> Error {
     Error::RustError(why.into())
@@ -112,6 +113,8 @@ pub struct Pins {
     pub sites: Option<String>,
     /// The requirement on `blog`, if set.
     pub blog: Option<String>,
+    /// The requirement on `landing`, if set.
+    pub landing: Option<String>,
 }
 
 /// Reads [`Pins`] from an approved record, as core's `sites_scope` answers it. Pure.
@@ -120,6 +123,7 @@ pub fn pins(record: &Value) -> Pins {
     Pins {
         sites: get("sites"),
         blog: get("blog"),
+        landing: get("landing"),
     }
 }
 
@@ -141,8 +145,18 @@ pub fn check_sites_pin(pin: Option<&str>, running: &str) -> std::result::Result<
 
 /// Parses the `blog` pin into a requirement. Pure.
 pub fn blog_requirement(pin: Option<&str>) -> std::result::Result<Option<Requirement>, String> {
-    pin.map(|p| Requirement::parse(p).map_err(|e| format!("the blog pin `{p}`: {e}")))
-        .transpose()
+    template_requirement(Template::Blog, pin)
+}
+
+/// Parses a template's pin into a requirement. Pure.
+pub fn template_requirement(
+    template: Template,
+    pin: Option<&str>,
+) -> std::result::Result<Option<Requirement>, String> {
+    pin.map(|p| {
+        Requirement::parse(p).map_err(|e| format!("the {} pin `{p}`: {e}", template.component()))
+    })
+    .transpose()
 }
 
 /// Whether the requirement, when there is one, allows the template version `v`. Pure.
@@ -386,6 +400,8 @@ async fn publish(
     )
     .map_err(bad)?;
     let blog_pin = blog_requirement(pins.blog.as_deref()).map_err(bad)?;
+    let landing_pin =
+        template_requirement(Template::Landing, pins.landing.as_deref()).map_err(bad)?;
     let t = target(record, &env.var("ZONE")?.to_string()).map_err(bad)?;
 
     let credential = scoped_core(
@@ -422,19 +438,21 @@ async fn publish(
         receipt.check_commit(&commit).map_err(bad)?;
     }
     let year = tarball::year_of(archive.mtime);
-    let s = pigeon_blog::repo::split(archive.files).map_err(bad)?;
-    let input = pigeon_blog::Input {
-        site_toml: s
-            .site_toml
-            .ok_or_else(|| bad("the repository has no .pigeon/site.toml"))?,
-        posts: s.posts,
-        pages: s.pages,
-        statics: s.statics.iter().map(|(p, _)| p.clone()).collect(),
+    let s = templates::split(archive.files).map_err(bad)?;
+    if !s.has_site_toml {
+        return Err(bad("the repository has no .pigeon/site.toml"));
+    }
+    let parts = templates::Parts {
         base_url: t.base_url.clone(),
         commit: commit.chars().take(7).collect(),
         commit_year: year,
+        ..s.parts
     };
-    let out = match pigeon_blog::render_pinned(&input, &|v| allows(blog_pin.as_ref(), v)) {
+    let pinned = |template: Template, v: &str| match template {
+        Template::Blog => allows(blog_pin.as_ref(), v),
+        Template::Landing => allows(landing_pin.as_ref(), v),
+    };
+    let out = match templates::render(&parts, &pinned) {
         Ok(o) => o,
         Err(problems) => {
             return Ok(json!({
@@ -505,7 +523,7 @@ async fn publish(
         "template": out.template,
         "template_version": out.version,
         "template_digest": out.digest,
-        "renderer_digest": pigeon_blog::renderer_digest(),
+        "renderer_digest": out.renderer_digest,
         "base_url": t.base_url,
     });
     // Every deploy is an immutable release; `target` refused a record without a profile.

@@ -63,6 +63,9 @@ paths = [
     # deployed by a landing. The ingest library they use is linked by core, so it is core's.
     "src/data-worker/*",
     "src/ingest-runner/*",
+    # The pigeon.dev landing's content (docs/plans/platform-self-hosting.md): rendered only by
+    # the smoke suite until the home instance publishes it.
+    "site/*",
 ]
 
 [[worker]]
@@ -89,13 +92,13 @@ test_job = "test"
 deploy_job = "deploy"
 after = ["architecture", "portal_sync"]
 
-# The sites Worker: the blog renderer and instance site deploys. A capability Worker behind
-# core (docs/plans/workers-split.md, phase 2).
+# The sites Worker: the blog and landing renderers and instance site deploys. A capability
+# Worker behind core (docs/plans/workers-split.md, phase 2).
 [[worker]]
 name = "sites"
 script = "pigeon-sites"
 dir = "src/sites"
-paths = ["src/sites/*", "src/blog/*", "ci/deploy/deploy-sites.sh"]
+paths = ["src/sites/*", "src/blog/*", "src/landing/*", "ci/deploy/deploy-sites.sh"]
 test_job = "test"
 deploy_job = "deploy-sites"
 after = ["portal_sync"]

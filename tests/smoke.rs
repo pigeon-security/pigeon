@@ -135,6 +135,10 @@ mod proxy;
 /// Sites and blogs: the apex, rendering, auth and deploys.
 #[path = "smoke/sites.rs"]
 mod sites;
+/// pigeon-sites' template dispatch, which is pure: the Worker builds for wasm32 only, so the suite
+/// compiles the one file natively.
+#[path = "../src/sites/src/templates.rs"]
+mod sites_templates;
 
 /// A number in `v`, or NaN when it is none.
 fn num_of(v: &Value) -> f64 {

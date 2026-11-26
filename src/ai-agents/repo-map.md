@@ -11,6 +11,7 @@ Each crate lives in `src/<name>` (see `members` in `Cargo.toml`).
 - `src/capabilities`: pigeon's capabilities: the features a Worker hosts, each an end result built from the
 - `src/platform`: pigeon-platform: the one Worker, hosting pigeon's capabilities. It answers `/health` and the
 - `src/blog`: The `blog` template and its renderer: a consumer repository (`.pigeon/site.toml`,
+- `src/landing`: The `landing` template and its renderer, a peer of `blog` (docs/plans/platform-self-hosting.md,
 - `src/email`: The email message schema and a parser from raw MIME.
 - `src/sites`: pigeon-sites: the sites Worker (docs/plans/workers-split.md). It renders consumer
 - `src/models`: Models: requests to model providers through one Cloudflare AI Gateway, and what they used.
@@ -33,9 +34,9 @@ From `ci/workers.toml` and each Worker's `wrangler.toml`. "Links" lists every
 workspace crate the Worker crate pulls in, directly or not.
 
 - `core`: script `pigeon-platform`, crate `src/platform`, config `src/platform/wrangler.toml`
-  - links: `src/ai-agents`, `src/blog`, `src/capabilities`, `src/ci`, `src/cloud`, `src/contract`, `src/core`, `src/email`, `src/ingest`, `src/ingest-runner`, `src/models`, `src/proxies`
+  - links: `src/ai-agents`, `src/blog`, `src/capabilities`, `src/ci`, `src/cloud`, `src/contract`, `src/core`, `src/email`, `src/ingest`, `src/ingest-runner`, `src/landing`, `src/models`, `src/proxies`
 - `sites`: script `pigeon-sites`, crate `src/sites`, config `src/sites/wrangler.toml`
-  - links: `src/blog`, `src/contract`, `src/core`
+  - links: `src/blog`, `src/contract`, `src/core`, `src/landing`
 - `model-gateway`: script `pigeon-model-gateway`, crate `src/model-gateway`, config `src/model-gateway/wrangler.toml`
   - links: `src/contract`, `src/core`, `src/models`
 - `cloud-gateway`: script `pigeon-cloud-gateway`, crate `src/cloud-gateway`, config `src/cloud-gateway/wrangler.toml`

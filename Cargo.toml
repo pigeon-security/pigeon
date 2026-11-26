@@ -6,6 +6,7 @@ members = [
     "src/capabilities",
     "src/platform",
     "src/blog",
+    "src/landing",
     "src/email",
     "src/sites",
     "src/models",

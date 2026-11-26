@@ -1,0 +1,30 @@
+# The pigeon.dev landing page as a `landing@1` site (docs/plans/platform-self-hosting.md). Not
+# published yet: the apex still serves src/core/src/home.rs, and this content renders the same
+# page (the smoke suite checks that the two agree).
+template = "landing@1"
+
+[site]
+title = "pigeon"
+description = "pigeon is a private workspace for making sense of money records."
+console_url = "https://platform.pigeon.dev/app"
+console_label = "Open console"
+
+[[nav]]
+title = "Overview"
+link = "/"
+
+[[nav]]
+title = "Architecture"
+link = "/architecture"
+
+[[links]]
+title = "Architecture"
+link = "/architecture"
+
+[[links]]
+title = "architecture.json"
+link = "/architecture.json"
+
+[[links]]
+title = "Console"
+link = "https://platform.pigeon.dev/app"

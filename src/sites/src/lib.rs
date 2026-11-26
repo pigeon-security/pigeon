@@ -1,5 +1,6 @@
 //! pigeon-sites: the sites Worker (docs/plans/workers-split.md). It renders consumer
-//! repositories with the blog template ([`pigeon_blog`], the version an instance's pin selects) and deploys instance sites
+//! repositories with the template their `site.toml` names ([`templates`]: [`pigeon_blog`] or
+//! [`pigeon_landing`], the version an instance's pin selects) and deploys instance sites
 //! ([`deploy`]).
 //! A capability Worker: it has no public surface, and answers only core over a Service Binding,
 //! through [`pigeon_contract::serve`], which checks the caller core signed. `site_deploy` and
@@ -14,6 +15,7 @@ mod context;
 mod deploy;
 pub mod public;
 mod queued;
+mod templates;
 mod versions;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -58,7 +60,8 @@ fn files(pairs: &Value) -> std::result::Result<Vec<(String, String)>, String> {
         .collect()
 }
 
-/// `site_render`: a consumer repository's content rendered with the blog template version `pin` selects, answering what the
+/// `site_render`: a consumer repository's content rendered with the template its `site.toml`
+/// names, at the version `pin` selects, answering what the
 /// site would hold (every path, its size and type, and the template's digest) or the problems
 /// with the content. Nothing is written anywhere.
 fn render(args: &Value) -> std::result::Result<Value, String> {
@@ -71,10 +74,11 @@ fn render(args: &Value) -> std::result::Result<Value, String> {
                 .collect()
         })
         .unwrap_or_default();
-    let input = pigeon_blog::Input {
+    let input = templates::Parts {
         site_toml: text("site_toml"),
         posts: files(&args["posts"])?,
         pages: files(&args["pages"])?,
+        index: args["index"].as_str().map(str::to_string),
         statics,
         base_url: text("base_url"),
         commit: text("commit"),
@@ -87,11 +91,11 @@ fn render(args: &Value) -> std::result::Result<Value, String> {
         Some(p) => Some(Requirement::parse(p).map_err(|e| format!("`pin` `{p}`: {e}"))?),
         None => None,
     };
-    let allows = |v: &str| {
+    let allows = |_: templates::Template, v: &str| {
         pin.as_ref()
             .is_none_or(|r| Version::parse(v).is_ok_and(|v| r.matches(&v)))
     };
-    Ok(match pigeon_blog::render_pinned(&input, &allows) {
+    Ok(match templates::render(&input, &allows) {
         Ok(out) => json!({
             "template": out.template,
             "version": out.version,
@@ -120,7 +124,8 @@ impl Service for Sites {
                     ToolSpec {
                         name: "site_render".into(),
                         description:
-                            "Render a consumer repository's content with the blog template version the pin selects, \
+                            "Render a consumer repository's content with the template its site.toml names \
+                                  (blog or landing), at the version the pin selects, \
                                   as a dry run: every path the site would hold, with its size \
                                   and type, and the template's digest; or the problems with \
                                   the content. Nothing is written. Served by pigeon-sites."
@@ -131,6 +136,7 @@ impl Service for Sites {
                                 "site_toml": { "type": "string", "description": "The text of .pigeon/site.toml." },
                                 "posts": { "type": "array", "items": { "type": "array", "items": { "type": "string" } }, "description": "content/posts/*.md as [name, text] pairs." },
                                 "pages": { "type": "array", "items": { "type": "array", "items": { "type": "string" } }, "description": "content/pages/*.md as [name, text] pairs." },
+                                "index": { "type": "string", "description": "The text of content/index.toml, the landing template's home page." },
                                 "statics": { "type": "array", "items": { "type": "string" }, "description": "Paths under static/." },
                                 "base_url": { "type": "string", "description": "Such as https://example.com." },
                                 "commit": { "type": "string", "description": "The short commit, for the footer." },
@@ -144,7 +150,7 @@ impl Service for Sites {
                         name: "site_deploy".into(),
                         description:
                             "Deploy an instance's site: its GitHub repository at `rev` (a \
-                                  commit or branch; main when omitted), rendered with the blog template version the instance's pin selects \
+                                  commit or branch; main when omitted), rendered with the template its site.toml names (blog or landing), at the version the instance's pin selects \
                                   and written to the bucket its record names, then made live. \
                                   Only adds objects and moves `live`, so the previous deploy \
                                   stays whole. Answers the commit and counts, or the content's \
