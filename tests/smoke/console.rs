@@ -713,6 +713,11 @@ fn console_ops_allow_the_reads_the_console_needs_and_nothing_else() {
         &json!({ "instance": "blog", "limit": 5 })
     ));
     assert!(allowed("app_inbox", &json!({ "instance": "blog" })));
+    // Platform › Architecture reads the selected instance's own (capability scoping, M1).
+    assert!(allowed(
+        "architecture_describe",
+        &json!({ "svg": true, "instance": "blog" })
+    ));
     assert_eq!(read_keys("console_manifest"), Some(&["instance"][..]));
     // The instance areas' reads take the instance, and are bound to its record when they do.
     for (op, args) in [
@@ -836,29 +841,17 @@ fn console_ops_allow_the_reads_the_console_needs_and_nothing_else() {
 
 // ---- P15: the new console shell's contract (`console/web/shell.js`, `views.js`) ----
 
-/// Every area and view `console_manifest` can send: its answer for a home instance with every
-/// instance capability enabled, given every platform capability's sections (core's own, and
-/// the AI Agents Worker's, which core reads from its manifest as `remote.rs` does).
-fn console_every_view() -> std::collections::BTreeMap<String, Vec<String>> {
+/// Every hosted capability's console views, each with the capability that declares it, as
+/// `console_manifest` collects them from the platform Worker: core's own, and the AI Agents
+/// Worker's, which core reads from its manifest as `remote.rs` does.
+pub(super) fn hosted_views() -> Vec<(
+    &'static str,
+    pigeon_capabilities::console::sections::Section,
+)> {
     use pigeon_capabilities::Capability;
     use pigeon_capabilities::console::sections::{Section, area_named};
-    use pigeon_capabilities::instances::{manifest::manifest, record::Instance, tools::Scope};
     use pigeon_contract::Service;
 
-    let record: Instance = serde_json::from_value(json!({
-        "id": "all", "title": "All", "account": { "kind": "home" },
-        "zones": ["example.com"], "worker": "all-worker",
-        "repo": { "kind": "artifacts", "namespace": "example", "repo": "all" },
-        "sites": [{ "name": "blog", "bucket": "all-site", "auth": "passkey", "targets": [] }],
-        "publishing": { "state": "enabled", "site": "blog" },
-        "storage": { "state": "enabled", "store": "s", "bucket": "b", "prefix": "p/" },
-        "source": { "state": "enabled" },
-        "ci": { "state": "enabled", "jobs": ["test"] },
-        "observability": { "state": "enabled" },
-        "ingest": { "state": "enabled", "source": "r2:all", "bucket": "src",
-            "destination_bucket": "all-site" }
-    }))
-    .unwrap();
     let caps: Vec<Box<dyn Capability>> = vec![
         Box::new(pigeon_capabilities::architecture::Architecture),
         Box::new(pigeon_capabilities::users::Users { host: "h".into() }),
@@ -898,10 +891,11 @@ fn console_every_view() -> std::collections::BTreeMap<String, Vec<String>> {
         )
         .collect();
     for cap in pigeon_ai_agents::service::Agents.manifest().capabilities {
+        let name = leak(&cap.name);
         for s in cap.sections.into_iter().filter(|s| s.view) {
             let area = area_named(&s.tab).unwrap().id;
             platform.push((
-                "ai_agents",
+                name,
                 Section {
                     area,
                     id: leak(&s.id),
@@ -912,6 +906,29 @@ fn console_every_view() -> std::collections::BTreeMap<String, Vec<String>> {
             ));
         }
     }
+    platform
+}
+
+/// Every area and view `console_manifest` can send: its answer for a home instance with every
+/// instance capability enabled, given every hosted capability's views ([`hosted_views`]).
+fn console_every_view() -> std::collections::BTreeMap<String, Vec<String>> {
+    use pigeon_capabilities::instances::{manifest::manifest, record::Instance, tools::Scope};
+
+    let record: Instance = serde_json::from_value(json!({
+        "id": "all", "title": "All", "account": { "kind": "home" },
+        "zones": ["example.com"], "worker": "all-worker",
+        "repo": { "kind": "artifacts", "namespace": "example", "repo": "all" },
+        "sites": [{ "name": "blog", "bucket": "all-site", "auth": "passkey", "targets": [] }],
+        "publishing": { "state": "enabled", "site": "blog" },
+        "storage": { "state": "enabled", "store": "s", "bucket": "b", "prefix": "p/" },
+        "source": { "state": "enabled" },
+        "ci": { "state": "enabled", "jobs": ["test"] },
+        "observability": { "state": "enabled" },
+        "ingest": { "state": "enabled", "source": "r2:all", "bucket": "src",
+            "destination_bucket": "all-site" }
+    }))
+    .unwrap();
+    let platform = hosted_views();
     let scope = Scope::new(&record).unwrap();
     let m = manifest(&record, &scope, &platform, &[], Some(0));
     m["areas"]
@@ -1063,8 +1080,19 @@ fn console_shell_contract() {
         assert!(known, "{key} is registered but no manifest sends it");
     }
 
-    // The recorded manifests: areas as AREAS declares them, Inbox first, platform areas only
-    // on home, and only views the manifest can send.
+    // The recorded manifests: areas as AREAS declares them, Inbox first, home-only
+    // capabilities' views only on home, and only views the manifest can send.
+    use pigeon_capabilities::catalogue;
+    let hosted: Vec<&str> = hosted_views().into_iter().map(|(c, _)| c).collect();
+    let capabilities: Vec<&str> = hosted
+        .iter()
+        .copied()
+        .chain(
+            pigeon_capabilities::instances::tools::CAPABILITIES
+                .iter()
+                .map(|c| c.name),
+        )
+        .collect();
     for (name, body) in [
         (
             "home",
@@ -1100,15 +1128,24 @@ fn console_shell_contract() {
                 "key": declared.key, "views": a["views"] }),
                 "{name}: {id}"
             );
-            assert!(
-                a["group"] != "platform" || home,
-                "{name}: {id} is platform-wide"
-            );
             for v in a["views"].as_array().unwrap() {
                 let view = v["id"].as_str().unwrap();
                 assert!(
                     every[id].iter().any(|w| w == view),
                     "{name}: {id}/{view} is not sent"
+                );
+                // Each view names the capability that declares it, and a home-only one shows
+                // on home alone (docs/plans/capability-scoping.md).
+                let cap = v["capability"].as_str().unwrap();
+                assert!(
+                    capabilities.contains(&cap),
+                    "{name}: {id}/{view} names an unknown capability {cap}"
+                );
+                let home_only = catalogue::find(cap)
+                    .is_none_or(|e| e.availability == catalogue::Availability::HomeOnly);
+                assert!(
+                    home || !home_only || !hosted.contains(&cap),
+                    "{name}: {id}/{view} is home-only"
                 );
                 assert!(v["upgrade"].is_null() || v["upgrade"]["since"].is_string());
             }

@@ -1,4 +1,4 @@
-/* Platform (platform-wide, home only): Architecture, Models and Endpoints. Ported from
+/* Platform: Architecture (the selected instance's), Models and Endpoints. Ported from
  * architecture.js, the read-only Settings › Models panel (settings.js) and Settings ›
  * Connections' endpoint list (connections.js); C1: they are shown only here. Models edits the
  * defaults (`model-defaults`) and the concurrency caps (`agents-config`) through the one write
@@ -26,7 +26,8 @@
   }
 
   async function architecture(ctx) {
-    const d = await ctx.op("architecture_describe", { svg: true });
+    // The selected instance's own architecture: on home the platform's, as before.
+    const d = await ctx.op("architecture_describe", { svg: true, instance: ctx.instance.id });
     const workers = d.workers || [];
     const tools = new Map();
     for (const w of workers) for (const t of new Set(w.tools || [])) tools.set(t, [...(tools.get(t) || []), w.name]);

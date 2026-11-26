@@ -141,14 +141,14 @@
           "id": "live",
           "title": "Live",
           "order": 10,
-          "capability": "ai_agents",
+          "capability": "ai-agents",
           "upgrade": null
         },
         {
           "id": "compare",
           "title": "Compare",
           "order": 20,
-          "capability": "ai_agents",
+          "capability": "ai-agents",
           "upgrade": null
         }
       ]
@@ -163,21 +163,21 @@
           "id": "7d",
           "title": "7 days",
           "order": 10,
-          "capability": "cost",
+          "capability": "observability",
           "upgrade": null
         },
         {
           "id": "today",
           "title": "Today",
           "order": 20,
-          "capability": "cost",
+          "capability": "observability",
           "upgrade": null
         },
         {
           "id": "all",
           "title": "30 days",
           "order": 30,
-          "capability": "cost",
+          "capability": "observability",
           "upgrade": null
         }
       ]

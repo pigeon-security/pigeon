@@ -39,7 +39,8 @@ fn plain(components: &[Carried]) -> Vec<Component> {
 }
 
 /// The answer of `capabilities_versions`: each component once (the first declaration wins), the
-/// undeclared capabilities, and each of `instances` with its pins checked.
+/// undeclared capabilities, each of `instances` with its pins checked, and the capability
+/// catalogue (placement, scope and availability; docs/plans/capability-scoping.md).
 pub fn versions_view(
     components: &[Carried],
     undeclared: &[String],
@@ -71,7 +72,12 @@ pub fn versions_view(
         .iter()
         .map(|i| json!({ "id": i.id, "pins": to_value(pin_status(&i.pins, &carried)) }))
         .collect();
-    json!({ "components": rows, "undeclared": undeclared, "instances": instances })
+    json!({
+        "components": rows,
+        "undeclared": undeclared,
+        "instances": instances,
+        "catalogue": to_value(crate::catalogue::CATALOGUE),
+    })
 }
 
 /// The answer of `capabilities_upgrade_plan`: for each of `instances`, the steps that move its
@@ -127,8 +133,9 @@ impl Capability for Versioning {
                 description: "Read-only. The versions pigeon declares: each component's name, \
                               kind, newest version, versions served, Worker and problems, the \
                               capabilities that declare none, and each instance's pins checked \
-                              against them. `changelog` adds each component's changelog; \
-                              `instance` limits the pins to one instance.",
+                              against them, and the capability catalogue: each capability's \
+                              placement, scope and availability. `changelog` adds each \
+                              component's changelog; `instance` limits the pins to one instance.",
                 input_schema: json!({
                     "type": "object",
                     "properties": {

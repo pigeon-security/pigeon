@@ -129,5 +129,100 @@
       "id": "notes",
       "pins": []
     }
+  ],
+  "catalogue": [
+    {
+      "name": "ai-agents",
+      "placements": [
+        "inline",
+        "own_worker"
+      ],
+      "home": "own_worker",
+      "home_worker": "pigeon-ai-agents",
+      "scope": "instance",
+      "availability": "any",
+      "requires": []
+    },
+    {
+      "name": "observability",
+      "placements": [
+        "inline"
+      ],
+      "home": "inline",
+      "home_worker": null,
+      "scope": "instance",
+      "availability": "any",
+      "requires": []
+    },
+    {
+      "name": "secrets",
+      "placements": [
+        "inline"
+      ],
+      "home": "inline",
+      "home_worker": null,
+      "scope": "instance",
+      "availability": "any",
+      "requires": []
+    },
+    {
+      "name": "proxy",
+      "placements": [
+        "inline",
+        "own_worker"
+      ],
+      "home": "own_worker",
+      "home_worker": "pigeon-proxy",
+      "scope": "instance",
+      "availability": "any",
+      "requires": [
+        "secrets"
+      ]
+    },
+    {
+      "name": "models",
+      "placements": [
+        "inline",
+        "own_worker"
+      ],
+      "home": "own_worker",
+      "home_worker": "pigeon-model-gateway",
+      "scope": "instance",
+      "availability": "any",
+      "requires": []
+    },
+    {
+      "name": "instances",
+      "placements": [
+        "inline"
+      ],
+      "home": "inline",
+      "home_worker": null,
+      "scope": "platform",
+      "availability": "home_only",
+      "requires": []
+    },
+    {
+      "name": "users",
+      "placements": [
+        "inline"
+      ],
+      "home": "inline",
+      "home_worker": null,
+      "scope": "platform",
+      "availability": "home_only",
+      "requires": []
+    },
+    {
+      "name": "architecture",
+      "placements": [
+        "inline"
+      ],
+      "home": "inline",
+      "home_worker": null,
+      "scope": "instance",
+      "availability": "any",
+      "requires": []
+    }
   ]
 }

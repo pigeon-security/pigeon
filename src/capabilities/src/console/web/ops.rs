@@ -86,8 +86,9 @@ pub const READS: &[(&str, &[&str])] = &[
     ("passkeys_list", &["user_id"]),
     ("oauth_clients", &[]),
     ("users_whoami", &[]),
-    // Platform: architecture, models (read with no `set`), limits (read with no arguments).
-    ("architecture_describe", &["public", "svg"]),
+    // Platform: architecture (of the selected instance), models (read with no `set`), limits
+    // (read with no arguments).
+    ("architecture_describe", &["public", "svg", "instance"]),
     ("ai_agents_models", &[]),
     ("ai_agents_config", &[]),
 ];

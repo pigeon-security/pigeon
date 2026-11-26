@@ -1,6 +1,6 @@
 # Capability scoping: every console view comes from a capability on the instance
 
-Status: **decided** (2026-11-26); nothing built yet. Code references are to main at the time of writing.
+Status: **decided** (2026-11-26); M1 built. Code references are to main at the time of writing.
 
 ## Goal
 
@@ -151,3 +151,12 @@ change on any instance.
 ## Log
 
 - 2026-11-26: planned.
+- 2026-11-26: M1 built. Until M2 splits it, the catalogue lists `instances` (which still
+  declares All instances and Endpoints) as platform-scoped and home-only. A hosted capability's
+  view may now sit in any area but Inbox, not only the formerly platform-wide ones; no hosted
+  capability declares one elsewhere today, so no list changed. Architecture on a linked
+  instance answers `instance_model`: its Worker, hostnames, bucket (`resources.buckets`, absent
+  from the platform's model), zone, repository, enabled capabilities and scoped tools, with the
+  platform's commit and digest, drawn by the same `diagram`; `instance_tools` is kept.
+  `capabilities_versions` answers `catalogue`. The recorded manifests now name each view's
+  real capability (`ai-agents`, `observability`), which the shell contract checks.

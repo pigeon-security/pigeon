@@ -6,6 +6,7 @@
 pub mod apple;
 pub mod approvals;
 pub mod architecture;
+pub mod catalogue;
 pub mod cf_proxy;
 pub mod changelog;
 pub mod ci;

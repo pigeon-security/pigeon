@@ -193,14 +193,20 @@ pub struct Scope {
     home: bool,
     registrations: Vec<&'static Registration>,
     views: Vec<ScopedView>,
+    /// The names of the capabilities the record's profile fields enable.
+    capabilities: Vec<&'static str>,
 }
 
 impl Scope {
     pub fn new(instance: &Instance) -> serde_json::Result<Self> {
         let mut registrations: Vec<&'static Registration> = Vec::new();
         let mut views: Vec<ScopedView> = Vec::new();
+        let mut capabilities = Vec::new();
         for contributor in CAPABILITIES {
             let enabled = (contributor.register)(instance)?;
+            if !enabled.tools.is_empty() || !enabled.views.is_empty() {
+                capabilities.push(contributor.name);
+            }
             for view in enabled.views {
                 if views
                     .iter()
@@ -235,7 +241,14 @@ impl Scope {
             home: instance.account == super::record::AccountRef::Home,
             registrations,
             views,
+            capabilities,
         })
+    }
+
+    /// The names of the capabilities the record enables by its profile fields, in
+    /// [`CAPABILITIES`] order.
+    pub fn capabilities(&self) -> &[&'static str] {
+        &self.capabilities
     }
 
     /// The console views the instance's enabled capabilities add.

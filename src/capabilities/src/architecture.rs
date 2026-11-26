@@ -59,7 +59,7 @@ impl Capability for Architecture {
                         },
                         "instance": {
                             "type": "string",
-                            "description": "Include the tool names exposed by this approved instance's scoped MCP endpoint."
+                            "description": "Describe this approved instance: on home, the platform's architecture with the tool names its scoped MCP endpoint exposes; on any other, that instance's own (its Worker, hostnames, bucket, enabled capabilities and scoped tools)."
                         },
                         "svg": {
                             "type": "boolean",
@@ -116,10 +116,21 @@ impl Capability for Architecture {
                     .flat_map(|c| c.tools())
                     .collect();
                 scope.restrict_tools(&mut tools);
-                model["instance_tools"] = serde_json::json!({
-                    "instance": id,
-                    "tools": tools.into_iter().map(|tool| tool.name).collect::<Vec<_>>(),
-                });
+                let names: Vec<String> = tools.into_iter().map(|t| t.name.to_string()).collect();
+                let instance_tools = serde_json::json!({ "instance": id, "tools": names });
+                // An instance other than home answers its own architecture, never the
+                // platform's (docs/plans/capability-scoping.md, M1). Home's is the platform's.
+                if !crate::catalogue::is_home(&record) {
+                    let enabled = crate::catalogue::enabled(&record, &scope, cx.hosted);
+                    let own = instance_model(&record, &enabled, &names, &built.model);
+                    let mut answer = to_value(&own);
+                    answer["instance_tools"] = instance_tools;
+                    if svg {
+                        answer["drawing"] = Value::String(diagram(&own));
+                    }
+                    return Ok(answer);
+                }
+                model["instance_tools"] = instance_tools;
             }
             if svg {
                 model["drawing"] = Value::String(built.drawing.clone());
@@ -244,6 +255,18 @@ pub struct Model {
     pub digest: String,
     /// The commit it was built from (`PIGEON_COMMIT` at build time); empty for a local build.
     pub commit: String,
+    /// Set only on one instance's own architecture ([`instance_model`]): the instance it
+    /// describes. Absent from the platform's, so `/architecture.json` is unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instance: Option<InstanceRef>,
+}
+
+/// The instance an instance's own architecture describes.
+#[derive(Serialize, Clone)]
+pub struct InstanceRef {
+    pub id: String,
+    pub title: String,
+    pub home: bool,
 }
 
 /// One declared component's version, as the architecture shows it.
@@ -382,6 +405,10 @@ pub struct Resources {
     pub permissions: Vec<String>,
     /// Bindings and queues wrangler.toml declares that no code names: drift to remove.
     pub unused: Vec<String>,
+    /// R2 buckets: set only on one instance's own architecture (its sites' bucket), so the
+    /// platform's model and `/architecture.json` are unchanged.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub buckets: Vec<String>,
 }
 
 /// The part of the model fit for the public apex. It is an allow-list: each field is copied by
@@ -470,12 +497,14 @@ pub fn public(m: &Model) -> Model {
             gateways: m.resources.gateways.clone(),
             permissions: Vec::new(),
             unused: Vec::new(),
+            buckets: Vec::new(),
         },
         inventory: Vec::new(),
         versions: m.versions.clone(),
         files: m.files,
         digest: m.digest.clone(),
         commit: m.commit.clone(),
+        instance: None,
     }
 }
 
@@ -761,6 +790,135 @@ pub fn describe(sources: &[Source], hosted: &Hosted) -> Model {
         files: sorted.len(),
         digest: digest(&sorted),
         commit: option_env!("PIGEON_COMMIT").unwrap_or_default().to_string(),
+        instance: None,
+    }
+}
+
+/// The architecture of one instance other than home (docs/plans/capability-scoping.md, M1):
+/// what the platform runs for it, read from its approved record alone. Its Worker (with its
+/// routes, workers.dev preview and the tools its scoped MCP endpoint offers), the hostnames
+/// that Worker serves, its sites' bucket and zone, and the capabilities enabled on it as its
+/// parts, each with the summary the platform's own `platform` model gives that name. The commit
+/// and digest are the platform's: the code the instance's capabilities run. Nothing of the
+/// platform's own Workers, routes or resources is in it. `platform_zone` is the zone the
+/// instance's platform subdomains sit in.
+pub fn instance_model(
+    record: &crate::instances::record::Instance,
+    enabled: &[&str],
+    tools: &[String],
+    platform: &Value,
+) -> Model {
+    use crate::instances::record::{RepoRef, Target, worker_for};
+    let worker = record
+        .worker
+        .clone()
+        .or_else(|| worker_for(record).ok().flatten())
+        .unwrap_or_else(|| record.id.clone());
+    let platform_zone = platform["resources"]["zone"].as_str();
+    let mut routes = Vec::new();
+    let mut hostnames = Vec::new();
+    let mut workers_dev = false;
+    for target in record.sites.iter().flat_map(|s| s.targets.iter()) {
+        let host = match target {
+            Target::Preview => {
+                workers_dev = true;
+                continue;
+            }
+            Target::Zone {
+                hostname, route, ..
+            } => {
+                routes.push(route.clone());
+                hostname.clone()
+            }
+            Target::Domain { hostname } => hostname.clone(),
+            Target::Subdomain { label } => match platform_zone {
+                Some(zone) => crate::instances::record::subdomain_host(label, zone),
+                None => continue,
+            },
+        };
+        if !hostnames.iter().any(|h: &Hostname| h.host == host) {
+            hostnames.push(Hostname {
+                host,
+                worker: worker.clone(),
+                by: "instances".into(),
+                access: Vec::new(),
+                behind_access: false,
+                public_paths: Vec::new(),
+            });
+        }
+    }
+    hostnames.sort_by(|a, b| a.host.cmp(&b.host));
+    routes.sort();
+    routes.dedup();
+    let summary = |name: &str| {
+        platform["parts"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|p| p["name"] == name)
+            .and_then(|p| p["summary"].as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    let parts: Vec<Part> = enabled
+        .iter()
+        .map(|name| Part {
+            name: (*name).to_string(),
+            capability: true,
+            summary: summary(name),
+            interface: Vec::new(),
+            calls: Vec::new(),
+            permissions: Vec::new(),
+            bindings: Vec::new(),
+        })
+        .collect();
+    let mut buckets: Vec<String> = record.sites.iter().map(|s| s.bucket.clone()).collect();
+    buckets.sort();
+    buckets.dedup();
+    let repos = match &record.repo {
+        Some(RepoRef::Artifacts { namespace, repo }) => vec![format!("{namespace}/{repo}")],
+        Some(RepoRef::Github { full_name, .. }) => vec![full_name.clone()],
+        None => Vec::new(),
+    };
+    let mut tools = tools.to_vec();
+    tools.sort();
+    tools.dedup();
+    let text = |key: &str| platform[key].as_str().unwrap_or_default().to_string();
+    Model {
+        parts,
+        inventory: Vec::new(),
+        workers: vec![Worker {
+            name: worker,
+            source: "the instance record".into(),
+            workers_dev,
+            routes,
+            tools,
+            handlers: if record.sites.is_empty() {
+                Vec::new()
+            } else {
+                vec!["fetch".into()]
+            },
+            uses: enabled.iter().map(|n| (*n).to_string()).collect(),
+            ..Worker::default()
+        }],
+        hostnames,
+        links: Vec::new(),
+        externals: Vec::new(),
+        resources: Resources {
+            zone: record.zones.first().cloned(),
+            repos,
+            buckets,
+            ..Resources::default()
+        },
+        versions: Vec::new(),
+        files: 0,
+        digest: text("digest"),
+        commit: text("commit"),
+        instance: Some(InstanceRef {
+            id: record.id.clone(),
+            title: record.title.clone(),
+            home: false,
+        }),
     }
 }
 
@@ -1710,7 +1868,8 @@ fn worker_card(s: &mut Svg, wk: &Worker, x: f64, y: f64, w: f64) {
     }
 }
 
-fn diagram(m: &Model) -> String {
+/// The map of `m` as an SVG: the platform's, or one instance's own ([`instance_model`]).
+pub fn diagram(m: &Model) -> String {
     let hosts = &m.hostnames;
     let n = hosts.len().max(1) as f64;
     let col_w = (W - 2.0 * M - (n - 1.0) * GAP) / n;

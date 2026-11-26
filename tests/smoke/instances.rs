@@ -522,6 +522,346 @@ fn console_manifest_with_nothing_enabled() {
     );
 }
 
+/// Each area of `m` with its views, as `view@capability`.
+fn manifest_by_capability(m: &Value) -> Vec<(String, Vec<String>)> {
+    m["areas"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| {
+            let views = a["views"].as_array().unwrap().iter().map(|v| {
+                format!(
+                    "{}@{}",
+                    v["id"].as_str().unwrap(),
+                    v["capability"].as_str().unwrap()
+                )
+            });
+            (a["id"].as_str().unwrap().to_string(), views.collect())
+        })
+        .collect()
+}
+
+/// Capability scoping, M1 (docs/plans/capability-scoping.md): given every hosted capability's
+/// views as the platform Worker has them, each kind of instance today shows exactly the areas
+/// and views it showed when a `group` decided them. Home: its own areas, then every hosted
+/// capability's (home runs the platform). A linked instance, publishing or with source alone:
+/// only what its record enables. Each area still carries its group for the iOS app.
+#[test]
+fn console_manifest_by_capability_per_instance_kind() {
+    use pigeon_capabilities::instances::{manifest::manifest, record::Instance, tools::Scope};
+    let hosted = crate::console::hosted_views();
+    let of = |record: Value| {
+        let record: Instance = serde_json::from_value(record).unwrap();
+        let scope = Scope::new(&record).unwrap();
+        manifest(&record, &scope, &hosted, &[], Some(0))
+    };
+    let expect = |rows: &[(&str, &[&str])]| -> Vec<(String, Vec<String>)> {
+        rows.iter()
+            .map(|(a, v)| (a.to_string(), v.iter().map(|s| s.to_string()).collect()))
+            .collect()
+    };
+
+    let home = of(json!({
+        "id": "example/platform", "title": "Example", "account": { "kind": "home" },
+        "zones": ["example.com"], "observability": { "state": "enabled" },
+        "worker": "example-platform"
+    }));
+    assert_eq!(
+        manifest_by_capability(&home),
+        expect(&[
+            ("inbox", &[]),
+            ("overview", &[]),
+            ("metrics", &["workers@observability"]),
+            ("capabilities", &[]),
+            ("sessions", &["live@ai-agents", "compare@ai-agents"]),
+            (
+                "cost",
+                &[
+                    "7d@observability",
+                    "today@observability",
+                    "all@observability"
+                ]
+            ),
+            (
+                "access",
+                &[
+                    "secrets@secrets",
+                    "tokens@proxy",
+                    "people@users",
+                    "apps@users"
+                ]
+            ),
+            ("instances", &["list@instances"]),
+            (
+                "platform",
+                &[
+                    "architecture@architecture",
+                    "models@models",
+                    "endpoints@instances"
+                ]
+            ),
+        ])
+    );
+    let groups: Vec<&str> = home["areas"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["group"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        groups,
+        [
+            "top", "instance", "instance", "instance", "platform", "platform", "platform",
+            "platform", "platform"
+        ]
+    );
+
+    let publishing = of(json!({
+        "id": "docs", "title": "Docs",
+        "account": { "kind": "linked", "account_id": "0123456789abcdef0123456789abcdef" },
+        "zones": ["example.org"], "worker": "example",
+        "sites": [{ "name": "docs", "bucket": "example-site", "auth": "passkey",
+            "targets": [{ "kind": "domain", "hostname": "docs.example.org" }] }],
+        "publishing": { "state": "enabled", "site": "docs" },
+        "storage": { "state": "enabled", "store": "s", "bucket": "b", "prefix": "p/" },
+        "observability": { "state": "enabled" }
+    }));
+    assert_eq!(
+        manifest_by_capability(&publishing),
+        expect(&[
+            ("inbox", &[]),
+            ("overview", &[]),
+            (
+                "site",
+                &[
+                    "sites@publishing",
+                    "deployments@publishing",
+                    "visitors@site_passkeys"
+                ]
+            ),
+            ("storage", &["buckets@storage"]),
+            ("metrics", &["workers@observability"]),
+            ("capabilities", &[]),
+        ])
+    );
+
+    let source = of(json!({
+        "id": "notes", "title": "Notes", "account": { "kind": "linked" },
+        "repo": { "kind": "github", "full_name": "example/notes" },
+        "source": { "state": "enabled" }
+    }));
+    assert_eq!(
+        manifest_by_capability(&source),
+        expect(&[
+            ("inbox", &[]),
+            ("overview", &[]),
+            ("source", &["repository@source"]),
+            ("capabilities", &[]),
+        ])
+    );
+}
+
+/// The capability catalogue (docs/plans/capability-scoping.md): each capability's placement,
+/// scope and availability as decided, and every hosted capability that fills a console view
+/// is in it.
+#[test]
+fn capability_catalogue_as_decided() {
+    use pigeon_capabilities::catalogue::{Availability, CATALOGUE, Placement, Scope, find};
+    for (name, choice, home, worker, scope, availability, requires) in [
+        (
+            "ai-agents",
+            true,
+            Placement::OwnWorker,
+            Some("pigeon-ai-agents"),
+            Scope::Instance,
+            Availability::Any,
+            &[][..],
+        ),
+        (
+            "observability",
+            false,
+            Placement::Inline,
+            None,
+            Scope::Instance,
+            Availability::Any,
+            &[],
+        ),
+        (
+            "secrets",
+            false,
+            Placement::Inline,
+            None,
+            Scope::Instance,
+            Availability::Any,
+            &[],
+        ),
+        (
+            "proxy",
+            true,
+            Placement::OwnWorker,
+            Some("pigeon-proxy"),
+            Scope::Instance,
+            Availability::Any,
+            &["secrets"],
+        ),
+        (
+            "models",
+            true,
+            Placement::OwnWorker,
+            Some("pigeon-model-gateway"),
+            Scope::Instance,
+            Availability::Any,
+            &[],
+        ),
+        (
+            "users",
+            false,
+            Placement::Inline,
+            None,
+            Scope::Platform,
+            Availability::HomeOnly,
+            &[],
+        ),
+        (
+            "architecture",
+            false,
+            Placement::Inline,
+            None,
+            Scope::Instance,
+            Availability::Any,
+            &[],
+        ),
+    ] {
+        let e = find(name).unwrap_or_else(|| panic!("{name} is catalogued"));
+        assert_eq!(e.offers_choice(), choice, "{name}");
+        assert!(e.placements.contains(&e.home), "{name}");
+        assert_eq!(e.home, home, "{name}");
+        assert_eq!(e.home_worker, worker, "{name}");
+        assert_eq!(e.scope, scope, "{name}");
+        assert_eq!(e.availability, availability, "{name}");
+        assert_eq!(e.requires, requires, "{name}");
+    }
+    for e in CATALOGUE {
+        assert_eq!(
+            e.home == Placement::OwnWorker,
+            e.home_worker.is_some(),
+            "{}",
+            e.name
+        );
+        for r in e.requires {
+            assert!(find(r).is_some(), "{} requires an uncatalogued {r}", e.name);
+        }
+    }
+    for (name, _) in crate::console::hosted_views() {
+        assert!(
+            find(name).is_some(),
+            "{name} fills a view but is not catalogued"
+        );
+    }
+    // `capabilities_versions` answers it beside the components.
+    let v = pigeon_capabilities::versioning::versions_view(&[], &[], &[], false);
+    assert_eq!(v["catalogue"].as_array().unwrap().len(), CATALOGUE.len());
+    assert_eq!(
+        v["catalogue"][0]["placements"],
+        json!(["inline", "own_worker"])
+    );
+    assert_eq!(v["catalogue"][0]["availability"], "any");
+    let recorded: Value = serde_json::from_str(include_str!(
+        "../../src/capabilities/src/console/web/fixtures/capabilities_versions.json"
+    ))
+    .unwrap();
+    assert_eq!(
+        recorded["catalogue"], v["catalogue"],
+        "the recorded catalogue"
+    );
+}
+
+/// Platform › Architecture is the selected instance's (capability scoping, M1): a linked
+/// instance's own Worker, hostnames, bucket, enabled capabilities and scoped tools, and none
+/// of the platform's. What `/architecture.json` serves gains nothing.
+#[test]
+fn architecture_of_a_linked_instance_is_its_own() {
+    use pigeon_capabilities::architecture::{diagram, instance_model, public};
+    use pigeon_capabilities::instances::{record::Instance, tools::Scope};
+    let record: Instance = serde_json::from_value(json!({
+        "id": "docs", "title": "Docs",
+        "account": { "kind": "linked", "account_id": "0123456789abcdef0123456789abcdef" },
+        "zones": ["example.org"], "worker": "example",
+        "repo": { "kind": "github", "full_name": "example/docs" },
+        "sites": [{ "name": "docs", "bucket": "example-site", "targets": [
+            { "kind": "preview" },
+            { "kind": "zone", "hostname": "www.example.org", "route": "www.example.org/*", "enabled": true },
+            { "kind": "domain", "hostname": "docs.example.org" },
+            { "kind": "subdomain", "label": "example" }
+        ] }],
+        "source": { "state": "enabled" },
+        "observability": { "state": "enabled" }
+    }))
+    .unwrap();
+    let scope = Scope::new(&record).unwrap();
+    assert_eq!(scope.capabilities(), ["source", "observability"]);
+    let platform = json!({
+        "commit": "0123456789ab", "digest": "d1",
+        "resources": { "zone": "pigeon.example" },
+        "parts": [{ "name": "source", "summary": "Read-only source." }],
+        "workers": [{ "name": "pigeon-platform" }]
+    });
+    let tools = vec![
+        "source_read_file".to_string(),
+        "observability_worker_metrics".into(),
+    ];
+    let own = instance_model(&record, scope.capabilities(), &tools, &platform);
+    let v = serde_json::to_value(&own).unwrap();
+    assert_eq!(
+        v["instance"],
+        json!({ "id": "docs", "title": "Docs", "home": false })
+    );
+    assert_eq!(v["workers"].as_array().unwrap().len(), 1);
+    let w = &v["workers"][0];
+    assert_eq!(w["name"], "example");
+    assert_eq!(w["workers_dev"], true);
+    assert_eq!(w["routes"], json!(["www.example.org/*"]));
+    assert_eq!(
+        w["tools"],
+        json!(["observability_worker_metrics", "source_read_file"])
+    );
+    assert_eq!(w["uses"], json!(["source", "observability"]));
+    let hosts: Vec<&str> = v["hostnames"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h["host"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        hosts,
+        [
+            "docs.example.org",
+            "example.pigeon.example",
+            "www.example.org"
+        ]
+    );
+    assert!(
+        v["hostnames"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|h| h["worker"] == "example")
+    );
+    assert_eq!(v["resources"]["buckets"], json!(["example-site"]));
+    assert_eq!(v["resources"]["zone"], "example.org");
+    assert_eq!(v["resources"]["repos"], json!(["example/docs"]));
+    assert_eq!(v["parts"][0]["name"], "source");
+    assert_eq!(v["parts"][0]["summary"], "Read-only source.");
+    assert_eq!(v["parts"][1]["capability"], true);
+    assert_eq!(v["commit"], "0123456789ab");
+    assert!(!v.to_string().contains("pigeon-platform"));
+    assert!(diagram(&own).starts_with("<svg "));
+    // The public view, as `/architecture.json` serves it, never carries an instance or buckets.
+    let shown = serde_json::to_value(public(&own)).unwrap();
+    assert!(shown.get("instance").is_none());
+    assert!(shown["resources"].get("buckets").is_none());
+}
+
 /// A view newer than the version an instance's pin selects stays, flagged for an upgrade;
 /// with no pin the instance runs the newest version and needs none.
 #[test]

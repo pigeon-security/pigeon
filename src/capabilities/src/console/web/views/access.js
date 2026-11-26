@@ -1,4 +1,4 @@
-/* Access (platform-wide, home only): Secrets, Tokens, People and Apps. Ported from the first
+/* Access: Secrets (secrets), Tokens (proxy), People and Apps (users). Ported from the first
  * console's keys.js (Credentials) and users.js (People, Delegation), mounted until now through
  * management.js, and the read-only copies in settings.js (C1: this is the only place they are
  * shown). Reads go through /app/op; every write is a ConfirmDialog on /console/write. A secret's

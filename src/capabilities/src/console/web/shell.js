@@ -3,8 +3,10 @@
  *
  * What the shell owns:
  * - The sidebar: the instance switcher at the top, the only way to pick an instance (P1); the
- *   nav, built only from console_manifest(instance) (M3), Inbox first with its count (P5), the
- *   instance's areas, then the platform-wide group, which the manifest sends only for home.
+ *   nav, built only from console_manifest(instance) (M3), Inbox first with its count (P5), then
+ *   the selected instance's areas in the manifest's order, with no group headings: each area
+ *   is there because a capability enabled on the instance fills it
+ *   (docs/plans/capability-scoping.md). Each area's `group` is not read.
  * - Routing: <base>/<instance>/<area>/<view>, from the manifest's stable ids (P12). The
  *   Worker redirects the first console's bookmarks here in one hop (C7). Switching to an instance
  *   without the current area opens its Overview and says why in a toast (M5). A view newer
@@ -671,11 +673,7 @@
           a.key ? el("kbd", { text: `g ${a.key}` }) : null],
         { "aria-current": current?.area.id === a.id ? "page" : null });
     };
-    navNode.append(...areas.filter((a) => a.group === "top").map(link));
-    const own = areas.filter((a) => a.group === "instance");
-    if (own.length) navNode.append(el("div", { class: "nav-label", text: inst?.title || "Instance" }), ...own.map(link));
-    const platform = areas.filter((a) => a.group === "platform");
-    if (platform.length) navNode.append(el("div", { class: "nav-label", text: "Platform-wide" }), ...platform.map(link));
+    navNode.append(...areas.map(link));
     side.replaceChildren(switcher, navNode, accountFoot());
   }
   const initials = (name) => String(name || "?").split(/\s+/).filter(Boolean).slice(0, 2).map((w) => initial(w)).join("");
@@ -788,8 +786,7 @@
     const views = ordered(area.views);
     const heading = el("h1", { tabindex: "-1", text: area.title });
     const head = el("div", { class: "page-head" },
-      el("div", { class: "grow" }, area.group === "instance" ? el("div", { class: "crumbs", text: `${inst.title} /` }) : null, heading),
-      area.group === "platform" ? el("span", { class: "muted", text: "Platform-wide" }) : null);
+      el("div", { class: "grow" }, el("div", { class: "crumbs", text: `${inst.title} /` }), heading));
     const outlet = el("div", { class: "view", "aria-busy": "true" });
     main.replaceChildren(head);
     if (views.length > 1) {

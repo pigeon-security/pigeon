@@ -1,12 +1,15 @@
-//! The console's areas and the views platform capabilities put in them. An area is one item of
+//! The console's areas and the views hosted capabilities put in them. An area is one item of
 //! the console's navigation, with a stable id ([`AREAS`]); `console_manifest` lists the areas an
-//! instance shows (docs/plans/console-redesign.md). A section is a view a platform capability
-//! declares in one of the platform areas; its data comes from the tools the view reads through
-//! `/app/op`. Pure: no I/O and no `worker` types.
+//! instance shows: those an enabled capability fills (docs/plans/console-redesign.md,
+//! docs/plans/capability-scoping.md). A section is a view a hosted capability declares in one
+//! of the areas; its data comes from the tools the view reads through `/app/op`. Pure: no I/O
+//! and no `worker` types.
 
 use serde::Serialize;
 
-/// Which part of the navigation an area sits in.
+/// The part of the navigation an area sat in before capability scoping. Only a label now: the
+/// manifest still sends it for the clients that decode it (the iOS app), and nothing decides
+/// by it. An area shows on an instance while an enabled capability fills it.
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Group {
@@ -14,7 +17,7 @@ pub enum Group {
     Top,
     /// The selected instance's own areas.
     Instance,
-    /// Platform-wide areas, shown on the home instance only.
+    /// Areas the home instance's platform capabilities fill today.
     Platform,
 }
 
@@ -61,7 +64,7 @@ pub fn area_named(id: &str) -> Option<&'static Area> {
     AREAS.iter().find(|a| a.id == id)
 }
 
-/// A view a platform capability adds to one of the platform areas.
+/// A view a hosted capability adds to one of the areas.
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct Section {
     /// The id of the area it sits in, one of [`AREAS`].

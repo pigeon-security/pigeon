@@ -1,30 +1,33 @@
 //! `console_manifest`: the console's navigation for one instance, as data (docs/plans/
-//! console-redesign.md, M3, M4, M6, P12, P16). The approved record is the only input that
-//! decides what an instance shows: its [`Scope`] gives the instance areas' views, the same
-//! Scope that limits the instance's MCP endpoint. Platform capabilities' view sections fill the
-//! platform areas, on the home instance only. It answers ids, titles, orders and counts, never
-//! HTML, so the console and the iOS app build the same navigation from it. Pure but for
-//! [`console_manifest`], which reads the record, versions and inbox.
+//! console-redesign.md, M3, M4, M6, P12, P16; docs/plans/capability-scoping.md, M1). Every view
+//! comes from a capability enabled on the instance: the approved record's [`Scope`] gives the
+//! views of the capabilities it enables by its profile fields, the same Scope that limits the
+//! instance's MCP endpoint; the hosted capabilities the catalogue says are enabled there
+//! ([`catalogue::hosted_enabled`]) add theirs. An area shows while an enabled capability fills
+//! it; no group decides. It answers ids, titles, orders and counts, never HTML, so the console
+//! and the iOS app build the same navigation from it. Pure but for [`console_manifest`], which
+//! reads the record, versions and inbox.
 
 use pigeon_core::approval::{Kind as ApprovalKind, Record, State};
 use pigeon_core::versions::{Component, Requirement, Version, find};
 use serde_json::{Value, json};
 use worker::{Error, Result};
 
-use super::record::{AccountRef, Instance};
+use super::record::Instance;
 use super::tools::Scope;
 use crate::Context;
-use crate::console::sections::{AREAS, Group, Section, area_named};
+use crate::catalogue;
+use crate::console::sections::{AREAS, Section, area_named};
 
 /// The tool's name.
 pub const TOOL: &str = "console_manifest";
 
-/// A platform capability's view section, with the capability that declares it.
+/// A hosted capability's view section, with the capability that declares it.
 pub type PlatformView = (&'static str, Section);
 
-/// Whether `record` is the home account's instance: the one the platform areas show on.
+/// Whether `record` is the home account's instance: the one the platform runs in.
 pub fn is_home(record: &Instance) -> bool {
-    record.account == AccountRef::Home
+    catalogue::is_home(record)
 }
 
 /// The version of `component` that `record` runs: the newest served one its pin allows, or the
@@ -88,9 +91,11 @@ fn host(record: &Instance) -> Option<&str> {
 }
 
 /// The manifest: `record`'s areas in [`AREAS`] order, each with its views sorted by order.
-/// Inbox, Overview and Capabilities are always there; an instance area only while a capability
-/// the record enables adds a view to it; a platform area only on the home instance and while a
-/// platform capability declares a view in it. `inbox` is None when it could not be read.
+/// Inbox, Overview and Capabilities are always there; any other area only while a capability
+/// enabled on the instance adds a view to it: one the record enables, or a hosted one in
+/// `platform` that the catalogue enables there. Each area still carries its `group`, which the
+/// navigation no longer uses, for clients that decode it. `inbox` is None when it could not be
+/// read.
 pub fn manifest(
     record: &Instance,
     scope: &Scope,
@@ -111,24 +116,22 @@ pub fn manifest(
             }),
         ));
     }
-    if home {
-        for (capability, s) in platform {
-            let platform_area = area_named(s.area).is_some_and(|a| a.group == Group::Platform);
-            let known = views
-                .iter()
-                .any(|(a, _, v)| *a == s.area && v["id"] == s.id);
-            if !platform_area || known {
-                continue;
-            }
-            views.push((
-                s.area,
-                s.order,
-                json!({
-                    "id": s.id, "title": s.title, "order": s.order,
-                    "capability": capability, "upgrade": null,
-                }),
-            ));
+    for (capability, s) in platform {
+        let placed = area_named(s.area).is_some_and(|a| a.id != "inbox");
+        let known = views
+            .iter()
+            .any(|(a, _, v)| *a == s.area && v["id"] == s.id);
+        if !placed || known || !catalogue::hosted_enabled(record, capability) {
+            continue;
         }
+        views.push((
+            s.area,
+            s.order,
+            json!({
+                "id": s.id, "title": s.title, "order": s.order,
+                "capability": capability, "upgrade": null,
+            }),
+        ));
     }
     let always = ["inbox", "overview", "capabilities"];
     let areas: Vec<Value> = AREAS
