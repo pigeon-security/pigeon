@@ -16,6 +16,7 @@ use crate::users::directory;
 pub const STATUS: &str = "digitalocean_droplet_status";
 pub const SET_TOKEN: &str = "digitalocean-droplet-token-set";
 pub const START: &str = "digitalocean-droplet-start";
+pub const CANCEL: &str = "digitalocean-droplet-cancel";
 pub const CALLBACK_PATH: &str = "/internal/droplet-health";
 const CALLBACK: &str = "https://platform.pigeon.dev/internal/droplet-health";
 const COMMIT: &str = "088a2dc05c1782fd8ba9a7678a5e4edd67952cb7";
@@ -115,6 +116,18 @@ impl Job {
         self.next_ms = 0;
     }
 
+    fn schedule_cancel(&mut self, run: &str, time: u64) -> bool {
+        if self.id != run || self.terminal() || self.state == State::Cleanup {
+            return false;
+        }
+        self.health = "cancelled".into();
+        self.error = None;
+        self.callback_hash = None;
+        self.state = State::Cleanup;
+        self.next_ms = time;
+        true
+    }
+
     fn callback(&mut self, token: &str, event: &str, version: Option<&str>, time: u64) -> bool {
         let supplied = oauth::hash(token);
         if self.terminal()
@@ -205,6 +218,10 @@ pub(super) async fn check_write(cx: &Context<'_>, w: &Write<'_>) -> Result<Value
     let record = for_write(cx.env, &w.target).await?;
     if !enabled(&record) {
         return Err(bad("the Droplet health check is disabled on this instance"));
+    }
+    if w.action.id == CANCEL {
+        let (_, job) = cancel_target(cx.env, &record, w).await?;
+        return Ok(json!({"run":job.public()}));
     }
     if w.action.id != START {
         return Ok(Value::Null);
@@ -342,6 +359,31 @@ pub(super) async fn start(cx: &Context<'_>, w: &Write<'_>) -> Result<Value> {
     }
     if !replace(cx.env, &prior, &job).await? {
         return status(cx.env, &record).await;
+    }
+    Ok(json!({"instance":record.id,"run":job.public()}))
+}
+
+async fn cancel_target(env: &Env, record: &Instance, w: &Write<'_>) -> Result<(String, Job)> {
+    if !enabled(record) {
+        return Err(bad("the Droplet health check is disabled on this instance"));
+    }
+    setting::<Job>(env, &job_key(&record.id))
+        .await?
+        .filter(|(_, job)| {
+            w.change["run"].as_str() == Some(job.id.as_str())
+                && !job.terminal()
+                && job.state != State::Cleanup
+        })
+        .ok_or_else(|| bad("that Droplet health job is no longer waiting for cancellation"))
+}
+
+pub(super) async fn cancel(cx: &Context<'_>, w: &Write<'_>) -> Result<Value> {
+    let record = for_write(cx.env, &w.target).await?;
+    let (prior, mut job) = cancel_target(cx.env, &record, w).await?;
+    if !job.schedule_cancel(w.change["run"].as_str().unwrap_or_default(), now())
+        || !replace(cx.env, &prior, &job).await?
+    {
+        return Err(bad("the Droplet health job changed; refresh its status"));
     }
     Ok(json!({"instance":record.id,"run":job.public()}))
 }

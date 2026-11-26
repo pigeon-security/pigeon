@@ -164,6 +164,7 @@ pub fn state_keys(id: &str) -> Vec<String> {
         format!("data_key:{id}"),
         crate::digitalocean::token_key(id),
         crate::digitalocean::spaces::key(id),
+        crate::digitalocean::health::token_key(id),
         ledger_key(id),
     ]
 }

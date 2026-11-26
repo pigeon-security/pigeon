@@ -2824,6 +2824,7 @@ fn instance_retire_removes_only_what_pigeon_made() {
             "forget",
             "forget",
             "forget",
+            "forget",
             "unlink",
             "remove_record",
         ]
@@ -2844,6 +2845,8 @@ fn instance_retire_removes_only_what_pigeon_made() {
     assert_eq!(forgets[0], "github:deploy:canary");
     assert!(forgets.contains(&"digitalocean-token:canary"));
     assert!(forgets.contains(&"digitalocean-spaces-key:canary"));
+    assert!(forgets.contains(&"digitalocean-droplet-token:canary"));
+    assert!(!forgets.contains(&"digitalocean-droplet-job:canary"));
     assert_eq!(forgets.last(), Some(&"ledger:canary"));
     assert_eq!(describe(&steps).len(), steps.len());
     // Keeping the link, for a reset.
@@ -5739,5 +5742,22 @@ fn digitalocean_droplet_plan_is_opted_in_and_passkey_bound() {
     assert_ne!(
         digest(start, "operator", &target, &current, None),
         digest(start, "operator", &target, &stale, None)
+    );
+    let cancel = action(health::CANCEL).unwrap();
+    assert!(cancel.destructive && !cancel.by_bearer);
+    let one = cancel
+        .change(&json!({"run":"1".repeat(32)}), Step::Finish)
+        .unwrap();
+    let two = cancel
+        .change(&json!({"run":"2".repeat(32)}), Step::Finish)
+        .unwrap();
+    assert_ne!(
+        digest(cancel, "operator", &target, &one, None),
+        digest(cancel, "operator", &target, &two, None)
+    );
+    assert!(
+        cancel
+            .change(&json!({"run":"../../random"}), Step::Finish)
+            .is_err()
     );
 }

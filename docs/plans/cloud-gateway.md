@@ -432,5 +432,8 @@ confirmed or the create was definitively refused.
 This phase uses no Spaces or R2 access. No system creates a Droplet merely
 because the capability was enabled. Live provisioning and end-to-end callback
 verification require a separate console passkey action; the native tests use a
-fake provider. Automatic cleanup is available; an explicit cancel action and
-operator resolution for an indefinitely ambiguous response are follow-up work.
+fake provider. The console can cancel an exact waiting job after a passkey check.
+Cancellation invalidates further health callbacks and schedules the same
+reconciliation and deletion. Retiring an instance forgets its standing token,
+while the outstanding job retains just the sealed copy it needs to finish.
+Operator resolution for an indefinitely ambiguous response is follow-up work.

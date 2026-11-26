@@ -276,7 +276,9 @@ impl Capability for DigitalOcean {
         Box::pin(async move {
             match w.action.id {
                 spaces::SET_KEY => return spaces::check_write(cx, w).await,
-                health::START | health::SET_TOKEN => return health::check_write(cx, w).await,
+                health::START | health::SET_TOKEN | health::CANCEL => {
+                    return health::check_write(cx, w).await;
+                }
                 _ => {}
             }
             for_write(cx.env, &w.target).await?;
@@ -289,6 +291,7 @@ impl Capability for DigitalOcean {
             match w.action.id {
                 spaces::SET_KEY => spaces::save(cx, w).await,
                 health::START => health::start(cx, w).await,
+                health::CANCEL => health::cancel(cx, w).await,
                 health::SET_TOKEN => health::save_token(cx, w).await,
                 _ => save(cx, w).await,
             }

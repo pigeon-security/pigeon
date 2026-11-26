@@ -84,6 +84,8 @@ pub enum Change {
     Secret,
     /// The exact fingerprint of the current Droplet health check plan.
     DropletHealthPlan,
+    /// The exact ID of a waiting Droplet health check.
+    DropletHealthJob,
     /// `{record}`: an instance record as JSON text, bound by its digest.
     Record,
     /// `{days}`: a proxy credential's lifetime.
@@ -208,6 +210,14 @@ pub const ACTIONS: &[Action] = &[
         false,
         Target::DigitalOceanTeam,
         Change::DropletHealthPlan,
+    ),
+    act(
+        crate::digitalocean::health::CANCEL,
+        "Cancel this Droplet health check",
+        Cap(crate::digitalocean::NAME),
+        true,
+        Target::DigitalOceanTeam,
+        Change::DropletHealthJob,
     ),
     app(act(
         "token-issue",
@@ -598,6 +608,18 @@ impl Action {
                     (None, Some(_), Step::Begin) => return Err("not a SHA-256 digest".into()),
                     _ => return Err("the change is {value}, or {digest} to begin".into()),
                 }
+            }
+            Change::DropletHealthJob => {
+                only(&o, &["run"], true)?;
+                let run = s("run")
+                    .filter(|id| {
+                        id.len() == 32
+                            && id
+                                .bytes()
+                                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+                    })
+                    .ok_or("expected the exact Droplet health job ID")?;
+                json!({"run":run})
             }
             Change::DropletHealthPlan => {
                 only(&o, &["plan"], true)?;
