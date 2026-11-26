@@ -951,6 +951,9 @@ pub mod push {
     /// push. On since the person asked for it.
     pub const NOTIFY_APPROVALS: bool = true;
 
+    /// The iOS notification category of an approval push (`NotificationRoute.approvalCategory`).
+    pub const APPROVAL_CATEGORY: &str = "APPROVAL";
+
     /// The payload and headers of one alert push for the "pigeon" app, with a link in its data.
     pub fn alert_parts(
         title: &str,
@@ -958,9 +961,26 @@ pub mod push {
         link: &str,
         collapse_id: &str,
     ) -> Result<(String, Vec<(&'static str, String)>)> {
-        let data = json!({ "link": link });
-        let payload = apns::payload(apns::PushType::Alert, Some((title, body)), Some(&data))
+        // An approval push (collapse id `approval:<id>`) names its approval in the data and uses
+        // the app's APPROVAL category, whose one Review action only opens the app: nothing is
+        // decided from the notification.
+        let approval = collapse_id
+            .strip_prefix("approval:")
+            .filter(|id| !id.is_empty());
+        let data = match approval {
+            Some(id) => json!({ "link": link, "approval": id }),
+            None => json!({ "link": link }),
+        };
+        let mut payload = apns::payload(apns::PushType::Alert, Some((title, body)), Some(&data))
             .map_err(|e| bad(&e))?;
+        if approval.is_some() {
+            let mut v: Value = serde_json::from_str(&payload).map_err(|e| bad(&e.to_string()))?;
+            v["aps"]["category"] = json!(APPROVAL_CATEGORY);
+            payload = v.to_string();
+            if payload.len() > apns::MAX_PAYLOAD {
+                return Err(bad("the approval push is larger than APNs allows"));
+            }
+        }
         let headers = apns::headers("pigeon", apns::PushType::Alert, Some(collapse_id))
             .map_err(|e| bad(&e))?;
         Ok((payload, headers))

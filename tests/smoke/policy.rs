@@ -1182,7 +1182,8 @@ fn platform_users_people() {
     assert!(list[1]["acting_for_me"].as_array().unwrap().is_empty());
 }
 
-/// Approval push is on, and its alert carries the link and collapse id.
+/// Approval push is on, and its alert carries the link, collapse id, approval id and the
+/// Review category.
 #[test]
 fn platform_approval_push_on() {
     use pigeon_capabilities::apple::push::{NOTIFY_APPROVALS, alert_parts};
@@ -1198,4 +1199,12 @@ fn platform_approval_push_on() {
     let v: Value = serde_json::from_str(&payload).unwrap();
     assert_eq!(v["link"], "pigeon://approvals");
     assert!(headers.contains(&("apns-collapse-id", "approval:abc".to_string())));
+    assert_eq!(v["approval"], "abc");
+    assert_eq!(v["aps"]["category"], "APPROVAL");
+
+    // Any other alert has neither.
+    let (other, _) = alert_parts("Title", "Body", "pigeon://land", "land:x").unwrap();
+    let o: Value = serde_json::from_str(&other).unwrap();
+    assert!(o.get("approval").is_none());
+    assert!(o["aps"].get("category").is_none());
 }
