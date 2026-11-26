@@ -1,7 +1,8 @@
 //! The home instance's credential: a short-lived token of purpose [`PURPOSE`] (`instance_home`),
 //! minted from the parent token for one plan or one apply and revoked after it, whether the work
-//! succeeded or not. It holds R2 write (the landing bucket) and the zone's custom-domain
-//! permissions, never Workers-scripts write: the platform's Workers are the Lander's.
+//! succeeded or not. The parent needs only Account API Tokens Write to mint it. It holds Workers
+//! R2 Storage Write on the account and Zone Read on the platform zone, never Workers-scripts
+//! write: the platform's Workers are the Lander's.
 //!
 //! The token's value lives only in the [`Account`] handed to the work, as its bearer, so every
 //! core helper uses it as it is and mints nothing else from the parent. It is never stored,
@@ -25,10 +26,8 @@ const TOKEN_PURPOSE: &str = "instance-home";
 
 /// What the person does when the home token cannot be had.
 pub const PERSON_STEPS: &str = "Nothing was changed. The person confirms that `instance_home` \
-     is a credential purpose of the deployed platform (it lands through the gate), and that the \
-     parent token holds its permissions (Workers R2 Storage Write on the account; Zone Read on \
-     the platform zone); then \
-     plan again.";
+     is a credential purpose of the deployed platform, and that the parent token can still mint \
+     account tokens (Account API Tokens Write); then plan again.";
 
 fn bad(why: String) -> Error {
     Error::RustError(why)

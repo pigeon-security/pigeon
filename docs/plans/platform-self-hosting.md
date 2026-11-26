@@ -164,7 +164,7 @@ Steps:
 ## Steps only the person can take
 
 - Approve the new home record and each home `instance_apply` (passkey).
-- Add `instance_home` to `purpose_permissions` and confirm the parent token holds it.
+- Nothing for the token: the parent mints `instance_home` with its Account API Tokens Write.
 - Run `site_publish` to move the apex onto `pigeon-platform` for good (S1).
 - Approve the R1 migration.
 
