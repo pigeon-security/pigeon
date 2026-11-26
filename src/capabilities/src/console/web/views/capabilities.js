@@ -131,6 +131,10 @@
       for (const v of a.views || []) if (v.upgrade && !gated.has(v.capability)) gated.set(v.capability, v);
     }
     let state = null;
+    // Internal plumbing (catalogue::PLUMBING: dispatch, the console itself, OAuth…) stays folded
+    // under its heading until Show; `redraw` re-renders from `state` without reading again.
+    let internal = false;
+    let redraw = false;
     const table = dataTable({
       label: "Capabilities", noun: "capabilities", signal: ctx.signal,
       empty: "This instance has no record to change.",
@@ -144,6 +148,10 @@
         { label: "", cls: "acts", cell: (row) => row.acts },
       ],
       load: async () => {
+        if (redraw && state) {
+          redraw = false;
+          return rows(state);
+        }
         const [record, versions, plan] = await Promise.all([
           recordOf(ctx),
           ctx.op("capabilities_versions", { instance: inst.id }).catch(() => null),
@@ -194,12 +202,19 @@
       const out = [{ group: `Enabled on ${inst.title} (${yes.length})` }, ...yes, { group: `Available (${no.length})` }, ...no];
       if (inst.home) {
         const ours = new Set(CAPS.map((c) => c.component));
-        const platform = (versions?.components || []).filter((c) => c.kind === "capability" && !ours.has(c.name));
-        if (platform.length) {
-          out.push({ group: "Platform capabilities · deployed with the platform" }, ...platform.map((c) => ({
-            cap: c.name, what: c.worker ? `Served by ${c.worker}` : "", adds: [], field: null, latest: c.version,
-            pinText: code(c.version), status: pill("Deployed", "ok"), acts: el("span", { class: "muted", text: "Changes land through code" }),
-          })));
+        const deployed = (versions?.components || []).filter((c) => c.kind === "capability" && !ours.has(c.name));
+        const platformRow = (c) => ({
+          cap: c.name, what: c.worker ? `Served by ${c.worker}` : "", adds: [], field: null, latest: c.version,
+          pinText: code(c.version), status: pill("Deployed", "ok"), acts: el("span", { class: "muted", text: "Changes land through code" }),
+        });
+        const platform = deployed.filter((c) => !c.plumbing);
+        const plumbing = deployed.filter((c) => c.plumbing);
+        if (platform.length) out.push({ group: "Platform capabilities · deployed with the platform" }, ...platform.map(platformRow));
+        if (plumbing.length) {
+          const flip = () => { internal = !internal; redraw = true; table.reload(); };
+          out.push({ group: [`Internal · platform plumbing (${plumbing.length}) `,
+            button(internal ? "Hide" : "Show", flip, { size: "sm", variant: "ghost", "aria-expanded": String(internal) })] });
+          if (internal) out.push(...plumbing.map(platformRow));
         }
       }
       return out;

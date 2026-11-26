@@ -61,6 +61,8 @@ pub fn versions_view(
             "serves": c.serves,
             "worker": worker,
             "problems": c.problems(),
+            // Internal plumbing the console tucks away (catalogue::PLUMBING).
+            "plumbing": crate::catalogue::is_plumbing(&c.name),
         });
         if changelog {
             row["changelog"] = to_value(&c.changelog);
@@ -131,7 +133,8 @@ impl Capability for Versioning {
             Tool {
                 name: "capabilities_versions",
                 description: "Read-only. The versions pigeon declares: each component's name, \
-                              kind, newest version, versions served, Worker and problems, the \
+                              kind, newest version, versions served, Worker, problems and \
+                              whether it is internal plumbing, the \
                               capabilities that declare none, and each instance's pins checked \
                               against them, and the capability catalogue: each capability's \
                               placement, scope and availability. `changelog` adds each \

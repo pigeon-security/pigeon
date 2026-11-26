@@ -48,8 +48,8 @@ This session's network does not allow noisypigeon.com, so its live headers were 
 
 ### pigeon
 
-- **One Worker.** `pigeon-platform` serves platform.pigeon.dev, proxy.pigeon.dev and the apex
-  pigeon.dev, routed by host.
+- **One Worker.** `pigeon-platform` serves platform.pigeon.dev and the apex pigeon.dev, routed
+  by host. proxy.pigeon.dev is served by the proxy Worker, `pigeon-proxy`, since 2026-11-22.
 - **Cloudflare calls.** Every call goes through `pigeon_core::Account { id, parent,
   secrets_store }`, with a token minted from `CF_PARENT_TOKEN` and revoked after the call.
 - **Secrets.** Secrets are fixed `Slot`s bound in `wrangler.toml`. The console's Access tab sets

@@ -30,7 +30,7 @@ Each capability in the catalogue (`src/capabilities/src/catalogue.rs`) declares:
 | `ai-agents` | Sessions › Live, Compare | inline or own (home: own, `pigeon-ai-agents`) | instance | any |
 | `observability` | Cost › 7 days, Today, 30 days (home only, for now) and Metrics › Workers, both while the record enables `observability` | inline | instance | any |
 | `secrets` | Access › Secrets | inline | instance | any |
-| `proxy` (requires `secrets`) | Access › Tokens | inline or own (home: own, `pigeon-proxy`) | instance | any |
+| `proxy` (requires `secrets`) | Access › Tokens (issuing and revoking proxy credentials; the proxy host itself is served by `pigeon-proxy`) | inline | instance | any |
 | `models` | Platform › Models | inline or own (home: own, `pigeon-model-gateway`) | instance | any |
 | `multi-instance` (new, split out of `instances`) | Instances › All instances, Platform › Endpoints, creating and linking instances | inline | platform | **home_only** |
 | `users` | Access › People, Apps | inline | platform | **home_only** |
@@ -174,3 +174,11 @@ change on any instance.
   validation refuses it there). The record's `capabilities` maps a name to settings that hold
   nothing yet; `catalogue::problems` is part of `record::validate`. `requires` is checked on
   every record, home included.
+- 2026-11-26: plumbing flag. `catalogue::PLUMBING` names the hosted capabilities that are
+  internal plumbing, not something a person uses: `dispatch`, `split`, `versioning`, `console`,
+  `passkeys`, `oauth`, `public_host` and `images`. `capabilities_versions` marks each component
+  row `plumbing` (additive; no public view carries it), and the console's Capabilities view on
+  home lists them under a folded "Internal" heading (Show / Hide) below "Platform capabilities",
+  as does the iOS app. The `proxy` entry now says what is true: core serves Access › Tokens
+  inline; `pigeon-proxy` serves the proxy host's `/git/` and `/cf/`, which are not this
+  capability.

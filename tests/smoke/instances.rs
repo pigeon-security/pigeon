@@ -716,9 +716,9 @@ fn capability_catalogue_as_decided() {
         ),
         (
             "proxy",
-            true,
-            Placement::OwnWorker,
-            Some("pigeon-proxy"),
+            false,
+            Placement::Inline,
+            None,
             Scope::Instance,
             Availability::Any,
             &["secrets"],
@@ -817,6 +817,32 @@ fn capability_catalogue_as_decided() {
         recorded["catalogue"], v["catalogue"],
         "the recorded catalogue"
     );
+    // Internal plumbing is marked on each component row, so the console can fold it away; the
+    // recorded components mark it as the code does.
+    use pigeon_capabilities::catalogue::{PLUMBING, is_plumbing};
+    use pigeon_core::versions::{Component, Kind};
+    let carried: Vec<(Component, String)> = ["dispatch", "secrets"]
+        .iter()
+        .map(|n| {
+            (
+                Component::began(n, Kind::Capability),
+                "pigeon-platform".to_string(),
+            )
+        })
+        .collect();
+    let v = pigeon_capabilities::versioning::versions_view(&carried, &[], &[], false);
+    assert_eq!(v["components"][0]["plumbing"], true);
+    assert_eq!(v["components"][1]["plumbing"], false);
+    for name in PLUMBING {
+        assert!(
+            find(name).is_none(),
+            "{name} is plumbing, not a catalogued capability"
+        );
+    }
+    for c in recorded["components"].as_array().unwrap() {
+        let name = c["name"].as_str().unwrap();
+        assert_eq!(c["plumbing"], is_plumbing(name), "recorded {name}");
+    }
 }
 
 /// Capability scoping, M2: a record lists the catalogue capabilities it enables beyond its

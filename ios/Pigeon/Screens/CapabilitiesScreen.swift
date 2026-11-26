@@ -27,6 +27,8 @@ struct CapabilitiesScreen: View {
     @State private var state: Loadable<CapabilitiesData> = .loading
     @State private var request: WriteRequest?
     @State private var editing: CapabilityEdit?
+    /// Whether the internal plumbing (`plumbing` in `capabilities_versions`) is shown.
+    @State private var showInternal = false
 
     private var instance: ConsoleManifest.Instance { context.instance }
 
@@ -125,20 +127,15 @@ struct CapabilitiesScreen: View {
         }
         if instance.home {
             let ours = Set(CapabilityCatalog.all.map(\.component))
-            let platform = data.versions["components"].items.filter {
+            let deployed = data.versions["components"].items.filter {
                 $0["kind"].string == "capability" && !ours.contains($0["name"].string ?? "")
             }
+            let platform = deployed.filter { $0["plumbing"].bool != true }
+            let plumbing = deployed.filter { $0["plumbing"].bool == true }
             if !platform.isEmpty {
                 Section {
                     ForEach(platform, id: \.self) { c in
-                        ListRow(
-                            title: c["name"].string ?? "—",
-                            subtitle: c["worker"].string.map { "Served by \($0) · changes land through code" }
-                                ?? "Changes land through code",
-                            monoTitle: true
-                        ) {
-                            Text(c["version"].text ?? "—").idStyle().foregroundStyle(Theme.muted)
-                        }
+                        platformRow(c)
                     }
                 } header: {
                     Text("Platform capabilities")
@@ -146,6 +143,33 @@ struct CapabilitiesScreen: View {
                     Text("Deployed with the platform.")
                 }
             }
+            if !plumbing.isEmpty {
+                Section {
+                    Button(showInternal ? "Hide internal" : "Show internal (\(plumbing.count))") {
+                        showInternal.toggle()
+                    }
+                    if showInternal {
+                        ForEach(plumbing, id: \.self) { c in
+                            platformRow(c)
+                        }
+                    }
+                } header: {
+                    Text("Internal")
+                } footer: {
+                    Text("Platform plumbing: deployed with the platform, nothing to use directly.")
+                }
+            }
+        }
+    }
+
+    private func platformRow(_ c: JSON) -> some View {
+        ListRow(
+            title: c["name"].string ?? "—",
+            subtitle: c["worker"].string.map { "Served by \($0) · changes land through code" }
+                ?? "Changes land through code",
+            monoTitle: true
+        ) {
+            Text(c["version"].text ?? "—").idStyle().foregroundStyle(Theme.muted)
         }
     }
 

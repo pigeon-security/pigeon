@@ -10,7 +10,8 @@
         "1.4.0"
       ],
       "worker": "pigeon-sites",
-      "problems": []
+      "problems": [],
+      "plumbing": false
     },
     {
       "name": "site_passkeys",
@@ -22,7 +23,8 @@
         "1.3.2"
       ],
       "worker": "pigeon-core",
-      "problems": []
+      "problems": [],
+      "plumbing": false
     },
     {
       "name": "storage",
@@ -30,7 +32,8 @@
       "version": "1.0.0",
       "serves": [],
       "worker": "pigeon-core",
-      "problems": []
+      "problems": [],
+      "plumbing": false
     },
     {
       "name": "source",
@@ -38,7 +41,8 @@
       "version": "1.0.0",
       "serves": [],
       "worker": "pigeon-core",
-      "problems": []
+      "problems": [],
+      "plumbing": false
     },
     {
       "name": "ci",
@@ -46,7 +50,8 @@
       "version": "1.0.0",
       "serves": [],
       "worker": "pigeon-ci",
-      "problems": []
+      "problems": [],
+      "plumbing": false
     },
     {
       "name": "observability",
@@ -54,7 +59,8 @@
       "version": "1.0.0",
       "serves": [],
       "worker": "pigeon-core",
-      "problems": []
+      "problems": [],
+      "plumbing": false
     },
     {
       "name": "ingest",
@@ -62,7 +68,8 @@
       "version": "1.0.0",
       "serves": [],
       "worker": "pigeon-core",
-      "problems": []
+      "problems": [],
+      "plumbing": false
     },
     {
       "name": "approvals",
@@ -70,7 +77,8 @@
       "version": "1.0.0",
       "serves": [],
       "worker": "pigeon-core",
-      "problems": []
+      "problems": [],
+      "plumbing": false
     },
     {
       "name": "models",
@@ -78,7 +86,35 @@
       "version": "1.2.0",
       "serves": [],
       "worker": "pigeon-models",
-      "problems": []
+      "problems": [],
+      "plumbing": false
+    },
+    {
+      "name": "dispatch",
+      "kind": "capability",
+      "version": "1.0.0",
+      "serves": [],
+      "worker": "pigeon-core",
+      "problems": [],
+      "plumbing": true
+    },
+    {
+      "name": "console",
+      "kind": "capability",
+      "version": "1.0.0",
+      "serves": [],
+      "worker": "pigeon-core",
+      "problems": [],
+      "plumbing": true
+    },
+    {
+      "name": "oauth",
+      "kind": "capability",
+      "version": "1.0.0",
+      "serves": [],
+      "worker": "pigeon-core",
+      "problems": [],
+      "plumbing": true
     },
     {
       "name": "blog",
@@ -86,7 +122,8 @@
       "version": "2.2.0",
       "serves": [],
       "worker": "pigeon-sites",
-      "problems": []
+      "problems": [],
+      "plumbing": false
     }
   ],
   "undeclared": [],
@@ -174,11 +211,10 @@
     {
       "name": "proxy",
       "placements": [
-        "inline",
-        "own_worker"
+        "inline"
       ],
-      "home": "own_worker",
-      "home_worker": "pigeon-proxy",
+      "home": "inline",
+      "home_worker": null,
       "scope": "instance",
       "availability": "any",
       "requires": [

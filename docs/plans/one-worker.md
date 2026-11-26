@@ -7,7 +7,8 @@ the architecture page, uploaded it as that Worker's module with `pigeon_core::wo
 and attached the apex to it. The page only changed when someone called `site_publish` again.
 
 The goal: one Worker, `pigeon-platform`, serves `platform.pigeon.dev`, `proxy.pigeon.dev` and
-`pigeon.dev`. It picks what to serve by the request's host. The old `pigeon` Worker is retired
+`pigeon.dev`. It picks what to serve by the request's host. (Since 2026-11-22 `proxy.pigeon.dev`
+is served by its own Worker, `pigeon-proxy`: docs/plans/workers-split.md, phase 6.) The old `pigeon` Worker is retired
 once the apex is live on the platform.
 
 ## What was true before (checked 2026-11-21)

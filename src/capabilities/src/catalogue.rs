@@ -124,10 +124,13 @@ pub const CATALOGUE: &[Entry] = &[
         name: "secrets",
         ..BASE
     },
-    // Access › Tokens.
+    // Access › Tokens: issuing, listing and revoking proxy credentials, which core serves. The
+    // proxies those credentials reach, `/git/` and `/cf/` on the proxy host, are served by the
+    // proxy Worker, `pigeon-proxy`, and are not this capability.
     Entry {
+        name: "proxy",
         requires: &["secrets"],
-        ..own("proxy", "pigeon-proxy")
+        ..BASE
     },
     // Platform › Models.
     own("models", "pigeon-model-gateway"),
@@ -149,6 +152,27 @@ pub const CATALOGUE: &[Entry] = &[
         ..BASE
     },
 ];
+
+/// The hosted capabilities that are internal plumbing rather than something a person uses:
+/// request dispatch, the Worker split, versioning, the console itself, passkeys, OAuth, the
+/// public host and image hosting. Each is still a declared component in `capabilities_versions`,
+/// marked `plumbing`, so the console can tuck it away instead of listing it beside the
+/// capabilities a person enables or works with.
+pub const PLUMBING: &[&str] = &[
+    "dispatch",
+    "split",
+    "versioning",
+    "console",
+    "passkeys",
+    "oauth",
+    "public_host",
+    "images",
+];
+
+/// Whether the hosted capability or component `name` is internal plumbing ([`PLUMBING`]).
+pub fn is_plumbing(name: &str) -> bool {
+    PLUMBING.contains(&name)
+}
 
 /// The capability that works across instances: split out of `instances` (M2).
 pub const MULTI_INSTANCE: &str = "multi-instance";

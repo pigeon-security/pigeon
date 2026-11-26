@@ -22,6 +22,12 @@ one **proxy credential**, saved as the environment's network secret for `proxy.p
 only. The session's network proxy adds it as
 `Authorization: Bearer …`, so no command, and no transcript, ever sees it.
 
+> **Since 2026-11-22** (docs/plans/workers-split.md, phase 6) the proxy Worker, `pigeon-proxy`,
+> serves `proxy.pigeon.dev`'s `/git/` and `/cf/`; it holds no parent token and asks core for
+> each check. Core (`pigeon-platform`) still issues and revokes the proxy credentials (the
+> `proxy` capability, Access › Tokens). Where this plan says the platform Worker serves the
+> proxies, read it as the history it is.
+
 ## Who does what
 
 - **Planning session (this one):** writes the plan, briefs the agents, applies their output,

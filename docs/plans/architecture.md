@@ -185,7 +185,7 @@ other Workers show up only as names in `split`'s footprint. Checked against the 
 | Containers | `CiRunner` only | Also `Sandbox` (image `pigeon-ai-agent-sandbox`), one per AI agent run, in `pigeon-ai-agents` |
 | Queues | `pigeon-ci-events` as core's | Both core and the CI gateway produce to it |
 | Secrets | One list of 12, all core's | Core's 12 plus `CALLER_KEY` in every Worker and `BUILDKITE_API_TOKEN` in the CI gateway. Only core holds `CF_PARENT_TOKEN` |
-| `proxy.pigeon.dev` | Served by `pigeon-platform` | Served by `pigeon-proxy` since the cutover (workers-split log, 2026-11-22). `settings::PROXY_WORKER` still names core: step 4 of that cutover ("land `PROXY_WORKER = PROXY_WORKER_NEXT`") was never done |
+| `proxy.pigeon.dev` | Served by `pigeon-platform` | Served by `pigeon-proxy` since the cutover (workers-split log, 2026-11-22). `settings::PROXY_WORKER` was then still core; it names `pigeon-proxy` now |
 | Sites hostnames | Only `pigeon.dev` (core) | `pigeon-sites` serves the instance subdomains on pigeon.dev, such as `noisypigeon.pigeon.dev`. `noisypigeon.com` is served by the instance Worker in the linked account, from its own R2 bucket. These are instance records (Directory data), not code |
 | MCP Server Portal | Not drawn | Claude reaches `/mcp` through the Cloudflare MCP Server Portal at `mcp.pigeon.dev` (servers `pigeon` and `buildkite`). The Lander syncs it after deploys (`portal_sync`) |
 | External services | AI gateway `pigeon` and the GitHub mirror only | Also Buildkite (cluster `pigeon`, hosted Linux and macOS queues), Cloudflare Containers as the second CI connector, the GitHub App, and linked Cloudflare accounts (OAuth) |

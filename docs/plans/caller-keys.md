@@ -1,11 +1,14 @@
 # Per-Worker caller keys
 
-Status: **steps 0, 1 and 5 done; step 2 built, not landed.** Steps 1 and 5 are on main
-(`a8363fe`, `57e270d`). Step 0 is done live: `workers_setup` reported all seven caller keys
-"already there; kept" (2026-11-25). Step 2 is built on seven branches (see step 2 below), based
-on main at `9d0df43`. Steps 3 and 4 are not started. Until step 2 lands, per-Worker keys are not
-active: no Worker sends `X-Pigeon-Worker`, no `src/*/wrangler.toml` binds a `CALLER_KEY_*`
-secret, and all seven Workers bind the shared `CALLER_KEY`. Task K1 of the clean-up.
+Status: **steps 0, 1, 2 and 5 done; step 3 half done (3a); step 4 not started.** Steps 1 and 5
+are on main (`a8363fe`, `57e270d`). Step 0 is done live: `workers_setup` reported all seven
+caller keys "already there; kept" (2026-11-25). Step 2 landed on 2026-11-25 (`50a15bc` and the
+six "Bind the … Worker's own caller key" commits, `2c6b959` to `aaa1fd2`): core binds the six
+`CALLER_KEY_<WORKER>`, each Worker binds its own as `CALLER_KEY_OWN` and names itself. Step 3a
+landed in `950f461`: the Workers that serve core check its calls with `CALLER_KEY_OWN`, then
+`CALLER_KEY`. Step 3b (each side signs with the per-Worker key) is not started, so every
+signature is still made with the shared `CALLER_KEY`, which all seven Workers still bind, and
+`WORKER_OPS` still bounds nothing. Task K1 of the clean-up.
 
 ## Goal
 
@@ -76,7 +79,7 @@ Each step is safe alone. Landing order is the order below.
    `X-Pigeon-Worker` yet, so the new path is not reached. Deploys core's lane only
    (src/capabilities is core's; it deploys `pigeon-platform`).
 2. **Each Worker binds its own key and names itself, still signing with the shared one.**
-   Built, not landed, on seven branches. Each lands alone, so a failed deploy shows which
+   Landed on 2026-11-25, as the seven branches below. Each lands alone, so a failed deploy shows which
    Worker. Land them in this order:
    1. `claude/caller-keys-step2-header` (shared lane: every Worker deploys). Adds
       `pigeon_contract::identify(name)` and `WORKER_HEADER`; `ask` sends `X-Pigeon-Worker`
@@ -101,23 +104,26 @@ Each step is safe alone. Landing order is the order below.
    and checks the shared key alone. Each wrangler change was checked with
    `ci/deploy/allowlist.sh` (all calls on the allowlist; see "Checking each wrangler binding
    change").
-3. **Each side signs with the per-Worker key.** Not started. Core signs for Worker X with `CALLER_KEY_X`;
+3. **Each side signs with the per-Worker key.** 3a (Workers verify `CALLER_KEY_OWN`, then
+   `CALLER_KEY`) landed in `950f461`; 3b (switching the signers) is not started. Core signs for Worker X with `CALLER_KEY_X`;
    Worker X signs with its own. Must wait until all seven step 2 branches have landed and their
    deploys are live (core and the six Workers). Within step 3, first make each Worker verify
    core's calls with `CALLER_KEY_OWN` and then `CALLER_KEY` (step 2 does not: Workers still
    verify with the shared key only), and deploy that everywhere; only then switch the signers.
-4. **Drop the shared key.** Not started. Remove the `CALLER_KEY` bindings and the fallback code. Delete the
-   secret from the Secrets Store last, by the person.
+4. **Drop the shared key.** Not started; only after 3b is deployed everywhere. Remove the
+   `CALLER_KEY` binding from all seven `wrangler.toml`s and the fallback code: the shared key
+   in `pigeon_contract::Keys` (src/contract/src/keys.rs, `SHARED_KEY`), `split::KeyUsed::Shared`
+   and its fall-back in `split::verify_caller`, and the shared-key signing in
+   `remote::caller_key` and in src/ci/src/lib.rs (`CALLER_KEY`). Delete the secret from the
+   Secrets Store last, by the person.
 5. **Bind each Worker to the core operations it may call.** Enforcement landed in `57e270d`;
    see the next section. It takes effect only for requests
    signed with a Worker's own key, so it bounds nothing until step 2 (core binds the keys,
    Workers send the header) and step 3 (Workers sign with their own key). It bounds everything
    only after step 4, while the shared key still verifies unbounded requests.
 
-**Next: land step 2** in the order above (header, then core, then each Worker). **Then step 3**,
-only once all seven step 2 deploys are live: Workers verify core's calls with
-`CALLER_KEY_OWN` then `CALLER_KEY`, deployed everywhere, and only after that each side signs
-with the per-Worker key, one Worker per landing.
+**Next: step 3b.** Steps 2 and 3a are live, so each side may now sign with the per-Worker key,
+one Worker per landing. **Then step 4**, once every 3b deploy is live.
 
 ## Step 5: per-Worker allowed core operations (landed, inert until steps 2 and 3)
 
@@ -200,5 +206,5 @@ step 0 check by the person.
 1. Done (2026-11-25): `workers_setup` live reported all seven caller keys present.
 2. The binding name in each Worker is `CALLER_KEY_OWN` (used by the step 2 branches).
 3. After step 4, delete `CALLER_KEY` from the Secrets Store.
-4. `docs/plans/workers-split.md`, `architecture.md` and `proxies.md` mention the one shared
-   `CALLER_KEY`; update them once step 4 lands.
+4. Once step 4 lands: `docs/plans/workers-split.md`, `architecture.md` and `docs/proxies.md`
+   still describe the one shared `CALLER_KEY`, and must say each Worker holds only its own.
