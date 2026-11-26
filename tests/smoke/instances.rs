@@ -831,6 +831,7 @@ fn capability_catalogue_as_decided() {
     }
     // `capabilities_versions` answers it beside the components.
     let v = pigeon_capabilities::versioning::versions_view(&[], &[], &[], false);
+    assert_eq!(v["linked_placement_choices"]["cloud"], json!(["inline"]));
     assert_eq!(v["catalogue"].as_array().unwrap().len(), CATALOGUE.len());
     assert_eq!(
         v["catalogue"][0]["placements"],

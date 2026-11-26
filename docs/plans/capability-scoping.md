@@ -356,3 +356,11 @@ change on any instance.
 - 2026-11-26: M5 mechanism built (M5, above), with every catalogue entry still inline on linked
   instances. The test drives it with a stand-in build. The first real use is `models` (M4
   step 5): list its build in `LINKED_WORKERS`, and validation, plan, apply and retire follow.
+
+### Placement in the enable and configure dialogs
+
+The console offers placement on linked capabilities that model a separate
+Worker. It reads the supported choices from `capabilities_versions` and keeps
+Separate Worker disabled until a linked-account build is registered. Inline
+writes `capabilities.<name>.placement: "inline"` in the reviewed record diff.
+Enabling or editing placement uses the existing passkey-bound record write.

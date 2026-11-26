@@ -130,7 +130,7 @@
       remove: (r) => { delete r.redirects; } },
   ];
   // Catalogue capabilities enabled by name in `capabilities`: linked entries on linked
-  // instances and opt-in entries on home. Enabling writes `capabilities.<name>: {}`.
+  // instances and opt-in entries on home. Placement is stored in the capability settings.
   // Disabling removes the entry and its dependents.
   const CATALOGUE_ADDS = {
     architecture: { adds: ["Platform › Architecture"], what: "Show this instance’s own setup: its Worker, bucket, hostnames and tools" },
@@ -138,20 +138,34 @@
     secrets: { adds: ["Access › Secrets"], what: "List the secrets in this instance’s own Cloudflare account (its Secrets Store)" },
   };
   function catalogueCaps(versions, home) {
-    return (versions?.catalogue || []).filter((e) => (home ? e.opt_in : e.linked) && !e.always && e.name !== "redirects").map((e) => ({
-      cap: e.name, field: `capabilities.${e.name}`, component: e.name,
-      adds: CATALOGUE_ADDS[e.name]?.adds || [], what: CATALOGUE_ADDS[e.name]?.what || "", effect: CATALOGUE_ADDS[e.name]?.effect,
-      on: (r) => Boolean(r.capabilities && r.capabilities[e.name]),
-      needs: (r) => { const lack = (e.requires || []).filter((q) => !(r.capabilities || {})[q]); return lack.length ? lack.join(", ") : null; },
-      fields: () => [],
-      apply: (r) => { r.capabilities = { ...(r.capabilities || {}), [e.name]: {} }; },
-      remove: (r) => {
-        const caps = { ...(r.capabilities || {}) };
-        delete caps[e.name];
-        for (const other of versions.catalogue) if ((other.requires || []).includes(e.name)) delete caps[other.name];
-        if (Object.keys(caps).length) r.capabilities = caps; else delete r.capabilities;
-      },
-    }));
+    return (versions?.catalogue || []).filter((e) => (home ? e.opt_in : e.linked) && !e.always && e.name !== "redirects").map((e) => {
+      const configurable = !home && (e.placements || []).includes("own_worker");
+      const choices = versions.linked_placement_choices?.[e.name] || ["inline"];
+      return {
+        cap: e.name, field: `capabilities.${e.name}`, component: e.name,
+        adds: CATALOGUE_ADDS[e.name]?.adds || [], what: CATALOGUE_ADDS[e.name]?.what || "", effect: CATALOGUE_ADDS[e.name]?.effect,
+        on: (r) => Boolean(r.capabilities && r.capabilities[e.name]),
+        needs: (r) => { const lack = (e.requires || []).filter((q) => !(r.capabilities || {})[q]); return lack.length ? lack.join(", ") : null; },
+        current: (r) => ({ placement: "inline", ...r.capabilities?.[e.name] }),
+        fields: () => configurable ? [{
+          key: "placement", label: "Worker placement", options: ["inline", "own_worker"],
+          labels: { inline: "Inline", own_worker: "Separate Worker" },
+          disabled: (option) => !choices.includes(option),
+          hint: choices.includes("own_worker") ? undefined : "Separate Worker requires a linked-account build for this capability.",
+        }] : [],
+        apply: (r, v) => {
+          const settings = { ...r.capabilities?.[e.name] };
+          if (configurable) settings.placement = v.placement;
+          r.capabilities = { ...(r.capabilities || {}), [e.name]: settings };
+        },
+        remove: (r) => {
+          const caps = { ...(r.capabilities || {}) };
+          delete caps[e.name];
+          for (const other of versions.catalogue) if ((other.requires || []).includes(e.name)) delete caps[other.name];
+          if (Object.keys(caps).length) r.capabilities = caps; else delete r.capabilities;
+        },
+      };
+    });
   }
   const profileOf = (r, c) => (c.current ? c.current(r) : r[c.field] || {});
   // The record with capability `c` set to `values`, or without it (and what needs it).
@@ -288,7 +302,7 @@
       const controls = fields.map((f) => {
         const value = now[f.key] ?? (f.key === "site" ? r.publishing?.site : "");
         const control = f.options
-          ? el("select", { class: "input", name: f.key }, f.options.map((o) => el("option", { value: o, text: o, selected: o === value })))
+          ? el("select", { class: "input", name: f.key }, f.options.map((o) => el("option", { value: o, text: f.labels?.[o] || o, selected: o === value, disabled: f.disabled?.(o) || false })))
           : input({ name: f.key, mono: f.mono, autocomplete: "off", spellcheck: "false", value: Array.isArray(value) ? value.join(", ") : String(value ?? "") });
         return { f, control };
       });

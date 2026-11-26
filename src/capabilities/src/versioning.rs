@@ -80,7 +80,18 @@ pub fn versions_view(
             })
         })
         .collect();
+    let linked_placement_choices: serde_json::Map<String, Value> = crate::catalogue::CATALOGUE
+        .iter()
+        .filter(|entry| entry.linked && !entry.always)
+        .map(|entry| {
+            (
+                entry.name.to_string(),
+                to_value(crate::catalogue::linked_placements(entry)),
+            )
+        })
+        .collect();
     json!({
+        "linked_placement_choices": linked_placement_choices,
         "components": rows,
         "undeclared": undeclared,
         "instances": instances,
