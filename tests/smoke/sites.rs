@@ -1164,8 +1164,8 @@ fn sites_apex_pages() {
     }
     assert_eq!(home::route("POST", "/nope"), Route::NotFound);
 
-    // `/platform` and `/platform/*` on the apex go to the console, path and query kept; both
-    // apex Workers (pigeon-sites' apex.rs and core's site.rs) answer this with a 302.
+    // `/platform` and `/platform/*` on the apex go to the console, path and query kept; core's
+    // site.rs answers this with a 302 (pigeon-sites' apex.rs went after S1).
     let console = "https://platform.pigeon.dev/app";
     for (path, query, want) in [
         ("/platform", None, console.to_string()),

@@ -12,7 +12,6 @@
 //! stages it itself (docs/plans/platform-self-hosting.md, L3). Built
 //! for `wasm32-unknown-unknown` only.
 
-mod apex;
 mod context;
 mod deploy;
 pub mod public;
@@ -337,7 +336,8 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         .to_ascii_lowercase();
     let zone = env.var("ZONE")?.to_string();
     if host == zone.to_ascii_lowercase() {
-        return apex::serve(req, &env, key.as_bytes(), WORKER).await;
+        // Since S1 the apex is core's (pigeon-platform); this Worker no longer serves it.
+        return Response::error("Not Found", 404);
     }
     if host.ends_with(&format!(".{zone}")) {
         return public::serve(req, &env, key.as_bytes(), WORKER, &host).await;

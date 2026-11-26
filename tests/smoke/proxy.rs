@@ -188,11 +188,6 @@ fn core_bounds_each_workers_ops_with_its_own_key() {
     // Each Worker's real calls pass.
     let real = [
         ("sites", "sites_scope", json!({"action": "record"})),
-        (
-            "sites",
-            "dispatch",
-            json!({"tool": "architecture_describe"}),
-        ),
         ("sites", "dispatch", json!({"tool": "instance_subdomains"})),
         ("sites", "dispatch", json!({"tool": "site_passkey"})),
         ("ci-gateway", "credential", json!({"kind": "scoped"})),
@@ -235,6 +230,12 @@ fn core_bounds_each_workers_ops_with_its_own_key() {
         ("sites", "credential", json!({"kind": "github"})),
         ("sites", "dispatch", json!({"tool": "instances_list"})),
         ("sites", "dispatch", json!({"tool": "land"})),
+        // The apex's architecture read went with apex.rs after S1.
+        (
+            "sites",
+            "dispatch",
+            json!({"tool": "architecture_describe"}),
+        ),
         ("sites", "dispatch", json!({})),
         (
             "model-gateway",

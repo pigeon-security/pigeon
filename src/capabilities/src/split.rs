@@ -299,22 +299,15 @@ const fn only(op: &'static str, which: &'static [&'static str]) -> Allowed {
 /// ([`KeyUsed::Own`]); one signed with the shared key is not bounded until step 4.
 ///
 /// `ai-agents` runs whatever tools a run's model chooses, so its `dispatch` is bounded by the
-/// signed caller and core's gate, not a tool list. `sites` dispatches three tools only, for its
-/// apex and public routes; its deploys reach core only through `sites_scope`.
+/// signed caller and core's gate, not a tool list. `sites` dispatches two tools only, for its
+/// public routes; its deploys reach core only through `sites_scope`.
 pub const WORKER_OPS: [(&str, &[Allowed]); 6] = [
-    // src/sites/src/deploy.rs (sites_scope), apex.rs, public.rs (dispatch).
+    // src/sites/src/deploy.rs (sites_scope), public.rs (dispatch).
     (
         "sites",
         &[
             any("sites_scope"),
-            only(
-                "dispatch",
-                &[
-                    "architecture_describe",
-                    "instance_subdomains",
-                    "site_passkey",
-                ],
-            ),
+            only("dispatch", &["instance_subdomains", "site_passkey"]),
         ],
     ),
     // src/ci/src/lib.rs, src/ci/src/scope.rs.

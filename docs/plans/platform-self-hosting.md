@@ -195,7 +195,8 @@ What the person does after S1 lands and deploys:
 3. Verify: `curl -sI https://pigeon.dev/` shows `x-served-by: pigeon-platform`,
    `x-pigeon-release: release-…` and the CSP; `https://pigeon.dev/architecture.json` names
    main's commit; `https://pigeon.dev/nope` is the release's 404 page.
-4. Then an agent removes `src/sites/src/apex.rs` (nothing points at it any more).
+4. Done: `src/sites/src/apex.rs` is removed; pigeon-sites answers 404 on the apex and may no
+   longer ask core for `architecture_describe`.
 
 ## R1: instance id rename migration
 
