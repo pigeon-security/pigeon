@@ -81,6 +81,14 @@ binding = "CALLER_KEY"
 store_id = "5185c227b9f34b4291045175695b78ec"
 secret_name = "CALLER_KEY"
 
+# The key protected sites' origin keys are derived from (instance apply), made by
+# workers_setup (docs/plans/caller-keys.md, step 4). pigeon-sites binds the same secret and
+# derives alike; no other Worker binds it.
+[[secrets_store_secrets]]
+binding = "SITE_KEY"
+store_id = "5185c227b9f34b4291045175695b78ec"
+secret_name = "SITE_KEY"
+
 # Each capability Worker's own caller key, made by workers_setup (docs/plans/caller-keys.md,
 # step 2). Core checks a request naming a Worker in X-Pigeon-Worker with that Worker's key first,
 # then CALLER_KEY. The binding names are split::WORKER_KEYS.

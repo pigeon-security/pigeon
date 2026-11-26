@@ -5269,6 +5269,100 @@ fn redirects_answered_by_the_instance_worker() {
     assert!(check(&m).is_empty());
 }
 
+/// Step 4 of docs/plans/caller-keys.md: protected origin keys are derived from `SITE_KEY`, not
+/// `CALLER_KEY`. A protected origin Worker pigeon uploaded before then holds the old key, so its
+/// recorded digest no longer matches: the plan shows the Worker's upload again (replacing
+/// pigeon's own), with its origin, and once applied it reads back unchanged. Public sites'
+/// Workers are untouched.
+#[test]
+fn protected_origins_replan_once_their_key_moves_to_site_key() {
+    use pigeon_capabilities::instances::{
+        plan::{
+            Ledger, ORIGIN_KEY_BINDING, Observed, Step, module_digest, plan, protected_site_worker,
+            record,
+        },
+        record::Instance,
+    };
+
+    let mut instance: Instance = serde_json::from_value(json!({
+        "id": "fixture", "title": "Fixture", "worker": "fixture",
+        "account": {"kind":"linked","account_id":"00000000000000000000000000000000"}, "version": 1,
+        "sites": [{
+            "name": "preview", "bucket": "fixture-site", "auth": "passkey", "allow": ["site"],
+            "targets": [{"kind":"subdomain","label":"fixture"}]
+        }]
+    }))
+    .unwrap();
+    let observed = Observed {
+        account_id: "fixture".into(),
+        bucket_exists: true,
+        worker_exists: true,
+        workers_dev: Some(true),
+        account_subdomain: Some("fixture".into()),
+        domains: vec![],
+        subdomains: vec![],
+    };
+    // The digest pigeon recorded for the Worker before step 4: no key source in it.
+    let before = pigeon_core::oauth::hash(
+        &json!({
+            "public_module": module_digest("fixture-site", None),
+            "protected_module": protected_site_worker(),
+            "origin_key": ORIGIN_KEY_BINDING,
+            "instance": "fixture",
+            "site": "preview",
+            "upstream": "https://fixture.fixture.workers.dev",
+        })
+        .to_string(),
+    );
+    let mut ledger = Ledger {
+        buckets: vec!["fixture-site".into()],
+        workers: vec![("fixture".into(), before.clone())],
+        protected_workers: vec!["fixture".into()],
+        protected_buckets: vec!["fixture-site".into()],
+        ..Ledger::default()
+    };
+    let steps = plan(&instance, &observed, &ledger, None);
+    assert!(!steps.iter().any(Step::stops), "{steps:?}");
+    let changes: Vec<&Step> = steps.iter().filter(|s| s.changes()).collect();
+    let [
+        Step::UploadWorker {
+            name,
+            replaces: true,
+            origin: Some(origin),
+            module,
+            ..
+        },
+    ] = changes.as_slice()
+    else {
+        panic!("only the origin Worker's upload: {steps:?}");
+    };
+    assert_eq!(name, "fixture");
+    assert_eq!(origin, "https://fixture.fixture.workers.dev");
+    assert_ne!(module, &before);
+    // Applied, it reads back unchanged.
+    let upload = changes[0].clone();
+    record(&mut ledger, &upload);
+    assert!(
+        !plan(&instance, &observed, &ledger, None)
+            .iter()
+            .any(Step::changes)
+    );
+
+    // A public site's Worker keeps its digest: nothing to re-apply.
+    instance.sites[0].auth = None;
+    instance.sites[0].allow.clear();
+    let public = Ledger {
+        buckets: vec!["fixture-site".into()],
+        workers: vec![("fixture".into(), module_digest("fixture-site", None))],
+        ..Ledger::default()
+    };
+    assert!(
+        !plan(&instance, &observed, &public, None)
+            .iter()
+            .any(Step::changes)
+    );
+}
+
 #[test]
 fn cloud_gateway_off_by_default_and_scoped_status_opt_in() {
     use pigeon_capabilities::catalogue::{hosted_enabled, placements, problems};

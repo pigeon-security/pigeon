@@ -20,6 +20,23 @@ pub async fn read(binding: &SecretStore) -> Result<Option<String>> {
     binding.get().await
 }
 
+/// The key protected sites' origin and visitor session keys are derived from, bound as
+/// [`crate::site_auth::SITE_KEY`] (docs/plans/caller-keys.md, step 4). Core and pigeon-sites
+/// both read it here, so they derive alike. An error when it is not bound or not set: nothing
+/// falls back to another key.
+pub async fn site_key(env: &worker::Env) -> Result<Vec<u8>> {
+    use crate::site_auth::SITE_KEY;
+    let binding = env
+        .secret_store(SITE_KEY)
+        .map_err(|_| Error::RustError(format!("{SITE_KEY} is not bound")))?;
+    let key = read(&binding).await?.ok_or_else(|| {
+        Error::RustError(format!(
+            "{SITE_KEY} is not set in the Secrets Store: run workers_setup"
+        ))
+    })?;
+    Ok(key.into_bytes())
+}
+
 /// A secret as listed: never its value.
 #[derive(Debug, Deserialize)]
 pub struct Secret {

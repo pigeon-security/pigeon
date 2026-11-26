@@ -1931,3 +1931,106 @@ fn sites_template_dispatch() {
         .is_err()
     );
 }
+
+/// Core (instance apply) and pigeon-sites derive a protected site's origin key from the same
+/// secret, `SITE_KEY`, and no other (docs/plans/caller-keys.md, step 4): both bind it under one
+/// name, both read it through `secrets_store::site_key`, and the derivations are pinned, so the
+/// key core puts in the origin Worker is the one sites sends. Sites' visitor session keys come
+/// from the same secret.
+#[test]
+fn sites_and_core_derive_protected_site_keys_from_site_key() {
+    use pigeon_core::site_auth::{SITE_KEY, origin_key, session_key};
+
+    assert_eq!(SITE_KEY, "SITE_KEY");
+    let secrets = |file: &str| -> Vec<(String, String)> {
+        let parsed: toml::Value = file.parse().unwrap();
+        parsed["secrets_store_secrets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| {
+                (
+                    s["binding"].as_str().unwrap().to_string(),
+                    s["secret_name"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect()
+    };
+    let site_key = (SITE_KEY.to_string(), SITE_KEY.to_string());
+    // Core and sites bind it, under its own name.
+    for (worker, file) in [
+        (
+            "pigeon-platform",
+            include_str!("../../src/platform/wrangler.toml"),
+        ),
+        (
+            "pigeon-sites",
+            include_str!("../../src/sites/wrangler.toml"),
+        ),
+    ] {
+        assert!(secrets(file).contains(&site_key), "{worker} binds SITE_KEY");
+    }
+    // No other Worker does.
+    for (worker, file) in [
+        (
+            "pigeon-model-gateway",
+            include_str!("../../src/model-gateway/wrangler.toml"),
+        ),
+        (
+            "pigeon-ci-gateway",
+            include_str!("../../src/ci-gateway/wrangler.toml"),
+        ),
+        (
+            "pigeon-ai-agents",
+            include_str!("../../src/ai-agents-worker/wrangler.toml"),
+        ),
+        (
+            "pigeon-cloud-gateway",
+            include_str!("../../src/cloud-gateway/wrangler.toml"),
+        ),
+        (
+            "pigeon-proxy",
+            include_str!("../../src/proxy/wrangler.toml"),
+        ),
+    ] {
+        assert!(
+            secrets(file).iter().all(|(_, s)| s != SITE_KEY),
+            "{worker} binds no SITE_KEY"
+        );
+    }
+    // Both sides read the key the one way, and derive with the one function. Sites builds for
+    // wasm only, so its source is checked rather than linked.
+    let core = include_str!("../../src/capabilities/src/instances.rs");
+    let sites = include_str!("../../src/sites/src/lib.rs");
+    let public = include_str!("../../src/sites/src/public.rs");
+    assert!(core.contains("pigeon_core::secrets_store::site_key(cx.env)"));
+    assert!(core.contains("pigeon_core::site_auth::origin_key("));
+    assert!(!core.contains("caller_key(cx.env)"));
+    assert!(sites.contains("pigeon_core::secrets_store::site_key(env)"));
+    assert!(public.contains("site_auth::origin_key(") && public.contains("keys.site"));
+    assert!(public.contains("site_auth::session_key(&keys.site, scope)"));
+
+    // The derivations, pinned (HMAC-SHA256 under the site key).
+    let key = b"site key fixture";
+    let upstream = "https://fixture.sandbox.workers.dev";
+    assert_eq!(
+        origin_key(key, "fixture", "preview", "fixture-site", upstream),
+        "cb4b36e7e1466fab93fb6735dfebc176e367db120983b55ac2ee816030d80094"
+    );
+    assert_eq!(
+        pigeon_core::sign::hex(&session_key(key, "scope")),
+        "b056f8e44afcd199003503c451906f9b00b46dd3241e9add4d58af59064da8e0"
+    );
+    // A different secret (the retired CALLER_KEY) derives different keys: an origin Worker
+    // uploaded before step 4 must be re-applied, and every visitor signs in again.
+    assert_ne!(
+        origin_key(
+            b"caller key",
+            "fixture",
+            "preview",
+            "fixture-site",
+            upstream
+        ),
+        origin_key(key, "fixture", "preview", "fixture-site", upstream)
+    );
+}

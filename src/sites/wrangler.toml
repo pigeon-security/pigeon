@@ -33,12 +33,19 @@ ZONE = "pigeon.dev"
 
 # The shared caller key, made once by core's `workers_setup`. This Worker still accepts core's
 # calls signed with it, after its own key, until step 4 of docs/plans/caller-keys.md; it no
-# longer signs with it. It still derives protected sites' origin keys from it (as core does)
-# and their sign-in session keys.
+# longer signs with it, nor derives anything from it.
 [[secrets_store_secrets]]
 binding = "CALLER_KEY"
 store_id = "5185c227b9f34b4291045175695b78ec"
 secret_name = "CALLER_KEY"
+
+# The key protected sites' origin keys and visitor session keys are derived from, made by
+# core's `workers_setup` (docs/plans/caller-keys.md, step 4). Core binds the same secret and
+# derives origin keys alike in instance apply; no other Worker binds it.
+[[secrets_store_secrets]]
+binding = "SITE_KEY"
+store_id = "5185c227b9f34b4291045175695b78ec"
+secret_name = "SITE_KEY"
 
 # This Worker's own caller key, CALLER_KEY_SITES, made by core's `workers_setup`
 # (docs/plans/caller-keys.md, step 3). Core signs its calls here with it, and this Worker

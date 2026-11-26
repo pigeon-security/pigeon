@@ -941,7 +941,9 @@ impl Instances {
                             .sites
                             .first()
                             .ok_or_else(|| bad("missing protected site"))?;
-                        let key = crate::split::caller_key(cx.env).await?;
+                        // SITE_KEY, as pigeon-sites derives it (docs/plans/caller-keys.md,
+                        // step 4).
+                        let key = pigeon_core::secrets_store::site_key(cx.env).await?;
                         bindings.push(workers::Binding::Secret {
                             name: plan::ORIGIN_KEY_BINDING.into(),
                             text: pigeon_core::site_auth::origin_key(

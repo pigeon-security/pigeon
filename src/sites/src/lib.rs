@@ -39,22 +39,21 @@ const WORKER: &str = "pigeon-sites";
 pub struct SiteKeys {
     /// Its own caller key (`CALLER_KEY_OWN`), which signs every ask of core.
     pub sign: Vec<u8>,
-    /// The shared `CALLER_KEY`, kept only to derive the keys core derives from it too: a
-    /// protected site's origin key (`site_auth::origin_key`, also derived by core's
-    /// instance apply) and its sign-in session key. It signs nothing. Moving these off the
-    /// shared key is part of step 4.
+    /// `SITE_KEY` ([`pigeon_core::site_auth::SITE_KEY`]), only to derive the keys core derives
+    /// from it too: a protected site's origin key (`site_auth::origin_key`, also derived by
+    /// core's instance apply) and its sign-in session key. It signs nothing
+    /// (docs/plans/caller-keys.md, step 4).
     pub site: Vec<u8>,
 }
 
-/// [`SiteKeys`]; an error naming what is missing. Never falls back to the shared key to sign.
+/// [`SiteKeys`]; an error naming what is missing. Never falls back to another key.
 async fn site_keys(env: &Env) -> std::result::Result<SiteKeys, String> {
     let sign = pigeon_contract::own_key(env)
         .await
         .map_err(|e| e.to_string())?;
-    let site = pigeon_contract::keys::shared_key(env)
+    let site = pigeon_core::secrets_store::site_key(env)
         .await
-        .map_err(|e| e.to_string())?
-        .ok_or("CALLER_KEY is not bound or not set")?;
+        .map_err(|e| e.to_string())?;
     Ok(SiteKeys { sign, site })
 }
 
@@ -333,8 +332,8 @@ fn identify_worker() {
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     // Its own key signs every ask of core and checks core's calls first; the shared key checks
-    // them second and derives protected sites' keys. Without its own key it serves nothing
-    // (docs/plans/caller-keys.md, step 3).
+    // them second. SITE_KEY derives protected sites' keys. Without its own key or SITE_KEY it
+    // serves nothing (docs/plans/caller-keys.md, steps 3 and 4).
     let keys = match site_keys(&env).await {
         Ok(keys) => keys,
         Err(why) => {
@@ -359,7 +358,7 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     }
     let contract = pigeon_contract::Keys {
         own: keys.sign,
-        shared: Some(keys.site),
+        shared: pigeon_contract::keys::shared_key(&env).await?,
     };
     pigeon_contract::serve(req, &env, &Sites, &contract).await
 }

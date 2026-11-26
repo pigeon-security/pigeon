@@ -489,6 +489,7 @@ fn wanted(
                 "public_module": module_digest(bucket, jurisdiction.as_deref()),
                 "protected_module": protected_site_worker(),
                 "origin_key": ORIGIN_KEY_BINDING,
+                "origin_key_from": pigeon_core::site_auth::SITE_KEY,
                 "instance": instance.id,
                 "site": site.name,
                 "upstream": upstream,
