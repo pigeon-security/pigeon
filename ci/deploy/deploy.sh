@@ -17,8 +17,8 @@
 # an entry for a call wrangler makes after the upload, the first deploy uploads the new Worker
 # and is then refused at that call; the deploy is made once more, through the new allowlist. A
 # refused call before the upload cannot be fixed that way, and is reported. Cloudflare 10429
-# on the pre-upload Workers service lookup is retried with the same build, up to five attempts in
-# all, with jittered, doubling waits.
+# on one of wrangler's pre-upload reads of this Worker (its service, its secrets, ...) is retried
+# with the same build, up to five attempts in all, with jittered, doubling waits.
 #
 # Once deployed, it checks the apex serves this commit's architecture page (see `published`).
 #
@@ -125,16 +125,20 @@ deploy() {
     return "$rc"
 }
 
-# Wrangler 4.166.0 reads the Worker service and migration tag before uploading. The
-# proxy allows only GET on this exact path. A post-upload operation can also read it,
-# so require the service diagnostic and its own 10429 note before the upload marker.
+# Wrangler 4.166.0 reads the Worker before uploading: its service and migration tag, its
+# secrets, its settings. Any of those reads can be rate limited (10429) when several Workers
+# deploy at once. Retry only when the one API error is a 10429 on a path of this Worker
+# (`/workers/services/<script>` or `/workers/scripts/<script>/...`) and came before the upload
+# marker, so nothing was changed yet.
 rate_limited_before_upload() {
     [ -n "$account" ] && [ -n "$script" ] || return 1
-    awk -v service="/accounts/$account/workers/services/$script" '
+    awk -v service="/accounts/$account/workers/services/$script" \
+        -v scripts="/accounts/$account/workers/scripts/$script" '
         /^Uploaded / { uploaded = 1 }
         /A request to the Cloudflare API \(/ {
             api_errors++
-            reading = index($0, "(" service ") failed.") > 0
+            reading = index($0, "(" service ") failed.") > 0 \
+                || index($0, "(" scripts "/") > 0 || index($0, "(" scripts ") failed.") > 0
         }
         reading && /\[code: 10429\]/ { limited = 1 }
         END { exit !(api_errors == 1 && limited && !uploaded) }
@@ -199,7 +203,7 @@ if ! grep -q "pigeon's proxy does not allow" "$log"; then
             sample=$(od -An -N1 -tu1 /dev/urandom) || sample=0
             delay=$(( base + (base / 2) * sample / 255 ))
             attempt=$(( attempt + 1 ))
-            echo "Cloudflare rate limited the pre-upload Worker lookup; attempt $attempt in ${delay}s" >&2
+            echo "Cloudflare rate limited a pre-upload read of the Worker; attempt $attempt in ${delay}s" >&2
             sleep "$delay"
             if deploy "$attempt"; then
                 check

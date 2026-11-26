@@ -1039,7 +1039,7 @@ fn ci_warm_image_cache_is_latent_and_keyed_by_cargo_lock() {
 }
 
 #[test]
-fn deploy_runner_retries_only_the_pre_upload_service_rate_limit() {
+fn deploy_runner_retries_only_pre_upload_rate_limits_on_its_worker() {
     use std::os::unix::fs::PermissionsExt;
 
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -1103,10 +1103,12 @@ exit "$FAKE_SECOND_EXIT"
         )
     };
     let matching = error(target, 10429);
-    let wrong_path = error(
-        "/accounts/fixture-account/workers/scripts/fixture-worker/versions",
+    // Wrangler's other pre-upload reads of the Worker (its secrets, settings, ...) retry too.
+    let secrets = error(
+        "/accounts/fixture-account/workers/scripts/fixture-worker/secrets",
         10429,
     );
+    let wrong_path = error("/accounts/fixture-account/workers/subdomain", 10429);
     let wrong_worker = error(
         "/accounts/fixture-account/workers/services/another-worker",
         10429,
@@ -1130,6 +1132,7 @@ exit "$FAKE_SECOND_EXIT"
             5,
             4,
         ),
+        (secrets.as_str(), "1", "", "0", "200", 0, 2, 1),
         (wrong_path.as_str(), "1", "", "0", "200", 1, 1, 0),
         (wrong_worker.as_str(), "1", "", "0", "200", 1, 1, 0),
         (wrong_code.as_str(), "1", "", "0", "200", 1, 1, 0),
