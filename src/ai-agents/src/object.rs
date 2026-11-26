@@ -28,8 +28,6 @@ use crate::{Role, compare, estimate, handoff, prompts, sandbox};
 pub const BINDING: &str = "AI_AGENT_RUNS";
 /// The one index object.
 pub const INDEX: &str = "index";
-/// The Secrets Store binding of the key callers are signed with.
-pub const CALLER_KEY: &str = "CALLER_KEY";
 /// The service binding to core.
 pub const PLATFORM: &str = "PLATFORM";
 
@@ -89,14 +87,13 @@ pub async fn call(env: &Env, name: &str, op: &str, args: &Value) -> Result<Value
     durable::call(env, BINDING, name, op, args).await
 }
 
-/// The key callers are signed with: read in one place, so a per-Worker key drops in later.
-pub async fn caller_key(env: &Env) -> Result<String> {
-    let binding = env
-        .secret_store(CALLER_KEY)
-        .map_err(|_| bad("pigeon-ai-agents has no caller key: CALLER_KEY is not bound"))?;
-    pigeon_core::secrets_store::read(&binding)
-        .await?
-        .ok_or_else(|| bad("pigeon-ai-agents has no caller key: CALLER_KEY is not set"))
+/// The key this Worker signs its requests to core with: its own (`CALLER_KEY_OWN`), never the
+/// shared one, so core knows which Worker asked (docs/plans/caller-keys.md, step 3). None fails
+/// the call.
+pub async fn caller_key(env: &Env) -> Result<Vec<u8>> {
+    pigeon_contract::own_key(env)
+        .await
+        .map_err(|e| bad(format!("pigeon-ai-agents: {e}")))
 }
 
 /// Runs pigeon tool `tool` with `args` through core's gate, as `caller` (its JSON). A tool's
@@ -110,7 +107,7 @@ pub async fn dispatch(env: &Env, caller: &Value, tool: &str, args: &Value) -> Re
         "https://core",
         "dispatch",
         &json!({ "tool": tool, "args": args }),
-        Some((key.as_bytes(), caller)),
+        Some((&key, caller)),
         &nonce,
     )
     .await?
@@ -2837,7 +2834,7 @@ pub async fn grant(env: &Env, caller: &Value, start: &Value) -> Result<String> {
         "https://core",
         "credential",
         &asked,
-        Some((key.as_bytes(), caller)),
+        Some((&key, caller)),
         &nonce,
     )
     .await?
@@ -2866,7 +2863,7 @@ pub async fn revoke_grant(env: &Env, caller: &Value, run: &str) -> Result<u64> {
         "https://core",
         "credential_revoke",
         &revoke_request(run),
-        Some((key.as_bytes(), caller)),
+        Some((&key, caller)),
         &nonce,
     )
     .await?
@@ -2887,7 +2884,7 @@ pub async fn release_tokens(env: &Env, caller: &Value) -> Result<u64> {
         "https://core",
         "credential_release",
         &json!({ "kind": "scoped" }),
-        Some((key.as_bytes(), caller)),
+        Some((&key, caller)),
         &nonce,
     )
     .await?
@@ -2993,7 +2990,7 @@ pub async fn service_user(env: &Env, caller: &Value, key: &str) -> Result<Value>
         "https://core",
         "service_user",
         &json!({ "key": key }),
-        Some((k.as_bytes(), caller)),
+        Some((&k, caller)),
         &nonce,
     )
     .await?

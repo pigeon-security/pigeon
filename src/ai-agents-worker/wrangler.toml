@@ -28,15 +28,17 @@ command = "cargo install -q worker-build@0.9.0 && worker-build --release"
 [vars]
 CF_ACCOUNT_ID = "4f94676cb2cbe46fd985b089ca97ea27"
 
-# The key core signs callers with, made once by core's `workers_setup`.
+# The shared caller key, made once by core's `workers_setup`. This Worker still accepts core's
+# calls signed with it, after its own key, until step 4 of docs/plans/caller-keys.md; it no
+# longer signs with it.
 [[secrets_store_secrets]]
 binding = "CALLER_KEY"
 store_id = "5185c227b9f34b4291045175695b78ec"
 secret_name = "CALLER_KEY"
 
 # This Worker's own caller key, CALLER_KEY_AI_AGENTS, made by core's `workers_setup`
-# (docs/plans/caller-keys.md, step 2). Bound now and not yet read: this Worker still signs with
-# CALLER_KEY until step 3.
+# (docs/plans/caller-keys.md, step 3). Core signs its calls here with it, and this Worker
+# signs its requests to core with it; a missing one refuses both, with no fall-back.
 [[secrets_store_secrets]]
 binding = "CALLER_KEY_OWN"
 store_id = "5185c227b9f34b4291045175695b78ec"
