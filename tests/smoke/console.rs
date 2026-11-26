@@ -885,9 +885,9 @@ pub(super) fn hosted_views() -> Vec<(
         .iter()
         .flat_map(|c| c.sections().into_iter().map(|s| (c.name(), s)))
         .chain(
-            pigeon_capabilities::instances::instances_sections()
+            pigeon_capabilities::instances::multi_instance_sections()
                 .into_iter()
-                .map(|s| ("instances", s)),
+                .map(|s| ("multi-instance", s)),
         )
         .collect();
     for cap in pigeon_ai_agents::service::Agents.manifest().capabilities {

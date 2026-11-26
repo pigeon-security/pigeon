@@ -2,9 +2,10 @@
 //! Worker runs for an instance, where it may run (its [`Placement`]), what its data is about
 //! (its [`Scope`]) and which instances may enable it (its [`Availability`]). Every console view
 //! comes from a capability enabled on the selected instance: [`hosted_enabled`] says which of
-//! the hosted capabilities are, and `console_manifest` shows only their views. The capabilities
-//! an instance record enables by its own profile fields (publishing, storage, source, CI,
-//! Metrics, ingest) are `instances::tools::CAPABILITIES`. Pure: no I/O.
+//! the hosted capabilities are, and `console_manifest` shows only their views. An instance
+//! record lists the catalogue capabilities it enables in `capabilities`, checked by
+//! [`problems`]. The capabilities a record enables by its own profile fields (publishing,
+//! storage, source, CI, Metrics, ingest) are `instances::tools::CAPABILITIES`. Pure: no I/O.
 
 use serde::Serialize;
 
@@ -43,7 +44,8 @@ pub enum Availability {
 /// One capability of the catalogue.
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Entry {
-    /// The capability's name, as its hosted `Capability::name` and the console manifest give it.
+    /// The capability's name, as its hosted `Capability::name`, the console manifest and an
+    /// instance record's `capabilities` give it.
     pub name: &'static str,
     /// The placements it offers. More than one means an instance may choose.
     pub placements: &'static [Placement],
@@ -55,6 +57,12 @@ pub struct Entry {
     pub availability: Availability,
     /// The capabilities it needs enabled beside it.
     pub requires: &'static [&'static str],
+    /// Whether a linked instance's record may enable it yet. M4 turns it on one capability at a
+    /// time, each with what the instance's Worker needs to serve it and the scopes it needs.
+    pub linked: bool,
+    /// Whether every instance has it, so a record never lists it: `instances`, whose record,
+    /// plan and apply every instance needs.
+    pub always: bool,
 }
 
 impl Entry {
@@ -67,104 +75,83 @@ impl Entry {
 const INLINE: &[Placement] = &[Placement::Inline];
 const EITHER: &[Placement] = &[Placement::Inline, Placement::OwnWorker];
 
-const fn entry(
-    name: &'static str,
-    placements: &'static [Placement],
-    home: Placement,
-    home_worker: Option<&'static str>,
-    scope: Scope,
-    availability: Availability,
-    requires: &'static [&'static str],
-) -> Entry {
+/// An instance-scoped capability any instance may have, run inline, needing nothing beside it,
+/// not yet on linked instances: what each entry differs from.
+const BASE: Entry = Entry {
+    name: "",
+    placements: INLINE,
+    home: Placement::Inline,
+    home_worker: None,
+    scope: Scope::Instance,
+    availability: Availability::Any,
+    requires: &[],
+    linked: false,
+    always: false,
+};
+
+/// One that runs inline or in its own Worker, and on home runs in `worker`.
+const fn own(name: &'static str, worker: &'static str) -> Entry {
     Entry {
         name,
-        placements,
-        home,
-        home_worker,
-        scope,
-        availability,
-        requires,
+        placements: EITHER,
+        home: Placement::OwnWorker,
+        home_worker: Some(worker),
+        ..BASE
+    }
+}
+
+/// One about the platform as a whole, which only home may have.
+const fn platform(name: &'static str) -> Entry {
+    Entry {
+        name,
+        scope: Scope::Platform,
+        availability: Availability::HomeOnly,
+        ..BASE
     }
 }
 
 /// Every catalogued capability. A hosted capability missing here is treated as home-only.
 pub const CATALOGUE: &[Entry] = &[
-    entry(
-        "ai-agents",
-        EITHER,
-        Placement::OwnWorker,
-        Some("pigeon-ai-agents"),
-        Scope::Instance,
-        Availability::Any,
-        &[],
-    ),
-    entry(
-        "observability",
-        INLINE,
-        Placement::Inline,
-        None,
-        Scope::Instance,
-        Availability::Any,
-        &[],
-    ),
-    entry(
-        "secrets",
-        INLINE,
-        Placement::Inline,
-        None,
-        Scope::Instance,
-        Availability::Any,
-        &[],
-    ),
-    entry(
-        "proxy",
-        EITHER,
-        Placement::OwnWorker,
-        Some("pigeon-proxy"),
-        Scope::Instance,
-        Availability::Any,
-        &["secrets"],
-    ),
-    entry(
-        "models",
-        EITHER,
-        Placement::OwnWorker,
-        Some("pigeon-model-gateway"),
-        Scope::Instance,
-        Availability::Any,
-        &[],
-    ),
-    // Instances › All instances and Platform › Endpoints, and creating and linking instances.
-    entry(
-        "instances",
-        INLINE,
-        Placement::Inline,
-        None,
-        Scope::Platform,
-        Availability::HomeOnly,
-        &[],
-    ),
-    // Identity stays platform-level; per-instance membership is a later phase.
-    entry(
-        "users",
-        INLINE,
-        Placement::Inline,
-        None,
-        Scope::Platform,
-        Availability::HomeOnly,
-        &[],
-    ),
-    // The selected instance's own setup: on home the platform's, as before.
-    entry(
-        "architecture",
-        INLINE,
-        Placement::Inline,
-        None,
-        Scope::Instance,
-        Availability::Any,
-        &[],
-    ),
+    // Sessions › Live and Compare.
+    own("ai-agents", "pigeon-ai-agents"),
+    // Cost › 7 days, Today and 30 days (Metrics › Workers is the record's own `observability`).
+    Entry {
+        name: "observability",
+        ..BASE
+    },
+    // Access › Secrets.
+    Entry {
+        name: "secrets",
+        ..BASE
+    },
+    // Access › Tokens.
+    Entry {
+        requires: &["secrets"],
+        ..own("proxy", "pigeon-proxy")
+    },
+    // Platform › Models.
+    own("models", "pigeon-model-gateway"),
+    // Instances › All instances, Platform › Endpoints, and creating and linking instances.
+    platform(MULTI_INSTANCE),
+    // Access › People and Apps. Identity stays platform-level; per-instance membership is a
+    // later phase.
+    platform("users"),
+    // Platform › Architecture: the selected instance's own setup; on home the platform's.
+    Entry {
+        name: "architecture",
+        ..BASE
+    },
+    // No views of its own: every instance's record, `console_manifest`, plan, apply and retire.
+    Entry {
+        name: "instances",
+        linked: true,
+        always: true,
+        ..BASE
+    },
 ];
+
+/// The capability that works across instances: split out of `instances` (M2).
+pub const MULTI_INSTANCE: &str = "multi-instance";
 
 /// The catalogue's entry for `name`, if it has one.
 pub fn find(name: &str) -> Option<&'static Entry> {
@@ -178,10 +165,58 @@ pub fn is_home(record: &Instance) -> bool {
 
 /// Whether hosted capability `name` is enabled on `record`, so its views show in that
 /// instance's console. The home instance runs the platform, so every hosted capability is
-/// enabled there. Another instance enables none yet: per-capability enablement on linked
-/// instances is M4.
-pub fn hosted_enabled(record: &Instance, _name: &str) -> bool {
-    is_home(record)
+/// enabled there. Another instance has the ones every instance has, and those its record lists
+/// that may be on a linked instance yet ([`Entry::linked`]; none until M4); never a home-only
+/// one, nor one the catalogue does not list, whatever its record says.
+pub fn hosted_enabled(record: &Instance, name: &str) -> bool {
+    let home = is_home(record);
+    match find(name) {
+        None => home,
+        Some(e) if e.availability == Availability::HomeOnly => home,
+        Some(_) if home => true,
+        Some(e) => e.always || (e.linked && record.capabilities.contains_key(name)),
+    }
+}
+
+/// What is wrong with the catalogue capabilities `record` lists, for record validation: a name
+/// the catalogue does not know, one every instance has, a home-only one on a record that is not
+/// home, one a linked instance may not enable yet, or one without the capabilities it requires.
+pub fn problems(record: &Instance) -> Vec<String> {
+    let home = is_home(record);
+    let mut out = Vec::new();
+    for name in record.capabilities.keys() {
+        let Some(e) = find(name) else {
+            out.push(format!(
+                "The capability \"{name}\" is not one pigeon knows."
+            ));
+            continue;
+        };
+        if e.always {
+            out.push(format!(
+                "The capability \"{name}\" is on every instance; leave it out of capabilities."
+            ));
+            continue;
+        }
+        if e.availability == Availability::HomeOnly && !home {
+            out.push(format!(
+                "The capability \"{name}\" is home-only: only the home instance may enable it."
+            ));
+            continue;
+        }
+        if !home && !e.linked {
+            out.push(format!(
+                "The capability \"{name}\" cannot be enabled on a linked instance yet."
+            ));
+        }
+        for r in e.requires {
+            if !record.capabilities.contains_key(*r) {
+                out.push(format!(
+                    "The capability \"{name}\" needs \"{r}\" enabled beside it."
+                ));
+            }
+        }
+    }
+    out
 }
 
 /// The capabilities enabled on `record`, by name: those its profile fields enable (`scope`),

@@ -1,6 +1,6 @@
 # Capability scoping: every console view comes from a capability on the instance
 
-Status: **decided** (2026-11-26); M1 built. Code references are to main at the time of writing.
+Status: **decided** (2026-11-26); M1 and M2 built. Code references are to main at the time of writing.
 
 ## Goal
 
@@ -160,3 +160,12 @@ change on any instance.
   platform's commit and digest, drawn by the same `diagram`; `instance_tools` is kept.
   `capabilities_versions` answers `catalogue`. The recorded manifests now name each view's
   real capability (`ai-agents`, `observability`), which the shell contract checks.
+- 2026-11-26: M2 built. `multi-instance` is its own hosted capability (`instances::MultiInstance`,
+  on the platform Worker), with All instances and Endpoints; its tools (`instance_propose` of a
+  new id, `/linked/begin`) stay served by `instances` and `linked`, which only home's console
+  and the platform MCP endpoint reach, so no runtime gate was added beside record validation
+  and the manifest. The catalogue's entries carry `linked` (false for all but `instances` until
+  M4) and `always` (`instances`: every instance has it, so a record never lists it, and
+  validation refuses it there). The record's `capabilities` maps a name to settings that hold
+  nothing yet; `catalogue::problems` is part of `record::validate`. `requires` is checked on
+  every record, home included.

@@ -228,7 +228,7 @@
           "id": "list",
           "title": "All instances",
           "order": 10,
-          "capability": "instances",
+          "capability": "multi-instance",
           "upgrade": null
         }
       ]
@@ -257,7 +257,7 @@
           "id": "endpoints",
           "title": "Endpoints",
           "order": 30,
-          "capability": "instances",
+          "capability": "multi-instance",
           "upgrade": null
         }
       ]

@@ -141,7 +141,9 @@
       "home_worker": "pigeon-ai-agents",
       "scope": "instance",
       "availability": "any",
-      "requires": []
+      "requires": [],
+      "linked": false,
+      "always": false
     },
     {
       "name": "observability",
@@ -152,7 +154,9 @@
       "home_worker": null,
       "scope": "instance",
       "availability": "any",
-      "requires": []
+      "requires": [],
+      "linked": false,
+      "always": false
     },
     {
       "name": "secrets",
@@ -163,7 +167,9 @@
       "home_worker": null,
       "scope": "instance",
       "availability": "any",
-      "requires": []
+      "requires": [],
+      "linked": false,
+      "always": false
     },
     {
       "name": "proxy",
@@ -177,7 +183,9 @@
       "availability": "any",
       "requires": [
         "secrets"
-      ]
+      ],
+      "linked": false,
+      "always": false
     },
     {
       "name": "models",
@@ -189,10 +197,12 @@
       "home_worker": "pigeon-model-gateway",
       "scope": "instance",
       "availability": "any",
-      "requires": []
+      "requires": [],
+      "linked": false,
+      "always": false
     },
     {
-      "name": "instances",
+      "name": "multi-instance",
       "placements": [
         "inline"
       ],
@@ -200,7 +210,9 @@
       "home_worker": null,
       "scope": "platform",
       "availability": "home_only",
-      "requires": []
+      "requires": [],
+      "linked": false,
+      "always": false
     },
     {
       "name": "users",
@@ -211,7 +223,9 @@
       "home_worker": null,
       "scope": "platform",
       "availability": "home_only",
-      "requires": []
+      "requires": [],
+      "linked": false,
+      "always": false
     },
     {
       "name": "architecture",
@@ -222,7 +236,22 @@
       "home_worker": null,
       "scope": "instance",
       "availability": "any",
-      "requires": []
+      "requires": [],
+      "linked": false,
+      "always": false
+    },
+    {
+      "name": "instances",
+      "placements": [
+        "inline"
+      ],
+      "home": "inline",
+      "home_worker": null,
+      "scope": "instance",
+      "availability": "any",
+      "requires": [],
+      "linked": true,
+      "always": true
     }
   ]
 }

@@ -66,6 +66,13 @@ pub struct Instance {
     /// of records without it do not change.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<PlatformRef>,
+    /// The catalogue capabilities (`catalogue::CATALOGUE`) the instance enables beyond its
+    /// profile fields, by name, each with its settings (docs/plans/capability-scoping.md, M2).
+    /// Absent when empty, so the digests of records without it do not change. Checked by
+    /// `catalogue::problems`: no home-only capability off home, none on a linked instance until
+    /// M4 turns each on.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub capabilities: BTreeMap<String, CapabilitySettings>,
     /// The record version, which is not part of a diff.
     #[serde(default)]
     pub version: u64,
@@ -85,6 +92,11 @@ impl Toggle {
         matches!(self, Self::Enabled)
     }
 }
+
+/// One catalogue capability's settings on an instance record: none yet (its placement is M3).
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CapabilitySettings {}
 
 /// Where the home instance's platform (console, MCP, OAuth) lives.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -800,6 +812,7 @@ pub fn validate(instance: &Instance, others: &[Instance], rules: &Rules) -> Vec<
     check_home_hosts(instance, rules, &mut problems);
     check_platform(instance, rules, &mut problems);
     check_worker(instance, others, rules, &mut problems);
+    problems.extend(crate::catalogue::problems(instance));
     if let Some(pigeon_core::site_publish::Profile::Enabled { site }) = &instance.publishing {
         let named = instance.sites.iter().find(|record| record.name == *site);
         if named.is_none() {

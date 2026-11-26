@@ -15,7 +15,7 @@ use pigeon_capabilities::git_proxy::GitProxy;
 use pigeon_capabilities::github::Github;
 use pigeon_capabilities::images::Images;
 use pigeon_capabilities::ingest;
-use pigeon_capabilities::instances::Instances;
+use pigeon_capabilities::instances::{Instances, MultiInstance};
 use pigeon_capabilities::land::{self, Land};
 use pigeon_capabilities::linked::Linked;
 use pigeon_capabilities::mirror::{self, Mirror};
@@ -327,6 +327,8 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
                 site_name: "pigeon".into(),
             },
         }),
+        // Instances › All instances and Platform › Endpoints: the home-only side of instances.
+        Box::new(MultiInstance),
         // Passkeys for the sites pigeon-sites serves: its calls only.
         Box::new(SitePasskeys { zone: ZONE.into() }),
         // The console: one page at the root, signed in to once with a passkey.

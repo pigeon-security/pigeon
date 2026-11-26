@@ -283,9 +283,43 @@ impl Instances {
     }
 }
 
-/// The views instances adds on the home instance: Instances › All instances and Platform ›
-/// Endpoints.
-pub fn instances_sections() -> Vec<Section> {
+/// `multi-instance` (docs/plans/capability-scoping.md, M2): what the platform does across its
+/// instances, split out of [`Instances`]: Instances › All instances, Platform › Endpoints, and
+/// creating instances (`instance_propose` of a record with a new id) and linking them
+/// (`/linked/begin`). Home-only (`catalogue::MULTI_INSTANCE`): a record that is not home may
+/// not enable it, and the manifest never shows its views elsewhere. Its tools stay served by
+/// `instances` and `linked`, on the platform Worker, which only home's console reaches.
+pub struct MultiInstance;
+
+impl Capability for MultiInstance {
+    fn name(&self) -> &'static str {
+        crate::catalogue::MULTI_INSTANCE
+    }
+
+    fn versions(&self) -> Vec<pigeon_core::versions::Component> {
+        use pigeon_core::versions::{Component, Kind};
+        vec![Component::began(
+            crate::catalogue::MULTI_INSTANCE,
+            Kind::Capability,
+        )]
+    }
+
+    fn tools(&self) -> Vec<Tool> {
+        Vec::new()
+    }
+
+    fn call<'a>(&'a self, _cx: &'a Context<'a>, tool: &'a str, _args: &'a Value) -> Call<'a> {
+        Box::pin(async move { Err(unknown(tool)) })
+    }
+
+    fn sections(&self) -> Vec<Section> {
+        multi_instance_sections()
+    }
+}
+
+/// The views `multi-instance` adds on the home instance: Instances › All instances and
+/// Platform › Endpoints.
+pub fn multi_instance_sections() -> Vec<Section> {
     vec![
         Section {
             area: "instances",
@@ -988,10 +1022,6 @@ impl Capability for Instances {
                 other => Err(unknown(other)),
             }
         })
-    }
-
-    fn sections(&self) -> Vec<Section> {
-        instances_sections()
     }
 
     fn write_check<'a>(

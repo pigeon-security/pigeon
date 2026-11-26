@@ -375,8 +375,8 @@ fn manifest_platform_views() -> Vec<(
     for (name, sections) in [
         ("architecture", Architecture.sections()),
         (
-            "instances",
-            pigeon_capabilities::instances::instances_sections(),
+            "multi-instance",
+            pigeon_capabilities::instances::multi_instance_sections(),
         ),
     ] {
         out.extend(sections.into_iter().map(|s| (name, s)));
@@ -591,13 +591,13 @@ fn console_manifest_by_capability_per_instance_kind() {
                     "apps@users"
                 ]
             ),
-            ("instances", &["list@instances"]),
+            ("instances", &["list@multi-instance"]),
             (
                 "platform",
                 &[
                     "architecture@architecture",
                     "models@models",
-                    "endpoints@instances"
+                    "endpoints@multi-instance"
                 ]
             ),
         ])
@@ -714,6 +714,24 @@ fn capability_catalogue_as_decided() {
             &[],
         ),
         (
+            "multi-instance",
+            false,
+            Placement::Inline,
+            None,
+            Scope::Platform,
+            Availability::HomeOnly,
+            &[],
+        ),
+        (
+            "instances",
+            false,
+            Placement::Inline,
+            None,
+            Scope::Instance,
+            Availability::Any,
+            &[],
+        ),
+        (
             "users",
             false,
             Placement::Inline,
@@ -740,6 +758,12 @@ fn capability_catalogue_as_decided() {
         assert_eq!(e.scope, scope, "{name}");
         assert_eq!(e.availability, availability, "{name}");
         assert_eq!(e.requires, requires, "{name}");
+    }
+    // Until M4, no catalogue capability may be enabled on a linked instance's record; every
+    // instance has `instances`.
+    for e in CATALOGUE {
+        assert_eq!(e.linked, e.always, "{}", e.name);
+        assert_eq!(e.always, e.name == "instances", "{}", e.name);
     }
     for e in CATALOGUE {
         assert_eq!(
@@ -773,6 +797,148 @@ fn capability_catalogue_as_decided() {
     assert_eq!(
         recorded["catalogue"], v["catalogue"],
         "the recorded catalogue"
+    );
+}
+
+/// Capability scoping, M2: a record lists the catalogue capabilities it enables beyond its
+/// profile fields. Validation refuses an unknown one, `instances` (every instance has it), a
+/// home-only one (`multi-instance`, `users`) off home, any on a linked instance until M4, and
+/// one without what it requires. The manifest never shows a home-only capability's views off
+/// home, whatever the record says, and a record that lists none keeps its digest.
+#[test]
+fn capability_scoping_enforces_home_only() {
+    use pigeon_capabilities::catalogue::{MULTI_INSTANCE, hosted_enabled, problems};
+    use pigeon_capabilities::instances::record::{self, Instance, Rules};
+    use pigeon_capabilities::instances::{manifest::manifest, tools::Scope};
+
+    let home_json = json!({
+        "id": "example/platform", "title": "Example", "account": { "kind": "home" },
+        "zones": ["example.com"]
+    });
+    let linked_json = json!({ "id": "docs", "title": "Docs", "account": { "kind": "linked" } });
+    let with = |base: &Value, caps: Value| -> Instance {
+        let mut v = base.clone();
+        v["capabilities"] = caps;
+        serde_json::from_value(v).unwrap()
+    };
+
+    // Absent when empty: the stored records' digests do not change.
+    let plain: Instance = serde_json::from_value(home_json.clone()).unwrap();
+    assert!(
+        serde_json::to_value(&plain)
+            .unwrap()
+            .get("capabilities")
+            .is_none()
+    );
+    let empty = with(&home_json, json!({}));
+    assert_eq!(record::digest(&empty), record::digest(&plain));
+    // Settings are none yet: an unknown setting does not parse.
+    let mut bad = home_json.clone();
+    bad["capabilities"] = json!({ "users": { "placement": "inline" } });
+    assert!(serde_json::from_value::<Instance>(bad).is_err());
+
+    // Home may list the home-only ones, and the others with what they require.
+    let home = with(
+        &home_json,
+        json!({ "multi-instance": {}, "users": {}, "secrets": {}, "proxy": {} }),
+    );
+    assert_eq!(problems(&home), Vec::<String>::new());
+    let home_problems = |caps: Value| problems(&with(&home_json, caps));
+    assert_eq!(
+        home_problems(json!({ "proxy": {} })),
+        ["The capability \"proxy\" needs \"secrets\" enabled beside it."]
+    );
+    assert_eq!(
+        home_problems(json!({ "instances": {} })),
+        ["The capability \"instances\" is on every instance; leave it out of capabilities."]
+    );
+    assert_eq!(
+        home_problems(json!({ "teleport": {} })),
+        ["The capability \"teleport\" is not one pigeon knows."]
+    );
+
+    // A linked record may not enable a home-only one, nor any other yet.
+    let linked = |caps: Value| problems(&with(&linked_json, caps));
+    for name in ["multi-instance", "users"] {
+        assert_eq!(
+            linked(json!({ name: {} })),
+            [format!(
+                "The capability \"{name}\" is home-only: only the home instance may enable it."
+            )]
+        );
+    }
+    for name in [
+        "ai-agents",
+        "observability",
+        "secrets",
+        "models",
+        "architecture",
+    ] {
+        assert_eq!(
+            linked(json!({ name: {} })),
+            [format!(
+                "The capability \"{name}\" cannot be enabled on a linked instance yet."
+            )]
+        );
+    }
+    assert_eq!(linked(json!({ "proxy": {}, "secrets": {} })).len(), 2);
+    assert!(linked(json!({})).is_empty());
+
+    // Record validation carries them.
+    let rules = Rules {
+        platform_zone: "pigeon.dev",
+        reserved_labels: &[],
+        reserved_workers: &[],
+        platform_worker: "pigeon-platform",
+    };
+    let refused = with(&linked_json, json!({ MULTI_INSTANCE: {} }));
+    assert!(
+        record::validate(&refused, &[], &rules)
+            .iter()
+            .any(|p| p.contains("home-only"))
+    );
+    let plain_linked: Instance = serde_json::from_value(linked_json.clone()).unwrap();
+    assert!(
+        !record::validate(&plain_linked, &[], &rules)
+            .iter()
+            .any(|p| p.contains("capability"))
+    );
+
+    // Which hosted capabilities are enabled where: every one on home; off home, only
+    // `instances`, whatever the record lists.
+    let listed = with(
+        &linked_json,
+        json!({ "multi-instance": {}, "users": {}, "secrets": {}, "architecture": {} }),
+    );
+    for name in [
+        "multi-instance",
+        "users",
+        "secrets",
+        "architecture",
+        "ai-agents",
+        "approvals",
+    ] {
+        assert!(hosted_enabled(&plain, name), "{name} on home");
+        assert!(!hosted_enabled(&listed, name), "{name} off home");
+    }
+    assert!(hosted_enabled(&listed, "instances"));
+
+    // The manifest of that record: no hosted capability's views, home-only least of all.
+    let hosted = crate::console::hosted_views();
+    let scope = Scope::new(&listed).unwrap();
+    let m = manifest(&listed, &scope, &hosted, &[], None);
+    assert_eq!(manifest_areas(&m), ["inbox", "overview", "capabilities"]);
+    let scope = Scope::new(&plain).unwrap();
+    let m = manifest(&plain, &scope, &hosted, &[], None);
+    assert_eq!(manifest_views(&m, "instances"), ["list"]);
+    assert_eq!(
+        m["areas"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["id"] == "instances")
+            .unwrap()["views"][0]["capability"],
+        MULTI_INSTANCE
     );
 }
 
