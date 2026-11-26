@@ -325,9 +325,8 @@ instance provider connections are not configured. Scoped status runs in core
 and reads no shared platform credential. The existing gateway's organization,
 project, and key slots are shared platform credentials. Linked instances cannot
 use those provider tools, including through the generic `call` tool or an
-`instance` argument on global MCP. An explicit opt-in on the approved home
-record enables those existing tools on global MCP. Its scoped endpoint also
-offers only setup status.
+`instance` argument on global MCP. The old shared tools were retired with the home Worker. Opting in exposes
+setup status on the scoped endpoint.
 
 No provider connection, secret slot, compute permission, or linked-account
 deployment is created by enabling the capability. Instance-specific provider
@@ -347,3 +346,21 @@ catalogue also models `own_worker`, but M5 validation must decline it until
 a linked-account build is registered, the signed instance context is
 verified in that Worker, and it resolves provider credentials in the
 approved instance account. The legacy home wrapper is not that build.
+
+## DigitalOcean account connection, phase 1
+
+DigitalOcean is opt-in for each instance and depends on Cloud Gateway being
+enabled on the same instance. The approved record carries the expected
+DigitalOcean account UUID. The credential is scoped to that instance and
+provider, and managed separately from the approved record.
+
+Verification uses the inline Cloud Gateway and its DigitalOcean adapter.
+The only provider request is the read-only account endpoint. Resolve the
+approved target and credential on the server before any provider request.
+A match confirms the token belongs to the approved account. Provider payloads
+and secret values are excluded from status and error responses.
+
+Land the capability off by default, then use a separate approved opt-in and
+credential setup to verify one account on `willowgraysen`. Test home and
+cross-instance denial before treating the canary as complete. Spaces access,
+Droplet provisioning, and ingestion are later phases.
