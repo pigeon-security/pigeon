@@ -62,6 +62,7 @@ impl worker::DurableObject for CiScheduler {
 #[worker::durable_object]
 pub struct Lander {
     inner: pigeon_capabilities::land::Lander,
+    env: Env,
 }
 
 impl worker::DurableObject for Lander {
@@ -72,17 +73,24 @@ impl worker::DurableObject for Lander {
             sources: SOURCES,
             bindings: settings::BINDINGS,
         };
-        let inner = pigeon_capabilities::land::Lander::new(state, env, settings::land(), hosting)
-            .expect("the Lander's migrations apply");
-        Self { inner }
+        let inner =
+            pigeon_capabilities::land::Lander::new(state, env.clone(), settings::land(), hosting)
+                .expect("the Lander's migrations apply");
+        Self { inner, env }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
-        self.inner.fetch(req).await
+        let answer = self.inner.fetch(req).await;
+        pigeon_capabilities::ledger::flush_calls(&self.env, false).await;
+        answer
     }
 
+    /// A landing's Artifacts and deploy calls are counted in this object's isolate, which may
+    /// not be the Worker's: its counts go to the ledger from here.
     async fn alarm(&self) -> Result<Response> {
-        self.inner.alarm().await
+        let answer = self.inner.alarm().await;
+        pigeon_capabilities::ledger::flush_calls(&self.env, false).await;
+        answer
     }
 }
 
@@ -172,6 +180,13 @@ use worker::{
 
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, ctx: WorkerContext) -> Result<Response> {
+    let answer = route(req, env.clone(), &ctx).await;
+    // This isolate's Cloudflare API call counts, at most once a minute, after the answer.
+    ctx.wait_until(async move { pigeon_capabilities::ledger::flush_calls(&env, false).await });
+    answer
+}
+
+async fn route(req: Request, env: Env, ctx: &WorkerContext) -> Result<Response> {
     let path = req.path();
     let host = req.url()?.host_str().unwrap_or_default().to_string();
     // A capability Worker asking core, over its `PLATFORM` binding; never from the internet,
@@ -195,7 +210,7 @@ async fn fetch(req: Request, env: Env, ctx: WorkerContext) -> Result<Response> {
             caller: None,
             caller_note: None,
             instance: None,
-            worker: Some(&ctx),
+            worker: Some(ctx),
         };
         return split::serve(req, &cx).await;
     }
@@ -225,7 +240,7 @@ async fn fetch(req: Request, env: Env, ctx: WorkerContext) -> Result<Response> {
             caller: None,
             caller_note: None,
             instance: None,
-            worker: Some(&ctx),
+            worker: Some(ctx),
         };
         return c.fetch(&cx, req).await;
     }
@@ -240,7 +255,8 @@ async fn fetch(req: Request, env: Env, ctx: WorkerContext) -> Result<Response> {
 
 /// Queue messages: each capability that wants one of the batch acts once. A failure fails the
 /// batch, so the queue retries it.
-/// The minute's cron processes pending site deploys and sweeps Pigeon's API tokens.
+/// The minute's cron processes pending site deploys and sweeps Pigeon's API tokens, then sends
+/// this isolate's Cloudflare API call counts to the ledger.
 #[event(scheduled)]
 async fn scheduled(_event: worker::ScheduledEvent, env: Env, _ctx: worker::ScheduleContext) {
     sweep_tokens(&env).await;
@@ -249,6 +265,7 @@ async fn scheduled(_event: worker::ScheduledEvent, env: Env, _ctx: worker::Sched
         Ok(_) => {}
         Err(e) => console_error!("github deploys failed: {e}"),
     }
+    pigeon_capabilities::ledger::flush_calls(&env, true).await;
 }
 
 /// Reconciles pending/released leases and expired tokens in the account ledger.

@@ -280,3 +280,26 @@ Workers deployed (CI job `VLX0RWKanYN05cYfZiqqIq`, about 07:47–08:00 UTC), and
 retries added to the count. The deploy proxy now remembers each successful answer to that
 lookup for a day and answers a `10429` on it with the remembered one, marked
 `x-pigeon-served-from-cache: 10429` (docs/proxies.md, "The Worker lookup, remembered").
+
+Three more changes followed the same day:
+
+- **Calls are counted.** `pigeon_core::cloudflare` counts every call by method, path template
+  (the query string cut off, each id or name `{id}`: `/accounts/{id}/tokens/{id}`) and status
+  class (2xx, 4xx, `429` for HTTP 429 or code 10429/971, 5xx, other, `error` for no answer)
+  in the isolate's memory (`pigeon_core::api_calls`); the GraphQL call in `observability` counts
+  too. Core stores the counts per hour in the token ledger's Durable Object (table `api_calls`,
+  a week and a day kept): the ledger drains its own isolate after each request, the platform
+  Worker's fetch handler and the Lander send theirs at most once a minute (`ledger::flush_calls`),
+  and the cron sends its isolate's every run. `cloudflare_calls {hours, limit}` reads them, most
+  called path first. Only core reports: the capability Workers (sites, the gateways, the proxy,
+  AI agents) count in their own isolates but have no store yet; reporting theirs over `PLATFORM`
+  is a later step.
+- **One token per summary.** `observability_summary` mints one token holding Account Analytics
+  Read, Workers Observability Write and Billing Read for its three Cloudflare sources, and revokes
+  it once they have answered or failed (`observability::with_one_token`): one create and one
+  delete instead of three each.
+- **The Artifacts repository lookup is kept.** `artifacts::session` (each git proxy request, the
+  Lander's merges) keeps the repository it looked up for five minutes per isolate
+  (`artifacts::RepoCache`), forgotten when the lookup finds nothing, when minting the git token
+  fails, or when the git proxy gets a 404 from the remote. That saves the namespace and repository
+  list calls (two or three) per request; the git token is still minted and revoked each time.

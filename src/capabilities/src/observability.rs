@@ -589,10 +589,22 @@ async fn graphql(token: &str, body: &Value) -> Result<Value> {
     init.with_headers(headers);
     init.with_body(Some(body.to_string().into()));
     let request = Request::new_with_init("https://api.cloudflare.com/client/v4/graphql", &init)?;
-    let mut response = Fetch::Request(request).send().await?;
+    let mut response = match Fetch::Request(request).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            pigeon_core::api_calls::record("POST", "/graphql", None, &[]);
+            return Err(e);
+        }
+    };
     let status = response.status_code();
-    let v: Value = serde_json::from_str(&response.text().await?)
-        .map_err(|e| Error::RustError(format!("graphql: {status}: not JSON: {e}")))?;
+    let parsed = serde_json::from_str::<Value>(&response.text().await?);
+    let codes = parsed
+        .as_ref()
+        .map(pigeon_core::api_calls::codes)
+        .unwrap_or_default();
+    pigeon_core::api_calls::record("POST", "/graphql", Some(status), &codes);
+    let v: Value =
+        parsed.map_err(|e| Error::RustError(format!("graphql: {status}: not JSON: {e}")))?;
     if v["errors"].as_array().is_some_and(|e| !e.is_empty()) {
         return Err(Error::RustError(format!(
             "graphql: {status}: {}",
@@ -629,6 +641,12 @@ impl Capability for Observability {
                 "1.1.0",
                 "`containers_images` moved here from the `images` capability, which is gone; the \
                  tool's name, schema and answer are unchanged.",
+            )
+            .entry(
+                "1.2.0",
+                "`cloudflare_calls`: core's Cloudflare API calls per path template and status \
+                 class. `observability_summary` mints one token for its three Cloudflare sources \
+                 instead of one each.",
             ),
         ]
     }
@@ -711,6 +729,22 @@ impl Capability for Observability {
                 }),
             },
             Tool {
+                name: CALLS_TOOL,
+                description: "Read-only. Core's Cloudflare API calls (the pigeon-platform Worker \
+                              and its Durable Objects) over the last `hours`: totals by status \
+                              class (2xx, 4xx, 429 for a rate-limit refusal or code 10429, 5xx, \
+                              other, error for no answer), and each method and path template \
+                              (ids as `{id}`, no query strings) with its count per class, most \
+                              called first. Counted per isolate and stored at most a minute late.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "hours": { "type": "integer", "description": "Window, 1 to 168; 24 by default." },
+                        "limit": { "type": "integer", "description": "Most paths listed, 1 to 200; 50 by default." }
+                    }
+                }),
+            },
+            Tool {
                 name: "cost_daily",
                 description: "Read-only. Daily cost buckets in US dollars: Cloudflare lines and AI \
                               gateway cost by gateway, model and role; promotional grants and net cost. `range` is today, 7d or all.",
@@ -731,6 +765,7 @@ impl Capability for Observability {
                 images::TOOL => return images::containers_images(cx).await,
                 "cost_daily" => return crate::cost::cost_daily(cx, args).await,
                 "tokens_status" => return tokens_status(cx, args).await,
+                CALLS_TOOL => return cloudflare_calls(cx, args).await,
                 "observability_errors" => return errors(self, cx, args).await,
                 "observability_monitors_plan" if args["check"] == true => {
                     return monitors_check(cx).await;
@@ -2101,6 +2136,85 @@ pub fn ci_price(seconds: &BTreeMap<String, f64>) -> (f64, BTreeMap<String, f64>,
     (total, by_class, unpriced)
 }
 
+/// The permissions of the one token `observability_summary` mints for its Cloudflare sources:
+/// metrics (GraphQL), logs (the telemetry query) and billable usage.
+pub const SUMMARY_PERMISSIONS: [&str; 3] = [
+    ANALYTICS_PERMISSION,
+    OBSERVABILITY_PERMISSION,
+    BILLING_PERMISSION,
+];
+
+/// Mints and revokes the one token a read shares among its sources: [`with_one_token`]'s seam,
+/// so the smoke suite counts the mints.
+#[allow(async_fn_in_trait)] // Workers futures are not `Send`; nothing here needs it.
+pub trait OneToken {
+    /// A token holding every one of `permissions`: its id, `None` for a linked account's own
+    /// token (never revoked), and its value.
+    async fn open(&self, permissions: &[&str]) -> Result<(Option<String>, String)>;
+    /// Revokes token `id`.
+    async fn close(&self, id: &str) -> Result<()>;
+}
+
+/// [`OneToken`] for a tool call: minted through the account's token ledger, living
+/// [`TOKEN_TTL`], as [`Scoped::open_for`] mints.
+struct MintedTokens<'a, 'b>(&'b Context<'a>);
+
+impl OneToken for MintedTokens<'_, '_> {
+    async fn open(&self, permissions: &[&str]) -> Result<(Option<String>, String)> {
+        let account = self.0.account;
+        if let Some(bearer) = account.bearer.as_deref() {
+            return Ok((None, bearer.to_string()));
+        }
+        let request = pigeon_core::tokens::MintRequest {
+            ttl_secs: TOKEN_TTL,
+            ..pigeon_core::tokens::MintRequest::new(
+                "observability",
+                vec![Policy::new(Scope::Account, permissions)],
+            )
+        };
+        let minted = within(pigeon_core::tokens::mint_for(account, &request)).await?;
+        Ok((Some(minted.id), minted.value))
+    }
+
+    async fn close(&self, id: &str) -> Result<()> {
+        pigeon_core::tokens::revoke_for(self.0.account, id).await
+    }
+}
+
+/// What [`with_one_token`] did: the work's answer, and why the token's revoke failed, if it did.
+pub struct Shared<T> {
+    pub value: T,
+    pub revoke_failed: Option<String>,
+}
+
+/// Mints one token holding all of `permissions`, runs `work` with its value and revokes it,
+/// whatever `work` answered: the work's sources report their own failures in `T`. Fails only
+/// when the token could not be minted.
+pub async fn with_one_token<A, T, W, WF>(
+    api: &A,
+    permissions: &[&str],
+    work: W,
+) -> std::result::Result<Shared<T>, String>
+where
+    A: OneToken,
+    W: FnOnce(String) -> WF,
+    WF: std::future::Future<Output = T>,
+{
+    let (id, value) = api
+        .open(permissions)
+        .await
+        .map_err(|e| format!("the token was not minted: {e}"))?;
+    let value = work(value).await;
+    let revoke_failed = match id {
+        Some(id) => api.close(&id).await.err().map(|e| e.to_string()),
+        None => None,
+    };
+    Ok(Shared {
+        value,
+        revoke_failed,
+    })
+}
+
 /// Opens a token for one source, living five minutes.
 async fn open<'a>(cx: &Context<'a>, permission: &str) -> Result<Scoped<'a>> {
     Scoped::open_for(
@@ -2147,6 +2261,26 @@ where
     })
     .await;
     outcome.map_err(hide)
+}
+
+/// The tool that reads core's Cloudflare API call counts.
+pub const CALLS_TOOL: &str = "cloudflare_calls";
+
+/// `cloudflare_calls`'s `hours` and `limit`, defaulted and clamped.
+pub fn calls_args(args: &Value) -> (u64, usize) {
+    let hours = args["hours"].as_u64().unwrap_or(24).clamp(1, 168);
+    let limit = args["limit"].as_u64().unwrap_or(50).clamp(1, 200) as usize;
+    (hours, limit)
+}
+
+/// `cloudflare_calls`: this isolate's counts are sent first, so the answer includes them.
+async fn cloudflare_calls(cx: &Context<'_>, args: &Value) -> Result<Value> {
+    let (hours, limit) = calls_args(args);
+    crate::ledger::flush_calls(cx.env, true).await;
+    let rows = crate::ledger::calls(cx.env, hours).await?;
+    let mut out = pigeon_core::api_calls::view(&rows, hours, limit);
+    out["counted_in"] = json!("pigeon-platform (core) and its Durable Objects");
+    Ok(out)
 }
 
 /// `tokens_status`: the live-token gauge, after setting the soft ceiling when `soft_ceiling` is
@@ -2232,30 +2366,39 @@ async fn summary(this: &Observability, cx: &Context<'_>, hours: u64) -> Result<V
     let id = cx.account.id.as_str();
     let hide = |e: Error| e.to_string().replace(id, "{account}");
 
-    // Metrics: Account Analytics Read.
-    let metrics_work = with_token(cx, ANALYTICS_PERMISSION, |t| async move {
-        graphql(&t, &graphql_query(id, &iso(from), &iso(to))).await
-    });
-    // Logs: Workers Observability Write, the only permission the query endpoint takes, for two
-    // POSTs: the error lines, and which Workers have any events at all.
-    let logs_work = with_token(cx, OBSERVABILITY_PERMISSION, |t| async move {
-        let path = format!("/accounts/{id}/workers/observability/telemetry/query");
-        let errors = telemetry_query(&format!("pigeon-{}", to as i64), from as i64, to as i64);
-        let services =
-            telemetry_services_query(&format!("pigeon-s-{}", to as i64), from as i64, to as i64);
-        let post = |body: Value| {
-            let (t, path) = (t.clone(), path.clone());
-            async move {
-                pigeon_core::cloudflare::call_fresh(&t, Method::Post, &path, Some(&body)).await
-            }
-        };
-        let (errors, services) = futures_util::future::join(post(errors), post(services)).await;
-        Ok(json!({ "errors": errors?, "services": services? }))
-    });
-    // Billable usage: Billing Read.
-    let billing_work = with_token(cx, BILLING_PERMISSION, |t| async move {
-        let path = format!("/accounts/{id}/billable-usage");
-        pigeon_core::cloudflare::call_fresh(&t, Method::Get, &path, None).await
+    // The three Cloudflare sources share one token holding all of SUMMARY_PERMISSIONS, minted
+    // once and revoked once they have answered or failed.
+    let minted = MintedTokens(cx);
+    let cloudflare_work = with_one_token(&minted, &SUMMARY_PERMISSIONS, |t| async move {
+        // Metrics: Account Analytics Read.
+        let query = graphql_query(id, &iso(from), &iso(to));
+        let metrics = within(graphql(&t, &query));
+        // Logs: Workers Observability Write, the only permission the query endpoint takes, for
+        // two POSTs: the error lines, and which Workers have any events at all.
+        let logs = within(async {
+            let path = format!("/accounts/{id}/workers/observability/telemetry/query");
+            let errors = telemetry_query(&format!("pigeon-{}", to as i64), from as i64, to as i64);
+            let services = telemetry_services_query(
+                &format!("pigeon-s-{}", to as i64),
+                from as i64,
+                to as i64,
+            );
+            let post = |body: Value| {
+                let (t, path) = (t.clone(), path.clone());
+                async move {
+                    pigeon_core::cloudflare::call_fresh(&t, Method::Post, &path, Some(&body)).await
+                }
+            };
+            let (errors, services) = futures_util::future::join(post(errors), post(services)).await;
+            Ok(json!({ "errors": errors?, "services": services? }))
+        });
+        // Billable usage: Billing Read.
+        let billing = within(async {
+            let path = format!("/accounts/{id}/billable-usage");
+            pigeon_core::cloudflare::call_fresh(&t, Method::Get, &path, None).await
+        });
+        let (m, l, b) = futures_util::future::join3(metrics, logs, billing).await;
+        (m.map_err(hide), l.map_err(hide), b.map_err(hide))
     });
     let deploys_work = within(crate::land::deploys_since(cx.env, from as i64));
     let (models_args, agents_args, ci_args) = (
@@ -2268,9 +2411,9 @@ async fn summary(this: &Observability, cx: &Context<'_>, hours: u64) -> Result<V
     let ci_work = within(crate::dispatch(cx, "ci_jobs", &ci_args));
     let tokens_work = within(crate::ledger::gauge(cx.env));
 
-    let ((metrics_v, logs_v, billing_v), (deploys_v, models_v, agents_v, ci_v, tokens_v)) =
+    let (cloudflare_v, (deploys_v, models_v, agents_v, ci_v, tokens_v)) =
         futures_util::future::join(
-            futures_util::future::join3(metrics_work, logs_work, billing_work),
+            cloudflare_work,
             futures_util::future::join5(
                 deploys_work,
                 models_work,
@@ -2280,6 +2423,18 @@ async fn summary(this: &Observability, cx: &Context<'_>, hours: u64) -> Result<V
             ),
         )
         .await;
+    let (metrics_v, logs_v, billing_v) = match cloudflare_v {
+        Ok(shared) => {
+            if let Some(why) = shared.revoke_failed {
+                unavailable.push(missing("token revoke", &why.replace(id, "{account}")));
+            }
+            shared.value
+        }
+        Err(why) => {
+            let why = why.replace(id, "{account}");
+            (Err(why.clone()), Err(why.clone()), Err(why))
+        }
+    };
     let tokens = match tokens_v {
         Ok(g) => gauge_view(&g),
         Err(e) => {

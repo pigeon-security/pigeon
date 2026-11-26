@@ -3226,3 +3226,174 @@ fn core_architecture_check_is_clean_on_the_real_model() {
         assert!(rules.contains(&rule), "{rule}: {rules:?}");
     }
 }
+
+/// Every Cloudflare API call is counted by method, path template and status class: ids, names
+/// and query strings never reach a template, and a rate-limit refusal is its own class.
+#[test]
+fn core_cloudflare_calls_counted_by_template_and_class() {
+    use pigeon_core::api_calls::{class, codes, drain, due, record, restore, template};
+    for (path, want) in [
+        (
+            "/accounts/4f94676cb2cbe46fd985b089ca97ea27/tokens/0123abcd",
+            "/accounts/{id}/tokens/{id}",
+        ),
+        (
+            "/accounts/acc/tokens?page=2&per_page=50",
+            "/accounts/{id}/tokens",
+        ),
+        (
+            "/accounts/acc/tokens/permission_groups",
+            "/accounts/{id}/tokens/permission_groups",
+        ),
+        (
+            "/accounts/acc/tokens/verify",
+            "/accounts/{id}/tokens/verify",
+        ),
+        (
+            "/accounts/acc/artifacts/namespaces/pigeon/repos/blog/tokens/t1",
+            "/accounts/{id}/artifacts/namespaces/{id}/repos/{id}/tokens/{id}",
+        ),
+        (
+            "/accounts/acc/workers/observability/telemetry/query",
+            "/accounts/{id}/workers/observability/telemetry/query",
+        ),
+        (
+            "/accounts/acc/workers/services/pigeon-platform",
+            "/accounts/{id}/workers/services/{id}",
+        ),
+        ("/zones?name=pigeon.dev", "/zones"),
+        (
+            "/zones/023e105f4ecef8ad9ca31a8372d0c353/dns_records",
+            "/zones/{id}/dns_records",
+        ),
+        (
+            "/accounts/acc/r2/buckets/site/objects/img/a.png",
+            "/accounts/{id}/r2/buckets/{id}/objects/{id}",
+        ),
+        (
+            "/accounts/acc/billable-usage",
+            "/accounts/{id}/billable-usage",
+        ),
+        ("/graphql", "/graphql"),
+    ] {
+        assert_eq!(template(path), want, "{path}");
+    }
+    // An unknown segment holding anything but lowercase words is an id all the same.
+    assert_eq!(
+        template("/accounts/a/widgets/Secret.Name@x"),
+        "/accounts/{id}/widgets/{id}"
+    );
+
+    assert_eq!(class(Some(200), &[]), "2xx");
+    assert_eq!(class(Some(404), &[7003]), "4xx");
+    assert_eq!(class(Some(429), &[]), "429");
+    assert_eq!(class(Some(400), &[10429]), "429");
+    assert_eq!(class(Some(503), &[]), "5xx");
+    assert_eq!(class(None, &[]), "error");
+    let refused =
+        json!({ "success": false, "errors": [{ "code": 10429, "message": "slow down" }] });
+    assert_eq!(codes(&refused), vec![10429]);
+
+    // Counted per method, template and class; drained once; put back when the store fails.
+    record("GET", "/accounts/a/tokens?page=1", Some(200), &[]);
+    record("GET", "/accounts/a/tokens?page=2", Some(200), &[]);
+    record("GET", "/accounts/a/workers/services/w", Some(400), &[10429]);
+    record("DELETE", "/accounts/a/tokens/t9", Some(404), &[]);
+    assert!(due(120_000.0));
+    let counted = drain(120_000.0);
+    let seen: Vec<(&str, &str, &str, u64)> = counted
+        .iter()
+        .map(|c| (c.method.as_str(), c.path.as_str(), c.class.as_str(), c.n))
+        .collect();
+    assert_eq!(
+        seen,
+        vec![
+            ("GET", "/accounts/{id}/tokens", "2xx", 2),
+            ("DELETE", "/accounts/{id}/tokens/{id}", "4xx", 1),
+            ("GET", "/accounts/{id}/workers/services/{id}", "429", 1),
+        ]
+    );
+    assert!(drain(120_001.0).is_empty());
+    restore(counted.clone());
+    // Flushed less than a minute ago: not due yet, though counts wait.
+    assert!(!due(150_000.0));
+    assert!(due(180_001.0));
+    assert_eq!(drain(180_001.0), counted);
+    // No template carries the account, a token id or a query value.
+    let text = serde_json::to_string(&counted).unwrap();
+    for leak in ["t9", "page", "?", "/a/"] {
+        assert!(!text.contains(leak), "{leak} in {text}");
+    }
+}
+
+/// `session`'s repository lookup is kept for five minutes per repository, and forgotten when the
+/// lookup finds nothing, when the work after it fails, or when it is asked to be.
+#[test]
+fn core_artifacts_repo_lookup_is_kept_and_forgotten() {
+    use pigeon_core::artifacts::{REPO_KEPT_MS, Repo, RepoCache, with_cached_repo};
+    use std::cell::Cell;
+    let cache = RepoCache::default();
+    let lookups = Cell::new(0u32);
+    let found = || async {
+        lookups.set(lookups.get() + 1);
+        Ok(Some(Repo {
+            namespace: "pigeon".into(),
+            name: "blog".into(),
+            remote: format!("https://artifacts.example/blog-{}", lookups.get()),
+            default_branch: Some("main".into()),
+        }))
+    };
+    let mint = |r: Repo| async move { Ok(format!("token for {}", r.remote)) };
+    let key = RepoCache::key("acc", "pigeon", "blog");
+    let run = |now: i64| token_block_on(with_cached_repo(&cache, &key, now, found, mint));
+
+    // Two sessions within five minutes look the repository up once.
+    let (a, ta) = run(TOKEN_NOW_MS).unwrap();
+    let (b, _) = run(TOKEN_NOW_MS + 60_000).unwrap();
+    assert_eq!(
+        (a.remote.as_str(), b.remote.as_str(), lookups.get()),
+        (
+            "https://artifacts.example/blog-1",
+            "https://artifacts.example/blog-1",
+            1
+        )
+    );
+    assert_eq!(ta, "token for https://artifacts.example/blog-1");
+    // Five minutes on, it is looked up again.
+    let (c, _) = run(TOKEN_NOW_MS + REPO_KEPT_MS).unwrap();
+    assert_eq!(
+        (c.remote.as_str(), lookups.get()),
+        ("https://artifacts.example/blog-2", 2)
+    );
+
+    // The work failing (a 404 on the git token's mint) forgets it.
+    let gone =
+        |_: Repo| async { Err::<String, _>(worker::Error::RustError("/x: 404: no repo".into())) };
+    let now = TOKEN_NOW_MS + REPO_KEPT_MS + 1;
+    assert!(token_block_on(with_cached_repo(&cache, &key, now, found, gone)).is_err());
+    assert_eq!(
+        lookups.get(),
+        2,
+        "the kept repository served the failed try"
+    );
+    assert!(cache.get(&key, now).is_none());
+    run(now).unwrap();
+    assert_eq!(lookups.get(), 3);
+
+    // Asked to forget (the git proxy's upstream 404), it is looked up again.
+    cache.forget(&key);
+    run(now).unwrap();
+    assert_eq!(lookups.get(), 4);
+
+    // A repository that does not exist, or a lookup that fails, is not kept.
+    let other = RepoCache::key("acc", "pigeon", "missing");
+    let none = || async { Ok(None) };
+    let err = token_block_on(with_cached_repo(&cache, &other, now, none, mint)).unwrap_err();
+    assert!(err.to_string().contains("does not exist"));
+    assert!(cache.get(&other, now).is_none());
+    let failing = || async { Err(worker::Error::RustError("/x: 500: down".into())) };
+    assert!(token_block_on(with_cached_repo(&cache, &other, now, failing, mint)).is_err());
+    assert!(cache.get(&other, now).is_none());
+    // Other repositories keep their own entries.
+    assert!(cache.get(&key, now).is_some());
+}

@@ -1114,3 +1114,148 @@ fn core_observability_errors_args_and_folding() {
     );
     assert_eq!(all["workers"].as_array().unwrap().len(), 2);
 }
+
+/// `cloudflare_calls` answers totals by class and each path with its classes, most called first,
+/// within `limit`; its `hours` and `limit` are clamped.
+#[test]
+fn core_cloudflare_calls_tool_shape() {
+    use pigeon_capabilities::observability::{CALLS_TOOL, Observability, calls_args};
+    use pigeon_core::api_calls::{Count, view};
+    let map = pigeon_core::lanes::parse(include_str!("../../ci/workers.toml")).unwrap();
+    let obs = Observability { map };
+    let tool = pigeon_capabilities::Capability::tools(&obs)
+        .into_iter()
+        .find(|t| t.name == CALLS_TOOL)
+        .expect("the tool is listed");
+    assert!(tool.description.starts_with("Read-only."));
+    assert_eq!(calls_args(&json!({})), (24, 50));
+    assert_eq!(calls_args(&json!({ "hours": 999, "limit": 0 })), (168, 1));
+
+    let count = |method: &str, path: &str, class: &str, n: u64| Count {
+        method: method.into(),
+        path: path.into(),
+        class: class.into(),
+        n,
+    };
+    let rows = vec![
+        count("DELETE", "/accounts/{id}/tokens/{id}", "2xx", 40),
+        count("GET", "/accounts/{id}/tokens", "2xx", 9),
+        count("GET", "/accounts/{id}/tokens", "429", 3),
+        count("POST", "/accounts/{id}/tokens", "2xx", 41),
+        count("POST", "/accounts/{id}/tokens", "5xx", 1),
+        count("GET", "/accounts/{id}/workers/services/{id}", "429", 2),
+    ];
+    let v = view(&rows, 24, 3);
+    assert_eq!(v["hours"], 24);
+    assert_eq!(v["total"], 96);
+    assert_eq!(
+        v["by_class"],
+        json!({ "2xx": 90, "4xx": 0, "429": 5, "5xx": 1, "other": 0, "error": 0 })
+    );
+    assert_eq!(v["paths_shown"], 3);
+    let paths = v["paths"].as_array().unwrap();
+    assert_eq!(paths.len(), 3);
+    assert_eq!(
+        paths[0],
+        json!({ "method": "POST", "path": "/accounts/{id}/tokens", "total": 42,
+                "2xx": 41, "4xx": 0, "429": 0, "5xx": 1, "other": 0, "error": 0 })
+    );
+    assert_eq!(paths[1]["method"], "DELETE");
+    assert_eq!(
+        (
+            paths[2]["method"].as_str(),
+            paths[2]["total"].as_u64(),
+            paths[2]["429"].as_u64()
+        ),
+        (Some("GET"), Some(12), Some(3))
+    );
+}
+
+/// `observability_summary` mints one token holding its three sources' permissions, and revokes
+/// it once, whether the sources answered or failed.
+#[test]
+fn core_observability_summary_mints_one_token() {
+    use super::core::token_block_on;
+    use pigeon_capabilities::observability::{OneToken, SUMMARY_PERMISSIONS, with_one_token};
+    use std::cell::RefCell;
+    #[derive(Default)]
+    struct Counting {
+        opened: RefCell<Vec<Vec<String>>>,
+        closed: RefCell<Vec<String>>,
+        refuse: bool,
+    }
+    impl OneToken for Counting {
+        async fn open(&self, permissions: &[&str]) -> worker::Result<(Option<String>, String)> {
+            if self.refuse {
+                return Err(worker::Error::RustError("no capacity".into()));
+            }
+            self.opened
+                .borrow_mut()
+                .push(permissions.iter().map(|p| p.to_string()).collect());
+            let n = self.opened.borrow().len();
+            Ok((Some(format!("id-{n}")), format!("value-{n}")))
+        }
+        async fn close(&self, id: &str) -> worker::Result<()> {
+            self.closed.borrow_mut().push(id.to_string());
+            Ok(())
+        }
+    }
+    let mut want: Vec<&str> = SUMMARY_PERMISSIONS.to_vec();
+    want.sort_unstable();
+    assert_eq!(
+        want,
+        [
+            "Account Analytics Read",
+            "Billing Read",
+            "Workers Observability Write"
+        ]
+    );
+
+    // Three sources, as the summary runs them, all under one token.
+    let api = Counting::default();
+    let three = |t: String| async move {
+        let source = |name: &str| format!("{name} as {t}");
+        (
+            Ok::<_, String>(source("metrics")),
+            Ok::<_, String>(source("logs")),
+            source("billing"),
+        )
+    };
+    let shared = token_block_on(with_one_token(&api, &SUMMARY_PERMISSIONS, three)).unwrap();
+    assert_eq!(api.opened.borrow().len(), 1);
+    assert_eq!(api.opened.borrow()[0].len(), 3);
+    assert_eq!(*api.closed.borrow(), ["id-1"]);
+    assert_eq!(shared.value.0.unwrap(), "metrics as value-1");
+    assert_eq!(shared.value.2, "billing as value-1");
+    assert!(shared.revoke_failed.is_none());
+
+    // Sources that fail still revoke the token.
+    let failing = |_t: String| async {
+        (
+            Err::<(), _>("metrics: 500".to_string()),
+            Err::<(), _>("logs: 500".to_string()),
+        )
+    };
+    let shared = token_block_on(with_one_token(&api, &SUMMARY_PERMISSIONS, failing)).unwrap();
+    assert!(shared.value.0.is_err() && shared.value.1.is_err());
+    assert_eq!(api.opened.borrow().len(), 2);
+    assert_eq!(*api.closed.borrow(), ["id-1", "id-2"]);
+
+    // A mint that fails runs nothing and revokes nothing.
+    let refusing = Counting {
+        refuse: true,
+        ..Counting::default()
+    };
+    let ran = std::cell::Cell::new(false);
+    let err = token_block_on(with_one_token(
+        &refusing,
+        &SUMMARY_PERMISSIONS,
+        |_t| async {
+            ran.set(true);
+        },
+    ))
+    .err()
+    .unwrap();
+    assert!(err.contains("not minted"), "{err}");
+    assert!(!ran.get() && refusing.closed.borrow().is_empty());
+}

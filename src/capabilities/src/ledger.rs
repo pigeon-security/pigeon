@@ -32,7 +32,7 @@ pub const OBJECT: &str = tokens::LEDGER_OBJECT;
 /// taker that keeps one token for a job's steps still has time to finish with it.
 pub const MIN_LEFT_MS: i64 = 300_000;
 
-const MIGRATIONS: [&str; 2] = [
+const MIGRATIONS: [&str; 3] = [
     "CREATE TABLE tokens (
         id TEXT PRIMARY KEY,
         key TEXT NOT NULL,
@@ -48,7 +48,20 @@ const MIGRATIONS: [&str; 2] = [
     // `created_at` is when the ledger minted a row; rows from before are NULL.
     "ALTER TABLE tokens ADD COLUMN created_at INTEGER;
     CREATE TABLE gauge (k TEXT PRIMARY KEY, v INTEGER NOT NULL)",
+    // Core's Cloudflare API calls per hour (since the epoch), method, path template and status
+    // class (pigeon_core::api_calls): what the `cloudflare_calls` tool reads.
+    "CREATE TABLE api_calls (
+        hour INTEGER NOT NULL,
+        method TEXT NOT NULL,
+        path TEXT NOT NULL,
+        class TEXT NOT NULL,
+        n INTEGER NOT NULL,
+        PRIMARY KEY (hour, method, path, class)
+    )",
 ];
+
+/// How many hours of call counts are kept: the tool's longest window, a week, and a day more.
+pub const CALLS_KEPT_HOURS: i64 = 8 * 24;
 
 /// Cloudflare's cap on live API tokens in an account.
 pub const HARD_CAP: u32 = 500;
@@ -964,9 +977,70 @@ impl TokenLedger {
         })
     }
 
-    /// Dispatches token lifecycle and status operations.
+    /// Dispatches token lifecycle and status operations. The API calls this object made (and
+    /// any its isolate counted for the Worker) are stored after each.
     pub async fn fetch(&self, req: Request) -> Result<Response> {
-        durable::serve(req, async |op, args| self.handle(op, &args).await).await
+        let answer = durable::serve(req, async |op, args| self.handle(op, &args).await).await;
+        let now_ms = worker::Date::now().as_millis() as f64;
+        let counted = pigeon_core::api_calls::drain(now_ms);
+        if let Err(e) = self.add_calls(&counted, now_ms as i64) {
+            worker::console_error!("token ledger: storing API call counts: {e}");
+            pigeon_core::api_calls::restore(counted);
+        }
+        answer
+    }
+
+    /// Adds `counts` to the hour of `now_ms`, and forgets hours older than [`CALLS_KEPT_HOURS`].
+    fn add_calls(&self, counts: &[pigeon_core::api_calls::Count], now_ms: i64) -> Result<()> {
+        if counts.is_empty() {
+            return Ok(());
+        }
+        let hour = now_ms / 3_600_000;
+        let db = &self.ledger.store.0;
+        for c in counts {
+            db.exec(
+                "INSERT INTO api_calls (hour, method, path, class, n) VALUES (?, ?, ?, ?, ?) \
+                 ON CONFLICT (hour, method, path, class) DO UPDATE SET n = n + excluded.n",
+                vec![
+                    hour.into(),
+                    c.method.as_str().into(),
+                    c.path.as_str().into(),
+                    c.class.as_str().into(),
+                    (c.n as i64).into(),
+                ],
+            )?;
+        }
+        db.exec(
+            "DELETE FROM api_calls WHERE hour < ?",
+            vec![(hour - CALLS_KEPT_HOURS).into()],
+        )
+    }
+
+    /// The counts of the last `hours` (the current hour included), summed per method, template
+    /// and class.
+    fn calls(&self, hours: i64, now_ms: i64) -> Result<Vec<pigeon_core::api_calls::Count>> {
+        #[derive(Deserialize)]
+        struct Summed {
+            method: String,
+            path: String,
+            class: String,
+            n: i64,
+        }
+        let since = now_ms / 3_600_000 - hours + 1;
+        let rows = self.ledger.store.0.rows::<Summed>(
+            "SELECT method, path, class, SUM(n) AS n FROM api_calls WHERE hour >= ? \
+             GROUP BY method, path, class",
+            vec![since.into()],
+        )?;
+        Ok(rows
+            .into_iter()
+            .map(|r| pigeon_core::api_calls::Count {
+                method: r.method,
+                path: r.path,
+                class: r.class,
+                n: r.n.max(0) as u64,
+            })
+            .collect())
     }
 
     async fn parent(&self) -> Result<Parent> {
@@ -1068,6 +1142,16 @@ impl TokenLedger {
                 };
                 Ok(serde_json::to_value(self.ledger.reap(&api, now_ms).await?)?)
             }
+            "calls_add" => {
+                let counts: Vec<pigeon_core::api_calls::Count> =
+                    serde_json::from_value(a["counts"].clone())?;
+                self.add_calls(&counts, now_ms)?;
+                Ok(json!({ "ok": true }))
+            }
+            "calls" => {
+                let hours = a["hours"].as_i64().unwrap_or(24).clamp(1, 168);
+                Ok(serde_json::to_value(self.calls(hours, now_ms)?)?)
+            }
             "ceiling_set" => {
                 let v = a["soft_ceiling"].as_i64().unwrap_or(-1);
                 Ok(json!({ "soft_ceiling": self.ledger.ceiling_set(v)? }))
@@ -1141,5 +1225,33 @@ pub async fn ceiling_set(env: &Env, soft_ceiling: i64) -> Result<u32> {
 /// The sweeper's call: deletes released tokens and forgets expired rows.
 pub async fn reap(env: &Env) -> Result<Reaped> {
     let v = durable::call(env, BINDING, OBJECT, "reap", &json!({})).await?;
+    Ok(serde_json::from_value(v)?)
+}
+
+/// Sends this isolate's Cloudflare API call counts to the ledger, when it has some and has not
+/// sent them for a minute (pigeon_core::api_calls); counts that do not arrive are kept for the
+/// next try. For the platform Worker's fetch and cron handlers.
+pub async fn flush_calls(env: &Env, force: bool) {
+    let now_ms = worker::Date::now().as_millis() as f64;
+    if !force && !pigeon_core::api_calls::due(now_ms) {
+        return;
+    }
+    let counts = pigeon_core::api_calls::drain(now_ms);
+    if counts.is_empty() {
+        return;
+    }
+    let args = json!({ "counts": counts });
+    if durable::call(env, BINDING, OBJECT, "calls_add", &args)
+        .await
+        .is_err()
+    {
+        pigeon_core::api_calls::restore(counts);
+    }
+}
+
+/// Core's Cloudflare API call counts over the last `hours`, summed per method, template and
+/// class.
+pub async fn calls(env: &Env, hours: u64) -> Result<Vec<pigeon_core::api_calls::Count>> {
+    let v = durable::call(env, BINDING, OBJECT, "calls", &json!({ "hours": hours })).await?;
     Ok(serde_json::from_value(v)?)
 }

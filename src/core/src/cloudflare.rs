@@ -1,8 +1,11 @@
-//! A minimal Cloudflare API client: one call, its `result` or its `errors`.
+//! A minimal Cloudflare API client: one call, its `result` or its `errors`. Every call is
+//! counted by method, path template and status class ([`crate::api_calls`]).
 
 use serde_json::Value;
 use worker::js_sys::Uint8Array;
 use worker::{Error, Fetch, Headers, Method, Request, RequestInit, Result};
+
+use crate::api_calls;
 
 const API: &str = "https://api.cloudflare.com/client/v4";
 
@@ -43,14 +46,31 @@ pub async fn call_with(
     }
     init.with_headers(headers);
     let request = Request::new_with_init(&format!("{API}{path}"), &init)?;
-    let mut response = Fetch::Request(request).send().await?;
+    let method = init.method.to_string();
+    let mut response = match Fetch::Request(request).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            api_calls::record(&method, path, None, &[]);
+            return Err(e);
+        }
+    };
     let status = response.status_code();
-    let text = response.text().await?;
+    let text = match response.text().await {
+        Ok(t) => t,
+        Err(e) => {
+            api_calls::record(&method, path, Some(status), &[]);
+            return Err(e);
+        }
+    };
     // Some calls, such as Artifacts' deletes, answer success with no body.
     if text.trim().is_empty() && (200..300).contains(&status) {
+        api_calls::record(&method, path, Some(status), &[]);
         return Ok(Value::Null);
     }
-    let v: Value = serde_json::from_str(&text)
+    let parsed = serde_json::from_str::<Value>(&text);
+    let codes = parsed.as_ref().map(api_calls::codes).unwrap_or_default();
+    api_calls::record(&method, path, Some(status), &codes);
+    let v: Value = parsed
         .map_err(|e| Error::RustError(format!("{path}: {status}: the answer is not JSON: {e}")))?;
     if v["success"].as_bool() == Some(true) {
         Ok(v["result"].clone())

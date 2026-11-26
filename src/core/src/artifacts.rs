@@ -25,7 +25,7 @@ pub struct Spec {
 }
 
 /// A repository, as the API describes it.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Repo {
     pub namespace: String,
     pub name: String,
@@ -227,8 +227,99 @@ pub async fn mint(
     token.finish(minted).await
 }
 
+/// How long this isolate keeps a repository it looked up, in milliseconds: a repository's
+/// remote rarely changes, and the lookup is two or three list calls.
+pub const REPO_KEPT_MS: i64 = 5 * 60 * 1000;
+
+/// The most repositories one isolate keeps; past it, the kept ones are forgotten.
+const REPOS_KEPT: usize = 64;
+
+/// Repositories looked up, per account, namespace and name, with when each was looked up.
+#[derive(Default)]
+pub struct RepoCache {
+    kept: std::cell::RefCell<std::collections::HashMap<String, (Repo, i64)>>,
+}
+
+impl RepoCache {
+    /// The key of repository `name` in `namespace` on `account`.
+    pub fn key(account: &str, namespace: &str, name: &str) -> String {
+        format!("{account}/{namespace}/{name}")
+    }
+
+    /// The repository kept under `key`, if looked up less than [`REPO_KEPT_MS`] before `now_ms`.
+    pub fn get(&self, key: &str, now_ms: i64) -> Option<Repo> {
+        let kept = self.kept.borrow();
+        let (repo, at) = kept.get(key)?;
+        (now_ms - at < REPO_KEPT_MS && now_ms >= *at).then(|| repo.clone())
+    }
+
+    /// Keeps `repo` under `key`, looked up at `now_ms`.
+    pub fn put(&self, key: &str, repo: &Repo, now_ms: i64) {
+        let mut kept = self.kept.borrow_mut();
+        if kept.len() >= REPOS_KEPT && !kept.contains_key(key) {
+            kept.clear();
+        }
+        kept.insert(key.to_string(), (repo.clone(), now_ms));
+    }
+
+    /// Forgets the repository under `key`.
+    pub fn forget(&self, key: &str) {
+        self.kept.borrow_mut().remove(key);
+    }
+}
+
+std::thread_local! {
+    /// The repositories `session` looked up, for this isolate.
+    static REPOS: std::rc::Rc<RepoCache> = std::rc::Rc::default();
+}
+
+/// Forgets repository `name` in `namespace` on account `account` (its id), so the next
+/// [`session`] looks it up again: for a caller that found the kept remote wrong (a 404).
+pub fn forget_repo(account: &str, namespace: &str, name: &str) {
+    REPOS.with(|r| r.forget(&RepoCache::key(account, namespace, name)));
+}
+
+/// The repository under `key`, from `cache` or else from `lookup` (kept when found), then
+/// `work` on it. `lookup` answering `None` (no such repository), or failing, keeps nothing; when
+/// `work` fails the kept repository is forgotten, since a wrong remote or a deleted repository
+/// shows there first.
+pub async fn with_cached_repo<T, L, LF, W, WF>(
+    cache: &RepoCache,
+    key: &str,
+    now_ms: i64,
+    lookup: L,
+    work: W,
+) -> Result<(Repo, T)>
+where
+    L: FnOnce() -> LF,
+    LF: std::future::Future<Output = Result<Option<Repo>>>,
+    W: FnOnce(Repo) -> WF,
+    WF: std::future::Future<Output = Result<T>>,
+{
+    let repo = match cache.get(key, now_ms) {
+        Some(repo) => repo,
+        None => {
+            cache.forget(key);
+            let repo = lookup()
+                .await?
+                .ok_or_else(|| Error::RustError(format!("repository `{key}` does not exist")))?;
+            cache.put(key, &repo, now_ms);
+            repo
+        }
+    };
+    match work(repo.clone()).await {
+        Ok(v) => Ok((repo, v)),
+        Err(e) => {
+            cache.forget(key);
+            Err(e)
+        }
+    }
+}
+
 /// Repository `name` in `namespace` and a git token for it, living `ttl_secs`: both under one
-/// minted Cloudflare token, for a caller that needs the remote and a token together.
+/// minted Cloudflare token, for a caller that needs the remote and a token together. The
+/// repository is looked up at most every [`REPO_KEPT_MS`] per isolate ([`RepoCache`]); the git
+/// token is minted every time.
 pub async fn session(
     account: &Account,
     namespace: &str,
@@ -238,11 +329,21 @@ pub async fn session(
 ) -> Result<(Repo, GitToken)> {
     with_account_token(account, |token| async move {
         let api = Api::new(account, &token);
-        let repo = api.repo(namespace, name).await?.ok_or_else(|| {
-            Error::RustError(format!("repository `{namespace}/{name}` does not exist"))
-        })?;
-        let minted = api.mint(namespace, name, access, ttl_secs).await?;
-        Ok((repo, minted))
+        let cache = REPOS.with(std::rc::Rc::clone);
+        let key = RepoCache::key(&account.id, namespace, name);
+        let now_ms = worker::Date::now().as_millis() as i64;
+        with_cached_repo(
+            &cache,
+            &key,
+            now_ms,
+            || api.repo(namespace, name),
+            |_| api.mint(namespace, name, access, ttl_secs),
+        )
+        .await
+        .map_err(|e| {
+            // The key holds the account id: name the repository as the caller does.
+            Error::RustError(e.to_string().replace(&key, &format!("{namespace}/{name}")))
+        })
     })
     .await
 }

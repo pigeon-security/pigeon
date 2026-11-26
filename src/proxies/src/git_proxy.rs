@@ -704,6 +704,7 @@ impl GitProxy {
             url: repo.remote.trim_end_matches('/').to_string(),
             authorization: format!("Bearer {}", token.value),
         };
+        let account_id = account.id.clone();
         // From here the token is revoked whatever happens: when the answer's body ends, or now.
         let (ended, done) = oneshot::channel::<()>();
         let (namespace, name, id) = (self.namespace.clone(), self.repo.clone(), token.id.clone());
@@ -811,6 +812,11 @@ impl GitProxy {
             }
         }
         let status = upstream.status_code();
+        if status == 404 {
+            // The kept remote may be stale (the repository moved or was deleted): look it up
+            // afresh next time.
+            artifacts::forget_repo(&account_id, &self.namespace, &self.repo);
+        }
         if matches!(status, 401 | 403) {
             // Passed on, a 401 would send git looking for a password; it is the proxy's
             // token that was refused, not the caller.
