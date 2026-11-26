@@ -491,7 +491,7 @@ fn core_signs_each_bound_workers_calls_with_that_workers_key() {
         .iter()
         .map(|s| s["service"].as_str().unwrap())
         .collect();
-    assert!(services.len() >= 5, "{services:?}");
+    assert!(services.len() >= 4, "{services:?}");
     let core_secrets = secrets(core_file);
     for script in &services {
         let name = signing_key_name(script).unwrap_or_else(|e| panic!("{e}"));

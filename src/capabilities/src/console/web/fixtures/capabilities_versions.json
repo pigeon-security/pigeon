@@ -312,6 +312,7 @@
         "own_worker"
       ],
       "home": "inline",
+      "home_worker": null,
       "scope": "instance",
       "availability": "any",
       "requires": [],

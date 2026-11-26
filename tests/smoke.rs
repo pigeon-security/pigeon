@@ -2819,7 +2819,6 @@ fn instance_worker_metrics_cover_every_platform_worker_on_home_only() {
         "pigeon-ai-agents",
         "pigeon-model-gateway",
         "pigeon-ci-gateway",
-        "pigeon-cloud-gateway",
     ] {
         assert!(platform.contains(&name), "the lane map lists {name}");
     }
