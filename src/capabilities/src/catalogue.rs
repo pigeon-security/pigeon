@@ -114,7 +114,8 @@ const fn platform(name: &'static str) -> Entry {
 pub const CATALOGUE: &[Entry] = &[
     // Sessions › Live and Compare.
     own("ai-agents", "pigeon-ai-agents"),
-    // Cost › 7 days, Today and 30 days (Metrics › Workers is the record's own `observability`).
+    // Metrics › Workers, and on home Cost › 7 days, Today and 30 days: both shown only when the
+    // record's own `observability` is enabled.
     Entry {
         name: "observability",
         ..BASE
