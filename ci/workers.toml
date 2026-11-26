@@ -59,7 +59,6 @@ paths = [
     # The email library (docs/plans/email.md): used by no Worker yet. Move it into its Worker's
     # paths when one depends on it.
     "src/email/*",
-    "src/cloud/*",
     "src/cloud-gateway/*",
     # The data Worker and the ingest runner (docs/plans/ingest.md): not platform Workers, never
     # deployed by a landing. The ingest library they use is linked by core, so it is core's.
@@ -83,8 +82,9 @@ paths = [
     "src/proxies/*",
     "src/blog/*",
     "src/ai-agents/*",
-    # pigeon-capabilities links pigeon-ingest.
+    # pigeon-capabilities links the ingest and cloud libraries.
     "src/ingest/*",
+    "src/cloud/*",
     # Compiled in: the map (core's deploy scope) and CI's runner scripts (src/ci).
     "ci/workers.toml",
     "ci/runner/entrypoint.sh",

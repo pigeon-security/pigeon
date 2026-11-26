@@ -2826,6 +2826,7 @@ fn arch_home_capabilities() -> Vec<Box<dyn pigeon_capabilities::Capability>> {
         pigeon_ai_agents::service::Agents.manifest(),
     ));
     caps.push(Box::new(pigeon_capabilities::cloud_scope::Inline));
+    caps.push(Box::new(pigeon_capabilities::digitalocean::DigitalOcean));
     caps
 }
 

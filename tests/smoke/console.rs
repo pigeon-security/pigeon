@@ -32,6 +32,7 @@ fn bound_purpose(
 fn console_write_actions_each_have_a_handler_and_policy() {
     const OWNERS: &[&str] = &[
         "secrets",
+        "digitalocean",
         "proxy",
         "linked",
         "instances",

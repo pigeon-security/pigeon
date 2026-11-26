@@ -2822,6 +2822,7 @@ fn instance_retire_removes_only_what_pigeon_made() {
             "forget",
             "forget",
             "forget",
+            "forget",
             "unlink",
             "remove_record",
         ]
@@ -2840,6 +2841,7 @@ fn instance_retire_removes_only_what_pigeon_made() {
         })
         .collect();
     assert_eq!(forgets[0], "github:deploy:canary");
+    assert!(forgets.contains(&"digitalocean-token:canary"));
     assert_eq!(forgets.last(), Some(&"ledger:canary"));
     assert_eq!(describe(&steps).len(), steps.len());
     // Keeping the link, for a reset.
