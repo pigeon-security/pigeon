@@ -255,7 +255,10 @@
       table);
   }
 
-  // ---- Metrics › Workers: the instance's approved Worker over a window of hours.
+  // ---- Metrics › Workers: the instance's approved Worker over a window of hours; on the home
+  // instance every platform Worker, in total and one row each (`workers`).
+  const dollars = (v) => (Number.isFinite(Number(v)) ? `$${Number(v).toFixed(Number(v) < 1 ? 4 : 2)}` : "—");
+  const errorRate = (r) => (r >= 0.01 ? pill(percent(r), "bad") : r >= 0.001 ? pill(percent(r), "warn") : percent(r));
   const WINDOWS = [{ id: "1", title: "1 h" }, { id: "6", title: "6 h" }, { id: "24", title: "24 h" }, { id: "168", title: "7 d" }];
   function metrics(ctx) {
     let hours = "24";
@@ -266,19 +269,37 @@
       const statuses = Object.entries(m.by_status || {}).sort((a, b) => b[1] - a[1]);
       const total = statuses.reduce((n, [, v]) => n + Number(v || 0), 0);
       const usd = Number(d.estimated_cost?.usd);
+      const workers = Array.isArray(d.workers) ? d.workers : [];
+      const several = workers.length > 1;
+      const perWorker = several ? el("div", { class: "section" }, el("h2", { text: "By Worker" }), dataTable({
+        label: "Metrics by Worker", noun: "Workers", empty: "No Workers in this window.",
+        load: [...workers].sort((a, b) => Number(b.metrics?.requests || 0) - Number(a.metrics?.requests || 0)),
+        columns: [
+          { label: "Worker", cell: (w) => code(w.worker || "—") },
+          { label: "Requests", cls: "num", cell: (w) => count(w.metrics?.requests) },
+          { label: "Errors", cls: "num", cell: (w) => count(w.metrics?.errors) },
+          { label: "Error rate", cls: "num", cell: (w) => errorRate(Number(w.metrics?.error_rate) || 0) },
+          { label: "CPU p50", cls: "num", cell: (w) => ms(w.metrics?.cpu_ms_p50) },
+          { label: "Wall p99", cls: "num", cell: (w) => ms(w.metrics?.wall_ms_p99) },
+          { label: "Estimated cost", cls: "num", cell: (w) => dollars(w.estimated_cost?.usd) },
+        ],
+      })) : null;
       return [
-        el("p", { class: "muted" }, "Worker ", code(d.worker || ctx.record?.worker || "—"), ` · ${iso(d.from)} to ${iso(d.to)}`),
+        several
+          ? el("p", { class: "muted" }, `All ${workers.length} platform Workers, in total and each · ${iso(d.from)} to ${iso(d.to)}`)
+          : el("p", { class: "muted" }, "Worker ", code(d.worker || ctx.record?.worker || "—"), ` · ${iso(d.from)} to ${iso(d.to)}`),
         el("div", { class: "cols" },
           panel("Traffic", facts([
             ["Requests", count(m.requests)],
             ["Errors", count(m.errors)],
-            ["Error rate", rate >= 0.01 ? pill(percent(rate), "bad") : rate >= 0.001 ? pill(percent(rate), "warn") : percent(rate)],
-            ["Estimated cost", Number.isFinite(usd) ? `$${usd.toFixed(usd < 1 ? 4 : 2)}` : "—"],
+            ["Error rate", errorRate(rate)],
+            ["Estimated cost", dollars(usd)],
           ]), d.estimated_cost?.basis ? el("p", { class: "muted", text: d.estimated_cost.basis }) : null),
           panel("Time per request", facts([
             ["CPU p50", ms(m.cpu_ms_p50)], ["CPU p99", ms(m.cpu_ms_p99)],
             ["Wall p50", ms(m.wall_ms_p50)], ["Wall p99", ms(m.wall_ms_p99)],
           ]))),
+        perWorker,
         el("div", { class: "section" }, el("h2", { text: "By status" }), dataTable({
           label: "Requests by status", noun: "statuses", empty: "No requests in this window.",
           load: statuses.map(([status, n]) => ({ status, n })),
@@ -294,7 +315,9 @@
     const windows = segmented({ label: "Window", options: WINDOWS, value: hours, onChange: (id) => { hours = id; reload(); } });
     reload();
     return el("div", { class: "view" },
-      el("div", { class: "toolbar" }, readOnly("Read-only. Request counts, errors and time for the instance’s approved Worker."),
+      el("div", { class: "toolbar" }, readOnly(ctx.record?.account?.kind === "home"
+        ? "Read-only. Request counts, errors and time for every platform Worker."
+        : "Read-only. Request counts, errors and time for the instance’s approved Worker."),
         el("span", { class: "grow" }), el("span", { class: "label", text: "Window" }), windows),
       body);
   }

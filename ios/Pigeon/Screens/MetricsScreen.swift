@@ -50,7 +50,9 @@ struct MetricsScreen: View {
 
     /// "Worker x · from to to", as the web's line above the panels.
     private static func rangeText(_ d: JSON) -> String {
-        var out = "Worker " + (d["worker"].string ?? "—")
+        // Home answers every platform Worker: `metrics` is then their total.
+        let workers = d["workers"].array?.count ?? 0
+        var out = workers > 1 ? "All \(workers) platform Workers" : "Worker " + (d["worker"].string ?? "—")
         if let from = ConsoleFormat.ms(d["from"]) { out += " · " + ConsoleFormat.when(from) }
         if let to = ConsoleFormat.ms(d["to"]) { out += " to " + ConsoleFormat.when(to) }
         return out

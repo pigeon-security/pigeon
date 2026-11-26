@@ -355,5 +355,13 @@ stays.
 ## Open questions
 
 1. ~~Home publishing from Artifacts (no GitHub App) or GitHub?~~ Artifacts (L2–L3).
-2. Home metrics: the platform Workers too, or only managed resources?
+2. ~~Home metrics: the platform Workers too, or only managed resources?~~ The platform Workers
+   too. `observability_worker_metrics {instance: "pigeon.dev"}` reads the home record's
+   `worker` and every Worker in the lane map (ci/workers.toml, the list `observability_summary`
+   and the architecture model also read): `pigeon-platform`, `pigeon-sites`,
+   `pigeon-model-gateway`, `pigeon-cloud-gateway`, `pigeon-ci-gateway`, `pigeon-proxy` and
+   `pigeon-ai-agents`. One GraphQL query (`scriptName_in`) under one analytics token; the
+   answer's `metrics` and `estimated_cost` are the totals, and `workers` adds one row per Worker
+   (the console's Metrics › Workers shows them as a table). A linked instance still reads only
+   its one approved Worker, with a one-row `workers`.
 3. Do other instances later get a `platform.<zone>` target of their own?

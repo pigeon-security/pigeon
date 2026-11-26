@@ -1,4 +1,6 @@
-//! A read-only metrics view over one explicitly approved instance Worker.
+//! A read-only metrics view over an instance's approved Workers: a linked instance's one
+//! approved Worker, or, for the home instance, every Worker the platform deploys (the lane map,
+//! ci/workers.toml) besides its own. One GraphQL query and one analytics token per call.
 
 use pigeon_core::mcp::Tool;
 use pigeon_core::tokens::{Policy, Scope, Scoped};
@@ -95,7 +97,9 @@ pub(super) fn tool() -> Tool {
         name: METRICS,
         description: concat!(
             "Read request counts, errors, status counts, CPU and wall time, and an estimated ",
-            "list-price usage cost for the approved Worker. Excludes logs, billing and token capacity."
+            "list-price usage cost for the approved Worker: on the home instance, for every ",
+            "platform Worker, per Worker (`workers`) and in total (`metrics`). Excludes logs, ",
+            "billing and token capacity."
         ),
         input_schema: json!({
             "type": "object",
@@ -109,34 +113,116 @@ pub(super) fn tool() -> Tool {
     }
 }
 
-/// Select the Worker in the provider request as well as checking the response.
-pub fn query(account: &str, script: &str, from: &str, to: &str) -> Value {
+/// The Workers a metrics call reads for `instance`: its approved Worker, and on the home
+/// instance also every platform Worker in `platform` (the lane map's scripts, in its order).
+/// A linked instance reads only its own Worker, whatever `platform` names.
+pub fn metrics_scripts(
+    instance: &Instance,
+    platform: &[&str],
+) -> std::result::Result<Vec<String>, String> {
+    let own = approved_worker(instance)?;
+    let mut out = vec![own.to_string()];
+    if instance.account == AccountRef::Home {
+        for script in platform {
+            if label(script) && !out.iter().any(|s| s == script) {
+                out.push((*script).to_string());
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Select the Workers in the provider request as well as checking the response: one query
+/// whose `scriptName_in` filter names every script.
+pub fn query(account: &str, scripts: &[String], from: &str, to: &str) -> Value {
     json!({
         "query": concat!(
-            "query($tag: string, $script: string, $from: Time, $to: Time) { viewer { accounts(filter: ",
+            "query($tag: string, $scripts: [string!], $from: Time, $to: Time) { viewer { accounts(filter: ",
             "{accountTag: $tag}) { workersInvocationsAdaptive(limit: 10000, filter: ",
-            "{scriptName: $script, datetime_geq: $from, datetime_leq: $to}) { sum { requests errors subrequests } ",
+            "{scriptName_in: $scripts, datetime_geq: $from, datetime_leq: $to}) { sum { requests errors subrequests } ",
             "quantiles { cpuTimeP50 cpuTimeP99 wallTimeP50 wallTimeP99 } ",
             "dimensions { scriptName status datetimeHour } } } } }"
         ),
-        "variables": { "tag": account, "script": script, "from": from, "to": to }
+        "variables": { "tag": account, "scripts": scripts, "from": from, "to": to }
     })
 }
 
+/// What one metrics call asks of Cloudflare: the Workers, the one GraphQL body that covers
+/// them all, and the policies of the one analytics token it mints.
+pub struct MetricsRequest {
+    pub scripts: Vec<String>,
+    pub body: Value,
+    pub policies: Vec<Policy>,
+}
+
+/// The request for `instance`'s metrics in `account` between the ISO times `from` and `to`.
+pub fn metrics_request(
+    instance: &Instance,
+    platform: &[&str],
+    account: &str,
+    from: &str,
+    to: &str,
+) -> std::result::Result<MetricsRequest, String> {
+    let scripts = metrics_scripts(instance, platform)?;
+    let body = query(account, &scripts, from, to);
+    let policies = vec![Policy::new(Scope::Account, &[super::ANALYTICS_PERMISSION])];
+    Ok(MetricsRequest {
+        scripts,
+        body,
+        policies,
+    })
+}
+
+const BASIS: &str =
+    "Workers list price before included usage, with CPU estimated from the request-weighted median";
+
 /// Reject provider responses missing the metrics rows. Ignore rows for all other scripts.
-pub fn worker_result(answer: &Value, script: &str) -> std::result::Result<Value, String> {
-    if !answer["data"]["viewer"]["accounts"][0]["workersInvocationsAdaptive"].is_array() {
+/// `metrics` and `estimated_cost` are the totals over `scripts` (for one Worker, that Worker's);
+/// `workers` has one row per script, in `scripts`' order, zero when it had no requests.
+pub fn worker_result(answer: &Value, scripts: &[String]) -> std::result::Result<Value, String> {
+    let Some(rows) =
+        answer["data"]["viewer"]["accounts"][0]["workersInvocationsAdaptive"].as_array()
+    else {
         return Err("Cloudflare did not return Worker metrics for this account".into());
-    }
-    let worker = super::fold_invocations(answer)
-        .remove(script)
-        .unwrap_or_default();
+    };
+    let mut folded = super::fold_invocations(answer);
+    let workers: Vec<Value> = scripts
+        .iter()
+        .map(|script| {
+            let w = folded.remove(script).unwrap_or_default();
+            json!({
+                "worker": script,
+                "metrics": w.public(),
+                "estimated_cost": { "usd": super::workers_estimate(w.requests, w.cpu_ms_estimate()) },
+            })
+        })
+        .collect();
+    // The totals fold the approved scripts' rows as though they were one script's.
+    let total: Vec<Value> = rows
+        .iter()
+        .filter(|row| {
+            row["dimensions"]["scriptName"]
+                .as_str()
+                .is_some_and(|name| scripts.iter().any(|s| s == name))
+        })
+        .map(|row| {
+            let mut row = row.clone();
+            row["dimensions"]["scriptName"] = json!("");
+            row
+        })
+        .collect();
+    let total = super::fold_invocations(
+        &json!({"data": {"viewer": {"accounts": [{"workersInvocationsAdaptive": total}]}}}),
+    )
+    .remove("")
+    .unwrap_or_default();
     Ok(json!({
-        "metrics": worker.public(),
+        "metrics": total.public(),
         "estimated_cost": {
-            "usd": super::workers_estimate(worker.requests, worker.cpu_ms_estimate()),
-            "basis": "Workers list price before included usage, with CPU estimated from the request-weighted median",
-        }
+            "usd": super::workers_estimate(total.requests, total.cpu_ms_estimate()),
+            "basis": BASIS,
+        },
+        "workers": workers,
     }))
 }
 
@@ -165,12 +251,12 @@ pub fn metrics_arguments(args: &Value) -> Result<(&str, u64)> {
     Ok((instance, hours))
 }
 
-pub(super) async fn metrics(cx: &Context<'_>, args: &Value) -> Result<Value> {
+pub(super) async fn metrics(cx: &Context<'_>, platform: &[&str], args: &Value) -> Result<Value> {
     let (instance, hours) = metrics_arguments(args)?;
     let record = crate::instances::one(cx.env, instance)
         .await?
         .ok_or_else(|| bad("unknown observability instance"))?;
-    let script = approved_worker(&record).map_err(bad)?;
+    let script = approved_worker(&record).map_err(bad)?.to_string();
 
     let linked;
     let account = match &record.account {
@@ -191,19 +277,24 @@ pub(super) async fn metrics(cx: &Context<'_>, args: &Value) -> Result<Value> {
     let from = to - hours as f64 * 3_600_000.0;
     let from = super::iso(from);
     let to = super::iso(to);
-    let body = query(&account.id, script, &from, &to);
-    let policy = Policy::new(Scope::Account, &[super::ANALYTICS_PERMISSION]);
-    let token = Scoped::open_for(account, "observability", vec![policy], super::TOKEN_TTL)
+    let request = metrics_request(&record, platform, &account.id, &from, &to).map_err(bad)?;
+    // One token and one query for every Worker of the call.
+    let token = Scoped::open_for(account, "observability", request.policies, super::TOKEN_TTL)
         .await
         .map_err(|_| bad("an analytics credential is unavailable for the approved account"))?;
-    let result = super::within(super::graphql(token.value(), &body)).await;
+    let result = super::within(super::graphql(token.value(), &request.body)).await;
     let result = token
         .finish(result)
         .await
         .map_err(|_| bad("Cloudflare Worker metrics are unavailable for the approved account"))?;
-    let mut result = worker_result(&result, script).map_err(bad)?;
+    let mut result = worker_result(&result, &request.scripts).map_err(bad)?;
     result["instance"] = json!(record.id);
     result["worker"] = json!(script);
+    result["scope"] = json!(if request.scripts.len() > 1 {
+        "platform"
+    } else {
+        "worker"
+    });
     result["from"] = json!(from);
     result["to"] = json!(to);
     Ok(result)

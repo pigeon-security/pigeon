@@ -2782,14 +2782,142 @@ fn instance_worker_metrics_ignore_other_workloads_even_if_returned_by_the_provid
             ]}]}}
         })
     };
+    let allowed = ["allowed".to_string()];
     assert_eq!(
-        query("account", "allowed", "from", "to")["variables"]["script"],
-        "allowed"
+        query("account", &allowed, "from", "to")["variables"]["scripts"],
+        json!(["allowed"])
     );
-    let result = worker_result(&rows(50), "allowed").unwrap();
-    assert_eq!(result, worker_result(&rows(5_000), "allowed").unwrap());
+    let result = worker_result(&rows(50), &allowed).unwrap();
+    assert_eq!(result, worker_result(&rows(5_000), &allowed).unwrap());
     assert_eq!(result["metrics"]["requests"].as_f64(), Some(1.0));
-    assert!(worker_result(&json!({}), "allowed").is_err());
+    assert!(worker_result(&json!({}), &allowed).is_err());
+}
+
+/// The platform's Workers, as core reads them: the lane map, ci/workers.toml.
+fn platform_scripts() -> Vec<String> {
+    let mut root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    while !root.join("ci/workers.toml").exists() {
+        assert!(root.pop(), "ci/workers.toml is above the checkout");
+    }
+    let text = std::fs::read_to_string(root.join("ci/workers.toml")).unwrap();
+    let map = pigeon_core::lanes::parse(&text).expect("the map parses");
+    map.scripts().into_iter().map(String::from).collect()
+}
+
+/// Home's metrics read every platform Worker in one `scriptName_in` query under one analytics
+/// token; a linked instance's read only its own Worker, whatever the platform deploys.
+#[test]
+fn instance_worker_metrics_cover_every_platform_worker_on_home_only() {
+    use pigeon_capabilities::instances::record::Instance;
+    use pigeon_capabilities::observability::instance::{metrics_request, metrics_scripts};
+    let platform = platform_scripts();
+    let platform: Vec<&str> = platform.iter().map(String::as_str).collect();
+    for name in [
+        "pigeon-platform",
+        "pigeon-sites",
+        "pigeon-proxy",
+        "pigeon-ai-agents",
+        "pigeon-model-gateway",
+        "pigeon-ci-gateway",
+        "pigeon-cloud-gateway",
+    ] {
+        assert!(platform.contains(&name), "the lane map lists {name}");
+    }
+    let home: Instance = serde_json::from_value(json!({
+        "id": "pigeon.dev", "title": "Pigeon", "account": {"kind": "home"},
+        "observability": {"state": "enabled"}, "worker": "pigeon-platform"
+    }))
+    .unwrap();
+    let linked: Instance = serde_json::from_value(json!({
+        "id": "blog", "title": "Blog", "account": {"kind": "linked", "account_id": "fictional"},
+        "observability": {"state": "enabled"}, "worker": "blog-worker"
+    }))
+    .unwrap();
+
+    let scripts = metrics_scripts(&home, &platform).unwrap();
+    assert_eq!(scripts[0], "pigeon-platform");
+    let mut sorted = scripts.clone();
+    sorted.sort();
+    let mut expected: Vec<String> = platform.iter().map(|s| s.to_string()).collect();
+    expected.sort();
+    assert_eq!(sorted, expected, "every platform Worker, once each");
+    assert_eq!(
+        metrics_scripts(&linked, &platform).unwrap(),
+        ["blog-worker"]
+    );
+
+    for (instance, count) in [(&home, platform.len()), (&linked, 1)] {
+        let request = metrics_request(instance, &platform, "acct", "from", "to").unwrap();
+        assert_eq!(request.scripts.len(), count);
+        // One query names every script, filtered by `scriptName_in`.
+        let query = request.body["query"].as_str().unwrap();
+        assert!(query.contains("scriptName_in: $scripts"));
+        assert_eq!(query.matches("workersInvocationsAdaptive").count(), 1);
+        assert_eq!(request.body["variables"]["scripts"], json!(request.scripts));
+        assert_eq!(request.body["variables"]["tag"], "acct");
+        // One token, with only the analytics read.
+        assert_eq!(request.policies.len(), 1);
+        assert_eq!(request.policies[0].permissions, ["Account Analytics Read"]);
+    }
+
+    let mut off = home.clone();
+    off.observability = None;
+    assert!(metrics_request(&off, &platform, "acct", "from", "to").is_err());
+}
+
+/// The answer keeps `metrics` and `estimated_cost` (now the totals) and adds a `workers` row per
+/// Worker, in the request's order, with zero rows for a Worker with no requests.
+#[test]
+fn instance_worker_metrics_answer_per_worker_rows_and_totals() {
+    use pigeon_capabilities::observability::instance::worker_result;
+    let answer = json!({"data":{"viewer":{"accounts":[{"workersInvocationsAdaptive":[
+        {"sum":{"requests":100,"errors":2},"quantiles":{"cpuTimeP50":1000,"cpuTimeP99":5000,"wallTimeP50":2000,"wallTimeP99":9000},
+         "dimensions":{"scriptName":"pigeon-platform","status":"success"}},
+        {"sum":{"requests":10,"errors":10},"quantiles":{"cpuTimeP50":3000,"cpuTimeP99":7000,"wallTimeP50":4000,"wallTimeP99":8000},
+         "dimensions":{"scriptName":"pigeon-platform","status":"exception"}},
+        {"sum":{"requests":40,"errors":0},"quantiles":{"cpuTimeP50":500,"cpuTimeP99":12000,"wallTimeP50":600,"wallTimeP99":700},
+         "dimensions":{"scriptName":"pigeon-sites","status":"success"}},
+        {"sum":{"requests":999,"errors":999},"quantiles":{"cpuTimeP50":1,"cpuTimeP99":1,"wallTimeP50":1,"wallTimeP99":1},
+         "dimensions":{"scriptName":"someone-else","status":"success"}}
+    ]}]}}});
+    let scripts: Vec<String> = ["pigeon-platform", "pigeon-sites", "pigeon-proxy"]
+        .map(String::from)
+        .to_vec();
+    let r = worker_result(&answer, &scripts).unwrap();
+    let rows = r["workers"].as_array().unwrap();
+    let names: Vec<&str> = rows.iter().map(|w| w["worker"].as_str().unwrap()).collect();
+    assert_eq!(names, ["pigeon-platform", "pigeon-sites", "pigeon-proxy"]);
+    assert_eq!(rows[0]["metrics"]["requests"], 110.0);
+    assert_eq!(rows[0]["metrics"]["errors"], 12.0);
+    assert_eq!(rows[1]["metrics"]["requests"], 40.0);
+    assert_eq!(rows[2]["metrics"]["requests"], 0.0);
+    for row in rows {
+        for key in [
+            "requests",
+            "errors",
+            "error_rate",
+            "by_status",
+            "cpu_ms_p50",
+            "cpu_ms_p99",
+        ] {
+            assert!(!row["metrics"][key].is_null(), "{key}");
+        }
+        assert!(row["estimated_cost"]["usd"].is_number());
+    }
+    // Totals: sums, the largest p99, foreign rows left out.
+    let m = &r["metrics"];
+    assert_eq!(m["requests"], 150.0);
+    assert_eq!(m["errors"], 12.0);
+    assert_eq!(m["by_status"], json!({"success": 140.0, "exception": 10.0}));
+    assert_eq!(m["cpu_ms_p99"], 12.0);
+    assert_eq!(m["wall_ms_p99"], 9.0);
+    let sum: f64 = rows
+        .iter()
+        .map(|w| w["estimated_cost"]["usd"].as_f64().unwrap())
+        .sum();
+    let total = r["estimated_cost"]["usd"].as_f64().unwrap();
+    assert!((total - sum).abs() < 1e-12);
+    assert!(r["estimated_cost"]["basis"].is_string());
 }
 
 #[test]

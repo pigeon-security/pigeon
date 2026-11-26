@@ -725,7 +725,9 @@ impl Capability for Observability {
     fn call<'a>(&'a self, cx: &'a Context<'a>, tool: &'a str, args: &'a Value) -> Call<'a> {
         Box::pin(async move {
             match tool {
-                instance::METRICS => return instance::metrics(cx, args).await,
+                instance::METRICS => {
+                    return instance::metrics(cx, &self.map.scripts(), args).await;
+                }
                 images::TOOL => return images::containers_images(cx).await,
                 "cost_daily" => return crate::cost::cost_daily(cx, args).await,
                 "tokens_status" => return tokens_status(cx, args).await,
