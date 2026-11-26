@@ -50,9 +50,19 @@ What else differs from core's backup:
 - `/cf/` calls use the `cf_deploy` token core minted for the Worker, not one minted per call with only that call's permissions. `cf_deploy` is the union of the permissions in the table below. The allowlist and the body rules are the same.
 - `/git/` mints and revokes a git token per request as core does, through the `artifacts` token.
 
+## How agents push: three tiers
+
+A coding agent (Claude Code, Codex) pushes through its Pigeon MCP session, scoped by which app it is: Claude writes `claude/…`, OpenAI's Codex `codex/…` ([plans/agent-git.md](plans/agent-git.md)).
+
+1. **`branch_push` (the default).** The agent sends a git bundle of its commits through the tool call. The platform writes it to the branch through its own git path. No token is involved.
+2. **`session_credential` (large pushes).** A `pgn_px_` credential held by the app's grant. It reaches `/git/` only and pushes only the app's namespace, for an hour by default and four at most. It is revoked by the app's Disconnect or by removing the person. It is in the agent's transcript, which is why it is short-lived and narrow.
+3. **The proxy credential (break-glass).** The person's own credential, below: full git and `/cf/` scope, issued with a passkey.
+
+Every tier lands with `land {branch, commit}`.
+
 ## The proxy credential
 
-The credential is a bearer token with the prefix `pgn_px_`. It is shown once and kept only as a hash.
+The credential is a bearer token with the prefix `pgn_px_`. It is the break-glass tier: normal pushes use `branch_push` or `session_credential` (above). It is shown once and kept only as a hash.
 
 MCP refuses it, because MCP looks up only its own token kind. The proxies refuse MCP tokens.
 
@@ -119,6 +129,7 @@ Each request gets its own Artifacts git token: read for fetch, write for push. T
 
 The proxy checks the push's ref updates before it mints any token. The rules are the person's policy, `.pigeon/policy.toml` (see `docs/plans/policy.md`): each ref update is asked of it.
 
+- A git-only credential pushes only its own branches, before the policy is asked: an AI agent run's grant only its run's branches, and an app's `session_credential` only its namespace (`claude/` or `codex/`).
 - A branch under `refs/heads/claude/` may be created, pushed, rewritten (force-pushed) or deleted: rule `session-branches`. A rewrite (the old tip not in the new one's history) is recorded as `rewrite_branch`: the proxy reads the branch's history once the push has gone through.
 - `main` is never pushed, created or deleted through the proxy: rule `main-forward-only`. It moves only by a landing's fast-forward (`land`).
 - Any other ref, tags included, is not in policy.
