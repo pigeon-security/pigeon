@@ -89,8 +89,8 @@ revoked after each apply. No Workers-scripts write: the Worker is platform-owned
 
 As built (H2, `instances/home.rs`, `split::purpose_permissions`): `instance_home` is
 `Workers R2 Storage Write` on the account (creating a bucket is account-level; Cloudflare's
-bucket-scoped groups cover objects only), and `Zone Read`, `DNS Write`,
-`SSL and Certificates Write`, `Workers Routes Write` on the platform zone alone. Core mints it
+bucket-scoped groups cover objects only), and `Zone Read` on the platform zone alone (no DNS, certificate or route write until a
+home step needs one: every home custom-domain step is platform-owned and blocked today). Core mints it
 through the token ledger (`mint_for`, 600 s), hands it to the work as the account's bearer (so
 no helper mints from the parent), and revokes it after each plan and each apply, on success and
 failure. A capability Worker may not ask `credential` for it (`CORE_ONLY_PURPOSES`). If the

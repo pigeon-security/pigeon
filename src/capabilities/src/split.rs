@@ -986,13 +986,7 @@ pub fn purpose_permissions(purpose: &str) -> Option<&'static [&'static str]> {
         // bucket (on the account, as creating a bucket needs), and the platform zone's custom
         // domains (on that zone alone). Never Workers-scripts write: the platform's Workers are
         // the Lander's. Core mints it itself; a capability Worker may not ask for it.
-        "instance_home" => &[
-            "Workers R2 Storage Write",
-            "Zone Read",
-            "DNS Write",
-            "SSL and Certificates Write",
-            "Workers Routes Write",
-        ],
+        "instance_home" => &["Workers R2 Storage Write", "Zone Read"],
         _ => return None,
     })
 }

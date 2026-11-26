@@ -2528,16 +2528,7 @@ fn home_instance_plans_and_applies_with_a_minted_token() {
     // The credential: exactly R2 write and the zone's custom domains, never Workers scripts,
     // and core alone mints it.
     let permissions = purpose_permissions(PURPOSE).unwrap();
-    assert_eq!(
-        permissions,
-        &[
-            "Workers R2 Storage Write",
-            "Zone Read",
-            "DNS Write",
-            "SSL and Certificates Write",
-            "Workers Routes Write",
-        ][..]
-    );
+    assert_eq!(permissions, &["Workers R2 Storage Write", "Zone Read",][..]);
     assert!(!permissions.iter().any(|p| p.starts_with("Workers Scripts")));
     assert!(CORE_ONLY_PURPOSES.contains(&PURPOSE));
     let exact = vec![

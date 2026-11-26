@@ -26,8 +26,8 @@ const TOKEN_PURPOSE: &str = "instance-home";
 /// What the person does when the home token cannot be had.
 pub const PERSON_STEPS: &str = "Nothing was changed. The person confirms that `instance_home` \
      is a credential purpose of the deployed platform (it lands through the gate), and that the \
-     parent token holds its permissions (Workers R2 Storage Write on the account; Zone Read, \
-     DNS Write, SSL and Certificates Write and Workers Routes Write on the platform zone); then \
+     parent token holds its permissions (Workers R2 Storage Write on the account; Zone Read on \
+     the platform zone); then \
      plan again.";
 
 fn bad(why: String) -> Error {
