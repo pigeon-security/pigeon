@@ -18,6 +18,7 @@ pub mod digitalocean;
 pub mod dispatch;
 pub mod email;
 pub mod expiry;
+pub mod federation;
 pub mod github;
 pub mod ingest;
 pub mod instances;

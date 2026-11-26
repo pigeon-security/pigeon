@@ -63,7 +63,7 @@ workspace crate the Worker crate pulls in, directly or not.
 - Tests: only `tests/smoke.rs` and its area modules in `tests/smoke/`. A test name starts
   with its Worker's name. Never add a test elsewhere.
   Modules:
-  `accounts`, `ai_agents`, `apple`, `ci`, `cloud`, `console`, `core`, `instances`, `jobs_audit`, `land`, `models`, `observability`, `policy`, `proxy`, `sites`
+  `accounts`, `ai_agents`, `apple`, `ci`, `cloud`, `console`, `core`, `federation`, `instances`, `jobs_audit`, `land`, `models`, `observability`, `policy`, `proxy`, `sites`
 - CI: `.pigeon/ci.toml` defines the jobs, `ci/runner` holds their scripts. Jobs:
   `smoke`, `smoke-fail`, `test`, `allowlist`, `deploy`, `sleep`, `deploy-sites`, `deploy-model-gateway`, `deploy-cloud-gateway`, `deploy-ci-gateway`, `deploy-proxy`, `deploy-ai-agents`, `ios-check`, `ios-release`, `deploy-dotest-a`, `deploy-dotest-b`
   Run the gate with `sh ci/runner/test.sh`.

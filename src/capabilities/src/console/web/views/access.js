@@ -9,7 +9,7 @@
   "use strict";
   const shell = window.pigeonShell;
   if (!shell) return;
-  const { register, el, pill, tag, code, button, field, input, dataTable, confirm, sha256 } = shell;
+  const { register, el, pill, tag, code, button, field, input, facts, dataTable, confirm, sha256 } = shell;
 
   const day = (ms) => (ms ? new Date(ms).toISOString().slice(0, 10) : "—");
   const DAY = 86_400_000;
@@ -390,7 +390,7 @@
               : button("Remove", () => removePerson(ctx, p), { size: "sm", variant: "danger" })]
           : null) },
       ],
-      expand: (p) => el("div", {}, dataTable({
+      expand: (p) => el("div", {}, facts([["Person ID", code(p.id)]]), dataTable({
         label: `Passkeys of ${p.name}`, noun: "passkeys", empty: "No passkeys registered.", signal: ctx.signal, load: p.passkeys,
         columns: [
           { label: "Passkey", cell: (k) => k.name || "Unnamed passkey" },
@@ -409,7 +409,7 @@
         columns: [
           { label: "Instance", cls: "mono", cell: (r) => r.id },
           { label: "Role", cell: (r) => (p.admin ? pill("Owner (admin)", "plain") : r.role ? pill(r.role, "plain") : el("span", { class: "muted", text: "None" })) },
-          { label: "", cls: "acts", cell: (r) => (!p.admin && manage.includes(r.id)
+          { label: "", cls: "acts", cell: (r) => (manage.includes(r.id)
             ? button("Change", () => setRole(ctx, p, r.id, r.role), { size: "sm" })
             : null) },
         ],

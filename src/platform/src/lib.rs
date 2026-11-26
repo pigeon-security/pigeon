@@ -363,8 +363,22 @@ async fn mcp_post(mut req: Request, env: &Env) -> Result<Response> {
         .filter(|c| cloud_scope::discovered_globally(c.name(), show_global_cloud))
         .flat_map(|c| c.tools())
         .collect();
+    use pigeon_capabilities::federation;
+    let federated_request = scope.is_none()
+        && bearer.is_some()
+        && (global_discovery
+            || message["params"]["name"].as_str().is_some_and(|name| {
+                name == federation::DISCOVER || federation::READS.contains(&name)
+            }));
+    let available = if federated_request {
+        Some(federation::Available::load(env, &caller, true).await?)
+    } else {
+        None
+    };
     if let Some(scope) = &scope {
         scope.restrict_tools(&mut tools);
+    } else if let Some(available) = &available {
+        tools.extend(available.tools(&hosted));
     }
     pigeon_capabilities::approvals::annotate(&mut tools);
     let server = Server {
@@ -403,6 +417,11 @@ async fn mcp_post(mut req: Request, env: &Env) -> Result<Response> {
             instance: scope.as_ref(),
             worker: None,
         };
+        if let Some(available) = &available
+            && (name == federation::DISCOVER || federation::READS.contains(&name))
+        {
+            return available.call(&cx, name, args).await;
+        }
         pigeon_capabilities::dispatch_checked(&cx, name, args).await
     };
     match mcp::answer(&server, &tools, &message, call).await {

@@ -28,7 +28,7 @@ use worker::{Env, Error, Method, Result};
 
 use crate::console::sections::Section;
 use crate::passkeys::Passkeys;
-use crate::users::{User, directory};
+use crate::users::{Caller, User, directory};
 use crate::{Call, Capability, Context, arg, to_value, unknown};
 use record::{Instance, Rules};
 
@@ -237,6 +237,7 @@ impl Instances {
         id: &str,
         text: &str,
         audit: Option<&str>,
+        person: &User,
     ) -> Result<Value> {
         let (record, current) = match self.check(cx, text).await? {
             Ok(pair) => pair,
@@ -245,6 +246,7 @@ impl Instances {
         if record.id != id {
             return Ok(json!({ "errors": ["the record's id is not the target"] }));
         }
+        federation_owner(cx, current.as_ref(), &record, person).await?;
         let mut changes = to_value(record::diff(current.as_ref(), &record));
         if changes.as_array().is_some_and(Vec::is_empty) {
             return Ok(json!({ "errors": ["nothing changes"] }));
@@ -295,6 +297,7 @@ impl Instances {
         if record.id != id {
             return Err(bad("the record's id is not the target"));
         }
+        federation_owner(cx, current.as_ref(), &record, person).await?;
         if let Some((prior, action)) = audit_setup_change(current.as_ref(), &record, audit)? {
             crate::jobs_audit::setup_apply(cx.env, &self.passkeys.host, prior, action).await?;
             record.version += 1;
@@ -319,7 +322,19 @@ impl Instances {
             );
         }
         record.version += 1;
-        put(cx.env, &key(&record.id), &serde_json::to_string(&record)?).await?;
+        let saved = directory(
+            cx.env,
+            "instance.record_save",
+            json!({
+                "instance": id, "base": current, "record": serde_json::to_string(&record)?, "person": person.id
+            }),
+        )
+        .await?;
+        if saved != true {
+            return Err(bad(
+                "the instance changed during the write: reload and review again",
+            ));
+        }
         let mut index = ids(cx.env).await?;
         if !index.contains(&record.id) {
             index.push(record.id.clone());
@@ -359,6 +374,11 @@ impl Instances {
                 json!({ "problems": ["Set up the required Jobs audit bucket from the instance’s Capabilities console."] }),
             );
         }
+        if crate::federation::changed(current.as_ref(), &record) {
+            return Ok(
+                json!({"problems": ["An instance owner must set or remove MCP Federation trust in the console."]}),
+            );
+        }
         let changes = record::diff(current.as_ref(), &record);
         if changes.is_empty() {
             return Ok(json!({ "problems": ["nothing changes"] }));
@@ -388,6 +408,58 @@ impl Instances {
             "note": "Nothing changes until the person approves this on the console's Approvals tab.",
         }))
     }
+}
+
+/// Federation changes are membership-sensitive even though other instance edits need only operator.
+async fn federation_owner(
+    cx: &Context<'_>,
+    prior: Option<&Instance>,
+    next: &Instance,
+    person: &User,
+) -> Result<()> {
+    if !crate::federation::changed(prior, next) {
+        return Ok(());
+    }
+    let Some(prior) = prior else {
+        return Err(bad("create the instance before enabling MCP Federation"));
+    };
+    if record::jobs_audit_change(Some(prior), next) {
+        return Err(bad(
+            "review Jobs audit setup and MCP Federation trust as separate changes",
+        ));
+    }
+    crate::membership::access(cx.env, &person.id)
+        .await?
+        .may_manage(&next.id)
+        .map_err(|_| bad("only an instance owner can set or remove MCP Federation trust"))?;
+    for grant in crate::federation::grants(next)
+        .iter()
+        .filter(|grant| !crate::federation::grants(prior).contains(grant))
+    {
+        let peer = one(cx.env, &grant.peer).await?;
+        if !peer.is_some_and(|peer| {
+            peer.id == grant.peer
+                && crate::catalogue::is_home(&peer) != crate::catalogue::is_home(next)
+        }) {
+            return Err(bad(
+                "select the current ID of the home instance or a linked peer",
+            ));
+        }
+        let linked: Option<Caller> = serde_json::from_value(
+            directory(cx.env, "caller.of", json!({"user_id": grant.app})).await?,
+        )?;
+        if !linked.is_some_and(|caller| {
+            caller.user.kind == "service"
+                && caller
+                    .acting_for
+                    .is_some_and(|person| person.kind == "standard" && person.id == grant.person)
+        }) {
+            return Err(bad(
+                "the selected app is not currently connected to the named person",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Bind setup to the existing linked account, the deterministic/configured bucket, and the
@@ -1434,8 +1506,14 @@ impl Capability for Instances {
     ) -> Call<'a> {
         Box::pin(async move {
             let text = w.change["record"].as_str().unwrap_or_default();
-            self.put_check(cx, w.text(), text, w.change["jobs_audit"].as_str())
-                .await
+            self.put_check(
+                cx,
+                w.text(),
+                text,
+                w.change["jobs_audit"].as_str(),
+                w.person,
+            )
+            .await
         })
     }
 

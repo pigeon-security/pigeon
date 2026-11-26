@@ -683,6 +683,7 @@ const LINKED_SO_FAR: &[&str] = &[
     "secrets",
     "cloud",
     "digitalocean",
+    "mcp-federation",
     "jobs",
 ];
 

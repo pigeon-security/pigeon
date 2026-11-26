@@ -337,6 +337,20 @@
       "opt_in": true
     },
     {
+      "name": "mcp-federation",
+      "placements": [
+        "inline"
+      ],
+      "home": "inline",
+      "home_worker": null,
+      "scope": "instance",
+      "availability": "any",
+      "requires": [],
+      "linked": true,
+      "always": false,
+      "opt_in": true
+    },
+    {
       "name": "jobs",
       "placements": [
         "inline"

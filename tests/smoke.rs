@@ -3413,6 +3413,8 @@ fn queued_publish_terminalizes_an_expired_final_claim_without_attempting_again()
     assert!(!due(&row, 400_000.0));
 }
 
+#[path = "smoke/federation.rs"]
+mod federation;
 /// Private instance-owned structured diagnostic exports.
 #[path = "smoke/jobs_audit.rs"]
 mod jobs_audit;

@@ -134,6 +134,7 @@
   // Disabling removes the entry and its dependents.
   const CATALOGUE_ADDS = {
     architecture: { adds: ["Platform › Architecture"], what: "Show this instance’s own setup: its Worker, bucket, hostnames and tools" },
+    "mcp-federation": { what: "Share approved Jobs reads through the platform MCP connection" },
     jobs: {
       adds: ["Jobs › Runs"], what: "Inspect this instance’s job history",
       effect: "Shows instance-owned job history and exports terminal audit records to one private R2 bucket.",
@@ -442,7 +443,8 @@
             c.cap === "jobs" && !record.capabilities.jobs.audit_bucket
               ? button("Set up audit storage", () => configureJobs(c, true), sm) : null,
             step ? button("Upgrade", () => upgrade(c, step), { ...sm, variant: view ? "primary" : undefined }) : null,
-            c.fields(record).length ? button("Configure", () => configure(c, true), { ...sm, variant: "ghost" }) : null,
+            c.fields(record).length || c.cap === "mcp-federation"
+              ? button(c.cap === "mcp-federation" ? "Manage trust" : "Configure", () => configure(c, true), { ...sm, variant: "ghost" }) : null,
             c.cap === "digitalocean" ? button("Connection", () => digitalOceanConnection(ctx, record), sm) : null,
             c.cap === "digitalocean" && record.capabilities.digitalocean.droplet_health
               ? button("Runner check", () => digitalOceanDroplet(ctx, record), sm) : null,
@@ -520,9 +522,63 @@
       load();
     }
 
+    function configureFederation(editing) {
+      const record = state.record;
+      const name = "mcp-federation";
+      const grants = record.capabilities?.[name]?.federation || [];
+      const tools = [
+        ["digitalocean_droplet_jobs", "List runner checks"],
+        ["digitalocean_droplet_job", "Read a runner check"],
+        ["digitalocean_droplet_status", "Read runner status"],
+      ];
+      const peer = input({ name: "peer", mono: true, spellcheck: "false" });
+      const person = input({ name: "person", mono: true, spellcheck: "false" });
+      const app = input({ name: "app", mono: true, spellcheck: "false" });
+      const choices = tools.map(([value, label]) => ({ value, label, control: el("input", { type: "checkbox", checked: true }) }));
+      const title = editing ? "Manage MCP Federation trust" : "Enable MCP Federation";
+      function review(nextGrants, removing) {
+        const next = clone(record);
+        next.capabilities = { ...next.capabilities, [name]: { ...next.capabilities?.[name], federation: nextGrants } };
+        if (!nextGrants.length) delete next.capabilities[name].federation;
+        d.close();
+        putRecord(ctx, {
+          record, next, title: removing ? "Revoke MCP Federation trust" : title,
+          target: [["Capability", code(name)]], danger: removing,
+          confirmLabel: removing ? "Revoke with passkey" : "Approve with passkey",
+          effect: removing ? "Blocks this federation grant on the next call."
+            : "The peer instance owner must also approve this person, app and tool access.",
+        });
+      }
+      const add = () => {
+        const grant = { peer: peer.value.trim(), person: person.value.trim(), app: app.value.trim(),
+          tools: choices.filter(({ control }) => control.checked).map(({ value }) => value) };
+        if (!grant.peer || !grant.person || !grant.app || !grant.tools.length || grant.peer === record.id)
+          return d.say("Enter a different peer instance, the person ID, the OAuth app service user ID, and select at least one tool.", true);
+        if (grants.some((g) => g.peer === grant.peer && g.person === grant.person && g.app === grant.app))
+          return d.say("Revoke the existing grant for this peer, person and app before replacing it.", true);
+        if (grants.length >= 16) return d.say("This instance already has 16 grants.", true);
+        review([...grants, grant], false);
+      };
+      const d = dialog({
+        title,
+        body: [
+          ...grants.map((g, index) => el("div", { class: "section" },
+            facts([["Peer instance", code(g.peer)], ["Person ID", code(g.person)], ["OAuth app service user ID", code(g.app)],
+              ["Read tools", g.tools.map((tool) => tools.find(([value]) => value === tool)?.[1] || tool).join(", ")]]),
+            button("Revoke grant", () => review(grants.filter((_, i) => i !== index), true), { variant: "danger" }))),
+          field({ label: "Peer instance ID", control: peer }),
+          field({ label: "Person ID", hint: "On the home instance, open Access → People and expand the person.", control: person }),
+          field({ label: "OAuth app service user ID", hint: "Expand the person’s connected app to see its service user ID.", control: app }),
+          ...choices.map(({ control, label }) => el("label", {}, [control, " ", label])),
+        ],
+        actions: [button("Cancel", () => d.close()), button("Review grant", add, { variant: "primary" })],
+      });
+    }
+
     // Enable or Configure: the capability's settings, its diff as they are typed, then the passkey.
     function configure(c, editing) {
       if (c.cap === "jobs") return configureJobs(c, editing);
+      if (c.cap === "mcp-federation") return configureFederation(editing);
       const r = state.record;
       const now = profileOf(r, c);
       const fields = c.fields(r);

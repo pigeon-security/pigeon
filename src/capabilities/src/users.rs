@@ -1356,6 +1356,33 @@ impl Directory {
                 )?;
                 Value::Null
             }
+            "instance.record_save" => {
+                use crate::instances::{self, rename::Stored};
+                let key = instances::key(s("instance"));
+                let prior = self.setting_value(&key, t)?;
+                let current = match prior.as_deref().map(Stored::parse).transpose()? {
+                    Some(Stored::Record(record)) => Some(record),
+                    None => None,
+                    Some(Stored::Tombstone(_)) => return Ok(json!(false)),
+                };
+                if serde_json::to_value(&current)? != a["base"] {
+                    return Ok(json!(false));
+                }
+                let next: instances::record::Instance = serde_json::from_str(s("record"))?;
+                if crate::federation::changed(current.as_deref(), &next)
+                    && !self.admins()?.iter().any(|id| id == s("person"))
+                    && !self
+                        .owners(crate::membership::key(&next.id))?
+                        .iter()
+                        .any(|id| id == s("person"))
+                {
+                    return Err(bad(
+                        "only an instance owner can set or remove MCP Federation trust",
+                    ));
+                }
+                self.setting_keep(&key, s("record"), t.saturating_add(instances::KEPT_MS))?;
+                json!(true)
+            }
             "instance.jobs_audit_save" => {
                 use crate::instances::{self, rename::Stored};
                 let key = instances::key(s("instance"));

@@ -156,6 +156,9 @@ pub struct CapabilitySettings {
     /// Absence on a legacy profile requires setup before Jobs can export.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audit_bucket: Option<String>,
+    /// The peer, OAuth app, person and read tools approved by this instance owner.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub federation: Vec<crate::federation::Grant>,
     /// `data` only: the tier of the instance's unified data store, `lite` today
     /// (docs/plans/email.md, "Tiers").
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -461,6 +464,11 @@ pub fn approval_problems(next: &Instance, stored: &[Instance]) -> Vec<String> {
     let mut problems = Vec::new();
     check_home(next, stored, &mut problems);
     let current = stored.iter().find(|i| i.id == next.id);
+    if crate::federation::changed(current, next) {
+        problems.push(
+            "An instance owner must set or remove MCP Federation trust in the console.".into(),
+        );
+    }
     if jobs_audit_change(current, next) {
         problems.push(
             "Set up the required Jobs audit bucket from the instance’s Capabilities console."

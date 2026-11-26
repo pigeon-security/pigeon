@@ -169,6 +169,12 @@ pub const CATALOGUE: &[Entry] = &[
         requires: &[crate::cloud_scope::NAME],
         ..BASE
     },
+    Entry {
+        name: crate::federation::NAME,
+        linked: true,
+        opt_in: true,
+        ..BASE
+    },
     // Jobs › Runs reads instance-owned job history in core.
     Entry {
         name: JOBS,
@@ -313,7 +319,10 @@ pub fn placement(record: &Instance, name: &str) -> Option<(Placement, Option<Str
         Placement::Inline
             if matches!(
                 name,
-                crate::cloud_scope::NAME | crate::digitalocean::NAME | JOBS
+                crate::cloud_scope::NAME
+                    | crate::digitalocean::NAME
+                    | crate::federation::NAME
+                    | JOBS
             ) =>
         {
             (p, Some("pigeon-platform".into()))
@@ -449,6 +458,13 @@ pub fn problems(record: &Instance) -> Vec<String> {
             out.push(format!(
                 "The capability \"{name}\" does not accept Droplet health checks."
             ));
+        }
+        let grants = &record.capabilities[name].federation;
+        if !crate::federation::valid_grants(record, name, grants) {
+            out.push(
+                "MCP Federation requires distinct peers, people, apps and approved read tools."
+                    .into(),
+            );
         }
         out.extend(crate::data_store::field_problems(
             name,
