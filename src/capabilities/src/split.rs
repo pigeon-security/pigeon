@@ -982,9 +982,24 @@ pub fn purpose_permissions(purpose: &str) -> Option<&'static [&'static str]> {
             "Workers Containers Write",
             "Workers R2 Storage Read",
         ],
+        // The home instance's plans and applies (`instances::home`): R2 write for its landing
+        // bucket (on the account, as creating a bucket needs), and the platform zone's custom
+        // domains (on that zone alone). Never Workers-scripts write: the platform's Workers are
+        // the Lander's. Core mints it itself; a capability Worker may not ask for it.
+        "instance_home" => &[
+            "Workers R2 Storage Write",
+            "Zone Read",
+            "DNS Write",
+            "SSL and Certificates Write",
+            "Workers Routes Write",
+        ],
         _ => return None,
     })
 }
+
+/// Purposes in [`purpose_permissions`] that core mints for itself and a capability Worker may
+/// not ask `credential` for.
+pub const CORE_ONLY_PURPOSES: [&str; 1] = [crate::instances::home::PURPOSE];
 
 /// A token minted from the parent token for `purposes`, living [`SCOPED_TTL_SECS`]: the
 /// capability Worker uses it as an `Account`'s bearer, and it expires on its own.
@@ -994,6 +1009,11 @@ async fn scoped(cx: &Context<'_>, purposes: &[String]) -> Result<Value> {
     }
     let mut permissions: Vec<&str> = Vec::new();
     for p in purposes {
+        if CORE_ONLY_PURPOSES.contains(&p.as_str()) {
+            return Err(bad(&format!(
+                "credential purpose `{p}` is minted by core alone"
+            )));
+        }
         let more =
             purpose_permissions(p).ok_or_else(|| bad(&format!("no credential purpose `{p}`")))?;
         for m in more {

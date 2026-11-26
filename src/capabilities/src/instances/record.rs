@@ -15,7 +15,8 @@ use serde_json::Value;
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Instance {
-    /// The instance id, such as "pigeon-security/platform" or "noisypigeon".
+    /// The instance id, such as "pigeon-security/platform" or "noisypigeon". Ids may not hold a
+    /// dot yet: the home instance becomes `pigeon.dev` in its own migration (R1).
     pub id: String,
     /// A short human readable title.
     pub title: String,
@@ -60,6 +61,11 @@ pub struct Instance {
     /// Optional approved ingestion source and destination.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ingest: Option<crate::ingest::Profile>,
+    /// Where the platform itself (console, MCP, OAuth) is served: only the home instance names
+    /// it, and it is platform-owned, so plans never touch it. Absent when unset, so the digests
+    /// of records without it do not change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<PlatformRef>,
     /// The record version, which is not part of a diff.
     #[serde(default)]
     pub version: u64,
@@ -79,6 +85,19 @@ impl Toggle {
         matches!(self, Self::Enabled)
     }
 }
+
+/// Where the home instance's platform (console, MCP, OAuth) lives.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PlatformRef {
+    /// Such as `platform.pigeon.dev`: a platform-owned hostname of the platform zone.
+    pub host: String,
+}
+
+/// The one template a record may name for a site today: the landing page, which alone may
+/// serve the home instance's apex. The same as `pigeon_landing::TEMPLATE` (the smoke suite
+/// checks it), without depending on the template crate.
+pub const LANDING_TEMPLATE: &str = "landing@1";
 
 /// Which Cloudflare account an instance lives in.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -144,6 +163,17 @@ pub struct SiteRecord {
     /// Who may sign in when `auth` is set: user ids, or "site" for every site user of the host.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allow: Vec<String>,
+    /// The template the site is built from, such as `landing@1` ([`LANDING_TEMPLATE`]). Absent
+    /// when unset, so the digests of records without it do not change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+}
+
+impl SiteRecord {
+    /// Whether the site is built from the landing template.
+    pub fn landing(&self) -> bool {
+        self.template.as_deref() == Some(LANDING_TEMPLATE)
+    }
 }
 
 /// A place where a site is published.
@@ -523,7 +553,14 @@ pub fn platform_hosts(rules: &Rules) -> Vec<String> {
     out
 }
 
-/// The home instance's zone and domain targets may not name a platform-owned hostname.
+/// Whether `hostname` is the platform zone's apex, ignoring ASCII case.
+pub fn is_apex(hostname: &str, rules: &Rules) -> bool {
+    hostname.eq_ignore_ascii_case(rules.platform_zone)
+}
+
+/// The home instance's zone and domain targets may not name a platform-owned hostname, except
+/// the apex as a custom domain of a site built from the landing template: the platform's Worker
+/// serves it, and the plan keeps it as it is.
 fn check_home_hosts(instance: &Instance, rules: &Rules, problems: &mut Vec<String>) {
     if instance.account != AccountRef::Home {
         return;
@@ -534,12 +571,34 @@ fn check_home_hosts(instance: &Instance, rules: &Rules, problems: &mut Vec<Strin
             let (Target::Zone { hostname, .. } | Target::Domain { hostname }) = target else {
                 continue;
             };
-            if owned.contains(&hostname.to_ascii_lowercase()) {
+            let landing_apex = site.landing()
+                && matches!(target, Target::Domain { .. })
+                && is_apex(hostname, rules);
+            if !landing_apex && owned.contains(&hostname.to_ascii_lowercase()) {
                 problems.push(format!(
                     "The sites[{i}].targets[{j}].hostname \"{hostname}\" is the platform's own, and the home instance may not serve it."
                 ));
             }
         }
+    }
+}
+
+/// Only the home instance names where the platform lives, and only as a platform-owned host of
+/// the platform zone other than the apex.
+fn check_platform(instance: &Instance, rules: &Rules, problems: &mut Vec<String>) {
+    let Some(platform) = &instance.platform else {
+        return;
+    };
+    if instance.account != AccountRef::Home {
+        problems.push("Only the home instance may name the platform's host.".into());
+        return;
+    }
+    let host = platform.host.to_ascii_lowercase();
+    if !dns_name(&host) || is_apex(&host, rules) || !platform_hosts(rules).contains(&host) {
+        problems.push(format!(
+            "The platform.host \"{}\" must be one of the platform's own hostnames under {}, such as platform.{}, and not the apex.",
+            platform.host, rules.platform_zone, rules.platform_zone
+        ));
     }
 }
 
@@ -698,6 +757,13 @@ fn check_sites(
             ));
         }
         check_auth(&p, site, problems);
+        if let Some(t) = &site.template
+            && t != LANDING_TEMPLATE
+        {
+            problems.push(format!(
+                "The {p}.template \"{t}\" must be \"{LANDING_TEMPLATE}\", the one template a record names."
+            ));
+        }
         let mut previews = 0usize;
         for (j, target) in site.targets.iter().enumerate() {
             if matches!(target, Target::Preview) {
@@ -732,6 +798,7 @@ pub fn validate(instance: &Instance, others: &[Instance], rules: &Rules) -> Vec<
     check_repo(instance, &mut problems);
     check_sites(instance, others, rules, &mut problems);
     check_home_hosts(instance, rules, &mut problems);
+    check_platform(instance, rules, &mut problems);
     check_worker(instance, others, rules, &mut problems);
     if let Some(pigeon_core::site_publish::Profile::Enabled { site }) = &instance.publishing {
         if !instance.sites.iter().any(|record| record.name == *site) {

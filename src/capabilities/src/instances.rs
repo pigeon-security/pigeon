@@ -6,6 +6,7 @@
 //! person named. The console's Instances tab shows every instance and edits one; over MCP they
 //! can only be listed.
 
+pub mod home;
 pub mod manifest;
 pub mod plan;
 pub(crate) mod publishing;
@@ -416,6 +417,56 @@ async fn observe(account: &pigeon_core::Account, instance: &Instance) -> Result<
     })
 }
 
+/// What the platform's own account holds for the home instance, read with the home token
+/// (`account`'s bearer) alone: whether its landing bucket exists. Its Worker is the platform's
+/// when it names it (deployed by the Lander, not read: the token holds no Workers-scripts
+/// permission), and nothing else is read; [`plan::plan`] keeps or blocks the rest.
+async fn observe_home(
+    account: &pigeon_core::Account,
+    instance: &Instance,
+    zone: &str,
+    platform_worker: bool,
+) -> Result<plan::Observed> {
+    use pigeon_core::r2;
+    let bucket_exists = match instance.sites.first() {
+        Some(s) => {
+            r2::bucket_exists(
+                account,
+                &r2::Bucket {
+                    name: s.bucket.clone(),
+                    jurisdiction: s.jurisdiction.clone(),
+                },
+            )
+            .await?
+        }
+        None => false,
+    };
+    let subdomains = instance
+        .sites
+        .iter()
+        .flat_map(|s| s.targets.iter())
+        .filter_map(|t| match t {
+            record::Target::Subdomain { label } => Some(plan::SeenSubdomain {
+                hostname: record::subdomain_host(label, zone),
+                zone_id: None,
+                worker: SITES_WORKER.to_string(),
+                service: None,
+                upstream: None,
+            }),
+            _ => None,
+        })
+        .collect();
+    Ok(plan::Observed {
+        account_id: account.id.clone(),
+        bucket_exists,
+        worker_exists: platform_worker,
+        workers_dev: None,
+        account_subdomain: None,
+        domains: Vec::new(),
+        subdomains,
+    })
+}
+
 async fn ledger(env: &Env, id: &str) -> Result<plan::Ledger> {
     match directory(env, "setting.get", json!({ "key": plan::ledger_key(id) })).await? {
         Value::String(text) => Ok(serde_json::from_str(&text)?),
@@ -455,7 +506,8 @@ impl Instances {
             }
             record::AccountRef::Home => {
                 return Err(bad(&format!(
-                    "instance {id} runs in the platform's own account; plans are for linked ones"
+                    "instance {id} runs in the platform's own account: it is planned with the \
+                     home token"
                 )));
             }
         };
@@ -468,6 +520,14 @@ impl Instances {
         }
         let mut seen = observe(&account, &instance).await?;
         seen.subdomains = self.observe_subdomains(cx, &instance).await?;
+        let owned = self.owned(cx, &instance);
+        let steps = plan::plan(&instance, &seen, &ledger(env, id).await?, owned.as_ref());
+        let digest = plan::digest(&instance, &account.id, &steps);
+        Ok((instance, account, steps, digest))
+    }
+
+    /// What is platform-owned for `instance`: `None` for a linked one.
+    fn owned(&self, cx: &Context<'_>, instance: &Instance) -> Option<plan::PlatformOwned> {
         let reserved = self.reserved(cx);
         let workers = self.workers(cx);
         let rules = Rules {
@@ -476,10 +536,55 @@ impl Instances {
             reserved_workers: &workers,
             platform_worker: cx.hosted.worker,
         };
-        let owned = plan::platform_owned(&instance, &rules);
-        let steps = plan::plan(&instance, &seen, &ledger(env, id).await?, owned.as_ref());
-        let digest = plan::digest(&instance, &account.id, &steps);
-        Ok((instance, account, steps, digest))
+        plan::platform_owned(instance, &rules)
+    }
+
+    /// The home instance's plan, read with the home token's `account`: the steps, their digest
+    /// (bound to the platform's own account) and what is platform-owned.
+    async fn home_planned(
+        &self,
+        cx: &Context<'_>,
+        instance: &Instance,
+        account: &pigeon_core::Account,
+    ) -> Result<(Vec<plan::Step>, String, Option<plan::PlatformOwned>)> {
+        let owned = self.owned(cx, instance);
+        let platform_worker = instance
+            .worker
+            .as_deref()
+            .is_some_and(|w| owned.as_ref().is_some_and(|o| o.worker(w)));
+        let seen = observe_home(account, instance, &self.zone, platform_worker).await?;
+        let steps = plan::plan(
+            instance,
+            &seen,
+            &ledger(cx.env, &instance.id).await?,
+            owned.as_ref(),
+        );
+        let digest = plan::digest(instance, &account.id, &steps);
+        Ok((steps, digest, owned))
+    }
+
+    /// Runs `work` with the home token: minted from the parent token for purpose
+    /// `instance_home`, scoped to the platform zone, and revoked after `work`, whether it
+    /// succeeded or not. Refuses before any work when the purpose or the parent token's
+    /// permissions are missing.
+    async fn with_home<F, Fut, T>(&self, cx: &Context<'_>, work: F) -> Result<T>
+    where
+        F: FnOnce(pigeon_core::Account) -> Fut,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
+        let zone_id = pigeon_core::zones::active(cx.account, &self.zone)
+            .await
+            .map(|z| z.id)
+            .unwrap_or_default();
+        home::with_token(
+            cx.account,
+            crate::split::purpose_permissions(home::PURPOSE),
+            &zone_id,
+            &cx.account.id,
+            &cx.account.secrets_store,
+            work,
+        )
+        .await
     }
 
     /// Each Subdomain target as the platform's own account has it. Reads only.
@@ -539,7 +644,22 @@ impl Instances {
             .as_ref()
             .ok_or_else(|| bad("the caller acts for no person who could approve this"))?;
         let id = arg(args, "instance")?;
-        let (instance, account, steps, digest) = self.planned(cx, id).await?;
+        let (instance, account_id, steps, digest) = match one(cx.env, id).await? {
+            Some(home) if home.account == record::AccountRef::Home => {
+                let h = &home;
+                let (steps, digest) = self
+                    .with_home(cx, |account| async move {
+                        let (steps, digest, _) = self.home_planned(cx, h, &account).await?;
+                        Ok((steps, digest))
+                    })
+                    .await?;
+                (home, cx.account.id.clone(), steps, digest)
+            }
+            _ => {
+                let (instance, account, steps, digest) = self.planned(cx, id).await?;
+                (instance, account.id, steps, digest)
+            }
+        };
         let lines = plan::describe(&steps);
         if steps.iter().any(plan::Step::stops) {
             return Ok(json!({ "instance": id, "plan": lines, "applies": false,
@@ -557,7 +677,7 @@ impl Instances {
                 "kind": kind.name(),
                 "subject": id,
                 "digest": digest,
-                "summary": { "instance": id, "account_id": account.id,
+                "summary": { "instance": id, "account_id": account_id,
                              "version": instance.version, "plan": lines },
                 "payload": { "steps": steps },
                 "caller_id": caller.user.id,
@@ -576,9 +696,10 @@ impl Instances {
         }))
     }
 
-    /// `instance_apply`: the approved plan, if the account still gives the same one.
+    /// `instance_apply`: the approved plan, if the account still gives the same one. The home
+    /// instance's is read and applied with the home token, revoked after, and refused outright
+    /// when anything in it is platform-owned.
     async fn apply(&self, cx: &Context<'_>, args: &Value) -> Result<Value> {
-        use pigeon_core::{r2, workers};
         let caller = cx
             .caller
             .ok_or_else(|| bad("applying needs a known caller"))?;
@@ -590,20 +711,42 @@ impl Instances {
             .filter(|_| got["kind"] == "linked_plan" && !retiring::is_retire(&got))
             .ok_or_else(|| bad(&format!("there is no plan approval {approval_id}")))?
             .to_string();
-        let (instance, account, steps, digest) = self.planned(cx, &id).await?;
-        let taken = directory(
-            cx.env,
-            "approval.take",
-            json!({ "id": approval_id, "digest": digest, "caller_id": caller.user.id }),
-        )
-        .await?;
-        if let Some(why) = taken["refused"].as_str() {
-            return Err(bad(&format!(
-                "the plan does not run: {why}. If the account changed since it was approved, \
-                 plan again."
-            )));
+        if let Some(home) = one(cx.env, &id)
+            .await?
+            .filter(|i| i.account == record::AccountRef::Home)
+        {
+            let h = &home;
+            let id = id.as_str();
+            return self
+                .with_home(cx, |account| async move {
+                    let (steps, digest, owned) = self.home_planned(cx, h, &account).await?;
+                    if let Some(why) = plan::home_refusal(&steps, owned.as_ref()) {
+                        return Err(bad(&format!(
+                            "the home plan does not run: {why}. Nothing was changed."
+                        )));
+                    }
+                    take(cx, approval_id, &digest, &caller.user.id).await?;
+                    self.run(cx, id, h, &account, &steps).await
+                })
+                .await;
         }
-        let mut l = ledger(cx.env, &id).await?;
+        let (instance, account, steps, digest) = self.planned(cx, &id).await?;
+        take(cx, approval_id, &digest, &caller.user.id).await?;
+        self.run(cx, &id, &instance, &account, &steps).await
+    }
+
+    /// Applies each changing step of `steps` in `account`, in order, recording each in
+    /// instance `id`'s ledger as it is done.
+    async fn run(
+        &self,
+        cx: &Context<'_>,
+        id: &str,
+        instance: &Instance,
+        account: &pigeon_core::Account,
+        steps: &[plan::Step],
+    ) -> Result<Value> {
+        use pigeon_core::{r2, workers};
+        let mut l = ledger(cx.env, id).await?;
         let mut done = Vec::new();
         for step in steps.iter().filter(|s| s.changes()) {
             let outcome = match step {
@@ -614,7 +757,7 @@ impl Instances {
                         name: name.clone(),
                         jurisdiction: jurisdiction.clone(),
                     };
-                    let e = r2::ensure_bucket(&account, &b).await?;
+                    let e = r2::ensure_bucket(account, &b).await?;
                     if !e.created {
                         return Err(bad(&format!(
                             "bucket {name} appeared before pigeon created it; it is not \
@@ -644,19 +787,19 @@ impl Instances {
                         bindings.push(workers::Binding::Secret {
                             name: plan::ORIGIN_KEY_BINDING.into(),
                             text: pigeon_core::site_auth::origin_key(
-                                &key, &id, &site.name, bucket, upstream,
+                                &key, id, &site.name, bucket, upstream,
                             ),
                         });
                         plan::protected_site_worker()
                     } else {
                         plan::SITE_WORKER.to_string()
                     };
-                    workers::upload(&account, name, plan::COMPATIBILITY_DATE, &bindings, &module)
+                    workers::upload(account, name, plan::COMPATIBILITY_DATE, &bindings, &module)
                         .await?;
                     format!("uploaded Worker {name}")
                 }
                 plan::Step::EnableWorkersDev { name } => {
-                    let url = workers::enable_workers_dev(&account, name).await?;
+                    let url = workers::enable_workers_dev(account, name).await?;
                     format!("preview at {url}")
                 }
                 plan::Step::AttachDomain {
@@ -664,7 +807,7 @@ impl Instances {
                     zone_id,
                     worker,
                 } => {
-                    pigeon_core::custom_domain::attach(&account, zone_id, hostname, worker).await?;
+                    pigeon_core::custom_domain::attach(account, zone_id, hostname, worker).await?;
                     format!("{hostname} is served by Worker {worker}")
                 }
                 plan::Step::AttachSubdomain {
@@ -687,11 +830,28 @@ impl Instances {
                 _ => continue,
             };
             plan::record(&mut l, step);
-            keep_ledger(cx.env, &id, &l).await?;
+            keep_ledger(cx.env, id, &l).await?;
             done.push(outcome);
         }
         Ok(json!({ "instance": id, "done": done }))
     }
+}
+
+/// Takes plan approval `approval_id` for `caller`, once, if it was approved for `digest`.
+async fn take(cx: &Context<'_>, approval_id: &str, digest: &str, caller: &str) -> Result<()> {
+    let taken = directory(
+        cx.env,
+        "approval.take",
+        json!({ "id": approval_id, "digest": digest, "caller_id": caller }),
+    )
+    .await?;
+    if let Some(why) = taken["refused"].as_str() {
+        return Err(bad(&format!(
+            "the plan does not run: {why}. If the account changed since it was approved, \
+             plan again."
+        )));
+    }
+    Ok(())
 }
 
 impl Capability for Instances {
@@ -728,12 +888,15 @@ impl Capability for Instances {
             },
             Tool {
                 name: "instance_plan",
-                description: "Dry run of what a linked instance needs in its account: its R2 \
+                description: "Dry run of what an instance needs in its account: its R2 \
                               bucket, its site Worker and the Worker's workers.dev preview, \
                               read live and compared with what pigeon made. Changes nothing. \
-                              When there is something to do and nothing in the way, the plan \
-                              waits on the console's Approvals tab for the person's passkey; \
-                              `instance_apply` then applies exactly that plan, once.",
+                              The home instance is read with a short-lived `instance_home` \
+                              token (revoked after) and plans only its landing bucket: the \
+                              platform's Workers and hosts are kept as they are, never \
+                              changed. When there is something to do and nothing in the way, \
+                              the plan waits on the console's Approvals tab for the person's \
+                              passkey; `instance_apply` then applies exactly that plan, once.",
                 input_schema: json!({
                     "type": "object",
                     "properties": { "instance": { "type": "string" } },

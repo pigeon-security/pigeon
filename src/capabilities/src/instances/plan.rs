@@ -208,6 +208,9 @@ pub struct PlatformOwned {
     pub workers: Vec<String>,
     /// The platform zone's apex and its reserved hostnames, such as `platform.pigeon.dev`.
     pub hosts: Vec<String>,
+    /// The platform zone's apex, such as `pigeon.dev`: platform-owned, and kept as it is when the
+    /// home instance's landing site names it.
+    pub apex: String,
 }
 
 impl PlatformOwned {
@@ -238,6 +241,7 @@ pub fn platform_owned(instance: &Instance, rules: &Rules) -> Option<PlatformOwne
     Some(PlatformOwned {
         workers,
         hosts: super::record::platform_hosts(rules),
+        apex: rules.platform_zone.to_ascii_lowercase(),
     })
 }
 
@@ -284,8 +288,81 @@ fn guard(step: Step, owned: &PlatformOwned) -> Step {
                 step
             }
         }
+        // The home instance's credential (`instance_home`) holds no Workers-scripts write: the
+        // platform deploys Workers, never an instance plan, even one the home instance names.
+        Step::UploadWorker { name, .. } | Step::EnableWorkersDev { name } => Step::Blocked {
+            why: format!("Worker {name}: {NO_SCRIPTS}"),
+        },
         _ => step,
     }
+}
+
+/// Why the home instance's plan never uploads a Worker or turns on its workers.dev address.
+pub const NO_SCRIPTS: &str = "the home instance's credential (instance_home) holds no \
+                              Workers-scripts write; the platform deploys Workers, never an \
+                              instance plan";
+
+/// The custom domain step for `hostname`, a Domain target of the home instance's `site`, when
+/// what is platform-owned decides it: the apex of a landing site is kept (the platform's Worker
+/// serves it); any other platform host, or any host the platform's Worker would serve, is
+/// blocked. `None` when the ordinary domain step applies.
+fn home_domain(
+    site: &super::record::SiteRecord,
+    hostname: &str,
+    worker: &str,
+    owned: &PlatformOwned,
+) -> Option<Step> {
+    if site.landing() && hostname.eq_ignore_ascii_case(&owned.apex) {
+        return Some(Step::Keep {
+            what: "custom domain".into(),
+            name: hostname.to_string(),
+            why: PLATFORM_OWNED.into(),
+        });
+    }
+    if owned.host(hostname) {
+        return Some(Step::Blocked {
+            why: format!("{hostname} is {PLATFORM_OWNED}"),
+        });
+    }
+    owned.worker(worker).then(|| Step::Blocked {
+        why: format!("{hostname}'s Worker {worker} is {PLATFORM_OWNED}"),
+    })
+}
+
+/// Why the home instance's `steps` may not be applied, checked again just before applying: a
+/// step that stops the plan, or a change naming anything platform-owned, or any change but a
+/// bucket or a custom domain (the only things `instance_home` may make). `None` when they may.
+/// Fails closed: without the platform-owned set, nothing is applied.
+pub fn home_refusal(steps: &[Step], owned: Option<&PlatformOwned>) -> Option<String> {
+    let Some(owned) = owned else {
+        return Some("what is platform-owned is not known, so nothing is applied".into());
+    };
+    if let Some(Step::Blocked { why } | Step::Conflict { why, .. }) =
+        steps.iter().find(|s| s.stops())
+    {
+        return Some(format!("something is in the way: {why}"));
+    }
+    for step in steps.iter().filter(|s| s.changes()) {
+        let touches = match step {
+            Step::CreateBucket { .. } => None,
+            Step::AttachDomain {
+                hostname, worker, ..
+            } if owned.host(hostname) || owned.worker(worker) => Some(hostname.as_str()),
+            Step::AttachDomain { .. } => None,
+            Step::UploadWorker { name, .. } | Step::EnableWorkersDev { name } => {
+                Some(name.as_str())
+            }
+            Step::AttachSubdomain { hostname, .. } => Some(hostname.as_str()),
+            _ => None,
+        };
+        if let Some(name) = touches {
+            return Some(format!(
+                "the plan would change {name}, which the home instance may not: it is \
+                 platform-owned or needs Workers-scripts write"
+            ));
+        }
+    }
+    None
 }
 
 /// The plan for `instance` given what is there and its ledger. An instance with no site or no
@@ -297,9 +374,8 @@ pub fn plan(
     ledger: &Ledger,
     owned: Option<&PlatformOwned>,
 ) -> Vec<Step> {
-    let steps = wanted(instance, seen, ledger);
     if instance.account != AccountRef::Home {
-        return steps;
+        return wanted(instance, seen, ledger, None);
     }
     let Some(owned) = owned else {
         return vec![Step::Blocked {
@@ -307,11 +383,20 @@ pub fn plan(
                 .into(),
         }];
     };
-    steps.into_iter().map(|s| guard(s, owned)).collect()
+    wanted(instance, seen, ledger, Some(owned))
+        .into_iter()
+        .map(|s| guard(s, owned))
+        .collect()
 }
 
-/// The plan's steps before the home instance's guard.
-fn wanted(instance: &Instance, seen: &Observed, ledger: &Ledger) -> Vec<Step> {
+/// The plan's steps before the home instance's guard. `owned` is given for the home instance
+/// alone: its custom domains are decided by [`home_domain`] first.
+fn wanted(
+    instance: &Instance,
+    seen: &Observed,
+    ledger: &Ledger,
+    owned: Option<&PlatformOwned>,
+) -> Vec<Step> {
     let (Some(site), Some(worker)) = (instance.sites.first(), instance.worker.as_deref()) else {
         return Vec::new();
     };
@@ -437,6 +522,10 @@ fn wanted(instance: &Instance, seen: &Observed, ledger: &Ledger) -> Vec<Step> {
         let super::record::Target::Domain { hostname } = target else {
             continue;
         };
+        if let Some(step) = owned.and_then(|o| home_domain(site, hostname, worker, o)) {
+            steps.push(step);
+            continue;
+        }
         let seen_domain = seen.domains.iter().find(|d| &d.hostname == hostname);
         steps.push(match seen_domain {
             Some(SeenDomain {
@@ -460,11 +549,20 @@ fn wanted(instance: &Instance, seen: &Observed, ledger: &Ledger) -> Vec<Step> {
                 worker: worker.into(),
             },
             _ => Step::Blocked {
-                why: format!("the zone of {hostname} is not in the linked account"),
+                why: format!("the zone of {hostname} is not in the instance's account"),
             },
         });
     }
     for seen_sub in &seen.subdomains {
+        if owned.is_some_and(|o| o.worker(&seen_sub.worker)) {
+            steps.push(Step::Blocked {
+                why: format!(
+                    "{}'s Worker {} is {PLATFORM_OWNED}",
+                    seen_sub.hostname, seen_sub.worker
+                ),
+            });
+            continue;
+        }
         let upstream = seen
             .account_subdomain
             .as_deref()

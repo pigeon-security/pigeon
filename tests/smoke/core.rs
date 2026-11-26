@@ -952,7 +952,7 @@ fn core_console_cost_views() {
 const TOKEN_NOW_MS: i64 = 1_795_500_000_000;
 
 /// Runs a future that never waits to its end, with no runtime.
-fn token_block_on<F: std::future::Future>(f: F) -> F::Output {
+pub(crate) fn token_block_on<F: std::future::Future>(f: F) -> F::Output {
     use std::task::{Context, Poll, Waker};
     let mut cx = Context::from_waker(Waker::noop());
     let mut f = std::pin::pin!(f);
@@ -964,14 +964,14 @@ fn token_block_on<F: std::future::Future>(f: F) -> F::Output {
 }
 
 /// A token list with a cap, a page size, failing deletes and a record of deletes.
-struct MockTokens {
-    tokens: std::cell::RefCell<Vec<pigeon_core::tokens::Listed>>,
+pub(crate) struct MockTokens {
+    pub(crate) tokens: std::cell::RefCell<Vec<pigeon_core::tokens::Listed>>,
     cap: usize,
     page_size: usize,
-    fail_delete: Vec<&'static str>,
-    deleted: std::cell::RefCell<Vec<String>>,
+    pub(crate) fail_delete: Vec<&'static str>,
+    pub(crate) deleted: std::cell::RefCell<Vec<String>>,
     next: std::cell::Cell<u32>,
-    attempts: std::cell::Cell<u32>,
+    pub(crate) attempts: std::cell::Cell<u32>,
     /// While set, listing the tokens fails.
     fail_list: std::cell::Cell<bool>,
     lose_create_response: std::cell::Cell<bool>,
@@ -979,7 +979,7 @@ struct MockTokens {
 }
 
 impl MockTokens {
-    fn new(cap: usize, page_size: usize) -> Self {
+    pub(crate) fn new(cap: usize, page_size: usize) -> Self {
         Self {
             tokens: Default::default(),
             cap,

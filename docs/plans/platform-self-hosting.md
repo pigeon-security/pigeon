@@ -1,7 +1,7 @@
 # pigeon.dev as an instance of pigeon
 
-Status: **decided** (2026-11-26); H1 and L1 in progress, the `/platform` redirect built, the
-rest not started. Code references are to main at the time of writing.
+Status: **decided** (2026-11-26); H1 and L1 done, the `/platform` redirect built, H2 built,
+the rest not started. Code references are to main at the time of writing.
 
 ## Goal
 
@@ -41,9 +41,10 @@ hostnames, by Host:
 - `ci/deploy/deploy.sh:144-166` and the `site_publish` pre-flight (`site.rs`, `publish`) require
   `https://pigeon.dev/architecture.json` to answer with the deployed commit. **This contract
   stays.**
-- The home record is `account: home`, no zones, no sites, no Worker, CI only.
-  `instance_plan` refuses home (`instances.rs:454-458`); publishing requires a GitHub repo and
-  a linked account (`record.rs:634-648`, `sites_scope.rs:19-29`, `deploy.rs:75-86`).
+- The home record is `account: home`, no zones, no sites, no Worker, CI only. Since H2,
+  `instance_plan`/`instance_apply` accept home (with the `instance_home` token, below);
+  publishing still requires a GitHub repo and a linked account (`record.rs`, `sites_scope.rs`,
+  `deploy.rs`).
 - The home instance is found by account kind, never by id (`console.rs:174-179`,
   `manifest.rs:26-27`, `ci.rs:33`, iOS `InstanceStore.platform`), which keeps R1 small.
 
@@ -65,6 +66,13 @@ source, ci, observability
   the Lander and setup tools. Never in plan steps, never in the ledger; shown read-only.
 - **Managed** resources (the landing bucket, its releases) are what `instance_apply` creates.
 
+As built (H2): `platform` is `PlatformRef { host }` on the record (home only; a platform-owned
+host of the platform zone, never the apex). `template` is a site field (only `landing@1`). The
+apex target is `{ "kind": "domain", "hostname": "pigeon.dev" }`, allowed for home only on a
+`landing@1` site. Both new fields are omitted when unset, so existing record digests do not
+move. The home plan is the bucket step plus `Keep` lines for the platform's Worker and the apex
+(read-only, never a change, never in the ledger).
+
 ### Guard rails (unchanged from the earlier plan)
 
 1. Reserved Worker names and footprint hosts are `Blocked` in `plan::plan` for home; the
@@ -78,6 +86,17 @@ source, ci, observability
 Home plan/apply and publishing mint a short-lived purpose-scoped token from the parent token
 (new purpose `instance_home`: R2 write on the landing bucket, custom domains on the zone),
 revoked after each apply. No Workers-scripts write: the Worker is platform-owned.
+
+As built (H2, `instances/home.rs`, `split::purpose_permissions`): `instance_home` is
+`Workers R2 Storage Write` on the account (creating a bucket is account-level; Cloudflare's
+bucket-scoped groups cover objects only), and `Zone Read`, `DNS Write`,
+`SSL and Certificates Write`, `Workers Routes Write` on the platform zone alone. Core mints it
+through the token ledger (`mint_for`, 600 s), hands it to the work as the account's bearer (so
+no helper mints from the parent), and revokes it after each plan and each apply, on success and
+failure. A capability Worker may not ask `credential` for it (`CORE_ONLY_PURPOSES`). If the
+purpose is unknown or the parent cannot mint it, plan/apply refuse before any step. A home
+Worker is never uploaded and workers.dev never turned on (`plan::NO_SCRIPTS`), and
+`plan::home_refusal` re-checks every step before apply.
 
 ## Serving: core serves the apex
 
@@ -127,12 +146,13 @@ Steps:
 
 ## Phases
 
-- **H1** guard rails and validation, no behaviour change. *In progress.*
+- **H1** guard rails and validation, no behaviour change. *Done.*
 - **L1** `landing@1` template crate (pure, peer of `pigeon-blog`; no scripts; tokens embedded,
   digest tied to version), template dispatch (`deploy.rs:425-437`), `versions.rs` component.
-  *In progress.*
+  *Done.*
 - **H2** home plan/apply with the minted `instance_home` token; the platform target in the
-  record; platform-owned resources excluded from plans.
+  record; platform-owned resources excluded from plans. *Built* (smoke
+  `home_instance_plans_and_applies_with_a_minted_token`).
 - **L2–L3** home publishing from Artifacts: `sites[].build` as root (`record.rs:134-136`),
   an Artifacts archive read (`artifacts.rs:566-591` reads single files only), the home bucket,
   shared release/rollback/list code.

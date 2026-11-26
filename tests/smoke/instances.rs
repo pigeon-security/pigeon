@@ -2178,3 +2178,529 @@ fn home_instance_guard_rails() {
     assert!(refusal(&home).is_some() && refusal(&managed).is_some());
     assert!(refusal(&linked).is_none());
 }
+
+/// One mint as [`HomeMinter`] records it: the purpose, then each policy's scope and permissions.
+type HomeMint = (String, Vec<(String, Vec<String>)>);
+
+/// The `instance_home` token's minter in the suite: the core suite's [`MockTokens`], recording
+/// each mint's purpose and policies as (scope, permission names).
+struct HomeMinter<'a> {
+    tokens: &'a super::core::MockTokens,
+    minted: std::cell::RefCell<Vec<HomeMint>>,
+}
+
+impl pigeon_capabilities::instances::home::Minter for HomeMinter<'_> {
+    async fn mint(
+        &self,
+        purpose: &str,
+        policies: Vec<pigeon_core::tokens::Policy>,
+        ttl_secs: u64,
+    ) -> worker::Result<(String, String)> {
+        use pigeon_core::tokens::{Scope, TokenApi, name};
+        assert!(ttl_secs <= 900, "short-lived: {ttl_secs}");
+        let seen = policies
+            .iter()
+            .map(|p| {
+                let scope = match &p.scope {
+                    Scope::Account => "account".to_string(),
+                    Scope::Zones(z) => format!("zones:{}", z.join(",")),
+                    Scope::AllZones => "all zones".to_string(),
+                };
+                (scope, p.permissions.clone())
+            })
+            .collect();
+        self.minted.borrow_mut().push((purpose.into(), seen));
+        let body = json!({
+            "name": name(purpose, "2026-11-26T00:00:00Z"),
+            "expires_on": "2026-11-26T00:10:00Z",
+        });
+        let made = self.tokens.create(&body).await?;
+        Ok((made.id, made.value))
+    }
+
+    async fn revoke(&self, id: &str) -> worker::Result<()> {
+        use pigeon_core::tokens::TokenApi;
+        self.tokens.delete(id).await
+    }
+}
+
+/// Area: instances. H2: the home instance is planned and applied like a linked one, with the
+/// same passkey approval, but only its managed resources (the landing bucket) are ever steps;
+/// everything platform-owned is kept or blocks the plan, never reaches the ledger, and the
+/// work runs with a minted `instance_home` token that is revoked whatever happens.
+#[test]
+fn home_instance_plans_and_applies_with_a_minted_token() {
+    use super::core::{MockTokens, token_block_on};
+    use pigeon_capabilities::instances::home::{self, PERSON_STEPS, PURPOSE, with_token};
+    use pigeon_capabilities::instances::plan::{
+        Ledger, NO_SCRIPTS, Observed, PLATFORM_OWNED, SeenDomain, Step, digest, home_refusal, plan,
+        platform_owned, record,
+    };
+    use pigeon_capabilities::instances::record::{
+        Instance, LANDING_TEMPLATE, Rules, Target, reserved_labels, validate,
+    };
+    use pigeon_capabilities::split::{CORE_ONLY_PURPOSES, purpose_permissions};
+
+    let reserved = reserved_labels(
+        &[
+            "platform.pigeon.dev".into(),
+            "proxy.pigeon.dev".into(),
+            "pigeon.dev".into(),
+        ],
+        "pigeon.dev",
+    );
+    let workers: Vec<String> = ["ai-agents", "pigeon-platform", "pigeon-sites", "proxy"]
+        .map(String::from)
+        .to_vec();
+    let rules = Rules {
+        platform_zone: "pigeon.dev",
+        reserved_labels: &reserved,
+        reserved_workers: &workers,
+        platform_worker: "pigeon-platform",
+    };
+    let has = |problems: &[String], why: &str| {
+        assert!(
+            problems.iter().any(|p| p.contains(why)),
+            "{why}: {problems:?}"
+        );
+    };
+
+    // The record the plan describes: the platform's Worker, its host, and a landing site on the
+    // apex. The id is not renamed yet (R1): a dotted id is still refused.
+    assert_eq!(LANDING_TEMPLATE, pigeon_landing::TEMPLATE);
+    let home_json = json!({
+        "id": "pigeon-security/platform", "title": "pigeon",
+        "account": { "kind": "home" }, "zones": ["pigeon.dev"],
+        "worker": "pigeon-platform",
+        "platform": { "host": "platform.pigeon.dev" },
+        "sites": [{ "name": "landing", "bucket": "pigeon-platform-site", "template": "landing@1",
+            "targets": [{ "kind": "domain", "hostname": "pigeon.dev" }] }],
+        "version": 3
+    });
+    let home: Instance = serde_json::from_value(home_json).unwrap();
+    let stored = serde_json::to_value(&home).unwrap();
+    assert_eq!(stored["platform"]["host"], "platform.pigeon.dev");
+    assert_eq!(stored["sites"][0]["template"], "landing@1");
+    let linked_json = json!({
+        "id": "noisypigeon", "title": "noisypigeon",
+        "account": { "kind": "linked", "account_id": "a".repeat(32) },
+        "zones": ["noisypigeon.com"], "worker": "noisypigeon",
+        "sites": [{ "name": "blog", "bucket": "noisypigeon-site",
+            "targets": [{ "kind": "preview" }, { "kind": "domain", "hostname": "noisypigeon.com" }] }],
+        "version": 1
+    });
+    let linked: Instance = serde_json::from_value(linked_json).unwrap();
+    // A record without the new fields serializes as before, so its digest does not move.
+    let text = serde_json::to_string(&linked).unwrap();
+    assert!(
+        !text.contains("platform") && !text.contains("template"),
+        "{text}"
+    );
+    assert_eq!(
+        validate(&home, std::slice::from_ref(&linked), &rules),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        validate(&linked, std::slice::from_ref(&home), &rules),
+        Vec::<String>::new()
+    );
+    let mut dotted = home.clone();
+    dotted.id = "pigeon.dev".into();
+    has(
+        &validate(&dotted, &[], &rules),
+        "\"pigeon.dev\" must be made of",
+    );
+    let mut second = home.clone();
+    second.id = "other/platform".into();
+    has(
+        &validate(&second, std::slice::from_ref(&home), &rules),
+        "only one home instance",
+    );
+    // Only home names the platform's host, and only a platform host that is not the apex.
+    let mut platform_linked = linked.clone();
+    platform_linked.platform = home.platform.clone();
+    has(
+        &validate(&platform_linked, &[], &rules),
+        "Only the home instance",
+    );
+    for bad_host in ["pigeon.dev", "blog.pigeon.dev", "platform.example.com"] {
+        let mut h = home.clone();
+        h.platform.as_mut().unwrap().host = bad_host.into();
+        has(&validate(&h, &[], &rules), "The platform.host");
+    }
+    // The apex is the landing template's alone, and only as a custom domain.
+    let mut not_landing = home.clone();
+    not_landing.sites[0].template = None;
+    has(
+        &validate(&not_landing, &[], &rules),
+        "\"pigeon.dev\" is the platform's own",
+    );
+    let mut other_template = home.clone();
+    other_template.sites[0].template = Some("blog@1".into());
+    let problems = validate(&other_template, &[], &rules);
+    has(&problems, "template \"blog@1\" must be \"landing@1\"");
+    has(&problems, "\"pigeon.dev\" is the platform's own");
+    let mut routed = home.clone();
+    routed.sites[0].targets = vec![Target::Zone {
+        hostname: "pigeon.dev".into(),
+        route: "pigeon.dev/*".into(),
+        enabled: true,
+    }];
+    has(
+        &validate(&routed, &[], &rules),
+        "\"pigeon.dev\" is the platform's own",
+    );
+    let mut reserved_host = home.clone();
+    reserved_host.sites[0].targets.push(Target::Domain {
+        hostname: "platform.pigeon.dev".into(),
+    });
+    has(
+        &validate(&reserved_host, &[], &rules),
+        "\"platform.pigeon.dev\" is the platform's own",
+    );
+
+    // A home plan has only managed steps: the landing bucket is created; the platform's Worker
+    // and the apex are kept as they are, never uploaded or attached.
+    let owned = platform_owned(&home, &rules).unwrap();
+    assert_eq!(owned.apex, "pigeon.dev");
+    let seen = Observed {
+        account_id: "h".repeat(32),
+        bucket_exists: false,
+        worker_exists: true,
+        workers_dev: None,
+        account_subdomain: None,
+        domains: vec![],
+        subdomains: vec![],
+    };
+    let l = Ledger::default();
+    let steps = plan(&home, &seen, &l, Some(&owned));
+    let keep = |what: &str, name: &str| Step::Keep {
+        what: what.into(),
+        name: name.into(),
+        why: PLATFORM_OWNED.into(),
+    };
+    assert_eq!(
+        steps,
+        vec![
+            Step::CreateBucket {
+                name: "pigeon-platform-site".into(),
+                jurisdiction: None,
+                protected: false,
+            },
+            keep("worker", "pigeon-platform"),
+            keep("custom domain", "pigeon.dev"),
+        ]
+    );
+    assert_eq!(home_refusal(&steps, Some(&owned)), None);
+    assert!(
+        home_refusal(&steps, None).is_some(),
+        "fails closed without the set"
+    );
+    // Even when the account says the apex is served (by either platform Worker), it is kept.
+    for service in ["pigeon-platform", "pigeon-sites"] {
+        let served = Observed {
+            domains: vec![SeenDomain {
+                hostname: "pigeon.dev".into(),
+                zone_id: Some("z".into()),
+                service: Some(service.into()),
+            }],
+            ..seen.clone()
+        };
+        assert_eq!(plan(&home, &served, &l, Some(&owned)), steps, "{service}");
+    }
+    // Nothing platform-owned is ever a change, or in the ledger.
+    let mut after = l.clone();
+    for step in &steps {
+        record(&mut after, step);
+    }
+    assert_eq!(after.buckets, vec!["pigeon-platform-site".to_string()]);
+    assert!(after.workers.is_empty() && after.domains.is_empty() && after.subdomains.is_empty());
+    assert!(after.protected_workers.is_empty() && after.protected_buckets.is_empty());
+    let applied = plan(
+        &home,
+        &Observed {
+            bucket_exists: true,
+            ..seen.clone()
+        },
+        &after,
+        Some(&owned),
+    );
+    assert!(!applied.iter().any(Step::changes), "{applied:?}");
+    assert!(!applied.iter().any(Step::stops), "{applied:?}");
+    // The approval binds the same subject and digest as a linked plan's: the instance, its
+    // version, the platform's own account and the exact steps.
+    let d = digest(&home, &seen.account_id, &steps);
+    assert_eq!(d, digest(&home, &seen.account_id, &steps));
+    assert_ne!(d, digest(&home, &"i".repeat(32), &steps));
+    assert_ne!(d, digest(&home, &seen.account_id, &applied));
+
+    // A reserved Worker or host blocks the plan, and apply refuses it.
+    let blocked = |i: &Instance| {
+        let steps = plan(i, &seen, &l, Some(&owned));
+        assert!(steps.iter().any(Step::stops), "{steps:?}");
+        assert!(
+            !steps
+                .iter()
+                .any(|s| matches!(s, Step::UploadWorker { .. } | Step::AttachDomain { .. })),
+            "{steps:?}"
+        );
+        let why = home_refusal(&steps, Some(&owned)).unwrap();
+        assert!(why.contains("in the way"), "{why}");
+        steps
+    };
+    let steps = blocked(&reserved_host);
+    assert!(steps.contains(&Step::Blocked {
+        why: format!("platform.pigeon.dev is {PLATFORM_OWNED}")
+    }));
+    let mut blog = home.clone();
+    blog.sites[0].targets.push(Target::Domain {
+        hostname: "blog.pigeon.dev".into(),
+    });
+    let steps = blocked(&blog);
+    assert!(steps.contains(&Step::Blocked {
+        why: format!("blog.pigeon.dev's Worker pigeon-platform is {PLATFORM_OWNED}")
+    }));
+    let mut sub = home.clone();
+    sub.sites[0].targets.push(Target::Subdomain {
+        label: "landing".into(),
+    });
+    let with_sub = Observed {
+        subdomains: vec![pigeon_capabilities::instances::plan::SeenSubdomain {
+            hostname: "landing.pigeon.dev".into(),
+            zone_id: None,
+            worker: "pigeon-sites".into(),
+            service: None,
+            upstream: None,
+        }],
+        ..seen.clone()
+    };
+    let steps = plan(&sub, &with_sub, &l, Some(&owned));
+    assert!(home_refusal(&steps, Some(&owned)).is_some(), "{steps:?}");
+    // A home Worker that is not the platform's is never uploaded: the token holds no
+    // Workers-scripts write.
+    let mut own = home.clone();
+    own.worker = Some("landing".into());
+    own.worker_override = true;
+    let steps = plan(
+        &own,
+        &Observed {
+            worker_exists: false,
+            ..seen.clone()
+        },
+        &l,
+        Some(&owned),
+    );
+    assert!(steps.contains(&Step::Blocked {
+        why: format!("Worker landing: {NO_SCRIPTS}")
+    }));
+    // The second line: a change naming anything platform-owned, or a Worker, is refused even
+    // if a plan somehow held it.
+    let attach = |hostname: &str, worker: &str| Step::AttachDomain {
+        hostname: hostname.into(),
+        zone_id: "z".into(),
+        worker: worker.into(),
+    };
+    for bad in [
+        attach("pigeon.dev", "landing"),
+        attach("blog.pigeon.dev", "pigeon-platform"),
+        Step::UploadWorker {
+            name: "pigeon-platform".into(),
+            bucket: "b".into(),
+            jurisdiction: None,
+            module: "m".into(),
+            replaces: true,
+            origin: None,
+        },
+        Step::EnableWorkersDev {
+            name: "landing".into(),
+        },
+    ] {
+        assert!(
+            home_refusal(std::slice::from_ref(&bad), Some(&owned)).is_some(),
+            "{bad:?}"
+        );
+    }
+    assert_eq!(
+        home_refusal(&[attach("blog.pigeon.dev", "landing")], Some(&owned)),
+        None
+    );
+
+    // The credential: exactly R2 write and the zone's custom domains, never Workers scripts,
+    // and core alone mints it.
+    let permissions = purpose_permissions(PURPOSE).unwrap();
+    assert_eq!(
+        permissions,
+        &[
+            "Workers R2 Storage Write",
+            "Zone Read",
+            "DNS Write",
+            "SSL and Certificates Write",
+            "Workers Routes Write",
+        ][..]
+    );
+    assert!(!permissions.iter().any(|p| p.starts_with("Workers Scripts")));
+    assert!(CORE_ONLY_PURPOSES.contains(&PURPOSE));
+    let exact = vec![
+        (
+            "account".to_string(),
+            vec!["Workers R2 Storage Write".to_string()],
+        ),
+        (
+            "zones:zone-1".to_string(),
+            permissions[1..].iter().map(|p| p.to_string()).collect(),
+        ),
+    ];
+    let missing = home::policies(None, "zone-1").err().unwrap();
+    assert!(missing.contains("not a credential purpose") && missing.contains(PERSON_STEPS));
+    assert!(
+        home::policies(Some(&["Workers Scripts Write"]), "zone-1")
+            .err()
+            .unwrap()
+            .contains("never holds")
+    );
+    assert!(home::policies(Some(permissions), "").is_err());
+
+    // Minted for the work, used as the account's bearer, and revoked after it succeeds...
+    let tokens = MockTokens::new(10, 50);
+    let minter = HomeMinter {
+        tokens: &tokens,
+        minted: Default::default(),
+    };
+    let ran = token_block_on(with_token(
+        &minter,
+        Some(permissions),
+        "zone-1",
+        &"h".repeat(32),
+        "store",
+        |account| async move {
+            assert_eq!(account.bearer.as_deref(), Some("v"));
+            assert!(account.parent.is_empty(), "nothing mints from the parent");
+            assert_eq!(account.id, "h".repeat(32));
+            Ok(json!({ "done": ["created bucket pigeon-platform-site"] }))
+        },
+    ))
+    .unwrap();
+    assert!(
+        !ran.to_string().contains("\"v\""),
+        "the token is never returned"
+    );
+    assert_eq!(
+        *minter.minted.borrow(),
+        vec![("instance-home".to_string(), exact.clone())]
+    );
+    assert_eq!(*tokens.deleted.borrow(), vec!["t100".to_string()]);
+    assert!(tokens.tokens.borrow().is_empty());
+
+    // ... and after it fails, the work's own error first.
+    let failed = token_block_on(with_token(
+        &minter,
+        Some(permissions),
+        "zone-1",
+        &"h".repeat(32),
+        "store",
+        |_account| async move { Err::<(), _>(worker::Error::RustError("bucket refused".into())) },
+    ))
+    .unwrap_err()
+    .to_string();
+    assert!(failed.contains("bucket refused"), "{failed}");
+    assert_eq!(minter.minted.borrow().len(), 2);
+    assert_eq!(minter.minted.borrow()[1].1, exact);
+    assert_eq!(
+        *tokens.deleted.borrow(),
+        vec!["t100".to_string(), "t101".to_string()]
+    );
+    assert!(tokens.tokens.borrow().is_empty());
+
+    // A token that could not be revoked is said so, after the work's own result.
+    let mut stuck = MockTokens::new(10, 50);
+    stuck.fail_delete = vec!["t100"];
+    let stuck_minter = HomeMinter {
+        tokens: &stuck,
+        minted: Default::default(),
+    };
+    let unrevoked = token_block_on(with_token(
+        &stuck_minter,
+        Some(permissions),
+        "zone-1",
+        "h",
+        "store",
+        |_account| async move { Ok(()) },
+    ))
+    .unwrap_err()
+    .to_string();
+    assert!(unrevoked.contains("not revoked"), "{unrevoked}");
+
+    // Refused before any work when the purpose is missing (nothing minted) or the parent token
+    // cannot mint it; the message names what the person does.
+    let worked = std::cell::Cell::new(false);
+    let w = &worked;
+    let none = MockTokens::new(10, 50);
+    let none_minter = HomeMinter {
+        tokens: &none,
+        minted: Default::default(),
+    };
+    let refused = token_block_on(with_token(
+        &none_minter,
+        None,
+        "zone-1",
+        "h",
+        "store",
+        move |_account| async move {
+            w.set(true);
+            Ok(())
+        },
+    ))
+    .unwrap_err()
+    .to_string();
+    assert!(refused.contains(PERSON_STEPS), "{refused}");
+    assert_eq!(none.attempts.get(), 0);
+    let full = MockTokens::new(0, 50);
+    let full_minter = HomeMinter {
+        tokens: &full,
+        minted: Default::default(),
+    };
+    let refused = token_block_on(with_token(
+        &full_minter,
+        Some(permissions),
+        "zone-1",
+        "h",
+        "store",
+        move |_account| async move {
+            w.set(true);
+            Ok(())
+        },
+    ))
+    .unwrap_err()
+    .to_string();
+    assert!(
+        refused.contains("parent token could not mint") && refused.contains(PERSON_STEPS),
+        "{refused}"
+    );
+    assert!(!worked.get(), "nothing is half-applied");
+    assert!(full.deleted.borrow().is_empty());
+
+    // Linked instances plan exactly as before.
+    let linked_seen = Observed {
+        account_id: "a".repeat(32),
+        worker_exists: false,
+        workers_dev: Some(false),
+        account_subdomain: Some("np".into()),
+        domains: vec![SeenDomain {
+            hostname: "noisypigeon.com".into(),
+            zone_id: Some("z".into()),
+            service: None,
+        }],
+        ..seen.clone()
+    };
+    let linked_steps = plan(&linked, &linked_seen, &l, None);
+    assert_eq!(linked_steps, plan(&linked, &linked_seen, &l, Some(&owned)));
+    assert!(platform_owned(&linked, &rules).is_none());
+    assert!(linked_steps.iter().any(
+        |s| matches!(s, Step::AttachDomain { hostname, .. } if hostname == "noisypigeon.com")
+    ));
+    assert!(
+        linked_steps
+            .iter()
+            .any(|s| matches!(s, Step::EnableWorkersDev { .. }))
+    );
+}
