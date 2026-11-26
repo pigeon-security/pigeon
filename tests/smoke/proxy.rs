@@ -118,27 +118,22 @@ fn core_contract_per_worker_caller_keys() {
     let (shared, sites, ci) = (&b"shared"[..], &b"sites key"[..], &b"ci key"[..]);
     let (body, now) = (&b"{}"[..], 1_800_000_000_000);
     let by = |key: &[u8]| sign(key, &json!(null), "dispatch", body, now, "n");
-    let check = |own: Option<&[u8]>, header: &str, at: i64| {
-        verify_caller(own, shared, Some(header), "dispatch", body, at)
-    };
-    // The Worker's own key, and the shared key as before.
-    assert!(check(Some(sites), &by(sites), now).is_ok());
-    assert!(check(Some(sites), &by(shared), now).is_ok());
-    assert!(check(None, &by(shared), now).is_ok());
+    let check =
+        |own: &[u8], header: &str, at: i64| verify_caller(own, Some(header), "dispatch", body, at);
+    // The Worker's own key verifies.
+    assert!(check(sites, &by(sites), now).is_ok());
+    // The retired shared key no longer does (docs/plans/caller-keys.md, step 4).
+    assert_eq!(check(sites, &by(shared), now), Err(Refused::BadSignature));
     // Another Worker's key, or a wrong one, is refused.
-    assert_eq!(check(Some(sites), &by(ci), now), Err(Refused::BadSignature));
-    assert_eq!(check(None, &by(ci), now), Err(Refused::BadSignature));
-    assert_eq!(
-        check(Some(sites), &by(b"wrong"), now),
-        Err(Refused::BadSignature)
-    );
+    assert_eq!(check(sites, &by(ci), now), Err(Refused::BadSignature));
+    assert_eq!(check(sites, &by(b"wrong"), now), Err(Refused::BadSignature));
     // The skew checks still apply to the per-Worker key.
     assert_eq!(
-        check(Some(sites), &by(sites), now + 61_000),
+        check(sites, &by(sites), now + 61_000),
         Err(Refused::Expired)
     );
     assert_eq!(
-        check(Some(sites), &by(sites), now - 6_000),
+        check(sites, &by(sites), now - 6_000),
         Err(Refused::FromTheFuture)
     );
     assert_eq!(worker_key_name("sites"), Some("CALLER_KEY_SITES"));
@@ -174,14 +169,12 @@ fn contract_worker_names_itself() {
     );
 }
 
-/// Core bounds what each capability Worker may ask once its own key signed the request
-/// (docs/plans/caller-keys.md, step 5); the shared key keeps today's behaviour, and a Worker
-/// claiming another's name never gets that Worker's table.
+/// Core bounds what each capability Worker may ask, by its own key (docs/plans/caller-keys.md,
+/// step 5). Since step 4 every accepted request is signed with a Worker's own key, so the table
+/// always applies, and a Worker claiming another's name fails that Worker's key.
 #[test]
 fn core_bounds_each_workers_ops_with_its_own_key() {
-    use pigeon_capabilities::split::{
-        KeyUsed, WORKER_KEYS, WORKER_OPS, verify_caller_keyed, worker_may,
-    };
+    use pigeon_capabilities::split::{WORKER_KEYS, WORKER_OPS, verify_caller, worker_may};
     use pigeon_contract::{CORE_OPS, Refused, sign};
 
     let may = |w: &str, op: &str, body: Value| worker_may(w, op, body.to_string().as_bytes());
@@ -271,79 +264,73 @@ fn core_bounds_each_workers_ops_with_its_own_key() {
         assert!(allowed.iter().all(|a| CORE_OPS.contains(&a.op)));
     }
 
-    // Which key verified decides whether the table applies.
+    // Only the named Worker's own key verifies; there is no unbounded shared-key request.
     let (shared, sites, ci) = (&b"shared"[..], &b"sites key"[..], &b"ci key"[..]);
     let (body, now) = (&b"{}"[..], 1_800_000_000_000);
     let by = |key: &[u8]| sign(key, &json!(null), "approval", body, now, "n");
-    let check = |own: Option<&[u8]>, header: &str| {
-        verify_caller_keyed(own, shared, Some(header), "approval", body, now).map(|(_, k)| k)
-    };
-    assert_eq!(check(Some(sites), &by(sites)), Ok(KeyUsed::Own));
-    // Signed with the shared key: today's behaviour, no table, whatever name was claimed.
-    assert_eq!(check(Some(sites), &by(shared)), Ok(KeyUsed::Shared));
-    assert_eq!(check(None, &by(shared)), Ok(KeyUsed::Shared));
-    // Sites claiming to be ci-gateway, signing with its own key: core checks ci-gateway's key,
-    // then the shared one, and both fail.
-    assert_eq!(check(Some(ci), &by(sites)), Err(Refused::BadSignature));
+    let check = |own: &[u8], header: &str| verify_caller(own, Some(header), "approval", body, now);
+    assert!(check(sites, &by(sites)).is_ok());
+    // Signed with the retired shared key: refused, whatever name was claimed.
+    assert_eq!(check(sites, &by(shared)), Err(Refused::BadSignature));
+    // Sites claiming to be ci-gateway, signing with its own key: core checks ci-gateway's key
+    // only, and it fails.
+    assert_eq!(check(ci, &by(sites)), Err(Refused::BadSignature));
 }
 
-/// Step 2 of docs/plans/caller-keys.md: core binds every Worker's key and each Worker sends
-/// `X-Pigeon-Worker`, but still signs with the shared key. Core's signed endpoint, as it runs
-/// (`verify_request`, with the recipient check), tries the named Worker's key, gets a bad
-/// signature, falls back to the shared key and accepts the request as `Shared`, so no
-/// Worker's table applies and nothing is refused that was accepted before.
+/// Step 4 of docs/plans/caller-keys.md: core's signed endpoint, as it runs (`verify_request`,
+/// with the recipient check), accepts a named Worker's request only when that Worker's own key
+/// signed it. A request signed with the retired shared `CALLER_KEY` is refused, legacy or
+/// contextual, so no request escapes the Worker's `WORKER_OPS` row.
 #[test]
-fn core_accepts_a_named_worker_signing_with_the_shared_key() {
-    use pigeon_capabilities::split::{KeyUsed, verify_request, worker_may};
+fn core_refuses_a_named_worker_signing_with_the_shared_key() {
+    use pigeon_capabilities::split::{verify_request, worker_may};
     use pigeon_contract::{Refused, WorkerContext, sign, sign_with_context};
 
     let (shared, sites) = (&b"shared"[..], &b"sites key"[..]);
     let now = 1_800_000_000_000;
     let core = "pigeon-platform";
     let check = |header: &str, op: &str, body: &[u8], at: i64, recipient: &str| {
-        verify_request(Some(sites), shared, Some(header), op, body, at, recipient)
+        verify_request(sites, Some(header), op, body, at, recipient)
     };
-    // An op outside sites' table: accepted all the same, since the shared key verified it.
+    // An op outside sites' table, signed with the shared key: refused at the signature, so it
+    // never reaches the table.
     let body = br#"{"action":"create"}"#;
     assert!(worker_may("sites", "approval", body).is_err());
     let header = sign(shared, &json!(null), "approval", body, now, "n");
-    let (_, used) = check(&header, "approval", body, now, core).unwrap();
-    assert_eq!(used, KeyUsed::Shared);
+    assert_eq!(
+        check(&header, "approval", body, now, core).map(|_| ()),
+        Err(Refused::BadSignature)
+    );
 
-    // A contextual callback (sites_scope), signed with the shared key for core.
+    // A contextual callback (sites_scope), signed with the shared key for core: refused.
     let body = br#"{"instance":"willow"}"#;
     let who = json!({ "user": { "name": "willow" } });
     let context = WorkerContext::new(core, Some("willow"));
     let header = sign_with_context(shared, &who, "sites_scope", body, now, "n", &context);
-    let (signed, used) = check(&header, "sites_scope", body, now, core).unwrap();
-    assert_eq!(used, KeyUsed::Shared);
+    assert_eq!(
+        check(&header, "sites_scope", body, now, core).map(|_| ()),
+        Err(Refused::BadSignature)
+    );
+    // Signed with sites' own key: accepted, with the recipient and age checks.
+    let header = sign_with_context(sites, &who, "sites_scope", body, now, "n", &context);
+    let signed = check(&header, "sites_scope", body, now, core).unwrap();
     assert_eq!(signed.instance(), Some("willow"));
-    // The recipient and age checks still apply after the fall-back.
-    let used = |at: i64, recipient: &str| {
-        check(&header, "sites_scope", body, at, recipient).map(|(_, k)| k)
-    };
+    let used =
+        |at: i64, recipient: &str| check(&header, "sites_scope", body, at, recipient).map(|_| ());
     assert_eq!(used(now, "other"), Err(Refused::WrongRecipient));
     assert_eq!(used(now + 61_000, core), Err(Refused::Expired));
-    // Once sites signs with its own key (step 3), the same request is `Own`.
-    let header = sign_with_context(sites, &who, "sites_scope", body, now, "n", &context);
-    assert_eq!(
-        check(&header, "sites_scope", body, now, core).map(|(_, k)| k),
-        Ok(KeyUsed::Own)
-    );
 }
 
-/// Step 3 of docs/plans/caller-keys.md, the receivers first: a capability Worker checks core's
-/// call with its own key (`CALLER_KEY_OWN`), then the shared `CALLER_KEY`, so core can switch to
-/// signing with each Worker's own key with no call refused in between.
+/// Steps 3 and 4 of docs/plans/caller-keys.md: a capability Worker checks core's call with its
+/// own key (`CALLER_KEY_OWN`) alone; the retired shared `CALLER_KEY` no longer verifies.
 #[test]
-fn worker_checks_cores_calls_with_its_own_key_then_the_shared_one() {
+fn worker_checks_cores_calls_with_its_own_key_only() {
     use pigeon_contract::{Keys, Refused, WorkerContext, sign, sign_with_context};
     use pigeon_core::webauthn::b64url;
 
     let (shared, sites, ci) = (&b"shared"[..], &b"sites key"[..], &b"ci key"[..]);
     let keys = Keys {
         own: sites.to_vec(),
-        shared: Some(shared.to_vec()),
     };
     let (body, now) = (&br#"{"tool":"site_deploy"}"#[..], 1_800_000_000_000);
     let who = json!({ "user": { "name": "willow" } });
@@ -354,8 +341,8 @@ fn worker_checks_cores_calls_with_its_own_key_then_the_shared_one() {
 
     // Signed with the Worker's own key: verifies.
     assert_eq!(check(&keys, &by(sites), now).unwrap().caller, who);
-    // Signed with the shared key: still verifies during the transition.
-    assert!(check(&keys, &by(shared), now).is_ok());
+    // Signed with the retired shared key: refused.
+    assert_eq!(check(&keys, &by(shared), now), Err(Refused::BadSignature));
     // Another Worker's key, or a wrong one, is refused.
     assert_eq!(check(&keys, &by(ci), now), Err(Refused::BadSignature));
     assert_eq!(check(&keys, &by(b"wrong"), now), Err(Refused::BadSignature));
@@ -386,7 +373,7 @@ fn worker_checks_cores_calls_with_its_own_key_then_the_shared_one() {
         keys.verify(None, "call", body, now, me),
         Err(Refused::Missing)
     );
-    // A good own signature that is too old is refused as such, not retried with the shared key.
+    // A good own signature that is too old is refused as such.
     assert_eq!(
         check(&keys, &by(sites), now + 61_000),
         Err(Refused::Expired)
@@ -396,40 +383,28 @@ fn worker_checks_cores_calls_with_its_own_key_then_the_shared_one() {
         Err(Refused::FromTheFuture)
     );
 
-    // Contextual calls: the recipient check applies whichever key signed.
+    // Contextual calls: the own key verifies, with the recipient check; no other key does.
     let context = WorkerContext::new(me, Some("willow"));
     let in_context = |key: &[u8]| sign_with_context(key, &who, "call", body, now, "n", &context);
-    for key in [sites, shared] {
-        let got = check(&keys, &in_context(key), now).unwrap();
-        assert_eq!(got.instance(), Some("willow"));
+    let got = check(&keys, &in_context(sites), now).unwrap();
+    assert_eq!(got.instance(), Some("willow"));
+    assert_eq!(
+        keys.verify(
+            Some(&in_context(sites)),
+            "call",
+            body,
+            now,
+            "pigeon-ci-gateway"
+        ),
+        Err(Refused::WrongRecipient)
+    );
+    for key in [shared, ci] {
         assert_eq!(
-            keys.verify(
-                Some(&in_context(key)),
-                "call",
-                body,
-                now,
-                "pigeon-ci-gateway"
-            ),
-            Err(Refused::WrongRecipient)
+            check(&keys, &in_context(key), now),
+            Err(Refused::BadSignature)
         );
     }
-    assert_eq!(
-        check(&keys, &in_context(ci), now),
-        Err(Refused::BadSignature)
-    );
-
-    // Once the shared key is unbound (step 4), only the own key passes.
-    let own_only = Keys {
-        own: sites.to_vec(),
-        shared: None,
-    };
-    assert!(check(&own_only, &by(sites), now).is_ok());
-    assert_eq!(
-        check(&own_only, &by(shared), now),
-        Err(Refused::BadSignature)
-    );
     assert_eq!(pigeon_contract::OWN_KEY, "CALLER_KEY_OWN");
-    assert_eq!(pigeon_contract::SHARED_KEY, "CALLER_KEY");
 }
 
 /// Step 3 of docs/plans/caller-keys.md, the signers: core signs each call to a bound Worker with
@@ -542,12 +517,8 @@ fn core_signs_each_bound_workers_calls_with_that_workers_key() {
     }
 
     // A call core signs for each Worker verifies there, and at no other Worker.
-    let shared = b"shared".to_vec();
     let secret = |name: &str| format!("key of {name}").into_bytes();
-    let worker_keys = |name: &str| Keys {
-        own: secret(name),
-        shared: Some(shared.clone()),
-    };
+    let worker_keys = |name: &str| Keys { own: secret(name) };
     let (body, now) = (&br#"{"tool":"t"}"#[..], 1_800_000_000_000);
     let who = json!({ "user": { "name": "willow" } });
     for (to, _) in WORKER_KEYS {
@@ -578,10 +549,10 @@ fn core_signs_each_bound_workers_calls_with_that_workers_key() {
 fn workers_setup_plans_only_missing_caller_keys() {
     use pigeon_capabilities::split::{caller_key_names, keys_to_make, setup_key_names};
 
+    // The shared CALLER_KEY is no longer made (docs/plans/caller-keys.md, step 4).
     assert_eq!(
         caller_key_names(),
         [
-            "CALLER_KEY",
             "CALLER_KEY_CI_GATEWAY",
             "CALLER_KEY_MODEL_GATEWAY",
             "CALLER_KEY_SITES",
@@ -593,9 +564,9 @@ fn workers_setup_plans_only_missing_caller_keys() {
     let mut all = caller_key_names();
     all.push(pigeon_core::site_auth::SITE_KEY);
     assert_eq!(setup_key_names(), all);
-    // Today's store: every caller key, no site key yet (docs/plans/caller-keys.md, step 4).
+    // Every caller key, no site key yet.
     assert_eq!(keys_to_make(&caller_key_names()), ["SITE_KEY"]);
-    // Only the shared key, among unrelated secrets.
+    // Only the retired shared key, among unrelated secrets: it is not counted.
     assert_eq!(
         keys_to_make(&["CALLER_KEY", "GITHUB_APP_KEY"]),
         [
@@ -611,7 +582,6 @@ fn workers_setup_plans_only_missing_caller_keys() {
     assert_eq!(
         keys_to_make(&["CALLER_KEY_SITES", "CALLER_KEY_PROXY", "SITE_KEY"]),
         [
-            "CALLER_KEY",
             "CALLER_KEY_CI_GATEWAY",
             "CALLER_KEY_MODEL_GATEWAY",
             "CALLER_KEY_AI_AGENTS",

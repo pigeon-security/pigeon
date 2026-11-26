@@ -331,9 +331,9 @@ fn identify_worker() {
 
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
-    // Its own key signs every ask of core and checks core's calls first; the shared key checks
-    // them second. SITE_KEY derives protected sites' keys. Without its own key or SITE_KEY it
-    // serves nothing (docs/plans/caller-keys.md, steps 3 and 4).
+    // Its own key signs every ask of core and is the only key core's calls are checked with.
+    // SITE_KEY derives protected sites' keys. Without either it serves nothing
+    // (docs/plans/caller-keys.md, steps 3 and 4).
     let keys = match site_keys(&env).await {
         Ok(keys) => keys,
         Err(why) => {
@@ -356,9 +356,6 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     if host.ends_with(&format!(".{zone}")) {
         return public::serve(req, &env, &keys, WORKER, &host).await;
     }
-    let contract = pigeon_contract::Keys {
-        own: keys.sign,
-        shared: pigeon_contract::keys::shared_key(&env).await?,
-    };
+    let contract = pigeon_contract::Keys { own: keys.sign };
     pigeon_contract::serve(req, &env, &Sites, &contract).await
 }

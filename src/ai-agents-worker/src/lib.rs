@@ -29,8 +29,8 @@ fn identify_worker() {
 
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
-    // Core's calls are checked with this Worker's own key, then the shared one; with no own
-    // key it serves none (docs/plans/caller-keys.md, step 3).
+    // Core's calls are checked with this Worker's own key alone; with no own key it serves none
+    // (docs/plans/caller-keys.md, steps 3 and 4).
     let keys = match pigeon_contract::keys::read(&env).await {
         Ok(keys) => keys,
         Err(e) => {

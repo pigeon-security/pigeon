@@ -54,8 +54,7 @@ pub trait Service {
 /// Serves one request from core. It routes by op, checks the caller's signature (on every op
 /// but `manifest`, `fetch` and `events`, which carry no caller), parses the body and answers
 /// JSON. An unknown op answers kind `unknown_op` with HTTP 200, so core can tell skew from
-/// failure. The caller is checked with this Worker's own key, then the shared one
-/// ([`Keys::verify`]). A bad signature answers `unauthorized` with 401, and a body that does not parse
+/// failure. The caller is checked with this Worker's own key alone ([`Keys::verify`]). A bad signature answers `unauthorized` with 401, and a body that does not parse
 /// answers `bad_request` with 400. `fetch` requests are handed on as they came, without the
 /// `/fetch` prefix.
 pub async fn serve(

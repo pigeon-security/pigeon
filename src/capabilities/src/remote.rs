@@ -32,11 +32,6 @@ pub struct Binding {
     pub worker: &'static str,
 }
 
-/// The Secrets Store binding of the shared caller key (docs/plans/workers-split.md). Core still
-/// accepts it from capability Workers until step 4 of docs/plans/caller-keys.md; it no longer
-/// signs its own calls to them with it.
-pub const CALLER_KEY: &str = "CALLER_KEY";
-
 /// How long a manifest is kept in this isolate, in milliseconds.
 pub const MANIFEST_TTL_MS: i64 = 60_000;
 
@@ -265,7 +260,7 @@ impl Remote {
 
 /// The key core signs its calls to the Worker `script` with: that Worker's own key
 /// (docs/plans/caller-keys.md, step 3). Fails closed: a Worker with no known key, or a key
-/// that is not bound or not set, gets no call, never one signed with the shared key.
+/// that is not bound or not set, gets no call, never one signed with another key.
 async fn signing_key(env: &Env, script: &str) -> Result<String> {
     let name = crate::split::signing_key_name(script).map_err(failure)?;
     let missing = || {
