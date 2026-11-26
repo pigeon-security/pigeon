@@ -129,18 +129,18 @@
       },
       remove: (r) => { delete r.redirects; } },
   ];
-  // Catalogue capabilities a linked record enables by name in `capabilities` (capability scoping,
-  // M4): those whose catalogue entry is `linked`, one at a time as each is turned on. Enabling
-  // writes `capabilities.<name>: {}` (inline, the only placement a linked instance takes yet);
-  // disabling removes it and whatever requires it.
+  // Catalogue capabilities enabled by name in `capabilities`: linked entries on linked
+  // instances and opt-in entries on home. Enabling writes `capabilities.<name>: {}`.
+  // Disabling removes the entry and its dependents.
   const CATALOGUE_ADDS = {
     architecture: { adds: ["Platform › Architecture"], what: "Show this instance’s own setup: its Worker, bucket, hostnames and tools" },
+    cloud: { what: "Enable Cloud Gateway status for this instance", effect: "Adds cloud_status to the instance’s MCP endpoint. On home, also enables the platform Cloud Gateway tools." },
     secrets: { adds: ["Access › Secrets"], what: "List the secrets in this instance’s own Cloudflare account (its Secrets Store)" },
   };
-  function catalogueCaps(versions) {
-    return (versions?.catalogue || []).filter((e) => e.linked && !e.always && e.name !== "redirects").map((e) => ({
+  function catalogueCaps(versions, home) {
+    return (versions?.catalogue || []).filter((e) => (home ? e.opt_in : e.linked) && !e.always && e.name !== "redirects").map((e) => ({
       cap: e.name, field: `capabilities.${e.name}`, component: e.name,
-      adds: CATALOGUE_ADDS[e.name]?.adds || [], what: CATALOGUE_ADDS[e.name]?.what || "",
+      adds: CATALOGUE_ADDS[e.name]?.adds || [], what: CATALOGUE_ADDS[e.name]?.what || "", effect: CATALOGUE_ADDS[e.name]?.effect,
       on: (r) => Boolean(r.capabilities && r.capabilities[e.name]),
       needs: (r) => { const lack = (e.requires || []).filter((q) => !(r.capabilities || {})[q]); return lack.length ? lack.join(", ") : null; },
       fields: () => [],
@@ -255,12 +255,13 @@
             : [el("span", { class: "muted", text: "unpinned → " }), code(latest || "newest")];
         return { ...c, enabled, latest, status, acts, pinText, runs: enabled ? runs(c.cap) : null };
       };
-      const all = [...CAPS, ...(inst.home ? [] : catalogueCaps(versions))].map(row);
+      const offered = [...CAPS, ...catalogueCaps(versions, inst.home)];
+      const all = offered.map(row);
       const yes = all.filter((r) => r.enabled);
       const no = all.filter((r) => !r.enabled);
       const out = [{ group: `Enabled on ${inst.title} (${yes.length})` }, ...yes, { group: `Available (${no.length})` }, ...no];
       if (inst.home) {
-        const ours = new Set(CAPS.map((c) => c.component));
+        const ours = new Set(offered.map((c) => c.component));
         const deployed = (versions?.components || []).filter((c) => c.kind === "capability" && !ours.has(c.name));
         const platformRow = (c) => ({
           cap: c.name, what: c.worker ? `Served by ${c.worker}` : "", adds: [], field: null, latest: c.version, runs: runs(c.name),

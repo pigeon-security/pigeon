@@ -682,7 +682,7 @@ fn console_manifest_by_capability_per_instance_kind() {
 
 /// The catalogue capabilities a linked instance's record may enable so far (capability scoping,
 /// M4, one at a time), besides `instances`, which every instance has.
-const LINKED_SO_FAR: &[&str] = &["redirects", "architecture", "secrets"];
+const LINKED_SO_FAR: &[&str] = &["redirects", "architecture", "secrets", "cloud"];
 
 /// The capability catalogue (docs/plans/capability-scoping.md): each capability's placement,
 /// scope and availability as decided, and every hosted capability that fills a console view
@@ -726,6 +726,15 @@ fn capability_catalogue_as_decided() {
             Scope::Instance,
             Availability::Any,
             &["secrets"],
+        ),
+        (
+            "cloud",
+            true,
+            Placement::OwnWorker,
+            Some("pigeon-cloud-gateway"),
+            Scope::Instance,
+            Availability::Any,
+            &[],
         ),
         (
             "models",
@@ -5258,4 +5267,92 @@ fn redirects_answered_by_the_instance_worker() {
     let m = instance_model(&only, &[], &[], &platform);
     assert_eq!(m.workers[0].handlers, ["fetch"]);
     assert!(check(&m).is_empty());
+}
+
+#[test]
+fn cloud_gateway_off_by_default_and_scoped_status_opt_in() {
+    use pigeon_capabilities::catalogue::{hosted_enabled, placements, problems};
+    use pigeon_capabilities::cloud_scope::{
+        NAME, STATUS, discovered_globally, home_enabled, route,
+    };
+    use pigeon_capabilities::instances::{record::Instance, tools::Scope};
+    use pigeon_core::mcp::Tool;
+
+    let make = |id, kind, capabilities: Value| -> Instance {
+        serde_json::from_value(json!({
+            "id": id,
+            "title": "Cloud Gateway fixture",
+            "account": { "kind": kind },
+            "capabilities": capabilities,
+        }))
+        .unwrap()
+    };
+    let home = make("pigeon.dev", "home", json!({}));
+    let home_on = make("pigeon.dev", "home", json!({ "cloud": {} }));
+    let linked = make("willowgraysen", "linked", json!({ "cloud": {} }));
+    let linked_off = make("elsewhere", "linked", json!({}));
+    assert!(problems(&home_on).is_empty());
+    assert!(problems(&linked).is_empty());
+    assert!(!hosted_enabled(&home, NAME));
+    assert!(placements(&home).get(NAME).is_none());
+    assert_eq!(placements(&linked)[NAME]["worker"], "pigeon-platform");
+    assert!(!home_enabled(None));
+    assert!(!home_enabled(Some(&linked)));
+    assert!(!home_enabled(Some(&home)));
+    assert!(home_enabled(Some(&home_on)));
+    assert!(!discovered_globally(NAME, home_enabled(Some(&home))));
+    assert!(discovered_globally(NAME, home_enabled(Some(&home_on))));
+    assert!(discovered_globally("source", false));
+
+    let names = |scope: &Scope| {
+        let mut tools = vec![
+            Tool::bare("call", "Call by name"),
+            Tool::bare(STATUS, "Shared provider status"),
+            Tool::bare("cloud_tokens_list", "Shared provider tokens"),
+        ];
+        scope.restrict_tools(&mut tools);
+        tools.into_iter().map(|tool| tool.name).collect::<Vec<_>>()
+    };
+    let off = Scope::new(&linked_off).unwrap();
+    let on = Scope::new(&linked).unwrap();
+    assert!(names(&Scope::new(&home).unwrap()).is_empty());
+    assert!(names(&off).is_empty());
+    assert_eq!(names(&on), ["call", STATUS]);
+    assert!(route(Some(&off), true, STATUS, &json!({})).is_err());
+    assert!(route(Some(&on), false, "cloud_tokens_list", &json!({})).is_err());
+    assert!(
+        route(
+            Some(&on),
+            false,
+            STATUS,
+            &json!({ "instance": "elsewhere" })
+        )
+        .is_err()
+    );
+    assert!(
+        on.bind(
+            "call",
+            &json!({ "tool": "cloud_apply", "args": { "plan": "x" } })
+        )
+        .is_err()
+    );
+    let bound = on.bind("call", &json!({ "tool": STATUS })).unwrap();
+    assert_eq!(bound["args"]["instance"], "willowgraysen");
+    let status = route(Some(&on), false, STATUS, &bound["args"])
+        .unwrap()
+        .unwrap();
+    assert_eq!(status["instance"], "willowgraysen");
+    assert_eq!(status["providers_configured"], false);
+
+    assert!(route(None, false, "cloud_tokens_list", &json!({})).is_err());
+    assert!(
+        route(
+            None,
+            true,
+            "cloud_tokens_list",
+            &json!({ "instance": "willowgraysen" })
+        )
+        .is_err()
+    );
+    assert_eq!(route(None, true, "cloud_tokens_list", &json!({})), Ok(None));
 }

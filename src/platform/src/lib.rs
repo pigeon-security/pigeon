@@ -408,7 +408,14 @@ async fn mcp_post(mut req: Request, env: &Env) -> Result<Response> {
     };
     let caps = split::all(env, settings::capabilities(), settings::BINDINGS).await;
     let hosted = hosted(&caps);
-    let mut tools: Vec<mcp::Tool> = caps.iter().flat_map(|c| c.tools()).collect();
+    use pigeon_capabilities::cloud_scope;
+    let global_discovery = scope.is_none() && message["method"] == "tools/list";
+    let show_global_cloud = !global_discovery || cloud_scope::platform_enabled(env).await?;
+    let mut tools: Vec<mcp::Tool> = caps
+        .iter()
+        .filter(|c| cloud_scope::discovered_globally(c.name(), show_global_cloud))
+        .flat_map(|c| c.tools())
+        .collect();
     if let Some(scope) = &scope {
         scope.restrict_tools(&mut tools);
     }

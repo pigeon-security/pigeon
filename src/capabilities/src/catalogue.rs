@@ -73,6 +73,9 @@ pub struct Entry {
     /// Whether every instance has it, so a record never lists it: `instances`, whose record,
     /// plan and apply every instance needs.
     pub always: bool,
+    /// Whether even home must list this capability in its approved record.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub opt_in: bool,
 }
 
 impl Entry {
@@ -97,6 +100,7 @@ const BASE: Entry = Entry {
     requires: &[],
     linked: false,
     always: false,
+    opt_in: false,
 };
 
 /// One that runs inline or in its own Worker, and on home runs in `worker`.
@@ -146,6 +150,13 @@ pub const CATALOGUE: &[Entry] = &[
         name: "proxy",
         requires: &["secrets"],
         ..BASE
+    },
+    // Linked instances serve only scoped status, inline on core. The provider tools
+    // use the home Worker and remain off unless the home record opts in.
+    Entry {
+        linked: true,
+        opt_in: true,
+        ..own(crate::cloud_scope::NAME, "pigeon-cloud-gateway")
     },
     // Platform › Models.
     own("models", "pigeon-model-gateway"),
@@ -212,16 +223,15 @@ pub fn is_home(record: &Instance) -> bool {
 }
 
 /// Whether hosted capability `name` is enabled on `record`, so its views show in that
-/// instance's console. The home instance runs the platform, so every hosted capability is
-/// enabled there. Another instance has the ones every instance has, and those its record lists
-/// that may be on a linked instance yet ([`Entry::linked`], turned on one at a time in M4); never a home-only
-/// one, nor one the catalogue does not list, whatever its record says.
+/// instance's console. The home instance runs the platform, so every hosted capability
+/// is enabled there except catalogued opt-in capabilities. Linked instances have the capabilities
+/// every instance has and the linked capabilities their records list.
 pub fn hosted_enabled(record: &Instance, name: &str) -> bool {
     let home = is_home(record);
     match find(name) {
         None => home,
         Some(e) if e.availability == Availability::HomeOnly => home,
-        Some(_) if home => true,
+        Some(e) if home => !e.opt_in || record.capabilities.contains_key(name),
         Some(e) => e.always || (e.linked && record.capabilities.contains_key(name)),
     }
 }
@@ -244,7 +254,8 @@ pub fn linked_placements(entry: &Entry) -> &'static [Placement] {
 /// Where capability `name` runs for `record`, and in which Worker when that is one of its own:
 /// on home what is deployed (the catalogue's `home` and `home_worker`; the record cannot move
 /// it); on a linked instance what its record says, `inline` unless set, inside the instance's
-/// own Worker. `None` for a name the catalogue does not list.
+/// own Worker. Cloud Gateway's linked setup status is served in core. `None` for a name
+/// the catalogue does not list.
 pub fn placement(record: &Instance, name: &str) -> Option<(Placement, Option<String>)> {
     let e = find(name)?;
     if is_home(record) {
@@ -256,6 +267,9 @@ pub fn placement(record: &Instance, name: &str) -> Option<(Placement, Option<Str
         .and_then(|s| s.placement)
         .unwrap_or(Placement::Inline);
     Some(match p {
+        Placement::Inline if name == crate::cloud_scope::NAME => {
+            (p, Some("pigeon-platform".into()))
+        }
         Placement::Inline => (p, record.worker.clone()),
         Placement::OwnWorker => (p, Some(own_worker_name(&record.id, name))),
     })
@@ -269,7 +283,7 @@ pub fn placements(record: &Instance) -> serde_json::Value {
     let home = is_home(record);
     let mut out = serde_json::Map::new();
     for e in CATALOGUE {
-        if !(home || e.always || record.capabilities.contains_key(e.name)) {
+        if !hosted_enabled(record, e.name) {
             continue;
         }
         if let Some((p, worker)) = placement(record, e.name) {

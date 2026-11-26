@@ -306,6 +306,21 @@
       "always": false
     },
     {
+      "name": "cloud",
+      "placements": [
+        "inline",
+        "own_worker"
+      ],
+      "home": "own_worker",
+      "home_worker": "pigeon-cloud-gateway",
+      "scope": "instance",
+      "availability": "any",
+      "requires": [],
+      "linked": true,
+      "always": false,
+      "opt_in": true
+    },
+    {
       "name": "models",
       "placements": [
         "inline",

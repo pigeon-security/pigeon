@@ -9,6 +9,7 @@ pub mod architecture;
 pub mod catalogue;
 pub mod changelog;
 pub mod ci;
+pub mod cloud_scope;
 pub mod console;
 pub mod cost;
 pub mod dispatch;
@@ -336,10 +337,19 @@ pub async fn dispatch(cx: &Context<'_>, name: &str, args: &Value) -> Result<Valu
     let args = bound.as_ref().unwrap_or(args);
     let owner = owner(cx.hosted.capabilities, name)
         .ok_or_else(|| Error::RustError(pigeon_core::mcp::unknown_tool(name)))?;
+    let local = if owner.name() == cloud_scope::NAME {
+        cloud_scope::authorize(cx.env, cx.instance, name, args).await?
+    } else {
+        None
+    };
+    let run = async |args: &Value| match &local {
+        Some(status) => Ok(status.clone()),
+        None => owner.call(cx, name, args).await,
+    };
     match approvals::gate(cx, name, args).await? {
-        approvals::Gate::Run(args) => owner.call(cx, name, &args).await,
+        approvals::Gate::Run(args) => run(&args).await,
         approvals::Gate::Approved(args, record) => {
-            let result = owner.call(cx, name, &args).await;
+            let result = run(&args).await;
             // The call has run and its approval is used: a failed audit line never loses its answer.
             if let Err(e) = approvals::ran(cx.env, &record, result.is_ok()).await {
                 worker::console_error!("approval {} ran, not recorded: {e}", record.id);

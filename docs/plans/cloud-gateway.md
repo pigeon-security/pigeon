@@ -308,3 +308,27 @@ nowhere else: never paste it into a chat, a command or a file.
 - Landing `VMd5RhGvdu9UOtOv` (phases 0 to 2, commit `79497ebed392`) landed and deployed all seven
   lanes, including `cloud-gateway`. Phase 4 follows: `CLOUD` in core's `wrangler.toml` and
   `settings::BINDINGS`, and the architecture scenario checks the link.
+
+## Standalone instance enablement
+
+Cloud Gateway is off by default, including on home. An owner can enable it for
+an approved linked instance such as `willowgraysen` from **Capabilities**, or
+propose this addition to that instance's existing record and approve the change:
+
+```json
+{"capabilities": {"cloud": {}}}
+```
+
+Preserve any other `capabilities` entries in the record. On that instance's
+scoped MCP endpoint, `cloud_status` reports that the gateway is enabled and
+instance provider connections are not configured. Scoped status runs in core
+and reads no shared platform credential. The existing gateway's organization,
+project, and key slots are shared platform credentials. Linked instances cannot
+use those provider tools, including through the generic `call` tool or an
+`instance` argument on global MCP. An explicit opt-in on the approved home
+record enables those existing tools on global MCP. Its scoped endpoint also
+offers only setup status.
+
+No provider connection, secret slot, compute permission, or linked-account
+deployment is created by enabling the capability. Instance-specific provider
+bindings and runner lifecycle operations are separate follow-up work.
