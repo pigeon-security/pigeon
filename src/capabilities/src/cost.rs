@@ -1,8 +1,12 @@
 //! `cost_daily`: read-only daily cost buckets for the iOS app's Cost screen. It joins Cloudflare's
 //! billable usage, the AI Gateway's cost per model family and run (`models_daily`), and the AI
 //! agent runs' roles. Closed days are kept in the Directory's settings, one key per month, so the
-//! `all` range reaches back past the gateway's 31-day window. The folding is pure; only
-//! [`cost_daily`] reads or writes anything.
+//! `all` range reaches back past the gateway's 31-day window. A closed day's gateway logs do not
+//! change once its UTC day has ended, so a stored day that holds the gateway's reading
+//! ([`gateway_settled`]) is not listed again: a read lists the gateway's logs only from the oldest
+//! day of its range that is not stored yet ([`live_window`]), usually today alone. Listing every
+//! gateway's logs for 7 days took longer than the console's 10-second read limit. The folding is
+//! pure; only [`cost_daily`] reads or writes anything.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -33,6 +37,9 @@ const ROLES: [&str; 2] = ["planner", "executor"];
 const SPAN_CAP: usize = 4_000;
 /// The key of the sorted list of months that have a stored rollup.
 const INDEX_KEY: &str = "cost.daily.months";
+/// The day record key that says the gateway's logs were read for that day, also when they held
+/// no cost.
+pub const GATEWAY_READ: &str = "gateway_read";
 
 /// The settings key of a month's rollup, such as `cost.daily.2026-03`.
 fn month_key(month: &str) -> String {
@@ -278,6 +285,7 @@ fn gateway_days(
         .unwrap_or_default();
     for day in days {
         let mut rec = Map::new();
+        rec.insert(GATEWAY_READ.into(), json!(true));
         let gateway_details = gateway_details_for_day(models, &day);
         if !gateway_details.is_empty() {
             rec.insert("gateway_details".into(), Value::Object(gateway_details));
@@ -304,10 +312,8 @@ fn gateway_days(
         // A day with no cost in the listing says nothing: the gateway's logs may be shorter
         // than what is stored, so an empty day never replaces a stored one.
         if families.is_empty() && by_role.values().all(|v| *v == 0.0) {
-            if !rec.is_empty() {
-                let old = out.get(&day).cloned().unwrap_or(Value::Null);
-                out.insert(day, merge_day(&old, &Value::Object(rec), false));
-            }
+            let old = out.get(&day).cloned().unwrap_or(Value::Null);
+            out.insert(day, merge_day(&old, &Value::Object(rec), false));
             continue;
         }
         rec.insert("models".into(), Value::Object(families));
@@ -464,6 +470,61 @@ pub fn closed_by_month(
         }
     }
     months
+}
+
+/// Whether a stored day already holds the gateway's reading of it: marked [`GATEWAY_READ`], or,
+/// for a day stored before the mark, with gateway cost in it. Only closed days are stored, and a
+/// closed day's logs do not change, so such a day need not be listed again.
+pub fn gateway_settled(rec: &Value) -> bool {
+    rec[GATEWAY_READ] == true || rec.get("models").is_some() || rec.get("gateway_details").is_some()
+}
+
+/// How many days ending `today` the gateway's logs must be listed for, of the `window` days a
+/// range covers: today, and back to the oldest closed day that no `stored` month settles
+/// ([`gateway_settled`]). 1 when every closed day is settled. Pure.
+pub fn live_window(today: &str, window: usize, stored: &BTreeMap<String, Value>) -> usize {
+    let days = days_ending(today, window.max(1));
+    let settled = |day: &str| {
+        stored
+            .get(day.get(..7).unwrap_or_default())
+            .is_some_and(|m| gateway_settled(&m[day]))
+    };
+    days.iter()
+        .position(|d| d.as_str() < today && !settled(d))
+        .map_or(1, |i| days.len() - i)
+}
+
+/// Whether a stored day among `days` was read from a cut-short gateway listing: one of its
+/// gateway snapshots says `truncated`. Pure.
+pub fn stored_truncated(days: &[String], stored: &BTreeMap<String, Value>) -> bool {
+    days.iter().any(|day| {
+        let rec = stored
+            .get(day.get(..7).unwrap_or_default())
+            .map_or(&Value::Null, |m| &m[day.as_str()]);
+        rec["gateway_details"]
+            .as_object()
+            .is_some_and(|g| g.values().any(|s| s["truncated"] == true))
+    })
+}
+
+/// The stored months a read of `range` needs, of the `index`: all of them for `all`; else the
+/// first (for `stored_from`), and those of the `window` days ending `today`. Pure.
+pub fn wanted_months(range: &str, index: &[String], today: &str, window: usize) -> Vec<String> {
+    if range == "all" {
+        return index.to_vec();
+    }
+    let mut w: BTreeSet<String> = index.first().cloned().into_iter().collect();
+    for d in days_ending(today, window)
+        .iter()
+        .map(String::as_str)
+        .chain([today])
+    {
+        let month = d.get(..7).unwrap_or_default().to_string();
+        if index.contains(&month) {
+            w.insert(month);
+        }
+    }
+    w.into_iter().collect()
 }
 
 /// A name as one of `known`, or `other` when it is none of them.
@@ -1025,9 +1086,10 @@ fn missing(source: &str, why: &str) -> Value {
 }
 
 /// `cost_daily`: the answer for `args.range` (`today`, `7d` or `all`; `7d` when absent). The
-/// sources run together, each within its limit; one that fails goes to `unavailable` and the
-/// rest still answers. Closed days it computed are stored; a failure to store is logged and
-/// noted, never fatal.
+/// sources run together, each within its limit; the gateway's logs are listed once the stored
+/// months are read, only for the days they do not settle ([`live_window`]). One that fails goes
+/// to `unavailable` and the rest still answers. Closed days it computed are stored; a failure to
+/// store is logged and noted, never fatal.
 pub async fn cost_daily(cx: &Context<'_>, args: &Value) -> Result<Value> {
     let range = args["range"].as_str().unwrap_or("7d");
     if !matches!(range, "today" | "7d" | "all") {
@@ -1045,21 +1107,28 @@ pub async fn cost_daily(cx: &Context<'_>, args: &Value) -> Result<Value> {
         let path = format!("/accounts/{id}/billable-usage");
         pigeon_core::cloudflare::call_fresh(&t, Method::Get, &path, None).await
     });
-    let models_args = json!({ "days": window });
     let agents_args = json!({ "limit": 100 });
-    let models_work = within(dispatch(cx, "models_daily", &models_args));
     let anthropic_args = json!({ "provider": "anthropic", "days": window });
     let anthropic_work = within(dispatch(cx, "models_billing", &anthropic_args));
     let agents_work = within(dispatch(cx, "ai_agents_status", &agents_args));
-    let index_work = within(read_index(cx));
-    let (billing_v, models_v, agents_v, index_v, anthropic_v) = futures_util::future::join5(
-        billing_work,
-        models_work,
-        agents_work,
-        index_work,
-        anthropic_work,
-    )
-    .await;
+    // The stored months first, then the gateway's logs for only the days they do not settle.
+    let gateway_work = async {
+        let index_v = within(read_index(cx)).await;
+        let wanted = match &index_v {
+            Ok(index) => wanted_months(range, index, &today, window),
+            Err(_) => Vec::new(),
+        };
+        let stored_v = within(read_months(cx, &wanted)).await;
+        let live_n = match &stored_v {
+            Ok(stored) => live_window(&today, window, stored),
+            Err(_) => window,
+        };
+        let models_args = json!({ "days": live_n });
+        let models_v = within(dispatch(cx, "models_daily", &models_args)).await;
+        (index_v, stored_v, models_v)
+    };
+    let (billing_v, agents_v, anthropic_v, (index_v, stored_v, models_v)) =
+        futures_util::future::join4(billing_work, agents_work, anthropic_work, gateway_work).await;
 
     let mut unavailable = Vec::new();
     let (mut cf_why, mut ai_why): (Option<String>, Option<String>) = (None, None);
@@ -1115,27 +1184,10 @@ pub async fn cost_daily(cx: &Context<'_>, args: &Value) -> Result<Value> {
         anthropic.as_ref(),
     );
 
-    // Which months to read: all of them for `all`; else the first, the window's and today's.
-    let index = match index_v {
-        Ok(i) => i,
-        Err(e) => {
-            unavailable.push(missing("stored rollups", &hide(e)));
-            Vec::new()
-        }
-    };
-    let wanted: Vec<String> = if range == "all" {
-        index.clone()
-    } else {
-        let mut w: BTreeSet<String> = index.first().cloned().into_iter().collect();
-        for d in days_ending(&today, window).iter().chain([&today]) {
-            let month = d[..7].to_string();
-            if index.contains(&month) {
-                w.insert(month);
-            }
-        }
-        w.into_iter().collect()
-    };
-    let stored = match within(read_months(cx, &wanted)).await {
+    if let Err(e) = index_v {
+        unavailable.push(missing("stored rollups", &hide(e)));
+    }
+    let stored = match stored_v {
         Ok(s) => s,
         Err(e) => {
             unavailable.push(missing("stored rollups", &hide(e)));
@@ -1158,6 +1210,11 @@ pub async fn cost_daily(cx: &Context<'_>, args: &Value) -> Result<Value> {
         Vec::new(),
         unavailable,
     );
+    // A stored day read from a cut-short listing keeps the answer's warning.
+    let days: Vec<String> = serde_json::from_value(answer["days"].clone()).unwrap_or_default();
+    if stored_truncated(&days, &stored) {
+        answer["truncated"] = json!(true);
+    }
     with_status(&mut answer, cf_why.as_deref(), ai_why.as_deref());
     Ok(answer)
 }

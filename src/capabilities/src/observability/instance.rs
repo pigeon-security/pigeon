@@ -7,6 +7,7 @@ use worker::{Error, Result};
 
 use crate::Context;
 use crate::instances::record::{AccountRef, Instance, Toggle, label};
+use crate::instances::tools::View;
 
 pub const METRICS: &str = "observability_worker_metrics";
 
@@ -41,20 +42,51 @@ const SCOPED_TOOLS: &[crate::instances::tools::Registration] =
         arguments: &["hours"],
     }];
 
-/// The Metrics area's views. Errors joins once an instance-scoped errors read exists.
-const VIEWS: &[crate::instances::tools::View] = &[crate::instances::tools::View {
+/// The Metrics area's view. Errors joins once an instance-scoped errors read exists.
+const METRICS_VIEW: View = View {
     area: "metrics",
     id: "workers",
     title: "Workers",
     order: 10,
     since: None,
-}];
+};
 
+/// A Cost area view: `cost_daily` over one of its ranges.
+const fn cost_view(id: &'static str, title: &'static str, order: u16) -> View {
+    View {
+        area: "cost",
+        id,
+        title,
+        order,
+        since: None,
+    }
+}
+
+/// The views of an instance whose record enables observability.
+const VIEWS: &[View] = &[METRICS_VIEW];
+
+/// The home instance's views when its record enables observability: Metrics, and Cost over
+/// `cost_daily`'s ranges. `cost_daily` reads the platform's spend as a whole, so only home shows
+/// it; a linked instance's own cost is a later step (docs/plans/capability-scoping.md, M4).
+const HOME_VIEWS: &[View] = &[
+    METRICS_VIEW,
+    cost_view("7d", "7 days", 10),
+    cost_view("today", "Today", 20),
+    cost_view("all", "30 days", 30),
+];
+
+/// What the record's `observability` toggle adds: Metrics over its approved Worker, and on home
+/// also Cost. Nothing while it is off.
 pub fn instance_tools(instance: &Instance) -> serde_json::Result<crate::instances::tools::Enabled> {
+    let views = if instance.account == AccountRef::Home {
+        HOME_VIEWS
+    } else {
+        VIEWS
+    };
     Ok(crate::instances::tools::Enabled::when(
         approved_worker(instance).is_ok(),
         SCOPED_TOOLS,
-        VIEWS,
+        views,
     ))
 }
 

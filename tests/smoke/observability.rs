@@ -843,6 +843,95 @@ fn platform_cost_daily_buckets() {
     assert!(near(&one["ai_gateway"]["total"], 1.5));
 }
 
+/// `cost_daily` lists the gateway's logs only for days no stored month settles: a closed day's
+/// logs do not change, so a day stored with the gateway's reading (even one with no AI cost) is
+/// not listed again. Listing every gateway for 7 days took longer than the console's 10-second
+/// read limit, so Cost answered 504 on web and iOS. The stored days and a today-only live read
+/// still assemble into the full week.
+#[test]
+fn platform_cost_daily_reads_only_unsettled_days() {
+    use pigeon_capabilities::cost::*;
+    use pigeon_core::ai_gateway::Log;
+    use pigeon_models::daily::daily_by_run;
+    use std::collections::BTreeMap;
+
+    let today = "2026-03-10";
+    let near = |a: &Value, b: f64| (a.as_f64().unwrap_or(f64::NAN) - b).abs() < 1e-9;
+    let opus = |at: &str, cost: f64| Log {
+        created_at: at.into(),
+        model: "anthropic/claude-opus-4".into(),
+        cost: Some(cost),
+        ..Log::default()
+    };
+
+    // Nothing stored: the whole range is listed; `today` is always one day.
+    let none = BTreeMap::new();
+    assert_eq!(live_window(today, 7, &none), 7);
+    assert_eq!(live_window(today, 1, &none), 1);
+
+    // A full 7-day read marks every day it listed, also the days with no cost.
+    let week_logs = vec![
+        opus("2026-03-05T10:00:00Z", 2.0),
+        opus("2026-03-09T10:00:00Z", 3.0),
+    ];
+    let models = json!(daily_by_run(&week_logs, today, 7));
+    let live = live_days(None, Some(&models), None, None);
+    for day in ["2026-03-04", "2026-03-06", "2026-03-09", today] {
+        assert_eq!(live[day][GATEWAY_READ], true, "{day}");
+    }
+    let closed = closed_by_month(&live, today);
+    assert!(!closed["2026-03"].contains_key(today));
+    let stored: BTreeMap<String, Value> = BTreeMap::from([(
+        "2026-03".to_string(),
+        merge_month(&Value::Null, &closed["2026-03"], false),
+    )]);
+    // Every closed day is settled now: the next read lists today alone.
+    assert_eq!(live_window(today, 7, &stored), 1);
+    // `all` lists back to the oldest of its 31 days that is not stored yet.
+    assert_eq!(live_window(today, 31, &stored), 31);
+
+    // A closed day left unsettled (a failed read stored only billing) is listed again, with
+    // everything after it.
+    let mut gap = stored.clone();
+    gap.get_mut("2026-03").unwrap()["2026-03-07"] = json!({ "cloudflare": { "Workers": 1.0 } });
+    assert_eq!(live_window(today, 7, &gap), 4);
+    // A day stored before the mark, with gateway cost in it, counts as settled.
+    assert!(gateway_settled(&json!({ "models": { "Opus": 1.0 } })));
+    assert!(gateway_settled(&json!({ "gateway_details": {} })));
+    assert!(!gateway_settled(&json!({ "cloudflare": {} })));
+    assert!(!gateway_settled(&Value::Null));
+
+    // The next read lists today only, and the answer still has the whole week.
+    let today_logs = vec![opus("2026-03-10T01:00:00Z", 0.5)];
+    let models = json!(daily_by_run(&today_logs, today, 1));
+    let live = live_days(None, Some(&models), None, None);
+    assert_eq!(live.keys().collect::<Vec<_>>(), [today]);
+    let week = assemble("7d", today, &stored, &live, false, false, vec![], vec![]);
+    let opus_days = &week["ai_gateway"]["by_model"][0]["by_day"];
+    assert!(near(&opus_days["2026-03-05"], 2.0));
+    assert!(near(&opus_days["2026-03-09"], 3.0));
+    assert!(near(&opus_days[today], 0.5));
+    assert!(near(&week["ai_gateway"]["total"], 5.5));
+
+    // A stored day read from a cut-short listing keeps the answer's warning.
+    let days: Vec<String> = serde_json::from_value(week["days"].clone()).unwrap();
+    assert!(!stored_truncated(&days, &stored));
+    let mut cut = stored.clone();
+    cut.get_mut("2026-03").unwrap()["2026-03-09"]["gateway_details"] =
+        json!({ "pigeon": { "total": 3.0, "models": {}, "truncated": true } });
+    assert!(stored_truncated(&days, &cut));
+
+    // The months a read needs: the first stored (for `stored_from`) and the range's.
+    let index = vec!["2025-12".to_string(), "2026-02".into(), "2026-03".into()];
+    assert_eq!(
+        wanted_months("7d", &index, today, 7),
+        ["2025-12", "2026-03"]
+    );
+    assert_eq!(wanted_months("7d", &index, "2026-03-03", 7), index);
+    assert_eq!(wanted_months("all", &index, today, 31), index);
+    assert!(wanted_months("today", &[], today, 1).is_empty());
+}
+
 #[test]
 fn core_observability_monitors_billing() {
     use pigeon_capabilities::observability::{

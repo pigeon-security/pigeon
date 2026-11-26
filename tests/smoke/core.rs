@@ -935,12 +935,16 @@ fn core_architecture_draws_every_worker_in_the_map() {
     assert!(!second.model.to_string().contains("ci_status"));
 }
 
-/// Observability's only console sections are the Cost area's views: `cost_daily`'s ranges. The
-/// console's routes and redirects are checked in `console_decommissioned` (console.rs).
+/// The Cost area follows the instance record's `observability` toggle, as Metrics does: the
+/// hosted observability capability declares no console sections of its own; home with
+/// observability enabled shows Cost over `cost_daily`'s ranges; home without it, and any linked
+/// instance (whose own cost is a later step), show none. The console's routes and redirects are
+/// checked in `console_decommissioned` (console.rs).
 #[test]
 fn core_console_cost_views() {
     use pigeon_capabilities::Capability;
-    use pigeon_capabilities::observability::Observability;
+    use pigeon_capabilities::instances::record::Instance;
+    use pigeon_capabilities::observability::{Observability, instance::instance_tools};
     use pigeon_core::lanes::Map;
 
     let o = Observability {
@@ -952,10 +956,37 @@ fn core_console_cost_views() {
             workers: vec![],
         },
     };
-    let s = o.sections();
-    assert!(s.iter().all(|s| s.area == "cost"));
-    let views: Vec<&str> = s.iter().map(|s| s.id).collect();
-    assert_eq!(views, ["7d", "today", "all"]);
+    assert!(o.sections().is_empty());
+
+    let views = |record: Value| -> Vec<String> {
+        let record: Instance = serde_json::from_value(record).unwrap();
+        instance_tools(&record)
+            .unwrap()
+            .views
+            .iter()
+            .map(|v| format!("{}/{}", v.area, v.id))
+            .collect()
+    };
+    let home = |observability: &str| {
+        json!({
+            "id": "example/platform", "title": "Example", "account": { "kind": "home" },
+            "zones": ["example.com"], "observability": { "state": observability },
+            "worker": "example-platform"
+        })
+    };
+    assert_eq!(
+        views(home("enabled")),
+        ["metrics/workers", "cost/7d", "cost/today", "cost/all"]
+    );
+    assert!(views(home("disabled")).is_empty());
+    let mut unset = home("enabled");
+    unset.as_object_mut().unwrap().remove("observability");
+    assert!(views(unset).is_empty());
+    let linked = json!({
+        "id": "docs", "title": "Docs", "account": { "kind": "linked", "account_id": "a1" },
+        "observability": { "state": "enabled" }, "worker": "docs-worker"
+    });
+    assert_eq!(views(linked), ["metrics/workers"]);
 }
 
 /// 2026-11-24T06:00:00Z in milliseconds since the epoch.

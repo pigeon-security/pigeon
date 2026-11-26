@@ -14,7 +14,6 @@ use serde_json::{Value, json};
 use worker::js_sys::Date;
 use worker::{Error, Fetch, Headers, Method, Request, RequestInit, Result};
 
-use crate::console::sections::Section;
 use crate::{Call, Capability, Context};
 
 /// The metrics permission: GraphQL `workersInvocationsAdaptive`.
@@ -622,22 +621,6 @@ impl Capability for Observability {
             "observability",
             pigeon_core::versions::Kind::Capability,
         )]
-    }
-
-    fn sections(&self) -> Vec<Section> {
-        // The Cost area's views: `cost_daily` over each of its ranges.
-        let range = |id, title, order| Section {
-            area: "cost",
-            id,
-            title,
-            description: "Spend per day: Cloudflare usage, model cost and agent runs.",
-            order,
-        };
-        vec![
-            range("7d", "7 days", 10),
-            range("today", "Today", 20),
-            range("all", "30 days", 30),
-        ]
     }
 
     fn tools(&self) -> Vec<Tool> {

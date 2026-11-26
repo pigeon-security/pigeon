@@ -28,7 +28,7 @@ Each capability in the catalogue (`src/capabilities/src/catalogue.rs`) declares:
 | Capability | Views | Placement options (home today) | Scope | Availability |
 |---|---|---|---|---|
 | `ai-agents` | Sessions › Live, Compare | inline or own (home: own, `pigeon-ai-agents`) | instance | any |
-| `observability` | Cost › 7 days, Today, 30 days (and Metrics › Workers) | inline | instance | any |
+| `observability` | Cost › 7 days, Today, 30 days (home only, for now) and Metrics › Workers, both while the record enables `observability` | inline | instance | any |
 | `secrets` | Access › Secrets | inline | instance | any |
 | `proxy` (requires `secrets`) | Access › Tokens | inline or own (home: own, `pigeon-proxy`) | instance | any |
 | `models` | Platform › Models | inline or own (home: own, `pigeon-model-gateway`) | instance | any |
@@ -121,6 +121,11 @@ account), so each step is its own landing with its own decision:
 1. `architecture` (needs no scope: it reads only the record) — can ride along with step 1.
 2. `secrets`: the instance's own Secrets Store (Secrets Store Write on the linked account).
 3. `observability` Cost: the instance account's usage (Account Analytics Read, Billing Read).
+   Today Cost follows the record's own `observability` toggle, as Metrics does
+   (`observability::instance::instance_tools`): its views show only on an instance whose record
+   enables `observability`, and only on home, because `cost_daily` reads the platform's spend as
+   a whole. A linked instance with `observability` gets Metrics and no Cost until this step adds
+   per-linked-account cost.
 4. `proxy` and Access › Tokens: proxy credentials scoped to the instance (requires `secrets`).
 5. `models`: an AI Gateway in the instance's account (AI Gateway Write), its own provider keys
    in its Secrets Store.

@@ -438,6 +438,7 @@ fn console_manifest_for_the_home_instance() {
             "overview",
             "metrics",
             "capabilities",
+            "cost",
             "instances",
             "platform"
         ]
@@ -455,6 +456,7 @@ fn console_manifest_for_the_home_instance() {
                 "capability": "observability", "upgrade": null })
     );
     assert_eq!(m["areas"][4]["group"], "platform");
+    assert_eq!(manifest_views(&m, "cost"), ["7d", "today", "all"]);
     assert_eq!(manifest_views(&m, "instances"), ["list"]);
     assert_eq!(
         manifest_views(&m, "platform"),
@@ -544,8 +546,9 @@ fn manifest_by_capability(m: &Value) -> Vec<(String, Vec<String>)> {
 /// Capability scoping, M1 (docs/plans/capability-scoping.md): given every hosted capability's
 /// views as the platform Worker has them, each kind of instance today shows exactly the areas
 /// and views it showed when a `group` decided them. Home: its own areas, then every hosted
-/// capability's (home runs the platform). A linked instance, publishing or with source alone:
-/// only what its record enables. Each area still carries its group for the iOS app.
+/// capability's (home runs the platform), and Cost only while its record enables observability.
+/// A linked instance, publishing or with source alone: only what its record enables, and no
+/// Cost even with observability, since `cost_daily` reads the platform's spend. Each area still carries its group for the iOS app.
 #[test]
 fn console_manifest_by_capability_per_instance_kind() {
     use pigeon_capabilities::instances::{manifest::manifest, record::Instance, tools::Scope};
@@ -615,6 +618,22 @@ fn console_manifest_by_capability_per_instance_kind() {
             "platform", "platform"
         ]
     );
+
+    // Cost follows home's own `observability` toggle, as Metrics does: without it, neither.
+    let home_off = of(json!({
+        "id": "example/platform", "title": "Example", "account": { "kind": "home" },
+        "zones": ["example.com"], "observability": { "state": "disabled" },
+        "worker": "example-platform"
+    }));
+    let areas: Vec<String> = manifest_by_capability(&home_off)
+        .into_iter()
+        .map(|(a, _)| a)
+        .collect();
+    assert!(
+        !areas.iter().any(|a| a == "cost" || a == "metrics"),
+        "{areas:?}"
+    );
+    assert!(areas.iter().any(|a| a == "sessions"), "{areas:?}");
 
     let publishing = of(json!({
         "id": "docs", "title": "Docs",
@@ -1145,6 +1164,7 @@ fn console_manifest_ids_are_stable_and_data_only() {
             "source",
             "metrics",
             "capabilities",
+            "cost",
             "instances",
             "platform"
         ]
