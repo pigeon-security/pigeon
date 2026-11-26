@@ -516,6 +516,7 @@ fn sites_auth_gates_every_path() {
         platform_zone: "pigeon.dev",
         reserved_labels: &reserved,
         reserved_workers: &workers,
+        platform_worker: "pigeon-platform",
     };
     let check = |notes: &pigeon_capabilities::instances::record::Instance| {
         validate(notes, std::slice::from_ref(&platform), &rules)

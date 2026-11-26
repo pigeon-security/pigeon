@@ -165,8 +165,10 @@ impl Instances {
             platform_zone: &self.zone,
             reserved_labels: &reserved,
             reserved_workers: &workers,
+            platform_worker: cx.hosted.worker,
         };
         let mut problems = record::validate(&record, &others, &rules);
+        problems.extend(record::account_change(current.as_ref(), &record));
         let carried: Vec<pigeon_core::versions::Component> = cx
             .hosted
             .capabilities
@@ -466,7 +468,16 @@ impl Instances {
         }
         let mut seen = observe(&account, &instance).await?;
         seen.subdomains = self.observe_subdomains(cx, &instance).await?;
-        let steps = plan::plan(&instance, &seen, &ledger(env, id).await?);
+        let reserved = self.reserved(cx);
+        let workers = self.workers(cx);
+        let rules = Rules {
+            platform_zone: &self.zone,
+            reserved_labels: &reserved,
+            reserved_workers: &workers,
+            platform_worker: cx.hosted.worker,
+        };
+        let owned = plan::platform_owned(&instance, &rules);
+        let steps = plan::plan(&instance, &seen, &ledger(env, id).await?, owned.as_ref());
         let digest = plan::digest(&instance, &account.id, &steps);
         Ok((instance, account, steps, digest))
     }

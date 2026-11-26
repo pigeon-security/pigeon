@@ -184,6 +184,9 @@ pub struct Rules<'a> {
     pub reserved_labels: &'a [String],
     /// Worker names that nobody may take, such as `pigeon-platform`.
     pub reserved_workers: &'a [String],
+    /// The Worker the platform itself runs as, `pigeon-platform`. Only the home instance may
+    /// name it as its `worker`, as a platform-owned Worker that plans never touch.
+    pub platform_worker: &'a str,
 }
 
 /// One difference between two records.
@@ -269,6 +272,57 @@ fn check_account(instance: &Instance, problems: &mut Vec<String>) {
             ));
         }
     }
+}
+
+/// Whether two account references are the same kind: both home or both linked.
+fn same_kind(a: &AccountRef, b: &AccountRef) -> bool {
+    std::mem::discriminant(a) == std::mem::discriminant(b)
+}
+
+/// At most one instance runs in the platform's own account.
+fn check_home(instance: &Instance, others: &[Instance], problems: &mut Vec<String>) {
+    if instance.account != AccountRef::Home {
+        return;
+    }
+    for other in others
+        .iter()
+        .filter(|o| o.id != instance.id && o.account == AccountRef::Home)
+    {
+        problems.push(format!(
+            "The account kind is home, but instance {} already runs in the platform's own account, and there is only one home instance.",
+            other.id
+        ));
+    }
+}
+
+/// Why `next` may not replace `current`: a record's account kind (home or linked) never
+/// changes once it is stored. `None` when it may.
+pub fn account_change(current: Option<&Instance>, next: &Instance) -> Option<String> {
+    let current = current?;
+    let name = |a: &AccountRef| match a {
+        AccountRef::Home => "home",
+        AccountRef::Linked { .. } => "linked",
+    };
+    (!same_kind(&current.account, &next.account)).then(|| {
+        format!(
+            "The account kind of instance {} is {}, and a draft may not change it to {}.",
+            next.id,
+            name(&current.account),
+            name(&next.account)
+        )
+    })
+}
+
+/// What approving `next` would break in the stored set `stored` (every instance, `next`'s own
+/// stored version among them): a second home instance, or a changed account kind. Checked again
+/// when a draft is approved, against what is stored then.
+pub fn approval_problems(next: &Instance, stored: &[Instance]) -> Vec<String> {
+    let mut problems = Vec::new();
+    check_home(next, stored, &mut problems);
+    if let Some(why) = account_change(stored.iter().find(|i| i.id == next.id), next) {
+        problems.push(why);
+    }
+    problems
 }
 
 fn check_zones(instance: &Instance, rules: &Rules, problems: &mut Vec<String>) {
@@ -419,7 +473,10 @@ fn check_worker(
             "The worker \"{name}\" must be 1 to 63 characters of lowercase letters, digits and dashes."
         ));
     }
-    if rules.reserved_workers.iter().any(|r| r == name) {
+    let platform_own = platform_worker(instance, rules);
+    if !platform_own
+        && (name == rules.platform_worker || rules.reserved_workers.iter().any(|r| r == name))
+    {
         problems.push(format!(
             "The worker \"{name}\" is the platform's own and cannot be used."
         ));
@@ -432,13 +489,56 @@ fn check_worker(
             ));
         }
     }
-    if !instance.worker_override {
+    if !instance.worker_override && !platform_own {
         match derived {
             Ok(Some(n)) if n != *name => problems.push(format!(
                 "The worker \"{name}\" should be \"{n}\", named after the instance's zone or subdomain; set worker_override to keep another name."
             )),
             Err(why) => problems.push(format!("The worker: {why}.")),
             _ => {}
+        }
+    }
+}
+
+/// Whether `instance` is the home instance naming the platform's own Worker as its `worker`: a
+/// platform-owned Worker, not one an instance made, so plans never upload or attach to it.
+pub fn platform_worker(instance: &Instance, rules: &Rules) -> bool {
+    instance.account == AccountRef::Home
+        && instance.worker.as_deref() == Some(rules.platform_worker)
+}
+
+/// The hostnames the platform owns in its zone: the apex and each reserved label under it
+/// (`platform.`, `proxy.`, `mcp.`, `www.` and every hostname a capability declares there).
+pub fn platform_hosts(rules: &Rules) -> Vec<String> {
+    let zone = rules.platform_zone.to_ascii_lowercase();
+    let mut out = vec![zone.clone()];
+    out.extend(
+        rules
+            .reserved_labels
+            .iter()
+            .map(|l| subdomain_host(&l.to_ascii_lowercase(), &zone)),
+    );
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// The home instance's zone and domain targets may not name a platform-owned hostname.
+fn check_home_hosts(instance: &Instance, rules: &Rules, problems: &mut Vec<String>) {
+    if instance.account != AccountRef::Home {
+        return;
+    }
+    let owned = platform_hosts(rules);
+    for (i, site) in instance.sites.iter().enumerate() {
+        for (j, target) in site.targets.iter().enumerate() {
+            let (Target::Zone { hostname, .. } | Target::Domain { hostname }) = target else {
+                continue;
+            };
+            if owned.contains(&hostname.to_ascii_lowercase()) {
+                problems.push(format!(
+                    "The sites[{i}].targets[{j}].hostname \"{hostname}\" is the platform's own, and the home instance may not serve it."
+                ));
+            }
         }
     }
 }
@@ -627,9 +727,11 @@ pub fn validate(instance: &Instance, others: &[Instance], rules: &Rules) -> Vec<
     check_id(instance, &mut problems);
     check_title(instance, &mut problems);
     check_account(instance, &mut problems);
+    check_home(instance, others, &mut problems);
     check_zones(instance, rules, &mut problems);
     check_repo(instance, &mut problems);
     check_sites(instance, others, rules, &mut problems);
+    check_home_hosts(instance, rules, &mut problems);
     check_worker(instance, others, rules, &mut problems);
     if let Some(pigeon_core::site_publish::Profile::Enabled { site }) = &instance.publishing {
         if !instance.sites.iter().any(|record| record.name == *site) {

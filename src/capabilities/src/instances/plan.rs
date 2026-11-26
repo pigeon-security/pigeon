@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::record::Instance;
+use super::record::{AccountRef, Instance, Rules};
 
 /// The R2 binding the site Worker reads its bucket through.
 pub const SITE_BINDING: &str = "SITE";
@@ -153,6 +153,13 @@ pub enum Step {
     },
     /// Something only the person can do first.
     Blocked { why: String },
+    /// There, but not the plan's to change: a platform-owned Worker that the home instance
+    /// names. Left alone, and the plan goes on.
+    Keep {
+        what: String,
+        name: String,
+        why: String,
+    },
 }
 
 fn is_public(protected: &bool) -> bool {
@@ -192,9 +199,119 @@ pub fn module_digest(bucket: &str, jurisdiction: Option<&str>) -> String {
     )
 }
 
+/// What in the platform's own account belongs to the platform, not to the home instance: the
+/// Workers in its footprint and the hostnames it serves. A plan never uploads, attaches or turns
+/// on workers.dev for any of them.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PlatformOwned {
+    /// Such as `pigeon-platform`, `pigeon-sites`, the gateways, `proxy` and `ai-agents`.
+    pub workers: Vec<String>,
+    /// The platform zone's apex and its reserved hostnames, such as `platform.pigeon.dev`.
+    pub hosts: Vec<String>,
+}
+
+impl PlatformOwned {
+    /// Whether Worker `name` is the platform's.
+    pub fn worker(&self, name: &str) -> bool {
+        self.workers.iter().any(|w| w == name)
+    }
+
+    /// Whether `hostname` is the platform's, ignoring ASCII case.
+    pub fn host(&self, hostname: &str) -> bool {
+        self.hosts.iter().any(|h| h.eq_ignore_ascii_case(hostname))
+    }
+}
+
+/// What is platform-owned for `instance`, from the reserved names `rules` carries (themselves
+/// derived from every capability's footprint). `None` for a linked instance: nothing in a linked
+/// account is the platform's.
+pub fn platform_owned(instance: &Instance, rules: &Rules) -> Option<PlatformOwned> {
+    if instance.account != AccountRef::Home {
+        return None;
+    }
+    let mut workers = rules.reserved_workers.to_vec();
+    workers.push(rules.platform_worker.to_string());
+    workers.push(super::SITES_WORKER.to_string());
+    workers.retain(|w| !w.is_empty());
+    workers.sort();
+    workers.dedup();
+    Some(PlatformOwned {
+        workers,
+        hosts: super::record::platform_hosts(rules),
+    })
+}
+
+/// Why a platform-owned name is left alone.
+pub const PLATFORM_OWNED: &str = "platform-owned: the platform deploys it, never an instance plan";
+
+/// `step` as the home instance may take it: anything that would upload, attach or turn on
+/// workers.dev for a platform-owned Worker or hostname is kept or blocked, never an action.
+fn guard(step: Step, owned: &PlatformOwned) -> Step {
+    let keep = |what: &str, name: &str| Step::Keep {
+        what: what.into(),
+        name: name.into(),
+        why: PLATFORM_OWNED.into(),
+    };
+    let blocked = |name: &str| Step::Blocked {
+        why: format!("{name} is {PLATFORM_OWNED}"),
+    };
+    let named_host = |what: &str| what == "custom domain" || what == "subdomain";
+    let named_worker = |what: &str| what == "worker" || what == "workers.dev";
+    match &step {
+        Step::UploadWorker { name, .. } if owned.worker(name) => keep("worker", name),
+        Step::EnableWorkersDev { name } if owned.worker(name) => keep("workers.dev", name),
+        Step::Ok { what, name } | Step::Conflict { what, name, .. }
+            if named_worker(what) && owned.worker(name) =>
+        {
+            keep(what, name)
+        }
+        Step::Ok { what, name } | Step::Conflict { what, name, .. }
+            if named_host(what) && owned.host(name) =>
+        {
+            blocked(name)
+        }
+        Step::AttachDomain {
+            hostname, worker, ..
+        }
+        | Step::AttachSubdomain {
+            hostname, worker, ..
+        } => {
+            if owned.host(hostname) {
+                blocked(hostname)
+            } else if owned.worker(worker) {
+                blocked(&format!("{hostname}'s Worker {worker}"))
+            } else {
+                step
+            }
+        }
+        _ => step,
+    }
+}
+
 /// The plan for `instance` given what is there and its ledger. An instance with no site or no
-/// Worker needs nothing.
-pub fn plan(instance: &Instance, seen: &Observed, ledger: &Ledger) -> Vec<Step> {
+/// Worker needs nothing. The home instance's plan also needs `owned`, what is the platform's
+/// ([`platform_owned`]): without it, its plan is blocked.
+pub fn plan(
+    instance: &Instance,
+    seen: &Observed,
+    ledger: &Ledger,
+    owned: Option<&PlatformOwned>,
+) -> Vec<Step> {
+    let steps = wanted(instance, seen, ledger);
+    if instance.account != AccountRef::Home {
+        return steps;
+    }
+    let Some(owned) = owned else {
+        return vec![Step::Blocked {
+            why: "the home instance's plan needs what is platform-owned, and it was not given"
+                .into(),
+        }];
+    };
+    steps.into_iter().map(|s| guard(s, owned)).collect()
+}
+
+/// The plan's steps before the home instance's guard.
+fn wanted(instance: &Instance, seen: &Observed, ledger: &Ledger) -> Vec<Step> {
     let (Some(site), Some(worker)) = (instance.sites.first(), instance.worker.as_deref()) else {
         return Vec::new();
     };
@@ -493,6 +610,9 @@ pub fn describe(steps: &[Step]) -> Vec<Value> {
                 ))
             }
             Step::Blocked { why } => json!(format!("stop: {why}")),
+            Step::Keep { what, name, why } => {
+                json!(format!("{what} {name}: {why}; pigeon leaves it alone"))
+            }
         })
         .collect()
 }

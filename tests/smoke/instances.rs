@@ -49,6 +49,7 @@ fn instances_are_data_a_person_approves() {
         platform_zone: "pigeon.dev",
         reserved_labels: &reserved,
         reserved_workers: &workers,
+        platform_worker: "pigeon-platform",
     };
     assert_eq!(
         validate(&noisy, std::slice::from_ref(&platform), &rules),
@@ -747,7 +748,7 @@ fn instance_plans_touch_only_what_pigeon_made() {
 
     // Nothing there: create, upload, preview, in that order.
     let empty = Ledger::default();
-    let first = plan(&inst, &seen(false, false, None, Some("np")), &empty);
+    let first = plan(&inst, &seen(false, false, None, Some("np")), &empty, None);
     assert_eq!(
         tags(&first),
         ["create_bucket", "upload_worker", "enable_workers_dev"]
@@ -761,24 +762,29 @@ fn instance_plans_touch_only_what_pigeon_made() {
         record(&mut l, s);
     }
     assert_eq!(l.buckets, ["noisypigeon-site"]);
-    let again = plan(&inst, &seen(true, true, Some(true), Some("np")), &l);
+    let again = plan(&inst, &seen(true, true, Some(true), Some("np")), &l, None);
     assert_eq!(tags(&again), ["ok", "ok", "ok"]);
     assert!(again.iter().all(|s| !s.changes()));
 
     // Same names, not pigeon's: conflicts, never touched.
-    let theirs = plan(&inst, &seen(true, true, Some(false), Some("np")), &empty);
+    let theirs = plan(
+        &inst,
+        &seen(true, true, Some(false), Some("np")),
+        &empty,
+        None,
+    );
     assert_eq!(tags(&theirs)[..2], ["conflict", "conflict"]);
     assert!(theirs.iter().any(Step::stops));
 
     // pigeon's Worker with an older module: an update, not a conflict.
     let mut old = l.clone();
     old.workers = vec![("noisypigeon".into(), "older".into())];
-    let upd = plan(&inst, &seen(true, true, Some(true), Some("np")), &old);
+    let upd = plan(&inst, &seen(true, true, Some(true), Some("np")), &old, None);
     assert!(matches!(&upd[1], Step::UploadWorker { replaces: true, .. }));
     assert_ne!(module_digest("noisypigeon-site", Some("eu")), "older");
 
     // No workers.dev subdomain on the account: blocked, for the person.
-    let blocked = plan(&inst, &seen(false, false, None, None), &empty);
+    let blocked = plan(&inst, &seen(false, false, None, None), &empty, None);
     assert_eq!(tags(&blocked)[2], "blocked");
 
     // A Domain target: attached when its zone is there and nothing serves it; ours reads back
@@ -793,22 +799,22 @@ fn instance_plans_touch_only_what_pigeon_made() {
         zone_id: Some("z1".into()),
         service: None,
     }];
-    let d = plan(&with_domain, &o, &l);
+    let d = plan(&with_domain, &o, &l, None);
     assert!(matches!(d.last(), Some(Step::AttachDomain { zone_id, .. }) if zone_id == "z1"));
     o.domains[0].service = Some("noisypigeon".into());
     assert!(matches!(
-        plan(&with_domain, &o, &l).last(),
+        plan(&with_domain, &o, &l, None).last(),
         Some(Step::Ok { .. })
     ));
     o.domains[0].service = Some("someone-else".into());
-    assert!(plan(&with_domain, &o, &l).last().unwrap().stops());
+    assert!(plan(&with_domain, &o, &l, None).last().unwrap().stops());
     o.domains[0] = SeenDomain {
         hostname: "noisypigeon.com".into(),
         zone_id: None,
         service: None,
     };
     assert!(matches!(
-        plan(&with_domain, &o, &l).last(),
+        plan(&with_domain, &o, &l, None).last(),
         Some(Step::Blocked { .. })
     ));
 
@@ -854,22 +860,22 @@ fn instance_plans_touch_only_what_pigeon_made() {
     }];
     let up = upstream_for("noisypigeon", "np");
     assert_eq!(up, "https://noisypigeon.np.workers.dev");
-    assert!(matches!(plan(&inst, &sub, &l).last(),
+    assert!(matches!(plan(&inst, &sub, &l, None).last(),
         Some(Step::AttachSubdomain { upstream, worker, .. })
             if *upstream == up && worker == "pigeon-sites"));
     sub.subdomains[0].service = Some("pigeon-sites".into());
     sub.subdomains[0].upstream = Some(up.clone());
     assert!(matches!(
-        plan(&inst, &sub, &l).last(),
+        plan(&inst, &sub, &l, None).last(),
         Some(Step::Ok { .. })
     ));
     sub.subdomains[0].service = Some("someone-else".into());
-    assert!(plan(&inst, &sub, &l).last().unwrap().stops());
+    assert!(plan(&inst, &sub, &l, None).last().unwrap().stops());
     let mut no_dev = sub.clone();
     no_dev.account_subdomain = None;
     no_dev.subdomains[0].service = None;
     assert!(
-        plan(&inst, &no_dev, &l)
+        plan(&inst, &no_dev, &l, None)
             .iter()
             .any(|s| matches!(s, Step::Blocked { .. }))
     );
@@ -1394,6 +1400,7 @@ fn protected_origins_require_dedicated_resources_and_bind_to_the_site_bucket() {
         platform_zone: "pigeon.dev",
         reserved_labels: &[],
         reserved_workers: &[],
+        platform_worker: "pigeon-platform",
     };
     assert!(validate(&instance, &[], &rules).is_empty());
     let mut shared = instance.clone();
@@ -1420,7 +1427,7 @@ fn protected_origins_require_dedicated_resources_and_bind_to_the_site_bucket() {
         subdomains: vec![],
     };
     let mut ledger = Ledger::default();
-    let steps = plan(&instance, &observed, &ledger);
+    let steps = plan(&instance, &observed, &ledger, None);
     assert!(matches!(
         steps.as_slice(),
         [
@@ -1436,21 +1443,37 @@ fn protected_origins_require_dedicated_resources_and_bind_to_the_site_bucket() {
         ]
     ));
     observed.bucket_exists = true;
-    assert!(plan(&instance, &observed, &ledger).iter().any(Step::stops));
+    assert!(
+        plan(&instance, &observed, &ledger, None)
+            .iter()
+            .any(Step::stops)
+    );
     record(&mut ledger, &steps[0]);
-    assert!(!plan(&instance, &observed, &ledger).iter().any(Step::stops));
+    assert!(
+        !plan(&instance, &observed, &ledger, None)
+            .iter()
+            .any(Step::stops)
+    );
     observed.worker_exists = true;
-    assert!(plan(&instance, &observed, &ledger).iter().any(Step::stops));
+    assert!(
+        plan(&instance, &observed, &ledger, None)
+            .iter()
+            .any(Step::stops)
+    );
     record(&mut ledger, &steps[1]);
     observed.workers_dev = Some(true);
     assert!(
-        !plan(&instance, &observed, &ledger)
+        !plan(&instance, &observed, &ledger, None)
             .iter()
             .any(Step::changes)
     );
 
     instance.sites[0].auth = None;
-    assert!(plan(&instance, &observed, &ledger).iter().any(Step::stops));
+    assert!(
+        plan(&instance, &observed, &ledger, None)
+            .iter()
+            .any(Step::stops)
+    );
     let upstream = "https://fixture.sandbox.workers.dev";
     let key = origin_key(
         b"fixture-only",
@@ -1902,4 +1925,256 @@ fn instance_retire_removes_only_what_pigeon_made() {
     assert_eq!(ran, expected);
     assert!(ledger.workers.is_empty() && ledger.buckets.is_empty());
     assert!(ledger.domains.is_empty() && ledger.subdomains.is_empty());
+}
+
+/// The home instance's guard rails, before any home plan exists: one home record, an account
+/// kind no draft changes, the platform's own Worker named only by home, and a home plan that
+/// keeps or blocks every platform-owned Worker and hostname instead of acting on it. Linked
+/// instances plan as before.
+#[test]
+fn home_instance_guard_rails() {
+    use pigeon_capabilities::instances::plan::{
+        Ledger, Observed, PLATFORM_OWNED, SeenDomain, SeenSubdomain, Step, describe, plan,
+        platform_owned,
+    };
+    use pigeon_capabilities::instances::record::{
+        AccountRef, Instance, Rules, Target, account_change, approval_problems, reserved_labels,
+        validate,
+    };
+    use pigeon_capabilities::instances::retire::refusal;
+
+    let reserved = reserved_labels(
+        &[
+            "platform.pigeon.dev".into(),
+            "proxy.pigeon.dev".into(),
+            "pigeon.dev".into(),
+        ],
+        "pigeon.dev",
+    );
+    let workers: Vec<String> = ["ai-agents", "pigeon-platform", "pigeon-sites", "proxy"]
+        .map(String::from)
+        .to_vec();
+    let rules = Rules {
+        platform_zone: "pigeon.dev",
+        reserved_labels: &reserved,
+        reserved_workers: &workers,
+        platform_worker: "pigeon-platform",
+    };
+    let home: Instance = serde_json::from_value(json!({
+        "id": "pigeon-security/platform", "title": "pigeon",
+        "account": { "kind": "home" }, "zones": ["pigeon.dev"]
+    }))
+    .unwrap();
+    let linked: Instance = serde_json::from_value(json!({
+        "id": "noisypigeon", "title": "noisypigeon",
+        "account": { "kind": "linked", "account_id": "a".repeat(32) },
+        "zones": ["noisypigeon.com"], "worker": "noisypigeon",
+        "sites": [{ "name": "blog", "bucket": "noisypigeon-site",
+            "targets": [{ "kind": "preview" }, { "kind": "domain", "hostname": "noisypigeon.com" }] }],
+        "version": 1
+    }))
+    .unwrap();
+    let has = |problems: &[String], why: &str| {
+        assert!(
+            problems.iter().any(|p| p.contains(why)),
+            "{why}: {problems:?}"
+        );
+    };
+    assert_eq!(
+        validate(&home, std::slice::from_ref(&linked), &rules),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        validate(&linked, std::slice::from_ref(&home), &rules),
+        Vec::<String>::new()
+    );
+
+    // One home instance: a second is refused on edit, and again on approval.
+    let mut second = home.clone();
+    second.id = "other/platform".into();
+    has(
+        &validate(&second, std::slice::from_ref(&home), &rules),
+        "only one home instance",
+    );
+    has(
+        &approval_problems(&second, &[home.clone(), linked.clone()]),
+        "only one home instance",
+    );
+    assert!(approval_problems(&home, &[home.clone(), linked.clone()]).is_empty());
+
+    // A draft never changes a stored record's account kind, either way.
+    let mut to_home = linked.clone();
+    to_home.account = AccountRef::Home;
+    has(
+        &account_change(Some(&linked), &to_home)
+            .into_iter()
+            .collect::<Vec<_>>(),
+        "may not change it to home",
+    );
+    let problems = approval_problems(&to_home, &[home.clone(), linked.clone()]);
+    has(&problems, "may not change it to home");
+    has(&problems, "only one home instance");
+    let mut to_linked = home.clone();
+    to_linked.account = AccountRef::Linked {
+        account_id: Some("b".repeat(32)),
+    };
+    has(
+        &approval_problems(&to_linked, &[home.clone(), linked.clone()]),
+        "may not change it to linked",
+    );
+    let mut relinked = linked.clone();
+    relinked.account = AccountRef::Linked {
+        account_id: Some("c".repeat(32)),
+    };
+    assert_eq!(account_change(Some(&linked), &relinked), None);
+    assert_eq!(account_change(None, &to_home), None, "a new record");
+
+    // Home may name the platform's own Worker as its worker; linked never may, and home may
+    // not take any other reserved Worker or serve a platform hostname.
+    let mut managed = home.clone();
+    managed.worker = Some("pigeon-platform".into());
+    assert_eq!(
+        validate(&managed, std::slice::from_ref(&linked), &rules),
+        Vec::<String>::new()
+    );
+    let mut taken = linked.clone();
+    taken.worker = Some("pigeon-platform".into());
+    has(&validate(&taken, &[], &rules), "platform's own");
+    taken.worker_override = true;
+    has(&validate(&taken, &[], &rules), "platform's own");
+    let bare = Rules {
+        reserved_workers: &[],
+        ..rules
+    };
+    has(&validate(&taken, &[], &bare), "platform's own");
+    let mut sites_worker = home.clone();
+    sites_worker.worker = Some("pigeon-sites".into());
+    sites_worker.worker_override = true;
+    has(&validate(&sites_worker, &[], &rules), "platform's own");
+    let mut serving = managed.clone();
+    serving.sites = serde_json::from_value(json!([{ "name": "landing", "bucket": "landing-site",
+        "bucket_override": true,
+        "targets": [{ "kind": "domain", "hostname": "platform.pigeon.dev" },
+            { "kind": "domain", "hostname": "pigeon.dev" },
+            { "kind": "domain", "hostname": "blog.pigeon.dev" }] }]))
+    .unwrap();
+    let problems = validate(&serving, &[], &rules);
+    has(&problems, "\"platform.pigeon.dev\" is the platform's own");
+    has(&problems, "\"pigeon.dev\" is the platform's own");
+    assert!(!problems.iter().any(|p| p.contains("blog.pigeon.dev")));
+
+    // The platform-owned set comes from the reserved names: the footprint's Workers and the
+    // apex, platform. and proxy. hosts. Nothing is platform-owned for a linked instance.
+    let owned = platform_owned(&serving, &rules).unwrap();
+    for w in ["pigeon-platform", "pigeon-sites", "proxy", "ai-agents"] {
+        assert!(owned.worker(w), "{w}");
+    }
+    for h in ["pigeon.dev", "platform.pigeon.dev", "PROXY.pigeon.dev"] {
+        assert!(owned.host(h), "{h}");
+    }
+    assert!(!owned.host("blog.pigeon.dev") && !owned.worker("landing"));
+    assert!(platform_owned(&linked, &rules).is_none());
+
+    // A home plan naming the platform's Worker and hosts: only Keep or Blocked for them.
+    serving.sites[0].targets.insert(0, Target::Preview);
+    serving.sites[0].targets.push(Target::Subdomain {
+        label: "landing".into(),
+    });
+    let domain = |h: &str| SeenDomain {
+        hostname: h.into(),
+        zone_id: Some("z".into()),
+        service: None,
+    };
+    let seen = Observed {
+        account_id: "h".repeat(32),
+        bucket_exists: false,
+        worker_exists: true,
+        workers_dev: Some(false),
+        account_subdomain: Some("home".into()),
+        domains: vec![
+            domain("platform.pigeon.dev"),
+            domain("pigeon.dev"),
+            domain("blog.pigeon.dev"),
+        ],
+        subdomains: vec![SeenSubdomain {
+            hostname: "landing.pigeon.dev".into(),
+            zone_id: Some("z".into()),
+            worker: "pigeon-sites".into(),
+            service: None,
+            upstream: None,
+        }],
+    };
+    let l = Ledger::default();
+    let steps = plan(&serving, &seen, &l, Some(&owned));
+    let actions: Vec<&Step> = steps.iter().filter(|s| s.changes()).collect();
+    assert!(
+        matches!(actions.as_slice(), [Step::CreateBucket { name, .. }] if name == "landing-site"),
+        "{steps:?}"
+    );
+    let keep = |what: &str| Step::Keep {
+        what: what.into(),
+        name: "pigeon-platform".into(),
+        why: PLATFORM_OWNED.into(),
+    };
+    assert_eq!(steps[1], keep("worker"), "never a conflict or an upload");
+    assert_eq!(steps[2], keep("workers.dev"));
+    let blocked: Vec<&str> = steps
+        .iter()
+        .filter_map(|s| match s {
+            Step::Blocked { why } => Some(why.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(blocked.len(), 4, "{blocked:?}");
+    assert!(blocked.iter().all(|why| why.contains("platform-owned")));
+    assert!(
+        describe(&steps)[1]
+            .as_str()
+            .unwrap()
+            .contains("platform-owned")
+    );
+    let mut fresh = seen.clone();
+    fresh.worker_exists = false;
+    assert!(
+        !plan(&serving, &fresh, &l, Some(&owned))
+            .iter()
+            .any(|s| matches!(s, Step::UploadWorker { .. }))
+    );
+    // Without the platform-owned set, the home plan is blocked outright.
+    assert!(matches!(
+        plan(&serving, &seen, &l, None).as_slice(),
+        [Step::Blocked { .. }]
+    ));
+    // A home Worker that is not the platform's still plans its own hosts; never the apex.
+    let mut own = serving.clone();
+    own.worker = Some("landing".into());
+    own.worker_override = true;
+    own.sites[0]
+        .targets
+        .retain(|t| !matches!(t, Target::Subdomain { .. }));
+    let mut theirs = seen.clone();
+    theirs.subdomains.clear();
+    let steps = plan(&own, &theirs, &l, Some(&owned));
+    assert!(steps.iter().any(
+        |s| matches!(s, Step::AttachDomain { hostname, .. } if hostname == "blog.pigeon.dev")
+    ));
+    assert!(!steps.iter().any(
+        |s| matches!(s, Step::AttachDomain { hostname, .. } if hostname != "blog.pigeon.dev")
+    ));
+
+    // Linked instances plan exactly as before, whatever set is passed.
+    let linked_seen = Observed {
+        account_id: "a".repeat(32),
+        domains: vec![domain("noisypigeon.com")],
+        subdomains: vec![],
+        ..seen.clone()
+    };
+    assert_eq!(
+        plan(&linked, &linked_seen, &l, None),
+        plan(&linked, &linked_seen, &l, Some(&owned))
+    );
+
+    // Retire still refuses the home instance.
+    assert!(refusal(&home).is_some() && refusal(&managed).is_some());
+    assert!(refusal(&linked).is_none());
 }

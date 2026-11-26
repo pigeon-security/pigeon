@@ -258,13 +258,27 @@ impl Directory {
         if approval::stale_draft(r, at, base) {
             return Ok(());
         }
-        next.version = base + 1;
-        let until = t.saturating_add(instances::KEPT_MS);
-        self.setting_keep(&key, &serde_json::to_string(&next)?, until)?;
         let mut ids: Vec<String> = match self.setting_value(instances::INDEX, t)? {
             Some(text) => serde_json::from_str(&text)?,
             None => Vec::new(),
         };
+        // Checked again against what is stored now: one home instance, and an account kind
+        // that never changes.
+        let mut stored = Vec::new();
+        for id in &ids {
+            if let Some(text) = self.setting_value(&instances::key(id), t)? {
+                stored.push(serde_json::from_str::<Instance>(&text)?);
+            }
+        }
+        let problems = instances::record::approval_problems(&next, &stored);
+        if !problems.is_empty() {
+            r.state = approval::State::Expired;
+            r.note = Some(problems.join(" "));
+            return Ok(());
+        }
+        next.version = base + 1;
+        let until = t.saturating_add(instances::KEPT_MS);
+        self.setting_keep(&key, &serde_json::to_string(&next)?, until)?;
         if !ids.contains(&next.id) {
             ids.push(next.id.clone());
             ids.sort();
