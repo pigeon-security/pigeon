@@ -209,6 +209,7 @@ pub fn ingest_instances() -> Vec<ingest::Target> {
 pub fn capabilities() -> Vec<Box<dyn Capability>> {
     vec![
         Box::new(pigeon_capabilities::cloud_scope::Inline),
+        Box::new(pigeon_capabilities::digitalocean::DigitalOcean),
         // Every path on the platform checks its callers itself (/mcp and /oauth with OAuth,
         // /auth and the console with passkeys) or is open to all (/health), so no Access is in front of it.
         Box::new(PublicHost {

@@ -143,6 +143,9 @@ pub struct CapabilitySettings {
     /// Absent: the catalogue's default for the instance (`catalogue::placement`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement: Option<crate::catalogue::Placement>,
+    /// The expected team identifier for the DigitalOcean connection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team_id: Option<String>,
 }
 
 /// Where the home instance's platform (console, MCP, OAuth) lives.

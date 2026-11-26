@@ -82,6 +82,16 @@ pub async fn authorize(
     route(scope, enabled, tool, args).map_err(Error::RustError)
 }
 
+/// Check a token against the team in this approved instance's DigitalOcean settings.
+/// This path exposes only the provider's read-only connection check.
+pub(crate) async fn verify_digitalocean(record: &Instance, token: &str) -> Result<()> {
+    let team = crate::digitalocean::team(record).ok_or_else(|| {
+        Error::RustError("DigitalOcean is not enabled on the approved instance".into())
+    })?;
+    pigeon_cloud::compute::probe_digitalocean(&pigeon_cloud::transport::FetchTransport, team, token)
+        .await
+}
+
 /// Inline capability for setup status, independent of any remote manifest.
 pub struct Inline;
 

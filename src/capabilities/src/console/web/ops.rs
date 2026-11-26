@@ -28,6 +28,8 @@ pub const READS: &[(&str, &[&str])] = &[
     ("instances_list", &[]),
     ("console_manifest", &["instance"]),
     ("app_linked_details", &["instance"]),
+    (crate::digitalocean::STATUS, &["instance"]),
+    (crate::digitalocean::VERIFY, &["instance"]),
     ("capabilities_versions", &["instance", "changelog"]),
     ("capabilities_upgrade_plan", &["instance"]),
     // Site: deployments (immutable releases and the live pointer) and visitors.
@@ -410,6 +412,20 @@ pub(super) async fn serve(
             "app_site_hosts" => site_access::site_hosts(host, cx.env, args).await,
             "app_site_visitors" => site_access::visitors(host, cx.env, args).await,
             "app_ingest_runs" => ingest_runs(&person_cx, args).await,
+            crate::digitalocean::STATUS | crate::digitalocean::VERIFY => {
+                let id = args["instance"]
+                    .as_str()
+                    .ok_or_else(|| bad("expected an instance ID"))?;
+                let record = crate::instances::one(cx.env, id)
+                    .await?
+                    .ok_or_else(|| bad("there is no approved instance"))?;
+                let scope = crate::instances::tools::Scope::new(&record)?;
+                let scoped = Context {
+                    instance: Some(&scope),
+                    ..person_cx
+                };
+                dispatch_checked(&scoped, name, args).await
+            }
             _ => {
                 let args = bound(&person_cx, name, args).await?;
                 dispatch_checked(&person_cx, name, &args).await

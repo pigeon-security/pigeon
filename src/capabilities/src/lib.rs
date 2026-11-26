@@ -12,6 +12,7 @@ pub mod ci;
 pub mod cloud_scope;
 pub mod console;
 pub mod cost;
+pub mod digitalocean;
 pub mod dispatch;
 pub mod expiry;
 pub mod github;
@@ -337,6 +338,11 @@ pub async fn dispatch(cx: &Context<'_>, name: &str, args: &Value) -> Result<Valu
     let args = bound.as_ref().unwrap_or(args);
     let owner = owner(cx.hosted.capabilities, name)
         .ok_or_else(|| Error::RustError(pigeon_core::mcp::unknown_tool(name)))?;
+    if owner.name() == digitalocean::NAME && cx.instance.is_none() {
+        return Err(Error::RustError(
+            "use the approved instance's MCP endpoint".into(),
+        ));
+    }
     let local = if owner.name() == cloud_scope::NAME {
         cloud_scope::authorize(cx.env, cx.instance, name, args).await?
     } else {

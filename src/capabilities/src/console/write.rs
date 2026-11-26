@@ -56,6 +56,8 @@ pub enum Target {
     /// such as `noisypigeon`, `owner/name` or the home instance's `pigeon.dev`. The record's own
     /// validation (`instances::record::check_id`) still decides what a saved id may be.
     Instance,
+    /// The approved DigitalOcean configuration: `{instance, team_id, version}`.
+    DigitalOceanTeam,
     /// A person's name, as an invite takes it.
     Name,
     /// `on` or `off`.
@@ -173,6 +175,14 @@ pub const ACTIONS: &[Action] = &[
         Target::Secret,
         Change::Secret,
     )),
+    act(
+        crate::digitalocean::SET_TOKEN,
+        "Set a DigitalOcean token",
+        Cap(crate::digitalocean::NAME),
+        false,
+        Target::DigitalOceanTeam,
+        Change::Secret,
+    ),
     app(act(
         "token-issue",
         "Issue a proxy token",
@@ -478,6 +488,24 @@ impl Action {
                 }
                 json!(t)
             }
+            Target::DigitalOceanTeam => {
+                let o = raw
+                    .as_object()
+                    .ok_or("the target is {instance, team_id, version}")?;
+                only(o, &["instance", "team_id", "version"], true)?;
+                let instance = raw["instance"]
+                    .as_str()
+                    .filter(|id| instance_like(id))
+                    .ok_or("the target must name an instance")?;
+                let team = raw["team_id"]
+                    .as_str()
+                    .filter(|id| pigeon_cloud::compute::is_digitalocean_team_id(id))
+                    .ok_or("the target must name a valid DigitalOcean team")?;
+                let version = raw["version"]
+                    .as_u64()
+                    .ok_or("the target needs the approved record version")?;
+                json!({"instance": instance, "team_id": team, "version": version})
+            }
             Target::Name => json!(crate::users::invite_name(text())?),
             Target::Switch => match text() {
                 t @ ("on" | "off") => json!(t),
@@ -678,6 +706,12 @@ impl Action {
     pub fn summary(&self, target: &Value, bound: &Value) -> Summary {
         let target_text = match target {
             Value::String(s) => s.clone(),
+            v if self.target == Target::DigitalOceanTeam => format!(
+                "{} / DigitalOcean team {} (record version {})",
+                v["instance"].as_str().unwrap_or(""),
+                v["team_id"].as_str().unwrap_or(""),
+                v["version"],
+            ),
             v => format!(
                 "{} / {} ({})",
                 v["instance"].as_str().unwrap_or(""),

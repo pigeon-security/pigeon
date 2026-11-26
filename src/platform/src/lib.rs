@@ -413,6 +413,7 @@ async fn mcp_post(mut req: Request, env: &Env) -> Result<Response> {
     let show_global_cloud = !global_discovery || cloud_scope::platform_enabled(env).await?;
     let mut tools: Vec<mcp::Tool> = caps
         .iter()
+        .filter(|c| scope.is_some() || c.name() != pigeon_capabilities::digitalocean::NAME)
         .filter(|c| cloud_scope::discovered_globally(c.name(), show_global_cloud))
         .flat_map(|c| c.tools())
         .collect();

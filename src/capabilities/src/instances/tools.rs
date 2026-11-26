@@ -69,6 +69,11 @@ pub struct Contributor {
 /// Every instance capability. The console lists an area's views by their order, not this one.
 pub const CAPABILITIES: &[Contributor] = &[
     Contributor {
+        name: crate::digitalocean::NAME,
+        component: crate::digitalocean::NAME,
+        register: crate::digitalocean::instance_tools,
+    },
+    Contributor {
         name: crate::cloud_scope::NAME,
         component: crate::cloud_scope::NAME,
         register: crate::cloud_scope::instance_tools,

@@ -159,6 +159,14 @@ pub const CATALOGUE: &[Entry] = &[
         placements: &[Placement::Inline, Placement::OwnWorker],
         ..BASE
     },
+    // DigitalOcean connection management is served inline on core.
+    Entry {
+        name: crate::digitalocean::NAME,
+        linked: true,
+        opt_in: true,
+        requires: &[crate::cloud_scope::NAME],
+        ..BASE
+    },
     // Platform › Models.
     own("models", "pigeon-model-gateway"),
     // Instances › All instances, Platform › Endpoints, and creating and linking instances.
@@ -268,7 +276,9 @@ pub fn placement(record: &Instance, name: &str) -> Option<(Placement, Option<Str
         .and_then(|s| s.placement)
         .unwrap_or(Placement::Inline);
     Some(match p {
-        Placement::Inline if name == crate::cloud_scope::NAME => {
+        Placement::Inline
+            if matches!(name, crate::cloud_scope::NAME | crate::digitalocean::NAME) =>
+        {
             (p, Some("pigeon-platform".into()))
         }
         Placement::Inline => (p, record.worker.clone()),
@@ -375,6 +385,19 @@ pub fn problems(record: &Instance) -> Vec<String> {
             && let Some(why) = placement_problem(record, e, p)
         {
             out.push(why);
+        }
+        match (name.as_str(), record.capabilities[name].team_id.as_deref()) {
+            (crate::digitalocean::NAME, Some(id))
+                if pigeon_cloud::compute::is_digitalocean_team_id(id) => {}
+            (crate::digitalocean::NAME, _) => {
+                out.push("DigitalOcean requires a valid team_id.".into());
+            }
+            (_, Some(_)) => {
+                out.push(format!(
+                    "The capability \"{name}\" does not accept a team_id."
+                ));
+            }
+            _ => {}
         }
         for r in e.requires {
             if !record.capabilities.contains_key(*r) {

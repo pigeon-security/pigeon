@@ -1158,6 +1158,32 @@ impl Directory {
                 )?;
                 Value::Null
             }
+            "digitalocean.token.put" => {
+                let target = &a["target"];
+                let id = target["instance"]
+                    .as_str()
+                    .ok_or_else(|| bad("expected an instance ID"))?;
+                let record = self
+                    .setting_value(&crate::instances::key(id), t)?
+                    .and_then(|text| {
+                        serde_json::from_str::<crate::instances::record::Instance>(&text).ok()
+                    })
+                    .filter(|record| crate::digitalocean::matches_target(record, target));
+                if record.is_none() {
+                    return Err(bad(
+                        "the approved DigitalOcean configuration changed; review it again",
+                    ));
+                }
+                let value = a["value"]
+                    .as_str()
+                    .ok_or_else(|| bad("expected a sealed token"))?;
+                self.setting_keep(
+                    &crate::digitalocean::token_key(id),
+                    value,
+                    t + crate::digitalocean::TOKEN_KEPT_MS,
+                )?;
+                Value::Null
+            }
             "setting.replace" => {
                 let key = s("key");
                 let previous = a["previous"]

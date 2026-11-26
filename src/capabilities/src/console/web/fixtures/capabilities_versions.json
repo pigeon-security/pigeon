@@ -321,6 +321,22 @@
       "opt_in": true
     },
     {
+      "name": "digitalocean",
+      "placements": [
+        "inline"
+      ],
+      "home": "inline",
+      "home_worker": null,
+      "scope": "instance",
+      "availability": "any",
+      "requires": [
+        "cloud"
+      ],
+      "linked": true,
+      "always": false,
+      "opt_in": true
+    },
+    {
       "name": "models",
       "placements": [
         "inline",

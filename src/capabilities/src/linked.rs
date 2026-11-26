@@ -375,7 +375,7 @@ async fn secret(env: &Env, name: &str) -> Option<String> {
     secrets_store::read(&binding).await.ok().flatten()
 }
 
-async fn sealing_key(env: &Env) -> Result<[u8; 32]> {
+pub(crate) async fn sealing_key(env: &Env) -> Result<[u8; 32]> {
     let text = secret(env, LINK_KEY)
         .await
         .ok_or_else(|| bad("linking is not set up yet: LINK_KEY is not bound"))?;

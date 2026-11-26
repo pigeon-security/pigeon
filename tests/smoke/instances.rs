@@ -682,7 +682,13 @@ fn console_manifest_by_capability_per_instance_kind() {
 
 /// The catalogue capabilities a linked instance's record may enable so far (capability scoping,
 /// M4, one at a time), besides `instances`, which every instance has.
-const LINKED_SO_FAR: &[&str] = &["redirects", "architecture", "secrets", "cloud"];
+const LINKED_SO_FAR: &[&str] = &[
+    "redirects",
+    "architecture",
+    "secrets",
+    "cloud",
+    "digitalocean",
+];
 
 /// The capability catalogue (docs/plans/capability-scoping.md): each capability's placement,
 /// scope and availability as decided, and every hosted capability that fills a console view
@@ -735,6 +741,15 @@ fn capability_catalogue_as_decided() {
             Scope::Instance,
             Availability::Any,
             &[],
+        ),
+        (
+            "digitalocean",
+            false,
+            Placement::Inline,
+            None,
+            Scope::Instance,
+            Availability::Any,
+            &["cloud"],
         ),
         (
             "models",
@@ -5470,4 +5485,122 @@ fn cloud_gateway_off_by_default_and_scoped_status_opt_in() {
         .is_err()
     );
     assert_eq!(route(None, true, "cloud_tokens_list", &json!({})), Ok(None));
+}
+
+#[test]
+fn digitalocean_connection_uses_approved_instance_team_and_version() {
+    use pigeon_capabilities::catalogue::problems;
+    use pigeon_capabilities::console::write::{Step, action, digest};
+    use pigeon_capabilities::digitalocean::{
+        SET_TOKEN, STATUS, VERIFY, connection_status, matches_target, token_context, token_key,
+    };
+    use pigeon_capabilities::instances::{record::Instance, tools::Scope};
+    use pigeon_capabilities::membership::{Need, Role, tool_need, write_need};
+    use pigeon_core::{mcp::Tool, oauth::hash};
+
+    let record = |capabilities: Value| -> Instance {
+        serde_json::from_value(json!({
+            "id": "willowgraysen",
+            "title": "Fixture",
+            "account": { "kind": "linked" },
+            "capabilities": capabilities,
+            "version": 4,
+        }))
+        .unwrap()
+    };
+    let off = record(json!({ "cloud": {} }));
+    let missing_cloud = record(json!({ "digitalocean": { "team_id": "team_A" } }));
+    let bad_team = record(json!({ "cloud": {}, "digitalocean": { "team_id": "https://other" } }));
+    let wrong_setting = record(json!({ "cloud": { "team_id": "team_A" } }));
+    let on = record(json!({ "cloud": {}, "digitalocean": { "team_id": "team_A" } }));
+    assert!(problems(&on).is_empty());
+    assert!(problems(&missing_cloud).iter().any(|p| p.contains("needs")));
+    assert!(problems(&bad_team).iter().any(|p| p.contains("team_id")));
+    assert!(
+        problems(&wrong_setting)
+            .iter()
+            .any(|p| p.contains("team_id"))
+    );
+
+    let names = |record: &Instance| {
+        let scope = Scope::new(record).unwrap();
+        let mut tools = vec![Tool::bare(STATUS, "Status"), Tool::bare(VERIFY, "Verify")];
+        scope.restrict_tools(&mut tools);
+        tools.into_iter().map(|tool| tool.name).collect::<Vec<_>>()
+    };
+    assert!(names(&off).is_empty());
+    assert!(names(&missing_cloud).is_empty());
+    assert_eq!(names(&on), [STATUS, VERIFY]);
+    let scoped = Scope::new(&on).unwrap();
+    for args in [
+        json!({"instance":"other"}),
+        json!({"team_id":"team_B"}),
+        json!({"token":"example"}),
+        json!({"url":"https://example.invalid"}),
+    ] {
+        assert!(scoped.bind(VERIFY, &args).is_err());
+        assert!(
+            scoped
+                .bind("call", &json!({"tool":VERIFY,"args":args}))
+                .is_err()
+        );
+    }
+    assert_eq!(connection_status(&on, None).unwrap()["state"], "missing");
+    assert_eq!(
+        connection_status(&on, Some("team_B")).unwrap()["state"],
+        "unverified"
+    );
+    assert_eq!(
+        connection_status(&on, Some("team_A")).unwrap(),
+        json!({"instance":"willowgraysen", "enabled":true, "state":"connected","team_id":"team_A"})
+    );
+    assert_ne!(token_key("willowgraysen"), token_key("other"));
+    assert_ne!(
+        token_context("willowgraysen", "team_A"),
+        token_context("other", "team_A")
+    );
+    assert_ne!(
+        token_context("willowgraysen", "team_A"),
+        token_context("willowgraysen", "team_B")
+    );
+
+    let action = action(SET_TOKEN).unwrap();
+    let target = action
+        .target(&json!({"instance":"willowgraysen","team_id":"team_A","version":4}))
+        .unwrap();
+    let value = "dummy-token";
+    let start = action
+        .change(&json!({"digest":hash(value)}), Step::Begin)
+        .unwrap();
+    let finish = action
+        .change(&json!({"value":value}), Step::Finish)
+        .unwrap();
+    assert!(matches_target(&on, &target));
+    assert_eq!(
+        write_need(action, &target),
+        Need::On(Some("willowgraysen".into()), Role::Operator)
+    );
+    assert_eq!(
+        tool_need("digitalocean", STATUS, &json!({})),
+        Some(Role::Viewer)
+    );
+    assert_eq!(
+        tool_need("digitalocean", VERIFY, &json!({})),
+        Some(Role::Operator)
+    );
+    assert_eq!(action.bound(&start), action.bound(&finish));
+    assert!(!action.bound(&finish).to_string().contains(value));
+    let challenge = |target: &Value| {
+        digest(
+            action,
+            "fixture-person",
+            target,
+            &action.bound(&finish),
+            None,
+        )
+    };
+    let mut stale_version = target.clone();
+    stale_version["version"] = json!(3);
+    assert!(!matches_target(&on, &stale_version));
+    assert_ne!(challenge(&target), challenge(&stale_version));
 }

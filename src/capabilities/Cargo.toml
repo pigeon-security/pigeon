@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 pigeon-core = { path = "../core" }
+pigeon-cloud = { path = "../cloud" }
 pigeon-ci = { path = "../ci" }
 pigeon-contract = { path = "../contract" }
 pigeon-models = { path = "../models" }
@@ -25,7 +26,6 @@ toml = { version = "0.8", default-features = false, features = ["parse"] }
 pigeon-ai-agents = { path = "../ai-agents" }
 pigeon-blog = { path = "../blog" }
 pigeon-landing = { path = "../landing" }
-pigeon-cloud = { path = "../cloud" }
 pigeon-email = { path = "../email" }
 pigeon-ingest-runner = { path = "../ingest-runner" }
 rsa = { version = "0.9", default-features = false, features = ["std"] }

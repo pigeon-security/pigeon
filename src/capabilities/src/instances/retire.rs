@@ -153,7 +153,7 @@ impl Step {
 }
 
 /// pigeon's Directory settings for instance `id`, other than its record and link: its
-/// publishing queue rows, its ingest run index, its data Worker's address and key, and last its
+/// publishing queue rows, ingest state, sealed DigitalOcean token, and last its
 /// ledger.
 pub fn state_keys(id: &str) -> Vec<String> {
     vec![
@@ -162,6 +162,7 @@ pub fn state_keys(id: &str) -> Vec<String> {
         format!("ingest:runs:{id}"),
         format!("data_url:{id}"),
         format!("data_key:{id}"),
+        crate::digitalocean::token_key(id),
         ledger_key(id),
     ]
 }
