@@ -91,7 +91,8 @@ fn bad(why: &str) -> Error {
 // ---- the Directory ----
 
 /// The Directory's schema, one statement per migration, applied in order and never edited.
-const MIGRATIONS: [&str; 25] = [
+#[doc(hidden)]
+pub const MIGRATIONS: [&str; 25] = [
     "CREATE TABLE users (id TEXT PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL, created_at INTEGER NOT NULL)",
     "CREATE TABLE service_ids (access_client_id TEXT PRIMARY KEY, user_id TEXT NOT NULL)",
     "CREATE TABLE passkeys (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, point TEXT NOT NULL, sign_count INTEGER NOT NULL, name TEXT NOT NULL, created_at INTEGER NOT NULL, last_used_at INTEGER)",
@@ -286,6 +287,61 @@ impl Directory {
             vec![instance.into()],
         )?;
         Ok(rows.into_iter().map(|r| r.person_id).collect())
+    }
+
+    /// How many rows `sql` (a `SELECT COUNT(*) AS n`) counts.
+    fn count(&self, sql: &str, args: Vec<worker::SqlStorageValue>) -> Result<i64> {
+        #[derive(Deserialize)]
+        struct N {
+            n: i64,
+        }
+        let n: Option<N> = self.db.row(sql, args)?;
+        Ok(n.map_or(0, |n| n.n))
+    }
+
+    /// What removing the user `id` deletes ([`REMOVE_USER`]), at `t`: their passkeys, sessions,
+    /// roles on instances (and those they are the last owner of), the apps acting for them,
+    /// which are disconnected, and the tokens they hold. No key material.
+    fn removal(&self, id: &str, t: i64) -> Result<Value> {
+        let user = self.user(id)?.ok_or_else(|| bad("no such user"))?;
+        let one = || vec![id.into()];
+        let roles: Vec<Value> = self.db.rows(
+            "SELECT instance, role FROM members WHERE person_id = ? ORDER BY instance",
+            one(),
+        )?;
+        let mut last_owner_of = Vec::new();
+        for r in &roles {
+            let instance = r["instance"].as_str().unwrap_or_default();
+            if r["role"] == "owner" && self.owners(instance)? == [id] {
+                last_owner_of.push(instance.to_string());
+            }
+        }
+        let apps: Vec<Value> = self.db.rows(
+            "SELECT u.id AS id, u.name AS name, EXISTS (SELECT 1 FROM oauth_clients c WHERE c.service_user_id = u.id) AS oauth, (SELECT COUNT(*) FROM oauth_tokens o WHERE o.service_user_id = u.id AND o.kind != 'proxy' AND o.expires_at > ?) AS tokens FROM links l JOIN users u ON u.id = l.service_user_id WHERE l.standard_user_id = ? ORDER BY u.name",
+            vec![t.into(), id.into()],
+        )?;
+        let apps: Vec<Value> = apps
+            .into_iter()
+            .map(|a| {
+                // SQLite's integers may arrive as floats.
+                let n = |k: &str| a[k].as_f64().unwrap_or(0.0) as i64;
+                let kind = if n("oauth") > 0 { "app" } else { "service" };
+                json!({ "id": a["id"], "name": a["name"], "kind": kind, "tokens": n("tokens") })
+            })
+            .collect();
+        Ok(json!({
+            "user": user,
+            "admin": self.admins()?.iter().any(|a| a == id),
+            "passkeys": self.count("SELECT COUNT(*) AS n FROM passkeys WHERE user_id = ?", one())?,
+            "sessions": self.count("SELECT COUNT(*) AS n FROM sessions WHERE user_id = ?", one())?,
+            "tokens": self.count(
+                "SELECT COUNT(*) AS n FROM oauth_tokens WHERE service_user_id = ? AND expires_at > ?",
+                vec![id.into(), t.into()],
+            )?,
+            "roles": roles,
+            "last_owner_of": last_owner_of,
+            "apps": apps,
+        }))
     }
 
     /// Gives `person_id` `role` on `instance` unless they have a role there already.
@@ -521,29 +577,36 @@ impl Directory {
                 }
                 to_value(user)
             }
+            // What removing a user deletes, without deleting it: `users_remove_preview` and the
+            // console's `user-remove` dialog.
+            "users.removal" => self.removal(s("id"), t)?,
+            // Removes a user and all that is theirs (`REMOVE_USER`). The last admin stays, and so
+            // does an instance's last owner while the platform would have no admin after
+            // (`membership::member_change`); both are checked here, in the call that deletes.
+            // With `person: true` (the console), only a person is removed. Who asks is checked
+            // before ([`person_removal`]).
             "users.remove" => {
                 let user = self.user(s("id"))?.ok_or_else(|| bad("no such user"))?;
+                if a["person"].as_bool() == Some(true) && user.kind != "standard" {
+                    return Err(bad("no such person"));
+                }
                 let id = user.id.as_str();
                 let admins = self.admins()?;
                 if admins.len() <= 1 && admins.iter().any(|a| a == id) {
                     return Err(bad(LAST_ADMIN));
                 }
-                for q in [
-                    "DELETE FROM service_ids WHERE user_id = ?",
-                    "DELETE FROM passkeys WHERE user_id = ?",
-                    "DELETE FROM links WHERE service_user_id = ? OR standard_user_id = ?",
-                    "DELETE FROM link_requests WHERE service_user_id = ? OR standard_user_id = ?",
-                    "DELETE FROM oauth_tokens WHERE service_user_id = ?",
-                    "DELETE FROM oauth_clients WHERE service_user_id = ?",
-                    "DELETE FROM sessions WHERE user_id = ?",
-                    "DELETE FROM enrolments WHERE user_id = ?",
-                    "DELETE FROM members WHERE person_id = ?",
-                    "DELETE FROM users WHERE id = ?",
-                ] {
+                let left = admins.iter().filter(|a| *a != id).count();
+                let deleted = self.removal(id, t)?;
+                for instance in deleted["last_owner_of"].as_array().into_iter().flatten() {
+                    let instance = instance.as_str().unwrap_or_default();
+                    crate::membership::member_change(&self.owners(instance)?, left, id, None)
+                        .map_err(|e| bad(&e))?;
+                }
+                for q in REMOVE_USER {
                     let args = vec![id.into(); q.matches('?').count()];
                     self.db.exec(q, args)?;
                 }
-                json!({ "removed": user })
+                json!({ "removed": user, "deleted": deleted })
             }
             // Per-instance membership (crate::membership).
             "members.access" => {
@@ -1720,6 +1783,137 @@ pub fn role_change(admins: &[String], target: &str, make: bool) -> std::result::
     Ok(())
 }
 
+/// Why a person cannot remove themselves.
+pub const SELF_REMOVAL: &str = "you cannot remove yourself; another admin can";
+
+/// Whether `remover` (an admin or not) may remove the user `target`, given today's `admins`:
+/// only an admin may, never themselves, and the last admin stays.
+pub fn person_removal(
+    remover: &str,
+    admin: bool,
+    admins: &[String],
+    target: &str,
+) -> std::result::Result<(), String> {
+    admin_only(admin, "remove a user")?;
+    if remover == target {
+        return Err(SELF_REMOVAL.into());
+    }
+    if admins.len() <= 1 && admins.iter().any(|a| a == target) {
+        return Err(LAST_ADMIN.into());
+    }
+    Ok(())
+}
+
+/// What removing a user deletes, in the Directory, each statement bound to the user's id in
+/// every `?`, in order. The apps acting for them are disconnected first, as `app.disconnect`
+/// does (their own tokens and push registrations go; the apps and their OAuth clients stay,
+/// acting for no one, until an admin allows them again): left with live tokens and no person,
+/// they would act as the platform's own automation, which membership does not limit. Then
+/// everything that is the user's own: service ids, passkeys, links, link requests, the tokens
+/// they hold (proxy tokens and run grants they issued included), their OAuth client (a service
+/// user's), console sessions, enrolment links, push registrations, instance roles, and the user.
+#[doc(hidden)]
+pub const REMOVE_USER: [&str; 12] = [
+    "DELETE FROM oauth_tokens WHERE kind != 'proxy' AND service_user_id IN (SELECT service_user_id FROM links WHERE standard_user_id = ?)",
+    "DELETE FROM apns_devices WHERE person_id = ? OR service_user_id = ? OR service_user_id IN (SELECT service_user_id FROM links WHERE standard_user_id = ?)",
+    "DELETE FROM service_ids WHERE user_id = ?",
+    "DELETE FROM passkeys WHERE user_id = ?",
+    "DELETE FROM links WHERE service_user_id = ? OR standard_user_id = ?",
+    "DELETE FROM link_requests WHERE service_user_id = ? OR standard_user_id = ?",
+    "DELETE FROM oauth_tokens WHERE service_user_id = ?",
+    "DELETE FROM oauth_clients WHERE service_user_id = ?",
+    "DELETE FROM sessions WHERE user_id = ?",
+    "DELETE FROM enrolments WHERE user_id = ?",
+    "DELETE FROM members WHERE person_id = ?",
+    "DELETE FROM users WHERE id = ?",
+];
+
+/// `n` and `noun`, plural when `n` is not 1.
+fn counted(n: i64, noun: &str) -> String {
+    if n == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{n} {noun}s")
+    }
+}
+
+/// The lines the console's `user-remove` dialog shows of a `users.removal` answer: what goes,
+/// in plain words, and that it cannot be undone.
+pub fn removal_lines(r: &Value) -> Vec<String> {
+    let n = |k: &str| r[k].as_f64().unwrap_or(0.0) as i64;
+    let name = r["user"]["name"].as_str().unwrap_or("This person");
+    let mut lines = vec![format!(
+        "{name} is removed and can no longer sign in or approve."
+    )];
+    lines.push(format!("Deletes {}.", counted(n("passkeys"), "passkey")));
+    lines.push(format!(
+        "Ends {}.",
+        counted(n("sessions"), "console session")
+    ));
+    let roles: Vec<String> = r["roles"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|x| {
+            format!(
+                "{} ({})",
+                x["instance"].as_str().unwrap_or_default(),
+                x["role"].as_str().unwrap_or_default()
+            )
+        })
+        .collect();
+    if r["admin"] == true {
+        lines.push("Ends their admin role.".into());
+    }
+    if roles.is_empty() {
+        lines.push("Removes no instance roles.".into());
+    } else {
+        lines.push(format!("Removes their roles: {}.", roles.join(", ")));
+    }
+    let last: Vec<&str> = r["last_owner_of"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    if !last.is_empty() {
+        lines.push(format!(
+            "They are the last owner of {}; admins stay owners there.",
+            last.join(", ")
+        ));
+    }
+    let apps: Vec<String> = r["apps"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|a| a["name"].as_str().unwrap_or("an app").to_string())
+        .collect();
+    if apps.is_empty() {
+        lines.push("No apps act for them.".into());
+    } else {
+        lines.push(format!(
+            "Disconnects {} acting for them, revoking their tokens: {}.",
+            counted(apps.len() as i64, "app"),
+            apps.join(", ")
+        ));
+    }
+    if n("tokens") > 0 {
+        lines.push(format!(
+            "Revokes {} they hold.",
+            counted(n("tokens"), "token")
+        ));
+    }
+    lines.push("This cannot be undone.".into());
+    lines
+}
+
+/// Refuses removing the user `target` unless `person` may now ([`person_removal`]).
+pub async fn check_person_removal(env: &Env, person: &User, target: &str) -> Result<()> {
+    let admins: Vec<String> = parse(directory(env, "users.admins", json!({})).await?)?;
+    let admin = admins.iter().any(|a| a == &person.id);
+    person_removal(&person.id, admin, &admins, target).map_err(|e| bad(&e))
+}
+
 /// Whether the person `id` is an admin, read from the Directory now.
 pub async fn is_admin(env: &Env, id: &str) -> Result<bool> {
     let admins: Vec<String> = parse(directory(env, "users.admins", json!({})).await?)?;
@@ -1903,6 +2097,7 @@ impl Users {
                 check_role_change(env, person, w.text(), make).await
             }
             "member-set" => check_member_set(env, person, w.text()).await,
+            "user-remove" => check_person_removal(env, person, w.text()).await,
             other => Err(bad(&format!("users makes no write `{other}`"))),
         }
     }
@@ -1961,6 +2156,12 @@ impl Users {
                     Some(r) => format!("{name} is now {r} on {target}."),
                     None => format!("{name} no longer belongs to {target}."),
                 } })
+            }
+            "user-remove" => {
+                let done =
+                    directory(env, "users.remove", json!({ "id": target, "person": true })).await?;
+                let name = done["removed"]["name"].as_str().unwrap_or("The person");
+                json!({ "message": format!("{name} is removed.") })
             }
             other => return Err(bad(&format!("users makes no write `{other}`"))),
         })
@@ -2097,10 +2298,16 @@ impl Users {
             "users_remove" => {
                 let id = arg(args, "id")?;
                 if cx.caller.is_some_and(|c| c.user.id == id) {
-                    return Err(bad("a user cannot remove themselves"));
+                    return Err(bad(SELF_REMOVAL));
                 }
-                require_admin(env, acting_person(cx)?, "remove a user").await?;
+                check_person_removal(env, acting_person(cx)?, id).await?;
                 directory(env, "users.remove", json!({ "id": id })).await?
+            }
+            "users_remove_preview" => {
+                let id = arg(args, "id")?;
+                require_admin(env, acting_person(cx)?, "remove a user").await?;
+                let r = directory(env, "users.removal", json!({ "id": id })).await?;
+                json!({ "removal": r, "plain": removal_lines(&r) })
             }
             "users_admin" => {
                 let id = arg(args, "id")?;
@@ -2241,9 +2448,21 @@ impl Capability for Users {
             ),
             one(
                 "users_remove",
-                "Remove a user and everything that is theirs: links, passkeys, tokens and OAuth \
-                 client. Only an admin can; a caller cannot remove themselves, and the last \
-                 admin stays.",
+                "Remove a user (`id`) and everything that is theirs: passkeys, console sessions, \
+                 instance roles, links, enrolment links, push registrations, the tokens they \
+                 hold and their OAuth client. Apps acting for a removed person are disconnected: \
+                 their tokens are revoked and they act for no one. Only an admin can; nobody \
+                 removes themselves, and the last admin stays. Cannot be undone; \
+                 users_remove_preview shows what it would delete.",
+                "id",
+                true,
+            ),
+            one(
+                "users_remove_preview",
+                "What users_remove would delete for the user `id`, without deleting anything: \
+                 their passkey and console session counts, instance roles (and those they are \
+                 the last owner of), the apps acting for them and the tokens they hold. Only an \
+                 admin can.",
                 "id",
                 true,
             ),
@@ -2302,6 +2521,14 @@ impl Capability for Users {
     fn write_check<'a>(&'a self, cx: &'a Context<'a>, w: &'a Write<'a>) -> Call<'a> {
         Box::pin(async move {
             self.write_rule(cx.env, w).await?;
+            // Removing a person: the dialog lists what goes, read now ([`removal_lines`]).
+            if w.action.id == "user-remove" {
+                let r = directory(cx.env, "users.removal", json!({ "id": w.text() })).await?;
+                if r["user"]["kind"] != "standard" {
+                    return Err(bad("no such person"));
+                }
+                return Ok(json!({ "change": removal_lines(&r) }));
+            }
             Ok(Value::Null)
         })
     }

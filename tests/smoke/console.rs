@@ -128,6 +128,7 @@ fn console_write_actions_each_have_a_handler_and_policy() {
         "visitor-revoke",
         "passkey-remove",
         "app-disconnect",
+        "user-remove",
         "run-stop",
     ] {
         assert!(destructive.contains(&id), "{id} is destructive");
@@ -533,6 +534,203 @@ fn console_people_admin_rules() {
     );
 }
 
+/// Removing a person (Access › People's Remove, `users_remove`): only an admin may, never
+/// themselves, and never the last admin. The console's `user-remove` is a `users` write like
+/// `person-admin`: console only, passkey-bound to the caller and target at `begin` and `finish`
+/// alike, its rules asked at both. Removal deletes the person's passkeys, sessions, roles and
+/// tokens, disconnects the apps acting for them, and leaves everyone else's rows.
+#[test]
+fn console_user_remove() {
+    use pigeon_capabilities::Capability;
+    use pigeon_capabilities::membership::{Need, write_need};
+    use pigeon_capabilities::users::{
+        LAST_ADMIN, MIGRATIONS, REMOVE_USER, SELF_REMOVAL, Users, person_removal, removal_lines,
+    };
+
+    // The action: the `users` capability's, behind the person's passkey, a danger dialog, and
+    // the console's only (the iOS app does not remove people).
+    let a = action("user-remove").unwrap();
+    assert_eq!(a.handler, Handler::Capability("users"));
+    assert_eq!(a.policy, Policy::Passkey);
+    assert!(a.destructive);
+    assert!(!a.by_bearer);
+    assert_eq!(write_need(a, &json!("u_sam")), Need::Own);
+    for (path, step) in [
+        ("/console/write/user-remove/begin", Step::Begin),
+        ("/console/write/user-remove/finish", Step::Finish),
+    ] {
+        assert_eq!(route(path), Some((a, step)), "{path}");
+    }
+    // Parity with the other writes: begin and finish bind one purpose for the same caller and
+    // target, and none for another caller or another person.
+    let p = |caller: &str, target: &str, step| {
+        bound_purpose("user-remove", caller, json!(target), json!({}), step).unwrap()
+    };
+    let begun = p("willow", "u_sam", Step::Begin);
+    assert!(begun.starts_with("console:write:user-remove:"));
+    assert_eq!(begun, p("willow", " u_sam ", Step::Finish));
+    assert_ne!(begun, p("rowan", "u_sam", Step::Finish), "another caller");
+    assert_ne!(begun, p("willow", "u_kai", Step::Finish), "another person");
+    assert_ne!(
+        begun,
+        bound_purpose(
+            "passkey-remove",
+            "willow",
+            json!("u_sam"),
+            json!({}),
+            Step::Finish
+        )
+        .unwrap(),
+        "another action"
+    );
+    assert!(a.target(&json!("u sam")).is_err());
+    assert!(a.change(&json!({ "admin": true }), Step::Begin).is_err());
+
+    // The rules, the same for the tool and the console.
+    let one = ["willow".to_string()];
+    let two = ["willow".to_string(), "rowan".to_string()];
+    let refused = person_removal("sam", false, &one, "kai").unwrap_err();
+    assert!(refused.contains("only an admin"), "{refused}");
+    assert!(
+        person_removal("sam", false, &one, "willow")
+            .unwrap_err()
+            .contains("only an admin")
+    );
+    assert_eq!(person_removal("willow", true, &one, "sam"), Ok(()));
+    assert_eq!(
+        person_removal("willow", true, &one, "willow").unwrap_err(),
+        SELF_REMOVAL
+    );
+    assert_eq!(
+        person_removal("willow", true, &two, "willow").unwrap_err(),
+        SELF_REMOVAL,
+        "not even with another admin left"
+    );
+    assert_eq!(person_removal("willow", true, &two, "rowan"), Ok(()));
+    // The last admin stays: the remover is an admin, so this is a race (`begin` saw two), which
+    // `finish` and the Directory's own check catch.
+    assert_eq!(
+        person_removal("rowan", true, &one, "willow").unwrap_err(),
+        LAST_ADMIN
+    );
+
+    // The tools: removing, and seeing what removing would delete first.
+    let tools = Users { host: "h".into() }.tools();
+    let tool = |name: &str| tools.iter().find(|t| t.name == name).unwrap();
+    let remove = tool("users_remove").description;
+    for word in ["Only an admin", "last admin", "themselves", "disconnected"] {
+        assert!(remove.contains(word), "users_remove: {word}");
+    }
+    assert_eq!(
+        tool("users_remove_preview").input_schema["required"],
+        json!(["id"])
+    );
+
+    // What goes, on the Directory's real schema: Sam's passkeys, sessions, roles, tokens, push
+    // registrations and the link and tokens of the app acting for him; not Willow's or Kai's,
+    // and not the app itself, which acts for no one after.
+    let db = rusqlite::Connection::open_in_memory().unwrap();
+    for m in MIGRATIONS {
+        db.execute_batch(m).unwrap();
+    }
+    let run = |sql: &str| db.execute_batch(sql).unwrap();
+    run("INSERT INTO users (id, kind, name, created_at, role) VALUES
+           ('willow', 'standard', 'Willow', 1, 'admin'),
+           ('sam', 'standard', 'Sam', 2, NULL),
+           ('kai', 'standard', 'Kai', 3, NULL),
+           ('app', 'service', 'Claude', 4, NULL),
+           ('kai_app', 'service', 'Agent', 5, NULL)");
+    run(
+        "INSERT INTO passkeys (id, user_id, point, sign_count, name, created_at) VALUES
+           ('k1', 'sam', 'p', 0, 'Phone', 1), ('k2', 'sam', 'p', 0, 'Key', 1),
+           ('k3', 'willow', 'p', 0, 'Mac', 1), ('k4', 'kai', 'p', 0, 'Pixel', 1)",
+    );
+    run(
+        "INSERT INTO sessions (hash, user_id, created_at, last_seen_at) VALUES
+           ('s1', 'sam', 1, 1), ('s2', 'willow', 1, 1)",
+    );
+    run("INSERT INTO members (instance, person_id, role) VALUES
+           ('sandbox', 'sam', 'owner'), ('pigeon.dev', 'sam', 'viewer'),
+           ('pigeon.dev', 'kai', 'operator')");
+    run(
+        "INSERT INTO links (service_user_id, standard_user_id, approved_at, approved_with) VALUES
+           ('app', 'sam', 1, 'k1'), ('kai_app', 'kai', 1, 'k4')",
+    );
+    run(
+        "INSERT INTO oauth_clients (id, name, redirect_uris, service_user_id, created_at) VALUES
+           ('c1', 'Claude', '[]', 'app', 1)",
+    );
+    run("INSERT INTO oauth_tokens (hash, kind, client_id, service_user_id, expires_at, created_at) VALUES
+           ('t1', 'access', 'c1', 'app', 9, 1), ('t2', 'refresh', 'c1', 'app', 9, 1),
+           ('t3', 'proxy', NULL, 'sam', 9, 1), ('t4', 'access', NULL, 'kai_app', 9, 1)");
+    run("INSERT INTO apns_devices (id, app, person_id, service_user_id, token, environment, created_at) VALUES
+           ('d1', 'ios', 'sam', 'app', 'x', 'prod', 1), ('d2', 'ios', 'kai', 'kai_app', 'y', 'prod', 1)");
+    run("INSERT INTO enrolments (code, user_id, expires_at) VALUES ('e1', 'sam', 9)");
+    for q in REMOVE_USER {
+        let n = q.matches('?').count();
+        db.execute(q, rusqlite::params_from_iter(vec!["sam"; n]))
+            .unwrap();
+    }
+    let ids = |sql: &str| -> Vec<String> {
+        let mut q = db.prepare(sql).unwrap();
+        q.query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    assert_eq!(
+        ids("SELECT id FROM users ORDER BY id"),
+        ["app", "kai", "kai_app", "willow"]
+    );
+    assert_eq!(ids("SELECT id FROM passkeys ORDER BY id"), ["k3", "k4"]);
+    assert_eq!(ids("SELECT hash FROM sessions"), ["s2"]);
+    assert_eq!(
+        ids("SELECT person_id || '@' || instance FROM members"),
+        ["kai@pigeon.dev"]
+    );
+    assert_eq!(ids("SELECT service_user_id FROM links"), ["kai_app"]);
+    assert_eq!(ids("SELECT hash FROM oauth_tokens"), ["t4"]);
+    assert_eq!(ids("SELECT id FROM oauth_clients"), ["c1"], "the app stays");
+    assert_eq!(ids("SELECT id FROM apns_devices"), ["d2"]);
+    assert!(ids("SELECT code FROM enrolments").is_empty());
+
+    // The dialog's lines: what goes, counted, and that it cannot be undone.
+    let lines = removal_lines(&json!({
+        "user": { "id": "sam", "kind": "standard", "name": "Sam Ito", "created_at": 2 },
+        "admin": false, "passkeys": 2, "sessions": 1, "tokens": 1,
+        "roles": [{ "instance": "pigeon.dev", "role": "viewer" }, { "instance": "sandbox", "role": "owner" }],
+        "last_owner_of": ["sandbox"],
+        "apps": [{ "id": "app", "name": "Claude", "kind": "app", "tokens": 2 }],
+    }));
+    assert_eq!(
+        lines,
+        [
+            "Sam Ito is removed and can no longer sign in or approve.",
+            "Deletes 2 passkeys.",
+            "Ends 1 console session.",
+            "Removes their roles: pigeon.dev (viewer), sandbox (owner).",
+            "They are the last owner of sandbox; admins stay owners there.",
+            "Disconnects 1 app acting for them, revoking their tokens: Claude.",
+            "Revokes 1 token they hold.",
+            "This cannot be undone.",
+        ]
+    );
+
+    // Access › People: Remove for an admin, never on one's own row nor for the last admin, in
+    // a danger dialog confirmed with the passkey, and the list read again after.
+    let view = include_str!("../../src/capabilities/src/console/web/views/access.js");
+    for needle in [
+        "action: \"user-remove\"",
+        "title: \"Remove person\", danger: true",
+        "confirmLabel: \"Remove with passkey\"",
+        "This cannot be undone.",
+        "meAdmin && !p.me",
+        "p.admin && admins <= 1",
+    ] {
+        assert!(view.contains(needle), "access.js: {needle}");
+    }
+}
+
 /// The role column's migration makes the platform's first person (the oldest standard user)
 /// its first admin, and no one else: not a later person, an older agent or a site visitor.
 #[test]
@@ -802,6 +1000,7 @@ fn console_membership_roles() {
         "person-admin",
         "member-set",
         "app-disconnect",
+        "user-remove",
     ] {
         assert_eq!(need(id, json!("x")), Need::Own, "{id}");
     }

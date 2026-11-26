@@ -273,6 +273,16 @@ pub const ACTIONS: &[Action] = &[
         Target::Instance,
         Change::Member,
     ),
+    // Console only, as making admins is: removing a person and all that is theirs. `begin`
+    // answers what goes (`users::removal_lines`); the rules are asked again at `finish`.
+    act(
+        "user-remove",
+        "Remove a person",
+        Cap("users"),
+        true,
+        Target::Id,
+        Change::Nothing,
+    ),
     app(act(
         "land-approve",
         "Approve a landing",

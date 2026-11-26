@@ -279,12 +279,27 @@
     });
   }
 
+  // Remove a person and all that is theirs. Only an admin may, never themselves, and never the
+  // last admin; begin answers exactly what goes, and the server checks again at finish.
+  function removePerson(ctx, person) {
+    confirm({
+      title: "Remove person", danger: true,
+      target: [["Person", el("strong", { text: person.name })], ["Role", person.admin ? "Admin" : "Member"],
+        ["Passkeys", String(person.passkeys.length)], ["Apps", String(person.apps || 0)]],
+      effect: "Deletes their passkeys, console sessions and instance roles, and disconnects the apps acting for them. This cannot be undone.",
+      action: "user-remove", id: person.id, confirmLabel: "Remove with passkey",
+      onDone: refresh(ctx),
+    });
+  }
+
   const lastUsed = (p) => Math.max(0, ...p.passkeys.map((k) => k.last_used_at || 0));
   const rolesText = (p) => Object.entries(p.roles || {}).map(([i, r]) => `${i}: ${r}`).join(", ") || "—";
 
   function people(ctx) {
     // Whether the one asking is an admin, from the read; the server checks every write again.
     let meAdmin = false;
+    // How many admins there are: the last one cannot be removed.
+    let admins = 0;
     // The instances the one asking may see, and those whose members they may change.
     let instances = [];
     let manage = [];
@@ -301,7 +316,10 @@
         { label: "Apps", cls: "num", cell: (p) => appsLink(p.apps) },
         { label: "Instances", cell: (p) => (p.admin ? el("span", { class: "muted", text: "Owner of all, as admin" }) : rolesText(p)) },
         { label: "", cls: "acts", cell: (p) => (meAdmin && !p.me
-          ? button(p.admin ? "Make member" : "Make admin", () => setAdmin(ctx, p, !p.admin), { size: "sm" })
+          ? [button(p.admin ? "Make member" : "Make admin", () => setAdmin(ctx, p, !p.admin), { size: "sm" }), " ",
+            p.admin && admins <= 1
+              ? el("span", { class: "muted", text: "Last admin" })
+              : button("Remove", () => removePerson(ctx, p), { size: "sm", variant: "danger" })]
           : null) },
       ],
       expand: (p) => el("div", {}, dataTable({
@@ -332,6 +350,7 @@
         meAdmin = data?.me_admin === true;
         instances = Array.isArray(data?.instances) ? data.instances : [];
         manage = Array.isArray(data?.manage) ? data.manage : [];
+        admins = (data?.people || []).filter((p) => p.admin).length;
         actions.replaceChildren(meAdmin ? button("Invite person", () => invitePerson(ctx), { variant: "primary" }) : "");
         const apps = data?.apps || [];
         return (data?.people || []).map((p) => ({ ...p, passkeys: p.passkeys || [], me: p.id === data.me,

@@ -36,7 +36,7 @@ belonged to the instance the change was about.
   the home instance, so the console opens for them. An owner or admin gives them more. The
   platform's first person (`users_bootstrap`) is its admin.
 - **Removing:** removing a user removes their memberships. Retiring an instance removes its
-  members.
+  members. See "Removing a person", below.
 
 ## Migration
 
@@ -63,7 +63,7 @@ at that moment (`members.access`) and never takes from a caller.
 | Console writes on an instance (`instance-put`, `site-deploy`, `site-rollback`, `visitor-invite`, `visitor-revoke`, `linked-unlink`) | operator on the target instance (a site's instance) | `console::write::begin` and `finish` |
 | Linking a Cloudflare account to an instance (`/linked/begin`) | operator on the instance | `linked::begin` |
 | Other console writes (`secret-set`, tokens, `land-approve`, `land-approval`, models, limits, runs, Apple) | operator on home | same |
-| `users` writes (`passkey-remove`, `invite`, `app-disconnect`, `person-admin`, `member-set`) | their own rules (admin, or one's own; owner for `member-set`) | `users::write_rule` |
+| `users` writes (`passkey-remove`, `invite`, `app-disconnect`, `person-admin`, `member-set`, `user-remove`) | their own rules (admin, or one's own; owner for `member-set`) | `users::write_rule` |
 | Tools from outside (MCP, `call`, `/app/op` tool reads, a capability Worker's dispatch for a run) | viewer for a console read called with only its read arguments (`console::ops::allowed`); operator for anything else; on the instance endpoint's instance, else the `instance` argument's, else home | `dispatch_checked` |
 | The console's own reads (`app_*`) | viewer on `instance`, else home; the whole inbox is filtered instead | `console::ops::serve` |
 | `approvals_list`, the Inbox count | lists only approvals the person may decide: theirs, on an instance they operate | `approvals::open_for` |
@@ -94,6 +94,35 @@ at that moment (`members.access`) and never takes from a caller.
   that writes, so two changes cannot both pass. While the platform has an admin (the last
   admin always stays one), an owner can be removed, and the admins remain owners.
 
+## Removing a person
+
+Built 2026-11-26 on `claude/console-user-remove`; not landed.
+
+- **Who:** only a platform admin. Nobody removes themselves, and the last admin stays
+  (`users::person_removal`). The same rule serves `users_remove` and the console's
+  `user-remove`, asked at `begin` and again at `finish`; the Directory checks the last admin
+  again in the call that deletes.
+- **What goes** (`users::REMOVE_USER`): passkeys, console sessions, instance roles (`members`
+  rows), the admin role, links and link requests, enrolment links, push registrations, service
+  ids, and the tokens the person holds, proxy tokens and run grants they issued included.
+- **Apps acting for them** are disconnected, as `app-disconnect` does: their tokens and push
+  registrations go and their link ends. The apps and their OAuth clients stay, acting for no
+  one, and an admin can see them in Access › Apps. Before this, removal only ended the link and
+  left the apps' tokens live. An app acting for no one is the platform's own automation, which
+  membership does not limit, so that was unsafe.
+- **Last owner:** removing the last owner of an instance is allowed, as `member_change`
+  already allows while the platform has an admin. The remover is an admin and the last admin
+  stays, so an admin is always left, and admins are owners everywhere. The Directory still asks
+  `member_change` for each such instance before it deletes.
+- **Preview:** `users_remove_preview {id}` (admin only) answers what removal would delete. The
+  console's `begin` answers the same, as the dialog's lines (`users::removal_lines`).
+- **Console:** Access › People shows Remove on each person's row for an admin, never on their
+  own row, and "Last admin" instead for the last admin. The dialog is a danger one, says what
+  goes and that it cannot be undone, and confirms with "Remove with passkey". The list reloads
+  after. `user-remove` is the console's only; the iOS app does not remove people.
+- **Policy:** `users_remove` is already in `risky-tools-need-passkey`. The preview is a read
+  and runs as other tools do.
+
 ## Policy
 
 `instance_member_set` changes who may approve on an instance, so it should need the person's
@@ -113,3 +142,5 @@ still checked.
 - 2026-11-26: built: the `members` table and its migration; `membership`'s rules at the write
   path, `dispatch_checked`, the console's reads, the approvals list and the switcher;
   `instance_members` and `instance_member_set`; `member-set` and the roles in Access › People.
+- 2026-11-26: removing a person from Access › People (`user-remove`); removal now disconnects
+  the apps acting for the person; `users_remove_preview`.

@@ -181,7 +181,8 @@ so it lives in `users` (home-only, `scope: platform`): the Directory's `users.ro
   the first admin; on a new platform `users_bootstrap` makes the first person one. Everyone
   else is a member until an admin makes them an admin.
 - **Admin only:** inviting a person (`users_invite`, console `invite`), removing a user
-  (`users_remove`), disconnecting an app (`oauth_revoke`, console `app-disconnect`), adding a
+  (`users_remove`, console `user-remove`; never oneself, see
+  [membership.md](membership.md#removing-a-person)), disconnecting an app (`oauth_revoke`, console `app-disconnect`), adding a
   passkey link for someone else (`users_enrol` of another person), removing another person's
   passkey (`passkeys_remove`, console `passkey-remove`; one's own needs no role, a last one is
   never removed) and changing a role (`users_admin`, console `person-admin`). The last admin
