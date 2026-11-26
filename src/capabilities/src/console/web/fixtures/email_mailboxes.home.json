@@ -1,0 +1,33 @@
+{
+  "instance": "home",
+  "mailboxes": [
+    {
+      "address": "cloudflare@pigeon.dev",
+      "count": 1,
+      "forward": "person@example.com",
+      "mailbox": "cloudflare",
+      "newest": "2026-11-26T12:00:00Z"
+    },
+    {
+      "address": "buildkite@pigeon.dev",
+      "count": 0,
+      "forward": null,
+      "mailbox": "buildkite",
+      "newest": null
+    },
+    {
+      "address": "apple@pigeon.dev",
+      "count": 0,
+      "forward": null,
+      "mailbox": "apple",
+      "newest": null
+    },
+    {
+      "address": null,
+      "count": 1,
+      "forward": null,
+      "mailbox": "catch-all",
+      "newest": "2026-11-26T12:00:01Z"
+    }
+  ]
+}

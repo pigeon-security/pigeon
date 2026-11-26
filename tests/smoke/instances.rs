@@ -810,6 +810,25 @@ fn capability_catalogue_as_decided() {
             Availability::Any,
             &[],
         ),
+        // The unified data store and email (docs/plans/email.md): in the data Worker alone.
+        (
+            "data",
+            false,
+            Placement::OwnWorker,
+            Some("pigeon-data"),
+            Scope::Instance,
+            Availability::Any,
+            &[],
+        ),
+        (
+            "email",
+            false,
+            Placement::OwnWorker,
+            Some("pigeon-data"),
+            Scope::Instance,
+            Availability::Any,
+            &["data"],
+        ),
     ] {
         let e = find(name).unwrap_or_else(|| panic!("{name} is catalogued"));
         assert_eq!(e.offers_choice(), choice, "{name}");
@@ -1672,6 +1691,7 @@ fn console_manifest_ids_are_stable_and_data_only() {
             "metrics",
             "jobs",
             "ingest",
+            "email",
             "capabilities",
             "sessions",
             "cost",
@@ -1684,7 +1704,7 @@ fn console_manifest_ids_are_stable_and_data_only() {
     assert_eq!(
         keys,
         [
-            "i", "v", "w", "b", "r", "k", "m", "j", "e", "x", "s", "c", "a", "n", "p"
+            "i", "v", "w", "b", "r", "k", "m", "j", "e", "l", "x", "s", "c", "a", "n", "p"
         ]
     );
     let every = json!({

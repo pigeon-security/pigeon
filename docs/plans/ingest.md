@@ -8,6 +8,14 @@ latent: nothing is deployed into DigitalOcean, Scaleway, Backblaze or an instanc
 until the person provides keys and approves a run. The first code it relies on, the email
 schema, is built off by default on the code branch named in [email.md](email.md).
 
+**Lite tier (2026-11-26, [email.md](email.md)).** Before the Iceberg tables exist, the home
+instance keeps the record rows `items`, `sightings` and `emails` in D1 `pigeon-data`, with
+exactly decision 3's columns (lists and structs as JSON text), so the later replay into Iceberg
+needs no rewrite. Bytes follow decision 9's layout in bucket `pigeon-data`; decision 10's B2
+backup is built with it. Vectorize, classification and entities wait for the full tier. Decision
+13.4's dedupe index also has a `sightings` table: when the runner joins the lite store its index
+moves to its own D1 database (email.md, "D1 table names").
+
 Related plans: [email.md](email.md) (the first source), [data-worker.md](data-worker.md) (where
 this runs), [mail-connectors.md](mail-connectors.md) (mail pulled from mailboxes),
 [linked-accounts.md](linked-accounts.md) (instances).
@@ -929,6 +937,11 @@ opened": the report says how many; a VM run can open them later).
    2024") to judge models and dimensions against.
 
 ## Log
+
+- 2026-11-26: the lite tier (email.md): decision 3's `items`, `sightings` and `emails` in D1 for
+  the home instance, decision 9's layout and decision 10's backup, built off by default on
+  `claude/email-capability`. Phase 3's email capture is now a catch-all on pigeon.dev, not a
+  capture subdomain.
 
 - 2026-11-22: design written overnight from the person's brief (#5 and the target use).
   Cloudflare's docs read from the sandbox: R2 Data Catalog, R2 SQL and Pipelines are now Basin

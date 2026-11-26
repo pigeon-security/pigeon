@@ -114,6 +114,10 @@ mod console;
 
 #[path = "smoke/core.rs"]
 mod core;
+/// The data Worker's email handler, which is pure: the Worker builds for wasm32 only, so the
+/// suite compiles the one file natively against stand-in bindings (tests/smoke/console.rs, `email`).
+#[path = "../src/data-worker/src/mail.rs"]
+mod data_worker_mail;
 /// Instances and versions: pins, plans and upgrades.
 #[path = "smoke/instances.rs"]
 mod instances;

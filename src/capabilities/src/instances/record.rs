@@ -156,6 +156,22 @@ pub struct CapabilitySettings {
     /// Absence on a legacy profile requires setup before Jobs can export.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audit_bucket: Option<String>,
+    /// `data` only: the tier of the instance's unified data store, `lite` today
+    /// (docs/plans/email.md, "Tiers").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
+    /// `data` only: the Backblaze B2 bucket the store is backed up to (ingest.md decision 10).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup: Option<crate::data_store::Backup>,
+    /// `email` only: the domain mail is received on; absent, the record's first zone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
+    /// `email` only: the listed addresses, each its own mailbox.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub addresses: Vec<crate::email::Address>,
+    /// `email` only: the forwarding scope and default destination.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forward: Option<crate::email::Forward>,
 }
 
 /// Where the home instance's platform (console, MCP, OAuth) lives.

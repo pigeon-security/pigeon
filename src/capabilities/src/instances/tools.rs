@@ -118,6 +118,11 @@ pub const CAPABILITIES: &[Contributor] = &[
         component: "ingest",
         register: crate::ingest::instance_tools,
     },
+    Contributor {
+        name: crate::email::NAME,
+        component: crate::email::NAME,
+        register: crate::email::instance_tools,
+    },
 ];
 
 /// What core does with an instance-targeted call from the global connector when the receiving

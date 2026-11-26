@@ -948,13 +948,34 @@ pub fn purpose_permissions(purpose: &str) -> Option<&'static [&'static str]> {
         // domains (on that zone alone). Never Workers-scripts write: the platform's Workers are
         // the Lander's. Core mints it itself; a capability Worker may not ask for it.
         "instance_home" => &["Workers R2 Storage Write", "Zone Read"],
+        // The home instance's data store and email (`instances::data_apply`,
+        // docs/plans/email.md): its bucket, D1, backup queues and data Worker on the account,
+        // the Secrets Store read for the B2 key's presence and the forward destinations; the
+        // email domain's DNS and Email Routing on that zone alone. Its Workers-scripts write
+        // uploads the data store's own Worker only (`data_plan::data_refusal`). Core mints it
+        // itself; a capability Worker may not ask for it.
+        "data_home" => &[
+            "Workers R2 Storage Write",
+            "D1 Write",
+            "Queues Write",
+            "Workers Scripts Write",
+            "Secrets Store Read",
+            "Email Routing Addresses Write",
+            "Zone Read",
+            "DNS Write",
+            "Email Routing Rules Write",
+            "Zone Settings Write",
+        ],
         _ => return None,
     })
 }
 
 /// Purposes in [`purpose_permissions`] that core mints for itself and a capability Worker may
 /// not ask `credential` for.
-pub const CORE_ONLY_PURPOSES: [&str; 1] = [crate::instances::home::PURPOSE];
+pub const CORE_ONLY_PURPOSES: [&str; 2] = [
+    crate::instances::home::PURPOSE,
+    crate::instances::data_apply::PURPOSE,
+];
 
 /// A token minted from the parent token for `purposes`, living [`SCOPED_TTL_SECS`]: the
 /// capability Worker uses it as an `Account`'s bearer, and it expires on its own.

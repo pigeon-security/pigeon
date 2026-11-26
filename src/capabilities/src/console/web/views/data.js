@@ -1,5 +1,5 @@
 /* The console's read-only data views of one instance: Storage › Buckets, Source › Repository,
- * CI › Jobs, Metrics › Workers, Jobs › Runs and Ingest › Runs. Each reads only through /app/op with the
+ * CI › Jobs, Metrics › Workers, Jobs › Runs, Ingest › Runs and Email › Mailboxes. Each reads only through /app/op with the
  * selected instance, which binds the call to that instance's approved record exactly as its MCP
  * endpoint does (console/web/ops.rs), so no view can name another bucket,
  * repository, Worker or job. None of them writes. */
@@ -7,7 +7,7 @@
   "use strict";
   const shell = window.pigeonShell;
   if (!shell) return;
-  const { register, el, pill, tag, code, button, facts, panel, strip, segmented, input, field, dataTable } = shell;
+  const { register, el, pill, tag, code, button, facts, panel, strip, segmented, input, field, dataTable, icon, mailFrame, saveFile } = shell;
 
   // ---- Formatting.
   const minutes = (ms) => Math.max(0, Math.round(ms / 60000));
@@ -61,10 +61,18 @@
   // by prefix a page at a time. storage_list_objects with `instance` answers keys relative to the
   // approved prefix and refuses a raw account or bucket; storage_list_buckets and
   // storage_head_object take those, so this view does not use them.
+  // With the instance's data store (`[capabilities.data]`, docs/plans/email.md) the view can
+  // also browse its bucket's `blobs/` and `derived/` through the data Worker (`source: "data"`),
+  // beside the approved S3 location, which reads as before.
   function storage(ctx) {
     const id = ctx.instance.id;
     const s = ctx.record?.storage || {};
-    const location = [s.bucket, s.prefix].filter(Boolean).join("/").replace(/\/+$/, "");
+    const hasS3 = s.state === "enabled" || Boolean(s.bucket);
+    const hasData = Boolean(ctx.record?.capabilities?.data);
+    let source = hasS3 ? "s3" : "data";
+    const dataName = ctx.record?.account?.kind === "home" ? "pigeon-data" : `${String(id).replace(/[/.]/g, "-")}-data`;
+    const locationOf = () => (source === "data" ? dataName : [s.bucket, s.prefix].filter(Boolean).join("/").replace(/\/+$/, ""));
+    let location = locationOf();
     let prefix = "";
     let rows = [];
     let next = null;
@@ -104,6 +112,7 @@
       ],
       load: async () => {
         const args = { instance: id, prefix, delimiter: "/", max_keys: 100 };
+        if (hasS3 && hasData) args.source = source;
         if (more && next) args.token = next;
         const data = await ctx.op("storage_list_objects", args);
         const page = [
@@ -118,10 +127,15 @@
       },
     });
     showCrumbs();
+    const sources = hasS3 && hasData ? segmented({ label: "Source", value: source,
+      options: [{ id: "s3", title: "Approved location" }, { id: "data", title: "Data store" }],
+      onChange: (to) => { source = to; location = locationOf(); open(""); } }) : null;
     return el("div", { class: "view" },
-      el("div", { class: "section-head" }, el("h2", { text: "Approved location" }),
-        readOnly("Read-only. Only this instance’s approved bucket and prefix.")),
-      s.store || s.bucket ? facts([
+      el("div", { class: "section-head" }, el("h2", { text: hasS3 ? "Approved location" : "Data store" }),
+        readOnly(hasS3 ? "Read-only. Only this instance’s approved bucket and prefix."
+          : "Read-only. The instance’s data store: originals under blobs/, derived files under derived/.")),
+      sources ? el("div", { class: "toolbar" }, el("span", { class: "label", text: "Source" }), sources) : null,
+      hasS3 && (s.store || s.bucket) ? facts([
         s.store && ["Store", code(s.store)],
         s.bucket && ["Bucket", code(s.bucket)],
         s.prefix && ["Prefix", code(s.prefix)],
@@ -445,10 +459,102 @@
     }));
   }
 
+  // ---- Email › Mailboxes (docs/plans/email.md): mailboxes on the left with their counts, the
+  // message list in the middle, the message on the right. The message's HTML is the sender's
+  // and is only ever shown in shell.mailFrame (sandboxed, nothing remote loads); its text is
+  // shown plain; attachments and the original are saved through the storage object reader on
+  // the data store (`storage_get_object` with `source: "data"`), never opened here.
+  const CHECKS = { pass: ["Sender verified", "ok"], partial: ["Partly verified", "warn"], fail: ["Sender check failed", "bad"], none: ["Not verified", "plain"] };
+  const senderCheck = (c) => { const [text, tone] = CHECKS[c] || CHECKS.none; return pill(text, tone); };
+  const person = (a) => (a ? a.name || a.address || "—" : "—");
+  const addresses = (list) => (Array.isArray(list) && list.length ? list.map((a) => (a.name ? `${a.name} <${a.address}>` : a.address)).join(", ") : "—");
+  async function save(ctx, key, name, type) {
+    const d = await ctx.op("storage_get_object", { instance: ctx.instance.id, key, source: "data" });
+    saveFile(name, d.content_type || type, d.encoding, d.body);
+  }
+  function message(ctx, id) {
+    const node = el("div", { class: "section", "aria-live": "polite" });
+    loadInto(node, () => ctx.op("email_get", { instance: ctx.instance.id, id }), (m) => {
+      const check = m.sightings?.[0]?.sender_check || "none";
+      const files = (m.attachments || []).map((a) => el("li", {},
+        button(a.filename || short(a.id, 12), () => save(ctx, a.key, a.filename || a.id, a.media_type).catch((e) => shell.toast?.(String(e.message || e), "bad")),
+          { variant: "ghost", size: "sm", icon: "clip", title: `Download ${a.filename || a.id}` }),
+        el("span", { class: "muted", text: ` ${a.media_type || ""} · ${bytes(a.size)}` })));
+      const headers = (m.headers || []).map((h) => `${h.name}: ${h.decoded || h.value}`).join("\n");
+      return [
+        el("div", { class: "section-head" }, el("h2", { text: m.subject || "(no subject)" }), senderCheck(check)),
+        facts([
+          ["From", addresses(m.from)], ["To", addresses(m.to)], m.cc?.length && ["Cc", addresses(m.cc)],
+          ["Date", m.date ? iso(m.date) : "—"], ["Received", iso(m.first_seen)], ["Size", bytes(m.size)],
+          m.status === "failed" && ["Parsed", pill("failed: kept as received", "warn")],
+        ]),
+        m.html ? el("div", { class: "section" }, el("h3", { text: "Message" }), mailFrame(m.html.body, m.subject || "Message"),
+          el("p", { class: "muted", text: "Shown sandboxed; remote images are blocked." })) : null,
+        m.text ? el("div", { class: "section" }, el("h3", { text: m.html ? "Text" : "Message" }),
+          el("pre", { class: "code", tabindex: "0", text: m.text })) : null,
+        files.length ? el("div", { class: "section" }, el("h3", { text: "Attachments" }), el("ul", {}, files)) : null,
+        el("div", { class: "toolbar" }, button("Download original (.eml)", () => save(ctx, m.key, `${m.id}.eml`, "message/rfc822"), { size: "sm" })),
+        el("details", {}, el("summary", { text: "All headers" }), el("pre", { class: "code", text: headers })),
+      ];
+    }, "the message");
+    return node;
+  }
+  function email(ctx) {
+    const id = ctx.instance.id;
+    let mailbox = null;
+    let rows = [];
+    let next = null;
+    let more = false;
+    const boxes = el("nav", { class: "boxes", "aria-label": "Mailboxes" });
+    const reading = el("div", { class: "section" }, readOnly("Pick a message to read it."));
+    const moreButton = button("Load more", () => { more = true; table.reload(); }, { size: "sm", hidden: true });
+    function choose(name) {
+      mailbox = name;
+      rows = [];
+      next = null;
+      more = false;
+      for (const b of boxes.querySelectorAll("button")) b.setAttribute("aria-pressed", String(b.dataset.mailbox === (name || "")));
+      table.reload();
+    }
+    const table = dataTable({
+      label: "Messages", noun: "messages", filter: "Filter this page", signal: ctx.signal,
+      empty: "No mail here yet.",
+      columns: [
+        { label: "From", cell: (r) => [el("span", { text: person(r.from) }), el("span", { class: "sub mono", text: r.from?.address || "" })] },
+        { label: "Subject", cell: (r) => button(r.subject || "(no subject)", () => reading.replaceChildren(message(ctx, r.id)),
+          { variant: "ghost", size: "sm", title: "Read this message" }) },
+        { label: "Date", cls: "num", cell: (r) => iso(r.date || r.seen_at) },
+        { label: "Sender", cell: (r) => senderCheck(r.sender_check) },
+        { label: "", cell: (r) => (r.attachments ? el("span", { title: `${r.attachments} attachment(s)` }, icon("clip")) : null) },
+      ],
+      load: async () => {
+        const args = { instance: id };
+        if (mailbox) args.mailbox = mailbox;
+        if (more && next) args.cursor = next;
+        const data = await ctx.op("email_list", args);
+        rows = more ? rows.concat(data.messages || []) : data.messages || [];
+        next = data.next || null;
+        more = false;
+        moreButton.hidden = !next;
+        return rows;
+      },
+    });
+    loadInto(boxes, () => ctx.op("email_mailboxes", { instance: id }), (d) => [
+      button("All mail", () => choose(null), { variant: "ghost", size: "sm", "data-mailbox": "", "aria-pressed": "true" }),
+      ...(d.mailboxes || []).map((m) => button([el("span", { text: m.mailbox }), el("span", { class: "muted", text: count(m.count) })],
+        () => choose(m.mailbox), { variant: "ghost", size: "sm", "data-mailbox": m.mailbox, "aria-pressed": "false",
+          title: m.address ? `${m.address}${m.forward ? `, forwarded to ${m.forward}` : ""}` : "Every address not listed" })),
+    ], "the mailboxes");
+    return el("div", { class: "view" },
+      readOnly("Read-only. Everything sent to this instance’s domain is kept here; listed addresses have mailboxes of their own."),
+      el("div", { class: "mail" }, boxes, el("div", {}, table, el("div", { class: "toolbar" }, moreButton)), reading));
+  }
+
   register("storage", "buckets", storage);
   register("source", "repository", source);
   register("ci", "jobs", ci);
   register("metrics", "workers", metrics);
   register("jobs", "runs", jobs);
   register("ingest", "runs", ingest);
+  register("email", "mailboxes", email);
 })();

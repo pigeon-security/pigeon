@@ -1001,9 +1001,13 @@ dependencies = [
 name = "pigeon-data-worker"
 version = "0.1.0"
 dependencies = [
+ "futures-util",
  "pigeon-core",
+ "pigeon-email",
  "pigeon-ingest",
+ "serde",
  "serde_json",
+ "sha2",
  "worker",
 ]
 

@@ -37,3 +37,24 @@ class_name = "IngestJob"
 image = "../ingest-runner/Dockerfile"
 instance_type = "standard-4"
 scheduling_policy = "durable_object"
+
+# ---- The lite data store (docs/plans/email.md). An instance plan uploads the Worker with these
+# bindings itself (instances::data_plan::worker_metadata); they are listed here for reading only.
+# [vars]
+# INSTANCE = "{instance}"
+# BACKUP = '{"endpoint":"https://s3.<region>.backblazeb2.com","region":"<region>","bucket":"pigeon-backup-{store}"}'
+#
+# [[secrets_store_secrets]]
+# binding = "B2_KEYS"
+# store_id = "{secrets-store-id}"
+# secret_name = "DATA_B2_{STORE}"
+#
+# The backup queue, fed by an R2 event notification on the whole bucket (object-create):
+# [[queues.consumers]]
+# queue = "{store}-backup"
+# max_batch_size = 10
+# max_retries = 5
+# dead_letter_queue = "{store}-backup-dlq"
+#
+# Email Routing's catch-all rule on the zone sends every message to this Worker's `email`
+# handler; no binding is needed for it.

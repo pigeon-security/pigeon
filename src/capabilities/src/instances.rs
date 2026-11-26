@@ -6,6 +6,8 @@
 //! person named. The console's Instances tab shows every instance and edits one; over MCP they
 //! can only be listed.
 
+pub mod data_apply;
+pub mod data_plan;
 pub mod home;
 pub mod home_site;
 pub mod manifest;
@@ -794,6 +796,89 @@ impl Instances {
         Ok((steps, digest, owned))
     }
 
+    /// The data store's and email's steps for `instance` (`data_plan::data_steps`), read with
+    /// a `data_home` token (`data_apply`), and the newest data Worker build. None when the record
+    /// does not enable the store; a linked instance's are not built yet.
+    async fn data_planned(
+        &self,
+        cx: &Context<'_>,
+        instance: &Instance,
+    ) -> Result<(Vec<plan::Step>, Option<data_plan::Artifact>)> {
+        if !crate::data_store::enabled(instance) {
+            return Ok((Vec::new(), None));
+        }
+        if instance.account != record::AccountRef::Home {
+            return Ok((
+                vec![plan::Step::Blocked {
+                    why: "the data store of a linked instance is not built yet".into(),
+                }],
+                None,
+            ));
+        }
+        let built = data_apply::artifact(cx.account).await?;
+        let zone = crate::email::domain(instance).unwrap_or_else(|| self.zone.clone());
+        let zone_id = pigeon_core::zones::active(cx.account, &zone)
+            .await
+            .map(|z| z.id)
+            .unwrap_or_default();
+        let owned = self.owned(cx, instance);
+        let kept = ledger(cx.env, &instance.id).await?;
+        let b = built.as_ref();
+        let steps = data_apply::with_token(cx.account, &zone_id, |token| async move {
+            let seen = data_apply::observe(
+                &token,
+                &cx.account.id,
+                &cx.account.secrets_store,
+                instance,
+                b,
+            )
+            .await?;
+            Ok(data_plan::data_steps(
+                instance,
+                &seen,
+                &kept,
+                owned.as_ref(),
+            ))
+        })
+        .await?;
+        Ok((steps, built))
+    }
+
+    /// Applies the approved data steps with a `data_home` token, keeping the ledger as each is
+    /// done.
+    async fn data_run(
+        &self,
+        cx: &Context<'_>,
+        instance: &Instance,
+        steps: &[plan::Step],
+        built: Option<&data_plan::Artifact>,
+    ) -> Result<Vec<String>> {
+        let zone = crate::email::domain(instance).unwrap_or_else(|| self.zone.clone());
+        let zone_id = pigeon_core::zones::active(cx.account, &zone)
+            .await
+            .map(|z| z.id)
+            .unwrap_or_default();
+        let mut l = ledger(cx.env, &instance.id).await?;
+        let lines = data_apply::with_token(cx.account, &zone_id, |token| {
+            let l = &mut l;
+            async move {
+                let apply = data_apply::Apply {
+                    env: cx.env,
+                    parent: cx.account,
+                    token: &token,
+                    account_id: &cx.account.id,
+                    secrets_store: &cx.account.secrets_store,
+                    built,
+                };
+                data_apply::run(&apply, instance, steps, l).await
+            }
+        })
+        .await;
+        // What was done is pigeon's, even when a later step failed.
+        keep_ledger(cx.env, &instance.id, &l).await?;
+        lines
+    }
+
     /// Runs `work` with the home token: minted from the parent token for purpose
     /// `instance_home`, scoped to the platform zone, and revoked after `work`, whether it
     /// succeeded or not. Refuses before any work when the purpose or the parent token's
@@ -878,12 +963,17 @@ impl Instances {
         let (instance, account_id, steps, digest) = match one(cx.env, id).await? {
             Some(home) if home.account == record::AccountRef::Home => {
                 let h = &home;
-                let (steps, digest) = self
+                let (mut steps, account_id) = self
                     .with_home(cx, |account| async move {
-                        let (steps, digest, _) = self.home_planned(cx, h, &account).await?;
-                        Ok((steps, digest))
+                        let (steps, _, _) = self.home_planned(cx, h, &account).await?;
+                        Ok((steps, account.id))
                     })
                     .await?;
+                // The data store's and email's steps (docs/plans/email.md), read with their
+                // own token; the digest binds both lists.
+                let (data, _) = self.data_planned(cx, h).await?;
+                steps.extend(data);
+                let digest = plan::digest(h, &account_id, &steps);
                 (home, cx.account.id.clone(), steps, digest)
             }
             _ => {
@@ -967,14 +1057,27 @@ impl Instances {
             let id = id.as_str();
             return self
                 .with_home(cx, |account| async move {
-                    let (steps, digest, owned) = self.home_planned(cx, h, &account).await?;
+                    let (steps, _, owned) = self.home_planned(cx, h, &account).await?;
+                    let (data, built) = self.data_planned(cx, h).await?;
+                    let mut all = steps.clone();
+                    all.extend(data.iter().cloned());
+                    let digest = plan::digest(h, &account.id, &all);
                     if let Some(why) = plan::home_refusal(&steps, owned.as_ref()) {
                         return Err(bad(&format!(
                             "the home plan does not run: {why}. Nothing was changed."
                         )));
                     }
+                    if let Some(why) = data_plan::data_refusal(h, &data, owned.as_ref()) {
+                        return Err(bad(&format!(
+                            "the home plan does not run: {why}. Nothing was changed."
+                        )));
+                    }
                     take(cx, approval_id, &digest, &caller.user.id).await?;
-                    self.run(cx, id, h, &account, &steps).await
+                    let mut out = self.run(cx, id, h, &account, &steps).await?;
+                    if data.iter().any(plan::Step::changes) {
+                        out["data"] = json!(self.data_run(cx, h, &data, built.as_ref()).await?);
+                    }
+                    Ok(out)
                 })
                 .await;
         }

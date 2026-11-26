@@ -1,231 +1,282 @@
-# Email capture: Cloudflare Email Routing into the data pipeline
+# Email: its own capability, writing into the instance's unified data store
 
-Status: **designed; phase 1 (the message schema and its parser, crate `pigeon-email`) on main,
-off by default** (2026-11-22). Nothing is deployed, routed or enabled. Code branch:
-`claude/ai-agent-NVhZ3wCsS5dT`; this plan: `claude/ai-agent-AFc1coPrsJTT`.
+Status: **designed 2026-11-26; phases 1 to 7 built off by default on
+`claude/email-capability`** (see "Phases" and "What is not verified"). Nothing is routed, no
+DNS record is changed and no resource exists until the person approves an `instance_plan` for pigeon.dev with their passkey and applies it.
+This plan replaces the 2026-11-22 capture-subdomain design (`in.<zone>` with literal rules),
+which is kept in git history at `007595d`.
 
-Related plans: [ingest.md](ingest.md) (where captured mail goes), [data-worker.md](data-worker.md)
-(the Worker that receives it), [mail-connectors.md](mail-connectors.md) (mail pulled from
-existing mailboxes), [linked-accounts.md](linked-accounts.md) (instances and linked accounts).
+Related plans: [ingest.md](ingest.md) (the record schema, the R2 layout, the B2 backup),
+[data-worker.md](data-worker.md) (the per-instance data Worker), [capability-scoping.md](capability-scoping.md)
+(catalogue, placement), [membership.md](membership.md) (viewer and operator),
+[storage-providers.md](storage-providers.md) (Storage › Buckets).
 
 ## Goal
 
-The person's words (#4): "Design a capability to use Cloudflare Email. This will be used on the
-main instance for pigeon.dev, as well as in the noisypigeon instance for noisypigeon.com. Any
-emails sent to the email should be captured and an extensible schema will capture the original
-email, attachments, full headers, as well as a taxonomy of the email. This should be fed into
-#5."
+The person's words (#4, 2026-11-22): "Design a capability to use Cloudflare Email. This will be
+used on the main instance for pigeon.dev, as well as in the noisypigeon instance for
+noisypigeon.com. Any emails sent to the email should be captured and an extensible schema will
+capture the original email, attachments, full headers, as well as a taxonomy of the email. This
+should be fed into #5."
 
-The target use, recorded for every data plan: a website where the person asks "Show me all
-financial records for <company>" or "Show me all correspondence with <business/person>" and gets
-**complete** results. The website is out of scope. This plan keeps what it needs from the first
-message: every address ready for entity linking, every header, the original bytes, and a
-taxonomy slot that classification fills (ingest.md, decisions 5 and 6).
+The person's design (2026-11-26), followed here:
 
-Hard lines:
-- No change to a zone's existing mail. noisypigeon.com's Proton MX, SPF, DKIM and DMARC records
-  are never touched (linked-accounts.md, "Other DNS records").
-- Off by default. Mail is routed only after the person approves the instance's `data.email`
-  record with their passkey and says go for the DNS step in the session that makes it.
-- Mail is personal data. It stays in the instance's own Cloudflare account, never in logs, never
-  in a model prompt outside Workers AI in that account.
+1. `email` is **its own capability**, enabled per instance in the record. It writes into the
+   instance's **unified data store**, the same R2 store the data and vector layers use. There
+   is no separate email bucket.
+2. The home instance gets the **lite tier** of that store first.
+3. One Email Routing **catch-all** on pigeon.dev sends every message to the data Worker.
+4. **Mailboxes** are listed addresses plus `catch-all`; everything is kept forever.
+5. **Forwarding** is selectable, listed addresses only by default, and changes to it need the
+   person's passkey.
 
-## What is true today (checked 2026-11-22)
+## The person's decisions
 
-### pigeon
+| Decision | Value |
+| --- | --- |
+| Which addresses | a **catch-all** on the zone, plus **listed addresses** that each get their own mailbox |
+| The old provider | the old Fastmail and Proton **MX records are deleted**; mail lost in the meantime is accepted. SPF, DKIM or DMARC TXT records may remain and are listed by the plan as stale |
+| Retention | **forever**: there is no delete tool; spam is kept in `catch-all` |
+| Forwarding scope | **selectable**, default **listed** (`forward.scope = "listed"`); `"all"` includes catch-all |
+| First listed addresses | `cloudflare`, `buildkite`, `apple` (all `@pigeon.dev`) |
+| Where data lives | everything in R2 (the instance's data bucket) and D1; an **offsite backup in Backblaze B2**; Vectorize, classification and entities **later, out of scope** |
 
-- No email code. No Worker has an `email` handler; no zone has Email Routing set up by pigeon.
-- workers-rs 0.9 (the version pigeon pins) supports `#[event(email)]` and
-  `ForwardableEmailMessage::raw_bytes()`, `raw_byte_stream()`, `set_reject()`, `forward()` and
-  `reply()` (read from `worker-0.9.0/src/email.rs` and `worker-macros-0.9.0/src/event.rs`).
-- Instances: records in the Directory with `AccountRef::Home` or `Linked`, zones, sites and one
-  site Worker per instance (`src/capabilities/src/instances/record.rs`). Instance resources are
-  made by plans the person approves, run by pigeon-sites (`instances/plan.rs`).
+## Tiers of the data store
 
-### Cloudflare
+The data store is one per instance: bucket, D1 and data Worker all named `{instance}-data`
+(`pigeon-data` for the home instance, data-worker.md decision 1). Its tier is a record value:
 
-Email Routing now lives in the docs under **Email Service**; `/email-routing/` redirects there.
+```toml
+[capabilities.data]
+tier = "lite"
+```
 
-| Fact | Value | Source |
+| | lite (built) | full (later, a superset) |
 | --- | --- | --- |
-| Inbound message size | 25 MiB; larger is rejected | [limits](https://developers.cloudflare.com/email-service/platform/limits/) |
-| Routing rules per domain | 200 | same |
-| Domains per zone (apex and subdomains, routing and sending together) | 30 | same |
-| Catch-all rules | apex only; a subdomain gets literal addresses only | [subdomains](https://developers.cloudflare.com/email-service/configuration/subdomains/) |
-| Inbound price | unlimited, free; the Worker is billed as Workers | [pricing](https://developers.cloudflare.com/email-service/platform/pricing/) |
-| Enabling routing on a domain | Cloudflare adds MX records (`route1..3.mx.cloudflare.net`) and a DKIM record; the old provider's MX must be removed first | [domains](https://developers.cloudflare.com/email-service/configuration/domains/) |
-| Authentication | Email Routing checks DMARC first and prepends `Authentication-Results: mx.cloudflare.net; spf=…; dkim=…; dmarc=…` | [Workers API](https://developers.cloudflare.com/email-service/api/route-emails/email-handler/) |
-| The handler | `email(message, env, ctx)`; `message.from`/`to` are the envelope; `raw` is a stream; `rawSize` | same |
-| Storage example | Cloudflare's own example stores the raw message in R2 and metadata elsewhere | [email storage](https://developers.cloudflare.com/email-service/examples/email-routing/email-storage/) |
-| Worker memory | 128 MB per isolate | [Workers limits](https://developers.cloudflare.com/workers/platform/limits/) |
+| R2 bucket | `{instance}-data`: originals at `blobs/sha256/{2}/{2}/{64}`, derived files at `derived/{item_id}/…` (ingest.md decision 9) | the same bucket and layout, plus the Iceberg warehouse prefix and `staging/` |
+| The record | D1 `{instance}-data`, tables `items`, `sightings`, `emails` with **exactly** ingest.md decision 3's columns (lists and structs as JSON text) | Iceberg tables in Basin Catalog, written through Pipelines; the lite rows are replayed into them once, with no rewrite, then D1 keeps only operational indexes |
+| The data Worker | `{instance}-data` with the `email` handler, the signed read ops and the backup consumer | adds the ingest queues, Vectorize, Workers AI, Pipelines |
+| Backup | an R2 event notification on the whole bucket → queue `{instance}-data-backup` → B2 (ingest.md decision 10) | the same |
+| Not in lite | Vectorize, classification, entities, relations, the ingest queues | built by ingest.md phases 3, 5 and 8 |
 
-## Decisions
+Seams left for the full tier: `items.status` is `stored` (never `classified` or `embedded`
+yet); the handler's last step is where an `{instance}-extract` queue message goes; `derived/`
+holds only `text.txt` today; the D1 tables carry the decision-3 keys, so the replay is a
+`SELECT` per table into the matching sink.
 
-### 1. Where mail lands: a capture subdomain, never a zone's existing mail
+**D1 table names.** The ingest runner's dedupe index (ingest.md decision 13.4) also has a table
+named `sightings`. The lite tier does not create the dedupe index. When the full tier adds the
+ingest runner, its index moves to its own database `{instance}-index` (or its tables are
+prefixed `index_`), decided then; the lite migrations refuse to run on a database that holds the
+index's `blobs` table.
 
-Each instance gets a **capture subdomain** with literal addresses routed to its data Worker:
+## The flow
 
-| Instance | Capture domain | First address |
+```
+ sender ─▶ MX route{1,2,3}.mx.cloudflare.net ─▶ Email Routing (pigeon.dev)
+                                                    │ catch-all rule: action worker
+                                                    ▼
+                               pigeon-data  email(message, env, ctx)
+   1  config from D1 `config` (absent → reject "not set up": off by default)
+   2  stream the raw bytes, SHA-256 as they arrive (≤ 25 MiB)
+   3  HEAD blobs/sha256/…; PUT once if absent  ── failure → setReject (sender gets a bounce)
+   4  parse with pigeon-email (a parse failure still stores; item status `failed`)
+   5  PUT html and attachments as blobs; derived/{item_id}/text.txt
+   6  D1 batch: items (kind=email), sightings (source=email_routing, locator=envelope_to,
+      extra={mailbox, auth}), emails  ── failure → setReject
+      a duplicate (same bytes) writes only the new sighting
+   7  forward (below); a failure is recorded in `email_deliveries`, the mail stays stored
+   8  log: id, size, mailbox, outcome; never content or addresses
+```
+
+- **Mailbox**: the envelope recipient, lowercased, with a `+tag` removed, matched against the
+  record's listed local parts on the record's email domain; anything else is `catch-all`.
+- **Auth**: the first `Authentication-Results` header written by `mx.cloudflare.net` (any
+  earlier one is the sender's and is not trusted), its `spf`, `dkim` and `dmarc` results into
+  `sightings.extra.auth`. The console shows a sender-check badge from it: `pass` (DMARC pass),
+  `fail` (DMARC fail), `partial` (SPF or DKIM pass), `none`.
+- **Ids**: `item_id` is the raw SHA-256; attachments are their own items with `parent_id`.
+  `emails.fingerprint` is the SHA-256 of the normalized Message-ID, else of From, Date, Subject
+  and the text's hash (ingest.md decision 2, tier 2).
+
+## Mailboxes
+
+```toml
+[capabilities.email]
+domain = "pigeon.dev"            # optional: the record's first zone
+addresses = [
+  { local = "cloudflare" },
+  { local = "buildkite" },
+  { local = "apple" },
+]
+
+[capabilities.email.forward]
+scope = "listed"                 # default; "all" also forwards catch-all
+# to = "person@example.com"      # optional default destination
+```
+
+- Each listed address is its own mailbox; everything else lands in `catch-all`, where spam lands.
+- Adding an address is a **record change** (`email_address_set` proposes it; the person
+  approves the record with their passkey; the next plan writes the Worker's config row). It is
+  never a DNS or routing change: the catch-all already sends everything to the Worker.
+- Retention is forever. No tool deletes mail.
+
+## Forwarding
+
+- A listed address forwards to its own `forward`, else to `forward.to`, else not at all.
+  `catch-all` forwards only with `scope = "all"`, to `forward.to`.
+- Cloudflare forwards only to **verified destination addresses** of the account: the plan adds
+  each destination (`AddDestination`), Cloudflare emails it a link, and the plan shows it as
+  **pending** until it is verified. The Worker forwards to a pending destination and records the
+  failure; the mail is stored either way.
+- **Passkey**: any change to a destination or the scope goes through `email_forward_set`, which
+  the policy gates per call (below), and becomes a record change the person approves with their
+  passkey.
+- **Loops**: every forward carries `X-Pigeon-Data: <instance>`. A message that arrives with that
+  header naming this instance is stored and never forwarded again (outcome `loop`).
+
+## Plan steps (`instances/plan.rs`, through `instance_plan` / `instance_apply`)
+
+Dry run first, as every instance plan; the person approves the exact steps with their passkey;
+`instance_apply` checks the account still gives the same plan (digest) and applies each step
+once, recording what pigeon made in the instance's ledger.
+
+| Step | Does | Ok when |
 | --- | --- | --- |
-| `pigeon-security/platform` | `in.pigeon.dev` | `capture@in.pigeon.dev` |
-| `noisypigeon` | `in.noisypigeon.com` | `capture@in.noisypigeon.com` |
-| `willowgraysen` | `in.willowgraysen.com` | `capture@in.willowgraysen.com` |
+| `CreateBucket` (exists) | the data bucket | the bucket is pigeon's |
+| `CreateDatabase` | D1 `{instance}-data` | the database is pigeon's |
+| `Migrate` | the lite migrations not yet applied, by id | all applied |
+| `UploadDataWorker` | the data Worker from its build artifact (digest shown), bindings `DATA` (R2), `DB` (D1), `B2_KEYS` (Secrets Store), `INSTANCE`, `BACKUP`, `DATA_KEY` (secret, made by core and kept sealed as `data_key:{instance}`); then its `workers.dev` address | the uploaded digest matches |
+| `WriteEmailConfig` | the config row the handler reads: domain, mailboxes, forward | the row's digest matches the record |
+| `CreateQueue` | `{instance}-data-backup` and its `-dlq`, consumed by the data Worker | they are pigeon's |
+| `AddBucketNotification` | the whole bucket's object-create events → the backup queue | it is there |
+| `Pending` | something only the person can do; shown, does not stop the plan: the B2 key not set, a destination not verified | — |
+| `RemoveStaleDns` | one stale old-provider record, by id, exactly as shown | — |
+| `EnableEmailRouting` | Email Routing on the zone (Cloudflare adds its MX, SPF and DKIM) | enabled |
+| `SetCatchAll` | the zone's catch-all rule → action worker `{instance}-data` | it says so |
+| `AddDestination` | a forward destination address; Cloudflare emails it a link | it exists (then `Pending` until verified) |
 
-- Why a subdomain: enabling routing on an apex replaces its MX records. noisypigeon.com receives
-  mail at Proton, so its apex can never be routed. A subdomain has its own MX records and leaves
-  the apex alone. The same rule for every instance keeps one code path.
-- "Any emails sent to the email": the person points copies at the capture address. Proton,
-  Fastmail, iCloud and Gmail can all forward or filter-forward to it. Old mail comes through the
-  connectors (mail-connectors.md), not through forwarding.
-- More addresses later (one per purpose, such as `receipts@in.noisypigeon.com`) are more literal
-  rules on the same subdomain; up to 200. The address a message came to is kept
-  (`Source::EmailRouting.envelope_to`), so a purpose address is a free label.
-- The label `in` is a default in the record (`data.email.subdomain`), not code. The person may
-  pick another, or the apex for a zone with no mail of its own.
+**The DNS dry run reads the zone first** (`GET /zones/{id}/dns_records`):
 
-**Open, for phase 0:** the subdomain docs start from "select the apex domain, then open
-Settings". Whether a subdomain can be routed while the apex is not is not stated. Phase 0 tries
-it on a throwaway subdomain of pigeon.dev (pigeon's own zone) and reads the DNS records
-Cloudflare adds. If the apex must be enabled, noisypigeon.com cannot use Email Routing at all and
-the fallback is an address per instance on pigeon.dev's capture subdomain (for example
-`noisypigeon@in.pigeon.dev`), received by the home instance's data Worker, which passes the raw bytes on to the instance's
-data Worker over the signed contract and keeps no copy
-(data-worker.md decision 3).
+- **Refuses** (a `Blocked` step, which stops the plan) when any MX record exists that is not
+  Cloudflare's `route{1,2,3}.mx.cloudflare.net`: a live foreign MX means another provider still
+  receives the zone's mail.
+- **Lists stale old-provider records** as "stale, to replace", each as its own
+  `RemoveStaleDns` step with its id, name, type and content: an apex SPF TXT that includes
+  Fastmail (`messagingengine.com`) or Proton (`protonmail.ch`), Fastmail's DKIM
+  (`fm1`/`fm2`/`fm3._domainkey`), Proton's DKIM (`protonmail*._domainkey`), a
+  `protonmail-verification=` TXT, and a `_dmarc` TXT whose reports go to either provider. A
+  `_dmarc` record that names neither is kept and shown as kept.
+- **Never deletes anything not shown in the plan**: apply deletes exactly the record ids the
+  approved plan names, and the digest check refuses the apply if the zone gave a different plan.
 
-### 2. The handler: store the bytes, queue a reference, nothing else
+**Credentials.** A linked instance's plan uses its link. The home instance's existing token
+(`instance_home`) holds R2 write and Zone Read, never Workers-scripts write. The data steps on
+home therefore use a second core-only purpose, `data_home` (`split::purpose_permissions`),
+minted for one plan or apply and revoked after: on the account Workers R2 Storage Write, D1
+Write, Queues Write, Workers Scripts Write, Secrets Store Read and Email Routing Addresses
+Write; on the email domain's zone alone Zone Read, DNS Write, Email Routing Rules Write and
+Zone Settings Write. Its Workers-scripts write is used for exactly one script, the one the plan names
+(`pigeon-data`), which must not be platform-owned; the plan refuses otherwise. This widens what
+home's plans may do and is the person's decision: see Follow-ups.
 
-The instance's data Worker (data-worker.md) has the `email` handler. It does as little as
-possible, so it stays well under CPU and memory limits and never loses a message:
+## Tools
 
-1. Read the raw message (at most 25 MiB, so it fits in memory).
-2. Hash it (SHA-256) and write it to the instance's data bucket at
-   `blobs/sha256/{2}/{2}/{64}` (`ContentRef::key`) unless that key exists.
-3. Send one queue message to `{instance}-ingest`: `{kind: "email", raw: ContentRef, source:
-   Source::EmailRouting {envelope_from, envelope_to}, received_at}`. Under 1 KB; the content
-   never goes through the queue (128 KB message limit).
-4. Return. No forward, no reply, no reject.
-
-If step 2 or 3 fails, the handler throws. Whether Email Routing then answers the sender with a
-temporary failure (so the sender retries) or drops the message is not stated in the docs; phase
-0 checks it. If it drops, step 3 moves after a second write: a small `inbox/{received_at}-{sha}`
-marker that a Cron sweep turns into queue messages.
-
-Parsing happens in the queue consumer, with `pigeon_email::parse` (decision 3), so a parser bug
-never bounces mail: the raw bytes are already safe in R2 and can be parsed again.
-
-### 3. The schema: `pigeon_email::Message` (built in phase 1)
-
-A pure Rust crate, `src/email` (`pigeon-email`), with no Worker runtime, so the data Worker, the
-connectors and the uploader all share it and the smoke suite tests it natively. It parses with
-[`mail-parser`](https://crates.io/crates/mail-parser) 1.0 (Apache-2.0 OR MIT, builds for
-`wasm32-unknown-unknown`, handles RFC 2047 words, charsets, quoted-printable, base64 and nested
-multiparts).
-
-| Part | Type | What it keeps |
+| Tool | Role | Does |
 | --- | --- | --- |
-| Original | `raw: ContentRef` | SHA-256 and size of the exact bytes received. The bytes are in R2. This is the true original; everything else is derived from it and can be derived again. |
-| Where from | `source: Source` | `EmailRouting`, `Imap`, `Gmail`, `Jmap` or `Upload`, each with what identifies the message there (envelope, mailbox and UID, Gmail id and labels, JMAP id). New sources are new variants. |
-| Headers in full | `headers: Vec<Header>` | Every header line in order, repeats (`Received`) included: name as written, raw value as written, decoded value when different. |
-| Threading | `message_id`, `in_reply_to`, `references` | Without angle brackets. |
-| People | `from`, `sender`, `reply_to`, `to`, `cc`, `bcc`, `delivered_to: Vec<Address>` | Each `Address` has the display name, the address as written, the normalized address (lowercased) and the domain: what entity linking looks up (ingest.md decision 6). Groups are flattened. `participants()` lists every address with its role. |
-| Body | `text: Option<String>`, `html: Option<ContentRef>` | The plain text for classification and chunking; the HTML as a blob. |
-| Attachments | `attachments: Vec<Attachment>` | Each file as a `ContentRef` of its decoded bytes, with content type, filename, disposition and Content-ID. Inline images and forwarded messages (`message/rfc822`) are attachments too. |
-| Taxonomy | `taxonomy: Taxonomy` | `signals` read from headers alone at parse time (reply, forward, attachments, `List-Id`, `List-Unsubscribe`, `Auto-Submitted`, `Precedence`, SPF/DKIM/DMARC results, mailer); `doc_type`, `labels` and `fields`, empty until classification fills them. |
-| Version | `schema: u32` | `SCHEMA_VERSION`, 1. |
+| `email_status {instance}` | viewer | setup state, or the steps to turn it on; counts, the last message's time, forwarding failures |
+| `email_mailboxes {instance}` | viewer | each listed mailbox and `catch-all` with its count and newest time |
+| `email_list {instance, mailbox?, since?, from?, cursor?, limit?}` | viewer | from D1, newest first: id, from, subject, date, sender check, attachment count; 50 a page, at most 200 |
+| `email_get {instance, id}` | viewer | headers, the text, the HTML marked `sandboxed` (never inlined into the console's own DOM), the attachment list |
+| `email_address_set {instance, local, remove?}` | operator | proposes the record with that listed address added or removed |
+| `email_forward_set {instance, local?, to?, scope?}` | operator, **passkey per call** | proposes the record with a destination or the scope changed |
 
-`parse(raw, source)` answers `Parsed { message, blobs }`: the message and the bytes to store, one
-per distinct SHA-256 (two copies of one PDF are stored once). Empty input and input that is not
-MIME are errors, never panics. Parsing is deterministic: the same bytes give the same message.
+- Core reaches the data Worker through **signed contract ops**: a POST to
+  `https://{instance}-data.{subdomain}.workers.dev/data/call` signed with the instance's
+  `DATA_KEY` (`pigeon_ingest::protocol`, at most 60 s of clock skew), the instance id inside the
+  signed body. The home instance uses the same path, so there is one code path.
+- The read ops are `status`, `mailboxes`, `list`, `get`, `objects` and `object`; the Worker
+  answers 404 with no body to anything unsigned.
 
-**Extensible without migrations:**
-- Fields are only added. Every optional field has a serde default and is skipped when empty, so
-  a version-1 reader reads a version-2 record and a version-2 reader reads version 1.
-- The taxonomy is open. `Label {scheme, value, confidence, by}` takes any vocabulary (`doc_type`,
-  `category`, `language`, `project`) with no schema change. `Field {name, value, by}` takes any
-  key field. `DOC_TYPES` is the starting vocabulary, not a closed enum.
-- `by` names the rule or the model and its version, so a label can be traced and re-made
-  (ingest.md decision 5).
+## Storage reuse
 
-### 4. Identity and duplicates of a message
+Storage gains a **data store** source: `storage_list_objects` and `storage_get_object` with
+`instance` and `source: "data"` read the instance's `{instance}-data` bucket through its data
+Worker (`objects` and `object` ops), limited to `blobs/` and `derived/`. Storage › Buckets shows
+it when the record enables `data`, beside the S3 providers (Scaleway, DigitalOcean, Backblaze),
+which work as before.
 
-The same email arrives many times: in the capture address, in Gmail, in an IMAP folder, in an
-export. Each copy's bytes differ (each server adds its own `Received` and `Delivered-To`), so the
-raw SHA-256 alone does not find them.
+## The Email tab
 
-- **Item id**: the raw SHA-256. Two byte-identical copies are one item with two sightings.
-- **Message fingerprint** (ingest.md decision 2, tier 2): SHA-256 over the normalized
-  `Message-ID`; when there is none, over normalized From, Date, Subject and the text body's
-  hash. Copies with one fingerprint are one *message* with several items; queries count it once
-  and show where it was seen.
-- Attachments are their own items, keyed by their own SHA-256, linked to the message by an
-  `attachment_of` relation. The same invoice PDF sent three times is stored once and linked
-  three times.
-- A forwarded `message/rfc822` attachment is parsed again as an email item in its own right and
-  linked `forwarded_in`.
+A console area `email` (key `g l`), shown only on instances whose record enables `email`, to
+viewers and up:
 
-### 5. Taxonomy: signals now, classification in the pipeline
-
-- At parse: `Signals`, from headers only, deterministic and free. They cut model calls: a message
-  with `List-Unsubscribe` and `Precedence: bulk` is a newsletter candidate before any model runs.
-- In the pipeline (ingest.md decision 5): a document type from `DOC_TYPES`, labels and key fields
-  (amount, currency, date, counterparty), each with the model and version that made it.
-- Where it is kept: the JSON `Message` keeps the taxonomy as parsed; the Iceberg tables
-  `classifications` and `fields` keep every classification run, so the latest wins and older
-  ones stay for comparison. "All financial records" is a filter on the table, not on the JSON.
-
-### 6. Spam, failures and safety
-
-- Everything that reaches the capture address is kept, spam included, with its
-  `Authentication-Results`. Classification labels spam (`scheme: "spam"`); queries leave it out
-  by default. Nothing is deleted on a guess.
-- The first `Authentication-Results` header from `mx.cloudflare.net` is the one to trust (the
-  docs say other such headers may come from upstream servers). `Signals.auth` keeps all of them
-  in order; ingest reads the first.
-- No outbound mail. The handler never replies, so the capture address cannot be used to send.
-
-### 7. Off by default
-
-- No routing rule exists until the person approves the instance's `data.email` record and the
-  DNS step. Without it no mail reaches the Worker.
-- The data Worker's `email` handler, if it ever runs without `data.email.enabled` in its
-  configuration, rejects with "this address is not set up" and stores nothing.
-- `data_status {instance}` (data-worker.md) answers "email capture is not set up" and the steps
-  below.
+- **Left**: mailboxes with counts (`email_mailboxes`).
+- **Middle**: the message list (`email_list`): from, subject, date, a sender-check badge, a
+  paperclip when there are attachments.
+- **Right**: the message (`email_get`), through the storage object reader for the parts and a
+  mail renderer (`shell.mailFrame`): the HTML in an `<iframe sandbox="">` (no scripts, an
+  opaque origin, no forms or popups) whose document carries
+  `default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:` and also
+  inherits the console's own policy, so remote images are blocked; the text shown plain; each
+  attachment, and the original `.eml`, saved through `storage_get_object` with
+  `source: "data"` (`shell.saveFile`), never opened in the console.
+- Fixtures: `email_mailboxes.home.json`, `email_list.home.json` and `email_get.home.json` are
+  what the read ops answer for the smoke suite's stand-in mail, checked by the suite
+  (`PIGEON_WRITE_FIXTURES=1` rewrites them).
 
 ## Phases
 
-| Phase | What | Lands with | Who |
-| --- | --- | --- | --- |
-| 0 | Spikes on pigeon.dev only: route a throwaway subdomain address to a throwaway Worker; read the DNS records added; does the apex need enabling; what a thrown handler does to the sender; the largest message that parses within limits | nothing kept | agent, person's go-ahead for the DNS step |
-| 1 | `pigeon-email`: schema and parser, smoke scenario `email_parses_a_multipart_message` | **built** on `claude/ai-agent-NVhZ3wCsS5dT`, off (a library nothing calls) | executor, reviewed by planner |
-| 2 | The data Worker's `email` handler and the parse stage in its ingest consumer | needs data-worker.md phases 1 and 2 | agent |
-| 3 | Routing per instance: capture subdomain and literal rule, as instance plan steps (`EnableEmailRouting`, `AddEmailRule`) in the record's account | person's passkey on the record and go-ahead for the DNS step | agent, person |
-| 4 | Message fingerprint and relations in the pipeline (decision 4) | ingest.md phase 3 | agent |
-| 5 | Forwarding from existing mailboxes to the capture addresses | person's own mail settings | person |
+| Phase | What | State |
+| --- | --- | --- |
+| 1 | This plan | written |
+| 2 | Lite data store: D1 migrations (`pigeon_ingest::datastore`), data Worker minimal (`/data/call` signed read ops, `src/data-worker/src/store.rs`), the plan steps (`instances/data_plan.rs`) and their observe/apply (`instances/data_apply.rs`) | built, off |
+| 3 | Email capability: catalogue, record, the handler (`src/data-worker/src/mail.rs`), the mailbox rule, the tools (`src/capabilities/src/email.rs`) | built, off |
+| 4 | Storage data-store source | built, off |
+| 5 | The Email tab | built, off |
+| 6 | Forwarding: destinations, scope, loop guard | built, off |
+| 7 | B2 backup steps and consumer | built, off |
+| 8 | Turn on for pigeon.dev (the person) | waits for the person |
+| later | noisypigeon and willowgraysen (linked; `linked: true` in the catalogue); the full tier | not started |
 
 ## Follow-ups for the person
 
-1. Decide the capture label (default `in`) for each of pigeon.dev, noisypigeon.com and
-   willowgraysen.com, or say "apex" for a zone that has no other mail.
-2. Before phase 0: say go for one throwaway subdomain on pigeon.dev (`in-test.pigeon.dev`) and
-   the DNS records Email Routing adds there. pigeon removes it after.
-3. Before phase 3, per instance: approve the `data.email` record on the console with your
-   passkey, then say go for the DNS step in that session. noisypigeon.com's Proton records stay
-   as they are; the step's dry run shows that.
-4. After phase 3: in Proton, Fastmail, iCloud and Gmail, add a forwarding rule (or a filter that
-   forwards) to `capture@in.<zone>`. Each provider checks the destination by sending it a code;
-   the code arrives as a captured message, and `data_item` shows it.
-5. The repository's crate map: `src/email/*` matches no Worker in `ci/workers.toml`, so a landing
-   that touches it counts as shared and deploys every Worker. When the data Worker exists, add
-   `src/email/*` to its lane and to core's (a gate change, yours).
+1. **Accept the `data_home` credential purpose** (Workers Scripts Write for the data Worker
+   alone, on home) or say how the home data Worker should be uploaded instead.
+2. **The data Worker's build artifact**: nothing builds the `.wasm` today (data-worker.md
+   decision 1). Until a CI job does (a `ci/` change, the delegate's approval), build it by hand
+   (`worker-build --release` in `src/data-worker`), put each module of `build/` in the
+   platform account's bucket `pigeon-data-artifacts` at `data-worker/{digest}/{module}`, and
+   write `data-worker/current.json` as `{"digest", "main", "modules": [{"name",
+   "content_type"}]}`. The digest is `data_plan::artifact_digest`: the SHA-256 of the lines
+   `{module} {sha256 of its bytes}`, in order. The plan shows the digest; the apply refuses
+   modules that do not match it.
+3. **Policy**: add `email_forward_set` to `risky-tools-need-passkey` (the diff is in the
+   landing report).
+4. **Backblaze**: create bucket `pigeon-backup-pigeon-data` (SSE-B2 on) and an application key
+   for it alone (read and write); enter it on Access as `DATA_B2_PIGEON_DATA`
+   (`KEY_ID:APPLICATION_KEY`); put the bucket's endpoint and region in the record's
+   `[capabilities.data.backup]`.
+5. **Forward destinations**: open the verification email Cloudflare sends each one.
+
+## What is not verified
+
+- No Cloudflare API in `instances/data_apply.rs` has been called: the paths and bodies for D1
+  (`/d1/database`, `/query`), Queues and their consumers, R2 event notifications, Email Routing
+  (`/email/routing`, `/email/routing/enable`, `/rules/catch_all`, `/email/routing/addresses`),
+  DNS and the Workers upload with a WASM module are written from Cloudflare's API reference and
+  untested; so are the `data_home` permission names, which `tokens` resolves by name. The first
+  `instance_plan` for pigeon.dev is a dry run and shows any failure before anything changes.
+- The data Worker has been built for `wasm32-unknown-unknown` (clippy), never run: the `email`
+  handler's streaming read, `setReject`, `forward` with the loop header, and the backup's
+  SigV4 `PUT` to B2.
+- What Email Routing does with a `setReject` (a permanent 5xx to the sender is expected).
+- The Email tab has been checked by `node --check` and the smoke suite's contract, not in a
+  browser; in particular that the sandboxed `srcdoc` frame renders under the console's policy.
 
 ## Log
 
-- 2026-11-22: design written overnight from the person's brief (#4). Email Routing found under
-  Email Service in Cloudflare's docs; catch-all is apex-only, so capture uses literal addresses on
-  a subdomain. Phase 1 handed to one executor with the schema above as its spec; the smoke
-  scenario parses a multipart message with a folded header, encoded words, a group, an inline
-  image and the same PDF twice. Nothing deployed.
-- 2026-11-22 23:40 UTC: handoff. The AI agents planner session wraps up; this plan's next
-  steps wait on the person's answers (`overnight-2026-11-22.md`, "#4–#7 Data platform" and
-  its handoff section), then an AI Gateway planner.
+- 2026-11-22: the capture-subdomain design and phase 1 (`pigeon-email`, schema and parser).
+- 2026-11-26: replaced by the person's design (catch-all on pigeon.dev, listed mailboxes, the
+  lite data store, forwarding, B2 backup). Built off by default on `claude/email-capability`;
+  no Cloudflare API was called while building.

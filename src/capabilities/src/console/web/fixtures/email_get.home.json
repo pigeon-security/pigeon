@@ -1,0 +1,119 @@
+{
+  "attachments": [
+    {
+      "filename": "invoice.pdf",
+      "id": "e5c62df5dab5c87b6a015ef3d43597074d1eec433b15f51aec63b8582d0e4ab4",
+      "key": "blobs/sha256/e5/c6/e5c62df5dab5c87b6a015ef3d43597074d1eec433b15f51aec63b8582d0e4ab4",
+      "media_type": "application/pdf",
+      "size": 9
+    }
+  ],
+  "cc": [],
+  "date": "2026-11-26T09:00:00Z",
+  "error": null,
+  "first_seen": "2026-11-26T12:00:00Z",
+  "from": [
+    {
+      "address": "billing@example.com",
+      "domain": "example.com",
+      "name": "Sender",
+      "normalized": "billing@example.com"
+    }
+  ],
+  "headers": [
+    {
+      "name": "Authentication-Results",
+      "value": "mx.cloudflare.net; spf=pass smtp.mailfrom=billing@example.com; dkim=pass header.d=example.com; dmarc=pass header.from=example.com"
+    },
+    {
+      "name": "Authentication-Results",
+      "value": "mx.cloudflare.net.evil.example; dmarc=fail"
+    },
+    {
+      "name": "From",
+      "value": "Sender <billing@example.com>"
+    },
+    {
+      "name": "To",
+      "value": "cloudflare@pigeon.dev"
+    },
+    {
+      "name": "Subject",
+      "value": "Fixture 0"
+    },
+    {
+      "name": "Date",
+      "value": "Thu, 26 Nov 2026 09:00:00 +0000"
+    },
+    {
+      "name": "Message-ID",
+      "value": "<Fixture 0@example.com>"
+    },
+    {
+      "name": "MIME-Version",
+      "value": "1.0"
+    },
+    {
+      "name": "Content-Type",
+      "value": "multipart/mixed; boundary=\"b1\""
+    }
+  ],
+  "html": {
+    "body": "<p>Hello <img src=\"https://tracker.example/p.gif\"></p>",
+    "remote_images": "blocked",
+    "render": "sandboxed"
+  },
+  "id": "67f7b9c10d70318f69315b6b888de68ee18ad35c780cff042963638a6d64bc8e",
+  "key": "blobs/sha256/67/f7/67f7b9c10d70318f69315b6b888de68ee18ad35c780cff042963638a6d64bc8e",
+  "message_id": "Fixture 0@example.com",
+  "reply_to": [],
+  "sightings": [
+    {
+      "auth": {
+        "dkim": "pass",
+        "dmarc": "pass",
+        "spf": "pass"
+      },
+      "mailbox": "cloudflare",
+      "seen_at": "2026-11-26T12:00:00Z",
+      "sender_check": "pass",
+      "source": "email_routing",
+      "to": "cloudflare@pigeon.dev"
+    }
+  ],
+  "signals": {
+    "auth": [
+      {
+        "method": "spf",
+        "result": "pass"
+      },
+      {
+        "method": "dkim",
+        "result": "pass"
+      },
+      {
+        "method": "dmarc",
+        "result": "pass"
+      },
+      {
+        "method": "dmarc",
+        "result": "fail"
+      }
+    ],
+    "has_attachments": true,
+    "is_forward": false,
+    "is_reply": false,
+    "list_unsubscribe": false
+  },
+  "size": 846,
+  "status": "stored",
+  "subject": "Fixture 0",
+  "text": "Hello from Fixture 0.",
+  "to": [
+    {
+      "address": "cloudflare@pigeon.dev",
+      "domain": "pigeon.dev",
+      "normalized": "cloudflare@pigeon.dev"
+    }
+  ]
+}

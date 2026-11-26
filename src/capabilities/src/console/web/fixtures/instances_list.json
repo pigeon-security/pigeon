@@ -75,6 +75,25 @@
       "bucket": "platform-raw",
       "destination_bucket": "home-site"
     },
+    "capabilities": {
+      "data": {
+        "tier": "lite"
+      },
+      "email": {
+        "addresses": [
+          {
+            "local": "cloudflare",
+            "forward": "person@example.com"
+          },
+          {
+            "local": "buildkite"
+          },
+          {
+            "local": "apple"
+          }
+        ]
+      }
+    },
     "version": 12
   },
   {

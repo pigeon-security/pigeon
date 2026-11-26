@@ -49,6 +49,16 @@ pub struct Ledger {
     /// Retire leaves them: they hold the person's secrets.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secrets_stores: Vec<String>,
+    /// D1 databases pigeon created for the data store (docs/plans/email.md). Never deleted by a
+    /// plan: they hold the record.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub databases: Vec<String>,
+    /// Queues pigeon created for the data store's backup.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub queues: Vec<String>,
+    /// Zones pigeon turned Email Routing on for, and whose catch-all it set.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub email_zones: Vec<String>,
 }
 
 /// The Directory key of instance `id`'s ledger.
@@ -184,6 +194,60 @@ pub enum Step {
         name: String,
         why: String,
     },
+    // ---- The data store and email (docs/plans/email.md, "Plan steps"; `data_plan`). ----
+    /// Create the data store's D1 database.
+    CreateDatabase { name: String },
+    /// Apply the data store's migrations not yet applied, by id, in order.
+    Migrate {
+        database: String,
+        migrations: Vec<String>,
+    },
+    /// Upload the data Worker from its build artifact (`artifact`, its digest) with its
+    /// bindings, then turn on its workers.dev address; `module` is the digest of both, which
+    /// the ledger keeps.
+    UploadDataWorker {
+        name: String,
+        artifact: String,
+        bucket: String,
+        database: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        backup: Option<String>,
+        module: String,
+        replaces: bool,
+    },
+    /// Write the email handler's configuration row (its digest) into the store's D1.
+    WriteEmailConfig { database: String, digest: String },
+    /// Create a queue, consumed by the data Worker when `consumer` names it.
+    CreateQueue {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        consumer: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dead_letter: Option<String>,
+    },
+    /// Send the bucket's object-create events to a queue.
+    AddBucketNotification { bucket: String, queue: String },
+    /// Waits on the person; shown, and the plan goes on without it.
+    Pending { what: String, why: String },
+    /// Delete one stale record of an old mail provider, exactly as shown.
+    RemoveStaleDns {
+        zone_id: String,
+        id: String,
+        name: String,
+        kind: String,
+        content: String,
+        why: String,
+    },
+    /// Turn Email Routing on for a zone: Cloudflare adds its MX, SPF and DKIM records.
+    EnableEmailRouting { zone: String, zone_id: String },
+    /// Point the zone's catch-all rule at the data Worker.
+    SetCatchAll {
+        zone: String,
+        zone_id: String,
+        worker: String,
+    },
+    /// Add a forward destination address to the account; Cloudflare emails it a link.
+    AddDestination { email: String },
 }
 
 fn is_public(protected: &bool) -> bool {
@@ -198,6 +262,16 @@ impl Step {
             Step::CreateBucket { .. }
                 | Step::UploadWorker { .. }
                 | Step::CreateSecretsStore { .. }
+                | Step::CreateDatabase { .. }
+                | Step::Migrate { .. }
+                | Step::UploadDataWorker { .. }
+                | Step::WriteEmailConfig { .. }
+                | Step::CreateQueue { .. }
+                | Step::AddBucketNotification { .. }
+                | Step::RemoveStaleDns { .. }
+                | Step::EnableEmailRouting { .. }
+                | Step::SetCatchAll { .. }
+                | Step::AddDestination { .. }
                 | Step::UploadCapabilityWorker { .. }
                 | Step::EnableWorkersDev { .. }
                 | Step::AttachDomain { .. }
@@ -982,6 +1056,21 @@ pub fn record(ledger: &mut Ledger, step: &Step) {
         Step::CreateSecretsStore { name } if !ledger.secrets_stores.contains(name) => {
             ledger.secrets_stores.push(name.clone());
         }
+        Step::CreateDatabase { name } if !ledger.databases.contains(name) => {
+            ledger.databases.push(name.clone());
+        }
+        Step::UploadDataWorker { name, module, .. } => {
+            ledger.workers.retain(|(n, _)| n != name);
+            ledger.workers.push((name.clone(), module.clone()));
+        }
+        Step::CreateQueue { name, .. } if !ledger.queues.contains(name) => {
+            ledger.queues.push(name.clone());
+        }
+        Step::EnableEmailRouting { zone, .. } | Step::SetCatchAll { zone, .. }
+            if !ledger.email_zones.contains(zone) =>
+        {
+            ledger.email_zones.push(zone.clone());
+        }
         _ => {}
     }
 }
@@ -1082,6 +1171,74 @@ pub fn describe(steps: &[Step]) -> Vec<Value> {
             Step::Keep { what, name, why } => {
                 json!(format!("{what} {name}: {why}; pigeon leaves it alone"))
             }
+            Step::CreateDatabase { name } => json!(format!(
+                "create D1 database {name} for the data store's record; a plan never deletes it"
+            )),
+            Step::Migrate {
+                database,
+                migrations,
+            } => json!(format!(
+                "apply migrations {} to D1 database {database}",
+                migrations.join(", ")
+            )),
+            Step::UploadDataWorker {
+                name,
+                artifact,
+                bucket,
+                database,
+                backup,
+                replaces,
+                ..
+            } => json!(format!(
+                "{} data Worker {name} from build {artifact}, reading bucket {bucket} as DATA and                  D1 {database} as DB{}, with a new DATA_KEY that core keeps sealed; then turn on                  its workers.dev address, which answers only calls signed with that key",
+                if *replaces { "update" } else { "upload" },
+                backup
+                    .as_deref()
+                    .map(|b| format!(", copying new objects to B2 bucket {b}"))
+                    .unwrap_or_default()
+            )),
+            Step::WriteEmailConfig { database, digest } => json!(format!(
+                "write the email handler's configuration (mailboxes and forwarding from the                  record, digest {}) into D1 {database}",
+                &digest[..digest.len().min(12)]
+            )),
+            Step::CreateQueue {
+                name,
+                consumer,
+                dead_letter,
+            } => json!(format!(
+                "create queue {name}{}{}",
+                consumer
+                    .as_deref()
+                    .map(|c| format!(", consumed by {c}"))
+                    .unwrap_or_default(),
+                dead_letter
+                    .as_deref()
+                    .map(|d| format!(", failures to {d}"))
+                    .unwrap_or_default()
+            )),
+            Step::AddBucketNotification { bucket, queue } => json!(format!(
+                "send bucket {bucket}'s new objects to queue {queue}, for the B2 backup (deletes                  are not mirrored)"
+            )),
+            Step::Pending { what, why } => json!(format!("pending: {what}: {why}")),
+            Step::RemoveStaleDns {
+                name,
+                kind,
+                content,
+                why,
+                ..
+            } => json!(format!(
+                "stale, to replace: delete {kind} {name} \"{}\" ({why})",
+                content.trim().trim_matches('"')
+            )),
+            Step::EnableEmailRouting { zone, .. } => json!(format!(
+                "turn on Email Routing for {zone}: Cloudflare adds its MX records                  (route1-3.mx.cloudflare.net), its SPF and its DKIM"
+            )),
+            Step::SetCatchAll { zone, worker, .. } => json!(format!(
+                "send every address @{zone} (the catch-all rule) to Worker {worker}"
+            )),
+            Step::AddDestination { email } => json!(format!(
+                "add forward destination {email}; Cloudflare emails it a link, and forwarding                  to it waits until it is verified"
+            )),
         })
         .collect()
 }

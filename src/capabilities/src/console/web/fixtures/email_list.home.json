@@ -1,0 +1,36 @@
+{
+  "instance": "home",
+  "messages": [
+    {
+      "attachments": 0,
+      "date": "2026-11-26T09:00:00Z",
+      "from": {
+        "address": "win@prize.example",
+        "name": "Sender"
+      },
+      "id": "013a30d5d62bebbd28a07f99c35ff95c1dc4d598910ebf0aa2be4785c6dafa7c",
+      "mailbox": "catch-all",
+      "seen_at": "2026-11-26T12:00:01Z",
+      "sender_check": "pass",
+      "size": 842,
+      "subject": "Fixture 1",
+      "to": "hello@pigeon.dev"
+    },
+    {
+      "attachments": 1,
+      "date": "2026-11-26T09:00:00Z",
+      "from": {
+        "address": "billing@example.com",
+        "name": "Sender"
+      },
+      "id": "67f7b9c10d70318f69315b6b888de68ee18ad35c780cff042963638a6d64bc8e",
+      "mailbox": "cloudflare",
+      "seen_at": "2026-11-26T12:00:00Z",
+      "sender_check": "pass",
+      "size": 846,
+      "subject": "Fixture 0",
+      "to": "cloudflare@pigeon.dev"
+    }
+  ],
+  "next": null
+}

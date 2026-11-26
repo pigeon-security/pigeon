@@ -42,7 +42,7 @@ const fn area(id: &'static str, title: &'static str, group: Group, key: &'static
 }
 
 /// Every area, in the navigation's order.
-pub const AREAS: [Area; 15] = [
+pub const AREAS: [Area; 16] = [
     area("inbox", "Inbox", Group::Top, "i"),
     area("overview", "Overview", Group::Instance, "v"),
     area("site", "Site", Group::Instance, "w"),
@@ -52,6 +52,7 @@ pub const AREAS: [Area; 15] = [
     area("metrics", "Metrics", Group::Instance, "m"),
     area("jobs", "Jobs", Group::Instance, "j"),
     area("ingest", "Ingest", Group::Instance, "e"),
+    area("email", "Email", Group::Instance, "l"),
     area("capabilities", "Capabilities", Group::Instance, "x"),
     area("sessions", "Sessions", Group::Platform, "s"),
     area("cost", "Cost", Group::Platform, "c"),

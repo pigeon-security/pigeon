@@ -55,9 +55,13 @@ pub const READS: &[(&str, &[&str])] = &[
             "instance",
             "max_keys",
             "prefix",
+            "source",
             "token",
         ],
     ),
+    // Only with `instance`: the instance's approved location or data store (attachments of
+    // Email › Mailboxes download through it).
+    ("storage_get_object", &["instance", "key", "source"]),
     ("storage_head_object", &["account", "bucket", "key"]),
     ("source_resolve_revision", &["instance", "revision"]),
     ("source_read_file", &["instance", "path", "revision"]),
@@ -77,6 +81,15 @@ pub const READS: &[(&str, &[&str])] = &[
     // Ingest › Runs lists an instance's runs here: `ingest_status` would also delete the VM of
     // a run that has ended, so the console never calls it.
     ("app_ingest_runs", &["instance"]),
+    // Email (docs/plans/email.md): the instance's mailboxes and messages, read from its data
+    // Worker. The writes (`email_address_set`, `email_forward_set`) are never reads.
+    ("email_status", &["instance"]),
+    ("email_mailboxes", &["instance"]),
+    (
+        "email_list",
+        &["instance", "mailbox", "since", "from", "cursor", "limit"],
+    ),
+    ("email_get", &["instance", "id"]),
     // Sessions, cost and compare.
     (
         "ai_agents_status",
@@ -111,6 +124,11 @@ pub const READS: &[(&str, &[&str])] = &[
 /// `account` or a CI `repo`.
 pub const INSTANCE_OPS: &[&str] = &[
     "storage_list_objects",
+    "storage_get_object",
+    "email_status",
+    "email_mailboxes",
+    "email_list",
+    "email_get",
     "source_resolve_revision",
     "source_read_file",
     "ci_jobs",

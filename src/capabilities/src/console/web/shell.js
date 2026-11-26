@@ -33,6 +33,7 @@
   const READS = Object.freeze(["console_manifest", "instances_list", "app_inbox", "app_linked_details", "app_jobs_audit_plan",
     "storage_list_objects", "source_resolve_revision", "source_read_file", "ci_jobs", "ci_status",
     "observability_worker_metrics", "app_ingest_runs", "ingest_report", "digitalocean_status", "digitalocean_verify",
+    "email_mailboxes", "email_list", "email_get", "storage_get_object",
     "digitalocean_spaces_status", "digitalocean_spaces_verify", "digitalocean_droplet_status",
     "digitalocean_droplet_jobs", "digitalocean_droplet_job",
     "ai_agents_status", "ai_agents_compare", "cost_daily", "land_list",
@@ -88,6 +89,8 @@
     metrics: "M2 12l4-5 3 3 5-6",
     jobs: "M2 3h12v10H2zM5 6h6M5 9h6",
     ingest: "M8 2v8M5 7l3 3 3-3M3 13h10",
+    email: "M2 3.5h12v9H2zM2 3.5l6 5 6-5",
+    clip: "M10.5 5.5l-4 4a1.4 1.4 0 0 0 2 2l4.5-4.5a2.8 2.8 0 0 0-4-4L4.5 7.5a4.2 4.2 0 0 0 6 6l3-3",
     capabilities: "M6 2h4v3h3v4h-3v5H6V9H3V5h3z",
     sessions: "M2 4h12M2 8h8M2 12h10",
     cost: "M2 13V9M6 13V5M10 13V7M14 13V3",
@@ -948,9 +951,36 @@
     }
   }
 
+  // ---- Mail (Email › Mailboxes). A message's HTML is the sender's: it is shown only in an
+  // iframe sandboxed with no permissions at all (no scripts, an opaque origin, no forms, no
+  // popups), carrying its own policy that loads nothing remote, so remote images and trackers
+  // are blocked. It never enters the console's own DOM.
+  const MAIL_POLICY = "default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:";
+  function mailFrame(html, title) {
+    const frame = document.createElement("iframe");
+    frame.setAttribute("sandbox", "");
+    frame.setAttribute("referrerpolicy", "no-referrer");
+    frame.setAttribute("title", title || "Message");
+    frame.setAttribute("class", "mail-frame");
+    frame.srcdoc = `<!doctype html><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${MAIL_POLICY}">${String(html ?? "")}`;
+    return frame;
+  }
+  // Hands the person a file read through /app/op (`storage_get_object`'s answer): never opened
+  // in the console, only saved.
+  function saveFile(name, type, encoding, body) {
+    const bytes = encoding === "base64" ? Uint8Array.from(atob(body || ""), (c) => c.charCodeAt(0)) : new TextEncoder().encode(body || "");
+    const url = URL.createObjectURL(new Blob([bytes], { type: type || "application/octet-stream" }));
+    const a = document.createElement("a");
+    a.setAttribute("href", url);
+    a.setAttribute("download", String(name || "file").replace(/[\/\\]/g, "_"));
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  }
+
   window.pigeonShell = Object.freeze({
     register, op: (name, args) => op(name, args), el, icon, pill, tag, code, button, facts, segmented, input, field,
     panel, strip, bar, meter, diffBlock, dataTable, toast, dialog, confirm, sha256, showOnce, copyField, href,
+    mailFrame, saveFile,
     get fixtures() { return Boolean(FIXTURES); },
   });
 

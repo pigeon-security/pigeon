@@ -1,9 +1,17 @@
 //! The instance's data Worker: for now, the ingest job runner for Backblaze B2 as a Cloudflare
-//! Container, and the manifest applier for the D1 dedupe index (docs/plans/ingest.md,
-//! decision 13). Not a platform Worker; nothing deploys it yet (see `wrangler.example.toml`).
+//! Container and the manifest applier for the D1 dedupe index (docs/plans/ingest.md, decision
+//! 13); and the lite tier of the unified data store (docs/plans/email.md): the `email` handler
+//! ([`mail`], [`store`]), the signed read ops at `/data/call`, and the B2 backup consumer.
+//!
+//! Not a platform Worker: no landing deploys it; an instance plan uploads it.
 //!
 //! Bindings: `DATA_KEY` (secret), `DB` (D1 `{instance}-data`), `DATA` (the instance bucket),
-//! `INGEST_JOB` (the Durable Object). The queue `{instance}-ingest-manifests` is consumed here.
+//! `INSTANCE` (text, the instance id), `BACKUP` (text, the B2 bucket), `B2_KEYS` (Secrets Store),
+//! `INGEST_JOB` (the Durable Object, ingest only). It consumes `{instance}-ingest-manifests` and
+//! `{instance}-data-backup`.
+
+pub mod mail;
+pub mod store;
 
 pub use pigeon_ingest;
 
@@ -14,8 +22,9 @@ use pigeon_ingest::protocol::{self, StartRequest, StopRequest};
 use serde_json::{Value, json};
 use worker::wasm_bindgen::JsValue;
 use worker::{
-    Context, D1PreparedStatement, DurableObject, Env, MessageBatch, MessageExt, Method, Request,
-    RequestInit, Response, Result, State, console_log, event, wasm_bindgen,
+    Context, D1PreparedStatement, DurableObject, Env, ForwardableEmailMessage, MessageBatch,
+    MessageExt, Method, Request, RequestInit, Response, Result, State, console_log, event,
+    wasm_bindgen,
 };
 
 /// The image's key in the object's `ctx.container.images`.
@@ -71,11 +80,19 @@ async fn to_job(env: &Env, run: &str, path: &str, body: Vec<u8>) -> Result<Respo
     stub.fetch_with_request(req).await
 }
 
-/// The HTTP surface: signed `POST /ingest/start` and `/ingest/stop`, open `GET /ingest/health`.
+/// The HTTP surface: signed `POST /ingest/start` and `/ingest/stop`, open `GET /ingest/health`,
+/// and the data store's signed `POST /data/call`, which answers 404 with no body unless signed.
 #[event(fetch)]
 async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
     let path = req.path();
     match (req.method(), path.as_str()) {
+        (Method::Post, pigeon_ingest::datastore::CALL_PATH) => {
+            let body = match signed_body(&mut req, &env).await? {
+                Ok(b) => b,
+                Err(_) => return Response::empty().map(|r| r.with_status(404)),
+            };
+            store::call(&env, &body).await
+        }
         (Method::Get, "/ingest/health") => json_answer(200, json!({ "ok": true })),
         (Method::Post, protocol::START_PATH) => {
             let body = match signed_body(&mut req, &env).await? {
@@ -147,15 +164,12 @@ impl DurableObject for IngestJob {
     }
 }
 
-/// A JSON parameter as a D1 value.
-fn js(v: &Value) -> JsValue {
-    match v {
-        Value::Null => JsValue::NULL,
-        Value::Bool(b) => JsValue::from_bool(*b),
-        Value::Number(n) => JsValue::from_f64(n.as_f64().unwrap_or(0.0)),
-        Value::String(s) => JsValue::from_str(s),
-        other => JsValue::from_str(&other.to_string()),
-    }
+use store::js;
+
+/// Email Routing's handler (docs/plans/email.md): the catch-all rule sends every message here.
+#[event(email)]
+async fn email(message: ForwardableEmailMessage, env: Env, _ctx: Context) -> Result<()> {
+    store::email(message, &env).await
 }
 
 /// Parses manifest JSONL; answers the good lines and how many were bad. Bad lines are logged
@@ -207,10 +221,28 @@ async fn apply(env: &Env, key: &str) -> Result<()> {
     Ok(())
 }
 
-/// The queue consumer: each message is an R2 event notification. A manifest part is applied to
-/// the index; any other key is acknowledged and ignored. A D1 or R2 error retries the message.
+/// The queue consumer: each message is an R2 event notification. On the backup queue
+/// (`…-backup`) each new object is copied to B2, deletes never mirrored; otherwise a manifest
+/// part is applied to the index and any other key is acknowledged and ignored. A D1, R2 or B2
+/// error retries the message.
 #[event(queue)]
 async fn queue(batch: MessageBatch<Value>, env: Env, _ctx: Context) -> Result<()> {
+    if batch.queue().ends_with("-backup") {
+        for message in batch.messages()? {
+            match protocol::parse_event(message.body()) {
+                Some(e) => match store::back_up(&env, &e.key).await {
+                    Ok(()) => message.ack(),
+                    Err(err) => {
+                        console_log!("backup of an object failed: {err}");
+                        message.retry();
+                    }
+                },
+                // A delete, or not an event: nothing to copy.
+                None => message.ack(),
+            }
+        }
+        return Ok(());
+    }
     for message in batch.messages()? {
         match protocol::parse_event(message.body()) {
             Some(e) if e.is_manifest_part => match apply(&env, &e.key).await {

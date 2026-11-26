@@ -125,6 +125,21 @@
       ]
     },
     {
+      "id": "email",
+      "title": "Email",
+      "group": "instance",
+      "key": "l",
+      "views": [
+        {
+          "id": "mailboxes",
+          "title": "Mailboxes",
+          "order": 10,
+          "capability": "email",
+          "upgrade": null
+        }
+      ]
+    },
+    {
       "id": "capabilities",
       "title": "Capabilities",
       "group": "instance",

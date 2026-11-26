@@ -417,6 +417,36 @@
       "always": true
     },
     {
+      "name": "data",
+      "placements": [
+        "own_worker"
+      ],
+      "home": "own_worker",
+      "home_worker": "pigeon-data",
+      "scope": "instance",
+      "availability": "any",
+      "requires": [],
+      "linked": false,
+      "always": false,
+      "opt_in": true
+    },
+    {
+      "name": "email",
+      "placements": [
+        "own_worker"
+      ],
+      "home": "own_worker",
+      "home_worker": "pigeon-data",
+      "scope": "instance",
+      "availability": "any",
+      "requires": [
+        "data"
+      ],
+      "linked": false,
+      "always": false,
+      "opt_in": true
+    },
+    {
       "name": "redirects",
       "placements": [
         "inline"

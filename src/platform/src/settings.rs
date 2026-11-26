@@ -319,6 +319,9 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
                 site_name: "pigeon".into(),
             },
         }),
+        // Email (docs/plans/email.md): mail in the instance's data store, read through its data
+        // Worker. Off until a record enables `email` and an instance plan makes the store.
+        Box::new(pigeon_capabilities::email::Email),
         Box::new(Instances {
             zone: ZONE.into(),
             passkeys: Passkeys {

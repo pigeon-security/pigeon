@@ -12,6 +12,16 @@ is deployed (Follow-ups 1 and 2). Design branch `claude/ai-agent-AFc1coPrsJTT` (
 planner ([linked-accounts.md](linked-accounts.md)); this plan changes none of their code and
 lists what it needs from them.
 
+**Lite tier (2026-11-26, [email.md](email.md)).** The home instance gets the data Worker first,
+as the lite tier of the unified data store (`[capabilities.data] tier = "lite"`): bucket, D1 and
+Worker all `pigeon-data`; D1 holds the record rows `items`, `sightings` and `emails` in ingest.md
+decision 3's schema; the Worker has only the `email` handler, the signed read ops
+(`/data/call`: `status`, `mailboxes`, `list`, `get`, `objects`, `object`) and the B2 backup
+consumer. Vectorize, AI, Pipelines and the ingest queues are the full tier, later. The D1 binding
+is `DB` (decision 1 called it `OPS`; the code's name stays). The home Worker is made by an instance
+plan like a linked one's, with a core-only `data_home` token (email.md, "Credentials"). Built off
+by default on `claude/email-capability`.
+
 Related plans: [email.md](email.md), [ingest.md](ingest.md),
 [mail-connectors.md](mail-connectors.md), [mcp-portal.md](mcp-portal.md),
 [workers-split.md](workers-split.md).
@@ -91,7 +101,7 @@ Hard lines:
 
 | Handler | Does |
 | --- | --- |
-| `email` | email.md decision 2: store raw, queue a reference |
+| `email` | email.md "The flow": hash, store once, write the record rows, forward |
 | `queue` | the ingest stages (ingest.md decision 8), the backup consumer, connector sync work |
 | `scheduled` | connector sync ticks (mail-connectors.md), backup reconciliation, stale-run checks |
 | `fetch` | only the signed contract ops (decision 2) and the uploader's endpoints (decision 5) |
@@ -201,7 +211,8 @@ directly, not through MCP (bulk bytes do not belong in tool calls):
 | R2 event notification | whole bucket → backup queue; `staging/` → ingest | `AddBucketNotification` |
 | The Worker | `{instance}-data`, artifact digest, bindings | `UploadWorker` (extended) |
 | Worker secrets | `DATA_KEY`, later B2 and connector secrets | `SetWorkerSecret`, `DeleteWorkerSecret` |
-| Email routing | capture subdomain and literal rule → the Worker (email.md) | `EnableEmailRouting`, `AddEmailRule` (DNS: the person's go-ahead) |
+| Email routing | the zone's catch-all rule → the Worker (email.md; the capture subdomain is gone) | `RemoveStaleDns`, `EnableEmailRouting`, `SetCatchAll`, `AddDestination` |
+| Email config | the D1 `config` row the handler reads | `WriteEmailConfig` |
 
 Each step is safe to run twice, shows in the dry run and is recorded in the ledger. Nothing is
 deleted by a plan except what the ledger holds, and deletes of data resources (bucket, index,
@@ -222,7 +233,7 @@ A new instance record, proposed by an agent and approved by the person:
     "worker": "willowgraysen-data",
     "bucket": "willowgraysen-data",
     "jurisdiction": null,
-    "email": {"enabled": false, "subdomain": "in", "addresses": ["capture"]},
+    "email": {"enabled": false, "addresses": []},
     "connectors": []
   }
 }
@@ -313,6 +324,11 @@ Numbered so they can answer item by item. None of this is built by this plan.
   the rest of linked-accounts.md's open items.
 
 ## Log
+
+- 2026-11-26: the lite tier for the home instance (email.md): `[capabilities.data] tier =
+  "lite"` and `[capabilities.email]` in the record replace decision 7's `data` section for now;
+  the signed `/data/call` read ops, the D1 record tables, the plan steps of decision 6 that the
+  lite tier needs, and the backup consumer built off by default on `claude/email-capability`.
 
 - 2026-11-22: design written overnight from the person's brief (#6), after reading the instance
   record, the linked capability, instance plans, worker uploads, the contract and the portal

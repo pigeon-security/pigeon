@@ -2305,7 +2305,6 @@ fn console_every_view() -> std::collections::BTreeMap<String, Vec<String>> {
 
     let record: Instance = serde_json::from_value(json!({
         "id": "all", "title": "All", "account": { "kind": "home" },
-        "capabilities": { "jobs": {} },
         "zones": ["example.com"], "worker": "all-worker",
         "repo": { "kind": "artifacts", "namespace": "example", "repo": "all" },
         "sites": [{ "name": "blog", "bucket": "all-site", "auth": "passkey", "targets": [] }],
@@ -2315,7 +2314,8 @@ fn console_every_view() -> std::collections::BTreeMap<String, Vec<String>> {
         "ci": { "state": "enabled", "jobs": ["test"] },
         "observability": { "state": "enabled" },
         "ingest": { "state": "enabled", "source": "r2:all", "bucket": "src",
-            "destination_bucket": "all-site" }
+            "destination_bucket": "all-site" },
+        "capabilities": { "jobs": {}, "data": { "tier": "lite" }, "email": { "addresses": [{ "local": "a" }] } }
     }))
     .unwrap();
     let platform = hosted_views();
@@ -2928,4 +2928,1410 @@ fn console_urls_encode_an_instance_id_with_a_slash() {
         "/app/sandbox/site/deployments"
     );
     assert_eq!(page::segment("a b/c?d"), "a%20b%2Fc%3Fd");
+}
+
+/// Email and the lite data store (docs/plans/email.md): the data Worker's handler on a
+/// stand-in (R2 as a map, D1 as SQLite, failures on demand), its read queries, the plan steps
+/// with their DNS review, the record's rules, the tools' roles and the Email tab's fixtures.
+mod email {
+    use super::*;
+
+    use std::cell::{Cell, RefCell};
+    use std::collections::BTreeMap;
+
+    use crate::data_worker_mail as mail;
+    use pigeon_capabilities::instances::record::Instance;
+    use pigeon_ingest::datastore::{self, EmailConfig, ForwardScope, Listed};
+    use pigeon_ingest::index::Statement;
+
+    /// Runs a future whose stand-ins answer at once.
+    fn ready<F: std::future::Future>(f: F) -> F::Output {
+        use std::task::{Context, Poll, Waker};
+        let mut f = std::pin::pin!(f);
+        let mut cx = Context::from_waker(Waker::noop());
+        loop {
+            if let Poll::Ready(v) = f.as_mut().poll(&mut cx) {
+                return v;
+            }
+        }
+    }
+
+    fn sql_value(v: &Value) -> rusqlite::types::Value {
+        use rusqlite::types::Value as S;
+        match v {
+            Value::Null => S::Null,
+            Value::Bool(b) => S::Integer(i64::from(*b)),
+            Value::Number(n) => n
+                .as_i64()
+                .map(S::Integer)
+                .unwrap_or_else(|| S::Real(n.as_f64().unwrap_or(0.0))),
+            Value::String(s) => S::Text(s.clone()),
+            other => S::Text(other.to_string()),
+        }
+    }
+
+    /// The data store with its bindings stood in: R2 a map, D1 an in-memory SQLite with the lite
+    /// migrations applied; `fail_put` and `fail_db` make writes fail.
+    struct Store {
+        db: RefCell<rusqlite::Connection>,
+        blobs: RefCell<BTreeMap<String, Vec<u8>>>,
+        fail_put: Cell<bool>,
+        fail_db: Cell<bool>,
+    }
+
+    impl Store {
+        fn new(config: Option<&EmailConfig>) -> Store {
+            let db = rusqlite::Connection::open_in_memory().unwrap();
+            db.execute(datastore::MIGRATIONS_TABLE, []).unwrap();
+            let store = Store {
+                db: RefCell::new(db),
+                blobs: RefCell::new(BTreeMap::new()),
+                fail_put: Cell::new(false),
+                fail_db: Cell::new(false),
+            };
+            for m in datastore::MIGRATIONS {
+                store.exec(datastore::migration_statements(m, "2026-11-26T00:00:00Z"));
+            }
+            if let Some(c) = config {
+                store.exec(vec![datastore::config_statement(c, "2026-11-26T00:00:00Z")]);
+            }
+            store
+        }
+
+        fn exec(&self, statements: Vec<Statement>) {
+            let mut db = self.db.borrow_mut();
+            let tx = db.transaction().unwrap();
+            for s in statements {
+                let params: Vec<rusqlite::types::Value> = s.params.iter().map(sql_value).collect();
+                tx.execute(&s.sql, rusqlite::params_from_iter(params))
+                    .unwrap_or_else(|e| panic!("{}: {e}", s.sql));
+            }
+            tx.commit().unwrap();
+        }
+
+        fn rows(&self, s: &Statement) -> Vec<Value> {
+            let db = self.db.borrow();
+            let mut q = db
+                .prepare(&s.sql)
+                .unwrap_or_else(|e| panic!("{}: {e}", s.sql));
+            let names: Vec<String> = q.column_names().iter().map(|n| n.to_string()).collect();
+            let params: Vec<rusqlite::types::Value> = s.params.iter().map(sql_value).collect();
+            q.query_map(rusqlite::params_from_iter(params), |row| {
+                let mut out = serde_json::Map::new();
+                for (i, name) in names.iter().enumerate() {
+                    use rusqlite::types::ValueRef;
+                    let v = match row.get_ref(i)? {
+                        ValueRef::Null => Value::Null,
+                        ValueRef::Integer(n) => json!(n),
+                        ValueRef::Real(f) => json!(f),
+                        ValueRef::Text(t) => json!(String::from_utf8_lossy(t)),
+                        ValueRef::Blob(_) => Value::Null,
+                    };
+                    out.insert(name.clone(), v);
+                }
+                Ok(Value::Object(out))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+        }
+
+        fn count(&self, sql: &str) -> i64 {
+            self.db.borrow().query_row(sql, [], |r| r.get(0)).unwrap()
+        }
+    }
+
+    impl mail::Bindings for Store {
+        async fn has(&self, key: &str) -> Result<bool, String> {
+            Ok(self.blobs.borrow().contains_key(key))
+        }
+
+        async fn put(&self, key: &str, bytes: &[u8], sha256: &str) -> Result<(), String> {
+            if self.fail_put.get() {
+                return Err("R2 put failed".into());
+            }
+            // R2 checks the SHA-256 it is given.
+            assert_eq!(datastore::sha256_hex(bytes), sha256, "{key}");
+            self.blobs.borrow_mut().insert(key.into(), bytes.to_vec());
+            Ok(())
+        }
+
+        async fn run(&self, statements: Vec<Statement>) -> Result<(), String> {
+            if self.fail_db.get() {
+                return Err("D1 batch failed".into());
+            }
+            self.exec(statements);
+            Ok(())
+        }
+
+        async fn config(&self) -> Result<Option<EmailConfig>, String> {
+            Ok(self
+                .rows(&datastore::config_query())
+                .first()
+                .and_then(|r| serde_json::from_str(r["value"].as_str()?).ok()))
+        }
+    }
+
+    /// pigeon.dev as the person set it up: the three listed addresses, cloudflare forwarded.
+    fn pigeon_config() -> EmailConfig {
+        EmailConfig {
+            instance: "pigeon.dev".into(),
+            domain: "pigeon.dev".into(),
+            addresses: ["cloudflare", "buildkite", "apple"]
+                .iter()
+                .map(|l| Listed {
+                    local: l.to_string(),
+                    forward: (*l == "cloudflare").then(|| "person@example.com".to_string()),
+                })
+                .collect(),
+            scope: ForwardScope::Listed,
+            forward_to: None,
+        }
+    }
+
+    /// A message with a trusted Authentication-Results (Cloudflare's, first) and a forged one, an
+    /// HTML part and a PDF attachment.
+    fn message(subject: &str, from: &str) -> Vec<u8> {
+        format!(
+            "Authentication-Results: mx.cloudflare.net; spf=pass smtp.mailfrom={from}; \
+             dkim=pass header.d=example.com; dmarc=pass header.from=example.com\r\n\
+             Authentication-Results: mx.cloudflare.net.evil.example; dmarc=fail\r\n\
+             From: Sender <{from}>\r\n\
+             To: cloudflare@pigeon.dev\r\n\
+             Subject: {subject}\r\n\
+             Date: Thu, 26 Nov 2026 09:00:00 +0000\r\n\
+             Message-ID: <{subject}@example.com>\r\n\
+             MIME-Version: 1.0\r\n\
+             Content-Type: multipart/mixed; boundary=\"b1\"\r\n\r\n\
+             --b1\r\nContent-Type: multipart/alternative; boundary=\"b2\"\r\n\r\n\
+             --b2\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nHello from {subject}.\r\n\
+             --b2\r\nContent-Type: text/html; charset=utf-8\r\n\r\n\
+             <p>Hello <img src=\"https://tracker.example/p.gif\"></p>\r\n--b2--\r\n\
+             --b1\r\nContent-Type: application/pdf\r\n\
+             Content-Disposition: attachment; filename=\"invoice.pdf\"\r\n\
+             Content-Transfer-Encoding: base64\r\n\r\nJVBERi0xLjQK\r\n--b1--\r\n"
+        )
+        .into_bytes()
+    }
+
+    fn incoming<'a>(raw: &'a [u8], to: &'a str, at: &str, marks: &[&str]) -> mail::Incoming<'a> {
+        let mut h = mail::Hasher::default();
+        for chunk in raw.chunks(7) {
+            h.update(chunk);
+        }
+        assert_eq!(h.size(), raw.len() as u64);
+        mail::Incoming {
+            envelope_from: "sender@example.com",
+            envelope_to: to,
+            raw,
+            content: h.finish(),
+            loop_marks: marks.iter().map(|m| m.to_string()).collect(),
+            received_at: at.into(),
+        }
+    }
+
+    fn stored(v: mail::Verdict) -> mail::Stored {
+        match v {
+            mail::Verdict::Stored(s) => s,
+            mail::Verdict::Reject(why) => panic!("rejected: {why}"),
+        }
+    }
+
+    /// The handler on a stand-in: a listed address lands in its mailbox and anything else in
+    /// catch-all; the bytes are stored once, by their SHA-256 hashed as they stream, with the
+    /// record rows of ingest.md decision 3; a duplicate adds only a sighting; the trusted sender
+    /// checks are recorded; a store failure rejects; forwarding is listed-only by default, `all`
+    /// when set, and never loops; the log names no content.
+    #[test]
+    fn email_handler_stores_files_and_forwards() {
+        let config = pigeon_config();
+        let store = Store::new(Some(&config));
+        let raw = message("first", "billing@example.com");
+
+        // A listed address, its case and a +tag ignored.
+        let s = stored(ready(mail::receive(
+            &store,
+            &incoming(
+                &raw,
+                "Cloudflare+billing@PIGEON.dev",
+                "2026-11-26T09:00:01Z",
+                &[],
+            ),
+        )));
+        assert_eq!(s.mailbox, "cloudflare");
+        assert!(!s.duplicate && !s.looped);
+        assert_eq!(s.item_id, datastore::sha256_hex(&raw));
+        assert_eq!(s.size, raw.len() as u64);
+        assert_eq!(s.forward.as_deref(), Some("person@example.com"));
+        let key = pigeon_ingest::blob_key(&s.item_id);
+        assert_eq!(store.blobs.borrow()[&key], raw);
+        assert!(
+            store
+                .blobs
+                .borrow()
+                .contains_key(&format!("derived/{}/text.txt", s.item_id))
+        );
+        // The PDF and the HTML are blobs of their own; the PDF an item whose parent is the message.
+        assert_eq!(store.count("SELECT COUNT(*) FROM items"), 2);
+        assert_eq!(
+            store.count("SELECT COUNT(*) FROM items WHERE kind = 'email' AND status = 'stored'"),
+            1
+        );
+        assert_eq!(
+            store.count(&format!(
+                "SELECT COUNT(*) FROM items WHERE parent_id = '{}' AND filename = 'invoice.pdf' \
+                 AND kind = 'document'",
+                s.item_id
+            )),
+            1
+        );
+        let sighting = &store.rows(&Statement {
+            sql: "SELECT * FROM sightings".into(),
+            params: vec![],
+        })[0];
+        assert_eq!(sighting["source"], "email_routing");
+        assert_eq!(sighting["locator"], "cloudflare+billing@pigeon.dev");
+        let extra: Value = serde_json::from_str(sighting["extra"].as_str().unwrap()).unwrap();
+        // Cloudflare's own header, not the forged one that only looks like it.
+        assert_eq!(
+            extra,
+            json!({ "mailbox": "cloudflare", "auth": { "spf": "pass", "dkim": "pass", "dmarc": "pass" } })
+        );
+        let email = &store.rows(&Statement {
+            sql: "SELECT subject, \"from\", fingerprint, html_ref, text_ref FROM emails".into(),
+            params: vec![],
+        })[0];
+        assert_eq!(email["subject"], "first");
+        assert!(
+            email["from"]
+                .as_str()
+                .unwrap()
+                .contains("billing@example.com")
+        );
+        assert_eq!(email["fingerprint"].as_str().unwrap().len(), 64);
+        assert!(store.blobs.borrow().contains_key(&pigeon_ingest::blob_key(
+            email["html_ref"].as_str().unwrap()
+        )));
+
+        // An unknown address, and another domain, land in catch-all, which forwards nothing by
+        // default.
+        let other = message("second", "news@example.org");
+        let s2 = stored(ready(mail::receive(
+            &store,
+            &incoming(&other, "nobody@pigeon.dev", "2026-11-26T09:00:02Z", &[]),
+        )));
+        assert_eq!(
+            (s2.mailbox.as_str(), s2.forward.as_deref()),
+            ("catch-all", None)
+        );
+        assert_eq!(config.mailbox_for("apple@another.example"), "catch-all");
+        assert_eq!(config.mailbox_for("not an address"), "catch-all");
+
+        // The same bytes again, to another address: no new item, no new email row, one more
+        // sighting.
+        let blobs_before = store.blobs.borrow().len();
+        let s3 = stored(ready(mail::receive(
+            &store,
+            &incoming(&raw, "apple@pigeon.dev", "2026-11-26T09:00:03Z", &[]),
+        )));
+        assert!(s3.duplicate);
+        assert_eq!(s3.mailbox, "apple");
+        assert_eq!(s3.forward, None, "apple has no destination");
+        assert_eq!(store.blobs.borrow().len(), blobs_before);
+        // Three items: both messages and the PDF they both carry, stored once.
+        assert_eq!(store.count("SELECT COUNT(*) FROM items"), 3);
+        assert_eq!(store.count("SELECT COUNT(*) FROM emails"), 2);
+        assert_eq!(store.count("SELECT COUNT(*) FROM sightings"), 3);
+
+        // Forwarding scope `all` with a default destination forwards catch-all too.
+        let all = EmailConfig {
+            scope: ForwardScope::All,
+            forward_to: Some("inbox@example.com".into()),
+            ..config.clone()
+        };
+        assert_eq!(
+            all.forward_for("catch-all").as_deref(),
+            Some("inbox@example.com")
+        );
+        assert_eq!(
+            all.forward_for("apple").as_deref(),
+            Some("inbox@example.com")
+        );
+        assert_eq!(
+            all.forward_for("cloudflare").as_deref(),
+            Some("person@example.com")
+        );
+        assert_eq!(config.forward_for("catch-all"), None);
+        assert_eq!(
+            all.destinations(),
+            ["inbox@example.com", "person@example.com"]
+        );
+        let all_store = Store::new(Some(&all));
+        let s4 = stored(ready(mail::receive(
+            &all_store,
+            &incoming(&other, "x@pigeon.dev", "2026-11-26T09:00:04Z", &[]),
+        )));
+        assert_eq!(s4.forward.as_deref(), Some("inbox@example.com"));
+
+        // A message that already passed through this instance's forward is stored, not forwarded.
+        let back = message("looped", "billing@example.com");
+        let s5 = stored(ready(mail::receive(
+            &store,
+            &incoming(
+                &back,
+                "cloudflare@pigeon.dev",
+                "2026-11-26T09:00:05Z",
+                &["pigeon.dev"],
+            ),
+        )));
+        assert!(s5.looped && s5.forward.is_none());
+        // Another instance's mark is not this one's.
+        let s6 = stored(ready(mail::receive(
+            &store,
+            &incoming(
+                &back,
+                "cloudflare@pigeon.dev",
+                "2026-11-26T09:00:06Z",
+                &["noisypigeon"],
+            ),
+        )));
+        assert!(!s6.looped && s6.forward.is_some());
+
+        // What became of each is recorded; a failed forward too, with a reason and no content.
+        store.exec(vec![
+            mail::delivery_row(
+                &s,
+                "cloudflare@pigeon.dev",
+                "2026-11-26T09:00:07Z",
+                "forward_failed",
+                Some("Email Routing refused the forward"),
+            ),
+            mail::delivery_row(
+                &s5,
+                "cloudflare@pigeon.dev",
+                "2026-11-26T09:00:08Z",
+                "loop",
+                None,
+            ),
+        ]);
+        let q = datastore::status_queries();
+        let outcomes = store.rows(&q[1]);
+        assert_eq!(outcomes[0]["outcome"], "forward_failed");
+        assert_eq!(outcomes[1]["outcome"], "loop");
+        let line = mail::log_line(&s.item_id, s.size, &s.mailbox, "forwarded");
+        assert!(!line.contains("billing") && !line.contains("Hello") && !line.contains("first"));
+
+        // Failures: storing the bytes or the rows rejects, so the sender gets a bounce; nothing is
+        // half-written as the record.
+        let fresh = message("third", "a@example.com");
+        store.fail_put.set(true);
+        let v = ready(mail::receive(
+            &store,
+            &incoming(&fresh, "apple@pigeon.dev", "2026-11-26T09:01:00Z", &[]),
+        ));
+        assert_eq!(v, mail::Verdict::Reject(mail::NOT_STORED.into()));
+        store.fail_put.set(false);
+        store.fail_db.set(true);
+        let v = ready(mail::receive(
+            &store,
+            &incoming(&fresh, "apple@pigeon.dev", "2026-11-26T09:01:01Z", &[]),
+        ));
+        assert_eq!(v, mail::Verdict::Reject(mail::NOT_STORED.into()));
+        store.fail_db.set(false);
+        assert_eq!(
+            store.count("SELECT COUNT(*) FROM emails WHERE subject = 'third'"),
+            0
+        );
+
+        // Off by default: without the configuration the plan writes, every message is rejected.
+        let off = Store::new(None);
+        let v = ready(mail::receive(
+            &off,
+            &incoming(&raw, "cloudflare@pigeon.dev", "2026-11-26T09:02:00Z", &[]),
+        ));
+        assert_eq!(v, mail::Verdict::Reject(mail::NOT_SET_UP.into()));
+        assert!(off.blobs.borrow().is_empty());
+
+        // Not MIME: kept as received, marked failed, never bounced for a parser bug.
+        let junk = b"\x00\x01 not mail".to_vec();
+        let s7 = stored(ready(mail::receive(
+            &store,
+            &incoming(&junk, "apple@pigeon.dev", "2026-11-26T09:03:00Z", &[]),
+        )));
+        assert_eq!(
+            store.count(&format!(
+                "SELECT COUNT(*) FROM items WHERE item_id = '{}' AND status = 'failed'",
+                s7.item_id
+            )),
+            1
+        );
+    }
+
+    /// The signed read ops' queries on the stand-in: mailboxes with counts, a page of mail newest
+    /// first with a cursor, filters by mailbox and sender, one message with its HTML marked for
+    /// sandboxed rendering and its attachments; and the ops refuse what is not theirs to read.
+    #[test]
+    fn email_read_ops_answer_from_the_record() {
+        use datastore::{DataCall, ListQuery, call_problem};
+        let config = pigeon_config();
+        let store = Store::new(Some(&config));
+        let mut ids = Vec::new();
+        for (i, (to, from)) in [
+            ("cloudflare@pigeon.dev", "billing@example.com"),
+            ("buildkite@pigeon.dev", "ci@buildkite.example"),
+            ("spam@pigeon.dev", "win@prize.example"),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let raw = message(&format!("m{i}"), from);
+            let s = stored(ready(mail::receive(
+                &store,
+                &incoming(&raw, to, &format!("2026-11-26T10:00:0{i}Z"), &[]),
+            )));
+            ids.push(s.item_id);
+        }
+        let boxes = store.rows(&datastore::mailboxes_query());
+        let merged = pigeon_capabilities::email::merge_mailboxes(&config, &json!(boxes));
+        let counts: Vec<(String, u64)> = merged
+            .iter()
+            .map(|m| {
+                (
+                    m["mailbox"].as_str().unwrap().to_string(),
+                    m["count"].as_u64().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            counts,
+            [
+                ("cloudflare".into(), 1),
+                ("buildkite".into(), 1),
+                ("apple".into(), 0),
+                ("catch-all".into(), 1)
+            ]
+        );
+
+        // Newest first, a page of two, then the rest by cursor.
+        let page =
+            |q: &ListQuery| datastore::list_answer(&store.rows(&datastore::list_query(q)), q.limit);
+        let first = page(&ListQuery {
+            limit: Some(2),
+            ..Default::default()
+        });
+        let got: Vec<&str> = first["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(got, [ids[2].as_str(), ids[1].as_str()]);
+        let next = first["next"].as_str().unwrap().to_string();
+        let second = page(&ListQuery {
+            limit: Some(2),
+            cursor: Some(next),
+            ..Default::default()
+        });
+        assert_eq!(second["messages"][0]["id"], ids[0].as_str());
+        assert!(second["next"].is_null());
+        let m = &second["messages"][0];
+        assert_eq!(m["sender_check"], "pass");
+        assert_eq!(m["attachments"], 1);
+        assert_eq!(m["from"]["address"], "billing@example.com");
+        assert_eq!(m["mailbox"], "cloudflare");
+
+        let by_box = page(&ListQuery {
+            mailbox: Some("catch-all".into()),
+            ..Default::default()
+        });
+        assert_eq!(by_box["messages"].as_array().unwrap().len(), 1);
+        let by_domain = page(&ListQuery {
+            from: Some("BUILDKITE.example".into()),
+            ..Default::default()
+        });
+        assert_eq!(by_domain["messages"][0]["id"], ids[1].as_str());
+
+        // One message.
+        let qs = datastore::get_queries(&ids[0]);
+        let html_ref = store.rows(&qs[1])[0]["html_ref"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let html =
+            String::from_utf8(store.blobs.borrow()[&pigeon_ingest::blob_key(&html_ref)].clone())
+                .unwrap();
+        let text = String::from_utf8(
+            store.blobs.borrow()[&format!("derived/{}/text.txt", ids[0])].clone(),
+        )
+        .unwrap();
+        let got = datastore::get_answer(
+            &store.rows(&qs[0]),
+            &store.rows(&qs[1]),
+            &store.rows(&qs[2]),
+            &store.rows(&qs[3]),
+            Some(text),
+            Some(html),
+        )
+        .unwrap();
+        assert_eq!(got["subject"], "m0");
+        assert_eq!(got["html"]["render"], "sandboxed");
+        assert_eq!(got["html"]["remote_images"], "blocked");
+        assert!(got["text"].as_str().unwrap().contains("Hello from m0"));
+        assert_eq!(got["attachments"][0]["filename"], "invoice.pdf");
+        assert!(
+            got["attachments"][0]["key"]
+                .as_str()
+                .unwrap()
+                .starts_with("blobs/sha256/")
+        );
+        assert_eq!(got["sightings"][0]["sender_check"], "pass");
+        assert!(
+            datastore::get_answer(&[], &[], &[], &[], None, None).is_none(),
+            "no such item"
+        );
+
+        // What the ops refuse before any query.
+        for (call, why) in [
+            (DataCall::Get { id: "../x".into() }, "64 hex"),
+            (
+                DataCall::Object {
+                    key: "staging/x".into(),
+                },
+                "blobs/",
+            ),
+            (
+                DataCall::Object {
+                    key: "blobs/../config".into(),
+                },
+                "blobs/",
+            ),
+            (
+                DataCall::Objects {
+                    prefix: "ingest/".into(),
+                    cursor: None,
+                    limit: None,
+                },
+                "blobs/",
+            ),
+            (
+                DataCall::List(ListQuery {
+                    limit: Some(500),
+                    ..Default::default()
+                }),
+                "limit",
+            ),
+            (
+                DataCall::List(ListQuery {
+                    cursor: Some("x".into()),
+                    ..Default::default()
+                }),
+                "cursor",
+            ),
+        ] {
+            assert!(
+                call_problem(&call).is_some_and(|p| p.contains(why)),
+                "{call:?}"
+            );
+        }
+        assert!(
+            call_problem(&DataCall::Objects {
+                prefix: "derived/".into(),
+                cursor: None,
+                limit: None
+            })
+            .is_none()
+        );
+        // The call core signs names its instance and op.
+        let body = serde_json::to_value(datastore::CallRequest {
+            instance: "pigeon.dev".into(),
+            call: DataCall::List(ListQuery {
+                mailbox: Some("apple".into()),
+                ..Default::default()
+            }),
+        })
+        .unwrap();
+        assert_eq!(
+            body,
+            json!({ "instance": "pigeon.dev", "call": { "op": "list", "mailbox": "apple" } })
+        );
+
+        // The D1 schema is ingest.md decision 3's, column for column.
+        let columns = |table: &str| -> Vec<String> {
+            store
+                .rows(&Statement {
+                    sql: format!("SELECT name FROM pragma_table_info('{table}')"),
+                    params: vec![],
+                })
+                .iter()
+                .map(|r| r["name"].as_str().unwrap().to_string())
+                .collect()
+        };
+        assert_eq!(
+            columns("items"),
+            [
+                "item_id",
+                "sha256",
+                "blake3",
+                "size",
+                "media_type",
+                "kind",
+                "filename",
+                "text_sha256",
+                "parent_id",
+                "first_seen",
+                "status",
+                "error",
+                "version"
+            ]
+        );
+        assert_eq!(
+            columns("sightings"),
+            [
+                "item_id", "source", "account", "locator", "seen_at", "extra"
+            ]
+        );
+        assert_eq!(
+            columns("emails"),
+            [
+                "item_id",
+                "schema",
+                "fingerprint",
+                "message_id",
+                "in_reply_to",
+                "references",
+                "subject",
+                "date",
+                "from",
+                "to",
+                "cc",
+                "bcc",
+                "reply_to",
+                "sender",
+                "delivered_to",
+                "headers",
+                "signals",
+                "text_ref",
+                "html_ref"
+            ]
+        );
+        // And it refuses a database holding the ingest runner's dedupe index.
+        assert!(datastore::migration_refusal(&["blobs".into(), "sightings".into()]).is_some());
+        assert!(datastore::migration_refusal(&["items".into()]).is_none());
+        assert_eq!(
+            datastore::pending_migrations(&["0001_record".into()]).len(),
+            1
+        );
+    }
+
+    /// pigeon.dev's record with the lite store and email.
+    fn pigeon_record(extra: Value) -> Instance {
+        let mut v = json!({
+            "id": "pigeon.dev", "title": "pigeon.dev", "account": { "kind": "home" },
+            "zones": ["pigeon.dev"],
+            "capabilities": {
+                "data": { "tier": "lite" },
+                "email": { "addresses": [
+                    { "local": "cloudflare", "forward": "person@example.com" },
+                    { "local": "buildkite" }, { "local": "apple" }
+                ] }
+            }
+        });
+        if let (Some(base), Some(more)) = (v.as_object_mut(), extra.as_object()) {
+            for (k, x) in more {
+                base.insert(k.clone(), x.clone());
+            }
+        }
+        serde_json::from_value(v).unwrap()
+    }
+
+    fn rec(
+        id: &str,
+        name: &str,
+        kind: &str,
+        content: &str,
+    ) -> pigeon_capabilities::instances::data_plan::DnsRecord {
+        pigeon_capabilities::instances::data_plan::DnsRecord {
+            id: id.into(),
+            name: name.into(),
+            kind: kind.into(),
+            content: content.into(),
+        }
+    }
+
+    /// The data store's and email's plan steps: the dry run reads the zone first. With no MX the
+    /// plan makes everything and routes the catch-all; a live foreign MX stops it; old Fastmail and
+    /// Proton records are listed one by one as stale, to replace, and nothing not shown is touched;
+    /// what was made is the ledger's; applying is refused for anything but the store's own Worker.
+    #[test]
+    fn email_plan_steps_read_the_zone_first() {
+        use pigeon_capabilities::instances::data_plan::{
+            SeenData, SeenDestination, data_refusal, data_steps, dns_review,
+        };
+        use pigeon_capabilities::instances::plan::{
+            Ledger, PlatformOwned, Step, describe, digest, record,
+        };
+        let r = pigeon_record(json!({}));
+        let owned = PlatformOwned {
+            workers: vec!["pigeon-platform".into(), "pigeon-sites".into()],
+            hosts: vec!["platform.pigeon.dev".into()],
+            apex: "pigeon.dev".into(),
+        };
+        let fresh = SeenData {
+            artifact: Some("a".repeat(64)),
+            zone_id: Some("zone1".into()),
+            ..Default::default()
+        };
+
+        // Nothing there and no MX: every resource, then routing.
+        let steps = data_steps(&r, &fresh, &Ledger::default(), Some(&owned));
+        let kinds: Vec<&str> = steps
+            .iter()
+            .map(|s| match s {
+                Step::CreateBucket { .. } => "bucket",
+                Step::CreateDatabase { .. } => "database",
+                Step::Migrate { .. } => "migrate",
+                Step::UploadDataWorker { .. } => "worker",
+                Step::Pending { .. } => "pending",
+                Step::WriteEmailConfig { .. } => "config",
+                Step::EnableEmailRouting { .. } => "routing",
+                Step::SetCatchAll { .. } => "catch-all",
+                Step::AddDestination { .. } => "destination",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                "bucket",
+                "database",
+                "migrate",
+                "worker",
+                "pending",
+                "config",
+                "routing",
+                "catch-all",
+                "destination",
+                "pending"
+            ]
+        );
+        assert!(steps.iter().all(|s| !s.stops()));
+        assert!(matches!(&steps[3], Step::UploadDataWorker { name, .. } if name == "pigeon-data"));
+        assert!(
+            matches!(&steps[7], Step::SetCatchAll { worker, zone, .. } if worker == "pigeon-data" && zone == "pigeon.dev")
+        );
+        assert!(data_refusal(&r, &steps, Some(&owned)).is_none());
+        let lines = describe(&steps);
+        assert!(lines[4].as_str().unwrap().contains("B2 backup"));
+        assert!(
+            lines[9]
+                .as_str()
+                .unwrap()
+                .starts_with("pending: forward destination person@example.com")
+        );
+
+        // A live foreign MX: stop, change nothing about mail.
+        let foreign = SeenData {
+            dns: vec![rec(
+                "mx1",
+                "pigeon.dev",
+                "MX",
+                "in1-smtp.messagingengine.com",
+            )],
+            ..fresh.clone()
+        };
+        let steps = data_steps(&r, &foreign, &Ledger::default(), Some(&owned));
+        let stop = steps.iter().find(|s| s.stops()).unwrap();
+        assert!(
+            matches!(stop, Step::Blocked { why } if why.contains("live MX") && why.contains("messagingengine"))
+        );
+        assert!(!steps.iter().any(|s| matches!(
+            s,
+            Step::EnableEmailRouting { .. }
+                | Step::RemoveStaleDns { .. }
+                | Step::SetCatchAll { .. }
+        )));
+        assert!(data_refusal(&r, &steps, Some(&owned)).is_some());
+
+        // The old MX are gone; their TXT and DKIM remain: each listed, stale, to replace.
+        let zone = vec![
+            rec(
+                "t1",
+                "pigeon.dev",
+                "TXT",
+                "\"v=spf1 include:spf.messagingengine.com include:_spf.protonmail.ch ~all\"",
+            ),
+            rec(
+                "t2",
+                "fm1._domainkey.pigeon.dev",
+                "CNAME",
+                "fm1.pigeon.dev.dkim.fmhosted.com",
+            ),
+            rec(
+                "t3",
+                "protonmail._domainkey.pigeon.dev",
+                "CNAME",
+                "protonmail.domainkey.abc.domains.proton.ch",
+            ),
+            rec("t4", "pigeon.dev", "TXT", "protonmail-verification=abc123"),
+            rec(
+                "t5",
+                "_dmarc.pigeon.dev",
+                "TXT",
+                "v=DMARC1; p=quarantine; rua=mailto:x@dmarc.example",
+            ),
+            rec("t6", "pigeon.dev", "TXT", "google-site-verification=keep"),
+            rec("t7", "www.pigeon.dev", "CNAME", "pigeon.dev"),
+        ];
+        let review = dns_review("pigeon.dev", &zone);
+        let stale: Vec<&str> = review.stale.iter().map(|(r, _)| r.id.as_str()).collect();
+        assert_eq!(stale, ["t1", "t2", "t3", "t4"]);
+        assert_eq!(
+            review.kept.len(),
+            1,
+            "the DMARC policy naming no old provider stays"
+        );
+        assert!(review.foreign_mx.is_empty());
+        let with_stale = SeenData {
+            dns: zone,
+            ..fresh.clone()
+        };
+        let steps = data_steps(&r, &with_stale, &Ledger::default(), Some(&owned));
+        let removals: Vec<&str> = steps
+            .iter()
+            .filter_map(|s| match s {
+                Step::RemoveStaleDns { id, .. } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            removals,
+            ["t1", "t2", "t3", "t4"],
+            "only what the plan shows"
+        );
+        let shown = describe(&steps);
+        assert!(shown.iter().any(|l| {
+            l.as_str()
+                .unwrap()
+                .starts_with("stale, to replace: delete TXT pigeon.dev \"v=spf1")
+        }));
+        assert!(
+            shown
+                .iter()
+                .any(|l| l.as_str().unwrap().contains("_dmarc.pigeon.dev")
+                    && l.as_str().unwrap().contains("kept"))
+        );
+        // Removals come before routing is turned on, so Cloudflare's SPF is the only one.
+        let at = |f: &dyn Fn(&Step) -> bool| steps.iter().position(f).unwrap();
+        assert!(
+            at(&|s| matches!(s, Step::RemoveStaleDns { .. }))
+                < at(&|s| matches!(s, Step::EnableEmailRouting { .. }))
+        );
+        // A Cloudflare MX means routing is already on: not foreign.
+        assert!(
+            dns_review(
+                "pigeon.dev",
+                &[rec("m", "pigeon.dev", "MX", "route1.mx.cloudflare.net")]
+            )
+            .foreign_mx
+            .is_empty()
+        );
+
+        // Applied once, recorded in the ledger: the next plan is all in place.
+        let mut ledger = Ledger::default();
+        let first = data_steps(&r, &fresh, &ledger, Some(&owned));
+        for s in &first {
+            record(&mut ledger, s);
+        }
+        assert_eq!(ledger.databases, ["pigeon-data"]);
+        assert_eq!(ledger.email_zones, ["pigeon.dev"]);
+        let module = match &first[3] {
+            Step::UploadDataWorker { module, .. } => module.clone(),
+            _ => unreachable!(),
+        };
+        let config = pigeon_capabilities::email::config(&r).unwrap();
+        let done = SeenData {
+            bucket_exists: true,
+            database: Some("db1".into()),
+            tables: vec![
+                "items".into(),
+                "sightings".into(),
+                "emails".into(),
+                "migrations".into(),
+            ],
+            applied: datastore::MIGRATIONS
+                .iter()
+                .map(|m| m.id.to_string())
+                .collect(),
+            worker_exists: true,
+            config_digest: Some(config.digest()),
+            routing_enabled: true,
+            catch_all: Some("pigeon-data".into()),
+            destinations: vec![SeenDestination {
+                email: "person@example.com".into(),
+                verified: true,
+            }],
+            ..fresh.clone()
+        };
+        let again = data_steps(&r, &done, &ledger, Some(&owned));
+        assert!(
+            again.iter().all(|s| !s.changes() && !s.stops()),
+            "{again:?}"
+        );
+        assert!(
+            ledger
+                .workers
+                .contains(&("pigeon-data".to_string(), module))
+        );
+        // An unverified destination is pending, and does not stop the plan.
+        let pending = SeenData {
+            destinations: vec![SeenDestination {
+                email: "person@example.com".into(),
+                verified: false,
+            }],
+            ..done.clone()
+        };
+        assert!(data_steps(&r, &pending, &ledger, Some(&owned)).iter().any(
+            |s| matches!(s, Step::Pending { what, .. } if what.contains("person@example.com"))
+        ));
+        // Adding an address changes only the configuration row: no DNS, no routing.
+        let more = pigeon_capabilities::email::with_address(&r, "github", false).unwrap();
+        let changed: Vec<Step> = data_steps(&more, &done, &ledger, Some(&owned))
+            .into_iter()
+            .filter(|s| s.changes())
+            .collect();
+        assert!(
+            matches!(changed.as_slice(), [Step::WriteEmailConfig { .. }]),
+            "{changed:?}"
+        );
+        // Someone else's resources are conflicts; the catch-all of another Worker too.
+        let theirs = SeenData {
+            catch_all: Some("other".into()),
+            ..done.clone()
+        };
+        assert!(
+            data_steps(&r, &theirs, &Ledger::default(), Some(&owned))
+                .iter()
+                .any(|s| matches!(s, Step::Conflict { what, .. } if what == "catch-all"))
+        );
+        // No build yet: blocked, saying how to make one.
+        let unbuilt = SeenData {
+            artifact: None,
+            ..fresh.clone()
+        };
+        assert!(
+            data_steps(&r, &unbuilt, &Ledger::default(), Some(&owned))
+                .iter()
+                .any(|s| matches!(s, Step::Blocked { why } if why.contains("no build")))
+        );
+        // The store's Worker is never a platform Worker.
+        let clash = PlatformOwned {
+            workers: vec!["pigeon-data".into()],
+            ..owned.clone()
+        };
+        assert!(matches!(
+            data_steps(&r, &fresh, &Ledger::default(), Some(&clash)).as_slice(),
+            [Step::Blocked { .. }]
+        ));
+        // A record without the store plans nothing, so its digest is as before.
+        let plain = pigeon_record(json!({ "capabilities": {} }));
+        assert!(data_steps(&plain, &fresh, &Ledger::default(), Some(&owned)).is_empty());
+        assert_eq!(
+            digest(&plain, "acc", &[]),
+            digest(
+                &plain,
+                "acc",
+                &data_steps(&plain, &fresh, &Ledger::default(), None)
+            )
+        );
+
+        // The backup, once the record names its bucket: queues, the notification, the key.
+        let backed = pigeon_record(json!({ "capabilities": {
+            "data": { "tier": "lite", "backup": { "bucket": "pigeon-backup-pigeon-data",
+                "endpoint": "https://s3.eu-central-003.backblazeb2.com", "region": "eu-central-003" } },
+            "email": {}
+        } }));
+        let steps = data_steps(&backed, &fresh, &Ledger::default(), Some(&owned));
+        let queues: Vec<(&str, Option<&str>)> = steps
+            .iter()
+            .filter_map(|s| match s {
+                Step::CreateQueue { name, consumer, .. } => {
+                    Some((name.as_str(), consumer.as_deref()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            queues,
+            [
+                ("pigeon-data-backup-dlq", None),
+                ("pigeon-data-backup", Some("pigeon-data"))
+            ]
+        );
+        assert!(steps.iter().any(|s| matches!(s, Step::AddBucketNotification { queue, .. } if queue == "pigeon-data-backup")));
+        assert!(steps.iter().any(
+            |s| matches!(s, Step::Pending { why, .. } if why.contains("DATA_B2_PIGEON_DATA"))
+        ));
+
+        // The upload's metadata and body: the bindings the Worker reads, every module.
+        use pigeon_capabilities::data_store::Backup;
+        use pigeon_capabilities::instances::data_plan::{
+            WorkerBindings, artifact_digest, multipart, worker_metadata,
+        };
+        let b = Backup {
+            bucket: "pigeon-backup-pigeon-data".into(),
+            endpoint: "https://s3.eu-central-003.backblazeb2.com".into(),
+            region: "eu-central-003".into(),
+        };
+        let meta = worker_metadata(
+            "shim.mjs",
+            &WorkerBindings {
+                instance: "pigeon.dev",
+                bucket: "pigeon-data",
+                database_id: "db1",
+                data_key: "k",
+                backup: Some((&b, "store1", "DATA_B2_PIGEON_DATA")),
+            },
+        );
+        let names: Vec<&str> = meta["bindings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            ["DATA", "DB", "INSTANCE", "DATA_KEY", "BACKUP", "B2_KEYS"]
+        );
+        let parts = vec![
+            (
+                "shim.mjs".to_string(),
+                "application/javascript+module".to_string(),
+                b"js".to_vec(),
+            ),
+            (
+                "index.wasm".to_string(),
+                "application/wasm".to_string(),
+                vec![0, 97, 115, 109],
+            ),
+        ];
+        let body = multipart("XYZ", &meta, &parts);
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.contains("name=\"index.wasm\"") && text.ends_with("--XYZ--\r\n"));
+        assert_ne!(
+            artifact_digest(&[("a", b"1")]),
+            artifact_digest(&[("a", b"2")])
+        );
+
+        // The home token for these steps never reaches past its zone for DNS and routing.
+        use pigeon_capabilities::instances::data_apply::{PURPOSE, policies};
+        let perms = pigeon_capabilities::split::purpose_permissions(PURPOSE).unwrap();
+        let p = policies(Some(perms), "zone1").unwrap();
+        assert_eq!(p.len(), 2);
+        assert!(p[1].permissions.iter().any(|x| x == "DNS Write"));
+        assert!(!p[0].permissions.iter().any(|x| x.starts_with("DNS")));
+        assert!(pigeon_capabilities::split::CORE_ONLY_PURPOSES.contains(&PURPOSE));
+        assert!(policies(Some(perms), "").is_err());
+    }
+
+    /// The record's rules for `data` and `email`, the record changes the two write tools propose,
+    /// and the roles the tools need: reads are viewer's, writes operator's.
+    #[test]
+    fn email_record_rules_and_tool_roles() {
+        use pigeon_capabilities::catalogue::problems;
+        use pigeon_capabilities::email::{self, with_address, with_forward};
+        use pigeon_capabilities::membership::{Role, tool_need};
+
+        let r = pigeon_record(json!({}));
+        assert!(problems(&r).is_empty(), "{:?}", problems(&r));
+        assert!(email::enabled(&r));
+        let c = email::config(&r).unwrap();
+        assert_eq!(c.domain, "pigeon.dev");
+        assert_eq!(
+            email::mailbox_names(&c),
+            ["cloudflare", "buildkite", "apple", "catch-all"]
+        );
+        assert_eq!(email::FIRST_ADDRESSES, ["cloudflare", "buildkite", "apple"]);
+        assert_eq!(
+            pigeon_capabilities::data_store::store_name(&r),
+            "pigeon-data"
+        );
+
+        for (extra, why) in [
+            (json!({ "capabilities": { "email": {} } }), "needs \"data\""),
+            (
+                json!({ "capabilities": { "data": { "tier": "full" } } }),
+                "not built yet",
+            ),
+            (
+                json!({ "capabilities": { "data": {}, "email": { "addresses": [{ "local": "catch-all" }] } } }),
+                "not a listed address",
+            ),
+            (
+                json!({ "capabilities": { "data": {}, "email": { "addresses": [{ "local": "a" }, { "local": "a" }] } } }),
+                "listed twice",
+            ),
+            (
+                json!({ "capabilities": { "data": {}, "email": { "addresses": [{ "local": "a", "forward": "nope" }] } } }),
+                "not a forward destination",
+            ),
+            (
+                json!({ "capabilities": { "data": {}, "email": { "domain": "other.example" } } }),
+                "not one of the instance's zones",
+            ),
+            (
+                json!({ "capabilities": { "data": { "addresses": [{ "local": "a" }] } } }),
+                "does not accept a domain",
+            ),
+            (
+                json!({ "capabilities": { "data": { "backup": { "bucket": "b2b", "endpoint": "https://evil.example", "region": "x" } } } }),
+                "backblazeb2.com",
+            ),
+        ] {
+            let got = problems(&pigeon_record(extra.clone()));
+            assert!(got.iter().any(|p| p.contains(why)), "{extra}: {got:?}");
+        }
+        // Not on a linked instance yet.
+        let linked = pigeon_record(
+            json!({ "id": "noisypigeon", "account": { "kind": "linked", "account_id": null },
+            "zones": ["noisypigeon.com"] }),
+        );
+        assert!(
+            problems(&linked)
+                .iter()
+                .any(|p| p.contains("cannot be enabled on a linked instance yet"))
+        );
+        // Off by default: a record without them has neither, and every view and tool is hidden.
+        let off = pigeon_record(json!({ "capabilities": {} }));
+        assert!(!email::enabled(&off) && email::config(&off).is_none());
+        assert!(email::instance_tools(&off).unwrap().views.is_empty());
+        assert_eq!(email::instance_tools(&r).unwrap().views[0].area, "email");
+        // The settings read back as written, so record digests are stable.
+        let back: Instance = serde_json::from_value(serde_json::to_value(&r).unwrap()).unwrap();
+        assert_eq!(back, r);
+
+        // An address is a record change; a forward change too, and scope only through it.
+        let added = with_address(&r, "GitHub", false).unwrap();
+        assert!(
+            added.capabilities["email"]
+                .addresses
+                .iter()
+                .any(|a| a.local == "github")
+        );
+        assert!(with_address(&r, "apple", false).is_err());
+        assert!(with_address(&r, "catch-all", false).is_err());
+        let removed = with_address(&r, "apple", true).unwrap();
+        assert_eq!(removed.capabilities["email"].addresses.len(), 2);
+        let fwd = with_forward(&r, Some("apple"), Some("me@example.com"), None).unwrap();
+        assert_eq!(
+            email::config(&fwd).unwrap().forward_for("apple").as_deref(),
+            Some("me@example.com")
+        );
+        let all = with_forward(&r, None, Some("me@example.com"), Some(ForwardScope::All)).unwrap();
+        let c = email::config(&all).unwrap();
+        assert_eq!(
+            (c.scope, c.forward_for("catch-all").as_deref()),
+            (ForwardScope::All, Some("me@example.com"))
+        );
+        let cleared = with_forward(&r, Some("cloudflare"), None, None).unwrap();
+        assert_eq!(
+            email::config(&cleared).unwrap().forward_for("cloudflare"),
+            None
+        );
+        assert!(with_forward(&r, Some("nobody"), Some("me@example.com"), None).is_err());
+        assert!(with_forward(&r, None, Some("not-an-address"), None).is_err());
+        assert!(problems(&all).is_empty());
+
+        // Roles: the reads are viewer's with exactly their arguments; the writes operator's.
+        let i = json!({ "instance": "pigeon.dev" });
+        assert_eq!(tool_need("email", "email_status", &i), Some(Role::Viewer));
+        assert_eq!(
+            tool_need("email", "email_mailboxes", &i),
+            Some(Role::Viewer)
+        );
+        assert_eq!(
+            tool_need(
+                "email",
+                "email_list",
+                &json!({ "instance": "pigeon.dev", "mailbox": "apple", "cursor": "x" })
+            ),
+            Some(Role::Viewer)
+        );
+        assert_eq!(
+            tool_need(
+                "email",
+                "email_get",
+                &json!({ "instance": "pigeon.dev", "id": "a" })
+            ),
+            Some(Role::Viewer)
+        );
+        assert_eq!(
+            tool_need(
+                "email",
+                "email_list",
+                &json!({ "instance": "pigeon.dev", "account": "x" })
+            ),
+            Some(Role::Operator),
+            "an argument outside the read's is not a read"
+        );
+        assert_eq!(
+            tool_need(
+                "email",
+                "email_address_set",
+                &json!({ "instance": "pigeon.dev", "local": "x" })
+            ),
+            Some(Role::Operator)
+        );
+        assert_eq!(
+            tool_need(
+                "email",
+                "email_forward_set",
+                &json!({ "instance": "pigeon.dev", "scope": "all" })
+            ),
+            Some(Role::Operator)
+        );
+        // The storage data-store source is a read too, bound to the instance.
+        assert_eq!(
+            tool_need(
+                "storage",
+                "storage_get_object",
+                &json!({ "instance": "pigeon.dev", "key": "blobs/x", "source": "data" })
+            ),
+            Some(Role::Viewer)
+        );
+        use pigeon_capabilities::storage::{Source, source_of};
+        assert_eq!(source_of(&r, &json!({})), Ok(Source::Data));
+        assert_eq!(source_of(&r, &json!({ "source": "s3" })), Ok(Source::S3));
+        assert!(source_of(&r, &json!({ "source": "r2" })).is_err());
+        // On the instance endpoint, the email tools take only their own arguments.
+        use pigeon_capabilities::instances::tools::bind_global;
+        assert!(
+            bind_global(
+                "pigeon.dev",
+                Some(&r),
+                "email_list",
+                &json!({ "mailbox": "apple" })
+            )
+            .is_ok()
+        );
+        assert!(
+            bind_global(
+                "pigeon.dev",
+                Some(&r),
+                "email_list",
+                &json!({ "account": "x" })
+            )
+            .is_err()
+        );
+        assert!(bind_global("pigeon.dev", Some(&off), "email_list", &json!({})).is_err());
+    }
+
+    /// The Email tab's fixtures are what the read ops answer for the stand-in's mail, so fixture
+    /// mode shows the shapes the code sends.
+    #[test]
+    fn email_tab_fixtures_match_the_read_ops() {
+        let config = pigeon_config();
+        let store = Store::new(Some(&config));
+        let mut ids = Vec::new();
+        for (i, (to, from)) in [
+            ("cloudflare@pigeon.dev", "billing@example.com"),
+            ("hello@pigeon.dev", "win@prize.example"),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let raw = message(&format!("Fixture {i}"), from);
+            let s = stored(ready(mail::receive(
+                &store,
+                &incoming(&raw, to, &format!("2026-11-26T12:00:0{i}Z"), &[]),
+            )));
+            ids.push(s.item_id);
+        }
+        let mailboxes = json!({
+            "instance": "home",
+            "mailboxes": pigeon_capabilities::email::merge_mailboxes(&config, &json!(store.rows(&datastore::mailboxes_query()))),
+        });
+        let mut list = datastore::list_answer(
+            &store.rows(&datastore::list_query(&Default::default())),
+            None,
+        );
+        list["instance"] = json!("home");
+        let qs = datastore::get_queries(&ids[0]);
+        let html_ref = store.rows(&qs[1])[0]["html_ref"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let html =
+            String::from_utf8(store.blobs.borrow()[&pigeon_ingest::blob_key(&html_ref)].clone())
+                .unwrap();
+        let text = String::from_utf8(
+            store.blobs.borrow()[&format!("derived/{}/text.txt", ids[0])].clone(),
+        )
+        .unwrap();
+        let get = datastore::get_answer(
+            &store.rows(&qs[0]),
+            &store.rows(&qs[1]),
+            &store.rows(&qs[2]),
+            &store.rows(&qs[3]),
+            Some(text),
+            Some(html),
+        )
+        .unwrap();
+        // `PIGEON_WRITE_FIXTURES=1` rewrites them from this scenario.
+        if std::env::var_os("PIGEON_WRITE_FIXTURES").is_some() {
+            let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/console/web/fixtures");
+            for (name, v) in [
+                ("email_mailboxes.home.json", &mailboxes),
+                ("email_list.home.json", &list),
+                ("email_get.home.json", &get),
+            ] {
+                std::fs::write(
+                    dir.join(name),
+                    serde_json::to_string_pretty(v).unwrap() + "\n",
+                )
+                .unwrap();
+            }
+        }
+        for (name, want, recorded) in [
+            (
+                "email_mailboxes.home.json",
+                &mailboxes,
+                include_str!(
+                    "../../src/capabilities/src/console/web/fixtures/email_mailboxes.home.json"
+                ),
+            ),
+            (
+                "email_list.home.json",
+                &list,
+                include_str!(
+                    "../../src/capabilities/src/console/web/fixtures/email_list.home.json"
+                ),
+            ),
+            (
+                "email_get.home.json",
+                &get,
+                include_str!("../../src/capabilities/src/console/web/fixtures/email_get.home.json"),
+            ),
+        ] {
+            let recorded: Value = serde_json::from_str(recorded).unwrap();
+            assert_eq!(&recorded, want, "{name}: regenerate it from this scenario");
+        }
+        // The home fixture record enables the tab, and its manifest sends it.
+        let homes: Value = serde_json::from_str(include_str!(
+            "../../src/capabilities/src/console/web/fixtures/instances_list.json"
+        ))
+        .unwrap();
+        let home: Instance = serde_json::from_value(homes[0].clone()).unwrap();
+        assert!(pigeon_capabilities::email::enabled(&home));
+        let manifest: Value = serde_json::from_str(include_str!(
+            "../../src/capabilities/src/console/web/fixtures/console_manifest.home.json"
+        ))
+        .unwrap();
+        assert!(
+            manifest["areas"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|a| a["id"] == "email" && a["views"][0]["id"] == "mailboxes")
+        );
+    }
 }

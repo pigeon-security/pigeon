@@ -87,6 +87,8 @@ impl Entry {
 
 const INLINE: &[Placement] = &[Placement::Inline];
 const EITHER: &[Placement] = &[Placement::Inline, Placement::OwnWorker];
+/// Only in a Worker of its own: the instance's data Worker.
+const OWN: &[Placement] = &[Placement::OwnWorker];
 
 /// An instance-scoped capability any instance may have, run inline, needing nothing beside it,
 /// not yet on linked instances: what each entry differs from.
@@ -194,6 +196,28 @@ pub const CATALOGUE: &[Entry] = &[
         name: "instances",
         linked: true,
         always: true,
+        ..BASE
+    },
+    // The instance's unified data store, lite tier (docs/plans/email.md): bucket, D1 and data
+    // Worker `{instance}-data`, `pigeon-data` on home, made by an instance plan, never by a
+    // landing. Opt-in even on home; not on linked instances yet.
+    Entry {
+        name: crate::data_store::NAME,
+        placements: OWN,
+        home: Placement::OwnWorker,
+        home_worker: Some("pigeon-data"),
+        opt_in: true,
+        ..BASE
+    },
+    // Email › Mailboxes (docs/plans/email.md): mail received through the zone's catch-all into
+    // the data store, so it needs `data` and runs in the data Worker. Opt-in even on home.
+    Entry {
+        name: crate::email::NAME,
+        placements: OWN,
+        home: Placement::OwnWorker,
+        home_worker: Some("pigeon-data"),
+        requires: &[crate::data_store::NAME],
+        opt_in: true,
         ..BASE
     },
     // No views of its own: the record's `redirects`, answered by the instance's own site
@@ -426,6 +450,15 @@ pub fn problems(record: &Instance) -> Vec<String> {
                 "The capability \"{name}\" does not accept Droplet health checks."
             ));
         }
+        out.extend(crate::data_store::field_problems(
+            name,
+            &record.capabilities[name],
+        ));
+        out.extend(crate::email::field_problems(
+            record,
+            name,
+            &record.capabilities[name],
+        ));
         for r in e.requires {
             if !record.capabilities.contains_key(*r) {
                 out.push(format!(

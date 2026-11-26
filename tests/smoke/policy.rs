@@ -370,7 +370,7 @@ fn core_run_grant_revoked_when_the_run_ends() {
 }
 
 /// The six tools the person gates with their passkey (docs/plans/tool-approvals.md).
-const GATED: [&str; 7] = [
+const GATED: [&str; 8] = [
     "source_token",
     "setup_platform",
     "users_remove",
@@ -378,6 +378,7 @@ const GATED: [&str; 7] = [
     "instance_member_set",
     "passkeys_remove",
     "oauth_revoke",
+    "email_forward_set",
 ];
 
 #[test]

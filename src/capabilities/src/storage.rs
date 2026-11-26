@@ -22,16 +22,16 @@ const INSTANCE_TOOLS: &[Registration] = &[
     Registration {
         name: "storage_list_objects",
         description: Some(
-            "List objects in the instance’s approved storage location. Supply a relative prefix or the continuation token from the preceding page.",
+            "List objects in the instance’s approved storage location, or with `source: \"data\"` in its data store (`blobs/` and `derived/`). Supply a relative prefix or the continuation token from the preceding page.",
         ),
-        arguments: &["prefix", "delimiter", "max_keys", "token"],
+        arguments: &["prefix", "delimiter", "max_keys", "token", "source"],
     },
     Registration {
         name: "storage_get_object",
         description: Some(
-            "Read a small object from the instance’s approved storage location. Supply a relative key.",
+            "Read a small object from the instance’s approved storage location, or with `source: \"data\"` from its data store. Supply a relative key.",
         ),
-        arguments: &["key"],
+        arguments: &["key", "source"],
     },
 ];
 
@@ -43,16 +43,44 @@ const INSTANCE_VIEWS: &[View] = &[View {
     since: None,
 }];
 
-/// Storage declares the subset of its tools, and its console view, on enabled instance profiles.
+/// Storage declares the subset of its tools, and its console view, on enabled instance profiles:
+/// an S3 location (`storage`), the instance's data store (`[capabilities.data]`), or both.
 pub fn instance_tools(instance: &Instance) -> serde_json::Result<Enabled> {
     Ok(Enabled::when(
-        instance
-            .storage
-            .as_ref()
-            .is_some_and(|profile| profile.enabled()),
+        s3_enabled(instance) || crate::data_store::enabled(instance),
         INSTANCE_TOOLS,
         INSTANCE_VIEWS,
     ))
+}
+
+fn s3_enabled(instance: &Instance) -> bool {
+    instance
+        .storage
+        .as_ref()
+        .is_some_and(|profile| profile.enabled())
+}
+
+/// Where a scoped call reads: the approved S3 location, or the instance's data store
+/// (docs/plans/email.md, "Storage reuse").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source {
+    S3,
+    Data,
+}
+
+/// The source a scoped call names (`source`: `s3` or `data`); without one, the S3 location when
+/// the record has one, else the data store.
+pub fn source_of(instance: &Instance, args: &Value) -> std::result::Result<Source, String> {
+    match args.get("source").map(|v| v.as_str()) {
+        None => Ok(if s3_enabled(instance) {
+            Source::S3
+        } else {
+            Source::Data
+        }),
+        Some(Some("s3")) => Ok(Source::S3),
+        Some(Some("data")) => Ok(Source::Data),
+        _ => Err("`source` is `s3` or `data`".into()),
+    }
 }
 
 /// The instance a scoped storage call names, once its arguments are only that instance and
@@ -60,8 +88,15 @@ pub fn instance_tools(instance: &Instance) -> serde_json::Result<Enabled> {
 pub fn scoped_instance<'a>(tool: &str, args: &'a Value) -> Result<&'a str> {
     let instance = arg(args, "instance")?;
     let allowed: &[&str] = match tool {
-        "storage_list_objects" => &["instance", "prefix", "delimiter", "max_keys", "token"],
-        "storage_get_object" => &["instance", "key"],
+        "storage_list_objects" => &[
+            "instance",
+            "prefix",
+            "delimiter",
+            "max_keys",
+            "token",
+            "source",
+        ],
+        "storage_get_object" => &["instance", "key", "source"],
         _ => return Err(unknown(tool)),
     };
     if !args
@@ -373,6 +408,9 @@ impl Storage {
         let record = crate::instances::one(cx.env, instance)
             .await?
             .ok_or_else(|| bad("unknown storage instance".into()))?;
+        if source_of(&record, args).map_err(bad)? == Source::Data {
+            return data_source(cx, &record, tool, args).await;
+        }
         let binding = record
             .storage
             .as_ref()
@@ -495,6 +533,37 @@ impl Storage {
         }
         Ok(inline_fields(&fields, size, bytes))
     }
+}
+
+/// A scoped call on the instance's data store, through its data Worker's signed ops: keys are
+/// the bucket's own (`blobs/…`, `derived/…`), and nothing else may be listed or read.
+async fn data_source(
+    cx: &Context<'_>,
+    record: &Instance,
+    tool: &str,
+    args: &Value,
+) -> Result<Value> {
+    use pigeon_ingest::datastore::DataCall;
+    let text = |k: &str| {
+        args[k]
+            .as_str()
+            .map(str::to_string)
+            .filter(|s| !s.is_empty())
+    };
+    let call = match tool {
+        "storage_get_object" => DataCall::Object {
+            key: arg(args, "key")?.to_string(),
+        },
+        _ => DataCall::Objects {
+            prefix: text("prefix").unwrap_or_default(),
+            cursor: text("token"),
+            limit: args["max_keys"].as_u64().map(|n| n.clamp(1, 1000) as u32),
+        },
+    };
+    let mut out = crate::data_store::call(cx.env, record, call).await?;
+    out["source"] = json!("data");
+    out["store"] = json!(crate::data_store::store_name(record));
+    Ok(out)
 }
 
 /// Reads a scoped object inline, without creating a reusable link or reading past the limit.

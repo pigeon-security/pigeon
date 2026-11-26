@@ -2766,6 +2766,7 @@ fn arch_home_capabilities() -> Vec<Box<dyn pigeon_capabilities::Capability>> {
             accounts: Vec::new(),
             passkeys: pk(),
         }),
+        Box::new(pigeon_capabilities::email::Email),
         Box::new(instances::Instances {
             zone: zone.into(),
             passkeys: pk(),
