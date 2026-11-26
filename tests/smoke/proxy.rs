@@ -432,6 +432,146 @@ fn worker_checks_cores_calls_with_its_own_key_then_the_shared_one() {
     assert_eq!(pigeon_contract::SHARED_KEY, "CALLER_KEY");
 }
 
+/// Step 3 of docs/plans/caller-keys.md, the signers: core signs each call to a bound Worker with
+/// that Worker's own key, which that Worker binds as `CALLER_KEY_OWN`, and no other Worker
+/// accepts it. Checked against the real wrangler files, so every remote capability in the split
+/// still gets its calls.
+#[test]
+fn core_signs_each_bound_workers_calls_with_that_workers_key() {
+    use pigeon_capabilities::split::{
+        WORKER_KEYS, signing_key_name, worker_key_name, worker_of_script,
+    };
+    use pigeon_contract::{Keys, Refused, WorkerContext, sign, sign_with_context};
+
+    // Core picks the key by the Worker it calls.
+    for (script, key) in [
+        ("pigeon-sites", "CALLER_KEY_SITES"),
+        ("pigeon-model-gateway", "CALLER_KEY_MODEL_GATEWAY"),
+        ("pigeon-ci-gateway", "CALLER_KEY_CI_GATEWAY"),
+        ("pigeon-ai-agents", "CALLER_KEY_AI_AGENTS"),
+        ("pigeon-cloud-gateway", "CALLER_KEY_CLOUD_GATEWAY"),
+        ("pigeon-proxy", "CALLER_KEY_PROXY"),
+    ] {
+        assert_eq!(signing_key_name(script), Ok(key), "{script}");
+    }
+    // Anything else gets nothing signed: not the shared key, not a guess.
+    for script in [
+        "pigeon-platform",
+        "pigeon-other",
+        "sites",
+        "",
+        "pigeon-",
+        "CALLER_KEY",
+    ] {
+        assert!(signing_key_name(script).is_err(), "{script}");
+    }
+    assert_eq!(worker_of_script("pigeon-ai-agents"), Some("ai-agents"));
+    assert_eq!(worker_of_script("pigeon-platform"), None);
+
+    let secrets = |file: &str| -> Vec<(String, String)> {
+        let parsed: toml::Value = file.parse().unwrap();
+        parsed["secrets_store_secrets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| {
+                (
+                    s["binding"].as_str().unwrap().to_string(),
+                    s["secret_name"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect()
+    };
+    // Every Worker core binds as a service has a key, and core binds that key by its name.
+    let core_file = include_str!("../../src/platform/wrangler.toml");
+    let core: toml::Value = core_file.parse().unwrap();
+    let services: Vec<&str> = core["services"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["service"].as_str().unwrap())
+        .collect();
+    assert!(services.len() >= 5, "{services:?}");
+    let core_secrets = secrets(core_file);
+    for script in &services {
+        let name = signing_key_name(script).unwrap_or_else(|e| panic!("{e}"));
+        assert!(
+            core_secrets.contains(&(name.to_string(), name.to_string())),
+            "core binds no {name} for {script}"
+        );
+    }
+    // Each Worker binds, as CALLER_KEY_OWN, the very key core signs its calls with.
+    let workers = [
+        (
+            "pigeon-sites",
+            include_str!("../../src/sites/wrangler.toml"),
+        ),
+        (
+            "pigeon-model-gateway",
+            include_str!("../../src/model-gateway/wrangler.toml"),
+        ),
+        (
+            "pigeon-ci-gateway",
+            include_str!("../../src/ci-gateway/wrangler.toml"),
+        ),
+        (
+            "pigeon-ai-agents",
+            include_str!("../../src/ai-agents-worker/wrangler.toml"),
+        ),
+        (
+            "pigeon-cloud-gateway",
+            include_str!("../../src/cloud-gateway/wrangler.toml"),
+        ),
+        (
+            "pigeon-proxy",
+            include_str!("../../src/proxy/wrangler.toml"),
+        ),
+    ];
+    for (script, file) in workers {
+        let name = signing_key_name(script).unwrap();
+        let own: Vec<_> = secrets(file)
+            .into_iter()
+            .filter(|(b, _)| b == "CALLER_KEY_OWN")
+            .collect();
+        assert_eq!(
+            own,
+            [("CALLER_KEY_OWN".to_string(), name.to_string())],
+            "{script}"
+        );
+        assert!(file.contains(&format!("name = \"{script}\"")), "{script}");
+    }
+
+    // A call core signs for each Worker verifies there, and at no other Worker.
+    let shared = b"shared".to_vec();
+    let secret = |name: &str| format!("key of {name}").into_bytes();
+    let worker_keys = |name: &str| Keys {
+        own: secret(name),
+        shared: Some(shared.clone()),
+    };
+    let (body, now) = (&br#"{"tool":"t"}"#[..], 1_800_000_000_000);
+    let who = json!({ "user": { "name": "willow" } });
+    for (to, _) in WORKER_KEYS {
+        let script = format!("pigeon-{to}");
+        let key = secret(signing_key_name(&script).unwrap());
+        let legacy = sign(&key, &who, "call", body, now, "n");
+        let context = WorkerContext::new(&script, Some("willow"));
+        let scoped = sign_with_context(&key, &who, "call", body, now, "n", &context);
+        for (at, _) in WORKER_KEYS {
+            let keys = worker_keys(worker_key_name(at).unwrap());
+            let at_script = format!("pigeon-{at}");
+            let got = keys.verify(Some(&legacy), "call", body, now, &at_script);
+            let got_scoped = keys.verify(Some(&scoped), "call", body, now, &at_script);
+            if at == to {
+                assert_eq!(got.unwrap().caller, who, "{to}");
+                assert_eq!(got_scoped.unwrap().instance(), Some("willow"), "{to}");
+            } else {
+                assert_eq!(got, Err(Refused::BadSignature), "{to} at {at}");
+                assert_eq!(got_scoped, Err(Refused::BadSignature), "{to} at {at}");
+            }
+        }
+    }
+}
+
 /// `workers_setup` makes exactly the caller keys the store lacks, and keeps the rest.
 #[test]
 fn workers_setup_plans_only_missing_caller_keys() {

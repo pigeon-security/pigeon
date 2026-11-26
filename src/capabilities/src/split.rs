@@ -8,8 +8,11 @@
 //!
 //! The ops: `credential`, `dispatch` and `approval` for a signed caller; and the proxy Worker's checks,
 //! `verify` (who holds a proxy credential), `grant` (a CI job token's grant) and `deploy_grant`
-//! (the caller a landing's deploy job token stands for), signed with `CALLER_KEY` but for no
-//! caller, since each carries the credential it asks about.
+//! (the caller a landing's deploy job token stands for), signed with the proxy's caller key but
+//! for no caller, since each carries the credential it asks about.
+//!
+//! Core signs its own calls to each capability Worker with that Worker's key
+//! ([`signing_key_name`], docs/plans/caller-keys.md, step 3).
 //!
 //! Core stays the front door. A capability Worker's call to `dispatch` runs through the same
 //! [`crate::dispatch`] as `/mcp`, gate included, as the caller core signed for it. A
@@ -164,10 +167,10 @@ pub async fn caller_key(env: &Env) -> Result<Vec<u8>> {
 /// signature with that Worker's own key. The claim proves nothing alone: only a signature made
 /// with that Worker's key passes.
 ///
-/// Per-Worker keys are not yet active: core binds the [`WORKER_KEYS`] and Workers send this
-/// header (step 2 of docs/plans/caller-keys.md), but every Worker still signs with the shared
-/// [`CALLER_KEY`], so its own key fails with a bad signature, the shared key passes
-/// ([`KeyUsed::Shared`]) and [`WORKER_OPS`] bounds nothing until step 3.
+/// A Worker that signs with its own key (step 3 of docs/plans/caller-keys.md) checks out as
+/// [`KeyUsed::Own`], and [`WORKER_OPS`] bounds what it may ask. One still signing with the
+/// shared [`CALLER_KEY`] fails its own key with a bad signature and passes with the shared key
+/// as [`KeyUsed::Shared`], unbounded, until step 4 drops the shared key.
 pub const WORKER_HEADER: &str = "X-Pigeon-Worker";
 
 /// The capability Workers that may get a key of their own, by the name they claim in
@@ -189,6 +192,25 @@ pub fn worker_key_name(worker: &str) -> Option<&'static str> {
         .iter()
         .find(|(w, _)| *w == worker)
         .map(|(_, k)| *k)
+}
+
+/// The name in [`WORKER_KEYS`] of the capability Worker deployed as `script` (its `script` in
+/// ci/workers.toml, `pigeon-` and the name); `None` for any other script. Pure.
+pub fn worker_of_script(script: &str) -> Option<&'static str> {
+    let name = script.strip_prefix("pigeon-")?;
+    WORKER_KEYS
+        .iter()
+        .find(|(w, _)| *w == name)
+        .map(|(w, _)| *w)
+}
+
+/// The Secrets Store binding core signs its calls to the Worker deployed as `script` with: that
+/// Worker's own key (docs/plans/caller-keys.md, step 3), so no other Worker's key, nor the
+/// shared one, signs for it. An unknown script is an error: core sends it nothing signed. Pure.
+pub fn signing_key_name(script: &str) -> std::result::Result<&'static str, String> {
+    worker_of_script(script)
+        .and_then(worker_key_name)
+        .ok_or_else(|| format!("{script} is not a capability Worker with a caller key of its own"))
 }
 
 /// `worker`'s own caller key from the Secrets Store, when core binds it and it is set; `None`

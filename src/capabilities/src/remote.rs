@@ -2,7 +2,8 @@
 //! capability looks like any other `Capability` to core: dispatch, the tool list, console
 //! sections, secrets, queue fan-out and the architecture page need no special case. Core asks
 //! each bound Worker for its manifest and keeps it a minute, so a capability deploy needs no
-//! core deploy. Calls carry the caller, signed with CALLER_KEY. A Worker that does not answer is
+//! core deploy. Calls carry the caller, signed with the bound Worker's own key
+//! (`CALLER_KEY_<WORKER>`, [`crate::split::signing_key_name`]). A Worker that does not answer is
 //! left out and shown as unreachable, rather than failing everything.
 
 use std::cell::RefCell;
@@ -31,7 +32,9 @@ pub struct Binding {
     pub worker: &'static str,
 }
 
-/// The Secrets Store binding holding the key that signs callers (docs/plans/workers-split.md).
+/// The Secrets Store binding of the shared caller key (docs/plans/workers-split.md). Core still
+/// accepts it from capability Workers until step 4 of docs/plans/caller-keys.md; it no longer
+/// signs its own calls to them with it.
 pub const CALLER_KEY: &str = "CALLER_KEY";
 
 /// How long a manifest is kept in this isolate, in milliseconds.
@@ -217,7 +220,7 @@ impl Remote {
         let nonce = webauthn::random()?;
         match caller {
             Some(caller) => {
-                let key = caller_key(env).await?;
+                let key = signing_key(env, self.worker).await?;
                 pigeon_contract::ask(
                     &fetcher,
                     BASE,
@@ -260,9 +263,17 @@ impl Remote {
     }
 }
 
-async fn caller_key(env: &Env) -> Result<String> {
-    let missing = || failure("the caller key (CALLER_KEY) is not set in the Secrets Store");
-    let store = env.secret_store(CALLER_KEY).map_err(|_| missing())?;
+/// The key core signs its calls to the Worker `script` with: that Worker's own key
+/// (docs/plans/caller-keys.md, step 3). Fails closed: a Worker with no known key, or a key
+/// that is not bound or not set, gets no call, never one signed with the shared key.
+async fn signing_key(env: &Env, script: &str) -> Result<String> {
+    let name = crate::split::signing_key_name(script).map_err(failure)?;
+    let missing = || {
+        failure(format!(
+            "{script}'s caller key ({name}) is not bound or not set in the Secrets Store"
+        ))
+    };
+    let store = env.secret_store(name).map_err(|_| missing())?;
     secrets_store::read(&store).await?.ok_or_else(missing)
 }
 
@@ -290,7 +301,7 @@ pub async fn call_owned_instance(
     )
     .map_err(failure)?;
     let fetcher = env.service(binding.binding)?;
-    let key = caller_key(&env).await?;
+    let key = signing_key(&env, binding.worker).await?;
     let nonce = webauthn::random()?;
     let body = json_of(&CallRequest {
         capability: Some(capability.to_string()),
@@ -461,7 +472,7 @@ impl Capability for Remote {
             let answer = if let Some(context) = context {
                 let fetcher = cx.env.service(self.binding)?;
                 let nonce = webauthn::random()?;
-                let key = caller_key(cx.env).await?;
+                let key = signing_key(cx.env, self.worker).await?;
                 pigeon_contract::ask_with_context(
                     &fetcher,
                     BASE,
