@@ -167,6 +167,13 @@ pub const CATALOGUE: &[Entry] = &[
         requires: &[crate::cloud_scope::NAME],
         ..BASE
     },
+    // Jobs › Runs reads instance-owned job history in core.
+    Entry {
+        name: JOBS,
+        linked: true,
+        opt_in: true,
+        ..BASE
+    },
     // Platform › Models.
     own("models", "pigeon-model-gateway"),
     // Instances › All instances, Platform › Endpoints, and creating and linking instances.
@@ -220,6 +227,9 @@ pub fn is_plumbing(name: &str) -> bool {
 
 /// The capability that works across instances: split out of `instances` (M2).
 pub const MULTI_INSTANCE: &str = "multi-instance";
+
+/// Read-only history of jobs that ran for an instance.
+pub const JOBS: &str = "jobs";
 
 /// The catalogue's entry for `name`, if it has one.
 pub fn find(name: &str) -> Option<&'static Entry> {
@@ -277,7 +287,10 @@ pub fn placement(record: &Instance, name: &str) -> Option<(Placement, Option<Str
         .unwrap_or(Placement::Inline);
     Some(match p {
         Placement::Inline
-            if matches!(name, crate::cloud_scope::NAME | crate::digitalocean::NAME) =>
+            if matches!(
+                name,
+                crate::cloud_scope::NAME | crate::digitalocean::NAME | JOBS
+            ) =>
         {
             (p, Some("pigeon-platform".into()))
         }

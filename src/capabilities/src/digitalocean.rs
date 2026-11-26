@@ -10,7 +10,7 @@ use crate::console::write::Write;
 use crate::instances::{
     self,
     record::Instance,
-    tools::{Enabled, Registration},
+    tools::{Enabled, Registration, View},
 };
 use crate::{Call, Capability, Context, catalogue, users::directory};
 
@@ -73,6 +73,34 @@ pub fn instance_tools(record: &Instance) -> serde_json::Result<Enabled> {
         (false, false) => &TOOLS,
     };
     Ok(Enabled::when(team(record).is_some(), tools, &[]))
+}
+
+/// Jobs owns historical inspection independently of current provider connections.
+pub fn jobs_instance_tools(record: &Instance) -> serde_json::Result<Enabled> {
+    const HISTORY_TOOLS: &[Registration] = &[
+        Registration {
+            name: health::JOBS,
+            description: None,
+            arguments: &[],
+        },
+        Registration {
+            name: health::JOB,
+            description: None,
+            arguments: &["id"],
+        },
+    ];
+    const VIEWS: &[View] = &[View {
+        area: "jobs",
+        id: "runs",
+        title: "Runs",
+        order: 10,
+        since: None,
+    }];
+    Ok(Enabled::when(
+        catalogue::hosted_enabled(record, catalogue::JOBS),
+        HISTORY_TOOLS,
+        VIEWS,
+    ))
 }
 
 /// The approved identity, available only with both capabilities enabled.
@@ -249,17 +277,44 @@ impl Capability for DigitalOcean {
                 "Show the approved temporary Droplet health plan and state.",
             ),
             Tool::bare(
+                health::JOBS,
+                "List temporary Droplet jobs recorded for this instance.",
+            ),
+            Tool {
+                name: health::JOB,
+                description: "Read one temporary Droplet job and its event history.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {"id": {"type": "string"}},
+                    "required": ["id"]
+                }),
+            },
+            Tool::bare(
                 spaces::VERIFY,
                 "Verify the approved DigitalOcean Spaces binding with one bounded read.",
             ),
         ]
     }
 
-    fn call<'a>(&'a self, cx: &'a Context<'a>, tool: &'a str, _args: &'a Value) -> Call<'a> {
+    fn call<'a>(&'a self, cx: &'a Context<'a>, tool: &'a str, args: &'a Value) -> Call<'a> {
         Box::pin(async move {
             let scope = cx
                 .instance
                 .ok_or_else(|| bad("use the approved instance's MCP endpoint"))?;
+            if matches!(tool, health::JOBS | health::JOB) {
+                let instance = scope.instance();
+                instances::one(cx.env, instance)
+                    .await?
+                    .filter(|record| {
+                        record.id == instance && catalogue::hosted_enabled(record, catalogue::JOBS)
+                    })
+                    .ok_or_else(|| bad("Jobs is not enabled on the approved instance"))?;
+                return if tool == health::JOBS {
+                    health::jobs(cx.env, instance).await
+                } else {
+                    health::job(cx.env, instance, args["id"].as_str().unwrap_or_default()).await
+                };
+            }
             let record = approved(cx.env, scope.instance()).await?;
             match tool {
                 STATUS => status(&record, cx.env).await,

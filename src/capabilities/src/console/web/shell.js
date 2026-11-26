@@ -34,6 +34,7 @@
     "storage_list_objects", "source_resolve_revision", "source_read_file", "ci_jobs", "ci_status",
     "observability_worker_metrics", "app_ingest_runs", "ingest_report", "digitalocean_status", "digitalocean_verify",
     "digitalocean_spaces_status", "digitalocean_spaces_verify", "digitalocean_droplet_status",
+    "digitalocean_droplet_jobs", "digitalocean_droplet_job",
     "ai_agents_status", "ai_agents_compare", "cost_daily", "land_list",
     "site_releases", "app_site_hosts", "app_site_visitors", "capabilities_versions", "capabilities_upgrade_plan",
     // Access and Platform.
@@ -85,6 +86,7 @@
     source: "M4.5 5v6M11.5 7c0 2.5-3 3-6.5 4M6 3.5a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0zM6 12.5a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0zM13 5.5a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0z",
     ci: "M5.5 8.2l1.8 1.8 3.2-4M14 8A6 6 0 1 1 2 8a6 6 0 0 1 12 0z",
     metrics: "M2 12l4-5 3 3 5-6",
+    jobs: "M2 3h12v10H2zM5 6h6M5 9h6",
     ingest: "M8 2v8M5 7l3 3 3-3M3 13h10",
     capabilities: "M6 2h4v3h3v4h-3v5H6V9H3V5h3z",
     sessions: "M2 4h12M2 8h8M2 12h10",
@@ -519,7 +521,7 @@
   }
 
   // ---- Routes. In fixture mode the route lives in the hash, so a static server can serve it.
-  const STABLE = ["inbox", "overview", "site", "storage", "source", "ci", "metrics", "ingest", "capabilities",
+  const STABLE = ["inbox", "overview", "site", "storage", "source", "ci", "metrics", "jobs", "ingest", "capabilities",
     "sessions", "cost", "access", "instances", "platform"];
   function parseRoute() {
     const raw = FIXTURES ? location.hash.replace(/^#\/?/, "") : location.pathname.slice(base.length);

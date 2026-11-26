@@ -1,7 +1,7 @@
 /* The console's read-only data views of one instance: Storage › Buckets, Source › Repository,
- * CI › Jobs, Metrics › Workers and Ingest › Runs. Each reads only through /app/op with the
+ * CI › Jobs, Metrics › Workers, Jobs › Runs and Ingest › Runs. Each reads only through /app/op with the
  * selected instance, which binds the call to that instance's approved record exactly as its MCP
- * endpoint does (console/web/ops.rs INSTANCE_OPS), so no view can name another bucket,
+ * endpoint does (console/web/ops.rs), so no view can name another bucket,
  * repository, Worker or job. None of them writes. */
 (() => {
   "use strict";
@@ -385,9 +385,68 @@
       }));
   }
 
+  // ---- Jobs › Runs: durable history, independent of the provider's live connection.
+  const estimatedUsd = (amount) => typeof amount === "number" && Number.isFinite(amount)
+    ? `${amount.toFixed(2)} USD` : "—";
+  const auditStatus = (status) => ({
+    not_configured: "No audit bucket",
+    pending: "Pending",
+    stored: "Stored in R2",
+    verified: "Verified in R2",
+  })[status] || status;
+  function jobHistory(ctx, row) {
+    const node = el("div", { class: "section" });
+    loadInto(node, () => ctx.op("digitalocean_droplet_job", { instance: ctx.instance.id, id: row.id }), (data) => {
+      const job = data.job;
+      return [
+        facts([
+          ["Job", code(job.id)],
+          ["Job state", job.state || "—"],
+          ["Provider state", job.provider_state || "—"],
+          ["Runner stage", job.stage || "—"],
+          ["Estimated cost", estimatedUsd(job.estimated_usd)],
+          ["Started", when(job.started_ms)],
+          ["Deadline", when(job.deadline_ms)],
+          ...(job.audit_status ? [["Audit export", auditStatus(job.audit_status)]] : []),
+        ]),
+        job.error ? el("p", { class: "error", text: job.error }) : null,
+        dataTable({
+          label: "Job events", noun: "events", signal: ctx.signal,
+          empty: "No runner stages have been recorded.",
+          columns: [
+            { label: "Time", cell: (event) => when(event.at_ms) },
+            { label: "Stage", cell: (event) => event.stage },
+            { label: "Outcome", cell: (event) => event.outcome },
+          ],
+          load: job.events || [],
+        }),
+      ];
+    }, "the job history");
+    return node;
+  }
+
+  function jobs(ctx) {
+    return el("div", { class: "view" }, dataTable({
+      label: "Job runs", noun: "runs", filter: "Filter runs", signal: ctx.signal,
+      empty: "No runs have been recorded for this instance.",
+      expand: (row) => jobHistory(ctx, row),
+      columns: [
+        { label: "Job", cls: "mono", cell: (job) => code(job.id) },
+        { label: "Provider", cell: () => "DigitalOcean" },
+        { label: "Job state", cell: (job) => job.state || "—" },
+        { label: "Provider state", cell: (job) => job.provider_state || "—" },
+        { label: "Runner stage", cell: (job) => job.stage || "—" },
+        { label: "Estimated cost", cls: "num", cell: (job) => estimatedUsd(job.estimated_usd) },
+        { label: "Started", cls: "num", cell: (job) => ago(job.started_ms) },
+      ],
+      load: async () => (await ctx.op("digitalocean_droplet_jobs", { instance: ctx.instance.id })).jobs || [],
+    }));
+  }
+
   register("storage", "buckets", storage);
   register("source", "repository", source);
   register("ci", "jobs", ci);
   register("metrics", "workers", metrics);
+  register("jobs", "runs", jobs);
   register("ingest", "runs", ingest);
 })();

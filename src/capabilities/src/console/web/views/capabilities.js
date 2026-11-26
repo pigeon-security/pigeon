@@ -134,6 +134,10 @@
   // Disabling removes the entry and its dependents.
   const CATALOGUE_ADDS = {
     architecture: { adds: ["Platform › Architecture"], what: "Show this instance’s own setup: its Worker, bucket, hostnames and tools" },
+    jobs: {
+      adds: ["Jobs › Runs"], what: "Inspect this instance’s job history",
+      effect: "Shows instance-owned job history. An approved audit bucket can receive copies of job events.",
+    },
     cloud: { what: "Enable Cloud Gateway status for this instance", effect: "Adds cloud_status to the instance’s MCP endpoint." },
     digitalocean: {
       what: "Connect the instance to one DigitalOcean team",
@@ -144,6 +148,7 @@
   function catalogueCaps(versions, home) {
     return (versions?.catalogue || []).filter((e) => (home ? e.opt_in : e.linked) && !e.always && e.name !== "redirects").map((e) => {
       const digitalOcean = e.name === "digitalocean";
+      const jobs = e.name === "jobs" && !home;
       const configurable = !home && (e.placements || []).includes("own_worker");
       const choices = versions.linked_placement_choices?.[e.name] || ["inline"];
       return {
@@ -160,6 +165,8 @@
           } : {}) };
         },
         fields: () => [
+          ...(jobs ? [{ key: "audit_bucket", label: "R2 audit bucket", mono: true, optional: true,
+            hint: "An existing private bucket in this instance’s Cloudflare account." }] : []),
           ...(digitalOcean ? [{ key: "team_id", label: "DigitalOcean team ID", mono: true,
             hint: "Verification checks that the token belongs to this team.",
             validate: (value) => /^[A-Za-z0-9_-]{1,128}$/.test(value) },
@@ -183,6 +190,10 @@
         ],
         apply: (r, v) => {
           const settings = { ...r.capabilities?.[e.name] };
+          if (jobs) {
+            if (v.audit_bucket) settings.audit_bucket = v.audit_bucket;
+            else delete settings.audit_bucket;
+          }
           if (configurable) settings.placement = v.placement;
           if (digitalOcean) {
             settings.team_id = v.team_id;

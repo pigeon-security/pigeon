@@ -2239,6 +2239,49 @@ pub(super) fn hosted_views() -> Vec<(
     platform
 }
 
+#[test]
+fn jobs_view_and_reads_are_opt_in_per_instance() {
+    use pigeon_capabilities::digitalocean::health::{JOB, JOBS};
+    use pigeon_capabilities::instances::{manifest::manifest, record::Instance, tools::Scope};
+
+    let mut raw = json!({"id":"linked", "title":"Linked", "account":{"kind":"linked"}});
+    let scope_of = |raw: &serde_json::Value| {
+        let record = serde_json::from_value::<Instance>(raw.clone()).unwrap();
+        let scope = Scope::new(&record).unwrap();
+        (record, scope)
+    };
+
+    let (_, scope) = scope_of(&raw);
+    assert!(scope.bind(JOBS, &json!({})).is_err());
+
+    raw["capabilities"] = json!({"jobs": {}});
+    let (record, scope) = scope_of(&raw);
+    assert_eq!(
+        scope.bind(JOBS, &json!({})).unwrap(),
+        json!({"instance":"linked"})
+    );
+    assert_eq!(
+        scope.bind(JOB, &json!({"id":"older"})).unwrap()["id"],
+        "older"
+    );
+    assert!(
+        scope
+            .bind(JOB, &json!({"id":"older", "instance":"other"}))
+            .is_err()
+    );
+    assert!(scope.bind(JOBS, &json!({"id":"older"})).is_err());
+
+    let value = manifest(&record, &scope, &[], &[], None);
+    let area = value["areas"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|area| area["id"] == "jobs")
+        .unwrap();
+    assert_eq!(area["views"][0]["id"], "runs");
+    assert_eq!(area["views"][0]["capability"], "jobs");
+}
+
 /// Every area and view `console_manifest` can send: its answer for a home instance with every
 /// instance capability enabled, given every hosted capability's views ([`hosted_views`]).
 fn console_every_view() -> std::collections::BTreeMap<String, Vec<String>> {
@@ -2246,6 +2289,7 @@ fn console_every_view() -> std::collections::BTreeMap<String, Vec<String>> {
 
     let record: Instance = serde_json::from_value(json!({
         "id": "all", "title": "All", "account": { "kind": "home" },
+        "capabilities": { "jobs": {} },
         "zones": ["example.com"], "worker": "all-worker",
         "repo": { "kind": "artifacts", "namespace": "example", "repo": "all" },
         "sites": [{ "name": "blog", "bucket": "all-site", "auth": "passkey", "targets": [] }],

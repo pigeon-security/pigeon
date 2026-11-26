@@ -33,6 +33,8 @@ pub const READS: &[(&str, &[&str])] = &[
     (crate::digitalocean::spaces::STATUS, &["instance"]),
     (crate::digitalocean::spaces::VERIFY, &["instance"]),
     (crate::digitalocean::health::STATUS, &["instance"]),
+    (crate::digitalocean::health::JOBS, &["instance"]),
+    (crate::digitalocean::health::JOB, &["instance", "id"]),
     ("capabilities_versions", &["instance", "changelog"]),
     ("capabilities_upgrade_plan", &["instance"]),
     // Site: deployments (immutable releases and the live pointer) and visitors.
@@ -432,7 +434,9 @@ pub(super) async fn serve(
             | crate::digitalocean::VERIFY
             | crate::digitalocean::spaces::STATUS
             | crate::digitalocean::spaces::VERIFY
-            | crate::digitalocean::health::STATUS => {
+            | crate::digitalocean::health::STATUS
+            | crate::digitalocean::health::JOBS
+            | crate::digitalocean::health::JOB => {
                 let id = args["instance"]
                     .as_str()
                     .ok_or_else(|| bad("expected an instance ID"))?;

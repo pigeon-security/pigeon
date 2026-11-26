@@ -476,3 +476,14 @@ distinct from the provider lifecycle. No shell output, provisioning
 credential, callback bearer, or response body is collected. The payload
 still requires the exact expected version to pass. Legacy callback
 messages remain accepted until jobs from a previous revision finish.
+### Jobs history in the console
+
+Enable `capabilities.jobs` on the approved instance to show **Jobs → Runs**.
+Jobs is independent of the current provider connection. Its first history
+reader shows the instance's stored temporary DigitalOcean Droplet runs and
+opens a run's event history by its exact id. The read checks the approved
+instance and requires viewer access. It never needs a provider credential or
+contacts a provider. The view distinguishes provider lifecycle, runner stage,
+and the approved estimated cost. An optional private R2 audit target is
+configured on the Jobs profile. Show the export state only when the run record
+reports it.
