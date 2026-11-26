@@ -387,7 +387,7 @@
 
   // ---- Jobs › Runs: durable history, independent of the provider's live connection.
   const estimatedUsd = (amount) => typeof amount === "number" && Number.isFinite(amount)
-    ? `${amount.toFixed(2)} USD` : "—";
+    ? (amount > 0 && amount < 0.01 ? "<0.01 USD" : `${amount.toFixed(2)} USD`) : "—";
   const auditStatus = (status) => ({
     not_configured: "No audit bucket",
     pending: "Pending",
