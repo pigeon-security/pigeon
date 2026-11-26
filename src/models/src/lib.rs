@@ -648,6 +648,47 @@ fn kind_rank(kind: GatewayKind) -> u8 {
     }
 }
 
+/// Each of `gateways` (id and kind, in the order wanted) read with `read`, all at once, answered
+/// in `gateways`' order whatever order the reads end in: each with whether it stopped at `max`.
+/// When `allow_unprovisioned`, a gateway whose logs endpoint answers 404 (configured, not yet
+/// created) reads as empty. Any other failure fails the whole read, the first in `gateways`'
+/// order, as reading them one after another would.
+pub async fn read_gateways<'g, F, Fut>(
+    gateways: &[(&'g str, GatewayKind)],
+    read: F,
+    max: usize,
+    allow_unprovisioned: bool,
+) -> Result<Vec<daily::GatewayLogs>>
+where
+    F: Fn(&'g str) -> Fut,
+    Fut: Future<Output = Result<Vec<ai_gateway::Log>>>,
+{
+    let reads = futures_util::future::join_all(gateways.iter().map(|(id, _)| read(id))).await;
+    let mut out = Vec::with_capacity(gateways.len());
+    for (&(id, kind), got) in gateways.iter().zip(reads) {
+        let logs = match got {
+            Ok(logs) => logs,
+            // A configured gateway may not have been created yet. Only accept a 404
+            // from its logs endpoint, not a failure to get the scoped credential.
+            Err(e)
+                if allow_unprovisioned
+                    && e.to_string().contains(&format!("/gateways/{id}/logs?"))
+                    && e.to_string().contains(": 404:") =>
+            {
+                Vec::new()
+            }
+            Err(e) => return Err(e),
+        };
+        out.push(daily::GatewayLogs {
+            id: id.to_string(),
+            kind,
+            truncated: logs.len() >= max,
+            logs,
+        });
+    }
+    Ok(out)
+}
+
 /// Whether a Cloudflare API error text says the gateway does not exist: a 404, or a body with
 /// Cloudflare's "not found" message (the API's exact answer for a missing gateway is not verified).
 pub fn is_missing(error: &str) -> bool {
@@ -993,7 +1034,8 @@ impl Models {
     }
 
     /// Every declared gateway's logs since `since_ms`, each with its kind and whether the read
-    /// stopped at `max`; Byok gateways first.
+    /// stopped at `max`; Byok gateways first. The gateways are read at once, under one token, each
+    /// paging as [`ai_gateway::LogsReader::logs`] does; see [`read_gateways`].
     async fn gateway_logs(
         &self,
         account: &Account,
@@ -1002,31 +1044,21 @@ impl Models {
         max: usize,
         allow_unprovisioned: bool,
     ) -> Result<Vec<daily::GatewayLogs>> {
-        let mut order: Vec<&Gateway> = self.gateways.iter().collect();
-        order.sort_by_key(|g| kind_rank(g.kind));
-        let mut out = Vec::new();
-        for g in order {
-            let logs = match ai_gateway::logs(account, &g.id, since_ms, filter, max).await {
-                Ok(logs) => logs,
-                // A configured gateway may not have been created yet. Only accept a 404
-                // from its logs endpoint, not a failure to get the scoped credential.
-                Err(e)
-                    if allow_unprovisioned
-                        && e.to_string().contains(&format!("/gateways/{}/logs?", g.id))
-                        && e.to_string().contains(": 404:") =>
-                {
-                    Vec::new()
-                }
-                Err(e) => return Err(e),
-            };
-            out.push(daily::GatewayLogs {
-                id: g.id.clone(),
-                kind: g.kind,
-                truncated: logs.len() >= max,
-                logs,
-            });
-        }
-        Ok(out)
+        let mut order: Vec<(&str, GatewayKind)> = self
+            .gateways
+            .iter()
+            .map(|g| (g.id.as_str(), g.kind))
+            .collect();
+        order.sort_by_key(|(_, kind)| kind_rank(*kind));
+        let reader = ai_gateway::LogsReader::open(account).await?;
+        let read = read_gateways(
+            &order,
+            |id| reader.logs(id, since_ms, filter, max),
+            max,
+            allow_unprovisioned,
+        )
+        .await;
+        reader.finish(read).await
     }
 
     /// Every gateway's logs in one list, each log's provider replaced by its [`route_of`] name,

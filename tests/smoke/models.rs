@@ -1172,3 +1172,206 @@ fn models_openai_responses_reply() {
     assert_eq!(reply.stop_reason.as_deref(), Some("tool_use"));
     assert_eq!((reply.tokens_in, reply.tokens_out), (Some(10), Some(30)));
 }
+
+/// `read_gateways` reads every gateway at once yet answers as a read one after another would:
+/// the same logs, in the gateways' order, however the reads interleave and end; an unprovisioned
+/// gateway's 404 reads as empty when allowed, and a failure is the first in the gateways' order.
+#[test]
+fn models_gateway_logs_read_at_once_in_order() {
+    use pigeon_core::ai_gateway::{GatewayKind, Log};
+    use pigeon_models::read_gateways;
+    use std::cell::RefCell;
+    use std::task::Poll;
+
+    let log = |at: &str, provider: &str, model: &str, cost: f64| -> Log {
+        serde_json::from_value(json!({
+            "created_at": at, "provider": provider, "model": model, "cost": cost,
+        }))
+        .unwrap_or_default()
+    };
+    // Byok first, as `gateway_logs` sorts them.
+    let gateways = [
+        ("pigeon-anthropic", GatewayKind::Byok),
+        ("pigeon-openai", GatewayKind::Byok),
+        ("pigeon", GatewayKind::Retired),
+        ("pigeon-cloudflare", GatewayKind::Credits),
+    ];
+    let logs_of = |id: &str| -> Vec<Log> {
+        match id {
+            "pigeon-anthropic" => vec![
+                log("2026-11-25T03:00:00Z", "anthropic", "claude-opus-5-5", 1.5),
+                log("2026-11-25T01:00:00Z", "anthropic", "claude-haiku-5-5", 0.1),
+            ],
+            "pigeon-openai" => vec![log("2026-11-25T02:00:00Z", "openai", "gpt-6.2-sol", 0.4)],
+            "pigeon" => Vec::new(),
+            _ => vec![
+                log(
+                    "2026-11-25T04:00:00Z",
+                    "anthropic",
+                    "claude-sonnet-5-5",
+                    0.7,
+                ),
+                log("2026-11-25T00:30:00Z", "workers-ai", "llama", 0.0),
+                log("2026-11-25T00:10:00Z", "workers-ai", "llama", 0.0),
+            ],
+        }
+    };
+    // How many times each gateway's read is pending before it answers: the first in order ends
+    // last, so the reads end in another order than they start.
+    let delay = |id: &str| match id {
+        "pigeon-anthropic" => 7,
+        "pigeon-openai" => 1,
+        "pigeon" => 4,
+        _ => 0,
+    };
+    let shape = |read: &[pigeon_models::daily::GatewayLogs]| -> Value {
+        json!(
+            read.iter()
+                .map(|g| json!({
+                    "id": g.id,
+                    "kind": format!("{:?}", g.kind),
+                    "truncated": g.truncated,
+                    "logs": g.logs.iter().map(|l| json!([l.created_at, l.provider, l.model, l.cost])).collect::<Vec<_>>(),
+                }))
+                .collect::<Vec<_>>()
+        )
+    };
+    // A gateway double: its logs (or `fail`'s error) after `delay` polls, recording when it
+    // started and ended.
+    let events = RefCell::new(Vec::<String>::new());
+    let double = |id: &'static str, fail: Option<&'static str>| {
+        let events = &events;
+        let mut left = delay(id);
+        let mut started = false;
+        std::future::poll_fn(move |_| {
+            if !started {
+                started = true;
+                events.borrow_mut().push(format!("start {id}"));
+            }
+            if left > 0 {
+                left -= 1;
+                return Poll::Pending;
+            }
+            events.borrow_mut().push(format!("end {id}"));
+            Poll::Ready(match fail {
+                Some(e) => Err(worker::Error::RustError(e.replace("{id}", id))),
+                None => Ok(logs_of(id)),
+            })
+        })
+    };
+
+    // One after another, the way `gateway_logs` read them before.
+    let mut sequential = Vec::new();
+    for (id, kind) in gateways {
+        let logs = super::core::token_block_on(double(id, None)).unwrap();
+        sequential.push(pigeon_models::daily::GatewayLogs {
+            id: id.into(),
+            kind,
+            truncated: logs.len() >= 3,
+            logs,
+        });
+    }
+    events.borrow_mut().clear();
+
+    let at_once =
+        super::core::token_block_on(read_gateways(&gateways, |id| double(id, None), 3, false))
+            .unwrap();
+    assert_eq!(shape(&at_once), shape(&sequential));
+    assert_eq!(
+        at_once.iter().map(|g| g.id.as_str()).collect::<Vec<_>>(),
+        [
+            "pigeon-anthropic",
+            "pigeon-openai",
+            "pigeon",
+            "pigeon-cloudflare"
+        ]
+    );
+    // Only the gateway that hit `max` is truncated.
+    assert_eq!(
+        at_once.iter().map(|g| g.truncated).collect::<Vec<_>>(),
+        [false, false, false, true]
+    );
+    // Concurrent: every read started before the first one ended, and they ended out of order.
+    let events = events.into_inner();
+    let first_end = events.iter().position(|e| e.starts_with("end")).unwrap();
+    assert_eq!(
+        events[..first_end]
+            .iter()
+            .filter(|e| e.starts_with("start"))
+            .count(),
+        4
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e.starts_with("end"))
+            .collect::<Vec<_>>(),
+        [
+            "end pigeon-cloudflare",
+            "end pigeon-openai",
+            "end pigeon",
+            "end pigeon-anthropic"
+        ]
+    );
+
+    // A gateway not created yet: its logs endpoint's 404 reads as empty when allowed.
+    let missing =
+        "Cloudflare API GET /accounts/a/ai-gateway/gateways/{id}/logs?per_page=50: 404: not found";
+    let events = RefCell::new(Vec::<String>::new());
+    let double = |id: &'static str, fail: Option<&'static str>| {
+        let events = &events;
+        let mut left = delay(id);
+        std::future::poll_fn(move |_| {
+            if left > 0 {
+                left -= 1;
+                return Poll::Pending;
+            }
+            events.borrow_mut().push(id.to_string());
+            Poll::Ready(match fail {
+                Some(e) => Err(worker::Error::RustError(e.replace("{id}", id))),
+                None => Ok(logs_of(id)),
+            })
+        })
+    };
+    let fail_on = |bad: &'static str, error: &'static str| {
+        move |id: &'static str| double(id, (id == bad).then_some(error))
+    };
+    let read = super::core::token_block_on(read_gateways(
+        &gateways,
+        fail_on("pigeon", missing),
+        3,
+        true,
+    ))
+    .unwrap();
+    assert_eq!(read.len(), 4);
+    assert_eq!(read[2].id, "pigeon");
+    assert!(read[2].logs.is_empty() && !read[2].truncated);
+    assert_eq!(shape(&read[..2]), shape(&sequential[..2]));
+    assert_eq!(shape(&read[3..]), shape(&sequential[3..]));
+    // Not allowed, the same 404 fails the read.
+    let failed = super::core::token_block_on(read_gateways(
+        &gateways,
+        fail_on("pigeon", missing),
+        3,
+        false,
+    ));
+    assert!(
+        failed
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("/gateways/pigeon/logs?")
+    );
+    // Two failures: the first in the gateways' order is the one answered, though the other ended
+    // first, as a read one after another would have stopped there.
+    let two = |id: &'static str| {
+        let error = match id {
+            "pigeon-anthropic" => Some("anthropic down"),
+            "pigeon-cloudflare" => Some("cloudflare down"),
+            _ => None,
+        };
+        double(id, error)
+    };
+    let failed = super::core::token_block_on(read_gateways(&gateways, two, 3, true));
+    assert_eq!(failed.err().unwrap().to_string(), "anthropic down");
+}

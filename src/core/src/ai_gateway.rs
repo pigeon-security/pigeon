@@ -712,23 +712,50 @@ impl Filter {
     }
 }
 
-/// Gateway `gateway`'s logs since `since_ms` (milliseconds since the epoch), newest first, those
-/// `filter` keeps only: at most `max`, so a busy gateway cannot run a call long.
-pub async fn logs(
-    account: &Account,
-    gateway: &str,
-    since_ms: f64,
-    filter: &Filter,
-    max: usize,
-) -> Result<Vec<Log>> {
-    let token = Scoped::open(
-        account,
-        "ai-gateway",
-        vec![Policy::new(Scope::Account, &READ_PERMISSIONS)],
-    )
-    .await?;
-    let read = logs_with(token.value(), account, gateway, since_ms, filter, max).await;
-    token.finish(read).await
+/// One read-only token for several gateways' log reads, which may run at once: one mint and one
+/// revoke against the account's API budget, not one of each per gateway. Call
+/// [`LogsReader::finish`] to revoke it.
+pub struct LogsReader<'a> {
+    account: &'a Account,
+    token: Scoped<'a>,
+}
+
+impl<'a> LogsReader<'a> {
+    /// Mints the token, holding only [`READ_PERMISSIONS`].
+    pub async fn open(account: &'a Account) -> Result<Self> {
+        let token = Scoped::open(
+            account,
+            "ai-gateway",
+            vec![Policy::new(Scope::Account, &READ_PERMISSIONS)],
+        )
+        .await?;
+        Ok(Self { account, token })
+    }
+
+    /// Gateway `gateway`'s logs since `since_ms` (milliseconds since the epoch), newest first,
+    /// those `filter` keeps only: at most `max`, so a busy gateway cannot run a call long.
+    pub async fn logs(
+        &self,
+        gateway: &str,
+        since_ms: f64,
+        filter: &Filter,
+        max: usize,
+    ) -> Result<Vec<Log>> {
+        logs_with(
+            self.token.value(),
+            self.account,
+            gateway,
+            since_ms,
+            filter,
+            max,
+        )
+        .await
+    }
+
+    /// Revokes the token, then answers `result`: the work's own error comes first.
+    pub async fn finish<T>(self, result: Result<T>) -> Result<T> {
+        self.token.finish(result).await
+    }
 }
 
 async fn logs_with(
