@@ -22,6 +22,7 @@ use worker::{Context, Date, Env, Method, Request, Response, Result, SqlStorage, 
 // The `durable_object` macro's expansion names `wasm_bindgen` at the crate root.
 use worker::wasm_bindgen;
 
+// Redeployed by a landing that touches only this crate (second rehearsal, fallback deploy).
 /// This Worker's name, as deployed.
 const WORKER: &str = "pigeon-dotest-a";
 /// The Durable Object binding.
