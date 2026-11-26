@@ -39,8 +39,6 @@ workspace crate the Worker crate pulls in, directly or not.
   - links: `src/blog`, `src/contract`, `src/core`, `src/landing`
 - `model-gateway`: script `pigeon-model-gateway`, crate `src/model-gateway`, config `src/model-gateway/wrangler.toml`
   - links: `src/contract`, `src/core`, `src/models`
-- `cloud-gateway`: script `pigeon-cloud-gateway`, crate `src/cloud-gateway`, config `src/cloud-gateway/wrangler.toml`
-  - links: `src/cloud`, `src/contract`, `src/core`
 - `ci-gateway`: script `pigeon-ci-gateway`, crate `src/ci-gateway`, config `src/ci-gateway/wrangler.toml`
   - links: `src/ci`, `src/contract`, `src/core`
 - `proxy`: script `pigeon-proxy`, crate `src/proxy`, config `src/proxy/wrangler.toml`
@@ -61,10 +59,10 @@ workspace crate the Worker crate pulls in, directly or not.
   Modules:
   `accounts`, `ai_agents`, `apple`, `ci`, `cloud`, `console`, `core`, `instances`, `land`, `models`, `observability`, `policy`, `proxy`, `sites`
 - CI: `.pigeon/ci.toml` defines the jobs, `ci/runner` holds their scripts. Jobs:
-  `smoke`, `smoke-fail`, `test`, `allowlist`, `deploy`, `sleep`, `deploy-sites`, `deploy-model-gateway`, `deploy-cloud-gateway`, `deploy-ci-gateway`, `deploy-proxy`, `deploy-ai-agents`, `ios-check`, `ios-release`
+  `smoke`, `smoke-fail`, `test`, `allowlist`, `deploy`, `sleep`, `deploy-sites`, `deploy-model-gateway`, `deploy-ci-gateway`, `deploy-proxy`, `deploy-ai-agents`, `ios-check`, `ios-release`
   Run the gate with `sh ci/runner/test.sh`.
 - Deploy: `ci/deploy/deploy.sh` and one `ci/deploy/deploy-<worker>.sh` per capability
   Worker. Scripts in `ci/deploy`:
-  `allowlist.sh`, `deploy-ai-agents.sh`, `deploy-ci-gateway.sh`, `deploy-cloud-gateway.sh`, `deploy-model-gateway.sh`, `deploy-proxy.sh`, `deploy-sites.sh`, `deploy.sh`, `node.sh`, `standin.mjs`
+  `allowlist.sh`, `deploy-ai-agents.sh`, `deploy-ci-gateway.sh`, `deploy-model-gateway.sh`, `deploy-proxy.sh`, `deploy-sites.sh`, `deploy.sh`, `node.sh`, `standin.mjs`
 - Worker ownership of paths (lanes): `ci/workers.toml`.
 - This map: `ci/repo-map.sh` writes `src/ai-agents/repo-map.md`.

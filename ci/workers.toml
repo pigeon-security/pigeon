@@ -59,6 +59,8 @@ paths = [
     # The email library (docs/plans/email.md): used by no Worker yet. Move it into its Worker's
     # paths when one depends on it.
     "src/email/*",
+    "src/cloud/*",
+    "src/cloud-gateway/*",
     # The data Worker and the ingest runner (docs/plans/ingest.md): not platform Workers, never
     # deployed by a landing. The ingest library they use is linked by core, so it is core's.
     "src/data-worker/*",
@@ -113,18 +115,6 @@ dir = "src/model-gateway"
 paths = ["src/model-gateway/*", "src/models/*", "ci/deploy/deploy-model-gateway.sh"]
 test_job = "test"
 deploy_job = "deploy-model-gateway"
-after = ["portal_sync"]
-
-# The cloud gateway Worker: Scaleway's API keys, buckets and objects behind the contract, every
-# change a plan the person approves first. A capability Worker behind core
-# (docs/plans/cloud-gateway.md).
-[[worker]]
-name = "cloud-gateway"
-script = "pigeon-cloud-gateway"
-dir = "src/cloud-gateway"
-paths = ["src/cloud-gateway/*", "src/cloud/*", "ci/deploy/deploy-cloud-gateway.sh"]
-test_job = "test"
-deploy_job = "deploy-cloud-gateway"
 after = ["portal_sync"]
 
 # The CI gateway Worker: CI's tools and /ci/ routes behind the contract, and the scheduler's

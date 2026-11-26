@@ -311,8 +311,7 @@
         "inline",
         "own_worker"
       ],
-      "home": "own_worker",
-      "home_worker": "pigeon-cloud-gateway",
+      "home": "inline",
       "scope": "instance",
       "availability": "any",
       "requires": [],

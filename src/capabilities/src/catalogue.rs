@@ -151,12 +151,13 @@ pub const CATALOGUE: &[Entry] = &[
         requires: &["secrets"],
         ..BASE
     },
-    // Linked instances serve only scoped status, inline on core. The provider tools
-    // use the home Worker and remain off unless the home record opts in.
+    // Cloud Gateway setup status runs inline on core.
     Entry {
         linked: true,
         opt_in: true,
-        ..own(crate::cloud_scope::NAME, "pigeon-cloud-gateway")
+        name: crate::cloud_scope::NAME,
+        placements: &[Placement::Inline, Placement::OwnWorker],
+        ..BASE
     },
     // Platform › Models.
     own("models", "pigeon-model-gateway"),

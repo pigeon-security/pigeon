@@ -1077,11 +1077,15 @@ fn land_rebases_disjoint_branches_and_lanes() {
             "pigeon-platform",
             "pigeon-sites",
             "pigeon-model-gateway",
-            "pigeon-cloud-gateway",
             "pigeon-ci-gateway",
             "pigeon-proxy",
             "pigeon-ai-agents"
         ]
+    );
+    assert!(map.worker("cloud-gateway").is_none());
+    assert!(
+        map.deploy_order(&map.classify(&["src/cloud-gateway/src/lib.rs"]))
+            .is_empty()
     );
     assert!(map.worker("sites").unwrap().queues.is_empty());
     // A Worker's deploy scope: its queues and container classes, from the map.
@@ -1126,7 +1130,6 @@ fn land_rebases_disjoint_branches_and_lanes() {
             "core",
             "sites",
             "model-gateway",
-            "cloud-gateway",
             "ci-gateway",
             "proxy",
             "ai-agents"

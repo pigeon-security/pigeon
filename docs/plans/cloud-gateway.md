@@ -332,3 +332,18 @@ offers only setup status.
 No provider connection, secret slot, compute permission, or linked-account
 deployment is created by enabling the capability. Instance-specific provider
 bindings and runner lifecycle operations are separate follow-up work.
+
+## Retiring the home Worker
+
+Home has no Cloud Gateway by default. Remove the platform Service Binding and
+automatic home deploy lane before deleting the legacy Worker in the home
+Cloudflare account. Verify the deployed core revision has no CLOUD binding,
+then delete only the named Worker. Preserve existing secret values during
+this cutover so a rollback can restore the old binding and Worker together.
+
+Linked records use `capabilities.cloud.placement: inline` (the default).
+The inline core capability currently provides scoped setup status. The
+catalogue also models `own_worker`, but M5 validation must decline it until
+a linked-account build is registered, the signed instance context is
+verified in that Worker, and it resolves provider credentials in the
+approved instance account. The legacy home wrapper is not that build.

@@ -602,13 +602,7 @@ fn core_architecture_draws_every_worker_in_the_map() {
             "pigeon-ai-agents",
             json!({ "name": "ai_agents", "tools": [tool("ai_agents_start")], "footprint": null }),
         ),
-        // The cloud gateway: its real manifest entry, so its tools and outbound hosts are the ones
-        // the Worker serves.
-        remote(
-            "CLOUD",
-            "pigeon-cloud-gateway",
-            serde_json::to_value(pigeon_cloud::capability()).unwrap(),
-        ),
+        Box::new(pigeon_capabilities::cloud_scope::Inline),
     ];
     let hosted = Hosted {
         worker: "pigeon-platform",
@@ -765,7 +759,6 @@ fn core_architecture_draws_every_worker_in_the_map() {
         ("MODELS", "pigeon-model-gateway"),
         ("CI", "pigeon-ci-gateway"),
         ("AI_AGENTS", "pigeon-ai-agents"),
-        ("CLOUD", "pigeon-cloud-gateway"),
     ] {
         assert!(has("pigeon-platform", to, binding), "core binds {binding}");
     }
@@ -775,7 +768,6 @@ fn core_architecture_draws_every_worker_in_the_map() {
         "pigeon-ci-gateway",
         "pigeon-proxy",
         "pigeon-ai-agents",
-        "pigeon-cloud-gateway",
     ] {
         assert!(has(from, "pigeon-platform", "PLATFORM"), "{from}: PLATFORM");
     }
@@ -810,28 +802,13 @@ fn core_architecture_draws_every_worker_in_the_map() {
         .iter()
         .map(|e| e["name"].as_str().unwrap())
         .collect();
-    assert_eq!(externals, ["AI Gateway", "Buildkite", "Scaleway"]);
-    // Scaleway is drawn with the four hosts the cloud gateway may call, and no others.
-    let scaleway = model["externals"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|e| e["name"] == "Scaleway")
-        .unwrap();
-    assert_eq!(
-        scaleway["detail"],
-        "api.scaleway.com, s3.fr-par.scw.cloud, s3.nl-ams.scw.cloud, s3.pl-waw.scw.cloud"
-    );
-    assert_eq!(
-        strs(&worker("pigeon-cloud-gateway")["tools"]).len(),
-        pigeon_cloud::tools::TOOLS.len()
-    );
-    assert!(strs(&worker("pigeon-cloud-gateway")["tools"]).contains(&"cloud_apply".into()));
+    assert_eq!(externals, ["AI Gateway", "Buildkite"]);
+    assert!(strs(&worker("pigeon-platform")["tools"]).contains(&"cloud_status".into()));
     assert!(drawing.contains("Buildkite"));
     // The drawing names every link's binding and every external, in both views.
     let public_drawing = &built(&hosted).public_drawing;
     for view in [drawing, public_drawing] {
-        for binding in ["SITES", "MODELS", "CI", "AI_AGENTS", "CLOUD", "PLATFORM"] {
+        for binding in ["SITES", "MODELS", "CI", "AI_AGENTS", "PLATFORM"] {
             assert!(view.contains(binding), "{binding} labels an arrow");
         }
         for name in &externals {
@@ -2836,11 +2813,7 @@ fn arch_home_capabilities() -> Vec<Box<dyn pigeon_capabilities::Capability>> {
         "pigeon-ai-agents",
         pigeon_ai_agents::service::Agents.manifest(),
     ));
-    caps.extend(remote(
-        "CLOUD",
-        "pigeon-cloud-gateway",
-        pigeon_cloud::CloudGateway::new().manifest(),
-    ));
+    caps.push(Box::new(pigeon_capabilities::cloud_scope::Inline));
     caps
 }
 

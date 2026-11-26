@@ -1,5 +1,5 @@
 //! Cloud Gateway instance opt-in. Scoped status answers from the approved
-//! instance record. The existing provider tools use the platform's shared credentials.
+//! instance record. Provider operations require a future instance-bound implementation.
 
 use serde_json::{Value, json};
 use worker::{Env, Error, Result};
@@ -80,4 +80,42 @@ pub async fn authorize(
         false
     };
     route(scope, enabled, tool, args).map_err(Error::RustError)
+}
+
+/// Inline capability for setup status, independent of any remote manifest.
+pub struct Inline;
+
+impl crate::Capability for Inline {
+    fn name(&self) -> &'static str {
+        NAME
+    }
+
+    fn tools(&self) -> Vec<pigeon_core::mcp::Tool> {
+        vec![pigeon_core::mcp::Tool::bare(
+            STATUS,
+            "Cloud Gateway setup status for the approved instance.",
+        )]
+    }
+
+    fn call<'a>(
+        &'a self,
+        _cx: &'a crate::Context<'a>,
+        _tool: &'a str,
+        _args: &'a Value,
+    ) -> crate::Call<'a> {
+        Box::pin(async {
+            Ok(json!({
+                "enabled": true,
+                "providers_configured": false,
+                "detail": "Instance-scoped provider connections are not available yet."
+            }))
+        })
+    }
+
+    fn versions(&self) -> Vec<pigeon_core::versions::Component> {
+        vec![pigeon_core::versions::Component::began(
+            NAME,
+            pigeon_core::versions::Kind::Capability,
+        )]
+    }
 }

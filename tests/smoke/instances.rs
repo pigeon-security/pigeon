@@ -730,8 +730,8 @@ fn capability_catalogue_as_decided() {
         (
             "cloud",
             true,
-            Placement::OwnWorker,
-            Some("pigeon-cloud-gateway"),
+            Placement::Inline,
+            None,
             Scope::Instance,
             Availability::Any,
             &[],
@@ -5385,6 +5385,26 @@ fn cloud_gateway_off_by_default_and_scoped_status_opt_in() {
     let home_on = make("pigeon.dev", "home", json!({ "cloud": {} }));
     let linked = make("willowgraysen", "linked", json!({ "cloud": {} }));
     let linked_off = make("elsewhere", "linked", json!({}));
+    let linked_inline = make(
+        "willowgraysen",
+        "linked",
+        json!({ "cloud": { "placement": "inline" } }),
+    );
+    let linked_dedicated = make(
+        "willowgraysen",
+        "linked",
+        json!({ "cloud": { "placement": "own_worker" } }),
+    );
+    assert!(problems(&linked_inline).is_empty());
+    assert_eq!(
+        placements(&linked_inline)[NAME]["worker"],
+        "pigeon-platform"
+    );
+    assert!(
+        problems(&linked_dedicated)
+            .iter()
+            .any(|why| why.contains("only inline"))
+    );
     assert!(problems(&home_on).is_empty());
     assert!(problems(&linked).is_empty());
     assert!(!hosted_enabled(&home, NAME));
