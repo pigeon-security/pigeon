@@ -1404,6 +1404,7 @@ fn proxy_worker_caches_and_core_ops() {
             "pigeon-ci-gateway",
             "pigeon-proxy",
             "pigeon-ai-agents",
+            "pigeon-dotest-b",
             "pigeon-dotest-a"
         ]
     );

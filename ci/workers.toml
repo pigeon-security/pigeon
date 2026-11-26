@@ -64,9 +64,6 @@ paths = [
     # deployed by a landing. The ingest library they use is linked by core, so it is core's.
     "src/data-worker/*",
     "src/ingest-runner/*",
-    # The DO rehearsal's destination (docs/plans/do-rehearsal.md): built and tested, never
-    # deployed, until the landing that gives it a [[worker]] entry takes this line out.
-    "src/dotest-b/*",
     # The pigeon.dev landing's content (docs/plans/platform-self-hosting.md): rendered only by
     # the smoke suite until the home instance publishes it.
     "site/*",
@@ -180,10 +177,21 @@ after = ["portal_sync"]
 containers = ["Sandbox"]
 
 # A throwaway Worker for the Durable Object rehearsals (docs/plans/do-rehearsal.md, "Second
-# rehearsal"): the transfer's source, which later stops exporting the class. Its first deploy is
-# the landing that adds this entry (the Lander deploys a Worker it adds). Its entry comes out
-# once the rehearsal is done. pigeon-dotest-b's crate is in the workspace but not in this map,
-# so nothing deploys it until a later landing lists it, before this entry.
+# rehearsal"): the transfer's destination. Its first deploy, in the landing that adds this entry,
+# is the transfer. Listed before dotest-a, whose binding names it, so a landing that deploys both
+# deploys it first. Its entry comes out once the rehearsal is done.
+[[worker]]
+name = "dotest-b"
+script = "pigeon-dotest-b"
+dir = "src/dotest-b"
+paths = ["src/dotest-b/*", "ci/deploy/deploy-dotest-b.sh"]
+test_job = "test"
+deploy_job = "deploy-dotest-b"
+after = []
+
+# A throwaway Worker for the Durable Object rehearsals (docs/plans/do-rehearsal.md, "Second
+# rehearsal"): the transfer's source, which later stops exporting the class. Its entry comes out
+# once the rehearsal is done.
 [[worker]]
 name = "dotest-a"
 script = "pigeon-dotest-a"
