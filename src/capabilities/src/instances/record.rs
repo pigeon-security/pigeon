@@ -1063,18 +1063,17 @@ pub fn validate(instance: &Instance, others: &[Instance], rules: &Rules) -> Vec<
     check_redirects(instance, others, rules, &mut problems);
     problems.extend(crate::catalogue::problems(instance));
     for (capability, settings) in &instance.capabilities {
-        if let Some(bucket) = &settings.audit_bucket {
-            if capability != "jobs"
+        if let Some(bucket) = &settings.audit_bucket
+            && (capability != "jobs"
                 || !matches!(
                     &instance.account,
                     AccountRef::Linked {
                         account_id: Some(_)
                     }
                 )
-                || !crate::jobs_audit::bucket_ok(bucket)
-            {
-                problems.push("The audit bucket belongs only to Jobs on a linked instance and must be a valid R2 bucket name.".into());
-            }
+                || !crate::jobs_audit::bucket_ok(bucket))
+        {
+            problems.push("The audit bucket belongs only to Jobs on a linked instance and must be a valid R2 bucket name.".into());
         }
     }
     if let Some(pigeon_core::site_publish::Profile::Enabled { site }) = &instance.publishing {
