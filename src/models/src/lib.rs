@@ -78,9 +78,6 @@ pub const TOOLS: [&str; 12] = [
     "models_billing",
 ];
 
-/// The Secrets Store binding of the key core signs callers with.
-const CALLER_KEY: &str = "CALLER_KEY";
-
 /// The Service Binding to core.
 const PLATFORM: &str = "PLATFORM";
 
@@ -1929,13 +1926,6 @@ pub struct ModelGateway {
     pub models: Models,
 }
 
-/// The key core signs callers with, from the Secrets Store binding [`CALLER_KEY`].
-async fn caller_key(env: &Env) -> Result<String> {
-    let missing = || bad("the caller key (CALLER_KEY) is not set in the Secrets Store");
-    let store = env.secret_store(CALLER_KEY).map_err(|_| missing())?;
-    secrets_store::read(&store).await?.ok_or_else(missing)
-}
-
 /// An account acting with a token core minted for `purposes`, asked as `caller`.
 pub async fn credential(env: &Env, caller: &Signed, purposes: &[&str]) -> Result<Account> {
     credential_as(env, &caller.caller, purposes).await
@@ -1959,7 +1949,9 @@ pub async fn credential_as(env: &Env, caller: &Value, purposes: &[&str]) -> Resu
 /// its id.
 async fn credential_given(env: &Env, caller: &Value, purposes: &[&str]) -> Result<Credential> {
     let platform = env.service(PLATFORM)?;
-    let key = caller_key(env).await?;
+    // This Worker's own key (CALLER_KEY_OWN), never the shared one: core then knows which
+    // Worker asked (docs/plans/caller-keys.md, step 3).
+    let key = pigeon_contract::own_key(env).await?;
     let nonce = random()?;
     let request = CredentialRequest {
         kind: "scoped".into(),
@@ -1971,7 +1963,7 @@ async fn credential_given(env: &Env, caller: &Value, purposes: &[&str]) -> Resul
         "https://core",
         "credential",
         &serde_json::to_value(&request)?,
-        Some((key.as_bytes(), caller)),
+        Some((&key, caller)),
         &nonce,
     )
     .await?;
