@@ -118,16 +118,14 @@ pub enum Accounts {
     /// From core, as a credential scoped to the purposes asked and minted for the call in hand,
     /// over the [`PLATFORM`] binding: for `pigeon-ci-gateway`, which never holds the parent
     /// token. Asked as the signed caller in hand, or, when no one is calling (the scheduler's
-    /// alarm), as the Worker itself ([`SCOPED_WORKER`]) with the key from its own
-    /// [`CALLER_KEY`] binding.
+    /// alarm), as the Worker itself ([`SCOPED_WORKER`]) with its own key
+    /// ([`pigeon_contract::OWN_KEY`], docs/plans/caller-keys.md, step 3).
     Scoped,
 }
 
 /// The Worker that runs CI with [`Accounts::Scoped`]: the service it signs as when no one is
 /// calling.
 pub const SCOPED_WORKER: &str = "pigeon-ci-gateway";
-/// The Secrets Store binding of the key core signs callers with.
-pub const CALLER_KEY: &str = "CALLER_KEY";
 
 /// The caller [`SCOPED_WORKER`] signs its own requests as: itself, a service, acting for no
 /// one, as pigeon-proxy does.
@@ -155,14 +153,10 @@ pub async fn account(cx: &Cx<'_>, purposes: &[&str]) -> Result<Account> {
             let (key, caller) = match (cx.key, cx.caller) {
                 (Some(key), Some(caller)) => (key, caller),
                 _ => {
-                    let store = cx.env.secret_store(CALLER_KEY).map_err(|_| {
-                        bad("no one is calling and this Worker binds no CALLER_KEY to ask as itself")
-                    })?;
-                    own_key = pigeon_core::secrets_store::read(&store)
-                        .await?
-                        .ok_or_else(|| bad("CALLER_KEY is not set in the Secrets Store"))?;
+                    // Its own key, never the shared one; none fails the call.
+                    own_key = pigeon_contract::own_key(cx.env).await?;
                     own_caller = itself();
-                    (own_key.as_bytes(), &own_caller)
+                    (own_key.as_slice(), &own_caller)
                 }
             };
             let request = CredentialRequest {

@@ -21,13 +21,13 @@ pub const WORKER: &str = "pigeon-ci-gateway";
 /// CI as a capability Worker's [`Service`]: its tools, its `/ci/` routes and its secrets.
 pub struct CiGateway {
     ci: Ci,
-    /// The key core signs callers with, which this Worker signs its own asks of core with.
+    /// This Worker's own caller key (`CALLER_KEY_OWN`), which it signs its asks of core with.
     key: Vec<u8>,
 }
 
 impl CiGateway {
     /// The gateway with `settings` (whose accounts are [`crate::Accounts::Scoped`]) and the
-    /// caller key.
+    /// Worker's own caller key.
     pub fn new(settings: Settings, key: Vec<u8>) -> Self {
         Self {
             ci: Ci { settings },

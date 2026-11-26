@@ -18,14 +18,9 @@ compile_error!(
 
 use pigeon_ci::{Accounts, CiGateway};
 use pigeon_contract::{Answer, FailureKind};
-use pigeon_core::secrets_store;
 use worker::{Context, Env, Request, Response, Result, event};
 // The `durable_object` macro's expansion names `wasm_bindgen` at the crate root.
 use worker::wasm_bindgen;
-
-/// The Secrets Store binding of the shared key, which this Worker still signs its asks of core
-/// with until it switches to its own (docs/plans/caller-keys.md, step 3).
-const CALLER_KEY: &str = "CALLER_KEY";
 
 /// Names this Worker (`ci-gateway` in ci/workers.toml) on every request it signs to core, before any
 /// fetch or Durable Object code runs, so core checks it with CALLER_KEY_CI_GATEWAY first
@@ -38,19 +33,9 @@ fn identify_worker() {
 
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
-    let key = match env.secret_store(CALLER_KEY) {
-        Ok(binding) => secrets_store::read(&binding).await?,
-        Err(_) => None,
-    };
-    let Some(key) = key else {
-        let answer = Answer::error(
-            FailureKind::Failed,
-            "pigeon-ci-gateway has no caller key: CALLER_KEY is not set",
-        );
-        return Ok(Response::from_json(&answer)?.with_status(503));
-    };
-    // Core's calls are checked with this Worker's own key, then the shared one; with no own
-    // key it serves none (docs/plans/caller-keys.md, step 3).
+    // Core's calls are checked with this Worker's own key, then the shared one, and the
+    // Worker signs its asks of core with its own key; with no own key it does neither
+    // (docs/plans/caller-keys.md, step 3).
     let keys = match pigeon_contract::keys::read(&env).await {
         Ok(keys) => keys,
         Err(e) => {
@@ -60,7 +45,7 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     };
     let gateway = CiGateway::new(
         pigeon_ci::pigeon::settings(Accounts::Scoped),
-        key.into_bytes(),
+        keys.own.clone(),
     );
     pigeon_contract::serve(req, &env, &gateway, &keys).await
 }
