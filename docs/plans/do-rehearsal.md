@@ -115,6 +115,37 @@ in the dashboard before anything else (cleanup.md, Follow-ups for the person, 4)
    `.pigeon/ci.toml`. It deploys core and the proxy (the map), not a (cleanup item 4).
 2. A landing touching only `src/dotest-a/`, the export removed. It is a's lane alone.
 
+### Landings as built (2026-11-26, both Workers deleted)
+
+Two facts on main change the sequence above. The Lander now deploys a Worker in the landing that
+adds its map entry (L6, `28caf24`; cleanup item 4), after core and the proxy. And `Cargo.toml` is
+shared, so a landing that adds a workspace member redeploys every mapped Worker. Gate landings
+are delegate-approved (`gate-changes`).
+
+1. `claude/do-rehearsal2-gate-a` (gate): a's crate, map entry, deploy script and job, and b's
+   crate as a workspace member but *not* in the map. Deploys every Worker, then a (its first
+   deploy). b's crate rides here so the landing that maps b changes no shared path.
+2. `claude/do-rehearsal2-deploy-a`: a fallback only, if a did not deploy in 1.
+3. `claude/do-rehearsal2-gate-b` (gate): b's map entry (before a's), deploy script and job. No
+   shared path, so it deploys core, the proxy, then b: the transfer. a does not deploy, so it
+   cannot race the transfer with its old binding (10061, incident 5).
+4. `claude/do-rehearsal2-deploy-b`: a fallback only, if b did not deploy in 3.
+5. `claude/do-rehearsal2-rebind-a`: a's `PROBE` gains `script_name = "pigeon-dotest-b"`. It must
+   be a's next deploy after 3: hold every other landing that would deploy a (any shared one)
+   until it is `landed`.
+6. `claude/do-rehearsal2-unexport-a`: a no longer exports `Probe`.
+7. `claude/do-rehearsal2-redeploy-a`: a comment; a deploys again without the class.
+8. `claude/do-rehearsal2-reexport-a`: a exports `Probe` again, as a rollback to 5's build would.
+
+Each branch is stacked on the one it follows (5 on 3, not on 4). A landing the Lander rebased has
+new commit ids, so rebase the next branch onto main before landing it, and check that the
+check's worker list names only the Workers above.
+
+Neither Worker needs workers.dev to be read: a cron (every five minutes) asks the object for its
+state and logs it as an error line, `dotest-state {...}`, which `observability_errors` with
+`worker` set to the script shows, grouped by text with a count. a's copy seeds on its first tick;
+b's never does.
+
 ### What to record
 
 - Did a's deploy upload? The deploy job's output: accepted, or refused with which code and text.
