@@ -137,8 +137,8 @@ pub struct Built {
     pub model: Value,
     /// The SVG for the signed-in console.
     drawing: String,
-    /// The SVG drawn only from the public model.
-    public_svg: String,
+    /// The SVG drawn only from the public model: what the apex's architecture page shows.
+    pub public_svg: String,
     /// The whole page, as the site serves it.
     pub page: String,
     /// The public view of the model: what the apex serves and `architecture_describe` answers

@@ -7,6 +7,7 @@ use super::*;
 fn site_on_the_apex() {
     use pigeon_capabilities::Capability;
     use pigeon_capabilities::site::{PAGES, Site, is_apex, page};
+    use pigeon_core::home::{Asset, Route};
 
     assert!(is_apex("pigeon.dev", "pigeon.dev"), "the apex");
     assert!(is_apex("PIGEON.dev", "pigeon.dev"), "ignoring case");
@@ -19,10 +20,26 @@ fn site_on_the_apex() {
         assert!(!is_apex(host, "pigeon.dev"), "{host} is not the apex");
     }
 
-    for (i, path) in PAGES.iter().enumerate() {
-        assert_eq!(page("GET", path), Some(i), "GET {path}");
-        assert_eq!(page("HEAD", path), Some(i), "HEAD {path}");
+    // The same pages and images pigeon-sites serves, so the apex looks the same on either.
+    assert_eq!(PAGES, ["/", "/architecture", "/architecture.json"]);
+    let want = [Route::Home, Route::Architecture, Route::Json];
+    for (path, want) in PAGES.iter().zip(want) {
+        assert_eq!(page("GET", path), Some(want), "GET {path}");
+        assert_eq!(page("HEAD", path), Some(want), "HEAD {path}");
     }
+    for a in Asset::ALL {
+        assert_eq!(
+            page("GET", a.path()),
+            Some(Route::Asset(a)),
+            "GET {}",
+            a.path()
+        );
+    }
+    assert_eq!(
+        page("GET", "/logo.png"),
+        None,
+        "the iOS app icon is pigeon-sites' alone"
+    );
     for path in [
         "/mcp",
         "/auth/",
@@ -43,6 +60,7 @@ fn site_on_the_apex() {
         ("POST", "/"),
         ("PUT", "/architecture.json"),
         ("DELETE", "/"),
+        ("POST", "/favicon-32.png"),
     ] {
         assert_eq!(page(method, path), None, "{method} {path} on the apex");
     }
@@ -720,6 +738,12 @@ fn sites_apex_pages() {
         ("/architecture", Route::Architecture),
         ("/architecture.json", Route::Json),
         ("/logo.png", Route::Logo),
+        ("/mark/head.webp", Route::Asset(home::Asset::MarkHead)),
+        ("/favicon-32.png", Route::Asset(home::Asset::Favicon)),
+        (
+            "/apple-touch-icon.png",
+            Route::Asset(home::Asset::AppleTouch),
+        ),
     ];
     for (p, want) in known {
         assert_eq!(home::route("GET", p), want);
@@ -727,36 +751,77 @@ fn sites_apex_pages() {
         assert_eq!(home::route("POST", p), Route::MethodNotAllowed);
         assert_eq!(home::route("DELETE", p), Route::MethodNotAllowed);
     }
-    for p in ["/nope", "//", "/architecture/", "", "/logo.png/"] {
+    for p in [
+        "/nope",
+        "//",
+        "/architecture/",
+        "",
+        "/logo.png/",
+        "/mark/",
+        "/favicon.ico",
+    ] {
         assert_eq!(home::route("GET", p), Route::NotFound, "{p}");
     }
     assert_eq!(home::route("POST", "/nope"), Route::NotFound);
+    // The images are real and small: the mark's artwork, the favicon and the touch icon.
+    for a in home::Asset::ALL {
+        let b = a.bytes();
+        let magic: &[u8] = if a.content_type() == "image/webp" {
+            b"RIFF"
+        } else {
+            b"\x89PNG"
+        };
+        assert!(b.starts_with(magic), "{}", a.path());
+        assert!(b.len() < 40_000, "{} is {} bytes", a.path(), b.len());
+    }
     let build = home::Build {
         commit: "0123456789abcdef",
         digest: "a1b2c3d4",
     };
+    let stamp = "<span>0123456789ab · digest a1b2c3d4</span>";
     let h = home::home_html(Some(build));
-    assert!(h.contains("href=\"https://platform.pigeon.dev/app\""));
-    assert!(h.contains(">Console ") && h.contains("↗"));
-    assert!(h.contains("href=\"/architecture\">Architecture"));
-    assert!(h.contains("href=\"/\" aria-current=\"page\">Overview"));
-    assert!(h.contains(">P</span>pigeon"));
-    assert!(h.contains("radial-gradient"));
-    assert!(h.contains(">Coming soon</p><h1>Find the pattern. Act with confidence.</h1>"));
-    assert!(h.contains("<footer>0123456789ab · digest a1b2c3d4</footer>"));
+    // One primary action, the console; no sign-up, no scripts, no web fonts.
+    assert!(h.contains(
+        "<a class=\"btn btn-primary\" href=\"https://platform.pigeon.dev/app\">Open console "
+    ));
+    assert!(h.contains("↗"));
+    assert!(!h.contains("<form") && !h.contains("<script") && !h.contains("@font-face"));
+    assert!(h.contains("<a href=\"/\" aria-current=\"page\">Overview</a>"));
+    assert!(h.contains("<a href=\"/architecture\">Architecture</a>"));
+    assert!(h.contains("<h1>Find the pattern. Act with confidence.</h1>"));
+    assert!(h.contains("<span class=\"pill accent\">Invite only</span>"));
+    assert!(h.contains("aria-label=\"Example of a pattern pigeon finds\""));
+    assert!(h.contains("<span class=\"tag\">Example</span>"));
+    assert!(h.contains("<a class=\"btn\" href=\"/architecture\">View architecture</a>"));
+    assert!(h.contains("href=\"/architecture.json\""));
+    assert!(h.contains(stamp));
+    // The mark, the favicon and the touch icon come from the apex itself, as the policy allows.
+    assert!(h.contains("url(\"/mark/head.webp\")"));
+    assert!(h.contains("href=\"/favicon-32.png\"") && h.contains("href=\"/apple-touch-icon.png\""));
+    // The console's tokens, by the system theme only; the old look is gone.
+    assert!(h.contains("--accent: #B03A6A;") && h.contains("--accent: #E07FA8;"));
+    assert!(h.contains("@media (prefers-color-scheme: dark)"));
+    assert!(!h.contains("data-theme"));
+    assert!(!h.contains("radial-gradient") && !h.contains("Inter Tight"));
+    assert!(!h.contains("box-shadow") && !h.contains("color-mix"));
     assert!(!h.contains("data:image/svg+xml"));
+    // Discreet: it reads as a money-records workspace and nothing more.
+    let lower = h.to_lowercase();
+    for word in ["abuse", "survivor", "safety", "victim", "domestic"] {
+        assert!(!lower.contains(word), "{word}");
+    }
 
     let svg = "<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>";
     let a = home::architecture_html(svg, build);
-    assert!(a.contains("href=\"/architecture\" aria-current=\"page\">Architecture"));
-    assert!(a.contains(">Architecture</p><h1>Diagram</h1>"));
+    assert!(a.contains("<a href=\"/architecture\" aria-current=\"page\">Architecture</a>"));
+    assert!(a.contains("<span class=\"label\">Architecture</span><h1>Diagram</h1>"));
     assert!(a.contains(&format!(
         "data:image/svg+xml;base64,{}",
         pigeon_core::git::base64(svg.as_bytes())
     )));
     assert!(!a.contains("<svg"), "the drawing is an image, not HTML");
     assert!(!a.contains("<h2>Workers</h2>"));
-    assert!(a.contains("<footer>0123456789ab · digest a1b2c3d4</footer>"));
+    assert!(a.contains(stamp));
     let escaped = home::architecture_html(
         svg,
         home::Build {
@@ -764,10 +829,12 @@ fn sites_apex_pages() {
             digest: "<i>",
         },
     );
-    assert!(escaped.contains("<footer>&lt;b&gt; · digest &lt;i&gt;</footer>"));
-    assert!(home::home_html(None).contains("Deployment metadata unavailable"));
-    assert!(home::unavailable_html(None).contains("The architecture is not available right now."));
-    assert!(home::unavailable_html(Some(build)).contains("0123456789ab · digest a1b2c3d4"));
+    assert!(escaped.contains("<span>&lt;b&gt; · digest &lt;i&gt;</span>"));
+    assert!(home::home_html(None).contains("<span>Deployment metadata unavailable</span>"));
+    let u = home::unavailable_html(None);
+    assert!(u.contains("The architecture is not available right now."));
+    assert!(u.contains("<a href=\"/architecture\" aria-current=\"page\">Architecture</a>"));
+    assert!(home::unavailable_html(Some(build)).contains(stamp));
     assert!(!home::CSP.contains("script-src"));
     assert!(home::CSP.contains("frame-ancestors 'none'"));
 }

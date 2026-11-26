@@ -1,8 +1,8 @@
-//! The pigeon.dev apex: the home page, the architecture page and its JSON, and the logo. The
-//! pages are pure ([`pigeon_core::home`]). The architecture comes from core
-//! (`architecture_describe`, public), asked as this Worker itself and kept for 30 seconds per
-//! isolate: short, because the deploy script polls for it after a core deploy. No credential
-//! is on this path.
+//! The pigeon.dev apex: the home page, the architecture page and its JSON, their images, and
+//! the logo. The pages and images are pure ([`pigeon_core::home`]). The architecture comes
+//! from core (`architecture_describe`, public), asked as this Worker itself and kept for 30
+//! seconds per isolate: short, because the deploy script polls for it after a core deploy. No
+//! credential is on this path.
 
 use std::cell::RefCell;
 
@@ -136,6 +136,13 @@ pub async fn serve(req: Request, env: &Env, key: &[u8], worker: &str) -> Result<
             "image/png",
             "public, max-age=86400",
             LOGO.to_vec(),
+            head,
+        ),
+        Route::Asset(a) => reply(
+            200,
+            a.content_type(),
+            home::ASSET_CACHE,
+            a.bytes().to_vec(),
             head,
         ),
         Route::Architecture => match architecture(env, key, worker).await {

@@ -1,10 +1,15 @@
-//! The pages of the pigeon.dev apex: the home page and the architecture page, as pure HTML,
-//! and the routing of a method and path to one of them. No Cloudflare calls.
+//! The pages of the pigeon.dev apex: the home page and the architecture page, as pure HTML, the
+//! images they use, and the routing of a method and path to one of them. No Cloudflare calls.
+//! Both Workers that can own the apex (pigeon-sites and the platform) serve from here.
 
 use crate::{design::escape, git::base64};
 
-/// The Content-Security-Policy of the apex pages: inline styles and the logo, nothing else.
+/// The Content-Security-Policy of the apex pages: inline styles and images from the apex itself
+/// or `data:`, nothing else.
 pub const CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+
+/// Where the console is.
+pub const CONSOLE: &str = "https://platform.pigeon.dev/app";
 
 /// What a request for the apex is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,13 +20,60 @@ pub enum Route {
     Architecture,
     /// `/architecture.json`, the public model.
     Json,
-    /// `/logo.png`, the logo.
+    /// `/logo.png`, the iOS app icon (pigeon-sites only).
     Logo,
+    /// One of the pages' images.
+    Asset(Asset),
     /// No such page.
     NotFound,
     /// A known path, asked with a method other than GET or HEAD.
     MethodNotAllowed,
 }
+
+/// An image the apex pages use, built into the Worker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Asset {
+    /// `/mark/head.webp`: the mark's artwork, drawn on its ground by CSS.
+    MarkHead,
+    /// `/favicon-32.png`.
+    Favicon,
+    /// `/apple-touch-icon.png`, 180px.
+    AppleTouch,
+}
+
+impl Asset {
+    /// Every asset.
+    pub const ALL: [Asset; 3] = [Asset::MarkHead, Asset::Favicon, Asset::AppleTouch];
+
+    /// The path it is served at.
+    pub fn path(self) -> &'static str {
+        match self {
+            Asset::MarkHead => "/mark/head.webp",
+            Asset::Favicon => "/favicon-32.png",
+            Asset::AppleTouch => "/apple-touch-icon.png",
+        }
+    }
+
+    /// Its `Content-Type`.
+    pub fn content_type(self) -> &'static str {
+        match self {
+            Asset::MarkHead => "image/webp",
+            Asset::Favicon | Asset::AppleTouch => "image/png",
+        }
+    }
+
+    /// Its bytes.
+    pub fn bytes(self) -> &'static [u8] {
+        match self {
+            Asset::MarkHead => include_bytes!("../assets/mark-head.webp"),
+            Asset::Favicon => include_bytes!("../assets/favicon-32.png"),
+            Asset::AppleTouch => include_bytes!("../assets/apple-touch-180.png"),
+        }
+    }
+}
+
+/// The `Cache-Control` of an image: a day.
+pub const ASSET_CACHE: &str = "public, max-age=86400";
 
 /// The route for `method` and `path`. Paths are matched exactly: no trailing slash.
 pub fn route(method: &str, path: &str) -> Route {
@@ -30,7 +82,10 @@ pub fn route(method: &str, path: &str) -> Route {
         "/architecture" => Route::Architecture,
         "/architecture.json" => Route::Json,
         "/logo.png" => Route::Logo,
-        _ => return Route::NotFound,
+        _ => match Asset::ALL.into_iter().find(|a| a.path() == path) {
+            Some(a) => Route::Asset(a),
+            None => return Route::NotFound,
+        },
     };
     if method == "GET" || method == "HEAD" {
         known
@@ -39,52 +94,7 @@ pub fn route(method: &str, path: &str) -> Route {
     }
 }
 
-const CSS: &str = r#"
-:root {
-  color-scheme: dark;
-  --bg: #141418;
-  --card: #1F1F25;
-  --shadow: #0B0B0E;
-  --ink: #ECEAE6;
-  --muted: #B9B6BF;
-  --pink: #E07FA8;
-  --line: #2C2C33;
-  --gutter: clamp(16px, 5vw, 56px);
-}
-* { box-sizing: border-box; }
-body {
-  margin: 0;
-  min-height: 100vh;
-  display: flex;
-  flex-direction: column;
-  background: var(--bg) radial-gradient(circle, rgba(255,255,255,.07) 1px, transparent 1px) 0 0 / 22px 22px;
-  color: var(--ink);
-  font: 16px/1.5 Inter, system-ui, sans-serif;
-}
-.bar { border-bottom: 1px solid var(--line); background: var(--bg); }
-.bar-inner, main, footer { width: min(100% - var(--gutter) * 2, 1120px); margin-inline: auto; }
-.bar-inner { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 24px; padding-block: 12px; }
-.bar a { text-decoration: none; }
-.brand { display: flex; align-items: center; gap: 10px; color: var(--ink); font-size: 20px; font-weight: 700; }
-.logo { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 9px; background: var(--pink); color: #1A0F14; }
-.bar nav { display: flex; gap: 4px; flex-wrap: wrap; }
-.tab, .console { display: inline-flex; align-items: center; min-height: 40px; padding: 0 12px; border-radius: 12px; font-size: 14px; font-weight: 600; }
-.tab { color: var(--muted); }
-.tab:hover, .tab[aria-current=page] { color: var(--pink); background: var(--card); }
-.console { margin-left: auto; gap: 6px; background: var(--pink); color: #1A0F14; }
-.console:hover { background: #F2A3C4; }
-:focus-visible { outline: 2px solid #F2A3C4; outline-offset: 3px; }
-main { padding-block: 48px; flex: 1 0 auto; min-width: 0; }
-.label, footer { color: var(--muted); font: 13px/1.5 ui-monospace, monospace; }
-.label { margin: 0 0 10px; text-transform: uppercase; letter-spacing: .08em; }
-h1 { margin: 0; font: 700 clamp(36px, 7vw, 56px)/1.06 "Inter Tight", Inter, system-ui, sans-serif; letter-spacing: -.035em; }
-.diagram-frame { margin-top: 24px; padding: 8px; overflow-x: auto; border: 1px solid var(--line); border-radius: 22px; background: var(--card); box-shadow: 0 6px 0 var(--shadow); }
-.diagram-frame img { display: block; width: 100%; min-width: 840px; height: auto; }
-footer { margin-top: auto; padding-block: 14px 20px; border-top: 1px solid var(--line); text-align: right; overflow-wrap: anywhere; }
-@media (max-width: 500px) {
-  .bar nav { order: 1; flex: 1 0 100%; }
-}
-"#;
+const CSS: &str = include_str!("home.css");
 
 /// Architecture provenance supplied by the deployed platform, not the sites build.
 #[derive(Clone, Copy)]
@@ -93,14 +103,9 @@ pub struct Build<'a> {
     pub digest: &'a str,
 }
 
-fn page(title: &str, architecture: bool, content: &str, build: Option<Build<'_>>) -> String {
-    let current = " aria-current=\"page\"";
-    let (overview, diagram) = if architecture {
-        ("", current)
-    } else {
-        (current, "")
-    };
-    let stamp = build.map_or_else(
+/// The footer's build stamp: the commit, cut to 12 characters, and the digest.
+fn stamp(build: Option<Build<'_>>) -> String {
+    build.map_or_else(
         || "Deployment metadata unavailable".to_string(),
         |b| {
             let short: String = b.commit.chars().take(12).collect();
@@ -111,29 +116,124 @@ fn page(title: &str, architecture: bool, content: &str, build: Option<Build<'_>>
             };
             format!("{commit} · digest {}", escape(b.digest))
         },
-    );
-    format!(
-        r##"<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="theme-color" content="#141418"><title>{title}</title>
-<style>{CSS}</style></head><body>
-<header class="bar"><div class="bar-inner">
-<a class="brand" href="/"><span class="logo" aria-hidden="true">P</span>pigeon</a>
-<nav aria-label="Site"><a class="tab" href="/"{overview}>Overview</a><a class="tab" href="/architecture"{diagram}>Architecture</a></nav>
-<a class="console" href="https://platform.pigeon.dev/app">Console <span aria-hidden="true">↗</span></a>
-</div></header><main>{content}</main><footer>{stamp}</footer></body></html>"##
     )
 }
 
-/// The overview. It still renders when the platform cannot supply deployment metadata.
-pub fn home_html(build: Option<Build<'_>>) -> String {
-    page(
-        "pigeon",
-        false,
-        "<p class=\"label\">Coming soon</p><h1>Find the pattern. Act with confidence.</h1>",
-        build,
+fn page(title: &str, architecture: bool, content: &str, build: Option<Build<'_>>) -> String {
+    let current = " aria-current=\"page\"";
+    let (overview, diagram) = if architecture {
+        ("", current)
+    } else {
+        (current, "")
+    };
+    let stamp = stamp(build);
+    format!(
+        r##"<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#FFFFFF" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#141418" media="(prefers-color-scheme: dark)">
+<meta name="description" content="pigeon is a private workspace for making sense of money records.">
+<title>{title}</title>
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<style>{CSS}</style></head><body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="top"><div class="wrap">
+<a class="brand" href="/">pigeon</a>
+<nav class="nav" aria-label="Site"><a href="/"{overview}>Overview</a><a href="/architecture"{diagram}>Architecture</a></nav>
+<span class="spacer"></span>
+<a class="btn btn-primary" href="{CONSOLE}">Open console <span aria-hidden="true">↗</span></a>
+</div></header>
+<main id="main"><div class="wrap">{content}</div></main>
+<footer class="foot"><div class="wrap">
+<span>{stamp}</span>
+<nav aria-label="Footer"><a href="/architecture">Architecture</a><a href="/architecture.json">architecture.json</a><a href="{CONSOLE}">Console</a></nav>
+</div></footer>
+</body></html>"##
     )
 }
+
+/// The home page's content, between the top bar and the footer. The example record's figures
+/// are invented, and the panel says so.
+const HOME: &str = r##"<div class="hero">
+<div class="hero-copy">
+<span class="mark" aria-hidden="true"></span>
+<span><span class="pill accent">Invite only</span></span>
+<h1>Find the pattern. Act with confidence.</h1>
+<p class="lede">pigeon is a private workspace for making sense of money records. Bring in statements, receipts and messages you already have. pigeon lines them up by date, shows what repeats, and keeps a record you can rely on.</p>
+<div class="actions">
+<a class="btn btn-primary btn-lg" href="https://platform.pigeon.dev/app">Open console <span aria-hidden="true">↗</span></a>
+<a class="btn btn-ghost btn-lg" href="#how">How it works</a>
+</div>
+<p class="fine">Sign in with a passkey. pigeon is in a small private test; there is no public sign-up yet.</p>
+</div>
+<figure class="panel record" aria-label="Example of a pattern pigeon finds">
+<div class="record-head">
+<span class="t">Transfers after each deposit</span>
+<span class="pill info">Pattern</span>
+<span class="tag">Example</span>
+</div>
+<dl class="record-sum">
+<div><dt>Times</dt><dd>7</dd></div>
+<div><dt>Since</dt><dd>Mar 2026</dd></div>
+<div><dt>Total</dt><dd>$2,940.00</dd></div>
+</dl>
+<div class="tbl-wrap">
+<table class="tbl">
+<thead><tr><th>Date</th><th>What</th><th class="hide-sm">Source</th><th class="num">Amount</th></tr></thead>
+<tbody>
+<tr><td class="mono">2026-09-01</td><td>Paycheck in<span class="sub">Checking ··4417</span></td><td class="hide-sm"><span class="tag">statement</span></td><td class="num">+$1,850.00</td></tr>
+<tr class="hit"><td class="mono">2026-09-01</td><td>Transfer out<span class="sub">to ··0932, same day</span></td><td class="hide-sm"><span class="tag">statement</span></td><td class="num">−$420.00</td></tr>
+<tr><td class="mono">2026-10-01</td><td>Paycheck in<span class="sub">Checking ··4417</span></td><td class="hide-sm"><span class="tag">statement</span></td><td class="num">+$1,850.00</td></tr>
+<tr class="hit"><td class="mono">2026-10-02</td><td>Transfer out<span class="sub">to ··0932, next day</span></td><td class="hide-sm"><span class="tag">statement</span></td><td class="num">−$420.00</td></tr>
+<tr><td class="mono">2026-10-02</td><td>Message mentions “the usual”<span class="sub">linked to the transfer above</span></td><td class="hide-sm"><span class="tag">email</span></td><td class="num muted">—</td></tr>
+</tbody>
+</table>
+</div>
+<div class="record-foot">
+<span>Each row links to its original file, unchanged.</span>
+<span class="mono">5 of 21 rows</span>
+</div>
+</figure>
+</div>
+<section class="block" id="how" aria-labelledby="how-h">
+<header><span class="label">How it works</span><h2 id="how-h">Three steps, at your pace</h2></header>
+<ol class="steps">
+<li><h3>Bring it in</h3><p>Add bank statements, card exports, receipts and emails. pigeon keeps each original exactly as it arrived, with the date it was added.</p></li>
+<li><h3>See what repeats</h3><p>pigeon puts everything on one timeline and points out what recurs: the same payee, the same day, the same amount. You decide what matters.</p></li>
+<li><h3>Keep a clear record</h3><p>Save what you find as a dated record with its sources attached, ready when you choose to share it with someone you trust.</p></li>
+</ol>
+</section>
+<section class="block" id="private" aria-labelledby="priv-h">
+<header><span class="label">Privacy</span><h2 id="priv-h">Yours, and only yours</h2></header>
+<div class="tbl-wrap">
+<table class="kv">
+<tbody>
+<tr><th>Sign-in</th><td>Passkeys on your own device. No passwords to guess or reset.</td><td class="st"><span class="pill ok">Live</span></td></tr>
+<tr><th>Approvals</th><td>Anything that changes or shares your data waits for your passkey on that exact action.</td><td class="st"><span class="pill ok">Live</span></td></tr>
+<tr><th>Your own space</th><td>Each person gets a separate instance. Nothing is pooled with anyone else’s.</td><td class="st"><span class="pill ok">Live</span></td></tr>
+<tr><th>Originals</th><td>Files are stored by their content and never edited, so a record can always be traced back.</td><td class="st"><span class="pill warn">In testing</span></td></tr>
+<tr><th>Email in</th><td>A private address per person for forwarding messages and receipts.</td><td class="st"><span class="pill">Planned</span></td></tr>
+</tbody>
+</table>
+</div>
+</section>
+<section class="block" id="hood" aria-labelledby="hood-h">
+<header><span class="label">Under the hood</span><h2 id="hood-h">Built in the open</h2></header>
+<div class="stack">
+<p class="hood">pigeon runs on Cloudflare Workers. Its architecture page is drawn from the deployed code on every release.</p>
+<p class="hood"><a class="btn" href="/architecture">View architecture</a> <a class="btn btn-ghost" href="/architecture.json"><span class="mono">architecture.json</span></a></p>
+</div>
+</section>"##;
+
+/// The overview. It still renders when the platform cannot supply deployment metadata.
+pub fn home_html(build: Option<Build<'_>>) -> String {
+    page("pigeon", false, HOME, build)
+}
+
+/// The heading of the architecture page.
+const ARCHITECTURE_HEAD: &str =
+    r#"<div class="page-head"><span class="label">Architecture</span><h1>Diagram</h1></div>"#;
 
 /// The architecture page uses the platform's public SVG in image mode, never as inline markup.
 pub fn architecture_html(svg: &str, build: Build<'_>) -> String {
@@ -142,7 +242,7 @@ pub fn architecture_html(svg: &str, build: Build<'_>) -> String {
         "pigeon architecture",
         true,
         &format!(
-            r#"<p class="label">Architecture</p><h1>Diagram</h1><div class="diagram-frame" role="region" aria-label="Platform diagram" tabindex="0"><img src="data:image/svg+xml;base64,{image}" alt="Platform architecture: routes, Workers, Durable Objects, containers and services"></div>"#
+            r#"{ARCHITECTURE_HEAD}<div class="figure" role="region" aria-label="Platform diagram" tabindex="0"><img src="data:image/svg+xml;base64,{image}" alt="Platform architecture: routes, Workers, Durable Objects, containers and services"></div>"#
         ),
         Some(build),
     )
@@ -153,7 +253,9 @@ pub fn unavailable_html(build: Option<Build<'_>>) -> String {
     page(
         "pigeon architecture",
         true,
-        "<p class=\"label\">Architecture</p><h1>Diagram</h1><p>The architecture is not available right now. Try again soon.</p>",
+        &format!(
+            r#"{ARCHITECTURE_HEAD}<p class="notice">The architecture is not available right now. Try again soon.</p>"#
+        ),
         build,
     )
 }

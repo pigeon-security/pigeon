@@ -1,11 +1,13 @@
-//! The public site on a zone's apex, served by the hosting Worker itself, by host: the
-//! architecture page and its model, rendered once per isolate from the sources the Worker was
-//! built with, so each deploy serves its own. `site_publish` moves the apex onto this Worker.
+//! The public site on a zone's apex, served by the hosting Worker itself, by host: the home
+//! page, the architecture page, its model and their images ([`pigeon_core::home`], the same
+//! pages pigeon-sites serves), rendered once per isolate from the sources the Worker was built
+//! with, so each deploy serves its own. `site_publish` moves the apex onto this Worker.
 
 use std::sync::OnceLock;
 
+use pigeon_core::home::{self, Route};
 use pigeon_core::mcp::Tool;
-use pigeon_core::{custom_domain, design, zones};
+use pigeon_core::{custom_domain, zones};
 use serde_json::{Value, json};
 use worker::{Headers, Request, Response, Result};
 
@@ -24,45 +26,54 @@ pub struct Site {
     pub bindings: Vec<(String, String)>,
 }
 
-/// The site's pages, by path.
-pub const PAGES: [&str; 2] = ["/", "/architecture.json"];
+/// The site's pages, by path; each image of [`home::Asset`] is served besides.
+pub const PAGES: [&str; 3] = ["/", "/architecture", "/architecture.json"];
 
-/// The pages, rendered once per isolate: the HTML and the JSON model.
-static RENDERED: OnceLock<(String, String)> = OnceLock::new();
+/// The pages, rendered once per isolate: the home page, the architecture page and the JSON
+/// model.
+static RENDERED: OnceLock<[String; 3]> = OnceLock::new();
 
 /// Whether `host` is the apex `apex`, ignoring ASCII case.
 pub fn is_apex(host: &str, apex: &str) -> bool {
     host.eq_ignore_ascii_case(apex)
 }
 
-/// The index in [`PAGES`] of the page answering `method path` on the apex: `GET` or `HEAD` of a
-/// page; `None` otherwise.
-pub fn page(method: &str, path: &str) -> Option<usize> {
-    if method != "GET" && method != "HEAD" {
-        return None;
+/// What answers `method path` on the apex: `GET` or `HEAD` of a page or an image; `None`
+/// otherwise. `/logo.png` (pigeon-sites' iOS app icon) is not served here.
+pub fn page(method: &str, path: &str) -> Option<Route> {
+    match home::route(method, path) {
+        r @ (Route::Home | Route::Architecture | Route::Json | Route::Asset(_)) => Some(r),
+        Route::Logo | Route::NotFound | Route::MethodNotAllowed => None,
     }
-    PAGES.iter().position(|p| *p == path)
 }
 
-/// The page and the model, both the public view of the architecture the Worker was built with:
-/// no Access token names, permissions, repositories or paths. The JSON has `commit` at the top
+/// The pages, all from the public view of the architecture the Worker was built with: no
+/// Access token names, permissions, repositories or paths. The JSON has `commit` at the top
 /// level, as ci/deploy/deploy.sh reads it.
-fn render(hosted: &Hosted<'_>) -> Result<(String, String)> {
+fn render(hosted: &Hosted<'_>) -> Result<[String; 3]> {
     let built = architecture::built(hosted);
+    let build = home::Build {
+        commit: built.public_model["commit"].as_str().unwrap_or_default(),
+        digest: &built.digest,
+    };
     let body = json!({
         "commit": built.public_model["commit"],
         "digest": built.digest,
         "model": built.public_model,
     });
     let json = serde_json::to_string_pretty(&body)?;
-    Ok((architecture::page_around(&built.public_drawing), json))
+    Ok([
+        home::home_html(Some(build)),
+        home::architecture_html(&built.public_svg, build),
+        json,
+    ])
 }
 
 impl Site {
-    /// Serves a request to the apex: a page, or 404.
+    /// Serves a request to the apex: a page, an image, or 404.
     pub async fn serve(&self, hosted: &Hosted<'_>, req: Request) -> Result<Response> {
         let method = req.method().to_string();
-        let Some(index) = page(&method, &req.path()) else {
+        let Some(route) = page(&method, &req.path()) else {
             return Response::error("not found", 404);
         };
         let rendered = match RENDERED.get() {
@@ -72,21 +83,26 @@ impl Site {
                 RENDERED.get_or_init(|| r)
             }
         };
-        let (body, content_type) = if index == 0 {
-            (&rendered.0, "text/html; charset=utf-8")
-        } else {
-            (&rendered.1, "application/json")
+        let html = "text/html; charset=utf-8";
+        let (body, content_type, cache): (&[u8], &str, Option<&str>) = match route {
+            Route::Asset(a) => (a.bytes(), a.content_type(), Some(home::ASSET_CACHE)),
+            Route::Architecture => (rendered[1].as_bytes(), html, None),
+            Route::Json => (rendered[2].as_bytes(), "application/json", None),
+            _ => (rendered[0].as_bytes(), html, None),
         };
         let headers = Headers::new();
         headers.set("Content-Type", content_type)?;
-        headers.set("Content-Security-Policy", design::CSP)?;
+        headers.set("Content-Security-Policy", home::CSP)?;
         headers.set("X-Content-Type-Options", "nosniff")?;
         headers.set("Referrer-Policy", "no-referrer")?;
         headers.set("X-Served-By", &self.worker)?;
+        if let Some(cache) = cache {
+            headers.set("Cache-Control", cache)?;
+        }
         let response = if method == "HEAD" {
             Response::empty()?
         } else {
-            Response::ok(body.as_str())?
+            Response::from_bytes(body.to_vec())?
         };
         Ok(response.with_headers(headers))
     }
@@ -106,7 +122,7 @@ impl Site {
                     worker::Error::RustError(format!("no service binding to Worker `{target}`"))
                 })?;
             let fetcher = cx.env.service(binding)?;
-            for path in ["/", "/architecture", "/architecture.json"] {
+            for path in PAGES {
                 let url = format!("https://{}{path}", self.zone);
                 let mut answer = fetcher.fetch(url.clone(), None).await.map_err(|e| {
                     worker::Error::RustError(format!("{target} did not answer {url}: {e}"))
