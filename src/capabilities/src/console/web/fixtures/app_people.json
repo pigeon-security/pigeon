@@ -80,20 +80,74 @@
   ],
   "apps": [
     {
-      "id": "svc_claude_code",
-      "name": "Claude Code",
+      "id": "svc_ios_1",
+      "name": "Pigeon for iOS",
       "person": "u_rowan",
-      "linked_at": 1777806400000,
-      "tokens": 3,
-      "kind": "app"
+      "linked_at": 1794996400000,
+      "tokens": 2,
+      "kind": "app",
+      "app": "pigeon-ios",
+      "app_label": "Pigeon for iOS"
+    },
+    {
+      "id": "svc_ios_0",
+      "name": "Pigeon for iOS",
+      "person": "u_rowan",
+      "linked_at": 1793876800000,
+      "tokens": 1,
+      "kind": "app",
+      "app": "pigeon-ios",
+      "app_label": "Pigeon for iOS"
     },
     {
       "id": "svc_claude_ai",
-      "name": "Claude (claude.ai)",
+      "name": "Claude",
       "person": "u_rowan",
       "linked_at": 1780484800000,
       "tokens": 1,
-      "kind": "app"
+      "kind": "app",
+      "app": "claude",
+      "app_label": "Claude"
+    },
+    {
+      "id": "svc_chatgpt",
+      "name": "ChatGPT",
+      "person": "u_rowan",
+      "linked_at": 1790484800000,
+      "tokens": 2,
+      "kind": "app",
+      "app": "openai",
+      "app_label": "OpenAI"
+    },
+    {
+      "id": "svc_codex",
+      "name": "Codex",
+      "person": "u_rowan",
+      "linked_at": 1791484800000,
+      "tokens": 1,
+      "kind": "app",
+      "app": "openai",
+      "app_label": "OpenAI"
+    },
+    {
+      "id": "svc_planner",
+      "name": "Pigeon planner",
+      "person": "u_rowan",
+      "linked_at": 1779806400000,
+      "tokens": 0,
+      "kind": "service",
+      "app": "ai-gateway",
+      "app_label": "AI Gateway"
+    },
+    {
+      "id": "svc_executor",
+      "name": "Pigeon executor",
+      "person": "u_rowan",
+      "linked_at": 1779806400000,
+      "tokens": 0,
+      "kind": "service",
+      "app": "ai-gateway",
+      "app_label": "AI Gateway"
     },
     {
       "id": "svc_docs_agent",
@@ -101,7 +155,9 @@
       "person": "u_sam",
       "linked_at": 1791716800000,
       "tokens": 1,
-      "kind": "service"
+      "kind": "service",
+      "app": "name:docs-agent",
+      "app_label": "docs-agent"
     },
     {
       "id": "svc_old_client",
@@ -109,7 +165,241 @@
       "person": null,
       "linked_at": null,
       "tokens": 0,
-      "kind": "app"
+      "kind": "app",
+      "app": "host:mcp.example.org",
+      "app_label": "old-mcp-client"
+    }
+  ],
+  "app_groups": [
+    {
+      "app": "ai-gateway",
+      "label": "AI Gateway",
+      "vendor": "Pigeon",
+      "person": "u_rowan",
+      "kinds": [
+        "service"
+      ],
+      "roles": [
+        {
+          "id": "planner",
+          "label": "Planner",
+          "note": "Plans a run, starts executor runs and may land."
+        },
+        {
+          "id": "executor",
+          "label": "Executor",
+          "note": "Edits and tests on its run's branch; never lands."
+        }
+      ],
+      "clients": 2,
+      "tokens": 0,
+      "linked_at": 1779806400000,
+      "last_used_at": null,
+      "added_ms": 1779806300000,
+      "members": [
+        {
+          "id": "svc_planner",
+          "name": "Pigeon planner",
+          "kind": "service",
+          "client_id": null,
+          "redirect_host": null,
+          "role": "planner",
+          "matched_by": "service id",
+          "tokens": 0,
+          "linked_at": 1779806400000,
+          "last_used_at": null,
+          "created_at": 1779806300000
+        },
+        {
+          "id": "svc_executor",
+          "name": "Pigeon executor",
+          "kind": "service",
+          "client_id": null,
+          "redirect_host": null,
+          "role": "executor",
+          "matched_by": "service id",
+          "tokens": 0,
+          "linked_at": 1779806400000,
+          "last_used_at": null,
+          "created_at": 1779806300000
+        }
+      ]
+    },
+    {
+      "app": "claude",
+      "label": "Claude",
+      "vendor": "Anthropic",
+      "person": "u_rowan",
+      "kinds": [
+        "oauth"
+      ],
+      "roles": [],
+      "clients": 1,
+      "tokens": 1,
+      "linked_at": 1780484800000,
+      "last_used_at": 1794990000000,
+      "added_ms": 1780484700000,
+      "members": [
+        {
+          "id": "svc_claude_ai",
+          "name": "Claude",
+          "kind": "oauth",
+          "client_id": "c_claude",
+          "redirect_host": "claude.ai",
+          "role": null,
+          "matched_by": "redirect",
+          "tokens": 1,
+          "linked_at": 1780484800000,
+          "last_used_at": 1794990000000,
+          "created_at": 1780484700000
+        }
+      ]
+    },
+    {
+      "app": "openai",
+      "label": "OpenAI",
+      "vendor": "OpenAI",
+      "person": "u_rowan",
+      "kinds": [
+        "oauth"
+      ],
+      "roles": [],
+      "clients": 2,
+      "tokens": 3,
+      "linked_at": 1791484800000,
+      "last_used_at": 1794980000000,
+      "added_ms": 1790484700000,
+      "members": [
+        {
+          "id": "svc_chatgpt",
+          "name": "ChatGPT",
+          "kind": "oauth",
+          "client_id": "c_chatgpt",
+          "redirect_host": "chatgpt.com",
+          "role": null,
+          "matched_by": "redirect",
+          "tokens": 2,
+          "linked_at": 1790484800000,
+          "last_used_at": 1794980000000,
+          "created_at": 1790484700000
+        },
+        {
+          "id": "svc_codex",
+          "name": "Codex",
+          "kind": "oauth",
+          "client_id": "c_codex",
+          "redirect_host": "127.0.0.1",
+          "role": null,
+          "matched_by": "name",
+          "tokens": 1,
+          "linked_at": 1791484800000,
+          "last_used_at": 1794500000000,
+          "created_at": 1791484700000
+        }
+      ]
+    },
+    {
+      "app": "pigeon-ios",
+      "label": "Pigeon for iOS",
+      "vendor": "Pigeon",
+      "person": "u_rowan",
+      "kinds": [
+        "oauth"
+      ],
+      "roles": [],
+      "clients": 2,
+      "tokens": 3,
+      "linked_at": 1794996400000,
+      "last_used_at": 1794996500000,
+      "added_ms": 1793876700000,
+      "members": [
+        {
+          "id": "svc_ios_1",
+          "name": "Pigeon for iOS",
+          "kind": "oauth",
+          "client_id": "c_ios_1",
+          "redirect_host": "platform.example.dev",
+          "role": null,
+          "matched_by": "name",
+          "tokens": 2,
+          "linked_at": 1794996400000,
+          "last_used_at": 1794996500000,
+          "created_at": 1794996300000
+        },
+        {
+          "id": "svc_ios_0",
+          "name": "Pigeon for iOS",
+          "kind": "oauth",
+          "client_id": "c_ios_0",
+          "redirect_host": "platform.example.dev",
+          "role": null,
+          "matched_by": "name",
+          "tokens": 1,
+          "linked_at": 1793876800000,
+          "last_used_at": 1793880000000,
+          "created_at": 1793876700000
+        }
+      ]
+    },
+    {
+      "app": "name:docs-agent",
+      "label": "docs-agent",
+      "vendor": null,
+      "person": "u_sam",
+      "kinds": [
+        "service"
+      ],
+      "roles": [],
+      "clients": 1,
+      "tokens": 1,
+      "linked_at": 1791716800000,
+      "last_used_at": 1794000000000,
+      "added_ms": 1791716700000,
+      "members": [
+        {
+          "id": "svc_docs_agent",
+          "name": "docs-agent",
+          "kind": "service",
+          "client_id": null,
+          "redirect_host": null,
+          "role": null,
+          "matched_by": "own",
+          "tokens": 1,
+          "linked_at": 1791716800000,
+          "last_used_at": 1794000000000,
+          "created_at": 1791716700000
+        }
+      ]
+    },
+    {
+      "app": "host:mcp.example.org",
+      "label": "old-mcp-client",
+      "vendor": null,
+      "person": null,
+      "kinds": [
+        "oauth"
+      ],
+      "roles": [],
+      "clients": 1,
+      "tokens": 0,
+      "linked_at": null,
+      "last_used_at": null,
+      "added_ms": 1777806400000,
+      "members": [
+        {
+          "id": "svc_old_client",
+          "name": "old-mcp-client",
+          "kind": "oauth",
+          "client_id": "c_old",
+          "redirect_host": "mcp.example.org",
+          "role": null,
+          "matched_by": "own",
+          "tokens": 0,
+          "linked_at": null,
+          "last_used_at": null,
+          "created_at": 1777806400000
+        }
+      ]
     }
   ],
   "instances": [

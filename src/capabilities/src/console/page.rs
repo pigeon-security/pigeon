@@ -133,7 +133,7 @@ pub const OLD_TABS: &[(&str, Option<&str>, &str, Option<&str>)] = &[
     ("architecture", None, "platform", Some("architecture")),
     ("management", Some("credentials"), "access", Some("secrets")),
     ("management", Some("people"), "access", Some("people")),
-    ("management", Some("delegation"), "access", Some("apps")),
+    ("management", Some("delegation"), "access", Some("people")),
     ("management", None, "access", Some("secrets")),
     ("cost", Some("7d"), "cost", Some("7d")),
     ("cost", Some("today"), "cost", Some("today")),

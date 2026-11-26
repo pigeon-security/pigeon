@@ -92,7 +92,7 @@ fn bad(why: &str) -> Error {
 
 /// The Directory's schema, one statement per migration, applied in order and never edited.
 #[doc(hidden)]
-pub const MIGRATIONS: [&str; 25] = [
+pub const MIGRATIONS: [&str; 26] = [
     "CREATE TABLE users (id TEXT PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL, created_at INTEGER NOT NULL)",
     "CREATE TABLE service_ids (access_client_id TEXT PRIMARY KEY, user_id TEXT NOT NULL)",
     "CREATE TABLE passkeys (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, point TEXT NOT NULL, sign_count INTEGER NOT NULL, name TEXT NOT NULL, created_at INTEGER NOT NULL, last_used_at INTEGER)",
@@ -126,6 +126,9 @@ pub const MIGRATIONS: [&str; 25] = [
     // of every instance that exists now, so nobody loses access on deploy.
     crate::membership::MEMBERS_TABLE,
     crate::membership::MEMBERS_SEED,
+    // Apps acting for a person (`crate::delegates`): an admin's override of which app a grant
+    // belongs to. Empty on deploy; the roll-up is computed from the rows above.
+    crate::delegates::ASSIGNMENTS_TABLE,
 ];
 
 /// The users' platform role: `admin`, or null for a member.
@@ -329,6 +332,21 @@ impl Directory {
                 json!({ "id": a["id"], "name": a["name"], "kind": kind, "tokens": n("tokens") })
             })
             .collect();
+        // The same apps, rolled up as the console shows them (`crate::delegates`).
+        let grants: Vec<crate::delegates::Grant> = self
+            .grants(t)?
+            .into_iter()
+            .filter(|g| g.person.as_deref() == Some(id))
+            .collect();
+        let app_groups: Vec<Value> = crate::delegates::group(&grants)
+            .into_iter()
+            .map(|a| {
+                json!({
+                    "app": a["app"], "label": a["label"], "clients": a["clients"],
+                    "tokens": a["tokens"], "roles": a["roles"].as_array().map_or(0, Vec::len),
+                })
+            })
+            .collect();
         Ok(json!({
             "user": user,
             "admin": self.admins()?.iter().any(|a| a == id),
@@ -341,7 +359,22 @@ impl Directory {
             "roles": roles,
             "last_owner_of": last_owner_of,
             "apps": apps,
+            "app_groups": app_groups,
         }))
+    }
+
+    /// Every service user as a grant ([`crate::delegates::GRANTS_SQL`]), at `t`.
+    fn grants(&self, t: i64) -> Result<Vec<crate::delegates::Grant>> {
+        let rows: Vec<Value> = self.db.rows(crate::delegates::GRANTS_SQL, vec![t.into()])?;
+        Ok(rows.iter().map(crate::delegates::Grant::from_row).collect())
+    }
+
+    /// Disconnects the grant `id` ([`crate::delegates::DISCONNECT_GRANT`]).
+    fn disconnect_grant(&self, id: &str) -> Result<()> {
+        for q in crate::delegates::DISCONNECT_GRANT {
+            self.db.exec(q, vec![id.into()])?;
+        }
+        Ok(())
     }
 
     /// Gives `person_id` `role` on `instance` unless they have a role there already.
@@ -526,7 +559,9 @@ impl Directory {
                 let clients: Vec<Value> = self
                     .db
                     .rows("SELECT service_user_id FROM oauth_clients", vec![])?;
-                json!({ "users": users, "links": links, "passkeys": passkeys, "clients": clients, "admins": self.admins()? })
+                let grants: Vec<Value> =
+                    self.db.rows(crate::delegates::GRANTS_SQL, vec![t.into()])?;
+                json!({ "users": users, "links": links, "passkeys": passkeys, "clients": clients, "admins": self.admins()?, "grants": grants })
             }
             "users.get" => to_value(self.user(s("id"))?),
             "users.site_visitors" => {
@@ -796,7 +831,9 @@ impl Directory {
                     "SELECT u.id AS id, u.name AS name, l.standard_user_id AS person, l.approved_at AS linked_at, (SELECT COUNT(*) FROM oauth_tokens o WHERE o.service_user_id = u.id AND o.kind != 'proxy' AND o.expires_at > ?) AS tokens FROM users u LEFT JOIN links l ON l.service_user_id = u.id WHERE u.kind = 'service' ORDER BY u.name",
                     vec![t.into()],
                 )?;
-                json!({ "people": people, "passkeys": passkeys, "apps": apps })
+                let grants: Vec<Value> =
+                    self.db.rows(crate::delegates::GRANTS_SQL, vec![t.into()])?;
+                json!({ "people": people, "passkeys": passkeys, "apps": apps, "grants": grants })
             }
             // An app's own tokens go and its link goes; proxy credentials a person issued stay.
             "app.disconnect" => {
@@ -804,19 +841,73 @@ impl Directory {
                     .user(s("id"))?
                     .filter(|u| u.kind == "service")
                     .ok_or_else(|| bad("no such app"))?;
-                self.db.exec(
-                    "DELETE FROM oauth_tokens WHERE service_user_id = ? AND kind != 'proxy'",
-                    vec![s("id").into()],
-                )?;
-                self.db.exec(
-                    "DELETE FROM links WHERE service_user_id = ?",
-                    vec![s("id").into()],
-                )?;
-                self.db.exec(
-                    "DELETE FROM apns_devices WHERE service_user_id = ?",
-                    vec![s("id").into()],
-                )?;
+                self.disconnect_grant(&app.id)?;
                 json!({ "name": app.name })
+            }
+            // Every grant of one app for one person, as the console's dialog listed them
+            // (`members`): the app is the one grant `id` belongs to now, and only those of
+            // `members` still in it go, so a client that joined since is left alone.
+            "app.disconnect_app" => {
+                let apps = crate::delegates::group(&self.grants(t)?);
+                let app =
+                    crate::delegates::app_with(&apps, s("id")).ok_or_else(|| bad("no such app"))?;
+                let asked: Vec<String> = a["members"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|m| m.as_str().map(str::to_string))
+                    .collect();
+                let gone = crate::delegates::still_members(app, &asked);
+                if gone.is_empty() {
+                    return Err(bad("this app changed since it was shown; look again"));
+                }
+                for id in &gone {
+                    self.disconnect_grant(id)?;
+                }
+                json!({ "label": app["label"], "person": app["person"], "disconnected": gone })
+            }
+            // Every grant, and the same rolled up into apps (`crate::delegates`).
+            "apps.grants" => {
+                let rows: Vec<Value> =
+                    self.db.rows(crate::delegates::GRANTS_SQL, vec![t.into()])?;
+                json!(rows)
+            }
+            // An approved clean-up plan (`apps_cleanup_apply`): removes grants as removing a
+            // user does ([`REMOVE_USER`]) and sets overrides. Only service users; checked here,
+            // in the call that deletes.
+            "apps.cleanup" => {
+                let mut removed = Vec::new();
+                for id in a["remove"].as_array().into_iter().flatten() {
+                    let id = id.as_str().unwrap_or_default();
+                    let user = self
+                        .user(id)?
+                        .filter(|u| u.kind == "service")
+                        .ok_or_else(|| bad(&format!("no app acting through `{id}`")))?;
+                    for q in REMOVE_USER {
+                        let args = vec![user.id.as_str().into(); q.matches('?').count()];
+                        self.db.exec(q, args)?;
+                    }
+                    removed.push(user.id);
+                }
+                let mut assigned = Vec::new();
+                for x in a["assign"].as_array().into_iter().flatten() {
+                    let (id, app) = (
+                        x["id"].as_str().unwrap_or_default(),
+                        x["app"].as_str().unwrap_or_default(),
+                    );
+                    if !crate::delegates::override_allowed(app) {
+                        return Err(bad(&format!("`{app}` is not an app")));
+                    }
+                    self.user(id)?
+                        .filter(|u| u.kind == "service")
+                        .ok_or_else(|| bad(&format!("no app acting through `{id}`")))?;
+                    self.db.exec(
+                        crate::delegates::ASSIGN,
+                        vec![id.into(), app.into(), t.into(), s("set_by").into()],
+                    )?;
+                    assigned.push(json!({ "id": id, "app": app }));
+                }
+                json!({ "removed": removed, "assigned": assigned })
             }
             // One row per (app, client); a token that moves to another client moves its row.
             "apns.register" => {
@@ -1856,9 +1947,10 @@ pub fn person_removal(
 /// they would act as the platform's own automation, which membership does not limit. Then
 /// everything that is the user's own: service ids, passkeys, links, link requests, the tokens
 /// they hold (proxy tokens and run grants they issued included), their OAuth client (a service
-/// user's), console sessions, enrolment links, push registrations, instance roles, and the user.
+/// user's), console sessions, enrolment links, push registrations, instance roles, an app
+/// override (a service user's), and the user.
 #[doc(hidden)]
-pub const REMOVE_USER: [&str; 12] = [
+pub const REMOVE_USER: [&str; 13] = [
     "DELETE FROM oauth_tokens WHERE kind != 'proxy' AND service_user_id IN (SELECT service_user_id FROM links WHERE standard_user_id = ?)",
     "DELETE FROM apns_devices WHERE person_id = ? OR service_user_id = ? OR service_user_id IN (SELECT service_user_id FROM links WHERE standard_user_id = ?)",
     "DELETE FROM service_ids WHERE user_id = ?",
@@ -1870,6 +1962,7 @@ pub const REMOVE_USER: [&str; 12] = [
     "DELETE FROM sessions WHERE user_id = ?",
     "DELETE FROM enrolments WHERE user_id = ?",
     "DELETE FROM members WHERE person_id = ?",
+    "DELETE FROM app_assignments WHERE service_user_id = ?",
     "DELETE FROM users WHERE id = ?",
 ];
 
@@ -1927,12 +2020,31 @@ pub fn removal_lines(r: &Value) -> Vec<String> {
             last.join(", ")
         ));
     }
-    let apps: Vec<String> = r["apps"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .map(|a| a["name"].as_str().unwrap_or("an app").to_string())
-        .collect();
+    // Rolled up into apps when the answer has them (`crate::delegates`), each with how many
+    // clients or roles it has; else one per service user, as before.
+    let apps: Vec<String> = match r["app_groups"].as_array() {
+        Some(groups) => groups
+            .iter()
+            .map(|a| {
+                let label = a["label"].as_str().unwrap_or("an app");
+                let roles = a["roles"].as_f64().unwrap_or(0.0) as i64;
+                let clients = a["clients"].as_f64().unwrap_or(1.0) as i64;
+                if roles > 1 {
+                    format!("{label} ({roles} roles)")
+                } else if clients > 1 {
+                    format!("{label} ({clients} clients)")
+                } else {
+                    label.to_string()
+                }
+            })
+            .collect(),
+        None => r["apps"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|a| a["name"].as_str().unwrap_or("an app").to_string())
+            .collect(),
+    };
     if apps.is_empty() {
         lines.push("No apps act for them.".into());
     } else {
@@ -1949,6 +2061,31 @@ pub fn removal_lines(r: &Value) -> Vec<String> {
         ));
     }
     lines.push("This cannot be undone.".into());
+    lines
+}
+
+/// The lines the console's app disconnect dialog shows: each of `asked` still in `app`
+/// ([`crate::delegates::still_members`]), with its live tokens, and what stays.
+pub fn disconnect_lines(app: &Value, asked: &[String]) -> Vec<String> {
+    let label = app["label"].as_str().unwrap_or("The app");
+    let going = crate::delegates::still_members(app, asked);
+    let mut lines = vec![format!(
+        "Disconnects {label}: {} of {}.",
+        counted(going.len() as i64, "client"),
+        counted(app["clients"].as_i64().unwrap_or(0), "client")
+    )];
+    for m in app["members"].as_array().into_iter().flatten() {
+        let id = m["id"].as_str().unwrap_or_default();
+        if !going.iter().any(|g| g == id) {
+            continue;
+        }
+        lines.push(format!(
+            "{} ({id}): revokes {}.",
+            m["name"].as_str().unwrap_or("A client"),
+            counted(m["tokens"].as_i64().unwrap_or(0), "live token")
+        ));
+    }
+    lines.push("Each acts for no one after; signing in again with a passkey reconnects it.".into());
     lines
 }
 
@@ -2135,7 +2272,9 @@ impl Users {
         let person = w.person;
         match w.action.id {
             "passkey-remove" => check_passkey_removal(env, person, w.text()).await,
-            "app-disconnect" => require_admin(env, person, "disconnect an app").await,
+            "app-disconnect" | "app-group-disconnect" => {
+                require_admin(env, person, "disconnect an app").await
+            }
             "invite" => require_admin(env, person, "invite a person").await,
             "person-admin" => {
                 let make = w.change["admin"].as_bool().unwrap_or(false);
@@ -2162,6 +2301,21 @@ impl Users {
                     "{} is disconnected: its tokens are revoked and it acts for no one.",
                     gone["name"].as_str().unwrap_or("The app")
                 ) })
+            }
+            "app-group-disconnect" => {
+                let gone = directory(
+                    env,
+                    "app.disconnect_app",
+                    json!({ "id": target, "members": w.change["members"] }),
+                )
+                .await?;
+                let n = gone["disconnected"].as_array().map_or(0, Vec::len);
+                let label = gone["label"].as_str().unwrap_or("The app");
+                json!({ "message": if n == 1 {
+                    format!("{label} is disconnected: its tokens are revoked and it acts for no one.")
+                } else {
+                    format!("{label} is disconnected: {n} clients' tokens are revoked and they act for no one.")
+                } })
             }
             "invite" => {
                 let made = self.enrol_new_user(env, target, None, None).await?;
@@ -2244,7 +2398,18 @@ impl Users {
                     .filter_map(|c| c["service_user_id"].as_str().map(str::to_string))
                     .collect();
                 let admins: Vec<String> = parse(raw["admins"].clone())?;
-                people(&users, &rows("links"), &rows("passkeys"), &clients, &admins)
+                let grants: Vec<crate::delegates::Grant> = rows("grants")
+                    .iter()
+                    .map(crate::delegates::Grant::from_row)
+                    .collect();
+                people(
+                    &users,
+                    &rows("links"),
+                    &rows("passkeys"),
+                    &clients,
+                    &admins,
+                    &grants,
+                )
             }
             // The platform's first person is its first admin.
             "users_bootstrap" => {
@@ -2382,6 +2547,14 @@ impl Users {
                 check_member_set(env, acting_person(cx)?, instance).await?;
                 set_member(env, instance, arg(args, "person")?, arg(args, "role")?).await?
             }
+            "apps_cleanup" => {
+                require_admin(env, acting_person(cx)?, "clean up apps").await?;
+                crate::delegates::cleanup_plan(cx, args).await?
+            }
+            "apps_cleanup_apply" => {
+                require_admin(env, acting_person(cx)?, "clean up apps").await?;
+                crate::delegates::cleanup_apply(cx, args).await?
+            }
             "users_rename" => {
                 directory(
                     env,
@@ -2408,22 +2581,13 @@ impl Capability for Users {
     }
 
     fn sections(&self) -> Vec<Section> {
-        vec![
-            Section {
-                area: "access",
-                id: "people",
-                title: "People",
-                description: "Who can sign in, with their passkeys. An invite is a one-time link to register a passkey.",
-                order: 30,
-            },
-            Section {
-                area: "access",
-                id: "apps",
-                title: "Apps",
-                description: "Apps that act for a person, and apps that act for no one. Disconnecting one asks for your passkey.",
-                order: 40,
-            },
-        ]
+        vec![Section {
+            area: "access",
+            id: "people",
+            title: "People",
+            description: "Who can sign in, with their passkeys and the apps acting for them. An invite is a one-time link to register a passkey.",
+            order: 30,
+        }]
     }
 
     fn tools(&self) -> Vec<Tool> {
@@ -2548,6 +2712,35 @@ impl Capability for Users {
                 }),
             },
             Tool {
+                name: "apps_cleanup",
+                description: "Plan a clean-up of the apps acting for people (an admin only). \
+                 With no arguments, answers each app rolled up from its clients and service \
+                 users, and a suggestion: `remove` (acting for no one) and `maybe_remove` \
+                 (earlier sign-ins of Pigeon for iOS). With `remove` (grant ids: service users) \
+                 and `assign` ([{id, app}], `app` a known app's key or `own`), lists exactly what \
+                 would change and asks the person's approval on the console's Approvals tab; \
+                 nothing changes until apps_cleanup_apply.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "remove": { "type": "array", "items": { "type": "string" } },
+                        "assign": { "type": "array", "items": {
+                            "type": "object",
+                            "properties": { "id": { "type": "string" }, "app": { "type": "string" } },
+                            "required": ["id", "app"]
+                        } }
+                    }
+                }),
+            },
+            one(
+                "apps_cleanup_apply",
+                "Apply an approved apps_cleanup plan (`plan`: its approval id), once: re-reads \
+                 the apps, refuses if any listed one changed since, then removes and assigns \
+                 exactly as listed.",
+                "plan",
+                true,
+            ),
+            Tool {
                 name: "users_rename",
                 description: "Change a user's display name.",
                 input_schema: json!({
@@ -2574,6 +2767,26 @@ impl Capability for Users {
                 }
                 return Ok(json!({ "change": removal_lines(&r) }));
             }
+            // Disconnecting an app: the dialog lists each client that goes, read now.
+            if w.action.id == "app-group-disconnect" {
+                let rows = directory(cx.env, "apps.grants", json!({})).await?;
+                let grants: Vec<crate::delegates::Grant> = rows
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(crate::delegates::Grant::from_row)
+                    .collect();
+                let apps = crate::delegates::group(&grants);
+                let app = crate::delegates::app_with(&apps, w.text())
+                    .ok_or_else(|| bad("no such app"))?;
+                let asked: Vec<String> = w.change["members"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|m| m.as_str().map(str::to_string))
+                    .collect();
+                return Ok(json!({ "change": disconnect_lines(app, &asked) }));
+            }
             Ok(Value::Null)
         })
     }
@@ -2593,13 +2806,17 @@ pub fn initials(name: &str) -> String {
 /// last_used_at only), `clients` (the service user ids that have an OAuth client) and
 /// `admins` (the admins' ids). Only
 /// standard users are listed, oldest first; service users linked to no one are counted.
+/// `grants` (`crate::delegates`) adds each person's `apps`, rolled up one per real app, and
+/// `unassigned_apps`, those acting for no one; `acting_for_me` stays one per service user.
 pub fn people(
     users: &[User],
     links: &[Value],
     passkeys: &[Value],
     clients: &[String],
     admins: &[String],
+    grants: &[crate::delegates::Grant],
 ) -> Value {
+    let apps = crate::delegates::group(grants);
     let linked_to = |service: &str| {
         links
             .iter()
@@ -2638,6 +2855,7 @@ pub fn people(
                 "role": if admins.contains(&p.id) { "Admin" } else { "Person" },
                 "admin": admins.contains(&p.id), "added_ms": p.created_at,
                 "passkeys": keys, "acting_for_me": acting,
+                "apps": apps.iter().filter(|a| a["person"] == p.id.as_str()).collect::<Vec<_>>(),
             })
         })
         .collect();
@@ -2645,5 +2863,6 @@ pub fn people(
         .iter()
         .filter(|u| u.kind == "service" && linked_to(&u.id).is_none())
         .count();
-    json!({ "people": list, "unlinked": unlinked })
+    let unassigned: Vec<&Value> = apps.iter().filter(|a| a["person"].is_null()).collect();
+    json!({ "people": list, "unlinked": unlinked, "unassigned_apps": unassigned })
 }

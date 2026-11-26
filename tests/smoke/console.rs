@@ -128,6 +128,7 @@ fn console_write_actions_each_have_a_handler_and_policy() {
         "visitor-revoke",
         "passkey-remove",
         "app-disconnect",
+        "app-group-disconnect",
         "user-remove",
         "run-stop",
     ] {
@@ -420,7 +421,13 @@ fn console_people_admin_rules() {
     };
 
     // Each people write is made by `users`, not the console's plumbing.
-    for id in ["passkey-remove", "app-disconnect", "invite", "person-admin"] {
+    for id in [
+        "passkey-remove",
+        "app-disconnect",
+        "app-group-disconnect",
+        "invite",
+        "person-admin",
+    ] {
         let a = action(id).unwrap();
         assert_eq!(a.handler, Handler::Capability("users"), "{id}");
         assert_eq!(a.policy, Policy::Passkey, "{id}");
@@ -731,6 +738,552 @@ fn console_user_remove() {
     }
 }
 
+/// Apps acting for a person (`delegates`): the platform's clients and service users as they
+/// are live, rolled up one per real app and person; an app disconnected as one, on the
+/// Directory's real schema, leaving its other people's, its proxy tokens and its clients; a
+/// person's removal still clearing everything; the clean-up plan's checks; and Access › People's
+/// data and view.
+#[test]
+fn console_app_delegates() {
+    use pigeon_capabilities::delegates::{
+        self as d, DISCONNECT_GRANT, GRANTS_SQL, Grant, app_of, app_with, group, still_members,
+    };
+    use pigeon_capabilities::users::{MIGRATIONS, REMOVE_USER, disconnect_lines, removal_lines};
+
+    // The live platform's 18 service users, as `oauth_clients` and `users_list` answered on
+    // 26 November (Willow is `w`): (id, name, redirect URI or none, service id, linked).
+    let ios = "https://platform.pigeon.dev/app/oauth";
+    let rows: [(&str, &str, Option<&str>, Option<&str>, bool); 18] = [
+        ("pj7dM_Jf7VnquzzOXnea2v", "Claude", None, None, false),
+        ("3IQ5uYePQwgzxNxk7QUoU8", "probe", None, None, false),
+        (
+            "Zn1_T1mNC90uA4yAG7lb6n",
+            "Cloudflare MCP Portal",
+            Some(
+                "https://dash.cloudflare.com/4f94/one/access-controls/ai-controls/mcp-server/oauth-callback/pigeon",
+            ),
+            None,
+            true,
+        ),
+        (
+            "S7J12_Q6DL9PT5ZBP0qSG2",
+            "Cloudflare MCP Portal",
+            Some("https://mcp.pigeon.dev/servers-callback"),
+            None,
+            true,
+        ),
+        (
+            "7J_ufHKtBGlOJQmJDChv71",
+            "Claude",
+            Some("https://claude.ai/api/mcp/auth_callback"),
+            None,
+            true,
+        ),
+        (
+            "ncLywA4Jiv2pH_Kyf4L1I0",
+            "Pigeon planner",
+            None,
+            Some("ai-agent:planner"),
+            true,
+        ),
+        (
+            "IHxWvKcYpS_JkIRYQR8UOd",
+            "Pigeon executor",
+            None,
+            Some("ai-agent:executor"),
+            true,
+        ),
+        (
+            "fDg0dvKXY2HcmYia6BgsuJ",
+            "Pigeon for iOS",
+            Some(ios),
+            None,
+            true,
+        ),
+        (
+            "ltBeEvXJ9i5AZecpvCtlQu",
+            "Pigeon for iOS",
+            Some(ios),
+            None,
+            true,
+        ),
+        (
+            "4mZ5esml0A6a-2dllvvoke",
+            "x",
+            Some("https://chatgpt.com/connector_platform_oauth_redirect"),
+            None,
+            false,
+        ),
+        (
+            "sL---g8C_wojNooXL_3bMz",
+            "Codex",
+            Some("http://127.0.0.1:59061/callback/j9pVkEBFs4kI"),
+            None,
+            true,
+        ),
+        (
+            "ohF3WqOpr2_-g5HbhjeNqq",
+            "Pigeon ChatGPT connectivity probe (no sign-in)",
+            Some("https://chatgpt.com/connector_platform_oauth_redirect"),
+            None,
+            false,
+        ),
+        (
+            "-IxPdyQgcA7Vw6TjDcdWm_",
+            "Pigeon for iOS",
+            Some(ios),
+            None,
+            true,
+        ),
+        (
+            "8Rdkjl0eb1gkqhV2Ys2fob",
+            "Pigeon for iOS",
+            Some(ios),
+            None,
+            true,
+        ),
+        (
+            "BykU0BgsA2eAHshI89ci2O",
+            "ChatGPT",
+            Some("https://chatgpt.com/connector/oauth/WJXcr2Iya52_"),
+            None,
+            true,
+        ),
+        (
+            "JioMsMHqiQ5Pa4tPb7zow4",
+            "Pigeon for iOS",
+            Some(ios),
+            None,
+            true,
+        ),
+        (
+            "LGJ-TWs8KQPqgBiT6KiOWL",
+            "Pigeon for iOS",
+            Some(ios),
+            None,
+            true,
+        ),
+        (
+            "CExKpvhCUjT6H9L8S3fVoW",
+            "Pigeon for iOS",
+            Some(ios),
+            None,
+            true,
+        ),
+    ];
+    let grants: Vec<Grant> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, (id, name, uri, key, linked))| {
+            Grant::from_row(&json!({
+                "id": id, "name": name, "created_at": i as i64,
+                "client_id": uri.map(|_| format!("c{i}")),
+                "redirect_uris": uri.map(|u| json!([u]).to_string()),
+                "service_key": key, "person": linked.then_some("w"),
+                "linked_at": linked.then_some(100 + i as i64),
+                "tokens": 1, "last_used_at": 1000 + i as i64,
+            }))
+        })
+        .collect();
+
+    // How each one is told: redirect host, name with a known path or loopback, service id.
+    let by = |id: &str| app_of(grants.iter().find(|g| g.id == id).unwrap());
+    assert_eq!(by("7J_ufHKtBGlOJQmJDChv71").by, "redirect");
+    assert_eq!(
+        by("sL---g8C_wojNooXL_3bMz").key,
+        "openai",
+        "Codex: loopback, by name"
+    );
+    assert_eq!(by("sL---g8C_wojNooXL_3bMz").by, "name");
+    assert_eq!(by("S7J12_Q6DL9PT5ZBP0qSG2").key, "cloudflare-portal");
+    assert_eq!(by("ncLywA4Jiv2pH_Kyf4L1I0").role.unwrap().id, "planner");
+    assert_eq!(by("IHxWvKcYpS_JkIRYQR8UOd").by, "service id");
+    // `x` registered with ChatGPT's callback: OpenAI's, not Grokbot (grok.com).
+    assert_eq!(by("4mZ5esml0A6a-2dllvvoke").key, "openai");
+    assert_eq!(
+        by("pj7dM_Jf7VnquzzOXnea2v").key,
+        "claude",
+        "a revoked client's leftover"
+    );
+    assert_eq!(by("pj7dM_Jf7VnquzzOXnea2v").by, "name");
+    assert_eq!(grants[0].kind(), "leftover");
+    assert_eq!(by("3IQ5uYePQwgzxNxk7QUoU8").key, "name:probe");
+    // A name alone never claims a known app when the client redirects to a host of its own.
+    let impostor = Grant::from_row(&json!({
+        "id": "i", "name": "ChatGPT", "client_id": "ci",
+        "redirect_uris": "[\"https://chatgpt.example.net/cb\"]",
+    }));
+    assert_eq!(app_of(&impostor).key, "host:chatgpt.example.net");
+    let grok = Grant::from_row(&json!({
+        "id": "g", "name": "Grok", "client_id": "cg",
+        "redirect_uris": "[\"https://grok.com/connectors-oauth-exchange-code/\"]",
+    }));
+    assert_eq!(app_of(&grok).label, "Grokbot");
+
+    // Willow's 14 grants are 6 apps; the 4 acting for no one, 3 entries.
+    let apps = group(&grants);
+    let willow: Vec<(&str, i64)> = apps
+        .iter()
+        .filter(|a| a["person"] == "w")
+        .map(|a| (a["label"].as_str().unwrap(), a["clients"].as_i64().unwrap()))
+        .collect();
+    assert_eq!(
+        willow,
+        [
+            ("AI Gateway", 2),
+            ("Claude", 1),
+            ("Cloudflare MCP Portal", 2),
+            ("OpenAI", 2),
+            ("Pigeon for iOS", 7),
+        ]
+        .iter()
+        .map(|(l, n)| (*l, *n))
+        .collect::<Vec<_>>()
+    );
+    let gateway = apps.iter().find(|a| a["app"] == "ai-gateway").unwrap();
+    assert_eq!(gateway["roles"][0]["id"], "planner");
+    assert_eq!(gateway["roles"][1]["id"], "executor");
+    assert!(
+        gateway["roles"][0]["note"]
+            .as_str()
+            .unwrap()
+            .contains("land")
+    );
+    assert_eq!(gateway["kinds"], json!(["service"]));
+    let ios_app = apps.iter().find(|a| a["app"] == "pigeon-ios").unwrap();
+    assert_eq!(ios_app["tokens"], 7);
+    assert_eq!(ios_app["last_used_at"], 1017);
+    assert_eq!(
+        ios_app["members"][0]["id"], "CExKpvhCUjT6H9L8S3fVoW",
+        "newest first"
+    );
+    let none: Vec<&str> = apps
+        .iter()
+        .filter(|a| a["person"].is_null())
+        .map(|a| a["label"].as_str().unwrap())
+        .collect();
+    assert_eq!(none, ["Claude", "OpenAI", "probe"]);
+
+    // An admin's override wins: one of the known apps, or its own entry.
+    let mut moved = grants[1].clone();
+    moved.app_override = Some("grokbot".into());
+    assert_eq!(app_of(&moved).label, "Grokbot");
+    assert_eq!(app_of(&moved).by, "override");
+    moved.app_override = Some("own".into());
+    assert_eq!(app_of(&moved).key, "own:3IQ5uYePQwgzxNxk7QUoU8");
+    assert!(d::override_allowed("openai") && !d::override_allowed("nope"));
+
+    // Disconnecting the app as the dialog listed it: a client that joined since stays.
+    let openai = app_with(&apps, "BykU0BgsA2eAHshI89ci2O").unwrap();
+    assert_eq!(
+        still_members(openai, &["sL---g8C_wojNooXL_3bMz".into(), "gone".into()]),
+        ["sL---g8C_wojNooXL_3bMz"]
+    );
+    let lines = disconnect_lines(
+        openai,
+        &[
+            "BykU0BgsA2eAHshI89ci2O".into(),
+            "sL---g8C_wojNooXL_3bMz".into(),
+        ],
+    );
+    assert_eq!(lines[0], "Disconnects OpenAI: 2 clients of 2 clients.");
+    assert!(lines[1].starts_with("ChatGPT (BykU0BgsA2eAHshI89ci2O): revokes 1 live token"));
+    // The write: any one client as its target, the clients the dialog showed as its change.
+    let a = action("app-group-disconnect").unwrap();
+    assert_eq!(a.handler, Handler::Capability("users"));
+    assert!(a.destructive && !a.by_bearer);
+    assert_eq!(
+        a.change(&json!({ "members": ["b", " a", "b"] }), Step::Begin),
+        Ok(json!({ "members": ["a", "b"] }))
+    );
+    for bad in [
+        json!({}),
+        json!({ "members": [] }),
+        json!({ "members": ["a b"] }),
+    ] {
+        assert!(a.change(&bad, Step::Begin).is_err(), "{bad}");
+    }
+    assert_ne!(
+        bound_purpose(
+            "app-group-disconnect",
+            "w",
+            json!("x"),
+            json!({ "members": ["a"] }),
+            Step::Begin
+        ),
+        bound_purpose(
+            "app-group-disconnect",
+            "w",
+            json!("x"),
+            json!({ "members": ["a", "b"] }),
+            Step::Begin
+        ),
+        "the passkey covers exactly the clients listed"
+    );
+
+    // On the Directory's real schema.
+    let db = rusqlite::Connection::open_in_memory().unwrap();
+    for m in MIGRATIONS {
+        db.execute_batch(m).unwrap();
+    }
+    let run = |sql: &str| db.execute_batch(sql).unwrap();
+    run("INSERT INTO users (id, kind, name, created_at, role) VALUES
+           ('w', 'standard', 'Willow', 1, 'admin'), ('sam', 'standard', 'Sam', 2, NULL),
+           ('gpt', 'service', 'ChatGPT', 3, NULL), ('codex', 'service', 'Codex', 4, NULL),
+           ('sam_gpt', 'service', 'ChatGPT', 5, NULL), ('plan', 'service', 'Pigeon planner', 6, NULL),
+           ('x', 'service', 'x', 7, NULL)");
+    run("INSERT INTO service_ids (access_client_id, user_id) VALUES ('ai-agent:planner', 'plan')");
+    run(
+        r#"INSERT INTO oauth_clients (id, name, redirect_uris, service_user_id, created_at) VALUES
+           ('c1', 'ChatGPT', '["https://chatgpt.com/connector/oauth/a"]', 'gpt', 3),
+           ('c2', 'Codex', '["http://127.0.0.1:1/cb"]', 'codex', 4),
+           ('c3', 'ChatGPT', '["https://chatgpt.com/connector/oauth/b"]', 'sam_gpt', 5),
+           ('c4', 'x', '["https://chatgpt.com/connector_platform_oauth_redirect"]', 'x', 7)"#,
+    );
+    run("INSERT INTO links (service_user_id, standard_user_id, approved_at, approved_with) VALUES
+           ('gpt', 'w', 10, 'k'), ('codex', 'w', 11, 'k'), ('sam_gpt', 'sam', 12, 'k'), ('plan', 'w', 13, 'k')");
+    run("INSERT INTO oauth_tokens (hash, kind, client_id, service_user_id, expires_at, created_at) VALUES
+           ('t1', 'access', 'c1', 'gpt', 99, 20), ('t2', 'refresh', 'c2', 'codex', 99, 21),
+           ('t3', 'access', 'c3', 'sam_gpt', 99, 22), ('t4', 'proxy', NULL, 'gpt', 99, 23),
+           ('t5', 'access', 'c2', 'codex', 5, 30)");
+    run("INSERT INTO apns_devices (id, app, person_id, service_user_id, token, environment, created_at) VALUES
+           ('d1', 'ios', 'w', 'gpt', 'tk', 'prod', 1)");
+    let grants_now = |db: &rusqlite::Connection| -> Vec<Grant> {
+        let mut q = db.prepare(GRANTS_SQL).unwrap();
+        let names: Vec<String> = q.column_names().iter().map(|n| n.to_string()).collect();
+        q.query_map([10], |r| {
+            let mut o = serde_json::Map::new();
+            for (i, n) in names.iter().enumerate() {
+                let v = match r.get_ref(i)? {
+                    rusqlite::types::ValueRef::Null => Value::Null,
+                    rusqlite::types::ValueRef::Integer(n) => json!(n),
+                    rusqlite::types::ValueRef::Real(f) => json!(f),
+                    rusqlite::types::ValueRef::Text(t) => json!(String::from_utf8_lossy(t)),
+                    rusqlite::types::ValueRef::Blob(_) => Value::Null,
+                };
+                o.insert(n.clone(), v);
+            }
+            Ok(Grant::from_row(&Value::Object(o)))
+        })
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+    };
+    let read = grants_now(&db);
+    let codex = read.iter().find(|g| g.id == "codex").unwrap();
+    assert_eq!(codex.tokens, 1, "live tokens only, at now = 10");
+    assert_eq!(
+        codex.last_used_at,
+        Some(30),
+        "the last token issued, live or not"
+    );
+    assert_eq!(
+        read.iter().find(|g| g.id == "gpt").unwrap().tokens,
+        1,
+        "proxy aside"
+    );
+    assert_eq!(
+        read.iter()
+            .find(|g| g.id == "plan")
+            .unwrap()
+            .service_key
+            .as_deref(),
+        Some("ai-agent:planner")
+    );
+    let apps = group(&read);
+    let mine = app_with(&apps, "gpt").unwrap();
+    assert_eq!(mine["label"], "OpenAI");
+    assert_eq!(mine["person"], "w");
+    let going = still_members(mine, &["gpt".into(), "codex".into(), "sam_gpt".into()]);
+    assert_eq!(
+        going,
+        ["codex", "gpt"],
+        "Sam's ChatGPT is his own grant, not Willow's"
+    );
+    for id in &going {
+        for q in DISCONNECT_GRANT {
+            db.execute(q, [id]).unwrap();
+        }
+    }
+    let ids = |sql: &str| -> Vec<String> {
+        let mut q = db.prepare(sql).unwrap();
+        q.query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    assert_eq!(
+        ids("SELECT service_user_id FROM links ORDER BY 1"),
+        ["plan", "sam_gpt"]
+    );
+    assert_eq!(
+        ids("SELECT hash FROM oauth_tokens ORDER BY 1"),
+        ["t3", "t4"],
+        "a person's proxy token stays"
+    );
+    assert!(ids("SELECT id FROM apns_devices").is_empty());
+    assert_eq!(
+        ids("SELECT id FROM oauth_clients ORDER BY 1"),
+        ["c1", "c2", "c3", "c4"],
+        "clients stay"
+    );
+    let after = group(&grants_now(&db));
+    assert_eq!(
+        app_with(&after, "gpt").unwrap()["person"],
+        Value::Null,
+        "now acting for no one"
+    );
+
+    // The clean-up plan: what it may name, and its digest moving when a grant changes.
+    let read = grants_now(&db);
+    assert!(
+        d::steps(&json!({}), &read)
+            .unwrap_err()
+            .contains("changes nothing")
+    );
+    assert!(d::steps(&json!({ "remove": ["nobody"] }), &read).is_err());
+    assert!(d::steps(&json!({ "assign": [{ "id": "x", "app": "nope" }] }), &read).is_err());
+    assert!(
+        d::steps(
+            &json!({ "remove": ["x"], "assign": [{ "id": "x", "app": "own" }] }),
+            &read
+        )
+        .is_err()
+    );
+    let steps = d::steps(
+        &json!({ "remove": ["x", "x"], "assign": [{ "id": "plan", "app": "ai-gateway" }] }),
+        &read,
+    )
+    .unwrap();
+    assert_eq!(
+        steps,
+        [
+            d::Step::Remove("x".into()),
+            d::Step::Assign("plan".into(), "ai-gateway".into())
+        ]
+    );
+    let lines = d::plan_lines(&steps, &read, &|id| {
+        if id == "w" {
+            "Willow".into()
+        } else {
+            id.into()
+        }
+    });
+    assert_eq!(
+        lines,
+        [
+            "Remove x (OAuth app, x), acting for no one, with its 0 live tokens.",
+            "Show Pigeon planner (plan) under AI Gateway.",
+        ]
+    );
+    let before = d::payload(&steps, &read);
+    let mut relinked = read.clone();
+    relinked.iter_mut().find(|g| g.id == "x").unwrap().person = Some("w".into());
+    assert_ne!(
+        before,
+        d::payload(&steps, &relinked),
+        "an approval no longer matches"
+    );
+    let suggested = d::suggest(&read);
+    let names: Vec<&str> = suggested["remove"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["gpt", "codex", "x"], "those acting for no one");
+    // Applying it: removing a grant as removing a user does, and an override.
+    for q in REMOVE_USER {
+        db.execute(
+            q,
+            rusqlite::params_from_iter(vec!["x"; q.matches('?').count()]),
+        )
+        .unwrap();
+    }
+    db.execute(d::ASSIGN, rusqlite::params!["plan", "ai-gateway", 50, "w"])
+        .unwrap();
+    assert!(ids("SELECT id FROM users WHERE id = 'x'").is_empty());
+    assert_eq!(
+        ids("SELECT id FROM oauth_clients ORDER BY 1"),
+        ["c1", "c2", "c3"]
+    );
+    assert_eq!(
+        grants_now(&db)
+            .iter()
+            .find(|g| g.id == "plan")
+            .unwrap()
+            .app_override
+            .as_deref(),
+        Some("ai-gateway")
+    );
+
+    // Removing a person still clears everything acting for them, through the same grants; a
+    // removed service user takes its override with it.
+    for q in REMOVE_USER {
+        db.execute(
+            q,
+            rusqlite::params_from_iter(vec!["w"; q.matches('?').count()]),
+        )
+        .unwrap();
+    }
+    assert_eq!(ids("SELECT service_user_id FROM links"), ["sam_gpt"]);
+    for q in REMOVE_USER {
+        db.execute(
+            q,
+            rusqlite::params_from_iter(vec!["plan"; q.matches('?').count()]),
+        )
+        .unwrap();
+    }
+    assert!(ids("SELECT service_user_id FROM app_assignments").is_empty());
+    // The removal dialog names the apps rolled up.
+    let lines = removal_lines(&json!({
+        "user": { "name": "Willow" }, "passkeys": 1, "sessions": 0, "tokens": 0, "roles": [],
+        "apps": [{ "name": "Pigeon for iOS" }, { "name": "Pigeon for iOS" }],
+        "app_groups": [
+            { "label": "AI Gateway", "clients": 2, "roles": 2 },
+            { "label": "Pigeon for iOS", "clients": 7, "roles": 0 },
+            { "label": "Claude", "clients": 1, "roles": 0 },
+        ],
+    }));
+    assert!(lines.contains(&"Disconnects 3 apps acting for them, revoking their tokens: AI Gateway (2 roles), Pigeon for iOS (7 clients), Claude.".to_string()), "{lines:?}");
+
+    // Access › People's data: the fixture's apps roll up into its app groups, one per real
+    // app and person, and every client in a group is one of its `apps` rows.
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../src/capabilities/src/console/web/fixtures/app_people.json"
+    ))
+    .unwrap();
+    let groups = fixture["app_groups"].as_array().unwrap();
+    for a in fixture["apps"].as_array().unwrap() {
+        let g = app_with(groups, a["id"].as_str().unwrap()).unwrap();
+        assert_eq!(g["app"], a["app"], "{a}");
+        assert_eq!(g["person"], a["person"], "{a}");
+    }
+    for g in groups {
+        assert_eq!(
+            g["clients"].as_u64().unwrap() as usize,
+            g["members"].as_array().unwrap().len()
+        );
+    }
+    // And its view: apps in each person's row, the app's clients inside it, those acting for
+    // no one at the bottom for an admin, and no Apps page of their own.
+    let view = include_str!("../../src/capabilities/src/console/web/views/access.js");
+    for needle in [
+        "action: \"app-group-disconnect\"",
+        "change: { members: ids(a) }",
+        "action: \"app-disconnect\"",
+        "appsTable(ctx, p.apps",
+        "Apps acting for no one",
+        "meAdmin && none.length",
+        "String(p.apps.length)",
+    ] {
+        assert!(view.contains(needle), "access.js: {needle}");
+    }
+    assert!(!view.contains("register(\"access\", \"apps\""));
+    let shell = include_str!("../../src/capabilities/src/console/web/shell.js");
+    assert!(shell.contains("\"app-group-disconnect\""));
+}
+
 /// The role column's migration makes the platform's first person (the oldest standard user)
 /// its first admin, and no one else: not a later person, an older agent or a site visitor.
 #[test]
@@ -1000,6 +1553,7 @@ fn console_membership_roles() {
         "person-admin",
         "member-set",
         "app-disconnect",
+        "app-group-disconnect",
         "user-remove",
     ] {
         assert_eq!(need(id, json!("x")), Need::Own, "{id}");
@@ -2246,7 +2800,7 @@ fn console_decommissioned() {
         (
             "tab=management&subtab=delegation",
             None,
-            ("access", Some("apps")),
+            ("access", Some("people")),
         ),
         ("tab=cost&subtab=today", None, ("cost", Some("today"))),
         ("tab=cost&subtab=bogus", None, ("cost", None)),

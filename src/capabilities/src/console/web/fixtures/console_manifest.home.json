@@ -208,13 +208,6 @@
           "order": 30,
           "capability": "users",
           "upgrade": null
-        },
-        {
-          "id": "apps",
-          "title": "Apps",
-          "order": 40,
-          "capability": "users",
-          "upgrade": null
         }
       ]
     },

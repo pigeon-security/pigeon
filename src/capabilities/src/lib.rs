@@ -12,6 +12,7 @@ pub mod ci;
 pub mod cloud_scope;
 pub mod console;
 pub mod cost;
+pub mod delegates;
 pub mod digitalocean;
 pub mod dispatch;
 pub mod expiry;

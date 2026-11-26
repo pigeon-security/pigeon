@@ -43,7 +43,7 @@
     "instance-put", "linked-unlink", "site-deploy", "site-rollback", "visitor-invite", "visitor-revoke",
     // Access and Platform.
     "secret-set", "apple-adopt", "apple-identity", "token-issue", "token-revoke", "invite", "passkey-remove", "person-admin", "member-set", "user-remove",
-    "app-disconnect", "model-defaults", "agents-config", "digitalocean-token-set", "digitalocean-spaces-key-set", "digitalocean-droplet-token-set", "digitalocean-droplet-start", "digitalocean-droplet-cancel"]);
+    "app-disconnect", "app-group-disconnect", "model-defaults", "agents-config", "digitalocean-token-set", "digitalocean-spaces-key-set", "digitalocean-droplet-token-set", "digitalocean-droplet-start", "digitalocean-droplet-cancel"]);
 
   // ---- Fixture mode (P14) and routing base.
   const query = new URLSearchParams(location.search);

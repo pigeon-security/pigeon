@@ -260,9 +260,12 @@ async fn proxy_tokens(cx: &Context<'_>) -> Result<Value> {
     Ok(json!({ "tokens": tokens }))
 }
 
-/// Access › People and Apps: each person with their passkeys (no key material) and whether
-/// they are an admin, each app or service user with the person it acts for, its live token
-/// count and its kind, and who is asking and whether they are an admin.
+/// Access › People: each person with their passkeys (no key material) and whether they are an
+/// admin; `app_groups`, the apps acting for people rolled up one per real app and person
+/// (`crate::delegates`), with their clients as `members`, those acting for no one under a null
+/// `person`; `apps`, the same one per service user, with the person it acts for, its live token
+/// count, its kind and the `app` it rolls up into (the iOS app reads these); and who is asking
+/// and whether they are an admin.
 async fn people(cx: &Context<'_>, me: &str) -> Result<Value> {
     let all = directory(cx.env, "people.list", json!({})).await?;
     let clients = directory(cx.env, "oauth.clients", json!({})).await?;
@@ -288,11 +291,21 @@ async fn people(cx: &Context<'_>, me: &str) -> Result<Value> {
             })
         })
         .collect();
+    let grants: Vec<crate::delegates::Grant> = list(&all, "grants")
+        .iter()
+        .map(crate::delegates::Grant::from_row)
+        .collect();
+    let app_groups = crate::delegates::group(&grants);
     let apps: Vec<Value> = list(&all, "apps")
         .into_iter()
         .map(|mut a| {
             let app = a["id"].as_str().is_some_and(|id| oauth.contains(&id));
             a["kind"] = json!(if app { "app" } else { "service" });
+            let id = a["id"].as_str().unwrap_or_default();
+            if let Some(g) = crate::delegates::app_with(&app_groups, id) {
+                a["app"] = g["app"].clone();
+                a["app_label"] = g["label"].clone();
+            }
             a
         })
         .collect();
@@ -310,7 +323,7 @@ async fn people(cx: &Context<'_>, me: &str) -> Result<Value> {
         .collect();
     Ok(json!({
         "me": me, "me_admin": me_admin, "people": people, "apps": apps,
-        "instances": instances, "manage": manage,
+        "app_groups": app_groups, "instances": instances, "manage": manage,
     }))
 }
 

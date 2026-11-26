@@ -1135,13 +1135,32 @@ fn platform_users_people() {
     ];
     let keys = [json!({ "id": "k1", "user_id": "p1", "name": "Laptop",
         "created_at": 11, "last_used_at": null })];
+    let grant = |id: &str, name: &str, person: Option<&str>| {
+        pigeon_capabilities::delegates::Grant::from_row(&json!({
+            "id": id, "name": name, "created_at": 30, "person": person,
+            "client_id": (id == "s1").then_some("c1"),
+            "redirect_uris": (id == "s1").then_some("[\"https://claude.ai/api/mcp/auth_callback\"]"),
+        }))
+    };
+    let grants = [
+        grant("s1", "Sample App", Some("p1")),
+        grant("s2", "Sample Agent", Some("p1")),
+        grant("s3", "Loose Agent", None),
+    ];
     let out = people(
         &users,
         &links,
         &keys,
         &["s1".to_string()],
         &["p1".to_string()],
+        &grants,
     );
+    // The same service users rolled up into apps: s1 is Claude by its redirect.
+    let apps = out["people"][0]["apps"].as_array().unwrap();
+    assert_eq!(apps.len(), 2);
+    assert_eq!(apps[0]["label"], "Claude");
+    assert_eq!(apps[1]["label"], "Sample Agent");
+    assert_eq!(out["unassigned_apps"][0]["label"], "Loose Agent");
     assert_eq!(out["unlinked"], 1);
     let list = out["people"].as_array().unwrap();
     assert_eq!(list.len(), 2);

@@ -111,7 +111,13 @@ pub enum Change {
     /// `{person, role}`: a person's id and their role on the target instance, `owner`,
     /// `operator`, `viewer` or `none` to remove them.
     Member,
+    /// `{members}`: 1 to [`MAX_MEMBERS`] ids of the grants an app's dialog listed
+    /// (`crate::delegates`), sorted, so the passkey covers exactly those.
+    Members,
 }
+
+/// The most grants one app's disconnect names.
+pub const MAX_MEMBERS: usize = 100;
 
 /// One write the console makes.
 #[derive(Debug, PartialEq, Eq)]
@@ -283,6 +289,16 @@ pub const ACTIONS: &[Action] = &[
         Target::Id,
         Change::Nothing,
     )),
+    // Console only: every client of one app for one person, as Access › People lists them. The
+    // target is any one of them; the change lists all the dialog showed.
+    act(
+        "app-group-disconnect",
+        "Disconnect an app",
+        Cap("users"),
+        true,
+        Target::Id,
+        Change::Members,
+    ),
     app(act(
         "invite",
         "Invite a person",
@@ -718,6 +734,26 @@ impl Action {
                 let role = s("role").unwrap_or_default().trim();
                 crate::membership::parse_setting(role)?;
                 json!({ "person": person, "role": role })
+            }
+            Change::Members => {
+                only(&o, &["members"], true)?;
+                let list = o
+                    .get("members")
+                    .and_then(Value::as_array)
+                    .ok_or("the change is {members}, a list of ids")?;
+                let mut ids: Vec<&str> = Vec::new();
+                for m in list {
+                    match m.as_str().map(str::trim) {
+                        Some(id) if id_like(id) => ids.push(id),
+                        _ => return Err("each member is an id".into()),
+                    }
+                }
+                ids.sort_unstable();
+                ids.dedup();
+                if ids.is_empty() || ids.len() > MAX_MEMBERS {
+                    return Err(format!("the change lists 1 to {MAX_MEMBERS} members"));
+                }
+                json!({ "members": ids })
             }
             Change::Extend => {
                 only(&o, EXTEND, true)?;

@@ -1,4 +1,5 @@
-/* Access: Secrets (secrets), Tokens (proxy), People and Apps (users). Ported from the first
+/* Access: Secrets (secrets), Tokens (proxy), and People (users), each person with the apps
+ * acting for them, rolled up one per real app (src/capabilities/src/delegates.rs). Ported from the first
  * console's keys.js (Credentials) and users.js (People, Delegation), mounted until now through
  * management.js, and the read-only copies in settings.js (C1: this is the only place they are
  * shown). Reads go through /app/op; every write is a ConfirmDialog on /console/write. A secret's
@@ -285,10 +286,77 @@
     confirm({
       title: "Remove person", danger: true,
       target: [["Person", el("strong", { text: person.name })], ["Role", person.admin ? "Admin" : "Member"],
-        ["Passkeys", String(person.passkeys.length)], ["Apps", String(person.apps || 0)]],
+        ["Passkeys", String(person.passkeys.length)], ["Apps", String(person.apps.length)]],
       effect: "Deletes their passkeys, console sessions and instance roles, and disconnects the apps acting for them. This cannot be undone.",
       action: "user-remove", id: person.id, confirmLabel: "Remove with passkey",
       onDone: refresh(ctx),
+    });
+  }
+
+  // ---- Apps acting for a person: one row per real app, its clients and service users inside.
+  const KIND = { oauth: "OAuth app", service: "Service user", leftover: "No client" };
+  const kinds = (a) => (a.kinds || []).map((k) => tag(KIND[k] || k));
+  const ids = (a) => (a.members || []).map((m) => m.id);
+
+  // Every client of one app for one person; the dialog lists them and the passkey covers them.
+  function disconnectApp(ctx, a, personName) {
+    confirm({
+      title: "Disconnect app", danger: true,
+      target: [["App", el("strong", { text: a.label })], ["Kind", kinds(a)], ["Acting for", personName || "No one"],
+        ["Clients", String(a.clients ?? 0)], ["Live tokens", String(a.tokens ?? 0)]],
+      effect: "Revokes the tokens of each client listed and their link, so they act for no one. Signing in again with a passkey reconnects one. Proxy tokens a person issued stay.",
+      action: "app-group-disconnect", id: a.members[0].id, change: { members: ids(a) },
+      confirmLabel: "Disconnect with passkey",
+      onDone: refresh(ctx),
+    });
+  }
+
+  // One client or service user of an app: a single install can still be disconnected.
+  function disconnectOne(ctx, a, m, personName) {
+    confirm({
+      title: "Disconnect client", danger: true,
+      target: [["App", el("strong", { text: a.label })], ["Client", m.name], ["Id", code(m.id)], ["Acting for", personName || "No one"],
+        ["Live tokens", String(m.tokens ?? 0)]],
+      effect: "Revokes its tokens and its link, so it acts for no one. The app's other clients stay connected.",
+      action: "app-disconnect", id: m.id, confirmLabel: "Disconnect with passkey",
+      onDone: refresh(ctx),
+    });
+  }
+
+  const roleNote = (a, m) => (a.roles || []).find((r) => r.id === m.role);
+
+  function appsTable(ctx, list, { label, personName, meAdmin, empty }) {
+    return dataTable({
+      label, noun: "apps", empty, signal: ctx.signal, load: list,
+      columns: [
+        { label: "App", cell: (a) => [el("strong", { text: a.label }), a.vendor ? el("span", { class: "sub", text: a.vendor }) : null] },
+        { label: "Kind", cell: (a) => kinds(a) },
+        { label: "Roles", cell: (a) => ((a.roles || []).length ? (a.roles || []).map((r) => pill(r.label, "plain")) : "—") },
+        { label: "Clients", cls: "num", cell: (a) => String(a.clients ?? 0) },
+        { label: "Tokens", cls: "num", cell: (a) => String(a.tokens ?? 0) },
+        { label: "Linked", cls: "num", cell: (a) => day(a.linked_at) },
+        { label: "Last active", cls: "num", cell: (a) => (a.last_used_at ? day(a.last_used_at) : "never") },
+        { label: "", cls: "acts", cell: (a) => (meAdmin ? button("Disconnect", () => disconnectApp(ctx, a, personName), { size: "sm", variant: "danger" }) : null) },
+      ],
+      expand: (a) => el("div", {},
+        (a.roles || []).length > 1
+          ? el("dl", { class: "facts" }, (a.roles || []).flatMap((r) => [el("dt", { text: r.label }), el("dd", { text: r.note })]))
+          : null,
+        dataTable({
+          label: `Clients of ${a.label}`, noun: "clients", empty: "No clients.", signal: ctx.signal, load: a.members || [],
+          columns: [
+            { label: "Client", cell: (m) => [el("strong", { text: m.name }), el("span", { class: "sub mono", text: m.id })] },
+            { label: "Kind", cell: (m) => tag(KIND[m.kind] || m.kind) },
+            { label: "Role", cell: (m) => (roleNote(a, m) ? pill(roleNote(a, m).label, "plain") : "—") },
+            { label: "Redirect", cls: "mono", cell: (m) => m.redirect_host || "—" },
+            { label: "Tokens", cls: "num", cell: (m) => String(m.tokens ?? 0) },
+            { label: "Added", cls: "num", cell: (m) => day(m.created_at) },
+            { label: "Last active", cls: "num", cell: (m) => (m.last_used_at ? day(m.last_used_at) : "never") },
+            { label: "", cls: "acts", cell: (m) => (meAdmin && (a.members || []).length > 1
+              ? button("Disconnect", () => disconnectOne(ctx, a, m, personName), { size: "sm", variant: "danger" })
+              : null) },
+          ],
+        })),
     });
   }
 
@@ -304,8 +372,8 @@
     let instances = [];
     let manage = [];
     const actions = el("span");
-    const appsLink = (n) => (n && ctx.nav ? el("a", { href: shell.href({ instance: ctx.instance.id, area: "access", view: "apps" }), text: String(n),
-      on: { click: (e) => { if (e.button === 0 && !e.metaKey && !e.ctrlKey) { e.preventDefault(); ctx.nav({ instance: ctx.instance.id, area: "access", view: "apps" }); } } } }) : String(n || 0));
+    // Apps acting for no one: an admin's to see and disconnect, under the people.
+    const unassigned = el("div");
     const table = dataTable({
       label: "People", noun: "people", filter: "Filter people", signal: ctx.signal, empty: "No people yet.",
       columns: [
@@ -313,7 +381,7 @@
           el("strong", { text: p.name }), p.me ? pill("You", "accent") : null, p.admin ? pill("Admin", "plain") : null) },
         { label: "Passkeys", cls: "num", cell: (p) => String(p.passkeys.length) },
         { label: "Last sign-in", cls: "num", cell: (p) => (lastUsed(p) ? day(lastUsed(p)) : "never") },
-        { label: "Apps", cls: "num", cell: (p) => appsLink(p.apps) },
+        { label: "Apps", cls: "num", cell: (p) => String(p.apps.length) },
         { label: "Instances", cell: (p) => (p.admin ? el("span", { class: "muted", text: "Owner of all, as admin" }) : rolesText(p)) },
         { label: "", cls: "acts", cell: (p) => (meAdmin && !p.me
           ? [button(p.admin ? "Make member" : "Make admin", () => setAdmin(ctx, p, !p.admin), { size: "sm" }), " ",
@@ -334,7 +402,8 @@
               ? button("Remove", () => removePasskey(ctx, p, k), { size: "sm", variant: "danger" })
               : null) },
         ],
-      }), dataTable({
+      }), appsTable(ctx, p.apps, { label: `Apps acting for ${p.name}`, personName: p.name, meAdmin,
+        empty: "No apps act for them." }), dataTable({
         label: `Roles of ${p.name}`, noun: "instances", empty: "No instances you can see.", signal: ctx.signal,
         load: instances.map((i) => ({ id: i, role: (p.roles || {})[i] || null })),
         columns: [
@@ -352,63 +421,25 @@
         manage = Array.isArray(data?.manage) ? data.manage : [];
         admins = (data?.people || []).filter((p) => p.admin).length;
         actions.replaceChildren(meAdmin ? button("Invite person", () => invitePerson(ctx), { variant: "primary" }) : "");
-        const apps = data?.apps || [];
+        const groups = data?.app_groups || [];
+        const none = groups.filter((a) => !a.person);
+        unassigned.replaceChildren(...(meAdmin && none.length
+          ? [el("h3", { text: "Apps acting for no one" }),
+            intro("Registered, or disconnected, and not allowed by anyone. One acts for a person again only once that person signs in from it with their passkey."),
+            appsTable(ctx, none, { label: "Apps acting for no one", personName: null, meAdmin, empty: "None." })]
+          : []));
         return (data?.people || []).map((p) => ({ ...p, passkeys: p.passkeys || [], me: p.id === data.me,
-          apps: apps.filter((a) => a.person === p.id).length }))
+          apps: groups.filter((a) => a.person === p.id) }))
           .sort((a, b) => Number(b.me) - Number(a.me));
       },
     });
     return el("div", { class: "view" },
-      intro("Who can sign in to the platform and approve with a passkey, and their role on each instance: owners manage who belongs, operators write and approve, viewers read. Expand a person for their passkeys and roles. Admins invite and remove people, manage anyone's passkeys and are owners everywhere.",
+      intro("Who can sign in to the platform and approve with a passkey, the apps acting for them, and their role on each instance: owners manage who belongs, operators write and approve, viewers read. Expand a person for their passkeys, apps and roles. Admins invite and remove people, disconnect apps, manage anyone's passkeys and are owners everywhere.",
         actions),
-      table);
-  }
-
-  // ---- Apps: OAuth apps and service users, by the person each acts for; disconnect.
-  const KIND = { app: "OAuth app", service: "Service user" };
-
-  function disconnect(ctx, a) {
-    confirm({
-      title: "Disconnect app", danger: true,
-      target: [["App", el("strong", { text: a.name })], ["Kind", KIND[a.kind] || a.kind], ["Acting for", a.personName || "No one"], ["Live tokens", String(a.tokens ?? 0)]],
-      effect: "Revokes its tokens and its link, so it acts for no one. It must be allowed again with a passkey to reconnect. Proxy tokens a person issued stay.",
-      action: "app-disconnect", id: a.id, confirmLabel: "Disconnect with passkey",
-      onDone: refresh(ctx),
-    });
-  }
-
-  function apps(ctx) {
-    let meAdmin = false;
-    return el("div", { class: "view" },
-      intro("OAuth apps (MCP clients) and service users (agents) that act for a person. Disconnecting revokes their tokens."),
-      dataTable({
-        label: "Apps", noun: "apps", filter: "Filter apps", signal: ctx.signal,
-        empty: "No apps yet. Add pigeon as a connector in Claude, then allow it with your passkey.",
-        columns: [
-          { label: "App", cell: (a) => [el("strong", { text: a.name }), el("span", { class: "sub mono", text: a.id })] },
-          { label: "Kind", cell: (a) => tag(KIND[a.kind] || a.kind) },
-          { label: "Acting for", cell: (a) => (a.personName ? a.personName : pill("No one", "warn")) },
-          { label: "Tokens", cls: "num", cell: (a) => String(a.tokens ?? 0) },
-          { label: "Linked", cls: "num", cell: (a) => day(a.linked_at) },
-          { label: "", cls: "acts", cell: (a) => (meAdmin ? button("Disconnect", () => disconnect(ctx, a), { size: "sm", variant: "danger" }) : null) },
-        ],
-        load: async () => {
-          const data = await ctx.op("app_people");
-          meAdmin = data?.me_admin === true;
-          const names = new Map((data?.people || []).map((p) => [p.id, p.name]));
-          const all = (data?.apps || []).map((a) => ({ ...a, personName: a.person ? names.get(a.person) || a.person : null }));
-          const none = all.filter((a) => !a.person);
-          const some = all.filter((a) => a.person).sort((a, b) => a.personName.localeCompare(b.personName) || a.name.localeCompare(b.name));
-          return [
-            ...(none.length ? [{ group: "Acting for no one" }, ...none] : []),
-            ...(some.length ? [{ group: "Acting for a person" }, ...some] : []),
-          ];
-        },
-      }));
+      table, unassigned);
   }
 
   register("access", "secrets", secrets);
   register("access", "tokens", tokens);
   register("access", "people", people);
-  register("access", "apps", apps);
 })();

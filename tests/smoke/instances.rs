@@ -587,12 +587,7 @@ fn console_manifest_by_capability_per_instance_kind() {
             ),
             (
                 "access",
-                &[
-                    "secrets@secrets",
-                    "tokens@proxy",
-                    "people@users",
-                    "apps@users"
-                ]
+                &["secrets@secrets", "tokens@proxy", "people@users"]
             ),
             ("instances", &["list@multi-instance"]),
             (
