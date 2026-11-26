@@ -133,10 +133,24 @@ impl Instances {
                     objects,
                 });
             }
-            for t in instance.sites.iter().flat_map(|s| s.targets.iter()) {
-                let record::Target::Domain { hostname } = t else {
-                    continue;
-                };
+            // Each Domain target and each redirect host: both are custom domains of the Worker.
+            let mut domain_hosts: Vec<String> = instance
+                .sites
+                .iter()
+                .flat_map(|s| s.targets.iter())
+                .filter_map(|t| match t {
+                    record::Target::Domain { hostname } => Some(hostname.clone()),
+                    _ => None,
+                })
+                .chain(
+                    instance
+                        .redirects
+                        .iter()
+                        .map(|r| r.host.to_ascii_lowercase()),
+                )
+                .collect();
+            domain_hosts.dedup();
+            for hostname in &domain_hosts {
                 let service = workers::custom_domains(account, hostname)
                     .await?
                     .iter()

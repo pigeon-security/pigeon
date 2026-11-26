@@ -59,7 +59,7 @@
   // ---- Instance capabilities: the record field each one is enabled by, and what it adds.
   const list = (s) => String(s || "").split(",").map((x) => x.trim()).filter(Boolean);
   const passkeySites = (r) => (r.sites || []).filter((s) => s.auth === "passkey");
-  const on = (r, c) => (c.cap === "site_passkeys" ? passkeySites(r).length > 0 && on(r, CAPS[0]) : r[c.field]?.state === "enabled");
+  const on = (r, c) => (c.on ? c.on(r) : c.cap === "site_passkeys" ? passkeySites(r).length > 0 && on(r, CAPS[0]) : r[c.field]?.state === "enabled");
   const CAPS = [
     { cap: "publishing", field: "publishing", component: "sites", adds: ["Site › Sites", "Site › Deployments"],
       what: "Publish one of the instance’s sites from its repository",
@@ -104,6 +104,30 @@
         { key: "prefix", label: "Prefix", mono: true, optional: true },
         { key: "destination_bucket", label: "Destination bucket", mono: true },
       ] },
+    // A list on the record: Configure adds the redirect for a host, or replaces the one it has.
+    { cap: "redirects", field: "redirects", component: "instances", adds: [],
+      what: "Answer a hostname in the instance’s zones with a redirect to another URL",
+      effect: "Its plan attaches the host to the instance’s Worker, which answers it with the redirect.",
+      on: (r) => (r.redirects || []).length > 0,
+      needs: (r) => (!(r.zones || []).length ? "a zone in the record" : r.worker ? null : "a Worker in the record"),
+      fields: (r) => [
+        { key: "host", label: "Host", mono: true, hint: `A hostname in ${(r.zones || []).join(", ") || "the instance’s zones"}. An existing host’s redirect is replaced.` },
+        { key: "to", label: "Redirect to", mono: true, hint: "An https:// URL, with no query or fragment." },
+        { key: "status", label: "Status", options: ["301", "302", "307", "308"], hint: "301 and 308 are permanent; 302 and 307 temporary." },
+        { key: "keep_path", label: "Keep path", options: ["yes", "no"], hint: "Append the request’s path and query to the URL." },
+      ],
+      current: (r) => {
+        const x = (r.redirects || [])[0];
+        return x ? { host: x.host, to: x.to, status: String(x.status ?? 301), keep_path: x.keep_path === false ? "no" : "yes" }
+          : { host: (r.zones || [])[0] || "", to: "", status: "301", keep_path: "yes" };
+      },
+      apply: (r, v) => {
+        const entry = { host: v.host.toLowerCase(), to: v.to };
+        if (v.status !== "301") entry.status = Number(v.status);
+        if (v.keep_path === "no") entry.keep_path = false;
+        r.redirects = [...(r.redirects || []).filter((x) => x.host !== entry.host), entry];
+      },
+      remove: (r) => { delete r.redirects; } },
   ];
   const profileOf = (r, c) => (c.current ? c.current(r) : r[c.field] || {});
   // The record with capability `c` set to `values`, or without it (and what needs it).
@@ -243,7 +267,7 @@
         putRecord(ctx, {
           record: r, next: withCap(r, c, values), title: `${verb} ${c.cap} on ${inst.title}`,
           target: [["Capability", code(c.cap)]], confirmLabel: `${verb} with passkey`,
-          effect: editing ? `Changes how ${c.cap} is scoped. The console sections stay the same.`
+          effect: c.effect ? c.effect : editing ? `Changes how ${c.cap} is scoped. The console sections stay the same.`
             : `Adds ${c.adds.join(", ")} to this instance’s console, and ${c.cap}’s tools to its MCP endpoint.`,
         });
       };
@@ -280,7 +304,7 @@
       putRecord(ctx, {
         record: r, next: withoutCap(r, c), title: `Disable ${c.cap} on ${inst.title}`, danger: true, confirmLabel: "Disable with passkey",
         target: [["Capability", code(c.cap)], also.length && ["Also disables", also.map((d) => d.cap).join(", ")]].filter(Boolean),
-        effect: `Removes ${[c, ...also].flatMap((d) => d.adds).join(", ")} from this instance’s console and ${[c, ...also].map((d) => d.cap).join(" and ")} from its MCP tools. Nothing in the account is deleted.`,
+        effect: c.cap === "redirects" ? "Removes every redirect from the record. Their hosts stay attached to the instance’s Worker: pigeon never detaches them." : `Removes ${[c, ...also].flatMap((d) => d.adds).join(", ")} from this instance’s console and ${[c, ...also].map((d) => d.cap).join(" and ")} from its MCP tools. Nothing in the account is deleted.`,
       });
     }
 
@@ -291,7 +315,7 @@
   }
 
   // ---- Overview (C2): facts, the link, and the record's other fields as a form or JSON.
-  const CAP_FIELDS = new Set(["publishing", "storage", "source", "ci", "observability", "ingest", "pins"]);
+  const CAP_FIELDS = new Set(["publishing", "storage", "source", "ci", "observability", "ingest", "redirects", "pins"]);
   const FIXED = new Set(["id", "account", "version"]);
   const editable = (r) => Object.fromEntries(Object.entries(r).filter(([k]) => !CAP_FIELDS.has(k) && !FIXED.has(k)));
   const repoText = (repo) => (!repo ? "" : repo.kind === "github" ? `github:${repo.full_name}` : repo.kind === "artifacts" ? `artifacts:${repo.namespace}/${repo.repo}` : JSON.stringify(repo));

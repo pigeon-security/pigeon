@@ -1077,6 +1077,11 @@ fn host_order(m: &Model) -> Vec<usize> {
         .collect()
 }
 
+/// The label of a redirect host: where it sends visitors.
+pub fn redirect_label(to: &str) -> String {
+    format!("redirects to {}", to.trim_start_matches("https://"))
+}
+
 /// The status pill of a hostname.
 fn host_status(h: &Hostname) -> (&'static str, &'static str) {
     if behind_access(h) {
@@ -1178,8 +1183,9 @@ fn wide(b: &mut Build) -> (Option<Rect>, f64) {
         b.eyebrow(P, y, "HOSTNAMES", "eb");
         y += 12.0;
         let most = chip_rows.iter().map(Vec::len).max().unwrap_or(0);
+        let redirects = order.iter().any(|i| m.hostnames[*i].redirect.is_some());
         let host_h = if !b.full {
-            36.0
+            if redirects { 50.0 } else { 36.0 }
         } else if most == 0 {
             48.0
         } else {
@@ -1210,9 +1216,21 @@ fn wide(b: &mut Build) -> (Option<Rect>, f64) {
                     &fit(&h.host, hw - 24.0, 13.0),
                     "start",
                 );
+                if let Some(to) = &h.redirect {
+                    b.text(
+                        x + 12.0,
+                        y + 39.0,
+                        "meta",
+                        &fit(&redirect_label(to), hw - 24.0, 11.0 * 0.93),
+                        "start",
+                    );
+                }
                 continue;
             }
-            let tag = if b.tools && mcp[*i] {
+            let label = h.redirect.as_deref().map(redirect_label);
+            let tag = if let Some(l) = label.as_deref() {
+                Some(l)
+            } else if b.tools && mcp[*i] {
                 Some("/mcp · every tool")
             } else {
                 None
@@ -2020,6 +2038,9 @@ fn narrow(b: &mut Build) -> (Option<Rect>, f64) {
                 b.pill(left + full_w - 12.0 - st_w, y + 6.0, st, cls);
             }
             let mut sub = format!("→ {}", h.worker);
+            if let Some(to) = &h.redirect {
+                sub.push_str(&format!("  {}", redirect_label(to)));
+            }
             if b.tools && mcp[*i] {
                 sub.push_str("  /mcp");
             }

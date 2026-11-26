@@ -12,6 +12,7 @@ pub mod manifest;
 pub mod plan;
 pub(crate) mod publishing;
 pub mod record;
+pub mod redirects;
 pub mod rename;
 mod renaming;
 pub mod retire;
@@ -428,10 +429,27 @@ async fn observe(account: &pigeon_core::Account, instance: &Instance) -> Result<
         Err(e) => return Err(e),
     };
     let mut domains = Vec::new();
-    for t in site.map(|s| s.targets.as_slice()).unwrap_or_default() {
-        let record::Target::Domain { hostname } = t else {
+    // Each Domain target, then each redirect host: both are custom domains of the Worker.
+    let targets = site
+        .map(|s| s.targets.as_slice())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|t| match t {
+            record::Target::Domain { hostname } => Some(hostname.clone()),
+            _ => None,
+        });
+    let redirect_hosts = instance
+        .redirects
+        .iter()
+        .map(|r| r.host.to_ascii_lowercase());
+    for hostname in targets.chain(redirect_hosts) {
+        let hostname = &hostname;
+        if domains
+            .iter()
+            .any(|d: &plan::SeenDomain| &d.hostname == hostname)
+        {
             continue;
-        };
+        }
         let zone = instance
             .zones
             .iter()
@@ -716,13 +734,26 @@ impl Instances {
             }
         };
         let lines = plan::describe(&steps);
+        // The record's redirects as the plan serves them, and that removing one detaches nothing.
+        let shown = (!instance.redirects.is_empty())
+            .then(|| json!({ "hosts": redirects::lines(&instance), "note": plan::REDIRECTS_NOTE }));
+        let with_redirects = |mut out: Value| {
+            if let Some(r) = &shown {
+                out["redirects"] = r.clone();
+            }
+            out
+        };
         if steps.iter().any(plan::Step::stops) {
-            return Ok(json!({ "instance": id, "plan": lines, "applies": false,
-                "note": "Something is in the way; nothing was asked or changed." }));
+            return Ok(with_redirects(
+                json!({ "instance": id, "plan": lines, "applies": false,
+                "note": "Something is in the way; nothing was asked or changed." }),
+            ));
         }
         if !steps.iter().any(plan::Step::changes) {
-            return Ok(json!({ "instance": id, "plan": lines, "applies": false,
-                "note": "Everything is already in place." }));
+            return Ok(with_redirects(
+                json!({ "instance": id, "plan": lines, "applies": false,
+                "note": "Everything is already in place." }),
+            ));
         }
         let kind = pigeon_core::approval::Kind::LinkedPlan;
         let made = directory(
@@ -740,7 +771,7 @@ impl Instances {
             }),
         )
         .await?;
-        Ok(json!({
+        Ok(with_redirects(json!({
             "instance": id,
             "plan": lines,
             "applies": true,
@@ -748,7 +779,7 @@ impl Instances {
             "waits_until_ms": made["record"]["expires_ms"],
             "note": "Nothing changes until the person approves this plan on the console's \
                      Approvals tab; then instance_apply {plan: <this approval>} applies it once.",
-        }))
+        })))
     }
 
     /// `instance_apply`: the approved plan, if the account still gives the same one. The home
@@ -830,14 +861,21 @@ impl Instances {
                     bucket,
                     jurisdiction,
                     origin,
+                    redirects,
                     ..
                 } => {
-                    let mut bindings = vec![workers::Binding::R2 {
-                        name: plan::SITE_BINDING.into(),
-                        bucket: bucket.clone(),
-                        jurisdiction: jurisdiction.clone(),
-                    }];
+                    let mut bindings = Vec::new();
+                    if let Some(bucket) = bucket {
+                        bindings.push(workers::Binding::R2 {
+                            name: plan::SITE_BINDING.into(),
+                            bucket: bucket.clone(),
+                            jurisdiction: jurisdiction.clone(),
+                        });
+                    }
                     let module = if let Some(upstream) = origin.as_deref() {
+                        let bucket = bucket
+                            .as_deref()
+                            .ok_or_else(|| bad("a protected origin needs its site's bucket"))?;
                         let site = instance
                             .sites
                             .first()
@@ -852,6 +890,17 @@ impl Instances {
                         plan::protected_site_worker()
                     } else {
                         plan::SITE_WORKER.to_string()
+                    };
+                    // The redirect hosts are answered first, by the script in front of the site.
+                    let module = match redirects {
+                        Some(map) => {
+                            bindings.push(workers::Binding::Text {
+                                name: redirects::BINDING.into(),
+                                text: map.clone(),
+                            });
+                            redirects::wrap(&module)
+                        }
+                        None => module,
                     };
                     workers::upload(account, name, plan::COMPATIBILITY_DATE, &bindings, &module)
                         .await?;
@@ -921,9 +970,17 @@ impl Capability for Instances {
     fn versions(&self) -> Vec<pigeon_core::versions::Component> {
         use pigeon_core::versions::{Component, Kind};
         vec![
-            Component::began("instances", Kind::Capability),
+            Component::began("instances", Kind::Capability).entry(
+                "1.1.0",
+                "Records may hold redirects: hostnames in the instance's zones that answer with \
+                 an HTTP redirect, attached to the instance's Worker by its plan.",
+            ),
             // The site Worker module (`plan::SITE_WORKER`) that instance_apply uploads.
-            Component::began("instances.site_worker", Kind::Installed),
+            Component::began("instances.site_worker", Kind::Installed).entry(
+                "1.1.0",
+                "With redirects, the module answers each redirect host first \
+                 (`redirects::MODULE`); without, it is unchanged.",
+            ),
         ]
     }
 
@@ -949,6 +1006,8 @@ impl Capability for Instances {
                 name: "instance_plan",
                 description: "Dry run of what an instance needs in its account: its R2 \
                               bucket, its site Worker and the Worker's workers.dev preview, \
+                              its custom domains (a redirect host is one, answered by the \
+                              Worker's redirect map), \
                               read live and compared with what pigeon made. Changes nothing. \
                               The home instance is read with a short-lived `instance_home` \
                               token (revoked after) and plans only its landing bucket: the \

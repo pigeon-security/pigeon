@@ -540,6 +540,10 @@ pub struct Hostname {
     pub behind_access: bool,
     /// Paths on it Access lets everyone through.
     pub public_paths: Vec<String>,
+    /// Where it redirects to, when the host answers only with a redirect (an instance record's
+    /// `redirects`); absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirect: Option<String>,
 }
 
 #[derive(Serialize, Default, Clone)]
@@ -627,6 +631,7 @@ pub fn public(m: &Model) -> Model {
                 access: Vec::new(),
                 behind_access: h.behind_access || !h.access.is_empty(),
                 public_paths: h.public_paths.clone(),
+                redirect: h.redirect.clone(),
             })
             .collect(),
         links: m.links.clone(),
@@ -878,6 +883,7 @@ pub fn describe(sources: &[Source], hosted: &Hosted) -> Model {
                 access: h.access.clone(),
                 behind_access: false,
                 public_paths: h.public_paths.clone(),
+                redirect: None,
             });
         }
         for w in &f.workers {
@@ -1156,6 +1162,22 @@ pub fn instance_model(
                 access: Vec::new(),
                 behind_access: false,
                 public_paths: Vec::new(),
+                redirect: None,
+            });
+        }
+    }
+    // Each redirect host, served by the same Worker, labelled with where it sends visitors.
+    for r in &record.redirects {
+        let host = r.host.to_ascii_lowercase();
+        if !hostnames.iter().any(|h: &Hostname| h.host == host) {
+            hostnames.push(Hostname {
+                host,
+                worker: worker.clone(),
+                by: "redirects".into(),
+                access: Vec::new(),
+                behind_access: false,
+                public_paths: Vec::new(),
+                redirect: Some(r.to.clone()),
             });
         }
     }
@@ -1205,7 +1227,7 @@ pub fn instance_model(
             workers_dev,
             routes,
             tools,
-            handlers: if record.sites.is_empty() {
+            handlers: if record.sites.is_empty() && record.redirects.is_empty() {
                 Vec::new()
             } else {
                 vec!["fetch".into()]

@@ -2825,6 +2825,7 @@ fn arch_bare_model() -> pigeon_capabilities::architecture::Model {
             access: Vec::new(),
             behind_access: false,
             public_paths: Vec::new(),
+            redirect: None,
         }],
         links: vec![
             link("front", "back", "BACK"),

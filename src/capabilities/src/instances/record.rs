@@ -62,6 +62,11 @@ pub struct Instance {
     /// Optional approved ingestion source and destination.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ingest: Option<crate::ingest::Profile>,
+    /// Hostnames in the instance's zones that answer with an HTTP redirect to another URL, served
+    /// by the instance's own Worker (docs/plans/redirects.md). Absent when empty, so the digests
+    /// of records without it do not change.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub redirects: Vec<Redirect>,
     /// Where the platform itself (console, MCP, OAuth) is served: only the home instance names
     /// it, and it is platform-owned, so plans never touch it. Absent when unset, so the digests
     /// of records without it do not change.
@@ -93,6 +98,38 @@ impl Toggle {
         matches!(self, Self::Enabled)
     }
 }
+
+/// One hostname that answers with a redirect: `host` (in one of the instance's zones) sends
+/// every request to `to`, an absolute `https://` URL, with `status` (301 unless set), appending
+/// the request's path and query unless `keep_path` is false. Unset fields stay absent, so the
+/// record reads back as the person wrote it.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Redirect {
+    pub host: String,
+    pub to: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_path: Option<bool>,
+}
+
+impl Redirect {
+    /// The status it answers with: 301 unless set.
+    pub fn status(&self) -> u16 {
+        self.status.unwrap_or(301)
+    }
+
+    /// Whether the request's path and query are appended to `to`: yes unless set to false.
+    pub fn keep_path(&self) -> bool {
+        self.keep_path.unwrap_or(true)
+    }
+}
+
+/// The most redirects one record may hold.
+pub const MAX_REDIRECTS: usize = 20;
+/// The statuses a redirect may answer with.
+pub const REDIRECT_STATUSES: [u16; 4] = [301, 302, 307, 308];
 
 /// One catalogue capability's settings on an instance record: none yet (its placement is M3).
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -512,7 +549,7 @@ fn check_worker(
 ) {
     let derived = worker_for(instance);
     let Some(name) = &instance.worker else {
-        if !instance.sites.is_empty() {
+        if !instance.sites.is_empty() || !instance.redirects.is_empty() {
             match derived {
                 Ok(Some(n)) => problems.push(format!(
                     "The worker is missing: it should be \"{n}\", one Worker for the whole instance."
@@ -814,6 +851,181 @@ fn check_sites(
     }
 }
 
+/// Whether `host` is `zone` or a name under it.
+fn in_zone(host: &str, zone: &str) -> bool {
+    host == zone || host.ends_with(&format!(".{zone}"))
+}
+
+/// The hostnames an instance's sites are published at in its zones: its Zone and Domain
+/// targets, lowercased.
+fn site_hosts(instance: &Instance) -> Vec<String> {
+    instance
+        .sites
+        .iter()
+        .flat_map(|s| s.targets.iter())
+        .filter_map(|t| match t {
+            Target::Zone { hostname, .. } | Target::Domain { hostname } => {
+                Some(hostname.to_ascii_lowercase())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// A redirect's `to` split into its host and the rest (path, empty or starting with `/`), or
+/// why it is not an absolute `https://` URL with a host, no user, query or fragment.
+pub fn redirect_target(to: &str) -> Result<(String, String), String> {
+    let rest = to
+        .strip_prefix("https://")
+        .ok_or_else(|| "must start with https://".to_string())?;
+    if to.len() > 2048 {
+        return Err("must be at most 2048 characters long".into());
+    }
+    if to
+        .chars()
+        .any(|c| c.is_whitespace() || c.is_control() || matches!(c, '"' | '<' | '>' | '\\'))
+    {
+        return Err("must not contain spaces, quotes, angle brackets or backslashes".into());
+    }
+    if to.contains(['?', '#']) {
+        return Err("must not have a query or a fragment".into());
+    }
+    let (authority, path) = match rest.find('/') {
+        Some(i) => rest.split_at(i),
+        None => (rest, ""),
+    };
+    if authority.contains('@') {
+        return Err("must not name a user".into());
+    }
+    let (host, port) = match authority.split_once(':') {
+        Some((h, p)) => (h, Some(p)),
+        None => (authority, None),
+    };
+    let host = host.to_ascii_lowercase();
+    if !dns_name(&host) {
+        return Err(format!(
+            "names host \"{host}\", which is not a valid DNS name"
+        ));
+    }
+    if let Some(p) = port
+        && (p.is_empty() || p.len() > 5 || !p.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return Err("has a port that is not a number".into());
+    }
+    if path.split('/').any(|seg| seg == "..") {
+        return Err("must not have \"..\" in its path".into());
+    }
+    Ok((host, path.to_string()))
+}
+
+/// Reports problems with the record's redirects: at most [`MAX_REDIRECTS`]; each host a DNS
+/// name in the instance's zones, listed once, not one of its sites' hostnames, not used by
+/// another instance, and not platform-owned; each `to` an `https://` URL that does not point at
+/// a redirect host of this instance (no loops); each status one of [`REDIRECT_STATUSES`].
+fn check_redirects(
+    instance: &Instance,
+    others: &[Instance],
+    rules: &Rules,
+    problems: &mut Vec<String>,
+) {
+    if instance.capabilities.contains_key("redirects") {
+        problems.push(
+            "The capability \"redirects\" is set by the record's redirects list; leave it out of capabilities.".into(),
+        );
+    }
+    if instance.redirects.is_empty() {
+        return;
+    }
+    if instance.redirects.len() > MAX_REDIRECTS {
+        problems.push(format!(
+            "The redirects list holds {} entries, and at most {MAX_REDIRECTS} are allowed.",
+            instance.redirects.len()
+        ));
+    }
+    let sites = site_hosts(instance);
+    let owned = if instance.account == AccountRef::Home {
+        platform_hosts(rules)
+    } else {
+        Vec::new()
+    };
+    let hosts: Vec<String> = instance
+        .redirects
+        .iter()
+        .map(|r| r.host.to_ascii_lowercase())
+        .collect();
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for (i, r) in instance.redirects.iter().enumerate() {
+        let p = format!("redirects[{i}]");
+        let host = &r.host;
+        if !dns_name(host) {
+            problems.push(format!(
+                "The {p}.host \"{host}\" is not a valid lowercase DNS name."
+            ));
+        } else if !instance.zones.iter().any(|z| in_zone(host, z)) {
+            problems.push(format!(
+                "The {p}.host: hostname {host} is not in this instance's zones."
+            ));
+        }
+        if !seen.insert(host.as_str()) {
+            problems.push(format!("The {p}.host \"{host}\" is listed more than once."));
+        }
+        if sites.contains(host) {
+            problems.push(format!(
+                "The {p}.host \"{host}\" is also a site target of this instance; a host either serves a site or redirects."
+            ));
+        }
+        if owned.contains(host) || uses_platform_label(others, instance, host, rules) {
+            problems.push(format!(
+                "The {p}.host \"{host}\" is the platform's own, and the home instance may not redirect it."
+            ));
+        }
+        for other in others.iter().filter(|o| o.id != instance.id) {
+            if site_hosts(other).contains(host)
+                || other
+                    .redirects
+                    .iter()
+                    .any(|o| o.host.eq_ignore_ascii_case(host))
+            {
+                problems.push(format!(
+                    "The {p}.host \"{host}\" is already used by instance {}.",
+                    other.id
+                ));
+            }
+        }
+        match redirect_target(&r.to) {
+            Err(why) => problems.push(format!("The {p}.to \"{}\" {why}.", r.to)),
+            Ok((to_host, _)) if hosts.contains(&to_host) => problems.push(format!(
+                "The {p}.to \"{}\" points back at {to_host}, a redirect host of this instance, which would loop.",
+                r.to
+            )),
+            Ok(_) => {}
+        }
+        if !REDIRECT_STATUSES.contains(&r.status()) {
+            problems.push(format!(
+                "The {p}.status {} must be 301, 302, 307 or 308.",
+                r.status()
+            ));
+        }
+    }
+}
+
+/// Whether `host` is the home instance's platform subdomain of any instance (`label.zone`),
+/// which pigeon-sites serves: never a redirect host.
+fn uses_platform_label(
+    others: &[Instance],
+    instance: &Instance,
+    host: &str,
+    rules: &Rules,
+) -> bool {
+    let Some(label) = host.strip_suffix(&format!(".{}", rules.platform_zone)) else {
+        return false;
+    };
+    others
+        .iter()
+        .chain(std::iter::once(instance))
+        .any(|i| uses_label(i, label))
+}
+
 /// Finds every problem with a record. An empty list means the record is valid.
 pub fn validate(instance: &Instance, others: &[Instance], rules: &Rules) -> Vec<String> {
     let mut problems = Vec::new();
@@ -827,6 +1039,7 @@ pub fn validate(instance: &Instance, others: &[Instance], rules: &Rules) -> Vec<
     check_home_hosts(instance, rules, &mut problems);
     check_platform(instance, rules, &mut problems);
     check_worker(instance, others, rules, &mut problems);
+    check_redirects(instance, others, rules, &mut problems);
     problems.extend(crate::catalogue::problems(instance));
     if let Some(pigeon_core::site_publish::Profile::Enabled { site }) = &instance.publishing {
         let named = instance.sites.iter().find(|record| record.name == *site);

@@ -152,6 +152,13 @@ pub const CATALOGUE: &[Entry] = &[
         always: true,
         ..BASE
     },
+    // No views of its own: the record's `redirects`, answered by the instance's own site
+    // Worker (docs/plans/redirects.md). Set by that field, never listed in `capabilities`.
+    Entry {
+        name: "redirects",
+        linked: true,
+        ..BASE
+    },
 ];
 
 /// The hosted capabilities that are internal plumbing rather than something a person uses:

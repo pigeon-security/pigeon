@@ -118,15 +118,22 @@ pub enum Step {
         protected: bool,
     },
     /// Upload the site Worker, bound to the bucket (a new Worker, or a new version of pigeon's).
+    /// An instance with redirects and no site has no bucket: its Worker answers its redirects
+    /// alone.
     UploadWorker {
         name: String,
-        bucket: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bucket: Option<String>,
         jurisdiction: Option<String>,
         module: String,
         replaces: bool,
         /// Used to bind the protected origin key to this specific endpoint.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         origin: Option<String>,
+        /// The redirect map (`redirects::config`) the Worker reads, when the instance has
+        /// redirects; absent otherwise, so plans without them read as before.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        redirects: Option<String>,
     },
     /// Turn on the Worker's workers.dev address, the preview.
     EnableWorkersDev { name: String },
@@ -397,8 +404,15 @@ fn wanted(
     ledger: &Ledger,
     owned: Option<&PlatformOwned>,
 ) -> Vec<Step> {
-    let (Some(site), Some(worker)) = (instance.sites.first(), instance.worker.as_deref()) else {
+    let Some(worker) = instance.worker.as_deref() else {
         return Vec::new();
+    };
+    let redirects = super::redirects::config(instance);
+    let Some(site) = instance.sites.first() else {
+        return match redirects {
+            Some(map) => redirect_only(instance, worker, map, seen, ledger, owned),
+            None => Vec::new(),
+        };
     };
     let protected = site.auth.as_deref() == Some("passkey");
     if instance.sites.iter().any(|site| site.auth.is_some()) && instance.sites.len() != 1 {
@@ -465,6 +479,7 @@ fn wanted(
     } else {
         module_digest(bucket, jurisdiction.as_deref())
     };
+    let module = with_redirects(Some(&module), redirects.as_deref());
     let uploaded = ledger
         .workers
         .iter()
@@ -473,11 +488,12 @@ fn wanted(
     steps.push(match (seen.worker_exists, uploaded) {
         (false, _) => Step::UploadWorker {
             name: worker.into(),
-            bucket: bucket.into(),
+            bucket: Some(bucket.into()),
             jurisdiction: jurisdiction.clone(),
             module: module.clone(),
             replaces: false,
             origin: origin.clone(),
+            redirects: redirects.clone(),
         },
         (true, Some(d)) if d == module => Step::Ok {
             what: "worker".into(),
@@ -485,11 +501,12 @@ fn wanted(
         },
         (true, Some(_)) => Step::UploadWorker {
             name: worker.into(),
-            bucket: bucket.into(),
+            bucket: Some(bucket.into()),
             jurisdiction: jurisdiction.clone(),
             module: module.clone(),
             replaces: true,
             origin,
+            redirects: redirects.clone(),
         },
         (true, None) => Step::Conflict {
             what: "worker".into(),
@@ -526,33 +543,9 @@ fn wanted(
             steps.push(step);
             continue;
         }
-        let seen_domain = seen.domains.iter().find(|d| &d.hostname == hostname);
-        steps.push(match seen_domain {
-            Some(SeenDomain {
-                service: Some(s), ..
-            }) if s == worker => Step::Ok {
-                what: "custom domain".into(),
-                name: hostname.clone(),
-            },
-            Some(SeenDomain {
-                service: Some(s), ..
-            }) => Step::Conflict {
-                what: "custom domain".into(),
-                name: hostname.clone(),
-                why: format!("it is already served by Worker {s}"),
-            },
-            Some(SeenDomain {
-                zone_id: Some(z), ..
-            }) => Step::AttachDomain {
-                hostname: hostname.clone(),
-                zone_id: z.clone(),
-                worker: worker.into(),
-            },
-            _ => Step::Blocked {
-                why: format!("the zone of {hostname} is not in the instance's account"),
-            },
-        });
+        steps.push(domain_step(seen, hostname, worker));
     }
+    steps.extend(redirect_domains(instance, worker, seen, owned));
     for seen_sub in &seen.subdomains {
         if owned.is_some_and(|o| o.worker(&seen_sub.worker)) {
             steps.push(Step::Blocked {
@@ -600,6 +593,138 @@ fn wanted(
     }
     steps
 }
+
+/// The step for custom domain `hostname` on `worker`, from what the account has: unchanged when
+/// the Worker serves it, a conflict when another does, attached when its zone is in the account,
+/// else blocked.
+fn domain_step(seen: &Observed, hostname: &str, worker: &str) -> Step {
+    match seen.domains.iter().find(|d| d.hostname == hostname) {
+        Some(SeenDomain {
+            service: Some(s), ..
+        }) if s == worker => Step::Ok {
+            what: "custom domain".into(),
+            name: hostname.to_string(),
+        },
+        Some(SeenDomain {
+            service: Some(s), ..
+        }) => Step::Conflict {
+            what: "custom domain".into(),
+            name: hostname.to_string(),
+            why: format!("it is already served by Worker {s}"),
+        },
+        Some(SeenDomain {
+            zone_id: Some(z), ..
+        }) => Step::AttachDomain {
+            hostname: hostname.to_string(),
+            zone_id: z.clone(),
+            worker: worker.into(),
+        },
+        _ => Step::Blocked {
+            why: format!("the zone of {hostname} is not in the instance's account"),
+        },
+    }
+}
+
+/// Why the home instance's redirects are never served: they need the instance's own Worker to
+/// carry the redirect map, and the home instance's plan uploads no Worker.
+pub const HOME_REDIRECTS: &str = "redirects are answered by the instance's own Worker, and the \
+                                  home instance's plan uploads none: the platform deploys its \
+                                  Workers";
+
+/// The custom domain steps of the instance's redirect hosts, each like a Domain target's. The
+/// home instance's are blocked ([`HOME_REDIRECTS`]).
+fn redirect_domains(
+    instance: &Instance,
+    worker: &str,
+    seen: &Observed,
+    owned: Option<&PlatformOwned>,
+) -> Vec<Step> {
+    if instance.redirects.is_empty() {
+        return Vec::new();
+    }
+    if owned.is_some() {
+        return vec![Step::Blocked {
+            why: HOME_REDIRECTS.into(),
+        }];
+    }
+    instance
+        .redirects
+        .iter()
+        .map(|r| domain_step(seen, &r.host.to_ascii_lowercase(), worker))
+        .collect()
+}
+
+/// The digest of what is uploaded as the Worker once its redirects are added: `site` (the site
+/// module's digest, `None` with no site) as it is when there are none, so instances without
+/// redirects keep their digests and read back unchanged.
+pub fn with_redirects(site: Option<&str>, redirects: Option<&str>) -> String {
+    match (site, redirects) {
+        (Some(site), None) => site.to_string(),
+        (site, redirects) => pigeon_core::oauth::hash(
+            &json!({
+                "site": site,
+                "redirect_module": super::redirects::MODULE,
+                "compatibility_date": COMPATIBILITY_DATE,
+                "binding": super::redirects::BINDING,
+                "redirects": redirects,
+            })
+            .to_string(),
+        ),
+    }
+}
+
+/// The plan of an instance with redirects and no site: its Worker, answering only its
+/// redirects (no bucket, no preview), and each redirect host as a custom domain of it.
+fn redirect_only(
+    instance: &Instance,
+    worker: &str,
+    map: String,
+    seen: &Observed,
+    ledger: &Ledger,
+    owned: Option<&PlatformOwned>,
+) -> Vec<Step> {
+    if owned.is_some() {
+        return vec![Step::Blocked {
+            why: HOME_REDIRECTS.into(),
+        }];
+    }
+    let module = with_redirects(None, Some(&map));
+    let uploaded = ledger
+        .workers
+        .iter()
+        .find(|(n, _)| n == worker)
+        .map(|(_, d)| d.as_str());
+    let upload = |replaces: bool| Step::UploadWorker {
+        name: worker.into(),
+        bucket: None,
+        jurisdiction: None,
+        module: module.clone(),
+        replaces,
+        origin: None,
+        redirects: Some(map.clone()),
+    };
+    let mut steps = vec![match (seen.worker_exists, uploaded) {
+        (false, _) => upload(false),
+        (true, Some(d)) if d == module => Step::Ok {
+            what: "worker".into(),
+            name: worker.into(),
+        },
+        (true, Some(_)) => upload(true),
+        (true, None) => Step::Conflict {
+            what: "worker".into(),
+            name: worker.into(),
+            why: "a Worker with this name exists, and pigeon did not upload it".into(),
+        },
+    }];
+    steps.extend(redirect_domains(instance, worker, seen, owned));
+    steps
+}
+
+/// What the plan says about redirects beside its steps: that removing one detaches nothing.
+pub const REDIRECTS_NOTE: &str = "Removing a redirect detaches nothing: pigeon never deletes, so \
+                                  its host stays a custom domain of the instance's Worker (which \
+                                  then serves the site there, or answers 404 with no site) until \
+                                  a person detaches it or the instance is retired.";
 
 /// The digest an approval binds: the instance, its version, the account and the steps.
 pub fn digest(instance: &Instance, account_id: &str, steps: &[Step]) -> String {
@@ -672,17 +797,36 @@ pub fn describe(steps: &[Step]) -> Vec<Value> {
                 bucket,
                 replaces,
                 origin,
+                redirects,
                 ..
-            } => json!(format!(
-                "{} {}Worker {name}, reading bucket {bucket} as {SITE_BINDING}; it serves the live \
-                 deploy, or \"nothing deployed yet\" until the first",
-                if *replaces { "update" } else { "upload" },
-                if origin.is_some() {
-                    "authenticated origin "
-                } else {
-                    ""
+            } => {
+                let verb = if *replaces { "update" } else { "upload" };
+                let hosts = redirects
+                    .as_deref()
+                    .and_then(|m| serde_json::from_str::<serde_json::Map<String, Value>>(m).ok())
+                    .map(|m| m.keys().cloned().collect::<Vec<_>>().join(", "))
+                    .filter(|h| !h.is_empty());
+                let first = hosts
+                    .as_deref()
+                    .map(|h| format!("; it answers {h} with its redirect first"))
+                    .unwrap_or_default();
+                match bucket {
+                    Some(bucket) => json!(format!(
+                        "{verb} {}Worker {name}, reading bucket {bucket} as {SITE_BINDING}; it \
+                         serves the live deploy, or \"nothing deployed yet\" until the first{first}",
+                        if origin.is_some() {
+                            "authenticated origin "
+                        } else {
+                            ""
+                        }
+                    )),
+                    None => json!(format!(
+                        "{verb} Worker {name}, with no site: it answers only its redirects ({}) \
+                         and 404 for anything else",
+                        hosts.as_deref().unwrap_or("none")
+                    )),
                 }
-            )),
+            }
             Step::EnableWorkersDev { name } => {
                 json!(format!("turn on {name}'s workers.dev address"))
             }

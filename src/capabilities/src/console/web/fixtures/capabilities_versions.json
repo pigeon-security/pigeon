@@ -288,6 +288,19 @@
       "requires": [],
       "linked": true,
       "always": true
+    },
+    {
+      "name": "redirects",
+      "placements": [
+        "inline"
+      ],
+      "home": "inline",
+      "home_worker": null,
+      "scope": "instance",
+      "availability": "any",
+      "requires": [],
+      "linked": true,
+      "always": false
     }
   ]
 }

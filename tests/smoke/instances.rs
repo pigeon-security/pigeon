@@ -768,6 +768,15 @@ fn capability_catalogue_as_decided() {
             Availability::Any,
             &[],
         ),
+        (
+            "redirects",
+            false,
+            Placement::Inline,
+            None,
+            Scope::Instance,
+            Availability::Any,
+            &[],
+        ),
     ] {
         let e = find(name).unwrap_or_else(|| panic!("{name} is catalogued"));
         assert_eq!(e.offers_choice(), choice, "{name}");
@@ -778,10 +787,10 @@ fn capability_catalogue_as_decided() {
         assert_eq!(e.availability, availability, "{name}");
         assert_eq!(e.requires, requires, "{name}");
     }
-    // Until M4, no catalogue capability may be enabled on a linked instance's record; every
-    // instance has `instances`.
+    // Until M4, no catalogue capability may be enabled on a linked instance's record but
+    // `redirects` (set by the record's own `redirects` list); every instance has `instances`.
     for e in CATALOGUE {
-        assert_eq!(e.linked, e.always, "{}", e.name);
+        assert_eq!(e.linked, e.always || e.name == "redirects", "{}", e.name);
         assert_eq!(e.always, e.name == "instances", "{}", e.name);
     }
     for e in CATALOGUE {
@@ -2225,11 +2234,12 @@ fn instance_retire_removes_only_what_pigeon_made() {
         },
         ApplyStep::UploadWorker {
             name: "canary".into(),
-            bucket: "canary-site".into(),
+            bucket: Some("canary-site".into()),
             jurisdiction: Some("eu".into()),
             module: "m".into(),
             replaces: false,
             origin: None,
+            redirects: None,
         },
         ApplyStep::AttachDomain {
             hostname: "canary.example".into(),
@@ -3055,11 +3065,12 @@ fn home_instance_plans_and_applies_with_a_minted_token() {
         attach("blog.pigeon.dev", "pigeon-platform"),
         Step::UploadWorker {
             name: "pigeon-platform".into(),
-            bucket: "b".into(),
+            bucket: Some("b".into()),
             jurisdiction: None,
             module: "m".into(),
             replaces: true,
             origin: None,
+            redirects: None,
         },
         Step::EnableWorkersDev {
             name: "landing".into(),
@@ -4382,4 +4393,390 @@ fn home_id_rename_r1() {
         plan(&block(observe(&partial, FROM, TO)).unwrap(), FROM, TO),
         Vec::<Step>::new()
     );
+}
+
+/// Redirects (docs/plans/redirects.md): a record's `redirects` are checked (in a zone, listed
+/// once, not a site's host, not another instance's, not platform-owned, an `https://` target
+/// that does not loop, a redirect status, at most 20); the plan attaches each host to the
+/// instance's own Worker and uploads it with the redirect map, for an instance with no site and
+/// for one whose only site is a passkey-protected platform subdomain (willowgraysen's shape);
+/// the Worker's answer is decided as `redirects::answer` decides it; the drawing labels each
+/// redirect host with its target.
+#[test]
+fn redirects_answered_by_the_instance_worker() {
+    use pigeon_capabilities::architecture::{Mode, Theme, Width, check, draw, instance_model};
+    use pigeon_capabilities::instances::plan::{
+        HOME_REDIRECTS, Ledger, Observed, PlatformOwned, SITE_WORKER, SeenDomain, SeenSubdomain,
+        Step, describe, plan, protected_site_worker, record, with_redirects,
+    };
+    use pigeon_capabilities::instances::record::{Instance, Rules, digest, validate};
+    use pigeon_capabilities::instances::redirects::{self, answer, config, wrap};
+
+    let rules = Rules {
+        platform_zone: "pigeon.dev",
+        reserved_labels: &["platform".to_string()],
+        reserved_workers: &[],
+        platform_worker: "pigeon-platform",
+    };
+    let willow = json!({
+        "id": "willowgraysen", "title": "Willow Graysen",
+        "account": { "kind": "linked", "account_id": "b".repeat(32) },
+        "zones": ["willowgraysen.com"], "worker": "willowgraysen",
+        "sites": [{ "name": "site", "bucket": "willowgraysen-site", "auth": "passkey",
+            "allow": ["site"], "targets": [{ "kind": "subdomain", "label": "willowgraysen" }] }],
+        "redirects": [{ "host": "willowgraysen.com", "to": "https://noisypigeon.com" }],
+        "version": 3
+    });
+    let inst: Instance = serde_json::from_value(willow.clone()).unwrap();
+    assert_eq!(validate(&inst, &[], &rules), Vec::<String>::new());
+    // Defaults stay absent, and a record without redirects keeps its digest.
+    let v = serde_json::to_value(&inst).unwrap();
+    assert_eq!(
+        v["redirects"],
+        json!([{ "host": "willowgraysen.com", "to": "https://noisypigeon.com" }])
+    );
+    let mut bare = inst.clone();
+    bare.redirects.clear();
+    assert!(
+        serde_json::to_value(&bare)
+            .unwrap()
+            .get("redirects")
+            .is_none()
+    );
+    let mut without = willow.clone();
+    without.as_object_mut().unwrap().remove("redirects");
+    assert_eq!(
+        digest(&bare),
+        digest(&serde_json::from_value(without).unwrap())
+    );
+
+    // Refused, one problem each.
+    let refused = |patch: Value, what: &str| {
+        let mut v = willow.clone();
+        for (k, x) in patch.as_object().unwrap() {
+            v[k] = x.clone();
+        }
+        let i: Instance = serde_json::from_value(v).unwrap();
+        let problems = validate(&i, &[], &rules);
+        assert!(
+            problems.iter().any(|p| p.contains(what)),
+            "{what}: {problems:?}"
+        );
+    };
+    let one = |r: Value| json!({ "redirects": [r] });
+    refused(
+        one(json!({ "host": "example.com", "to": "https://noisypigeon.com" })),
+        "not in this instance's zones",
+    );
+    refused(
+        one(json!({ "host": "Willowgraysen.com", "to": "https://noisypigeon.com" })),
+        "not a valid lowercase DNS name",
+    );
+    refused(
+        one(json!({ "host": "willowgraysen.com", "to": "http://noisypigeon.com" })),
+        "must start with https://",
+    );
+    refused(
+        one(json!({ "host": "willowgraysen.com", "to": "https://noisypigeon.com/?a=1" })),
+        "query or a fragment",
+    );
+    refused(
+        one(json!({ "host": "willowgraysen.com", "to": "https://u@noisypigeon.com" })),
+        "must not name a user",
+    );
+    refused(
+        one(json!({ "host": "willowgraysen.com", "to": "https://WillowGraysen.com/x" })),
+        "would loop",
+    );
+    refused(
+        one(json!({ "host": "willowgraysen.com", "to": "https://noisypigeon.com", "status": 303 })),
+        "must be 301, 302, 307 or 308",
+    );
+    refused(
+        json!({ "redirects": [
+            { "host": "willowgraysen.com", "to": "https://noisypigeon.com" },
+            { "host": "willowgraysen.com", "to": "https://example.com" }] }),
+        "listed more than once",
+    );
+    refused(
+        json!({ "redirects": [
+            { "host": "a.willowgraysen.com", "to": "https://b.willowgraysen.com" },
+            { "host": "b.willowgraysen.com", "to": "https://a.willowgraysen.com" }] }),
+        "would loop",
+    );
+    let many: Vec<Value> = (0..21)
+        .map(|n| json!({ "host": format!("h{n}.willowgraysen.com"), "to": "https://noisypigeon.com" }))
+        .collect();
+    refused(json!({ "redirects": many }), "at most 20");
+    refused(
+        json!({ "sites": [{ "name": "site", "bucket": "willowgraysen-site",
+            "targets": [{ "kind": "domain", "hostname": "willowgraysen.com" }] }] }),
+        "also a site target",
+    );
+    refused(
+        json!({ "capabilities": { "redirects": {} } }),
+        "leave it out of capabilities",
+    );
+    refused(json!({ "worker": null }), "The worker is missing");
+    // Another instance's host is refused.
+    let mut other = inst.clone();
+    other.id = "other".into();
+    other.worker = Some("other".into());
+    other.sites.clear();
+    let mut mine = inst.clone();
+    mine.id = "mine".into();
+    assert!(
+        validate(&mine, &[other], &rules)
+            .iter()
+            .any(|p| p.contains("already used by instance other"))
+    );
+    // The home instance may not redirect a platform-owned host.
+    let home: Instance = serde_json::from_value(json!({
+        "id": "home", "title": "Home", "account": { "kind": "home" },
+        "zones": ["pigeon.dev"], "worker": "pigeon-platform",
+        "redirects": [{ "host": "platform.pigeon.dev", "to": "https://noisypigeon.com" }]
+    }))
+    .unwrap();
+    assert!(
+        validate(&home, &[], &rules)
+            .iter()
+            .any(|p| p.contains("the platform's own"))
+    );
+
+    // The map the Worker reads, and its answers: the path and query kept unless asked not to.
+    let map = config(&inst).unwrap();
+    assert_eq!(
+        map,
+        r#"{"willowgraysen.com":{"cache":"public, max-age=3600","keep_path":true,"status":301,"to":"https://noisypigeon.com"}}"#
+    );
+    assert_eq!(config(&bare), None);
+    assert_eq!(
+        answer(&map, "WillowGraysen.com", "/a/b", "?c=1"),
+        Some((
+            301,
+            "https://noisypigeon.com/a/b?c=1".into(),
+            "public, max-age=3600".into()
+        ))
+    );
+    assert_eq!(
+        answer(&map, "willowgraysen.com", "/", "").unwrap().1,
+        "https://noisypigeon.com/"
+    );
+    assert_eq!(answer(&map, "willowgraysen.pigeon.dev", "/", ""), None);
+    let mut temp = inst.clone();
+    temp.redirects[0].to = "https://noisypigeon.com/landing/".into();
+    temp.redirects[0].status = Some(302);
+    temp.redirects[0].keep_path = Some(false);
+    assert_eq!(
+        answer(&config(&temp).unwrap(), "willowgraysen.com", "/x", "?y"),
+        Some((
+            302,
+            "https://noisypigeon.com/landing/".into(),
+            "no-store".into()
+        ))
+    );
+    temp.redirects[0].keep_path = None;
+    assert_eq!(
+        answer(&config(&temp).unwrap(), "willowgraysen.com", "/x", "?y")
+            .unwrap()
+            .1,
+        "https://noisypigeon.com/landing/x?y"
+    );
+    // The Worker decides as `answer` does, before the site and a protected origin's key check.
+    let js = redirects::MODULE;
+    assert!(js.contains(
+        "const location = rule.keep_path ? rule.to + url.pathname + url.search : rule.to;"
+    ));
+    assert!(js.contains("\"cache-control\": rule.cache"));
+    assert!(js.contains("return served.fetch(request, env, ctx);"));
+    for module in [wrap(SITE_WORKER), wrap(&protected_site_worker())] {
+        assert_eq!(module.matches("export default {").count(), 1);
+        assert!(module.contains("const served = {"));
+        let export = module.find("export default {").unwrap();
+        assert!(module[export..].contains("redirectMap[url.hostname]"));
+        assert!(!module[export..].contains("authorized("));
+    }
+
+    // The plan: willowgraysen's shape, nothing there yet.
+    let seen = |worker: bool, served: Option<&str>| Observed {
+        account_id: "b".repeat(32),
+        bucket_exists: worker,
+        worker_exists: worker,
+        workers_dev: worker.then_some(true),
+        account_subdomain: Some("willow".into()),
+        domains: vec![SeenDomain {
+            hostname: "willowgraysen.com".into(),
+            zone_id: Some("zw".into()),
+            service: served.map(str::to_string),
+        }],
+        subdomains: vec![SeenSubdomain {
+            hostname: "willowgraysen.pigeon.dev".into(),
+            zone_id: Some("zp".into()),
+            worker: "pigeon-sites".into(),
+            service: worker.then(|| "pigeon-sites".into()),
+            upstream: worker.then(|| "https://willowgraysen.willow.workers.dev".into()),
+        }],
+    };
+    let tags = |steps: &[Step]| -> Vec<String> {
+        steps
+            .iter()
+            .map(|s| {
+                serde_json::to_value(s).unwrap()["step"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect()
+    };
+    let first = plan(&inst, &seen(false, None), &Ledger::default(), None);
+    assert_eq!(
+        tags(&first),
+        [
+            "create_bucket",
+            "upload_worker",
+            "enable_workers_dev",
+            "attach_domain",
+            "attach_subdomain"
+        ]
+    );
+    assert!(
+        matches!(&first[1], Step::UploadWorker { origin: Some(_), redirects: Some(m), bucket: Some(b), .. }
+        if *m == map && b == "willowgraysen-site")
+    );
+    assert!(
+        matches!(&first[3], Step::AttachDomain { hostname, zone_id, worker }
+        if hostname == "willowgraysen.com" && zone_id == "zw" && worker == "willowgraysen")
+    );
+    let lines = describe(&first);
+    assert!(
+        lines[1]
+            .as_str()
+            .unwrap()
+            .contains("authenticated origin Worker willowgraysen")
+    );
+    assert!(
+        lines[1]
+            .as_str()
+            .unwrap()
+            .contains("it answers willowgraysen.com with its redirect first")
+    );
+
+    // Already deployed without redirects (sandbox's shape today): the Worker is updated with
+    // the map and the host attached; nothing else changes.
+    let mut l = Ledger::default();
+    for s in plan(&bare, &seen(false, None), &Ledger::default(), None) {
+        record(&mut l, &s);
+    }
+    let before = plan(&bare, &seen(true, None), &l, None);
+    assert!(!before.iter().any(Step::changes), "{before:?}");
+    let added = plan(&inst, &seen(true, None), &l, None);
+    assert_eq!(
+        tags(&added),
+        ["ok", "upload_worker", "ok", "attach_domain", "ok"]
+    );
+    assert!(matches!(
+        &added[1],
+        Step::UploadWorker {
+            replaces: true,
+            origin: Some(_),
+            ..
+        }
+    ));
+    for s in &added {
+        record(&mut l, s);
+    }
+    assert_eq!(l.domains, ["willowgraysen.com"]);
+    let applied = plan(&inst, &seen(true, Some("willowgraysen")), &l, None);
+    assert!(!applied.iter().any(Step::changes), "{applied:?}");
+    // Another Worker's custom domain is a conflict, never moved.
+    assert!(
+        plan(&inst, &seen(true, Some("someone-else")), &l, None)
+            .iter()
+            .any(Step::stops)
+    );
+    // Removing the redirect detaches nothing: the Worker goes back to the site module alone.
+    let removed = plan(&bare, &seen(true, Some("willowgraysen")), &l, None);
+    assert_eq!(tags(&removed), ["ok", "upload_worker", "ok", "ok"]);
+    assert!(
+        !removed
+            .iter()
+            .any(|s| matches!(s, Step::AttachDomain { .. }))
+    );
+
+    // An instance with redirects and no site: its Worker alone, with no bucket.
+    let mut only = inst.clone();
+    only.sites.clear();
+    assert_eq!(validate(&only, &[], &rules), Vec::<String>::new());
+    let mut o = seen(false, None);
+    o.subdomains.clear();
+    let steps = plan(&only, &o, &Ledger::default(), None);
+    assert_eq!(tags(&steps), ["upload_worker", "attach_domain"]);
+    assert!(
+        matches!(&steps[0], Step::UploadWorker { bucket: None, origin: None, redirects: Some(_), replaces: false, module, .. }
+        if *module == with_redirects(None, Some(&map)))
+    );
+    assert!(
+        describe(&steps)[0]
+            .as_str()
+            .unwrap()
+            .contains("answers only its redirects (willowgraysen.com)")
+    );
+    let mut lo = Ledger::default();
+    for s in &steps {
+        record(&mut lo, s);
+    }
+    o.worker_exists = true;
+    o.domains[0].service = Some("willowgraysen".into());
+    assert_eq!(tags(&plan(&only, &o, &lo, None)), ["ok", "ok"]);
+    let mut moved = only.clone();
+    moved.redirects[0].to = "https://example.com".into();
+    assert!(matches!(
+        &plan(&moved, &o, &lo, None)[0],
+        Step::UploadWorker { replaces: true, .. }
+    ));
+    // A Worker with that name pigeon did not upload: a conflict.
+    assert!(
+        plan(&only, &o, &Ledger::default(), None)
+            .iter()
+            .any(Step::stops)
+    );
+
+    // The home instance's plan uploads no Worker, so its redirects are blocked, with the reason.
+    let mut home_ok = home.clone();
+    home_ok.redirects[0].host = "go.pigeon.dev".into();
+    let owned = PlatformOwned {
+        workers: vec!["pigeon-platform".into()],
+        hosts: vec!["pigeon.dev".into()],
+        apex: "pigeon.dev".into(),
+    };
+    let h = plan(&home_ok, &o, &Ledger::default(), Some(&owned));
+    assert!(matches!(h.as_slice(), [Step::Blocked { why }] if why == HOME_REDIRECTS));
+
+    // The drawing: the redirect host beside the subdomain, on the instance's Worker, labelled.
+    let platform = json!({ "commit": "c", "digest": "d", "resources": { "zone": "pigeon.dev" } });
+    let m = instance_model(&inst, &[], &[], &platform);
+    let v = serde_json::to_value(&m).unwrap();
+    assert_eq!(
+        v["hostnames"],
+        json!([
+            { "host": "willowgraysen.com", "worker": "willowgraysen", "by": "redirects",
+              "access": [], "public_paths": [], "redirect": "https://noisypigeon.com" },
+            { "host": "willowgraysen.pigeon.dev", "worker": "willowgraysen", "by": "instances",
+              "access": [], "public_paths": [] }
+        ])
+    );
+    assert!(check(&m).is_empty(), "{:?}", check(&m));
+    for mode in [Mode::Compact, Mode::Full] {
+        for width in [Width::Wide, Width::Narrow] {
+            let d = draw(&m, mode, width, Theme::Light);
+            assert!(
+                d.svg.contains("redirects to noisypigeon.com"),
+                "{mode:?} {width:?}"
+            );
+            assert!(d.text.contains("willowgraysen.com"));
+        }
+    }
+    let m = instance_model(&only, &[], &[], &platform);
+    assert_eq!(m.workers[0].handlers, ["fetch"]);
+    assert!(check(&m).is_empty());
 }
