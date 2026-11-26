@@ -10,7 +10,6 @@ use pigeon_capabilities::ci;
 use pigeon_capabilities::console::Console;
 use pigeon_capabilities::dispatch::Dispatch;
 use pigeon_capabilities::github::Github;
-use pigeon_capabilities::images::Images;
 use pigeon_capabilities::ingest;
 use pigeon_capabilities::instances::{Instances, MultiInstance};
 use pigeon_capabilities::land::{self, Land};
@@ -295,10 +294,9 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
         // which the Lander and the proxies read through their bindings.
         // Landing: a session branch tested, moved into main and deployed, through `land`.
         Box::new(Land { settings: land() }),
-        // `observability_summary`: Worker metrics, error logs, deploys and cost, read only.
+        // `observability_summary`: Worker metrics, error logs, deploys and cost, read only; and
+        // `containers_images`, what the container applications run and the registry holds.
         Box::new(Observability { map: map() }),
-        // What the container applications run and the registry holds, read only.
-        Box::new(Images),
         // `call {tool, args}`: any tool above by name, for sessions whose tool list predates it.
         Box::new(Dispatch),
         // The capability Workers: the caller key's setup and asking their manifests again.

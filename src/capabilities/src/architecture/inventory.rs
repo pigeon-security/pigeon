@@ -59,8 +59,8 @@ fn scope(name: &str, foundation: bool) -> Scope {
         "ci" | "ingest" | "observability" | "site_passkeys" | "sites" | "source" | "storage" => {
             InstanceFeature
         }
-        "ai-agents" | "apple" | "changelog" | "cloud" | "cost" | "github" | "images" | "land"
-        | "mirror" | "models" => MainPlatformFeature,
+        "ai-agents" | "apple" | "changelog" | "cloud" | "cost" | "github" | "land" | "mirror"
+        | "models" => MainPlatformFeature,
         "approvals" | "dispatch" | "expiry" | "instances" | "ledger" | "linked" | "oauth"
         | "passkeys" | "policy" | "proxy" | "remote" | "secrets" | "split" | "users" => {
             SharedFoundation

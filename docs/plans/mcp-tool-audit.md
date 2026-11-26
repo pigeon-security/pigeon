@@ -106,7 +106,7 @@ Evidence is the line that declares the tool. "none met" means none of (a), (b), 
 | `deploy_token` | removed later (26 Nov) | (b): superseded by the proxy credential and `land`; break-glass is the person's own Cloudflare login | was `src/capabilities/src/deploys.rs` | none |
 | `revoke_api_token` | removed later (26 Nov) | revoked only `deploy_token`'s tokens | was `deploys.rs` | none |
 | `github_status` | keep | none met | `src/capabilities/src/github.rs:343` | none |
-| `containers_images` | keep | none met | `src/capabilities/src/images.rs:28` | none |
+| `containers_images` | keep (moved to `observability`, 26 Nov) | none met | `src/capabilities/src/observability/images.rs` | none |
 | `instances_list` | keep | none met | `src/capabilities/src/instances.rs:738` | none |
 | `instances_tabs` | deleted (console decommission, 2026-11-25) | replaced by `console_manifest` | none | none |
 | `instance_plan` | keep | none met | `instances.rs:747` | none |

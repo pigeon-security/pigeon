@@ -163,7 +163,7 @@ pub const CATALOGUE: &[Entry] = &[
 
 /// The hosted capabilities that are internal plumbing rather than something a person uses:
 /// request dispatch, the Worker split, versioning, the console itself, passkeys, OAuth, the
-/// public host and image hosting. Each is still a declared component in `capabilities_versions`,
+/// public host. Each is still a declared component in `capabilities_versions`,
 /// marked `plumbing`, so the console can tuck it away instead of listing it beside the
 /// capabilities a person enables or works with.
 pub const PLUMBING: &[&str] = &[
@@ -174,7 +174,6 @@ pub const PLUMBING: &[&str] = &[
     "passkeys",
     "oauth",
     "public_host",
-    "images",
 ];
 
 /// Whether the hosted capability or component `name` is internal plumbing ([`PLUMBING`]).

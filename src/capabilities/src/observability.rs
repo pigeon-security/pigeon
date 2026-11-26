@@ -1,8 +1,10 @@
 //! `observability_summary`: a read-only look at how the platform's Workers are doing and what
 //! the platform costs, from Cloudflare's metrics, logs and billable usage, plus pigeon's own
 //! model cost and deploys. The folding is plain functions with no Worker types, so the smoke
-//! suite runs them on fixtures. See docs/plans/observability.md.
+//! suite runs them on fixtures. See docs/plans/observability.md. It also answers
+//! `containers_images` ([`images`]), the read-only look at container applications and images.
 
+pub mod images;
 pub mod instance;
 
 use std::collections::BTreeMap;
@@ -605,7 +607,8 @@ fn iso(ms: f64) -> String {
     String::from(Date::new(&ms.into()).to_iso_string())
 }
 
-/// The `observability` capability: its one tool.
+/// The `observability` capability: Worker metrics, errors, monitors, cost, token capacity and
+/// container images, each read only but for the monitors.
 pub struct Observability {
     /// The platform Workers (ci/workers.toml), whose scripts are reported.
     pub map: Map,
@@ -617,15 +620,23 @@ impl Capability for Observability {
     }
 
     fn versions(&self) -> Vec<pigeon_core::versions::Component> {
-        vec![pigeon_core::versions::Component::began(
-            "observability",
-            pigeon_core::versions::Kind::Capability,
-        )]
+        vec![
+            pigeon_core::versions::Component::began(
+                "observability",
+                pigeon_core::versions::Kind::Capability,
+            )
+            .entry(
+                "1.1.0",
+                "`containers_images` moved here from the `images` capability, which is gone; the \
+                 tool's name, schema and answer are unchanged.",
+            ),
+        ]
     }
 
     fn tools(&self) -> Vec<Tool> {
         vec![
             instance::tool(),
+            images::tool(),
             Tool {
                 name: "observability_monitors_plan",
                 description: "Dry run of the notification policies pigeon wants (Workers \
@@ -715,6 +726,7 @@ impl Capability for Observability {
         Box::pin(async move {
             match tool {
                 instance::METRICS => return instance::metrics(cx, args).await,
+                images::TOOL => return images::containers_images(cx).await,
                 "cost_daily" => return crate::cost::cost_daily(cx, args).await,
                 "tokens_status" => return tokens_status(cx, args).await,
                 "observability_errors" => return errors(self, cx, args).await,

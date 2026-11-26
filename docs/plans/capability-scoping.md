@@ -212,6 +212,10 @@ change on any instance.
   as does the iOS app. The `proxy` entry now says what is true: core serves Access › Tokens
   inline; `pigeon-proxy` serves the proxy host's `/git/` and `/cf/`, which are not this
   capability.
+- 2026-11-26: `images` folded into `observability`. `containers_images` is now one of
+  `observability`'s tools (`observability/images.rs`; same name, schema and answer), and the
+  `images` capability, its versions component, its `PLUMBING` entry and its inventory class are
+  gone. `observability` is 1.1.0.
 - 2026-11-26: platform admin built ("Platform admin", above): the Directory's `users.role`,
   Willow the first admin by migration, admin-only invites, removals, app disconnects, others'
   passkey links and passkeys, and role changes, at the MCP tools and the console's writes alike.

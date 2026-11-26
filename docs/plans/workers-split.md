@@ -691,6 +691,17 @@ What only this session knew (lessons for whoever picks this up):
 
 ## Log
 
+- 2026-11-26: clean-up item 7, core's `CiScheduler` and `ModelJobs` exports, checked again.
+  Core's `wrangler.toml` still declares both classes live in its own migrations (v2 and v4,
+  `new_sqlite_classes`) with no `deleted_classes` step; their storage left core by
+  `transferred_classes` in each gateway's v1 migration, and core's bindings name the gateways
+  (`script_name`). So the exports stay: whether Cloudflare takes an upload of core without them
+  is still unchecked (incident 5; the second rehearsal in `do-rehearsal.md`, cleanup item 6 and
+  R1 in `cleanup.md`), and that rehearsal needs a gate change the person approves. No
+  `deleted_classes` migration was added: it is irreversible, and for a transferred class it
+  could reach the gateway's objects. Each export in `src/platform/src/lib.rs` now says why it
+  stays, that the gateway serves the class, and that removing it is the person's decision after
+  the rehearsal. The old doc on `CiScheduler` ("Core hosts it") is corrected.
 - 2026-11-22: clean-up planner `wy1pD62aNvwr` took over open items 4 to 14. Open questions 1
   and 2 closed. Items 4 to 13 planned per branch in cleanup.md ("Second pass: the branch
   plan"); nothing built, because the run had 29 minutes of sandbox time and each executor needs

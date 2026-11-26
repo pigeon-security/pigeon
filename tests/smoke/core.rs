@@ -2153,7 +2153,7 @@ fn core_served_tools() -> Vec<pigeon_core::mcp::Tool> {
     use pigeon_capabilities::architecture::Architecture;
     use pigeon_capabilities::dispatch::Dispatch;
     use pigeon_capabilities::github::Github;
-    use pigeon_capabilities::images::Images;
+    use pigeon_capabilities::observability::Observability;
     use pigeon_capabilities::policy::Policy;
     use pigeon_capabilities::versioning::Versioning;
     use pigeon_contract::Service;
@@ -2164,7 +2164,15 @@ fn core_served_tools() -> Vec<pigeon_core::mcp::Tool> {
         Box::new(Architecture),
         Box::new(Dispatch),
         Box::new(Github),
-        Box::new(Images),
+        Box::new(Observability {
+            map: pigeon_core::lanes::Map {
+                docs: vec![],
+                shared: vec![],
+                checks: vec![],
+                core_first: None,
+                workers: vec![],
+            },
+        }),
         Box::new(Versioning),
         Box::new(Policy {
             session_prefix: "claude/".into(),
@@ -2758,7 +2766,6 @@ fn arch_home_capabilities() -> Vec<Box<dyn pigeon_capabilities::Capability>> {
             },
         }),
         Box::new(observability::Observability { map }),
-        Box::new(images::Images),
         Box::new(dispatch::Dispatch),
         Box::new(split::Split { bindings: &[] }),
         Box::new(github::Github),

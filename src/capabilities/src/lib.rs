@@ -14,7 +14,6 @@ pub mod cost;
 pub mod dispatch;
 pub mod expiry;
 pub mod github;
-pub mod images;
 pub mod ingest;
 pub mod instances;
 pub mod land;
