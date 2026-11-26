@@ -1,7 +1,7 @@
 # pigeon.dev as an instance of pigeon
 
-Status: **decided** (2026-11-26); H1 and L1 done, the `/platform` redirect built, H2 and
-L2–L3 built, the rest not started. Code references are to main at the time of writing.
+Status: **decided** (2026-11-26); H1 and L1 done, the `/platform` redirect built, H2, L2–L3 and
+S1 built, the rest not started. Code references are to main at the time of writing.
 
 ## Goal
 
@@ -125,7 +125,7 @@ Worker is never uploaded and workers.dev never turned on (`plan::NO_SCRIPTS`), a
   `home::with_token`: one `instance_home` token per call, revoked on success and failure.
   Rollback (`site_publish::staged`) and listing (`site_publish::releases`) are the same code
   pigeon-sites now uses for linked instances. No new permission: R2 write covers the reads.
-- **Not touched.** No Worker upload, no domain attach; the apex is still served by
+- **Not touched.** No Worker upload, no domain attach; the apex was still served by
   `pigeon_core::home` until S1. The `sites` pin is not checked for home (core publishes it).
 
 What the person does next:
@@ -133,7 +133,8 @@ What the person does next:
 1. Propose the record change (`instance_propose`), approve it with the passkey:
    `sites[0].build: "site"` and `publishing: {"state": "enabled", "site": "landing"}`.
 2. Run `site_deploy {instance: "pigeon-security/platform"}` (or Site › Deployments › Deploy),
-   approving with the passkey; `site_releases` lists it. Nothing on pigeon.dev changes until S1.
+   approving with the passkey; `site_releases` lists it. pigeon.dev serves it once S1 has
+   landed and the domain is on core.
 
 ## Serving: core serves the apex
 
@@ -144,6 +145,56 @@ manifest, stream the object. `/architecture`, `/architecture.json`, `/mark/*`, t
 `home_html`. Then `pigeon-sites` no longer owns the apex: `settings::site()` drops `also`, and
 `apex.rs` is removed once nothing points at it. The earlier core→sites forwarding idea is
 dropped.
+
+## As built (S1): core serves the apex
+
+- **Order** (`site::apex`, `src/capabilities/src/site.rs`): `/platform*` answers the console
+  302; `/architecture`, `/architecture.json`, `/mark/head.webp`, `/favicon-32.png` and
+  `/apple-touch-icon.png` are built into core and answered next, whatever the release holds;
+  every other `GET`/`HEAD` is the release; any other method is 404, as before.
+- **Reading the release.** `site_worker.js`'s `current`/`resolve` are in Rust in
+  `pigeon_core::site_publish` beside the publishing code (`live`, `resolve`, `pick`,
+  `cache_control`, `etag`, `decode_path`), over a read-only `Read` trait every `Store` gets.
+  Core reads `pigeon-platform-site` through a new **R2 binding, `HOME_SITE`**, in
+  `src/platform/wrangler.toml` (not a `ci/`-gated path): no token is minted or held to serve,
+  and the binding can be no wider than that one bucket. Writes still go only through the minted
+  `instance_home` token (L3). Each isolate rereads `live` at most every 30 s, as the JS does,
+  and keeps the last release it read if a read fails.
+- **Serving.** The file the path resolves to (exact, then `…/index.html`; `..` never resolves),
+  else the release's `/404.html` with 404, with the JS's ETag/304, `Cache-Control` (60 s for
+  `.html`/`.xml`, an hour otherwise), `X-Pigeon-Release` and `X-Pigeon-Commit`. Images and
+  fonts are streamed; text (pages, CSS, SVG, XML) is read whole and checked.
+- **Fallback.** No binding, nothing live, `live` not naming a release, a missing manifest or
+  blob, a read error, a bad escape, or no `/index.html`: today's answer, `home_html` for `/`
+  (never a 5xx) and 404 for the rest.
+- **No script.** Every answer carries `home::CSP` (no `script-src`, `default-src 'none'`). Its
+  `style-src` now also allows `'self'`, because the release links `/assets/pigeon.css` rather
+  than inlining it; still no script. At serve time a script type (`javascript`, `ecmascript`,
+  `wasm`) is never answered, and text carrying `<script`, `javascript:` or an `on…=` attribute
+  in a tag is refused (logged, built-in answer instead): defence in depth behind L1's check.
+- **Ownership.** `settings::site()` has no `also` (and no service binding to move to):
+  `site_publish` offers only `pigeon-platform`. Its pre-flight for core itself now checks core's
+  own `/architecture.json` names a 40-character commit and answers which release `/` will serve
+  (`release`, `null` for the built-in page).
+- **pigeon-sites keeps `apex.rs` for now.** The apex's custom domain is still attached to
+  pigeon-sites (`x-served-by: pigeon-sites` on 2026-11-26). Removing it in this landing would
+  break pigeon.dev, and deploy.sh's `/architecture.json` check, until the person moves the
+  domain. Remove `src/sites/src/apex.rs` (and its `mod`/host branch in `src/sites/src/lib.rs`)
+  in the landing after step 2 below.
+- Smoke: `apex_serves_the_home_release`, `linked_site_worker_serving_unchanged`,
+  `site_on_the_apex`. `site_worker.js` is unchanged.
+
+What the person does after S1 lands and deploys:
+
+1. Check the binding deployed: `site_releases {instance: "pigeon-security/platform"}` shows the
+   live release.
+2. Run `site_publish {}` (no `worker`: `pigeon-platform`). It checks core's own
+   `/architecture.json` names a commit, answers the `release` `/` will serve, and attaches
+   `pigeon.dev` to `pigeon-platform` as its Workers Custom Domain, taking it from pigeon-sites.
+3. Verify: `curl -sI https://pigeon.dev/` shows `x-served-by: pigeon-platform`,
+   `x-pigeon-release: release-…` and the CSP; `https://pigeon.dev/architecture.json` names
+   main's commit; `https://pigeon.dev/nope` is the release's 404 page.
+4. Then an agent removes `src/sites/src/apex.rs` (nothing points at it any more).
 
 ## R1: instance id rename migration
 
@@ -195,7 +246,8 @@ Steps:
   shared release/rollback/list code. *Built* (smoke
   `home_site_publishes_from_artifacts_with_a_minted_token`); see "As built (L2–L3)" below.
 - **S1** core serves the apex release (fallback `home_html`); `/architecture.json` unchanged;
-  `pigeon-sites` leaves the apex.
+  `pigeon-sites` leaves the apex. *Built* (smoke `apex_serves_the_home_release`); see "As built
+  (S1)" above. The domain moves when the person runs `site_publish`; `apex.rs` goes after.
 - **R1** instance id rename, above.
 - **H4** console shows the platform-owned inventory read-only on the home Overview.
 
@@ -203,7 +255,8 @@ Steps:
 
 - Approve the new home record and each home `instance_apply` (passkey).
 - Nothing for the token: the parent mints `instance_home` with its Account API Tokens Write.
-- Run `site_publish` to move the apex onto `pigeon-platform` for good (S1).
+- Run `site_publish {}` to move the apex onto `pigeon-platform` for good (S1; steps in "As
+  built (S1)").
 - Approve the R1 migration.
 
 ## Open questions

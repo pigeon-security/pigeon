@@ -226,6 +226,15 @@ queue = "pigeon-ci-events"
 binding = "CHANGELOG"
 bucket_name = "pigeon-changelog"
 
+# The home instance's landing site (src/capabilities/src/site.rs, docs/plans/platform-self-hosting.md
+# S1): the apex serves the release `live` names in this bucket, read through this binding with no
+# token; core writes it only with a minted instance_home token (instances/home_site.rs). The
+# bucket exists (the home instance's releases are in it), since a binding to a missing bucket
+# fails the deploy.
+[[r2_buckets]]
+binding = "HOME_SITE"
+bucket_name = "pigeon-platform-site"
+
 # App Store Connect (src/capabilities/src/apple.rs, docs/plans/ios.md phase 1b): the team id,
 # the API key's issuer id, key id and .p8, set by the person on the secrets page; bound once all
 # four existed, since a binding to a missing secret fails the deploy.

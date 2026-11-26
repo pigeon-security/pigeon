@@ -4,9 +4,10 @@
 
 use crate::{design::escape, git::base64};
 
-/// The Content-Security-Policy of the apex pages: inline styles and images from the apex itself
-/// or `data:`, nothing else.
-pub const CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+/// The Content-Security-Policy of the apex pages: styles inline or from the apex itself (a
+/// published release links its stylesheet), images from the apex itself or `data:`, nothing
+/// else. No script, ever.
+pub const CSP: &str = "default-src 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 /// Where the console is.
 pub const CONSOLE: &str = "https://platform.pigeon.dev/app";

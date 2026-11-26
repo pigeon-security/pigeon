@@ -68,8 +68,9 @@ fn site_on_the_apex() {
     let site = Site {
         zone: "pigeon.dev".into(),
         worker: "pigeon-platform".into(),
-        also: vec!["pigeon-sites".into()],
-        bindings: vec![("pigeon-sites".into(), "SITES".into())],
+        also: Vec::new(),
+        bindings: Vec::new(),
+        release: Some(pigeon_capabilities::site::HOME_SITE.into()),
     };
     let fp = site.footprint();
     assert_eq!(fp.hostnames.len(), 1, "one hostname");
@@ -83,9 +84,407 @@ fn site_on_the_apex() {
     let schema = &site.tools()[0].input_schema;
     assert_eq!(
         schema["properties"]["worker"]["enum"],
-        json!(["pigeon-platform", "pigeon-sites"]),
-        "the apex may move to the sites Worker"
+        json!(["pigeon-platform"]),
+        "since S1 the apex is core's alone"
     );
+}
+
+/// A bucket in the suite: every object by key.
+#[derive(Default)]
+struct MemBucket(std::cell::RefCell<std::collections::BTreeMap<String, Vec<u8>>>);
+
+impl pigeon_core::site_publish::Store for MemBucket {
+    async fn list(&self, prefix: &str) -> worker::Result<Vec<String>> {
+        Ok(self
+            .0
+            .borrow()
+            .keys()
+            .filter(|k| k.starts_with(prefix))
+            .cloned()
+            .collect())
+    }
+    async fn get(&self, key: &str) -> worker::Result<Option<Vec<u8>>> {
+        Ok(self.0.borrow().get(key).cloned())
+    }
+    async fn put(&self, key: &str, _ctype: &str, body: Vec<u8>) -> worker::Result<()> {
+        self.0.borrow_mut().insert(key.to_string(), body);
+        Ok(())
+    }
+    async fn put_objects(&self, objects: Vec<pigeon_core::r2::ObjectWrite>) -> worker::Result<()> {
+        for o in objects {
+            self.0.borrow_mut().insert(o.key, o.body);
+        }
+        Ok(())
+    }
+}
+
+/// Area: sites. S1: core serves the home instance's published landing release on the apex. The
+/// console redirect and the built-in architecture pages and images answer first, whatever the
+/// release holds; every other GET is the release's file (or its 404 page), with the apex's
+/// script-free CSP, read from the bucket the way a linked instance's site Worker reads its own;
+/// with no release, or nothing to answer `/`, the built-in home page answers. A file carrying
+/// script is never served.
+#[test]
+fn apex_serves_the_home_release() {
+    use super::core::token_block_on as run;
+    use pigeon_capabilities::site::{
+        Apex, FromRelease, apex, architecture_json, from_release, headers,
+    };
+    use pigeon_core::home::{self, Asset, Route};
+    use pigeon_core::site_publish::{self, live, scriptless};
+
+    // The order of routes: the console redirect, then the built-in dynamic routes, then the
+    // release; anything but GET or HEAD is 404.
+    assert_eq!(
+        apex("GET", "/platform/inbox", Some("q=1")),
+        Apex::Console("https://platform.pigeon.dev/app/inbox?q=1".into())
+    );
+    assert_eq!(
+        apex("GET", "/architecture", None),
+        Apex::Built(Route::Architecture)
+    );
+    assert_eq!(
+        apex("HEAD", "/architecture.json", None),
+        Apex::Built(Route::Json)
+    );
+    for a in Asset::ALL {
+        assert_eq!(
+            apex("GET", a.path(), None),
+            Apex::Built(Route::Asset(a)),
+            "{}",
+            a.path()
+        );
+    }
+    for path in [
+        "/",
+        "/about",
+        "/about/",
+        "/assets/pigeon.css",
+        "/404.html",
+        "/logo.png",
+        "/x",
+    ] {
+        assert_eq!(apex("GET", path, None), Apex::Release, "{path}");
+        assert_eq!(apex("HEAD", path, None), Apex::Release, "{path}");
+    }
+    for (method, path) in [
+        ("POST", "/"),
+        ("PUT", "/about"),
+        ("DELETE", "/architecture.json"),
+    ] {
+        assert_eq!(apex(method, path, None), Apex::NotFound, "{method} {path}");
+    }
+
+    // The home landing, rendered by landing@1 with a page, and published as the home deploy
+    // stages it: blobs, manifest, provenance, then `live`.
+    let mut input = landing_site();
+    input.pages = vec![(
+        "about.md".into(),
+        "+++\ntitle = \"About\"\n+++\n\nAbout pigeon.\n".into(),
+    )];
+    let out = pigeon_landing::render(&input).expect("the landing renders");
+    let mut files: Vec<(String, Vec<u8>, String)> = out
+        .files
+        .iter()
+        .map(|(p, (b, t))| (p.clone(), b.clone(), t.to_string()))
+        .collect();
+    // A release that also holds the dynamic routes' paths: the built-in ones still win.
+    for p in ["architecture.json", "architecture", "platform/index.html"] {
+        files.push((
+            p.into(),
+            b"from the release".to_vec(),
+            "text/plain; charset=utf-8".into(),
+        ));
+    }
+    let bucket = MemBucket::default();
+    assert_eq!(
+        run(live(&bucket, None)).unwrap(),
+        None,
+        "nothing is live yet"
+    );
+    let commit = "c".repeat(40);
+    let provenance = json!({
+        "instance": "pigeon-security/platform", "site": "landing", "base_url": "https://pigeon.dev",
+        "commit": commit, "template": "landing@1",
+    });
+    let staged = run(site_publish::stage(
+        &bucket,
+        &provenance,
+        files,
+        &mut |_| {},
+    ))
+    .unwrap();
+    assert_eq!(
+        run(live(&bucket, None)).unwrap(),
+        None,
+        "staged is not live"
+    );
+    run(site_publish::activate(&bucket, &staged.release)).unwrap();
+    let l = run(live(&bucket, None)).unwrap().expect("a live release");
+    assert_eq!(l.release, staged.release);
+    assert_eq!(l.commit.as_deref(), Some(commit.as_str()));
+    assert_eq!(
+        run(live(&bucket, Some(&l))).unwrap().as_ref(),
+        Some(&l),
+        "kept as read"
+    );
+    for path in [
+        "/architecture.json",
+        "/architecture",
+        "/platform",
+        "/platform/",
+    ] {
+        assert_ne!(
+            apex("GET", path, None),
+            Apex::Release,
+            "{path} is never the release's"
+        );
+    }
+
+    let blob = |b: &str| bucket.0.borrow()[&pigeon_core::r2::blob_key(b)].clone();
+    let header =
+        |h: &[(&str, String)], k: &str| h.iter().find(|(n, _)| *n == k).map(|(_, v)| v.clone());
+    let served = |path: &str| match from_release(&l, path, None, "pigeon-platform") {
+        FromRelease::File {
+            status,
+            blob: b,
+            content_type,
+            headers,
+        } => (status, blob(b), content_type.to_string(), headers),
+        other => panic!("{path}: {other:?}"),
+    };
+    // `/` and the pages: the release's files, with its CSP and caching.
+    let (status, body, kind, h) = served("/");
+    assert_eq!((status, kind.as_str()), (200, "text/html; charset=utf-8"));
+    let index = String::from_utf8(body.clone()).unwrap();
+    assert!(index.contains("<h1>Find the pattern. Act with confidence.</h1>"));
+    assert!(scriptless(&kind, &body));
+    assert_eq!(
+        header(&h, "Content-Security-Policy").as_deref(),
+        Some(home::CSP)
+    );
+    assert_eq!(
+        header(&h, "X-Content-Type-Options").as_deref(),
+        Some("nosniff")
+    );
+    assert_eq!(
+        header(&h, "Cache-Control").as_deref(),
+        Some("public, max-age=60")
+    );
+    assert_eq!(header(&h, "X-Pigeon-Release"), Some(l.release.clone()));
+    assert_eq!(header(&h, "X-Pigeon-Commit"), Some(commit.clone()));
+    assert_eq!(
+        header(&h, "X-Served-By").as_deref(),
+        Some("pigeon-platform")
+    );
+    let etag = header(&h, "ETag").unwrap();
+    for path in ["/about", "/about/", "/about/index.html", "/%61bout"] {
+        let (status, body, _, _) = served(path);
+        assert_eq!(status, 200, "{path}");
+        assert!(
+            String::from_utf8(body).unwrap().contains("About pigeon."),
+            "{path}"
+        );
+    }
+    let (status, css, kind, h) = served("/assets/pigeon.css");
+    assert_eq!((status, kind.as_str()), (200, "text/css; charset=utf-8"));
+    assert_eq!(css, pigeon_landing::CSS.as_bytes());
+    assert_eq!(
+        header(&h, "Cache-Control").as_deref(),
+        Some("public, max-age=3600")
+    );
+    // The stylesheet is the apex's own, so the CSP allows it, and still no script.
+    assert!(home::CSP.contains("style-src 'self'"));
+    assert!(index.contains("<link rel=\"stylesheet\" href=\"/assets/pigeon.css\">"));
+    // A path the release lacks: its 404 page, with 404; a `..` never resolves.
+    for path in [
+        "/nope",
+        "/about/nope",
+        "/%2e%2e/etc/passwd",
+        "/assets/../index.html",
+    ] {
+        let (status, body, kind, h) = served(path);
+        assert_eq!(status, 404, "{path}");
+        assert!(
+            String::from_utf8(body.clone())
+                .unwrap()
+                .contains("Page not found"),
+            "{path}"
+        );
+        assert!(scriptless(&kind, &body));
+        assert_eq!(
+            header(&h, "Content-Security-Policy").as_deref(),
+            Some(home::CSP)
+        );
+    }
+    // A client holding the file: 304, with the same headers.
+    match from_release(&l, "/", Some(&etag), "pigeon-platform") {
+        FromRelease::NotModified { headers } => assert_eq!(header(&headers, "ETag"), Some(etag)),
+        other => panic!("{other:?}"),
+    }
+    // A malformed escape: the built-in answer.
+    assert_eq!(from_release(&l, "/%zz", None, "w"), FromRelease::Fallback);
+
+    // `/architecture.json` is built in and names the deployed commit, first and at the top
+    // level, as deploy.sh and site_publish's pre-flight read it.
+    let model = json!({ "commit": "a".repeat(40), "workers": [] });
+    let page = architecture_json(&model, "49fdb709").unwrap();
+    let parsed: Value = serde_json::from_str(&page).unwrap();
+    assert_eq!(parsed["commit"], json!("a".repeat(40)));
+    assert_eq!(parsed["model"], model);
+    let first = page.find("\"commit\"").unwrap();
+    assert!(page[first..].starts_with(&format!("\"commit\": \"{}\"", "a".repeat(40))));
+
+    // No release, or none that answers `/`: the built-in home page, never a 5xx.
+    for (named, keep_manifest) in [("not-a-release", true), (staged.release.as_str(), false)] {
+        let b = MemBucket::default();
+        for (k, v) in bucket.0.borrow().iter() {
+            if keep_manifest || !k.starts_with("deploys/") {
+                b.0.borrow_mut().insert(k.clone(), v.clone());
+            }
+        }
+        b.0.borrow_mut()
+            .insert("live".into(), named.as_bytes().to_vec());
+        assert_eq!(run(live(&b, None)).unwrap(), None, "{named}");
+    }
+    let mut no_index = l.clone();
+    no_index.manifest.remove("/index.html");
+    assert_eq!(
+        from_release(&no_index, "/", None, "w"),
+        FromRelease::Fallback
+    );
+    assert!(matches!(
+        from_release(&no_index, "/about", None, "w"),
+        FromRelease::File { status: 200, .. }
+    ));
+    let mut bare = no_index.clone();
+    bare.manifest.remove("/404.html");
+    assert_eq!(
+        from_release(&bare, "/nope", None, "w"),
+        FromRelease::Fallback
+    );
+    let fallback = home::home_html(None);
+    assert!(scriptless("text/html; charset=utf-8", fallback.as_bytes()));
+    assert_eq!(
+        header(
+            &headers("text/html; charset=utf-8", None, "w"),
+            "Content-Security-Policy"
+        )
+        .as_deref(),
+        Some(home::CSP)
+    );
+
+    // No script is ever served: a script file is not answered at all, and a page, stylesheet or
+    // drawing carrying one is refused when read.
+    let mut scripted = l.clone();
+    let entry = |kind: &str| pigeon_core::r2::Entry {
+        blob: "0".repeat(64),
+        content_type: kind.into(),
+        size: 1,
+    };
+    scripted
+        .manifest
+        .insert("/app.js".into(), entry("text/javascript; charset=utf-8"));
+    scripted
+        .manifest
+        .insert("/app.wasm".into(), entry("application/wasm"));
+    assert_eq!(
+        from_release(&scripted, "/app.js", None, "w"),
+        FromRelease::Fallback
+    );
+    assert_eq!(
+        from_release(&scripted, "/app.wasm", None, "w"),
+        FromRelease::Fallback
+    );
+    let html = "text/html; charset=utf-8";
+    for bad in [
+        "<p>x</p><SCRIPT>alert(1)</SCRIPT>",
+        "<a href=\"JavaScript:alert(1)\">x</a>",
+        "<img src=x onerror=alert(1)>",
+        "<body onload = \"x()\">",
+        "<svg/onload=x>",
+        "<a href=x\"onclick=y>",
+    ] {
+        assert!(!scriptless(html, bad.as_bytes()), "{bad}");
+    }
+    assert!(!scriptless(
+        "image/svg+xml; charset=utf-8",
+        b"<svg><script>x</script></svg>"
+    ));
+    assert!(!scriptless(
+        "text/css; charset=utf-8",
+        b"a { background: url(javascript:x) }"
+    ));
+    for fine in [
+        "<p>Turn it on = off.</p>",
+        "<a href=\"/one\">once</a>",
+        "<p data-on=\"x\">",
+    ] {
+        assert!(scriptless(html, fine.as_bytes()), "{fine}");
+    }
+    assert!(
+        scriptless("image/png", b"\x89PNG<script>"),
+        "images are not markup"
+    );
+    for (_, body, kind, _) in ["/", "/about", "/nope", "/assets/pigeon.css"].map(served) {
+        assert!(scriptless(&kind, &body));
+    }
+}
+
+/// Area: sites. S1 leaves linked instances' site Worker as it was: it reads the same bucket
+/// layout core now reads for the apex (`live`, `deploys/`, `release-meta/`, `blobs/`, the 404
+/// page) with the same resolution and caching, and core's apex code is not in it.
+#[test]
+fn linked_site_worker_serving_unchanged() {
+    use pigeon_core::r2::{Entry, LIVE, blob_key, manifest_key};
+    use pigeon_core::site_publish::{NOT_FOUND_PAGE, cache_control, release_key, resolve};
+
+    let js = include_str!("../../src/capabilities/src/instances/site_worker.js");
+    for line in [
+        "const RECHECK_MS = 30_000;",
+        &format!("const live = await env.SITE.get(\"{LIVE}\");"),
+        "if (!release.startsWith(\"release-\")) return",
+        "const m = await env.SITE.get(`deploys/${release}.json`);",
+        "const meta = await env.SITE.get(`release-meta/${release}.json`);",
+        "if (path.split(\"/\").includes(\"..\")) return null;",
+        "const candidate = `${path.replace(/\\/+$/, \"\")}/index.html`;",
+        &format!(
+            "key = Object.hasOwn(s.manifest, \"{NOT_FOUND_PAGE}\") ? \"{NOT_FOUND_PAGE}\" : null;"
+        ),
+        "const etag = `\"${entry.blob}\"`;",
+        &format!("? \"{}\"", cache_control("/index.html")),
+        &format!(": \"{}\",", cache_control("/a.png")),
+        "const obj = await env.SITE.get(`blobs/${entry.blob}`);",
+        "if (!s.manifest) return plain(503, \"Nothing is deployed here yet.\");",
+    ] {
+        assert!(js.contains(line), "site_worker.js: {line}");
+    }
+    assert!(!js.contains("HOME_SITE") && !js.contains("Content-Security-Policy"));
+    assert_eq!(manifest_key("release-x"), "deploys/release-x.json");
+    assert_eq!(release_key("release-x"), "release-meta/release-x.json");
+    assert_eq!(blob_key("ab"), "blobs/ab");
+    assert_eq!(cache_control("/feed.xml"), "public, max-age=60");
+    // The same resolution as the JS: exact, then `index.html`, never `..`.
+    let e = || Entry {
+        blob: "b".into(),
+        content_type: "text/html".into(),
+        size: 1,
+    };
+    let m: pigeon_core::r2::Manifest = ["/index.html", "/a/index.html", "/b.html"]
+        .map(|k| (k.to_string(), e()))
+        .into();
+    for (path, want) in [
+        ("/", Some("/index.html")),
+        ("/a", Some("/a/index.html")),
+        ("/a/", Some("/a/index.html")),
+        ("/a//", Some("/a/index.html")),
+        ("/b.html", Some("/b.html")),
+        ("/b", None),
+        ("/a/../index.html", None),
+        ("/c", None),
+    ] {
+        assert_eq!(resolve(&m, path), want, "{path}");
+    }
 }
 
 /// The blog renderer (`pigeon_blog`): a consumer repository in, a static site out, with

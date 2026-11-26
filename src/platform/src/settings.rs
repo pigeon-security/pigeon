@@ -27,7 +27,7 @@ use pigeon_capabilities::proxy::Tokens;
 use pigeon_capabilities::public_host::{PublicHost, Retire};
 use pigeon_capabilities::remote::Binding;
 use pigeon_capabilities::secrets::Secrets;
-use pigeon_capabilities::site::Site;
+use pigeon_capabilities::site::{self, Site};
 use pigeon_capabilities::site_passkeys::SitePasskeys;
 use pigeon_capabilities::source::Source;
 use pigeon_capabilities::split::Split;
@@ -123,13 +123,16 @@ const fn mirrors_no_session_branch(branches: &[&str]) -> bool {
     true
 }
 
-/// The public site on the zone's apex, served by this Worker.
+/// The public site on the zone's apex, served by this Worker: the home instance's published
+/// landing release from its bucket (bound as [`site::HOME_SITE`]), with the architecture pages
+/// built in (docs/plans/platform-self-hosting.md, S1). No other Worker owns it.
 pub fn site() -> Site {
     Site {
         zone: ZONE.into(),
         worker: WORKER.into(),
-        also: vec!["pigeon-sites".into()],
-        bindings: vec![("pigeon-sites".into(), "SITES".into())],
+        also: Vec::new(),
+        bindings: Vec::new(),
+        release: Some(site::HOME_SITE.into()),
     }
 }
 

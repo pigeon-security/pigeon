@@ -3,7 +3,9 @@
 //! [`Store`] (the blobs it lacks, `deploys/{release}.json`, then `release-meta/{release}.json`)
 //! and made live by one write of [`crate::r2::LIVE`], so the previous release stays whole until
 //! that last write; a rollback checks a staged release belongs to the same target and moves
-//! `live` back; a listing reads the releases and the live one.
+//! `live` back; a listing reads the releases and the live one. A Worker serving a release itself
+//! (core, on the home instance's apex) reads it with [`live`] and [`pick`], as `site_worker.js`
+//! does for linked instances.
 use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
@@ -286,4 +288,184 @@ pub async fn releases<S: Store>(
         }));
     }
     Ok(json!({ "instance": instance, "site": site, "live": live, "total": total, "releases": out }))
+}
+
+// ---------------------------------------------------------------------------
+// Serving: what `src/capabilities/src/instances/site_worker.js` does for a linked instance's
+// Worker, for a Worker that serves a release itself (core, for the home instance's apex). The
+// same layout: `live` names a release, `deploys/{release}.json` maps each site path to its blob,
+// `release-meta/{release}.json` holds its provenance, `blobs/{sha256}` each file.
+// ---------------------------------------------------------------------------
+
+/// Reads one object: all that serving a release needs. Every [`Store`] reads.
+#[allow(async_fn_in_trait)] // Workers futures are not `Send`; nothing here needs it.
+pub trait Read {
+    /// The object at `key`, or `None`.
+    async fn read(&self, key: &str) -> Result<Option<Vec<u8>>>;
+}
+
+impl<S: Store> Read for S {
+    async fn read(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        self.get(key).await
+    }
+}
+
+/// The release `live` names, with its manifest and the commit its provenance names.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Live {
+    pub release: String,
+    pub commit: Option<String>,
+    pub manifest: Manifest,
+}
+
+/// The live release in `store`, as `site_worker.js`'s `current` reads it: `None` when nothing
+/// is live (no `live`, a `live` naming anything but a release, or a release whose manifest is
+/// missing). When `known` is already that release it is answered again without reading its
+/// manifest. Reads only.
+pub async fn live<R: Read>(store: &R, known: Option<&Live>) -> Result<Option<Live>> {
+    let Some(named) = store.read(r2::LIVE).await? else {
+        return Ok(None);
+    };
+    let release = String::from_utf8_lossy(&named).trim().to_string();
+    // Only immutable releases are served; anything else serves nothing until the next publish.
+    if !is_release_id(&release) {
+        return Ok(None);
+    }
+    if let Some(k) = known.filter(|k| k.release == release) {
+        return Ok(Some(k.clone()));
+    }
+    let Some(manifest) = store.read(&r2::manifest_key(&release)).await? else {
+        return Ok(None);
+    };
+    let manifest: Manifest = serde_json::from_slice(&manifest)?;
+    let commit = match store.read(&release_key(&release)).await? {
+        Some(meta) => serde_json::from_slice::<Value>(&meta)
+            .ok()
+            .and_then(|m| m["commit"].as_str().map(str::to_string)),
+        None => None,
+    };
+    Ok(Some(Live {
+        release,
+        commit,
+        manifest,
+    }))
+}
+
+/// The manifest key that serves the decoded `path`: the path itself, or its `index.html`
+/// (`/` is `/index.html`, `/about/` and `/about` are `/about/index.html`). A path with a `..`
+/// segment never resolves. Pure.
+pub fn resolve<'a>(manifest: &'a Manifest, path: &str) -> Option<&'a str> {
+    if path.split('/').any(|s| s == "..") {
+        return None;
+    }
+    if let Some((k, _)) = manifest.get_key_value(path) {
+        return Some(k);
+    }
+    let candidate = format!("{}/index.html", path.trim_end_matches('/'));
+    manifest.get_key_value(&candidate).map(|(k, _)| k.as_str())
+}
+
+/// The release's page for a path it does not have.
+pub const NOT_FOUND_PAGE: &str = "/404.html";
+
+/// What a release answers for the decoded `path`: its file with 200, or the release's
+/// [`NOT_FOUND_PAGE`] with 404; `None` when it has neither. Pure.
+pub fn pick<'a>(manifest: &'a Manifest, path: &str) -> Option<(u16, &'a str, &'a r2::Entry)> {
+    let (status, key) = match resolve(manifest, path) {
+        Some(k) => (200, k),
+        None => (404, manifest.get_key_value(NOT_FOUND_PAGE)?.0.as_str()),
+    };
+    Some((status, key, &manifest[key]))
+}
+
+/// The `Cache-Control` of a release file: a minute for pages and feeds, an hour for the rest.
+pub fn cache_control(key: &str) -> &'static str {
+    if key.ends_with(".html") || key.ends_with(".xml") {
+        "public, max-age=60"
+    } else {
+        "public, max-age=3600"
+    }
+}
+
+/// The `ETag` of a release file: its blob, quoted.
+pub fn etag(entry: &r2::Entry) -> String {
+    format!("\"{}\"", entry.blob)
+}
+
+/// A URL path, percent-decoded as `decodeURIComponent` does; `None` when an escape is malformed
+/// or the bytes are not UTF-8. Pure.
+pub fn decode_path(raw: &str) -> Option<String> {
+    let b = raw.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' {
+            let hex = raw.get(i + 1..i + 3)?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// Whether a file of `content_type` is a script, which a script-free origin never serves.
+pub fn is_script_type(content_type: &str) -> bool {
+    let t = content_type.to_ascii_lowercase();
+    ["javascript", "ecmascript", "wasm"]
+        .iter()
+        .any(|s| t.contains(s))
+}
+
+/// Whether a file of `content_type` is text a browser may run script from (pages, SVG, XML,
+/// stylesheets), so it is read whole and checked by [`scriptless`] before it is served.
+pub fn needs_scan(content_type: &str) -> bool {
+    let t = content_type.to_ascii_lowercase();
+    t.starts_with("text/") || t.contains("xml") || t.contains("svg") || t.contains("html")
+}
+
+/// Whether `body`, of `content_type`, is free of script: not a script type, and, when it is
+/// text, no `<script`, no `javascript:` and no `on…=` event-handler attribute in any tag. The
+/// templates never write any (L1); this is the serving side's check of the same, so a release
+/// that somehow carries one is not served. Pure.
+pub fn scriptless(content_type: &str, body: &[u8]) -> bool {
+    if is_script_type(content_type) {
+        return false;
+    }
+    if !needs_scan(content_type) {
+        return true;
+    }
+    let lower = String::from_utf8_lossy(body).to_ascii_lowercase();
+    !(lower.contains("<script") || lower.contains("javascript:") || has_event_handler(&lower))
+}
+
+/// Whether lowercase markup has an `on…=` attribute inside a tag.
+fn has_event_handler(lower: &str) -> bool {
+    let b = lower.as_bytes();
+    let mut in_tag = false;
+    for i in 0..b.len() {
+        match b[i] {
+            b'<' => in_tag = true,
+            b'>' => in_tag = false,
+            c if in_tag
+                && (c.is_ascii_whitespace() || c == b'/' || c == b'"' || c == b'\'')
+                && b[i + 1..].starts_with(b"on") =>
+            {
+                let rest = &b[i + 3..];
+                let name = rest.iter().take_while(|c| c.is_ascii_alphabetic()).count();
+                if name > 0
+                    && rest[name..]
+                        .iter()
+                        .find(|c| !c.is_ascii_whitespace())
+                        .is_some_and(|c| *c == b'=')
+                {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }

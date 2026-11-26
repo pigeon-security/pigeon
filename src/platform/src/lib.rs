@@ -185,7 +185,7 @@ async fn fetch(req: Request, env: Env, ctx: WorkerContext) -> Result<Response> {
     // The apex is the public site's alone: none of the platform's paths answer there.
     if site::is_apex(&host, settings::ZONE) {
         let hosted = hosted(&caps);
-        return settings::site().serve(&hosted, req).await;
+        return settings::site().serve(&env, &hosted, req).await;
     }
     // A route is a prefix, so the root, the console's first tab, is matched by name.
     if let Some(c) = caps.iter().find(|c| {

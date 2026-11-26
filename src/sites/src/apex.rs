@@ -1,5 +1,9 @@
-//! The pigeon.dev apex: the home page, the architecture page and its JSON, their images, and
-//! the logo. The pages and images are pure ([`pigeon_core::home`]). The architecture comes
+//! The pigeon.dev apex, while its custom domain is still attached to this Worker: the home page,
+//! the architecture page and its JSON, their images, and the logo. Since S1
+//! (docs/plans/platform-self-hosting.md) core serves the apex itself, from the home instance's
+//! published release, and core's `site_publish` no longer offers this Worker; this module stays
+//! only until the person runs `site_publish` to move the domain onto core, so pigeon.dev and
+//! deploy.sh's `/architecture.json` check keep answering in between. Remove it after. The pages and images are pure ([`pigeon_core::home`]). The architecture comes
 //! from core (`architecture_describe`, public), asked as this Worker itself and kept for 30
 //! seconds per isolate: short, because the deploy script polls for it after a core deploy. No
 //! credential is on this path.
