@@ -177,6 +177,7 @@ impl Job {
         json!({
             "id": self.id, "state": self.state, "health": self.health,
             "started_ms": self.started_ms, "deadline_ms": self.deadline_ms,
+            "finished_ms": self.updated_ms.filter(|_| self.terminal()),
             "error": self.error,
             "estimated_usd": estimate.as_ref().map(|cost| cost.estimated_usd_micros as f64 / 1_000_000.0),
             "compute_estimate": estimate,
@@ -425,6 +426,12 @@ pub(super) async fn check_write(cx: &Context<'_>, w: &Write<'_>) -> Result<Value
     }
     if w.action.id != START {
         return Ok(Value::Null);
+    }
+    if record.capabilities.contains_key("jobs") && jobs_audit::configured_bucket(&record).is_none()
+    {
+        return Err(bad(
+            "Set up the Jobs audit bucket in Capabilities before starting a runner check.",
+        ));
     }
     let plan = plan();
     if w.change["plan"] != plan["fingerprint"] {
@@ -790,14 +797,12 @@ async fn export_audits(env: &Env, host: &str) -> Result<()> {
             continue;
         }
         let status = jobs_audit::export(env, host, instance, &row["job"]).await;
-        if status != ExportStatus::Pending {
-            directory(
-                env,
-                "digitalocean.health.audit_finish",
-                json!({"instance":instance, "id":id, "status":status}),
-            )
-            .await?;
-        }
+        directory(
+            env,
+            "digitalocean.health.audit_finish",
+            json!({"instance":instance, "id":id, "status":status}),
+        )
+        .await?;
     }
     Ok(())
 }

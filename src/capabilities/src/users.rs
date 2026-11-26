@@ -1356,6 +1356,27 @@ impl Directory {
                 )?;
                 Value::Null
             }
+            "instance.jobs_audit_save" => {
+                use crate::instances::{self, rename::Stored};
+                let key = instances::key(s("instance"));
+                let prior = self.setting_value(&key, t)?;
+                let current = prior.as_deref().map(Stored::parse).transpose()?;
+                let link: Option<crate::linked::Link> = self
+                    .setting_value(&crate::linked::key(s("instance")), t)?
+                    .filter(|text| !text.is_empty())
+                    .as_deref()
+                    .map(serde_json::from_str)
+                    .transpose()?;
+                if let (Some(Stored::Record(current)), Some(link)) = (current, link)
+                    && Some(link.account_id.as_str()) == a["base"]["account"]["account_id"].as_str()
+                    && serde_json::to_value(current)? == a["base"]
+                {
+                    self.setting_keep(&key, s("record"), t.saturating_add(instances::KEPT_MS))?;
+                    json!(true)
+                } else {
+                    json!(false)
+                }
+            }
             "digitalocean.health.history" => {
                 let instance = s("instance");
                 let mut history = self.droplet_history(instance, t)?;
@@ -1392,7 +1413,7 @@ impl Directory {
                       WHERE settings.key >= 'digitalocean-droplet-history:'
                         AND settings.key < 'digitalocean-droplet-history;'
                         AND settings.expires_at > ?
-                        AND json_extract(jobs.value, '$.audit_status') = 'pending'
+                        AND json_extract(jobs.value, '$.audit_status') IN ('pending', 'retrying')
                         AND coalesce(json_extract(jobs.value, '$.audit_retry_at'), 0) <= ?
                      ORDER BY coalesce(json_extract(jobs.value, '$.audit_retry_at'), 0), settings.key, jobs.key
                      LIMIT 2",
@@ -1417,10 +1438,10 @@ impl Directory {
                 let instance = s("instance");
                 let id = s("id");
                 let mut history = self.droplet_history(instance, t)?;
-                let Some(job) = history
-                    .iter_mut()
-                    .find(|row| row["id"].as_str() == Some(id) && row["audit_status"] == "pending")
-                else {
+                let Some(job) = history.iter_mut().find(|row| {
+                    row["id"].as_str() == Some(id)
+                        && matches!(row["audit_status"].as_str(), Some("pending" | "retrying"))
+                }) else {
                     return Ok(json!(false));
                 };
                 if op == "digitalocean.health.audit_claim" {
@@ -1434,7 +1455,9 @@ impl Directory {
                         return Err(bad("invalid finished audit export status"));
                     }
                     job["audit_status"] = json!(status);
-                    if let Some(fields) = job.as_object_mut() {
+                    if status != ExportStatus::Retrying
+                        && let Some(fields) = job.as_object_mut()
+                    {
                         fields.remove("audit_retry_at");
                     }
                 }

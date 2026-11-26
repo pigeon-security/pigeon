@@ -152,7 +152,8 @@ pub struct CapabilitySettings {
     /// Whether this instance permits approved temporary Droplet health checks.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub droplet_health: bool,
-    /// Existing private R2 bucket in the approved linked account for sealed Jobs diagnostics.
+    /// Private R2 bucket in the approved linked account for Jobs diagnostics.
+    /// Absence on a legacy profile requires setup before Jobs can export.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audit_bucket: Option<String>,
 }
@@ -428,13 +429,29 @@ pub fn account_change(current: Option<&Instance>, next: &Instance) -> Option<Str
     })
 }
 
+/// A transition that must provision or verify its audit destination with a passkey.
+pub fn jobs_audit_change(current: Option<&Instance>, next: &Instance) -> bool {
+    let Some(settings) = next.capabilities.get("jobs") else {
+        return false;
+    };
+    let prior = current.and_then(|record| record.capabilities.get("jobs"));
+    prior != Some(settings) || current.is_some_and(|record| record.account != next.account)
+}
+
 /// What approving `next` would break in the stored set `stored` (every instance, `next`'s own
 /// stored version among them): a second home instance, or a changed account kind. Checked again
 /// when a draft is approved, against what is stored then.
 pub fn approval_problems(next: &Instance, stored: &[Instance]) -> Vec<String> {
     let mut problems = Vec::new();
     check_home(next, stored, &mut problems);
-    if let Some(why) = account_change(stored.iter().find(|i| i.id == next.id), next) {
+    let current = stored.iter().find(|i| i.id == next.id);
+    if jobs_audit_change(current, next) {
+        problems.push(
+            "Set up the required Jobs audit bucket from the instance’s Capabilities console."
+                .into(),
+        );
+    }
+    if let Some(why) = account_change(current, next) {
         problems.push(why);
     }
     problems
@@ -1071,7 +1088,8 @@ pub fn validate(instance: &Instance, others: &[Instance], rules: &Rules) -> Vec<
                         account_id: Some(_)
                     }
                 )
-                || !crate::jobs_audit::bucket_ok(bucket))
+                || !crate::jobs_audit::bucket_ok(bucket)
+                || instance.sites.iter().any(|site| site.bucket == *bucket))
         {
             problems.push("The audit bucket belongs only to Jobs on a linked instance and must be a valid R2 bucket name.".into());
         }

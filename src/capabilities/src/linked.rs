@@ -298,7 +298,7 @@ fn now_ms() -> f64 {
     worker::js_sys::Date::now()
 }
 
-fn key(instance: &str) -> String {
+pub(crate) fn key(instance: &str) -> String {
     format!("link:{instance}")
 }
 

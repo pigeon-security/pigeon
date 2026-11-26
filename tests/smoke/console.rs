@@ -1870,6 +1870,21 @@ fn console_write_binds_the_exact_change_caller_and_action() {
         .is_err()
     );
 
+    let audit_purpose = |intent, step| {
+        bound_purpose(
+            "instance-put",
+            "u1",
+            json!("blog"),
+            json!({ "record": record, "jobs_audit": intent }),
+            step,
+        )
+    };
+    let create = audit_purpose("create", Step::Begin).unwrap();
+    assert_eq!(create, audit_purpose("create", Step::Finish).unwrap());
+    assert_ne!(create, audit_purpose("reuse", Step::Finish).unwrap());
+    assert_ne!(create, a);
+    assert!(audit_purpose("automatic", Step::Begin).is_err());
+
     // Approving binds the approval's own digest too: a different call under the same id differs.
     let ap = action("approval-approve").unwrap();
     let t = json!("a1");
@@ -2008,6 +2023,7 @@ fn console_ops_allow_the_reads_the_console_needs_and_nothing_else() {
         "land_list",
         "instances_list",
         "app_linked_details",
+        "app_jobs_audit_plan",
         "capabilities_versions",
         "capabilities_upgrade_plan",
         "site_releases",

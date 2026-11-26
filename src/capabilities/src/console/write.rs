@@ -645,12 +645,19 @@ impl Action {
                 json!({"plan":plan})
             }
             Change::Record => {
-                only(&o, &["record", "digest"], true)?;
+                only(&o, &["record", "digest", "jobs_audit"], true)?;
                 let record = s("record").ok_or("the change is {record}")?;
                 if s("digest").is_some_and(|d| d != hash(record)) {
                     return Err("the digest is not the record's".into());
                 }
-                json!({ "record": record })
+                if let Some(action) = o.get("jobs_audit") {
+                    if !matches!(action.as_str(), Some("create" | "reuse")) {
+                        return Err("the Jobs audit action must be create or reuse".into());
+                    }
+                    json!({ "record": record, "jobs_audit": action })
+                } else {
+                    json!({ "record": record })
+                }
             }
             Change::Days => {
                 only(&o, &["days"], false)?;
@@ -780,7 +787,13 @@ impl Action {
                 Some(v) => json!({ "digest": hash(v) }),
                 None => json!({ "digest": change["digest"] }),
             },
-            Change::Record => json!({ "digest": hash(change["record"].as_str().unwrap_or("")) }),
+            Change::Record => {
+                let mut bound = json!({ "digest": hash(change["record"].as_str().unwrap_or("")) });
+                if let Some(action) = change.get("jobs_audit") {
+                    bound["jobs_audit"] = action.clone();
+                }
+                bound
+            }
             _ => change.clone(),
         }
     }

@@ -390,6 +390,7 @@
     ? (amount > 0 && amount < 0.01 ? "<0.01 USD" : `${amount.toFixed(2)} USD`) : "—";
   const auditStatus = (status) => ({
     not_configured: "No audit bucket",
+    retrying: "Delivery failed · retry scheduled",
     pending: "Pending",
     stored: "Stored in R2",
     verified: "Verified in R2",

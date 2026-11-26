@@ -479,33 +479,43 @@ messages remain accepted until jobs from a previous revision finish.
 
 ### Jobs history in the console
 
-Enable `capabilities.jobs` on the approved instance to show **Jobs → Runs**.
+Enable Jobs on the approved instance to show **Jobs → Runs** and export its
+terminal audit records.
 Jobs is independent of the current provider connection. Its first history
 reader shows the instance's stored temporary DigitalOcean Droplet runs and
 opens a run's event history by its exact id. The read checks the approved
 instance and requires viewer access. It never needs a provider credential or
 contacts a provider. The view distinguishes provider lifecycle, runner stage,
-and the approved estimated cost. An optional private R2 audit target is
-configured on the Jobs profile. Show the export state only when the run record
-reports it.
+and the approved estimated cost. Show the export state only when the run
+record reports it.
 
 ## Jobs diagnostic export
 
-An optional `capabilities.jobs.audit_bucket` in the approved linked instance
-record names an existing private R2 bucket. The exporter uses the same linked
-account binding as other instance R2 operations, refuses a changed account,
-requires managed public access disabled and no custom domains, and rereads
-the approved destination before writing. Home credentials and bucket creation
-are outside this operation.
+Enabling Jobs requires one private R2 audit bucket for the instance, shared by
+every job type. The Capabilities console reviews the existing configured bucket
+or a deterministic per-instance name in the approved linked account. It shows
+whether the bucket will be created or reused. The same passkey binds the
+record version, bucket and reviewed action. Pigeon rechecks the linked
+account, creates only when requested, checks for disabled managed public
+access and no custom domains, and verifies write access with a temporary
+empty object before saving the profile. A bucket created during a failed
+save can be reused after a fresh review. A name claimed after review also
+requires a fresh reuse review. Home credentials are never used. Raw record
+edits and agent drafts cannot bypass setup. Existing Jobs profiles without
+a bucket retain history and offer **Set up audit storage** explicitly.
+A DigitalOcean runner check with Jobs enabled must first complete that setup.
+Runner checks remain available independently when Jobs is off.
 
-A versioned object under
-`jobs/{instance}/digitalocean-droplet/{job}/{digest}.json` contains only terminal
-job state, health, time bounds, and bounded allowlisted stage events. Its body
-digest makes repeats of the same snapshot use the same key. Runner output,
-credentials, provider responses, and free-form errors are excluded. A successful
-PUT reports `stored`. A refusal or transfer failure leaves the export `pending`
-and the terminal runner result stays independently available.
-
+A terminal record is written to
+`audit/v1/instances/{instance}/jobs/{job_type}/{run_id}/terminal/{digest}.json`.
+Slashes in instance IDs are encoded within one key segment. The JSON carries
+an envelope with the schema version, instance ID, job type, run ID and
+provider. Terminal state, health, time bounds, a typed compute estimate
+when known, and bounded ordered stage events are allowlisted. Runner output,
+credentials, provider responses and free-form errors are excluded.
+Content-addressed writes retry at the same key. Previously stored audit
+objects under `jobs/{instance}/digitalocean-droplet/{job}/{digest}.json`
+stay available in their original format.
 
 The cron reads exact, tagged Droplets while an approved health job is active.
 Its last provider observation is separate from cloud-init stage. Compute
@@ -517,6 +527,7 @@ billing cap.
 Terminal jobs are persisted before audit export. The cron claims at most
 two due exports each tick and retries failed exports independently from
 Droplet cleanup. With an approved private linked-instance audit bucket,
-it writes the content-addressed redacted record. Without one, the Jobs
-record shows that export is not configured. The history exposes export
-status but omits the internal retry timestamp.
+it writes the content-addressed redacted record. Legacy runs that completed
+without an approved destination retain their original audit status. The
+history exposes failed delivery while awaiting retry and omits the internal
+retry timestamp.

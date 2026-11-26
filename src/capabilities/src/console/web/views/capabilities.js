@@ -44,14 +44,14 @@
         c.to !== null && { op: "add", text: `${c.path}: ${show(c.to)}` }].filter(Boolean))];
   }
   // One record write: the exact diff, then the passkey, through instance-put.
-  function putRecord(ctx, { record, next, title, target = [], effect, danger = false, confirmLabel }) {
+  function putRecord(ctx, { record, next, title, target = [], effect, danger = false, confirmLabel, jobsAudit }) {
     const list = changes(record, next);
     if (!list.length) return toast("Nothing changes.", "info");
     confirm({
       title, danger, confirmLabel,
       target: [["Instance", code(record.id)], ...target],
       diff: diffLines(record, list), effect,
-      action: "instance-put", id: record.id, change: { record: JSON.stringify(next) },
+      action: "instance-put", id: record.id, change: { record: JSON.stringify(next), ...(jobsAudit ? { jobs_audit: jobsAudit } : {}) },
       onDone: () => setTimeout(ctx.refresh, 0),
     });
   }
@@ -136,7 +136,7 @@
     architecture: { adds: ["Platform › Architecture"], what: "Show this instance’s own setup: its Worker, bucket, hostnames and tools" },
     jobs: {
       adds: ["Jobs › Runs"], what: "Inspect this instance’s job history",
-      effect: "Shows instance-owned job history. An approved audit bucket can receive copies of job events.",
+      effect: "Shows instance-owned job history and exports terminal audit records to one private R2 bucket.",
     },
     cloud: { what: "Enable Cloud Gateway status for this instance", effect: "Adds cloud_status to the instance’s MCP endpoint." },
     digitalocean: {
@@ -155,7 +155,7 @@
         cap: e.name, field: `capabilities.${e.name}`, component: e.name,
         adds: CATALOGUE_ADDS[e.name]?.adds || [], what: CATALOGUE_ADDS[e.name]?.what || "", effect: CATALOGUE_ADDS[e.name]?.effect,
         on: (r) => Boolean(r.capabilities && r.capabilities[e.name]),
-        needs: (r) => { const lack = (e.requires || []).filter((q) => !(r.capabilities || {})[q]); return lack.length ? lack.join(", ") : null; },
+        needs: (r) => { if (jobs && !r.account?.account_id) return "a linked Cloudflare account"; const lack = (e.requires || []).filter((q) => !(r.capabilities || {})[q]); return lack.length ? lack.join(", ") : null; },
         current: (r) => {
           const settings = r.capabilities?.[e.name];
           return { placement: "inline", ...settings, ...(digitalOcean ? {
@@ -165,8 +165,6 @@
           } : {}) };
         },
         fields: () => [
-          ...(jobs ? [{ key: "audit_bucket", label: "R2 audit bucket", mono: true, optional: true,
-            hint: "An existing private bucket in this instance’s Cloudflare account." }] : []),
           ...(digitalOcean ? [{ key: "team_id", label: "DigitalOcean team ID", mono: true,
             hint: "Verification checks that the token belongs to this team.",
             validate: (value) => /^[A-Za-z0-9_-]{1,128}$/.test(value) },
@@ -190,10 +188,7 @@
         ],
         apply: (r, v) => {
           const settings = { ...r.capabilities?.[e.name] };
-          if (jobs) {
-            if (v.audit_bucket) settings.audit_bucket = v.audit_bucket;
-            else delete settings.audit_bucket;
-          }
+          if (jobs) settings.audit_bucket = v.audit_bucket;
           if (configurable) settings.placement = v.placement;
           if (digitalOcean) {
             settings.team_id = v.team_id;
@@ -442,7 +437,10 @@
           status = view ? pill(`Upgrade to see ${view.title}`, "warn")
             : pin?.state === "held" ? pill("Held by its pin", "bad")
               : step ? pill(major(step.to) > major(step.from) ? "Major upgrade" : "Update available", "info") : pill("Current", "ok");
+          if (c.cap === "jobs" && !record.capabilities.jobs.audit_bucket) status = pill("Audit setup required", "warn");
           acts = [
+            c.cap === "jobs" && !record.capabilities.jobs.audit_bucket
+              ? button("Set up audit storage", () => configureJobs(c, true), sm) : null,
             step ? button("Upgrade", () => upgrade(c, step), { ...sm, variant: view ? "primary" : undefined }) : null,
             c.fields(record).length ? button("Configure", () => configure(c, true), { ...sm, variant: "ghost" }) : null,
             c.cap === "digitalocean" ? button("Connection", () => digitalOceanConnection(ctx, record), sm) : null,
@@ -487,8 +485,44 @@
       return out;
     }
 
+    function configureJobs(c, editing) {
+      const record = state.record;
+      const title = editing ? `Set up Jobs audit storage on ${inst.title}` : `Enable Jobs on ${inst.title}`;
+      const review = button("Review bucket", load, { variant: "primary" });
+      const d = dialog({
+        title,
+        body: [el("p", { text: "All jobs on this instance share a private R2 audit bucket in its linked Cloudflare account." })],
+        actions: [button("Cancel", () => d.close()), review],
+      });
+      async function load() {
+        review.disabled = true;
+        d.say("Checking the audit bucket…");
+        try {
+          const plan = await ctx.op("app_jobs_audit_plan", { instance: record.id });
+          if (!d.content.isConnected) return;
+          if (!plan?.bucket || !["create", "reuse"].includes(plan.action)) {
+            throw new Error("Pigeon couldn’t determine which audit bucket action to review.");
+          }
+          const create = plan.action === "create";
+          d.close();
+          putRecord(ctx, {
+            record, next: withCap(record, c, { audit_bucket: plan.bucket }), title, jobsAudit: plan.action,
+            target: [["R2 audit bucket", code(plan.bucket)], ["Cloudflare account", plan.account_name || "This instance’s linked account"],
+              ["Bucket action", create ? "Create a private bucket" : "Reuse the existing private bucket"]],
+            confirmLabel: editing ? "Set up with passkey" : "Enable with passkey",
+            effect: "Pigeon verifies write access before saving Jobs. When a run finishes, Pigeon exports its audit record to this bucket.",
+          });
+        } catch (err) {
+          review.disabled = false;
+          d.say(err.message || String(err), true);
+        }
+      }
+      load();
+    }
+
     // Enable or Configure: the capability's settings, its diff as they are typed, then the passkey.
     function configure(c, editing) {
+      if (c.cap === "jobs") return configureJobs(c, editing);
       const r = state.record;
       const now = profileOf(r, c);
       const fields = c.fields(r);

@@ -28,6 +28,7 @@ pub const READS: &[(&str, &[&str])] = &[
     ("instances_list", &[]),
     ("console_manifest", &["instance"]),
     ("app_linked_details", &["instance"]),
+    ("app_jobs_audit_plan", &["instance"]),
     (crate::digitalocean::STATUS, &["instance"]),
     (crate::digitalocean::VERIFY, &["instance"]),
     (crate::digitalocean::spaces::STATUS, &["instance"]),
@@ -424,6 +425,16 @@ pub(super) async fn serve(
         }
         match name {
             "app_linked_details" => linked_details(&person_cx, args).await,
+            "app_jobs_audit_plan" => {
+                let id = args["instance"]
+                    .as_str()
+                    .ok_or_else(|| bad("expected an instance ID"))?;
+                membership::require(cx.env, &caller.user, Some(id), Role::Operator).await?;
+                let record = crate::instances::one(cx.env, id)
+                    .await?
+                    .ok_or_else(|| bad("instance not found"))?;
+                crate::jobs_audit::setup_plan(cx.env, host, &record).await
+            }
             "app_inbox" => inbox(&person_cx, args).await,
             "app_proxy_tokens" => proxy_tokens(&person_cx).await,
             "app_people" => people(&person_cx, &caller.user.id).await,

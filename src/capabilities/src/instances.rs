@@ -229,7 +229,13 @@ impl Instances {
     }
 
     /// The `instance-put` write's check: the problems, or the changes the record makes.
-    async fn put_check(&self, cx: &Context<'_>, id: &str, text: &str) -> Result<Value> {
+    async fn put_check(
+        &self,
+        cx: &Context<'_>,
+        id: &str,
+        text: &str,
+        audit: Option<&str>,
+    ) -> Result<Value> {
         let (record, current) = match self.check(cx, text).await? {
             Ok(pair) => pair,
             Err(errors) => return Ok(json!({ "errors": errors })),
@@ -237,11 +243,37 @@ impl Instances {
         if record.id != id {
             return Ok(json!({ "errors": ["the record's id is not the target"] }));
         }
-        let changes = record::diff(current.as_ref(), &record);
-        if changes.is_empty() {
+        let mut changes = to_value(record::diff(current.as_ref(), &record));
+        if changes.as_array().is_some_and(Vec::is_empty) {
             return Ok(json!({ "errors": ["nothing changes"] }));
         }
-        Ok(json!({ "changes": to_value(changes) }))
+        let setup = match audit_setup_change(current.as_ref(), &record, audit) {
+            Ok(setup) => setup,
+            Err(e) => return Ok(json!({"errors": [e.to_string()]})),
+        };
+        if let Some((prior, action)) = setup {
+            let plan = crate::jobs_audit::setup_plan(cx.env, &self.passkeys.host, prior).await?;
+            if plan["action"].as_str() != Some(action) {
+                return Ok(
+                    json!({"errors": ["The audit bucket’s availability changed. Return to setup and review again."]}),
+                );
+            }
+            if let Some(lines) = changes.as_array_mut() {
+                let verb = if action == "create" {
+                    "Create"
+                } else {
+                    "Reuse"
+                };
+                lines.insert(
+                    0,
+                    json!(format!(
+                        "{verb} private R2 bucket {} in this instance’s linked account",
+                        plan["bucket"].as_str().unwrap_or_default()
+                    )),
+                );
+            }
+        }
+        Ok(json!({ "changes": changes }))
     }
 
     /// The `instance-put` write, approved by `person`'s passkey for this record: checks it
@@ -252,13 +284,37 @@ impl Instances {
         id: &str,
         text: &str,
         person: &User,
+        audit: Option<&str>,
     ) -> Result<Value> {
-        let (mut record, _) = match self.check(cx, text).await? {
+        let (mut record, current) = match self.check(cx, text).await? {
             Ok(pair) => pair,
             Err(errors) => return Err(bad(&errors.join("; "))),
         };
         if record.id != id {
             return Err(bad("the record's id is not the target"));
+        }
+        if let Some((prior, action)) = audit_setup_change(current.as_ref(), &record, audit)? {
+            crate::jobs_audit::setup_apply(cx.env, &self.passkeys.host, prior, action).await?;
+            record.version += 1;
+            let saved = directory(
+                cx.env,
+                "instance.jobs_audit_save",
+                json!({
+                    "instance": id, "base": prior, "record": serde_json::to_string(&record)?
+                }),
+            )
+            .await
+            .ok()
+            .and_then(|result| result.as_bool())
+            .unwrap_or(false);
+            if !saved {
+                return Err(bad(
+                    "The audit bucket was verified, but the Jobs record could not be saved. Reload the instance and review reusing the bucket.",
+                ));
+            }
+            return Ok(
+                json!({"message": format!("Jobs audit storage is configured on {} at version {}.", record.id, record.version)}),
+            );
         }
         record.version += 1;
         put(cx.env, &key(&record.id), &serde_json::to_string(&record)?).await?;
@@ -296,6 +352,11 @@ impl Instances {
             Ok(pair) => pair,
             Err(problems) => return Ok(json!({ "problems": problems })),
         };
+        if record::jobs_audit_change(current.as_ref(), &record) {
+            return Ok(
+                json!({ "problems": ["Set up the required Jobs audit bucket from the instance’s Capabilities console."] }),
+            );
+        }
         let changes = record::diff(current.as_ref(), &record);
         if changes.is_empty() {
             return Ok(json!({ "problems": ["nothing changes"] }));
@@ -325,6 +386,42 @@ impl Instances {
             "note": "Nothing changes until the person approves this on the console's Approvals tab.",
         }))
     }
+}
+
+/// Bind setup to the existing linked account, the deterministic/configured bucket, and the
+/// reviewed action. Drafts and ordinary JSON edits cannot create or bypass audit setup.
+fn audit_setup_change<'a>(
+    current: Option<&'a Instance>,
+    next: &Instance,
+    action: Option<&'a str>,
+) -> Result<Option<(&'a Instance, &'a str)>> {
+    if !record::jobs_audit_change(current, next) {
+        return if action.is_none() {
+            Ok(None)
+        } else {
+            Err(bad("There is no Jobs audit setup change in this record."))
+        };
+    }
+    let (Some(prior), Some(action)) = (current, action) else {
+        return Err(bad(
+            "Set up the required Jobs audit bucket from the instance’s Capabilities console.",
+        ));
+    };
+    if next.account != prior.account {
+        return Err(bad(
+            "Link the target Cloudflare account first, then review Jobs audit setup.",
+        ));
+    }
+    let suggested = crate::jobs_audit::default_bucket(&prior.id);
+    let expected = crate::jobs_audit::configured_bucket(prior).unwrap_or(&suggested);
+    if crate::jobs_audit::configured_bucket(next) != Some(expected)
+        || next.sites.iter().any(|site| site.bucket == expected)
+    {
+        return Err(bad(
+            "Jobs requires the reviewed private audit bucket, separate from any site bucket.",
+        ));
+    }
+    Ok(Some((prior, action)))
 }
 
 /// `multi-instance` (docs/plans/capability-scoping.md, M2): what the platform does across its
@@ -1234,7 +1331,8 @@ impl Capability for Instances {
     ) -> Call<'a> {
         Box::pin(async move {
             let text = w.change["record"].as_str().unwrap_or_default();
-            self.put_check(cx, w.text(), text).await
+            self.put_check(cx, w.text(), text, w.change["jobs_audit"].as_str())
+                .await
         })
     }
 
@@ -1246,7 +1344,8 @@ impl Capability for Instances {
         Box::pin(async move {
             let person = w.person;
             let text = w.change["record"].as_str().unwrap_or_default();
-            self.put_record(cx, w.text(), text, person).await
+            self.put_record(cx, w.text(), text, person, w.change["jobs_audit"].as_str())
+                .await
         })
     }
 }
