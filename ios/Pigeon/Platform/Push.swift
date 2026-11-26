@@ -93,12 +93,13 @@ final class Push {
 
 /// Receives the APNs callbacks and shows notifications while the app is open.
 final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
-    /// Becomes the notification center's delegate.
+    /// Becomes the notification center's delegate and registers the Review action.
     func application(
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
         UNUserNotificationCenter.current().delegate = self
+        NotificationRoute.registerCategories()
         return true
     }
 
@@ -125,8 +126,20 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         [.banner, .sound, .badge]
     }
 
-    /// A tap brings the app forward, which is all it does for now.
+    /// A tap, or the Review action, opens the Inbox (and the approval's confirm sheet there).
+    /// Nothing is approved or denied from the notification (decision A6).
     func userNotificationCenter(
         _ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse
-    ) async {}
+    ) async {
+        let action = response.actionIdentifier
+        guard action == UNNotificationDefaultActionIdentifier
+            || action == NotificationRoute.reviewAction
+        else { return }
+        let request = response.notification.request
+        let userInfo = request.content.userInfo
+        guard NotificationRoute.opensInbox(identifier: request.identifier, userInfo: userInfo)
+        else { return }
+        let approval = NotificationRoute.approvalID(identifier: request.identifier, userInfo: userInfo)
+        await MainActor.run { NotificationRoute.shared.open(approvalID: approval) }
+    }
 }

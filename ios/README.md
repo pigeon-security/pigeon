@@ -1,19 +1,21 @@
 # Pigeon for iOS
 
-A SwiftUI app for platform.pigeon.dev. It signs in the way any MCP client does (OAuth with PKCE,
-the passkey step on the platform's own page). Every screen reads and writes through MCP tools. Tabs:
-Sessions (a Needs you card, then the live planners with their executors and a list of today's
-finished runs; Needs you holds agent questions, decisions made for the person and passkey
-approvals), Cost and Settings (the instances, then the current instance's settings; Users and
-Secrets are reached from there). The tabs are the system `TabView` (Liquid Glass on iOS 26). Every
-page title sits on one row with its top-right control. Only Sessions (Home on a linked instance)
-has the instance switcher. A linked instance shows Home and Settings only.
+A SwiftUI app for platform.pigeon.dev, being rebuilt from the approved iPhone mock-up
+(docs/plans/ios-app-redesign.md). It signs in the way any MCP client does (OAuth with PKCE, the
+passkey step on the platform's own page). It reads through the console's `/app/op` and writes
+through `/console/write/<action>/{begin,finish}` with its OAuth bearer (`ConsoleAPI`), each write
+approved with the person's passkey in one confirm sheet. The tabs are the areas of the selected
+instance's `console_manifest`, in order (the system More tab takes the rest); the instance pill at
+the top left is the only instance picker, the avatar opens the account sheet. Areas not yet ported
+show a placeholder that links to the same page on the web console. Colours are the console's tokens
+(`Assets.xcassets/Theme`, from `shell.css`, through `Theme`).
 
 ## Not built on Linux
 
 This code cannot be compiled on Linux. It is outside the Rust gate: `sh ci/runner/test.sh` never
 compiles Swift. The gate checks one thing only: that `Pigeon/Design/Tokens.swift` has not drifted
-from the web design tokens (the smoke scenario `platform_design_tokens_for_ios`).
+from the web design tokens (the smoke scenario `platform_design_tokens_for_ios`). The redesigned
+screens use `Theme` instead; `Tokens.swift` goes with its check at the redesign's release phase.
 
 ## Build on a Mac
 

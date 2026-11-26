@@ -7,8 +7,6 @@ final class MCPClient {
     private var initialized = false
     private var nextId = 1
     private var sessionId: String?
-    private var lastCost: (date: Date, payload: [String: Any])?
-    private var costGeneration = 0
     private let onSignedOut: @MainActor () -> Void
 
     /// A client that calls `onSignedOut` when the platform refuses the tokens for good.
@@ -16,37 +14,11 @@ final class MCPClient {
         self.onSignedOut = onSignedOut
     }
 
-    /// Calls the tool and remembers the latest Cost payload for the grant notices.
+    /// Calls the MCP tool `name` and answers its structured content, or the JSON in its text.
+    /// The app's own screens read through `ConsoleAPI.op` instead; this stays for the device
+    /// registration (`apns_register`, `apns_unregister`).
     func call(_ name: String, _ arguments: [String: Any] = [:]) async throws -> Any {
-        let started = Date()
-        let generation = costGeneration
-        let data = try await toolResult(name, arguments)
-        if name == "cost_daily", generation == costGeneration, !Task.isCancelled,
-            let payload = data as? [String: Any], lastCost.map({ $0.date <= started }) ?? true
-        {
-            lastCost = (started, payload)
-        }
-        return data
-    }
-
-    /// Reads Cost once for notices, reusing a recent payload from any range on detail opening.
-    func grantCost(reuse: Bool) async throws -> Any {
-        let now = Date()
-        var utc = Calendar(identifier: .gregorian)
-        utc.timeZone = .gmt
-        if reuse, let lastCost, now.timeIntervalSince(lastCost.date) < 300,
-            utc.isDate(lastCost.date, inSameDayAs: now),
-            (lastCost.payload["credits"] as? [String: Any])?["grants"] is [[String: Any]]
-        {
-            return lastCost.payload
-        }
-        return try await call("cost_daily", ["range": "today"])
-    }
-
-    /// Drops shared Cost data and prevents in-flight requests from repopulating it on sign-out.
-    func forgetCost() {
-        costGeneration += 1
-        lastCost = nil
+        try await toolResult(name, arguments)
     }
 
     /// Answers structured content, or the JSON in the tool's text.
@@ -122,7 +94,7 @@ final class MCPClient {
     }
 
     /// The stored tokens, refreshed on the first attempt when they are about to end. No tokens
-    /// signs out. Shared by the MCP calls and [`post`].
+    /// signs out. Shared by the MCP calls and [`send`].
     private func currentPair(attempt: Int) async throws -> TokenPair {
         guard var pair = Keychain.load(TokenPair.self, for: Keychain.Key.tokens) else {
             onSignedOut()
@@ -134,28 +106,29 @@ final class MCPClient {
         return pair
     }
 
-    /// POSTs `body` as JSON to `path` on the platform (such as `/console/write/x/begin`) with
-    /// the bearer token, and answers the JSON object. A 401 refreshes the tokens once and
-    /// retries. Any other failure is thrown with `step` and the platform's own `error` text.
-    /// `session` is the shared one unless the caller needs another, such as a secret write's,
-    /// which never follows a redirect.
-    func post(
-        _ path: String, _ body: [String: Any], step: String, session: URLSession = .shared
-    ) async throws -> [String: Any] {
+    /// POSTs `body` (JSON) to `path` on the platform with the bearer token and answers the
+    /// status and the body. A 401 refreshes the tokens once and retries. A second 401 signs
+    /// out when `signOutOn401`; otherwise it is answered like any other status, so a route
+    /// that does not take a bearer yet does not end the session. `session` is the shared one
+    /// unless the caller needs another, such as a secret write's, which never follows a redirect.
+    func send(
+        _ path: String, body: Data, session: URLSession = .shared, signOutOn401: Bool = true
+    ) async throws -> (status: Int, data: Data) {
         guard let url = URL(string: OAuth.base.absoluteString + path) else {
-            throw PlatformError.badResponse("\(step): URL")
+            throw PlatformError.badResponse("\(path): URL")
         }
-        let payload = try JSONSerialization.data(withJSONObject: body)
+        var last: (Int, Data) = (401, Data())
         for attempt in 0..<2 {
             let pair = try await currentPair(attempt: attempt)
             var req = URLRequest(url: url)
             req.httpMethod = "POST"
-            req.httpBody = payload
+            req.httpBody = body
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
             req.setValue("application/json", forHTTPHeaderField: "Accept")
             req.setValue("Bearer \(pair.access)", forHTTPHeaderField: "Authorization")
             let (data, response) = try await session.data(for: req)
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            last = (status, data)
             if status == 401 {
                 if attempt == 0 {
                     _ = try await refreshing(pair)
@@ -163,16 +136,13 @@ final class MCPClient {
                 }
                 break
             }
-            let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-            guard (200..<300).contains(status) else {
-                let why = json?["error"] as? String ?? "no error text"
-                throw PlatformError.server("\(step): HTTP \(status): \(why)")
-            }
-            guard let json else { throw PlatformError.badResponse("\(step): not a JSON object") }
-            return json
+            return (status, data)
         }
-        onSignedOut()
-        throw PlatformError.signedOut
+        if signOutOn401 {
+            onSignedOut()
+            throw PlatformError.signedOut
+        }
+        return last
     }
 
     /// Refreshes the tokens; a refused refresh signs out.

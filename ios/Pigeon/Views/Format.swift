@@ -85,12 +85,6 @@ func runName(_ run: [String: Any]) -> String {
     return runTitle(run)
 }
 
-/// The key letter of option `index`: A, B, C… (a number past Z).
-func optionKey(_ index: Int) -> String {
-    guard index >= 0, index < 26 else { return "\(index + 1)" }
-    return String(UnicodeScalar(UInt8(65 + index)))
-}
-
 /// A run's title: its `title` when the server sends one, else the first line of its brief.
 func runTitle(_ run: [String: Any]) -> String {
     if let t = run["title"] as? String, !t.isEmpty { return t }
