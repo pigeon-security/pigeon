@@ -275,6 +275,75 @@
     }
   }
 
+  function digitalOceanDroplet(ctx, record) {
+    const team = record.capabilities.digitalocean.team_id;
+    const id = { instance: record.id, team_id: team, version: record.version };
+    const target = [["Instance", code(record.id)], ["Expected team", code(team)]];
+    const details = el("div", { role: "status" });
+    let plan = null;
+    const setToken = button("Set compute token", () => {
+      const value = input({ type: "password", mono: true, autocomplete: "off", spellcheck: "false" });
+      confirm({
+        title: "Set DigitalOcean compute token", target,
+        form: field({ label: "Compute token", control: value, hint: "Use a separate token with account read and Droplet create, read, and delete permissions." }),
+        effect: "Pigeon verifies the token against the approved team before saving it.",
+        action: "digitalocean-droplet-token-set", id, confirmLabel: "Verify and save with passkey",
+        prepare: async () => {
+          const secret = value.value.trim();
+          if (!secret) throw new Error("Enter the DigitalOcean compute token.");
+          return { change: { value: secret }, begin: { digest: await sha256(secret) } };
+        },
+        onDone: () => refresh(),
+      });
+    });
+    const start = button("Review runner check", () => {
+      if (!plan) return;
+      confirm({
+        title: "Start temporary Droplet health check",
+        target: [...target, ...planFacts(plan)],
+        effect: "Creates one billable Droplet and authorizes its cleanup. The runner has no Spaces or R2 access.",
+        action: "digitalocean-droplet-start", id, change: {}, confirmLabel: "Start with passkey",
+        onDone: () => refresh(),
+      });
+    }, { variant: "primary" });
+    const refreshButton = button("Refresh", () => refresh());
+    const d = dialog({
+      title: "DigitalOcean runner check",
+      body: [facts(target), details],
+      actions: [refreshButton, setToken, start],
+    });
+    function planFacts(p) {
+      return [["Region", code(p.region)], ["Size", code(p.size)], ["Droplet image", code(p.image)],
+        ["Runner commit", code(p.commit)], ["Runtime limit", `${p.max_minutes} minutes`],
+        ["Estimated compute cost", `$${p.estimated_usd} USD`]];
+    }
+    async function refresh() {
+      refreshButton.disabled = setToken.disabled = start.disabled = true;
+      d.say("Checking runner status…");
+      try {
+        const result = await ctx.op("digitalocean_droplet_status", { instance: record.id });
+        plan = result.plan || null;
+        const run = result.run;
+        details.replaceChildren(
+          el("p", { class: "muted", text: result.credential === "configured"
+            ? "Compute token saved for this team." : "Set a compute token for the approved team." }),
+          ...(plan ? [facts(planFacts(plan))] : []),
+          ...(run ? [facts([["Run", code(run.id)], ["State", run.state],
+            ...(run.health ? [["Health", run.health]] : []),
+            ...(run.detail ? [["Detail", run.detail]] : [])])] : []),
+        );
+        setToken.disabled = false;
+        start.disabled = !plan || result.can_start !== true;
+        d.say("");
+      } catch (err) {
+        d.say(err.message || String(err), true);
+      } finally {
+        refreshButton.disabled = false;
+      }
+    }
+    refresh();
+  }
+
   // ---- Capabilities (M2).
   function capabilities(ctx) {
     const inst = ctx.instance;
@@ -348,6 +417,7 @@
             step ? button("Upgrade", () => upgrade(c, step), { ...sm, variant: view ? "primary" : undefined }) : null,
             c.fields(record).length ? button("Configure", () => configure(c, true), { ...sm, variant: "ghost" }) : null,
             c.cap === "digitalocean" ? button("Connection", () => digitalOceanConnection(ctx, record), sm) : null,
+            c.cap === "digitalocean" ? button("Runner check", () => digitalOceanDroplet(ctx, record), sm) : null,
             c.cap === "digitalocean" && record.capabilities.digitalocean.spaces
               ? button("Spaces", () => digitalOceanConnection(ctx, record, true), sm) : null,
             button("Disable", () => disable(c), { ...sm, variant: "danger" }),
