@@ -19,7 +19,7 @@ compile_error!(
 use serde_json::{Value, json};
 use worker::{Context, Env, Method, Request, Response, Result, event};
 
-// Redeployed by a landing that touches only this crate (second rehearsal, fallback deploy).
+// Redeployed without the class by a landing that touches only this crate (second rehearsal).
 /// This Worker's name, as deployed.
 const WORKER: &str = "pigeon-dotest-a";
 /// The Durable Object binding.
