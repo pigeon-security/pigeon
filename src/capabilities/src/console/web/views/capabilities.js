@@ -151,11 +151,25 @@
         adds: CATALOGUE_ADDS[e.name]?.adds || [], what: CATALOGUE_ADDS[e.name]?.what || "", effect: CATALOGUE_ADDS[e.name]?.effect,
         on: (r) => Boolean(r.capabilities && r.capabilities[e.name]),
         needs: (r) => { const lack = (e.requires || []).filter((q) => !(r.capabilities || {})[q]); return lack.length ? lack.join(", ") : null; },
-        current: (r) => ({ placement: "inline", ...r.capabilities?.[e.name] }),
+        current: (r) => {
+          const settings = r.capabilities?.[e.name];
+          return { placement: "inline", ...settings, ...(digitalOcean ? {
+            spaces_region: settings?.spaces?.region, spaces_bucket: settings?.spaces?.bucket,
+            spaces_prefix: settings?.spaces?.prefix,
+          } : {}) };
+        },
         fields: () => [
           ...(digitalOcean ? [{ key: "team_id", label: "DigitalOcean team ID", mono: true,
             hint: "Verification checks that the token belongs to this team.",
-            validate: (value) => /^[A-Za-z0-9_-]{1,128}$/.test(value) }] : []),
+            validate: (value) => /^[A-Za-z0-9_-]{1,128}$/.test(value) },
+          { key: "spaces_region", label: "Spaces region", optional: true, mono: true,
+            hint: "For example, nyc3. Leave region and bucket blank to keep Spaces off.",
+            validate: (value, values) => value ? /^[a-z]{2,8}[0-9]{1,2}$/.test(value) : !values.spaces_bucket },
+          { key: "spaces_bucket", label: "Spaces bucket", optional: true, mono: true,
+            validate: (value, values) => value ? /^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/.test(value) : !(values.spaces_region || values.spaces_prefix) },
+          { key: "spaces_prefix", label: "Spaces prefix", optional: true, mono: true,
+            hint: "Leave blank to check the bucket root.",
+            validate: (value) => new TextEncoder().encode(value).length <= 1024 && !/[\u0000-\u001f\u007f-\u009f]/u.test(value) }] : []),
           ...(configurable ? [{
             key: "placement", label: "Worker placement", options: ["inline", "own_worker"],
             labels: { inline: "Inline", own_worker: "Separate Worker" },
@@ -166,7 +180,12 @@
         apply: (r, v) => {
           const settings = { ...r.capabilities?.[e.name] };
           if (configurable) settings.placement = v.placement;
-          if (digitalOcean) settings.team_id = v.team_id;
+          if (digitalOcean) {
+            settings.team_id = v.team_id;
+            if (v.spaces_region || v.spaces_bucket || v.spaces_prefix) {
+              settings.spaces = { region: v.spaces_region, bucket: v.spaces_bucket, ...(v.spaces_prefix ? { prefix: v.spaces_prefix } : {}) };
+            } else delete settings.spaces;
+          }
           r.capabilities = { ...(r.capabilities || {}), [e.name]: settings };
         },
         remove: (r) => {
@@ -196,23 +215,29 @@
   }
   const dependents = (r, c) => (c.cap === "publishing" && on(r, CAPS[1]) ? [CAPS[1]] : []);
 
-  function digitalOceanConnection(ctx, record) {
+  function digitalOceanConnection(ctx, record, spaces = false) {
     const args = { instance: record.id };
     const teamId = record.capabilities.digitalocean.team_id;
     const target = [["Instance", code(record.id)], ["Expected team", code(teamId)]];
+    const source = record.capabilities.digitalocean.spaces;
+    if (spaces) target.push(["Source", code(`${source.region} / ${source.bucket} / ${source.prefix || ""}`)]);
+    const credential = spaces ? "Spaces key" : "token";
     const status = el("p", { class: "muted", role: "status", text: "Checking connection…" });
-    const verify = button("Verify token", verifyToken);
-    const token = button("Set token", () => {
-      const value = input({ type: "password", mono: true, autocomplete: "off", spellcheck: "false", "aria-label": "DigitalOcean API token" });
+    const verify = button(`Verify ${credential}`, verifyToken);
+    const token = button(`Set ${credential}`, () => {
+      const value = input({ type: "password", mono: true, autocomplete: "off", spellcheck: "false", "aria-label": spaces ? "Spaces access key and secret" : "DigitalOcean API token" });
       confirm({
-        title: "Set DigitalOcean token", target,
-        form: field({ label: "API token", control: value, hint: "Use a token with read access for team verification." }),
-        effect: "Pigeon verifies the token against the approved team before saving it.",
-        action: "digitalocean-token-set", id: { instance: record.id, team_id: teamId, version: record.version },
+        title: spaces ? "Set Spaces key" : "Set DigitalOcean token", target,
+        form: field({ label: spaces ? "Access key ID and secret" : "API token", control: value,
+          hint: spaces ? "Enter ACCESS_KEY_ID:SECRET_ACCESS_KEY for a read-only key limited to this bucket."
+            : "Use account:read for team verification. Add spaces_key:read if you will verify a Spaces key." }),
+        effect: spaces ? "Pigeon verifies the key’s bucket permissions and checks a bounded listing before saving it."
+          : "Pigeon verifies the token against the approved team before saving it.",
+        action: spaces ? "digitalocean-spaces-key-set" : "digitalocean-token-set", id: { instance: record.id, team_id: teamId, version: record.version },
         confirmLabel: "Verify and save with passkey",
         prepare: async () => {
           const secret = value.value.trim();
-          if (!secret) throw new Error("Enter the DigitalOcean API token.");
+          if (!secret) throw new Error(`Enter the ${spaces ? "Spaces access key and secret" : "DigitalOcean API token"}.`);
           return { change: { value: secret }, begin: { digest: await sha256(secret) } };
         },
         onDone: () => setTimeout(ctx.refresh, 0),
@@ -220,16 +245,16 @@
     });
     verify.disabled = token.disabled = true;
     const d = dialog({
-      title: "DigitalOcean connection",
+      title: spaces ? "DigitalOcean Spaces" : "DigitalOcean connection",
       body: [facts(target), status],
       actions: [verify, token],
     });
     const showError = (err) => d.say(err.message || String(err), true);
-    ctx.op("digitalocean_status", args).then((result) => {
-      status.textContent = result.state === "connected" ? "Token saved for the approved team."
-        : result.state === "unverified" ? "The stored token needs verification." : "No token is saved for the approved team.";
-      token.textContent = result.state === "missing" ? "Set token" : "Replace token";
-      verify.disabled = result.state === "missing";
+    ctx.op(spaces ? "digitalocean_spaces_status" : "digitalocean_status", args).then((result) => {
+      status.textContent = result.state === "connected" ? `Saved for the approved ${spaces ? "bucket" : "team"}.`
+        : result.state === "unverified" ? `Replace the saved ${credential} to verify this ${spaces ? "source" : "team"}.` : `No ${credential} is saved for the approved ${spaces ? "bucket" : "team"}.`;
+      token.textContent = `${result.state === "missing" ? "Set" : "Replace"} ${credential}`;
+      verify.disabled = result.state !== "connected";
       token.disabled = false;
     }).catch((err) => {
       status.textContent = "Connection status unavailable.";
@@ -239,9 +264,9 @@
       verify.disabled = token.disabled = true;
       d.say("Verifying…");
       try {
-        const result = await ctx.op("digitalocean_verify", args);
-        if (result.verified !== true) throw new Error("DigitalOcean team verification did not complete.");
-        d.say("Verified against the approved DigitalOcean team.");
+        const result = await ctx.op(spaces ? "digitalocean_spaces_verify" : "digitalocean_verify", args);
+        if (result.verified !== true) throw new Error("DigitalOcean verification did not complete.");
+        d.say(spaces ? "Verified read access to the approved Spaces source." : "Verified against the approved DigitalOcean team.");
       } catch (err) {
         showError(err);
       } finally {
@@ -323,6 +348,8 @@
             step ? button("Upgrade", () => upgrade(c, step), { ...sm, variant: view ? "primary" : undefined }) : null,
             c.fields(record).length ? button("Configure", () => configure(c, true), { ...sm, variant: "ghost" }) : null,
             c.cap === "digitalocean" ? button("Connection", () => digitalOceanConnection(ctx, record), sm) : null,
+            c.cap === "digitalocean" && record.capabilities.digitalocean.spaces
+              ? button("Spaces", () => digitalOceanConnection(ctx, record, true), sm) : null,
             button("Disable", () => disable(c), { ...sm, variant: "danger" }),
           ];
         } else {
@@ -380,7 +407,7 @@
         const values = read();
         const missing = controls.find(({ f }) => !f.optional && (f.list ? !values[f.key].length : !values[f.key]));
         if (missing) { missing.control.focus(); return d.say(`Fill in ${missing.f.label.toLowerCase()}.`, true); }
-        const invalid = controls.find(({ f }) => f.validate && !f.validate(values[f.key]));
+        const invalid = controls.find(({ f }) => f.validate && !f.validate(values[f.key], values));
         if (invalid) { invalid.control.focus(); return d.say(`Enter a valid ${invalid.f.label}.`, true); }
         putRecord(ctx, {
           record: r, next: withCap(r, c, values), title: `${verb} ${c.cap} on ${inst.title}`,

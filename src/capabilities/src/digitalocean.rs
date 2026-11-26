@@ -14,13 +14,15 @@ use crate::instances::{
 };
 use crate::{Call, Capability, Context, catalogue, users::directory};
 
+pub mod spaces;
+
 pub const NAME: &str = "digitalocean";
 pub const STATUS: &str = "digitalocean_status";
 pub const VERIFY: &str = "digitalocean_verify";
 pub const SET_TOKEN: &str = "digitalocean-token-set";
 pub(crate) const TOKEN_KEPT_MS: i64 = 100 * 365 * 24 * 3_600_000;
 
-const TOOLS: &[Registration] = &[
+const TOOLS: [Registration; 2] = [
     Registration {
         name: STATUS,
         description: None,
@@ -33,8 +35,28 @@ const TOOLS: &[Registration] = &[
     },
 ];
 
+const SPACES_TOOLS: &[Registration] = &[
+    TOOLS[0],
+    TOOLS[1],
+    Registration {
+        name: spaces::STATUS,
+        description: None,
+        arguments: &[],
+    },
+    Registration {
+        name: spaces::VERIFY,
+        description: None,
+        arguments: &[],
+    },
+];
+
 pub fn instance_tools(record: &Instance) -> serde_json::Result<Enabled> {
-    Ok(Enabled::when(team(record).is_some(), TOOLS, &[]))
+    let tools = if spaces::binding(record).is_some() {
+        SPACES_TOOLS
+    } else {
+        &TOOLS
+    };
+    Ok(Enabled::when(team(record).is_some(), tools, &[]))
 }
 
 /// The approved identity, available only with both capabilities enabled.
@@ -115,7 +137,7 @@ async fn status(record: &Instance, env: &Env) -> Result<Value> {
     connection_status(record, saved.as_ref().map(|value| value.team_id.as_str()))
 }
 
-async fn verify(record: &Instance, env: &Env) -> Result<Value> {
+async fn open_pat(record: &Instance, env: &Env) -> Result<String> {
     let expected = expected(record)?;
     let saved = credential(env, &record.id)
         .await?
@@ -125,9 +147,12 @@ async fn verify(record: &Instance, env: &Env) -> Result<Value> {
     let plaintext = crypto::open(&key, &saved.sealed, &token_context(&record.id, expected))
         .await
         .map_err(|_| bad("the saved DigitalOcean token could not be opened"))?;
-    let token = std::str::from_utf8(&plaintext)
-        .map_err(|_| bad("the saved DigitalOcean token is invalid"))?;
-    crate::cloud_scope::verify_digitalocean(record, token).await?;
+    String::from_utf8(plaintext).map_err(|_| bad("the saved DigitalOcean token is invalid"))
+}
+
+async fn verify(record: &Instance, env: &Env) -> Result<Value> {
+    let token = open_pat(record, env).await?;
+    crate::cloud_scope::verify_digitalocean(record, &token).await?;
     Ok(json!({"instance": record.id, "verified": true}))
 }
 
@@ -199,6 +224,14 @@ impl Capability for DigitalOcean {
                 VERIFY,
                 "Verify the saved DigitalOcean token with a read-only account check.",
             ),
+            Tool::bare(
+                spaces::STATUS,
+                "Show status for the approved DigitalOcean Spaces binding.",
+            ),
+            Tool::bare(
+                spaces::VERIFY,
+                "Verify the approved DigitalOcean Spaces binding with one bounded read.",
+            ),
         ]
     }
 
@@ -211,6 +244,8 @@ impl Capability for DigitalOcean {
             match tool {
                 STATUS => status(&record, cx.env).await,
                 VERIFY => verify(&record, cx.env).await,
+                spaces::STATUS => spaces::status(&record, cx.env).await,
+                spaces::VERIFY => spaces::verify(&record, cx.env).await,
                 _ => Err(crate::unknown(tool)),
             }
         })
@@ -218,12 +253,21 @@ impl Capability for DigitalOcean {
 
     fn write_check<'a>(&'a self, cx: &'a Context<'a>, w: &'a Write<'a>) -> Call<'a> {
         Box::pin(async move {
+            if w.action.id == spaces::SET_KEY {
+                return spaces::check_write(cx, w).await;
+            }
             for_write(cx.env, &w.target).await?;
             Ok(Value::Null)
         })
     }
 
     fn write_make<'a>(&'a self, cx: &'a Context<'a>, w: &'a Write<'a>) -> Call<'a> {
-        Box::pin(save(cx, w))
+        Box::pin(async move {
+            if w.action.id == spaces::SET_KEY {
+                spaces::save(cx, w).await
+            } else {
+                save(cx, w).await
+            }
+        })
     }
 }

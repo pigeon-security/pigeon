@@ -2823,6 +2823,7 @@ fn instance_retire_removes_only_what_pigeon_made() {
             "forget",
             "forget",
             "forget",
+            "forget",
             "unlink",
             "remove_record",
         ]
@@ -2842,6 +2843,7 @@ fn instance_retire_removes_only_what_pigeon_made() {
         .collect();
     assert_eq!(forgets[0], "github:deploy:canary");
     assert!(forgets.contains(&"digitalocean-token:canary"));
+    assert!(forgets.contains(&"digitalocean-spaces-key:canary"));
     assert_eq!(forgets.last(), Some(&"ledger:canary"));
     assert_eq!(describe(&steps).len(), steps.len());
     // Keeping the link, for a reset.
@@ -5605,4 +5607,83 @@ fn digitalocean_connection_uses_approved_instance_team_and_version() {
     stale_version["version"] = json!(3);
     assert!(!matches_target(&on, &stale_version));
     assert_ne!(challenge(&target), challenge(&stale_version));
+}
+
+#[test]
+fn digitalocean_spaces_has_one_approved_instance_scope() {
+    use pigeon_capabilities::catalogue::problems;
+    use pigeon_capabilities::console::write::{Step, action};
+    use pigeon_capabilities::digitalocean::{self, spaces};
+    use pigeon_capabilities::instances::{record::Instance, tools::Scope};
+    use pigeon_capabilities::membership::{Role, tool_need};
+    use pigeon_core::oauth::hash;
+
+    let mut record: Instance = serde_json::from_value(json!({
+        "id":"willowgraysen",
+        "title":"Fixture",
+        "account":{"kind":"linked"},
+        "capabilities":{"cloud":{}, "digitalocean":{"team_id":"approved-team"}},
+        "version":7
+    }))
+    .unwrap();
+    assert!(
+        Scope::new(&record)
+            .unwrap()
+            .bind(spaces::VERIFY, &json!({}))
+            .is_err()
+    );
+    record.capabilities.get_mut("digitalocean").unwrap().spaces = Some(
+        serde_json::from_value(
+            json!({"region":"nyc3","bucket":"fixture-bucket","prefix":"inside/"}),
+        )
+        .unwrap(),
+    );
+    assert!(problems(&record).is_empty());
+    let scope = Scope::new(&record).unwrap();
+    assert_eq!(
+        scope.bind(spaces::VERIFY, &json!({})).unwrap()["instance"],
+        record.id
+    );
+    for override_args in [
+        json!({"instance":"another"}),
+        json!({"bucket":"outside"}),
+        json!({"region":"sfo3"}),
+        json!({"prefix":"outside/"}),
+        json!({"token":"example"}),
+    ] {
+        assert!(scope.bind(spaces::VERIFY, &override_args).is_err());
+        assert!(
+            scope
+                .bind("call", &json!({"tool":spaces::VERIFY,"args":override_args}))
+                .is_err()
+        );
+    }
+    assert_eq!(
+        tool_need(digitalocean::NAME, spaces::VERIFY, &json!({})),
+        Some(Role::Operator)
+    );
+    let set = action(spaces::SET_KEY).unwrap();
+    assert!(!set.by_bearer);
+    let target = set
+        .target(&json!({"instance":"willowgraysen","team_id":"approved-team","version":7}))
+        .unwrap();
+    assert!(digitalocean::matches_target(&record, &target));
+    let pair = "dummy-id:dummy-secret";
+    let start = set
+        .change(&json!({"digest":hash(pair)}), Step::Begin)
+        .unwrap();
+    let finish = set.change(&json!({"value":pair}), Step::Finish).unwrap();
+    assert_eq!(set.bound(&start), set.bound(&finish));
+    assert!(!set.bound(&finish).to_string().contains(pair));
+
+    record
+        .capabilities
+        .get_mut("digitalocean")
+        .unwrap()
+        .spaces
+        .as_mut()
+        .unwrap()
+        .region = "fake".into();
+    assert!(!problems(&record).is_empty());
+    assert!(spaces::binding(&record).is_none());
 }

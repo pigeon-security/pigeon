@@ -30,6 +30,8 @@ pub const READS: &[(&str, &[&str])] = &[
     ("app_linked_details", &["instance"]),
     (crate::digitalocean::STATUS, &["instance"]),
     (crate::digitalocean::VERIFY, &["instance"]),
+    (crate::digitalocean::spaces::STATUS, &["instance"]),
+    (crate::digitalocean::spaces::VERIFY, &["instance"]),
     ("capabilities_versions", &["instance", "changelog"]),
     ("capabilities_upgrade_plan", &["instance"]),
     // Site: deployments (immutable releases and the live pointer) and visitors.
@@ -412,7 +414,10 @@ pub(super) async fn serve(
             "app_site_hosts" => site_access::site_hosts(host, cx.env, args).await,
             "app_site_visitors" => site_access::visitors(host, cx.env, args).await,
             "app_ingest_runs" => ingest_runs(&person_cx, args).await,
-            crate::digitalocean::STATUS | crate::digitalocean::VERIFY => {
+            crate::digitalocean::STATUS
+            | crate::digitalocean::VERIFY
+            | crate::digitalocean::spaces::STATUS
+            | crate::digitalocean::spaces::VERIFY => {
                 let id = args["instance"]
                     .as_str()
                     .ok_or_else(|| bad("expected an instance ID"))?;

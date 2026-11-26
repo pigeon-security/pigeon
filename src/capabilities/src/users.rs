@@ -1221,7 +1221,8 @@ impl Directory {
                 )?;
                 Value::Null
             }
-            "digitalocean.token.put" => {
+            "digitalocean.token.put" | "digitalocean.spaces.put" => {
+                let spaces = op == "digitalocean.spaces.put";
                 let target = &a["target"];
                 let id = target["instance"]
                     .as_str()
@@ -1231,7 +1232,10 @@ impl Directory {
                     .and_then(|text| {
                         serde_json::from_str::<crate::instances::record::Instance>(&text).ok()
                     })
-                    .filter(|record| crate::digitalocean::matches_target(record, target));
+                    .filter(|record| crate::digitalocean::matches_target(record, target))
+                    .filter(|record| {
+                        !spaces || crate::digitalocean::spaces::binding(record).is_some()
+                    });
                 if record.is_none() {
                     return Err(bad(
                         "the approved DigitalOcean configuration changed; review it again",
@@ -1240,11 +1244,12 @@ impl Directory {
                 let value = a["value"]
                     .as_str()
                     .ok_or_else(|| bad("expected a sealed token"))?;
-                self.setting_keep(
-                    &crate::digitalocean::token_key(id),
-                    value,
-                    t + crate::digitalocean::TOKEN_KEPT_MS,
-                )?;
+                let key = if spaces {
+                    crate::digitalocean::spaces::key(id)
+                } else {
+                    crate::digitalocean::token_key(id)
+                };
+                self.setting_keep(&key, value, t + crate::digitalocean::TOKEN_KEPT_MS)?;
                 Value::Null
             }
             "setting.replace" => {

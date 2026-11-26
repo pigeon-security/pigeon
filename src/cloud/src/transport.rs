@@ -20,7 +20,7 @@ pub const HOSTS: [&str; 4] = [
     "s3.pl-waw.scw.cloud",
 ];
 
-/// The only permitted DigitalOcean URL during the read-only connection work.
+/// The DigitalOcean account connection probe.
 pub(crate) const DIGITALOCEAN_ACCOUNT_URL: &str = "https://api.digitalocean.com/v2/account";
 
 /// A request to send. It may carry a credential in its headers, so `Debug` shows no header
@@ -41,7 +41,14 @@ impl fmt::Debug for HttpRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HttpRequest")
             .field("method", &self.method)
-            .field("url", &self.url)
+            .field(
+                "url",
+                &if crate::digitalocean_spaces::allowed_url(&self.url) {
+                    "<DigitalOcean Spaces URL>"
+                } else {
+                    self.url.as_str()
+                },
+            )
             .field(
                 "headers",
                 &self.headers.iter().map(|(k, _)| k).collect::<Vec<_>>(),
@@ -105,10 +112,14 @@ fn authority(url: &str) -> Option<&str> {
     Some(rest.split(['/', '?', '#']).next().unwrap_or(rest))
 }
 
-/// Whether the gateway may call `url`: the exact DigitalOcean probe URL, or HTTPS
+fn digitalocean_read_url(url: &str) -> bool {
+    url == DIGITALOCEAN_ACCOUNT_URL || crate::digitalocean_spaces::allowed_url(url)
+}
+
+/// Whether the gateway may call `url`: a DigitalOcean read endpoint, or HTTPS
 /// with a host exactly on [`HOSTS`].
 pub fn allowed(url: &str) -> bool {
-    if url == DIGITALOCEAN_ACCOUNT_URL {
+    if digitalocean_read_url(url) {
         return true;
     }
     let Some(host) = authority(url) else {
@@ -137,7 +148,7 @@ impl Transport for FetchTransport {
                     shown_host(&req.url)
                 )));
             }
-            if req.url == DIGITALOCEAN_ACCOUNT_URL && req.method != "GET" {
+            if digitalocean_read_url(&req.url) && req.method != "GET" {
                 return Err(Error::RustError(
                     "the DigitalOcean probe is read-only".into(),
                 ));

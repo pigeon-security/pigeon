@@ -237,13 +237,18 @@ pub fn tool_need(capability: &str, tool: &str, args: &Value) -> Option<Role> {
     if OWN_RULES.contains(&capability) || OWN_TOOLS.contains(&tool) {
         return None;
     }
-    Some(if tool == crate::digitalocean::VERIFY {
-        Role::Operator
-    } else if crate::console::ops::allowed(tool, args) {
-        Role::Viewer
-    } else {
-        Role::Operator
-    })
+    Some(
+        if matches!(
+            tool,
+            crate::digitalocean::VERIFY | crate::digitalocean::spaces::VERIFY
+        ) {
+            Role::Operator
+        } else if crate::console::ops::allowed(tool, args) {
+            Role::Viewer
+        } else {
+            Role::Operator
+        },
+    )
 }
 
 fn bad(why: impl Into<String>) -> Error {

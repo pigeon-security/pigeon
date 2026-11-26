@@ -33,6 +33,7 @@
   const READS = Object.freeze(["console_manifest", "instances_list", "app_inbox", "app_linked_details",
     "storage_list_objects", "source_resolve_revision", "source_read_file", "ci_jobs", "ci_status",
     "observability_worker_metrics", "app_ingest_runs", "ingest_report", "digitalocean_status", "digitalocean_verify",
+    "digitalocean_spaces_status", "digitalocean_spaces_verify",
     "ai_agents_status", "ai_agents_compare", "cost_daily", "land_list",
     "site_releases", "app_site_hosts", "app_site_visitors", "capabilities_versions", "capabilities_upgrade_plan",
     // Access and Platform.
@@ -42,7 +43,7 @@
     "instance-put", "linked-unlink", "site-deploy", "site-rollback", "visitor-invite", "visitor-revoke",
     // Access and Platform.
     "secret-set", "apple-adopt", "apple-identity", "token-issue", "token-revoke", "invite", "passkey-remove", "person-admin", "member-set", "user-remove",
-    "app-disconnect", "model-defaults", "agents-config", "digitalocean-token-set"]);
+    "app-disconnect", "model-defaults", "agents-config", "digitalocean-token-set", "digitalocean-spaces-key-set"]);
 
   // ---- Fixture mode (P14) and routing base.
   const query = new URLSearchParams(location.search);

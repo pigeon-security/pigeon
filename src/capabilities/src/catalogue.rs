@@ -399,6 +399,15 @@ pub fn problems(record: &Instance) -> Vec<String> {
             }
             _ => {}
         }
+        if let Some(spaces) = &record.capabilities[name].spaces {
+            if name != crate::digitalocean::NAME {
+                out.push(format!(
+                    "The capability \"{name}\" does not accept a Spaces binding."
+                ));
+            } else if let Err(why) = spaces.validate() {
+                out.push(why.into());
+            }
+        }
         for r in e.requires {
             if !record.capabilities.contains_key(*r) {
                 out.push(format!(

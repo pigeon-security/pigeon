@@ -364,3 +364,37 @@ Land the capability off by default, then use a separate approved opt-in and
 credential setup to verify one account on `willowgraysen`. Test home and
 cross-instance denial before treating the canary as complete. Spaces access,
 Droplet provisioning, and ingestion are later phases.
+
+## Spaces credential issuance follow-up
+
+DigitalOcean's Spaces Keys API can create bucket-scoped S3 credentials with
+a separate issuer credential. The public API does not expose general
+personal access token issuance. Keep the existing account verifier and
+Spaces access credential separate from the issuer credential.
+
+A future opt-in issuer may create a limited read key on demand for an
+approved instance, team, bucket, and job. Record its key identifier for
+revocation, revoke it when the job ends, and retry revocation from tracked
+state when cleanup fails. Require a passkey bound to the exact bucket and
+permission set before issuing a write-capable key. Show the provider's full
+grant, including delete if bundled with write. Never return issuer
+credentials or persist a newly generated secret in an audit entry.
+
+This is separate from verifying a pre-created read-only Spaces key. The
+verification capability does not request key creation or deletion scopes.
+
+## Read-only Spaces verification, phase 2
+
+An approved DigitalOcean profile can name one Spaces region, bucket and
+optional prefix. The team token needs `account:read` and `spaces_key:read`
+to verify the team and look up the submitted Spaces key's metadata. Pigeon
+accepts only a single read grant on the approved bucket, then signs a
+`ListObjectsV2` request for the approved prefix with `max-keys=1`. This
+checks access without returning object names. Bucket access uses the
+separate Spaces S3 credential. The Storage capability can remain off.
+
+The console binds the passkey to the reviewed instance record version and a
+digest of the credential. The stored key is sealed against the instance,
+team and Spaces source. Changing the approved source requires verifying
+and saving the key for the new binding. This rollout does not grant
+DigitalOcean write permissions or provision compute.

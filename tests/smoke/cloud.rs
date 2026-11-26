@@ -1489,3 +1489,115 @@ fn digitalocean_probe_redacts_failures_and_requires_team_identity() {
         .to_string();
     assert!(error.contains("transport failed") && !error.contains(SECRET));
 }
+
+#[test]
+fn digitalocean_spaces_verifies_team_key_grant_and_bounded_listing() {
+    use pigeon_cloud::digitalocean_spaces::{Binding, probe};
+    use pigeon_core::s3::Keys;
+
+    let binding = Binding {
+        region: "nyc3".into(),
+        bucket: "fixture-bucket".into(),
+        prefix: "inside/receipt ?".into(),
+    };
+    let keys = Keys {
+        access_key_id: "dummy-access-id".into(),
+        secret_access_key: "dummy-secret-key".into(),
+    };
+    let request = |permission, prefix, meta_status, team_id| {
+        let permission = String::from(permission);
+        let prefix = String::from(prefix);
+        let team_id = String::from(team_id);
+        Net {
+            log: RefCell::new(Vec::new()),
+            handler: Box::new(move |req| {
+                assert_eq!(req.method, "GET");
+                assert!(req.body.is_empty());
+                match req.url.as_str() {
+                    "https://api.digitalocean.com/v2/account" => {
+                        assert_eq!(
+                            req.header("Authorization"),
+                            Some("Bearer dummy-account-token")
+                        );
+                        json_res(200, json!({"account":{"team":{"uuid":team_id}}}))
+                    }
+                    "https://api.digitalocean.com/v2/spaces/keys/dummy-access-id" => {
+                        assert_eq!(
+                            req.header("Authorization"),
+                            Some("Bearer dummy-account-token")
+                        );
+                        assert!(!format!("{req:?}").contains("dummy-access-id"));
+                        json_res(
+                            meta_status,
+                            json!({"key":{
+                                "access_key":"dummy-access-id",
+                                "grants":[{"bucket":"fixture-bucket","permission":permission}],
+                                "secret_key":"dummy-secret-key"
+                            }}),
+                        )
+                    }
+                    "https://nyc3.digitaloceanspaces.com/fixture-bucket?list-type=2&max-keys=1&prefix=inside%2Freceipt%20%3F" =>
+                    {
+                        let auth = req.header("Authorization").unwrap();
+                        assert!(auth.starts_with("AWS4-HMAC-SHA256 Credential=dummy-access-id/"));
+                        assert!(!auth.contains("dummy-account-token"));
+                        assert!(!format!("{req:?}").contains("dummy-access-id"));
+                        text_res(
+                            200,
+                            &format!(
+                                "<ListBucketResult><Contents><Key>{prefix}item</Key><Size>5</Size></Contents></ListBucketResult>"
+                            ),
+                        )
+                    }
+                    _ => panic!("unexpected provider route"),
+                }
+            }),
+        }
+    };
+    let verify = |net: &Net| {
+        block(probe(
+            net,
+            "approved-team",
+            "dummy-account-token",
+            &binding,
+            &keys,
+            NOW,
+        ))
+    };
+    let good = request("read", "inside/receipt ?", 200, "approved-team");
+    verify(&good).unwrap();
+    assert_eq!(good.log.borrow().len(), 3);
+    for (permission, prefix, status, team_id, calls) in [
+        ("readwrite", "inside/receipt ?", 200, "approved-team", 2),
+        ("fullaccess", "inside/receipt ?", 200, "approved-team", 2),
+        ("unknown", "inside/receipt ?", 200, "approved-team", 2),
+        ("read", "inside/receipt ?", 403, "approved-team", 2),
+        ("read", "inside/receipt ?", 200, "another-team", 1),
+        ("read", "outside/", 200, "approved-team", 3),
+    ] {
+        let net = request(permission, prefix, status, team_id);
+        let error = verify(&net).unwrap_err().to_string();
+        assert_eq!(net.log.borrow().len(), calls);
+        for value in [
+            "dummy-access-id",
+            "dummy-secret-key",
+            "dummy-account-token",
+            "outside/",
+            "another-team",
+        ] {
+            assert!(!error.contains(value));
+        }
+    }
+
+    for prohibited in [
+        "https://api.digitalocean.com/v2/spaces/keys",
+        "https://api.digitalocean.com/v2/spaces/keys/anything?evil=1",
+        "https://nyc3.digitaloceanspaces.com/",
+        "https://nyc3.digitaloceanspaces.com/a-bucket?list-type=2&max-keys=2",
+        "https://nyc3.digitaloceanspaces.com/a-bucket/object?list-type=2&max-keys=1",
+        "https://nyc3.digitaloceanspaces.com/a-bucket?list-type=2&max-keys=1&continuation-token=1",
+        "https://elsewhere.digitaloceanspaces.com/a-bucket?list-type=2&max-keys=1",
+    ] {
+        assert!(!transport::allowed(prohibited));
+    }
+}

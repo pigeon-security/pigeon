@@ -146,6 +146,9 @@ pub struct CapabilitySettings {
     /// The expected team identifier for the DigitalOcean connection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub team_id: Option<String>,
+    /// The optional read-only DigitalOcean Spaces source binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spaces: Option<pigeon_cloud::digitalocean_spaces::Binding>,
 }
 
 /// Where the home instance's platform (console, MCP, OAuth) lives.

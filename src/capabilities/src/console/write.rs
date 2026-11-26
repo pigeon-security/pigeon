@@ -183,6 +183,14 @@ pub const ACTIONS: &[Action] = &[
         Target::DigitalOceanTeam,
         Change::Secret,
     ),
+    act(
+        crate::digitalocean::spaces::SET_KEY,
+        "Set a DigitalOcean Spaces key",
+        Cap(crate::digitalocean::NAME),
+        false,
+        Target::DigitalOceanTeam,
+        Change::Secret,
+    ),
     app(act(
         "token-issue",
         "Issue a proxy token",

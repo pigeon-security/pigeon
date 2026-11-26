@@ -92,6 +92,29 @@ pub(crate) async fn verify_digitalocean(record: &Instance, token: &str) -> Resul
         .await
 }
 
+/// Verify the approved bucket and prefix with the same instance's team credential.
+pub(crate) async fn verify_digitalocean_spaces(
+    record: &Instance,
+    pat: &str,
+    keys: &pigeon_core::s3::Keys,
+) -> Result<()> {
+    let team = crate::digitalocean::team(record).ok_or_else(|| {
+        Error::RustError("DigitalOcean is not enabled on the approved instance".into())
+    })?;
+    let binding = crate::digitalocean::spaces::binding(record).ok_or_else(|| {
+        Error::RustError("Spaces is not configured on the approved instance".into())
+    })?;
+    pigeon_cloud::digitalocean_spaces::probe(
+        &pigeon_cloud::transport::FetchTransport,
+        team,
+        pat,
+        binding,
+        keys,
+        worker::Date::now().as_millis() as i64,
+    )
+    .await
+}
+
 /// Inline capability for setup status, independent of any remote manifest.
 pub struct Inline;
 
