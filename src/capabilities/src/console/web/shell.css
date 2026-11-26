@@ -15,6 +15,7 @@
   --ok: #1F7A4D; --ok-soft: #E4F3EB; --warn: #8F5600; --warn-soft: #FCF0DA;
   --bad: #B42318; --bad-soft: #FCEBE9; --info: #2C5E9E; --info-soft: #E7EEF8;
   --scrim: rgba(20, 18, 24, .42); --shadow: 0 8px 28px rgba(20, 18, 24, .16);
+  --mark-ground: #F9E5EE; --mark-edge: #EEB9CF; --dot: #D5D1DB;
   --font-ui: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   --fs-xs: 11px; --fs-sm: 12px; --fs-md: 13px; --fs-lg: 15px; --fs-xl: 18px;
@@ -34,6 +35,7 @@
     --ok: #6CCB93; --ok-soft: #13261B; --warn: #E8B04A; --warn-soft: #2A2112;
     --bad: #F08A7A; --bad-soft: #2E1815; --info: #8DB6F0; --info-soft: #15202F;
     --scrim: rgba(0, 0, 0, .6); --shadow: 0 10px 32px rgba(0, 0, 0, .5);
+    --mark-ground: #3D2935; --mark-edge: #844F67; --dot: #34333D;
     color-scheme: dark;
   }
 }
@@ -45,6 +47,7 @@
   --ok: #6CCB93; --ok-soft: #13261B; --warn: #E8B04A; --warn-soft: #2A2112;
   --bad: #F08A7A; --bad-soft: #2E1815; --info: #8DB6F0; --info-soft: #15202F;
   --scrim: rgba(0, 0, 0, .6); --shadow: 0 10px 32px rgba(0, 0, 0, .5);
+  --mark-ground: #3D2935; --mark-edge: #844F67; --dot: #34333D;
   color-scheme: dark;
 }
 
@@ -125,10 +128,6 @@ kbd { font: 500 10px/1 var(--font-mono); padding: 2px 4px; border: 1px solid var
 .side { position: sticky; top: 0; align-self: start; height: 100vh; display: flex; flex-direction: column; gap: var(--sp-3); overflow-y: auto;
   padding: max(var(--sp-3), var(--safe-t)) var(--sp-2) max(var(--sp-3), var(--safe-b)) max(var(--sp-2), var(--safe-l));
   background: var(--sunk); border-right: 1px solid var(--line); }
-.brand { display: flex; align-items: center; gap: 8px; padding: 4px 8px; font-weight: 600; min-width: 0; }
-.brand > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.brand small { color: var(--muted); font-weight: 400; font-size: var(--fs-xs); }
-.logo { width: 20px; height: 20px; border-radius: 4px; background: var(--accent); color: var(--accent-ink); display: grid; place-items: center; font: 600 12px var(--font-mono); flex: none; }
 
 /* Instance switcher */
 .switcher { position: relative; }
@@ -157,9 +156,27 @@ kbd { font: 500 10px/1 var(--font-mono); padding: 2px 4px; border: 1px solid var
 .nav kbd { margin-left: auto; opacity: 0; }
 .nav a:hover kbd, .nav a:focus-visible kbd { opacity: 1; }
 .nav .count + kbd { margin-left: 4px; }
-.side-foot { margin-top: auto; display: grid; gap: 6px; padding: 8px; border-top: 1px solid var(--line); font-size: var(--fs-sm); }
-.who { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.who > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Account: one row (avatar, name) that opens a menu above it with the theme, the shortcuts and
+ * sign out */
+.side-foot { margin-top: auto; position: relative; padding-top: 8px; border-top: 1px solid var(--line); }
+.acct-btn { width: 100%; display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 8px; border: 0; border-radius: var(--r-1); background: transparent; color: var(--ink); font: 500 var(--fs-md) var(--font-ui); text-align: left; cursor: pointer; }
+.acct-btn:hover, .acct-btn[aria-expanded="true"] { background: var(--hover); }
+.acct-btn .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acct-btn > svg.icon { width: 12px; height: 12px; color: var(--muted); }
+.acct-pop { position: absolute; z-index: 25; left: 0; right: 0; bottom: calc(100% + 4px); background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--r-2); box-shadow: var(--shadow); padding: 4px; display: grid; gap: 1px; font-size: var(--fs-sm); }
+.acct-pop .mi { display: flex; align-items: center; gap: 8px; width: 100%; height: 28px; padding: 0 8px; border: 0; border-radius: var(--r-1); background: transparent; color: var(--ink); font: 400 var(--fs-sm) var(--font-ui); text-align: left; cursor: pointer; }
+.acct-pop .mi:hover, .acct-pop .mi:focus-visible { background: var(--hover); outline-offset: -2px; }
+.acct-pop .mi svg.icon { width: 14px; height: 14px; color: var(--muted); }
+.acct-pop .mi kbd { margin-left: auto; }
+.acct-pop hr { border: 0; border-top: 1px solid var(--line); margin: 3px 0; }
+.acct-pop .theme { display: flex; align-items: center; gap: 8px; padding: 4px 4px 4px 8px; color: var(--ink-2); }
+.acct-pop .theme > span { flex: 1; }
+.acct-pop .who-head, .acct-pop .who-sep { display: none; }
+.acct-pop .who-head { padding: 6px 8px 4px; font-weight: 600; font-size: var(--fs-md); }
+.seg button[role="radio"] { display: grid; place-items: center; width: 26px; height: 22px; padding: 0; color: var(--muted); }
+.seg button[role="radio"] svg.icon { width: 13px; height: 13px; }
+.seg button[aria-checked="true"] { background: var(--accent-soft); color: var(--accent); }
 .avatar { width: 22px; height: 22px; border-radius: 50%; background: var(--raised); border: 1px solid var(--line-strong); display: grid; place-items: center; font: 600 10px var(--font-ui); color: var(--ink-2); flex: none; }
 
 /* Main column */
@@ -276,18 +293,27 @@ details.more > .section { padding: 8px; }
 .figure img { display: block; width: 100%; min-width: 760px; height: auto; }
 
 /* Sign in and full-page states */
-.signin { min-height: 100vh; display: grid; place-items: center; background: var(--sunk);
+.signin { min-height: 100vh; display: grid; place-items: center; background-color: var(--sunk);
+  background-image: radial-gradient(circle, var(--dot) 1.1px, transparent 1.5px); background-size: 16px 16px; background-position: 8px 8px;
   padding: max(16px, var(--safe-t)) max(16px, var(--safe-r)) max(16px, var(--safe-b)) max(16px, var(--safe-l)); }
 .signin .box { width: min(340px, 100%); border: 1px solid var(--line); background: var(--surface); border-radius: var(--r-2); padding: 20px; display: grid; gap: 12px; }
+.signin .lockup { display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: var(--fs-lg); }
+/* The pigeon.dev mark: its artwork (served by the Worker at /app/mark/head.webp) on its ground. */
+.mark { width: 36px; height: 36px; border-radius: 8px; border: 1px solid var(--mark-edge); flex: none; background: url("mark/head.webp") center / cover no-repeat border-box, var(--mark-ground); }
 
 @media (max-width: 760px) {
   .app { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; }
   .side { position: static; height: auto; overflow: visible; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 6px;
     padding: max(8px, var(--safe-t)) max(16px, var(--safe-r)) 8px max(16px, var(--safe-l)); border-right: 0; border-bottom: 1px solid var(--line); }
-  .brand { order: 1; }
   .switcher { order: 2; flex: 1 1 200px; }
-  .side-foot { order: 3; margin: 0 0 0 auto; border: 0; padding: 0; display: flex; align-items: center; }
-  .side-foot .who > span:last-child, .side-foot .shortcut { display: none; }
+  /* The account is an avatar on the bar's right; its menu opens downward and names the person. */
+  .side-foot { order: 3; margin: 0; border: 0; padding: 0; }
+  .acct-btn { width: 32px; height: 32px; padding: 0; justify-content: center; }
+  .acct-btn .name, .acct-btn > svg.icon { display: none; }
+  .acct-btn .avatar { width: 24px; height: 24px; }
+  .acct-pop { left: auto; right: 0; bottom: auto; top: calc(100% + 4px); width: 220px; }
+  .acct-pop .who-head { display: grid; }
+  .acct-pop .who-sep { display: block; }
   .nav { order: 4; display: flex; gap: 2px; overflow-x: auto; width: 100%; }
   .nav a { flex: none; }
   .nav kbd, .nav-label { display: none; }

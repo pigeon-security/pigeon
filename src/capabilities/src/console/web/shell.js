@@ -93,6 +93,12 @@
     chev: "M6 3l5 5-5 5",
     copy: "M5 5h9v9H5zM11 5V2H2v9h3",
     dot: "M8 6a2 2 0 1 0 0 4 2 2 0 0 0 0-4z",
+    updown: "M5 6l3-3 3 3M5 10l3 3 3-3",
+    system: "M2 3h12v8H2zM6 14h4M8 11v3",
+    sun: "M8 5.5a2.5 2.5 0 1 1 0 5 2.5 2.5 0 0 1 0-5zM8 1.5v1.5M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1 1M11.6 11.6l1 1M3.4 12.6l1-1M11.6 4.4l1-1",
+    moon: "M13 9.5A5.5 5.5 0 0 1 6.5 3a5.5 5.5 0 1 0 6.5 6.5z",
+    keyboard: "M1.5 4h13v8h-13zM4 7h1M7 7h2M11 7h1M5 9.5h6",
+    signout: "M6 2.5H3v11h3M10.5 5L13.5 8l-3 3M13.5 8H6",
   };
   const SVG = "http://www.w3.org/2000/svg";
   function icon(name) {
@@ -536,6 +542,7 @@
   let current = null;
   let viewLoad = null;
   let switcherOpen = false;
+  let accountOpen = false;
   let app, side, main;
 
   const isHome = (record) => record?.account?.kind === "home";
@@ -627,8 +634,6 @@
   }
   function sidebar(manifest, list) {
     const inst = manifest?.instance;
-    const brand = el("div", { class: "brand" }, el("span", { class: "logo", "aria-hidden": "true", text: "p" }),
-      el("span", {}, `${site} `, el("small", { text: FIXTURES ? "fixtures" : location.host })));
     const switcher = el("div", { class: "switcher" });
     const swButton = el("button", {
       type: "button", class: "sw-btn", "aria-haspopup": "menu", "aria-expanded": String(switcherOpen),
@@ -671,15 +676,7 @@
     if (own.length) navNode.append(el("div", { class: "nav-label", text: inst?.title || "Instance" }), ...own.map(link));
     const platform = areas.filter((a) => a.group === "platform");
     if (platform.length) navNode.append(el("div", { class: "nav-label", text: "Platform-wide" }), ...platform.map(link));
-    const status = el("span", { class: "sr-only", role: "status" });
-    const out = button("Sign out", () => signOut(out, status), { size: "sm" });
-    const foot = el("div", { class: "side-foot" },
-      el("div", { class: "who" }, el("span", { class: "avatar", "aria-hidden": "true", text: initials(person) }), el("span", { text: person || "" })),
-      el("div", { class: "toolbar" }, out,
-        button("Shortcuts", help, { variant: "ghost", size: "sm", class: "btn btn-ghost btn-sm shortcut", "aria-keyshortcuts": "?" }),
-        themeButton()),
-      status);
-    side.replaceChildren(brand, switcher, navNode, foot);
+    side.replaceChildren(switcher, navNode, accountFoot());
   }
   const initials = (name) => String(name || "?").split(/\s+/).filter(Boolean).slice(0, 2).map((w) => initial(w)).join("");
   function routeLink(to, children, attrs = {}) {
@@ -688,12 +685,14 @@
       if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
       e.preventDefault();
       switcherOpen = false;
+      accountOpen = false;
       nav(to);
     });
     return a;
   }
   function toggleSwitcher(open = !switcherOpen) {
     switcherOpen = open;
+    if (open) accountOpen = false;
     if (!current) return;
     sidebar(current.manifest, instances);
     const target = open ? side.querySelector(".sw-pop a[aria-current='true']") || side.querySelector(".sw-pop a") : side.querySelector(".sw-btn");
@@ -707,14 +706,79 @@
     if (t === "system") delete document.documentElement.dataset.theme;
     else document.documentElement.dataset.theme = t;
   }
-  function themeButton() {
-    const b = button(`Theme: ${theme()}`, () => {
-      const next = THEMES[(THEMES.indexOf(theme()) + 1) % THEMES.length];
-      try { localStorage.setItem("pigeon.theme", next); } catch { /* Kept for this page only. */ }
-      applyTheme(next);
-      b.lastChild.textContent = `Theme: ${next}`;
-    }, { variant: "ghost", size: "sm" });
-    return b;
+
+  // The account menu, the sidebar's footer: the theme, the shortcuts and sign out. It follows
+  // the switcher's menu pattern: ↑ ↓ move between the theme, "Keyboard shortcuts" and
+  // "Sign out"; ← → move within the theme's radios; Escape or a click outside closes it.
+  const THEME_LABELS = { system: ["System", "system"], light: ["Light", "sun"], dark: ["Dark", "moon"] };
+  function accountFoot() {
+    const status = el("span", { class: "sr-only", role: "status" });
+    const picked = theme();
+    const radios = THEMES.map((t) => {
+      const [label, glyph] = THEME_LABELS[t];
+      const r = el("button", { type: "button", role: "radio", "aria-checked": String(t === picked), "aria-label": label, title: label,
+        tabindex: t === picked ? "0" : "-1" }, icon(glyph));
+      r.addEventListener("click", () => {
+        try { localStorage.setItem("pigeon.theme", t); } catch { /* Kept for this page only. */ }
+        applyTheme(t);
+        for (const x of radios) {
+          x.setAttribute("aria-checked", String(x === r));
+          x.tabIndex = x === r ? 0 : -1;
+        }
+        r.focus();
+      });
+      return r;
+    });
+    const keys = el("button", { type: "button", class: "mi", role: "menuitem", tabindex: "-1", "aria-keyshortcuts": "?" },
+      icon("keyboard"), "Keyboard shortcuts", el("kbd", { text: "?" }));
+    keys.addEventListener("click", () => { toggleAccount(false); help(); });
+    const out = el("button", { type: "button", class: "mi", role: "menuitem", tabindex: "-1" }, icon("signout"), "Sign out");
+    out.addEventListener("click", () => signOut(out, status));
+    const pop = el("div", { class: "acct-pop", role: "menu", "aria-label": "Account", id: "acct-menu", hidden: !accountOpen },
+      el("div", { class: "who-head" }, el("strong", { text: person || "" })),
+      el("hr", { class: "who-sep" }),
+      el("div", { class: "theme", role: "none" }, el("span", { text: "Theme" }),
+        el("div", { class: "seg", role: "radiogroup", "aria-label": "Theme" }, radios)),
+      keys, el("hr"), out);
+    pop.addEventListener("keydown", (e) => {
+      const at = document.activeElement;
+      const onRadio = radios.includes(at);
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        const stops = [radios.find((r) => r.tabIndex === 0) || radios[0], keys, out];
+        const i = onRadio ? 0 : stops.indexOf(at);
+        stops[(i + (e.key === "ArrowDown" ? 1 : -1) + stops.length) % stops.length].focus();
+      } else if (onRadio && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
+        const next = radios[(radios.indexOf(at) + (e.key === "ArrowRight" ? 1 : -1) + radios.length) % radios.length];
+        for (const x of radios) x.tabIndex = x === next ? 0 : -1;
+        next.focus();
+      } else if (e.key === "Escape" || e.key === "Tab") {
+        toggleAccount(false);
+      } else return;
+      e.preventDefault();
+      e.stopPropagation();
+    });
+    const btn = el("button", { type: "button", class: "acct-btn", "aria-haspopup": "menu", "aria-expanded": String(accountOpen),
+      "aria-controls": "acct-menu", "aria-label": `Account: ${person || ""}` },
+      el("span", { class: "avatar", "aria-hidden": "true", text: initials(person) }), el("span", { class: "name", text: person || "" }), icon("updown"));
+    btn.addEventListener("click", () => toggleAccount());
+    return el("div", { class: "side-foot acct" }, pop, btn, status);
+  }
+  // Opens or closes the account menu; opening it closes the switcher. Focus moves to the
+  // checked theme when it opens, and back to the account button when it closes, unless `focus`
+  // is false.
+  function toggleAccount(open = !accountOpen, { focus = true } = {}) {
+    accountOpen = open;
+    if (open && switcherOpen) {
+      switcherOpen = false;
+      if (current) sidebar(current.manifest, instances);
+    }
+    const pop = side?.querySelector(".acct-pop");
+    const btn = side?.querySelector(".acct-btn");
+    if (!pop || !btn) return;
+    pop.hidden = !open;
+    btn.setAttribute("aria-expanded", String(open));
+    if (!focus) return;
+    (open ? pop.querySelector("[role='radio'][tabindex='0']") : btn)?.focus();
   }
 
   // ---- Main column.
@@ -800,7 +864,9 @@
   }
   let pendingG = 0;
   document.addEventListener("keydown", (e) => {
-    if (openDialog || !current) return;
+    if (openDialog) return;
+    if (accountOpen && e.key === "Escape") { e.preventDefault(); toggleAccount(false); return; }
+    if (!current) return;
     if (switcherOpen) {
       if (e.key === "Escape") { e.preventDefault(); toggleSwitcher(false); return; }
       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
@@ -828,11 +894,17 @@
   });
   document.addEventListener("click", (e) => {
     if (switcherOpen && !e.target.closest(".switcher")) toggleSwitcher(false);
+    if (accountOpen && !e.target.closest(".acct")) {
+      // Focus goes back to the account button, unless the click put it somewhere else.
+      const at = document.activeElement;
+      toggleAccount(false, { focus: at === document.body || Boolean(at?.closest(".acct")) });
+    }
   });
 
   // ---- Sign in and out.
   function signIn() {
     person = undefined;
+    accountOpen = false;
     current = null;
     viewLoad?.abort();
     const status = el("p", { class: "muted", role: "status" });
@@ -852,7 +924,7 @@
     }, { variant: "primary", icon: "key" });
     app = null;
     root.replaceChildren(el("main", { class: "signin" }, el("div", { class: "box" },
-      el("div", { class: "brand" }, el("span", { class: "logo", "aria-hidden": "true", text: "p" }), el("span", { text: site })),
+      el("div", { class: "lockup" }, el("span", { class: "mark", "aria-hidden": "true" }), el("span", { text: site })),
       el("h1", { text: "Sign in" }), el("p", { class: "muted", text: "Use your passkey to open the console." }), go, status)));
   }
   async function signOut(btn, status) {

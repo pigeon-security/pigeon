@@ -3,6 +3,8 @@
      sign-in and no request to the platform. The Worker never serves this page or fixtures/:
      open it from a local static server rooted at this directory, as
      fixtures.html?fixtures=1#/home/inbox (add &state=loading|empty|error for views' reads).
+     mark/head.webp is a link to src/core/assets/mark-head.webp, the bytes the Worker serves at
+     /app/mark/head.webp, so shell.css finds the sign-in mark at the same relative path.
      The policy below is the console's own (page.rs CSP), less frame-ancestors, which a meta
      element cannot carry. -->
 <html lang="en"><head><meta charset="utf-8">

@@ -126,6 +126,8 @@ pub enum Get {
     Asset(&'static str, &'static str),
     /// The console's icon.
     Icon,
+    /// The pigeon.dev mark's artwork, for the sign-in card (also answered to HEAD).
+    Mark,
 }
 
 impl Get {
@@ -136,6 +138,7 @@ impl Get {
         }
         Some(match path {
             "/console/icon.png" => Self::Icon,
+            page::MARK => Self::Mark,
             p if page::is_page(p) => Self::App,
             p => {
                 let (body, kind) = page::asset_at(p)?;
@@ -205,6 +208,9 @@ impl Console {
         let url = req.url()?;
         let path = url.path().to_string();
         let method = req.method();
+        if method == Method::Head && path == page::MARK {
+            return page::mark();
+        }
         if method == Method::Get {
             let Some(route) = Get::route(&path, url.query()) else {
                 return Response::error("not found", 404);
@@ -231,6 +237,7 @@ impl Console {
                 }
                 Get::Asset(body, kind) => page::asset(body, kind),
                 Get::Icon => page::image(ICON, "image/png"),
+                Get::Mark => page::mark(),
             };
         }
         let route = match method {

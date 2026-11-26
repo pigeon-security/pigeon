@@ -1032,6 +1032,30 @@ fn console_shell_contract() {
             "GET {path}"
         );
     }
+
+    // The sign-in mark: the apex pages' artwork, served from this origin (the policy allows no
+    // other) at the path the stylesheet names relative to itself, and found by fixture mode
+    // beside shell.css through a link to the same file.
+    assert_eq!(page::MARK, format!("{}/mark/head.webp", page::BASE));
+    assert!(
+        css.contains("url(\"mark/head.webp\")"),
+        "shell.css draws the mark"
+    );
+    assert_eq!(Get::route(page::MARK, None), Some(Get::Mark));
+    assert!(!page::is_page(page::MARK));
+    for near in ["/app/mark", "/app/mark/", "/app/mark/head.png"] {
+        assert_ne!(Get::route(near, None), Some(Get::Mark), "GET {near}");
+    }
+    let fixture = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/console/web/mark/head.webp"
+    ))
+    .unwrap();
+    assert_eq!(
+        fixture,
+        pigeon_core::home::Asset::MarkHead.bytes(),
+        "fixture mode's mark is the served one"
+    );
 }
 
 /// The first console is gone for good (docs/plans/console-redesign.md, decommission

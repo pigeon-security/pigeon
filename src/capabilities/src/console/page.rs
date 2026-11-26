@@ -64,6 +64,12 @@ pub const ASSETS: &[(&str, &str, &str)] = &[
     ),
 ];
 
+/// Where the pigeon.dev mark's artwork is served, for the sign-in card. The policy loads images
+/// only from this origin, so the console serves the apex pages' own bytes
+/// ([`pigeon_core::home::Asset::MarkHead`]) here; the stylesheet names it relative to itself,
+/// as `mark/head.webp`, so fixture mode finds it beside `shell.css` too.
+pub const MARK: &str = "/app/mark/head.webp";
+
 /// The body and Content-Type of the shell's asset at `path`: only those it loads.
 pub fn asset_at(path: &str) -> Option<(&'static str, &'static str)> {
     ASSETS
@@ -276,6 +282,16 @@ pub fn redirect(location: &str) -> Result<Response> {
     headers.set("Location", location)?;
     headers.set("Cache-Control", "no-store")?;
     Ok(Response::empty()?.with_status(302).with_headers(headers))
+}
+
+/// The mark's artwork as a response, cached for a day like the apex pages' images.
+pub fn mark() -> Result<Response> {
+    use pigeon_core::home::{ASSET_CACHE, Asset};
+    let headers = Headers::new();
+    headers.set("Content-Type", Asset::MarkHead.content_type())?;
+    headers.set("X-Content-Type-Options", "nosniff")?;
+    headers.set("Cache-Control", ASSET_CACHE)?;
+    Ok(Response::from_bytes(Asset::MarkHead.bytes().to_vec())?.with_headers(headers))
 }
 
 /// The console's icon as a response, cached for an hour.
