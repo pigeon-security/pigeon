@@ -170,11 +170,15 @@ so it lives in `users` (home-only, `scope: platform`): the Directory's `users.ro
   says who may do it at all. `users_admin` is in `risky-tools-need-passkey`, so an agent acting
   for an admin still needs the admin's passkey for each call.
 - **Not gated yet:** `users_rename` and `users_unlink` of someone else.
-- **Open, for membership:** whether a platform admin is `owner` on every instance.
+- **Membership:** a platform admin is `owner` on every instance ([membership.md](membership.md)).
 
 ### Later: membership
 
-Today any signed-in person can approve any change on any instance: identity is platform-level
+Built 2026-11-26, as planned here with one change (`operator` also approves record changes,
+links and retirements; only member management is the owner's): see
+[membership.md](membership.md).
+
+Before it, any signed-in person could approve any change on any instance: identity is platform-level
 and there is no notion of who belongs to which instance. Membership adds per-instance roles —
 `owner` (approves record changes, links, retires), `operator` (approves deploys and runs),
 `viewer` (reads) — kept on the platform with identity staying platform-level (the `users`

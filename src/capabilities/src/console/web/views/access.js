@@ -238,11 +238,41 @@
     });
   }
 
+  // A person's role on one instance (docs/plans/membership.md): owner, operator, viewer, or
+  // none to remove them. Only the instance's owner or an admin may; the server checks again.
+  const ROLES = ["owner", "operator", "viewer", "none"];
+  const ROLE_TEXT = {
+    owner: "Owner: reads, writes, approves and manages who belongs",
+    operator: "Operator: reads, writes and approves changes",
+    viewer: "Viewer: reads only",
+    none: "None: removed from this instance",
+  };
+  function setRole(ctx, person, instance, now) {
+    const select = el("select", { class: "input", "aria-label": "Role" },
+      ROLES.map((r) => el("option", { value: r, text: ROLE_TEXT[r], selected: r === (now || "none") })));
+    confirm({
+      title: "Change role",
+      target: [["Person", person.name], ["Instance", instance], ["Now", now || "None"]],
+      form: field({ label: "Role", control: select }),
+      action: "member-set", id: instance,
+      prepare: () => {
+        if (select.value === (now || "none")) throw new Error("Pick another role first.");
+        return { change: { person: person.id, role: select.value } };
+      },
+      confirmLabel: "Change with passkey",
+      onDone: refresh(ctx),
+    });
+  }
+
   const lastUsed = (p) => Math.max(0, ...p.passkeys.map((k) => k.last_used_at || 0));
+  const rolesText = (p) => Object.entries(p.roles || {}).map(([i, r]) => `${i}: ${r}`).join(", ") || "—";
 
   function people(ctx) {
     // Whether the one asking is an admin, from the read; the server checks every write again.
     let meAdmin = false;
+    // The instances the one asking may see, and those whose members they may change.
+    let instances = [];
+    let manage = [];
     const actions = el("span");
     const appsLink = (n) => (n && ctx.nav ? el("a", { href: shell.href({ instance: ctx.instance.id, area: "access", view: "apps" }), text: String(n),
       on: { click: (e) => { if (e.button === 0 && !e.metaKey && !e.ctrlKey) { e.preventDefault(); ctx.nav({ instance: ctx.instance.id, area: "access", view: "apps" }); } } } }) : String(n || 0));
@@ -254,11 +284,12 @@
         { label: "Passkeys", cls: "num", cell: (p) => String(p.passkeys.length) },
         { label: "Last sign-in", cls: "num", cell: (p) => (lastUsed(p) ? day(lastUsed(p)) : "never") },
         { label: "Apps", cls: "num", cell: (p) => appsLink(p.apps) },
+        { label: "Instances", cell: (p) => (p.admin ? el("span", { class: "muted", text: "Owner of all, as admin" }) : rolesText(p)) },
         { label: "", cls: "acts", cell: (p) => (meAdmin && !p.me
           ? button(p.admin ? "Make member" : "Make admin", () => setAdmin(ctx, p, !p.admin), { size: "sm" })
           : null) },
       ],
-      expand: (p) => dataTable({
+      expand: (p) => el("div", {}, dataTable({
         label: `Passkeys of ${p.name}`, noun: "passkeys", empty: "No passkeys registered.", signal: ctx.signal, load: p.passkeys,
         columns: [
           { label: "Passkey", cell: (k) => k.name || "Unnamed passkey" },
@@ -270,10 +301,22 @@
               ? button("Remove", () => removePasskey(ctx, p, k), { size: "sm", variant: "danger" })
               : null) },
         ],
-      }),
+      }), dataTable({
+        label: `Roles of ${p.name}`, noun: "instances", empty: "No instances you can see.", signal: ctx.signal,
+        load: instances.map((i) => ({ id: i, role: (p.roles || {})[i] || null })),
+        columns: [
+          { label: "Instance", cls: "mono", cell: (r) => r.id },
+          { label: "Role", cell: (r) => (p.admin ? pill("Owner (admin)", "plain") : r.role ? pill(r.role, "plain") : el("span", { class: "muted", text: "None" })) },
+          { label: "", cls: "acts", cell: (r) => (!p.admin && manage.includes(r.id)
+            ? button("Change", () => setRole(ctx, p, r.id, r.role), { size: "sm" })
+            : null) },
+        ],
+      })),
       load: async () => {
         const data = await ctx.op("app_people");
         meAdmin = data?.me_admin === true;
+        instances = Array.isArray(data?.instances) ? data.instances : [];
+        manage = Array.isArray(data?.manage) ? data.manage : [];
         actions.replaceChildren(meAdmin ? button("Invite person", () => invitePerson(ctx), { variant: "primary" }) : "");
         const apps = data?.apps || [];
         return (data?.people || []).map((p) => ({ ...p, passkeys: p.passkeys || [], me: p.id === data.me,
@@ -282,7 +325,7 @@
       },
     });
     return el("div", { class: "view" },
-      intro("Who can sign in to the platform and approve with a passkey. Expand a person for their passkeys. Admins invite and remove people and manage anyone's passkeys.",
+      intro("Who can sign in to the platform and approve with a passkey, and their role on each instance: owners manage who belongs, operators write and approve, viewers read. Expand a person for their passkeys and roles. Admins invite and remove people, manage anyone's passkeys and are owners everywhere.",
         actions),
       table);
   }

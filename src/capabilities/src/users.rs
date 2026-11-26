@@ -91,7 +91,7 @@ fn bad(why: &str) -> Error {
 // ---- the Directory ----
 
 /// The Directory's schema, one statement per migration, applied in order and never edited.
-const MIGRATIONS: [&str; 23] = [
+const MIGRATIONS: [&str; 25] = [
     "CREATE TABLE users (id TEXT PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL, created_at INTEGER NOT NULL)",
     "CREATE TABLE service_ids (access_client_id TEXT PRIMARY KEY, user_id TEXT NOT NULL)",
     "CREATE TABLE passkeys (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, point TEXT NOT NULL, sign_count INTEGER NOT NULL, name TEXT NOT NULL, created_at INTEGER NOT NULL, last_used_at INTEGER)",
@@ -121,6 +121,10 @@ const MIGRATIONS: [&str; 23] = [
     // member. The first person on the platform is its first admin.
     ROLE_COLUMN,
     FIRST_ADMIN,
+    // Per-instance membership (docs/plans/membership.md): every person who exists now is owner
+    // of every instance that exists now, so nobody loses access on deploy.
+    crate::membership::MEMBERS_TABLE,
+    crate::membership::MEMBERS_SEED,
 ];
 
 /// The users' platform role: `admin`, or null for a member.
@@ -248,6 +252,51 @@ impl Directory {
         )
     }
 
+    /// The home instance's id, if there is one, and every instance's id, by membership key.
+    fn instance_ids(&self, t: i64) -> Result<(Option<String>, Vec<String>)> {
+        use crate::instances;
+        let ids: Vec<String> = match self.setting_value(instances::INDEX, t)? {
+            Some(text) => serde_json::from_str(&text)?,
+            None => Vec::new(),
+        };
+        let mut home = None;
+        for id in &ids {
+            let record: Option<Value> = self
+                .setting_value(&instances::key(id), t)?
+                .and_then(|text| serde_json::from_str(&text).ok());
+            if home.is_none() && record.is_some_and(|r| r["account"]["kind"] == "home") {
+                home = Some(crate::membership::key(id).to_string());
+            }
+        }
+        let keys = ids
+            .iter()
+            .map(|id| crate::membership::key(id).to_string())
+            .collect();
+        Ok((home, keys))
+    }
+
+    /// The owners of `instance` (a membership key), by id.
+    fn owners(&self, instance: &str) -> Result<Vec<String>> {
+        #[derive(Deserialize)]
+        struct Row {
+            person_id: String,
+        }
+        let rows: Vec<Row> = self.db.rows(
+            "SELECT person_id FROM members WHERE instance = ? AND role = 'owner'",
+            vec![instance.into()],
+        )?;
+        Ok(rows.into_iter().map(|r| r.person_id).collect())
+    }
+
+    /// Gives `person_id` `role` on `instance` unless they have a role there already.
+    fn grant(&self, instance: &str, person_id: &str, role: &str) -> Result<()> {
+        self.db.exec(
+            "INSERT OR IGNORE INTO members (instance, person_id, role) VALUES (?, ?, ?)",
+            vec![instance.into(), person_id.into(), role.into()],
+        )?;
+        Ok(())
+    }
+
     /// Approvals matching `query`, which selects `record`.
     fn approvals_where(
         &self,
@@ -288,7 +337,7 @@ impl Directory {
 
     /// Applies approved instance draft `r`: the record it holds becomes the instance's next
     /// version, unless the instance moved on since the draft was made, which expires it.
-    fn apply_draft(&self, r: &mut approval::Record, t: i64) -> Result<()> {
+    fn apply_draft(&self, r: &mut approval::Record, t: i64, person_id: &str) -> Result<()> {
         use crate::instances::{self, record::Instance};
         let base = r.payload["base_version"].as_u64().unwrap_or(0);
         let mut next: Instance = serde_json::from_value(r.payload["record"].clone())?;
@@ -336,6 +385,8 @@ impl Directory {
             ids.push(next.id.clone());
             ids.sort();
             self.setting_keep(instances::INDEX, &serde_json::to_string(&ids)?, until)?;
+            // The person who approved a new instance is its first owner.
+            self.grant(crate::membership::key(&next.id), person_id, "owner")?;
         }
         r.state = approval::State::Used;
         r.used_ms = Some(t);
@@ -486,12 +537,115 @@ impl Directory {
                     "DELETE FROM oauth_clients WHERE service_user_id = ?",
                     "DELETE FROM sessions WHERE user_id = ?",
                     "DELETE FROM enrolments WHERE user_id = ?",
+                    "DELETE FROM members WHERE person_id = ?",
                     "DELETE FROM users WHERE id = ?",
                 ] {
                     let args = vec![id.into(); q.matches('?').count()];
                     self.db.exec(q, args)?;
                 }
                 json!({ "removed": user })
+            }
+            // Per-instance membership (crate::membership).
+            "members.access" => {
+                #[derive(Deserialize)]
+                struct Row {
+                    instance: String,
+                    role: String,
+                }
+                let id = s("person_id");
+                let rows: Vec<Row> = self.db.rows(
+                    "SELECT instance, role FROM members WHERE person_id = ?",
+                    vec![id.into()],
+                )?;
+                let roles: serde_json::Map<String, Value> = rows
+                    .into_iter()
+                    .map(|r| (r.instance, json!(r.role)))
+                    .collect();
+                let (home, instances) = self.instance_ids(t)?;
+                json!({
+                    "person": id, "admin": self.admins()?.iter().any(|a| a == id),
+                    "roles": roles, "home": home, "instances": instances,
+                })
+            }
+            "members.list" => {
+                let instance = crate::membership::key(s("instance"));
+                let members: Vec<Value> = self.db.rows(
+                    "SELECT u.id, u.name, m.role FROM members m JOIN users u ON u.id = m.person_id WHERE m.instance = ? AND u.kind = 'standard' ORDER BY u.created_at, u.id",
+                    vec![instance.into()],
+                )?;
+                let admins: Vec<Value> = self.db.rows(
+                    "SELECT id, name FROM users WHERE kind = 'standard' AND role = ? ORDER BY created_at, id",
+                    vec![ADMIN.into()],
+                )?;
+                json!({ "instance": instance, "members": members, "admins": admins })
+            }
+            "members.all" => {
+                let rows: Vec<Value> = self.db.rows(
+                    "SELECT instance, person_id, role FROM members ORDER BY instance, person_id",
+                    vec![],
+                )?;
+                json!(rows)
+            }
+            // Sets a person's role on an instance, or removes them (`role` null); the last
+            // owner stays one unless the platform has an admin. Who asks is checked before.
+            "members.set" => {
+                let instance = crate::membership::key(s("instance")).to_string();
+                if !self.instance_ids(t)?.1.contains(&instance) {
+                    return Err(bad(&format!("no instance `{instance}`")));
+                }
+                let user = self
+                    .user(s("person_id"))?
+                    .filter(|u| u.kind == "standard")
+                    .ok_or_else(|| bad("no such person"))?;
+                let role = match a["role"].as_str() {
+                    None => None,
+                    Some(r) => Some(
+                        crate::membership::Role::parse(r)
+                            .ok_or_else(|| bad("the role is owner, operator or viewer"))?,
+                    ),
+                };
+                crate::membership::member_change(
+                    &self.owners(&instance)?,
+                    self.admins()?.len(),
+                    &user.id,
+                    role,
+                )
+                .map_err(|e| bad(&e))?;
+                match role {
+                    Some(r) => self.db.exec(
+                        "INSERT OR REPLACE INTO members (instance, person_id, role) VALUES (?, ?, ?)",
+                        vec![instance.as_str().into(), user.id.as_str().into(), r.name().into()],
+                    )?,
+                    None => self.db.exec(
+                        "DELETE FROM members WHERE instance = ? AND person_id = ?",
+                        vec![instance.as_str().into(), user.id.as_str().into()],
+                    )?,
+                };
+                json!({
+                    "instance": instance, "id": user.id, "name": user.name,
+                    "role": role.map(|r| r.name()),
+                })
+            }
+            // Gives a person a role where they have none: `instance` null is the home instance.
+            "members.grant" => {
+                let instance = match a["instance"].as_str() {
+                    Some(id) => Some(crate::membership::key(id).to_string()),
+                    None => self.instance_ids(t)?.0,
+                };
+                let role = crate::membership::Role::parse(s("role"))
+                    .ok_or_else(|| bad("the role is owner, operator or viewer"))?;
+                if let Some(instance) = &instance {
+                    self.grant(instance, s("person_id"), role.name())?;
+                }
+                json!({ "instance": instance })
+            }
+            // A retired instance's members go with it.
+            "members.forget" => {
+                self.db.exec(
+                    "DELETE FROM members WHERE instance = ?",
+                    vec![crate::membership::key(s("instance")).into()],
+                )?;
+                json!({ "ok": true })
             }
             "users.admins" => to_value(self.admins()?),
             // Makes a person an admin, or a member; the last admin stays one.
@@ -1374,7 +1528,7 @@ impl Directory {
                     && r.state == approval::State::Approved
                     && r.kind.applies_on_approve()
                 {
-                    self.apply_draft(&mut r, t)?;
+                    self.apply_draft(&mut r, t, s("person_id"))?;
                 }
                 // A refusal may still have changed the record, such as expiring it.
                 self.approval_put(&r)?;
@@ -1579,6 +1733,26 @@ pub async fn check_role_change(env: &Env, person: &User, target: &str, make: boo
     .map_err(|e| bad(&e))
 }
 
+/// Refuses changing who belongs to `instance` unless `person` is its owner or a platform admin
+/// now ([`crate::membership::Access::may_manage`]).
+pub async fn check_member_set(env: &Env, person: &User, instance: &str) -> Result<()> {
+    crate::membership::access(env, &person.id)
+        .await?
+        .may_manage(instance)
+        .map_err(|e| bad(&e))
+}
+
+/// Sets `person`'s role on `instance` (`none` removes them); the Directory keeps the last owner.
+async fn set_member(env: &Env, instance: &str, person: &str, role: &str) -> Result<Value> {
+    let role = crate::membership::parse_setting(role).map_err(|e| bad(&e))?;
+    directory(
+        env,
+        "members.set",
+        json!({ "instance": instance, "person_id": person, "role": role.map(|r| r.name()) }),
+    )
+    .await
+}
+
 /// Users, on the hostname whose Access tokens say who calls and whose `/auth` pages take
 /// passkeys.
 pub struct Users {
@@ -1672,6 +1846,11 @@ impl Users {
         )
         .await?;
         let id = user["id"].as_str().unwrap_or_default();
+        // A new person sees the home instance until an owner or admin gives them more
+        // (docs/plans/membership.md); the first person is an admin, owner everywhere.
+        if site.is_none() && !admin {
+            crate::membership::grant(env, id, None, crate::membership::Role::Viewer).await?;
+        }
         let code = directory(
             env,
             "enrol.create",
@@ -1697,6 +1876,7 @@ impl Users {
                 let make = w.change["admin"].as_bool().unwrap_or(false);
                 check_role_change(env, person, w.text(), make).await
             }
+            "member-set" => check_member_set(env, person, w.text()).await,
             other => Err(bad(&format!("users makes no write `{other}`"))),
         }
     }
@@ -1744,6 +1924,16 @@ impl Users {
                     format!("{name} is now an admin.")
                 } else {
                     format!("{name} is now a member.")
+                } })
+            }
+            "member-set" => {
+                let role = w.change["role"].as_str().unwrap_or_default();
+                let person = w.change["person"].as_str().unwrap_or_default();
+                let done = set_member(env, target, person, role).await?;
+                let name = done["name"].as_str().unwrap_or("The person");
+                json!({ "message": match done["role"].as_str() {
+                    Some(r) => format!("{name} is now {r} on {target}."),
+                    None => format!("{name} no longer belongs to {target}."),
                 } })
             }
             other => return Err(bad(&format!("users makes no write `{other}`"))),
@@ -1894,6 +2084,26 @@ impl Users {
                 check_role_change(env, acting_person(cx)?, id, make).await?;
                 directory(env, "users.set_admin", json!({ "id": id, "admin": make })).await?
             }
+            "instance_members" => {
+                let instance = arg(args, "instance")?;
+                let access = crate::membership::access(env, &acting_person(cx)?.id).await?;
+                if !access
+                    .instances
+                    .iter()
+                    .any(|i| i == crate::membership::key(instance))
+                {
+                    return Err(bad(&format!("no instance `{instance}`")));
+                }
+                access
+                    .check(Some(instance), crate::membership::Role::Viewer)
+                    .map_err(|e| bad(&e))?;
+                directory(env, "members.list", json!({ "instance": instance })).await?
+            }
+            "instance_member_set" => {
+                let instance = arg(args, "instance")?;
+                check_member_set(env, acting_person(cx)?, instance).await?;
+                set_member(env, instance, arg(args, "person")?, arg(args, "role")?).await?
+            }
             "users_rename" => {
                 directory(
                     env,
@@ -2019,6 +2229,32 @@ impl Capability for Users {
                     "type": "object",
                     "properties": { "id": { "type": "string" }, "admin": { "type": "boolean" } },
                     "required": ["id", "admin"]
+                }),
+            },
+            Tool {
+                name: "instance_members",
+                description: "Who belongs to an instance and with which role: owner (manages \
+                 members), operator (writes and approves) or viewer (reads). Platform admins are \
+                 owner everywhere and listed apart. For a member of the instance.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": { "instance": { "type": "string", "description": "The instance's id, such as noisypigeon." } },
+                    "required": ["instance"]
+                }),
+            },
+            Tool {
+                name: "instance_member_set",
+                description: "Give a person a role on an instance (owner, operator or viewer), \
+                 or remove them (none). Only an owner of the instance or a platform admin can; \
+                 the last owner stays one unless the platform has an admin.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "instance": { "type": "string" },
+                        "person": { "type": "string", "description": "The person's user id." },
+                        "role": { "type": "string", "enum": ["owner", "operator", "viewer", "none"] }
+                    },
+                    "required": ["instance", "person", "role"]
                 }),
             },
             Tool {

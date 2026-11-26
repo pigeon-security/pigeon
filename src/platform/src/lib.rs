@@ -449,7 +449,7 @@ async fn mcp_post(mut req: Request, env: &Env) -> Result<Response> {
             instance: scope.as_ref(),
             worker: None,
         };
-        pigeon_capabilities::dispatch(&cx, name, args).await
+        pigeon_capabilities::dispatch_checked(&cx, name, args).await
     };
     match mcp::answer(&server, &tools, &message, call).await {
         Some(mut answer) => {

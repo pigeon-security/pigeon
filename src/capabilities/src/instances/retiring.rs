@@ -428,6 +428,13 @@ impl Instances {
                     super::put(env, super::INDEX, &serde_json::to_string(&index)?).await?;
                 }
                 forget(env, &super::key(id)).await?;
+                // Its members go with it, so a later instance of the same id starts with none.
+                crate::users::directory(
+                    env,
+                    "members.forget",
+                    serde_json::json!({ "instance": id }),
+                )
+                .await?;
                 format!("instance {id} is retired")
             }
         };

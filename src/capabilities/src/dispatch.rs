@@ -69,7 +69,7 @@ impl Capability for Dispatch {
                 return Err(unknown(tool));
             }
             let (name, inner) = requested(args).map_err(Error::RustError)?;
-            crate::dispatch(cx, name, &inner).await
+            crate::dispatch_checked(cx, name, &inner).await
         })
     }
 }

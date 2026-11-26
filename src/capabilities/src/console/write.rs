@@ -102,6 +102,9 @@ pub enum Change {
     Extend,
     /// `{admin}`: true to make a person an admin, false a member.
     Admin,
+    /// `{person, role}`: a person's id and their role on the target instance, `owner`,
+    /// `operator`, `viewer` or `none` to remove them.
+    Member,
 }
 
 /// One write the console makes.
@@ -250,6 +253,15 @@ pub const ACTIONS: &[Action] = &[
         false,
         Target::Id,
         Change::Admin,
+    ),
+    // Console only, as making admins is: who belongs to an instance (docs/plans/membership.md).
+    act(
+        "member-set",
+        "Change a person's role on an instance",
+        Cap("users"),
+        false,
+        Target::Instance,
+        Change::Member,
     ),
     app(act(
         "land-approve",
@@ -604,6 +616,16 @@ impl Action {
                     _ => return Err("the change is {admin}, true or false".into()),
                 }
             }
+            Change::Member => {
+                only(&o, &["person", "role"], true)?;
+                let person = s("person").map(str::trim).unwrap_or_default();
+                if !id_like(person) {
+                    return Err("the change's person is not an id".into());
+                }
+                let role = s("role").unwrap_or_default().trim();
+                crate::membership::parse_setting(role)?;
+                json!({ "person": person, "role": role })
+            }
             Change::Extend => {
                 only(&o, EXTEND, true)?;
                 let ok = o.iter().all(|(k, v)| {
@@ -823,16 +845,16 @@ pub async fn begin(
     change: &Value,
 ) -> Result<Value> {
     let (target, change, bound, d) = bind(cx, action, person, target, change, Step::Begin).await?;
+    let w = Write {
+        action,
+        target: target.clone(),
+        change,
+        person,
+    };
+    // The person's role on the instance the write is about (docs/plans/membership.md).
+    crate::membership::check_write(cx.env, &w).await?;
     let checked = match action.handler {
-        Handler::Capability(name) => {
-            let w = Write {
-                action,
-                target: target.clone(),
-                change,
-                person,
-            };
-            owner(cx, name)?.write_check(cx, &w).await?
-        }
+        Handler::Capability(name) => owner(cx, name)?.write_check(cx, &w).await?,
         Handler::Tool(tool) => {
             if let Some(why) = crate::approvals::refused(&person.name, tool) {
                 return Err(bad(why));
@@ -874,18 +896,18 @@ pub async fn finish(
     passkeys
         .sign_in_finish(cx.env, &purpose(action, &d), body, Some(person.id.as_str()))
         .await?;
+    let w = Write {
+        action,
+        target,
+        change,
+        person,
+    };
+    // Asked again, now: a role taken away since `begin` holds.
+    crate::membership::check_write(cx.env, &w).await?;
     match action.handler {
-        Handler::Capability(name) => {
-            let w = Write {
-                action,
-                target,
-                change,
-                person,
-            };
-            owner(cx, name)?.write_make(cx, &w).await
-        }
+        Handler::Capability(name) => owner(cx, name)?.write_make(cx, &w).await,
         Handler::Tool(tool) => {
-            let mut args = action.args(&target, &change);
+            let mut args = action.args(&w.target, &w.change);
             if let Some(id) = crate::approvals::approve_own(cx.env, person, tool, &args).await? {
                 args[crate::approvals::ARG] = json!(id);
             }

@@ -11,9 +11,10 @@ use serde_json::{Value, json};
 use worker::{Response, Result};
 
 use super::{READ_MS, answer, bad, failed, timed};
+use crate::membership::{self, Role};
 use crate::site_passkeys::console as site_access;
 use crate::users::{Caller, User, directory};
-use crate::{Context, approvals, dispatch};
+use crate::{Context, approvals, dispatch, dispatch_checked};
 
 /// The reads the console may make, each with the only arguments it may be given. The called
 /// tools still check their own types and ranges.
@@ -140,6 +141,18 @@ pub fn inbox_for(mut listing: Value, instance: &str, home: bool) -> Value {
         items.clear();
     }
     listing
+}
+
+/// For one of the console's own `app_*` reads, the instance it is about (`None`: the home
+/// instance), whose viewer role it needs; `None` for a tool read, which `dispatch_checked`
+/// checks, and for the whole inbox, which lists only what the person may decide.
+pub fn app_read_instance<'a>(name: &str, args: &'a Value) -> Option<Option<&'a str>> {
+    let instance = args["instance"].as_str().filter(|id| !id.is_empty());
+    match name {
+        "app_inbox" if instance.is_none() => None,
+        n if n.starts_with("app_") => Some(instance),
+        _ => None,
+    }
 }
 
 /// The op allowlist: whether `/app/op` runs `name` with `args`.
@@ -281,7 +294,53 @@ async fn people(cx: &Context<'_>, me: &str) -> Result<Value> {
     // Whether the one asking is an admin, so the view offers only what they may do; every
     // write checks again.
     let me_admin = people.iter().any(|p| p["id"] == me && p["admin"] == true);
-    Ok(json!({ "me": me, "me_admin": me_admin, "people": people, "apps": apps }))
+    // Per-instance roles (docs/plans/membership.md), on the instances the one asking may see;
+    // `manage` lists those where they may change them (an admin's: all; an owner's: theirs).
+    let access = membership::access(cx.env, me).await?;
+    let members = directory(cx.env, "members.all", json!({})).await?;
+    let (instances, people) = with_roles(&access, people, members.as_array().map_or(&[], |v| v));
+    let manage: Vec<&String> = instances
+        .iter()
+        .filter(|i| access.may_manage(i).is_ok())
+        .collect();
+    Ok(json!({
+        "me": me, "me_admin": me_admin, "people": people, "apps": apps,
+        "instances": instances, "manage": manage,
+    }))
+}
+
+/// The instances `access` may see, and `people` each with `roles`: their role on each of those
+/// instances, from the `members` rows (`instance`, `person_id`, `role`); an admin is `owner`
+/// everywhere.
+pub fn with_roles(
+    access: &membership::Access,
+    mut people: Vec<Value>,
+    members: &[Value],
+) -> (Vec<String>, Vec<Value>) {
+    let instances: Vec<String> = access
+        .visible(access.instances.iter().map(String::as_str))
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    for p in &mut people {
+        let admin = p["admin"] == true;
+        let roles: serde_json::Map<String, Value> = instances
+            .iter()
+            .filter_map(|i| {
+                let role = if admin {
+                    Some(Role::Owner.name())
+                } else {
+                    members
+                        .iter()
+                        .find(|m| m["instance"] == i.as_str() && m["person_id"] == p["id"])
+                        .and_then(|m| m["role"].as_str())
+                };
+                role.map(|r| (i.clone(), json!(r)))
+            })
+            .collect();
+        p["roles"] = Value::Object(roles);
+    }
+    (instances, people)
 }
 
 /// The inbox for `args.instance`, or all of it.
@@ -338,6 +397,11 @@ pub(super) async fn serve(
         worker: cx.worker,
     };
     let call = async {
+        // The console's own reads need viewer on their instance, or on home for a platform-wide
+        // one (docs/plans/membership.md); a tool read is checked by `dispatch_checked`.
+        if let Some(instance) = app_read_instance(name, args) {
+            membership::require(cx.env, &caller.user, instance, Role::Viewer).await?;
+        }
         match name {
             "app_linked_details" => linked_details(&person_cx, args).await,
             "app_inbox" => inbox(&person_cx, args).await,
@@ -348,7 +412,7 @@ pub(super) async fn serve(
             "app_ingest_runs" => ingest_runs(&person_cx, args).await,
             _ => {
                 let args = bound(&person_cx, name, args).await?;
-                dispatch(&person_cx, name, &args).await
+                dispatch_checked(&person_cx, name, &args).await
             }
         }
     };

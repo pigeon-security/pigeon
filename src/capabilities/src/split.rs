@@ -548,7 +548,7 @@ pub async fn serve(mut req: Request, cx: &Context<'_>) -> Result<Response> {
             };
             let tool = asked["tool"].as_str().unwrap_or_default();
             let args = asked.get("args").cloned().unwrap_or_else(|| json!({}));
-            crate::dispatch(&cx, tool, &args).await
+            crate::dispatch_checked(&cx, tool, &args).await
         }
         "approval" => match serde_json::from_slice::<ApprovalRequest>(&body) {
             Ok(r) => remote_approval(&cx, &r).await,

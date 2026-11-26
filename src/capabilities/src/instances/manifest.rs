@@ -161,16 +161,32 @@ pub fn manifest(
 /// `console_manifest`: the manifest of the instance `args.instance` names, or of the home
 /// instance. Its Inbox counts what waits for the person the caller is or acts for.
 pub async fn console_manifest(cx: &Context<'_>, args: &Value) -> Result<Value> {
+    // Membership (docs/plans/membership.md): the person needs viewer on the instance; with none
+    // named, home if they may see it, else the first instance they may see.
+    let person = cx.caller.and_then(crate::users::person_of);
+    let access = match person {
+        Some(p) => Some(crate::membership::access(cx.env, &p.id).await?),
+        None => None,
+    };
+    let may_see = |r: &Instance| access.as_ref().is_none_or(|a| a.role(&r.id).is_some());
     let record = match args["instance"].as_str().filter(|id| !id.is_empty()) {
         Some(id) => super::one(cx.env, id)
             .await?
             .ok_or_else(|| Error::RustError(format!("no instance `{id}`")))?,
-        None => super::all(cx.env)
-            .await?
-            .into_iter()
-            .find(is_home)
-            .ok_or_else(|| Error::RustError("no home instance".into()))?,
+        None => {
+            let all = super::all(cx.env).await?;
+            let home = all.iter().find(|r| is_home(r)).cloned();
+            home.clone()
+                .filter(|r| may_see(r))
+                .or_else(|| all.into_iter().find(|r| may_see(r)))
+                .or(home)
+                .ok_or_else(|| Error::RustError("no home instance".into()))?
+        }
     };
+    if let Some(a) = &access {
+        a.check(Some(&record.id), crate::membership::Role::Viewer)
+            .map_err(Error::RustError)?;
+    }
     let scope = Scope::new(&record)?;
     let platform: Vec<PlatformView> = cx
         .hosted
@@ -206,5 +222,10 @@ pub async fn console_manifest(cx: &Context<'_>, args: &Value) -> Result<Value> {
         },
         None => None,
     };
-    Ok(manifest(&record, &scope, &platform, &carried, inbox))
+    let mut out = manifest(&record, &scope, &platform, &carried, inbox);
+    // The person's role here, so the views offer only what they may do; every write checks.
+    if let Some(a) = &access {
+        out["instance"]["role"] = json!(a.role(&record.id).map(|r| r.name()));
+    }
+    Ok(out)
 }

@@ -386,14 +386,22 @@ pub fn annotate(tools: &mut [Tool]) {
     }
 }
 
-/// The open approvals `person` may decide, recording any that expired.
+/// The open approvals `person` may decide, recording any that expired: theirs to approve, about
+/// an instance they are an operator or owner of (docs/plans/membership.md).
 pub async fn open_for(env: &Env, person: &User) -> Result<Vec<Record>> {
     let listed = directory(env, "approval.list", json!({})).await?;
     expired(env, &listed).await?;
     let open: Vec<Record> = serde_json::from_value(listed["open"].clone())?;
+    let access = crate::membership::access(env, &person.id).await?;
     Ok(open
         .into_iter()
         .filter(|r| r.approver_id.as_deref().is_none_or(|p| p == person.id))
+        .filter(|r| {
+            let instance = crate::instances::manifest::approval_instance(r);
+            access
+                .check(instance, crate::membership::Role::Operator)
+                .is_ok()
+        })
         .collect())
 }
 
@@ -673,6 +681,19 @@ pub fn plain_call(tool: &str, args: &Value, acting_for: &Value) -> String {
             _ => format!("Make user {} a member", text("id")),
         },
         "passkeys_remove" => format!("Remove passkey {}", text("id")),
+        "instance_member_set" => match args["role"].as_str() {
+            Some("none") => format!(
+                "Remove {} from instance {}",
+                text("person"),
+                text("instance")
+            ),
+            _ => format!(
+                "Make {} {} on instance {}",
+                text("person"),
+                text("role"),
+                text("instance")
+            ),
+        },
         "oauth_revoke" => format!("Disconnect app {}", text("client_id")),
         _ => {
             let n = args.as_object().map_or(0, |o| o.len());

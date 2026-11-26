@@ -19,6 +19,7 @@ pub mod instances;
 pub mod land;
 pub mod ledger;
 pub mod linked;
+pub mod membership;
 pub mod mirror;
 /// Signed notifications, in pigeon-core so the capability Workers share them.
 pub use pigeon_core::notify;
@@ -320,7 +321,9 @@ pub fn owner<'a>(
 /// Runs tool `name` with `args` as `cx`'s caller: the one way a tool is run, whether `/mcp`
 /// was asked for it directly or through `call`, or the Lander runs it, so all find it and fail
 /// the same way. The person's policy is asked first ([`approvals::gate`]): a tool it gates runs
-/// only with the person's passkey approval of that exact call, used once.
+/// only with the person's passkey approval of that exact call, used once. A call from outside
+/// (MCP, `call`, the console's reads, a capability Worker's dispatch for a run) comes through
+/// [`dispatch_checked`], which asks the caller's role on the instance first.
 pub async fn dispatch(cx: &Context<'_>, name: &str, args: &Value) -> Result<Value> {
     // An `instance` argument naming a renamed id (R1's compat window) names the new one.
     let current = instances::current_args(cx.env, args).await?;
@@ -344,6 +347,18 @@ pub async fn dispatch(cx: &Context<'_>, name: &str, args: &Value) -> Result<Valu
             result
         }
     }
+}
+
+/// Runs tool `name` for a caller from outside, as [`dispatch`] does, once the person the caller
+/// is or acts for has the role it needs on the instance the call is about
+/// (docs/plans/membership.md, [`membership::check_tool`]): viewer to read, operator for
+/// anything else. Calls a tool makes inside another go straight to [`dispatch`], so a read that
+/// gathers others (such as `cost_daily`) needs only its own role.
+pub async fn dispatch_checked(cx: &Context<'_>, name: &str, args: &Value) -> Result<Value> {
+    if let Some(owner) = owner(cx.hosted.capabilities, name) {
+        membership::check_tool(cx, owner.name(), name, args).await?;
+    }
+    dispatch(cx, name, args).await
 }
 
 /// `v` as JSON.

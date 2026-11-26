@@ -579,6 +579,404 @@ fn console_first_admin_migration() {
     empty.execute_batch(FIRST_ADMIN).unwrap();
 }
 
+/// Per-instance membership's migration (docs/plans/membership.md): every person who exists is
+/// owner of every instance in the index, so nobody loses access on deploy; agents and site
+/// visitors get nothing, and the home instance's old id (R1) is kept under its new one.
+#[test]
+fn console_membership_migration_grants_owner() {
+    use pigeon_capabilities::membership::{MEMBERS_SEED, MEMBERS_TABLE};
+    use rusqlite::Connection;
+
+    let open = |index: Option<&str>| {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE users (id TEXT PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL, created_at INTEGER NOT NULL);
+             CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, expires_at INTEGER NOT NULL);",
+        )
+        .unwrap();
+        for (id, kind) in [
+            ("willow", "standard"),
+            ("sam", "standard"),
+            ("agent", "service"),
+            ("visitor", "site:notes.example.org"),
+        ] {
+            db.execute(
+                "INSERT INTO users (id, kind, name, created_at) VALUES (?1, ?2, ?1, 1)",
+                rusqlite::params![id, kind],
+            )
+            .unwrap();
+        }
+        if let Some(index) = index {
+            db.execute(
+                "INSERT INTO settings (key, value, expires_at) VALUES ('instances:index', ?1, 9)",
+                [index],
+            )
+            .unwrap();
+        }
+        db.execute_batch(MEMBERS_TABLE).unwrap();
+        db.execute_batch(MEMBERS_SEED).unwrap();
+        let mut q = db
+            .prepare("SELECT instance, person_id, role FROM members ORDER BY instance, person_id")
+            .unwrap();
+        q.query_map([], |r| {
+            Ok(format!(
+                "{} {} {}",
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?
+            ))
+        })
+        .unwrap()
+        .map(Result::unwrap)
+        .collect::<Vec<String>>()
+    };
+    assert_eq!(
+        open(Some(
+            r#"["noisypigeon","pigeon.dev","sandbox","willowgraysen"]"#
+        )),
+        [
+            "noisypigeon sam owner",
+            "noisypigeon willow owner",
+            "pigeon.dev sam owner",
+            "pigeon.dev willow owner",
+            "sandbox sam owner",
+            "sandbox willow owner",
+            "willowgraysen sam owner",
+            "willowgraysen willow owner",
+        ]
+    );
+    // Before R1 has run, home's old id is kept under its new one, as every lookup keys it.
+    assert_eq!(
+        open(Some(r#"["pigeon-security/platform"]"#)),
+        ["pigeon.dev sam owner", "pigeon.dev willow owner"]
+    );
+    assert_eq!(
+        pigeon_capabilities::membership::key("pigeon-security/platform"),
+        "pigeon.dev"
+    );
+    // A platform with no instances yet gets no rows.
+    assert!(open(None).is_empty());
+}
+
+/// Who may do what on an instance: a viewer reads but neither writes nor approves; an operator
+/// writes and approves; an owner also manages members; a platform admin is owner everywhere.
+/// Console writes and approvals ask `write_need`; every tool from outside asks `tool_need`
+/// (a console read with its read arguments is a read, anything else a write). A platform-wide
+/// request is about the home instance. Service users and apps act as the person they act for.
+#[test]
+fn console_membership_roles() {
+    use pigeon_capabilities::console::ops::{app_read_instance, with_roles};
+    use pigeon_capabilities::membership::{
+        Access, LAST_OWNER, Need, Role, member_change, parse_setting, tool_need, write_need,
+    };
+    use pigeon_capabilities::users::{Caller, User, person_of};
+
+    let instances = ["noisypigeon", "pigeon.dev", "sandbox", "willowgraysen"];
+    let access = |person: &str, admin: bool, roles: &[(&str, Role)]| Access {
+        person: person.into(),
+        admin,
+        roles: roles.iter().map(|(i, r)| (i.to_string(), *r)).collect(),
+        home: Some("pigeon.dev".into()),
+        instances: instances.iter().map(|i| i.to_string()).collect(),
+    };
+    let viewer = access("sam", false, &[("noisypigeon", Role::Viewer)]);
+    let operator = access(
+        "kai",
+        false,
+        &[
+            ("noisypigeon", Role::Operator),
+            ("pigeon.dev", Role::Viewer),
+        ],
+    );
+    let admin = access("willow", true, &[]);
+
+    // A viewer reads, and neither writes nor approves there; nothing at all elsewhere.
+    assert_eq!(viewer.check(Some("noisypigeon"), Role::Viewer), Ok(()));
+    let refused = viewer
+        .check(Some("noisypigeon"), Role::Operator)
+        .unwrap_err();
+    assert!(
+        refused.contains("operator or above on instance noisypigeon"),
+        "{refused}"
+    );
+    assert!(refused.contains("a viewer"), "{refused}");
+    let none = viewer.check(Some("sandbox"), Role::Viewer).unwrap_err();
+    assert!(none.contains("not a member"), "{none}");
+    // A platform-wide request (no instance, or one not made yet) is about home.
+    assert!(viewer.check(None, Role::Viewer).is_err());
+    assert!(viewer.check(Some("brand-new"), Role::Viewer).is_err());
+    // An operator writes and approves there; reads home, writes nothing platform-wide.
+    assert_eq!(operator.check(Some("noisypigeon"), Role::Operator), Ok(()));
+    assert_eq!(operator.check(None, Role::Viewer), Ok(()));
+    assert!(operator.check(None, Role::Operator).is_err());
+    // An admin is owner everywhere, home and new instances included, with no rows.
+    for i in [
+        None,
+        Some("sandbox"),
+        Some("brand-new"),
+        Some("pigeon-security/platform"),
+    ] {
+        assert_eq!(admin.check(i, Role::Owner), Ok(()), "{i:?}");
+    }
+    assert_eq!(admin.role("willowgraysen"), Some(Role::Owner));
+    // Before R1, home's old id names its membership too.
+    assert_eq!(
+        operator.role("pigeon-security/platform"),
+        Some(Role::Viewer)
+    );
+
+    // Members: an owner or an admin manages them; an operator does not.
+    let owner = access("rowan", false, &[("sandbox", Role::Owner)]);
+    assert_eq!(owner.may_manage("sandbox"), Ok(()));
+    assert!(owner.may_manage("noisypigeon").is_err());
+    assert!(operator.may_manage("noisypigeon").is_err());
+    assert_eq!(admin.may_manage("noisypigeon"), Ok(()));
+    assert!(
+        admin
+            .may_manage("nowhere")
+            .unwrap_err()
+            .contains("no instance")
+    );
+    assert_eq!(parse_setting("none"), Ok(None));
+    assert_eq!(parse_setting(" operator "), Ok(Some(Role::Operator)));
+    assert!(parse_setting("admin").is_err());
+
+    // The last owner stays one, unless the platform has an admin.
+    let one = ["rowan".to_string()];
+    let two = ["rowan".to_string(), "kai".to_string()];
+    assert_eq!(
+        member_change(&one, 0, "rowan", None).unwrap_err(),
+        LAST_OWNER
+    );
+    assert_eq!(
+        member_change(&one, 0, "rowan", Some(Role::Operator)).unwrap_err(),
+        LAST_OWNER
+    );
+    assert_eq!(member_change(&one, 0, "rowan", Some(Role::Owner)), Ok(()));
+    assert_eq!(
+        member_change(&one, 1, "rowan", None),
+        Ok(()),
+        "an admin exists"
+    );
+    assert_eq!(member_change(&two, 0, "rowan", Some(Role::Viewer)), Ok(()));
+    assert_eq!(member_change(&one, 0, "sam", None), Ok(()), "not an owner");
+
+    // Console writes: operator on the instance they target; a site's instance; home for a
+    // platform-wide one; an approval's own instance; the `users` writes ask their own rules.
+    let need = |id: &str, target: Value| write_need(action(id).unwrap(), &target);
+    for id in [
+        "instance-put",
+        "site-deploy",
+        "site-rollback",
+        "linked-unlink",
+    ] {
+        assert_eq!(
+            need(id, json!("noisypigeon")),
+            Need::On(Some("noisypigeon".into()), Role::Operator),
+            "{id}"
+        );
+    }
+    let site = json!({ "instance": "noisypigeon", "site": "blog", "host": "noisypigeon.com" });
+    for id in ["visitor-invite", "visitor-revoke"] {
+        assert_eq!(
+            need(id, site.clone()),
+            Need::On(Some("noisypigeon".into()), Role::Operator)
+        );
+    }
+    for id in [
+        "secret-set",
+        "token-issue",
+        "land-approve",
+        "model-defaults",
+        "run-stop",
+    ] {
+        assert_eq!(need(id, json!("x")), Need::On(None, Role::Operator), "{id}");
+    }
+    for id in ["approval-approve", "approval-deny"] {
+        assert_eq!(need(id, json!("a1")), Need::Approval);
+    }
+    for id in [
+        "passkey-remove",
+        "invite",
+        "person-admin",
+        "member-set",
+        "app-disconnect",
+    ] {
+        assert_eq!(need(id, json!("x")), Need::Own, "{id}");
+    }
+
+    // Tools from outside: a read with its read arguments needs viewer; with more, or any other
+    // tool, operator; people, passkeys, apps, approvals and the switcher ask their own rules.
+    assert_eq!(
+        tool_need(
+            "sites",
+            "site_releases",
+            &json!({ "instance": "noisypigeon" })
+        ),
+        Some(Role::Viewer)
+    );
+    assert_eq!(
+        tool_need(
+            "sites",
+            "site_deploy",
+            &json!({ "instance": "noisypigeon" })
+        ),
+        Some(Role::Operator)
+    );
+    assert_eq!(
+        tool_need("ai_agents", "ai_agents_config", &json!({})),
+        Some(Role::Viewer)
+    );
+    assert_eq!(
+        tool_need(
+            "ai_agents",
+            "ai_agents_config",
+            &json!({ "max_live_runs": 2 })
+        ),
+        Some(Role::Operator),
+        "a read that also sets is a write"
+    );
+    assert_eq!(
+        tool_need("land", "land", &json!({ "branch": "claude/x" })),
+        Some(Role::Operator)
+    );
+    for (cap, tool) in [
+        ("users", "instance_member_set"),
+        ("users", "users_whoami"),
+        ("approvals", "approvals_list"),
+        ("passkeys", "passkeys_remove"),
+        ("dispatch", "call"),
+        ("instances", "instances_list"),
+        ("instances", "console_manifest"),
+    ] {
+        assert_eq!(tool_need(cap, tool, &json!({})), None, "{tool}");
+    }
+    // The console's own reads: viewer on their instance, or home; the whole inbox filters.
+    assert_eq!(
+        app_read_instance("app_site_hosts", &json!({ "instance": "noisypigeon" })),
+        Some(Some("noisypigeon"))
+    );
+    assert_eq!(app_read_instance("app_people", &json!({})), Some(None));
+    assert_eq!(app_read_instance("app_inbox", &json!({})), None);
+    assert_eq!(
+        app_read_instance("app_inbox", &json!({ "instance": "sandbox" })),
+        Some(Some("sandbox"))
+    );
+    assert_eq!(
+        app_read_instance("site_releases", &json!({ "instance": "x" })),
+        None
+    );
+
+    // The switcher shows only the person's instances; an admin sees all.
+    assert_eq!(viewer.visible(instances), ["noisypigeon"]);
+    assert_eq!(operator.visible(instances), ["noisypigeon", "pigeon.dev"]);
+    assert_eq!(admin.visible(instances), instances);
+    // Access › People: each person's roles on the instances the one asking may see.
+    let people = vec![
+        json!({ "id": "willow", "admin": true }),
+        json!({ "id": "kai", "admin": false }),
+        json!({ "id": "sam", "admin": false }),
+    ];
+    let rows = [
+        json!({ "instance": "noisypigeon", "person_id": "kai", "role": "operator" }),
+        json!({ "instance": "pigeon.dev", "person_id": "kai", "role": "viewer" }),
+        json!({ "instance": "noisypigeon", "person_id": "sam", "role": "viewer" }),
+        json!({ "instance": "sandbox", "person_id": "sam", "role": "owner" }),
+    ];
+    let (seen, people) = with_roles(&viewer, people, &rows);
+    assert_eq!(seen, ["noisypigeon"]);
+    assert_eq!(
+        people[0]["roles"],
+        json!({ "noisypigeon": "owner" }),
+        "an admin"
+    );
+    assert_eq!(people[1]["roles"], json!({ "noisypigeon": "operator" }));
+    assert_eq!(
+        people[2]["roles"],
+        json!({ "noisypigeon": "viewer" }),
+        "sandbox is not shown to a viewer of noisypigeon only"
+    );
+
+    // member-set: the console's only, bound to the instance, the person and the role.
+    let a = action("member-set").unwrap();
+    assert!(!a.by_bearer);
+    assert_eq!(a.handler, Handler::Capability("users"));
+    assert_eq!(
+        a.change(&json!({ "person": "u_sam", "role": "viewer" }), Step::Begin),
+        Ok(json!({ "person": "u_sam", "role": "viewer" }))
+    );
+    assert!(
+        a.change(&json!({ "person": "u_sam", "role": "admin" }), Step::Begin)
+            .is_err()
+    );
+    assert!(a.change(&json!({ "role": "viewer" }), Step::Begin).is_err());
+    assert_ne!(
+        bound_purpose(
+            "member-set",
+            "willow",
+            json!("noisypigeon"),
+            json!({ "person": "u_sam", "role": "viewer" }),
+            Step::Begin
+        ),
+        bound_purpose(
+            "member-set",
+            "willow",
+            json!("noisypigeon"),
+            json!({ "person": "u_sam", "role": "owner" }),
+            Step::Begin
+        ),
+    );
+
+    // An agent's instance_member_set, waiting for the person's passkey, in plain words.
+    use pigeon_capabilities::approvals::plain_call;
+    assert_eq!(
+        plain_call(
+            "instance_member_set",
+            &json!({ "instance": "sandbox", "person": "u_sam", "role": "operator" }),
+            &Value::Null
+        ),
+        "Make u_sam operator on instance sandbox"
+    );
+    assert_eq!(
+        plain_call(
+            "instance_member_set",
+            &json!({ "instance": "sandbox", "person": "u_sam", "role": "none" }),
+            &Value::Null
+        ),
+        "Remove u_sam from instance sandbox"
+    );
+
+    // Acting for a person: an app or agent is checked as the person it acts for, by bearer or
+    // MCP alike; one acting for no one is not a person, so membership does not ask about it
+    // (the platform's own automation, as before).
+    let user = |id: &str, kind: &str| User {
+        id: id.into(),
+        kind: kind.into(),
+        name: id.into(),
+        created_at: 0,
+    };
+    let app = Caller {
+        user: user("ios", "service"),
+        acting_for: Some(user("sam", "standard")),
+        run: None,
+    };
+    let person = person_of(&app).unwrap();
+    assert_eq!(person.id, viewer.person);
+    assert!(viewer.check(Some("noisypigeon"), Role::Operator).is_err());
+    let agent = Caller {
+        user: user("agent", "service"),
+        acting_for: Some(user("kai", "standard")),
+        run: Some("r1".into()),
+    };
+    assert_eq!(person_of(&agent).unwrap().id, operator.person);
+    let loose = Caller {
+        user: user("lander", "service"),
+        acting_for: None,
+        run: None,
+    };
+    assert!(person_of(&loose).is_none());
+}
+
 #[test]
 fn console_write_binds_the_exact_change_caller_and_action() {
     let release = format!("release-{}", "a".repeat(43));

@@ -434,8 +434,18 @@ impl Linked {
 
     /// Starts linking `instance`: its record must be a linked one; answers Cloudflare's consent
     /// URL with a state that only this callback, within ten minutes, will take.
-    async fn begin(&self, env: &Env, body: &Value, person: &str) -> Result<Value> {
+    async fn begin(&self, env: &Env, body: &Value, person: &crate::users::User) -> Result<Value> {
         let instance = arg(body, "instance")?;
+        // Linking an account is a write to the instance: operator or above on it
+        // (docs/plans/membership.md).
+        crate::membership::require(
+            env,
+            person,
+            Some(instance),
+            crate::membership::Role::Operator,
+        )
+        .await?;
+        let person = person.name.as_str();
         let record = instances::one(env, instance)
             .await?
             .ok_or_else(|| bad("no such instance"))?;
@@ -545,7 +555,7 @@ impl Linked {
         };
         let body: Value = req.json().await.unwrap_or(Value::Null);
         let answer = match path.as_str() {
-            "/linked/begin" => self.begin(cx.env, &body, &person.name).await, // route: session
+            "/linked/begin" => self.begin(cx.env, &body, &person).await, // route: session
             _ => return Response::error("not found", 404),
         };
         let headers = Headers::new();

@@ -24,7 +24,12 @@
           "created_at": 1777720000000,
           "last_used_at": 1793876800000
         }
-      ]
+      ],
+      "roles": {
+        "docs": "owner",
+        "notes": "owner",
+        "home": "owner"
+      }
     },
     {
       "id": "u_sam",
@@ -40,7 +45,11 @@
           "created_at": 1781176000000,
           "last_used_at": 1794913600000
         }
-      ]
+      ],
+      "roles": {
+        "docs": "operator",
+        "home": "viewer"
+      }
     },
     {
       "id": "u_kai",
@@ -63,7 +72,10 @@
           "created_at": 1788260800000,
           "last_used_at": null
         }
-      ]
+      ],
+      "roles": {
+        "notes": "viewer"
+      }
     }
   ],
   "apps": [
@@ -99,5 +111,15 @@
       "tokens": 0,
       "kind": "app"
     }
+  ],
+  "instances": [
+    "docs",
+    "home",
+    "notes"
+  ],
+  "manage": [
+    "docs",
+    "home",
+    "notes"
   ]
 }

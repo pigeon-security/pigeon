@@ -112,6 +112,21 @@ pub async fn current_args(env: &Env, args: &Value) -> Result<Option<Value>> {
     rename::current_args(&renaming::Live { env }, args).await
 }
 
+/// `instances_list`: the instances the person the caller is or acts for may see (an admin: all;
+/// docs/plans/membership.md), so the console's and the iOS app's switcher shows only theirs. A
+/// caller acting for no one (the platform's own automation) sees all, as before.
+async fn listed(cx: &Context<'_>) -> Result<Vec<Instance>> {
+    let everyone = all(cx.env).await?;
+    let Some(person) = cx.caller.and_then(crate::users::person_of) else {
+        return Ok(everyone);
+    };
+    let access = crate::membership::access(cx.env, &person.id).await?;
+    Ok(everyone
+        .into_iter()
+        .filter(|i| access.role(&i.id).is_some())
+        .collect())
+}
+
 async fn ids(env: &Env) -> Result<Vec<String>> {
     match directory(env, "setting.get", json!({ "key": INDEX })).await? {
         Value::String(text) => Ok(serde_json::from_str(&text)?),
@@ -252,6 +267,14 @@ impl Instances {
             index.push(record.id.clone());
             index.sort();
             put(cx.env, INDEX, &serde_json::to_string(&index)?).await?;
+            // The person who made a new instance is its first owner.
+            crate::membership::grant(
+                cx.env,
+                &person.id,
+                Some(&record.id),
+                crate::membership::Role::Owner,
+            )
+            .await?;
         }
         Ok(json!({
             "message": format!("{} is at version {}, approved by {}.", record.id, record.version, person.name)
@@ -1116,7 +1139,7 @@ impl Capability for Instances {
     fn call<'a>(&'a self, cx: &'a Context<'a>, tool: &'a str, args: &'a Value) -> Call<'a> {
         Box::pin(async move {
             match tool {
-                "instances_list" => Ok(to_value(all(cx.env).await?)),
+                "instances_list" => Ok(to_value(listed(cx).await?)),
                 manifest::TOOL => manifest::console_manifest(cx, args).await,
                 "instance_propose" => self.propose(cx, args).await,
                 "instance_plan" => self.plan(cx, args).await,
