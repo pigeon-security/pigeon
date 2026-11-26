@@ -572,10 +572,11 @@ fn core_signs_each_bound_workers_calls_with_that_workers_key() {
     }
 }
 
-/// `workers_setup` makes exactly the caller keys the store lacks, and keeps the rest.
+/// `workers_setup` makes exactly the caller keys and the site key the store lacks, and keeps the
+/// rest.
 #[test]
 fn workers_setup_plans_only_missing_caller_keys() {
-    use pigeon_capabilities::split::{caller_key_names, keys_to_make};
+    use pigeon_capabilities::split::{caller_key_names, keys_to_make, setup_key_names};
 
     assert_eq!(
         caller_key_names(),
@@ -589,7 +590,12 @@ fn workers_setup_plans_only_missing_caller_keys() {
             "CALLER_KEY_CLOUD_GATEWAY",
         ]
     );
-    // Today's store: only the shared key, among unrelated secrets.
+    let mut all = caller_key_names();
+    all.push(pigeon_core::site_auth::SITE_KEY);
+    assert_eq!(setup_key_names(), all);
+    // Today's store: every caller key, no site key yet (docs/plans/caller-keys.md, step 4).
+    assert_eq!(keys_to_make(&caller_key_names()), ["SITE_KEY"]);
+    // Only the shared key, among unrelated secrets.
     assert_eq!(
         keys_to_make(&["CALLER_KEY", "GITHUB_APP_KEY"]),
         [
@@ -599,10 +605,11 @@ fn workers_setup_plans_only_missing_caller_keys() {
             "CALLER_KEY_PROXY",
             "CALLER_KEY_AI_AGENTS",
             "CALLER_KEY_CLOUD_GATEWAY",
+            "SITE_KEY",
         ]
     );
     assert_eq!(
-        keys_to_make(&["CALLER_KEY_SITES", "CALLER_KEY_PROXY"]),
+        keys_to_make(&["CALLER_KEY_SITES", "CALLER_KEY_PROXY", "SITE_KEY"]),
         [
             "CALLER_KEY",
             "CALLER_KEY_CI_GATEWAY",
@@ -611,7 +618,7 @@ fn workers_setup_plans_only_missing_caller_keys() {
             "CALLER_KEY_CLOUD_GATEWAY",
         ]
     );
-    assert!(keys_to_make(&caller_key_names()).is_empty());
+    assert!(keys_to_make(&setup_key_names()).is_empty());
 }
 
 /// Core's `dispatch` must see the bound Workers' tools (`models_submit` is the model gateway's),

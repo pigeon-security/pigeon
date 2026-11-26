@@ -85,6 +85,12 @@ pub const ORIGIN_PROTECTED: &str = "X-Pigeon-Origin-Protected";
 /// Reserved upstream-only readiness endpoint.
 pub const ORIGIN_CHECK: &str = "/_pigeon/origin-check";
 
+/// The Secrets Store secret, and the binding name, that protected sites' origin keys
+/// ([`origin_key`]) and visitor session keys ([`session_key`]) are derived from
+/// (docs/plans/caller-keys.md, step 4). Core (instance apply) and pigeon-sites bind it, and no
+/// other Worker: both must derive from the same key. Made by core's `workers_setup`.
+pub const SITE_KEY: &str = "SITE_KEY";
+
 /// Derive a per-site upstream credential without sharing the platform key with the origin.
 pub fn origin_key(
     caller_key: &[u8],

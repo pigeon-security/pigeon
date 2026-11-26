@@ -24,6 +24,7 @@ use pigeon_contract::{
 };
 use pigeon_core::mcp::Tool;
 use pigeon_core::secrets_store::{self, Writer};
+use pigeon_core::site_auth::SITE_KEY;
 use serde_json::{Value, json};
 use worker::{Env, Error, Request, Response, Result};
 
@@ -1088,18 +1089,27 @@ pub fn caller_key_names() -> Vec<&'static str> {
         .collect()
 }
 
-/// The caller keys `workers_setup` makes, given the secrets the store already holds: each of
-/// [`caller_key_names`] not in `existing`, in that order. An existing key is never remade.
+/// Every key `workers_setup` keeps in the Secrets Store: the caller keys
+/// ([`caller_key_names`]), then [`SITE_KEY`], which protected sites' origin and visitor
+/// session keys are derived from (docs/plans/caller-keys.md, step 4).
+pub fn setup_key_names() -> Vec<&'static str> {
+    let mut names = caller_key_names();
+    names.push(SITE_KEY);
+    names
+}
+
+/// The keys `workers_setup` makes, given the secrets the store already holds: each of
+/// [`setup_key_names`] not in `existing`, in that order. An existing key is never remade.
 /// Pure.
 pub fn keys_to_make(existing: &[&str]) -> Vec<&'static str> {
-    caller_key_names()
+    setup_key_names()
         .into_iter()
         .filter(|k| !existing.contains(k))
         .collect()
 }
 
 impl Split {
-    /// Makes each caller key ([`caller_key_names`]) that is not in the Secrets Store, readable
+    /// Makes each key ([`setup_key_names`]) that is not in the Secrets Store, readable
     /// by Workers. An existing key is kept: replacing it would refuse every call in flight. No
     /// key's value is ever answered or logged.
     async fn setup(&self, cx: &Context<'_>) -> Result<Value> {
@@ -1113,6 +1123,10 @@ impl Split {
                 let comment = if *name == CALLER_KEY {
                     "signs the caller core forwards to capability Workers, by workers_setup"
                         .to_string()
+                } else if *name == SITE_KEY {
+                    "SITE_KEY: derives protected sites' origin and visitor session keys; \
+                     bound by core and pigeon-sites only, by workers_setup"
+                        .to_string()
                 } else {
                     format!("{name}: one capability Worker's own caller key, by workers_setup")
                 };
@@ -1124,7 +1138,7 @@ impl Split {
         }
         .await;
         let made = writer.finish(made).await?;
-        let keys: serde_json::Map<String, Value> = caller_key_names()
+        let keys: serde_json::Map<String, Value> = setup_key_names()
             .into_iter()
             .map(|k| {
                 let state = if made.contains(&k) {
@@ -1139,8 +1153,9 @@ impl Split {
             "caller_key": keys[CALLER_KEY],
             "keys": keys,
             "next": "bind CALLER_KEY in each platform Worker's wrangler.toml; the per-Worker \
-                     CALLER_KEY_* keys are bound in step 2 of docs/plans/caller-keys.md (a \
-                     binding to a missing secret fails the deploy, so it lands after this)",
+                     CALLER_KEY_* keys are bound in step 2 of docs/plans/caller-keys.md, and \
+                     SITE_KEY by core and pigeon-sites in its step 4 (a binding to a missing \
+                     secret fails the deploy, so it lands after this)",
         }))
     }
 }
@@ -1163,8 +1178,9 @@ impl Capability for Split {
                 "workers_setup",
                 "Make the keys that sign the caller core forwards to its capability Workers, \
                  in the Secrets Store: the shared CALLER_KEY and each capability Worker's own \
-                 CALLER_KEY_<WORKER>, each when it is not there; an existing key is kept and no \
-                 value is shown. Run before a capability Worker binds a key.",
+                 CALLER_KEY_<WORKER>, and SITE_KEY (protected sites' keys are derived from it), \
+                 each when it is not there; an existing key is kept and no value is shown. Run \
+                 before a Worker binds a key.",
             ),
             Tool::bare(
                 "manifest_refresh",
