@@ -458,3 +458,21 @@ credentials in that instance's account. Do not silently use a home bucket.
 Preserve sealed diagnostic event exports after teardown. Ingest per-file
 audit, transfer and scratch costs, and additional providers can reuse the job
 model after the health-check canary.
+
+## Droplet job history and structured health reports
+
+Each instance retains up to 30 Droplet health jobs for 180 days after its
+last update, with up to 32 distinct stage and outcome pairs per job. The
+Directory commits each approved active-job transition and its public
+history projection in one SQLite write. Older active records remain
+readable after the rollout. Job reads authorize the instance through the
+Jobs capability and read the Directory only.
+
+The bootstrap reports fixed cloud-init, package install, image build,
+and version-check stages using its existing job-only bearer. The
+Directory records requested creation, uncertain outcomes, cancellation,
+deadline handling, and confirmed cleanup separately. The job's stage is
+distinct from the provider lifecycle. No shell output, provisioning
+credential, callback bearer, or response body is collected. The payload
+still requires the exact expected version to pass. Legacy callback
+messages remain accepted until jobs from a previous revision finish.

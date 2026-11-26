@@ -424,6 +424,50 @@ impl Directory {
         Ok(())
     }
 
+    fn droplet_history(&self, instance: &str, time: i64) -> Result<Vec<Value>> {
+        use crate::digitalocean::health;
+        let jobs = self
+            .setting_value(&health::history_key(instance), time)?
+            .map(|saved| serde_json::from_str(&saved))
+            .transpose()?;
+        if let Some(jobs) = jobs {
+            return Ok(jobs);
+        }
+        // Bring forward the prior deployment's single job on the first read or write.
+        let prior = self
+            .setting_value(&health::job_key(instance), time)?
+            .map(|saved| serde_json::from_str::<health::Job>(&saved))
+            .transpose()?;
+        Ok(prior
+            .into_iter()
+            .map(|job| job.public_with_events())
+            .collect())
+    }
+
+    fn keep_droplet_job(&self, instance: &str, value: &str, time: i64) -> Result<()> {
+        use crate::digitalocean::{self, health};
+        let job: health::Job = serde_json::from_str(value)?;
+        if job.instance != instance {
+            return Err(bad("the Droplet job does not match the selected instance"));
+        }
+        let history = self.droplet_history(instance, time)?;
+        let history = health::update_history(history, &job);
+        // The object handles this synchronously. Commit the active job and its safe
+        // projection in one SQL statement so a failed write advances neither.
+        self.db.exec(
+            "INSERT OR REPLACE INTO settings (key, value, expires_at) VALUES (?, ?, ?), (?, ?, ?)",
+            vec![
+                health::job_key(instance).as_str().into(),
+                value.into(),
+                (time + digitalocean::TOKEN_KEPT_MS).into(),
+                health::history_key(instance).as_str().into(),
+                serde_json::to_string(&history)?.as_str().into(),
+                (time + health::HISTORY_TTL_MS).into(),
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Applies approved instance draft `r`: the record it holds becomes the instance's next
     /// version, unless the instance moved on since the draft was made, which expires it.
     fn apply_draft(&self, r: &mut approval::Record, t: i64, person_id: &str) -> Result<()> {
@@ -1312,6 +1356,41 @@ impl Directory {
                 )?;
                 Value::Null
             }
+            "digitalocean.health.history" => {
+                let instance = s("instance");
+                let mut history = self.droplet_history(instance, t)?;
+                if let Some(id) = a["id"].as_str() {
+                    let job = history
+                        .into_iter()
+                        .find(|job| job["id"].as_str() == Some(id));
+                    json!({"instance":instance,"job":job})
+                } else {
+                    for job in &mut history {
+                        if let Some(fields) = job.as_object_mut() {
+                            fields.remove("events");
+                        }
+                    }
+                    json!({"instance":instance,"jobs":history})
+                }
+            }
+            "digitalocean.health.replace" => {
+                use crate::digitalocean::health;
+                let instance = s("instance");
+                let previous = a["previous"]
+                    .as_str()
+                    .ok_or_else(|| bad("expected previous Droplet job"))?;
+                let value = a["value"]
+                    .as_str()
+                    .ok_or_else(|| bad("expected new Droplet job"))?;
+                let matches = self
+                    .setting_value(&health::job_key(instance), t)?
+                    .as_deref()
+                    == Some(previous);
+                if matches {
+                    self.keep_droplet_job(instance, value, t)?;
+                }
+                json!(matches)
+            }
             "digitalocean.health.pending" => {
                 #[derive(Deserialize)]
                 struct Row {
@@ -1376,7 +1455,8 @@ impl Directory {
                                 "the provisioning credential changed; review the plan again",
                             ));
                         }
-                        key
+                        self.keep_droplet_job(id, value, t)?;
+                        return Ok(Value::Null);
                     }
                     _ => digitalocean::token_key(id),
                 };

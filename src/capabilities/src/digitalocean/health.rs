@@ -14,6 +14,8 @@ use crate::instances::record::Instance;
 use crate::users::directory;
 
 pub const STATUS: &str = "digitalocean_droplet_status";
+pub const JOBS: &str = "digitalocean_droplet_jobs";
+pub const JOB: &str = "digitalocean_droplet_job";
 pub const SET_TOKEN: &str = "digitalocean-droplet-token-set";
 pub const START: &str = "digitalocean-droplet-start";
 pub const CANCEL: &str = "digitalocean-droplet-cancel";
@@ -24,6 +26,15 @@ const REPOSITORY: &str = "https://github.com/pigeon-security/pigeon.git";
 const EXPECTED_VERSION: &str = "pigeon-ingest-runner 0.1.0";
 const MINUTE: u64 = 60_000;
 const MAX_MINUTES: u64 = 30;
+const ESTIMATED_USD: f64 = 0.02;
+const MAX_EVENTS: usize = 32;
+
+pub(crate) const MAX_JOBS: usize = 30;
+pub(crate) const HISTORY_TTL_MS: i64 = 180 * 24 * 60 * 60 * 1000;
+
+pub(crate) fn history_key(instance: &str) -> String {
+    format!("digitalocean-droplet-history:{instance}")
+}
 
 pub fn enabled(record: &Instance) -> bool {
     team(record).is_some() && record.capabilities[super::NAME].droplet_health
@@ -51,7 +62,7 @@ pub fn plan() -> Value {
         "expected_version": EXPECTED_VERSION,
         "callback": CALLBACK,
         "max_minutes": MAX_MINUTES,
-        "estimated_usd": 0.02,
+        "estimated_usd": ESTIMATED_USD,
         "cleanup": "delete the owned Droplet after its result or deadline and confirm absence"
     });
     body["bootstrap_policy"] = json!(oauth::hash(include_str!("health.rs")));
@@ -75,10 +86,42 @@ enum State {
     Rejected,
 }
 
+#[derive(Clone, Copy, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum Stage {
+    DropletCreate,
+    CloudInit,
+    PackageInstall,
+    ImageBuild,
+    VersionCheck,
+    Cleanup,
+}
+
+#[derive(Clone, Copy, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum Outcome {
+    Requested,
+    Started,
+    Succeeded,
+    Failed,
+    Uncertain,
+    Retrying,
+    Cancelled,
+    TimedOut,
+    Confirmed,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+struct Event {
+    at_ms: u64,
+    stage: Stage,
+    outcome: Outcome,
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 pub(crate) struct Job {
-    id: String,
-    instance: String,
+    pub(crate) id: String,
+    pub(crate) instance: String,
     state: State,
     health: String,
     started_ms: u64,
@@ -86,10 +129,16 @@ pub(crate) struct Job {
     next_ms: u64,
     lease_until_ms: u64,
     expected_version: String,
+    #[serde(default)]
+    created_ms: Option<u64>,
+    #[serde(default)]
+    confirmed_delete_ms: Option<u64>,
     droplet: Option<u64>,
     credential: Option<Credential>,
     callback_hash: Option<String>,
     error: Option<String>,
+    #[serde(default)]
+    events: Vec<Event>,
 }
 
 impl Job {
@@ -98,11 +147,44 @@ impl Job {
     }
 
     fn public(&self) -> Value {
+        let provider_state = match self.state {
+            State::Creating if self.error.is_some() => "uncertain",
+            State::Creating => "creating",
+            State::Waiting => "waiting",
+            State::Cleanup => "cleanup",
+            State::Gone => "absent",
+            State::Rejected => "rejected",
+        };
         json!({
             "id": self.id, "state": self.state, "health": self.health,
             "started_ms": self.started_ms, "deadline_ms": self.deadline_ms,
-            "error": self.error,
+            "error": self.error, "estimated_usd": ESTIMATED_USD,
+            "provider_state": provider_state,
+            "stage": self.events.iter().map(|event| event.stage).max(),
+            "created_ms": self.created_ms,
+            "confirmed_delete_ms": self.confirmed_delete_ms,
         })
+    }
+
+    pub(crate) fn public_with_events(&self) -> Value {
+        let mut summary = self.public();
+        summary["events"] = json!(self.events);
+        summary
+    }
+
+    fn record(&mut self, stage: Stage, outcome: Outcome, time: u64) {
+        if self.events.len() < MAX_EVENTS
+            && !self
+                .events
+                .iter()
+                .any(|event| event.stage == stage && event.outcome == outcome)
+        {
+            self.events.push(Event {
+                at_ms: time,
+                stage,
+                outcome,
+            });
+        }
     }
 
     fn name(&self) -> String {
@@ -125,10 +207,18 @@ impl Job {
         self.callback_hash = None;
         self.state = State::Cleanup;
         self.next_ms = time;
+        self.record(Stage::Cleanup, Outcome::Cancelled, time);
         true
     }
 
-    fn callback(&mut self, token: &str, event: &str, version: Option<&str>, time: u64) -> bool {
+    fn callback(
+        &mut self,
+        token: &str,
+        event: &str,
+        stage: Option<Stage>,
+        version: Option<&str>,
+        time: u64,
+    ) -> bool {
         let supplied = oauth::hash(token);
         if self.terminal()
             || time >= self.deadline_ms
@@ -139,24 +229,69 @@ impl Job {
         {
             return false;
         }
+        let stage = match (stage, event) {
+            (
+                Some(
+                    stage @ (Stage::CloudInit
+                    | Stage::PackageInstall
+                    | Stage::ImageBuild
+                    | Stage::VersionCheck),
+                ),
+                _,
+            ) => stage,
+            // Accept legacy reports from an already-created Droplet during deployment.
+            (None, "started") => Stage::CloudInit,
+            (None, "result") => Stage::VersionCheck,
+            _ => return false,
+        };
+        // Retries and late in-flight messages cannot move a job back to an older stage.
+        if self.events.iter().any(|event| event.stage > stage) {
+            return true;
+        }
+        if self
+            .events
+            .iter()
+            .any(|event| event.stage == stage && event.outcome == Outcome::Succeeded)
+        {
+            return true;
+        }
         match event {
-            "started" if self.health == "pending" => self.health = "started".into(),
-            "result" if self.health == "pending" || self.health == "started" => {
-                self.health = if version == Some(self.expected_version.as_str()) {
-                    "passed"
+            "started" | "succeeded" if stage != Stage::VersionCheck || event == "started" => {
+                let outcome = if event == "started" {
+                    Outcome::Started
                 } else {
-                    "failed"
-                }
-                .into();
+                    Outcome::Succeeded
+                };
+                self.health = "started".into();
+                self.record(stage, outcome, time);
+            }
+            "failed" | "result" if event != "result" || stage == Stage::VersionCheck => {
+                let passed = event == "result" && version == Some(self.expected_version.as_str());
+                self.health = if passed { "passed" } else { "failed" }.into();
+                self.record(
+                    stage,
+                    if passed {
+                        Outcome::Succeeded
+                    } else {
+                        Outcome::Failed
+                    },
+                    time,
+                );
                 self.callback_hash = None;
                 self.state = State::Cleanup;
                 self.next_ms = time;
             }
-            "started" if self.health == "started" => {}
             _ => return false,
         }
         true
     }
+}
+
+pub(crate) fn update_history(mut history: Vec<Value>, job: &Job) -> Vec<Value> {
+    history.retain(|row| row["id"].as_str() != Some(job.id.as_str()));
+    history.insert(0, job.public_with_events());
+    history.truncate(MAX_JOBS);
+    history
 }
 
 fn now() -> u64 {
@@ -183,14 +318,38 @@ async fn setting<T: serde::de::DeserializeOwned>(
 async fn replace(env: &Env, prior: &str, job: &Job) -> Result<bool> {
     let answer = directory(
         env,
-        "setting.replace",
+        "digitalocean.health.replace",
         json!({
-            "key": job_key(&job.instance), "previous": prior, "value": serde_json::to_string(job)?,
-            "ttl_ms": super::TOKEN_KEPT_MS,
+            "instance": job.instance, "previous": prior, "value": serde_json::to_string(job)?,
         }),
     )
     .await?;
     Ok(answer == true)
+}
+
+pub(super) async fn jobs(env: &Env, instance: &str) -> Result<Value> {
+    directory(
+        env,
+        "digitalocean.health.history",
+        json!({"instance":instance}),
+    )
+    .await
+}
+
+pub(super) async fn job(env: &Env, instance: &str, id: &str) -> Result<Value> {
+    if id.len() != 32 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(bad("invalid Droplet job ID"));
+    }
+    let answer = directory(
+        env,
+        "digitalocean.health.history",
+        json!({"instance":instance, "id":id}),
+    )
+    .await?;
+    if answer["job"].is_null() {
+        return Err(bad("no such Droplet job on this instance"));
+    }
+    Ok(answer)
 }
 
 pub(super) async fn status(env: &Env, record: &Instance) -> Result<Value> {
@@ -278,15 +437,15 @@ async fn open(env: &Env, instance: &str, credential: &Credential) -> Result<Stri
 }
 
 fn script(job: &Job, token: &str) -> String {
-    let json_event = |event: &str, version: Option<&str>| {
+    let json_event = |event: &str, stage: Stage, version: Option<&str>| {
         json!({
-            "instance": job.instance, "id": job.id, "event": event, "version": version,
+            "instance": job.instance, "id": job.id, "event": event, "stage": stage, "version": version,
         })
         .to_string()
     };
-    let started = json_event("started", None);
-    let passed = json_event("result", Some(&job.expected_version));
-    let failed = json_event("result", None);
+    let started = |stage| json_event("started", stage, None);
+    let succeeded = |stage| json_event("succeeded", stage, None);
+    let failed = |stage| json_event("failed", stage, None);
     format!(
         r#"#!/bin/bash
 set -eu
@@ -294,15 +453,38 @@ report() {{
   curl --silent --fail --max-time 10 --retry 2 --retry-all-errors -X POST '{CALLBACK}' \
     -H 'Authorization: Bearer {token}' -H 'Content-Type: application/json' --data "$1" >/dev/null
 }}
-report '{started}' || true
-if timeout 1500 bash -c 'apt-get update -qq && apt-get install -y -qq docker.io git && docker build -f src/ingest-runner/Dockerfile --build-arg PIGEON_COMMIT={COMMIT} -t pigeon-health {REPOSITORY}#{COMMIT}' &&
-   output=$(timeout 60 docker run --rm --network none --read-only pigeon-health --version) &&
+report '{cloud_init}' || true
+report '{package_start}' || true
+if ! timeout 420 bash -c 'apt-get update -qq && apt-get install -y -qq docker.io git'; then
+  report '{package_failed}'
+  exit 1
+fi
+report '{package_passed}' || true
+report '{build_start}' || true
+if ! timeout 1080 docker build -f src/ingest-runner/Dockerfile --build-arg PIGEON_COMMIT={COMMIT} -t pigeon-health '{REPOSITORY}#{COMMIT}'; then
+  report '{build_failed}'
+  exit 1
+fi
+report '{build_passed}' || true
+report '{version_start}' || true
+if output=$(timeout 60 docker run --rm --network none --read-only pigeon-health --version) &&
    [ "$output" = '{version}' ]; then
   report '{passed}'
 else
-  report '{failed}'
+  report '{version_failed}'
+  exit 1
 fi
 "#,
+        cloud_init = started(Stage::CloudInit),
+        package_start = started(Stage::PackageInstall),
+        package_passed = succeeded(Stage::PackageInstall),
+        package_failed = failed(Stage::PackageInstall),
+        build_start = started(Stage::ImageBuild),
+        build_passed = succeeded(Stage::ImageBuild),
+        build_failed = failed(Stage::ImageBuild),
+        version_start = started(Stage::VersionCheck),
+        version_failed = failed(Stage::VersionCheck),
+        passed = json_event("result", Stage::VersionCheck, Some(&job.expected_version)),
         version = job.expected_version
     )
 }
@@ -330,11 +512,15 @@ pub(super) async fn start(cx: &Context<'_>, w: &Write<'_>) -> Result<Value> {
         next_ms: at + 2 * MINUTE,
         lease_until_ms: 0,
         expected_version: format!("{EXPECTED_VERSION} {COMMIT}"),
+        created_ms: None,
+        confirmed_delete_ms: None,
         droplet: None,
         credential: Some(credential),
         callback_hash: Some(oauth::hash(&callback)),
         error: None,
+        events: Vec::new(),
     };
+    job.record(Stage::DropletCreate, Outcome::Requested, at);
     let prior = serde_json::to_string(&job)?;
     directory(
         cx.env,
@@ -349,13 +535,21 @@ pub(super) async fn start(cx: &Context<'_>, w: &Write<'_>) -> Result<Value> {
     match result {
         Created::Accepted(id) => {
             job.droplet = Some(id);
+            job.created_ms = Some(job.started_ms);
             job.state = State::Waiting;
+            job.record(Stage::DropletCreate, Outcome::Succeeded, now());
         }
         Created::Rejected(status) => {
-            job.error = Some(format!("DigitalOcean refused the Droplet request (HTTP {status})"));
+            job.error = Some(format!(
+                "DigitalOcean refused the Droplet request (HTTP {status})"
+            ));
+            job.record(Stage::DropletCreate, Outcome::Failed, now());
             job.close(State::Rejected);
         }
-        Created::Unknown => job.error = Some("Droplet creation is uncertain. Pigeon will reconcile the original job without issuing a second create.".into()),
+        Created::Unknown => {
+            job.error = Some("Droplet creation is uncertain. Pigeon will reconcile the original job without issuing a second create.".into());
+            job.record(Stage::DropletCreate, Outcome::Uncertain, now());
+        }
     }
     if !replace(cx.env, &prior, &job).await? {
         return status(cx.env, &record).await;
@@ -416,10 +610,15 @@ pub async fn callback(env: &Env, mut request: Request) -> Result<Response> {
     let Some((prior, mut job)) = setting::<Job>(env, &job_key(instance)).await? else {
         return Response::error("unauthorized", 401);
     };
+    let stage: Option<Stage> = match serde_json::from_value(body["stage"].clone()) {
+        Ok(stage) => stage,
+        Err(_) => return Response::error("invalid health stage", 400),
+    };
     if body["id"].as_str() != Some(job.id.as_str())
         || !job.callback(
             &token,
             body["event"].as_str().unwrap_or_default(),
+            stage,
             body["version"].as_str(),
             now(),
         )
@@ -446,6 +645,8 @@ async fn reap_one(env: &Env, job: &mut Job, time: u64) -> Result<()> {
             return Ok(());
         }
         job.error = None;
+        job.created_ms.get_or_insert(job.started_ms);
+        job.record(Stage::DropletCreate, Outcome::Succeeded, time);
         if job.state == State::Creating {
             job.state = State::Waiting;
         }
@@ -457,11 +658,17 @@ async fn reap_one(env: &Env, job: &mut Job, time: u64) -> Result<()> {
     if matches!(job.health.as_str(), "pending" | "started") {
         job.health = "failed".into();
         job.error = Some("No verified health result before the deadline.".into());
+        job.record(Stage::Cleanup, Outcome::TimedOut, time);
     }
     job.state = State::Cleanup;
+    job.record(Stage::Cleanup, Outcome::Requested, time);
     if let Some(id) = job.droplet {
         match provider::cleanup(&FetchTransport, &pat, &job.name(), id).await? {
-            Removal::Absent => job.close(State::Gone),
+            Removal::Absent => {
+                job.confirmed_delete_ms = Some(time);
+                job.record(Stage::Cleanup, Outcome::Confirmed, time);
+                job.close(State::Gone);
+            }
             Removal::Requested => {}
         }
     }
@@ -483,10 +690,102 @@ pub async fn reap(env: &Env) -> Result<()> {
         }
         job.next_ms = time + MINUTE;
         if reap_one(env, &mut job, time).await.is_err() {
+            job.record(Stage::Cleanup, Outcome::Retrying, time);
             job.error = Some("Could not safely reconcile or delete the Droplet. Pigeon will retry; verify the provider credential and check the team dashboard.".into());
         }
         job.lease_until_ms = 0;
         replace(env, &claim, &job).await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Start from the persisted shape of a job created before diagnostics were added.
+    fn legacy_job(id: &str) -> Job {
+        serde_json::from_value(json!({
+            "id":id, "instance":"example", "state":"waiting", "health":"pending",
+            "started_ms":1, "deadline_ms":100, "next_ms":99, "lease_until_ms":0,
+            "expected_version":"expected-version", "droplet":101,
+            "callback_hash":oauth::hash("test-bearer"),
+            "credential":{"team":"private-team","sealed":"private-ciphertext"}
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn reports_are_ordered_idempotent_and_redacted() {
+        let mut job = legacy_job("one");
+        let token = "test-bearer";
+        assert!(!job.callback("wrong", "started", Some(Stage::ImageBuild), None, 2));
+        assert!(job.callback(token, "started", None, None, 3));
+        assert!(job.callback(token, "started", Some(Stage::ImageBuild), None, 4));
+        assert!(job.callback(token, "started", Some(Stage::ImageBuild), None, 5));
+        assert!(job.callback(token, "failed", Some(Stage::PackageInstall), None, 6));
+        assert_eq!(job.events.len(), 2);
+        assert!(!job.callback(token, "succeeded", Some(Stage::VersionCheck), None, 7));
+        assert!(job.callback(
+            token,
+            "result",
+            Some(Stage::VersionCheck),
+            Some("expected-version"),
+            8
+        ));
+        assert!(!job.callback(token, "started", Some(Stage::VersionCheck), None, 9));
+        assert_eq!(job.public()["health"], "passed");
+        assert_eq!(job.public()["provider_state"], "cleanup");
+        assert_eq!(job.public()["stage"], "version_check");
+        let public = job.public_with_events();
+        assert_eq!(public["events"][2]["outcome"], "succeeded");
+        for name in [
+            "private-team",
+            "private-ciphertext",
+            "callback_hash",
+            "expected_version",
+        ] {
+            assert!(!public.to_string().contains(name));
+        }
+    }
+
+    #[test]
+    fn reports_distinguish_failed_stage_and_cancelled_job() {
+        let mut job = legacy_job("one");
+        assert!(job.callback(
+            "test-bearer",
+            "failed",
+            Some(Stage::PackageInstall),
+            None,
+            4
+        ));
+        assert_eq!(job.public()["health"], "failed");
+        assert_eq!(job.public()["stage"], "package_install");
+        let mut cancelled = legacy_job("two");
+        assert!(cancelled.schedule_cancel("two", 5));
+        assert!(!cancelled.callback("test-bearer", "result", None, Some("expected-version"), 6));
+        assert_eq!(
+            cancelled.public_with_events()["events"][0]["outcome"],
+            "cancelled"
+        );
+    }
+
+    #[test]
+    fn history_keeps_the_latest_jobs_and_updates_in_place() {
+        let mut history = Vec::new();
+        for index in 0..=MAX_JOBS {
+            let job = legacy_job(&index.to_string());
+            history = update_history(history, &job);
+        }
+        assert_eq!(history.len(), MAX_JOBS);
+        assert_eq!(history[0]["id"], MAX_JOBS.to_string());
+        assert_eq!(history.last().unwrap()["id"], "1");
+
+        let mut last = legacy_job(&MAX_JOBS.to_string());
+        last.schedule_cancel(&last.id.clone(), 9);
+        let history = update_history(history, &last);
+        assert_eq!(history.len(), MAX_JOBS);
+        assert_eq!(history[0]["events"][0]["outcome"], "cancelled");
+        assert_eq!(history[1]["id"], (MAX_JOBS - 1).to_string());
+    }
 }
