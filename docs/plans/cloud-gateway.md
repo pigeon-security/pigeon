@@ -437,3 +437,24 @@ Cancellation invalidates further health callbacks and schedules the same
 reconciliation and deletion. Retiring an instance forgets its standing token,
 while the outstanding job retains just the sealed copy it needs to finish.
 Operator resolution for an indefinitely ambiguous response is follow-up work.
+
+## Instance Jobs canary
+
+Jobs is an approved, opt-in instance capability. The first producer is the
+DigitalOcean runner health check. The selected instance's Jobs view contains
+only its own jobs. Read authorization follows the instance membership rules.
+The home instance remains off by default.
+
+Keep a bounded history and stage events through teardown. Runner callbacks
+use the existing job credential and submit allowlisted stages, not arbitrary
+command output. Provider observations use only the bound team's exact job
+resource. Show observed resource state alongside progress and cleanup, and
+label compute amounts as estimates until billing data can be attributed.
+Accrue estimates until absence is confirmed. Retain job records separately
+from provider credentials and do not retain bearer tokens in events.
+
+Private R2 export is instance-owned and must use approved storage and
+credentials in that instance's account. Do not silently use a home bucket.
+Preserve sealed diagnostic event exports after teardown. Ingest per-file
+audit, transfer and scratch costs, and additional providers can reuse the job
+model after the health-check canary.
