@@ -2,8 +2,9 @@
 //! schemas as an allowlist: some tools that list data also change settings when given optional
 //! arguments (`ai_agents_config`, `ai_agents_models`), or clean up as they read
 //! (`ingest_status`), so each read lists the arguments it may take. Every op runs through
-//! `dispatch` as the signed-in person, under the same scope and policy as MCP; the `app_*` ops
-//! are the console's own reads. Nothing here writes: every write, a run's stop, note and
+//! `dispatch` as the signed-in person (or, for the iOS app by bearer, the person its token acts
+//! for, run exactly as that person: [`super::app_person`]), under the same scope and policy as
+//! MCP; the `app_*` ops are the console's own reads. Nothing here writes: every write, a run's stop, note and
 //! extension included, goes through the console's write path (`console::write`).
 
 use serde_json::{Value, json};
@@ -288,7 +289,8 @@ async fn inbox(cx: &Context<'_>, args: &Value) -> Result<Value> {
     Ok(inbox_for(listing, id, home))
 }
 
-/// Called after the console's same-origin JSON and standard-person session checks.
+/// Called after the console's JSON check and its person check: a same-origin request with a
+/// standard person's session, or an app's bearer acting for a standard person.
 pub(super) async fn serve(
     cx: &Context<'_>,
     host: &str,

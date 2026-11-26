@@ -141,105 +141,109 @@ const fn act(
     }
 }
 
-use Handler::{Capability as Cap, Tool};
-
-/// Every write the console makes.
-pub const ACTIONS: &[Action] = &[
-    // The iOS app sets secrets by bearer for the person it acts for (SecretsView).
+/// `a`, which the app may also make by bearer for the person it acts for: the same purpose,
+/// policy gate and passkey as from the console; only how the person is found differs.
+const fn app(a: Action) -> Action {
     Action {
         by_bearer: true,
-        ..act(
-            "secret-set",
-            "Set a secret",
-            Cap("secrets"),
-            false,
-            Target::Secret,
-            Change::Secret,
-        )
-    },
-    act(
+        ..a
+    }
+}
+
+use Handler::{Capability as Cap, Tool};
+
+/// Every write the console makes. Those in [`app`] are also every write the iOS app makes
+/// (docs/plans/console-redesign.md, "Bearer parity"); `land-approval` and the two Apple
+/// signing writes are not in the app, so they stay the console's own.
+pub const ACTIONS: &[Action] = &[
+    app(act(
+        "secret-set",
+        "Set a secret",
+        Cap("secrets"),
+        false,
+        Target::Secret,
+        Change::Secret,
+    )),
+    app(act(
         "token-issue",
         "Issue a proxy token",
         Cap("proxy"),
         false,
         Target::Label,
         Change::Days,
-    ),
-    act(
+    )),
+    app(act(
         "token-revoke",
         "Revoke a proxy token",
         Cap("proxy"),
         true,
         Target::Token,
         Change::Nothing,
-    ),
-    act(
+    )),
+    app(act(
         "linked-unlink",
         "Unlink a Cloudflare account",
         Cap("linked"),
         true,
         Target::Id,
         Change::Nothing,
-    ),
-    act(
+    )),
+    app(act(
         "instance-put",
         "Save an instance record",
         Cap("instances"),
         false,
         Target::Id,
         Change::Record,
-    ),
-    act(
+    )),
+    app(act(
         "visitor-invite",
         "Invite a site visitor",
         Cap("console"),
         false,
         Target::Site,
         Change::Visitor,
-    ),
-    act(
+    )),
+    app(act(
         "visitor-revoke",
         "Remove a site visitor",
         Cap("console"),
         true,
         Target::Site,
         Change::VisitorUser,
-    ),
-    act(
+    )),
+    app(act(
         "passkey-remove",
         "Remove a passkey",
         Cap("console"),
         true,
         Target::Id,
         Change::Nothing,
-    ),
-    act(
+    )),
+    app(act(
         "app-disconnect",
         "Disconnect an app",
         Cap("console"),
         true,
         Target::Id,
         Change::Nothing,
-    ),
-    act(
+    )),
+    app(act(
         "invite",
         "Invite a person",
         Cap("console"),
         false,
         Target::Name,
         Change::Nothing,
-    ),
-    Action {
-        by_bearer: true,
-        ..act(
-            "land-approve",
-            "Approve a landing",
-            Cap("console"),
-            false,
-            Target::Id,
-            Change::Nothing,
-        )
-    },
+    )),
+    app(act(
+        "land-approve",
+        "Approve a landing",
+        Cap("console"),
+        false,
+        Target::Id,
+        Change::Nothing,
+    )),
     act(
         "land-approval",
         "Set whether landings wait for approval",
@@ -248,8 +252,7 @@ pub const ACTIONS: &[Action] = &[
         Target::Switch,
         Change::Nothing,
     ),
-    Action {
-        by_bearer: true,
+    app(Action {
         policy: Policy::Approval,
         ..act(
             "approval-approve",
@@ -259,18 +262,15 @@ pub const ACTIONS: &[Action] = &[
             Target::Id,
             Change::Nothing,
         )
-    },
-    Action {
-        by_bearer: true,
-        ..act(
-            "approval-deny",
-            "Deny a request",
-            Cap("console"),
-            false,
-            Target::Id,
-            Change::Nothing,
-        )
-    },
+    }),
+    app(act(
+        "approval-deny",
+        "Deny a request",
+        Cap("console"),
+        false,
+        Target::Id,
+        Change::Nothing,
+    )),
     // Apple signing (P8): shown in Access › Secrets once APPLE_ASC_KEY is set.
     act(
         "apple-adopt",
@@ -288,62 +288,62 @@ pub const ACTIONS: &[Action] = &[
         Target::Fixed(pigeon_core::apple::BUNDLE_ID),
         Change::Nothing,
     ),
-    act(
+    app(act(
         "model-defaults",
         "Set model defaults",
         Tool("ai_agents_models"),
         false,
         Target::Fixed("models"),
         Change::Models,
-    ),
-    act(
+    )),
+    app(act(
         "agents-config",
         "Set AI agent limits",
         Tool("ai_agents_config"),
         false,
         Target::Fixed("limits"),
         Change::Caps,
-    ),
-    act(
+    )),
+    app(act(
         "site-rollback",
         "Roll a site back to a release",
         Tool("site_rollback"),
         true,
         Target::Id,
         Change::Release,
-    ),
-    act(
+    )),
+    app(act(
         "site-deploy",
         "Deploy a site",
         Tool("site_deploy"),
         false,
         Target::Id,
         Change::Rev,
-    ),
-    act(
+    )),
+    app(act(
         "run-stop",
         "Stop a run",
         Tool("ai_agents_stop"),
         true,
         Target::Id,
         Change::Nothing,
-    ),
-    act(
+    )),
+    app(act(
         "run-note",
         "Send a run a note",
         Tool("ai_agents_note"),
         false,
         Target::Id,
         Change::Note,
-    ),
-    act(
+    )),
+    app(act(
         "run-extend",
         "Extend a run's budget",
         Tool("ai_agents_extend"),
         false,
         Target::Id,
         Change::Extend,
-    ),
+    )),
 ];
 
 /// The action named `id`.

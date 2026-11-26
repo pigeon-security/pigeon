@@ -208,6 +208,43 @@ phase 4 needs: `approvals_list` (Inbox), `storage_list_buckets`/`_objects`/`_get
 binds to the selected instance through the instance's `Scope` (`bind`), as on the instance MCP
 endpoint.
 
+### Bearer parity (the iOS app)
+
+The person decided the rebuilt iOS app (the approved iPhone mock-up, its Spec's "Ops each
+screen uses") uses the same reads, the same write path and the same passkey binding as the
+web. The app holds an OAuth access token acting for a person, not a session cookie.
+
+- **Reads:** `POST /app/op` with `Authorization: Bearer <token>`,
+  `Content-Type: application/json`, body `{ "name", "args" }`. The person is the one the
+  token acts for (`oauth::caller` → `console::app_person`: `acting_for`, a standard user only;
+  an app acting for no one gets 403, an unknown or expired token 401). The op then runs exactly
+  as that person's session would: the one `READS` allowlist with its exact arguments, the
+  `INSTANCE_OPS` binding to the instance's approved record (`bind_global`), `dispatch` as the
+  person, the 10-second timeout. Answers `200 {data}`, `403` for an op or argument not
+  allowed, `400 {error}`, `504 {error, retry: true}`. No op or argument was added; the app's
+  `ios_releases` is not a console read and stays on MCP. `instances_list` and
+  `console_manifest` (`{instance}`) are reachable this way.
+- **Writes:** `POST /console/write/<action>/{begin,finish}` with the same bearer and body
+  `{target, change}` (finish adds the passkey's answer, as from the web). Allowed by bearer
+  (`write::app`): `secret-set`, `token-issue`, `token-revoke`, `linked-unlink`,
+  `instance-put`, `visitor-invite`, `visitor-revoke`, `passkey-remove`, `app-disconnect`,
+  `invite`, `land-approve`, `approval-approve`, `approval-deny`, `model-defaults`,
+  `agents-config`, `site-rollback`, `site-deploy`, `run-stop`, `run-note`, `run-extend`. The
+  purpose is the session path's: the person's id, the action, the target and the change's
+  digest (and the approval's own purpose for `approval-approve`), answered only by that
+  person's passkey, once, within the challenge's lifetime; tool writes meet the person's
+  `call_tool` policy first. Not by bearer: `land-approval`, `apple-adopt`, `apple-identity`
+  (the app does not make them); they answer 403 to a bearer.
+- **CSRF:** a bearer counts only on `/app/op` and the write routes (`Post::takes_bearer`);
+  there the cookie is not read at all, so a bad bearer is refused and never falls back to the
+  session. Only then is the Origin check skipped (`session::admitted`): a browser never sends
+  an `Authorization` header by itself and the console answers no CORS preflight. A request
+  without a bearer still needs `Origin: https://<host>`, and every POST still needs JSON.
+  Signing in and out never take a bearer.
+
+Smoke: `console_app_bearer_parity`, `console_write_actions_each_have_a_handler_and_policy`,
+`platform_approvals_list_and_bearer_writes`.
+
 ## Phases
 
 1. **Manifest** (`claude/console-manifest`). Views beside tool registrations; areas replace the
@@ -384,6 +421,10 @@ the first console answers 404.
   `/app/visitor.js`), `GET /console/api/section/credentials` and `POST /secrets/put/begin`,
   `/tokens/issue/begin`, `/console/site-access/list` answer 404; `instances_tabs` is not in the
   MCP tool list.
+- 2026-11-26: bearer parity for the iOS rebuild, on `claude/ios-bearer-parity` (see "Bearer
+  parity" above). `/app/op` takes the app's bearer as well as the session; every write the
+  mock-up names is allowed by bearer with the session path's binding. No op, argument or
+  policy rule changed.
 
 ## Archive
 

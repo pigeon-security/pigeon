@@ -578,18 +578,12 @@ fn platform_approvals_list_and_bearer_writes() {
         ("approval-deny", true),
         ("land-approve", true),
         ("land-approval", false),
-        ("invite", false),
-        ("remove-passkey", false),
-        ("disconnect-app", false),
+        ("invite", true),
+        ("passkey-remove", true),
+        ("app-disconnect", true),
     ] {
-        if let Some(w) = action(name) {
-            assert_eq!(w.by_bearer, yes, "{name}");
-        }
+        assert_eq!(action(name).unwrap().by_bearer, yes, "{name}");
     }
-    assert!(action("approval-approve").unwrap().by_bearer);
-    assert!(action("land-approve").unwrap().by_bearer);
-    assert!(!action("passkey-remove").unwrap().by_bearer);
-    assert!(!action("app-disconnect").unwrap().by_bearer);
 
     let make = |id: &str, kind: Kind, subject: &str| {
         approval::new(

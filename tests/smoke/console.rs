@@ -139,23 +139,38 @@ fn console_write_actions_each_have_a_handler_and_policy() {
     ] {
         assert!(!destructive.contains(&id), "{id} is not destructive");
     }
-    // Only what the iOS app makes may come from it by bearer: setting a secret, deciding
-    // approvals and approving a landing.
+    // Exactly what the iOS app makes may come from it by bearer (bearer parity).
     let bearer: Vec<&str> = ACTIONS
         .iter()
         .filter(|a| a.by_bearer)
         .map(|a| a.id)
         .collect();
-    assert_eq!(
-        bearer,
-        [
-            "secret-set",
-            "land-approve",
-            "approval-approve",
-            "approval-deny"
-        ]
-    );
+    assert_eq!(bearer, APP_WRITES);
 }
+
+/// Every write the iOS app makes, in [`ACTIONS`] order (the mock-up's "Ops each screen uses").
+const APP_WRITES: &[&str] = &[
+    "secret-set",
+    "token-issue",
+    "token-revoke",
+    "linked-unlink",
+    "instance-put",
+    "visitor-invite",
+    "visitor-revoke",
+    "passkey-remove",
+    "app-disconnect",
+    "invite",
+    "land-approve",
+    "approval-approve",
+    "approval-deny",
+    "model-defaults",
+    "agents-config",
+    "site-rollback",
+    "site-deploy",
+    "run-stop",
+    "run-note",
+    "run-extend",
+];
 
 /// The iOS app's `secret-set` by bearer: `/console/write/secret-set/{begin,finish}` with
 /// `{target, change: {digest | value}}` binds begin and finish to one purpose for the person the
@@ -206,18 +221,188 @@ fn console_bearer_secret_set_binds_the_person_and_value() {
         "another secret"
     );
 
-    // Every other write keeps needing the console's own session.
-    for id in [
-        "token-issue",
-        "token-revoke",
-        "passkey-remove",
-        "app-disconnect",
-        "instance-put",
-        "land-approval",
-    ] {
+    // The writes the app does not make keep needing the console's own session.
+    for id in ["land-approval", "apple-adopt", "apple-identity"] {
         let (a, _) = route(&format!("/console/write/{id}/begin")).unwrap();
         assert!(!a.by_bearer, "{id} is not allowed by bearer");
     }
+}
+
+/// Bearer parity: the iOS app reads through `/app/op` and writes through
+/// `/console/write/<action>/{begin,finish}` by bearer, exactly as the person it acts for would
+/// from the console. Every app write binds the same purpose for the same person, target and
+/// change (the purpose has no input for how the person was found), and none for another
+/// person; the cookie still needs this site's Origin; a bearer read meets the same allowlist
+/// and instance binding.
+#[test]
+fn console_app_bearer_parity() {
+    use pigeon_capabilities::console::session::{admitted, bearer};
+    use pigeon_capabilities::console::{Post, app_person};
+    use pigeon_capabilities::users::Caller;
+
+    // Writes: a valid target and change (begin, finish) for every write the app makes.
+    let release = format!("release-{}", "a".repeat(43));
+    let site = json!({ "instance": "blog", "site": "blog", "host": "blog.example.org" });
+    let same = |v: Value| (v.clone(), v);
+    let samples: Vec<(&str, Value, (Value, Value))> = vec![
+        (
+            "secret-set",
+            json!("X"),
+            (json!({ "digest": hash("v") }), json!({ "value": "v" })),
+        ),
+        ("token-issue", json!("laptop"), same(json!({ "days": 30 }))),
+        ("token-revoke", json!("abcdefghijkl"), same(json!({}))),
+        ("linked-unlink", json!("blog"), same(json!({}))),
+        (
+            "instance-put",
+            json!("blog"),
+            same(json!({ "record": "{\"id\":\"blog\"}" })),
+        ),
+        (
+            "visitor-invite",
+            site.clone(),
+            same(json!({ "name": "Lee" })),
+        ),
+        ("visitor-revoke", site, same(json!({ "user": "u1" }))),
+        ("passkey-remove", json!("k1"), same(json!({}))),
+        ("app-disconnect", json!("app1"), same(json!({}))),
+        ("invite", json!("Sam Ito"), same(json!({}))),
+        ("land-approve", json!("l1"), same(json!({}))),
+        ("approval-approve", json!("a1"), same(json!({}))),
+        ("approval-deny", json!("a1"), same(json!({}))),
+        (
+            "model-defaults",
+            Value::Null,
+            same(json!({ "set": { "executor": "m" } })),
+        ),
+        (
+            "agents-config",
+            Value::Null,
+            same(json!({ "max_live_runs": 2 })),
+        ),
+        (
+            "site-rollback",
+            json!("blog"),
+            same(json!({ "release": release })),
+        ),
+        ("site-deploy", json!("blog"), same(json!({ "rev": "main" }))),
+        ("run-stop", json!("r1"), same(json!({}))),
+        ("run-note", json!("r1"), same(json!({ "text": "hi" }))),
+        ("run-extend", json!("r1"), same(json!({ "turns": 5 }))),
+    ];
+    let ids: Vec<&str> = samples.iter().map(|(id, ..)| *id).collect();
+    assert_eq!(ids, APP_WRITES);
+    for (id, target, (begun, finished)) in samples {
+        let a = action(id).unwrap();
+        assert!(a.by_bearer, "{id}");
+        let p = |who: &str, change: &Value, step| {
+            bound_purpose(id, who, target.clone(), change.clone(), step).unwrap()
+        };
+        // Begun by bearer and finished from the console (or the other way): one purpose.
+        let begin = p("willow", &begun, Step::Begin);
+        assert_eq!(begin, p("willow", &finished, Step::Finish), "{id}");
+        assert!(begin.starts_with(&format!("console:write:{id}:")), "{id}");
+        // A bearer for another person finds no challenge begun for this one.
+        assert_ne!(begin, p("alex", &finished, Step::Finish), "{id}");
+        // A tool write still goes through MCP's policy gate, whoever starts it.
+        if let Handler::Tool(_) = a.handler {
+            assert_eq!(a.policy, Policy::ToolGate, "{id}");
+        }
+    }
+    for gone in ["land-approval", "apple-adopt", "apple-identity"] {
+        assert!(!action(gone).unwrap().by_bearer, "{gone}");
+    }
+
+    // The person is the one the app's OAuth token acts for, and only a person.
+    let user =
+        |id: &str, kind: &str| json!({ "id": id, "kind": kind, "name": id, "created_at": 0 });
+    let caller = |acting: Value| -> Caller {
+        serde_json::from_value(json!({ "user": user("ios", "service"), "acting_for": acting }))
+            .unwrap()
+    };
+    assert_eq!(
+        app_person(caller(user("willow", "standard"))).map(|u| u.id),
+        Some("willow".into())
+    );
+    assert!(app_person(caller(Value::Null)).is_none(), "acts for no one");
+    assert!(
+        app_person(caller(user("bot", "service"))).is_none(),
+        "acts for a service user"
+    );
+
+    // Which POSTs take a bearer: the reads and the writes, never signing in or out.
+    for (path, yes) in [
+        ("/app/op", true),
+        ("/console/write/secret-set/begin", true),
+        ("/console/write/land-approval/finish", true),
+        ("/console/sign-in/begin", false),
+        ("/console/sign-in/finish", false),
+        ("/console/sign-out", false),
+    ] {
+        assert_eq!(Post::route(path).unwrap().takes_bearer(), yes, "{path}");
+    }
+    assert_eq!(bearer(Some("Bearer  t0k ")), Some("t0k"));
+    for no in [None, Some("Bearer "), Some("Basic dTpw"), Some("bearer t")] {
+        assert_eq!(bearer(no), None, "{no:?}");
+    }
+
+    // CSRF: a cookie request still needs this site's Origin; a bearer one needs none. Both are
+    // JSON only.
+    let host = "platform.pigeon.dev";
+    let json_type = Some("application/json");
+    assert!(admitted(
+        Some("https://platform.pigeon.dev"),
+        host,
+        json_type,
+        false
+    ));
+    for origin in [None, Some("https://evil.example"), Some("null")] {
+        assert!(!admitted(origin, host, json_type, false), "{origin:?}");
+        assert!(admitted(origin, host, json_type, true), "{origin:?}");
+    }
+    for by_bearer in [false, true] {
+        assert!(!admitted(
+            Some("https://platform.pigeon.dev"),
+            host,
+            Some("text/plain"),
+            by_bearer
+        ));
+    }
+
+    // Reads: the one allowlist, whoever asks; no op or argument more for the app.
+    for op in ["instances_list", "console_manifest", "app_inbox"] {
+        assert!(allowed(op, &json!({})), "{op}");
+    }
+    assert!(allowed("console_manifest", &json!({ "instance": "blog" })));
+    assert!(!allowed("ios_releases", &json!({})), "not a console read");
+    assert!(!allowed("site_rollback", &json!({ "instance": "blog" })));
+    assert!(!allowed("instances_list", &json!({ "extra": 1 })));
+    assert!(!allowed(
+        "console_manifest",
+        &json!({ "instance": "blog", "x": 1 })
+    ));
+    // And the same instance binding: a bound read cannot widen past its record.
+    let record: pigeon_capabilities::instances::record::Instance = serde_json::from_value(json!({
+        "id": "blog", "title": "Blog", "account": { "kind": "home" },
+        "storage": { "state": "enabled", "store": "scaleway:archive", "bucket": "blog-assets" },
+    }))
+    .unwrap();
+    let bind = |tool: &str, args: Value| {
+        pigeon_capabilities::instances::tools::bind_global("blog", Some(&record), tool, &args)
+    };
+    assert!(INSTANCE_OPS.contains(&"storage_list_objects"));
+    assert!(bind("storage_list_objects", json!({ "instance": "blog" })).is_ok());
+    assert!(
+        bind(
+            "storage_list_objects",
+            json!({ "instance": "blog", "bucket": "other" })
+        )
+        .is_err()
+    );
+    assert!(
+        bind("source_read_file", json!({ "instance": "blog" })).is_err(),
+        "source is off"
+    );
 }
 
 #[test]

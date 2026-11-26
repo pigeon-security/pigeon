@@ -99,3 +99,27 @@ pub fn json_content(content_type: Option<&str>) -> bool {
         None => false,
     }
 }
+
+/// The token of an `Authorization: Bearer <token>` header, trimmed; nothing for another
+/// scheme or an empty token.
+pub fn bearer(authorization: Option<&str>) -> Option<&str> {
+    authorization?
+        .strip_prefix("Bearer ")
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+}
+
+/// Whether a POST passes the console's guard. Every POST is JSON. One that the session cookie
+/// authenticates must also name this host as its Origin, since a browser sends the cookie by
+/// itself, even from another site's page (CSRF). One that a bearer authenticates (`by_bearer`:
+/// a route that takes one, where the cookie is then never read) needs no Origin: the iOS app
+/// sends none, a browser never adds the header by itself, and another site's page cannot add
+/// it without a CORS preflight that the console never answers.
+pub fn admitted(
+    origin: Option<&str>,
+    host: &str,
+    content_type: Option<&str>,
+    by_bearer: bool,
+) -> bool {
+    json_content(content_type) && (by_bearer || same_origin(origin, host))
+}

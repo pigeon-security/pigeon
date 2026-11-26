@@ -5,8 +5,10 @@
 //! ([`page::bookmark`]). A person signs in once with a passkey and gets a session cookie:
 //! HttpOnly, SameSite Strict, kept only as a hash in the Directory, ending after 30 minutes idle
 //! or 8 hours. The session lets them read; every write still takes a passkey of its own, bound
-//! to what it changes. Every POST must come from this host's own pages, in JSON, except a write
-//! an app makes by bearer for the person it acts for.
+//! to what it changes. Every POST is JSON and must come from this host's own pages, except a
+//! read or write an app (the iOS app) makes by bearer for the person it acts for: that one is
+//! made exactly as that person's session would make it, with the same allowlist, binding and
+//! passkey ([`app_person`], [`Post::takes_bearer`], [`session::admitted`]).
 
 #[path = "console/web/ops.rs"]
 pub mod ops;
@@ -26,7 +28,7 @@ use worker::{Env, Error, Headers, Method, Request, Response, Result};
 
 use crate::passkeys::Passkeys;
 use crate::site_passkeys::console as site_access;
-use crate::users::{User, directory};
+use crate::users::{Caller, User, directory};
 use crate::{Call, Capability, Context, Serve, arg, unknown};
 use write::Step;
 
@@ -171,6 +173,20 @@ impl Post {
             _ => return None,
         })
     }
+
+    /// Whether an app may make this POST by bearer for the person it acts for, instead of the
+    /// session cookie: the reads, and the writes whose action allows it
+    /// ([`write::Action::by_bearer`]). Signing in and out are the browser's own.
+    pub fn takes_bearer(&self) -> bool {
+        matches!(self, Self::AppOp | Self::Write)
+    }
+}
+
+/// The person an app's bearer acts for, as `caller` (its OAuth token's caller) names them: only
+/// a person (a standard user), never the app's own service user. Reads and writes by bearer
+/// both find the person this way, and then run exactly as for that person's console session.
+pub fn app_person(caller: Caller) -> Option<User> {
+    caller.acting_for.filter(|u| u.kind == "standard")
 }
 
 /// The home instance's id, when it can be read.
@@ -202,6 +218,34 @@ impl Console {
         let found = directory(env, "session.get", json!({ "hash": hash(token) })).await?;
         let signed: Option<Signed> = serde_json::from_value(found).ok();
         Ok(signed.filter(|s| s.user.kind == "standard"))
+    }
+
+    /// Who a POST is made for: with `bearer`, the person the app's OAuth token acts for
+    /// ([`app_person`]), and the cookie is not read; else the person signed in by cookie. `Err`
+    /// is the refusal to answer.
+    async fn person(
+        &self,
+        env: &Env,
+        req: &Request,
+        bearer: Option<&str>,
+    ) -> Result<std::result::Result<User, Response>> {
+        let Some(token) = bearer else {
+            return Ok(match self.signed(env, req).await? {
+                Some(signed) => Ok(signed.user),
+                None => Err(answer(&json!({ "error": "sign in first" }), 401)?),
+            });
+        };
+        let caller = match crate::oauth::caller(env, token).await {
+            Ok(c) => c,
+            Err(e) => return Ok(Err(answer(&json!({ "error": e.to_string() }), 401)?)),
+        };
+        Ok(match app_person(caller) {
+            Some(person) => Ok(person),
+            None => Err(answer(
+                &json!({ "error": "the app acts for no person" }),
+                403,
+            )?),
+        })
     }
 
     async fn serve(&self, cx: &Context<'_>, mut req: Request) -> Result<Response> {
@@ -249,17 +293,16 @@ impl Console {
         };
         let origin = req.headers().get("Origin")?;
         let content = req.headers().get("Content-Type")?;
-        let bearer = req
-            .headers()
-            .get("Authorization")?
-            .and_then(|h| h.strip_prefix("Bearer ").map(|t| t.trim().to_string()))
-            .filter(|t| !t.is_empty());
-        let is_write = route == Post::Write;
-        // A bearer is not ambient, so the Origin check that guards the cookie is skipped for it.
-        let by_bearer = is_write && bearer.is_some();
-        if (!by_bearer && !session::same_origin(origin.as_deref(), &self.host))
-            || !session::json_content(content.as_deref())
-        {
+        // A bearer counts only on a route an app may use; there, the cookie is never read.
+        let bearer = session::bearer(req.headers().get("Authorization")?.as_deref())
+            .filter(|_| route.takes_bearer())
+            .map(str::to_string);
+        if !session::admitted(
+            origin.as_deref(),
+            &self.host,
+            content.as_deref(),
+            bearer.is_some(),
+        ) {
             return answer(
                 &json!({ "error": "refused: not from this site's own pages" }),
                 403,
@@ -267,12 +310,10 @@ impl Console {
         }
         let body: Value = req.json().await.unwrap_or(Value::Null);
         match route {
-            Post::AppOp => {
-                let Some(signed) = self.signed(cx.env, &req).await? else {
-                    return answer(&json!({ "error": "sign in first" }), 401);
-                };
-                ops::serve(cx, &self.host, signed.user, &body).await
-            }
+            Post::AppOp => match self.person(cx.env, &req, bearer.as_deref()).await? {
+                Ok(person) => ops::serve(cx, &self.host, person, &body).await,
+                Err(refused) => Ok(refused),
+            },
             Post::SignInBegin => match self.passkeys.sign_in_begin(cx.env, SIGN_IN, None).await {
                 Ok(v) => answer(&v, 200),
                 Err(e) => answer(&json!({ "error": e.to_string() }), 400),
@@ -298,26 +339,15 @@ impl Console {
                 let Some((action, step)) = write::route(&path) else {
                     return Response::error("not found", 404);
                 };
-                let person = if let Some(token) = bearer {
-                    if !action.by_bearer {
-                        return answer(
-                            &json!({ "error": "this write needs the console, not an app" }),
-                            403,
-                        );
-                    }
-                    let caller = match crate::oauth::caller(cx.env, &token).await {
-                        Ok(c) => c,
-                        Err(e) => return answer(&json!({ "error": e.to_string() }), 401),
-                    };
-                    let Some(person) = caller.acting_for.filter(|u| u.kind == "standard") else {
-                        return answer(&json!({ "error": "the app acts for no person" }), 403);
-                    };
-                    person
-                } else {
-                    let Some(signed) = self.signed(cx.env, &req).await? else {
-                        return answer(&json!({ "error": "sign in first" }), 401);
-                    };
-                    signed.user
+                if bearer.is_some() && !action.by_bearer {
+                    return answer(
+                        &json!({ "error": "this write needs the console, not an app" }),
+                        403,
+                    );
+                }
+                let person = match self.person(cx.env, &req, bearer.as_deref()).await? {
+                    Ok(person) => person,
+                    Err(refused) => return Ok(refused),
                 };
                 let who = &person;
                 let (target, change) = (&body["target"], &body["change"]);
