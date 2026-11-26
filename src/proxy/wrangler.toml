@@ -36,14 +36,6 @@ PLATFORM_HOST = "platform.pigeon.dev"
 # The one hostname this Worker answers on.
 PROXY_HOST = "proxy.pigeon.dev"
 
-# The shared caller key, made once by core's `workers_setup`. No longer read: this Worker signs
-# with its own key below and serves no signed calls. Removed in step 4 of
-# docs/plans/caller-keys.md.
-[[secrets_store_secrets]]
-binding = "CALLER_KEY"
-store_id = "5185c227b9f34b4291045175695b78ec"
-secret_name = "CALLER_KEY"
-
 # This Worker's own caller key, CALLER_KEY_PROXY, made by core's `workers_setup`
 # (docs/plans/caller-keys.md, step 3). This Worker signs its requests to core with it; a missing
 # one refuses them, with no fall-back.

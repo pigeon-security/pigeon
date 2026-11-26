@@ -785,7 +785,19 @@ fn core_architecture_draws_every_worker_in_the_map() {
     // Queues, secrets, the proxy host and externals.
     let queues = worker("pigeon-ci-gateway")["queues"].to_string();
     assert!(queues.contains("pigeon-ci-events") && queues.contains("produces"));
-    assert!(strs(&worker("pigeon-sites")["secrets"]).contains(&"CALLER_KEY".into()));
+    let sites_secrets = strs(&worker("pigeon-sites")["secrets"]);
+    assert!(
+        sites_secrets.contains(&"CALLER_KEY_OWN".into()),
+        "{sites_secrets:?}"
+    );
+    assert!(
+        sites_secrets.contains(&"SITE_KEY".into()),
+        "{sites_secrets:?}"
+    );
+    assert!(
+        !sites_secrets.contains(&"CALLER_KEY".into()),
+        "{sites_secrets:?}"
+    );
     assert!(strs(&worker("pigeon-ci-gateway")["secrets"]).contains(&"BUILDKITE_API_TOKEN".into()));
     assert!(!strs(&worker("pigeon-sites")["secrets"]).contains(&"CF_PARENT_TOKEN".into()));
     assert!(strs(&worker("pigeon-platform")["secrets"]).contains(&"CF_PARENT_TOKEN".into()));

@@ -543,6 +543,69 @@ fn core_signs_each_bound_workers_calls_with_that_workers_key() {
     }
 }
 
+/// Step 4 of docs/plans/caller-keys.md: no Worker binds the shared `CALLER_KEY` any more, under
+/// any binding name, and every capability Worker still binds its own key as `CALLER_KEY_OWN`.
+/// Once this deploys everywhere, the person deletes `CALLER_KEY` from the Secrets Store.
+#[test]
+fn no_worker_binds_the_shared_caller_key() {
+    let files = [
+        (
+            "pigeon-platform",
+            include_str!("../../src/platform/wrangler.toml"),
+        ),
+        (
+            "pigeon-sites",
+            include_str!("../../src/sites/wrangler.toml"),
+        ),
+        (
+            "pigeon-model-gateway",
+            include_str!("../../src/model-gateway/wrangler.toml"),
+        ),
+        (
+            "pigeon-ci-gateway",
+            include_str!("../../src/ci-gateway/wrangler.toml"),
+        ),
+        (
+            "pigeon-ai-agents",
+            include_str!("../../src/ai-agents-worker/wrangler.toml"),
+        ),
+        (
+            "pigeon-cloud-gateway",
+            include_str!("../../src/cloud-gateway/wrangler.toml"),
+        ),
+        (
+            "pigeon-proxy",
+            include_str!("../../src/proxy/wrangler.toml"),
+        ),
+    ];
+    for (worker, file) in files {
+        let parsed: toml::Value = file.parse().unwrap();
+        let bound: Vec<(&str, &str)> = parsed["secrets_store_secrets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| {
+                (
+                    s["binding"].as_str().unwrap(),
+                    s["secret_name"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert!(
+            bound
+                .iter()
+                .all(|(b, s)| *b != "CALLER_KEY" && *s != "CALLER_KEY"),
+            "{worker} still binds CALLER_KEY: {bound:?}"
+        );
+        if worker != "pigeon-platform" {
+            assert!(
+                bound.iter().any(|(b, _)| *b == pigeon_contract::OWN_KEY),
+                "{worker} binds no CALLER_KEY_OWN"
+            );
+        }
+    }
+}
+
 /// `workers_setup` makes exactly the caller keys and the site key the store lacks, and keeps the
 /// rest.
 #[test]
