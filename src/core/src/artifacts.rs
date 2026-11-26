@@ -587,6 +587,81 @@ pub async fn read_file(
     Ok(file)
 }
 
+/// Runs `work` over one temporary read-only Git session on `namespace/repo`: the remote and
+/// its advertised refs. The session's token is revoked after, whether `work` succeeded or not;
+/// `work`'s own error comes first.
+async fn read_session<T, F, Fut>(
+    account: &Account,
+    namespace: &str,
+    repo: &str,
+    work: F,
+) -> Result<T>
+where
+    F: FnOnce(crate::git::Remote) -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let (found, token) = session(account, namespace, repo, Access::Read, 900).await?;
+    let remote = crate::git::Remote {
+        url: found.remote.trim_end_matches('/').to_string(),
+        authorization: format!("Bearer {}", token.value),
+    };
+    let outcome = work(remote).await;
+    let revoked = match &token.id {
+        Some(id) => revoke(account, namespace, repo, id).await,
+        None => Err(Error::RustError(
+            "the Git token came back without an id".into(),
+        )),
+    };
+    let result = outcome?;
+    revoked?;
+    Ok(result)
+}
+
+/// The commit `revision` (a commit id, `HEAD`, a branch or `refs/heads/…`) names in `advertised`.
+fn resolved(advertised: &crate::git::Refs, revision: &str) -> Result<String> {
+    if crate::git::is_id(revision) {
+        return Ok(revision.to_ascii_lowercase());
+    }
+    let name = if revision == "HEAD" || revision.starts_with("refs/heads/") {
+        revision.to_string()
+    } else {
+        format!("refs/heads/{revision}")
+    };
+    Ok(advertised
+        .refs
+        .get(&name)
+        .filter(|sha| crate::git::is_id(sha))
+        .ok_or_else(|| Error::RustError("branch was not found in the approved repository".into()))?
+        .to_ascii_lowercase())
+}
+
+/// The objects of `commit` alone, one commit deep, checked to hold that commit.
+async fn commit_objects(
+    remote: &crate::git::Remote,
+    caps: &[String],
+    commit: &str,
+) -> Result<crate::pack::Objects> {
+    let bad = Error::RustError;
+    let fetched = crate::git::fetch_with(
+        remote,
+        caps,
+        std::slice::from_ref(&commit.to_string()),
+        &[],
+        None,
+        Some(1),
+    )
+    .await?;
+    let objects = crate::pack::objects(&fetched.pack).map_err(bad)?;
+    if !objects
+        .by_id
+        .get(commit)
+        .is_some_and(|(kind, _)| *kind == 1)
+    {
+        return Err(bad("the resolved object is not a repository commit".into()));
+    }
+    Ok(objects)
+}
+
 /// Resolve a revision and optionally read one file over one temporary read-only Git session.
 pub async fn read_revision(
     account: &Account,
@@ -600,46 +675,11 @@ pub async fn read_revision(
     if let Some(path) = path {
         crate::repository::file_path(path).map_err(bad)?;
     }
-    let (found, token) = session(account, namespace, repo, Access::Read, 900).await?;
-    let remote = crate::git::Remote {
-        url: found.remote.trim_end_matches('/').to_string(),
-        authorization: format!("Bearer {}", token.value),
-    };
-    let outcome = async {
+    read_session(account, namespace, repo, |remote| async move {
         let advertised = crate::git::refs(&remote, "git-upload-pack").await?;
-        let commit = if crate::git::is_id(revision) {
-            revision.to_ascii_lowercase()
-        } else {
-            let name = if revision == "HEAD" || revision.starts_with("refs/heads/") {
-                revision.to_string()
-            } else {
-                format!("refs/heads/{revision}")
-            };
-            advertised
-                .refs
-                .get(&name)
-                .filter(|sha| crate::git::is_id(sha))
-                .ok_or_else(|| bad("branch was not found in the approved repository".into()))?
-                .to_ascii_lowercase()
-        };
+        let commit = resolved(&advertised, revision)?;
         let file = if path.is_some() || crate::git::is_id(revision) {
-            let fetched = crate::git::fetch_with(
-                &remote,
-                &advertised.caps,
-                std::slice::from_ref(&commit),
-                &[],
-                None,
-                Some(1),
-            )
-            .await?;
-            let objects = crate::pack::objects(&fetched.pack).map_err(bad)?;
-            if !objects
-                .by_id
-                .get(&commit)
-                .is_some_and(|(kind, _)| *kind == 1)
-            {
-                return Err(bad("the resolved object is not a repository commit".into()));
-            }
+            let objects = commit_objects(&remote, &advertised.caps, &commit).await?;
             path.map(|path| crate::pack::read_path(&objects, &commit, path))
                 .transpose()
                 .map_err(bad)?
@@ -648,13 +688,30 @@ pub async fn read_revision(
             None
         };
         Ok((commit, file))
-    }
-    .await;
-    let revoked = match &token.id {
-        Some(id) => revoke(account, namespace, repo, id).await,
-        None => Err(bad("the Git token came back without an id".into())),
-    };
-    let result = outcome?;
-    revoked?;
-    Ok(result)
+    })
+    .await
+}
+
+/// Resolve a revision and read every regular file under directory `root` of it (the whole
+/// tree when `None`), within `limits`, over one temporary read-only Git session: the commit and
+/// the files, paths relative to `root` (`pack::read_tree`). The commit alone is fetched, one
+/// commit deep.
+pub async fn read_tree(
+    account: &Account,
+    namespace: &str,
+    repo: &str,
+    revision: &str,
+    root: Option<&str>,
+    limits: &crate::pack::TreeLimits,
+) -> Result<(String, Vec<(String, Vec<u8>)>)> {
+    let bad = Error::RustError;
+    let revision = crate::repository::revision(revision).map_err(bad)?;
+    read_session(account, namespace, repo, |remote| async move {
+        let advertised = crate::git::refs(&remote, "git-upload-pack").await?;
+        let commit = resolved(&advertised, revision)?;
+        let objects = commit_objects(&remote, &advertised.caps, &commit).await?;
+        let files = crate::pack::read_tree(&objects, &commit, root, limits).map_err(bad)?;
+        Ok((commit, files))
+    })
+    .await
 }

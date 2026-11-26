@@ -11,12 +11,13 @@
 //! template its `site.toml` names ([`crate::templates`]: `blog` or `landing`), and written to the profile's site bucket
 //! as an immutable release in the layout the site Worker serves: the blobs it lacks, then
 //! `deploys/{release}.json` and `release-meta/{release}.json`, then `live`. It only adds objects
-//! and moves `live`, so the previous release stays whole until the last write.
-
-use std::collections::BTreeSet;
+//! and moves `live`, so the previous release stays whole until the last write. The release,
+//! rollback and listing code is [`pigeon_core::site_publish`]'s, shared with core's home
+//! publishing.
 
 use pigeon_contract::{Answer, Signed, SitesScopeRequest, WorkerContext};
-use pigeon_core::r2::{self, Bucket, Manifest};
+use pigeon_core::r2::{self, Bucket};
+use pigeon_core::site_publish::{Owner, R2};
 use pigeon_core::versions::{Requirement, Version};
 use pigeon_core::{Account, site_publish, tarball};
 use serde_json::{Value, json};
@@ -248,27 +249,16 @@ pub async fn rollback(
     let record = approved_record(env, key, caller, instance).await?;
     let target = target(&record, &env.var("ZONE")?.to_string()).map_err(bad)?;
     let account = linked_account(env, key, caller, instance, &target, &record).await?;
-    let provenance = r2::get(
-        &account,
-        &target.bucket,
-        &site_publish::release_key(release),
-    )
-    .await?
-    .ok_or_else(|| bad("unknown site release"))?;
-    let provenance: Value = serde_json::from_slice(&provenance)?;
-    if provenance["instance"] != instance
-        || provenance["base_url"] != target.base_url
-        || provenance["site"] != target.site
-    {
-        return Err(bad("release belongs to a different publishing target"));
-    }
-    let manifest = r2::get(&account, &target.bucket, &r2::manifest_key(release))
-        .await?
-        .ok_or_else(|| bad("site release is missing its manifest"))?;
-    let manifest: Manifest = serde_json::from_slice(&manifest)?;
-    if site_publish::release_id(&provenance, &manifest) != release {
-        return Err(bad("site release manifest does not match its identity"));
-    }
+    let store = R2 {
+        account: &account,
+        bucket: &target.bucket,
+    };
+    let owner = Owner {
+        instance,
+        base_url: &target.base_url,
+        site: &target.site,
+    };
+    let provenance = site_publish::staged(&store, release, &owner).await?;
     ensure_current(env, key, caller, instance, &record).await?;
     if target.protected {
         crate::public::require_protected_origin(
@@ -282,21 +272,11 @@ pub async fn rollback(
         .await?;
         r2::require_private_bucket(&account, &target.bucket).await?;
     }
-    r2::put(
-        &account,
-        &target.bucket,
-        r2::LIVE,
-        "text/plain",
-        release.as_bytes().to_vec(),
-    )
-    .await?;
+    site_publish::activate(&store, release).await?;
     Ok(
         json!({"instance": instance, "release": release, "commit": provenance["commit"], "deployed": true}),
     )
 }
-
-/// The most releases [`releases`] answers.
-pub const MAX_RELEASES: usize = 50;
 
 /// The immutable releases of an instance's site and the one `live` points at: each release's
 /// provenance (commit, template, base URL), live first, then by id. Reads only.
@@ -310,41 +290,11 @@ pub async fn releases(
     let record = approved_record(env, key, caller, instance).await?;
     let target = target(&record, &env.var("ZONE")?.to_string()).map_err(bad)?;
     let account = linked_account(env, key, caller, instance, &target, &record).await?;
-    let live = r2::get(&account, &target.bucket, r2::LIVE)
-        .await?
-        .map(|b| String::from_utf8_lossy(&b).trim().to_string());
-    let mut ids: Vec<String> = r2::list(&account, &target.bucket, "release-meta/")
-        .await?
-        .iter()
-        .filter_map(|k| {
-            k.strip_prefix("release-meta/")?
-                .strip_suffix(".json")
-                .filter(|id| site_publish::is_release_id(id))
-                .map(str::to_string)
-        })
-        .collect();
-    let total = ids.len();
-    ids.sort_by_key(|id| (Some(id) != live.as_ref(), id.clone()));
-    ids.truncate(limit.clamp(1, MAX_RELEASES));
-    let mut out = Vec::new();
-    for id in ids {
-        let provenance: Value =
-            match r2::get(&account, &target.bucket, &site_publish::release_key(&id)).await? {
-                Some(b) => serde_json::from_slice(&b).unwrap_or(Value::Null),
-                None => Value::Null,
-            };
-        out.push(json!({
-            "release": id,
-            "live": Some(&id) == live.as_ref(),
-            "commit": provenance["commit"],
-            "template": provenance["template"],
-            "template_version": provenance["template_version"],
-            "base_url": provenance["base_url"],
-        }));
-    }
-    Ok(
-        json!({ "instance": instance, "site": target.site, "live": live, "total": total, "releases": out }),
-    )
+    let store = R2 {
+        account: &account,
+        bucket: &target.bucket,
+    };
+    site_publish::releases(&store, instance, &target.site, limit).await
 }
 
 fn publish_stage(started: &mut u64, stage: &str) {
@@ -478,44 +428,19 @@ async fn publish(
         r2::require_private_bucket(&account, &t.bucket).await?;
     }
     publish_stage(&mut started, "storage_preflight");
-    let mut present: BTreeSet<String> = r2::list(&account, &t.bucket, "blobs/")
-        .await?
-        .iter()
-        .filter_map(|k| r2::blob_of_key(k).map(str::to_string))
-        .collect();
-
-    let mut manifest = Manifest::new();
-    let mut fresh = Vec::new();
-    let mut add = |path: String, bytes: Vec<u8>, ctype: String| {
-        let pair = [(path, bytes)];
-        let (p, mut e) = r2::manifest_of(&pair)
-            .into_iter()
-            .next()
-            .expect("one file gives one entry");
-        let [(_, bytes)] = pair;
-        e.content_type = ctype.clone();
-        if present.insert(e.blob.clone()) {
-            fresh.push(r2::ObjectWrite {
-                key: r2::blob_key(&e.blob),
-                content_type: ctype,
-                body: bytes,
-            });
-        }
-        manifest.insert(p, e);
+    let store = R2 {
+        account: &account,
+        bucket: &t.bucket,
     };
-    for (path, (bytes, ctype)) in out.files {
-        add(path, bytes, ctype.to_string());
-    }
+    let mut files: Vec<(String, Vec<u8>, String)> = out
+        .files
+        .into_iter()
+        .map(|(path, (bytes, ctype))| (path, bytes, ctype.to_string()))
+        .collect();
     for (path, bytes) in s.statics {
         let ctype = r2::content_type(&path).to_string();
-        add(path, bytes, ctype);
+        files.push((path, bytes, ctype));
     }
-    let uploaded = fresh.len();
-    publish_stage(&mut started, "storage_plan");
-    worker::console_log!("site_deploy staging blobs={uploaded}");
-    r2::put_objects(&account, &t.bucket, fresh).await?;
-    publish_stage(&mut started, "blobs_staged");
-    let files = manifest.len();
     let provenance = json!({
         "commit": commit,
         "instance": instance,
@@ -527,33 +452,16 @@ async fn publish(
         "base_url": t.base_url,
     });
     // Every deploy is an immutable release; `target` refused a record without a profile.
-    let release = site_publish::release_id(&provenance, &manifest);
-    r2::put(
-        &account,
-        &t.bucket,
-        &r2::manifest_key(&release),
-        "application/json",
-        serde_json::to_vec(&manifest).map_err(|e| bad(e.to_string()))?,
-    )
+    let staged = site_publish::stage(&store, &provenance, files, &mut |stage| match stage
+        .strip_prefix("blobs=")
+    {
+        Some(n) => worker::console_log!("site_deploy staging blobs={n}"),
+        None => publish_stage(&mut started, stage),
+    })
     .await?;
-    r2::put(
-        &account,
-        &t.bucket,
-        &site_publish::release_key(&release),
-        "application/json",
-        serde_json::to_vec(&provenance)?,
-    )
-    .await?;
-    publish_stage(&mut started, "manifest_staged");
+    let (files, uploaded, release) = (staged.files, staged.uploaded, staged.release);
     ensure_current(env, key, caller, instance, record).await?;
-    r2::put(
-        &account,
-        &t.bucket,
-        r2::LIVE,
-        "text/plain",
-        release.as_bytes().to_vec(),
-    )
-    .await?;
+    site_publish::activate(&store, &release).await?;
     publish_stage(&mut started, "activated");
     Ok(json!({
         "instance": instance,

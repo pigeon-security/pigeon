@@ -189,6 +189,8 @@ pub struct ScopedView {
 /// An approved instance's enabled capabilities. The request cannot supply a replacement scope.
 pub struct Scope {
     instance: String,
+    /// Whether the instance is the home instance, whose publishing core serves itself.
+    home: bool,
     registrations: Vec<&'static Registration>,
     views: Vec<ScopedView>,
 }
@@ -230,6 +232,7 @@ impl Scope {
         }
         Ok(Self {
             instance: instance.id.clone(),
+            home: instance.account == super::record::AccountRef::Home,
             registrations,
             views,
         })
@@ -243,6 +246,11 @@ impl Scope {
     /// The approved target identifier, used when core signs a call to another Worker.
     pub fn instance(&self) -> &str {
         &self.instance
+    }
+
+    /// Whether the instance is the home instance (`account: home`).
+    pub fn home(&self) -> bool {
+        self.home
     }
 
     fn registration(&self, tool: &str) -> Option<&Registration> {

@@ -395,6 +395,12 @@ impl Capability for Remote {
     fn call<'a>(&'a self, cx: &'a Context<'a>, tool: &'a str, args: &'a Value) -> Call<'a> {
         Box::pin(async move {
             let mut args = args.clone();
+            // The home instance's publishing is core's own (instances/home_site.rs): its
+            // bucket is written with the `instance_home` token, which never leaves core.
+            let mut home = cx
+                .instance
+                .filter(|scope| scope.home())
+                .map(|s| s.instance().to_string());
             // Once selected, contextual transport never retries with a legacy envelope.
             let context = match cx.instance {
                 Some(scope) => Some(
@@ -423,12 +429,29 @@ impl Capability for Remote {
                                     &args,
                                 )
                                 .map_err(failure)?;
+                                if record.is_some_and(|r| {
+                                    r.account == crate::instances::record::AccountRef::Home
+                                }) {
+                                    home = Some(id);
+                                }
                                 Some(context)
                             }
                         }
                     }
                 },
             };
+            if let Some(id) =
+                home.filter(|_| crate::instances::home_site::routed(self.name, tool, true))
+            {
+                let zone = cx
+                    .hosted
+                    .capabilities
+                    .iter()
+                    .filter(|c| c.worker().is_none())
+                    .find_map(|c| c.footprint().zone)
+                    .ok_or_else(|| failure("the platform zone is not known to this Worker"))?;
+                return crate::instances::home_site::call(cx, &zone, tool, &id, &args).await;
+            }
             let body = json_of(&CallRequest {
                 capability: Some(self.name.to_string()),
                 tool: tool.to_string(),

@@ -7,7 +7,9 @@
 //! `site_rollback` require signed instance context matching their `instance` ([`context`]); a
 //! deploy asks core for what it must not hold itself (the approved record, a linked account's
 //! token, a GitHub installation token) only through the instance-scoped `sites_scope` callback
-//! over its `PLATFORM` binding. Built
+//! over its `PLATFORM` binding. For the home instance, whose bucket only core may write, core
+//! asks the private `site_build` ([`templates::site_build`]) to render a `landing@1` release and
+//! stages it itself (docs/plans/platform-self-hosting.md, L3). Built
 //! for `wasm32-unknown-unknown` only.
 
 mod apex;
@@ -276,6 +278,17 @@ impl Service for Sites {
                     match deploy::releases(env, key.as_bytes(), caller, instance, limit).await {
                         Ok(v) => Answer::Ok(v),
                         Err(e) => Answer::error(FailureKind::Failed, e.to_string()),
+                    }
+                }
+                templates::BUILD_TOOL => {
+                    // Core's private call for the home instance's release: pure, and only for
+                    // the instance the call is signed for.
+                    if let Err(why) = context::require(caller, &req.args) {
+                        return Answer::error(FailureKind::Unauthorized, why);
+                    }
+                    match templates::site_build(&req.args) {
+                        Ok(v) => Answer::Ok(v),
+                        Err(why) => Answer::error(FailureKind::BadRequest, why),
                     }
                 }
                 "site_render" => match render(&req.args) {

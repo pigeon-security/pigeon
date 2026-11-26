@@ -2695,3 +2695,639 @@ fn home_instance_plans_and_applies_with_a_minted_token() {
             .any(|s| matches!(s, Step::EnableWorkersDev { .. }))
     );
 }
+
+/// A site bucket in the suite: every object by (bucket, key), and the bearer each write and
+/// read used. A put or the blobs' write can be made to fail.
+#[derive(Default)]
+struct BucketState {
+    objects: std::collections::BTreeMap<(String, String), Vec<u8>>,
+    bearers: Vec<Option<String>>,
+    fail_blobs: bool,
+}
+
+/// One bucket of [`BucketState`], opened with an account's credential.
+struct MockBucket<'a> {
+    bucket: String,
+    bearer: Option<String>,
+    state: &'a std::cell::RefCell<BucketState>,
+}
+
+impl pigeon_core::site_publish::Store for MockBucket<'_> {
+    async fn list(&self, prefix: &str) -> worker::Result<Vec<String>> {
+        let mut s = self.state.borrow_mut();
+        s.bearers.push(self.bearer.clone());
+        Ok(s.objects
+            .keys()
+            .filter(|(b, k)| *b == self.bucket && k.starts_with(prefix))
+            .map(|(_, k)| k.clone())
+            .collect())
+    }
+    async fn get(&self, key: &str) -> worker::Result<Option<Vec<u8>>> {
+        let mut s = self.state.borrow_mut();
+        s.bearers.push(self.bearer.clone());
+        Ok(s.objects
+            .get(&(self.bucket.clone(), key.to_string()))
+            .cloned())
+    }
+    async fn put(&self, key: &str, _ctype: &str, body: Vec<u8>) -> worker::Result<()> {
+        let mut s = self.state.borrow_mut();
+        s.bearers.push(self.bearer.clone());
+        s.objects
+            .insert((self.bucket.clone(), key.to_string()), body);
+        Ok(())
+    }
+    async fn put_objects(&self, objects: Vec<pigeon_core::r2::ObjectWrite>) -> worker::Result<()> {
+        if self.state.borrow().fail_blobs {
+            return Err(worker::Error::RustError("blob write refused".into()));
+        }
+        for o in objects {
+            self.put(&o.key, &o.content_type, o.body).await?;
+        }
+        Ok(())
+    }
+}
+
+/// A repository whose `site/` holds the home landing's content (the repository's own `site/`),
+/// a static file and a page, beside files outside it: its directory and the commit.
+fn home_site_repo(name: &str, extra: &str) -> (PathBuf, String) {
+    let dir = repo(name);
+    let put = |path: &str, body: &str| {
+        let p = dir.join(path);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    };
+    put(
+        "site/.pigeon/site.toml",
+        include_str!("../../site/.pigeon/site.toml"),
+    );
+    put(
+        "site/content/index.toml",
+        include_str!("../../site/content/index.toml"),
+    );
+    put(
+        "site/content/pages/about.md",
+        &format!("+++\ntitle = \"About\"\n+++\n\nAbout pigeon. {extra}\n"),
+    );
+    put("site/static/robots.txt", "User-agent: *\n");
+    put("src/lib.rs", "// not part of the site\n");
+    put("README.md", "outside the content root\n");
+    git(&dir, &["add", "-A"], None);
+    git(&dir, &["commit", "-q", "-m", "site"], None);
+    let head = String::from_utf8(git(&dir, &["rev-parse", "HEAD"], None))
+        .unwrap()
+        .trim()
+        .to_string();
+    (dir, head)
+}
+
+/// What Artifacts answers a one-commit-deep fetch of `commit`: the commit and its whole tree.
+fn commit_pack(dir: &Path, commit: &str) -> pigeon_core::pack::Objects {
+    let pack = git(
+        dir,
+        &["pack-objects", "--stdout", "--revs", "-q"],
+        Some(&format!("{commit}\n")),
+    );
+    pigeon_core::pack::objects(&pack).unwrap()
+}
+
+/// Area: instances. L2–L3: the home instance publishes its landing site from its Artifacts
+/// repository's content root, with no GitHub App and no linked account, as immutable releases in
+/// its own bucket, written with a minted `instance_home` token revoked whatever happens; the
+/// release, rollback and listing code is the one linked instances use, unchanged for them.
+#[test]
+fn home_site_publishes_from_artifacts_with_a_minted_token() {
+    use super::core::{MockTokens, token_block_on};
+    use pigeon_capabilities::instances::home::PURPOSE;
+    use pigeon_capabilities::instances::home_site::{
+        BUILD_TOOL, Build, LIMITS, Token, build_request, built_from, provenance, release, releases,
+        rollback, routed, target,
+    };
+    use pigeon_capabilities::instances::record::{Instance, Rules, reserved_labels, validate};
+    use pigeon_capabilities::split::purpose_permissions;
+    use pigeon_core::pack::{TreeLimits, read_tree};
+    use pigeon_core::site_publish::{self, Owner};
+
+    // The record the person approves to publish: the content root and the publishing profile.
+    let home_json = json!({
+        "id": "pigeon-security/platform", "title": "pigeon",
+        "account": { "kind": "home" }, "zones": ["pigeon.dev"],
+        "repo": { "kind": "artifacts", "namespace": "pigeon-security", "repo": "pigeon" },
+        "worker": "pigeon-platform",
+        "platform": { "host": "platform.pigeon.dev" },
+        "sites": [{ "name": "landing", "bucket": "pigeon-platform-site", "template": "landing@1",
+            "build": "site", "targets": [{ "kind": "domain", "hostname": "pigeon.dev" }] }],
+        "publishing": { "state": "enabled", "site": "landing" },
+        "version": 4
+    });
+    let home: Instance = serde_json::from_value(home_json).unwrap();
+    let reserved = reserved_labels(
+        &["platform.pigeon.dev".into(), "proxy.pigeon.dev".into()],
+        "pigeon.dev",
+    );
+    let workers: Vec<String> = ["pigeon-platform", "pigeon-sites"]
+        .map(String::from)
+        .to_vec();
+    let rules = Rules {
+        platform_zone: "pigeon.dev",
+        reserved_labels: &reserved,
+        reserved_workers: &workers,
+        platform_worker: "pigeon-platform",
+    };
+    assert_eq!(validate(&home, &[], &rules), Vec::<String>::new());
+    // Home publishes from Artifacts and only the landing template; a linked instance still
+    // needs GitHub and a linked account, word for word.
+    let mut on_github = home.clone();
+    on_github.repo = Some(pigeon_capabilities::instances::record::RepoRef::Github {
+        full_name: "pigeon-security/pigeon".into(),
+        installation: None,
+    });
+    assert!(
+        validate(&on_github, &[], &rules)
+            .iter()
+            .any(|p| p.contains("publishes from its Artifacts repository")),
+    );
+    let mut other_site = home.clone();
+    other_site.sites.push(other_site.sites[0].clone());
+    other_site.sites[1].name = "notes".into();
+    other_site.sites[1].template = None;
+    other_site.sites[1].targets = vec![];
+    other_site.publishing = Some(site_publish::Profile::Enabled {
+        site: "notes".into(),
+    });
+    let problems = validate(&other_site, &[], &rules);
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.contains("publishes only the landing@1 template, and site notes")),
+        "{problems:?}"
+    );
+    let mut unknown = home.clone();
+    unknown.publishing = Some(site_publish::Profile::Enabled {
+        site: "nope".into(),
+    });
+    assert!(
+        validate(&unknown, &[], &rules)
+            .iter()
+            .any(|p| p == "Publishing names an unknown site: nope.")
+    );
+    let linked: Instance = serde_json::from_value(json!({
+        "id": "noisypigeon", "title": "noisypigeon",
+        "account": { "kind": "linked", "account_id": "a".repeat(32) },
+        "zones": ["noisypigeon.com"], "worker": "noisypigeon",
+        "repo": { "kind": "artifacts", "namespace": "np", "repo": "site" },
+        "sites": [{ "name": "blog", "bucket": "noisypigeon-site",
+            "targets": [{ "kind": "domain", "hostname": "noisypigeon.com" }] }],
+        "publishing": { "state": "enabled", "site": "blog" },
+        "version": 1
+    }))
+    .unwrap();
+    assert!(
+        validate(&linked, &[], &rules)
+            .contains(&"Publishing needs a GitHub repository and a linked account.".to_string())
+    );
+    let mut linked_github = linked.clone();
+    linked_github.repo = on_github.repo.clone();
+    assert_eq!(validate(&linked_github, &[], &rules), Vec::<String>::new());
+
+    // pigeon-sites never acts for home: its callback still refuses the record, so only core,
+    // which holds the token, publishes it. Linked publishing tools still go to pigeon-sites.
+    let refused = pigeon_capabilities::sites_scope::approved_record(
+        &home,
+        &pigeon_contract::SitesScopeRequest::Record {
+            instance: home.id.clone(),
+        },
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        refused.contains("GitHub repository and a linked account"),
+        "{refused}"
+    );
+    for tool in ["site_deploy", "site_releases", "site_rollback"] {
+        assert!(routed("sites", tool, true), "{tool}");
+        assert!(!routed("sites", tool, false), "{tool}");
+    }
+    assert!(!routed("sites", "site_render", true));
+    assert!(!routed("ci", "site_deploy", true));
+    // The tools and the Deployments view are on for home, bound to it as for a linked record.
+    let scope = pigeon_capabilities::instances::tools::Scope::new(&home).unwrap();
+    assert!(scope.home());
+    assert!(scope.views().iter().any(|v| v.view.id == "deployments"));
+    let bound = pigeon_capabilities::instances::tools::bind_global(
+        &home.id,
+        Some(&home),
+        "site_deploy",
+        &json!({ "instance": home.id, "rev": "main" }),
+    )
+    .unwrap();
+    assert_eq!(bound["instance"], "pigeon-security/platform");
+    assert!(
+        !pigeon_capabilities::instances::tools::Scope::new(&linked_github)
+            .unwrap()
+            .home()
+    );
+
+    // L2: the content root at the resolved commit, and nothing outside it.
+    let t = target(&home, "pigeon.dev").unwrap();
+    assert_eq!(t.bucket.name, "pigeon-platform-site");
+    assert_eq!(t.base_url, "https://pigeon.dev");
+    assert_eq!(
+        (t.namespace.as_str(), t.repo.as_str()),
+        ("pigeon-security", "pigeon")
+    );
+    assert_eq!(t.root.as_deref(), Some("site"));
+    for (bad, why) in [
+        (&linked_github, "not the home instance"),
+        (&on_github, "publishes from Artifacts"),
+    ] {
+        assert!(
+            target(bad, "pigeon.dev").unwrap_err().contains(why),
+            "{why}"
+        );
+    }
+    let mut off = home.clone();
+    off.publishing = None;
+    assert!(target(&off, "pigeon.dev").is_err());
+    let (dir, commit) = home_site_repo("home-site", "One.");
+    let objects = commit_pack(&dir, &commit);
+    let files = read_tree(&objects, &commit, t.root.as_deref(), &LIMITS).unwrap();
+    let paths: Vec<&str> = files.iter().map(|(p, _)| p.as_str()).collect();
+    assert_eq!(
+        paths,
+        [
+            ".pigeon/site.toml",
+            "content/index.toml",
+            "content/pages/about.md",
+            "static/robots.txt"
+        ]
+    );
+    assert_eq!(
+        (LIMITS.max_files, LIMITS.max_bytes, LIMITS.max_depth),
+        (256, 8 * 1024 * 1024, 8)
+    );
+    // The whole tree when there is no root; refused roots and trees past the limits.
+    let all = read_tree(&objects, &commit, None, &LIMITS).unwrap();
+    assert!(all.iter().any(|(p, _)| p == "src/lib.rs"));
+    for root in [
+        "../src",
+        "site/../src",
+        "/site",
+        "site/",
+        "",
+        ".",
+        "si\\te",
+        "README.md",
+        "nope",
+    ] {
+        assert!(
+            read_tree(&objects, &commit, Some(root), &LIMITS).is_err(),
+            "{root:?}"
+        );
+    }
+    let tight = |f: &dyn Fn(&mut TreeLimits)| {
+        let mut l = LIMITS;
+        f(&mut l);
+        read_tree(&objects, &commit, Some("site"), &l).unwrap_err()
+    };
+    assert!(tight(&|l| l.max_files = 3).contains("more than 3 files"));
+    assert!(tight(&|l| l.max_bytes = 1024).contains("more than 1024 bytes"));
+    assert!(tight(&|l| l.max_depth = 1).contains("directories deep"));
+    assert!(tight(&|l| l.max_path = 10).contains("longer than 10 bytes"));
+    // A tree naming `..` (written past git's own checks), a symbolic link and a submodule are
+    // refused, never followed.
+    let blob = String::from_utf8(git(&dir, &["hash-object", "-w", "--stdin"], Some("x")))
+        .unwrap()
+        .trim()
+        .to_string();
+    let raw = |name: &str, mode: &str, id: &str| {
+        let mut tree = format!("{mode} {name}\0").into_bytes();
+        for i in 0..20 {
+            tree.push(u8::from_str_radix(&id[i * 2..i * 2 + 2], 16).unwrap());
+        }
+        tree
+    };
+    let evil = |tree: Vec<u8>| {
+        let file = dir.join("tree.bin");
+        std::fs::write(&file, tree).unwrap();
+        let sub = String::from_utf8(git(
+            &dir,
+            &[
+                "hash-object",
+                "-t",
+                "tree",
+                "--literally",
+                "-w",
+                file.to_str().unwrap(),
+            ],
+            None,
+        ))
+        .unwrap()
+        .trim()
+        .to_string();
+        let top = raw("site", "40000", &sub);
+        std::fs::write(&file, top).unwrap();
+        let top = String::from_utf8(git(
+            &dir,
+            &[
+                "hash-object",
+                "-t",
+                "tree",
+                "--literally",
+                "-w",
+                file.to_str().unwrap(),
+            ],
+            None,
+        ))
+        .unwrap()
+        .trim()
+        .to_string();
+        let c = String::from_utf8(git(&dir, &["commit-tree", &top, "-m", "evil"], None))
+            .unwrap()
+            .trim()
+            .to_string();
+        let objects = commit_pack(&dir, &c);
+        read_tree(&objects, &c, Some("site"), &LIMITS).unwrap_err()
+    };
+    assert!(evil(raw("..", "100644", &blob)).contains("bad name"));
+    assert!(evil(raw("a\\b", "100644", &blob)).contains("backslash"));
+    assert!(evil(raw("link", "120000", &blob)).contains("symbolic link"));
+    assert!(evil(raw("sub", "160000", &commit)).contains("submodule"));
+
+    // The landing@1 build, rendered by pigeon-sites (which carries the templates) in a private
+    // call holding no credential: the template's digest, no scripts, statics as they are.
+    assert_eq!(BUILD_TOOL, super::sites_templates::BUILD_TOOL);
+    let build = |files: Vec<(String, Vec<u8>)>, commit: &str, pin: Option<&str>| {
+        let request = build_request(&home.id, &files, commit, pin);
+        assert_eq!(request["instance"], json!(home.id));
+        built_from(&super::sites_templates::site_build(&request)?)
+    };
+    let Build::Ready(built) = build(files.clone(), &commit, None).unwrap() else {
+        panic!("the home content builds")
+    };
+    assert_eq!(built.template, "landing@1");
+    assert_eq!(built.version, pigeon_landing::VERSION);
+    assert_eq!(
+        built.template_digest,
+        pigeon_landing::template_digest(&pigeon_landing::TEMPLATES[0])
+    );
+    assert_eq!(built.renderer_digest, pigeon_landing::renderer_digest());
+    let html: Vec<&(String, Vec<u8>, String)> = built
+        .files
+        .iter()
+        .filter(|(_, _, ctype)| ctype.starts_with("text/"))
+        .collect();
+    assert!(html.iter().any(|(p, _, _)| p == "index.html"));
+    assert!(html.iter().any(|(p, _, _)| p == "about/index.html"));
+    for (path, bytes, _) in &html {
+        let text = String::from_utf8_lossy(bytes).to_lowercase();
+        assert!(!text.contains("<script"), "{path}");
+    }
+    assert!(built.files.iter().any(|(p, b, c)| p == "robots.txt"
+        && b == b"User-agent: *\n"
+        && c.starts_with("text/plain")));
+    // A pin that allows nothing carried, a blog site.toml and a missing site.toml are the
+    // content's problems, never a release; a bad pin is refused.
+    let problems = |b: Build| match b {
+        Build::Problems(p) => p,
+        Build::Ready(_) => panic!("built"),
+    };
+    assert!(
+        problems(build(files.clone(), &commit, Some("=0.9.0")).unwrap())
+            .iter()
+            .any(|p| p.contains("pin allows none"))
+    );
+    let mut blog = files.clone();
+    blog[0].1 = b"template = \"blog@1\"\n".to_vec();
+    assert!(problems(build(blog, &commit, None).unwrap())[0].contains("only landing@1"));
+    assert!(
+        problems(build(files[1..].to_vec(), &commit, None).unwrap())[0]
+            .contains(".pigeon/site.toml")
+    );
+    assert!(build(files.clone(), &commit, Some("not a pin")).is_err());
+    assert!(build(files.clone(), "not a commit", None).is_err());
+    // Core takes nothing from pigeon-sites but a landing@1 release of site paths.
+    let answer =
+        super::sites_templates::site_build(&build_request(&home.id, &files, &commit, None))
+            .unwrap();
+    for (field, value, why) in [
+        ("template", json!("landing@2"), "Problems"),
+        ("files", json!([["../x", "", "text/plain"]]), "bad path"),
+        ("files", json!([["/x", "", "text/plain"]]), "bad path"),
+        ("files", json!([["a\\b", "", "text/plain"]]), "bad path"),
+        ("files", json!([["x"]]), "malformed"),
+        ("built", json!("yes"), "did not answer"),
+    ] {
+        let mut a = answer.clone();
+        a[field] = value;
+        let got = format!("{:?}", built_from(&a));
+        assert!(got.contains(why), "{field}: {got}");
+    }
+
+    // L3: staged and made live in the home bucket alone, every read and write with the minted
+    // `instance_home` token, revoked after.
+    let permissions = purpose_permissions(PURPOSE).unwrap();
+    let tokens = MockTokens::new(10, 50);
+    let minter = HomeMinter {
+        tokens: &tokens,
+        minted: Default::default(),
+    };
+    let token = Token {
+        minter: &minter,
+        permissions: Some(permissions),
+        zone_id: "zone-1",
+        account_id: "h",
+        secrets_store: "store",
+    };
+    let state = std::cell::RefCell::new(BucketState::default());
+    let open = |account: pigeon_core::Account| {
+        assert!(account.parent.is_empty(), "nothing mints from the parent");
+        MockBucket {
+            bucket: t.bucket.name.clone(),
+            bearer: account.bearer,
+            state: &state,
+        }
+    };
+    let current = || async { Ok(()) };
+    let first = provenance(&home.id, &t, &commit, &built);
+    assert_eq!(first["template"], "landing@1");
+    assert_eq!(first["template_digest"], json!(built.template_digest));
+    let staged =
+        token_block_on(release(&token, open, &first, built.files.clone(), current)).unwrap();
+    {
+        let s = state.borrow();
+        assert!(s.objects.keys().all(|(b, _)| b == "pigeon-platform-site"));
+        assert!(
+            s.bearers.iter().all(|b| b.as_deref() == Some("v")),
+            "{:?}",
+            s.bearers
+        );
+        let key = |k: &str| ("pigeon-platform-site".to_string(), k.to_string());
+        assert_eq!(s.objects[&key("live")], staged.release.as_bytes());
+        let meta: Value =
+            serde_json::from_slice(&s.objects[&key(&site_publish::release_key(&staged.release))])
+                .unwrap();
+        assert_eq!(meta, first);
+        assert!(
+            s.objects
+                .contains_key(&key(&pigeon_core::r2::manifest_key(&staged.release)))
+        );
+    }
+    assert_eq!(staged.files, built.files.len());
+    assert_eq!(staged.uploaded, built.files.len());
+    let exact = vec![
+        (
+            "account".to_string(),
+            vec!["Workers R2 Storage Write".to_string()],
+        ),
+        ("zones:zone-1".to_string(), vec!["Zone Read".to_string()]),
+    ];
+    assert_eq!(
+        *minter.minted.borrow(),
+        vec![("instance-home".to_string(), exact)]
+    );
+    assert_eq!(*tokens.deleted.borrow(), vec!["t100".to_string()]);
+    // The same deploy again is the same release, and uploads nothing new.
+    let again =
+        token_block_on(release(&token, open, &first, built.files.clone(), current)).unwrap();
+    assert_eq!(
+        (again.release.as_str(), again.uploaded),
+        (staged.release.as_str(), 0)
+    );
+    // The release id is what linked releases have always been: the provenance and manifest.
+    let manifest: pigeon_core::r2::Manifest = built
+        .files
+        .iter()
+        .map(|(p, b, c)| {
+            let (path, mut e) = pigeon_core::r2::manifest_of(&[(p.clone(), b.clone())])
+                .into_iter()
+                .next()
+                .unwrap();
+            e.content_type = c.clone();
+            (path, e)
+        })
+        .collect();
+    assert_eq!(staged.release, site_publish::release_id(&first, &manifest));
+
+    // A failed write, or a record that changed before `live` moves, leaves `live` where it was,
+    // and the token is revoked all the same.
+    let (dir2, commit2) = home_site_repo("home-site-2", "Two.");
+    let files2 = read_tree(
+        &commit_pack(&dir2, &commit2),
+        &commit2,
+        Some("site"),
+        &LIMITS,
+    )
+    .unwrap();
+    let Build::Ready(built2) = build(files2, &commit2, Some("^1")).unwrap() else {
+        panic!("builds")
+    };
+    let second = provenance(&home.id, &t, &commit2, &built2);
+    state.borrow_mut().fail_blobs = true;
+    let failed = token_block_on(release(
+        &token,
+        open,
+        &second,
+        built2.files.clone(),
+        current,
+    ))
+    .unwrap_err()
+    .to_string();
+    assert!(failed.contains("blob write refused"), "{failed}");
+    state.borrow_mut().fail_blobs = false;
+    let changed = || async {
+        Err::<(), _>(worker::Error::RustError(
+            "the approved publishing record changed".into(),
+        ))
+    };
+    let failed = token_block_on(release(
+        &token,
+        open,
+        &second,
+        built2.files.clone(),
+        changed,
+    ))
+    .unwrap_err()
+    .to_string();
+    assert!(failed.contains("record changed"), "{failed}");
+    let live = |s: &std::cell::RefCell<BucketState>| {
+        String::from_utf8(
+            s.borrow().objects[&("pigeon-platform-site".to_string(), "live".to_string())].clone(),
+        )
+        .unwrap()
+    };
+    assert_eq!(live(&state), staged.release);
+    assert_eq!(
+        *tokens.deleted.borrow(),
+        ["t100", "t101", "t102", "t103"].map(String::from)
+    );
+    assert!(tokens.tokens.borrow().is_empty());
+
+    // A second release goes live; releases list live first; rollback moves `live` back.
+    let newer = token_block_on(release(
+        &token,
+        open,
+        &second,
+        built2.files.clone(),
+        current,
+    ))
+    .unwrap();
+    assert_ne!(newer.release, staged.release);
+    assert_eq!(live(&state), newer.release);
+    let listed = token_block_on(releases(&token, open, &home.id, &t.site, 20)).unwrap();
+    assert_eq!(listed["total"], 2);
+    assert_eq!(listed["live"], json!(newer.release));
+    assert_eq!(listed["releases"][0]["release"], json!(newer.release));
+    assert_eq!(listed["releases"][0]["live"], true);
+    assert_eq!(listed["releases"][1]["commit"], json!(commit));
+    assert_eq!(listed["releases"][1]["template"], "landing@1");
+    let owner = Owner {
+        instance: &home.id,
+        base_url: &t.base_url,
+        site: &t.site,
+    };
+    let back = token_block_on(rollback(&token, open, &staged.release, &owner, current)).unwrap();
+    assert_eq!(back["commit"], json!(commit));
+    assert_eq!(live(&state), staged.release);
+    // A release of another target, an unknown one or no release id is refused; `live` stays.
+    let elsewhere = Owner {
+        instance: "noisypigeon",
+        ..owner
+    };
+    for (release_id, who, why) in [
+        (
+            newer.release.as_str(),
+            &elsewhere,
+            "different publishing target",
+        ),
+        (
+            "release-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            &owner,
+            "unknown site release",
+        ),
+        ("main", &owner, "expected a site release ID"),
+    ] {
+        let why_not = token_block_on(rollback(&token, open, release_id, who, current))
+            .unwrap_err()
+            .to_string();
+        assert!(why_not.contains(why), "{why_not}");
+    }
+    assert_eq!(live(&state), staged.release);
+    // Every mint was revoked; nothing outside the home bucket was ever written.
+    assert!(tokens.tokens.borrow().is_empty());
+    assert!(
+        minter
+            .minted
+            .borrow()
+            .iter()
+            .all(|(p, _)| p == "instance-home")
+    );
+    assert!(
+        state
+            .borrow()
+            .objects
+            .keys()
+            .all(|(b, _)| b == "pigeon-platform-site")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&dir2);
+}

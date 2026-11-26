@@ -226,3 +226,113 @@ pub fn split(files: Vec<(String, Vec<u8>)>) -> Result<Split, String> {
         }
     })
 }
+
+/// A release rendered from a content root, ready to stage: each file's site path, bytes and
+/// content type (the template's files, then `static/`'s), and what rendered it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Release {
+    pub files: Vec<(String, Vec<u8>, String)>,
+    pub template: &'static str,
+    pub version: &'static str,
+    pub digest: String,
+    pub renderer_digest: String,
+}
+
+/// Renders a content root's `files` (paths relative to it) at `commit` as a release of the
+/// landing template alone, at the newest carried version `allows` accepts: the home instance's
+/// site (docs/plans/platform-self-hosting.md, L3). Anything else, a blog among it, is a problem,
+/// never a release.
+pub fn landing_release(
+    files: Vec<(String, Vec<u8>)>,
+    commit: &str,
+    allows: &dyn Fn(&str) -> bool,
+) -> Result<Release, Vec<String>> {
+    let s = split(files).map_err(|e| vec![e])?;
+    if !s.has_site_toml {
+        return Err(vec![
+            ".pigeon/site.toml: the content root has none; the site is built from it".into(),
+        ]);
+    }
+    if Template::of(&s.parts.site_toml) != Template::Landing {
+        return Err(vec![format!(
+            ".pigeon/site.toml: only {} is published here; set template = \"{}\"",
+            pigeon_landing::TEMPLATE,
+            pigeon_landing::TEMPLATE
+        )]);
+    }
+    let parts = Parts {
+        commit: commit.chars().take(7).collect(),
+        ..s.parts
+    };
+    let out = render(&parts, &|template, v| {
+        template == Template::Landing && allows(v)
+    })
+    .map_err(|ps| ps.iter().map(ToString::to_string).collect::<Vec<_>>())?;
+    let mut files: Vec<(String, Vec<u8>, String)> = out
+        .files
+        .into_iter()
+        .map(|(path, (bytes, ctype))| (path, bytes, ctype.to_string()))
+        .collect();
+    for (path, bytes) in s.statics {
+        let ctype = pigeon_core::r2::content_type(&path).to_string();
+        files.push((path, bytes, ctype));
+    }
+    Ok(Release {
+        files,
+        template: out.template,
+        version: out.version,
+        digest: out.digest,
+        renderer_digest: out.renderer_digest,
+    })
+}
+
+/// The private call core makes to render the home instance's release: never in the manifest,
+/// so no person or agent calls it, and signed with the instance's context.
+pub const BUILD_TOOL: &str = "site_build";
+
+/// [`BUILD_TOOL`]'s answer to `args` (`files`: `[path, base64url]` pairs relative to the content
+/// root, `commit`, and the `landing` pin when the record holds one): `{"built": true, …, files:
+/// [[path, base64url, content type]]}`, or `{"built": false, "problems": […]}`. Nothing is read
+/// or written; an argument that is not as described is an error.
+pub fn site_build(args: &serde_json::Value) -> Result<serde_json::Value, String> {
+    use pigeon_core::versions::{Requirement, Version};
+    use pigeon_core::webauthn::{b64url, unb64url};
+    let commit = args["commit"]
+        .as_str()
+        .filter(|c| !c.is_empty() && c.len() <= 64 && c.bytes().all(|b| b.is_ascii_hexdigit()))
+        .ok_or("`commit` must be the commit's id")?;
+    let pin = match &args["pin"] {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(p) => {
+            Some(Requirement::parse(p).map_err(|e| format!("the landing pin `{p}`: {e}"))?)
+        }
+        _ => return Err("`pin` must be a version requirement".into()),
+    };
+    let mut files = Vec::new();
+    for pair in args["files"].as_array().ok_or("`files` is required")? {
+        let (Some(path), Some(body)) = (pair[0].as_str(), pair[1].as_str()) else {
+            return Err("each file is a [path, base64url] pair".into());
+        };
+        let bytes = unb64url(body).map_err(|e| format!("{path}: {e}"))?;
+        files.push((path.to_string(), bytes));
+    }
+    let allows = |v: &str| {
+        pin.as_ref()
+            .is_none_or(|r| Version::parse(v).is_ok_and(|v| r.matches(&v)))
+    };
+    Ok(match landing_release(files, commit, &allows) {
+        Ok(r) => serde_json::json!({
+            "built": true,
+            "template": r.template,
+            "template_version": r.version,
+            "template_digest": r.digest,
+            "renderer_digest": r.renderer_digest,
+            "files": r
+                .files
+                .iter()
+                .map(|(p, b, c)| serde_json::json!([p, b64url(b), c]))
+                .collect::<Vec<_>>(),
+        }),
+        Err(problems) => serde_json::json!({ "built": false, "problems": problems }),
+    })
+}

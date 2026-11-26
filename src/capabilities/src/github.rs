@@ -83,7 +83,7 @@ pub(crate) async fn installation_token_for(
 /// The ref whose pushes deploy.
 pub const DEPLOY_REF: &str = "refs/heads/main";
 /// The capability Worker that deploys sites, as core binds it.
-const SITES_BINDING: crate::remote::Binding = crate::remote::Binding {
+pub(crate) const SITES_BINDING: crate::remote::Binding = crate::remote::Binding {
     binding: "SITES",
     worker: "pigeon-sites",
 };

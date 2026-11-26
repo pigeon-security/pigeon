@@ -1,7 +1,7 @@
 # pigeon.dev as an instance of pigeon
 
-Status: **decided** (2026-11-26); H1 and L1 done, the `/platform` redirect built, H2 built,
-the rest not started. Code references are to main at the time of writing.
+Status: **decided** (2026-11-26); H1 and L1 done, the `/platform` redirect built, H2 and
+L2–L3 built, the rest not started. Code references are to main at the time of writing.
 
 ## Goal
 
@@ -42,9 +42,9 @@ hostnames, by Host:
   `https://pigeon.dev/architecture.json` to answer with the deployed commit. **This contract
   stays.**
 - The home record is `account: home`, no zones, no sites, no Worker, CI only. Since H2,
-  `instance_plan`/`instance_apply` accept home (with the `instance_home` token, below);
-  publishing still requires a GitHub repo and a linked account (`record.rs`, `sites_scope.rs`,
-  `deploy.rs`).
+  `instance_plan`/`instance_apply` accept home (with the `instance_home` token, below).
+  Since L2–L3, home publishes from Artifacts (below); a linked instance still needs a GitHub
+  repo and a linked account (`record.rs`, `sites_scope.rs`, `deploy.rs`).
 - The home instance is found by account kind, never by id (`console.rs:174-179`,
   `manifest.rs:26-27`, `ci.rs:33`, iOS `InstanceStore.platform`), which keeps R1 small.
 
@@ -97,6 +97,43 @@ failure. A capability Worker may not ask `credential` for it (`CORE_ONLY_PURPOSE
 purpose is unknown or the parent cannot mint it, plan/apply refuse before any step. A home
 Worker is never uploaded and workers.dev never turned on (`plan::NO_SCRIPTS`), and
 `plan::home_refusal` re-checks every step before apply.
+
+## As built (L2–L3): home publishing
+
+- **Record.** `publishing: {state: enabled, site}` is valid for home when `repo.kind` is
+  `artifacts` and the named site is `landing@1` (`record.rs`, `validate`); a linked record still
+  needs GitHub and a linked account, with the same message. `sites[].build` is the content
+  root for home (the repository root when unset); linked deploys ignore it, as before.
+- **Who serves the tools.** `site_deploy`, `site_releases` and `site_rollback` for the home
+  record are core's own (`instances/home_site.rs`, routed in `remote.rs` by
+  `home_site::routed`), after the same policy gate and passkey as a linked call; the console's
+  Site › Deployments and its `site-deploy`/`site-rollback` writes reach them unchanged.
+  pigeon-sites never acts for home: `sites_scope` still refuses the record.
+- **Source (L2).** `artifacts::read_tree` resolves the revision (`main` by default) and reads
+  every regular file under the root of that one commit, over a read-only git token revoked
+  after (`pack::read_tree`): at most 256 files, 8 MiB, 8 directories deep, 512-byte paths.
+  A root that is not a relative path, `..`/`.`/empty names, backslashes or control characters,
+  symbolic links and submodules are refused; nothing is written.
+- **Render.** pigeon-sites renders, as it carries the templates and declares their versions:
+  core sends the files to its private `site_build` (not in its manifest, signed with the
+  instance's context, pure, no credential), which answers a `landing@1` release at the version
+  the record's `landing` pin allows, or the content's problems. Core takes only `landing@1` and
+  site paths back. This keeps `pigeon-landing` out of core.
+- **Storage (L3).** The release is staged with `site_publish::stage` (blobs it lacks,
+  `deploys/{release}.json`, `release-meta/{release}.json`), the record is checked unchanged,
+  then `live` moves (`site_publish::activate`), all in `pigeon-platform-site` inside
+  `home::with_token`: one `instance_home` token per call, revoked on success and failure.
+  Rollback (`site_publish::staged`) and listing (`site_publish::releases`) are the same code
+  pigeon-sites now uses for linked instances. No new permission: R2 write covers the reads.
+- **Not touched.** No Worker upload, no domain attach; the apex is still served by
+  `pigeon_core::home` until S1. The `sites` pin is not checked for home (core publishes it).
+
+What the person does next:
+
+1. Propose the record change (`instance_propose`), approve it with the passkey:
+   `sites[0].build: "site"` and `publishing: {"state": "enabled", "site": "landing"}`.
+2. Run `site_deploy {instance: "pigeon-security/platform"}` (or Site › Deployments › Deploy),
+   approving with the passkey; `site_releases` lists it. Nothing on pigeon.dev changes until S1.
 
 ## Serving: core serves the apex
 
@@ -155,7 +192,8 @@ Steps:
   `home_instance_plans_and_applies_with_a_minted_token`).
 - **L2–L3** home publishing from Artifacts: `sites[].build` as root (`record.rs:134-136`),
   an Artifacts archive read (`artifacts.rs:566-591` reads single files only), the home bucket,
-  shared release/rollback/list code.
+  shared release/rollback/list code. *Built* (smoke
+  `home_site_publishes_from_artifacts_with_a_minted_token`); see "As built (L2–L3)" below.
 - **S1** core serves the apex release (fallback `home_html`); `/architecture.json` unchanged;
   `pigeon-sites` leaves the apex.
 - **R1** instance id rename, above.
@@ -170,6 +208,6 @@ Steps:
 
 ## Open questions
 
-1. Home publishing from Artifacts (no GitHub App) or GitHub?
+1. ~~Home publishing from Artifacts (no GitHub App) or GitHub?~~ Artifacts (L2–L3).
 2. Home metrics: the platform Workers too, or only managed resources?
 3. Do other instances later get a `platform.<zone>` target of their own?

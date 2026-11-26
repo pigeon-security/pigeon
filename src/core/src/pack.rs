@@ -620,3 +620,115 @@ pub fn path_id(objects: &Objects, commit: &str, path: &str) -> Result<Option<Str
     }
     Ok(Some(id))
 }
+
+// ---- reading a directory at a commit ----
+
+/// How much of a directory [`read_tree`] reads before it refuses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TreeLimits {
+    /// The most regular files.
+    pub max_files: usize,
+    /// The most bytes, all files together.
+    pub max_bytes: usize,
+    /// The most directories deep below the root.
+    pub max_depth: usize,
+    /// The longest path, relative to the root, in bytes.
+    pub max_path: usize,
+}
+
+/// Whether `path` is a relative directory path: parts split by `/`, none empty, `.` or `..`,
+/// and no backslash or control character anywhere.
+fn relative_dir(path: &str) -> bool {
+    !path.is_empty()
+        && !path.chars().any(|c| c == '\\' || c.is_control())
+        && path
+            .split('/')
+            .all(|p| !p.is_empty() && p != "." && p != "..")
+}
+
+/// Every regular file under directory `root` (the whole tree when `None`) of `commit`'s tree,
+/// from `objects`: its path relative to `root` and its bytes, sorted by path. The tree is
+/// untrusted: a root that is not a relative path or not a directory, an entry name holding a
+/// backslash or control character, a symbolic link or submodule, a missing object, or a tree
+/// past `limits`, is an error and nothing is answered.
+pub fn read_tree(
+    objects: &Objects,
+    commit: &str,
+    root: Option<&str>,
+    limits: &TreeLimits,
+) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let Some((1, commit_data)) = objects.by_id.get(commit) else {
+        return Err("the commit is not in the pack".to_string());
+    };
+    let mut tree_id = commit_tree(commit_data)?;
+    if let Some(root) = root {
+        if !relative_dir(root) {
+            return Err(format!("the directory `{root}` is not a relative path"));
+        }
+        for part in root.split('/') {
+            let Some((2, data)) = objects.by_id.get(&tree_id) else {
+                return Err("a tree is not in the pack".to_string());
+            };
+            match tree_entries(data)?.into_iter().find(|e| e.name == part) {
+                Some(e) if e.mode == "40000" => tree_id = e.id,
+                _ => return Err(format!("the commit has no directory `{root}`")),
+            }
+        }
+    }
+    let mut out = Vec::new();
+    let mut bytes = 0usize;
+    // (tree, its path relative to the root with a trailing slash or empty, its depth)
+    let mut todo = vec![(tree_id, String::new(), 0usize)];
+    while let Some((id, prefix, depth)) = todo.pop() {
+        let Some((2, data)) = objects.by_id.get(&id) else {
+            return Err("a tree is not in the pack".to_string());
+        };
+        for entry in tree_entries(data)? {
+            if entry.name.chars().any(|c| c == '\\' || c.is_control()) {
+                return Err(format!(
+                    "`{prefix}{}` has a backslash or control character in its name",
+                    entry.name.escape_debug()
+                ));
+            }
+            let path = format!("{prefix}{}", entry.name);
+            if path.len() > limits.max_path {
+                return Err(format!("`{path}` is longer than {} bytes", limits.max_path));
+            }
+            match entry.mode.as_str() {
+                "40000" => {
+                    if depth + 1 > limits.max_depth {
+                        return Err(format!(
+                            "`{path}` is more than {} directories deep",
+                            limits.max_depth
+                        ));
+                    }
+                    todo.push((entry.id, format!("{path}/"), depth + 1));
+                }
+                "100644" | "100755" => {
+                    let Some((3, blob)) = objects.by_id.get(&entry.id) else {
+                        return Err(format!("the blob of `{path}` is not in the pack"));
+                    };
+                    if out.len() + 1 > limits.max_files {
+                        return Err(format!(
+                            "the directory holds more than {} files",
+                            limits.max_files
+                        ));
+                    }
+                    bytes = bytes.saturating_add(blob.len());
+                    if bytes > limits.max_bytes {
+                        return Err(format!(
+                            "the directory holds more than {} bytes",
+                            limits.max_bytes
+                        ));
+                    }
+                    out.push((path, blob.clone()));
+                }
+                "120000" => return Err(format!("`{path}` is a symbolic link")),
+                "160000" => return Err(format!("`{path}` is a submodule")),
+                other => return Err(format!("`{path}` has an unknown mode {other}")),
+            }
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(out)
+}

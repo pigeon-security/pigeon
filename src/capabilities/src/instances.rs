@@ -7,6 +7,7 @@
 //! can only be listed.
 
 pub mod home;
+pub mod home_site;
 pub mod manifest;
 pub mod plan;
 pub(crate) mod publishing;

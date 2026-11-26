@@ -801,10 +801,25 @@ pub fn validate(instance: &Instance, others: &[Instance], rules: &Rules) -> Vec<
     check_platform(instance, rules, &mut problems);
     check_worker(instance, others, rules, &mut problems);
     if let Some(pigeon_core::site_publish::Profile::Enabled { site }) = &instance.publishing {
-        if !instance.sites.iter().any(|record| record.name == *site) {
+        let named = instance.sites.iter().find(|record| record.name == *site);
+        if named.is_none() {
             problems.push(format!("Publishing names an unknown site: {site}."));
         }
-        if !matches!(instance.repo, Some(RepoRef::Github { .. }))
+        if instance.account == AccountRef::Home {
+            // The home instance publishes from its Artifacts repository, with no GitHub App
+            // and no linked account, and only the landing template (instances/home_site.rs).
+            if !matches!(instance.repo, Some(RepoRef::Artifacts { .. })) {
+                problems.push(
+                    "The home instance publishes from its Artifacts repository: set repo.kind to artifacts.".into(),
+                );
+            }
+            if let Some(named) = named.filter(|n| !n.landing()) {
+                problems.push(format!(
+                    "The home instance publishes only the {LANDING_TEMPLATE} template, and site {} does not name it.",
+                    named.name
+                ));
+            }
+        } else if !matches!(instance.repo, Some(RepoRef::Github { .. }))
             || !matches!(
                 instance.account,
                 AccountRef::Linked {
