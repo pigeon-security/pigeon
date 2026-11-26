@@ -753,7 +753,8 @@ fn console_app_delegates() {
     // The live platform's 18 service users, as `oauth_clients` and `users_list` answered on
     // 26 November (Willow is `w`): (id, name, redirect URI or none, service id, linked).
     let ios = "https://platform.pigeon.dev/app/oauth";
-    let rows: [(&str, &str, Option<&str>, Option<&str>, bool); 18] = [
+    type Row<'a> = (&'a str, &'a str, Option<&'a str>, Option<&'a str>, bool);
+    let rows: [Row; 18] = [
         ("pj7dM_Jf7VnquzzOXnea2v", "Claude", None, None, false),
         ("3IQ5uYePQwgzxNxk7QUoU8", "probe", None, None, false),
         (
