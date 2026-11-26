@@ -24,39 +24,6 @@ use pigeon_capabilities::{Capability, Context, Hosted};
 /// The Directory's class, exported from this Worker for its Durable Object binding.
 pub use pigeon_capabilities::users::Directory;
 
-/// The CI scheduler's class, kept only for an old migration. It is served from
-/// `pigeon-ci-gateway` now: its v1 migration transferred the class there
-/// (`transferred_classes`), with its objects, and this Worker's `CI_SCHEDULER` binding names that
-/// Worker (`script_name`). Nothing here runs it.
-///
-/// It stays because this Worker's migration v2 (`src/platform/wrangler.toml`) still declares
-/// `CiScheduler` in `new_sqlite_classes`, with no later `deleted_classes`, and no one has checked
-/// that Cloudflare accepts an upload of a script that no longer exports a class its migrations
-/// once created and that was transferred away (incident 5, `docs/plans/workers-split.md`; the
-/// planned check is the second rehearsal in `docs/plans/do-rehearsal.md`). Removing it is the
-/// person's decision, after that rehearsal passes. Never add a `deleted_classes` migration for it
-/// here without a reviewed plan: a deletion is irreversible and could reach the gateway's objects.
-#[worker::durable_object]
-pub struct CiScheduler {
-    inner: pigeon_ci::scheduler::Scheduler,
-}
-
-impl worker::DurableObject for CiScheduler {
-    fn new(state: worker::State, env: Env) -> Self {
-        let inner = pigeon_ci::scheduler::Scheduler::new(state, env, settings::ci())
-            .expect("the CI scheduler's migrations apply");
-        Self { inner }
-    }
-
-    async fn fetch(&self, req: Request) -> Result<Response> {
-        self.inner.fetch(req).await
-    }
-
-    async fn alarm(&self) -> Result<Response> {
-        self.inner.alarm().await
-    }
-}
-
 /// The Lander: landings, one live at a time, followed by its alarm. It runs CI's tools through
 /// this Worker's capabilities, as `/mcp` would.
 #[worker::durable_object]
@@ -111,39 +78,6 @@ impl worker::DurableObject for TokenLedger {
 
     async fn fetch(&self, req: Request) -> Result<Response> {
         self.inner.fetch(req).await
-    }
-}
-
-/// Async model jobs' class (the index and each job's own object), kept only for an old
-/// migration. It is served from `pigeon-model-gateway` now: its v1 migration transferred the
-/// class there (`transferred_classes`), with its objects, and this Worker's `MODEL_JOBS` binding
-/// names that Worker (`script_name`). Nothing here runs it.
-///
-/// It stays because this Worker's migration v4 (`src/platform/wrangler.toml`) still declares
-/// `ModelJobs` in `new_sqlite_classes`, with no later `deleted_classes`, and no one has checked
-/// that Cloudflare accepts an upload of a script that no longer exports a class its migrations
-/// once created and that was transferred away (incident 5, `docs/plans/workers-split.md`; the
-/// planned check is the second rehearsal in `docs/plans/do-rehearsal.md`). Removing it is the
-/// person's decision, after that rehearsal passes. Never add a `deleted_classes` migration for it
-/// here without a reviewed plan: a deletion is irreversible and could reach the gateway's objects.
-#[worker::durable_object]
-pub struct ModelJobs {
-    inner: pigeon_models::runner::ModelJobs,
-}
-
-impl worker::DurableObject for ModelJobs {
-    fn new(state: worker::State, env: Env) -> Self {
-        let inner = pigeon_models::runner::ModelJobs::new(state, env, settings::model_jobs())
-            .expect("the model jobs' migrations apply");
-        Self { inner }
-    }
-
-    async fn fetch(&self, req: Request) -> Result<Response> {
-        self.inner.fetch(req).await
-    }
-
-    async fn alarm(&self) -> Result<Response> {
-        self.inner.alarm().await
     }
 }
 

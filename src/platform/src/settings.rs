@@ -381,14 +381,6 @@ pub fn land() -> land::Settings {
     }
 }
 
-/// What async model jobs run with: the gateway `Models` sends through, and the parent token.
-pub fn model_jobs() -> pigeon_models::runner::Settings {
-    pigeon_models::runner::Settings {
-        gateway: "pigeon".into(),
-        token: pigeon_models::runner::Token::Parent(PARENT_TOKEN.into()),
-    }
-}
-
 /// The CI gateway's settings: pigeon's (`pigeon_ci::pigeon`), acting with the parent token,
 /// which this Worker holds.
 pub fn ci() -> pigeon_ci::Settings {
