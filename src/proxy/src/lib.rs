@@ -4,7 +4,8 @@
 //! found.
 //!
 //! It never holds the parent token. Everything that needs core's state or power it asks core
-//! for over its `PLATFORM` binding, signing each request with `CALLER_KEY`: a scoped credential
+//! for over its `PLATFORM` binding, signing each request with its own key, `CALLER_KEY_OWN`
+//! (docs/plans/caller-keys.md, step 3): a scoped credential
 //! per purpose (`credential`, kept until a minute before it expires), who holds a proxy
 //! credential (`verify`, kept a minute, keyed by the credential's hash), a CI job token's grant
 //! (`grant`) and the caller a landing's deploy job stands for (`deploy_grant`), these two asked
@@ -18,7 +19,7 @@ compile_error!("pigeon-proxy builds for wasm32 only: cargo build --target wasm32
 use std::cell::RefCell;
 
 use pigeon_contract::{Answer, Credential, CredentialRequest, GrantRequest, VerifyRequest};
-use pigeon_core::{Account, secrets_store, webauthn};
+use pigeon_core::{Account, webauthn};
 use pigeon_proxies::cache::{Credentials, Verified};
 use pigeon_proxies::cf_proxy::CfProxy;
 use pigeon_proxies::git_proxy::GitProxy;
@@ -28,9 +29,6 @@ use worker::{Context, Env, Error, Method, Request, Response, Result, event};
 
 /// This Worker's name, as deployed.
 const WORKER: &str = "pigeon-proxy";
-/// The Secrets Store binding of the key core signs callers with, which this Worker signs its
-/// requests to core with.
-const CALLER_KEY: &str = "CALLER_KEY";
 /// The service binding to core.
 const PLATFORM: &str = "PLATFORM";
 /// Where core answers its ops over the binding.
@@ -228,17 +226,17 @@ async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
             _ => Response::error("not found", 404),
         };
     }
-    let key = match env.secret_store(CALLER_KEY) {
-        Ok(binding) => secrets_store::read(&binding).await?,
-        Err(_) => None,
-    };
-    let Some(key) = key else {
-        worker::console_error!("pigeon-proxy has no caller key: CALLER_KEY is not set");
-        return Response::error("the proxy is not set up; see the proxy's logs", 503);
+    // Its own key, never the shared one: core then knows the proxy asked. None serves nothing.
+    let key = match pigeon_contract::own_key(&env).await {
+        Ok(key) => key,
+        Err(e) => {
+            worker::console_error!("pigeon-proxy: {e}");
+            return Response::error("the proxy is not set up; see the proxy's logs", 503);
+        }
     };
     let core = Core {
         env: &env,
-        key: key.into_bytes(),
+        key,
         account_id: env.var("CF_ACCOUNT_ID")?.to_string(),
         secrets_store: env.var("CF_SECRETS_STORE_ID")?.to_string(),
     };
