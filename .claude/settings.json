@@ -9,7 +9,9 @@
       "mcp__Pigeon_MCP__pigeon_land",
       "mcp__Pigeon_MCP__pigeon_land_status",
       "mcp__Pigeon_MCP__pigeon_land_cancel",
-      "Bash(git push https://proxy.pigeon.dev/*)"
+      "Bash(git push https://proxy.pigeon.dev/*)",
+      "mcp__Pigeon_MCP__pigeon_branch_push",
+      "mcp__Pigeon_MCP__pigeon_session_credential"
     ]
   }
 }

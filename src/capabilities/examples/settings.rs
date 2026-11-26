@@ -42,9 +42,14 @@ fn tools(k: Kind) -> &'static [Tool] {
             Tool::Pigeon("land_status"),
             Tool::Pigeon("land_cancel"),
         ],
-        Kind::PushBranch | Kind::RewriteBranch | Kind::DeleteBranch => {
-            &[Tool::Bash("git push https://proxy.pigeon.dev/*")]
-        }
+        // Git through the proxy, or over MCP: `branch_push` writes a bundle to the app's own
+        // namespace, `session_credential` mints a git-only credential for it
+        // (docs/plans/agent-git.md). Both are scoped to the calling app's namespace.
+        Kind::PushBranch | Kind::RewriteBranch | Kind::DeleteBranch => &[
+            Tool::Bash("git push https://proxy.pigeon.dev/*"),
+            Tool::Pigeon("branch_push"),
+            Tool::Pigeon("session_credential"),
+        ],
         Kind::HandoffBranch
         | Kind::Deploy
         | Kind::MoveMain
