@@ -403,6 +403,7 @@
           ["Job", code(job.id)],
           ["Job state", job.state || "—"],
           ["Provider state", job.provider_state || "—"],
+          ...(job.provider_observed_ms ? [["Provider checked", when(job.provider_observed_ms)]] : []),
           ["Runner stage", job.stage || "—"],
           ["Estimated cost", estimatedUsd(job.estimated_usd)],
           ["Started", when(job.started_ms)],
