@@ -240,7 +240,7 @@ pub fn shell(site_name: &str, person: Option<&str>) -> String {
     });
     format!(
         "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\n\
-         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
+         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1, viewport-fit=cover\">\n\
          <title>{site} · Console</title>\n{assets}</head><body>\n\
          <div id=\"pigeon-shell\" data-site=\"{site}\" data-base=\"{BASE}\"{person}></div>\n\
          <noscript><p>The console needs JavaScript.</p></noscript>\n\
