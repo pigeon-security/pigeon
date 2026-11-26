@@ -24,7 +24,6 @@ pub mod land;
 pub mod ledger;
 pub mod linked;
 pub mod mirror;
-pub mod models;
 /// Signed notifications, in pigeon-core so the capability Workers share them.
 pub use pigeon_core::notify;
 pub mod oauth;
@@ -32,7 +31,6 @@ pub mod observability;
 pub mod passkeys;
 pub mod policy;
 pub mod portal_oauth;
-pub mod protected_host;
 pub mod proxy;
 pub mod public_host;
 pub mod remote;
@@ -91,7 +89,7 @@ pub struct Hosted<'a> {
 
 /// A feature a Worker hosts.
 pub trait Capability {
-    /// Its module's name, such as `protected_host`.
+    /// Its module's name, such as `public_host`.
     fn name(&self) -> &'static str;
 
     /// The MCP tools it offers.

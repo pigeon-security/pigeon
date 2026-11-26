@@ -1232,13 +1232,12 @@ fn proxy_worker_caches_and_core_ops() {
 
     // The cutover moves the proxy host in one call, `setup_proxy_host {worker}`, and back.
     use pigeon_capabilities::Capability;
-    use pigeon_capabilities::public_host::{PublicHost, Retire};
+    use pigeon_capabilities::public_host::PublicHost;
     let host = |also: Vec<String>| PublicHost {
         zone: "pigeon.dev".into(),
         host: "proxy.pigeon.dev".into(),
         worker: "pigeon-platform".into(),
         also,
-        retire: Retire::default(),
         tool: "setup_proxy_host",
     };
     let tools = host(vec!["pigeon-proxy".into()]).tools();

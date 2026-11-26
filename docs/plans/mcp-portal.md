@@ -136,7 +136,8 @@ server. There are two coherent choices:
   `platform.pigeon.dev`, `proxy.pigeon.dev` and `pigeon.dev` are public at the edge, and the
   portal is the only Access. Landings followed: the matching fix above, an empty retire configuration for
   `setup_platform`, and (in `claude/one-worker`) `site_publish` without a retirement at all, so
-  setting a host up never deletes Access state again.
+  setting a host up never deletes Access state again. Later, `PublicHost`'s `Retire` was removed
+  altogether as dead code: setting up a public host only attaches it.
 - The direct `platform.pigeon.dev/mcp` stays open to pigeon's OAuth: it is the rollback path, and the only path for headless agents with an issued token. Narrowing it to the portal's client is a later decision for the person.
 - The leftover Access-JWT path in `users::caller` stays for now. The docs give no sign that the portal signs requests to the server with an Access JWT. If phase 0 finds one, verifying its `email` claim against the person is a possible phase-3 alternative to the second OAuth hop.
 

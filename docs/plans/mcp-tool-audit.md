@@ -49,7 +49,7 @@ argument or a message that is wrong. Both are small fixes.
 
 | Tool | Verdict | Why |
 |---|---|---|
-| `setup_proxy_host` | keep | A re-run attaches the host again and retires nothing (`Retire::default()`, `src/platform/src/settings.rs:197`). It is the documented rollback of the proxy cutover (`settings.rs:194`) and is called in `tests/smoke/proxy.rs:927` and `tests/smoke/core.rs:575`. Not a no-op: its `worker` argument moves the host. |
+| `setup_proxy_host` | keep | A re-run attaches the host again and nothing else (`PublicHost` has no Access retirement since it was removed as dead code). It is the documented rollback of the proxy cutover (`settings.rs:194`) and is called in `tests/smoke/proxy.rs:927` and `tests/smoke/core.rs:575`. Not a no-op: its `worker` argument moves the host. |
 | `setup_source` | keep | An ensure of repository, queue, consumer and subscription (`src/capabilities/src/source.rs:87`). On a healthy platform it changes nothing. If a queue or subscription is lost, it is the only way to make them again. That is recovery, not a finished migration. |
 | `users_bootstrap` | keep | It refuses once a standard user exists (`src/capabilities/src/users.rs:1321`). But `users_remove` stops only a user removing themselves (`users.rs:1391`), so a service caller can remove the last person. Then `users_bootstrap` is the only way back in. A recovery tool. |
 | `models_setup` | keep | Used to attach each new provider key. `models_providers` only reads (`src/models/src/lib.rs:1498`, `:1504`). Error messages tell the person to run `models_setup` (`src/core/src/ai_gateway.rs:280`). |

@@ -193,7 +193,7 @@ other Workers show up only as names in `split`'s footprint. Checked against the 
 | `ai-agents` footprint | | Sends `{"durable_objects": [...]}`, a key `Footprint` does not have, so it is dropped silently |
 | Memo | | The `OnceLock` keeps the first build. If a capability Worker's manifest failed on that request, its tools stay missing until the isolate ends |
 | Staleness across lanes | | Core embeds every Worker's `wrangler.toml` when core builds. A landing that changes only a capability Worker deploys only that Worker's lane. Core's picture of that Worker stays old until core next deploys |
-| Stale summaries | `models`: "as core hosts them until its binding … lands" | Out of date wording in `src/capabilities/src/models.rs`. Core also still exports a `ModelJobs` class that nothing binds now. Noted for the workers-split owner. Not fixed here |
+| Stale summaries | `models`: "as core hosts them until its binding … lands" | Fixed: core's unregistered `Capability` over `pigeon_models::Models` (`src/capabilities/src/models.rs`) is gone; the model gateway serves the tools. Core also still exports a `ModelJobs` class that nothing binds now. Noted for the workers-split owner. Not fixed here |
 
 Nothing secret is drawn today. `wrangler.toml`'s `account_id`, Secrets Store id and
 `GITHUB_APP_CLIENT_ID` are read by the reader but are not in the model. The fix keeps it so,

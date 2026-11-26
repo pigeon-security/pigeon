@@ -108,9 +108,10 @@ one API call, and it is deleted only after the new Worker is seen serving.
   the live state before 2026-11-21. If Access apps are restored on `pigeon.dev` or the platform
   host, routing by host still works, but the apex's two pages must stay outside any Access app
   for the site to be public.
-- `setup_platform` (`PublicHost`'s `Retire`) still deletes, on every call, the Access apps on
-  `platform.pigeon.dev`, `/auth`, `/oauth`, `/.well-known` and `/mcp`, among others. That is
-  outside this plan and was reported to the parent session.
+- `setup_platform` (`PublicHost`'s `Retire`) still deleted, on every call, the Access apps on
+  `platform.pigeon.dev`, `/auth`, `/oauth`, `/.well-known` and `/mcp`, among others. That was
+  outside this plan and was reported to the parent session. Since fixed: its retire list was
+  emptied, and later `Retire` was removed from `PublicHost` altogether.
 - Phase 2 needs no dashboard work: the Custom Domain move keeps DNS. The dashboard is only the
   rollback path given there.
 

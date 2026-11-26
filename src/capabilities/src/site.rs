@@ -47,10 +47,6 @@ pub struct Site {
     pub zone: String,
     /// The Worker serving it: the hosting Worker itself.
     pub worker: String,
-    /// Other Workers the apex may move to; none once this Worker serves the release.
-    pub also: Vec<String>,
-    /// Each of those Workers with its service binding's name in this Worker.
-    pub bindings: Vec<(String, String)>,
     /// The R2 binding whose live release the apex serves ([`HOME_SITE`]); `None` serves the
     /// built-in pages only.
     pub release: Option<String>,
@@ -395,67 +391,28 @@ impl Site {
         current(&bucket).await
     }
 
-    /// Moves the apex's custom domain onto `target`. A Worker other than this one is asked for
-    /// the three pages first, over its service binding, and the move is refused unless they
-    /// answer. It touches no Access setup.
-    async fn publish(&self, cx: &Context<'_>, target: &str) -> Result<Value> {
-        let mut checked: Vec<String> = Vec::new();
-        if target != self.worker {
-            let binding = self
-                .bindings
-                .iter()
-                .find(|(w, _)| w == target)
-                .map(|(_, b)| b.as_str())
-                .ok_or_else(|| {
-                    worker::Error::RustError(format!("no service binding to Worker `{target}`"))
-                })?;
-            let fetcher = cx.env.service(binding)?;
-            for path in PAGES {
-                let url = format!("https://{}{path}", self.zone);
-                let mut answer = fetcher.fetch(url.clone(), None).await.map_err(|e| {
-                    worker::Error::RustError(format!("{target} did not answer {url}: {e}"))
-                })?;
-                let status = answer.status_code();
-                if status != 200 {
-                    return Err(worker::Error::RustError(format!(
-                        "{target} answered {status} for {url}; not moving {}",
-                        self.zone
-                    )));
-                }
-                if path == "/architecture.json" {
-                    let body: Value = serde_json::from_str(&answer.text().await?)?;
-                    if !body["commit"].as_str().is_some_and(is_commit) {
-                        return Err(worker::Error::RustError(format!(
-                            "{target}'s {url} names no 40-character commit; not moving {}",
-                            self.zone
-                        )));
-                    }
-                }
-                checked.push(path.to_string());
-            }
+    /// Moves the apex's custom domain onto this Worker, once its own architecture model names
+    /// the commit deploy.sh waits for; the answer says which release `/` will serve (none: the
+    /// built-in home page). It touches no Access setup.
+    async fn publish(&self, cx: &Context<'_>) -> Result<Value> {
+        let json: Value = serde_json::from_str(&rendered(cx.hosted)?[2])?;
+        if !json["commit"].as_str().is_some_and(is_commit) {
+            return Err(worker::Error::RustError(format!(
+                "this Worker's /architecture.json names no 40-character commit; not moving {}",
+                self.zone
+            )));
         }
-        // This Worker: its own architecture model must name the commit deploy.sh waits for, and
-        // the answer says which release `/` will serve (none: the built-in home page).
-        let mut release = Value::Null;
-        if target == self.worker {
-            let json: Value = serde_json::from_str(&rendered(cx.hosted)?[2])?;
-            if !json["commit"].as_str().is_some_and(is_commit) {
-                return Err(worker::Error::RustError(format!(
-                    "this Worker's /architecture.json names no 40-character commit; not moving {}",
-                    self.zone
-                )));
-            }
-            if let Some(live) = self.serving(cx.env).await {
-                release = json!({ "release": live.release, "commit": live.commit });
-            }
-        }
+        let release = match self.serving(cx.env).await {
+            Some(live) => json!({ "release": live.release, "commit": live.commit }),
+            None => Value::Null,
+        };
         let zone = zones::active(cx.account, &self.zone).await?;
-        let custom_domain = custom_domain::attach(cx.account, &zone.id, &zone.name, target).await?;
+        let custom_domain =
+            custom_domain::attach(cx.account, &zone.id, &zone.name, &self.worker).await?;
         Ok(json!({
-            "worker": target,
+            "worker": self.worker,
             "host": zone.name,
-            "pages": if checked.is_empty() { json!(PAGES) } else { json!(checked) },
-            "checked": checked,
+            "pages": PAGES,
             "release": release,
             "custom_domain": custom_domain,
         }))
@@ -473,51 +430,34 @@ impl Capability for Site {
     }
 
     fn versions(&self) -> Vec<pigeon_core::versions::Component> {
-        vec![pigeon_core::versions::Component::began(
-            "site",
-            pigeon_core::versions::Kind::Capability,
-        )]
+        vec![
+            pigeon_core::versions::Component::began(
+                "site",
+                pigeon_core::versions::Kind::Capability,
+            )
+            .entry(
+                "1.0.1",
+                "site_publish takes no worker argument: since S1 it only ever named this Worker.",
+            ),
+        ]
     }
 
     fn tools(&self) -> Vec<Tool> {
-        let mut workers = vec![self.worker.clone()];
-        workers.extend(self.also.iter().cloned());
-        vec![Tool {
-            name: "site_publish",
-            description: "Serve the public site on the zone's apex from a Worker, moving the \
-                          apex's custom domain onto it. This Worker serves the published landing \
-                          release, with its built-in /architecture, /architecture.json and \
-                          images; another Worker is checked first: it must answer /, \
-                          /architecture and /architecture.json. Changes no Access setup.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "worker": {
-                        "type": "string",
-                        "enum": workers,
-                        "description": "The Worker to serve the apex; this Worker when not given.",
-                    }
-                }
-            }),
-        }]
+        vec![Tool::bare(
+            "site_publish",
+            "Serve the public site on the zone's apex from this Worker, moving the apex's \
+             custom domain onto it. This Worker serves the published landing release, with its \
+             built-in /architecture, /architecture.json and images; its own /architecture.json \
+             must name a commit first. Changes no Access setup.",
+        )]
     }
 
-    fn call<'a>(&'a self, cx: &'a Context<'a>, tool: &'a str, args: &'a Value) -> Call<'a> {
+    fn call<'a>(&'a self, cx: &'a Context<'a>, tool: &'a str, _args: &'a Value) -> Call<'a> {
         Box::pin(async move {
             if tool != "site_publish" {
                 return Err(unknown(tool));
             }
-            let target = match args.get("worker").and_then(Value::as_str) {
-                None => self.worker.as_str(),
-                Some(w) if w == self.worker || self.also.iter().any(|a| a == w) => w,
-                Some(w) => {
-                    return Err(worker::Error::RustError(format!(
-                        "{} cannot be served by `{w}`",
-                        self.zone
-                    )));
-                }
-            };
-            Ok(to_value(self.publish(cx, target).await?))
+            Ok(to_value(self.publish(cx).await?))
         })
     }
 

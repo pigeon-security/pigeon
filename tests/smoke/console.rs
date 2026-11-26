@@ -842,8 +842,8 @@ fn console_ops_allow_the_reads_the_console_needs_and_nothing_else() {
 // ---- P15: the new console shell's contract (`console/web/shell.js`, `views.js`) ----
 
 /// Every hosted capability's console views, each with the capability that declares it, as
-/// `console_manifest` collects them from the platform Worker: core's own, and the AI Agents
-/// Worker's, which core reads from its manifest as `remote.rs` does.
+/// `console_manifest` collects them from the platform Worker: core's own, and the AI Agents and
+/// model gateway Workers', which core reads from their manifests as `remote.rs` does.
 pub(super) fn hosted_views() -> Vec<(
     &'static str,
     pigeon_capabilities::console::sections::Section,
@@ -871,14 +871,6 @@ pub(super) fn hosted_views() -> Vec<(
                 workers: vec![],
             },
         }),
-        Box::new(pigeon_models::Models {
-            gateways: Vec::new(),
-            providers: Vec::new(),
-            staged: Vec::new(),
-            secrets_page: "https://x/secrets".into(),
-            host: "h".into(),
-            proxy_host: "p".into(),
-        }),
     ];
     let leak = |s: &str| -> &'static str { Box::leak(s.to_string().into_boxed_str()) };
     let mut platform: Vec<(&'static str, Section)> = caps
@@ -890,7 +882,17 @@ pub(super) fn hosted_views() -> Vec<(
                 .map(|s| ("multi-instance", s)),
         )
         .collect();
-    for cap in pigeon_ai_agents::service::Agents.manifest().capabilities {
+    // Models: the model gateway's capability, as its manifest carries it.
+    let models = pigeon_models::Models {
+        gateways: Vec::new(),
+        providers: Vec::new(),
+        staged: Vec::new(),
+        secrets_page: "https://x/secrets".into(),
+        host: "h".into(),
+        proxy_host: "p".into(),
+    };
+    let remote = pigeon_ai_agents::service::Agents.manifest().capabilities;
+    for cap in remote.into_iter().chain([models.capability()]) {
         let name = leak(&cap.name);
         for s in cap.sections.into_iter().filter(|s| s.view) {
             let area = area_named(&s.tab).unwrap().id;

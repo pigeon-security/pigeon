@@ -66,7 +66,7 @@ fn scope(name: &str, foundation: bool) -> Scope {
             SharedFoundation
         }
         "architecture" | "console" | "portal_oauth" | "versioning" => PlatformAdministration,
-        "cf_proxy" | "git_proxy" | "protected_host" | "public_host" | "site" => Routing,
+        "cf_proxy" | "git_proxy" | "public_host" | "site" => Routing,
         _ => Unclassified,
     }
 }

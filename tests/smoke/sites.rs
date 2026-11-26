@@ -68,8 +68,6 @@ fn site_on_the_apex() {
     let site = Site {
         zone: "pigeon.dev".into(),
         worker: "pigeon-platform".into(),
-        also: Vec::new(),
-        bindings: Vec::new(),
         release: Some(pigeon_capabilities::site::HOME_SITE.into()),
     };
     let fp = site.footprint();
@@ -83,9 +81,9 @@ fn site_on_the_apex() {
     assert_eq!(tools, ["site_publish"], "site_publish only");
     let schema = &site.tools()[0].input_schema;
     assert_eq!(
-        schema["properties"]["worker"]["enum"],
-        json!(["pigeon-platform"]),
-        "since S1 the apex is core's alone"
+        schema["properties"],
+        json!({}),
+        "since S1 the apex is core's alone: no Worker to choose"
     );
 }
 

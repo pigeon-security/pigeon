@@ -22,7 +22,7 @@ Keeping a tool on the main platform leaves those checks in force.
 | `changelog` | `pigeon-platform`. `changelog`, `changelog_update`, and processing of Artifacts pushes to main or landing notes. | The platform source history and changelog R2 bucket. | Git history and object storage. The feature owns extraction, classification, and incremental processing. |
 | `deploys` | `pigeon-platform`. `deploy_token` and `revoke_api_token`. | Platform account Cloudflare deployment credentials. Token issuance follows the platform's existing passkey policy. | Scoped credential minting and revocation. Landing and publishing can deploy through their own already-bound Worker operations. |
 | `images` | `pigeon-platform`. `containers_images`. | Read-only inventory of platform container applications and registry images. Registry pull credentials stay inside the Worker. | Container and registry read operations for platform diagnostics. |
-| `site` | `pigeon-platform`. Public apex routes and the `site_publish` tool. | Pigeon's public apex and the configured Worker choices that may serve it. | Hostname and Worker operations. The feature owns the public architecture site. Instance content publishing is served by `pigeon-sites`. |
+| `site` | `pigeon-platform`. Public apex routes and the `site_publish` tool. | Pigeon's public apex, served by `pigeon-platform` alone. | Hostname and Worker operations. The feature owns the public architecture site. Instance content publishing is served by `pigeon-sites`. |
 
 [Platform composition](../../src/platform/src/settings.rs) ·
 [AI Agents tools](../../src/ai-agents/src/service.rs) ·

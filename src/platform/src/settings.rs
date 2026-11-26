@@ -24,7 +24,7 @@ use pigeon_capabilities::observability::Observability;
 use pigeon_capabilities::passkeys::Passkeys;
 use pigeon_capabilities::policy::Policy;
 use pigeon_capabilities::proxy::Tokens;
-use pigeon_capabilities::public_host::{PublicHost, Retire};
+use pigeon_capabilities::public_host::PublicHost;
 use pigeon_capabilities::remote::Binding;
 use pigeon_capabilities::secrets::Secrets;
 use pigeon_capabilities::site::{self, Site};
@@ -130,8 +130,6 @@ pub fn site() -> Site {
     Site {
         zone: ZONE.into(),
         worker: WORKER.into(),
-        also: Vec::new(),
-        bindings: Vec::new(),
         release: Some(site::HOME_SITE.into()),
     }
 }
@@ -183,9 +181,6 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
             zone: ZONE.into(),
             host: HOST.into(),
             worker: WORKER.into(),
-            // Its Access setup was retired, and that is done: nothing is retired again, so
-            // setting the host up never deletes an Access application, policy or token.
-            retire: Retire::default(),
             also: Vec::new(),
             tool: "setup_platform",
         }),
@@ -196,7 +191,6 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
             worker: PROXY_WORKER.into(),
             // Core serves the same proxies, so the rollback is one call, `setup_proxy_host {worker}`.
             also: vec![WORKER.into()],
-            retire: Retire::default(),
             tool: "setup_proxy_host",
         }),
         Box::new(site()),

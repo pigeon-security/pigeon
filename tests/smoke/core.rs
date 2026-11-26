@@ -491,7 +491,7 @@ fn core_architecture_draws_every_worker_in_the_map() {
     use pigeon_capabilities::architecture::{
         Architecture, Source, Wrangler, built, describe, public,
     };
-    use pigeon_capabilities::public_host::{PublicHost, Retire};
+    use pigeon_capabilities::public_host::PublicHost;
     use pigeon_capabilities::remote::{Binding, Remote};
     use pigeon_capabilities::{Capability, Hosted};
     use pigeon_contract::CapabilityManifest;
@@ -561,7 +561,6 @@ fn core_architecture_draws_every_worker_in_the_map() {
         host: "proxy.pigeon.dev".into(),
         worker: "pigeon-proxy".into(),
         also: vec!["pigeon-platform".into()],
-        retire: Retire::default(),
         tool: "setup_proxy_host",
     };
     let capabilities: Vec<Box<dyn Capability>> = vec![
@@ -2068,7 +2067,6 @@ fn core_served_tools() -> Vec<pigeon_core::mcp::Tool> {
         host: "h".into(),
         proxy_host: "p".into(),
     };
-    tools.extend(models.tools());
     // The Workers whose tools core merges from their manifests: leaked names keep `Tool`'s
     // static strings; a test process is short.
     let leak = |s: &str| -> &'static str { Box::leak(s.to_string().into_boxed_str()) };
@@ -2076,16 +2074,16 @@ fn core_served_tools() -> Vec<pigeon_core::mcp::Tool> {
         pigeon_ai_agents::service::Agents.manifest(),
         pigeon_cloud::CloudGateway::new().manifest(),
     ];
-    for m in manifests {
-        for cap in m.capabilities {
-            for t in cap.tools {
-                tools.push(Tool {
-                    name: leak(&t.name),
-                    description: leak(&t.description),
-                    input_schema: t.input_schema,
-                });
-            }
-        }
+    let capabilities = manifests
+        .into_iter()
+        .flat_map(|m| m.capabilities)
+        .chain([models.capability()]);
+    for t in capabilities.flat_map(|cap| cap.tools) {
+        tools.push(Tool {
+            name: leak(&t.name),
+            description: leak(&t.description),
+            input_schema: t.input_schema,
+        });
     }
     tools
 }
@@ -2555,7 +2553,6 @@ fn arch_home_capabilities() -> Vec<Box<dyn pigeon_capabilities::Capability>> {
             zone: zone.into(),
             host: host.into(),
             worker: "pigeon-platform".into(),
-            retire: public_host::Retire::default(),
             also: Vec::new(),
             tool: "setup_platform",
         }),
@@ -2564,14 +2561,11 @@ fn arch_home_capabilities() -> Vec<Box<dyn pigeon_capabilities::Capability>> {
             host: proxy_host.into(),
             worker: "pigeon-proxy".into(),
             also: vec!["pigeon-platform".into()],
-            retire: public_host::Retire::default(),
             tool: "setup_proxy_host",
         }),
         Box::new(site::Site {
             zone: zone.into(),
             worker: "pigeon-platform".into(),
-            also: Vec::new(),
-            bindings: Vec::new(),
             release: Some(site::HOME_SITE.into()),
         }),
         Box::new(source::Source {

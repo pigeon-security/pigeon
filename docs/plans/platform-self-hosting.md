@@ -176,7 +176,9 @@ dropped.
 - **Ownership.** `settings::site()` has no `also` (and no service binding to move to):
   `site_publish` offers only `pigeon-platform`. Its pre-flight for core itself now checks core's
   own `/architecture.json` names a 40-character commit and answers which release `/` will serve
-  (`release`, `null` for the built-in page).
+  (`release`, `null` for the built-in page). Later clean-up (`site` 1.0.1): `Site` lost `also`
+  and `bindings`, `site_publish` lost its `worker` argument and the other-Worker page
+  pre-flight, and it always attaches the apex to this Worker.
 - **pigeon-sites keeps `apex.rs` for now.** The apex's custom domain is still attached to
   pigeon-sites (`x-served-by: pigeon-sites` on 2026-11-26). Removing it in this landing would
   break pigeon.dev, and deploy.sh's `/architecture.json` check, until the person moves the
@@ -189,7 +191,7 @@ What the person does after S1 lands and deploys:
 
 1. Check the binding deployed: `site_releases {instance: "pigeon-security/platform"}` shows the
    live release.
-2. Run `site_publish {}` (no `worker`: `pigeon-platform`). It checks core's own
+2. Run `site_publish {}` (it serves from `pigeon-platform`). It checks core's own
    `/architecture.json` names a commit, answers the `release` `/` will serve, and attaches
    `pigeon.dev` to `pigeon-platform` as its Workers Custom Domain, taking it from pigeon-sites.
 3. Verify: `curl -sI https://pigeon.dev/` shows `x-served-by: pigeon-platform`,
