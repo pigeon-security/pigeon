@@ -52,6 +52,10 @@ pub enum Policy {
 pub enum Target {
     /// An id: 1 to 200 base64url characters.
     Id,
+    /// An instance's id: 1 to 64 of A-Z, a-z, 0-9, `-`, `_` and `.`, with at most one `/`,
+    /// such as `noisypigeon`, `owner/name` or the home instance's `pigeon.dev`. The record's own
+    /// validation (`instances::record::check_id`) still decides what a saved id may be.
+    Instance,
     /// A person's name, as an invite takes it.
     Name,
     /// `on` or `off`.
@@ -185,7 +189,7 @@ pub const ACTIONS: &[Action] = &[
         "Unlink a Cloudflare account",
         Cap("linked"),
         true,
-        Target::Id,
+        Target::Instance,
         Change::Nothing,
     )),
     app(act(
@@ -193,7 +197,7 @@ pub const ACTIONS: &[Action] = &[
         "Save an instance record",
         Cap("instances"),
         false,
-        Target::Id,
+        Target::Instance,
         Change::Record,
     )),
     app(act(
@@ -309,7 +313,7 @@ pub const ACTIONS: &[Action] = &[
         "Roll a site back to a release",
         Tool("site_rollback"),
         true,
-        Target::Id,
+        Target::Instance,
         Change::Release,
     )),
     app(act(
@@ -317,7 +321,7 @@ pub const ACTIONS: &[Action] = &[
         "Deploy a site",
         Tool("site_deploy"),
         false,
-        Target::Id,
+        Target::Instance,
         Change::Rev,
     )),
     app(act(
@@ -397,6 +401,17 @@ fn id_like(s: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
+/// An instance's id as a write may name it (see [`Target::Instance`]).
+fn instance_like(s: &str) -> bool {
+    (1..=64).contains(&s.len())
+        && s.matches('/').count() <= 1
+        && !s.starts_with(['/', '.'])
+        && !s.ends_with(['/', '.'])
+        && !s.contains("..")
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'/'))
+}
+
 fn digest_like(s: &str) -> bool {
     s.len() == 43 && id_like(s)
 }
@@ -430,6 +445,13 @@ impl Action {
                 let t = text();
                 if !id_like(t) {
                     return Err("the target is not an id".into());
+                }
+                json!(t)
+            }
+            Target::Instance => {
+                let t = text();
+                if !instance_like(t) {
+                    return Err("the target is not an instance's id".into());
                 }
                 json!(t)
             }

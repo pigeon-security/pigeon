@@ -565,6 +565,34 @@ fn tool_call_approvals() {
     assert_eq!(approve.policy, Policy::Approval);
     assert_ne!(action("approval-deny").unwrap().policy, Policy::Approval);
     assert!(approve.target(&json!("not an id!")).is_err());
+
+    // Writes on an instance take its real id: the home instance's dotted `pigeon.dev` and an
+    // `owner/name` one too, but nothing that could walk out of the id.
+    for name in [
+        "instance-put",
+        "linked-unlink",
+        "site-deploy",
+        "site-rollback",
+    ] {
+        let a = action(name).unwrap();
+        for ok in ["pigeon.dev", "noisypigeon", "owner/name", "a_b-c"] {
+            assert_eq!(a.target(&json!(ok)).unwrap(), json!(ok), "{name} {ok}");
+        }
+        for no in [
+            "",
+            ".",
+            "a/b/c",
+            "../x",
+            "a..b",
+            "/a",
+            "a/",
+            "a b",
+            "pigeon.dev.",
+            &"x".repeat(65),
+        ] {
+            assert!(a.target(&json!(no)).is_err(), "{name} {no:?}");
+        }
+    }
 }
 
 #[test]
