@@ -32,7 +32,7 @@
   // ---- Contract (P15): every op the shell and its views read, and every write they make.
   const READS = Object.freeze(["console_manifest", "instances_list", "app_inbox", "app_linked_details",
     "storage_list_objects", "source_resolve_revision", "source_read_file", "ci_jobs", "ci_status",
-    "observability_worker_metrics", "app_ingest_runs", "ingest_report",
+    "observability_worker_metrics", "app_ingest_runs", "ingest_report", "digitalocean_status", "digitalocean_verify",
     "ai_agents_status", "ai_agents_compare", "cost_daily", "land_list",
     "site_releases", "app_site_hosts", "app_site_visitors", "capabilities_versions", "capabilities_upgrade_plan",
     // Access and Platform.
@@ -42,7 +42,7 @@
     "instance-put", "linked-unlink", "site-deploy", "site-rollback", "visitor-invite", "visitor-revoke",
     // Access and Platform.
     "secret-set", "apple-adopt", "apple-identity", "token-issue", "token-revoke", "invite", "passkey-remove", "person-admin", "member-set",
-    "app-disconnect", "model-defaults", "agents-config"]);
+    "app-disconnect", "model-defaults", "agents-config", "digitalocean-token-set"]);
 
   // ---- Fixture mode (P14) and routing base.
   const query = new URLSearchParams(location.search);
@@ -416,6 +416,14 @@
     node.reload = reload;
     reload();
     return node;
+  }
+
+  // base64url SHA-256, as the write path binds a secret's value at begin.
+  async function sha256(text) {
+    const bytes = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)));
+    let bin = "";
+    for (const b of bytes) bin += String.fromCharCode(b);
+    return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
   }
 
   // ---- The read path (P11): POST /app/op, or the recorded fixtures.
@@ -939,7 +947,7 @@
 
   window.pigeonShell = Object.freeze({
     register, op: (name, args) => op(name, args), el, icon, pill, tag, code, button, facts, segmented, input, field,
-    panel, strip, bar, meter, diffBlock, dataTable, toast, dialog, confirm, showOnce, copyField, href,
+    panel, strip, bar, meter, diffBlock, dataTable, toast, dialog, confirm, sha256, showOnce, copyField, href,
     get fixtures() { return Boolean(FIXTURES); },
   });
 

@@ -8,21 +8,13 @@
   "use strict";
   const shell = window.pigeonShell;
   if (!shell) return;
-  const { register, el, pill, tag, code, button, field, input, dataTable, confirm } = shell;
+  const { register, el, pill, tag, code, button, field, input, dataTable, confirm, sha256 } = shell;
 
   const day = (ms) => (ms ? new Date(ms).toISOString().slice(0, 10) : "—");
   const DAY = 86_400_000;
   const refresh = (ctx) => () => setTimeout(ctx.refresh, 0);
   const more = (summary, ...children) => el("details", { class: "more" }, el("summary", { text: summary }), el("div", { class: "section" }, ...children));
   const intro = (text, ...right) => el("div", { class: "toolbar" }, el("p", { class: "muted grow", text }), ...right);
-
-  // base64url SHA-256, as the write path binds a secret's value at begin.
-  async function sha256(text) {
-    const bytes = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)));
-    let bin = "";
-    for (const b of bytes) bin += String.fromCharCode(b);
-    return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-  }
 
   // ---- Secrets: every declared secret (missing first), its owner, purpose, state and expiry;
   // the store's undeclared ones listed only; Apple signing once APPLE_ASC_KEY is set (P8).

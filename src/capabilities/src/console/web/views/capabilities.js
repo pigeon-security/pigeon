@@ -10,7 +10,7 @@
   "use strict";
   const shell = window.pigeonShell;
   if (!shell) return;
-  const { register, el, pill, tag, code, button, facts, panel, segmented, input, field, diffBlock, dataTable, dialog, confirm, strip, toast } = shell;
+  const { register, el, pill, tag, code, button, facts, panel, segmented, input, field, diffBlock, dataTable, dialog, confirm, strip, toast, sha256 } = shell;
 
   const when = (ms) => (ms ? new Date(ms).toISOString().replace("T", " ").slice(0, 16) + " UTC" : "—");
   const show = (v) => (v === undefined || v === null ? "none" : JSON.stringify(v));
@@ -135,10 +135,15 @@
   const CATALOGUE_ADDS = {
     architecture: { adds: ["Platform › Architecture"], what: "Show this instance’s own setup: its Worker, bucket, hostnames and tools" },
     cloud: { what: "Enable Cloud Gateway status for this instance", effect: "Adds cloud_status to the instance’s MCP endpoint." },
+    digitalocean: {
+      what: "Connect the instance to one DigitalOcean team",
+      effect: "Approves the expected team for this instance. Set and verify the token separately with a passkey.",
+    },
     secrets: { adds: ["Access › Secrets"], what: "List the secrets in this instance’s own Cloudflare account (its Secrets Store)" },
   };
   function catalogueCaps(versions, home) {
     return (versions?.catalogue || []).filter((e) => (home ? e.opt_in : e.linked) && !e.always && e.name !== "redirects").map((e) => {
+      const digitalOcean = e.name === "digitalocean";
       const configurable = !home && (e.placements || []).includes("own_worker");
       const choices = versions.linked_placement_choices?.[e.name] || ["inline"];
       return {
@@ -147,15 +152,21 @@
         on: (r) => Boolean(r.capabilities && r.capabilities[e.name]),
         needs: (r) => { const lack = (e.requires || []).filter((q) => !(r.capabilities || {})[q]); return lack.length ? lack.join(", ") : null; },
         current: (r) => ({ placement: "inline", ...r.capabilities?.[e.name] }),
-        fields: () => configurable ? [{
-          key: "placement", label: "Worker placement", options: ["inline", "own_worker"],
-          labels: { inline: "Inline", own_worker: "Separate Worker" },
-          disabled: (option) => !choices.includes(option),
-          hint: choices.includes("own_worker") ? undefined : "Separate Worker requires a linked-account build for this capability.",
-        }] : [],
+        fields: () => [
+          ...(digitalOcean ? [{ key: "team_id", label: "DigitalOcean team ID", mono: true,
+            hint: "Verification checks that the token belongs to this team.",
+            validate: (value) => /^[A-Za-z0-9_-]{1,128}$/.test(value) }] : []),
+          ...(configurable ? [{
+            key: "placement", label: "Worker placement", options: ["inline", "own_worker"],
+            labels: { inline: "Inline", own_worker: "Separate Worker" },
+            disabled: (option) => !choices.includes(option),
+            hint: choices.includes("own_worker") ? undefined : "Separate Worker requires a linked-account build for this capability.",
+          }] : []),
+        ],
         apply: (r, v) => {
           const settings = { ...r.capabilities?.[e.name] };
           if (configurable) settings.placement = v.placement;
+          if (digitalOcean) settings.team_id = v.team_id;
           r.capabilities = { ...(r.capabilities || {}), [e.name]: settings };
         },
         remove: (r) => {
@@ -184,6 +195,60 @@
     return next;
   }
   const dependents = (r, c) => (c.cap === "publishing" && on(r, CAPS[1]) ? [CAPS[1]] : []);
+
+  function digitalOceanConnection(ctx, record) {
+    const args = { instance: record.id };
+    const teamId = record.capabilities.digitalocean.team_id;
+    const target = [["Instance", code(record.id)], ["Expected team", code(teamId)]];
+    const status = el("p", { class: "muted", role: "status", text: "Checking connection…" });
+    const verify = button("Verify token", verifyToken);
+    const token = button("Set token", () => {
+      const value = input({ type: "password", mono: true, autocomplete: "off", spellcheck: "false", "aria-label": "DigitalOcean API token" });
+      confirm({
+        title: "Set DigitalOcean token", target,
+        form: field({ label: "API token", control: value, hint: "Use a token with read access for team verification." }),
+        effect: "Pigeon verifies the token against the approved team before saving it.",
+        action: "digitalocean-token-set", id: { instance: record.id, team_id: teamId, version: record.version },
+        confirmLabel: "Verify and save with passkey",
+        prepare: async () => {
+          const secret = value.value.trim();
+          if (!secret) throw new Error("Enter the DigitalOcean API token.");
+          return { change: { value: secret }, begin: { digest: await sha256(secret) } };
+        },
+        onDone: () => setTimeout(ctx.refresh, 0),
+      });
+    });
+    verify.disabled = token.disabled = true;
+    const d = dialog({
+      title: "DigitalOcean connection",
+      body: [facts(target), status],
+      actions: [verify, token],
+    });
+    const showError = (err) => d.say(err.message || String(err), true);
+    ctx.op("digitalocean_status", args).then((result) => {
+      status.textContent = result.state === "connected" ? "Token saved for the approved team."
+        : result.state === "unverified" ? "The stored token needs verification." : "No token is saved for the approved team.";
+      token.textContent = result.state === "missing" ? "Set token" : "Replace token";
+      verify.disabled = result.state === "missing";
+      token.disabled = false;
+    }).catch((err) => {
+      status.textContent = "Connection status unavailable.";
+      showError(err);
+    });
+    async function verifyToken() {
+      verify.disabled = token.disabled = true;
+      d.say("Verifying…");
+      try {
+        const result = await ctx.op("digitalocean_verify", args);
+        if (result.verified !== true) throw new Error("DigitalOcean team verification did not complete.");
+        d.say("Verified against the approved DigitalOcean team.");
+      } catch (err) {
+        showError(err);
+      } finally {
+        verify.disabled = token.disabled = false;
+      }
+    }
+  }
 
   // ---- Capabilities (M2).
   function capabilities(ctx) {
@@ -257,6 +322,7 @@
           acts = [
             step ? button("Upgrade", () => upgrade(c, step), { ...sm, variant: view ? "primary" : undefined }) : null,
             c.fields(record).length ? button("Configure", () => configure(c, true), { ...sm, variant: "ghost" }) : null,
+            c.cap === "digitalocean" ? button("Connection", () => digitalOceanConnection(ctx, record), sm) : null,
             button("Disable", () => disable(c), { ...sm, variant: "danger" }),
           ];
         } else {
@@ -314,6 +380,8 @@
         const values = read();
         const missing = controls.find(({ f }) => !f.optional && (f.list ? !values[f.key].length : !values[f.key]));
         if (missing) { missing.control.focus(); return d.say(`Fill in ${missing.f.label.toLowerCase()}.`, true); }
+        const invalid = controls.find(({ f }) => f.validate && !f.validate(values[f.key]));
+        if (invalid) { invalid.control.focus(); return d.say(`Enter a valid ${invalid.f.label}.`, true); }
         putRecord(ctx, {
           record: r, next: withCap(r, c, values), title: `${verb} ${c.cap} on ${inst.title}`,
           target: [["Capability", code(c.cap)]], confirmLabel: `${verb} with passkey`,
