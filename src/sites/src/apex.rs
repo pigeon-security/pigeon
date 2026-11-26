@@ -117,7 +117,13 @@ fn reply(status: u16, kind: &str, cache: &str, body: Vec<u8>, head: bool) -> Res
 pub async fn serve(req: Request, env: &Env, key: &[u8], worker: &str) -> Result<Response> {
     let method = req.method().to_string();
     let head = method == "HEAD";
-    let path = req.url()?.path().to_string();
+    let url = req.url()?;
+    if let Some(to) = home::console_redirect(url.path(), url.query()) {
+        let r = reply(302, TEXT, "no-store", Vec::new(), head)?;
+        r.headers().set("Location", &to)?;
+        return Ok(r);
+    }
+    let path = url.path().to_string();
     match home::route(&method, &path) {
         Route::NotFound => reply(404, TEXT, "no-store", b"not found".to_vec(), head),
         Route::MethodNotAllowed => {

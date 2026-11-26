@@ -70,10 +70,20 @@ fn render(hosted: &Hosted<'_>) -> Result<[String; 3]> {
 }
 
 impl Site {
-    /// Serves a request to the apex: a page, an image, or 404.
+    /// Serves a request to the apex: a page, an image, a 302 of `/platform*` to the console
+    /// ([`home::console_redirect`]), or 404.
     pub async fn serve(&self, hosted: &Hosted<'_>, req: Request) -> Result<Response> {
         let method = req.method().to_string();
-        let Some(route) = page(&method, &req.path()) else {
+        let url = req.url()?;
+        if let Some(to) = home::console_redirect(url.path(), url.query()) {
+            let headers = Headers::new();
+            headers.set("Location", &to)?;
+            headers.set("Cache-Control", "no-store")?;
+            headers.set("Referrer-Policy", "no-referrer")?;
+            headers.set("X-Served-By", &self.worker)?;
+            return Ok(Response::empty()?.with_status(302).with_headers(headers));
+        }
+        let Some(route) = page(&method, url.path()) else {
             return Response::error("not found", 404);
         };
         let rendered = match RENDERED.get() {

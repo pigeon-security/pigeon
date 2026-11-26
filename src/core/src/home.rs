@@ -11,6 +11,23 @@ pub const CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; img-src 's
 /// Where the console is.
 pub const CONSOLE: &str = "https://platform.pigeon.dev/app";
 
+/// Where a request for `/platform` or `/platform/<rest>` on the apex goes: `/platform` to
+/// [`CONSOLE`], `/platform/<rest>` to `CONSOLE/<rest>`, with `query` (without its `?`) kept.
+/// The path is taken as the URL carries it, percent-encoding included. `None` for every other
+/// path, `/platformx` among them, which routes as usual. Both apex Workers answer it with a 302.
+pub fn console_redirect(path: &str, query: Option<&str>) -> Option<String> {
+    let rest = path.strip_prefix("/platform")?;
+    if !(rest.is_empty() || rest.starts_with('/')) {
+        return None;
+    }
+    let mut to = format!("{CONSOLE}{rest}");
+    if let Some(q) = query.filter(|q| !q.is_empty()) {
+        to.push('?');
+        to.push_str(q);
+    }
+    Some(to)
+}
+
 /// What a request for the apex is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Route {

@@ -763,6 +763,48 @@ fn sites_apex_pages() {
         assert_eq!(home::route("GET", p), Route::NotFound, "{p}");
     }
     assert_eq!(home::route("POST", "/nope"), Route::NotFound);
+
+    // `/platform` and `/platform/*` on the apex go to the console, path and query kept; both
+    // apex Workers (pigeon-sites' apex.rs and core's site.rs) answer this with a 302.
+    let console = "https://platform.pigeon.dev/app";
+    for (path, query, want) in [
+        ("/platform", None, console.to_string()),
+        ("/platform/", None, format!("{console}/")),
+        (
+            "/platform/pigeon-security%2Fplatform/inbox",
+            None,
+            format!("{console}/pigeon-security%2Fplatform/inbox"),
+        ),
+        (
+            "/platform/pigeon.dev/ci",
+            Some("tab=jobs&x=1"),
+            format!("{console}/pigeon.dev/ci?tab=jobs&x=1"),
+        ),
+        ("/platform", Some("a=b"), format!("{console}?a=b")),
+        ("/platform", Some(""), console.to_string()),
+    ] {
+        assert_eq!(
+            home::console_redirect(path, query),
+            Some(want),
+            "{path} {query:?}"
+        );
+    }
+    // Every other path is unaffected: no redirect, and the same route as before.
+    for p in [
+        "/",
+        "/architecture",
+        "/architecture.json",
+        "/logo.png",
+        "/mark/head.webp",
+        "/platformx",
+        "/platform.json",
+        "/app",
+        "/x/platform",
+        "",
+    ] {
+        assert_eq!(home::console_redirect(p, Some("q=1")), None, "{p}");
+    }
+    assert_eq!(home::route("GET", "/platform"), Route::NotFound);
     // The images are real and small: the mark's artwork, the favicon and the touch icon.
     for a in home::Asset::ALL {
         let b = a.bytes();
