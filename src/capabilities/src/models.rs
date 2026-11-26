@@ -98,7 +98,11 @@ impl Capability for Models {
             externals: self
                 .gateways
                 .iter()
-                .map(|g| External::new("AI Gateway", "model gateway", format!("gateway {}", g.id)))
+                .map(|g| {
+                    External::new("AI Gateway", "model gateway", format!("gateway {}", g.id))
+                        .place("account")
+                        .flows("model requests, on to the providers", "")
+                })
                 .collect(),
             ..Footprint::default()
         }

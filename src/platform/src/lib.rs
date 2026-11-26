@@ -209,9 +209,9 @@ async fn fetch(req: Request, env: Env, ctx: WorkerContext) -> Result<Response> {
         return c.fetch(&cx, req).await;
     }
     match (req.method(), path.as_str()) {
-        (Method::Get, "/health") => Response::ok("ok"),
-        (Method::Options, "/mcp") => Ok(mcp_cors(Response::empty()?.with_status(204))),
-        (Method::Post, "/mcp") => mcp_post(req, &env).await.map(mcp_cors),
+        (Method::Get, "/health") => Response::ok("ok"), // route: open
+        (Method::Options, "/mcp") => Ok(mcp_cors(Response::empty()?.with_status(204))), // route: open
+        (Method::Post, "/mcp") => mcp_post(req, &env).await.map(mcp_cors), // route: OAuth
         (_, "/mcp") => Response::error("the MCP endpoint takes POST only", 405),
         _ => Response::error("not found", 404),
     }

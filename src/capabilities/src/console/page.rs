@@ -11,7 +11,7 @@ use worker::{Headers, Response, Result};
 pub const CSP: &str = "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 /// Where the console is served: its pages are `/app/<instance>/<area>/<view>`.
-pub const BASE: &str = "/app";
+pub const BASE: &str = "/app"; // route: open
 
 /// The shell's assets, in load order: one stylesheet and its scripts. Its fixtures
 /// (`web/fixtures/`, `web/fixtures.html`) are never among them, so fixture mode cannot run on a
@@ -114,15 +114,15 @@ pub enum Bookmark {
 
 /// An old bookmark's path and the area and view it now opens. `/` opens the console's root.
 pub const BOOKMARKS: &[(&str, &str, Option<&str>)] = &[
-    ("/approvals", "inbox", None),
-    ("/instances", "instances", Some("list")),
-    ("/architecture", "platform", Some("architecture")),
-    ("/access", "access", None),
-    ("/settings", "access", None),
-    ("/secrets", "access", Some("secrets")),
-    ("/tokens", "access", Some("tokens")),
-    ("/cost", "cost", None),
-    ("/gateways", "cost", None),
+    ("/approvals", "inbox", None),                       // route: redirect
+    ("/instances", "instances", Some("list")),           // route: redirect
+    ("/architecture", "platform", Some("architecture")), // route: redirect
+    ("/access", "access", None),                         // route: redirect
+    ("/settings", "access", None),                       // route: redirect
+    ("/secrets", "access", Some("secrets")),             // route: redirect
+    ("/tokens", "access", Some("tokens")),               // route: redirect
+    ("/cost", "cost", None),                             // route: redirect
+    ("/gateways", "cost", None),                         // route: redirect
 ];
 
 /// The first console's `/app?tab=&subtab=` links: [tab, subtab or none, area, view or none].

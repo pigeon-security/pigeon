@@ -981,17 +981,19 @@ impl Ci {
     pub async fn serve(&self, env: &Env, req: Request) -> Result<Response> {
         let path = req.path();
         if let Some(name) = path.strip_prefix("/ci/hooks/") {
+            // route: webhook
             let name = name.to_string();
             return self.hook(env, req, &name).await;
         }
         if let Some(job) = path.strip_prefix("/ci/runner/") {
+            // route: job
             let job = job.to_string();
             return self.runner(env, req, &job).await;
         }
         match (req.method(), path.as_str()) {
-            (Method::Post, "/ci/token") => self.token(env, req).await,
-            (Method::Get, "/ci/buildkite.sh") => script(BUILDKITE_BOOTSTRAP),
-            (Method::Get, "/ci/runner.sh") => script(RUNNER),
+            (Method::Post, "/ci/token") => self.token(env, req).await, // route: job
+            (Method::Get, "/ci/buildkite.sh") => script(BUILDKITE_BOOTSTRAP), // route: open
+            (Method::Get, "/ci/runner.sh") => script(RUNNER),          // route: open
             _ => Response::error("not found", 404),
         }
     }

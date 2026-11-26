@@ -32,7 +32,7 @@ impl Capability for CfProxy {
     }
 
     fn routes(&self) -> Vec<&'static str> {
-        vec!["/cf/"]
+        vec!["/cf/"] // route: token
     }
 
     fn footprint(&self) -> Footprint {

@@ -564,15 +564,22 @@ impl Capability for Land {
             externals: if self.settings.portal_servers.is_empty() {
                 Vec::new()
             } else {
-                vec![External::new(
-                    "MCP Server Portal",
-                    "portal",
-                    format!(
-                        "{}, servers {}",
-                        self.settings.portal_host,
-                        self.settings.portal_servers.join(", ")
+                vec![
+                    External::new(
+                        "MCP Server Portal",
+                        "portal",
+                        format!(
+                            "{}, servers {}",
+                            self.settings.portal_host,
+                            self.settings.portal_servers.join(", ")
+                        ),
+                    )
+                    .place("account")
+                    .flows(
+                        "server sync after each deploy",
+                        "MCP clients at the portal host",
                     ),
-                )]
+                ]
             },
             ..Footprint::default()
         }

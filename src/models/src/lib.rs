@@ -1804,7 +1804,7 @@ impl Models {
             routes: Vec::new(),
             footprint: json!({
                 "gateways": self.gateways.iter().map(|g| g.id.clone()).collect::<Vec<_>>(),
-                "externals": self.gateways.iter().map(|g| json!({ "name": "AI Gateway", "kind": "model gateway", "detail": format!("gateway {}", g.id) })).collect::<Vec<_>>(),
+                "externals": self.gateways.iter().map(|g| json!({ "name": "AI Gateway", "kind": "model gateway", "detail": format!("gateway {}", g.id), "place": "account", "out": "model requests, on to the providers" })).collect::<Vec<_>>(),
             }),
             secrets: self.secrets(),
             wants: Vec::new(),

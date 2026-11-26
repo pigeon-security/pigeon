@@ -360,7 +360,7 @@ pub enum Step {
 
 /// The action and step a `/console/write/{action}/{begin|finish}` path names.
 pub fn route(path: &str) -> Option<(&'static Action, Step)> {
-    let (id, step) = path.strip_prefix("/console/write/")?.split_once('/')?;
+    let (id, step) = path.strip_prefix("/console/write/")?.split_once('/')?; // route: session
     let step = match step {
         "begin" => Step::Begin,
         "finish" => Step::Finish,

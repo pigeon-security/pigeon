@@ -77,6 +77,17 @@ fn console_sign_in_and_a_write() {
     }
     assert!(!c.contains("Domain"));
     assert!(clear().starts_with("__Host-pigeon_session=; ") && clear().ends_with("; Max-Age=0"));
+    // Sign-out needs the session: a live one is ended, an expired one only has its cookie
+    // cleared (so signing out after expiry still works), and none at all is refused, even from
+    // this site's own page.
+    assert_eq!(sign_out(Some("pgn_ss_live"), true), SignOut::End);
+    assert_eq!(sign_out(Some("pgn_ss_gone"), false), SignOut::Clear);
+    assert_eq!(sign_out(None, false), SignOut::Refuse);
+    assert_eq!(sign_out(None, true), SignOut::Refuse);
+    assert_eq!(
+        sign_out(token_from(&format!("{COOKIE}=not-a-session")), false),
+        SignOut::Refuse
+    );
     let t = "pgn_ss_AbC-12_xyz";
     assert_eq!(
         token_from(&format!("theme=dark;  {COOKIE}={t};lang=en")),
@@ -2330,4 +2341,768 @@ fn secrets_store_listing_reads_every_full_page() {
     assert!(more_pages(PER_PAGE));
     assert!(!more_pages(PER_PAGE - 1));
     assert!(!more_pages(0));
+}
+
+// ---- the architecture drawing (Direction A, the layered map) ----
+
+/// The repository's files as core's build.rs embeds them: the map, each crate's Rust and each
+/// Worker's wrangler.toml.
+fn arch_repo_files() -> Vec<(String, String)> {
+    let mut root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    while !root.join("ci/workers.toml").exists() {
+        assert!(root.pop(), "ci/workers.toml is above the checkout");
+    }
+    fn walk(dir: &Path, root: &Path, out: &mut Vec<(String, String)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+        paths.sort();
+        for p in paths {
+            if p.is_dir() {
+                walk(&p, root, out);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                let rel = p
+                    .strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                out.push((rel, std::fs::read_to_string(&p).unwrap()));
+            }
+        }
+    }
+    let mut files = vec![(
+        "ci/workers.toml".to_string(),
+        std::fs::read_to_string(root.join("ci/workers.toml")).unwrap(),
+    )];
+    let mut crates: Vec<PathBuf> = std::fs::read_dir(root.join("src"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    crates.sort();
+    for krate in crates {
+        if let Ok(toml) = std::fs::read_to_string(krate.join("wrangler.toml")) {
+            let rel = krate
+                .strip_prefix(&root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            files.push((format!("{rel}/wrangler.toml"), toml));
+        }
+        walk(&krate.join("src"), &root, &mut files);
+    }
+    files.sort();
+    files
+}
+
+/// The JSON keys of `v`, as dotted paths, arrays' elements merged under `[]`.
+fn arch_key_paths(v: &Value, at: &str, out: &mut std::collections::BTreeSet<String>) {
+    match v {
+        Value::Object(map) => {
+            for (k, x) in map {
+                let p = if at.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{at}.{k}")
+                };
+                out.insert(p.clone());
+                arch_key_paths(x, &p, out);
+            }
+        }
+        Value::Array(items) => {
+            for x in items {
+                arch_key_paths(x, &format!("{at}[]"), out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// `/architecture.json` keeps its shape: `commit`, `digest` and `model`, and the model's keys
+/// exactly as before the drawing's fields were added, so the deploy and `site_publish`'s
+/// pre-flight read it unchanged.
+#[test]
+fn core_architecture_public_json_keys_are_pinned() {
+    use pigeon_capabilities::architecture::{Source, describe, public};
+    use pigeon_capabilities::site::architecture_json;
+    use std::collections::BTreeSet;
+    let files = arch_repo_files();
+    let paths: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(p, t)| (p.as_str(), t.as_str()))
+        .collect();
+    let sources: Vec<Source> = files
+        .iter()
+        .map(|(path, text)| Source { path, text })
+        .collect();
+    let caps = arch_home_capabilities();
+    let hosted = pigeon_capabilities::Hosted {
+        worker: "pigeon-platform",
+        capabilities: &caps,
+        sources: &paths,
+    };
+    let model = serde_json::to_value(public(&describe(&sources, &hosted))).unwrap();
+    let page: Value = serde_json::from_str(&architecture_json(&model, "d1").unwrap()).unwrap();
+    let mut keys = BTreeSet::new();
+    arch_key_paths(&page, "", &mut keys);
+    let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
+    assert_eq!(keys, ARCH_PUBLIC_KEYS);
+}
+
+/// The keys of `/architecture.json` for home's model, before the drawing's fields were added.
+const ARCH_PUBLIC_KEYS: &[&str] = &[
+    "commit",
+    "digest",
+    "model",
+    "model.commit",
+    "model.digest",
+    "model.externals",
+    "model.externals[].by",
+    "model.externals[].detail",
+    "model.externals[].kind",
+    "model.externals[].name",
+    "model.files",
+    "model.hostnames",
+    "model.hostnames[].access",
+    "model.hostnames[].by",
+    "model.hostnames[].host",
+    "model.hostnames[].public_paths",
+    "model.hostnames[].worker",
+    "model.links",
+    "model.links[].from",
+    "model.links[].kind",
+    "model.links[].to",
+    "model.links[].via",
+    "model.parts",
+    "model.parts[].bindings",
+    "model.parts[].calls",
+    "model.parts[].capability",
+    "model.parts[].interface",
+    "model.parts[].name",
+    "model.parts[].permissions",
+    "model.parts[].summary",
+    "model.resources",
+    "model.resources.containers",
+    "model.resources.gateways",
+    "model.resources.mirrors",
+    "model.resources.objects",
+    "model.resources.permissions",
+    "model.resources.queues",
+    "model.resources.repos",
+    "model.resources.secrets",
+    "model.resources.unused",
+    "model.resources.zone",
+    "model.versions",
+    "model.versions[].kind",
+    "model.versions[].name",
+    "model.versions[].version",
+    "model.versions[].worker",
+    "model.workers",
+    "model.workers[].after",
+    "model.workers[].containers",
+    "model.workers[].crons",
+    "model.workers[].deploy_job",
+    "model.workers[].handlers",
+    "model.workers[].lane",
+    "model.workers[].merged_into",
+    "model.workers[].name",
+    "model.workers[].objects",
+    "model.workers[].objects[].binding",
+    "model.workers[].objects[].class",
+    "model.workers[].objects[].owner",
+    "model.workers[].published_by",
+    "model.workers[].queues",
+    "model.workers[].queues[].queue",
+    "model.workers[].queues[].role",
+    "model.workers[].routes",
+    "model.workers[].secrets",
+    "model.workers[].services",
+    "model.workers[].services[].binding",
+    "model.workers[].services[].service",
+    "model.workers[].source",
+    "model.workers[].tools",
+    "model.workers[].uses",
+    "model.workers[].workers_dev",
+];
+
+/// Home's capabilities as core hosts them (src/platform/src/settings.rs), with the capability
+/// Workers' from their own manifests, so the model is the one the deployed Worker describes.
+fn arch_home_capabilities() -> Vec<Box<dyn pigeon_capabilities::Capability>> {
+    use pigeon_capabilities::Capability;
+    use pigeon_capabilities::remote::{Binding, Remote};
+    use pigeon_capabilities::*;
+    use pigeon_contract::Service;
+    let zone = "pigeon.dev";
+    let host = "platform.pigeon.dev";
+    let proxy_host = "proxy.pigeon.dev";
+    let map = pigeon_core::lanes::parse(&arch_repo_files()[0].1).unwrap();
+    let pk = || passkeys::Passkeys {
+        host: host.into(),
+        site_name: "pigeon".into(),
+    };
+    let remote = |binding: &'static str, worker: &'static str, m: pigeon_contract::Manifest| {
+        m.capabilities
+            .into_iter()
+            .map(move |c| {
+                Box::new(Remote::new(&Binding { binding, worker }, c)) as Box<dyn Capability>
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut caps: Vec<Box<dyn Capability>> = vec![
+        Box::new(public_host::PublicHost {
+            zone: zone.into(),
+            host: host.into(),
+            worker: "pigeon-platform".into(),
+            retire: public_host::Retire::default(),
+            also: Vec::new(),
+            tool: "setup_platform",
+        }),
+        Box::new(public_host::PublicHost {
+            zone: zone.into(),
+            host: proxy_host.into(),
+            worker: "pigeon-proxy".into(),
+            also: vec!["pigeon-platform".into()],
+            retire: public_host::Retire::default(),
+            tool: "setup_proxy_host",
+        }),
+        Box::new(site::Site {
+            zone: zone.into(),
+            worker: "pigeon-platform".into(),
+            also: Vec::new(),
+            bindings: Vec::new(),
+            release: Some(site::HOME_SITE.into()),
+        }),
+        Box::new(source::Source {
+            namespace: "pigeon".into(),
+            repo: "pigeon".into(),
+            default_branch: "main".into(),
+            description: "pigeon".into(),
+            import_from: None,
+            queue: "pigeon-source-events".into(),
+        }),
+        Box::new(mirror::Mirror {
+            source: mirror::Source {
+                namespace: "pigeon".into(),
+                repo: "pigeon".into(),
+                branches: vec!["main".into()],
+            },
+            url: "https://github.com/pigeon-security/pigeon.git".into(),
+            token_binding: "GITHUB_MIRROR_TOKEN".into(),
+            tool: "source_mirror",
+        }),
+        Box::new(apple::Apple),
+        Box::new(storage::Storage {
+            accounts: Vec::new(),
+        }),
+        Box::new(users::Users { host: host.into() }),
+        Box::new(pk()),
+        Box::new(oauth::OAuth {
+            host: host.into(),
+            passkeys: pk(),
+        }),
+        Box::new(secrets::Secrets {
+            host: host.into(),
+            parent: "CF_PARENT_TOKEN".into(),
+        }),
+        Box::new(proxy::Tokens {
+            proxy_host: proxy_host.into(),
+        }),
+        Box::new(approvals::Approvals),
+        Box::new(policy::Policy {
+            session_prefix: "claude/".into(),
+            main: "main".into(),
+        }),
+        Box::new(git_proxy::GitProxy {
+            host: proxy_host.into(),
+            namespace: "pigeon".into(),
+            repo: "pigeon".into(),
+            protected: "refs/heads/main".into(),
+            prefix: "refs/heads/claude/".into(),
+        }),
+        Box::new(cf_proxy::CfProxy {
+            host: proxy_host.into(),
+            script: "pigeon-platform".into(),
+            others: Vec::new(),
+            queues: Vec::new(),
+            containers: Vec::new(),
+            land_repo: "pigeon/pigeon".into(),
+        }),
+        Box::new(land::Land {
+            settings: land::Settings {
+                namespace: "pigeon".into(),
+                repo: "pigeon".into(),
+                main: "refs/heads/main".into(),
+                parent: "CF_PARENT_TOKEN".into(),
+                test_job: "test".into(),
+                deploy_job: "deploy".into(),
+                deploy_connector: Some("containers".into()),
+                portal_servers: vec!["pigeon".into()],
+                portal_host: format!("mcp.{zone}"),
+                setup_connectors: true,
+                map: map.clone(),
+            },
+        }),
+        Box::new(deploys::Deploys),
+        Box::new(observability::Observability { map }),
+        Box::new(images::Images),
+        Box::new(dispatch::Dispatch),
+        Box::new(split::Split { bindings: &[] }),
+        Box::new(github::Github),
+        Box::new(architecture::Architecture),
+        Box::new(versioning::Versioning),
+        Box::new(linked::Linked { host: host.into() }),
+        Box::new(ingest::Ingest {
+            targets: Vec::new(),
+            accounts: Vec::new(),
+            passkeys: pk(),
+        }),
+        Box::new(instances::Instances {
+            zone: zone.into(),
+            passkeys: pk(),
+        }),
+        Box::new(instances::MultiInstance),
+        Box::new(site_passkeys::SitePasskeys { zone: zone.into() }),
+        Box::new(console::Console {
+            host: host.into(),
+            passkeys: pk(),
+        }),
+        Box::new(changelog::Changelog {
+            namespace: "pigeon".into(),
+            repo: "pigeon".into(),
+            branch: "main".into(),
+            bucket: "pigeon-changelog".into(),
+        }),
+    ];
+    let models = pigeon_models::Models {
+        gateways: vec![pigeon_models::Gateway {
+            id: "pigeon".into(),
+            kind: pigeon_core::ai_gateway::GatewayKind::Credits,
+        }],
+        providers: Vec::new(),
+        staged: Vec::new(),
+        secrets_page: "https://x/secrets".into(),
+        host: host.into(),
+        proxy_host: proxy_host.into(),
+    };
+    let models_manifest = pigeon_contract::Manifest {
+        capabilities: vec![models.capability()],
+        ..pigeon_cloud::CloudGateway::new().manifest()
+    };
+    let sites: pigeon_contract::CapabilityManifest = serde_json::from_value(json!({
+        "name": "sites",
+        "tools": [{ "name": "site_render", "description": "A tool.", "inputSchema": { "type": "object" } }]
+    }))
+    .unwrap();
+    caps.extend(remote("MODELS", "pigeon-model-gateway", models_manifest));
+    caps.extend(remote(
+        "CI",
+        "pigeon-ci-gateway",
+        pigeon_ci::CiGateway::new(
+            pigeon_ci::pigeon::settings(pigeon_ci::Accounts::Scoped),
+            b"key".to_vec(),
+        )
+        .manifest(),
+    ));
+    caps.push(Box::new(Remote::new(
+        &Binding {
+            binding: "SITES",
+            worker: "pigeon-sites",
+        },
+        sites,
+    )));
+    caps.extend(remote(
+        "AI_AGENTS",
+        "pigeon-ai-agents",
+        pigeon_ai_agents::service::Agents.manifest(),
+    ));
+    caps.extend(remote(
+        "CLOUD",
+        "pigeon-cloud-gateway",
+        pigeon_cloud::CloudGateway::new().manifest(),
+    ));
+    caps
+}
+
+/// Home's model, as the deployed core describes it.
+fn arch_home_model() -> pigeon_capabilities::architecture::Model {
+    use pigeon_capabilities::architecture::{Source, describe};
+    let files = arch_repo_files();
+    let paths: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(p, t)| (p.as_str(), t.as_str()))
+        .collect();
+    let sources: Vec<Source> = files
+        .iter()
+        .map(|(path, text)| Source { path, text })
+        .collect();
+    let caps = arch_home_capabilities();
+    let hosted = pigeon_capabilities::Hosted {
+        worker: "pigeon-platform",
+        capabilities: &caps,
+        sources: &paths,
+    };
+    describe(&sources, &hosted)
+}
+
+/// A linked instance's own model: one Worker, three hostnames, a bucket and two capabilities.
+fn arch_linked_model() -> pigeon_capabilities::architecture::Model {
+    use pigeon_capabilities::architecture::instance_model;
+    use pigeon_capabilities::instances::{record::Instance, tools::Scope};
+    let record: Instance = serde_json::from_value(json!({
+        "id": "docs", "title": "Docs",
+        "account": { "kind": "linked", "account_id": "0123456789abcdef0123456789abcdef" },
+        "zones": ["example.org"], "worker": "example",
+        "sites": [{ "name": "docs", "bucket": "example-site", "targets": [
+            { "kind": "zone", "hostname": "www.example.org", "route": "www.example.org/*", "enabled": true },
+            { "kind": "domain", "hostname": "docs.example.org" },
+            { "kind": "subdomain", "label": "example" }
+        ] }],
+        "source": { "state": "enabled" },
+        "observability": { "state": "enabled" }
+    }))
+    .unwrap();
+    let scope = Scope::new(&record).unwrap();
+    let platform = json!({
+        "commit": "0123456789ab", "digest": "d1",
+        "resources": { "zone": "pigeon.example" },
+        "parts": [{ "name": "source", "summary": "Read-only source." }]
+    });
+    let tools = vec![
+        "source_read_file".to_string(),
+        "observability_worker_metrics".into(),
+    ];
+    instance_model(&record, scope.capabilities(), &tools, &platform)
+}
+
+/// Two Workers bound to each other, one hostname, and no services at all.
+fn arch_bare_model() -> pigeon_capabilities::architecture::Model {
+    use pigeon_capabilities::architecture::{Hostname, Link, Model, Worker};
+    let worker = |name: &str, tools: &[&str]| Worker {
+        name: name.into(),
+        tools: tools.iter().map(|t| t.to_string()).collect(),
+        handlers: vec!["fetch".into()],
+        ..Worker::default()
+    };
+    let link = |from: &str, to: &str, via: &str| Link {
+        from: from.into(),
+        to: to.into(),
+        via: via.into(),
+        kind: "service binding".into(),
+    };
+    Model {
+        workers: vec![worker("front", &[]), worker("back", &[])],
+        hostnames: vec![Hostname {
+            host: "app.example.net".into(),
+            worker: "front".into(),
+            by: "site".into(),
+            access: Vec::new(),
+            behind_access: false,
+            public_paths: Vec::new(),
+        }],
+        links: vec![
+            link("front", "back", "BACK"),
+            link("back", "front", "FRONT"),
+        ],
+        ..Model::default()
+    }
+}
+
+/// No two cards of a layout overlap, and each lies inside the canvas.
+fn arch_assert_tidy(l: &pigeon_capabilities::architecture::Layout, what: &str) {
+    for (i, a) in l.cards.iter().enumerate() {
+        assert!(
+            a.x >= 0.0 && a.y >= 0.0 && a.x + a.w <= l.w + 0.5 && a.y + a.h <= l.h + 0.5,
+            "{what}: {} lies inside {}x{}: {:?}",
+            a.id,
+            l.w,
+            l.h,
+            (a.x, a.y, a.w, a.h)
+        );
+        for b in &l.cards[i + 1..] {
+            let apart =
+                a.x + a.w <= b.x || b.x + b.w <= a.x || a.y + a.h <= b.y || b.y + b.h <= a.y;
+            assert!(apart, "{what}: {} and {} overlap", a.id, b.id);
+        }
+    }
+}
+
+/// The drawing is laid out from the instance it draws: home's many Workers, gateways and
+/// services; a linked instance's one Worker with its bucket; two Workers and no services. A
+/// row, bus or layer with nothing in it is not drawn, in either width.
+#[test]
+fn core_architecture_layout_fits_the_instance() {
+    use pigeon_capabilities::architecture::{Mode, Width, layout};
+    let rows = |l: &pigeon_capabilities::architecture::Layout| -> Vec<&str> {
+        l.rows.iter().map(|r| r.id).collect()
+    };
+    let kinds = |l: &pigeon_capabilities::architecture::Layout| -> Vec<&str> {
+        let mut k: Vec<&str> = l.edges.iter().map(|e| e.kind).collect();
+        k.sort_unstable();
+        k.dedup();
+        k
+    };
+
+    // Home: every row, the bus from the hub, the services where their callers are.
+    let home = arch_home_model();
+    let full = layout(&home, Mode::Full, Width::Wide);
+    arch_assert_tidy(&full, "home full");
+    assert_eq!(full.hub.as_deref(), Some("pigeon-platform"));
+    for row in [
+        "hostnames",
+        "edge",
+        "bindings",
+        "inner",
+        "services",
+        "outside",
+        "called",
+    ] {
+        assert!(
+            rows(&full).contains(&row),
+            "home has {row}: {:?}",
+            rows(&full)
+        );
+    }
+    for kind in [
+        "host", "link", "bus", "binding", "object", "service", "through", "dispatch", "tool", "arc",
+    ] {
+        assert!(
+            kinds(&full).contains(&kind),
+            "home draws {kind}: {:?}",
+            kinds(&full)
+        );
+    }
+    let card = |l: &pigeon_capabilities::architecture::Layout, id: &str| {
+        l.cards
+            .iter()
+            .find(|c| c.id == id)
+            .unwrap_or_else(|| panic!("{id} is drawn"))
+            .clone()
+    };
+    // AI Gateway and the portal are in the account; Buildkite MCP hangs from the portal;
+    // Containers is no service, but a pill on ci-gateway.
+    assert_eq!(card(&full, "service:AI Gateway").row, "services");
+    assert_eq!(card(&full, "service:MCP Server Portal").row, "services");
+    assert_eq!(card(&full, "service:Buildkite MCP").row, "outside");
+    assert!(full.edges.iter().any(|e| e.kind == "through"
+        && e.from == "service:MCP Server Portal"
+        && e.to == "service:Buildkite MCP"));
+    assert!(!full.cards.iter().any(|c| c.name == "Cloudflare Containers"));
+    assert!(full.marks.iter().any(|m| m.text == "⧉ CiRunner on core"));
+    // AI Gateway hangs under the model gateway, not core.
+    let gw = card(&full, "worker:pigeon-model-gateway");
+    let ai = card(&full, "service:AI Gateway");
+    assert!(
+        ai.x >= gw.x && ai.x < gw.x + gw.w,
+        "AI Gateway is under the model gateway"
+    );
+    // Each binding drop is labelled with both sides.
+    assert!(full.edges.iter().any(|e| e.kind == "binding"
+        && e.to == "worker:pigeon-model-gateway"
+        && e.label.as_deref() == Some("MODELS ⇄ PLATFORM")));
+    // Tool calls: ai-agents → model-gateway beneath the cards.
+    assert!(full.edges.iter().any(|e| {
+        e.kind == "arc"
+            && e.from == "worker:pigeon-ai-agents"
+            && e.to == "worker:pigeon-model-gateway"
+            && e.label
+                .as_deref()
+                .is_some_and(|l| l.starts_with("models_* · "))
+    }));
+    // Route counts on the platform host; /mcp is tagged there.
+    assert!(full.marks.iter().any(|m| m.text == "/mcp · every tool"));
+    // Declared beside each route, a trailing comment or the first line of its arm: the GitHub
+    // App's and CI's webhooks both count on the platform host.
+    for chip in ["webhook 2", "sign-in 9", "redirect 9", "token 2"] {
+        assert!(full.marks.iter().any(|m| m.text == chip), "{chip}");
+    }
+    // The services' hosts never show twice; the drawing names no host it does not have.
+    let compact = layout(&home, Mode::Compact, Width::Wide);
+    arch_assert_tidy(&compact, "home compact");
+    assert!(compact.edges.iter().all(|e| e.layer == "base"));
+    assert!(
+        compact
+            .marks
+            .iter()
+            .all(|m| m.layer == "base" && m.kind != "pill")
+    );
+    for narrow in [Mode::Full, Mode::Compact] {
+        let n = layout(&home, narrow, Width::Narrow);
+        assert_eq!(n.w, 360.0);
+        arch_assert_tidy(&n, "home narrow");
+    }
+
+    // A linked instance: one Worker under its three hostnames, its bucket in the account; no
+    // bus, no outside rows, no tool calls.
+    let linked = arch_linked_model();
+    for (mode, width) in [
+        (Mode::Full, Width::Wide),
+        (Mode::Compact, Width::Wide),
+        (Mode::Full, Width::Narrow),
+    ] {
+        let l = layout(&linked, mode, width);
+        arch_assert_tidy(&l, "linked");
+        assert_eq!(l.hub.as_deref(), Some("example"));
+        assert_eq!(
+            rows(&l),
+            ["hostnames", "edge", "services"],
+            "{mode:?} {width:?}"
+        );
+        assert_eq!(l.cards.iter().filter(|c| c.kind == "worker").count(), 1);
+        assert_eq!(
+            card(&l, "service:example-site").place.as_deref(),
+            Some("account")
+        );
+        for none in [
+            "bus", "binding", "object", "dispatch", "tool", "arc", "through",
+        ] {
+            assert!(!kinds(&l).contains(&none), "linked draws no {none}");
+        }
+        assert!(!l.marks.iter().any(|m| m.text.contains("SERVICE BINDINGS")
+            || m.text.contains("OUTSIDE")
+            || m.text.contains("CALLED BY")));
+        if width == Width::Wide {
+            // The Worker spans its hostnames' columns.
+            let w = card(&l, "worker:example");
+            let hosts: Vec<_> = l.cards.iter().filter(|c| c.kind == "hostname").collect();
+            assert_eq!(hosts.len(), 3);
+            assert!((w.x - hosts[0].x).abs() < 0.5);
+            assert!((w.x + w.w - hosts[2].x - hosts[2].w).abs() < 0.5);
+        }
+    }
+
+    // Two Workers and no services: the bus, and nothing below the account.
+    let bare = arch_bare_model();
+    for width in [Width::Wide, Width::Narrow] {
+        let l = layout(&bare, Mode::Full, width);
+        arch_assert_tidy(&l, "bare");
+        assert!(
+            !rows(&l)
+                .iter()
+                .any(|r| ["services", "outside", "called"].contains(r))
+        );
+        assert!(kinds(&l).contains(&"binding"));
+        assert!(
+            !kinds(&l)
+                .iter()
+                .any(|k| ["dispatch", "tool", "arc"].contains(k))
+        );
+        assert!(
+            l.marks.iter().all(|m| m.layer == "base"),
+            "no tools, no tool layer"
+        );
+    }
+    let l = layout(&bare, Mode::Full, Width::Wide);
+    assert!(
+        l.edges
+            .iter()
+            .any(|e| e.label.as_deref() == Some("BACK ⇄ FRONT"))
+    );
+}
+
+/// Every drawing has its own marker and pattern ids, so two on one page keep their
+/// arrowheads; compact draws no tool layer and no route counts; each has a title.
+#[test]
+fn core_architecture_drawings_are_their_own() {
+    use pigeon_capabilities::architecture::{Mode, Theme, Width, draw};
+    let ids = |svg: &str| -> std::collections::BTreeSet<String> {
+        svg.match_indices("id=\"")
+            .map(|(i, _)| {
+                let rest = &svg[i + 4..];
+                rest[..rest.find('"').unwrap()].to_string()
+            })
+            .collect()
+    };
+    let home = arch_home_model();
+    let linked = arch_linked_model();
+    let drawings = [
+        draw(&home, Mode::Full, Width::Wide, Theme::Auto),
+        draw(&home, Mode::Compact, Width::Wide, Theme::Auto),
+        draw(&home, Mode::Compact, Width::Narrow, Theme::Auto),
+        draw(&home, Mode::Full, Width::Wide, Theme::Dark),
+        draw(&linked, Mode::Full, Width::Wide, Theme::Auto),
+    ];
+    for (i, a) in drawings.iter().enumerate() {
+        assert!(a.svg.starts_with("<svg "));
+        assert!(a.svg.contains("<title id=") && a.svg.contains("aria-labelledby="));
+        assert!(!a.svg.contains("<script"));
+        let mine = ids(&a.svg);
+        assert!(mine.len() >= 4, "{mine:?}");
+        for r in a.svg.match_indices("url(#") {
+            let rest = &a.svg[r.0 + 5..];
+            let id = &rest[..rest.find(')').unwrap()];
+            assert!(mine.contains(id), "{id} is defined in its own drawing");
+        }
+        for b in &drawings[i + 1..] {
+            assert!(mine.is_disjoint(&ids(&b.svg)), "ids are per drawing");
+        }
+    }
+    let compact = &drawings[1].svg;
+    assert!(!compact.contains("class=\"tools\"") && !compact.contains("tl-b\" x"));
+    assert!(!compact.contains("routes by check") && !compact.contains("pl-open-b\" x"));
+    assert!(drawings[0].svg.contains("class=\"tools\""));
+    assert!(drawings[0].svg.contains("routes by check"));
+    assert!(drawings[0].text.contains("pigeon-platform (hub)"));
+    // Dark draws the dark tokens only; auto carries both.
+    assert!(drawings[3].svg.contains("--bg:#141418") && !drawings[3].svg.contains("--bg:#FFFFFF"));
+    assert!(drawings[0].svg.contains("prefers-color-scheme:dark"));
+
+    // pigeon.dev/architecture: the compact drawing of the public view, wide and for a phone,
+    // as images in a <picture>, and no script anywhere.
+    let shown = pigeon_capabilities::architecture::public_drawable(&home);
+    let wide = draw(&shown, Mode::Compact, Width::Wide, Theme::Auto).svg;
+    let narrow = draw(&shown, Mode::Compact, Width::Narrow, Theme::Auto).svg;
+    let build = pigeon_core::home::Build {
+        commit: "0123456789ab",
+        digest: "d1",
+    };
+    let page = pigeon_core::home::architecture_picture(&wide, Some(&narrow), build);
+    assert!(page.contains(
+        "<picture><source media=\"(max-width: 640px)\" srcset=\"data:image/svg+xml;base64,"
+    ));
+    assert!(!page.contains("<svg") && !page.contains("<script"));
+    assert!(pigeon_core::site_publish::scriptless(
+        "text/html; charset=utf-8",
+        page.as_bytes()
+    ));
+    for svg in [&wide, &narrow] {
+        assert!(pigeon_core::site_publish::scriptless(
+            "image/svg+xml",
+            svg.as_bytes()
+        ));
+    }
+}
+
+/// What the drawing depends on is declared on the real model: every service has a place and
+/// a capability, every `through` names a service, every Worker is reached, every tool call
+/// reaches a Worker hosting the tool, and every route declares its check. A model that lacks
+/// them is told so.
+#[test]
+fn core_architecture_check_is_clean_on_the_real_model() {
+    use pigeon_capabilities::architecture::{Dependency, Worker, check};
+    let home = arch_home_model();
+    let findings = check(&home);
+    assert!(findings.is_empty(), "{findings:#?}");
+    assert!(!home.tool_calls.is_empty() && !home.route_kinds.is_empty());
+    let mut broken = arch_bare_model();
+    broken.externals.push(Dependency {
+        name: "Thing".into(),
+        kind: "API".into(),
+        through: "Nowhere".into(),
+        ..Dependency::default()
+    });
+    broken.workers.push(Worker {
+        name: "lonely".into(),
+        ..Worker::default()
+    });
+    let rules: Vec<&str> = check(&broken).iter().map(|f| f.rule).collect();
+    for rule in [
+        "external_place",
+        "external_by",
+        "external_through",
+        "worker_unreached",
+    ] {
+        assert!(rules.contains(&rule), "{rule}: {rules:?}");
+    }
 }

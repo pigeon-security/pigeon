@@ -329,12 +329,18 @@ impl Connector for Buildkite {
             "name": "Buildkite",
             "kind": "CI connector",
             "detail": format!("cluster {}, hosted queues {}", self.cluster, keys.join(", ")),
+            "place": "outside",
+            "out": "API: start builds; set up cluster, queues, pipeline",
+            "in": "webhooks /ci/hooks/; hosted agents call /ci/token, /ci/runner and fetch via proxy /git/",
         })];
         if let Some((server, _)) = &self.portal {
             out.push(json!({
                 "name": "Buildkite MCP",
                 "kind": "portal server",
                 "detail": format!("portal server `{server}`"),
+                "place": "outside",
+                "through": "MCP Server Portal",
+                "in": "MCP calls from clients, through the portal",
             }));
         }
         out

@@ -178,7 +178,11 @@ impl Capability for Mirror {
     fn footprint(&self) -> Footprint {
         Footprint {
             mirrors: vec![self.url.clone()],
-            externals: vec![External::new("GitHub", "mirror", self.url.clone())],
+            externals: vec![
+                External::new("GitHub", "mirror", self.url.clone())
+                    .place("outside")
+                    .flows("mirror pushes from Artifacts, forward-only", ""),
+            ],
             ..Footprint::default()
         }
     }

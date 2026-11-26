@@ -136,6 +136,7 @@ impl Connector for Containers {
             "name": "Cloudflare Containers",
             "kind": "CI connector",
             "detail": "runners in core's CiRunner containers",
+            "place": "container",
         })]
     }
 

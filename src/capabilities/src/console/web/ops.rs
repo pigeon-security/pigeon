@@ -89,6 +89,8 @@ pub const READS: &[(&str, &[&str])] = &[
     // Platform: architecture (of the selected instance), models (read with no `set`), limits
     // (read with no arguments).
     ("architecture_describe", &["public", "svg", "instance"]),
+    // The map itself, drawn for the selected instance in each theme and width.
+    ("architecture_draw", &["instance", "mode", "width", "theme"]),
     ("ai_agents_models", &[]),
     ("ai_agents_config", &[]),
 ];

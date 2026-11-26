@@ -242,6 +242,20 @@ pub struct External {
     pub kind: String,
     /// One line of public detail, such as a cluster name or a hostname.
     pub detail: String,
+    /// Where it runs, for the architecture drawing: `account` (a Cloudflare service in the
+    /// platform's own account), `outside` (a third party) or `container` (a container class of
+    /// one of the platform's Workers). Empty until declared, and then drawn as outside.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub place: String,
+    /// The service it is reached through, by name, such as a portal server's portal.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub through: String,
+    /// What the platform sends it, in a few words.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub out: String,
+    /// What it sends the platform, in a few words.
+    #[serde(rename = "in", skip_serializing_if = "String::is_empty")]
+    pub inbound: String,
 }
 
 impl External {
@@ -251,7 +265,27 @@ impl External {
             name: name.into(),
             kind: kind.into(),
             detail: detail.into(),
+            ..Self::default()
         }
+    }
+
+    /// Where it runs: `account`, `outside` or `container`.
+    pub fn place(mut self, place: &str) -> Self {
+        self.place = place.into();
+        self
+    }
+
+    /// The service it is reached through.
+    pub fn through(mut self, service: &str) -> Self {
+        self.through = service.into();
+        self
+    }
+
+    /// What flows to it (`out`) and from it (`inbound`); either may be empty.
+    pub fn flows(mut self, out: &str, inbound: &str) -> Self {
+        self.out = out.into();
+        self.inbound = inbound.into();
+        self
     }
 }
 

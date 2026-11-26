@@ -86,11 +86,13 @@ impl OAuth {
         match (req.method(), path.as_str()) {
             (Method::Options, _) => Ok(cors(Response::empty()?.with_status(204))),
             (Method::Get, p) if p.starts_with("/.well-known/oauth-protected-resource") => Ok(cors(
+                // route: open
                 Response::from_json(&oauth::resource_metadata(&format!("{issuer}/mcp"), &issuer))?,
             )),
             // The iOS app's associated domain (docs/plans/ios.md, phase 5): JSON, no redirect, HEAD too,
             // 404 while APPLE_TEAM_ID is unset.
             (Method::Get | Method::Head, "/.well-known/apple-app-site-association") => {
+                // route: open
                 match crate::apple::aasa(cx.env).await {
                     Some(doc) => {
                         let headers = Headers::new();
@@ -102,13 +104,16 @@ impl OAuth {
                 }
             }
             (Method::Get, p) if p.starts_with("/.well-known/oauth-authorization-server") => {
+                // route: open
                 Ok(cors(Response::from_json(&oauth::server_metadata(&issuer))?))
             }
             (Method::Post, "/oauth/register") => {
+                // route: open
                 let body: Value = req.json().await.unwrap_or(Value::Null);
                 self.register(cx.env, &body).await
             }
             (Method::Get, "/oauth/authorize") => {
+                // route: sign-in
                 let page = match self.authorize(cx.env, &query).await {
                     Ok((request, client)) => self.passkeys.page(
                         "Allow access",
@@ -134,6 +139,7 @@ impl OAuth {
                 html(&page)
             }
             (Method::Post, "/oauth/authorize/begin" | "/oauth/authorize/finish") => {
+                // route: sign-in
                 let body: Value = req.json().await.unwrap_or(Value::Null);
                 let answer = if path.ends_with("/begin") {
                     self.authorize_begin(cx.env, &body).await
@@ -149,6 +155,7 @@ impl OAuth {
                 }
             }
             (Method::Post, "/oauth/token") => {
+                // route: OAuth
                 let body = req.text().await?;
                 let fields = form(&body);
                 match field(&fields, "grant_type") {

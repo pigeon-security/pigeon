@@ -457,11 +457,11 @@ impl Capability for Github {
 
     fn footprint(&self) -> crate::Footprint {
         crate::Footprint {
-            externals: vec![crate::External::new(
-                "GitHub App",
-                "app",
-                "reads instances' repositories; webhooks to /github/hook",
-            )],
+            externals: vec![
+                crate::External::new("GitHub App", "app", "installed on instances' repositories")
+                    .place("outside")
+                    .flows("reads instances' repositories", "webhooks to /github/hook"),
+            ],
             ..crate::Footprint::default()
         }
     }
@@ -491,6 +491,7 @@ impl Capability for Github {
     fn fetch<'a>(&'a self, cx: &'a Context<'a>, req: Request) -> Serve<'a> {
         Box::pin(async move {
             if req.method() == Method::Post && req.path() == "/github/hook" {
+                // route: webhook
                 return self.hook(cx, req).await;
             }
             Response::error("not found", 404)

@@ -139,7 +139,7 @@ impl Get {
             return Some(Self::Bookmark(to));
         }
         Some(match path {
-            "/console/icon.png" => Self::Icon,
+            "/console/icon.png" => Self::Icon, // route: open
             page::MARK => Self::Mark,
             p if page::is_page(p) => Self::App,
             p => {
@@ -165,10 +165,10 @@ pub enum Post {
 impl Post {
     pub fn route(path: &str) -> Option<Self> {
         Some(match path {
-            "/app/op" => Self::AppOp,
-            "/console/sign-in/begin" => Self::SignInBegin,
-            "/console/sign-in/finish" => Self::SignInFinish,
-            "/console/sign-out" => Self::SignOut,
+            "/app/op" => Self::AppOp,                        // route: session
+            "/console/sign-in/begin" => Self::SignInBegin,   // route: sign-in
+            "/console/sign-in/finish" => Self::SignInFinish, // route: sign-in
+            "/console/sign-out" => Self::SignOut,            // route: session
             p if write::route(p).is_some() => Self::Write,
             _ => return None,
         })
@@ -338,13 +338,30 @@ impl Console {
                 Err(e) => answer(&json!({ "error": e.to_string() }), 400),
             },
             Post::SignOut => {
+                // It needs the session: a live one is ended; an expired or unknown one only has
+                // its cookie cleared; with no session cookie at all it is refused.
                 let header = req.headers().get("Cookie")?.unwrap_or_default();
-                if let Some(token) = session::token_from(&header) {
-                    directory(cx.env, "session.remove", json!({ "hash": hash(token) })).await?;
+                let token = session::token_from(&header);
+                let live = match token {
+                    Some(t) => {
+                        let found =
+                            directory(cx.env, "session.get", json!({ "hash": hash(t) })).await?;
+                        serde_json::from_value::<Signed>(found).is_ok()
+                    }
+                    None => false,
+                };
+                match session::sign_out(token, live) {
+                    session::SignOut::Refuse => answer(&json!({ "error": "sign in first" }), 401),
+                    step => {
+                        if let (session::SignOut::End, Some(token)) = (step, token) {
+                            directory(cx.env, "session.remove", json!({ "hash": hash(token) }))
+                                .await?;
+                        }
+                        let res = answer(&json!({ "ok": true }), 200)?;
+                        res.headers().set("Set-Cookie", &session::clear())?;
+                        Ok(res)
+                    }
                 }
-                let res = answer(&json!({ "ok": true }), 200)?;
-                res.headers().set("Set-Cookie", &session::clear())?;
-                Ok(res)
             }
             Post::Write => {
                 let Some((action, step)) = write::route(&path) else {

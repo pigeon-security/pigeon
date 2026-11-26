@@ -33,7 +33,7 @@ impl Capability for GitProxy {
     }
 
     fn routes(&self) -> Vec<&'static str> {
-        vec!["/git/"]
+        vec!["/git/"] // route: token
     }
 
     fn fetch<'a>(&'a self, cx: &'a Context<'a>, req: Request) -> Serve<'a> {

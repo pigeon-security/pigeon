@@ -68,6 +68,8 @@ pub fn capability() -> CapabilityManifest {
                 "name": "Scaleway",
                 "kind": "cloud provider",
                 "detail": transport::HOSTS.join(", "),
+                "place": "outside",
+                "out": "API: keys, buckets, objects, each a plan approved first",
             }],
         }),
         secrets: secrets(),

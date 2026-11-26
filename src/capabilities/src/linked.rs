@@ -521,6 +521,7 @@ impl Linked {
     async fn serve(&self, cx: &Context<'_>, mut req: Request) -> Result<Response> {
         let path = req.path();
         if req.method() == Method::Get && path == "/linked/callback" {
+            // route: OAuth
             let query = req.url()?.query().unwrap_or_default().to_string();
             let text = match self.callback(cx.env, &query).await {
                 Ok(done) => format!("{done} You can close this page."),
@@ -544,7 +545,7 @@ impl Linked {
         };
         let body: Value = req.json().await.unwrap_or(Value::Null);
         let answer = match path.as_str() {
-            "/linked/begin" => self.begin(cx.env, &body, &person.name).await,
+            "/linked/begin" => self.begin(cx.env, &body, &person.name).await, // route: session
             _ => return Response::error("not found", 404),
         };
         let headers = Headers::new();
@@ -645,11 +646,18 @@ impl Capability for Linked {
 
     fn footprint(&self) -> crate::Footprint {
         crate::Footprint {
-            externals: vec![crate::External::new(
-                "Linked Cloudflare accounts",
-                "OAuth",
-                "other accounts linked to an instance with Cloudflare's OAuth consent",
-            )],
+            externals: vec![
+                crate::External::new(
+                    "Linked Cloudflare accounts",
+                    "OAuth",
+                    "other accounts linked to an instance with Cloudflare's OAuth consent",
+                )
+                .place("outside")
+                .flows(
+                    "API calls with each link's sealed OAuth token",
+                    "OAuth consent returns to /linked/callback",
+                ),
+            ],
             ..crate::Footprint::default()
         }
     }

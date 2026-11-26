@@ -73,12 +73,14 @@ impl Passkeys {
         };
         match (req.method(), url.path()) {
             (Method::Get, "/auth/passkey.js") => {
+                // route: open
                 let headers = Headers::new();
                 headers.set("Content-Type", "text/javascript; charset=utf-8")?;
                 headers.set("X-Content-Type-Options", "nosniff")?;
                 Ok(Response::ok(SCRIPT)?.with_headers(headers))
             }
             (Method::Get, "/auth/enrol") => {
+                // route: sign-in
                 let code = query("code");
                 let page = match directory(cx.env, "enrol.peek", json!({ "code": code })).await {
                     Ok(user) if user["kind"] != "standard" => self.page(
@@ -106,6 +108,7 @@ impl Passkeys {
                 html(&page)
             }
             (Method::Get, "/auth/link") => {
+                // route: sign-in
                 let request = query("request");
                 let page = match directory(cx.env, "link.request_get", json!({ "id": request })).await {
                     Ok(v) => self.page(
@@ -131,14 +134,15 @@ impl Passkeys {
                 let body: Value = req.json().await.unwrap_or(Value::Null);
                 let answer = match path {
                     "/auth/enrol/begin" | "/auth/enrol/finish" => {
+                        // route: sign-in
                         match standard_code(cx, &body).await {
                             Ok(()) if path.ends_with("begin") => self.enrol_begin(cx, &body).await,
                             Ok(()) => self.enrol_finish(cx, &body).await,
                             Err(e) => Err(e),
                         }
                     }
-                    "/auth/link/begin" => self.link_begin(cx, &body).await,
-                    "/auth/link/finish" => self.link_finish(cx, &body).await,
+                    "/auth/link/begin" => self.link_begin(cx, &body).await, // route: sign-in
+                    "/auth/link/finish" => self.link_finish(cx, &body).await, // route: sign-in
                     _ => return Response::error("not found", 404),
                 };
                 match answer {

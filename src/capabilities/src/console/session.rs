@@ -78,6 +78,28 @@ fn from_future(time: i64, now: i64) -> bool {
     time.saturating_sub(now) > CLOCK_SKEW_MS
 }
 
+/// What `POST /console/sign-out` does with the session cookie it was sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignOut {
+    /// The cookie names a live session: end it, then clear the cookie.
+    End,
+    /// The cookie names a session that has expired or is gone: clear the cookie, so signing out
+    /// of an expired session still works, and end nothing.
+    Clear,
+    /// No session cookie: refused, as every other session POST is.
+    Refuse,
+}
+
+/// The sign-out for a request whose session cookie holds `token` (none when it holds no
+/// well-formed one), whose session is `live` in the Directory.
+pub fn sign_out(token: Option<&str>, live: bool) -> SignOut {
+    match (token, live) {
+        (None, _) => SignOut::Refuse,
+        (Some(_), true) => SignOut::End,
+        (Some(_), false) => SignOut::Clear,
+    }
+}
+
 /// Whether a POST's Origin header names this host: exactly `https://{host}`, no port, no path,
 /// no trailing slash, the host in any case. `None`, `null`, `http://`, another host, or a host
 /// that merely ends with ours is refused.

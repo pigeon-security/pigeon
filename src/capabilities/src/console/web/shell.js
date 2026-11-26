@@ -36,7 +36,7 @@
     "ai_agents_status", "ai_agents_compare", "cost_daily", "land_list",
     "site_releases", "app_site_hosts", "app_site_visitors", "capabilities_versions", "capabilities_upgrade_plan",
     // Access and Platform.
-    "secrets_list", "credentials_expiry", "app_proxy_tokens", "app_people", "architecture_describe",
+    "secrets_list", "credentials_expiry", "app_proxy_tokens", "app_people", "architecture_describe", "architecture_draw",
     "ai_agents_models", "ai_agents_config"]);
   const WRITES = Object.freeze(["approval-approve", "approval-deny", "land-approve", "run-stop", "run-note", "run-extend",
     "instance-put", "linked-unlink", "site-deploy", "site-rollback", "visitor-invite", "visitor-revoke",
@@ -53,8 +53,8 @@
   let person = FIXTURES ? "Fixture Person" : root.dataset.person;
 
   // ---- Elements: text only, never HTML.
-  const TAGS = new Set("a aside b button code dd details div dl dt em footer form h1 h2 h3 header hr img input kbd label li main nav ol option p pre section select small span strong summary table tbody td textarea th thead time tr ul".split(" "));
-  const ATTRS = /^(?:aria-[\w-]+|data-[\w-]+|id|class|role|tabindex|title|href|src|alt|type|name|value|placeholder|disabled|hidden|spellcheck|selected|checked|for|autocomplete|rows|colspan|scope|datetime|min|max|maxlength|step)$/;
+  const TAGS = new Set("a aside b button code dd details div dl dt em footer form h1 h2 h3 header hr img input kbd label li main nav ol option p picture pre section select small source span strong summary table tbody td textarea th thead time tr ul".split(" "));
+  const ATTRS = /^(?:aria-[\w-]+|data-[\w-]+|id|class|role|tabindex|title|href|src|alt|type|name|value|placeholder|disabled|hidden|spellcheck|selected|checked|for|autocomplete|rows|colspan|scope|datetime|min|max|maxlength|step|media|srcset)$/;
   function el(tag, attrs = {}, ...children) {
     if (!TAGS.has(tag)) throw new TypeError(`Unsupported tag: ${tag}`);
     const node = document.createElement(tag);
@@ -63,9 +63,9 @@
       if (key === "text") node.textContent = value;
       else if (key === "on") for (const [type, fn] of Object.entries(value)) node.addEventListener(type, fn);
       else if (!ATTRS.test(key)) throw new TypeError(`Unsupported attribute: ${key}`);
-      else if (key === "src") {
+      else if (key === "src" || key === "srcset") {
         // Only an image the platform drew, as a data URL: an SVG in an img runs no script.
-        if (tag !== "img" || !/^data:image\/svg\+xml;base64,[A-Za-z0-9+/=]+$/.test(value)) throw new TypeError("Unsupported image");
+        if (tag !== (key === "src" ? "img" : "source") || !/^data:image\/svg\+xml;base64,[A-Za-z0-9+/=]+$/.test(value)) throw new TypeError("Unsupported image");
         node.setAttribute(key, value);
       } else if (key === "href") {
         const target = new URL(value, location.href);

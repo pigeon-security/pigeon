@@ -17,7 +17,7 @@ pub const CONSOLE: &str = "https://platform.pigeon.dev/app";
 /// The path is taken as the URL carries it, percent-encoding included. `None` for every other
 /// path, `/platformx` among them, which routes as usual. Both apex Workers answer it with a 302.
 pub fn console_redirect(path: &str, query: Option<&str>) -> Option<String> {
-    let rest = path.strip_prefix("/platform")?;
+    let rest = path.strip_prefix("/platform")?; // route: redirect @site
     if !(rest.is_empty() || rest.starts_with('/')) {
         return None;
     }
@@ -96,10 +96,10 @@ pub const ASSET_CACHE: &str = "public, max-age=86400";
 /// The route for `method` and `path`. Paths are matched exactly: no trailing slash.
 pub fn route(method: &str, path: &str) -> Route {
     let known = match path {
-        "/" => Route::Home,
-        "/architecture" => Route::Architecture,
-        "/architecture.json" => Route::Json,
-        "/logo.png" => Route::Logo,
+        "/" => Route::Home,                     // route: open @site
+        "/architecture" => Route::Architecture, // route: open @site
+        "/architecture.json" => Route::Json,    // route: open @site
+        "/logo.png" => Route::Logo,             // route: open @site
         _ => match Asset::ALL.into_iter().find(|a| a.path() == path) {
             Some(a) => Route::Asset(a),
             None => return Route::NotFound,
@@ -255,12 +255,38 @@ const ARCHITECTURE_HEAD: &str =
 
 /// The architecture page uses the platform's public SVG in image mode, never as inline markup.
 pub fn architecture_html(svg: &str, build: Build<'_>) -> String {
-    let image = base64(svg.as_bytes());
+    architecture_picture(svg, None, build)
+}
+
+/// The width at or below which the architecture page shows the stacked drawing.
+pub const NARROW_MEDIA: &str = "(max-width: 640px)";
+
+/// The architecture page with the wide drawing and, for a phone, the stacked one, chosen by
+/// the browser through `<picture>`: both images, no script.
+pub fn architecture_picture(wide: &str, narrow: Option<&str>, build: Build<'_>) -> String {
+    let image = base64(wide.as_bytes());
+    let source = narrow
+        .map(|n| {
+            format!(
+                r#"<source media="{NARROW_MEDIA}" srcset="data:image/svg+xml;base64,{}">"#,
+                base64(n.as_bytes())
+            )
+        })
+        .unwrap_or_default();
+    // The stacked drawing is drawn for a phone: there it may be narrower than a wide one.
+    // Kept here, not in home.css, which the landing template's digest covers.
+    let narrow_style = if narrow.is_some() {
+        format!(
+            "<style>@media {NARROW_MEDIA} {{ .figure picture img {{ min-width: 0; }} }}</style>"
+        )
+    } else {
+        String::new()
+    };
     page(
         "pigeon architecture",
         true,
         &format!(
-            r#"{ARCHITECTURE_HEAD}<div class="figure" role="region" aria-label="Platform diagram" tabindex="0"><img src="data:image/svg+xml;base64,{image}" alt="Platform architecture: routes, Workers, Durable Objects, containers and services"></div>"#
+            r#"{ARCHITECTURE_HEAD}{narrow_style}<div class="figure" role="region" aria-label="Platform diagram" tabindex="0"><picture>{source}<img src="data:image/svg+xml;base64,{image}" alt="Platform architecture: hostnames, the Workers in the Cloudflare account and their bindings, and the services they call"></picture></div>"#
         ),
         Some(build),
     )

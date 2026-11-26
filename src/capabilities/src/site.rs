@@ -254,7 +254,7 @@ fn render(hosted: &Hosted<'_>) -> Result<[String; 3]> {
     let json = architecture_json(&built.public_model, &built.digest)?;
     Ok([
         home::home_html(Some(build)),
-        home::architecture_html(&built.public_svg, build),
+        home::architecture_picture(&built.public_svg, Some(&built.public_svg_narrow), build),
         json,
     ])
 }

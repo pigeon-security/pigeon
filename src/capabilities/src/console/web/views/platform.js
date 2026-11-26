@@ -14,20 +14,40 @@
   const head = (text, note) => el("div", { class: "section-head" }, el("h2", { text }), note ? el("span", { class: "muted", text: note }) : null);
   const list = (items) => (items?.length ? el("ul", { class: "plain" }, items.map((t) => el("li", {}, code(t)))) : "—");
 
-  // ---- Architecture: counts, then the platform's own map (an SVG it drew, shown as an image so
-  // it runs nothing), its Workers or its MCP tools.
-  function mapImage(svg) {
-    if (typeof svg !== "string" || !svg.startsWith("<svg ")) return strip("neutral", el("span", { text: "The platform did not supply a diagram." }));
+  // ---- Architecture: counts, then the selected instance's map (SVGs the platform drew, shown
+  // as images so they run nothing), its Workers or its MCP tools. An image cannot see the
+  // console's theme, so the map comes drawn light and dark, each wide and, for a phone,
+  // stacked; the stylesheet shows the one that matches (.arch-map in shell.css). The Workers
+  // and Tools views are its text alternative.
+  const dataUri = (svg) => {
     const bytes = new TextEncoder().encode(svg);
     let bin = "";
     for (const b of bytes) bin += String.fromCharCode(b);
-    return el("div", { class: "figure", role: "region", tabindex: "0", "aria-label": "Platform diagram" },
-      el("img", { src: `data:image/svg+xml;base64,${btoa(bin)}`, alt: "Platform architecture: routes, Workers, Durable Objects, containers and services" }));
+    return `data:image/svg+xml;base64,${btoa(bin)}`;
+  };
+  const isSvg = (d) => typeof d?.svg === "string" && d.svg.startsWith("<svg ");
+
+  function mapImage(drawn) {
+    if (!["light", "dark"].every((t) => isSvg(drawn[t]?.wide))) return strip("neutral", el("span", { text: "The platform did not supply a diagram." }));
+    const picture = (theme) => {
+      const { wide, narrow } = drawn[theme];
+      return el("picture", { class: `arch-${theme}` },
+        isSvg(narrow) ? el("source", { media: "(max-width: 640px)", srcset: dataUri(narrow.svg) }) : null,
+        el("img", { src: dataUri(wide.svg), alt: wide.title || "Architecture diagram" }));
+    };
+    return el("div", { class: "figure arch-map", role: "region", tabindex: "0", "aria-label": "Architecture diagram" },
+      picture("light"), picture("dark"));
+  }
+
+  async function drawings(ctx) {
+    const one = (theme, width) => ctx.op("architecture_draw", { instance: ctx.instance.id, mode: "full", theme, width }).catch(() => null);
+    const [lw, ln, dw, dn] = await Promise.all([one("light", "wide"), one("light", "narrow"), one("dark", "wide"), one("dark", "narrow")]);
+    return { light: { wide: lw, narrow: ln }, dark: { wide: dw, narrow: dn } };
   }
 
   async function architecture(ctx) {
     // The selected instance's own architecture: on home the platform's, as before.
-    const d = await ctx.op("architecture_describe", { svg: true, instance: ctx.instance.id });
+    const [d, drawn] = await Promise.all([ctx.op("architecture_describe", { instance: ctx.instance.id }), drawings(ctx)]);
     const workers = d.workers || [];
     const tools = new Map();
     for (const w of workers) for (const t of new Set(w.tools || [])) tools.set(t, [...(tools.get(t) || []), w.name]);
@@ -35,7 +55,7 @@
     const stat = (n, label) => el("span", {}, el("strong", { text: String(n) }), ` ${label}`);
     const body = el("div", { class: "view" });
     const views = {
-      map: () => mapImage(d.drawing),
+      map: () => mapImage(drawn),
       workers: () => dataTable({
         label: "Workers", noun: "Workers", filter: "Filter Workers", signal: ctx.signal, load: workers,
         columns: [

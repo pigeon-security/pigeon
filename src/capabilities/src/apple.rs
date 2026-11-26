@@ -733,6 +733,7 @@ pub struct Apple;
 impl Apple {
     async fn serve(&self, cx: &Context<'_>, req: Request) -> Result<Response> {
         if req.method() == Method::Get && req.path() == "/app/oauth" {
+            // route: open
             let headers = Headers::new();
             headers.set("Content-Type", "text/html; charset=utf-8")?;
             headers.set("Cache-Control", "no-store")?;
@@ -743,6 +744,7 @@ impl Apple {
             return Response::error("not found", 404);
         }
         if req.path().starts_with("/apple/release/") {
+            // route: job
             return release::serve(cx, req).await;
         }
         Response::error("not found", 404)
