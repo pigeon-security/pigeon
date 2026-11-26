@@ -156,6 +156,7 @@
           return { placement: "inline", ...settings, ...(digitalOcean ? {
             spaces_region: settings?.spaces?.region, spaces_bucket: settings?.spaces?.bucket,
             spaces_prefix: settings?.spaces?.prefix,
+            droplet_health: settings?.droplet_health ? "yes" : "no",
           } : {}) };
         },
         fields: () => [
@@ -170,6 +171,9 @@
           { key: "spaces_prefix", label: "Spaces prefix", optional: true, mono: true,
             hint: "Leave blank to check the bucket root.",
             validate: (value) => new TextEncoder().encode(value).length <= 1024 && !/[\u0000-\u001f\u007f-\u009f]/u.test(value) }] : []),
+          ...(digitalOcean ? [{ key: "droplet_health", label: "Droplet runner checks",
+            options: ["no", "yes"], labels: { no: "Off", yes: "On" },
+            hint: "Each runner check needs a separate passkey approval before compute starts." }] : []),
           ...(configurable ? [{
             key: "placement", label: "Worker placement", options: ["inline", "own_worker"],
             labels: { inline: "Inline", own_worker: "Separate Worker" },
@@ -182,6 +186,8 @@
           if (configurable) settings.placement = v.placement;
           if (digitalOcean) {
             settings.team_id = v.team_id;
+            if (v.droplet_health === "yes") settings.droplet_health = true;
+            else delete settings.droplet_health;
             if (v.spaces_region || v.spaces_bucket || v.spaces_prefix) {
               settings.spaces = { region: v.spaces_region, bucket: v.spaces_bucket, ...(v.spaces_prefix ? { prefix: v.spaces_prefix } : {}) };
             } else delete settings.spaces;
@@ -417,7 +423,8 @@
             step ? button("Upgrade", () => upgrade(c, step), { ...sm, variant: view ? "primary" : undefined }) : null,
             c.fields(record).length ? button("Configure", () => configure(c, true), { ...sm, variant: "ghost" }) : null,
             c.cap === "digitalocean" ? button("Connection", () => digitalOceanConnection(ctx, record), sm) : null,
-            c.cap === "digitalocean" ? button("Runner check", () => digitalOceanDroplet(ctx, record), sm) : null,
+            c.cap === "digitalocean" && record.capabilities.digitalocean.droplet_health
+              ? button("Runner check", () => digitalOceanDroplet(ctx, record), sm) : null,
             c.cap === "digitalocean" && record.capabilities.digitalocean.spaces
               ? button("Spaces", () => digitalOceanConnection(ctx, record, true), sm) : null,
             button("Disable", () => disable(c), { ...sm, variant: "danger" }),
