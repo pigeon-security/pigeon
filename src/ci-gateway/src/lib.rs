@@ -23,7 +23,8 @@ use worker::{Context, Env, Request, Response, Result, event};
 // The `durable_object` macro's expansion names `wasm_bindgen` at the crate root.
 use worker::wasm_bindgen;
 
-/// The Secrets Store binding of the key core signs callers with.
+/// The Secrets Store binding of the shared key, which this Worker still signs its asks of core
+/// with until it switches to its own (docs/plans/caller-keys.md, step 3).
 const CALLER_KEY: &str = "CALLER_KEY";
 
 /// Names this Worker (`ci-gateway` in ci/workers.toml) on every request it signs to core, before any
@@ -48,9 +49,20 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         );
         return Ok(Response::from_json(&answer)?.with_status(503));
     };
-    let key = key.into_bytes();
-    let gateway = CiGateway::new(pigeon_ci::pigeon::settings(Accounts::Scoped), key.clone());
-    pigeon_contract::serve(req, &env, &gateway, &key).await
+    // Core's calls are checked with this Worker's own key, then the shared one; with no own
+    // key it serves none (docs/plans/caller-keys.md, step 3).
+    let keys = match pigeon_contract::keys::read(&env).await {
+        Ok(keys) => keys,
+        Err(e) => {
+            let answer = Answer::error(FailureKind::Failed, format!("pigeon-ci-gateway: {e}"));
+            return Ok(Response::from_json(&answer)?.with_status(503));
+        }
+    };
+    let gateway = CiGateway::new(
+        pigeon_ci::pigeon::settings(Accounts::Scoped),
+        key.into_bytes(),
+    );
+    pigeon_contract::serve(req, &env, &gateway, &keys).await
 }
 
 /// The CI scheduler's class: `pigeon_ci::scheduler::Scheduler` with pigeon's connectors and

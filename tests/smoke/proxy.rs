@@ -332,6 +332,106 @@ fn core_accepts_a_named_worker_signing_with_the_shared_key() {
     );
 }
 
+/// Step 3 of docs/plans/caller-keys.md, the receivers first: a capability Worker checks core's
+/// call with its own key (`CALLER_KEY_OWN`), then the shared `CALLER_KEY`, so core can switch to
+/// signing with each Worker's own key with no call refused in between.
+#[test]
+fn worker_checks_cores_calls_with_its_own_key_then_the_shared_one() {
+    use pigeon_contract::{Keys, Refused, WorkerContext, sign, sign_with_context};
+    use pigeon_core::webauthn::b64url;
+
+    let (shared, sites, ci) = (&b"shared"[..], &b"sites key"[..], &b"ci key"[..]);
+    let keys = Keys {
+        own: sites.to_vec(),
+        shared: Some(shared.to_vec()),
+    };
+    let (body, now) = (&br#"{"tool":"site_deploy"}"#[..], 1_800_000_000_000);
+    let who = json!({ "user": { "name": "willow" } });
+    let me = "pigeon-sites";
+    let by = |key: &[u8]| sign(key, &who, "call", body, now, "n");
+    let check =
+        |keys: &Keys, header: &str, at: i64| keys.verify(Some(header), "call", body, at, me);
+
+    // Signed with the Worker's own key: verifies.
+    assert_eq!(check(&keys, &by(sites), now).unwrap().caller, who);
+    // Signed with the shared key: still verifies during the transition.
+    assert!(check(&keys, &by(shared), now).is_ok());
+    // Another Worker's key, or a wrong one, is refused.
+    assert_eq!(check(&keys, &by(ci), now), Err(Refused::BadSignature));
+    assert_eq!(check(&keys, &by(b"wrong"), now), Err(Refused::BadSignature));
+    // A tampered call is refused: another body, another op, or an edited envelope.
+    let header = by(sites);
+    assert_eq!(
+        keys.verify(Some(&header), "call", b"{}", now, me),
+        Err(Refused::BadSignature)
+    );
+    assert_eq!(
+        keys.verify(Some(&header), "secret", body, now, me),
+        Err(Refused::BadSignature)
+    );
+    let (_, tag) = header.split_once('.').unwrap();
+    let forged = json!({
+        "caller": { "user": { "name": "root" } },
+        "iat": now,
+        "exp": now + 60_000,
+        "nonce": "n",
+    });
+    let forged = b64url(forged.to_string().as_bytes());
+    assert_eq!(
+        check(&keys, &format!("{forged}.{tag}"), now),
+        Err(Refused::BadSignature)
+    );
+    assert_eq!(check(&keys, "nonsense", now), Err(Refused::Malformed));
+    assert_eq!(
+        keys.verify(None, "call", body, now, me),
+        Err(Refused::Missing)
+    );
+    // A good own signature that is too old is refused as such, not retried with the shared key.
+    assert_eq!(
+        check(&keys, &by(sites), now + 61_000),
+        Err(Refused::Expired)
+    );
+    assert_eq!(
+        check(&keys, &by(sites), now - 6_000),
+        Err(Refused::FromTheFuture)
+    );
+
+    // Contextual calls: the recipient check applies whichever key signed.
+    let context = WorkerContext::new(me, Some("willow"));
+    let in_context = |key: &[u8]| sign_with_context(key, &who, "call", body, now, "n", &context);
+    for key in [sites, shared] {
+        let got = check(&keys, &in_context(key), now).unwrap();
+        assert_eq!(got.instance(), Some("willow"));
+        assert_eq!(
+            keys.verify(
+                Some(&in_context(key)),
+                "call",
+                body,
+                now,
+                "pigeon-ci-gateway"
+            ),
+            Err(Refused::WrongRecipient)
+        );
+    }
+    assert_eq!(
+        check(&keys, &in_context(ci), now),
+        Err(Refused::BadSignature)
+    );
+
+    // Once the shared key is unbound (step 4), only the own key passes.
+    let own_only = Keys {
+        own: sites.to_vec(),
+        shared: None,
+    };
+    assert!(check(&own_only, &by(sites), now).is_ok());
+    assert_eq!(
+        check(&own_only, &by(shared), now),
+        Err(Refused::BadSignature)
+    );
+    assert_eq!(pigeon_contract::OWN_KEY, "CALLER_KEY_OWN");
+    assert_eq!(pigeon_contract::SHARED_KEY, "CALLER_KEY");
+}
+
 /// `workers_setup` makes exactly the caller keys the store lacks, and keeps the rest.
 #[test]
 fn workers_setup_plans_only_missing_caller_keys() {

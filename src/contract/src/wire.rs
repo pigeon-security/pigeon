@@ -10,8 +10,9 @@ pub const CONTRACT: u32 = 1;
 pub const OPS: [&str; 5] = ["manifest", "call", "fetch", "events", "secret"];
 
 /// The ops core answers for capability Workers. `verify`, `grant` and `deploy_grant` are the
-/// proxy Worker's checks: each carries the credential it asks about, so it is signed with
-/// `CALLER_KEY` but for no caller. `credential_revoke` takes a [`CredentialRequest`] and ends a
+/// proxy Worker's checks: each carries the credential it asks about, so it is signed with the
+/// proxy's caller key (its own, `CALLER_KEY_OWN`, from step 3 of docs/plans/caller-keys.md) but
+/// for no caller. `credential_revoke` takes a [`CredentialRequest`] and ends a
 /// run's git grant; it is signed for the run's caller. `credential_release` takes a
 /// [`CredentialRequest`] of kind `scoped` and revokes every shared token leased to the signed
 /// caller, when its last live run ends. `approval` takes an [`ApprovalRequest`]: a capability

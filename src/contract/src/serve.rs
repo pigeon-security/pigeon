@@ -6,9 +6,8 @@ use serde::de::DeserializeOwned;
 use worker::js_sys::Uint8Array;
 use worker::{Env, Request, RequestInit, Response};
 
-use crate::caller::{
-    CONTEXT_PREFIX, HEADER, Refused, Signed, WORKER_CONTEXT_VERSION, verify, verify_for,
-};
+use crate::caller::{HEADER, Refused, Signed, WORKER_CONTEXT_VERSION};
+use crate::keys::Keys;
 use crate::now_ms;
 use crate::wire::{
     Answer, CallRequest, EventsRequest, FailureKind, Manifest, OPS, SecretRequest, WorkerManifest,
@@ -55,14 +54,15 @@ pub trait Service {
 /// Serves one request from core. It routes by op, checks the caller's signature (on every op
 /// but `manifest`, `fetch` and `events`, which carry no caller), parses the body and answers
 /// JSON. An unknown op answers kind `unknown_op` with HTTP 200, so core can tell skew from
-/// failure. A bad signature answers `unauthorized` with 401, and a body that does not parse
+/// failure. The caller is checked with this Worker's own key, then the shared one
+/// ([`Keys::verify`]). A bad signature answers `unauthorized` with 401, and a body that does not parse
 /// answers `bad_request` with 400. `fetch` requests are handed on as they came, without the
 /// `/fetch` prefix.
 pub async fn serve(
     mut req: Request,
     env: &Env,
     service: &dyn Service,
-    key: &[u8],
+    keys: &Keys,
 ) -> worker::Result<Response> {
     let url = req.url()?;
     let trimmed = url.path().trim_start_matches('/');
@@ -84,7 +84,7 @@ pub async fn serve(
     let method = req.method().to_string();
     let agent = trimmed_agent(req.headers().get("User-Agent")?.as_deref());
     let body = req.bytes().await?;
-    match run(op, header.as_deref(), &body, env, service, key).await {
+    match run(op, header.as_deref(), &body, env, service, keys).await {
         Ok(answer) => reply(&answer, 200),
         Err(rejection) => {
             let answer = match rejection.reason {
@@ -134,7 +134,7 @@ async fn run(
     body: &[u8],
     env: &Env,
     service: &dyn Service,
-    key: &[u8],
+    keys: &Keys,
 ) -> Result<Answer, Rejection> {
     match op {
         "manifest" => serde_json::to_value(WorkerManifest {
@@ -150,14 +150,14 @@ async fn run(
             )
         }),
         "call" => {
-            let (caller, request) = signed_body::<CallRequest>(key, header, op, body, service)?;
+            let (caller, request) = signed_body::<CallRequest>(keys, header, op, body, service)?;
             caller
                 .check_instance(request.args["instance"].as_str())
                 .map_err(unauthorized)?;
             Ok(service.call(env, &caller, request).await)
         }
         "secret" => {
-            let (caller, request) = signed_body::<SecretRequest>(key, header, op, body, service)?;
+            let (caller, request) = signed_body::<SecretRequest>(keys, header, op, body, service)?;
             caller.check_instance(None).map_err(unauthorized)?;
             Ok(service.secret(env, &caller, request).await)
         }
@@ -175,19 +175,15 @@ async fn run(
 
 /// Checks the caller, then parses the body.
 fn signed_body<T: DeserializeOwned>(
-    key: &[u8],
+    keys: &Keys,
     header: Option<&str>,
     op: &str,
     body: &[u8],
     service: &dyn Service,
 ) -> Result<(Signed, T), Rejection> {
-    let now = now_ms();
-    let signed = if header.is_some_and(|h| h.starts_with(CONTEXT_PREFIX)) {
-        verify_for(key, header, op, body, now, &service.manifest().worker)
-    } else {
-        verify(key, header, op, body, now)
-    }
-    .map_err(unauthorized)?;
+    let signed = keys
+        .verify(header, op, body, now_ms(), &service.manifest().worker)
+        .map_err(unauthorized)?;
     Ok((signed, parse(body)?))
 }
 

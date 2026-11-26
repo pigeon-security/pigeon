@@ -16,7 +16,6 @@ compile_error!(
 );
 
 use pigeon_contract::{Answer, FailureKind};
-use pigeon_core::secrets_store;
 use pigeon_models::platform_gateways::{BYOK_GATEWAY, CREDITS_GATEWAY, GATEWAYS, OPENAI_GATEWAY};
 use pigeon_models::runner::{self, Token};
 use pigeon_models::{Billing, Dialect, ModelGateway, ModelIds, Models, Provider, Route};
@@ -28,8 +27,6 @@ use worker::wasm_bindgen;
 /// This Worker's script name: the service it signs as when no one is calling.
 const WORKER: &str = "pigeon-model-gateway";
 
-/// The Secrets Store binding of the key core signs callers with.
-const CALLER_KEY: &str = "CALLER_KEY";
 /// The platform's hostname, as core's settings name it.
 const HOST: &str = "platform.pigeon.dev";
 /// The proxies' hostname, as core's settings name it.
@@ -129,18 +126,16 @@ fn identify_worker() {
 
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
-    let key = match env.secret_store(CALLER_KEY) {
-        Ok(binding) => secrets_store::read(&binding).await?,
-        Err(_) => None,
+    // Core's calls are checked with this Worker's own key, then the shared one; with no own
+    // key it serves none (docs/plans/caller-keys.md, step 3).
+    let keys = match pigeon_contract::keys::read(&env).await {
+        Ok(keys) => keys,
+        Err(e) => {
+            let answer = Answer::error(FailureKind::Failed, format!("pigeon-model-gateway: {e}"));
+            return Ok(Response::from_json(&answer)?.with_status(503));
+        }
     };
-    let Some(key) = key else {
-        let answer = Answer::error(
-            FailureKind::Failed,
-            "pigeon-model-gateway has no caller key: CALLER_KEY is not set",
-        );
-        return Ok(Response::from_json(&answer)?.with_status(503));
-    };
-    pigeon_contract::serve(req, &env, &gateway(), key.as_bytes()).await
+    pigeon_contract::serve(req, &env, &gateway(), &keys).await
 }
 
 /// Async model jobs: the index and each job's own object. A job's model call acts on an

@@ -15,11 +15,7 @@ compile_error!(
 
 use pigeon_cloud::CloudGateway;
 use pigeon_contract::{Answer, FailureKind};
-use pigeon_core::secrets_store;
 use worker::{Context, Env, Request, Response, Result, event};
-
-/// The Secrets Store binding of the key core signs callers with.
-const CALLER_KEY: &str = "CALLER_KEY";
 
 /// Names this Worker (`cloud-gateway` in ci/workers.toml) on every request it signs to core, before any
 /// fetch or Durable Object code runs, so core checks it with CALLER_KEY_CLOUD_GATEWAY first
@@ -32,16 +28,14 @@ fn identify_worker() {
 
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
-    let key = match env.secret_store(CALLER_KEY) {
-        Ok(binding) => secrets_store::read(&binding).await?,
-        Err(_) => None,
+    // Core's calls are checked with this Worker's own key, then the shared one; with no own
+    // key it serves none (docs/plans/caller-keys.md, step 3).
+    let keys = match pigeon_contract::keys::read(&env).await {
+        Ok(keys) => keys,
+        Err(e) => {
+            let answer = Answer::error(FailureKind::Failed, format!("pigeon-cloud-gateway: {e}"));
+            return Ok(Response::from_json(&answer)?.with_status(503));
+        }
     };
-    let Some(key) = key else {
-        let answer = Answer::error(
-            FailureKind::Failed,
-            "pigeon-cloud-gateway has no caller key: CALLER_KEY is not set",
-        );
-        return Ok(Response::from_json(&answer)?.with_status(503));
-    };
-    pigeon_contract::serve(req, &env, &CloudGateway::new(), key.as_bytes()).await
+    pigeon_contract::serve(req, &env, &CloudGateway::new(), &keys).await
 }

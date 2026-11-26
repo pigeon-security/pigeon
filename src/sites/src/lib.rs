@@ -342,5 +342,14 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     if host.ends_with(&format!(".{zone}")) {
         return public::serve(req, &env, key.as_bytes(), WORKER, &host).await;
     }
-    pigeon_contract::serve(req, &env, &Sites, key.as_bytes()).await
+    // Core's calls are checked with this Worker's own key, then the shared one; with no own
+    // key it serves none (docs/plans/caller-keys.md, step 3).
+    let keys = match pigeon_contract::keys::read(&env).await {
+        Ok(keys) => keys,
+        Err(e) => {
+            let answer = Answer::error(FailureKind::Failed, format!("pigeon-sites: {e}"));
+            return Ok(Response::from_json(&answer)?.with_status(503));
+        }
+    };
+    pigeon_contract::serve(req, &env, &Sites, &keys).await
 }

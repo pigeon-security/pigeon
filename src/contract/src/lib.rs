@@ -12,6 +12,7 @@
 
 pub mod ask;
 pub mod caller;
+pub mod keys;
 pub mod serve;
 pub mod wire;
 
@@ -22,6 +23,7 @@ pub use caller::{
     HEADER, MAX_AGE_MS, Refused, Signed, WORKER_CONTEXT_VERSION, WorkerContext, sign,
     sign_with_context, verify, verify_for,
 };
+pub use keys::{Keys, OWN_KEY, SHARED_KEY, own_key};
 pub use serve::{Service, serve};
 pub use wire::{
     Answer, ApprovalRequest, CALLERLESS_OPS, CONTRACT, CORE_OPS, CallRequest, CapabilityManifest,

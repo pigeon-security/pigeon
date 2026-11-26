@@ -29,14 +29,16 @@ fn identify_worker() {
 
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
-    let key = match pigeon_ai_agents::object::caller_key(&env).await {
-        Ok(k) => k,
+    // Core's calls are checked with this Worker's own key, then the shared one; with no own
+    // key it serves none (docs/plans/caller-keys.md, step 3).
+    let keys = match pigeon_contract::keys::read(&env).await {
+        Ok(keys) => keys,
         Err(e) => {
-            let answer = Answer::error(FailureKind::Failed, e.to_string());
+            let answer = Answer::error(FailureKind::Failed, format!("pigeon-ai-agents: {e}"));
             return Ok(Response::from_json(&answer)?.with_status(503));
         }
     };
-    pigeon_contract::serve(req, &env, &Agents, key.as_bytes()).await
+    pigeon_contract::serve(req, &env, &Agents, &keys).await
 }
 
 /// The runs: the index and one object per run.
