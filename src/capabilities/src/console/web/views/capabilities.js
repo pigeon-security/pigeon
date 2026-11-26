@@ -287,6 +287,7 @@
     const target = [["Instance", code(record.id)], ["Expected team", code(team)]];
     const details = el("div", { role: "status" });
     let plan = null;
+    let run = null;
     const setToken = button("Set compute token", () => {
       const value = input({ type: "password", mono: true, autocomplete: "off", spellcheck: "false" });
       confirm({
@@ -312,11 +313,21 @@
         onDone: () => refresh(),
       });
     }, { variant: "primary" });
+    const cancel = button("Cancel runner", () => {
+      if (!run || !["creating", "waiting"].includes(run.state)) return;
+      confirm({
+        title: "Cancel DigitalOcean runner check",
+        target: [...target, ["Run", code(run.id)]],
+        effect: "Stops this runner check and requests cleanup of its Droplet.",
+        action: "digitalocean-droplet-cancel", id, change: { run: run.id },
+        confirmLabel: "Cancel runner with passkey", onDone: () => refresh(),
+      });
+    });
     const refreshButton = button("Refresh", () => refresh());
     const d = dialog({
       title: "DigitalOcean runner check",
       body: [facts(target), details],
-      actions: [refreshButton, setToken, start],
+      actions: [refreshButton, setToken, cancel, start],
     });
     function planFacts(p) {
       return [["Region", code(p.region)], ["Size", code(p.size)], ["Droplet image", code(p.image)],
@@ -324,12 +335,12 @@
         ["Estimated compute cost", `$${p.estimated_usd} USD`]];
     }
     async function refresh() {
-      refreshButton.disabled = setToken.disabled = start.disabled = true;
+      refreshButton.disabled = setToken.disabled = cancel.disabled = start.disabled = true;
       d.say("Checking runner status…");
       try {
         const result = await ctx.op("digitalocean_droplet_status", { instance: record.id });
         plan = result.plan || null;
-        const run = result.run;
+        run = result.run;
         details.replaceChildren(
           el("p", { class: "muted", text: result.credential === "configured"
             ? "Compute token saved for this team." : "Set a compute token for the approved team." }),
@@ -339,6 +350,7 @@
             ...(run.error ? [["Detail", run.error]] : [])])] : []),
         );
         setToken.disabled = false;
+        cancel.disabled = !run || !["creating", "waiting"].includes(run.state);
         start.disabled = !plan || result.can_start !== true;
         d.say("");
       } catch (err) {
