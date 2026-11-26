@@ -30,9 +30,9 @@ crons = ["*/5 * * * *"]
 command = "cargo install -q worker-build@0.9.0 && worker-build --release"
 
 # The class moved to pigeon-dotest-b (its `transferred_classes`): this binding reaches it there.
-# After the transfer this Worker's upload is refused without script_name (10061, incident 5), so
-# this is its first deploy after the transfer. It keeps its v1 migration and, until the next
-# landing, still exports the class.
+# After the transfer this Worker's upload is refused without script_name (10061, incident 5).
+# It keeps its v1 migration, which created the class, and no longer exports the class. Never add
+# `deleted_classes` for it: that would ask Cloudflare to delete the objects pigeon-dotest-b holds.
 [durable_objects]
 bindings = [
   { name = "PROBE", class_name = "Probe", script_name = "pigeon-dotest-b" },

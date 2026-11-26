@@ -1,16 +1,15 @@
 //! pigeon-dotest-a: a throwaway Worker for the Durable Object transfer rehearsal
-//! (docs/plans/do-rehearsal.md; docs/plans/workers-split.md, T17). It hosts a SQLite class,
-//! [`Probe`], that holds three rows and a pending alarm, and answers on its workers.dev URL what
-//! the object holds, so the same answer can be compared before and after the class is
-//! transferred to pigeon-dotest-b. It holds no secrets and only dummy data; every route asks
-//! for the header `X-Rehearsal: dotest`, a speed bump, not security. Built for
-//! `wasm32-unknown-unknown` only.
+//! (docs/plans/do-rehearsal.md; docs/plans/workers-split.md, T17). Its SQLite class `Probe`
+//! moved to pigeon-dotest-b with `transferred_classes`, and this Worker no longer exports it
+//! (the second rehearsal: does Cloudflare take the upload of a source that keeps the class's
+//! migration and binding but not its export?). It still answers on its workers.dev URL what
+//! the object holds, through its `PROBE` binding, which names pigeon-dotest-b. It holds no
+//! secrets and only dummy data; every route asks for the header `X-Rehearsal: dotest`, a speed
+//! bump, not security. Built for `wasm32-unknown-unknown` only.
 //!
-//! Rebuilt for the second rehearsal (docs/plans/do-rehearsal.md, "Second rehearsal"): a cron
-//! trigger asks the object for its state every five minutes and logs the answer as one
+//! A cron trigger asks the object for its state every five minutes and logs the answer as one
 //! `console.error` line, `dotest-state {...}`, so `observability_errors` for this Worker shows
-//! what `GET /state` would answer without anyone reaching workers.dev. While the object still
-//! runs this Worker's code, the first such tick also seeds it, as `POST /seed` does.
+//! what `GET /state` would answer without anyone reaching workers.dev.
 
 #[cfg(not(target_arch = "wasm32"))]
 compile_error!(
@@ -18,9 +17,7 @@ compile_error!(
 );
 
 use serde_json::{Value, json};
-use worker::{Context, Date, Env, Method, Request, Response, Result, SqlStorage, State, event};
-// The `durable_object` macro's expansion names `wasm_bindgen` at the crate root.
-use worker::wasm_bindgen;
+use worker::{Context, Env, Method, Request, Response, Result, event};
 
 // Redeployed by a landing that touches only this crate (second rehearsal, fallback deploy).
 /// This Worker's name, as deployed.
@@ -31,97 +28,6 @@ const BINDING: &str = "PROBE";
 const OBJECT: &str = "probe";
 /// The header every route asks for, and its value.
 const HEADER: (&str, &str) = ("X-Rehearsal", "dotest");
-/// How far ahead the seeded alarm is: 24 hours, in milliseconds.
-const ALARM_AHEAD_MS: i64 = 24 * 60 * 60 * 1000;
-
-/// The rehearsal's object: three rows, a counter of fired alarms, and one pending alarm.
-#[worker::durable_object]
-pub struct Probe {
-    state: State,
-}
-
-impl Probe {
-    fn sql(&self) -> Result<SqlStorage> {
-        let sql = self.state.storage().sql();
-        sql.exec(
-            "CREATE TABLE IF NOT EXISTS rows (n INTEGER PRIMARY KEY, label TEXT NOT NULL, at INTEGER NOT NULL)",
-            None,
-        )?;
-        sql.exec(
-            "CREATE TABLE IF NOT EXISTS counters (name TEXT PRIMARY KEY, n INTEGER NOT NULL)",
-            None,
-        )?;
-        Ok(sql)
-    }
-
-    /// Writes the three rows (once: seeding again keeps the first ones) and sets the alarm 24 h
-    /// ahead when none is set.
-    async fn seed(&self) -> Result<Value> {
-        let sql = self.sql()?;
-        let at = Date::now().as_millis() as i64;
-        for n in 1..=3i64 {
-            sql.exec(
-                "INSERT OR IGNORE INTO rows (n, label, at) VALUES (?, ?, ?)",
-                vec![n.into(), format!("row-{n}").into(), at.into()],
-            )?;
-        }
-        let storage = self.state.storage();
-        if storage.get_alarm().await?.is_none() {
-            storage.set_alarm(ALARM_AHEAD_MS).await?;
-        }
-        self.read().await
-    }
-
-    /// What the object holds: its id, the Worker whose code runs it, its rows, its alarm and how
-    /// many alarms have fired.
-    async fn read(&self) -> Result<Value> {
-        let sql = self.sql()?;
-        let rows: Vec<Value> = sql
-            .exec("SELECT n, label, at FROM rows ORDER BY n", None)?
-            .to_array()?;
-        let fired: Vec<Value> = sql
-            .exec("SELECT n FROM counters WHERE name = 'alarm_fired'", None)?
-            .to_array()?;
-        let fired = fired.first().and_then(|r| r["n"].as_i64()).unwrap_or(0);
-        let alarm = self.state.storage().get_alarm().await?;
-        Ok(json!({
-            "id": self.state.id().to_string(),
-            "host": WORKER,
-            "rows": rows,
-            "alarm": alarm,
-            "alarm_fired": fired,
-        }))
-    }
-
-    /// The cron's question: seeds (once, as `POST /seed`; this is the source's copy, which runs
-    /// the object only before the transfer), then answers as `GET /state`.
-    async fn tick(&self) -> Result<Value> {
-        self.seed().await
-    }
-}
-
-impl worker::DurableObject for Probe {
-    fn new(state: State, _env: Env) -> Self {
-        Self { state }
-    }
-
-    async fn fetch(&self, req: Request) -> Result<Response> {
-        match (req.method(), req.path().as_str()) {
-            (Method::Post, "/seed") => Response::from_json(&self.seed().await?), // route: open
-            (Method::Get, "/state") => Response::from_json(&self.read().await?), // route: open
-            (Method::Get, "/tick") => Response::from_json(&self.tick().await?),  // route: open
-            _ => Response::error("not found", 404),
-        }
-    }
-
-    async fn alarm(&self) -> Result<Response> {
-        self.sql()?.exec(
-            "INSERT INTO counters (name, n) VALUES ('alarm_fired', 1) ON CONFLICT (name) DO UPDATE SET n = n + 1",
-            None,
-        )?;
-        Response::ok("fired")
-    }
-}
 
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
