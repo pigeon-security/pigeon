@@ -285,7 +285,7 @@
       const value = input({ type: "password", mono: true, autocomplete: "off", spellcheck: "false" });
       confirm({
         title: "Set DigitalOcean compute token", target,
-        form: field({ label: "Compute token", control: value, hint: "Use a separate token with account read and Droplet create, read, and delete permissions." }),
+        form: field({ label: "Compute token", control: value, hint: "Use a separate API token with account:read, droplet:create, droplet:read, droplet:delete, and tag:create." }),
         effect: "Pigeon verifies the token against the approved team before saving it.",
         action: "digitalocean-droplet-token-set", id, confirmLabel: "Verify and save with passkey",
         prepare: async () => {
@@ -297,12 +297,12 @@
       });
     });
     const start = button("Review runner check", () => {
-      if (!plan) return;
+      if (!plan?.fingerprint) return;
       confirm({
         title: "Start temporary Droplet health check",
         target: [...target, ...planFacts(plan)],
         effect: "Creates one billable Droplet and authorizes its cleanup. The runner has no Spaces or R2 access.",
-        action: "digitalocean-droplet-start", id, change: {}, confirmLabel: "Start with passkey",
+        action: "digitalocean-droplet-start", id, change: { plan: plan.fingerprint }, confirmLabel: "Start with passkey",
         onDone: () => refresh(),
       });
     }, { variant: "primary" });
@@ -330,7 +330,7 @@
           ...(plan ? [facts(planFacts(plan))] : []),
           ...(run ? [facts([["Run", code(run.id)], ["State", run.state],
             ...(run.health ? [["Health", run.health]] : []),
-            ...(run.detail ? [["Detail", run.detail]] : [])])] : []),
+            ...(run.error ? [["Detail", run.error]] : [])])] : []),
         );
         setToken.disabled = false;
         start.disabled = !plan || result.can_start !== true;
