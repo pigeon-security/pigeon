@@ -19,6 +19,7 @@ pub mod expiry;
 pub mod github;
 pub mod ingest;
 pub mod instances;
+pub mod jobs_audit;
 pub mod land;
 pub mod ledger;
 pub mod linked;

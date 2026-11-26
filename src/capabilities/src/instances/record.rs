@@ -152,6 +152,9 @@ pub struct CapabilitySettings {
     /// Whether this instance permits approved temporary Droplet health checks.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub droplet_health: bool,
+    /// Existing private R2 bucket in the approved linked account for sealed Jobs diagnostics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit_bucket: Option<String>,
 }
 
 /// Where the home instance's platform (console, MCP, OAuth) lives.
@@ -1059,6 +1062,21 @@ pub fn validate(instance: &Instance, others: &[Instance], rules: &Rules) -> Vec<
     check_worker(instance, others, rules, &mut problems);
     check_redirects(instance, others, rules, &mut problems);
     problems.extend(crate::catalogue::problems(instance));
+    for (capability, settings) in &instance.capabilities {
+        if let Some(bucket) = &settings.audit_bucket {
+            if capability != "jobs"
+                || !matches!(
+                    &instance.account,
+                    AccountRef::Linked {
+                        account_id: Some(_)
+                    }
+                )
+                || !crate::jobs_audit::bucket_ok(bucket)
+            {
+                problems.push("The audit bucket belongs only to Jobs on a linked instance and must be a valid R2 bucket name.".into());
+            }
+        }
+    }
     if let Some(pigeon_core::site_publish::Profile::Enabled { site }) = &instance.publishing {
         let named = instance.sites.iter().find(|record| record.name == *site);
         if named.is_none() {

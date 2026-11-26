@@ -487,3 +487,19 @@ contacts a provider. The view distinguishes provider lifecycle, runner stage,
 and the approved estimated cost. An optional private R2 audit target is
 configured on the Jobs profile. Show the export state only when the run record
 reports it.
+## Jobs diagnostic export
+
+An optional `capabilities.jobs.audit_bucket` in the approved linked instance
+record names an existing private R2 bucket. The exporter uses the same linked
+account binding as other instance R2 operations, refuses a changed account,
+requires managed public access disabled and no custom domains, and rereads
+the approved destination before writing. Home credentials and bucket creation
+are outside this operation.
+
+A versioned object under
+`jobs/{instance}/digitalocean-droplet/{job}/{digest}.json` contains only terminal
+job state, health, time bounds, and bounded allowlisted stage events. Its body
+digest makes repeats of the same snapshot use the same key. Runner output,
+credentials, provider responses, and free-form errors are excluded. A successful
+PUT reports `stored`. A refusal or transfer failure leaves the export `pending`
+and the terminal runner result stays independently available.
