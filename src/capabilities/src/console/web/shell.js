@@ -41,7 +41,7 @@
   const WRITES = Object.freeze(["approval-approve", "approval-deny", "land-approve", "run-stop", "run-note", "run-extend",
     "instance-put", "linked-unlink", "site-deploy", "site-rollback", "visitor-invite", "visitor-revoke",
     // Access and Platform.
-    "secret-set", "apple-adopt", "apple-identity", "token-issue", "token-revoke", "invite", "passkey-remove",
+    "secret-set", "apple-adopt", "apple-identity", "token-issue", "token-revoke", "invite", "passkey-remove", "person-admin",
     "app-disconnect", "model-defaults", "agents-config"]);
 
   // ---- Fixture mode (P14) and routing base.

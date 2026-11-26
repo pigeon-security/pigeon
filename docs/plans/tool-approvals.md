@@ -327,3 +327,11 @@ Executors (AI Gateway, `models_submit`) build fixed pieces, each with its files 
 - The same call again answered "approval Dz2stcAdc6aABdOMTyHgw2 is used": it ran once and not twice.
 - `land`, `land_status` and `policy_check` ran throughout with no approval (rule `tools-run`).
 - Sessions started before the phase 2 deploy list the gated tools without the `approval` argument until they restart; passing it works anyway.
+
+## Later: `users_admin` (26 November)
+
+`users_admin`, which makes a person the platform's admin or a member, joined
+`risky-tools-need-passkey` with the platform admin role (`capability-scoping.md`, "Platform
+admin"). The admin role decides who may call `users_remove`, `passkeys_remove` (for another
+person's passkey), `oauth_revoke`, `users_invite` and `users_admin` at all; this rule still asks
+the person's passkey for each call of the gated ones.

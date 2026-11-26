@@ -37,6 +37,7 @@ fn console_write_actions_each_have_a_handler_and_policy() {
         "instances",
         "console",
         "apple",
+        "users",
     ];
     let mut ids = std::collections::BTreeSet::new();
     for a in ACTIONS {
@@ -403,6 +404,179 @@ fn console_app_bearer_parity() {
         bind("source_read_file", json!({ "instance": "blog" })).is_err(),
         "source is off"
     );
+}
+
+/// Who may manage people (docs/plans/capability-scoping.md, "Platform admin"): one's own
+/// passkey, or anyone's as an admin, never a last one; only an admin invites, disconnects an
+/// app or changes a role, and the last admin stays one. The console's writes for these are the
+/// `users` capability's, which asks the same rules as the MCP tools at `begin` and `finish`;
+/// the iOS app makes them by bearer as its person, under the same rules.
+#[test]
+fn console_people_admin_rules() {
+    use pigeon_capabilities::users::{
+        Caller, LAST_ADMIN, LAST_PASSKEY, User, admin_only, passkey_removal, person_of, role_change,
+    };
+
+    // Each people write is made by `users`, not the console's plumbing.
+    for id in ["passkey-remove", "app-disconnect", "invite", "person-admin"] {
+        let a = action(id).unwrap();
+        assert_eq!(a.handler, Handler::Capability("users"), "{id}");
+        assert_eq!(a.policy, Policy::Passkey, "{id}");
+    }
+    // Making admins is the console's only: the app does not.
+    assert!(!action("person-admin").unwrap().by_bearer);
+    for id in ["passkey-remove", "app-disconnect", "invite"] {
+        assert!(action(id).unwrap().by_bearer, "{id}");
+    }
+
+    // passkey-remove: your own, with another left.
+    assert_eq!(passkey_removal("willow", false, "willow", 2), Ok(()));
+    // Someone else's, as a member (standard user who is not an admin): refused.
+    let refused = passkey_removal("sam", false, "willow", 2).unwrap_err();
+    assert!(refused.contains("only an admin"), "{refused}");
+    // Someone else's, as an admin: allowed.
+    assert_eq!(passkey_removal("willow", true, "sam", 2), Ok(()));
+    // Nobody's last, not even an admin's own or by an admin.
+    assert_eq!(
+        passkey_removal("willow", true, "willow", 1).unwrap_err(),
+        LAST_PASSKEY
+    );
+    assert_eq!(
+        passkey_removal("willow", true, "sam", 1).unwrap_err(),
+        LAST_PASSKEY
+    );
+    // A member is refused another's last passkey for not being an admin first.
+    assert!(
+        passkey_removal("sam", false, "willow", 1)
+            .unwrap_err()
+            .contains("only an admin")
+    );
+
+    // invite, app-disconnect, users_remove, oauth_revoke: an admin's only.
+    assert_eq!(admin_only(true, "invite a person"), Ok(()));
+    assert_eq!(
+        admin_only(false, "invite a person").unwrap_err(),
+        "only an admin can invite a person"
+    );
+
+    // person-admin / users_admin: the last admin stays one; more may be made, and one of two
+    // may step down.
+    let one = ["willow".to_string()];
+    let two = ["willow".to_string(), "sam".to_string()];
+    assert_eq!(role_change(&one, "sam", true), Ok(()));
+    assert_eq!(role_change(&one, "willow", false).unwrap_err(), LAST_ADMIN);
+    assert_eq!(role_change(&one, "willow", true), Ok(()));
+    assert_eq!(role_change(&two, "willow", false), Ok(()));
+    assert_eq!(
+        role_change(&one, "sam", false),
+        Ok(()),
+        "a member made a member"
+    );
+
+    // The person a caller acts as: a person themselves, or the person an app acts for; an app
+    // acting for no one is no person, so it is no admin and owns no passkey.
+    let user = |id: &str, kind: &str| User {
+        id: id.into(),
+        kind: kind.into(),
+        name: id.into(),
+        created_at: 0,
+    };
+    let me = Caller {
+        user: user("willow", "standard"),
+        acting_for: None,
+        run: None,
+    };
+    assert_eq!(person_of(&me).unwrap().id, "willow");
+    let app = Caller {
+        user: user("ios", "service"),
+        acting_for: Some(user("willow", "standard")),
+        run: None,
+    };
+    assert_eq!(person_of(&app).unwrap().id, "willow");
+    let loose = Caller {
+        user: user("ios", "service"),
+        acting_for: None,
+        run: None,
+    };
+    assert!(person_of(&loose).is_none());
+
+    // The change person-admin takes: {admin} as a boolean, and nothing else.
+    let a = action("person-admin").unwrap();
+    assert!(a.target(&json!("u_sam")).is_ok());
+    assert_eq!(
+        a.change(&json!({ "admin": true }), Step::Begin),
+        Ok(json!({ "admin": true }))
+    );
+    assert!(a.change(&json!({ "admin": "yes" }), Step::Begin).is_err());
+    assert!(a.change(&json!({}), Step::Begin).is_err());
+    assert!(
+        a.change(&json!({ "admin": true, "role": "x" }), Step::Begin)
+            .is_err()
+    );
+    // Bound to the exact change: making and unmaking are different purposes.
+    assert_ne!(
+        bound_purpose(
+            "person-admin",
+            "willow",
+            json!("u_sam"),
+            json!({ "admin": true }),
+            Step::Begin
+        ),
+        bound_purpose(
+            "person-admin",
+            "willow",
+            json!("u_sam"),
+            json!({ "admin": false }),
+            Step::Begin
+        ),
+    );
+}
+
+/// The role column's migration makes the platform's first person (the oldest standard user)
+/// its first admin, and no one else: not a later person, an older agent or a site visitor.
+#[test]
+fn console_first_admin_migration() {
+    use pigeon_capabilities::users::{FIRST_ADMIN, ROLE_COLUMN};
+    use rusqlite::Connection;
+
+    let db = Connection::open_in_memory().unwrap();
+    db.execute_batch(
+        "CREATE TABLE users (id TEXT PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL, created_at INTEGER NOT NULL)",
+    )
+    .unwrap();
+    for (id, kind, at) in [
+        ("agent", "service", 1),
+        ("visitor", "site:notes.example.org", 2),
+        ("willow", "standard", 10),
+        ("sam", "standard", 20),
+    ] {
+        db.execute(
+            "INSERT INTO users (id, kind, name, created_at) VALUES (?1, ?2, ?1, ?3)",
+            rusqlite::params![id, kind, at],
+        )
+        .unwrap();
+    }
+    db.execute_batch(ROLE_COLUMN).unwrap();
+    db.execute_batch(FIRST_ADMIN).unwrap();
+    let mut q = db
+        .prepare("SELECT id FROM users WHERE role = 'admin'")
+        .unwrap();
+    let admins: Vec<String> = q
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(admins, ["willow"]);
+
+    // On a platform with no one yet it changes nothing; `users_bootstrap` makes the first admin.
+    let empty = Connection::open_in_memory().unwrap();
+    empty
+        .execute_batch(
+            "CREATE TABLE users (id TEXT PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL, created_at INTEGER NOT NULL)",
+        )
+        .unwrap();
+    empty.execute_batch(ROLE_COLUMN).unwrap();
+    empty.execute_batch(FIRST_ADMIN).unwrap();
 }
 
 #[test]

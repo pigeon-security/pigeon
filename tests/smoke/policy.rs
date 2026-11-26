@@ -369,12 +369,13 @@ fn core_run_grant_revoked_when_the_run_ends() {
     assert_ne!(run_branch_prefix("ab"), run_branch_prefix("abc"));
 }
 
-/// The six tools the person gates with their passkey (docs/plans/tool-approvals.md).
-const GATED: [&str; 6] = [
+/// The seven tools the person gates with their passkey (docs/plans/tool-approvals.md).
+const GATED: [&str; 7] = [
     "deploy_token",
     "source_token",
     "setup_platform",
     "users_remove",
+    "users_admin",
     "passkeys_remove",
     "oauth_revoke",
 ];
@@ -1098,6 +1099,22 @@ fn platform_approvals_list_plain_sentences() {
         "Remove passkey pk1"
     );
     assert_eq!(
+        plain_call(
+            "users_admin",
+            &json!({ "id": "u2", "admin": true }),
+            &Value::Null
+        ),
+        "Make user u2 an admin"
+    );
+    assert_eq!(
+        plain_call(
+            "users_admin",
+            &json!({ "id": "u2", "admin": false }),
+            &Value::Null
+        ),
+        "Make user u2 a member"
+    );
+    assert_eq!(
         plain_call("odd_tool", &json!({ "a": 1, "b": 2 }), &Value::Null),
         "Run odd_tool with 2 argument(s)"
     );
@@ -1194,19 +1211,28 @@ fn platform_users_people() {
     ];
     let keys = [json!({ "id": "k1", "user_id": "p1", "name": "Laptop",
         "created_at": 11, "last_used_at": null })];
-    let out = people(&users, &links, &keys, &["s1".to_string()]);
+    let out = people(
+        &users,
+        &links,
+        &keys,
+        &["s1".to_string()],
+        &["p1".to_string()],
+    );
     assert_eq!(out["unlinked"], 1);
     let list = out["people"].as_array().unwrap();
     assert_eq!(list.len(), 2);
     assert_eq!(list[0]["id"], "p1");
     assert_eq!(list[0]["initials"], "SP");
     assert!(list[0]["picture"].is_null());
-    assert_eq!(list[0]["role"], "Person");
+    assert_eq!(list[0]["role"], "Admin");
+    assert_eq!(list[0]["admin"], true);
     assert_eq!(list[0]["added_ms"], 10);
     assert_eq!(list[0]["passkeys"][0]["name"], "Laptop");
     assert_eq!(list[0]["acting_for_me"][0]["kind"], "app");
     assert_eq!(list[0]["acting_for_me"][1]["kind"], "service");
     assert_eq!(list[1]["id"], "p2");
+    assert_eq!(list[1]["role"], "Person");
+    assert_eq!(list[1]["admin"], false);
     assert!(list[1]["acting_for_me"].as_array().unwrap().is_empty());
 }
 

@@ -402,46 +402,10 @@ impl Console {
         let env = cx.env;
         let target = w.text();
         Ok(match w.action.id {
-            "passkey-remove" => {
-                directory(env, "passkey.remove", json!({ "id": target })).await?;
-                json!({ "message": "The passkey is removed." })
-            }
-            "app-disconnect" => {
-                let gone = directory(env, "app.disconnect", json!({ "id": target })).await?;
-                json!({ "message": format!(
-                    "{} is disconnected: its tokens are revoked and it acts for no one.",
-                    gone["name"].as_str().unwrap_or("The app")
-                ) })
-            }
             "land-approve" => crate::land::approve(env, target, &person.name).await?,
             "land-approval" => crate::land::set_approval(env, target == "on", &person.name).await?,
             "approval-approve" => crate::approvals::decide(env, target, true, person).await?,
             "approval-deny" => crate::approvals::decide(env, target, false, person).await?,
-            "invite" => {
-                let user = directory(
-                    env,
-                    "users.create",
-                    json!({ "kind": "standard", "name": target }),
-                )
-                .await?;
-                let id = user["id"].as_str().unwrap_or_default();
-                let code = directory(env, "enrol.create", json!({ "user_id": id })).await?;
-                let link = format!(
-                    "https://{}/auth/enrol?code={}",
-                    self.host,
-                    code.as_str().unwrap_or_default()
-                );
-                json!({
-                    "message": format!("{target} is added. Send them this link to register a passkey: it works once, within 15 minutes."),
-                    "link": link,
-                    // The new console's ShowOnce (P3).
-                    "reveal": {
-                        "value": link,
-                        "note": format!("Send this link to {target}. They register their own passkey from it, within 15 minutes."),
-                        "kind": "invite",
-                    },
-                })
-            }
             "visitor-invite" => {
                 let name = w.change["name"].as_str().unwrap_or_default();
                 site_access::invite(&self.host, env, &w.target, name).await?

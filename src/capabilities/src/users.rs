@@ -1,7 +1,8 @@
 //! Users: standard users, who are people, and service users, who are agents. A service user
 //! can be linked to a standard user, to act for them; the person approves the link with a
-//! passkey. Both kinds can do the same things for now. Every user has a display name and
-//! nothing else about them is kept.
+//! passkey. A person is the platform's admin or a member ("platform roles", below); a service
+//! user acting for a person has that person's role. Every user has a display name and nothing
+//! else about them is kept.
 //!
 //! Users live in the `Directory`, a Durable Object with SQLite storage. A service user is an
 //! Access service token, made a user the first time it calls.
@@ -14,6 +15,7 @@ use pigeon_core::identity::{self, Expected};
 use pigeon_core::mcp::Tool;
 
 use crate::console::sections::Section;
+use crate::console::write::Write;
 use pigeon_core::webauthn::{CHALLENGE_TTL_MS, random};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -89,7 +91,7 @@ fn bad(why: &str) -> Error {
 // ---- the Directory ----
 
 /// The Directory's schema, one statement per migration, applied in order and never edited.
-const MIGRATIONS: [&str; 21] = [
+const MIGRATIONS: [&str; 23] = [
     "CREATE TABLE users (id TEXT PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL, created_at INTEGER NOT NULL)",
     "CREATE TABLE service_ids (access_client_id TEXT PRIMARY KEY, user_id TEXT NOT NULL)",
     "CREATE TABLE passkeys (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, point TEXT NOT NULL, sign_count INTEGER NOT NULL, name TEXT NOT NULL, created_at INTEGER NOT NULL, last_used_at INTEGER)",
@@ -115,7 +117,21 @@ const MIGRATIONS: [&str; 21] = [
     "CREATE TABLE apns_devices (id TEXT PRIMARY KEY, app TEXT NOT NULL, person_id TEXT NOT NULL, service_user_id TEXT NOT NULL, token TEXT NOT NULL, environment TEXT NOT NULL, created_at INTEGER NOT NULL, last_ok_at INTEGER, last_error TEXT, UNIQUE(app, token))",
     "ALTER TABLE users ADD COLUMN site_scope TEXT",
     "ALTER TABLE enrolments ADD COLUMN site_scope TEXT",
+    // Platform roles (docs/plans/capability-scoping.md, "Platform admin"): `admin` or null, a
+    // member. The first person on the platform is its first admin.
+    ROLE_COLUMN,
+    FIRST_ADMIN,
 ];
+
+/// The users' platform role: `admin`, or null for a member.
+#[doc(hidden)]
+pub const ROLE_COLUMN: &str = "ALTER TABLE users ADD COLUMN role TEXT";
+
+/// The platform's first person, the oldest standard user, becomes its first admin. Run once,
+/// when the role column is added; a platform with no one yet gets its first admin from
+/// `users_bootstrap`.
+#[doc(hidden)]
+pub const FIRST_ADMIN: &str = "UPDATE users SET role = 'admin' WHERE id = (SELECT id FROM users WHERE kind = 'standard' ORDER BY created_at, id LIMIT 1)";
 
 /// A day, in milliseconds: how long an ended approval is kept.
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
@@ -196,6 +212,32 @@ impl Directory {
             ],
         )?;
         Ok(user)
+    }
+
+    /// The ids of the platform's admins, oldest first.
+    fn admins(&self) -> Result<Vec<String>> {
+        #[derive(Deserialize)]
+        struct Row {
+            id: String,
+        }
+        let rows: Vec<Row> = self.db.rows(
+            "SELECT id FROM users WHERE kind = 'standard' AND role = ? ORDER BY created_at, id",
+            vec![ADMIN.into()],
+        )?;
+        Ok(rows.into_iter().map(|r| r.id).collect())
+    }
+
+    /// How many people (standard users) there are.
+    fn standard_count(&self) -> Result<i64> {
+        #[derive(Deserialize)]
+        struct N {
+            n: i64,
+        }
+        let n: Option<N> = self.db.row(
+            "SELECT COUNT(*) AS n FROM users WHERE kind = 'standard'",
+            vec![],
+        )?;
+        Ok(n.map_or(0, |n| n.n))
     }
 
     /// The standard user `service_user_id` acts for.
@@ -377,7 +419,7 @@ impl Directory {
                 let clients: Vec<Value> = self
                     .db
                     .rows("SELECT service_user_id FROM oauth_clients", vec![])?;
-                json!({ "users": users, "links": links, "passkeys": passkeys, "clients": clients })
+                json!({ "users": users, "links": links, "passkeys": passkeys, "clients": clients, "admins": self.admins()? })
             }
             "users.get" => to_value(self.user(s("id"))?),
             "users.site_visitors" => {
@@ -411,11 +453,30 @@ impl Directory {
                 if site_host != scope.is_some() {
                     return Err(bad("only site users need an approved site binding"));
                 }
-                to_value(self.create(s("kind"), s("name"), scope)?)
+                // Only the platform's first person is made an admin as they are created; every
+                // later admin is made by an admin (`users.set_admin`).
+                let admin = a["admin"].as_bool() == Some(true);
+                if admin && (s("kind") != "standard" || self.standard_count()? > 0) {
+                    return Err(bad(
+                        "only the platform's first person is an admin from the start",
+                    ));
+                }
+                let user = self.create(s("kind"), s("name"), scope)?;
+                if admin {
+                    self.db.exec(
+                        "UPDATE users SET role = ? WHERE id = ?",
+                        vec![ADMIN.into(), user.id.as_str().into()],
+                    )?;
+                }
+                to_value(user)
             }
             "users.remove" => {
                 let user = self.user(s("id"))?.ok_or_else(|| bad("no such user"))?;
                 let id = user.id.as_str();
+                let admins = self.admins()?;
+                if admins.len() <= 1 && admins.iter().any(|a| a == id) {
+                    return Err(bad(LAST_ADMIN));
+                }
                 for q in [
                     "DELETE FROM service_ids WHERE user_id = ?",
                     "DELETE FROM passkeys WHERE user_id = ?",
@@ -431,6 +492,31 @@ impl Directory {
                     self.db.exec(q, args)?;
                 }
                 json!({ "removed": user })
+            }
+            "users.admins" => to_value(self.admins()?),
+            // Makes a person an admin, or a member; the last admin stays one.
+            "users.set_admin" => {
+                let user = self
+                    .user(s("id"))?
+                    .filter(|u| u.kind == "standard")
+                    .ok_or_else(|| bad("no such person"))?;
+                let make = a["admin"]
+                    .as_bool()
+                    .ok_or_else(|| bad("admin is true or false"))?;
+                let admins = self.admins()?;
+                role_change(&admins, &user.id, make)?;
+                self.db.exec(
+                    "UPDATE users SET role = ? WHERE id = ?",
+                    vec![
+                        if make {
+                            ADMIN.into()
+                        } else {
+                            worker::SqlStorageValue::Null
+                        },
+                        user.id.as_str().into(),
+                    ],
+                )?;
+                json!({ "id": user.id, "name": user.name, "admin": make })
             }
             "users.rename" => {
                 self.db.exec(
@@ -482,7 +568,7 @@ impl Directory {
             }
             "people.list" => {
                 let people: Vec<Value> = self.db.rows(
-                    "SELECT id, name, created_at, avatar FROM users WHERE kind = 'standard' ORDER BY created_at",
+                    "SELECT id, name, created_at, avatar, role FROM users WHERE kind = 'standard' ORDER BY created_at",
                     vec![],
                 )?;
                 let passkeys: Vec<Value> = self.db.rows(
@@ -594,17 +680,7 @@ impl Directory {
                 )?;
                 json!({ "ok": true })
             }
-            "users.standard_count" => {
-                #[derive(Deserialize)]
-                struct N {
-                    n: i64,
-                }
-                let n: Option<N> = self.db.row(
-                    "SELECT COUNT(*) AS n FROM users WHERE kind = 'standard'",
-                    vec![],
-                )?;
-                json!(n.map_or(0, |n| n.n))
-            }
+            "users.standard_count" => json!(self.standard_count()?),
             "service.find" => {
                 #[derive(Deserialize)]
                 struct Row {
@@ -742,6 +818,18 @@ impl Directory {
                 )?;
                 to_value(rows)
             }
+            // Whose a passkey is and how many they have, to decide who may remove it.
+            "passkey.owner" => {
+                let key: Passkey = self
+                    .db
+                    .row("SELECT * FROM passkeys WHERE id = ?", vec![s("id").into()])?
+                    .ok_or_else(|| bad("no such passkey"))?;
+                let theirs: Vec<Passkey> = self.db.rows(
+                    "SELECT * FROM passkeys WHERE user_id = ?",
+                    vec![key.user_id.as_str().into()],
+                )?;
+                json!({ "id": key.id, "user_id": key.user_id, "keys": theirs.len() })
+            }
             "passkey.remove" => {
                 let key: Passkey = self
                     .db
@@ -752,7 +840,7 @@ impl Directory {
                     vec![key.user_id.as_str().into()],
                 )?;
                 if theirs.len() <= 1 {
-                    return Err(bad("this is the user's last passkey; add another first"));
+                    return Err(bad(LAST_PASSKEY));
                 }
                 self.db
                     .exec("DELETE FROM passkeys WHERE id = ?", vec![s("id").into()])?;
@@ -1388,6 +1476,109 @@ pub(crate) fn invite_name(name: &str) -> std::result::Result<String, String> {
     }
 }
 
+// ---- platform roles ----
+//
+// A person is the platform's `admin` or a member (docs/plans/capability-scoping.md, "Platform
+// admin"). The role is platform-level, like identity: it lives here in `users`, which only home
+// serves. Only an admin invites, removes or disconnects for others, removes another person's
+// passkey, or makes someone an admin; the last admin stays one. The rules are the pure
+// functions below, asked by the MCP tools and the console's writes alike (at `begin` and again
+// at `finish`), with the role read from the Directory each time, never from a carried caller.
+
+/// The admin role, as the Directory keeps it.
+pub const ADMIN: &str = "admin";
+
+/// Why the last admin cannot go or be made a member.
+pub const LAST_ADMIN: &str =
+    "this is the platform's last admin; make another person an admin first";
+
+/// Why a person's last passkey cannot be removed.
+pub const LAST_PASSKEY: &str = "this is the user's last passkey; add another first";
+
+/// The person `caller` acts as: themselves when a person, else the person a service user acts
+/// for. A service user acting for no one is no person.
+pub fn person_of(caller: &Caller) -> Option<&User> {
+    if caller.user.kind == "standard" {
+        Some(&caller.user)
+    } else {
+        caller.acting_for.as_ref().filter(|u| u.kind == "standard")
+    }
+}
+
+/// Whether a person who is an admin (`admin`) may do `what`, which only an admin does.
+pub fn admin_only(admin: bool, what: &str) -> std::result::Result<(), String> {
+    if admin {
+        Ok(())
+    } else {
+        Err(format!("only an admin can {what}"))
+    }
+}
+
+/// Whether `person` (an admin or not) may remove a passkey of `owner`, who has `owner_keys`
+/// passkeys: their own, or anyone's as an admin; never anyone's last.
+pub fn passkey_removal(
+    person: &str,
+    admin: bool,
+    owner: &str,
+    owner_keys: usize,
+) -> std::result::Result<(), String> {
+    if person != owner {
+        admin_only(admin, "remove another person's passkey")?;
+    }
+    if owner_keys <= 1 {
+        return Err(LAST_PASSKEY.into());
+    }
+    Ok(())
+}
+
+/// Whether `target` may be made an admin (`make`) or a member, given today's `admins`: the last
+/// admin stays one. Who asks is checked by [`admin_only`].
+pub fn role_change(admins: &[String], target: &str, make: bool) -> std::result::Result<(), String> {
+    if !make && admins.len() <= 1 && admins.iter().any(|a| a == target) {
+        return Err(LAST_ADMIN.into());
+    }
+    Ok(())
+}
+
+/// Whether the person `id` is an admin, read from the Directory now.
+pub async fn is_admin(env: &Env, id: &str) -> Result<bool> {
+    let admins: Vec<String> = parse(directory(env, "users.admins", json!({})).await?)?;
+    Ok(admins.iter().any(|a| a == id))
+}
+
+/// The person `cx`'s caller acts as, or why there is none.
+pub fn acting_person<'a>(cx: &'a Context<'a>) -> Result<&'a User> {
+    cx.caller
+        .and_then(person_of)
+        .ok_or_else(|| bad("this needs a person: a person, or an app or agent acting for one"))
+}
+
+/// Refuses `what` unless `person` is an admin now.
+pub async fn require_admin(env: &Env, person: &User, what: &str) -> Result<()> {
+    admin_only(is_admin(env, &person.id).await?, what).map_err(|e| bad(&e))
+}
+
+/// Refuses removing the passkey `key` unless `person` may ([`passkey_removal`]).
+pub async fn check_passkey_removal(env: &Env, person: &User, key: &str) -> Result<()> {
+    let k = directory(env, "passkey.owner", json!({ "id": key })).await?;
+    let owner = k["user_id"].as_str().unwrap_or_default();
+    let keys = k["keys"].as_u64().unwrap_or(0) as usize;
+    let admin = person.id != owner && is_admin(env, &person.id).await?;
+    passkey_removal(&person.id, admin, owner, keys).map_err(|e| bad(&e))
+}
+
+/// Refuses making `target` an admin (`make`) or a member unless `person` is an admin and the
+/// change keeps one ([`role_change`]).
+pub async fn check_role_change(env: &Env, person: &User, target: &str, make: bool) -> Result<()> {
+    let admins: Vec<String> = parse(directory(env, "users.admins", json!({})).await?)?;
+    admin_only(
+        admins.iter().any(|a| a == &person.id),
+        "make a person an admin or a member",
+    )
+    .and_then(|()| role_change(&admins, target, make))
+    .map_err(|e| bad(&e))
+}
+
 /// Users, on the hostname whose Access tokens say who calls and whose `/auth` pages take
 /// passkeys.
 pub struct Users {
@@ -1458,6 +1649,18 @@ impl Users {
         site: Option<&str>,
         scope: Option<&str>,
     ) -> Result<Value> {
+        self.new_user(env, name, site, scope, false).await
+    }
+
+    /// As [`Users::enrol_new_user`]; `admin` only for the platform's first person.
+    async fn new_user(
+        &self,
+        env: &Env,
+        name: &str,
+        site: Option<&str>,
+        scope: Option<&str>,
+        admin: bool,
+    ) -> Result<Value> {
         let kind = match site {
             Some(host) => format!("site:{host}"),
             None => "standard".to_string(),
@@ -1465,7 +1668,7 @@ impl Users {
         let user = directory(
             env,
             "users.create",
-            json!({ "kind": kind, "name": name, "site_scope": scope }),
+            json!({ "kind": kind, "name": name, "site_scope": scope, "admin": admin }),
         )
         .await?;
         let id = user["id"].as_str().unwrap_or_default();
@@ -1480,6 +1683,71 @@ impl Users {
             "enrol": self.enrol_url(code.as_str().unwrap_or_default(), site),
             "expires_in_minutes": ENROL_TTL_MS / 60_000,
         }))
+    }
+
+    /// Refuses a console write of `users` that its person may not make, asked at `begin` and
+    /// again at `finish`, with the role read now: the same rules as the MCP tools.
+    async fn write_rule(&self, env: &Env, w: &Write<'_>) -> Result<()> {
+        let person = w.person;
+        match w.action.id {
+            "passkey-remove" => check_passkey_removal(env, person, w.text()).await,
+            "app-disconnect" => require_admin(env, person, "disconnect an app").await,
+            "invite" => require_admin(env, person, "invite a person").await,
+            "person-admin" => {
+                let make = w.change["admin"].as_bool().unwrap_or(false);
+                check_role_change(env, person, w.text(), make).await
+            }
+            other => Err(bad(&format!("users makes no write `{other}`"))),
+        }
+    }
+
+    /// Makes a console write of `users`, approved by its person's passkey.
+    async fn write(&self, env: &Env, w: &Write<'_>) -> Result<Value> {
+        self.write_rule(env, w).await?;
+        let target = w.text();
+        Ok(match w.action.id {
+            "passkey-remove" => {
+                directory(env, "passkey.remove", json!({ "id": target })).await?;
+                json!({ "message": "The passkey is removed." })
+            }
+            "app-disconnect" => {
+                let gone = directory(env, "app.disconnect", json!({ "id": target })).await?;
+                json!({ "message": format!(
+                    "{} is disconnected: its tokens are revoked and it acts for no one.",
+                    gone["name"].as_str().unwrap_or("The app")
+                ) })
+            }
+            "invite" => {
+                let made = self.enrol_new_user(env, target, None, None).await?;
+                let link = made["enrol"].as_str().unwrap_or_default().to_string();
+                json!({
+                    "message": format!("{target} is added. Send them this link to register a passkey: it works once, within 15 minutes."),
+                    "link": link,
+                    // The new console's ShowOnce (P3).
+                    "reveal": {
+                        "value": link,
+                        "note": format!("Send this link to {target}. They register their own passkey from it, within 15 minutes."),
+                        "kind": "invite",
+                    },
+                })
+            }
+            "person-admin" => {
+                let make = w.change["admin"].as_bool().unwrap_or(false);
+                let done = directory(
+                    env,
+                    "users.set_admin",
+                    json!({ "id": target, "admin": make }),
+                )
+                .await?;
+                let name = done["name"].as_str().unwrap_or("The person");
+                json!({ "message": if make {
+                    format!("{name} is now an admin.")
+                } else {
+                    format!("{name} is now a member.")
+                } })
+            }
+            other => return Err(bad(&format!("users makes no write `{other}`"))),
+        })
     }
 
     async fn run(&self, cx: &Context<'_>, tool: &str, args: &Value) -> Result<Value> {
@@ -1513,17 +1781,20 @@ impl Users {
                     .iter()
                     .filter_map(|c| c["service_user_id"].as_str().map(str::to_string))
                     .collect();
-                people(&users, &rows("links"), &rows("passkeys"), &clients)
+                let admins: Vec<String> = parse(raw["admins"].clone())?;
+                people(&users, &rows("links"), &rows("passkeys"), &clients, &admins)
             }
+            // The platform's first person is its first admin.
             "users_bootstrap" => {
                 let n = directory(env, "users.standard_count", json!({})).await?;
                 if n.as_i64().unwrap_or(0) > 0 {
                     return Err(bad("a standard user exists; invite with users_invite"));
                 }
-                self.standard_with_link(env, arg(args, "name")?, None)
+                self.new_user(env, arg(args, "name")?, None, None, true)
                     .await?
             }
             "users_invite" => {
+                require_admin(env, acting_person(cx)?, "invite a person").await?;
                 let site = args["site"].as_str();
                 self.standard_with_link(env, arg(args, "name")?, site)
                     .await?
@@ -1539,6 +1810,11 @@ impl Users {
                             || site.is_some_and(|host| u.kind == format!("site:{host}"))
                     })
                     .ok_or_else(|| bad("no such standard user, or user of that site"))?;
+                // A link to register a passkey is a way in: for anyone but oneself, an admin's.
+                let me = acting_person(cx)?;
+                if user.id != me.id {
+                    require_admin(env, me, "add a passkey for another person").await?;
+                }
                 let visitor = if user.kind == "standard" {
                     Visitor::Standard
                 } else {
@@ -1607,7 +1883,16 @@ impl Users {
                 if cx.caller.is_some_and(|c| c.user.id == id) {
                     return Err(bad("a user cannot remove themselves"));
                 }
+                require_admin(env, acting_person(cx)?, "remove a user").await?;
                 directory(env, "users.remove", json!({ "id": id })).await?
+            }
+            "users_admin" => {
+                let id = arg(args, "id")?;
+                let make = args["admin"]
+                    .as_bool()
+                    .ok_or_else(|| bad("admin is true or false"))?;
+                check_role_change(env, acting_person(cx)?, id, make).await?;
+                directory(env, "users.set_admin", json!({ "id": id, "admin": make })).await?
             }
             "users_rename" => {
                 directory(
@@ -1686,8 +1971,8 @@ impl Capability for Users {
             ),
             Tool {
                 name: "users_invite",
-                description: "Create a standard user and answer a single-use link where they \
-                 register a passkey. With `site` (a host such as notes.pigeon.dev), create a \
+                description: "Create a standard user (an admin only) and answer a single-use \
+                 link where they register a passkey. With `site` (a host such as notes.pigeon.dev), create a \
                  site user for that host instead, with a link on that host.",
                 input_schema: json!({
                     "type": "object",
@@ -1721,10 +2006,21 @@ impl Capability for Users {
             one(
                 "users_remove",
                 "Remove a user and everything that is theirs: links, passkeys, tokens and OAuth \
-                 client. A caller cannot remove themselves.",
+                 client. Only an admin can; a caller cannot remove themselves, and the last \
+                 admin stays.",
                 "id",
                 true,
             ),
+            Tool {
+                name: "users_admin",
+                description: "Make a person the platform's admin (`admin: true`) or a member \
+                 (`admin: false`). Only an admin can; the last admin stays one.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": { "id": { "type": "string" }, "admin": { "type": "boolean" } },
+                    "required": ["id", "admin"]
+                }),
+            },
             Tool {
                 name: "users_rename",
                 description: "Change a user's display name.",
@@ -1740,6 +2036,17 @@ impl Capability for Users {
     fn call<'a>(&'a self, cx: &'a Context<'a>, tool: &'a str, args: &'a Value) -> Call<'a> {
         Box::pin(self.run(cx, tool, args))
     }
+
+    fn write_check<'a>(&'a self, cx: &'a Context<'a>, w: &'a Write<'a>) -> Call<'a> {
+        Box::pin(async move {
+            self.write_rule(cx.env, w).await?;
+            Ok(Value::Null)
+        })
+    }
+
+    fn write_make<'a>(&'a self, cx: &'a Context<'a>, w: &'a Write<'a>) -> Call<'a> {
+        Box::pin(self.write(cx.env, w))
+    }
 }
 
 /// One or two uppercase letters for `name`: the first letters of its first and last words.
@@ -1749,9 +2056,16 @@ pub fn initials(name: &str) -> String {
 
 /// The `users_people` answer from the Directory's raw rows: `users` (all kinds), `links`
 /// (`service_user_id`, `standard_user_id`), `passkeys` (id, user_id, name, created_at,
-/// last_used_at only) and `clients` (the service user ids that have an OAuth client). Only
+/// last_used_at only), `clients` (the service user ids that have an OAuth client) and
+/// `admins` (the admins' ids). Only
 /// standard users are listed, oldest first; service users linked to no one are counted.
-pub fn people(users: &[User], links: &[Value], passkeys: &[Value], clients: &[String]) -> Value {
+pub fn people(
+    users: &[User],
+    links: &[Value],
+    passkeys: &[Value],
+    clients: &[String],
+    admins: &[String],
+) -> Value {
     let linked_to = |service: &str| {
         links
             .iter()
@@ -1787,7 +2101,8 @@ pub fn people(users: &[User], links: &[Value], passkeys: &[Value], clients: &[St
                 .collect();
             json!({
                 "id": p.id, "name": p.name, "initials": initials(&p.name), "picture": null,
-                "role": "Person", "added_ms": p.created_at,
+                "role": if admins.contains(&p.id) { "Admin" } else { "Person" },
+                "admin": admins.contains(&p.id), "added_ms": p.created_at,
                 "passkeys": keys, "acting_for_me": acting,
             })
         })

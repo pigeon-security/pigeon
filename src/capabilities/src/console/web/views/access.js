@@ -224,19 +224,39 @@
     });
   }
 
+  // Make a person an admin, or a member again. Only an admin may; the last admin stays one.
+  function setAdmin(ctx, person, make) {
+    confirm({
+      title: make ? "Make admin" : "Make member", danger: !make,
+      target: [["Person", person.name], ["Now", person.admin ? "Admin" : "Member"]],
+      effect: make
+        ? "They can invite and remove people, remove anyone's passkeys, disconnect apps and make other admins."
+        : "They keep their own passkeys and apps, and can no longer manage other people's.",
+      action: "person-admin", id: person.id, change: { admin: make },
+      confirmLabel: make ? "Make admin with passkey" : "Make member with passkey",
+      onDone: refresh(ctx),
+    });
+  }
+
   const lastUsed = (p) => Math.max(0, ...p.passkeys.map((k) => k.last_used_at || 0));
 
   function people(ctx) {
+    // Whether the one asking is an admin, from the read; the server checks every write again.
+    let meAdmin = false;
+    const actions = el("span");
     const appsLink = (n) => (n && ctx.nav ? el("a", { href: shell.href({ instance: ctx.instance.id, area: "access", view: "apps" }), text: String(n),
       on: { click: (e) => { if (e.button === 0 && !e.metaKey && !e.ctrlKey) { e.preventDefault(); ctx.nav({ instance: ctx.instance.id, area: "access", view: "apps" }); } } } }) : String(n || 0));
     const table = dataTable({
       label: "People", noun: "people", filter: "Filter people", signal: ctx.signal, empty: "No people yet.",
       columns: [
         { label: "Person", cell: (p) => el("span", { class: "who-cell" }, el("span", { class: "avatar", "aria-hidden": "true", text: p.initials || "?" }),
-          el("strong", { text: p.name }), p.me ? pill("You", "accent") : null) },
+          el("strong", { text: p.name }), p.me ? pill("You", "accent") : null, p.admin ? pill("Admin", "plain") : null) },
         { label: "Passkeys", cls: "num", cell: (p) => String(p.passkeys.length) },
         { label: "Last sign-in", cls: "num", cell: (p) => (lastUsed(p) ? day(lastUsed(p)) : "never") },
         { label: "Apps", cls: "num", cell: (p) => appsLink(p.apps) },
+        { label: "", cls: "acts", cell: (p) => (meAdmin && !p.me
+          ? button(p.admin ? "Make member" : "Make admin", () => setAdmin(ctx, p, !p.admin), { size: "sm" })
+          : null) },
       ],
       expand: (p) => dataTable({
         label: `Passkeys of ${p.name}`, noun: "passkeys", empty: "No passkeys registered.", signal: ctx.signal, load: p.passkeys,
@@ -244,13 +264,17 @@
           { label: "Passkey", cell: (k) => k.name || "Unnamed passkey" },
           { label: "Added", cls: "num", cell: (k) => day(k.created_at) },
           { label: "Last used", cls: "num", cell: (k) => (k.last_used_at ? day(k.last_used_at) : "never") },
-          { label: "", cls: "acts", cell: (k) => (p.passkeys.length > 1
-            ? button("Remove", () => removePasskey(ctx, p, k), { size: "sm", variant: "danger" })
-            : el("span", { class: "muted", text: "Only passkey" })) },
+          { label: "", cls: "acts", cell: (k) => (p.passkeys.length <= 1
+            ? el("span", { class: "muted", text: "Only passkey" })
+            : (p.me || meAdmin)
+              ? button("Remove", () => removePasskey(ctx, p, k), { size: "sm", variant: "danger" })
+              : null) },
         ],
       }),
       load: async () => {
         const data = await ctx.op("app_people");
+        meAdmin = data?.me_admin === true;
+        actions.replaceChildren(meAdmin ? button("Invite person", () => invitePerson(ctx), { variant: "primary" }) : "");
         const apps = data?.apps || [];
         return (data?.people || []).map((p) => ({ ...p, passkeys: p.passkeys || [], me: p.id === data.me,
           apps: apps.filter((a) => a.person === p.id).length }))
@@ -258,8 +282,8 @@
       },
     });
     return el("div", { class: "view" },
-      intro("Who can sign in to the platform and approve with a passkey. Expand a person for their passkeys.",
-        button("Invite person", () => invitePerson(ctx), { variant: "primary" })),
+      intro("Who can sign in to the platform and approve with a passkey. Expand a person for their passkeys. Admins invite and remove people and manage anyone's passkeys.",
+        actions),
       table);
   }
 
@@ -277,6 +301,7 @@
   }
 
   function apps(ctx) {
+    let meAdmin = false;
     return el("div", { class: "view" },
       intro("OAuth apps (MCP clients) and service users (agents) that act for a person. Disconnecting revokes their tokens."),
       dataTable({
@@ -288,10 +313,11 @@
           { label: "Acting for", cell: (a) => (a.personName ? a.personName : pill("No one", "warn")) },
           { label: "Tokens", cls: "num", cell: (a) => String(a.tokens ?? 0) },
           { label: "Linked", cls: "num", cell: (a) => day(a.linked_at) },
-          { label: "", cls: "acts", cell: (a) => button("Disconnect", () => disconnect(ctx, a), { size: "sm", variant: "danger" }) },
+          { label: "", cls: "acts", cell: (a) => (meAdmin ? button("Disconnect", () => disconnect(ctx, a), { size: "sm", variant: "danger" }) : null) },
         ],
         load: async () => {
           const data = await ctx.op("app_people");
+          meAdmin = data?.me_admin === true;
           const names = new Map((data?.people || []).map((p) => [p.id, p.name]));
           const all = (data?.apps || []).map((a) => ({ ...a, personName: a.person ? names.get(a.person) || a.person : null }));
           const none = all.filter((a) => !a.person);

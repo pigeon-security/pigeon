@@ -411,7 +411,8 @@ impl Capability for Passkeys {
             },
             Tool {
                 name: "passkeys_remove",
-                description: "Remove a passkey by id; a user's last passkey is kept.",
+                description: "Remove a passkey by id: your own, or anyone's as an admin; a \
+                 user's last passkey is kept.",
                 input_schema: json!({
                     "type": "object",
                     "properties": { "id": { "type": "string" } },
@@ -444,8 +445,16 @@ impl Capability for Passkeys {
                         .collect();
                     to_value(listed)
                 }
+                // One's own passkey, or anyone's as an admin; never a last one.
                 "passkeys_remove" => {
-                    directory(cx.env, "passkey.remove", json!({ "id": arg(args, "id")? })).await?
+                    let id = arg(args, "id")?;
+                    crate::users::check_passkey_removal(
+                        cx.env,
+                        crate::users::acting_person(cx)?,
+                        id,
+                    )
+                    .await?;
+                    directory(cx.env, "passkey.remove", json!({ "id": id })).await?
                 }
                 other => return Err(unknown(other)),
             })

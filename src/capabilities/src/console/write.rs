@@ -100,6 +100,8 @@ pub enum Change {
     Note,
     /// The amounts a run is extended by.
     Extend,
+    /// `{admin}`: true to make a person an admin, false a member.
+    Admin,
 }
 
 /// One write the console makes.
@@ -219,7 +221,7 @@ pub const ACTIONS: &[Action] = &[
     app(act(
         "passkey-remove",
         "Remove a passkey",
-        Cap("console"),
+        Cap("users"),
         true,
         Target::Id,
         Change::Nothing,
@@ -227,7 +229,7 @@ pub const ACTIONS: &[Action] = &[
     app(act(
         "app-disconnect",
         "Disconnect an app",
-        Cap("console"),
+        Cap("users"),
         true,
         Target::Id,
         Change::Nothing,
@@ -235,11 +237,20 @@ pub const ACTIONS: &[Action] = &[
     app(act(
         "invite",
         "Invite a person",
-        Cap("console"),
+        Cap("users"),
         false,
         Target::Name,
         Change::Nothing,
     )),
+    // Console only: the iOS app does not make admins.
+    act(
+        "person-admin",
+        "Change whether a person is an admin",
+        Cap("users"),
+        false,
+        Target::Id,
+        Change::Admin,
+    ),
     app(act(
         "land-approve",
         "Approve a landing",
@@ -584,6 +595,13 @@ impl Action {
                 match s("text") {
                     Some(t) if !t.trim().is_empty() && t.len() <= 4000 => json!({ "text": t }),
                     _ => return Err("the note is 1 to 4000 characters".into()),
+                }
+            }
+            Change::Admin => {
+                only(&o, &["admin"], true)?;
+                match o.get("admin") {
+                    Some(Value::Bool(b)) => json!({ "admin": b }),
+                    _ => return Err("the change is {admin}, true or false".into()),
                 }
             }
             Change::Extend => {

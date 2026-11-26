@@ -422,7 +422,7 @@ impl Capability for OAuth {
             ),
             Tool {
                 name: "oauth_revoke",
-                description: "Remove an OAuth client: its tokens and its link end.",
+                description: "Remove an OAuth client: its tokens and its link end. Only an admin can.",
                 input_schema: json!({
                     "type": "object",
                     "properties": { "client_id": { "type": "string" } },
@@ -446,6 +446,12 @@ impl Capability for OAuth {
             Ok(match tool {
                 "oauth_clients" => directory(cx.env, "oauth.clients", json!({})).await?,
                 "oauth_revoke" => {
+                    crate::users::require_admin(
+                        cx.env,
+                        crate::users::acting_person(cx)?,
+                        "disconnect an app",
+                    )
+                    .await?;
                     directory(
                         cx.env,
                         "oauth.client_remove",

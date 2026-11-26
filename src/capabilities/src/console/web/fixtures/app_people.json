@@ -1,12 +1,14 @@
 {
   "_recorded_ms": 1795000000000,
   "me": "u_rowan",
+  "me_admin": true,
   "people": [
     {
       "id": "u_rowan",
       "name": "Rowan Hale",
       "initials": "RH",
       "created_at": 1777720000000,
+      "admin": true,
       "passkeys": [
         {
           "id": "pk_mac_touch",
@@ -29,6 +31,7 @@
       "name": "Sam Ito",
       "initials": "SI",
       "created_at": 1781176000000,
+      "admin": false,
       "passkeys": [
         {
           "id": "pk_sam_phone",
@@ -44,6 +47,7 @@
       "name": "Kai Moreno",
       "initials": "KM",
       "created_at": 1788088000000,
+      "admin": false,
       "passkeys": [
         {
           "id": "pk_kai_pixel",

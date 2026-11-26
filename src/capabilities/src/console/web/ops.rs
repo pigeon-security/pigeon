@@ -242,9 +242,9 @@ async fn proxy_tokens(cx: &Context<'_>) -> Result<Value> {
     Ok(json!({ "tokens": tokens }))
 }
 
-/// Access › People and Apps: each person with their passkeys (no key material), each app or
-/// service user with the person it acts for, its live token count and its kind, and who is
-/// asking.
+/// Access › People and Apps: each person with their passkeys (no key material) and whether
+/// they are an admin, each app or service user with the person it acts for, its live token
+/// count and its kind, and who is asking and whether they are an admin.
 async fn people(cx: &Context<'_>, me: &str) -> Result<Value> {
     let all = directory(cx.env, "people.list", json!({})).await?;
     let clients = directory(cx.env, "oauth.clients", json!({})).await?;
@@ -265,6 +265,7 @@ async fn people(cx: &Context<'_>, me: &str) -> Result<Value> {
                 "name": name,
                 "initials": crate::users::initials(name),
                 "created_at": p["created_at"],
+                "admin": p["role"] == crate::users::ADMIN,
                 "passkeys": passkeys.iter().filter(|k| k["user_id"] == p["id"]).collect::<Vec<_>>(),
             })
         })
@@ -277,7 +278,10 @@ async fn people(cx: &Context<'_>, me: &str) -> Result<Value> {
             a
         })
         .collect();
-    Ok(json!({ "me": me, "people": people, "apps": apps }))
+    // Whether the one asking is an admin, so the view offers only what they may do; every
+    // write checks again.
+    let me_admin = people.iter().any(|p| p["id"] == me && p["admin"] == true);
+    Ok(json!({ "me": me, "me_admin": me_admin, "people": people, "apps": apps }))
 }
 
 /// The inbox for `args.instance`, or all of it.

@@ -679,6 +679,10 @@ pub fn plain_call(tool: &str, args: &Value, acting_for: &Value) -> String {
         "source_token" => format!("Give a source token to {who}"),
         "setup_platform" => "Set up the platform".to_string(),
         "users_remove" => format!("Remove user {}", text("id")),
+        "users_admin" => match args["admin"].as_bool() {
+            Some(true) => format!("Make user {} an admin", text("id")),
+            _ => format!("Make user {} a member", text("id")),
+        },
         "passkeys_remove" => format!("Remove passkey {}", text("id")),
         "oauth_revoke" => format!("Disconnect app {}", text("client_id")),
         _ => {

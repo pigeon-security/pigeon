@@ -142,6 +142,36 @@ account (`<instance>-<capability>`), bind it to the instance Worker, and record 
 ledger as pigeon's, so retire removes it. Only capabilities whose catalogue entry offers the
 choice (`ai-agents`, `proxy`, `models`).
 
+### Platform admin (built 2026-11-26)
+
+A person is the platform's **admin** or a **member**. The role is platform-level, like identity,
+so it lives in `users` (home-only, `scope: platform`): the Directory's `users.role` column,
+`admin` or null. It is not a catalogue capability and not a record setting.
+
+- **First admin.** The migration that adds the column makes the oldest standard user (Willow)
+  the first admin; on a new platform `users_bootstrap` makes the first person one. Everyone
+  else is a member until an admin makes them an admin.
+- **Admin only:** inviting a person (`users_invite`, console `invite`), removing a user
+  (`users_remove`), disconnecting an app (`oauth_revoke`, console `app-disconnect`), adding a
+  passkey link for someone else (`users_enrol` of another person), removing another person's
+  passkey (`passkeys_remove`, console `passkey-remove`; one's own needs no role, a last one is
+  never removed) and changing a role (`users_admin`, console `person-admin`). The last admin
+  cannot be removed or made a member.
+- **One rule, every path.** The rules are pure functions in `users` (`passkey_removal`,
+  `admin_only`, `role_change`); the MCP tools and the console's writes ask them, the writes at
+  `begin` (before the passkey) and again at `finish`. `passkey-remove`, `app-disconnect`,
+  `invite` and the new `person-admin` are the `users` capability's writes, no longer the
+  `console` plumbing's. The iOS app makes the first three by bearer as its person, under the same
+  rules; `person-admin` is the console's only.
+- **The role is read now.** Each check reads the Directory, never a role carried on a caller, so
+  a change of role holds at once, also for a run already going. A service user has the role of
+  the person it acts for; one acting for no one is no person and no admin.
+- **Policy is separate.** `.pigeon/policy.toml` says what agents may do without asking; the role
+  says who may do it at all. `users_admin` is in `risky-tools-need-passkey`, so an agent acting
+  for an admin still needs the admin's passkey for each call.
+- **Not gated yet:** `users_rename` and `users_unlink` of someone else.
+- **Open, for membership:** whether a platform admin is `owner` on every instance.
+
 ### Later: membership
 
 Today any signed-in person can approve any change on any instance: identity is platform-level
@@ -182,3 +212,6 @@ change on any instance.
   as does the iOS app. The `proxy` entry now says what is true: core serves Access › Tokens
   inline; `pigeon-proxy` serves the proxy host's `/git/` and `/cf/`, which are not this
   capability.
+- 2026-11-26: platform admin built ("Platform admin", above): the Directory's `users.role`,
+  Willow the first admin by migration, admin-only invites, removals, app disconnects, others'
+  passkey links and passkeys, and role changes, at the MCP tools and the console's writes alike.
