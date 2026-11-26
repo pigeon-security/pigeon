@@ -524,26 +524,16 @@ pub struct Scoped<'a> {
 }
 
 impl<'a> Scoped<'a> {
-    /// Mints a token for `purpose` holding `policies`, on `account`.
+    /// Mints a token for `purpose` holding `policies`, on `account`, living
+    /// [`DEFAULT_TTL_SECS`]. Like [`Scoped::open_for`], it goes through the account's token
+    /// ledger when it has one, so [`Scoped::finish`] revokes it there: a token minted around the
+    /// ledger has no ledger row, and the ledger's revoke would leave it live until it expires.
     pub async fn open(
         account: &'a crate::Account,
         purpose: &str,
         policies: Vec<Policy>,
     ) -> Result<Self> {
-        if let Some(bearer) = account.bearer.as_deref() {
-            return Ok(Self::linked(account, bearer));
-        }
-        let minted = mint(
-            &account.parent,
-            &account.id,
-            &MintRequest::new(purpose, policies),
-        )
-        .await?;
-        Ok(Self {
-            account,
-            minted: Some(minted),
-            bearer: None,
-        })
+        Self::open_for(account, purpose, policies, DEFAULT_TTL_SECS).await
     }
 
     /// A linked account's granted token, standing in for a minted one: what it may do is what

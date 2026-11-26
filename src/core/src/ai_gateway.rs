@@ -740,7 +740,10 @@ async fn logs_with(
     max: usize,
 ) -> Result<Vec<Log>> {
     const PER_PAGE: usize = 50;
-    // Fetched together: 10 rounds for 5,000 logs, not 100 calls in a row.
+    // Fetched together, at most this many pages a round, so 5,000 logs are not 100 calls in a
+    // row. Rounds start small and double: a page past the window's start, or past the last log,
+    // is a wasted call against the account's API budget, and a short read (today's logs, a quiet
+    // gateway) ends within its first pages.
     const BATCH: usize = 10;
     let base = format!(
         "/accounts/{}/ai-gateway/gateways/{gateway}/logs",
@@ -758,6 +761,7 @@ async fn logs_with(
     };
     let mut out = Vec::new();
     let mut next = 1;
+    let mut round = 1;
     while next <= pages {
         // The first page goes alone and fresh: it is the minted token's first call, which may come
         // before it is active.
@@ -768,7 +772,8 @@ async fn logs_with(
             let answer = call_fresh(token, Method::Get, &path, None).await?;
             vec![serde_json::from_value(answer).map_err(worker::Error::from)]
         } else {
-            let end = (next + BATCH - 1).min(pages);
+            round = (round * 2).min(BATCH);
+            let end = (next + round - 1).min(pages);
             futures_util::future::join_all((next..=end).map(&fetch)).await
         };
         next += batch.len();

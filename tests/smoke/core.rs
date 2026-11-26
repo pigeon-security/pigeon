@@ -1015,6 +1015,8 @@ pub(crate) struct MockTokens {
     pub(crate) attempts: std::cell::Cell<u32>,
     /// While set, listing the tokens fails.
     fail_list: std::cell::Cell<bool>,
+    /// List pages asked for, each one a Cloudflare API call.
+    pub(crate) list_calls: std::cell::Cell<u32>,
     lose_create_response: std::cell::Cell<bool>,
     suspend_create: std::cell::Cell<bool>,
 }
@@ -1030,6 +1032,7 @@ impl MockTokens {
             next: std::cell::Cell::new(100),
             attempts: std::cell::Cell::new(0),
             fail_list: std::cell::Cell::new(false),
+            list_calls: std::cell::Cell::new(0),
             lose_create_response: std::cell::Cell::new(false),
             suspend_create: std::cell::Cell::new(false),
         }
@@ -1047,6 +1050,7 @@ impl MockTokens {
 
 impl pigeon_core::tokens::TokenApi for MockTokens {
     async fn list(&self, page: u32) -> worker::Result<Vec<pigeon_core::tokens::Listed>> {
+        self.list_calls.set(self.list_calls.get() + 1);
         if self.fail_list.get() {
             return Err(worker::Error::RustError("list refused".into()));
         }
@@ -1649,6 +1653,84 @@ fn core_token_transient_cleanup_retries_failed_revocation_and_checks_sweep_time(
     assert_eq!((gauge.live, gauge.account_total), (0, Some(0)));
 }
 
+/// The account's API budget: a transient token is one create and one delete. The account is
+/// listed once for the count, not again after each revoke, and the every-minute sweep lists it
+/// only when the count is five minutes old or a reservation needs matching.
+#[test]
+fn core_token_ledger_spends_few_api_calls_per_mint_and_sweep() {
+    use pigeon_capabilities::ledger::{ACCOUNT_CACHE_MS, Ledger};
+    let api = MockTokens::new(500, 50);
+    // 90 tokens, as the account has: one list is three pages.
+    for i in 0..90 {
+        api.add(&format!("x{i}"), "outside", None, "active");
+    }
+    let ledger = Ledger::new((), Vec::new());
+    let mint = |at: i64| {
+        let token = token_block_on(ledger.mint_transient(
+            &api,
+            "observability",
+            300,
+            at,
+            token_body(TOKEN_EXPIRY).unwrap(),
+        ))
+        .unwrap();
+        token_block_on(ledger.revoke_transient(&api, &token.id)).unwrap();
+    };
+    mint(TOKEN_NOW_MS);
+    assert_eq!(api.list_calls.get(), 3);
+    for n in 1..=10 {
+        mint(TOKEN_NOW_MS + n * 1_000);
+    }
+    // Ten more mints and revokes: no list.
+    assert_eq!(api.list_calls.get(), 3);
+    assert_eq!((api.attempts.get(), api.deleted.borrow().len()), (11, 11));
+    assert!(ledger.rows().is_empty());
+    // The count followed every create and delete.
+    let g = token_block_on(ledger.gauge(&api, TOKEN_NOW_MS + 20_000)).unwrap();
+    assert_eq!(g.account_total, Some(90));
+    assert_eq!(api.list_calls.get(), 3);
+
+    // A sweep with nothing to reconcile and a fresh count lists nothing, and still succeeds.
+    let r = token_block_on(ledger.reap(&api, TOKEN_NOW_MS + 60_000)).unwrap();
+    assert_eq!(r, Default::default());
+    assert_eq!(api.list_calls.get(), 3);
+    let g = token_block_on(ledger.gauge(&api, TOKEN_NOW_MS + 60_000)).unwrap();
+    assert_eq!(g.last_sweep_succeeded_at_ms, Some(TOKEN_NOW_MS + 60_000));
+    // Once the count is older than the cache, the sweep lists once: one list, not two.
+    let later = TOKEN_NOW_MS + ACCOUNT_CACHE_MS + 1_000;
+    token_block_on(ledger.reap(&api, later)).unwrap();
+    assert_eq!(api.list_calls.get(), 6);
+    let g = token_block_on(ledger.gauge(&api, later)).unwrap();
+    assert_eq!((g.account_total, g.as_of_ms), (Some(90), later));
+    assert_eq!(api.list_calls.get(), 6);
+}
+
+/// A released row whose revoke failed is deleted by id at the next sweep, without a list, and
+/// the count follows.
+#[test]
+fn core_token_ledger_sweep_deletes_without_listing_and_keeps_the_count() {
+    use pigeon_capabilities::ledger::Ledger;
+    let mut api = MockTokens::new(500, 50);
+    let ledger = Ledger::new((), Vec::new());
+    let keys = token_keys("u1", &["A"]);
+    let lease = token_lease(&ledger, &api, &keys, TOKEN_NOW_MS).unwrap();
+    let lists = api.list_calls.get();
+    // `account_total` is the listed records; the new lease is counted on top of them.
+    let g = token_block_on(ledger.gauge(&api, TOKEN_NOW_MS)).unwrap();
+    assert_eq!((g.live, g.account_total), (1, Some(0)));
+    api.fail_delete = vec!["t100"];
+    assert_eq!(token_block_on(ledger.release(&api, &keys.1)).unwrap(), 1);
+    assert!(ledger.rows()[0].released);
+    api.fail_delete.clear();
+    let r = token_block_on(ledger.reap(&api, TOKEN_NOW_MS + 60_000)).unwrap();
+    assert_eq!((r.deleted, r.forgotten, r.failed), (1, 1, 0));
+    assert_eq!(api.list_calls.get(), lists);
+    assert_eq!(*api.deleted.borrow(), [lease.id]);
+    let g = token_block_on(ledger.gauge(&api, TOKEN_NOW_MS + 60_000)).unwrap();
+    assert_eq!((g.live, g.account_total), (0, Some(0)));
+    assert_eq!(api.list_calls.get(), lists);
+}
+
 #[test]
 fn core_token_ledger_release_revokes_one_callers_tokens_only() {
     use pigeon_capabilities::ledger::Ledger;
@@ -1813,7 +1895,7 @@ fn core_token_gauge_ceiling_bounds() {
 
 #[test]
 fn core_token_gauge_stale_refresh_and_fallback() {
-    use pigeon_capabilities::ledger::Ledger;
+    use pigeon_capabilities::ledger::{GAUGE_MAX_AGE_MS, Ledger};
     let api = MockTokens::new(500, 50);
     for i in 0..5 {
         api.add(
@@ -1829,14 +1911,20 @@ fn core_token_gauge_stale_refresh_and_fallback() {
     api.fail_list.set(true);
     let g = token_block_on(ledger.gauge(&api, TOKEN_NOW_MS + 60_000)).unwrap();
     assert_eq!((g.live, g.source.as_str()), (2, "sweep"));
-    // Older than 120 s: refreshed from the list.
+    // Older than five minutes: refreshed from the list.
+    assert_eq!(GAUGE_MAX_AGE_MS, 300_000);
+    let refreshed_at = TOKEN_NOW_MS + GAUGE_MAX_AGE_MS + 1_000;
     api.fail_list.set(false);
-    let g = token_block_on(ledger.gauge(&api, TOKEN_NOW_MS + 121_000)).unwrap();
+    let g = token_block_on(ledger.gauge(&api, refreshed_at)).unwrap();
     assert_eq!((g.live, g.source.as_str()), (5, "refreshed"));
-    assert_eq!(g.as_of_ms, TOKEN_NOW_MS + 121_000);
+    assert_eq!(g.as_of_ms, refreshed_at);
+    // Within five minutes of that list, the count stands with no list call.
+    api.fail_list.set(true);
+    let g = token_block_on(ledger.gauge(&api, refreshed_at + 120_000)).unwrap();
+    assert_eq!((g.live, g.account_total), (5, Some(5)));
     // Stale again and the list fails: the stored count, and it says so.
     api.fail_list.set(true);
-    let g = token_block_on(ledger.gauge(&api, TOKEN_NOW_MS + 400_000)).unwrap();
+    let g = token_block_on(ledger.gauge(&api, refreshed_at + GAUGE_MAX_AGE_MS + 1_000)).unwrap();
     assert_eq!((g.live, g.source.as_str()), (5, "stored (refresh failed)"));
     // Nothing stored and the list fails: the ledger's rows alone.
     let fresh = Ledger::new((), vec![gauge_row("x", TOKEN_NOW_MS + 5000, false, None)]);

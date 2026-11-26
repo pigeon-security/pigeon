@@ -60,8 +60,13 @@ pub const DEFAULT_SOFT_CEILING: u32 = tokens::DEFAULT_SOFT_CEILING;
 pub const CEILING_RANGE: std::ops::RangeInclusive<u32> = 10..=450;
 
 /// A stored gauge older than this (milliseconds) is refreshed when it is read.
-pub const GAUGE_MAX_AGE_MS: i64 = 120_000;
-const ACCOUNT_CACHE_MS: i64 = 15_000;
+pub const GAUGE_MAX_AGE_MS: i64 = ACCOUNT_CACHE_MS;
+/// How long the account's token count from one list stands (milliseconds). Every mint and
+/// revoke of the home account goes through the ledger, which adjusts the count as it goes, so
+/// the list is only a correction for tokens made or removed elsewhere. Listing is several
+/// Cloudflare API calls, and they count against the same account budget as deploys: a short
+/// cache made most mints, and the every-minute sweep, list the account again.
+pub const ACCOUNT_CACHE_MS: i64 = 300_000;
 const PENDING_PREFIX: &str = "pending:";
 const MINT_FLIGHT: &str = "account mint";
 
@@ -99,6 +104,18 @@ struct AccountCount {
 impl AccountCount {
     fn fresh(self, now_ms: i64) -> bool {
         (0..ACCOUNT_CACHE_MS).contains(&(now_ms - self.at_ms))
+    }
+
+    /// The count once `row`'s token is deleted: out of the reservations when it was minted after
+    /// the list, else out of the list.
+    fn without(mut self, row: &Row) -> Self {
+        if self.reserved > 0 && row.created_at.is_some_and(|c| c >= self.at_ms) {
+            self.reserved -= 1;
+        } else {
+            self.listed = self.listed.saturating_sub(1);
+        }
+        self.pigeon_live = self.pigeon_live.saturating_sub(1);
+        self
     }
 }
 
@@ -438,6 +455,12 @@ impl<S: Store> Ledger<S> {
 
     async fn refresh_total(&self, api: &impl TokenApi, now_ms: i64) -> Result<u32> {
         let listed = tokens::list_all(api).await?;
+        self.take_count(&listed, now_ms)
+    }
+
+    /// Stores the gauge and the account count from `listed`, the account's tokens as listed at
+    /// `now_ms`; answers the count.
+    fn take_count(&self, listed: &[tokens::Listed], now_ms: i64) -> Result<u32> {
         let names: HashSet<&str> = listed.iter().map(|t| t.name.as_str()).collect();
         let unseen = self
             .rows
@@ -613,7 +636,7 @@ impl<S: Store> Ledger<S> {
             } else if attempt != 0 {
                 break;
             }
-            self.sweep_locked(api, now_ms)
+            self.sweep_locked(api, now_ms, true)
                 .await
                 .map_err(|_| tokens::capacity_error())?;
         }
@@ -631,15 +654,25 @@ impl<S: Store> Ledger<S> {
         }
         match api.delete(&row.id).await {
             Ok(()) => {
-                self.account_total.set(None);
+                self.deleted(row);
                 self.forget(&row.id)
             }
             Err(e) if gone(&e) => {
-                self.account_total.set(None);
+                self.deleted(row);
                 self.forget(&row.id)
             }
             Err(_) => self.mark_released(&row.id),
         }
+    }
+
+    /// Takes `row`'s deleted token out of the cached account count, which stays fresh: a
+    /// revoke no longer makes the next mint list the account again.
+    fn deleted(&self, row: &Row) {
+        self.account_total.set(
+            self.account_total
+                .get()
+                .map(|snapshot| snapshot.without(row)),
+        );
     }
 
     /// Drops the row of `id`.
@@ -691,7 +724,7 @@ impl<S: Store> Ledger<S> {
     /// recovered after a restart. It only deletes tokens the ledger can identify as its own.
     pub async fn reap(&self, api: &impl TokenApi, now_ms: i64) -> Result<Reaped> {
         let _slot = self.mint_slot().await;
-        self.sweep_locked(api, now_ms).await
+        self.sweep_locked(api, now_ms, false).await
     }
 
     /// Mints a single-use token with the same account capacity and durable cleanup as leases.
@@ -737,16 +770,41 @@ impl<S: Store> Ledger<S> {
         Ok(())
     }
 
-    async fn sweep_locked(&self, api: &impl TokenApi, now_ms: i64) -> Result<Reaped> {
-        self.account_total.set(None);
-        let listed = tokens::list_all(api).await?;
+    /// The sweep. It lists the account only when it must: when `list` (a mint found the account
+    /// full), when a pending reservation needs matching by name, or when the account count is
+    /// older than [`ACCOUNT_CACHE_MS`]. Released, expired and orphaned rows are deleted by id
+    /// without a list. One list serves both the matching and the new count.
+    async fn sweep_locked(&self, api: &impl TokenApi, now_ms: i64, list: bool) -> Result<Reaped> {
+        let pending = self
+            .rows
+            .borrow()
+            .iter()
+            .any(|row| row.id.starts_with(PENDING_PREFIX));
+        let stale = self
+            .account_total
+            .get()
+            .is_none_or(|snapshot| !snapshot.fresh(now_ms));
+        let mut listed = if list || pending || stale {
+            self.account_total.set(None);
+            Some(tokens::list_all(api).await?)
+        } else {
+            None
+        };
+        // Tokens this sweep deleted (or found gone), taken out of `listed` before it is counted.
+        let mut removed: HashSet<String> = HashSet::new();
         let mut out = Reaped::default();
         for row in self.rows() {
             if row.id.starts_with(PENDING_PREFIX) {
-                if let Some(token) = listed.iter().find(|token| token.name == row.name) {
+                let found = listed
+                    .as_deref()
+                    .unwrap_or_default()
+                    .iter()
+                    .find(|token| token.name == row.name)
+                    .map(|token| token.id.clone());
+                if let Some(id) = found {
                     // A saved lease with this ID can still be in use.
-                    if !self.rows.borrow().iter().any(|known| known.id == token.id) {
-                        match api.delete(&token.id).await {
+                    if !self.rows.borrow().iter().any(|known| known.id == id) {
+                        match api.delete(&id).await {
                             Ok(()) => out.deleted += 1,
                             Err(e) if gone(&e) => {}
                             Err(_) => {
@@ -754,6 +812,7 @@ impl<S: Store> Ledger<S> {
                                 continue;
                             }
                         }
+                        removed.insert(id);
                     }
                 } else if row.expires_at > now_ms {
                     // An ambiguous POST can still be in flight on Cloudflare's side.
@@ -777,11 +836,19 @@ impl<S: Store> Ledger<S> {
                         continue;
                     }
                 }
+                if listed.is_some() {
+                    removed.insert(row.id.clone());
+                } else {
+                    self.deleted(&row);
+                }
                 self.forget(&row.id)?;
                 out.forgotten += 1;
             }
         }
-        self.refresh_total(api, now_ms).await?;
+        if let Some(listed) = listed.as_mut() {
+            listed.retain(|token| !removed.contains(&token.id));
+            self.take_count(listed, now_ms)?;
+        }
         if out.failed == 0 {
             self.store.save_setting("last_sweep_ms", now_ms)?;
             self.last_sweep.set(Some(now_ms));

@@ -226,7 +226,7 @@ A count taken hours later cannot reconstruct the account's token inventory at th
 All home-account mint paths with the platform ledger binding use the same Durable Object,
 including shared leases, ordinary scoped calls, and deploy tokens. The ledger serializes
 new mints, counts every account token record conservatively, and caches the count for
-15 seconds with local mints included. Reusing an existing shared lease consumes no capacity.
+five minutes, adding its own creates and taking out its own deletes as they happen. Reusing an existing shared lease consumes no capacity.
 The configured ceiling applies to each new mint. At the ceiling, or on Cloudflare quota
 refusal, the ledger sweeps and reevaluates capacity once. An incomplete list blocks a new
 mint. An agent turn encountering token capacity waits a minute and retries on the same model.
@@ -251,3 +251,24 @@ the account between listing and minting.
 `tokens_status` includes the account total and its observation time, and the last successful
 sweep time. The total is the last complete list and is null if that list is stale or unavailable. Admission also accounts for unlisted reservations and fresh mints. The sweep timestamp
 advances only when reconciliation, deletion, and the refreshed listing all succeed.
+
+### The account's API budget (2026-11-26)
+
+Listing the account's tokens is one Cloudflare API call per 50 records plus an empty last page,
+and those calls share the account's API rate limit with `wrangler deploy` (whose pre-upload
+`GET /workers/services/{script}` was refused with `10429`). Three changes keep the ledger's
+own traffic small:
+
+- `Scoped::open` mints through the ledger, as `Scoped::open_for` does. It used to mint around
+  it: a full account list before every create, and a revoke the ledger could not match to a row,
+  so the token stayed live until its hour ran out.
+- A revoke takes the token out of the cached count instead of discarding the count, so the next
+  mint does not list again. The count stands for five minutes (`ACCOUNT_CACHE_MS`, also the
+  gauge's refresh age).
+- The minute sweep deletes released, expired and orphaned rows by ID and lists the account only
+  when a reservation needs matching by name or the count is five minutes old; one list serves
+  both the matching and the new count (it used to list twice a minute). A mint that finds the
+  account full still lists before it sweeps.
+
+A transient token therefore costs one create and one delete; the account list is about three
+calls every five minutes rather than six a minute plus three before most mints.
