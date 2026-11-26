@@ -1359,6 +1359,11 @@ impl Directory {
             "digitalocean.health.history" => {
                 let instance = s("instance");
                 let mut history = self.droplet_history(instance, t)?;
+                for job in &mut history {
+                    if let Some(fields) = job.as_object_mut() {
+                        fields.remove("audit_retry_at");
+                    }
+                }
                 if let Some(id) = a["id"].as_str() {
                     let job = history
                         .into_iter()
@@ -1372,6 +1377,76 @@ impl Directory {
                     }
                     json!({"instance":instance,"jobs":history})
                 }
+            }
+            "digitalocean.health.audit_due" => {
+                #[derive(Deserialize)]
+                struct Row {
+                    instance: String,
+                    job: String,
+                }
+                let rows: Vec<Row> = self.db.rows(
+                    "SELECT substr(settings.key, length('digitalocean-droplet-history:') + 1) AS instance,
+                            jobs.value AS job
+                       FROM settings, json_each(CASE WHEN json_valid(settings.value)
+                                                     THEN settings.value ELSE '[]' END) AS jobs
+                      WHERE settings.key >= 'digitalocean-droplet-history:'
+                        AND settings.key < 'digitalocean-droplet-history;'
+                        AND settings.expires_at > ?
+                        AND json_extract(jobs.value, '$.audit_status') = 'pending'
+                        AND coalesce(json_extract(jobs.value, '$.audit_retry_at'), 0) <= ?
+                     ORDER BY coalesce(json_extract(jobs.value, '$.audit_retry_at'), 0), settings.key, jobs.key
+                     LIMIT 2",
+                    vec![t.into(), t.into()],
+                )?;
+                let output = rows
+                    .into_iter()
+                    .map(|row| -> Result<Value> {
+                        let mut job: Value = serde_json::from_str(&row.job)?;
+                        if let Some(fields) = job.as_object_mut() {
+                            fields.remove("audit_retry_at");
+                        }
+                        Ok(json!({"instance":row.instance,"job":job}))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                json!(output)
+            }
+            "digitalocean.health.audit_claim" | "digitalocean.health.audit_finish" => {
+                use crate::digitalocean::health;
+                use crate::jobs_audit::ExportStatus;
+
+                let instance = s("instance");
+                let id = s("id");
+                let mut history = self.droplet_history(instance, t)?;
+                let Some(job) = history
+                    .iter_mut()
+                    .find(|row| row["id"].as_str() == Some(id) && row["audit_status"] == "pending")
+                else {
+                    return Ok(json!(false));
+                };
+                if op == "digitalocean.health.audit_claim" {
+                    if job["audit_retry_at"].as_i64().unwrap_or(0) > t {
+                        return Ok(json!(false));
+                    }
+                    job["audit_retry_at"] = json!(t + 5 * 60 * 1000);
+                } else {
+                    let status: ExportStatus = serde_json::from_value(a["status"].clone())?;
+                    if status == ExportStatus::Pending {
+                        return Err(bad("invalid finished audit export status"));
+                    }
+                    job["audit_status"] = json!(status);
+                    if let Some(fields) = job.as_object_mut() {
+                        fields.remove("audit_retry_at");
+                    }
+                }
+                self.db.exec(
+                    "UPDATE settings SET value = ? WHERE key = ? AND expires_at > ?",
+                    vec![
+                        serde_json::to_string(&history)?.as_str().into(),
+                        health::history_key(instance).as_str().into(),
+                        t.into(),
+                    ],
+                )?;
+                json!(true)
             }
             "digitalocean.health.replace" => {
                 use crate::digitalocean::health;

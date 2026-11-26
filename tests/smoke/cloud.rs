@@ -1785,3 +1785,119 @@ mod droplet_observations {
         );
     }
 }
+
+mod droplet_job_history {
+    use pigeon_capabilities::digitalocean::health::{Job, MAX_JOBS, Stage, update_history};
+    use pigeon_core::oauth;
+    use serde_json::json;
+
+    /// Start from the persisted shape of a job created before diagnostics were added.
+    fn legacy_job(id: &str) -> Job {
+        serde_json::from_value(json!({
+            "id":id, "instance":"example", "state":"waiting", "health":"pending",
+            "started_ms":1, "deadline_ms":100, "next_ms":99, "lease_until_ms":0,
+            "expected_version":"expected-version", "droplet":101,
+            "callback_hash":oauth::hash("test-bearer"),
+            "credential":{"team":"private-team","sealed":"private-ciphertext"}
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn reports_are_ordered_idempotent_and_redacted() {
+        let mut job = legacy_job("one");
+        let token = "test-bearer";
+        assert!(!job.callback("wrong", "started", Some(Stage::ImageBuild), None, 2));
+        assert!(job.callback(token, "started", None, None, 3));
+        assert!(job.callback(token, "started", Some(Stage::ImageBuild), None, 4));
+        assert!(job.callback(token, "started", Some(Stage::ImageBuild), None, 5));
+        assert!(job.callback(token, "failed", Some(Stage::PackageInstall), None, 6));
+        assert_eq!(
+            job.public_with_events()["events"].as_array().unwrap().len(),
+            2
+        );
+        assert!(!job.callback(token, "succeeded", Some(Stage::VersionCheck), None, 7));
+        assert!(job.callback(
+            token,
+            "result",
+            Some(Stage::VersionCheck),
+            Some("expected-version"),
+            8
+        ));
+        assert!(!job.callback(token, "started", Some(Stage::VersionCheck), None, 9));
+        assert_eq!(job.public_with_events()["health"], "passed");
+        assert_eq!(job.public_with_events()["provider_state"], "cleanup");
+        assert_eq!(job.public_with_events()["stage"], "version_check");
+        let public = job.public_with_events();
+        assert_eq!(public["events"][2]["outcome"], "succeeded");
+        for name in [
+            "private-team",
+            "private-ciphertext",
+            "callback_hash",
+            "expected_version",
+        ] {
+            assert!(!public.to_string().contains(name));
+        }
+    }
+
+    #[test]
+    fn reports_distinguish_failed_stage_and_cancelled_job() {
+        let mut job = legacy_job("one");
+        assert!(job.callback(
+            "test-bearer",
+            "failed",
+            Some(Stage::PackageInstall),
+            None,
+            4
+        ));
+        assert_eq!(job.public_with_events()["health"], "failed");
+        assert_eq!(job.public_with_events()["stage"], "package_install");
+        let mut cancelled = legacy_job("two");
+        assert!(cancelled.schedule_cancel("two", 5));
+        assert!(!cancelled.callback("test-bearer", "result", None, Some("expected-version"), 6));
+        assert_eq!(
+            cancelled.public_with_events()["events"][0]["outcome"],
+            "cancelled"
+        );
+    }
+
+    #[test]
+    fn terminal_history_exports_independently_of_new_jobs() {
+        let mut record = serde_json::to_value(legacy_job("one")).unwrap();
+        record["state"] = json!("gone");
+        record["health"] = json!("passed");
+        record["created_ms"] = json!(1);
+        record["confirmed_delete_ms"] = json!(61_001);
+        let first: Job = serde_json::from_value(record).unwrap();
+        let mut history = update_history(Vec::new(), &first);
+        assert_eq!(history[0]["audit_status"], "pending");
+        assert_eq!(history[0]["compute_estimate"]["duration_ms"], 61_000);
+        assert_eq!(history[0]["compute_estimate"]["deletion_confirmed"], true);
+
+        history[0]["audit_status"] = json!("stored");
+        history = update_history(history, &first);
+        assert_eq!(history[0]["audit_status"], "stored");
+        let history = update_history(history, &legacy_job("two"));
+        assert!(history[0].get("audit_status").is_none());
+        assert_eq!(history[1]["audit_status"], "stored");
+    }
+
+    #[test]
+    fn history_keeps_the_latest_jobs_and_updates_in_place() {
+        let mut history = Vec::new();
+        for index in 0..=MAX_JOBS {
+            let job = legacy_job(&index.to_string());
+            history = update_history(history, &job);
+        }
+        assert_eq!(history.len(), MAX_JOBS);
+        assert_eq!(history[0]["id"], MAX_JOBS.to_string());
+        assert_eq!(history.last().unwrap()["id"], "1");
+
+        let mut last = legacy_job(&MAX_JOBS.to_string());
+        last.schedule_cancel(&MAX_JOBS.to_string(), 9);
+        let history = update_history(history, &last);
+        assert_eq!(history.len(), MAX_JOBS);
+        assert_eq!(history[0]["events"][0]["outcome"], "cancelled");
+        assert_eq!(history[1]["id"], (MAX_JOBS - 1).to_string());
+    }
+}

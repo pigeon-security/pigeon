@@ -1,6 +1,8 @@
 //! A bounded DigitalOcean Droplet health check for the approved instance.
 
-use pigeon_cloud::digitalocean_droplet::{self as provider, Created, Removal};
+use pigeon_cloud::digitalocean_droplet::{
+    self as provider, Created, DropletStatus, Observation, Removal,
+};
 use pigeon_cloud::transport::FetchTransport;
 use pigeon_core::{crypto, oauth, sign, webauthn};
 use serde::{Deserialize, Serialize};
@@ -11,6 +13,7 @@ use super::{bad, expected, for_write, team};
 use crate::Context;
 use crate::console::write::Write;
 use crate::instances::record::Instance;
+use crate::jobs_audit::{self, ExportStatus};
 use crate::users::directory;
 
 pub const STATUS: &str = "digitalocean_droplet_status";
@@ -28,8 +31,11 @@ const MINUTE: u64 = 60_000;
 const MAX_MINUTES: u64 = 30;
 const ESTIMATED_USD: f64 = 0.02;
 const MAX_EVENTS: usize = 32;
+const DEADLINE_FAILURE: &str = "No verified health result before the deadline.";
+const CLEANUP_RETRY: &str = "Could not safely reconcile or delete the Droplet. Pigeon will retry; verify the provider credential and check the team dashboard.";
 
-pub(crate) const MAX_JOBS: usize = 30;
+#[doc(hidden)]
+pub const MAX_JOBS: usize = 30;
 pub(crate) const HISTORY_TTL_MS: i64 = 180 * 24 * 60 * 60 * 1000;
 
 pub(crate) fn history_key(instance: &str) -> String {
@@ -88,7 +94,8 @@ enum State {
 
 #[derive(Clone, Copy, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
-enum Stage {
+#[doc(hidden)]
+pub enum Stage {
     DropletCreate,
     CloudInit,
     PackageInstall,
@@ -119,7 +126,8 @@ struct Event {
 }
 
 #[derive(Clone, Deserialize, Serialize)]
-pub(crate) struct Job {
+#[doc(hidden)]
+pub struct Job {
     pub(crate) id: String,
     pub(crate) instance: String,
     state: State,
@@ -133,6 +141,10 @@ pub(crate) struct Job {
     created_ms: Option<u64>,
     #[serde(default)]
     confirmed_delete_ms: Option<u64>,
+    #[serde(default)]
+    provider_observation: Option<(String, u64)>,
+    #[serde(default)]
+    updated_ms: Option<u64>,
     droplet: Option<u64>,
     credential: Option<Credential>,
     callback_hash: Option<String>,
@@ -155,18 +167,29 @@ impl Job {
             State::Gone => "absent",
             State::Rejected => "rejected",
         };
+        let estimate = self.created_ms.and_then(|start| {
+            provider::compute_estimate(
+                start,
+                self.updated_ms.unwrap_or(self.started_ms),
+                self.confirmed_delete_ms,
+            )
+        });
         json!({
             "id": self.id, "state": self.state, "health": self.health,
             "started_ms": self.started_ms, "deadline_ms": self.deadline_ms,
-            "error": self.error, "estimated_usd": ESTIMATED_USD,
-            "provider_state": provider_state,
+            "error": self.error,
+            "estimated_usd": estimate.as_ref().map(|cost| cost.estimated_usd_micros as f64 / 1_000_000.0),
+            "compute_estimate": estimate,
+            "provider_state": self.provider_observation.as_ref().map_or(provider_state, |(status, _)| status),
+            "provider_observed_ms": self.provider_observation.as_ref().map(|(_, at)| at),
             "stage": self.events.iter().map(|event| event.stage).max(),
             "created_ms": self.created_ms,
             "confirmed_delete_ms": self.confirmed_delete_ms,
         })
     }
 
-    pub(crate) fn public_with_events(&self) -> Value {
+    #[doc(hidden)]
+    pub fn public_with_events(&self) -> Value {
         let mut summary = self.public();
         summary["events"] = json!(self.events);
         summary
@@ -198,7 +221,8 @@ impl Job {
         self.next_ms = 0;
     }
 
-    fn schedule_cancel(&mut self, run: &str, time: u64) -> bool {
+    #[doc(hidden)]
+    pub fn schedule_cancel(&mut self, run: &str, time: u64) -> bool {
         if self.id != run || self.terminal() || self.state == State::Cleanup {
             return false;
         }
@@ -207,11 +231,13 @@ impl Job {
         self.callback_hash = None;
         self.state = State::Cleanup;
         self.next_ms = time;
+        self.updated_ms = Some(time);
         self.record(Stage::Cleanup, Outcome::Cancelled, time);
         true
     }
 
-    fn callback(
+    #[doc(hidden)]
+    pub fn callback(
         &mut self,
         token: &str,
         event: &str,
@@ -283,13 +309,28 @@ impl Job {
             }
             _ => return false,
         }
+        self.updated_ms = Some(time);
         true
     }
 }
 
-pub(crate) fn update_history(mut history: Vec<Value>, job: &Job) -> Vec<Value> {
+#[doc(hidden)]
+pub fn update_history(mut history: Vec<Value>, job: &Job) -> Vec<Value> {
+    let mut snapshot = job.public_with_events();
+    if job.terminal() {
+        let prior = history
+            .iter()
+            .find(|row| row["id"].as_str() == Some(job.id.as_str()));
+        snapshot["audit_status"] = prior
+            .and_then(|row| row.get("audit_status"))
+            .cloned()
+            .unwrap_or_else(|| json!(ExportStatus::Pending));
+        if let Some(retry_at) = prior.and_then(|row| row.get("audit_retry_at")) {
+            snapshot["audit_retry_at"] = retry_at.clone();
+        }
+    }
     history.retain(|row| row["id"].as_str() != Some(job.id.as_str()));
-    history.insert(0, job.public_with_events());
+    history.insert(0, snapshot);
     history.truncate(MAX_JOBS);
     history
 }
@@ -450,7 +491,7 @@ fn script(job: &Job, token: &str) -> String {
         r#"#!/bin/bash
 set -eu
 report() {{
-  curl --silent --fail --max-time 10 --retry 2 --retry-all-errors -X POST '{CALLBACK}' \
+  curl --silent --fail --max-time 4 --retry 2 --retry-delay 1 --retry-max-time 7 --retry-all-errors -X POST '{CALLBACK}' \
     -H 'Authorization: Bearer {token}' -H 'Content-Type: application/json' --data "$1" >/dev/null
 }}
 report '{cloud_init}' || true
@@ -514,6 +555,8 @@ pub(super) async fn start(cx: &Context<'_>, w: &Write<'_>) -> Result<Value> {
         expected_version: format!("{EXPECTED_VERSION} {COMMIT}"),
         created_ms: None,
         confirmed_delete_ms: None,
+        provider_observation: None,
+        updated_ms: Some(at),
         droplet: None,
         credential: Some(credential),
         callback_hash: Some(oauth::hash(&callback)),
@@ -551,6 +594,7 @@ pub(super) async fn start(cx: &Context<'_>, w: &Write<'_>) -> Result<Value> {
             job.record(Stage::DropletCreate, Outcome::Uncertain, now());
         }
     }
+    job.updated_ms = Some(now());
     if !replace(cx.env, &prior, &job).await? {
         return status(cx.env, &record).await;
     }
@@ -645,28 +689,50 @@ async fn reap_one(env: &Env, job: &mut Job, time: u64) -> Result<()> {
             return Ok(());
         }
         job.error = None;
-        job.created_ms.get_or_insert(job.started_ms);
         job.record(Stage::DropletCreate, Outcome::Succeeded, time);
         if job.state == State::Creating {
             job.state = State::Waiting;
         }
     }
+    job.created_ms.get_or_insert(job.started_ms);
     if time < job.deadline_ms && job.state != State::Cleanup {
-        job.next_ms = job.deadline_ms;
+        if let Some(id) = job.droplet {
+            let observation = provider::observe(&FetchTransport, &pat, &job.name(), id).await?;
+            let status = match observation {
+                Observation::Absent => "not_visible",
+                Observation::Present(DropletStatus::New) => "new",
+                Observation::Present(DropletStatus::Active) => "active",
+                Observation::Present(DropletStatus::Off) => "off",
+                Observation::Present(DropletStatus::Archive) => "archive",
+                Observation::Present(DropletStatus::Unknown) => "unknown",
+            };
+            job.provider_observation = Some((status.into(), now()));
+        }
+        job.next_ms = (time + MINUTE).min(job.deadline_ms);
         return Ok(());
     }
     if matches!(job.health.as_str(), "pending" | "started") {
         job.health = "failed".into();
-        job.error = Some("No verified health result before the deadline.".into());
+        job.error = Some(DEADLINE_FAILURE.into());
         job.record(Stage::Cleanup, Outcome::TimedOut, time);
     }
     job.state = State::Cleanup;
     job.record(Stage::Cleanup, Outcome::Requested, time);
     if let Some(id) = job.droplet {
-        match provider::cleanup(&FetchTransport, &pat, &job.name(), id).await? {
+        let removal = provider::cleanup(&FetchTransport, &pat, &job.name(), id).await?;
+        if job.error.as_deref() == Some(CLEANUP_RETRY) {
+            job.error = job
+                .events
+                .iter()
+                .any(|event| event.outcome == Outcome::TimedOut)
+                .then(|| DEADLINE_FAILURE.into());
+        }
+        match removal {
             Removal::Absent => {
-                job.confirmed_delete_ms = Some(time);
-                job.record(Stage::Cleanup, Outcome::Confirmed, time);
+                let confirmed = now();
+                job.provider_observation = Some(("absent".into(), confirmed));
+                job.confirmed_delete_ms = Some(confirmed);
+                job.record(Stage::Cleanup, Outcome::Confirmed, confirmed);
                 job.close(State::Gone);
             }
             Removal::Requested => {}
@@ -676,7 +742,13 @@ async fn reap_one(env: &Env, job: &mut Job, time: u64) -> Result<()> {
 }
 
 /// Cron work is bounded and claimed by compare-and-swap. Cleanup remains pending on any failure.
-pub async fn reap(env: &Env) -> Result<()> {
+pub async fn reap(env: &Env, host: &str) -> Result<()> {
+    let cleanup = reap_jobs(env).await;
+    let audit = export_audits(env, host).await;
+    cleanup.and(audit)
+}
+
+async fn reap_jobs(env: &Env) -> Result<()> {
     let time = now();
     let rows: Vec<String> = serde_json::from_value(
         directory(env, "digitalocean.health.pending", json!({"now":time})).await?,
@@ -690,102 +762,42 @@ pub async fn reap(env: &Env) -> Result<()> {
         }
         job.next_ms = time + MINUTE;
         if reap_one(env, &mut job, time).await.is_err() {
-            job.record(Stage::Cleanup, Outcome::Retrying, time);
-            job.error = Some("Could not safely reconcile or delete the Droplet. Pigeon will retry; verify the provider credential and check the team dashboard.".into());
+            if job.state == State::Cleanup || time >= job.deadline_ms {
+                job.record(Stage::Cleanup, Outcome::Retrying, time);
+                job.error = Some(CLEANUP_RETRY.into());
+            } else {
+                job.provider_observation = Some(("unavailable".into(), time));
+            }
         }
+        job.updated_ms = Some(now());
         job.lease_until_ms = 0;
         replace(env, &claim, &job).await?;
     }
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Start from the persisted shape of a job created before diagnostics were added.
-    fn legacy_job(id: &str) -> Job {
-        serde_json::from_value(json!({
-            "id":id, "instance":"example", "state":"waiting", "health":"pending",
-            "started_ms":1, "deadline_ms":100, "next_ms":99, "lease_until_ms":0,
-            "expected_version":"expected-version", "droplet":101,
-            "callback_hash":oauth::hash("test-bearer"),
-            "credential":{"team":"private-team","sealed":"private-ciphertext"}
-        }))
-        .unwrap()
-    }
-
-    #[test]
-    fn reports_are_ordered_idempotent_and_redacted() {
-        let mut job = legacy_job("one");
-        let token = "test-bearer";
-        assert!(!job.callback("wrong", "started", Some(Stage::ImageBuild), None, 2));
-        assert!(job.callback(token, "started", None, None, 3));
-        assert!(job.callback(token, "started", Some(Stage::ImageBuild), None, 4));
-        assert!(job.callback(token, "started", Some(Stage::ImageBuild), None, 5));
-        assert!(job.callback(token, "failed", Some(Stage::PackageInstall), None, 6));
-        assert_eq!(job.events.len(), 2);
-        assert!(!job.callback(token, "succeeded", Some(Stage::VersionCheck), None, 7));
-        assert!(job.callback(
-            token,
-            "result",
-            Some(Stage::VersionCheck),
-            Some("expected-version"),
-            8
-        ));
-        assert!(!job.callback(token, "started", Some(Stage::VersionCheck), None, 9));
-        assert_eq!(job.public()["health"], "passed");
-        assert_eq!(job.public()["provider_state"], "cleanup");
-        assert_eq!(job.public()["stage"], "version_check");
-        let public = job.public_with_events();
-        assert_eq!(public["events"][2]["outcome"], "succeeded");
-        for name in [
-            "private-team",
-            "private-ciphertext",
-            "callback_hash",
-            "expected_version",
-        ] {
-            assert!(!public.to_string().contains(name));
+async fn export_audits(env: &Env, host: &str) -> Result<()> {
+    let jobs: Vec<Value> = serde_json::from_value(
+        directory(env, "digitalocean.health.audit_due", Value::Null).await?,
+    )?;
+    for row in jobs {
+        let (Some(instance), Some(id)) = (row["instance"].as_str(), row["job"]["id"].as_str())
+        else {
+            continue;
+        };
+        let args = json!({"instance":instance,"id":id});
+        if directory(env, "digitalocean.health.audit_claim", args.clone()).await? != true {
+            continue;
+        }
+        let status = jobs_audit::export(env, host, instance, &row["job"]).await;
+        if status != ExportStatus::Pending {
+            directory(
+                env,
+                "digitalocean.health.audit_finish",
+                json!({"instance":instance, "id":id, "status":status}),
+            )
+            .await?;
         }
     }
-
-    #[test]
-    fn reports_distinguish_failed_stage_and_cancelled_job() {
-        let mut job = legacy_job("one");
-        assert!(job.callback(
-            "test-bearer",
-            "failed",
-            Some(Stage::PackageInstall),
-            None,
-            4
-        ));
-        assert_eq!(job.public()["health"], "failed");
-        assert_eq!(job.public()["stage"], "package_install");
-        let mut cancelled = legacy_job("two");
-        assert!(cancelled.schedule_cancel("two", 5));
-        assert!(!cancelled.callback("test-bearer", "result", None, Some("expected-version"), 6));
-        assert_eq!(
-            cancelled.public_with_events()["events"][0]["outcome"],
-            "cancelled"
-        );
-    }
-
-    #[test]
-    fn history_keeps_the_latest_jobs_and_updates_in_place() {
-        let mut history = Vec::new();
-        for index in 0..=MAX_JOBS {
-            let job = legacy_job(&index.to_string());
-            history = update_history(history, &job);
-        }
-        assert_eq!(history.len(), MAX_JOBS);
-        assert_eq!(history[0]["id"], MAX_JOBS.to_string());
-        assert_eq!(history.last().unwrap()["id"], "1");
-
-        let mut last = legacy_job(&MAX_JOBS.to_string());
-        last.schedule_cancel(&last.id.clone(), 9);
-        let history = update_history(history, &last);
-        assert_eq!(history.len(), MAX_JOBS);
-        assert_eq!(history[0]["events"][0]["outcome"], "cancelled");
-        assert_eq!(history[1]["id"], (MAX_JOBS - 1).to_string());
-    }
+    Ok(())
 }

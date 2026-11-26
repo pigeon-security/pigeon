@@ -503,3 +503,18 @@ digest makes repeats of the same snapshot use the same key. Runner output,
 credentials, provider responses, and free-form errors are excluded. A successful
 PUT reports `stored`. A refusal or transfer failure leaves the export `pending`
 and the terminal runner result stays independently available.
+
+
+The cron reads exact, tagged Droplets while an approved health job is active.
+Its last provider observation is separate from cloud-init stage. Compute
+cost is a prorated estimate using the fixed published hourly rate and the
+job's create-request timestamp. It updates on observation and stops accruing
+only after a read confirms absence. It is neither an invoice nor a guaranteed
+billing cap.
+
+Terminal jobs are persisted before audit export. The cron claims at most
+two due exports each tick and retries failed exports independently from
+Droplet cleanup. With an approved private linked-instance audit bucket,
+it writes the content-addressed redacted record. Without one, the Jobs
+record shows that export is not configured. The history exposes export
+status but omits the internal retry timestamp.
