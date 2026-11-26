@@ -683,6 +683,7 @@ const LINKED_SO_FAR: &[&str] = &[
     "secrets",
     "cloud",
     "digitalocean",
+    "jobs",
 ];
 
 /// The capability catalogue (docs/plans/capability-scoping.md): each capability's placement,
@@ -745,6 +746,15 @@ fn capability_catalogue_as_decided() {
             Scope::Instance,
             Availability::Any,
             &["cloud"],
+        ),
+        (
+            "jobs",
+            false,
+            Placement::Inline,
+            None,
+            Scope::Instance,
+            Availability::Any,
+            &[],
         ),
         (
             "models",
@@ -1660,6 +1670,7 @@ fn console_manifest_ids_are_stable_and_data_only() {
             "source",
             "ci",
             "metrics",
+            "jobs",
             "ingest",
             "capabilities",
             "sessions",
@@ -1673,7 +1684,7 @@ fn console_manifest_ids_are_stable_and_data_only() {
     assert_eq!(
         keys,
         [
-            "i", "v", "w", "b", "r", "k", "m", "e", "x", "s", "c", "a", "n", "p"
+            "i", "v", "w", "b", "r", "k", "m", "j", "e", "x", "s", "c", "a", "n", "p"
         ]
     );
     let every = json!({
