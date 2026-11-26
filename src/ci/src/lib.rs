@@ -520,6 +520,19 @@ pub async fn setup(env: &Env, apply: bool, build: &str) -> Result<Value> {
     scheduler(env, "setup", json!({ "apply": apply, "build": build })).await
 }
 
+/// How many jobs are attributed to instance `from`; with `apply`, those jobs are re-attributed
+/// to `to` (`UPDATE jobs SET instance = ?`) in the same scheduler call. Used once, by the home
+/// instance's id rename (R1); running it again answers 0.
+pub async fn rename_instance(env: &Env, from: &str, to: &str, apply: bool) -> Result<u64> {
+    let answer = scheduler(
+        env,
+        "instance_rename",
+        json!({ "from": from, "to": to, "apply": apply }),
+    )
+    .await?;
+    Ok(answer["jobs"].as_u64().unwrap_or(0))
+}
+
 /// The commit this Worker was built from (`PIGEON_COMMIT` at build time, which the deploy job
 /// sets); empty for a local build, which checks nothing.
 pub const BUILD: &str = match option_env!("PIGEON_COMMIT") {

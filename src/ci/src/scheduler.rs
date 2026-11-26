@@ -498,6 +498,32 @@ impl Scheduler {
                 let scope = serde_json::from_value(a["scope"].clone())?;
                 self.jobs(&a["query"], Some(&scope))
             }
+            // R1's rename: how many jobs are attributed to instance `from`, and with `apply`
+            // the same jobs re-attributed to `to`. Running it again finds none.
+            "instance_rename" => {
+                #[derive(Deserialize)]
+                struct Count {
+                    n: i64,
+                }
+                let (from, to) = (s("from"), s("to"));
+                if from.is_empty() || to.is_empty() || from == to {
+                    return Err(bad("`from` and `to` must be two instance ids"));
+                }
+                let n = self
+                    .db
+                    .row::<Count>(
+                        "SELECT COUNT(*) AS n FROM jobs WHERE instance = ?",
+                        vec![from.into()],
+                    )?
+                    .map_or(0, |c| c.n);
+                if a["apply"].as_bool() == Some(true) && n > 0 {
+                    self.db.exec(
+                        "UPDATE jobs SET instance = ? WHERE instance = ?",
+                        vec![to.into(), from.into()],
+                    )?;
+                }
+                Ok(json!({ "jobs": n }))
+            }
             "setup" => {
                 // A caller of another build (the old Lander, or a new one meeting this old
                 // scheduler) is refused, so stale settings are never applied.

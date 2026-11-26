@@ -73,8 +73,37 @@ pub fn resolve_scope(records: &[Record], request: &ScopeRequest) -> Value {
     }
 }
 
+/// The scope `request` resolves to. A read naming a renamed id (R1's compat window) resolves
+/// for the id it was renamed to, and says which id it was asked for (`renamed_from`), so CI's
+/// `for_read` accepts it. Attribution resolves by repository, so it names the new id by itself.
 pub async fn instance_scope(env: &worker::Env, request: &ScopeRequest) -> worker::Result<Value> {
-    Ok(resolve_scope(&crate::instances::all(env).await?, request))
+    let renamed = match request {
+        ScopeRequest::Read { instance } => crate::instances::renamed(env, instance).await?,
+        ScopeRequest::Attribute { .. } => None,
+    };
+    Ok(resolve_renamed(
+        &crate::instances::all(env).await?,
+        request,
+        renamed.as_deref(),
+    ))
+}
+
+/// [`resolve_scope`], for a read naming an id renamed to `renamed` (R1): resolved for the new
+/// id, carrying the id asked for as `renamed_from`. Pure.
+pub fn resolve_renamed(records: &[Record], request: &ScopeRequest, renamed: Option<&str>) -> Value {
+    let (ScopeRequest::Read { instance }, Some(to)) = (request, renamed) else {
+        return resolve_scope(records, request);
+    };
+    let mut scope = resolve_scope(
+        records,
+        &ScopeRequest::Read {
+            instance: to.into(),
+        },
+    );
+    if scope.is_object() {
+        scope["renamed_from"] = Value::String(instance.clone());
+    }
+    scope
 }
 
 /// Marks the CI reads in `answer` only when it answers a tools/list on an instance-scoped

@@ -50,17 +50,23 @@ impl WorkerContext {
     }
 }
 
+/// An instance id as core's records allow it: one or two labels split by a slash, or (the home
+/// instance's, R1) a DNS name such as `pigeon.dev`.
 fn valid_instance(id: &str) -> bool {
+    let label = |part: &str| {
+        (1..=63).contains(&part.len())
+            && !part.starts_with('-')
+            && !part.ends_with('-')
+            && part
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    };
     (1..=64).contains(&id.len())
-        && id.split('/').count() <= 2
-        && id.split('/').all(|part| {
-            (1..=63).contains(&part.len())
-                && !part.starts_with('-')
-                && !part.ends_with('-')
-                && part
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-        })
+        && if id.contains('.') {
+            !id.contains('/') && id.split('.').count() >= 2 && id.split('.').all(label)
+        } else {
+            id.split('/').count() <= 2 && id.split('/').all(label)
+        }
 }
 
 /// The caller context core signs.

@@ -311,6 +311,12 @@ pub(super) async fn serve(
             403,
         );
     }
+    // An old id during R1's compat window reads as the id it was renamed to.
+    let current = match crate::instances::current_args(cx.env, args).await {
+        Ok(c) => c,
+        Err(e) => return failed(&e),
+    };
+    let args = current.as_ref().unwrap_or(args);
     let caller = Caller {
         user: person,
         acting_for: None,

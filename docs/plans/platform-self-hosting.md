@@ -1,7 +1,8 @@
 # pigeon.dev as an instance of pigeon
 
 Status: **decided** (2026-11-26); H1 and L1 done, the `/platform` redirect built, H2, L2–L3 and
-S1 built, the rest not started. Code references are to main at the time of writing.
+S1 built, R1 steps 1–2 built (the migration not yet run), the rest not started. Code references
+are to main at the time of writing.
 
 ## Goal
 
@@ -232,6 +233,94 @@ Steps:
    `pigeon.dev`.
 5. **Remove** the alias and tombstone; update tests and docs.
 
+### As built (R1 steps 1–2)
+
+Steps 1 and 2 are built; **the migration has not run.** Until it does, nothing reads
+differently: every alias is keyed on the tombstone, which only the migration writes.
+
+- **Ids.** `record.rs` `check_id`: an id with a dot and no slash is allowed for the home record
+  only, and only when it is one of its `zones` (`pigeon.dev`); linked ids are unchanged. `label`
+  is unchanged (it is the DNS-label check). The signed Worker context accepts a dotted id too
+  (`pigeon_contract::caller::valid_instance`, a DNS name with no slash), so instance-scoped
+  calls to capability Workers keep working after the rename.
+- **The alias** (`instances/rename.rs`). `ALIASES = [("pigeon-security/platform",
+  "pigeon.dev")]`; an alias is active only while `instance:pigeon-security/platform` holds a
+  `Tombstone {renamed_to, renamed_from, renamed_ms, compat_until_ms, approval}`. Any id not in
+  `ALIASES` is answered without a Directory read. Where it is used:
+  - record reads: `instances::one` follows the tombstone, so the `?instance=` MCP endpoint, the
+    signed-context scope (`split.rs`), observability, publishing and the manifest read the new
+    record;
+  - every tool call: `dispatch` rewrites an `instance` argument naming the old id
+    (`instances::current_args`), and so do the console's reads (`console/web/ops.rs`, before
+    its `app_*` reads); this covers MCP tools that take `instance`, observability's
+    `instance` argument (whose answer now names `record.id`) and CI's scoped reads;
+  - CI: core's `ci_scope` answers a read naming the old id for the new one with
+    `renamed_from` (`ci::resolve_renamed`), and `pigeon_ci::scope::for_read` accepts it
+    (`Scope::answers`). Attribution resolves by repository, so new jobs name `pigeon.dev`
+    with no alias;
+  - console URLs: `/app/pigeon-security%2Fplatform/<rest>?<query>` answers **301** to
+    `/app/pigeon.dev/<rest>?<query>` (`console.rs`, `page::page_instance`, `page::moved`); old
+    `/app?instance=…` bookmarks land on the new id in one hop; `page::is_page` allows a dot in
+    the instance segment when an area follows it;
+  - a draft or record naming the old id is refused (`instances.rs` `check`, and the Directory's
+    `apply_draft` expires a draft whose key holds a tombstone);
+  - home rollback (`home_site.rs`) accepts a release staged under the old id.
+- **iOS** needs no change: `ManifestStore.selected` (`ios/Pigeon/Navigation/ManifestStore.swift`)
+  falls back to the home instance when the stored `selectedInstance` is not listed.
+- **The migration** is `instance_rename_home` (`instances/renaming.rs`), arguments
+  `{dry_run?: bool, plan?: string}`:
+  - without `plan`: reads the Directory and the CI scheduler and lists exactly what it would
+    do. With `dry_run: true` that is all. Otherwise, when there is something to do and nothing
+    in the way, it asks for the person's passkey: a `linked_plan` approval marked `rename`,
+    subject the old id, its digest bound to the old id, the new id, the home record's digest
+    and the steps (30 minutes to approve, as any plan).
+  - with `plan: <approval>`: reads everything again, refuses if the record's digest or the
+    plan changed (nothing is changed), takes the approval once, and runs the steps in order:
+    write `instance:pigeon.dev` (the same record, id `pigeon.dev`, version + 1); move each
+    per-instance key present (`ledger:`, `github:deploy:`, `github:push:`, `ingest:runs:`,
+    `data_url:`, `data_key:`; today only the ledger); expire the open approvals whose subject is
+    the old id (new Directory op `approval.expire`, with a note; the rename's own are left);
+    swap the index entry; `UPDATE jobs SET instance = 'pigeon.dev' WHERE instance = …` in the
+    CI scheduler (new scheduler op `instance_rename`, through `CI_SCHEDULER` as the Lander
+    reads it: `pigeon_ci::rename_instance`); last, the tombstone with a 30-day
+    `compat_until_ms`. Each step is safe to run again, and the steps are derived from what is
+    stored, so a run that stopped part way plans only what remains, and a run after it is done
+    answers "nothing to do".
+  - It refuses when `pigeon.dev` already holds a different record, when a moved key already
+    holds a different value under the new id, when the old id is not the home record, or when
+    `pigeon.dev` is not one of its zones.
+  - Smoke: `home_id_rename_r1` (with an in-memory Directory/CI double).
+- **Deploy order.** The contract change (every capability Worker), the scheduler op
+  (`pigeon-ci-gateway`) and core (`pigeon-platform`) must all be deployed before the migration
+  runs: one landing does it.
+
+What the person does (step 4 above is the verify):
+
+1. **Dry run.** Ask the agent to call `instance_rename_home {"dry_run": true}`. For the home
+   record today it should list: write `instance:pigeon.dev` (version 5), move
+   `ledger:pigeon-security/platform` (if the H2 apply recorded one), expire the open approvals
+   naming `pigeon-security/platform` (if any), swap the index entry, re-attribute the CI jobs
+   (with their count), replace the old key with the tombstone. Anything marked `stop:` means
+   nothing will run.
+2. **Approve.** The agent calls `instance_rename_home {}`; the plan waits on the console's
+   Approvals tab ("Rename the home instance pigeon-security/platform to pigeon.dev"). Read the
+   steps and approve with your passkey within 30 minutes; the agent then calls
+   `instance_rename_home {"plan": "<approval>"}`. If the record changed in between, nothing
+   runs: plan again.
+3. **Verify** (step 4): `instances_list` shows one home record, `pigeon.dev`; `ci_jobs
+   {instance: "pigeon.dev"}` includes pre-rename jobs, and `ci_jobs {instance:
+   "pigeon-security/platform"}` answers the same; `/app/pigeon.dev/inbox` loads and
+   `/app/pigeon-security%2Fplatform/inbox` answers 301 to it; `instance_rename_home
+   {"dry_run": true}` answers "already pigeon.dev; nothing to do"; the next CI run is
+   attributed to `pigeon.dev`. The iOS app reselects the home instance by itself.
+
+**Step 5, after `compat_until_ms` (30 days):** delete the `ALIASES` entry (which turns every
+alias off), forget the key `instance:pigeon-security/platform`, drop `renamed_from` from the CI
+scope and the old-id fallback in `home_site.rs` rollback, and update the tests and docs that
+name the old id (`tests/smoke/instances.rs`, `tests/smoke/console.rs`, `tests/smoke.rs`,
+`docs/plans/linked-accounts.md`, `ios-app-next.md`, `email.md`). `check_id`'s dotted-home rule
+stays.
+
 ## Phases
 
 - **H1** guard rails and validation, no behaviour change. *Done.*
@@ -248,7 +337,8 @@ Steps:
 - **S1** core serves the apex release (fallback `home_html`); `/architecture.json` unchanged;
   `pigeon-sites` leaves the apex. *Built* (smoke `apex_serves_the_home_release`); see "As built
   (S1)" above. The domain moves when the person runs `site_publish`; `apex.rs` goes after.
-- **R1** instance id rename, above.
+- **R1** instance id rename, above. Steps 1–2 *built* (smoke `home_id_rename_r1`); the
+  migration waits for the person's passkey; step 5 after 30 days.
 - **H4** console shows the platform-owned inventory read-only on the home Overview.
 
 ## Steps only the person can take
@@ -257,7 +347,7 @@ Steps:
 - Nothing for the token: the parent mints `instance_home` with its Account API Tokens Write.
 - Run `site_publish {}` to move the apex onto `pigeon-platform` for good (S1; steps in "As
   built (S1)").
-- Approve the R1 migration.
+- Approve the R1 migration (`instance_rename_home`; see "As built (R1 steps 1–2)").
 
 ## Open questions
 

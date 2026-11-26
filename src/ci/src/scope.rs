@@ -14,6 +14,10 @@ pub struct Scope {
     pub instance: String,
     pub repo: String,
     pub jobs: Vec<String>,
+    /// The id the request named when core answered for the instance it was renamed to (R1:
+    /// `pigeon-security/platform` → `pigeon.dev`, during the compat window). Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renamed_from: Option<String>,
 }
 
 impl Scope {
@@ -86,11 +90,19 @@ pub fn read_context(instance: &str, signed: Option<&str>) -> Result<Option<Worke
     }
 }
 
+impl Scope {
+    /// Whether this scope answers a read naming `instance`: its own id, or the id it was renamed
+    /// from during R1's compat window.
+    pub fn answers(&self, instance: &str) -> bool {
+        self.instance == instance || self.renamed_from.as_deref() == Some(instance)
+    }
+}
+
 pub(crate) async fn for_read(cx: &Cx<'_>, instance: &str, signed: Option<&str>) -> Result<Scope> {
     let context = read_context(instance, signed)?;
     lookup(cx, json!({ "instance": instance }), context)
         .await?
-        .filter(|scope| scope.instance == instance)
+        .filter(|scope| scope.answers(instance))
         .ok_or_else(|| Error::RustError("CI is unavailable on this instance".into()))
 }
 

@@ -2772,7 +2772,8 @@ fn home_instance_plans_and_applies_with_a_minted_token() {
     };
 
     // The record the plan describes: the platform's Worker, its host, and a landing site on the
-    // apex. The id is not renamed yet (R1): a dotted id is still refused.
+    // apex. The id is renamed by R1's migration (`home_id_rename_r1`); a dotted id equal to a
+    // zone is allowed for home.
     assert_eq!(LANDING_TEMPLATE, pigeon_landing::TEMPLATE);
     let home_json = json!({
         "id": "pigeon-security/platform", "title": "pigeon",
@@ -2812,10 +2813,7 @@ fn home_instance_plans_and_applies_with_a_minted_token() {
     );
     let mut dotted = home.clone();
     dotted.id = "pigeon.dev".into();
-    has(
-        &validate(&dotted, &[], &rules),
-        "\"pigeon.dev\" must be made of",
-    );
+    assert_eq!(validate(&dotted, &[], &rules), Vec::<String>::new());
     let mut second = home.clone();
     second.id = "other/platform".into();
     has(
@@ -3836,4 +3834,506 @@ fn home_site_publishes_from_artifacts_with_a_minted_token() {
     );
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&dir2);
+}
+
+/// One approval in the R1 double: id, subject, state, whether it is a rename plan, its note.
+type DoubleApproval = (String, String, String, bool, Option<String>);
+
+/// The R1 migration's double: the Directory's settings and approvals and the CI scheduler's
+/// jobs, in memory, with a count of reads and a write that can be made to fail.
+#[derive(Default)]
+struct RenameDouble {
+    settings: std::cell::RefCell<std::collections::BTreeMap<String, String>>,
+    approvals: std::cell::RefCell<Vec<DoubleApproval>>,
+    /// Each job's instance.
+    jobs: std::cell::RefCell<Vec<Option<String>>>,
+    reads: std::cell::Cell<u32>,
+    fail_jobs: std::cell::Cell<bool>,
+}
+
+impl RenameDouble {
+    fn approval(&self, id: &str, subject: &str, state: &str, rename: bool) {
+        self.approvals
+            .borrow_mut()
+            .push((id.into(), subject.into(), state.into(), rename, None));
+    }
+    fn state_of(&self, id: &str) -> (String, Option<String>) {
+        let a = self.approvals.borrow();
+        let r = a.iter().find(|r| r.0 == id).unwrap();
+        (r.2.clone(), r.4.clone())
+    }
+    fn jobs_of(&self, id: &str) -> usize {
+        self.jobs
+            .borrow()
+            .iter()
+            .filter(|j| j.as_deref() == Some(id))
+            .count()
+    }
+}
+
+impl pigeon_capabilities::instances::rename::Store for RenameDouble {
+    async fn get(&self, key: &str) -> worker::Result<Option<String>> {
+        self.reads.set(self.reads.get() + 1);
+        Ok(self.settings.borrow().get(key).cloned())
+    }
+    async fn put(&self, key: &str, value: &str) -> worker::Result<()> {
+        self.settings.borrow_mut().insert(key.into(), value.into());
+        Ok(())
+    }
+    async fn forget(&self, key: &str) -> worker::Result<()> {
+        self.settings.borrow_mut().remove(key);
+        Ok(())
+    }
+    async fn open_approvals(&self, subject: &str) -> worker::Result<Vec<String>> {
+        Ok(self
+            .approvals
+            .borrow()
+            .iter()
+            .filter(|a| a.1 == subject && !a.3 && (a.2 == "pending" || a.2 == "approved"))
+            .map(|a| a.0.clone())
+            .collect())
+    }
+    async fn expire_approvals(&self, ids: &[String], note: &str) -> worker::Result<()> {
+        for a in self.approvals.borrow_mut().iter_mut() {
+            if ids.contains(&a.0) && (a.2 == "pending" || a.2 == "approved") {
+                a.2 = "expired".into();
+                a.4 = Some(note.into());
+            }
+        }
+        Ok(())
+    }
+    async fn jobs(&self, from: &str, to: &str, apply: bool) -> worker::Result<u64> {
+        let n = self.jobs_of(from) as u64;
+        if apply {
+            if self.fail_jobs.get() {
+                return Err(worker::Error::RustError("the CI scheduler is away".into()));
+            }
+            for j in self.jobs.borrow_mut().iter_mut() {
+                if j.as_deref() == Some(from) {
+                    *j = Some(to.into());
+                }
+            }
+        }
+        Ok(n)
+    }
+}
+
+/// R1 (docs/plans/platform-self-hosting.md): the home instance's id becomes `pigeon.dev`. Before
+/// the migration nothing reads differently; a dotted id is allowed only for home and only as
+/// one of its zones; the dry run lists exactly what the run then does; the run moves every key,
+/// re-attributes CI jobs, expires open approvals naming the old id and leaves a tombstone that
+/// answers the old id (records, CI reads, MCP arguments, console URLs) for the new one; a second
+/// run does nothing; it refuses a conflicting `pigeon.dev`; a run that stopped resumes.
+#[test]
+fn home_id_rename_r1() {
+    use super::core::token_block_on as block;
+    use pigeon_capabilities::ci::{ScopeRequest, resolve_renamed, resolve_scope};
+    use pigeon_capabilities::console::Get;
+    use pigeon_capabilities::console::page;
+    use pigeon_capabilities::instances::record::{AccountRef, Instance, Rules, reserved_labels};
+    use pigeon_capabilities::instances::rename::{
+        self, COMPAT_MS, FROM, Step, Stored, TO, Tombstone, current_args, describe, observe, plan,
+        record, resolve, run,
+    };
+    use pigeon_capabilities::instances::{INDEX, key, record::validate};
+
+    assert_eq!((FROM, TO), ("pigeon-security/platform", "pigeon.dev"));
+    assert_eq!(rename::alias_of(FROM), Some(TO));
+    assert_eq!(rename::renamed_from(TO), Some(FROM));
+    assert_eq!(rename::alias_of("noisypigeon"), None);
+
+    // The home record as it is: version 4, its zone, the landing site and publishing.
+    let home_json = json!({
+        "id": FROM, "title": "pigeon",
+        "account": { "kind": "home" }, "zones": ["pigeon.dev"],
+        "repo": { "kind": "artifacts", "namespace": "pigeon-security", "repo": "pigeon" },
+        "worker": "pigeon-platform",
+        "platform": { "host": "platform.pigeon.dev" },
+        "sites": [{ "name": "landing", "bucket": "pigeon-platform-site", "template": "landing@1",
+            "build": "site",
+            "targets": [{ "kind": "domain", "hostname": "pigeon.dev" }] }],
+        "publishing": { "state": "enabled", "site": "landing" },
+        "ci": { "state": "enabled", "jobs": ["test"] },
+        "version": 4
+    });
+    let home: Instance = serde_json::from_value(home_json).unwrap();
+    let linked: Instance = serde_json::from_value(json!({
+        "id": "noisypigeon", "title": "noisypigeon",
+        "account": { "kind": "linked", "account_id": "a".repeat(32) },
+        "zones": ["noisypigeon.com"], "version": 1
+    }))
+    .unwrap();
+
+    // ---- The dotted id: home only, and only one of its zones.
+    let reserved = reserved_labels(
+        &["platform.pigeon.dev".into(), "pigeon.dev".into()],
+        "pigeon.dev",
+    );
+    let workers: Vec<String> = ["pigeon-platform", "pigeon-sites"]
+        .map(String::from)
+        .to_vec();
+    let rules = Rules {
+        platform_zone: "pigeon.dev",
+        reserved_labels: &reserved,
+        reserved_workers: &workers,
+        platform_worker: "pigeon-platform",
+    };
+    let id_problems = |r: &Instance| -> Vec<String> {
+        validate(r, &[], &rules)
+            .into_iter()
+            .filter(|p| p.contains("The id"))
+            .collect()
+    };
+    let renamed = rename::renamed(&home, TO);
+    assert_eq!((renamed.id.as_str(), renamed.version), (TO, 5));
+    assert_eq!(id_problems(&renamed), Vec::<String>::new());
+    assert_eq!(id_problems(&home), Vec::<String>::new());
+    let mut not_a_zone = renamed.clone();
+    not_a_zone.id = "example.com".into();
+    assert!(id_problems(&not_a_zone)[0].contains("one of the home instance's zones"));
+    let mut dotted_linked = linked.clone();
+    dotted_linked.id = "noisypigeon.com".into();
+    assert!(id_problems(&dotted_linked)[0].contains("only the home instance"));
+    let mut linked_slash = linked.clone();
+    linked_slash.id = "noisy/pigeon".into();
+    assert_eq!(id_problems(&linked_slash), Vec::<String>::new());
+    for bad in ["pigeon..dev", "pigeon.dev/x", ".pigeon.dev", "Pigeon.dev"] {
+        let mut r = renamed.clone();
+        r.id = bad.into();
+        r.zones = vec![bad.into()];
+        assert!(!id_problems(&r).is_empty(), "{bad}");
+    }
+    // Signed instance context carries the dotted id; a malformed one is still refused.
+    {
+        use pigeon_contract::{Refused, WorkerContext, sign_with_context, verify_for};
+        let key = b"fixture worker key";
+        let caller = json!({"user":{"id":"fixture"}});
+        let body = br#"{"args":{"instance":"pigeon.dev"}}"#;
+        for (id, ok) in [
+            (TO, true),
+            (FROM, true),
+            ("pigeon..dev", false),
+            ("pigeon.dev/x", false),
+        ] {
+            let context = WorkerContext::new("pigeon-ci-gateway", Some(id));
+            let header = sign_with_context(key, &caller, "call", body, 10, "n", &context);
+            let got = verify_for(key, Some(&header), "call", body, 10, "pigeon-ci-gateway");
+            match ok {
+                true => assert!(got.unwrap().require_instance(id).is_ok(), "{id}"),
+                false => assert_eq!(got, Err(Refused::BadContext), "{id}"),
+            }
+        }
+    }
+
+    // ---- The Directory and CI as they are.
+    let store = RenameDouble::default();
+    let put = |k: &str, v: String| {
+        store.settings.borrow_mut().insert(k.into(), v);
+    };
+    put(&key(FROM), serde_json::to_string(&home).unwrap());
+    put(&key("noisypigeon"), serde_json::to_string(&linked).unwrap());
+    put(INDEX, json!([FROM, "noisypigeon"]).to_string());
+    put(
+        &format!("ledger:{FROM}"),
+        r#"{"buckets":["pigeon-platform-site"]}"#.into(),
+    );
+    put(
+        "ledger:noisypigeon",
+        r#"{"buckets":["noisypigeon-site"]}"#.into(),
+    );
+    store.approval("draft-old", FROM, "pending", false);
+    store.approval("plan-old", FROM, "approved", false);
+    store.approval("used-old", FROM, "used", false);
+    store.approval("noisy", "noisypigeon", "pending", false);
+    store.approval("rename-1", FROM, "pending", true);
+    *store.jobs.borrow_mut() = vec![
+        Some(FROM.into()),
+        Some(FROM.into()),
+        Some("noisypigeon".into()),
+        None,
+        Some(FROM.into()),
+    ];
+    let before = store.settings.borrow().clone();
+
+    // ---- Before the migration nothing reads differently.
+    assert_eq!(block(resolve(&store, FROM)).unwrap(), None);
+    let reads = store.reads.get();
+    assert_eq!(block(resolve(&store, "noisypigeon")).unwrap(), None);
+    assert_eq!(
+        store.reads.get(),
+        reads,
+        "an id with no alias costs no read"
+    );
+    let args = json!({ "instance": FROM, "hours": 24 });
+    assert_eq!(block(current_args(&store, &args)).unwrap(), None);
+    assert_eq!(block(record(&store, FROM)).unwrap().unwrap(), home);
+    let records = [home.clone(), linked.clone()];
+    let read = ScopeRequest::Read {
+        instance: FROM.into(),
+    };
+    assert_eq!(
+        resolve_renamed(&records, &read, None),
+        resolve_scope(&records, &read)
+    );
+    assert_eq!(resolve_scope(&records, &read)["instance"], FROM);
+
+    // ---- The dry run: exactly what will be done, and the digest the passkey binds.
+    let seen = block(observe(&store, FROM, TO)).unwrap();
+    let steps = plan(&seen, FROM, TO);
+    let lines: Vec<String> = describe(&steps)
+        .iter()
+        .map(|l| l.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            "write instance:pigeon.dev: the home record as pigeon.dev, version 5",
+            "move ledger:pigeon-security/platform to ledger:pigeon.dev",
+            "expire 2 open approval(s) for pigeon-security/platform: draft-old, plan-old",
+            "list pigeon.dev in instances:index in place of pigeon-security/platform",
+            "re-attribute 3 CI job(s) from pigeon-security/platform to pigeon.dev (UPDATE jobs SET instance)",
+            "replace instance:pigeon-security/platform with a tombstone naming pigeon.dev: old \
+             console URLs, CI reads and MCP calls naming the old id are answered for pigeon.dev \
+             for 30 days",
+        ],
+        "{lines:#?}"
+    );
+    assert_eq!(
+        *store.settings.borrow(),
+        before,
+        "the dry run changes nothing"
+    );
+    let kind = pigeon_core::approval::Kind::LinkedPlan;
+    let digest_of = |seen: &rename::Seen| {
+        let steps = plan(seen, FROM, TO);
+        let payload = rename::payload(FROM, TO, &rename::record_digest(seen), &steps);
+        assert_eq!(payload["rename"], true);
+        pigeon_core::approval::payload_digest(&kind, FROM, &payload)
+    };
+    let approved = digest_of(&seen);
+    assert_eq!(
+        digest_of(&block(observe(&store, FROM, TO)).unwrap()),
+        approved,
+        "the same state plans the same digest"
+    );
+    // The record changing since the plan changes the digest, so the approval no longer runs.
+    let mut edited = seen.clone();
+    let mut h = home.clone();
+    h.title = "pigeon!".into();
+    edited.old = Some(Stored::Record(Box::new(h)));
+    assert_ne!(rename::record_digest(&edited), rename::record_digest(&seen));
+    assert_ne!(digest_of(&edited), approved);
+
+    // ---- The run.
+    let now = 1_800_000_000_000;
+    let done = block(run(&store, &steps, "rename-1", now)).unwrap();
+    assert_eq!(done.len(), 6, "{done:?}");
+    let settings = store.settings.borrow().clone();
+    let moved: Instance = serde_json::from_str(&settings[&key(TO)]).unwrap();
+    assert_eq!(moved, renamed);
+    assert_eq!(settings[INDEX], json!(["noisypigeon", TO]).to_string());
+    assert_eq!(
+        settings[&format!("ledger:{TO}")],
+        r#"{"buckets":["pigeon-platform-site"]}"#
+    );
+    assert!(!settings.contains_key(&format!("ledger:{FROM}")));
+    assert!(settings.contains_key("ledger:noisypigeon"));
+    let tomb: Tombstone = serde_json::from_str(&settings[&key(FROM)]).unwrap();
+    assert_eq!(
+        tomb,
+        Tombstone {
+            renamed_to: TO.into(),
+            renamed_from: FROM.into(),
+            renamed_ms: now,
+            compat_until_ms: now + COMPAT_MS,
+            approval: "rename-1".into(),
+        }
+    );
+    assert_eq!(COMPAT_MS, 30 * 24 * 3_600_000);
+    // No key names the old id but the tombstone.
+    let old_keys: Vec<&String> = settings.keys().filter(|k| k.contains(FROM)).collect();
+    assert_eq!(old_keys, [&key(FROM)]);
+    assert!(!settings[INDEX].contains(FROM));
+    // CI jobs are re-attributed; others' are not.
+    assert_eq!((store.jobs_of(FROM), store.jobs_of(TO)), (0, 3));
+    assert_eq!(store.jobs_of("noisypigeon"), 1);
+    // Open approvals naming the old id expired; the used one, others' and the rename's own kept.
+    let (state, note) = store.state_of("draft-old");
+    assert_eq!(state, "expired");
+    assert!(note.unwrap().contains("renamed"));
+    assert_eq!(store.state_of("plan-old").0, "expired");
+    assert_eq!(store.state_of("used-old").0, "used");
+    assert_eq!(store.state_of("noisy").0, "pending");
+    assert_eq!(store.state_of("rename-1").0, "pending");
+
+    // ---- After: the tombstone resolves; the old id reads as the new one.
+    assert_eq!(block(resolve(&store, FROM)).unwrap().as_deref(), Some(TO));
+    assert_eq!(block(resolve(&store, TO)).unwrap(), None);
+    assert_eq!(block(record(&store, FROM)).unwrap().unwrap().id, TO);
+    assert_eq!(block(record(&store, TO)).unwrap().unwrap(), renamed);
+    // MCP and console calls naming the old id (`instance` arguments, observability's included).
+    assert_eq!(
+        block(current_args(&store, &args)).unwrap(),
+        Some(json!({ "instance": TO, "hours": 24 }))
+    );
+    assert_eq!(
+        block(current_args(&store, &json!({ "instance": "noisypigeon" }))).unwrap(),
+        None
+    );
+    // instances_list: one home record, pigeon.dev.
+    let index: Vec<String> =
+        serde_json::from_str(store.settings.borrow().get(INDEX).unwrap()).unwrap();
+    let listed: Vec<Instance> = index
+        .iter()
+        .map(|id| block(record(&store, id)).unwrap().unwrap())
+        .collect();
+    let homes: Vec<&Instance> = listed
+        .iter()
+        .filter(|i| i.account == AccountRef::Home)
+        .collect();
+    assert_eq!(homes.len(), 1);
+    assert_eq!(homes[0].id, TO);
+    // CI reads naming the old id resolve for pigeon.dev and CI accepts them; jobs attributed
+    // after the rename resolve by repository to pigeon.dev.
+    let records = [renamed.clone(), linked.clone()];
+    let scope = resolve_renamed(&records, &read, Some(TO));
+    assert_eq!(scope["instance"], TO);
+    assert_eq!(scope["renamed_from"], FROM);
+    let scope: pigeon_ci::scope::Scope = serde_json::from_value(scope).unwrap();
+    assert!(scope.answers(FROM) && scope.answers(TO) && !scope.answers("noisypigeon"));
+    assert!(scope.allows(Some(TO), "pigeon-security/pigeon", "test"));
+    assert!(!scope.allows(Some(FROM), "pigeon-security/pigeon", "test"));
+    let fresh = resolve_scope(
+        &records,
+        &ScopeRequest::Attribute {
+            repo: "pigeon-security/pigeon".into(),
+            job: "test".into(),
+        },
+    );
+    assert_eq!(fresh["instance"], TO);
+    assert!(fresh.get("renamed_from").is_none());
+    let unaliased: pigeon_ci::scope::Scope = serde_json::from_value(fresh).unwrap();
+    assert!(!unaliased.answers(FROM));
+    // Console URLs: the old id's pages answer 301 to the same page of the new id.
+    let (id, rest) = page::page_instance("/app/pigeon-security%2Fplatform/site/visitors").unwrap();
+    assert_eq!((id.as_str(), rest), (FROM, "/site/visitors"));
+    let to = format!("{}/{}{rest}", page::BASE, page::segment(TO));
+    assert_eq!(to, "/app/pigeon.dev/site/visitors");
+    assert_eq!(page::url(TO, "inbox", None), "/app/pigeon.dev/inbox");
+    for p in [
+        "/app/pigeon.dev/inbox",
+        "/app/pigeon.dev/site/visitors",
+        &to,
+    ] {
+        assert_eq!(Get::route(p, None), Some(Get::App), "{p}");
+    }
+    for p in [
+        "/app/shell.css",
+        "/app/pigeon.dev",
+        "/app/pigeon.dev/site/x.js",
+        "/app/views/nope.js",
+    ] {
+        assert_ne!(Get::route(p, None), Some(Get::App), "{p}");
+    }
+    assert_eq!(
+        page::page_instance("/app/pigeon.dev/inbox"),
+        Some((TO.to_string(), "/inbox"))
+    );
+    assert_eq!(page::page_instance("/app"), None);
+    assert_eq!(
+        Get::route("/app", Some("instance=pigeon.dev&tab=cost")),
+        Some(Get::Bookmark(page::Bookmark::Area {
+            instance: Some(TO.into()),
+            area: "cost",
+            view: None,
+        }))
+    );
+
+    // ---- A second run is a no-op.
+    let again = plan(&block(observe(&store, FROM, TO)).unwrap(), FROM, TO);
+    assert_eq!(again, Vec::<Step>::new());
+    let settled = store.settings.borrow().clone();
+    assert!(
+        block(run(&store, &again, "rename-2", now + 1))
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(*store.settings.borrow(), settled);
+
+    // ---- It refuses a conflicting pigeon.dev, and changes nothing.
+    let conflict = RenameDouble::default();
+    for (k, v) in &before {
+        conflict.settings.borrow_mut().insert(k.clone(), v.clone());
+    }
+    let mut other = renamed.clone();
+    other.title = "someone else's".into();
+    conflict
+        .settings
+        .borrow_mut()
+        .insert(key(TO), serde_json::to_string(&other).unwrap());
+    let snapshot = conflict.settings.borrow().clone();
+    let blocked = plan(&block(observe(&conflict, FROM, TO)).unwrap(), FROM, TO);
+    assert!(
+        matches!(&blocked[..], [Step::Blocked { why }] if why.contains("already exists as a different record")),
+        "{blocked:?}"
+    );
+    assert!(block(run(&conflict, &blocked, "x", now)).is_err());
+    assert_eq!(*conflict.settings.borrow(), snapshot);
+    // A ledger already under the new id with another value also stops it.
+    conflict.settings.borrow_mut().remove(&key(TO));
+    conflict
+        .settings
+        .borrow_mut()
+        .insert(format!("ledger:{TO}"), "{}".into());
+    let blocked = plan(&block(observe(&conflict, FROM, TO)).unwrap(), FROM, TO);
+    assert!(
+        matches!(&blocked[..], [Step::Blocked { .. }]),
+        "{blocked:?}"
+    );
+    // Only the home instance, and only to one of its zones.
+    let mut seen = block(observe(&store, FROM, TO)).unwrap();
+    let mut not_home = linked.clone();
+    not_home.id = FROM.into();
+    seen.old = Some(Stored::Record(Box::new(not_home)));
+    seen.new = None;
+    assert!(
+        matches!(&plan(&seen, FROM, TO)[..], [Step::Blocked { why }] if why.contains("not the home instance"))
+    );
+    seen.old = Some(Stored::Record(Box::new(home.clone())));
+    assert!(
+        matches!(&plan(&seen, FROM, "example.com")[..], [Step::Blocked { why }] if why.contains("zones"))
+    );
+
+    // ---- A run that stopped part way plans only what remains, then completes.
+    let partial = RenameDouble::default();
+    for (k, v) in &before {
+        partial.settings.borrow_mut().insert(k.clone(), v.clone());
+    }
+    *partial.jobs.borrow_mut() = vec![Some(FROM.into())];
+    partial.fail_jobs.set(true);
+    let steps = plan(&block(observe(&partial, FROM, TO)).unwrap(), FROM, TO);
+    assert!(block(run(&partial, &steps, "rename-1", now)).is_err());
+    assert_eq!(
+        block(resolve(&partial, FROM)).unwrap(),
+        None,
+        "no tombstone until the last step"
+    );
+    partial.fail_jobs.set(false);
+    let rest = plan(&block(observe(&partial, FROM, TO)).unwrap(), FROM, TO);
+    assert!(
+        matches!(
+            &rest[..],
+            [
+                Step::ReattributeJobs { jobs: 1, .. },
+                Step::Tombstone { .. }
+            ]
+        ),
+        "{rest:?}"
+    );
+    block(run(&partial, &rest, "rename-3", now)).unwrap();
+    assert_eq!(partial.jobs_of(TO), 1);
+    assert_eq!(
+        plan(&block(observe(&partial, FROM, TO)).unwrap(), FROM, TO),
+        Vec::<Step>::new()
+    );
 }

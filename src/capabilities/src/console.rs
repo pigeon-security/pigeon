@@ -267,12 +267,23 @@ impl Console {
                     view,
                 }) => {
                     let to = match instance {
-                        Some(id) => page::url(&id, area, view),
+                        Some(id) => {
+                            let id = crate::instances::renamed(cx.env, &id).await?.unwrap_or(id);
+                            page::url(&id, area, view)
+                        }
                         None => home_url(cx.env, area, view).await,
                     };
                     page::redirect(&to)
                 }
                 Get::App => {
+                    // An old instance id (R1's compat window): the same page of its new id.
+                    if let Some((id, rest)) = page::page_instance(&path)
+                        && let Some(to) = crate::instances::renamed(cx.env, &id).await?
+                    {
+                        let query = url.query().map_or(String::new(), |q| format!("?{q}"));
+                        let to = format!("{}/{}{rest}{query}", page::BASE, page::segment(&to));
+                        return page::moved(&to);
+                    }
                     let signed = self.signed(cx.env, &req).await?;
                     page::html(&page::shell(
                         &self.passkeys.site_name,

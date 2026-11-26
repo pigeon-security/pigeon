@@ -294,6 +294,9 @@ pub fn owner<'a>(
 /// the same way. The person's policy is asked first ([`approvals::gate`]): a tool it gates runs
 /// only with the person's passkey approval of that exact call, used once.
 pub async fn dispatch(cx: &Context<'_>, name: &str, args: &Value) -> Result<Value> {
+    // An `instance` argument naming a renamed id (R1's compat window) names the new one.
+    let current = instances::current_args(cx.env, args).await?;
+    let args = current.as_ref().unwrap_or(args);
     let bound = cx
         .instance
         .map(|scope| scope.bind(name, args))

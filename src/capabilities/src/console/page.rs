@@ -79,13 +79,23 @@ pub fn asset_at(path: &str) -> Option<(&'static str, &'static str)> {
 }
 
 /// Whether `path` is one of the console's pages, `/app` or below it, rather than an asset or
-/// its op endpoint: no segment holds a dot.
+/// its op endpoint: no segment holds a dot, but for the instance's when an area follows it, so
+/// the home instance's `/app/pigeon.dev/inbox` is a page (R1) and `/app/shell.css` is not.
 pub fn is_page(path: &str) -> bool {
     let path = path.trim_end_matches('/');
-    path == BASE
-        || path
-            .strip_prefix(BASE)
-            .is_some_and(|rest| rest.starts_with('/') && !rest.contains('.') && rest != "/op")
+    if path == BASE {
+        return true;
+    }
+    let Some(rest) = path.strip_prefix(BASE).and_then(|r| r.strip_prefix('/')) else {
+        return false;
+    };
+    if rest == "op" {
+        return false;
+    }
+    match rest.split_once('/') {
+        Some((_, after)) => !after.contains('.'),
+        None => !rest.contains('.'),
+    }
 }
 
 /// Where an old console bookmark goes, in one hop (C7).
@@ -147,12 +157,13 @@ pub const OLD_TABS: &[(&str, Option<&str>, &str, Option<&str>)] = &[
     ("home", None, "overview", None),
 ];
 
-/// Whether `id` may be carried from an old link into a console URL as an instance id.
+/// Whether `id` may be carried from an old link into a console URL as an instance id: a
+/// dotted one too, such as the home instance's `pigeon.dev` (R1).
 fn instance_like(id: &str) -> bool {
     (1..=64).contains(&id.len())
         && id
             .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'/')
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'/' | b'.'))
 }
 
 /// Where the old bookmark at `path` with `query` goes; none for anything else, including the
@@ -200,6 +211,36 @@ pub fn bookmark(path: &str, query: Option<&str>) -> Option<Bookmark> {
         area,
         view,
     })
+}
+
+/// The instance a console page at `path` names, decoded, with the rest of the path after it
+/// (`/inbox`, `/site/visitors`): for answering an old instance id with a redirect to its new one
+/// (R1). `None` when the path names no instance. Pure.
+pub fn page_instance(path: &str) -> Option<(String, &str)> {
+    let rest = path.strip_prefix(BASE)?.strip_prefix('/')?;
+    let (segment, after) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+    let id = percent_decode(segment);
+    (!id.is_empty()).then_some((id, after))
+}
+
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && let Some(b) = s
+                .get(i + 1..i + 3)
+                .and_then(|h| u8::from_str_radix(h, 16).ok())
+        {
+            out.push(b);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// The console's URL for `area`, and `view` when given, of instance `instance`. Each segment is
@@ -273,6 +314,15 @@ pub fn asset(body: &str, content_type: &str) -> Result<Response> {
     headers.set("X-Content-Type-Options", "nosniff")?;
     headers.set("Cache-Control", "no-store")?;
     Ok(Response::ok(body)?.with_headers(headers))
+}
+
+/// A permanent redirect to `location`, a path on this host: an old instance id's console page
+/// to the same page of the id it was renamed to (R1's compat window).
+pub fn moved(location: &str) -> Result<Response> {
+    let headers = Headers::new();
+    headers.set("Location", location)?;
+    headers.set("Cache-Control", "no-store")?;
+    Ok(Response::empty()?.with_status(301).with_headers(headers))
 }
 
 /// A redirect to `location`, a path on this host; a browser keeps the request's fragment, so

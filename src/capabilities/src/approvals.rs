@@ -627,6 +627,12 @@ pub fn listing(open: &[Record]) -> Value {
                 r,
                 if r.summary["retire"] == true {
                     format!("Retire {}: remove what pigeon made for it", r.subject)
+                } else if r.summary["rename"] == true {
+                    format!(
+                        "Rename the home instance {} to {}",
+                        r.subject,
+                        r.summary["to"].as_str().unwrap_or_default()
+                    )
                 } else {
                     format!("Apply the plan for {}", r.subject)
                 },

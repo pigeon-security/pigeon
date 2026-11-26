@@ -12,6 +12,8 @@ pub mod manifest;
 pub mod plan;
 pub(crate) mod publishing;
 pub mod record;
+pub mod rename;
+mod renaming;
 pub mod retire;
 mod retiring;
 pub mod tools;
@@ -89,12 +91,24 @@ pub async fn all(env: &Env) -> Result<Vec<Instance>> {
     Ok(out)
 }
 
-/// Instance `id`'s record, if there is one.
+/// Instance `id`'s record, if there is one. An id renamed by a migration that has run (R1)
+/// answers the record it was renamed to ([`rename::record`]).
 pub async fn one(env: &Env, id: &str) -> Result<Option<Instance>> {
-    match directory(env, "setting.get", json!({ "key": key(id) })).await? {
-        Value::String(text) => Ok(Some(serde_json::from_str(&text)?)),
-        _ => Ok(None),
-    }
+    rename::record(&renaming::Live { env }, id).await
+}
+
+/// The id `id` was renamed to, once its rename has run ([`rename::resolve`]): only an
+/// [`rename::ALIASES`] id whose tombstone exists, and any other id is answered without a read.
+/// Before the migration, `None`.
+pub async fn renamed(env: &Env, id: &str) -> Result<Option<String>> {
+    rename::resolve(&renaming::Live { env }, id).await
+}
+
+/// `args` with its `instance` argument naming the id it was renamed to, when it names a renamed
+/// id; `None` when nothing changes ([`rename::current_args`]). What every tool call and console
+/// read does with an old id during the compat window.
+pub async fn current_args(env: &Env, args: &Value) -> Result<Option<Value>> {
+    rename::current_args(&renaming::Live { env }, args).await
 }
 
 async fn ids(env: &Env) -> Result<Vec<String>> {
@@ -158,6 +172,12 @@ impl Instances {
             Ok(r) => r,
             Err(e) => return Ok(Err(vec![format!("the record is not an instance: {e}")])),
         };
+        if let Some(to) = renamed(cx.env, &record.id).await? {
+            return Ok(Err(vec![format!(
+                "instance {} was renamed to {to}: edit {to}, or wait until the old id is retired",
+                record.id
+            )]));
+        }
         let everyone = all(cx.env).await?;
         let current = everyone.iter().find(|i| i.id == record.id).cloned();
         let others: Vec<Instance> = everyone.into_iter().filter(|i| i.id != record.id).collect();
@@ -743,7 +763,11 @@ impl Instances {
         let got = directory(cx.env, "approval.get", json!({ "id": approval_id })).await?;
         let id = got["subject"]
             .as_str()
-            .filter(|_| got["kind"] == "linked_plan" && !retiring::is_retire(&got))
+            .filter(|_| {
+                got["kind"] == "linked_plan"
+                    && !retiring::is_retire(&got)
+                    && !renaming::is_rename(&got)
+            })
             .ok_or_else(|| bad(&format!("there is no plan approval {approval_id}")))?
             .to_string();
         if let Some(home) = one(cx.env, &id)
@@ -987,6 +1011,28 @@ impl Capability for Instances {
                     "required": ["plan"]
                 }),
             },
+            Tool {
+                name: rename::TOOL,
+                description: "R1: rename the home instance's id from `pigeon-security/platform` \
+                              to `pigeon.dev`, its zone. Without `plan`, the dry run: lists \
+                              exactly what it would do (write instance:pigeon.dev, move the \
+                              ledger and any GitHub state, expire open approvals naming the old \
+                              id, swap the index entry, re-attribute CI jobs, leave a tombstone \
+                              at the old key answering the old id for 30 days) and, unless \
+                              `dry_run`, waits on the console's Approvals tab for the person's \
+                              passkey, bound to both ids, the home record's digest and the \
+                              steps. With `plan` (that approval), reads everything again, \
+                              refuses if the record or the plan changed, and runs it once. \
+                              Refuses when pigeon.dev already exists as a different record. A \
+                              second run finds nothing to do.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "dry_run": { "type": "boolean", "description": "Only list the steps; ask for no approval." },
+                        "plan": { "type": "string", "description": "The rename plan's approval id, to run it." }
+                    }
+                }),
+            },
             Tool::bare(
                 "instance_subdomains",
                 "The platform subdomains approved plans attached, each with the instance \
@@ -1019,6 +1065,7 @@ impl Capability for Instances {
                 "instance_apply" => self.apply(cx, args).await,
                 "instance_retire_plan" => self.retire_plan(cx, args).await,
                 "instance_retire_apply" => self.retire_apply(cx, args).await,
+                rename::TOOL => self.rename_home(cx, args).await,
                 other => Err(unknown(other)),
             }
         })

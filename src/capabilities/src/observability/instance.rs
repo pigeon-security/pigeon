@@ -170,7 +170,7 @@ pub(super) async fn metrics(cx: &Context<'_>, args: &Value) -> Result<Value> {
         .await
         .map_err(|_| bad("Cloudflare Worker metrics are unavailable for the approved account"))?;
     let mut result = worker_result(&result, script).map_err(bad)?;
-    result["instance"] = json!(instance);
+    result["instance"] = json!(record.id);
     result["worker"] = json!(script);
     result["from"] = json!(from);
     result["to"] = json!(to);

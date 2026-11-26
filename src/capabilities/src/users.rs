@@ -252,7 +252,18 @@ impl Directory {
         let mut next: Instance = serde_json::from_value(r.payload["record"].clone())?;
         let key = instances::key(&next.id);
         let at = match self.setting_value(&key, t)? {
-            Some(text) => serde_json::from_str::<Instance>(&text)?.version,
+            Some(text) => match instances::rename::Stored::parse(&text)? {
+                instances::rename::Stored::Record(r) => r.version,
+                // R1: a renamed id's key holds its tombstone, which no draft replaces.
+                instances::rename::Stored::Tombstone(to) => {
+                    r.state = approval::State::Expired;
+                    r.note = Some(format!(
+                        "instance {} was renamed to {}",
+                        next.id, to.renamed_to
+                    ));
+                    return Ok(());
+                }
+            },
             None => 0,
         };
         if approval::stale_draft(r, at, base) {
@@ -1232,6 +1243,26 @@ impl Directory {
                 json!({ "open": open, "expired": expired })
             }
             "approval.get" => to_value(self.approval_get(s("id"))?),
+            // Expires those of approvals `ids` still open, with `note`: R1's rename, whose old
+            // id their digests name. Answers the ids it expired.
+            "approval.expire" => {
+                let mut expired = Vec::new();
+                for id in a["ids"].as_array().into_iter().flatten() {
+                    let Some(mut r) = self.approval_get(id.as_str().unwrap_or_default())? else {
+                        continue;
+                    };
+                    if matches!(
+                        r.state,
+                        approval::State::Pending | approval::State::Approved
+                    ) {
+                        r.state = approval::State::Expired;
+                        r.note = Some(s("note").to_string());
+                        self.approval_put(&r)?;
+                        expired.push(r.id);
+                    }
+                }
+                json!({ "expired": expired })
+            }
             "approval.decide" | "approval.take" => {
                 let id = s("id");
                 let mut r = self

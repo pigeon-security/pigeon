@@ -304,7 +304,22 @@ where
     }
     token
         .with(open, |store| async move {
-            let provenance = site_publish::staged(&store, release, owner).await?;
+            let provenance = match site_publish::staged(&store, release, owner).await {
+                // R1: a release staged before the rename names the old id.
+                Err(e) => match super::rename::renamed_from(owner.instance) {
+                    Some(old) => {
+                        let before = Owner {
+                            instance: old,
+                            ..*owner
+                        };
+                        site_publish::staged(&store, release, &before)
+                            .await
+                            .map_err(|_| e)?
+                    }
+                    None => return Err(e),
+                },
+                Ok(p) => p,
+            };
             still_current().await?;
             site_publish::activate(&store, release).await?;
             Ok(provenance)

@@ -15,8 +15,9 @@ use serde_json::Value;
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Instance {
-    /// The instance id, such as "pigeon-security/platform" or "noisypigeon". Ids may not hold a
-    /// dot yet: the home instance becomes `pigeon.dev` in its own migration (R1).
+    /// The instance id, such as "noisypigeon" or "pigeon-security/platform". Only the home
+    /// instance's may hold a dot, and only as one of its zones: `pigeon.dev`, which R1's
+    /// migration (`instance_rename_home`) renames it to.
     pub id: String,
     /// A short human readable title.
     pub title: String,
@@ -282,6 +283,20 @@ fn check_id(instance: &Instance, problems: &mut Vec<String>) {
     }
     if id.matches('/').count() > 1 {
         problems.push(format!("The id \"{id}\" may contain at most one slash."));
+    }
+    // R1: the home instance may be named for one of its zones, such as `pigeon.dev`.
+    if id.contains('.') && !id.contains('/') {
+        if instance.account != AccountRef::Home {
+            problems.push(format!(
+                "The id \"{id}\" holds a dot, which only the home instance's may, as one of its zones."
+            ));
+        } else if !dns_name(id) || !instance.zones.iter().any(|z| z == id) {
+            problems.push(format!(
+                "The id \"{id}\" holds a dot, so it must be one of the home instance's zones ({}).",
+                instance.zones.join(", ")
+            ));
+        }
+        return;
     }
     if !id.is_empty() && !id.split('/').all(label) {
         problems.push(format!(
