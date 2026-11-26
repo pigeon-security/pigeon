@@ -29,6 +29,12 @@ map entry does not deploy that Worker: it is not in the map yet (the Log, 2026-1
 landing here also changes shared paths (`Cargo.toml`, `ci/`, `.pigeon/`), so it redeploys core
 and every Worker already in the map.
 
+**Stale (2026-11-26).** This section is the first rehearsal's procedure, kept as history. Two of
+its claims no longer hold: since L6 (`28caf24`) a Worker deploys in the landing that adds its map
+entry; and `.pigeon/ci.toml` and the gate's scripts are checks, not shared (only `Cargo.toml`,
+`Cargo.lock` and the deploy scripts every deploy runs are), while `deploy-<worker>.sh` belongs to
+its Worker. See "Landings as built" below.
+
 1. Land `claude/do-rehearsal-a`. Then a landing touching only `src/dotest-a/` (a one-line
    comment) deploys a alone.
 2. Land `claude/do-rehearsal-b`. In that landing a (already mapped) deploys its rebinding, and b
@@ -47,6 +53,10 @@ workers.dev needs one more allowlist entry: with `workers_dev = true`, wrangler 
 account's workers.dev subdomain (`GET /accounts/{account}/workers/subdomain`) after the upload
 and before it enables the script's subdomain, and the deploy proxy does not allow it. Until it
 does, the deploy fails after the upload.
+
+**Stale (2026-11-26).** The entry already existed: in the second rehearsal,
+`PIGEON_WORKER_DIR=src/dotest-a sh ci/deploy/allowlist.sh` found all 23 calls on the allowlist,
+`GET …/workers/subdomain` among them, and both Workers deployed with `workers_dev = true`.
 
 ## Running it
 
@@ -71,6 +81,9 @@ Any other result is the fallback in workers-split.md, phase 3: no transfer, a ne
 `pigeon-model-gateway`. Record the answers in workers-split.md's Log either way.
 
 ## Removing them
+
+The second rehearsal's pair was removed the same way on 2026-11-26 ("Second rehearsal: results",
+below). The first removal:
 
 Done on 2026-11-22. Their map entries, jobs, deploy scripts and crates came out in the
 delivery-speed batch (workers-split.md, Log). Each shared landing had spent two of CI's four
@@ -110,9 +123,10 @@ in the dashboard before anything else (cleanup.md, Follow-ups for the person, 4)
 
 ### Landings
 
-1. A gate change (the person's approval): a's crate as it was, a's `[[worker]]` entry in
-   `ci/workers.toml`, `ci/deploy/deploy-dotest-a.sh` and `[jobs.deploy-dotest-a]` in
-   `.pigeon/ci.toml`. It deploys core and the proxy (the map), not a (cleanup item 4).
+1. A gate change (the delegate's approval, `gate-changes`; not the passkey): a's crate as it
+   was, a's `[[worker]]` entry in `ci/workers.toml`, `ci/deploy/deploy-dotest-a.sh` and
+   `[jobs.deploy-dotest-a]` in `.pigeon/ci.toml`. ~~It deploys core and the proxy (the map), not
+   a (cleanup item 4).~~ Stale: since L6 it deploys a too ("Landings as built", below).
 2. A landing touching only `src/dotest-a/`, the export removed. It is a's lane alone.
 
 ### Landings as built (2026-11-26, both Workers deleted)
@@ -176,3 +190,53 @@ A cheaper option, for the person to choose instead: skip the pair, and remove on
 from core first, on a quiet queue. A refused upload changes nothing on Cloudflare (incident 5:
 core kept serving its build), and the only user of model jobs is the AI agents planner. Then
 `CiScheduler` in a second landing. The plan above is the conservative one, as do-rehearsal did.
+
+## Second rehearsal: results (2026-11-26)
+
+**It passed.** Cloudflare takes an upload of a script that no longer exports a class its
+migrations created, when the class was transferred away; it takes a redeploy of it, and a
+rollback that exports the class again. R1 then landed.
+
+| Step | Upload | State after it |
+| --- | --- | --- |
+| Baseline, 20:51 UTC (a alone) | deployed by the fallback deploy-a landing | a hosts `Probe`: rows with `at` `1795725926659`, alarm `1795812326659`, `alarm_fired` 0 |
+| Transfer: b's first deploy, about 21:24 (gate-b) | accepted on the first attempt | both Workers' cron logged `host: pigeon-dotest-b`, the same rows and alarm, `alarm_fired` 0. a's old binding (no `script_name`) forwarded to b |
+| rebind-a: `PROBE` gains `script_name = "pigeon-dotest-b"` | accepted | unchanged |
+| unexport-a: a no longer exports `Probe`; keeps its v1 migration and its binding; no `deleted_classes` | **accepted on the first attempt**. Wrangler showed `env.PROBE (Probe, defined in pigeon-dotest-b)` | unchanged |
+| redeploy-a: a comment | accepted | unchanged |
+| reexport-a: a exports `Probe` again, as a rollback to rebind-a's build would | accepted | unchanged, `host` still `pigeon-dotest-b` |
+
+All four answers in "What to record" held: a's upload without the class was accepted; after it
+`host` was `pigeon-dotest-b` with the same rows and alarm; a second deploy of a was accepted;
+and so was a deploy of a build that exports `Probe` again.
+
+**R1** landed on 2026-11-26 around 23:10 UTC (`724e98b`). Core no longer exports `CiScheduler`
+or `ModelJobs`, and keeps migrations v2 and v4 and the `script_name` bindings. Its upload was
+accepted, with no incident. R1 kept `pigeon-models` as a dependency of `src/platform`, to avoid
+a `Cargo.lock` landing of its own; nothing in the crate used it, so the removal landing below
+drops it.
+
+**How it was observed.** `observability_errors` on each Worker's five-minute cron line
+(`console.error`, `dotest-state {...}`); workers.dev was never read. The tool redacts ids, so
+the rows' `at` and the alarm time served as the object's fingerprint instead of `id`.
+
+**Incidents along the way.**
+
+- gate-a's `deploy-dotest-a` lost its runner, so the fallback `claude/do-rehearsal2-deploy-a`
+  landed and deployed a alone.
+- rebind-a and reexport-a each lost a CI container once and were landed again.
+- rebind-a was first built on gate-b's pre-merge commit, so the Lander counted gate-b's paths
+  again. Lesson: stacked rehearsal branches must be rebased onto main after each merge, not only
+  before landing.
+
+**Stale claims found in this file** (marked above): a Worker added to the map now deploys in
+the landing that adds it (L6); the workers.dev allowlist entry already existed; gate changes
+need the delegate's approval, not the passkey; `.pigeon/ci.toml` and the gate's scripts are
+checks, not shared.
+
+**Removed** on 2026-11-26 in one gate landing, as after the first rehearsal (`5ced0e0`): both
+crates and workspace members, their `Cargo.lock` entries, both map entries, both deploy scripts
+and jobs, the smoke lists' mentions, the architecture check's `worker_unreached` exemption and
+`repo-map.md`'s entries. The scripts are deleted by hand in the dashboard: `pigeon-dotest-a`
+first (its `PROBE` binding names the class in b), then `pigeon-dotest-b`. The two workers.dev
+hostnames can then leave the session environment's network allowlist, if they were added.

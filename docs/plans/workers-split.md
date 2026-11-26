@@ -620,8 +620,9 @@ In the Lander's queue at handoff (submitted by the parent session):
 
 Recorded, not started (no branch):
 
-4. Core stops exporting the transferred classes `CiScheduler` and `ModelJobs` (cleanup item 6;
-   needs a rehearsal first, as the transfers did).
+4. ~~Core stops exporting the transferred classes `CiScheduler` and `ModelJobs` (cleanup item 6;
+   needs a rehearsal first, as the transfers did).~~ Done 2026-11-26: the second rehearsal
+   passed and R1 landed (`724e98b`; the Log).
 5. `CiRunner` (the CI runners) moves to the CI gateway (cleanup item 13): the last class core
    hosts for another Worker. High risk; plan it like phase 4's transfer.
 6. Reuse the tested build at deploy (cleanup item 11): not designed.
@@ -691,6 +692,25 @@ What only this session knew (lessons for whoever picks this up):
 
 ## Log
 
+- 2026-11-26: the second DO rehearsal passed (`do-rehearsal.md`, "Second rehearsal: results").
+  Baseline at 20:51 UTC: a hosted `Probe` with rows at `1795725926659`, alarm `1795812326659`,
+  `alarm_fired` 0. b's first deploy (about 21:24) was accepted on the first attempt and both
+  crons then logged `host: pigeon-dotest-b` with the same rows and alarm; a's old binding (no
+  `script_name`) forwarded to b. rebind-a, unexport-a (no `Probe` export, v1 migration and
+  binding kept, no `deleted_classes`: accepted on the first attempt, wrangler showing
+  `env.PROBE (Probe, defined in pigeon-dotest-b)`), redeploy-a and reexport-a (a rollback that
+  exports `Probe` again) were all accepted, state unchanged. Observed with `observability_errors`
+  on a five-minute cron's `console.error` line; ids are redacted there, so rows' `at` and the
+  alarm time were the fingerprint. Incidents: gate-a's dotest-a deploy lost its runner (the
+  fallback deploy-a landing deployed a); rebind-a and reexport-a each lost a CI container once
+  and were landed again; rebind-a was first built on gate-b's pre-merge commit, so the Lander
+  counted gate-b's paths again (rebase stacked branches onto main after each merge).
+  - R1 landed around 23:10 UTC (`724e98b`): core no longer exports `CiScheduler`/`ModelJobs`,
+    keeps migrations v2/v4 and the `script_name` bindings; upload accepted, no incident. This
+    closes the open item "Cleanup. Core stops exporting `ModelJobs` and `CiScheduler`".
+  - Then a gate landing removed pigeon-dotest-a and -b from the repo (and `src/platform`'s
+    unused `pigeon-models` dependency). The person deletes both scripts in the dashboard, a
+    first.
 - 2026-11-26: clean-up item 7, core's `CiScheduler` and `ModelJobs` exports, checked again.
   Core's `wrangler.toml` still declares both classes live in its own migrations (v2 and v4,
   `new_sqlite_classes`) with no `deleted_classes` step; their storage left core by

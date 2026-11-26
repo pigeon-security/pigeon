@@ -44,7 +44,7 @@ day), L (more). "Tonight" means built on a branch tonight.
 | 3 | Check every `wrangler.toml` in the gate, without building | S | low | person (ci/) | follow-up 1, script tested |
 | 4 | A new Worker in one landing, not two | M | medium | code, later | procedure below; design below |
 | 5 | Pinned CI job retries on its connector | none | none | none | already fixed on main |
-| 6 | Core stops exporting `CiScheduler` and `ModelJobs` | S | medium | code, later | needs a rehearsal |
+| 6 | Core stops exporting `CiScheduler` and `ModelJobs` | S | medium | code | done: rehearsal passed, R1 landed (`724e98b`) |
 | 7 | Drop the gate's redundant `cargo check -p pigeon-platform` | XS | low | person (ci/) | follow-up 2 |
 | 8 | Clearer incident text for a Worker's first deploy | S | low | code, later | proposed |
 | 9 | Plan statuses out of date with the split | XS | none | docs | done on this branch |
@@ -180,6 +180,11 @@ day), L (more). "Tonight" means built on a branch tonight.
   away. Incident 5 shows that an upload can be refused over a moved class, and core runs the
   Lander. Rehearse first with a throwaway pair, as `do-rehearsal.md` did, and land on a quiet
   queue.
+- **Done (2026-11-26).** The second rehearsal passed (`do-rehearsal.md`, "Second rehearsal:
+  results"): a source that no longer exports a transferred class uploads, redeploys and rolls
+  back. R1 landed around 23:10 UTC (`724e98b`): no shims, migrations v2 and v4 and the
+  `script_name` bindings kept, upload accepted, no incident. The rehearsal Workers then left the
+  repo; `pigeon-models` left `src/platform`'s dependencies in the same landing.
 
 ### 7. The gate checks the platform twice
 
@@ -339,9 +344,10 @@ alone (plus whatever the map adds for `src/capabilities`).
    B2 onto main before landing it (see Branches). After B2's core deploy, `land_status` should
    show no `incidents_to_see` except dotest-a's, which is hidden, and the older ones read
    `covered` on their landings.
-4. **Check the rehearsal Workers are gone.** `pigeon-dotest-a` and `pigeon-dotest-b` are to be
-   deleted by hand in the dashboard, a first (`docs/plans/do-rehearsal.md`). If they still
-   exist, delete them.
+4. **Delete the rehearsal Workers.** The second rehearsal rebuilt `pigeon-dotest-a` and
+   `pigeon-dotest-b` (2026-11-26), and they are out of the repo again. Delete both by hand in
+   the dashboard, a first (its `PROBE` binding names the class in b), then b
+   (`docs/plans/do-rehearsal.md`).
 5. **Decide whether item 4 (a new Worker in one landing) is worth building** before the next
    Worker is added. Until then, the procedure in item 4 is the way.
 
@@ -387,7 +393,7 @@ existing smoke function the new scenario goes directly after.
 | L6 | a new Worker in one landing (item 4) | L4 and L5, rebased together | merge.rs `see`, land.rs check | core | none | `core_land_adds_a_worker_in_one_landing`, after `deploy_proxy_allowlist` |
 | L7 | delete `claude/land/<id>` test refs (item 10) | main | land.rs, merge.rs | core | none (marker in `settings`) | `core_land_deletes_test_refs`, after `land_rebases_disjoint_branches_and_lanes` |
 | K1 | per-Worker caller keys: design, then step 1 if safe alone | main | new `docs/plans/caller-keys.md`; remote.rs, split.rs | core (step 1) | none | `core_contract_per_worker_caller_keys`, after `contract_signed_callers_and_skew` |
-| R1 | core stops exporting `CiScheduler`/`ModelJobs` (item 6): rehearsal plan, then code; **do not land** | main | new section in `do-rehearsal.md`; src/platform | core | none | none |
+| R1 | core stops exporting `CiScheduler`/`ModelJobs` (item 6): rehearsal plan, then code; landed 2026-11-26 after the rehearsal passed | main | new section in `do-rehearsal.md`; src/platform | core | none | none |
 | R2 | `CiRunner` to the CI gateway (item 13): plan with the handover, then code; **do not land** | main | new `docs/plans/ci-runner-move.md`; src/ci, src/ci-gateway | core, ci-gateway | none | after `ci_route_and_run_on_a_fake_connector` |
 | B1 | reuse the build within the deploy job (item 11, first step; gate change) | G1 | `ci/deploy/allowlist.sh`, `deploy.sh` | all six | none | none |
 
@@ -499,7 +505,7 @@ Waves: G1, L1, L2, L4, L5, L7, K1, R1, R2 together. Then L3 on L1, L6 on L4 + L5
    deploys are ordered and what a deploy may deploy.
 5. K1 step 1.
 6. B1, after G1.
-7. R1 and R2: not to land until their rehearsals pass.
+7. R1 and R2: not to land until their rehearsals pass. (R1: passed and landed 2026-11-26.)
 
 ## Log
 
@@ -559,3 +565,11 @@ Waves: G1, L1, L2, L4, L5, L7, K1, R1, R2 together. Then L3 on L1, L6 on L4 + L5
     were lost to Cloudflare API 500s when core minted their credentials, one went to L1's fix,
     and one rebased the second-pass plan but could not push it (`commit_push` pushes only
     uncommitted changes). This branch carries that rebase instead.
+- 2026-11-26: item 6 / R1 done. The second DO rehearsal passed (`do-rehearsal.md`, "Second
+  rehearsal: results": unexport-a accepted on the first attempt, then redeploy-a and the
+  reexport-a rollback, state unchanged throughout). R1 landed around 23:10 UTC (`724e98b`),
+  upload accepted, no incident. Incidents on the way: gate-a's dotest-a deploy lost its runner
+  (the fallback deploy-a landing deployed a); rebind-a and reexport-a each lost a CI container
+  once and were landed again; rebind-a, first built on gate-b's pre-merge commit, made the Lander
+  count gate-b's paths again. Lesson: rebase stacked branches onto main after each merge. The
+  pair then left the repo in a gate landing; the person deletes the scripts, a first.
