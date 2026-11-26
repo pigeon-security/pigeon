@@ -20,6 +20,9 @@ pub const HOSTS: [&str; 4] = [
     "s3.pl-waw.scw.cloud",
 ];
 
+/// The only permitted DigitalOcean URL during the read-only connection work.
+pub(crate) const DIGITALOCEAN_ACCOUNT_URL: &str = "https://api.digitalocean.com/v2/account";
+
 /// A request to send. It may carry a credential in its headers, so `Debug` shows no header
 /// value and no body.
 #[derive(Clone, PartialEq)]
@@ -102,9 +105,12 @@ fn authority(url: &str) -> Option<&str> {
     Some(rest.split(['/', '?', '#']).next().unwrap_or(rest))
 }
 
-/// Whether the gateway may call `url`: `https`, and a host exactly on [`HOSTS`]. A user name, a
-/// port, a backslash, a percent escape or a look-alike suffix is refused.
+/// Whether the gateway may call `url`: the exact DigitalOcean probe URL, or HTTPS
+/// with a host exactly on [`HOSTS`].
 pub fn allowed(url: &str) -> bool {
+    if url == DIGITALOCEAN_ACCOUNT_URL {
+        return true;
+    }
     let Some(host) = authority(url) else {
         return false;
     };
@@ -130,6 +136,11 @@ impl Transport for FetchTransport {
                     "the cloud gateway does not call {}",
                     shown_host(&req.url)
                 )));
+            }
+            if req.url == DIGITALOCEAN_ACCOUNT_URL && req.method != "GET" {
+                return Err(Error::RustError(
+                    "the DigitalOcean probe is read-only".into(),
+                ));
             }
             let method = match req.method.as_str() {
                 "GET" => Method::Get,

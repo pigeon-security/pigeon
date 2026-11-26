@@ -8,7 +8,7 @@
 //! [`approvals::Approvals`], [`sink::Sink`]), so the smoke suite runs the whole flow against
 //! stubs. [`CloudGateway`] is the Worker's side of the contract: it fills those traits from the
 //! Worker's environment and its `PLATFORM` binding. A new key's secret is never in an answer,
-//! an error or a log line, and the Worker calls only the hosts in [`transport::HOSTS`].
+//! an error or a log line, and the Worker enforces [fixed outbound endpoints](transport::allowed).
 
 use pigeon_contract::serve::Answering;
 use pigeon_contract::{
@@ -21,6 +21,7 @@ use worker::{Date, Env};
 
 pub mod approvals;
 pub mod changes;
+pub mod compute;
 pub mod iam;
 pub mod link;
 pub mod provider;

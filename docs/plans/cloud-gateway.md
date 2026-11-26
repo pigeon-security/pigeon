@@ -351,7 +351,7 @@ approved instance account. The legacy home wrapper is not that build.
 
 DigitalOcean is opt-in for each instance and depends on Cloud Gateway being
 enabled on the same instance. The approved record carries the expected
-DigitalOcean account UUID. The credential is scoped to that instance and
+DigitalOcean team ID (`account.team.uuid`). The credential is scoped to that instance and
 provider, and managed separately from the approved record.
 
 Verification uses the inline Cloud Gateway and its DigitalOcean adapter.

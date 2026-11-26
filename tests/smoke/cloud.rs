@@ -1398,3 +1398,94 @@ fn cloud_gateway_redacts_what_scaleway_says() {
         .to_string();
     assert!(!e.contains(SECRET) && e.contains("connect failed"), "{e}");
 }
+
+#[test]
+fn digitalocean_probe_confirms_team_without_exposing_provider_data() {
+    use pigeon_cloud::compute::probe_digitalocean;
+
+    const TEAM: &str = "sampleTeamIdOpaque7812";
+    let net = Net {
+        log: RefCell::new(Vec::new()),
+        handler: Box::new(|request| {
+            assert_eq!(request.method, "GET");
+            assert_eq!(request.url, "https://api.digitalocean.com/v2/account");
+            assert_eq!(request.header("Authorization"), Some("Bearer dummy-key"));
+            assert!(request.body.is_empty());
+            json_res(
+                200,
+                json!({"account": {
+                    "uuid": ORG,
+                    "team": {"uuid": TEAM},
+                    "email": "private"
+                }}),
+            )
+        }),
+    };
+    block(probe_digitalocean(&net, TEAM, "dummy-key")).unwrap();
+    // A token's user ID or a case-folded team ID cannot authorize a team.
+    for target in [ORG, &TEAM.to_ascii_lowercase()] {
+        let err = block(probe_digitalocean(&net, target, "dummy-key"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("could not confirm the approved target"));
+        assert!(!err.contains(TEAM) && !err.contains("private"));
+    }
+    assert!(block(probe_digitalocean(&net, "invalid team", "dummy-key")).is_err());
+    assert!(block(probe_digitalocean(&net, TEAM, "")).is_err());
+    assert!(block(probe_digitalocean(&net, TEAM, "bad\nkey")).is_err());
+    assert_eq!(net.log.borrow().len(), 3);
+
+    assert!(!transport::allowed(
+        "https://api.digitalocean.com/v2/droplets"
+    ));
+    assert!(!transport::allowed(
+        "https://api.digitalocean.com/v2/account?foo=1"
+    ));
+}
+
+#[test]
+fn digitalocean_probe_redacts_failures_and_requires_team_identity() {
+    use pigeon_cloud::compute::probe_digitalocean;
+
+    const SECRET: &str = "dummy-key";
+    for (status, body, expected) in [
+        (
+            401,
+            "provider echoed dummy-key and private data",
+            "HTTP 401",
+        ),
+        (
+            503,
+            "provider echoed dummy-key and private data",
+            "HTTP 503",
+        ),
+        (200, "invalid JSON with dummy-key", "invalid JSON"),
+        (
+            200,
+            r#"{"account":{"uuid":"dummy-key"}}"#,
+            "could not confirm the approved target",
+        ),
+    ] {
+        let net = Net {
+            log: RefCell::new(Vec::new()),
+            handler: Box::new(move |_| text_res(status, body)),
+        };
+        let error = block(probe_digitalocean(&net, SECRET, SECRET))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(expected));
+        assert!(!error.contains(SECRET));
+        assert!(!error.contains("private data"));
+    }
+
+    struct Offline;
+    impl Transport for Offline {
+        fn send<'a>(&'a self, _req: HttpRequest) -> Fut<'a, HttpResponse> {
+            Box::pin(async { Err(worker::Error::RustError("provider echoed dummy-key".into())) })
+        }
+    }
+    let error = block(probe_digitalocean(&Offline, SECRET, SECRET))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("transport failed") && !error.contains(SECRET));
+}
