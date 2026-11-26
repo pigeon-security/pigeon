@@ -2689,6 +2689,7 @@ fn arch_home_capabilities() -> Vec<Box<dyn pigeon_capabilities::Capability>> {
             description: "pigeon".into(),
             import_from: None,
             queue: "pigeon-source-events".into(),
+            proxy_remote: None,
         }),
         Box::new(mirror::Mirror {
             source: mirror::Source {

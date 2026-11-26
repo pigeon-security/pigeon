@@ -1206,3 +1206,516 @@ fn platform_approval_push_on() {
     assert!(o.get("approval").is_none());
     assert!(o["aps"].get("category").is_none());
 }
+
+/// The policy with the change the person is asked to make for Codex (docs/plans/agent-git.md):
+/// `codex/*` beside `@session/*` in `land-and-deploy` and `session-branches`. Once the person
+/// has made it, the policy is used as it is.
+pub(crate) fn policy_with_codex() -> pigeon_core::policy::Policy {
+    let text = pigeon_capabilities::policy::TEXT;
+    let text = if text.contains("\"codex/*\"") {
+        text.to_string()
+    } else {
+        let with = text.replace(
+            "targets = [\"@session/*\"]",
+            "targets = [\"@session/*\", \"codex/*\"]",
+        );
+        assert_eq!(
+            with.matches("\"codex/*\"").count(),
+            2,
+            "the diff adds codex/* to land-and-deploy and session-branches"
+        );
+        with
+    };
+    pigeon_core::policy::parse(&text).unwrap()
+}
+
+/// A caller: service user `id` acting for Willow (`w`), or a person on their own.
+fn agent_caller(id: &str, kind: &str) -> pigeon_capabilities::users::Caller {
+    let user =
+        |id: &str, kind: &str| json!({ "id": id, "kind": kind, "name": id, "created_at": 0 });
+    let acting = if kind == "service" {
+        json!({ "id": "w", "kind": "standard", "name": "Willow", "created_at": 0 })
+    } else {
+        Value::Null
+    };
+    serde_json::from_value(json!({ "user": user(id, kind), "acting_for": acting })).unwrap()
+}
+
+/// A grant as the Directory reads it: an OAuth client named `name` redirecting to `redirect`,
+/// linked to Willow.
+fn agent_grant(id: &str, name: &str, redirect: &str) -> pigeon_capabilities::delegates::Grant {
+    pigeon_capabilities::delegates::Grant {
+        id: id.into(),
+        name: name.into(),
+        client_id: Some(format!("c-{id}")),
+        redirect_uris: vec![redirect.into()],
+        person: Some("w".into()),
+        ..Default::default()
+    }
+}
+
+/// Runs git in `dir` with binary `input` on stdin; its stdout.
+fn git_bytes(dir: &Path, args: &[&str], input: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut child = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "git {args:?}");
+    out.stdout
+}
+
+/// `git bundle create` of `range` in `dir`, base64-encoded as `branch_push` takes it.
+fn bundle_of(dir: &Path, range: &str) -> String {
+    let file = dir.join(format!("b-{}.bundle", range.replace(['.', '/', '^'], "_")));
+    git(
+        dir,
+        &["bundle", "create", "-q", file.to_str().unwrap(), range],
+        None,
+    );
+    pigeon_core::git::base64(&std::fs::read(&file).unwrap())
+}
+
+/// Commits `body` as file `f` with the message `message` (trailers and all); the commit's id.
+fn commit_msg(dir: &Path, body: &str, message: &str) -> String {
+    std::fs::write(dir.join("f"), body).unwrap();
+    git(dir, &["add", "f"], None);
+    git(dir, &["commit", "-q", "-F", "-"], Some(message));
+    String::from_utf8(git(dir, &["rev-parse", "HEAD"], None))
+        .unwrap()
+        .trim()
+        .to_string()
+}
+
+/// `branch_push` (docs/plans/agent-git.md): which app writes which namespace, the bundle read
+/// and checked against the repository (git is a local repository, and Artifacts' receive-pack a
+/// bare one taking the bundle's pack as it is), fast-forward unless forced, a bad base, input
+/// over the limit, the policy's say, and commit messages kept to the byte.
+#[test]
+fn agent_git_branch_push() {
+    use pigeon_capabilities::source::push::{
+        self, Move, agent_of, audit_line, branch_in, check, namespace_of, read,
+    };
+    use pigeon_core::bundle;
+    use pigeon_core::policy::Decision;
+    const MAIN: &str = "refs/heads/main";
+
+    // Which app: Claude (its redirect host), Codex (its name, loopback), the portal Claude Code
+    // reaches pigeon through, and an app with no namespace.
+    let claude = agent_grant("cl", "Claude", "https://claude.ai/api/mcp/auth_callback");
+    let codex = agent_grant("cx", "Codex", "http://127.0.0.1:1455/auth/callback");
+    let portal = agent_grant(
+        "pt",
+        "Cloudflare MCP Portal",
+        "https://mcp.pigeon.dev/servers-callback",
+    );
+    let grok = agent_grant("gk", "Grok", "https://grok.com/cb");
+    let ns = |g: &pigeon_capabilities::delegates::Grant| {
+        agent_of(&agent_caller(&g.id, "service"), Some(g)).map(|a| a.namespace)
+    };
+    assert_eq!(ns(&claude), Ok("claude/"));
+    assert_eq!(ns(&codex), Ok("codex/"));
+    assert_eq!(ns(&portal), Ok("claude/"));
+    let none = ns(&grok).unwrap_err();
+    assert!(none.contains("no branch namespace"), "{none}");
+    assert_eq!(
+        namespace_of("ai-gateway"),
+        None,
+        "AI agent runs keep their own grants"
+    );
+    // An admin's override moves a grant to that app's namespace.
+    let mut moved = grok.clone();
+    moved.app_override = Some("openai".into());
+    assert_eq!(ns(&moved), Ok("codex/"));
+    // A person's own session, an app acting for no one, and a grant linked to someone else.
+    assert!(agent_of(&agent_caller("w", "standard"), None).is_err());
+    let alone: pigeon_capabilities::users::Caller = serde_json::from_value(json!({
+        "user": { "id": "cx", "kind": "service", "name": "Codex", "created_at": 0 },
+        "acting_for": null,
+    }))
+    .unwrap();
+    assert!(agent_of(&alone, Some(&codex)).is_err());
+    let mut elsewhere = codex.clone();
+    elsewhere.person = Some("sam".into());
+    assert!(agent_of(&agent_caller("cx", "service"), Some(&elsewhere)).is_err());
+
+    // Which branches: Claude writes claude/x, never codex/x or main; Codex the other way.
+    assert_eq!(
+        branch_in("claude/", "claude/x", MAIN).as_deref(),
+        Ok("refs/heads/claude/x")
+    );
+    assert_eq!(
+        branch_in("codex/", "refs/heads/codex/x", MAIN).as_deref(),
+        Ok("refs/heads/codex/x")
+    );
+    for (namespace, bad) in [
+        ("claude/", "codex/x"),
+        ("claude/", "main"),
+        ("claude/", "refs/heads/main"),
+        ("claude/", "claude/"),
+        ("claude/", "claude/../main"),
+        ("claude/", "claudex/y"),
+        ("claude/", "refs/tags/claude/x"),
+        ("codex/", "claude/x"),
+        ("codex/", "main"),
+    ] {
+        assert!(
+            branch_in(namespace, bad, MAIN).is_err(),
+            "{namespace} {bad}"
+        );
+    }
+
+    // The repository: main, and Artifacts as a bare repository holding it.
+    let dir = repo("agent-git");
+    let m1 = commit(&dir, "one");
+    let m2 = commit(&dir, "one\ntwo");
+    let remote = dir.with_extension("remote");
+    let _ = std::fs::remove_dir_all(&remote);
+    git(
+        &dir,
+        &["clone", "-q", "--bare", ".", remote.to_str().unwrap()],
+        None,
+    );
+    // What Artifacts answers a fetch wanting `wants` and having `have`, as the tool asks.
+    let history = |wants: Vec<String>, have: String| {
+        let dir = dir.clone();
+        async move {
+            let input = format!("{}\n^{have}\n", wants.join("\n"));
+            let got = git(
+                &dir,
+                &["pack-objects", "--stdout", "--revs", "-q"],
+                Some(&input),
+            );
+            Ok(pigeon_core::pack::commit_parents(&got)?.parents)
+        }
+    };
+    let block = crate::core::token_block_on;
+
+    // An agent's work: two commits whose messages carry trailers, bundled against main.
+    git(&dir, &["checkout", "-q", "-b", "work"], None);
+    let message = "Add the thing\n\nWhy it is needed.\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\nClaude-Session: https://claude.ai/code/session_x\n";
+    let w1 = commit_msg(&dir, "one\ntwo\nthree", message);
+    let w2 = commit_msg(
+        &dir,
+        "one\ntwo\nthree\nfour",
+        "Second\n\nCo-Authored-By: Codex <codex@openai.com>\n",
+    );
+    let sent = bundle_of(&dir, "main..work");
+    let data = bundle::decode(&sent).unwrap();
+    let checked = read(&data).unwrap();
+    assert_eq!(checked.tip, w2);
+    assert_eq!(checked.bundle.prerequisites, vec![m2.clone()]);
+    assert_eq!(
+        checked.known.len(),
+        2,
+        "both commits, from the bundle's pack"
+    );
+    // A new branch is created at the tip.
+    assert_eq!(
+        block(check(&checked, &m2, None, false, history)),
+        Ok(Move::Create)
+    );
+    // The pack goes to receive-pack as it is: every commit keeps its bytes, trailers included.
+    git_bytes(
+        &remote,
+        &["index-pack", "--stdin", "--fix-thin"],
+        checked.bundle.pack,
+    );
+    for c in [&w1, &w2] {
+        assert_eq!(
+            git(&remote, &["cat-file", "commit", c], None),
+            git(&dir, &["cat-file", "commit", c], None),
+            "commit {c} arrives byte for byte"
+        );
+    }
+    let kept = String::from_utf8(git(&remote, &["log", "-1", "--format=%B", &w1], None)).unwrap();
+    assert!(kept.contains("Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"));
+    assert!(kept.contains("Claude-Session: https://claude.ai/code/session_x"));
+    // Pushed again unchanged, it is already there.
+    assert_eq!(
+        block(check(&checked, &m2, Some(&w2), false, history)),
+        Ok(Move::Already)
+    );
+
+    // Built on the branch's tip: a fast-forward.
+    let w3 = commit(&dir, "one\ntwo\nthree\nfour\nfive");
+    let more = bundle::decode(&bundle_of(&dir, &format!("{w2}..work"))).unwrap();
+    let more = read(&more).unwrap();
+    assert_eq!(more.tip, w3);
+    assert_eq!(
+        block(check(&more, &m2, Some(&w2), false, history)),
+        Ok(Move::Forward)
+    );
+    // Built on main while the branch moved on (an amend): refused without force, a rewrite with.
+    git(&dir, &["checkout", "-q", "-b", "amended", &m2], None);
+    let a1 = commit(&dir, "one\ntwo\nredone");
+    let amended = bundle::decode(&bundle_of(&dir, "main..amended")).unwrap();
+    let amended = read(&amended).unwrap();
+    assert_eq!(amended.tip, a1);
+    let refused = block(check(&amended, &m2, Some(&w2), false, history)).unwrap_err();
+    assert!(refused.contains("force"), "{refused}");
+    assert_eq!(
+        block(check(&amended, &m2, Some(&w2), true, history)),
+        Ok(Move::Rewrite)
+    );
+    // A base older than main is still on it.
+    git(&dir, &["checkout", "-q", "-b", "old-base", &m1], None);
+    commit(&dir, "one\nolder");
+    let old_base = bundle::decode(&bundle_of(&dir, &format!("{m1}..old-base"))).unwrap();
+    let old_base = read(&old_base).unwrap();
+    assert_eq!(
+        block(check(&old_base, &m2, None, false, history)),
+        Ok(Move::Create)
+    );
+
+    // A bad base: a commit on neither main nor the branch.
+    git(&dir, &["checkout", "-q", "-b", "side", &m2], None);
+    let s1 = commit(&dir, "side");
+    commit(&dir, "side\nmore");
+    let side = bundle::decode(&bundle_of(&dir, &format!("{s1}..side"))).unwrap();
+    let side = read(&side).unwrap();
+    let why = block(check(&side, &m2, None, false, history)).unwrap_err();
+    assert!(why.contains("not on main or on the branch"), "{why}");
+    assert!(block(check(&side, &m2, Some(&w2), false, history)).is_err());
+
+    // Malformed input: no base, refs at two commits, a changed byte, not base64.
+    let whole = bundle::decode(&bundle_of(&dir, "work")).unwrap();
+    assert!(read(&whole).unwrap_err().contains("no base"));
+    let mut two = data.clone();
+    let at = two.windows(2).position(|w| w == b"\n\n").unwrap() + 1;
+    two.splice(at..at, format!("{m1} refs/heads/other\n").into_bytes());
+    assert!(read(&two).unwrap_err().contains("different commits"));
+    let mut changed = data.clone();
+    let at = changed.len() - 30;
+    changed[at] ^= 1;
+    assert!(read(&changed).unwrap_err().contains("checksum"));
+    assert!(bundle::decode("not base64!").is_err());
+    assert!(bundle::parse(b"# v3 git bundle\n@filter=blob:none\n").is_err());
+
+    // Over the limit: refused before it is decoded, and decoded.
+    let big = "A".repeat(bundle::MAX / 3 * 4 + 8);
+    assert!(bundle::decode(&big).unwrap_err().contains("8 MiB"));
+    assert!(
+        bundle::parse(&vec![0u8; bundle::MAX + 1])
+            .unwrap_err()
+            .contains("8 MiB")
+    );
+
+    // The policy's say: Claude's pushes and rewrites under claude/ are allowed; codex/ is not
+    // in the policy until the person adds it, and then is.
+    let vars = vars();
+    let live = pigeon_core::policy_file::current().unwrap();
+    let decide = |p: &pigeon_core::policy::Policy, m: Move, b: &str| {
+        push::ask(p, &vars, "Claude for Willow", m, b).decision
+    };
+    assert_eq!(
+        decide(live, Move::Create, "refs/heads/claude/x"),
+        Decision::Allow
+    );
+    assert_eq!(
+        decide(live, Move::Rewrite, "refs/heads/claude/x"),
+        Decision::Allow
+    );
+    let not_yet = push::ask(
+        live,
+        &vars,
+        "Codex for Willow",
+        Move::Create,
+        "refs/heads/codex/x",
+    );
+    assert!(push::refusal(&not_yet).is_some());
+    let with = policy_with_codex();
+    for m in [Move::Create, Move::Forward, Move::Rewrite] {
+        assert_eq!(decide(&with, m, "refs/heads/codex/x"), Decision::Allow);
+    }
+    assert_eq!(
+        decide(&with, Move::Forward, MAIN),
+        Decision::Deny,
+        "main never"
+    );
+
+    // The audit line names the app, the person (by id), the branch and the tip; nothing else.
+    let who = agent_of(&agent_caller("cx", "service"), Some(&codex)).unwrap();
+    let line: Value = serde_json::from_str(&audit_line(
+        &who,
+        "refs/heads/codex/x",
+        Some(&w2),
+        &w3,
+        "pushed",
+    ))
+    .unwrap();
+    assert_eq!(line["audit"], "branch_push");
+    assert_eq!(line["app"], "openai");
+    assert_eq!(line["person"], "w");
+    assert_eq!(line["branch"], "codex/x");
+    assert_eq!(line["tip"], w3.as_str());
+    assert!(
+        !line.to_string().contains("Willow"),
+        "names stay out of kept logs"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&remote);
+}
+
+/// `session_credential` (docs/plans/agent-git.md): a git-only proxy credential held by the
+/// app's grant, on the Directory's real schema: its lifetime, who the proxies see behind it,
+/// its namespace at the git proxy, its expiry, and its revocation by the app's Disconnect and
+/// by removing the person.
+#[test]
+fn agent_git_session_credential() {
+    use pigeon_capabilities::delegates::{DISCONNECT_GRANT, GRANTS_SQL};
+    use pigeon_capabilities::proxy::{
+        APP_GIT_ADD_SQL, APP_GIT_LINKED_SQL, APP_GIT_SWEEP_SQL, ProxyCaller, TOKEN_GET_SQL,
+        app_git_ttl_ms,
+    };
+    use pigeon_capabilities::users::{MIGRATIONS, REMOVE_USER};
+    use pigeon_core::git::Command as Update;
+    use pigeon_core::proxy_caller::within_prefix;
+    use pigeon_proxies::git_proxy::{check_all, outside_why};
+
+    // Its lifetime: an hour unless asked, four at most, never cut short silently.
+    assert_eq!(app_git_ttl_ms(&Value::Null), Ok(3_600_000));
+    assert_eq!(app_git_ttl_ms(&json!(14_400)), Ok(14_400_000));
+    for bad in [json!(14_401), json!(59), json!(-1), json!("1h")] {
+        assert!(app_git_ttl_ms(&bad).is_err(), "{bad}");
+    }
+
+    let db = rusqlite::Connection::open_in_memory().unwrap();
+    for m in MIGRATIONS {
+        db.execute_batch(m).unwrap();
+    }
+    let run = |sql: &str| db.execute_batch(sql).unwrap();
+    run("INSERT INTO users (id, kind, name, created_at, role) VALUES
+           ('w', 'standard', 'Willow', 1, 'admin'), ('sam', 'standard', 'Sam', 2, NULL),
+           ('cx', 'service', 'Codex', 3, NULL), ('cl', 'service', 'Claude', 4, NULL)");
+    run(
+        r#"INSERT INTO oauth_clients (id, name, redirect_uris, service_user_id, created_at) VALUES
+           ('c1', 'Codex', '["http://127.0.0.1:1/cb"]', 'cx', 3),
+           ('c2', 'Claude', '["https://claude.ai/api/mcp/auth_callback"]', 'cl', 4)"#,
+    );
+    run(
+        "INSERT INTO links (service_user_id, standard_user_id, approved_at, approved_with) VALUES
+           ('cx', 'w', 10, 'k'), ('cl', 'w', 11, 'k')",
+    );
+    let linked = |grant: &str, person: &str| -> i64 {
+        db.query_row(APP_GIT_LINKED_SQL, [grant, person], |r| r.get(0))
+            .unwrap()
+    };
+    assert_eq!(linked("cx", "w"), 1);
+    assert_eq!(
+        linked("cx", "sam"),
+        0,
+        "only the person the app is linked to"
+    );
+    assert_eq!(linked("w", "w"), 0);
+    let add = |hash: &str, grant: &str, scope: &str, expires: i64| {
+        db.execute(
+            APP_GIT_ADD_SQL,
+            rusqlite::params![hash, grant, "Codex session credential", expires, 20, scope],
+        )
+        .unwrap();
+    };
+    let get = |hash: &str, now: i64| -> Option<ProxyCaller> {
+        let mut q = db.prepare(TOKEN_GET_SQL).unwrap();
+        let mut rows = q
+            .query_map(rusqlite::params![hash, now], |r| {
+                Ok(json!({
+                    "id": r.get::<_, String>(0)?, "label": r.get::<_, String>(1)?,
+                    "person": r.get::<_, String>(2)?, "branch_prefix": r.get::<_, Option<String>>(3)?,
+                }))
+            })
+            .unwrap();
+        rows.next()
+            .map(|r| serde_json::from_value(r.unwrap()).unwrap())
+    };
+    add("h_codex_one_x", "cx", "codex/", 1_000);
+    let held = get("h_codex_one_x", 30).unwrap();
+    assert_eq!(held.person, "Willow", "named for the person, not the app");
+    assert_eq!(held.branch_prefix.as_deref(), Some("codex/"));
+    assert_eq!(held.id, "h_codex_one_x"[..12]);
+    // Shown under the app: its live tokens count it.
+    let tokens: i64 = db
+        .query_row(
+            &format!(
+                "SELECT tokens FROM ({}) WHERE id = 'cx'",
+                GRANTS_SQL.trim_end_matches(" ORDER BY u.created_at, u.id")
+            ),
+            [30],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(tokens, 1);
+
+    // At the git proxy: git only, and pushes only under its namespace, never main.
+    let prefix = held.branch_prefix.unwrap();
+    assert!(within_prefix(["refs/heads/codex/x", "refs/heads/codex/a/b"], &prefix).is_ok());
+    let tried = [
+        "refs/heads/codex/x",
+        "refs/heads/main",
+        "refs/heads/claude/x",
+        "refs/heads/codex/",
+        "refs/heads/codex",
+        "refs/heads/codexx/y",
+        "refs/tags/codex/x",
+        "refs/heads/codex/../main",
+    ];
+    assert_eq!(within_prefix(tried, &prefix).unwrap_err(), tried[1..]);
+    assert!(outside_why(&prefix).contains("only branches under codex/"));
+    assert!(outside_why("claude/ai-agent-ab").contains("run's git grant"));
+    // Claude's credential and the session branch it pushes: inside, and allowed by the policy.
+    let up = Update {
+        old: pigeon_core::git::ZERO.into(),
+        new: "1".repeat(40),
+        name: "refs/heads/claude/x".into(),
+    };
+    assert!(within_prefix([up.name.as_str()], "claude/").is_ok());
+    assert!(check_all(&[up], "refs/heads/main", "refs/heads/claude/").is_ok());
+    // Never the Cloudflare API or MCP.
+    assert!(pigeon_proxies::cf_proxy::GIT_ONLY.contains("/git/ only"));
+    assert!(!pigeon_capabilities::proxy::reaches("proxy", "/mcp"));
+
+    // It expires, and expired ones are swept.
+    assert!(get("h_codex_one_x", 1_000).is_none());
+    db.execute(APP_GIT_SWEEP_SQL, [1_000]).unwrap();
+    let left: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM oauth_tokens WHERE kind = 'app_git'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(left, 0);
+
+    // Disconnecting the app revokes it; Claude's stays.
+    add("h_codex_two_x", "cx", "codex/", 9_999);
+    add("h_claude_one_x", "cl", "claude/", 9_999);
+    for q in DISCONNECT_GRANT {
+        db.execute(q, ["cx"]).unwrap();
+    }
+    assert!(get("h_codex_two_x", 30).is_none());
+    assert!(get("h_claude_one_x", 30).is_some());
+    // A link gone by any other way stops it at once too.
+    add("h_claude_two_x", "cl", "claude/", 9_999);
+    run("DELETE FROM links WHERE service_user_id = 'cl'");
+    assert!(get("h_claude_two_x", 30).is_none());
+    run(
+        "INSERT INTO links (service_user_id, standard_user_id, approved_at, approved_with) VALUES ('cl', 'w', 12, 'k')",
+    );
+    assert!(get("h_claude_two_x", 30).is_some());
+    // Removing the person revokes every app's.
+    for q in REMOVE_USER {
+        db.execute(
+            q,
+            rusqlite::params_from_iter(vec!["w"; q.matches('?').count()]),
+        )
+        .unwrap();
+    }
+    assert!(get("h_claude_one_x", 30).is_none());
+    assert!(get("h_claude_two_x", 30).is_none());
+}

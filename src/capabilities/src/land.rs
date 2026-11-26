@@ -1,6 +1,7 @@
 //! Landing: a session's branch to `main` and to the deployed platform, with no person in between
 //! unless one is asked for. `land {branch}` answers at once, and the Lander's alarm checks the
-//! branch's tip is a fast-forward of `main` under `refs/heads/claude/` (a failed check ends it
+//! branch's tip is a fast-forward of `main` under `refs/heads/claude/` or `refs/heads/codex/`,
+//! the agents' namespaces ([`state::PREFIXES`]; a failed check ends it
 //! `refused`), then runs CI job `test` at it, waits for a person's passkey approval
 //! when the setting asks for one or the commit changes what the gate itself runs, moves `main`
 //! to it through the platform's own git path, and deploys each Worker it affects in that
@@ -375,7 +376,8 @@ impl Capability for Land {
         vec![
             Tool {
                 name: "land",
-                description: "Land a session branch under claude/. Answers at once with the \
+                description: "Land a session branch under claude/ or codex/ (push it first \
+                              with branch_push, or git through the proxy). Answers at once with the \
                               landing in `checking`, and many landings run at once: each is \
                               checked (its base on main, what it changed, whether a person \
                               must approve) and tested on its own, outside any lock; a failed \
@@ -395,7 +397,7 @@ impl Capability for Land {
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "branch": { "type": "string", "description": "Such as `claude/my-change`." },
+                        "branch": { "type": "string", "description": "Such as `claude/my-change` or `codex/my-change`." },
                         "commit": { "type": "string", "description": "The commit expected at the branch's tip; refused if the tip differs." }
                     },
                     "required": ["branch"]

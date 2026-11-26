@@ -1786,10 +1786,47 @@ impl Directory {
             }
             "proxy.token_get" => {
                 let row: Option<Value> = self.db.row(
-                    "SELECT substr(o.hash, 1, 12) AS id, o.label AS label, u.name AS person, CASE WHEN o.kind = 'run_grant' THEN o.scope END AS branch_prefix FROM oauth_tokens o JOIN users u ON u.id = o.service_user_id WHERE o.hash = ? AND o.kind IN ('proxy', 'run_grant') AND o.expires_at > ?",
+                    crate::proxy::TOKEN_GET_SQL,
                     vec![s("hash").into(), t.into()],
                 )?;
                 row.unwrap_or(Value::Null)
+            }
+            // An app's session credential (`session_credential`, docs/plans/agent-git.md): kind
+            // 'app_git', held by the app's grant (its service user) while it is linked to a
+            // person, pushing only under `scope`, the app's branch namespace. Counted, and
+            // revoked, with the grant's other tokens: per-app Disconnect and removing the person.
+            "app_git.add" => {
+                let ttl_ms = a["ttl_ms"]
+                    .as_i64()
+                    .filter(|v| *v > 0 && *v <= crate::proxy::APP_GIT_MAX_MS)
+                    .ok_or_else(|| bad("ttl_ms must be positive and at most 4 hours"))?;
+                let scope = s("scope");
+                if !crate::source::push::is_namespace(scope) {
+                    return Err(bad(
+                        "an app git credential's scope is an app's branch namespace",
+                    ));
+                }
+                let linked = self.count(
+                    crate::proxy::APP_GIT_LINKED_SQL,
+                    vec![s("grant").into(), s("person").into()],
+                )?;
+                if linked != 1 {
+                    return Err(bad("the app is not linked to this person"));
+                }
+                self.db.exec(
+                    crate::proxy::APP_GIT_ADD_SQL,
+                    vec![
+                        s("hash").into(),
+                        s("grant").into(),
+                        s("label").into(),
+                        t.saturating_add(ttl_ms).into(),
+                        t.into(),
+                        scope.into(),
+                    ],
+                )?;
+                self.db
+                    .exec(crate::proxy::APP_GIT_SWEEP_SQL, vec![t.into()])?;
+                Value::Null
             }
             // An AI agent run's git grant (`docs/plans/ai-agents.md`): kind 'run_grant', held by
             // the person the run acts for, pushing only the branches under `scope`.

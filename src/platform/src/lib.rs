@@ -388,23 +388,25 @@ async fn mcp_post(mut req: Request, env: &Env) -> Result<Response> {
             "The instance is selected by this endpoint. Tools use its approved resources."
         } else {
             "pigeon's platform. Source code lives in Cloudflare Artifacts; GitHub is \
-                       a read-only copy of main. A cloud session reaches git at \
-                       https://proxy.pigeon.dev/git/pigeon-security/pigeon.git and deploys with \
-                       the pinned wrangler (`npm ci`, then `npx wrangler deploy`, in \
-                       src/platform: 4.166.0) and \
-                       CLOUDFLARE_API_BASE_URL=https://proxy.pigeon.dev/cf/client/v4; its \
-                       environment's network secret for proxy.pigeon.dev authenticates both, so \
-                       no token goes in a command. Push, rewrite and delete branches under \
-                       claude/; main moves only by a landing: `land {branch}` takes a claude/ \
-                       branch through CI's `test` job, into main and onto the deployed \
-                       platform, with land_status following it. The person's policy, \
+                       a read-only copy of main. A coding agent pushes with `branch_push` (a \
+                       git bundle of its commits, no token) to its app's namespace: claude/ \
+                       for Claude, codex/ for Codex; for a push too large for that, \
+                       `session_credential` mints a short-lived git credential for \
+                       https://proxy.pigeon.dev/git/pigeon-security/pigeon.git. A cloud \
+                       session holding the person's proxy credential (a network secret for \
+                       proxy.pigeon.dev, break-glass) can also push there and deploy with the \
+                       pinned wrangler (`npm ci`, then `npx wrangler deploy`, in src/platform: \
+                       4.166.0) and CLOUDFLARE_API_BASE_URL=https://proxy.pigeon.dev/cf/client/v4. \
+                       main moves only by a landing: `land {branch, commit}` takes a claude/ \
+                       or codex/ branch through CI's `test` job, into main and onto the \
+                       deployed platform, with land_status following it. The person's policy, \
                        .pigeon/policy.toml, says what agents may do: call `policy_check` \
                        before acting and after any refusal. Act on `allow` as the person's \
                        standing instruction; on `deny`, stop and tell the person the rule and \
                        reason. Never propose new rules or loosen one; only the person changes \
                        the policy. `call {tool, args}` reaches any tool deployed after this \
-                       session started. source_token remains for callers without the proxy \
-                       credential."
+                       session started. Never call source_token or deploy_token unless the \
+                       person asks for break-glass."
         },
     };
     let call = async |name: &str, args: &Value| -> Result<Value> {

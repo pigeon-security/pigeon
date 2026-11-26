@@ -237,6 +237,8 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
             description: "pigeon-security/pigeon".into(),
             import_from: Some("https://github.com/pigeon-security/pigeon".into()),
             queue: "pigeon-source-events".into(),
+            // What an app's `session_credential` reaches: the git proxy (docs/proxies.md).
+            proxy_remote: Some(format!("https://{PROXY_HOST}/git/{NAMESPACE}/{REPO}.git")),
         }),
         Box::new(Mirror {
             source: mirror::Source {

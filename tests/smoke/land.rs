@@ -3146,3 +3146,46 @@ fn land_scope_pins_representative_paths() {
     // A path nothing names is still shared at run time, the safe side.
     assert!(map.classify(&["src/nothing-names-this/x.rs"]).shared);
 }
+
+/// The Lander takes Codex's branches as it takes Claude's (docs/plans/agent-git.md): `codex/*`
+/// is a branch a landing takes, every agent namespace lands, an app acting for its person may
+/// land, and the policy decides once the person adds `codex/*`.
+#[test]
+fn land_takes_codex_branches() {
+    use pigeon_capabilities::land::{may_land, state};
+    use pigeon_capabilities::source::push::NAMESPACES;
+    use pigeon_core::policy::{Decision, Kind};
+    assert_eq!(
+        state::branch_ref("codex/fix").as_deref(),
+        Ok("refs/heads/codex/fix")
+    );
+    assert_eq!(
+        state::branch_ref("refs/heads/codex/a/b").as_deref(),
+        Ok("refs/heads/codex/a/b")
+    );
+    for bad in ["codex/", "codex/../main", "codexx/y", "refs/heads/codex"] {
+        assert!(state::branch_ref(bad).is_err(), "{bad}");
+    }
+    for (_, namespace) in NAMESPACES {
+        assert!(
+            state::PREFIXES.contains(&format!("refs/heads/{namespace}").as_str()),
+            "{namespace} lands"
+        );
+    }
+    // Codex, acting for its person, may land as Claude may.
+    let codex: pigeon_capabilities::users::Caller = serde_json::from_value(json!({
+        "user": { "id": "cx", "kind": "service", "name": "Codex", "created_at": 0 },
+        "acting_for": { "id": "w", "kind": "standard", "name": "Willow", "created_at": 0 },
+    }))
+    .unwrap();
+    assert!(may_land(&codex));
+    // The Lander asks the policy (`land-and-deploy`), and the deploy after it.
+    let with = super::policy::policy_with_codex();
+    for kind in [Kind::Land, Kind::Deploy] {
+        let a = with.evaluate(
+            &vars(),
+            &pigeon_core::policy_file::request("Codex", kind, "codex/fix"),
+        );
+        assert_eq!(a.decision, Decision::Allow, "{kind:?}");
+    }
+}

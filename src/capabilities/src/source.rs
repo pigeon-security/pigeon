@@ -1,7 +1,9 @@
 //! The source repository in Cloudflare Artifacts: the repository itself (imported from a git
 //! remote when created), the queue its push events go to with the hosting Worker as consumer,
-//! and short-lived git tokens on demand.
+//! and short-lived git tokens on demand. Coding agents write their branches here through MCP
+//! with `branch_push`, or with a `session_credential` through the git proxy ([`push`]).
 
+pub mod push;
 pub mod read;
 
 use std::collections::BTreeSet;
@@ -61,6 +63,9 @@ pub struct Source {
     pub import_from: Option<String>,
     /// The queue its push events go to, consumed by the hosting Worker.
     pub queue: String,
+    /// The git proxy's remote for this repository, which a `session_credential` reaches, such
+    /// as `https://proxy.pigeon.dev/git/<namespace>/<repo>.git`; `None` mints none.
+    pub proxy_remote: Option<String>,
 }
 
 /// How long a git token lives unless asked otherwise, and at most.
@@ -319,6 +324,48 @@ impl Capability for Source {
                     "required": ["branch"]
                 }),
             },
+            Tool {
+                name: "branch_push",
+                description: "Push your commits to a branch of the source repository, with no \
+                              token: the default way for a coding agent to push. Send a git \
+                              bundle, base64-encoded: `git bundle create /tmp/b.bundle \
+                              origin/main..HEAD && base64 -w0 /tmp/b.bundle`. Its commits are \
+                              written as they are (ids, authors, messages and trailers kept). \
+                              The branch must be under your app's namespace: `claude/` for \
+                              Claude, `codex/` for OpenAI's Codex and ChatGPT; never main. \
+                              Fast-forward only, unless `force` (your own namespace only). The \
+                              bundle's base must be on main or on the branch; 8 MiB at most \
+                              decoded (use session_credential for more). Answers the new tip \
+                              `commit`: then call land {branch, commit}.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "branch": { "type": "string", "description": "Such as `codex/my-change`, with or without `refs/heads/`." },
+                        "bundle": { "type": "string", "description": "The git bundle, standard base64." },
+                        "force": { "type": "boolean", "description": "Rewrite the branch when the bundle does not descend from its tip. Default false." }
+                    },
+                    "required": ["branch", "bundle"],
+                    "additionalProperties": false
+                }),
+            },
+            Tool {
+                name: "session_credential",
+                description: "Mint a short-lived git credential for pushes too large for \
+                              branch_push. It reaches the git proxy only: it fetches the \
+                              repository and pushes only branches under your app's namespace \
+                              (`claude/` or `codex/`), never main, and nothing else. An hour by \
+                              default, 4 hours at most. Git sends it as `Authorization: Bearer \
+                              <token>` (http.extraHeader). The token lands in your transcript: \
+                              do not save it anywhere lasting. Revoked by the app's Disconnect \
+                              and by removing the person.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "ttl": { "type": "integer", "description": "Seconds; 3600 by default, 60 to 14400." }
+                    },
+                    "additionalProperties": false
+                }),
+            },
             Tool::bare(
                 "setup_source",
                 "Make sure the source repository, its push-event queue and subscription exist.",
@@ -340,6 +387,17 @@ impl Capability for Source {
                     json!({ "revoked": id })
                 }
                 "branch_patch" => self.branch_patch(cx, args).await?,
+                "branch_push" => {
+                    push::branch_push(cx, &self.namespace, &self.repo, &self.default_branch, args)
+                        .await?
+                }
+                "session_credential" => {
+                    let remote = self
+                        .proxy_remote
+                        .as_deref()
+                        .ok_or_else(|| Error::RustError("this platform has no git proxy".into()))?;
+                    push::session_credential(cx, remote, args).await?
+                }
                 "setup_source" => to_value(self.setup(cx).await?),
                 other => return Err(unknown(other)),
             })

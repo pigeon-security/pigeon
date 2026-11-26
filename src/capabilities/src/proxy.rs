@@ -144,6 +144,83 @@ pub async fn revoke_run_grant(env: &Env, person: &str, run: &str) -> Result<u64>
     Ok(n.as_u64().unwrap_or(0))
 }
 
+/// Who holds a proxy-kind bearer token, by its hash, while it is live: a person's proxy
+/// credential (`proxy`), an AI agent run's git grant (`run_grant`) or an app's session
+/// credential (`app_git`). The last two are git-only and carry their branch prefix; an app's is
+/// named for the person its grant is linked to, and stops answering once that link is gone
+/// (per-app Disconnect, removing the person). Two `?`: the hash, then now in milliseconds.
+#[doc(hidden)]
+pub const TOKEN_GET_SQL: &str = "SELECT substr(o.hash, 1, 12) AS id, o.label AS label,
+    CASE WHEN o.kind = 'app_git' THEN p.name ELSE u.name END AS person,
+    CASE WHEN o.kind IN ('run_grant', 'app_git') THEN o.scope END AS branch_prefix
+    FROM oauth_tokens o JOIN users u ON u.id = o.service_user_id
+    LEFT JOIN links l ON l.service_user_id = o.service_user_id
+    LEFT JOIN users p ON p.id = l.standard_user_id AND p.kind = 'standard'
+    WHERE o.hash = ? AND o.kind IN ('proxy', 'run_grant', 'app_git') AND o.expires_at > ?
+    AND (o.kind != 'app_git' OR p.id IS NOT NULL)";
+
+/// Whether grant `?` (a service user) is linked to person `?`: one row counted when it is.
+#[doc(hidden)]
+pub const APP_GIT_LINKED_SQL: &str = "SELECT COUNT(*) AS n FROM links l JOIN users u ON u.id = l.service_user_id WHERE l.service_user_id = ? AND l.standard_user_id = ? AND u.kind = 'service'";
+
+/// Adds an app's session credential: hash, grant, label, expires_at, created_at, scope.
+#[doc(hidden)]
+pub const APP_GIT_ADD_SQL: &str = "INSERT INTO oauth_tokens (hash, kind, client_id, service_user_id, label, expires_at, created_at, scope) VALUES (?, 'app_git', NULL, ?, ?, ?, ?, ?)";
+
+/// Drops app session credentials that have expired; one `?`, now.
+#[doc(hidden)]
+pub const APP_GIT_SWEEP_SQL: &str =
+    "DELETE FROM oauth_tokens WHERE kind = 'app_git' AND expires_at <= ?";
+
+/// How long an app's session credential lives unless asked otherwise: an hour.
+pub const APP_GIT_DEFAULT_MS: i64 = 3_600_000;
+/// The longest an app's session credential may live: four hours.
+pub const APP_GIT_MAX_MS: i64 = 4 * 3_600_000;
+
+/// An app session credential's lifetime from `session_credential`'s `ttl` (seconds): an hour
+/// when not given, else 60 seconds to four hours; anything else is refused, never cut short.
+pub fn app_git_ttl_ms(v: &Value) -> std::result::Result<i64, String> {
+    if v.is_null() {
+        return Ok(APP_GIT_DEFAULT_MS);
+    }
+    match v.as_i64() {
+        Some(n) if (60..=APP_GIT_MAX_MS / 1000).contains(&n) => Ok(n * 1000),
+        Some(_) => Err(format!(
+            "ttl is from 60 to {} seconds (4 hours)",
+            APP_GIT_MAX_MS / 1000
+        )),
+        None => Err("ttl must be a whole number of seconds".into()),
+    }
+}
+
+/// Mints an app's session credential for `grant` (the calling app's service user), linked to
+/// `person` (a user id): a proxy credential that reaches `/git/` only and pushes only branches
+/// under `namespace`, living `ttl_ms`. Answers the token and when it expires.
+pub async fn issue_app_git(
+    env: &Env,
+    grant: &str,
+    person: &str,
+    namespace: &str,
+    label: &str,
+    ttl_ms: i64,
+) -> Result<(String, String, i64)> {
+    let (secret, secret_hash) = token(PREFIX)?;
+    directory(
+        env,
+        "app_git.add",
+        json!({
+            "hash": secret_hash, "grant": grant, "person": person, "label": label,
+            "scope": namespace, "ttl_ms": ttl_ms,
+        }),
+    )
+    .await?;
+    Ok((
+        secret,
+        secret_hash[..ID_LEN].to_string(),
+        worker::js_sys::Date::now() as i64 + ttl_ms,
+    ))
+}
+
 /// The grant of CI job token `presented` when it is live and for repository `repo`: core's
 /// own check, and what its `grant` op answers the proxy Worker.
 pub async fn job_grant(env: &Env, presented: &str, repo: &str) -> Result<Option<Grant>> {

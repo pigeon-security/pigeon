@@ -205,10 +205,16 @@ pub fn allowed(from: State, to: State) -> bool {
         .any(|s| [true, false].iter().any(|a| next(from, *a, s) == Some(to)))
 }
 
-/// The prefix of the branches that may land.
+/// The session prefix: what the policy's `@session/` stands for (`claude/`).
 pub const PREFIX: &str = "refs/heads/claude/";
 
-/// `given` (`claude/x` or `refs/heads/claude/x`) as the full ref of a branch that may land.
+/// The prefixes of the branches that may land: the agents' namespaces
+/// (`crate::source::push::NAMESPACES`), Claude's `claude/` and Codex's `codex/`. The policy
+/// still decides each landing (`land-and-deploy`).
+pub const PREFIXES: [&str; 2] = [PREFIX, "refs/heads/codex/"];
+
+/// `given` (`claude/x`, `codex/x` or `refs/heads/claude/x`) as the full ref of a branch that
+/// may land.
 pub fn branch_ref(given: &str) -> Result<String, String> {
     let given = given.trim();
     let full = if given.starts_with("refs/") {
@@ -216,9 +222,17 @@ pub fn branch_ref(given: &str) -> Result<String, String> {
     } else {
         format!("refs/heads/{given}")
     };
-    let name = full
-        .strip_prefix(PREFIX)
-        .ok_or_else(|| format!("only branches under {PREFIX} land; not `{given}`"))?;
+    let name = PREFIXES
+        .iter()
+        .find_map(|p| full.strip_prefix(p))
+        .ok_or_else(|| {
+            format!(
+                "only branches under {} land; not `{given}`",
+                PREFIXES
+                    .map(|p| p.trim_start_matches("refs/heads/"))
+                    .join(" or ")
+            )
+        })?;
     let ok = !name.is_empty()
         && full.len() <= 255
         && name.split('/').all(|seg| {
