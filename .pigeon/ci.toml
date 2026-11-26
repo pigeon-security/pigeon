@@ -73,6 +73,12 @@ cpu = 4
 memory_gb = 12
 disk_gb = 20
 
+# An older Lander can carry this lane while the retirement reaches core.
+# Keep the job name for that transition without deploying any Worker.
+[jobs.deploy-cloud-gateway]
+run = "ci/deploy/deploy-cloud-gateway.sh"
+timeout_min = 5
+
 # Deploys the pigeon-ci-gateway Worker (src/ci-gateway) from a landed commit, as `deploy` deploys core.
 [jobs.deploy-ci-gateway]
 run = "ci/deploy/deploy-ci-gateway.sh"
