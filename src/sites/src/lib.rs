@@ -28,15 +28,35 @@ use pigeon_contract::{
     Answer, CONTRACT, CallRequest, CapabilityManifest, FailureKind, Manifest, Service, Signed,
     ToolSpec,
 };
-use pigeon_core::secrets_store;
 use pigeon_core::versions::{Requirement, Version};
 use serde_json::{Value, json};
 use worker::{Context, Env, Request, Response, Result, event};
 
 /// This Worker's name, as deployed.
 const WORKER: &str = "pigeon-sites";
-/// The Secrets Store binding of the key core signs callers with.
-const CALLER_KEY: &str = "CALLER_KEY";
+
+/// The keys this Worker uses (docs/plans/caller-keys.md, step 3). No `Debug`: they are secrets.
+pub struct SiteKeys {
+    /// Its own caller key (`CALLER_KEY_OWN`), which signs every ask of core.
+    pub sign: Vec<u8>,
+    /// The shared `CALLER_KEY`, kept only to derive the keys core derives from it too: a
+    /// protected site's origin key (`site_auth::origin_key`, also derived by core's
+    /// instance apply) and its sign-in session key. It signs nothing. Moving these off the
+    /// shared key is part of step 4.
+    pub site: Vec<u8>,
+}
+
+/// [`SiteKeys`]; an error naming what is missing. Never falls back to the shared key to sign.
+async fn site_keys(env: &Env) -> std::result::Result<SiteKeys, String> {
+    let sign = pigeon_contract::own_key(env)
+        .await
+        .map_err(|e| e.to_string())?;
+    let site = pigeon_contract::keys::shared_key(env)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("CALLER_KEY is not bound or not set")?;
+    Ok(SiteKeys { sign, site })
+}
 
 /// The sites capability.
 struct Sites;
@@ -210,11 +230,11 @@ impl Service for Sites {
                         Ok(receipt) => receipt,
                         Err(why) => return Answer::error(FailureKind::Unauthorized, why),
                     };
-                    let key = call_key(env).await;
-                    let Some(key) = key else {
-                        return Answer::error(FailureKind::Failed, "CALLER_KEY is not set");
+                    let keys = match site_keys(env).await {
+                        Ok(keys) => keys,
+                        Err(why) => return Answer::error(FailureKind::Failed, why),
                     };
-                    match deploy::deploy_queued(env, key.as_bytes(), caller, &receipt).await {
+                    match deploy::deploy_queued(env, &keys, caller, &receipt).await {
                         Ok(value) => Answer::Ok(value),
                         Err(error) => Answer::error(FailureKind::Failed, error.to_string()),
                     }
@@ -243,17 +263,17 @@ impl Service for Sites {
                             "`rev` must be a commit or branch",
                         );
                     }
-                    let key = call_key(env).await;
-                    let Some(key) = key else {
-                        return Answer::error(FailureKind::Failed, "CALLER_KEY is not set");
+                    let keys = match site_keys(env).await {
+                        Ok(keys) => keys,
+                        Err(why) => return Answer::error(FailureKind::Failed, why),
                     };
                     let result = if req.tool == "site_rollback" {
                         let Some(release) = req.args["release"].as_str() else {
                             return Answer::error(FailureKind::BadRequest, "`release` is required");
                         };
-                        deploy::rollback(env, key.as_bytes(), caller, instance, release).await
+                        deploy::rollback(env, &keys, caller, instance, release).await
                     } else {
-                        deploy::deploy(env, key.as_bytes(), caller, instance, rev).await
+                        deploy::deploy(env, &keys, caller, instance, rev).await
                     };
                     match result {
                         Ok(v) => Answer::Ok(v),
@@ -271,10 +291,11 @@ impl Service for Sites {
                         Err(why) => return Answer::error(FailureKind::Unauthorized, why),
                     };
                     let limit = req.args["limit"].as_u64().unwrap_or(20) as usize;
-                    let Some(key) = call_key(env).await else {
-                        return Answer::error(FailureKind::Failed, "CALLER_KEY is not set");
+                    let keys = match site_keys(env).await {
+                        Ok(keys) => keys,
+                        Err(why) => return Answer::error(FailureKind::Failed, why),
                     };
-                    match deploy::releases(env, key.as_bytes(), caller, instance, limit).await {
+                    match deploy::releases(env, &keys, caller, instance, limit).await {
                         Ok(v) => Answer::Ok(v),
                         Err(e) => Answer::error(FailureKind::Failed, e.to_string()),
                     }
@@ -300,11 +321,6 @@ impl Service for Sites {
     }
 }
 
-async fn call_key(env: &Env) -> Option<String> {
-    let binding = env.secret_store(CALLER_KEY).ok()?;
-    secrets_store::read(&binding).await.ok().flatten()
-}
-
 /// Names this Worker (`sites` in ci/workers.toml) on every request it signs to core, before any
 /// fetch or Durable Object code runs, so core checks it with CALLER_KEY_SITES first
 /// (docs/plans/caller-keys.md, step 2). worker-build also exposes it as an entrypoint method of
@@ -316,16 +332,15 @@ fn identify_worker() {
 
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
-    let key = match env.secret_store(CALLER_KEY) {
-        Ok(binding) => secrets_store::read(&binding).await?,
-        Err(_) => None,
-    };
-    let Some(key) = key else {
-        let answer = Answer::error(
-            FailureKind::Failed,
-            "pigeon-sites has no caller key: CALLER_KEY is not set",
-        );
-        return Ok(Response::from_json(&answer)?.with_status(503));
+    // Its own key signs every ask of core and checks core's calls first; the shared key checks
+    // them second and derives protected sites' keys. Without its own key it serves nothing
+    // (docs/plans/caller-keys.md, step 3).
+    let keys = match site_keys(&env).await {
+        Ok(keys) => keys,
+        Err(why) => {
+            let answer = Answer::error(FailureKind::Failed, format!("pigeon-sites: {why}"));
+            return Ok(Response::from_json(&answer)?.with_status(503));
+        }
     };
     // A platform subdomain, such as noisypigeon.pigeon.dev, from the internet; core's calls
     // over the binding come as https://capability/… and go to the contract.
@@ -340,16 +355,11 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         return Response::error("Not Found", 404);
     }
     if host.ends_with(&format!(".{zone}")) {
-        return public::serve(req, &env, key.as_bytes(), WORKER, &host).await;
+        return public::serve(req, &env, &keys, WORKER, &host).await;
     }
-    // Core's calls are checked with this Worker's own key, then the shared one; with no own
-    // key it serves none (docs/plans/caller-keys.md, step 3).
-    let keys = match pigeon_contract::keys::read(&env).await {
-        Ok(keys) => keys,
-        Err(e) => {
-            let answer = Answer::error(FailureKind::Failed, format!("pigeon-sites: {e}"));
-            return Ok(Response::from_json(&answer)?.with_status(503));
-        }
+    let contract = pigeon_contract::Keys {
+        own: keys.sign,
+        shared: Some(keys.site),
     };
-    pigeon_contract::serve(req, &env, &Sites, &keys).await
+    pigeon_contract::serve(req, &env, &Sites, &contract).await
 }

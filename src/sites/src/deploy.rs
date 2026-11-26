@@ -23,6 +23,7 @@ use pigeon_core::{Account, site_publish, tarball};
 use serde_json::{Value, json};
 use worker::{Env, Error, Result};
 
+use crate::SiteKeys;
 use crate::queued::Receipt;
 use crate::templates::{self, Template};
 
@@ -33,7 +34,7 @@ fn bad(why: impl Into<String>) -> Error {
 /// A scoped Sites call may only request authority for its authenticated instance.
 async fn scoped_core(
     env: &Env,
-    key: &[u8],
+    keys: &SiteKeys,
     caller: &Signed,
     request: &SitesScopeRequest,
 ) -> Result<Value> {
@@ -50,7 +51,7 @@ async fn scoped_core(
         "https://core",
         "sites_scope",
         &args,
-        (key, &caller.caller),
+        (&keys.sign, &caller.caller),
         &nonce,
         &context,
     )
@@ -165,10 +166,15 @@ pub fn allows(req: Option<&Requirement>, v: &str) -> bool {
     req.is_none_or(|r| Version::parse(v).is_ok_and(|v| r.matches(&v)))
 }
 
-async fn approved_record(env: &Env, key: &[u8], caller: &Signed, instance: &str) -> Result<Value> {
+async fn approved_record(
+    env: &Env,
+    keys: &SiteKeys,
+    caller: &Signed,
+    instance: &str,
+) -> Result<Value> {
     let record = scoped_core(
         env,
-        key,
+        keys,
         caller,
         &SitesScopeRequest::Record {
             instance: instance.to_owned(),
@@ -183,12 +189,12 @@ async fn approved_record(env: &Env, key: &[u8], caller: &Signed, instance: &str)
 
 async fn ensure_current(
     env: &Env,
-    key: &[u8],
+    keys: &SiteKeys,
     caller: &Signed,
     instance: &str,
     expected: &Value,
 ) -> Result<()> {
-    if approved_record(env, key, caller, instance).await? != *expected {
+    if approved_record(env, keys, caller, instance).await? != *expected {
         return Err(bad(
             "the approved publishing record changed; retry with the current configuration",
         ));
@@ -198,7 +204,7 @@ async fn ensure_current(
 
 async fn linked_account(
     env: &Env,
-    key: &[u8],
+    keys: &SiteKeys,
     caller: &Signed,
     instance: &str,
     target: &Target,
@@ -206,7 +212,7 @@ async fn linked_account(
 ) -> Result<Account> {
     let linked = scoped_core(
         env,
-        key,
+        keys,
         caller,
         &SitesScopeRequest::Linked {
             instance: instance.to_owned(),
@@ -238,7 +244,7 @@ async fn linked_account(
 /// Reactivates a previously staged release within the same approved publishing target.
 pub async fn rollback(
     env: &Env,
-    key: &[u8],
+    keys: &SiteKeys,
     caller: &Signed,
     instance: &str,
     release: &str,
@@ -246,9 +252,9 @@ pub async fn rollback(
     if !site_publish::is_release_id(release) {
         return Err(bad("expected a site release ID"));
     }
-    let record = approved_record(env, key, caller, instance).await?;
+    let record = approved_record(env, keys, caller, instance).await?;
     let target = target(&record, &env.var("ZONE")?.to_string()).map_err(bad)?;
-    let account = linked_account(env, key, caller, instance, &target, &record).await?;
+    let account = linked_account(env, keys, caller, instance, &target, &record).await?;
     let store = R2 {
         account: &account,
         bucket: &target.bucket,
@@ -259,11 +265,11 @@ pub async fn rollback(
         site: &target.site,
     };
     let provenance = site_publish::staged(&store, release, &owner).await?;
-    ensure_current(env, key, caller, instance, &record).await?;
+    ensure_current(env, keys, caller, instance, &record).await?;
     if target.protected {
         crate::public::require_protected_origin(
             env,
-            key,
+            keys,
             &target.base_url,
             instance,
             &target.site,
@@ -282,14 +288,14 @@ pub async fn rollback(
 /// provenance (commit, template, base URL), live first, then by id. Reads only.
 pub async fn releases(
     env: &Env,
-    key: &[u8],
+    keys: &SiteKeys,
     caller: &Signed,
     instance: &str,
     limit: usize,
 ) -> Result<Value> {
-    let record = approved_record(env, key, caller, instance).await?;
+    let record = approved_record(env, keys, caller, instance).await?;
     let target = target(&record, &env.var("ZONE")?.to_string()).map_err(bad)?;
-    let account = linked_account(env, key, caller, instance, &target, &record).await?;
+    let account = linked_account(env, keys, caller, instance, &target, &record).await?;
     let store = R2 {
         account: &account,
         bucket: &target.bucket,
@@ -309,36 +315,36 @@ fn publish_stage(started: &mut u64, stage: &str) {
 /// Deploys `instance` at `rev`: the public, manual `site_deploy`.
 pub async fn deploy(
     env: &Env,
-    key: &[u8],
+    keys: &SiteKeys,
     caller: &Signed,
     instance: &str,
     rev: &str,
 ) -> Result<Value> {
-    publish(env, key, caller, instance, rev, None).await
+    publish(env, keys, caller, instance, rev, None).await
 }
 
 /// Deploys a push-started publish from core's private receipt: the approved record must still
 /// have the queued digest, and GitHub's archive must be the queued commit.
 pub async fn deploy_queued(
     env: &Env,
-    key: &[u8],
+    keys: &SiteKeys,
     caller: &Signed,
     receipt: &Receipt<'_>,
 ) -> Result<Value> {
     let (instance, rev) = (receipt.instance(), receipt.revision());
-    publish(env, key, caller, instance, rev, Some(receipt)).await
+    publish(env, keys, caller, instance, rev, Some(receipt)).await
 }
 
 async fn publish(
     env: &Env,
-    key: &[u8],
+    keys: &SiteKeys,
     caller: &Signed,
     instance: &str,
     rev: &str,
     receipt: Option<&Receipt<'_>>,
 ) -> Result<Value> {
     let mut started = worker::Date::now().as_millis();
-    let record = approved_record(env, key, caller, instance).await?;
+    let record = approved_record(env, keys, caller, instance).await?;
     let record = &record;
     if let Some(receipt) = receipt {
         receipt.check_record(record).map_err(bad)?;
@@ -356,7 +362,7 @@ async fn publish(
 
     let credential = scoped_core(
         env,
-        key,
+        keys,
         caller,
         &SitesScopeRequest::Github {
             instance: instance.to_owned(),
@@ -413,12 +419,12 @@ async fn publish(
     };
 
     publish_stage(&mut started, "render");
-    ensure_current(env, key, caller, instance, record).await?;
-    let account = linked_account(env, key, caller, instance, &t, record).await?;
+    ensure_current(env, keys, caller, instance, record).await?;
+    let account = linked_account(env, keys, caller, instance, &t, record).await?;
     if t.protected {
         crate::public::require_protected_origin(
             env,
-            key,
+            keys,
             &t.base_url,
             instance,
             &t.site,
@@ -460,7 +466,7 @@ async fn publish(
     })
     .await?;
     let (files, uploaded, release) = (staged.files, staged.uploaded, staged.release);
-    ensure_current(env, key, caller, instance, record).await?;
+    ensure_current(env, keys, caller, instance, record).await?;
     site_publish::activate(&store, &release).await?;
     publish_stage(&mut started, "activated");
     Ok(json!({

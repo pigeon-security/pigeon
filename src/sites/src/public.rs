@@ -23,6 +23,8 @@ use pigeon_core::site_auth::{self, Config, Gate, Reserved};
 use serde_json::{Value, json};
 use worker::{Cache, Env, Fetch, Headers, Method, Request, RequestInit, Response, Result};
 
+use crate::SiteKeys;
+
 /// How long the host map is kept.
 const MAP_MS: f64 = 5.0 * 60_000.0;
 
@@ -139,12 +141,12 @@ async fn host_of(env: &Env, key: &[u8], worker: &str, host: &str) -> Result<Opti
 pub async fn serve(
     mut req: Request,
     env: &Env,
-    key: &[u8],
+    keys: &SiteKeys,
     worker: &str,
     host: &str,
 ) -> Result<Response> {
     let host = host.to_ascii_lowercase();
-    let Some(entry) = host_of(env, key, worker, &host).await? else {
+    let Some(entry) = host_of(env, &keys.sign, worker, &host).await? else {
         return Response::error("not found", 404);
     };
     let Some(config) = entry.config.as_ref() else {
@@ -163,12 +165,12 @@ pub async fn serve(
             503,
         )?);
     };
-    let skey = site_auth::session_key(key, scope);
+    let skey = site_auth::session_key(&keys.site, scope);
     let now = i64::try_from(worker::Date::now().as_millis()).unwrap_or(0);
     let signed_in = signed_in(&req, &skey, &host, config, now);
     match site_auth::gate(Some(config), method, url.path(), signed_in) {
         Gate::Pass => {
-            let Some(credential) = entry.credential(key) else {
+            let Some(credential) = entry.credential(&keys.site) else {
                 return no_store(Response::error("protected origin unavailable", 503)?);
             };
             let answer = fetch_protected(
@@ -200,7 +202,7 @@ pub async fn serve(
                 Value::Null
             };
             reserved(
-                r, env, key, worker, &host, scope, &skey, config, &url, &body, now,
+                r, env, &keys.sign, worker, &host, scope, &skey, config, &url, &body, now,
             )
             .await
         }
@@ -291,7 +293,7 @@ async fn fetch_protected(
 /// Check the applied, approved upstream before a gated publish or rollback writes to R2.
 pub(crate) async fn require_protected_origin(
     env: &Env,
-    key: &[u8],
+    keys: &SiteKeys,
     base_url: &str,
     instance: &str,
     site: &str,
@@ -300,7 +302,14 @@ pub(crate) async fn require_protected_origin(
     let url = worker::Url::parse(base_url).map_err(|_| protected_unavailable())?;
     let host = url.host_str().ok_or_else(protected_unavailable)?;
     // Fetch the current map instead of relying on a five-minute isolate cache.
-    let listed = ask(env, key, crate::WORKER, "instance_subdomains", &json!({})).await?;
+    let listed = ask(
+        env,
+        &keys.sign,
+        crate::WORKER,
+        "instance_subdomains",
+        &json!({}),
+    )
+    .await?;
     let map = map_of(&listed);
     let entry = map
         .get(host)
@@ -316,7 +325,9 @@ pub(crate) async fn require_protected_origin(
     if anonymous.status_code() != 401 || protected_response(&anonymous)? {
         return Err(protected_unavailable());
     }
-    let credential = entry.credential(key).ok_or_else(protected_unavailable)?;
+    let credential = entry
+        .credential(&keys.site)
+        .ok_or_else(protected_unavailable)?;
     let authorized = fetch_protected(
         &entry.upstream,
         site_auth::ORIGIN_CHECK,
