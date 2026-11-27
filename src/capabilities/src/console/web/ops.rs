@@ -1,7 +1,7 @@
 //! The app's one read path, `/app/op`: the browser-facing tool subset. Do not accept tool
 //! schemas as an allowlist: some tools that list data also change settings when given optional
 //! arguments (`ai_agents_config`, `ai_agents_models`), or clean up as they read
-//! (`ingest_status`), so each read lists the arguments it may take. Every op runs through
+//! (`data_ingest_status`), so each read lists the arguments it may take. Every op runs through
 //! `dispatch` as the signed-in person (or, for the iOS app by bearer, the person its token acts
 //! for, run exactly as that person: [`super::app_person`]), under the same scope and policy as
 //! MCP; the `app_*` ops are the console's own reads. Nothing here writes: every write, a run's stop, note and
@@ -78,8 +78,8 @@ pub const READS: &[(&str, &[&str])] = &[
     ("observability_summary", &["hours"]),
     ("observability_errors", &["hours", "limit", "worker"]),
     ("observability_worker_metrics", &["instance", "hours"]),
-    ("ingest_report", &["instance", "run"]),
-    // Ingest › Runs lists an instance's runs here: `ingest_status` would also delete the VM of
+    ("data_ingest_report", &["instance", "run"]),
+    // Ingest › Runs lists an instance's runs here: `data_ingest_status` would also delete the VM of
     // a run that has ended, so the console never calls it.
     ("app_ingest_runs", &["instance"]),
     // Email (docs/plans/email.md): the instance's mailboxes and messages, read from its data
@@ -135,7 +135,7 @@ pub const INSTANCE_OPS: &[&str] = &[
     "ci_jobs",
     "ci_status",
     "observability_worker_metrics",
-    "ingest_report",
+    "data_ingest_report",
 ];
 
 /// The arguments read `name` may take, when it is one.
@@ -264,8 +264,8 @@ async fn ingest_runs(cx: &Context<'_>, args: &Value) -> Result<Value> {
         .filter(|id| !id.is_empty())
         .ok_or_else(|| bad("expected an instance ID"))?;
     let record = crate::instances::one(cx.env, id).await?;
-    // The instance's own ingest_report must be available to it, as on its MCP endpoint.
-    crate::instances::tools::bind_global(id, record.as_ref(), "ingest_report", &json!({}))
+    // The instance's own data_ingest_report must be available to it, as on its MCP endpoint.
+    crate::instances::tools::bind_global(id, record.as_ref(), "data_ingest_report", &json!({}))
         .map_err(|why| bad(&why))?;
     Ok(json!({ "instance": id, "runs": crate::ingest::runs(cx.env, id).await? }))
 }

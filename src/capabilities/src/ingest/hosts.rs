@@ -7,7 +7,7 @@ use pigeon_ingest::estimate::Host;
 use pigeon_ingest::manifest::{self, DestSpec, JobSpec, SourceSpec};
 use serde_json::{Value, json};
 
-use crate::storage::{Account, Provider};
+use crate::data_read::{Account, Provider};
 
 /// The public repository the runner image is built from.
 pub const REPO_URL: &str = "https://github.com/pigeon-security/pigeon.git";

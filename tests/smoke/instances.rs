@@ -2588,11 +2588,11 @@ fn core_ingest_plans_hosts_and_estimates() {
     assert_eq!(
         tools,
         [
-            "ingest_plan",
-            "ingest_start",
-            "ingest_status",
-            "ingest_report",
-            "ingest_stop"
+            "data_ingest_plan",
+            "data_ingest_start",
+            "data_ingest_status",
+            "data_ingest_report",
+            "data_ingest_stop"
         ]
     );
     let slots: Vec<String> = cap.secrets().into_iter().map(|s| s.name).collect();

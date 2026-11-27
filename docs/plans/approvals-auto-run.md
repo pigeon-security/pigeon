@@ -25,7 +25,7 @@ tool call, run through the same `dispatch` as `/mcp`, as the approval's original
 | `apps_cleanup` | `apps_cleanup` | `apps_cleanup_apply {plan}` | |
 | `portal_oauth_redirects` | `portal_oauth_redirects` | `portal_oauth_redirects_apply {plan}` | |
 | `observability_monitors` | `observability_monitors_plan` | `observability_monitors_apply {plan}` | |
-| `ingest_run` | `ingest_plan` | `ingest_start {plan}` | |
+| `ingest_run` | `data_ingest_plan` | `data_ingest_start {plan}` | |
 | `cloud_change` | the cloud gateway's plan tools | `cloud_apply {plan}` | a capability Worker's tool, reached through its binding |
 
 A kind not in this table (a newer one) does not run on approval: it keeps the old flow, and the

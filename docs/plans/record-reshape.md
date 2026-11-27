@@ -109,7 +109,8 @@ An example, willowgraysen after the migration:
    one.
 9. **`ingest` is removed.** An old record with `ingest` disabled reads without it; one with it
    enabled is refused on read. No stored record has one. `data-ingest` keeps its tools
-   (`ingest_plan`, `ingest_report`, `ingest_status`, `ingest_stop`) and the `src/ingest` crate,
+   (`ingest_plan`, `ingest_report`, `ingest_status`, `ingest_stop`; since renamed `data_ingest_*`
+   by [data-ingest-names.md](data-ingest-names.md)) and the `src/ingest` crate,
    which the data Worker and the ingest runner use.
 10. **Digests.** A record's digest is that of its new layout, so every record's digest changes
     once, at migration. Nothing an approval binds churns: an instance plan's digest binds the
@@ -223,3 +224,5 @@ setting, a `CapabilitySettings` field; `layout.rs` needs no change for a new `fi
   as they are; `pigeon_capabilities::storage` stays as a hidden alias of `data_read` for them,
   and their two messages still name `storage_accounts()` (now `data_read_accounts()`). A
   follow-up, once Codex's ingest work settles, moves them to `data_read` and drops the alias.
+- 2026-11-27: the follow-up is [data-ingest-names.md](data-ingest-names.md): the ingest files
+  use `data_read`, the alias is gone, and the ingest tools are `data_ingest_*`.

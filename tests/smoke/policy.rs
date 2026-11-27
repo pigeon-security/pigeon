@@ -1924,7 +1924,7 @@ fn approvals_auto_run() {
         ("apps_cleanup", "apps_cleanup_apply"),
         ("portal_oauth_redirects", "portal_oauth_redirects_apply"),
         ("observability_monitors", "observability_monitors_apply"),
-        ("ingest_run", "ingest_start"),
+        ("ingest_run", "data_ingest_start"),
         ("cloud_change", "cloud_apply"),
     ] {
         let mut other = plan.clone();
@@ -1939,6 +1939,34 @@ fn approvals_auto_run() {
     let mut unknown = plan.clone();
     unknown.kind = Kind::named("someday");
     assert_eq!(approvals::follow_up(&unknown).unwrap(), None);
+    // A call approved under a tool's old name (docs/plans/data-ingest-names.md) runs nothing
+    // and names the new one; a stored run approval (`ingest_run`) runs under the new name.
+    let args = json!({ "instance": "docs", "run": "r1" });
+    let mut old = approval::new(
+        "ap9".into(),
+        Kind::ToolCall,
+        "ingest_stop".into(),
+        approval::call_digest("ingest_stop", &args, "svc"),
+        json!({}),
+        json!({ "args": args }),
+        "svc".into(),
+        Some("willow".into()),
+        t0,
+    );
+    let why = approvals::follow_up(&old).unwrap_err();
+    assert!(why.contains("`data_ingest_stop`"), "{why}");
+    old.subject = "data_ingest_stop".into();
+    old.digest = approval::call_digest("data_ingest_stop", &args, "svc");
+    assert_eq!(
+        approvals::follow_up(&old).unwrap().unwrap().tool,
+        "data_ingest_stop"
+    );
+    for (from, to) in approvals::RENAMED {
+        assert!(
+            !from.starts_with("data_") && to.starts_with("data_"),
+            "{from}"
+        );
+    }
     // The previous run's item says its next approval still waits, for the tab's Approve.
     let ran_draft = {
         let mut d = draft.clone();

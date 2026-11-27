@@ -128,15 +128,15 @@ objects under `inside/` and one under `outside/`. On the canary MCP endpoint:
 For Ingest, confirm that the dedicated destination has no fixture objects.
 Propose `ingest: {state: "enabled", source: "<provider>:<name>", bucket:
 "<fixture-bucket>", prefix: "inside/", destination_bucket: "<fixture-r2>"}`.
-A scoped `ingest_plan` supplies the source, bucket, and prefix from this record.
+A scoped `data_ingest_plan` supplies the source, bucket, and prefix from this record.
 Confirm an explicit selector is rejected before approval creation. Then call
-`ingest_plan` with `dry_run: true` and a size estimate based on the fixture.
+`data_ingest_plan` with `dry_run: true` and a size estimate based on the fixture.
 A ready plan creates an approval request. Inspect its scope and estimate
-before approving. Once approved, call `ingest_start` with the approved `plan` ID. Read the terminal
-result using `ingest_report` with the returned `run` ID. Compare the destination
+before approving. Once approved, call `data_ingest_start` with the approved `plan` ID. Read the terminal
+result using `data_ingest_report` with the returned `run` ID. Compare the destination
 before and after. Run metadata is expected, and destination blobs or quarantine
 copies should be absent. Use a separately authorized cleanup path if needed.
-The platform `ingest_status` tool can delete a finished VM.
+The platform `data_ingest_status` tool can delete a finished VM.
 
 For Metrics, the current [OAuth setup](../../src/capabilities/src/linked.rs)
 keeps one shared client and scope vector, which omits Account Analytics Read.

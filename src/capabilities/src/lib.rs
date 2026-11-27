@@ -32,11 +32,6 @@ pub mod mirror;
 /// Signed notifications, in pigeon-core so the capability Workers share them.
 pub use pigeon_core::notify;
 pub mod data_read;
-/// The old path of [`data_read`] (the removed `storage` capability's module), kept only so the
-/// ingest runs, which Codex is changing in flight, build unchanged; a follow-up moves them to
-/// `data_read` and removes this (docs/plans/record-reshape.md).
-#[doc(hidden)]
-pub use data_read as storage;
 pub mod oauth;
 pub mod observability;
 pub mod passkeys;

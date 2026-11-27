@@ -2033,7 +2033,7 @@ fn console_ops_allow_the_reads_the_console_needs_and_nothing_else() {
         "source_read_file",
         "ci_jobs",
         "observability_worker_metrics",
-        "ingest_report",
+        "data_ingest_report",
         "ai_agents_status",
         "ai_agents_compare",
         "cost_daily",
@@ -2077,7 +2077,10 @@ fn console_ops_allow_the_reads_the_console_needs_and_nothing_else() {
             "observability_worker_metrics",
             json!({ "instance": "blog", "hours": 24 }),
         ),
-        ("ingest_report", json!({ "instance": "blog", "run": "r1" })),
+        (
+            "data_ingest_report",
+            json!({ "instance": "blog", "run": "r1" }),
+        ),
         ("app_ingest_runs", json!({ "instance": "blog" })),
     ] {
         assert!(allowed(op, &args), "{op} {args}");
@@ -2137,7 +2140,7 @@ fn console_ops_allow_the_reads_the_console_needs_and_nothing_else() {
     for (op, args) in [
         ("site_rollback", json!({ "instance": "blog" })),
         ("secrets_request", json!({})),
-        ("ingest_status", json!({ "instance": "blog" })),
+        ("data_ingest_status", json!({ "instance": "blog" })),
         ("ai_agents_models", json!({ "set": { "executor": "x" } })),
         ("ai_agents_config", json!({ "max_live_runs": 1 })),
         (
@@ -2356,7 +2359,7 @@ fn data_ingest_scope_requires_data_and_uses_the_approved_spaces_prefix() {
     assert!(
         Scope::new(&record)
             .unwrap()
-            .bind("ingest_plan", &json!({}))
+            .bind("data_ingest_plan", &json!({}))
             .is_err()
     );
 
@@ -2367,18 +2370,22 @@ fn data_ingest_scope_requires_data_and_uses_the_approved_spaces_prefix() {
     let scope = Scope::new(&record).unwrap();
     assert!(scope.capabilities().contains(&ingest::NAME));
     let args = json!({ "prefix": "approved/canary/" });
-    assert!(scope.bind("ingest_plan", &args).is_ok());
+    assert!(scope.bind("data_ingest_plan", &args).is_ok());
     assert!(
         scope
-            .bind("ingest_plan", &json!({"bucket": "other"}))
+            .bind("data_ingest_plan", &json!({"bucket": "other"}))
             .is_err()
     );
     assert!(
         scope
-            .bind("ingest_start", &json!({"plan": "approval"}))
+            .bind("data_ingest_start", &json!({"plan": "approval"}))
             .is_err()
     );
-    for tool in ["ingest_status", "ingest_report", "ingest_stop"] {
+    for tool in [
+        "data_ingest_status",
+        "data_ingest_report",
+        "data_ingest_stop",
+    ] {
         assert!(scope.bind(tool, &json!({"run": "legacy"})).is_ok());
     }
     assert_eq!(

@@ -337,11 +337,11 @@
   }
 
   // ---- Ingest › Runs: the instance's runs (app_ingest_runs, which never deletes a VM, unlike
-  // ingest_status) and, per run, its report once it has finished.
+  // data_ingest_status) and, per run, its report once it has finished.
   const runTone = (s) => ({ done: "ok", failed: "bad", stopped: "warn", running: "info", listing: "info", starting: "info" })[s] || "plain";
   function ingestReport(ctx, run) {
     const node = el("div", { class: "section" });
-    loadInto(node, () => ctx.op("ingest_report", { instance: ctx.instance.id, run: run.run }), (r) => {
+    loadInto(node, () => ctx.op("data_ingest_report", { instance: ctx.instance.id, run: run.run }), (r) => {
       if (!r || r.report === null || !r.counters) return readOnly(r?.note || "There is no report yet: the run has not finished.");
       const c = r.counters;
       const lines = (rows, label) => (rows?.length ? el("div", { class: "section" }, el("h3", { text: label }), dataTable({

@@ -516,7 +516,7 @@ pub async fn decide(env: &Env, id: &str, approve: bool, person: &User) -> Result
     }
     if r.kind.name() == "ingest_run" {
         return Ok(json!({ "message": if approve {
-            format!("Approved: run {} starts once, when the agent that asked calls ingest_start.", r.subject)
+            format!("Approved: run {} starts once, when the agent that asked calls data_ingest_start.", r.subject)
         } else {
             "Denied: nothing starts.".to_string()
         } }));
@@ -809,9 +809,39 @@ pub const PLAN_TOOLS: &[&str] = &[
     "apps_cleanup_apply",
     "portal_oauth_redirects_apply",
     "observability_monitors_apply",
-    "ingest_start",
+    "data_ingest_start",
     "cloud_apply",
 ];
+
+/// Tools renamed outright (docs/plans/record-reshape.md, docs/plans/data-ingest-names.md), old
+/// name first. An approval of a call asked for under an old name runs nothing and says so: the
+/// person signed for that name's digest, and the caller asks again under the new one.
+pub const RENAMED: &[(&str, &str)] = &[
+    ("ingest_plan", "data_ingest_plan"),
+    ("ingest_start", "data_ingest_start"),
+    ("ingest_status", "data_ingest_status"),
+    ("ingest_report", "data_ingest_report"),
+    ("ingest_stop", "data_ingest_stop"),
+    ("email_status", "data_email_status"),
+    ("email_list", "data_email_list"),
+    ("email_get", "data_email_get"),
+    ("email_mailboxes", "data_email_mailboxes"),
+    ("email_address_set", "data_email_address_set"),
+    ("email_forward_set", "data_email_forward_set"),
+    ("storage_accounts", "data_read_accounts"),
+    ("storage_list_buckets", "data_read_list_buckets"),
+    ("storage_list_objects", "data_read_list_objects"),
+    ("storage_get_object", "data_read_get_object"),
+    ("storage_head_object", "data_read_head_object"),
+];
+
+/// The name `tool` was renamed to, when it is an old name. Pure.
+pub fn renamed(tool: &str) -> Option<&'static str> {
+    RENAMED
+        .iter()
+        .find(|(old, _)| *old == tool)
+        .map(|(_, new)| *new)
+}
 
 /// The operation an approval stands for: a tool call, made as the approval's caller.
 #[derive(Debug, Clone, PartialEq)]
@@ -839,6 +869,12 @@ pub fn follow_up(r: &Record) -> std::result::Result<Option<FollowUp>, String> {
         ApprovalKind::ToolCall => {
             if r.summary["via"] == "console" || ANSWERS_SECRET.contains(&r.subject.as_str()) {
                 return Ok(None);
+            }
+            if let Some(to) = renamed(&r.subject) {
+                return Err(format!(
+                    "`{}` was renamed `{to}` after approval {} was asked for; nothing ran: call `{to}` for a new approval",
+                    r.subject, r.id
+                ));
             }
             let Some(args) = r.payload.get("args").filter(|a| a.is_object()) else {
                 return Ok(None);
@@ -875,7 +911,7 @@ pub fn follow_up(r: &Record) -> std::result::Result<Option<FollowUp>, String> {
             crate::delegates::KIND => plan("apps_cleanup_apply"),
             crate::portal_oauth::KIND => plan("portal_oauth_redirects_apply"),
             "observability_monitors" => plan("observability_monitors_apply"),
-            crate::ingest::KIND => plan("ingest_start"),
+            crate::ingest::KIND => plan("data_ingest_start"),
             "cloud_change" => plan("cloud_apply"),
             _ => Ok(None),
         },

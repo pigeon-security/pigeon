@@ -1,8 +1,8 @@
 import SwiftUI
 
 /// Ingest › Runs: the instance's runs (`app_ingest_runs`, which never deletes a VM, unlike
-/// `ingest_status`), newest first; a run opens its report once it has finished
-/// (`ingest_report`). Read-only: starting and stopping a run stay in MCP.
+/// `data_ingest_status`), newest first; a run opens its report once it has finished
+/// (`data_ingest_report`). Read-only: starting and stopping a run stay in MCP.
 struct IngestScreen: View {
     let context: AreaContext
     @Environment(ConsoleAPI.self) private var api
@@ -85,12 +85,12 @@ struct IngestScreen: View {
     }
 }
 
-/// One ingest run and its report (`ingest_report`).
+/// One ingest run and its report (`data_ingest_report`).
 struct IngestRunView: View {
     let instance: String
     let run: JSON
     @Environment(ConsoleAPI.self) private var api
-    @State private var report = OpResource<JSON>("ingest_report")
+    @State private var report = OpResource<JSON>("data_ingest_report")
 
     var body: some View {
         List {

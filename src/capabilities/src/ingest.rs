@@ -6,7 +6,7 @@
 //! to sample the collection. Credentials are never logged or included in a response.
 //!
 //! The commit a run is built from is the one this Worker was built from (`PIGEON_COMMIT` at
-//! build time). A local build has none, so `ingest_plan` takes an optional full `commit`, which
+//! build time). A local build has none, so `data_ingest_plan` takes an optional full `commit`, which
 //! also overrides the built-in one.
 
 pub mod hosts;
@@ -23,22 +23,22 @@ const INGEST_VIEWS: &[crate::instances::tools::View] = &[crate::instances::tools
 
 const DATA_TOOLS: &[crate::instances::tools::Registration] = &[
     crate::instances::tools::Registration {
-        name: "ingest_plan",
+        name: "data_ingest_plan",
         description: Some("Check the approved DigitalOcean Spaces source and data destination."),
         arguments: &["prefix", "size_bytes"],
     },
     crate::instances::tools::Registration {
-        name: "ingest_report",
+        name: "data_ingest_report",
         description: Some("Read an ingestion report owned by this instance."),
         arguments: &["run"],
     },
     crate::instances::tools::Registration {
-        name: "ingest_status",
+        name: "data_ingest_status",
         description: Some("Read ingest progress and clean up a finished legacy run."),
         arguments: &["run"],
     },
     crate::instances::tools::Registration {
-        name: "ingest_stop",
+        name: "data_ingest_stop",
         description: Some("Stop a run owned by this instance."),
         arguments: &["run"],
     },
@@ -78,9 +78,9 @@ use serde_json::{Value, json};
 use worker::js_sys::{Date, Math};
 use worker::{Env, Error, Method, Result};
 
+use crate::data_read::{self, Account, Provider};
 use crate::instances::{self, record::AccountRef};
 use crate::passkeys::Passkeys;
-use crate::storage::{self, Account, Provider};
 use crate::users::directory;
 use crate::{Call, Capability, Context, Slot, arg, to_value, unknown};
 
@@ -90,7 +90,7 @@ pub const KIND: &str = "ingest_run";
 pub const PENDING_MS: i64 = 24 * 3_600_000;
 /// How long a run's record is kept: a century.
 const KEPT_MS: i64 = 100 * 365 * 24 * 3_600_000;
-/// The most rows of a list `ingest_report` answers.
+/// The most rows of a list `data_ingest_report` answers.
 pub const REPORT_ROWS: usize = 200;
 /// The share of bytes a plan assumes unique (decision 13.7).
 const UNIQUE_SHARE: f64 = 0.3;
@@ -262,7 +262,7 @@ async fn runs_of(env: &Env, instance: &str) -> Result<Vec<String>> {
     })
 }
 
-/// The records of `instance`'s runs, oldest first. It only reads: unlike `ingest_status` for
+/// The records of `instance`'s runs, oldest first. It only reads: unlike `data_ingest_status` for
 /// one run, it never deletes a VM, so the console lists runs with it (`app_ingest_runs`).
 pub async fn runs(env: &Env, instance: &str) -> Result<Vec<RunRecord>> {
     let mut out = Vec::new();
@@ -333,7 +333,7 @@ pub fn check_job_binding(
     }
     if !matches!(&job.source, SourceSpec::S3 { account, endpoint, region, bucket, .. }
         if account == &source.id() && endpoint == &source.endpoint && region == &source.region
-            && bucket_ok(bucket) && storage::bucket_allowed(source, bucket))
+            && bucket_ok(bucket) && data_read::bucket_allowed(source, bucket))
     {
         return Err("the ingest source is no longer approved; plan again".into());
     }
@@ -512,11 +512,11 @@ impl Ingest {
         match given.or(built) {
             Some(c) if hosts::is_commit(&c) => Ok(c),
             Some(_) => Err("`commit` must be a full 40-character lowercase hex commit id".into()),
-            None => Err("this Worker has no build commit: pass `commit` (a full 40-character commit id on GitHub) to ingest_plan".into()),
+            None => Err("this Worker has no build commit: pass `commit` (a full 40-character commit id on GitHub) to data_ingest_plan".into()),
         }
     }
 
-    /// `ingest_plan`: checks, a sample, an estimate and, when nothing is missing, an approval.
+    /// `data_ingest_plan`: checks, a sample, an estimate and, when nothing is missing, an approval.
     async fn plan(&self, cx: &Context<'_>, args: &Value) -> Result<Value> {
         let caller = cx
             .caller
@@ -562,18 +562,18 @@ impl Ingest {
         let mut missing = Vec::new();
 
         // The source account and its keys.
-        let account = match storage::find(&self.accounts, source) {
-            Ok(a) if bucket_ok(bucket) && storage::bucket_allowed(a, bucket) => Some(a),
+        let account = match data_read::find(&self.accounts, source) {
+            Ok(a) if bucket_ok(bucket) && data_read::bucket_allowed(a, bucket) => Some(a),
             Ok(a) => {
                 missing.push(format!(
-                    "Bucket `{bucket}` is not allowed for `{}`. Ask an agent to add it to the account's buckets in `storage_accounts()`.",
+                    "Bucket `{bucket}` is not allowed for `{}`. Ask an agent to add it to the account's buckets in `data_read_accounts()`.",
                     a.id()
                 ));
                 None
             }
             Err(e) => {
                 missing.push(format!(
-                    "{e}. Ask an agent to declare the account in `storage_accounts()` in src/platform/src/settings.rs."
+                    "{e}. Ask an agent to declare the account in `data_read_accounts()` in src/platform/src/settings.rs."
                 ));
                 None
             }
@@ -782,11 +782,11 @@ impl Ingest {
             "sample": sample,
             "approval": made["record"]["id"],
             "waits_until_ms": made["record"]["expires_ms"],
-            "note": "Nothing starts until the person approves this plan on the console's Approvals tab; then the platform starts it once, as you (ingest_start). approvals_status {id: <this approval>} says how it went.",
+            "note": "Nothing starts until the person approves this plan on the console's Approvals tab; then the platform starts it once, as you (data_ingest_start). approvals_status {id: <this approval>} says how it went.",
         }))
     }
 
-    /// `ingest_start`: takes the approval, writes the job, starts the host, records the run.
+    /// `data_ingest_start`: takes the approval, writes the job, starts the host, records the run.
     async fn start(&self, cx: &Context<'_>, args: &Value) -> Result<Value> {
         let caller = cx
             .caller
@@ -823,7 +823,7 @@ impl Ingest {
             .ok_or_else(|| bad("the approved ingest instance no longer exists"))?;
         let source_args = json!({ "source": source_id, "bucket": source_bucket, "prefix": prefix });
         let bindings = self.bindings(&record, &source_args).map_err(bad)?;
-        let account = storage::find(&self.accounts, source_id)?;
+        let account = data_read::find(&self.accounts, source_id)?;
         let account_id =
             linked_id(&record).ok_or_else(|| bad("the approved instance has no linked account"))?;
         check_job_binding(&job, &account_id, bindings.destination_bucket, account).map_err(bad)?;
@@ -979,7 +979,7 @@ impl Ingest {
                 if let Err(error) = setup {
                     self.remove_vm(env, &mut rec).await?;
                     return Err(bad(format!(
-                        "{error}. Follow ingest_status for cleanup of {}.",
+                        "{error}. Follow data_ingest_status for cleanup of {}.",
                         rec.run
                     )));
                 }
@@ -1002,13 +1002,13 @@ impl Ingest {
             "vm": rec.vm,
             "bucket_created": ensured.created,
             "job": manifest::job_key(&job.run),
-            "note": "Started. Follow it with ingest_status; read ingest_report when it is done.",
+            "note": "Started. Follow it with data_ingest_status; read data_ingest_report when it is done.",
         }))
     }
 
     /// The host's key for a run's source account, when the host is a VM.
     async fn host_key(&self, env: &Env, rec: &RunRecord) -> Result<Option<String>> {
-        let account = storage::find(&self.accounts, &rec.source)?;
+        let account = data_read::find(&self.accounts, &rec.source)?;
         match hosts::host_slot(account) {
             None => Ok(None),
             Some(slot) => {
@@ -1134,7 +1134,7 @@ impl Ingest {
         ))
     }
 
-    /// `ingest_status`: the instance's runs, or one run's status and host state.
+    /// `data_ingest_status`: the instance's runs, or one run's status and host state.
     async fn status(&self, cx: &Context<'_>, args: &Value) -> Result<Value> {
         let env = cx.env;
         let instance = arg(args, "instance")?;
@@ -1169,7 +1169,7 @@ impl Ingest {
         }))
     }
 
-    /// `ingest_report`: the run's report with long lists capped.
+    /// `data_ingest_report`: the run's report with long lists capped.
     async fn report(&self, cx: &Context<'_>, args: &Value) -> Result<Value> {
         let instance = arg(args, "instance")?;
         let run = arg(args, "run")?;
@@ -1187,7 +1187,7 @@ impl Ingest {
         }
     }
 
-    /// `ingest_stop`: deletes the VM, or asks the data Worker to stop the Container.
+    /// `data_ingest_stop`: deletes the VM, or asks the data Worker to stop the Container.
     async fn stop(&self, cx: &Context<'_>, args: &Value) -> Result<Value> {
         let instance = arg(args, "instance")?;
         let run = arg(args, "run")?;
@@ -1258,23 +1258,30 @@ impl Capability for Ingest {
 
     fn versions(&self) -> Vec<pigeon_core::versions::Component> {
         use pigeon_core::versions::{Component, Kind};
-        vec![Component::began(NAME, Kind::Capability)]
+        vec![Component::began(NAME, Kind::Capability).breaking(
+            "2.0.0",
+            "Its tools are renamed data_ingest_*, like data_email_* and data_read_*, for the \
+             capability at the record's data.ingest.",
+            "Call data_ingest_plan, data_ingest_start, data_ingest_status, data_ingest_report \
+             and data_ingest_stop instead of ingest_*; runs, their records and their approvals \
+             are unchanged.",
+        )]
     }
 
     fn tools(&self) -> Vec<Tool> {
         let instance =
             json!({ "type": "string", "description": "The instance, such as `willowgraysen`." });
-        let run = json!({ "type": "string", "description": "A run id from ingest_plan or ingest_status." });
+        let run = json!({ "type": "string", "description": "A run id from data_ingest_plan or data_ingest_status." });
         vec![
             tool(
-                "ingest_plan",
+                "data_ingest_plan",
                 "Plan a run that copies a source bucket into an instance's R2 bucket, leaving behind \
                  only files R2 already holds with certainty. Reads only: checks what is set up, \
                  samples the source, estimates time and cost, and asks the person to approve. \
                  Anything missing comes back as `missing`.",
                 json!({
                     "instance": instance,
-                    "source": { "type": "string", "description": "A storage account id (a declared legacy target only)." },
+                    "source": { "type": "string", "description": "A data_read account id (a declared legacy target only)." },
                     "bucket": { "type": "string", "description": "The source bucket (a declared legacy target only)." },
                     "prefix": { "type": "string" },
                     "dry_run": { "type": "boolean", "description": "Default true: decide and record, copy nothing." },
@@ -1286,25 +1293,25 @@ impl Capability for Ingest {
                 &["instance"],
             ),
             tool(
-                "ingest_start",
+                "data_ingest_start",
                 "Start an approved ingest plan, once.",
-                json!({ "plan": { "type": "string", "description": "The approval id from ingest_plan." } }),
+                json!({ "plan": { "type": "string", "description": "The approval id from data_ingest_plan." } }),
                 &["plan"],
             ),
             tool(
-                "ingest_status",
+                "data_ingest_status",
                 "An instance's ingest runs, or one run's progress and host state. Deletes the VM of a run that ended.",
                 json!({ "instance": instance, "run": run }),
                 &["instance"],
             ),
             tool(
-                "ingest_report",
+                "data_ingest_report",
                 "A finished run's report, long lists capped at 200 rows.",
                 json!({ "instance": instance, "run": run }),
                 &["instance", "run"],
             ),
             tool(
-                "ingest_stop",
+                "data_ingest_stop",
                 "Stop a run pigeon started: delete its VM or stop its Container.",
                 json!({ "instance": instance, "run": run }),
                 &["instance", "run"],
@@ -1315,11 +1322,11 @@ impl Capability for Ingest {
     fn call<'a>(&'a self, cx: &'a Context<'a>, tool: &'a str, args: &'a Value) -> Call<'a> {
         Box::pin(async move {
             match tool {
-                "ingest_plan" => self.plan(cx, args).await,
-                "ingest_start" => self.start(cx, args).await,
-                "ingest_status" => self.status(cx, args).await,
-                "ingest_report" => self.report(cx, args).await,
-                "ingest_stop" => self.stop(cx, args).await,
+                "data_ingest_plan" => self.plan(cx, args).await,
+                "data_ingest_start" => self.start(cx, args).await,
+                "data_ingest_status" => self.status(cx, args).await,
+                "data_ingest_report" => self.report(cx, args).await,
+                "data_ingest_stop" => self.stop(cx, args).await,
                 other => Err(unknown(other)),
             }
         })

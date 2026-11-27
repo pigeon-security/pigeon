@@ -605,7 +605,7 @@ instance's account (`willowgraysen` first), not pigeon's.
 | --- | --- | --- |
 | Dedupe library | `src/ingest` (`pigeon-ingest`) | pure Rust, no I/O of its own, builds for WASM and natively: metrics, decision rules, zip walking, manifests and checkpoints, the index schema, estimates, and the engine that drives one run over a `Source` and a `Dest` |
 | Runner | `src/ingest-runner` (`pigeon-ingest-runner`), `src/ingest-runner/Dockerfile` | the container: a native binary that implements `Source` (S3 list and get, SigV4 through `pigeon_core::s3`; a local folder) and `Dest` (R2's S3 API) over blocking HTTPS, with worker threads and a spool directory |
-| Capability | `src/capabilities/src/ingest.rs` (+ `ingest/`) | the tools `ingest_plan`, `ingest_start`, `ingest_status`, `ingest_report`, `ingest_stop` in core, the run approval, the hosts' API requests, secret slots |
+| Capability | `src/capabilities/src/ingest.rs` (+ `ingest/`) | the tools `data_ingest_plan`, `data_ingest_start`, `data_ingest_status`, `data_ingest_report`, `data_ingest_stop` in core, the run approval, the hosts' API requests, secret slots |
 | Cloudflare-side path | `src/data-worker` (`pigeon-data-worker`) | the instance's data Worker (data-worker.md) with only its ingest parts so far: a Durable Object `IngestJob` that runs the runner image as a Cloudflare Container (for B2), and the queue consumer that applies manifests to the D1 index |
 
 **One image, three hosts.** The same runner image runs everywhere; only the host differs:
@@ -699,7 +699,7 @@ Everything about a run lives in the instance bucket under `ingest/runs/{run}/`:
 
 | Key | Written by | What |
 | --- | --- | --- |
-| `job.json` | pigeon, at `ingest_start` | the `JobSpec` (no secrets) |
+| `job.json` | pigeon, at `data_ingest_start` | the `JobSpec` (no secrets) |
 | `manifest/{seq:08}.jsonl` | runner | one `ManifestLine` per file or member: source identity, metrics, decision, reason, flags, hints, R2 key; a part closes at 5,000 lines or 8 MiB |
 | `checkpoint.json` | runner, after each part | `{seq, after_key, counters}`: `after_key` is the highest listing key with every key at or below it finished |
 | `status.json` | runner, every 30 s and at the end | state (`starting`, `listing`, `running`, `done`, `failed`, `stopped`), counters, rates, ETA, last error |
@@ -792,7 +792,7 @@ engine against a fake S3 server; building the Docker image in CI would need a ne
 
 #### 13.6 How pigeon deploys and drives it
 
-`ingest_plan {instance, source, bucket, prefix?, dry_run = true, keep_archives = true,
+`data_ingest_plan {instance, source, bucket, prefix?, dry_run = true, keep_archives = true,
 fingerprints = false, size?}` reads only, then asks the person: it checks the instance is
 linked, the source account is declared and its key bound, the host and R2 secrets are bound,
 and the instance bucket exists (if not, the plan's first step creates it through the link);
@@ -801,7 +801,7 @@ host request with secrets redacted, the estimate (13.7), and an approval of kind
 on the console's Approvals tab, bound to the digest of all of that and the commit. Anything
 missing makes the answer `applies: false` with what the person must do.
 
-`ingest_start {plan}` takes the approval (once; refused if the plan's digest changed), creates
+`data_ingest_start {plan}` takes the approval (once; refused if the plan's digest changed), creates
 the bucket if the plan said so, writes `job.json`, then starts the host:
 
 | Host | Calls | Credentials |
@@ -815,8 +815,8 @@ Keys reach the container only as environment at start: the source account's read
 (`INGEST_R2_<INSTANCE>`: an R2 API token for `{instance}-data` only, Object Read & Write, made by
 the person in the instance's dashboard, since an OAuth link cannot create R2 API tokens). On a
 VM they are in cloud-init user data, which the provider shows to the account owner and the VM's
-metadata service; the VM is deleted when the run ends (`ingest_status` deletes a Droplet or
-Instance whose run is `done`, `failed` or `stopped`; `ingest_stop {run}` does it at once), and
+metadata service; the VM is deleted when the run ends (`data_ingest_status` deletes a Droplet or
+Instance whose run is `done`, `failed` or `stopped`; `data_ingest_stop {run}` does it at once), and
 the person may rotate the R2 key after the backfill. Later: R2 temporary credentials scoped to
 the run's prefixes, minted through the link, replace the long-lived R2 key once phase 0 shows
 the OAuth link may call that endpoint.
@@ -828,9 +828,9 @@ written (`GET /v2/account`; Scaleway `GET /instance/v1/zones/{zone}/servers?per_
 `HEAD` on the bucket). As with every Secrets Store secret, its binding in
 `src/platform/wrangler.toml` lands after the secret exists.
 
-`ingest_status {instance, run?}` reads `status.json` through the link (`r2::get` with the
+`data_ingest_status {instance, run?}` reads `status.json` through the link (`r2::get` with the
 instance's account) and the host's state; without `run` it lists the instance's runs, kept in
-the Directory as `ingest:run:{run}` (host, ids, approval, commit). `ingest_report {instance,
+the Directory as `ingest:run:{run}` (host, ids, approval, commit). `data_ingest_report {instance,
 run}` answers `report.json`, at most 200 rows of each list. Nothing on the runner listens on a
 port: results flow back only through R2.
 
@@ -839,7 +839,7 @@ port: results flow back only through R2.
 Assumptions: SHA-256 with SHA extensions about 1.5 GB/s a core and BLAKE3 over 3 GB/s, so
 hashing is never the limit; the source read rate is 100–150 MB/s per VM in region (B2 to a
 Cloudflare Container 80–120 MB/s); unique share about 25–30% (decision 11).
-`pigeon_ingest::estimate` computes the same table for `ingest_plan` from the sampled sizes.
+`pigeon_ingest::estimate` computes the same table for `data_ingest_plan` from the sampled sizes.
 
 | Source | Read | Time at 100–150 MB/s | Host | Copy out (unique ~25–30%) | Requests | Total |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -885,11 +885,11 @@ opened": the report says how many; a VM run can open them later).
      the first approved plan create it and set the key after).
 4. **Ask an agent to bind the secrets** in `src/platform/wrangler.toml` and land (a binding to a
    missing secret fails the deploy, so this comes after step 3).
-5. **The first dry run** (DigitalOcean, one prefix): `ingest_plan {"instance":
+5. **The first dry run** (DigitalOcean, one prefix): `data_ingest_plan {"instance":
    "willowgraysen", "source": "digitalocean:<name>", "bucket": "<bucket>", "prefix":
    "<a small prefix>", "dry_run": true}`, approve it on the Approvals tab, then
-   `ingest_start {"plan": "<approval id>"}`; follow with `ingest_status` and read
-   `ingest_report`. Nothing is copied in a dry run; the Droplet is deleted at the end.
+   `data_ingest_start {"plan": "<approval id>"}`; follow with `data_ingest_status` and read
+   `data_ingest_report`. Nothing is copied in a dry run; the Droplet is deleted at the end.
 6. For B2: the data Worker must be deployed into willowgraysen first (data-worker.md phases 1
    and 3, plus a `wrangler deploy` that builds the container image there), which is a separate
    go-ahead.
@@ -1015,7 +1015,7 @@ Spaces binding for its first source. A planning request can narrow that prefix a
 service uses the saved read-only key to sample the source. The estimate covers the sample
 unless the caller supplies the full source size.
 
-1. Register `data-ingest` and serve the existing `ingest_plan` tool as a read-only preflight
+1. Register `data-ingest` and serve the existing `data_ingest_plan` tool as a read-only preflight
    on instances that opt in. Keep the existing tool names, profiles and run history.
 2. Provision the data store in linked accounts using the instance's own approved
    Cloudflare connection. Bind plans to the exact approved source and data destination.

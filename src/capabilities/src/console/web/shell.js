@@ -32,7 +32,7 @@
   // ---- Contract (P15): every op the shell and its views read, and every write they make.
   const READS = Object.freeze(["console_manifest", "instances_list", "app_inbox", "app_linked_details", "app_jobs_audit_plan", "app_federation_people",
     "data_read_list_objects", "source_resolve_revision", "source_read_file", "ci_jobs", "ci_status",
-    "observability_worker_metrics", "app_ingest_runs", "ingest_report", "digitalocean_status", "digitalocean_verify",
+    "observability_worker_metrics", "app_ingest_runs", "data_ingest_report", "digitalocean_status", "digitalocean_verify",
     "data_email_mailboxes", "data_email_list", "data_email_get", "data_read_get_object",
     "digitalocean_spaces_status", "digitalocean_spaces_verify", "digitalocean_droplet_status",
     "digitalocean_droplet_jobs", "digitalocean_droplet_job",

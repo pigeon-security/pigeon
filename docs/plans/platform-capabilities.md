@@ -101,6 +101,4 @@ change.
 
 ## The `storage` alias
 
-`pigeon_capabilities::storage` (the hidden alias of `data_read`) stays: Codex's ingest files
-(`src/capabilities/src/ingest.rs`, `ingest/hosts.rs`) still use it on main. It goes once they
-move to `data_read`.
+Removed by [data-ingest-names.md](data-ingest-names.md): the ingest files use `data_read`.

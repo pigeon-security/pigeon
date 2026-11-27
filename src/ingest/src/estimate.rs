@@ -1,4 +1,4 @@
-//! Throughput and cost estimates for a run (decision 13.7), for `ingest_plan`.
+//! Throughput and cost estimates for a run (decision 13.7), for `data_ingest_plan`.
 
 use serde::{Deserialize, Serialize};
 
