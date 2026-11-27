@@ -199,6 +199,8 @@ fn pipeline_terminal_audit_is_stable_and_scoped() {
     assert_eq!(body["job"]["cleanup"], "confirmed");
     assert_eq!(body["job"]["counts"]["stored"], 2);
     assert!(terminal_object("../demo", PipelineKind::ScalewayIngest, &terminal).is_none());
+    assert!(terminal_object("pigeon.dev", PipelineKind::EmailIngest, &terminal).is_some());
+    assert!(terminal_object("pigeon..dev", PipelineKind::EmailIngest, &terminal).is_none());
     terminal.run_id = "run/123".into();
     assert!(terminal_object("owner/demo", PipelineKind::ScalewayIngest, &terminal).is_none());
 }

@@ -82,9 +82,22 @@ pub fn terminal_object(
     kind: PipelineKind,
     terminal: &PipelineTerminal,
 ) -> Option<AuditObject> {
-    if instance.len() > 64
-        || instance.matches('/').count() > 1
-        || !instance.split('/').all(path_component)
+    let valid_instance = if instance.contains('.') {
+        instance.len() <= 253
+            && instance.split('.').all(|label| {
+                (1..=63).contains(&label.len())
+                    && label.starts_with(|c: char| c.is_ascii_alphanumeric())
+                    && label.ends_with(|c: char| c.is_ascii_alphanumeric())
+                    && label
+                        .bytes()
+                        .all(|c| c.is_ascii_alphanumeric() || c == b'-')
+            })
+    } else {
+        instance.len() <= 64
+            && instance.matches('/').count() <= 1
+            && instance.split('/').all(path_component)
+    };
+    if !valid_instance
         || terminal.run_id.len() > 96
         || !path_component(&terminal.run_id)
         || terminal.finished_ms < terminal.started_ms
