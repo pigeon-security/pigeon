@@ -13,6 +13,7 @@ const NAME_PREFIX: &str = "pigeon-ingest-";
 
 pub const SIZE: &str = "s-4vcpu-8gb";
 pub const IMAGE: &str = "ubuntu-24-04-x64";
+pub const VOLUME_FILESYSTEM: &str = "ext4";
 
 fn lower_hex(bytes: &[u8]) -> bool {
     bytes
@@ -201,7 +202,7 @@ pub async fn create_volume(
         "description": target.description(),
         "region": target.region,
         "size_gigabytes": gib,
-        "filesystem_type": "ext4",
+        "filesystem_type": VOLUME_FILESYSTEM,
     });
     let response = request(transport, token, "POST", VOLUMES.into(), Some(body)).await;
     outcome(response, 201, |value| {
@@ -318,6 +319,40 @@ pub async fn remove_droplet(
             "Could not verify DigitalOcean ingest Droplet ownership.",
         )),
     }
+}
+
+/// Check a bootstrap request against the exact owned Droplet's public IPv4 address.
+pub async fn public_ipv4(
+    transport: &dyn Transport,
+    token: &str,
+    target: &Target<'_>,
+    id: u64,
+) -> Result<Option<std::net::Ipv4Addr>> {
+    if id == 0 {
+        return Err(bad("Invalid DigitalOcean Droplet ID."));
+    }
+    let response = request(transport, token, "GET", format!("{DROPLETS}/{id}"), None).await?;
+    if response.status != 200 {
+        return Ok(None);
+    }
+    let body = read(&response)?;
+    let droplet = &body["droplet"];
+    if droplet_id(droplet, target) != Some(id) {
+        return Err(bad(
+            "Could not verify DigitalOcean ingest Droplet ownership.",
+        ));
+    }
+    let mut public = droplet["networks"]["v4"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|network| network["type"].as_str() == Some("public"))
+        .filter_map(|network| network["ip_address"].as_str()?.parse().ok());
+    let address = public.next();
+    if public.next().is_some() {
+        return Err(bad("DigitalOcean returned ambiguous public addresses."));
+    }
+    Ok(address)
 }
 
 /// A volume is deleted only after the provider reports it detached. A later GET confirms absence.

@@ -167,8 +167,8 @@
   const CATALOGUE_ADDS = {
     architecture: { adds: ["Platform › Architecture"], what: "Show this instance’s own setup: its Worker, bucket, hostnames and tools" },
     "data-ingest": {
-      adds: ["Ingest › Runs"], what: "Check the approved import source and data store",
-      effect: "Preview the Spaces source and estimated cost. Launch support is pending.",
+      adds: ["Ingest › Runs"], what: "Import approved source data into the instance's data store",
+      effect: "Review the Spaces scope and estimated cost, then approve the ingest run with a passkey.",
     },
     "mcp-federation": { what: "Share approved Jobs reads through the platform MCP connection" },
     jobs: {

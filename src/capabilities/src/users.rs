@@ -1558,6 +1558,35 @@ impl Directory {
                 }
                 json!(matches)
             }
+            "data-ingest.droplet.pending" | "data-ingest.droplet.list" => {
+                #[derive(Deserialize)]
+                struct Row {
+                    value: String,
+                }
+                const PREFIX: &str = "key >= 'do-ingest-run:' AND key < 'do-ingest-run;'
+                    AND expires_at > ? AND json_valid(value)";
+                let rows: Vec<Row> = if op == "data-ingest.droplet.pending" {
+                    self.db.rows(
+                        &format!(
+                            "SELECT value FROM settings WHERE {PREFIX}
+                            AND json_extract(value, '$.next_ms') BETWEEN 1 AND ?
+                            AND json_extract(value, '$.lease_until_ms') <= ?
+                            ORDER BY json_extract(value, '$.next_ms') LIMIT 4"
+                        ),
+                        vec![t.into(), t.into(), t.into()],
+                    )?
+                } else {
+                    self.db.rows(
+                        &format!(
+                            "SELECT value FROM settings WHERE {PREFIX}
+                            AND json_extract(value, '$.plan.job.instance') = ?
+                            ORDER BY json_extract(value, '$.started_ms') DESC LIMIT 100"
+                        ),
+                        vec![t.into(), s("instance").into()],
+                    )?
+                };
+                json!(rows.into_iter().map(|row| row.value).collect::<Vec<_>>())
+            }
             "digitalocean.health.pending" => {
                 #[derive(Deserialize)]
                 struct Row {

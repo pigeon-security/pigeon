@@ -2379,7 +2379,7 @@ fn data_ingest_scope_requires_data_and_uses_the_approved_spaces_prefix() {
     assert!(
         scope
             .bind("data_ingest_start", &json!({"plan": "approval"}))
-            .is_err()
+            .is_ok()
     );
     for tool in [
         "data_ingest_status",

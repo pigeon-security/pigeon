@@ -303,6 +303,7 @@ pub const CATALOGUE: &[Entry] = &[
         name: crate::ingest::NAME,
         field: Some("data.ingest"),
         requires: &[crate::data_store::NAME],
+        linked: true,
         opt_in: true,
         about: "Import external storage into the data store",
         ..BASE
@@ -428,6 +429,7 @@ pub fn placement(record: &Instance, name: &str) -> Option<(Placement, Option<Str
                 crate::cloud_scope::NAME
                     | crate::digitalocean::NAME
                     | crate::federation::NAME
+                    | crate::ingest::NAME
                     | JOBS
             ) =>
         {

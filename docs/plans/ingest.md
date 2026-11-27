@@ -1027,5 +1027,7 @@ unless the caller supplies the full source size.
    duplicate sightings, distinct variants, archive containers and member lineage against
    the source and terminal audit. Verify cleanup before expanding the rollout.
 
-The initial preflight produces no launch approval. Linked data provisioning and the Jobs
-lifecycle integration are required before that path can run.
+The DigitalOcean run uses the linked Data store and the Jobs lifecycle. It issues an
+approval after checking both private buckets and the provider credentials. See the
+[DigitalOcean run plan](digitalocean-ingest.md) for scratch storage, archive budgets,
+credentials and cleanup.

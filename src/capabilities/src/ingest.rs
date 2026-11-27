@@ -9,6 +9,7 @@
 //! build time). A local build has none, so `data_ingest_plan` takes an optional full `commit`, which
 //! also overrides the built-in one.
 
+pub mod digitalocean;
 pub mod hosts;
 pub mod net;
 
@@ -24,8 +25,25 @@ const INGEST_VIEWS: &[crate::instances::tools::View] = &[crate::instances::tools
 const DATA_TOOLS: &[crate::instances::tools::Registration] = &[
     crate::instances::tools::Registration {
         name: "data_ingest_plan",
-        description: Some("Check the approved DigitalOcean Spaces source and data destination."),
-        arguments: &["prefix", "size_bytes"],
+        description: Some("Plan an ingest using the approved source and private Data destination."),
+        arguments: &[
+            "source",
+            "prefix",
+            "size_bytes",
+            "dry_run",
+            "keep_archives",
+            "fingerprints",
+            "commit",
+            "scratch_gib",
+            "max_minutes",
+            "archive_inflated_gib",
+            "archive_member_gib",
+        ],
+    },
+    crate::instances::tools::Registration {
+        name: "data_ingest_start",
+        description: Some("Start the approved ingest plan for this instance."),
+        arguments: &["plan"],
     },
     crate::instances::tools::Registration {
         name: "data_ingest_report",
@@ -274,6 +292,8 @@ pub async fn runs(env: &Env, instance: &str) -> Result<Vec<RunRecord>> {
             }
         }
     }
+    out.extend(digitalocean::runs(env, instance).await?);
+    out.sort_by_key(|record| record.started_ms);
     Ok(out)
 }
 
@@ -374,74 +394,6 @@ pub fn spaces_prefix<'a>(
     }
 }
 
-async fn data_ingest_preflight(
-    record: &instances::record::Instance,
-    env: &Env,
-    args: &Value,
-) -> Result<Value> {
-    if !data_enabled(record) {
-        return Ok(unready(
-            vec!["Enable data on this instance before using data-ingest.".into()],
-            Value::Null,
-            Value::Null,
-        ));
-    }
-    if !args.as_object().is_some_and(|fields| {
-        fields
-            .keys()
-            .all(|key| matches!(key.as_str(), "instance" | "prefix" | "size_bytes"))
-    }) {
-        return Err(bad(
-            "Data ingest preflight takes only a prefix and source size.",
-        ));
-    }
-    let Some(binding) = crate::digitalocean::spaces::binding(record) else {
-        return Ok(unready(
-            vec!["Configure an approved DigitalOcean Spaces connection on this instance.".into()],
-            Value::Null,
-            Value::Null,
-        ));
-    };
-    let prefix = spaces_prefix(&binding.prefix, args).map_err(bad)?;
-    let mut missing =
-        vec!["Data ingest launch requires bounded Jobs cleanup and terminal audit support.".into()];
-    let destination = crate::data_store::store_name(record);
-    if record.account != AccountRef::Home {
-        missing.push("Data provisioning for linked instances is not available yet.".into());
-    }
-    let (sample, est) = match crate::digitalocean::spaces::ingest_sample(record, env, prefix).await
-    {
-        Ok(listing) => {
-            let objects = listing.objects.len() as u64;
-            let bytes = listing.objects.iter().map(|o| o.size).sum::<u64>();
-            let whole_bytes = args["size_bytes"].as_u64().unwrap_or(bytes);
-            let whole_objects = if whole_bytes == bytes {
-                objects
-            } else {
-                ((u128::from(whole_bytes) * u128::from(objects)) / u128::from(bytes.max(1)))
-                    .min(u128::from(u64::MAX)) as u64
-            };
-            (
-                json!({ "objects": objects, "bytes": bytes, "first_page_only": listing.next.is_some() }),
-                to_value(estimate::estimate(
-                    Host::DigitalOcean,
-                    whole_bytes,
-                    whole_objects,
-                    UNIQUE_SHARE,
-                )),
-            )
-        }
-        Err(_) => {
-            missing.push("Could not list the approved Spaces prefix with the saved read-only key. Check DigitalOcean Spaces in Capabilities.".into());
-            (Value::Null, Value::Null)
-        }
-    };
-    let mut out = unready(missing, est, sample);
-    out["source"] = json!({ "provider": "digitalocean", "region": binding.region, "bucket": binding.bucket, "prefix": prefix });
-    out["destination"] = json!({ "capability": crate::data_store::NAME, "bucket": destination });
-    Ok(out)
-}
-
 impl Ingest {
     fn target(&self, instance: &str) -> Result<&Target> {
         self.targets
@@ -537,7 +489,7 @@ impl Ingest {
             ));
         };
         if record.capabilities.contains_key(NAME) {
-            return data_ingest_preflight(&record, env, args).await;
+            return digitalocean::plan(cx, self.host_name(), &record, args).await;
         }
         let bindings = match self.bindings(&record, args) {
             Ok(bindings) => bindings,
@@ -796,6 +748,9 @@ impl Ingest {
         let got = directory(env, "approval.get", json!({ "id": approval_id })).await?;
         if got["kind"] != KIND {
             return Err(bad(format!("there is no ingest approval {approval_id}")));
+        }
+        if digitalocean::is_plan(&got["payload"]) {
+            return digitalocean::start(cx, self.host_name(), approval_id, &got, args).await;
         }
         let job: JobSpec = serde_json::from_value(got["payload"]["job"].clone())
             .map_err(|_| bad("the approval holds no readable job"))?;
@@ -1141,6 +1096,11 @@ impl Ingest {
         let Some(run) = args["run"].as_str() else {
             return Ok(json!({ "instance": instance, "runs": runs(env, instance).await? }));
         };
+        if let Some(result) =
+            digitalocean::read(env, self.host_name(), instance, run, false).await?
+        {
+            return Ok(result);
+        }
         let mut rec = run_of(env, instance, run).await?;
         let (account, bucket) = self.linked_for(cx, &rec).await?;
         let status: Value = match r2::get(&account, &bucket, &manifest::status_key(run)).await? {
@@ -1173,6 +1133,11 @@ impl Ingest {
     async fn report(&self, cx: &Context<'_>, args: &Value) -> Result<Value> {
         let instance = arg(args, "instance")?;
         let run = arg(args, "run")?;
+        if let Some(result) =
+            digitalocean::read(cx.env, self.host_name(), instance, run, true).await?
+        {
+            return Ok(result);
+        }
         let rec = run_of(cx.env, instance, run).await?;
         let (account, bucket) = self.linked_for(cx, &rec).await?;
         match r2::get(&account, &bucket, &manifest::report_key(run)).await? {
@@ -1191,6 +1156,9 @@ impl Ingest {
     async fn stop(&self, cx: &Context<'_>, args: &Value) -> Result<Value> {
         let instance = arg(args, "instance")?;
         let run = arg(args, "run")?;
+        if let Some(result) = digitalocean::cancel(cx.env, instance, run).await? {
+            return Ok(result);
+        }
         let mut rec = run_of(cx.env, instance, run).await?;
         if rec.vm_deleted {
             return Ok(json!({ "run": run, "note": "Already stopped." }));
@@ -1281,7 +1249,7 @@ impl Capability for Ingest {
                  Anything missing comes back as `missing`.",
                 json!({
                     "instance": instance,
-                    "source": { "type": "string", "description": "A data_read account id (a declared legacy target only)." },
+                    "source": { "type": "string", "description": "Provider adapter for Data ingest, or a registered account for a legacy run." },
                     "bucket": { "type": "string", "description": "The source bucket (a declared legacy target only)." },
                     "prefix": { "type": "string" },
                     "dry_run": { "type": "boolean", "description": "Default true: decide and record, copy nothing." },
@@ -1289,6 +1257,10 @@ impl Capability for Ingest {
                     "fingerprints": { "type": "boolean", "description": "Default false." },
                     "size_bytes": { "type": "integer", "description": "The source's whole size, for the estimate." },
                     "commit": { "type": "string", "description": "A full commit id to build the runner from; default this Worker's own." },
+                    "scratch_gib": { "type": "integer", "description": "Size of the dedicated DigitalOcean scratch volume (default 32 GiB)." },
+                    "max_minutes": { "type": "integer", "description": "DigitalOcean job deadline in minutes (default 30)." },
+                    "archive_inflated_gib": { "type": "integer", "description": "Maximum inflated GiB per ZIP tree, bounded by scratch space." },
+                    "archive_member_gib": { "type": "integer", "description": "Maximum inflated GiB per ZIP member." },
                 }),
                 &["instance"],
             ),

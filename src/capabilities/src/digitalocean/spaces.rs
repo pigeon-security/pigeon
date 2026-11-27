@@ -85,7 +85,7 @@ pub(super) async fn status(record: &Instance, env: &Env) -> Result<Value> {
     }))
 }
 
-async fn open_keys(record: &Instance, env: &Env, binding: &Binding) -> Result<s3::Keys> {
+pub(crate) async fn open_keys(record: &Instance, env: &Env, binding: &Binding) -> Result<s3::Keys> {
     let saved = saved(env, &record.id)
         .await?
         .filter(|s| current(s, record, binding))

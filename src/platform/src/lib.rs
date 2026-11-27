@@ -188,6 +188,13 @@ async fn route(req: Request, env: Env, ctx: &WorkerContext) -> Result<Response> 
     if !proxy::host_serves(&host, settings::PROXY_HOST, &path) {
         return Response::error("not found", 404);
     }
+    if host == settings::HOST && path == pigeon_capabilities::ingest::digitalocean::BOOT_PATH {
+        if req.method() == Method::Post {
+            return pigeon_capabilities::ingest::digitalocean::bootstrap(&env, settings::HOST, req)
+                .await;
+        }
+        return Response::error("method not allowed", 405);
+    }
     if host == settings::HOST && path == pigeon_capabilities::digitalocean::health::CALLBACK_PATH {
         if req.method() != Method::Post {
             return Response::error("method not allowed", 405);
@@ -247,6 +254,12 @@ async fn scheduled(_event: worker::ScheduledEvent, env: Env, _ctx: worker::Sched
         .is_err()
     {
         console_error!("Droplet health maintenance tick failed; check the instance's status");
+    }
+    if pigeon_capabilities::ingest::digitalocean::reap(&env, settings::HOST)
+        .await
+        .is_err()
+    {
+        console_error!("DigitalOcean ingest maintenance tick failed");
     }
     pigeon_capabilities::ledger::flush_calls(&env, true).await;
 }

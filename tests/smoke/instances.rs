@@ -740,6 +740,7 @@ const LINKED_SO_FAR: &[&str] = &[
     "mcp-federation",
     "jobs",
     "data",
+    "data-ingest",
     "data-email",
 ];
 

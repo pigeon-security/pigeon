@@ -693,7 +693,7 @@
       "field": "data.ingest",
       "home": "inline",
       "home_worker": null,
-      "linked": false,
+      "linked": true,
       "name": "data-ingest",
       "opt_in": true,
       "placements": [

@@ -1739,6 +1739,34 @@ fn digitalocean_ingest_recovers_resources_and_waits_for_volume_detach() {
 }
 
 #[test]
+fn digitalocean_ingest_bootstrap_uses_owned_droplet_ipv4() {
+    use pigeon_cloud::digitalocean_ingest::{Target, public_ipv4};
+
+    let id = "0123456789abcdef0123456789abcdef";
+    let target = Target::new(id, "tor1").unwrap();
+    let name = target.name().to_owned();
+    let net = Net {
+        log: RefCell::new(Vec::new()),
+        handler: Box::new(move |req| {
+            assert_eq!(req.method, "GET");
+            json_res(
+                200,
+                json!({"droplet":{
+                    "id":42,"name":name,"region":{"slug":"tor1"},"tags":["pigeon-ingest"],
+                    "networks":{"v4":[
+                        {"type":"private","ip_address":"10.0.0.1"},
+                        {"type":"public","ip_address":"192.0.2.42"}
+                    ]}
+                }}),
+            )
+        }),
+    };
+    let observed = block(public_ipv4(&net, "test-key", &target, 42)).unwrap();
+    assert_eq!(observed.unwrap().to_string(), "192.0.2.42");
+    assert!(block(public_ipv4(&net, "test-key", &target, 43)).is_err());
+}
+
+#[test]
 fn digitalocean_droplet_reconciles_ambiguous_create_and_confirms_owned_delete() {
     use pigeon_cloud::digitalocean_droplet::{Created, Removal, cleanup, create, reconcile};
     let name = "pigeon-health-11111111111111111111111111111111";

@@ -471,7 +471,17 @@ pub(super) async fn save_token(cx: &Context<'_>, w: &Write<'_>) -> Result<Value>
     Ok(json!({"instance":record.id,"verified":true}))
 }
 
-async fn open(env: &Env, instance: &str, credential: &Credential) -> Result<String> {
+/// Snapshot the instance's sealed compute credential for a managed ingest job.
+pub(crate) async fn for_ingest(env: &Env, record: &Instance) -> Result<Credential> {
+    let expected_team = expected(record)?;
+    setting::<Credential>(env, &token_key(&record.id))
+        .await?
+        .map(|(_, credential)| credential)
+        .filter(|credential| credential.team == expected_team)
+        .ok_or_else(|| bad("set a DigitalOcean compute token for the approved team"))
+}
+
+pub(crate) async fn open(env: &Env, instance: &str, credential: &Credential) -> Result<String> {
     let key = crate::linked::sealing_key(env).await?;
     let value = crypto::open(
         &key,
