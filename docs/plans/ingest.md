@@ -870,7 +870,7 @@ opened": the report says how many; a VM run can open them later).
 1. **Link willowgraysen**: approve its instance record on the Instances tab and press Link
    Cloudflare account (data-worker.md follow-up 1). Turn on Workers Paid there.
 2. **Name the source accounts** (`digitalocean:<name>`, `scaleway:<name>`, `backblaze:<name>`,
-   with regions and buckets) and ask an agent to declare them in `storage_accounts()`
+   with regions and buckets) and ask an agent to declare them in `data_read_accounts()`
    (storage-providers.md follow-up 5). That makes the slots below appear.
 3. **Create keys**, each on the provider's console, and set each on the Access tab:
    - `STORAGE_DIGITALOCEAN_<NAME>`: a Spaces key, Limited Access, Read on the source buckets.

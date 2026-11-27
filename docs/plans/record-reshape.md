@@ -171,9 +171,9 @@ the policy.
 | Phase | What | Branch | State |
 |---|---|---|---|
 | 1 | Plan (this doc) | `claude/record-reshape` | landing with phase 2 |
-| 2 | Layout (`layout.rs`), catalogue `field`, `email` → `data-email` id, `storage` → `data.read`, `ingest` removed, diff fix, migration, console/iOS/fixtures | `claude/record-reshape` | built, landing |
-| 3 | `data_email_*` tool renames, fail-closed gate, Email tab, ops lists, iOS | `claude/record-reshape-email` | — |
-| 4 | `data_read_*` tools, `storage` capability removed (changelog), docs | `claude/record-reshape-read` | — |
+| 2 | Layout (`layout.rs`), catalogue `field`, `email` → `data-email` id, `storage` → `data.read`, `ingest` removed, diff fix, migration, console/iOS/fixtures | `claude/record-reshape` | landing (am0KWs1fI8FFLWtB) |
+| 3 | `data_email_*` tool renames, fail-closed gate, Email tab, ops lists, iOS | `claude/record-reshape-email` | built, landing |
+| 4 | `data_read_*` tools, `storage` capability removed (changelog), docs | `claude/record-reshape-read` | built, landing |
 | 5 | Policy rename `email_forward_set` → `data_email_forward_set` | `claude/reserved-record-reshape-policy` (local) | waits for passkey |
 
 ## Platform-level capabilities in the new layout (for the follow-up)
@@ -208,3 +208,14 @@ setting, a `CapabilitySettings` field; `layout.rs` needs no change for a new `fi
 ## Log
 
 - 2026-11-27: plan written.
+- 2026-11-27: phase 2 merged as `07b8482` (landing `am0KWs1fI8FFLWtB`). Before it, the four
+  stored records (pigeon.dev, noisypigeon, sandbox, willowgraysen) held no `storage`, no `ingest`
+  and no `data-ingest`, so the migration only moves settings; none is kept in a git repository.
+- 2026-11-27: phase 3 (`data_email_*`) and phase 4 (`data_read_*`) built; phase 5, the policy
+  rename, reserved on the local branch `claude/reserved-record-reshape-policy` for the
+  person's passkey.
+- 2026-11-27: the first landing of phases 3 and 4 (`LS-SVrUo7o6rmFI4`) was refused: Codex's
+  ingest landings changed `ingest.rs` and `ingest/hosts.rs` under it. Those two files are left
+  as they are; `pigeon_capabilities::storage` stays as a hidden alias of `data_read` for them,
+  and their two messages still name `storage_accounts()` (now `data_read_accounts()`). A
+  follow-up, once Codex's ingest work settles, moves them to `data_read` and drops the alias.

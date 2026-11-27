@@ -707,7 +707,7 @@ fn console_manifest_by_capability_per_instance_kind() {
                     "visitors@site_passkeys"
                 ]
             ),
-            ("storage", &["buckets@storage"]),
+            ("storage", &["buckets@data-read"]),
             ("metrics", &["workers@observability"]),
             ("capabilities", &[]),
         ])
@@ -2290,9 +2290,9 @@ fn core_versions_semver_pins_and_upgrades() {
 #[test]
 fn core_every_capability_declares_its_version() {
     use pigeon_capabilities::Capability;
+    use pigeon_capabilities::data_read::DataRead;
     use pigeon_capabilities::linked::Linked;
     use pigeon_capabilities::passkeys::Passkeys;
-    use pigeon_capabilities::storage::Storage;
     use pigeon_core::versions::{Component, Kind};
 
     // Source coverage: every `impl Capability for` outside remote.rs has a `fn versions(`.
@@ -2330,7 +2330,7 @@ fn core_every_capability_declares_its_version() {
     );
 
     // The declarations that build natively keep the rules.
-    let storage = Storage { accounts: vec![] };
+    let storage = DataRead { accounts: vec![] };
     let linked = Linked {
         host: "example.test".into(),
     };
@@ -2345,7 +2345,7 @@ fn core_every_capability_declares_its_version() {
         ("ci", pigeon_ci::versions()),
         ("models", pigeon_models::versions()),
         ("ai-agents", pigeon_ai_agents::versions()),
-        ("storage", storage.versions()),
+        ("data", storage.versions()),
         ("linked", linked.versions()),
         ("instances", instances.versions()),
     ];
@@ -2376,9 +2376,9 @@ fn core_every_capability_declares_its_version() {
 #[test]
 fn core_ingest_plans_hosts_and_estimates() {
     use pigeon_capabilities::Capability;
+    use pigeon_capabilities::data_read::{Account, Provider};
     use pigeon_capabilities::ingest::{Ingest, Target, hosts};
     use pigeon_capabilities::passkeys::Passkeys;
-    use pigeon_capabilities::storage::{Account, Provider};
     use pigeon_ingest::estimate::{Host, estimate};
     use pigeon_ingest::manifest::SourceSpec;
 
@@ -2729,13 +2729,13 @@ fn protected_origins_require_dedicated_resources_and_bind_to_the_site_bucket() {
 
 #[test]
 fn scoped_storage_and_metrics_calls_refuse_raw_targets() {
+    use pigeon_capabilities::data_read::scoped_instance;
     use pigeon_capabilities::observability::instance::metrics_arguments;
-    use pigeon_capabilities::storage::scoped_instance;
 
     // Storage: the instance and relative object arguments only.
     assert_eq!(
         scoped_instance(
-            "storage_get_object",
+            "data_read_get_object",
             &json!({"instance":"archive","key":"a"})
         )
         .unwrap(),
@@ -2743,24 +2743,24 @@ fn scoped_storage_and_metrics_calls_refuse_raw_targets() {
     );
     assert_eq!(
         scoped_instance(
-            "storage_list_objects",
+            "data_read_list_objects",
             &json!({"instance":"archive","prefix":"p/","delimiter":"/","max_keys":5,"token":"t"})
         )
         .unwrap(),
         "archive"
     );
-    for tool in ["storage_get_object", "storage_list_objects"] {
+    for tool in ["data_read_get_object", "data_read_list_objects"] {
         for raw in ["account", "bucket"] {
             let mut args = json!({"instance":"archive","key":"a"});
-            if tool == "storage_list_objects" {
+            if tool == "data_read_list_objects" {
                 args = json!({"instance":"archive"});
             }
             args[raw] = json!("elsewhere");
             assert!(scoped_instance(tool, &args).is_err(), "{tool} {raw}");
         }
     }
-    assert!(scoped_instance("storage_get_object", &json!({"key":"a"})).is_err());
-    assert!(scoped_instance("storage_head_object", &json!({"instance":"archive"})).is_err());
+    assert!(scoped_instance("data_read_get_object", &json!({"key":"a"})).is_err());
+    assert!(scoped_instance("data_read_head_object", &json!({"instance":"archive"})).is_err());
 
     // Metrics: the instance and the window only.
     assert_eq!(

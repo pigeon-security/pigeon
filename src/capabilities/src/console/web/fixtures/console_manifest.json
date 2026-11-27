@@ -59,7 +59,7 @@
           "id": "buckets",
           "title": "Buckets",
           "order": 10,
-          "capability": "storage",
+          "capability": "data-read",
           "upgrade": null
         }
       ]

@@ -2462,7 +2462,7 @@ fn instance_tool_profiles_share_discovery_and_binding() {
         "data": {"read": {"state":"enabled", "store":"archive-store", "bucket":"archive", "prefix":"published/"}}
     })).unwrap();
     let catalog = || {
-        ["site_deploy", "storage_get_object", "storage_list_objects", "land", "call"]
+        ["site_deploy", "data_read_get_object", "data_read_list_objects", "land", "call"]
         .into_iter()
         .map(|name| Tool {
             name,
@@ -2489,7 +2489,7 @@ fn instance_tool_profiles_share_discovery_and_binding() {
             .is_err()
     );
     assert!(
-        site.bind("storage_get_object", &json!({"key":"note"}))
+        site.bind("data_read_get_object", &json!({"key":"note"}))
             .is_err()
     );
     assert!(site.bind("land", &json!({})).is_err());
@@ -2500,21 +2500,21 @@ fn instance_tool_profiles_share_discovery_and_binding() {
     archive.restrict_tools(&mut listed);
     assert_eq!(
         listed.iter().map(|tool| tool.name).collect::<Vec<_>>(),
-        ["storage_get_object", "storage_list_objects", "call"]
+        ["data_read_get_object", "data_read_list_objects", "call"]
     );
     assert_eq!(listed[0].input_schema["required"], json!(["key"]));
     assert_eq!(listed[0].input_schema["properties"], json!({"key":{}}));
     assert_eq!(
         archive
-            .bind("storage_get_object", &json!({"key":"note"}))
+            .bind("data_read_get_object", &json!({"key":"note"}))
             .unwrap(),
         json!({"instance":"archive","key":"note"})
     );
     assert_eq!(
         archive
-            .bind("call", &json!({"tool":"storage_list_objects"}))
+            .bind("call", &json!({"tool":"data_read_list_objects"}))
             .unwrap(),
-        json!({"tool":"storage_list_objects","args":{"instance":"archive"}})
+        json!({"tool":"data_read_list_objects","args":{"instance":"archive"}})
     );
     assert!(
         archive
@@ -2532,10 +2532,10 @@ fn instance_tool_profiles_share_discovery_and_binding() {
         json!({"key":"note","bucket":"site"}),
         json!({"key":"note","presign":true}),
     ] {
-        assert!(archive.bind("storage_get_object", &args).is_err());
+        assert!(archive.bind("data_read_get_object", &args).is_err());
         assert!(
             archive
-                .bind("call", &json!({"tool":"storage_get_object","args":args}))
+                .bind("call", &json!({"tool":"data_read_get_object","args":args}))
                 .is_err()
         );
     }
@@ -2565,7 +2565,7 @@ fn sites_release_identity_changes_with_theme_and_manifest_at_the_same_commit() {
 
 #[test]
 fn instance_storage_binds_keys_and_cursors_to_the_approved_scope() {
-    use pigeon_capabilities::storage::scope::Profile;
+    use pigeon_capabilities::data_read::scope::Profile;
     use pigeon_core::s3::{Listing, object_path};
 
     let profile: Profile = serde_json::from_value(json!({
@@ -2925,10 +2925,10 @@ fn instance_worker_metrics_answer_per_worker_rows_and_totals() {
 
 #[test]
 fn instances_bind_background_publishing_and_ingest_to_approved_targets() {
+    use pigeon_capabilities::data_read::Account;
     use pigeon_capabilities::github::{allows_queued_publish, instance_for, publishing_binding};
     use pigeon_capabilities::ingest::{check_job_binding, hosts};
     use pigeon_capabilities::instances::record::{AccountRef, Instance};
-    use pigeon_capabilities::storage::Account;
 
     let record: Instance = serde_json::from_value(json!({
         "id": "blog", "title": "Blog", "version": 4,
@@ -3785,5 +3785,106 @@ fn record_reshape_migrates_with_identical_settings() {
     assert_eq!(
         serde_json::to_value(&model).unwrap()["data"]["read"]["bucket"],
         "b"
+    );
+}
+
+/// The `email` capability is `data-email`, with its tools renamed `data_email_*`
+/// (docs/plans/record-reshape.md). The forwarding tool must be passkey-gated: until the
+/// policy names its new name it fails closed, and once it does it runs as gated.
+#[test]
+fn data_email_tools_renamed_and_forwarding_fails_closed() {
+    use pigeon_capabilities::Capability;
+    use pigeon_capabilities::email::{Email, MUST_BE_GATED, NAME, ungated};
+
+    assert_eq!(NAME, "data-email");
+    let names: Vec<&str> = Email.tools().iter().map(|t| t.name).collect();
+    assert_eq!(
+        names,
+        [
+            "data_email_status",
+            "data_email_mailboxes",
+            "data_email_list",
+            "data_email_get",
+            "data_email_address_set",
+            "data_email_forward_set"
+        ]
+    );
+    assert!(!names.iter().any(|n| n.starts_with("email_")));
+    assert_eq!(MUST_BE_GATED, ["data_email_forward_set"]);
+    // Not gated by the policy: refused, saying why.
+    let why = ungated("data_email_forward_set", |_| false).unwrap();
+    assert!(why.contains("waits for the policy update"), "{why}");
+    // Gated: it runs (through the passkey approval).
+    assert!(ungated("data_email_forward_set", |_| true).is_none());
+    // The reads and the address proposal are never held back.
+    for tool in [
+        "data_email_status",
+        "data_email_list",
+        "data_email_address_set",
+    ] {
+        assert!(ungated(tool, |_| false).is_none(), "{tool}");
+    }
+    // As the built-in policy stands, whether it gates the new name decides which it is.
+    let live = pigeon_capabilities::approvals::gated("data_email_forward_set");
+    assert_eq!(
+        ungated(
+            "data_email_forward_set",
+            pigeon_capabilities::approvals::gated
+        )
+        .is_none(),
+        live
+    );
+    // Its component says what changed.
+    let c = &Email.versions()[0];
+    assert_eq!(
+        (c.name.as_str(), c.version.as_str()),
+        ("data-email", "2.0.0")
+    );
+    assert!(c.changelog[0].breaking);
+}
+
+/// `storage` is replaced by the `data` capability's read tools, `data_read_*`
+/// (docs/plans/record-reshape.md): read-only, renamed outright, and no `storage` component or
+/// capability is left.
+#[test]
+fn data_read_replaces_storage() {
+    use pigeon_capabilities::Capability;
+    use pigeon_capabilities::data_read::DataRead;
+
+    let read = DataRead { accounts: vec![] };
+    assert_eq!(read.name(), "data");
+    let names: Vec<&str> = read.tools().iter().map(|t| t.name).collect();
+    assert_eq!(
+        names,
+        [
+            "data_read_accounts",
+            "data_read_list_buckets",
+            "data_read_list_objects",
+            "data_read_head_object",
+            "data_read_get_object"
+        ]
+    );
+    // Read-only: no tool writes, deletes or puts.
+    for n in &names {
+        assert!(
+            ["put", "write", "delete", "set", "create"]
+                .iter()
+                .all(|w| !n.contains(w)),
+            "{n}"
+        );
+    }
+    let versions = read.versions();
+    assert_eq!(versions[0].name, "data");
+    assert!(
+        versions[0].changelog[0]
+            .summary
+            .contains("storage capability")
+    );
+    assert!(!versions.iter().any(|c| c.name.starts_with("storage")));
+    assert!(pigeon_capabilities::catalogue::find("storage").is_none());
+    assert!(
+        !pigeon_capabilities::instances::tools::CAPABILITIES
+            .iter()
+            .any(|c| c.name == "storage" || c.component == "storage" || c.name == "ingest")
     );
 }

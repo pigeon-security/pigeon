@@ -133,7 +133,7 @@ fn expiry_readings() {
 
 #[test]
 fn storage_reads_s3_compatible_accounts() {
-    use pigeon_capabilities::storage::{self, Account, Mode, Provider};
+    use pigeon_capabilities::data_read::{self, Account, Mode, Provider};
     use pigeon_core::s3::{self, Endpoint, Keys};
     let keys = Keys {
         access_key_id: "AKIAIOSFODNN7EXAMPLE".into(),
@@ -273,48 +273,48 @@ fn storage_reads_s3_compatible_accounts() {
     let sw = Account::scaleway("personal", "fr-par");
     assert_eq!(sw.endpoint, "https://s3.fr-par.scw.cloud");
     assert_eq!(sw.id(), "scaleway:personal");
-    assert_eq!(sw.binding(), "STORAGE_SCALEWAY_PERSONAL");
+    assert_eq!(sw.binding(), "DATA_READ_SCALEWAY_PERSONAL");
     let docean = Account::digitalocean("old-one", "nyc3");
     assert_eq!(docean.endpoint, "https://nyc3.digitaloceanspaces.com");
     assert_eq!(docean.mode, Mode::ReadOnly);
-    assert_eq!(docean.binding(), "STORAGE_DIGITALOCEAN_OLD_ONE");
+    assert_eq!(docean.binding(), "DATA_READ_DIGITALOCEAN_OLD_ONE");
     let b2 = Account::backblaze("bk", "us-west-004");
     assert_eq!(b2.endpoint, "https://s3.us-west-004.backblazeb2.com");
     assert_eq!(b2.provider, Provider::Backblaze);
-    assert!(storage::validate(&[sw.clone(), docean.clone(), b2.clone()]).is_ok());
-    assert!(storage::validate(&[]).is_ok());
+    assert!(data_read::validate(&[sw.clone(), docean.clone(), b2.clone()]).is_ok());
+    assert!(data_read::validate(&[]).is_ok());
 
     let mut rw = docean.clone();
     rw.mode = Mode::ReadWrite;
-    assert!(storage::validate(&[rw]).is_err());
+    assert!(data_read::validate(&[rw]).is_err());
     for name in ["", "Bad", "-x", "x-", "a_b", &"a".repeat(33)] {
         assert!(
-            storage::validate(&[Account::scaleway(name, "fr-par")]).is_err(),
+            data_read::validate(&[Account::scaleway(name, "fr-par")]).is_err(),
             "{name}"
         );
     }
-    assert!(storage::validate(&[sw.clone(), sw.clone()]).is_err());
+    assert!(data_read::validate(&[sw.clone(), sw.clone()]).is_err());
     let mut slash = sw.clone();
     slash.endpoint.push('/');
-    assert!(storage::validate(&[slash]).is_err());
+    assert!(data_read::validate(&[slash]).is_err());
     let mut http = sw.clone();
     http.endpoint = "http://s3.fr-par.scw.cloud".into();
-    assert!(storage::validate(&[http]).is_err());
+    assert!(data_read::validate(&[http]).is_err());
     let mut shortb = sw.clone();
     shortb.buckets = vec!["ab".into()];
-    assert!(storage::validate(&[shortb]).is_err());
+    assert!(data_read::validate(&[shortb]).is_err());
 
     // Finding, and the setup text with no accounts.
-    let e = storage::find(&[], "scaleway:personal")
+    let e = data_read::find(&[], "scaleway:personal")
         .unwrap_err()
         .to_string();
-    assert!(e.contains("STORAGE_<PROVIDER>_<NAME>"));
-    let e = storage::find(std::slice::from_ref(&sw), "scaleway:other")
+    assert!(e.contains("DATA_READ_<PROVIDER>_<NAME>"));
+    let e = data_read::find(std::slice::from_ref(&sw), "scaleway:other")
         .unwrap_err()
         .to_string();
     assert!(e.contains("scaleway:personal"));
     assert_eq!(
-        storage::find(std::slice::from_ref(&sw), "scaleway:personal")
+        data_read::find(std::slice::from_ref(&sw), "scaleway:personal")
             .unwrap()
             .name,
         "personal"
@@ -322,10 +322,10 @@ fn storage_reads_s3_compatible_accounts() {
 
     // Bucket limits.
     let mut limited = sw.clone();
-    assert!(storage::bucket_allowed(&limited, "anything"));
+    assert!(data_read::bucket_allowed(&limited, "anything"));
     limited.buckets = vec!["photos".into()];
-    assert!(storage::bucket_allowed(&limited, "photos"));
-    assert!(!storage::bucket_allowed(&limited, "logs"));
+    assert!(data_read::bucket_allowed(&limited, "photos"));
+    assert!(!data_read::bucket_allowed(&limited, "logs"));
 }
 
 // ---- ingest runner ----

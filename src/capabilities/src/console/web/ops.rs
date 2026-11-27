@@ -45,10 +45,10 @@ pub const READS: &[(&str, &[&str])] = &[
     ("app_site_visitors", &["instance", "site", "host"]),
     // Storage, source, CI, metrics and ingest, scoped by their own arguments. With `instance`,
     // an op in `INSTANCE_OPS` is bound to that instance's approved record first.
-    ("storage_accounts", &[]),
-    ("storage_list_buckets", &["account"]),
+    ("data_read_accounts", &[]),
+    ("data_read_list_buckets", &["account"]),
     (
-        "storage_list_objects",
+        "data_read_list_objects",
         &[
             "account",
             "bucket",
@@ -62,8 +62,8 @@ pub const READS: &[(&str, &[&str])] = &[
     ),
     // Only with `instance`: the instance's approved location or data store (attachments of
     // Email › Mailboxes download through it).
-    ("storage_get_object", &["instance", "key", "source"]),
-    ("storage_head_object", &["account", "bucket", "key"]),
+    ("data_read_get_object", &["instance", "key", "source"]),
+    ("data_read_head_object", &["account", "bucket", "key"]),
     ("source_resolve_revision", &["instance", "revision"]),
     ("source_read_file", &["instance", "path", "revision"]),
     ("source_tokens", &[]),
@@ -83,14 +83,14 @@ pub const READS: &[(&str, &[&str])] = &[
     // a run that has ended, so the console never calls it.
     ("app_ingest_runs", &["instance"]),
     // Email (docs/plans/email.md): the instance's mailboxes and messages, read from its data
-    // Worker. The writes (`email_address_set`, `email_forward_set`) are never reads.
-    ("email_status", &["instance"]),
-    ("email_mailboxes", &["instance"]),
+    // Worker. The writes (`data_email_address_set`, `data_email_forward_set`) are never reads.
+    ("data_email_status", &["instance"]),
+    ("data_email_mailboxes", &["instance"]),
     (
-        "email_list",
+        "data_email_list",
         &["instance", "mailbox", "since", "from", "cursor", "limit"],
     ),
-    ("email_get", &["instance", "id"]),
+    ("data_email_get", &["instance", "id"]),
     // Sessions, cost and compare.
     (
         "ai_agents_status",
@@ -124,12 +124,12 @@ pub const READS: &[(&str, &[&str])] = &[
 /// does not enable it or an argument falls outside its registration, such as a raw storage
 /// `account` or a CI `repo`.
 pub const INSTANCE_OPS: &[&str] = &[
-    "storage_list_objects",
-    "storage_get_object",
-    "email_status",
-    "email_mailboxes",
-    "email_list",
-    "email_get",
+    "data_read_list_objects",
+    "data_read_get_object",
+    "data_email_status",
+    "data_email_mailboxes",
+    "data_email_list",
+    "data_email_get",
     "source_resolve_revision",
     "source_read_file",
     "ci_jobs",

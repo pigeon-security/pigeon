@@ -170,7 +170,7 @@ pub struct CapabilitySettings {
     /// `data` only: the approved external storage location its read tools also read
     /// (`data.read`; the `storage` profile before docs/plans/record-reshape.md).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub read: Option<crate::storage::scope::Profile>,
+    pub read: Option<crate::data_read::scope::Profile>,
     /// `data-email` only: the domain mail is received on; absent, the record's first zone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub domain: Option<String>,

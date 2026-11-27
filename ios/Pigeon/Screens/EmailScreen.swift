@@ -48,12 +48,12 @@ private struct MailboxOption: Hashable {
     let count: String
 }
 
-/// Email › Mailboxes: everything sent to the instance's domain (`email_list`, a page at a time),
-/// all of it or one mailbox (`email_mailboxes`); a message opens it (`email_get`). Read-only.
+/// Email › Mailboxes: everything sent to the instance's domain (`data_email_list`, a page at a time),
+/// all of it or one mailbox (`data_email_mailboxes`); a message opens it (`data_email_get`). Read-only.
 struct EmailScreen: View {
     let context: AreaContext
     @Environment(ConsoleAPI.self) private var api
-    @State private var mailboxes = OpResource<JSON>("email_mailboxes")
+    @State private var mailboxes = OpResource<JSON>("data_email_mailboxes")
     /// The picked mailbox; empty for all mail.
     @State private var mailbox = ""
     /// The mailbox `rows` were read for.
@@ -200,7 +200,7 @@ struct EmailScreen: View {
         }
         moreError = nil
         do {
-            let data = try await api.op("email_list", args: args(cursor: nil))
+            let data = try await api.op("data_email_list", args: args(cursor: nil))
             guard asked == mailbox else { return }
             rows = data["messages"].items
             next = MailFormat.nonEmpty(data["next"].string)
@@ -224,7 +224,7 @@ struct EmailScreen: View {
         defer { loadingMore = false }
         let asked = mailbox
         do {
-            let data = try await api.op("email_list", args: args(cursor: cursor))
+            let data = try await api.op("data_email_list", args: args(cursor: cursor))
             guard asked == mailbox else { return }
             let have = Set(rows.compactMap { $0["id"].string })
             rows += data["messages"].items.filter { m in
@@ -239,8 +239,8 @@ struct EmailScreen: View {
     }
 }
 
-/// One message (`email_get`): its sender, the plain text (never the sender's HTML), its
-/// attachments, the original and its headers. Files are saved through `storage_get_object` on
+/// One message (`data_email_get`): its sender, the plain text (never the sender's HTML), its
+/// attachments, the original and its headers. Files are saved through `data_read_get_object` on
 /// the data store and handed to the share sheet; nothing is opened here.
 private struct EmailMessageView: View {
     let instance: String
@@ -249,7 +249,7 @@ private struct EmailMessageView: View {
     let webURL: URL?
     @Environment(ConsoleAPI.self) private var api
     @Environment(ToastCenter.self) private var toasts
-    @State private var message = OpResource<JSON>("email_get")
+    @State private var message = OpResource<JSON>("data_email_get")
     /// The key of the file being read, while one is.
     @State private var saving: String?
     @State private var shared: SharedFile?
@@ -392,7 +392,7 @@ private struct EmailMessageView: View {
         defer { saving = nil }
         do {
             let object = try await api.op(
-                "storage_get_object",
+                "data_read_get_object",
                 args: ["instance": .string(instance), "key": .string(key), "source": "data"])
             shared = try SharedFile.write(object, name: name, type: type)
         } catch is CancellationError {
@@ -403,7 +403,7 @@ private struct EmailMessageView: View {
     }
 }
 
-/// A file read through `storage_get_object`, written to a temporary directory for the share
+/// A file read through `data_read_get_object`, written to a temporary directory for the share
 /// sheet.
 private struct SharedFile: Identifiable {
     let url: URL

@@ -116,7 +116,7 @@ scope = "listed"                 # default; "all" also forwards catch-all
 ```
 
 - Each listed address is its own mailbox; everything else lands in `catch-all`, where spam lands.
-- Adding an address is a **record change** (`email_address_set` proposes it; the person
+- Adding an address is a **record change** (`data_email_address_set` proposes it; the person
   approves the record with their passkey; the next plan writes the Worker's config row). It is
   never a DNS or routing change: the catch-all already sends everything to the Worker.
 - Retention is forever. No tool deletes mail.
@@ -129,7 +129,7 @@ scope = "listed"                 # default; "all" also forwards catch-all
   each destination (`AddDestination`), Cloudflare emails it a link, and the plan shows it as
   **pending** until it is verified. The Worker forwards to a pending destination and records the
   failure; the mail is stored either way.
-- **Passkey**: any change to a destination or the scope goes through `email_forward_set`, which
+- **Passkey**: any change to a destination or the scope goes through `data_email_forward_set`, which
   the policy gates per call (below), and becomes a record change the person approves with their
   passkey.
 - **Loops**: every forward carries `X-Pigeon-Data: <instance>`. A message that arrives with that
@@ -186,12 +186,12 @@ home's plans may do and is the person's decision: see Follow-ups.
 
 | Tool | Role | Does |
 | --- | --- | --- |
-| `email_status {instance}` | viewer | setup state, or the steps to turn it on; counts, the last message's time, forwarding failures |
-| `email_mailboxes {instance}` | viewer | each listed mailbox and `catch-all` with its count and newest time |
-| `email_list {instance, mailbox?, since?, from?, cursor?, limit?}` | viewer | from D1, newest first: id, from, subject, date, sender check, attachment count; 50 a page, at most 200 |
-| `email_get {instance, id}` | viewer | headers, the text, the HTML marked `sandboxed` (never inlined into the console's own DOM), the attachment list |
-| `email_address_set {instance, local, remove?}` | operator | proposes the record with that listed address added or removed |
-| `email_forward_set {instance, local?, to?, scope?}` | operator, **passkey per call** | proposes the record with a destination or the scope changed |
+| `data_email_status {instance}` | viewer | setup state, or the steps to turn it on; counts, the last message's time, forwarding failures |
+| `data_email_mailboxes {instance}` | viewer | each listed mailbox and `catch-all` with its count and newest time |
+| `data_email_list {instance, mailbox?, since?, from?, cursor?, limit?}` | viewer | from D1, newest first: id, from, subject, date, sender check, attachment count; 50 a page, at most 200 |
+| `data_email_get {instance, id}` | viewer | headers, the text, the HTML marked `sandboxed` (never inlined into the console's own DOM), the attachment list |
+| `data_email_address_set {instance, local, remove?}` | operator | proposes the record with that listed address added or removed |
+| `data_email_forward_set {instance, local?, to?, scope?}` | operator, **passkey per call** | proposes the record with a destination or the scope changed |
 
 - Core reaches the data Worker through **signed contract ops**: a POST to
   `https://{instance}-data.{subdomain}.workers.dev/data/call` signed with the instance's
@@ -202,7 +202,7 @@ home's plans may do and is the person's decision: see Follow-ups.
 
 ## Storage reuse
 
-Storage gains a **data store** source: `storage_list_objects` and `storage_get_object` with
+Storage gains a **data store** source: `data_read_list_objects` and `data_read_get_object` with
 `instance` and `source: "data"` read the instance's `{instance}-data` bucket through its data
 Worker (`objects` and `object` ops), limited to `blobs/` and `derived/`. Storage › Buckets shows
 it when the record enables `data`, beside the S3 providers (Scaleway, DigitalOcean, Backblaze),
@@ -213,17 +213,17 @@ which work as before.
 A console area `email` (key `g l`), shown only on instances whose record enables `email`, to
 viewers and up:
 
-- **Left**: mailboxes with counts (`email_mailboxes`).
-- **Middle**: the message list (`email_list`): from, subject, date, a sender-check badge, a
+- **Left**: mailboxes with counts (`data_email_mailboxes`).
+- **Middle**: the message list (`data_email_list`): from, subject, date, a sender-check badge, a
   paperclip when there are attachments.
-- **Right**: the message (`email_get`), through the storage object reader for the parts and a
+- **Right**: the message (`data_email_get`), through the storage object reader for the parts and a
   mail renderer (`shell.mailFrame`): the HTML in an `<iframe sandbox="">` (no scripts, an
   opaque origin, no forms or popups) whose document carries
   `default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:` and also
   inherits the console's own policy, so remote images are blocked; the text shown plain; each
-  attachment, and the original `.eml`, saved through `storage_get_object` with
+  attachment, and the original `.eml`, saved through `data_read_get_object` with
   `source: "data"` (`shell.saveFile`), never opened in the console.
-- Fixtures: `email_mailboxes.home.json`, `email_list.home.json` and `email_get.home.json` are
+- Fixtures: `data_email_mailboxes.home.json`, `data_email_list.home.json` and `data_email_get.home.json` are
   what the read ops answer for the smoke suite's stand-in mail, checked by the suite
   (`PIGEON_WRITE_FIXTURES=1` rewrites them).
 
@@ -260,7 +260,7 @@ viewers and up:
    (`cf_proxy::artifact_call`), answered through the bucket's R2 binding `DATA_ARTIFACTS`
    (on the proxy Worker, and on core for its backup proxy) with no Cloudflare token, since the
    R2 REST API's account-wide rate limit refused the build's reads.
-3. **Policy**: add `email_forward_set` to `risky-tools-need-passkey` (the diff is in the
+3. **Policy**: add `data_email_forward_set` to `risky-tools-need-passkey` (the diff is in the
    landing report).
 4. **Backblaze**: create bucket `pigeon-backup-pigeon-data` (SSE-B2 on) and an application key
    for it alone (read and write); enter it on Access as `DATA_B2_PIGEON_DATA`

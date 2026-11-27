@@ -1,7 +1,11 @@
-//! Read-only access to S3-compatible object storage (Scaleway, DigitalOcean Spaces, Backblaze
-//! B2) from accounts declared in code. It is off until an account is declared: with none, every
-//! tool only says how to set one up. Keys live in the Secrets Store, one secret per account, and
-//! are never answered by any tool.
+//! The `data` capability's read tools, `data_read_*` (docs/plans/record-reshape.md): read-only
+//! access to the instance's own data store (its R2 bucket, through the data Worker) and to
+//! S3-compatible object storage (Scaleway, DigitalOcean Spaces, Backblaze B2) from accounts
+//! declared in code, the approved location of which an instance record names at `data.read`.
+//! They replace the `storage` capability, which is removed. Nothing here writes. An external
+//! account is off until it is declared: with none, every account tool only says how to set one
+//! up. Keys live in the Secrets Store, one secret per account, and are never answered by any
+//! tool.
 
 pub mod scope;
 
@@ -20,14 +24,14 @@ use crate::instances::{
 
 const INSTANCE_TOOLS: &[Registration] = &[
     Registration {
-        name: "storage_list_objects",
+        name: "data_read_list_objects",
         description: Some(
             "List objects in the instance’s approved storage location, or with `source: \"data\"` in its data store (`blobs/` and `derived/`). Supply a relative prefix or the continuation token from the preceding page.",
         ),
         arguments: &["prefix", "delimiter", "max_keys", "token", "source"],
     },
     Registration {
-        name: "storage_get_object",
+        name: "data_read_get_object",
         description: Some(
             "Read a small object from the instance’s approved storage location, or with `source: \"data\"` from its data store. Supply a relative key.",
         ),
@@ -43,7 +47,7 @@ const INSTANCE_VIEWS: &[View] = &[View {
     since: None,
 }];
 
-/// Storage declares the subset of its tools, and its console view, on enabled instance profiles:
+/// The read tools declare the subset of their tools, and the console view, on enabled instances:
 /// an S3 location (`data.read`), the instance's data store (`data`), or both.
 pub fn instance_tools(instance: &Instance) -> serde_json::Result<Enabled> {
     Ok(Enabled::when(
@@ -85,7 +89,7 @@ pub fn source_of(instance: &Instance, args: &Value) -> std::result::Result<Sourc
 pub fn scoped_instance<'a>(tool: &str, args: &'a Value) -> Result<&'a str> {
     let instance = arg(args, "instance")?;
     let allowed: &[&str] = match tool {
-        "storage_list_objects" => &[
+        "data_read_list_objects" => &[
             "instance",
             "prefix",
             "delimiter",
@@ -93,7 +97,7 @@ pub fn scoped_instance<'a>(tool: &str, args: &'a Value) -> Result<&'a str> {
             "token",
             "source",
         ],
-        "storage_get_object" => &["instance", "key", "source"],
+        "data_read_get_object" => &["instance", "key", "source"],
         _ => return Err(unknown(tool)),
     };
     if !args
@@ -110,11 +114,11 @@ pub fn scoped_instance<'a>(tool: &str, args: &'a Value) -> Result<&'a str> {
 /// How to set an account up, for the person.
 pub const SETUP: &str = "No storage account is set up. To set one up: create a least-privilege \
 key in the provider's console (read-only for DigitalOcean). Store it on the app's Access page \
-(Credentials) as secret `STORAGE_<PROVIDER>_<NAME>` in the form `ACCESS_KEY_ID:SECRET_ACCESS_KEY`. \
-Bind it in src/platform/wrangler.toml. Declare the account in `storage_accounts()` in \
+(Credentials) as secret `DATA_READ_<PROVIDER>_<NAME>` in the form `ACCESS_KEY_ID:SECRET_ACCESS_KEY`. \
+Bind it in src/platform/wrangler.toml. Declare the account in `data_read_accounts()` in \
 src/platform/src/settings.rs. See docs/plans/storage-providers.md.";
 
-/// The largest object `storage_get_object` answers inline, in bytes.
+/// The largest object `data_read_get_object` answers inline, in bytes.
 pub const INLINE_MAX: u64 = 1024 * 1024;
 
 /// An object storage provider.
@@ -207,9 +211,9 @@ impl Account {
         format!("{}:{}", self.provider.slug(), self.name)
     }
 
-    /// The Secrets Store binding that holds its key, such as `STORAGE_SCALEWAY_PERSONAL`.
+    /// The Secrets Store binding that holds its key, such as `DATA_READ_SCALEWAY_PERSONAL`.
     pub fn binding(&self) -> String {
-        format!("STORAGE_{}_{}", self.provider.slug(), self.name)
+        format!("DATA_READ_{}_{}", self.provider.slug(), self.name)
             .to_uppercase()
             .replace('-', "_")
     }
@@ -298,8 +302,9 @@ pub fn bucket_allowed(account: &Account, bucket: &str) -> bool {
     account.buckets.is_empty() || account.buckets.iter().any(|b| b == bucket)
 }
 
-/// The storage capability: read-only tools over the declared accounts.
-pub struct Storage {
+/// The read tools of the `data` capability, over the instance's data store and the declared
+/// accounts.
+pub struct DataRead {
     pub accounts: Vec<Account>,
 }
 
@@ -316,7 +321,7 @@ fn tool(
     }
 }
 
-impl Storage {
+impl DataRead {
     /// The account for `args`, after checking the accounts and the bucket (if the tool has one).
     fn account(&self, args: &Value) -> Result<&Account> {
         validate(&self.accounts)?;
@@ -421,7 +426,7 @@ impl Storage {
         }
         let keys = self.keys(cx, account).await?;
         let endpoint = account.s3_endpoint();
-        if tool == "storage_get_object" {
+        if tool == "data_read_get_object" {
             let key = binding.key(arg(args, "key")?).map_err(bad)?;
             let path = s3::object_path(binding.bucket, &key);
             return read_scoped_inline(&endpoint, &path, &keys).await;
@@ -546,7 +551,7 @@ async fn data_source(
             .filter(|s| !s.is_empty())
     };
     let call = match tool {
-        "storage_get_object" => DataCall::Object {
+        "data_read_get_object" => DataCall::Object {
             key: arg(args, "key")?.to_string(),
         },
         _ => DataCall::Objects {
@@ -615,17 +620,27 @@ fn head_fields(res: &worker::Response) -> Result<Value> {
     }))
 }
 
-impl Capability for Storage {
+impl Capability for DataRead {
     fn name(&self) -> &'static str {
-        "storage"
+        crate::data_store::NAME
     }
 
     fn versions(&self) -> Vec<pigeon_core::versions::Component> {
         use pigeon_core::versions::{Component, Kind};
-        let mut out = vec![Component::began("storage", Kind::Capability)];
+        let mut out = vec![
+            Component::began(crate::data_store::NAME, Kind::Capability).breaking(
+                "2.0.0",
+                "Read tools on data (data_read_*) replace the storage capability, which is \
+                 removed: they read the instance's data store and the external location the \
+                 record names at data.read.",
+                "Call data_read_accounts, data_read_list_buckets, data_read_list_objects, \
+                 data_read_get_object and data_read_head_object instead of storage_*; a \
+                 record's storage profile moves to data.read, beside the data store.",
+            ),
+        ];
         for p in Provider::ALL {
             out.push(Component::began(
-                &format!("storage.{}", p.slug()),
+                &format!("data.read.{}", p.slug()),
                 Kind::Connector,
             ));
         }
@@ -639,17 +654,17 @@ impl Capability for Storage {
         let key = json!({ "type": "string" });
         vec![
             Tool::bare(
-                "storage_accounts",
+                "data_read_accounts",
                 "List the declared object storage accounts and whether each has its key set.",
             ),
             tool(
-                "storage_list_buckets",
+                "data_read_list_buckets",
                 "List the buckets an object storage account can see.",
                 json!({ "account": account }),
                 &["account"],
             ),
             tool(
-                "storage_list_objects",
+                "data_read_list_objects",
                 "List objects in a bucket, one page. Pass `next` back as `token` for the next page.",
                 json!({
                     "account": account, "bucket": bucket,
@@ -660,13 +675,13 @@ impl Capability for Storage {
                 &["account", "bucket"],
             ),
             tool(
-                "storage_head_object",
+                "data_read_head_object",
                 "Answer an object's size, content type, ETag and modified time.",
                 json!({ "account": account, "bucket": bucket, "key": key }),
                 &["account", "bucket", "key"],
             ),
             tool(
-                "storage_get_object",
+                "data_read_get_object",
                 "Read an object of at most 1 MiB inline, or with `presign` answer a temporary link.",
                 json!({
                     "account": account, "bucket": bucket, "key": key,
@@ -684,11 +699,11 @@ impl Capability for Storage {
                 return self.scoped(cx, tool, args).await;
             }
             match tool {
-                "storage_accounts" => self.accounts_tool(cx).await,
-                "storage_list_buckets" => self.list_buckets(cx, args).await,
-                "storage_list_objects" => self.list_objects(cx, args).await,
-                "storage_head_object" => self.head(cx, args).await,
-                "storage_get_object" => self.get(cx, args).await,
+                "data_read_accounts" => self.accounts_tool(cx).await,
+                "data_read_list_buckets" => self.list_buckets(cx, args).await,
+                "data_read_list_objects" => self.list_objects(cx, args).await,
+                "data_read_head_object" => self.head(cx, args).await,
+                "data_read_get_object" => self.get(cx, args).await,
                 other => Err(unknown(other)),
             }
         })
@@ -724,7 +739,7 @@ impl Capability for Storage {
                 .accounts
                 .iter()
                 .find(|a| a.binding() == name)
-                .ok_or_else(|| Error::RustError(format!("storage has no secret `{name}`")))?;
+                .ok_or_else(|| Error::RustError(format!("data has no secret `{name}`")))?;
             let keys = s3::parse_keys(value)?;
             let endpoint = account.s3_endpoint();
             let refused =

@@ -9,7 +9,7 @@ private struct StorageEntry: Identifiable, Hashable {
 }
 
 /// Storage › Buckets: the instance's one approved location (store, bucket, prefix), browsed by
-/// prefix a page at a time with `storage_list_objects` bound to the instance. Read-only.
+/// prefix a page at a time with `data_read_list_objects` bound to the instance. Read-only.
 struct StorageScreen: View {
     let context: AreaContext
     @Environment(ConsoleAPI.self) private var api
@@ -178,7 +178,7 @@ struct StorageScreen: View {
         moreError = nil
         let asked = prefix
         do {
-            let data = try await api.op("storage_list_objects", args: args(token: nil))
+            let data = try await api.op("data_read_list_objects", args: args(token: nil))
             guard asked == prefix else { return }
             rows = Self.entries(data)
             next = data["next"].string
@@ -200,7 +200,7 @@ struct StorageScreen: View {
         defer { loadingMore = false }
         let asked = prefix
         do {
-            let data = try await api.op("storage_list_objects", args: args(token: token))
+            let data = try await api.op("data_read_list_objects", args: args(token: token))
             guard asked == prefix else { return }
             rows += Self.entries(data)
             next = data["next"].string

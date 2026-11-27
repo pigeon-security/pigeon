@@ -1,5 +1,13 @@
 # Object storage providers: Scaleway, DigitalOcean and Backblaze B2 through the portal
 
+> **Replaced (2026-11-27, docs/plans/record-reshape.md).** The `storage` capability is removed.
+> Its tools are the `data` capability's read tools, renamed outright: `data_read_accounts`,
+> `data_read_list_buckets`, `data_read_list_objects`, `data_read_get_object`,
+> `data_read_head_object`. An instance record names its approved location at `data.read`
+> (beside its data store) instead of `storage`; the accounts are declared in
+> `data_read_accounts()` and their secrets are `DATA_READ_<PROVIDER>_<NAME>`. The rest of this
+> doc is the history of the storage capability as it was built.
+
 Status: **phase 1 landed, off by default** (22 November 2026, landing `FSRipNVPcpASWZka`). The
 read-only `storage` tools are on main with no account declared, so they only explain setup.
 No credentials exist yet. Phase 2 starts when the person has made the first key (Follow-ups for
@@ -172,7 +180,7 @@ An account's id is `provider:name`.
 
 ### What an account is
 
-Declared in `src/platform/src/settings.rs`, in `storage_accounts()`, which is empty:
+Declared in `src/platform/src/settings.rs`, in `data_read_accounts()`, which is empty:
 
 | Field | What | Example |
 | --- | --- | --- |
@@ -209,9 +217,9 @@ A list that fails leaves the capability in place, and every tool answers the rea
 
 ### Picking an account
 
-Every tool except `storage_accounts` takes `account`, the id. There is no default account, even
+Every tool except `data_read_accounts` takes `account`, the id. There is no default account, even
 when only one exists: a call always says which account it reads, so the record of a call is
-unambiguous. `storage_accounts` lists the ids, their mode and buckets, and whether each one's
+unambiguous. `data_read_accounts` lists the ids, their mode and buckets, and whether each one's
 secret is bound and set (never its value).
 
 ### Access mode
@@ -231,13 +239,13 @@ Phase 1, built:
 
 | Tool | Arguments | Answers |
 | --- | --- | --- |
-| `storage_accounts` | none | Each account: id, provider, mode, endpoint, region, buckets, binding, `configured`. With none: an empty list and the setup steps |
-| `storage_list_buckets` | `account` | Buckets the key can see, filtered by the account's list |
-| `storage_list_objects` | `account`, `bucket`, `prefix?`, `delimiter?`, `max_keys?` (100, at most 1000), `token?` | `objects` (key, size, etag, last modified), `prefixes`, and `next`: pass it back as `token` for the next page |
-| `storage_head_object` | `account`, `bucket`, `key` | Size, content type, etag, last modified |
-| `storage_get_object` | `account`, `bucket`, `key`, `presign?`, `expires_s?` (300, at most 3600) | Inline, for objects up to 1 MiB: the body as UTF-8 text or base64. With `presign`: a presigned GET link and its lifetime |
+| `data_read_accounts` | none | Each account: id, provider, mode, endpoint, region, buckets, binding, `configured`. With none: an empty list and the setup steps |
+| `data_read_list_buckets` | `account` | Buckets the key can see, filtered by the account's list |
+| `data_read_list_objects` | `account`, `bucket`, `prefix?`, `delimiter?`, `max_keys?` (100, at most 1000), `token?` | `objects` (key, size, etag, last modified), `prefixes`, and `next`: pass it back as `token` for the next page |
+| `data_read_head_object` | `account`, `bucket`, `key` | Size, content type, etag, last modified |
+| `data_read_get_object` | `account`, `bucket`, `key`, `presign?`, `expires_s?` (300, at most 3600) | Inline, for objects up to 1 MiB: the body as UTF-8 text or base64. With `presign`: a presigned GET link and its lifetime |
 
-- With no account declared, `storage_accounts` answers how to set one up, and every other tool
+- With no account declared, `data_read_accounts` answers how to set one up, and every other tool
   answers an error with the same steps. Nothing is fetched.
 - A bucket outside a non-empty `buckets` list is refused before any request.
 - A presigned link is a bearer link: anyone holding it can read that one object until it
@@ -284,8 +292,8 @@ Phase 3, to come, for `ReadWrite` accounts only:
 
 | Phase | What | Who | Lands with |
 | --- | --- | --- | --- |
-| 1 | **Registry and read tools, off.** `pigeon_core::s3` (SigV4 header and presigned signing, the ListBuckets, ListObjectsV2 and Error readers, `send`); `pigeon_capabilities::storage` (`Account`, `validate`, the five tools, one secret slot per account with a live `check_secret`); registered in `settings.rs` with `storage_accounts()` empty. Smoke: `storage_reads_s3_compatible_accounts` with a stubbed S3 endpoint (recorded XML), both AWS signing examples, and the registry's rules. | Agent (built, `claude/ai-agent-q7VjHJXE6Mv0`) | `land` by the person's reviewer. No passkey: no policy or settings.json change. |
-| 2 | **First accounts, live.** For each account the person wants: declare it in `storage_accounts()` and land; the person sets the secret on the Access tab (the live check runs); bind it in `wrangler.toml` and land. Check from a session: `pigeon_storage_accounts` shows it `configured`; list buckets, page through a bucket of more than 1000 objects, head, get a small object inline, get a large one presigned. Settle the open points: DigitalOcean's signing region (the datacenter slug or `us-east-1`); ListBuckets with a B2 key limited to one bucket; Scaleway's preferred project for Object Storage. | Person (keys, Follow-ups 1 to 6); agent (two landings per batch of accounts) | `land` |
+| 1 | **Registry and read tools, off.** `pigeon_core::s3` (SigV4 header and presigned signing, the ListBuckets, ListObjectsV2 and Error readers, `send`); `pigeon_capabilities::storage` (`Account`, `validate`, the five tools, one secret slot per account with a live `check_secret`); registered in `settings.rs` with `data_read_accounts()` empty. Smoke: `storage_reads_s3_compatible_accounts` with a stubbed S3 endpoint (recorded XML), both AWS signing examples, and the registry's rules. | Agent (built, `claude/ai-agent-q7VjHJXE6Mv0`) | `land` by the person's reviewer. No passkey: no policy or settings.json change. |
+| 2 | **First accounts, live.** For each account the person wants: declare it in `data_read_accounts()` and land; the person sets the secret on the Access tab (the live check runs); bind it in `wrangler.toml` and land. Check from a session: `pigeon_storage_accounts` shows it `configured`; list buckets, page through a bucket of more than 1000 objects, head, get a small object inline, get a large one presigned. Settle the open points: DigitalOcean's signing region (the datacenter slug or `us-east-1`); ListBuckets with a B2 key limited to one bucket; Scaleway's preferred project for Object Storage. | Person (keys, Follow-ups 1 to 6); agent (two landings per batch of accounts) | `land` |
 | 3 | **Writes for read-write accounts.** `storage_put_object`, `storage_presign_put`, `storage_delete_object`, refused on `ReadOnly` accounts and outside `buckets`. They are added only after the person's policy gates them with a passkey (Follow-up 7); until then the plan holds. Keys for those accounts gain write permission (Follow-up 8). Smoke: the refusals and the signed PUT. | Person (policy, keys); agent | `land` after the policy change (passkey) |
 | 4 | **Ingestion**, its own plan: what "consume into Pigeon Platform" means (copy to R2, index, or read in place), schedules, and the move of `storage` into its own Worker if it grows. | Person decides; agent | — |
 
@@ -313,8 +321,8 @@ Partner API entitlement, which is a conversation with Backblaze first. The backu
 
 ## Rollback
 
-- Phase 1 changes nothing while `storage_accounts()` is empty. To remove it, revert the landing.
-- An account: remove it from `storage_accounts()` and its binding from `wrangler.toml`, land,
+- Phase 1 changes nothing while `data_read_accounts()` is empty. To remove it, revert the landing.
+- An account: remove it from `data_read_accounts()` and its binding from `wrangler.toml`, land,
   then delete the secret on the Access tab and revoke the key in the provider's console.
 - At once, without a landing: switch the `pigeon_storage_*` tools off in the portal, and revoke
   the provider key. pigeon's calls then fail with the provider's refusal.
@@ -343,7 +351,7 @@ a time; DigitalOcean first is the safest, as it is read-only.
    (shown once). Do not use the master key: the S3 API refuses it. The S3 endpoint is on each
    bucket's page (`s3.<region>.backblazeb2.com`); the region is the middle part.
 5. **Ask an agent to declare the accounts** (a session or a planner run): "declare storage
-   accounts `<ids>` with regions `<…>` and buckets `<…>` in `storage_accounts()` per
+   accounts `<ids>` with regions `<…>` and buckets `<…>` in `data_read_accounts()` per
    docs/plans/storage-providers.md, and land it". This adds no binding yet, so the deploy is
    safe. The console's Access tab then lists `STORAGE_<PROVIDER>_<NAME>` as missing.
 6. **Set each secret.** Console → Access → Secrets and credentials →
@@ -397,7 +405,7 @@ executors through it. Each item: state, next step, who it waits on.
   - Researched the three providers' MCP servers from the sandbox (Sources). None fits object
     reading behind the portal; designed the `storage` capability over S3 instead.
   - Phase 1 built by an executor on `claude/ai-agent-q7VjHJXE6Mv0` (`2dabc75`; CI `test` job
-    `ZpJ3YuBi16HVJS9wziiWL2` passed, 31 scenarios), off by default (`storage_accounts()`
+    `ZpJ3YuBi16HVJS9wziiWL2` passed, 31 scenarios), off by default (`data_read_accounts()`
     empty), with the smoke scenario `storage_reads_s3_compatible_accounts`. Both AWS SigV4
     examples matched as published. Not landed: the person's reviewer lands it.
   - That branch also adds a short `docs/plans/storage-providers.md` of its own, which conflicts

@@ -27,9 +27,9 @@
       "plumbing": false
     },
     {
-      "name": "storage",
+      "name": "data",
       "kind": "capability",
-      "version": "1.0.0",
+      "version": "2.0.0",
       "serves": [],
       "worker": "pigeon-core",
       "problems": [],

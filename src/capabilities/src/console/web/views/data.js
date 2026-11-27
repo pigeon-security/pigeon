@@ -58,9 +58,9 @@
   const readOnly = (text) => el("p", { class: "muted", text });
 
   // ---- Storage › Buckets: the instance's one approved location (store, bucket, prefix), browsed
-  // by prefix a page at a time. storage_list_objects with `instance` answers keys relative to the
-  // approved prefix and refuses a raw account or bucket; storage_list_buckets and
-  // storage_head_object take those, so this view does not use them.
+  // by prefix a page at a time. data_read_list_objects with `instance` answers keys relative to the
+  // approved prefix and refuses a raw account or bucket; data_read_list_buckets and
+  // data_read_head_object take those, so this view does not use them.
   // With the instance's data store (the record's `data`, docs/plans/email.md) the view can
   // also browse its bucket's `blobs/` and `derived/` through the data Worker (`source: "data"`),
   // beside the approved S3 location (`data.read`), which reads as before.
@@ -114,7 +114,7 @@
         const args = { instance: id, prefix, delimiter: "/", max_keys: 100 };
         if (hasS3 && hasData) args.source = source;
         if (more && next) args.token = next;
-        const data = await ctx.op("storage_list_objects", args);
+        const data = await ctx.op("data_read_list_objects", args);
         const page = [
           ...(data.prefixes || []).map((key) => ({ dir: true, key })),
           ...(data.objects || []).map((o) => ({ ...o, dir: false })),
@@ -463,18 +463,18 @@
   // message list in the middle, the message on the right. The message's HTML is the sender's
   // and is only ever shown in shell.mailFrame (sandboxed, nothing remote loads); its text is
   // shown plain; attachments and the original are saved through the storage object reader on
-  // the data store (`storage_get_object` with `source: "data"`), never opened here.
+  // the data store (`data_read_get_object` with `source: "data"`), never opened here.
   const CHECKS = { pass: ["Sender verified", "ok"], partial: ["Partly verified", "warn"], fail: ["Sender check failed", "bad"], none: ["Not verified", "plain"] };
   const senderCheck = (c) => { const [text, tone] = CHECKS[c] || CHECKS.none; return pill(text, tone); };
   const person = (a) => (a ? a.name || a.address || "—" : "—");
   const addresses = (list) => (Array.isArray(list) && list.length ? list.map((a) => (a.name ? `${a.name} <${a.address}>` : a.address)).join(", ") : "—");
   async function save(ctx, key, name, type) {
-    const d = await ctx.op("storage_get_object", { instance: ctx.instance.id, key, source: "data" });
+    const d = await ctx.op("data_read_get_object", { instance: ctx.instance.id, key, source: "data" });
     saveFile(name, d.content_type || type, d.encoding, d.body);
   }
   function message(ctx, id) {
     const node = el("div", { class: "section", "aria-live": "polite" });
-    loadInto(node, () => ctx.op("email_get", { instance: ctx.instance.id, id }), (m) => {
+    loadInto(node, () => ctx.op("data_email_get", { instance: ctx.instance.id, id }), (m) => {
       const check = m.sightings?.[0]?.sender_check || "none";
       const files = (m.attachments || []).map((a) => el("li", {},
         button(a.filename || short(a.id, 12), () => save(ctx, a.key, a.filename || a.id, a.media_type).catch((e) => shell.toast?.(String(e.message || e), "bad")),
@@ -531,7 +531,7 @@
         const args = { instance: id };
         if (mailbox) args.mailbox = mailbox;
         if (more && next) args.cursor = next;
-        const data = await ctx.op("email_list", args);
+        const data = await ctx.op("data_email_list", args);
         rows = more ? rows.concat(data.messages || []) : data.messages || [];
         next = data.next || null;
         more = false;
@@ -539,7 +539,7 @@
         return rows;
       },
     });
-    loadInto(boxes, () => ctx.op("email_mailboxes", { instance: id }), (d) => [
+    loadInto(boxes, () => ctx.op("data_email_mailboxes", { instance: id }), (d) => [
       button("All mail", () => choose(null), { variant: "ghost", size: "sm", "data-mailbox": "", "aria-pressed": "true" }),
       ...(d.mailboxes || []).map((m) => button([el("span", { text: m.mailbox }), el("span", { class: "muted", text: count(m.count) })],
         () => choose(m.mailbox), { variant: "ghost", size: "sm", "data-mailbox": m.mailbox, "aria-pressed": "false",

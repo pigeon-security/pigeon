@@ -22,6 +22,24 @@ use crate::{Call, Capability, Context, arg, unknown};
 /// settings sit at the record's `data.email`.
 pub const NAME: &str = "data-email";
 
+/// The tools the person's policy must gate on their passkey, each call. A renamed tool is not
+/// gated until the policy names its new name, which only the person's passkey changes
+/// (docs/plans/record-reshape.md, "Fail closed until the policy gates it"); until then a call
+/// is refused rather than run without the passkey.
+pub const MUST_BE_GATED: &[&str] = &["data_email_forward_set"];
+
+/// Why a call of `tool` is refused because the policy does not gate it on the passkey as
+/// [`MUST_BE_GATED`] requires; `gated` answers whether the live policy does. Pure.
+pub fn ungated(tool: &str, gated: impl Fn(&str) -> bool) -> Option<String> {
+    (MUST_BE_GATED.contains(&tool) && !gated(tool)).then(|| {
+        format!(
+            "`{tool}` waits for the policy update that gates it on the person's passkey \
+             (rule risky-tools-need-passkey in .pigeon/policy.toml); until the person approves \
+             that update it does not run"
+        )
+    })
+}
+
 /// The listed addresses the person named first (docs/plans/email.md, "The person's decisions").
 pub const FIRST_ADDRESSES: &[&str] = &["cloudflare", "buildkite", "apple"];
 
@@ -215,7 +233,7 @@ pub fn with_forward(
                 .addresses
                 .iter_mut()
                 .find(|a| a.local == l)
-                .ok_or_else(|| format!("{l} is not listed: add it with email_address_set"))?;
+                .ok_or_else(|| format!("{l} is not listed: add it with data_email_address_set"))?;
             a.forward = to;
         }
         None => {
@@ -237,32 +255,32 @@ pub fn with_forward(
 /// The instance tools and the Email tab while the record enables mail.
 const TOOLS: &[Registration] = &[
     Registration {
-        name: "email_status",
+        name: "data_email_status",
         description: Some("This instance's mail: setup state, counts and forwarding failures."),
         arguments: &[],
     },
     Registration {
-        name: "email_mailboxes",
+        name: "data_email_mailboxes",
         description: Some("This instance's mailboxes with their counts."),
         arguments: &[],
     },
     Registration {
-        name: "email_list",
+        name: "data_email_list",
         description: Some("A page of this instance's mail, newest first."),
         arguments: &["mailbox", "since", "from", "cursor", "limit"],
     },
     Registration {
-        name: "email_get",
+        name: "data_email_get",
         description: Some("One message of this instance's mail."),
         arguments: &["id"],
     },
     Registration {
-        name: "email_address_set",
+        name: "data_email_address_set",
         description: Some("Propose adding or removing a listed address on this instance."),
         arguments: &["local", "remove"],
     },
     Registration {
-        name: "email_forward_set",
+        name: "data_email_forward_set",
         description: Some("Propose a change to this instance's mail forwarding."),
         arguments: &["local", "to", "scope"],
     },
@@ -495,10 +513,17 @@ impl Capability for Email {
     }
 
     fn versions(&self) -> Vec<pigeon_core::versions::Component> {
-        vec![pigeon_core::versions::Component::began(
-            NAME,
-            pigeon_core::versions::Kind::Capability,
-        )]
+        vec![
+            pigeon_core::versions::Component::began(NAME, pigeon_core::versions::Kind::Capability)
+                .breaking(
+                    "2.0.0",
+                    "Renamed from email: the capability is data-email, its settings sit at \
+                     the record's data.email, and its tools are data_email_*.",
+                    "Call data_email_status, data_email_list, data_email_get, \
+                     data_email_mailboxes, data_email_address_set and data_email_forward_set \
+                     instead of email_*; stored records move to data.email on deploy.",
+                ),
+        ]
     }
 
     fn tools(&self) -> Vec<Tool> {
@@ -506,21 +531,21 @@ impl Capability for Email {
             json!({ "type": "string", "description": "The instance, such as `pigeon.dev`." });
         vec![
             tool(
-                "email_status",
+                "data_email_status",
                 "An instance's mail: whether it is set up (or the steps to set it up), its \
                  domain, mailboxes and forwarding, and the data Worker's counts.",
                 json!({ "instance": instance }),
                 &["instance"],
             ),
             tool(
-                "email_mailboxes",
+                "data_email_mailboxes",
                 "An instance's mailboxes: each listed address and catch-all, with its count and \
                  newest message.",
                 json!({ "instance": instance }),
                 &["instance"],
             ),
             tool(
-                "email_list",
+                "data_email_list",
                 "A page of an instance's mail, newest first: id, from, subject, date, sender \
                  check and attachment count. Never bodies.",
                 json!({
@@ -534,17 +559,17 @@ impl Capability for Email {
                 &["instance"],
             ),
             tool(
-                "email_get",
+                "data_email_get",
                 "One message: headers, text, the HTML marked for sandboxed rendering, and its \
                  attachments with their keys in the data store.",
                 json!({
                     "instance": instance,
-                    "id": { "type": "string", "description": "The message id (its SHA-256) from email_list." },
+                    "id": { "type": "string", "description": "The message id (its SHA-256) from data_email_list." },
                 }),
                 &["instance", "id"],
             ),
             tool(
-                "email_address_set",
+                "data_email_address_set",
                 "Propose adding (or with `remove`, removing) a listed address, its own mailbox. \
                  A record change the person approves; never a DNS or routing change.",
                 json!({
@@ -555,7 +580,7 @@ impl Capability for Email {
                 &["instance", "local"],
             ),
             tool(
-                "email_forward_set",
+                "data_email_forward_set",
                 "Propose a forwarding change: a listed address's destination (`local` and `to`), \
                  the default destination (`to` alone; null clears it), or the scope (`listed`, the \
                  default, or `all` to include catch-all). Each call needs the person's passkey.",
@@ -572,13 +597,16 @@ impl Capability for Email {
 
     fn call<'a>(&'a self, cx: &'a Context<'a>, tool: &'a str, args: &'a Value) -> Call<'a> {
         Box::pin(async move {
+            if let Some(why) = ungated(tool, crate::approvals::gated) {
+                return Err(bad(why));
+            }
             match tool {
-                "email_status" => self.status(cx, args).await,
-                "email_mailboxes" => self.mailboxes(cx, args).await,
-                "email_list" => self.list(cx, args).await,
-                "email_get" => self.get(cx, args).await,
-                "email_address_set" => self.address_set(cx, args).await,
-                "email_forward_set" => self.forward_set(cx, args).await,
+                "data_email_status" => self.status(cx, args).await,
+                "data_email_mailboxes" => self.mailboxes(cx, args).await,
+                "data_email_list" => self.list(cx, args).await,
+                "data_email_get" => self.get(cx, args).await,
+                "data_email_address_set" => self.address_set(cx, args).await,
+                "data_email_forward_set" => self.forward_set(cx, args).await,
                 other => Err(unknown(other)),
             }
         })

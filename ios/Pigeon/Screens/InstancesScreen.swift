@@ -25,7 +25,7 @@ struct InstancesScreen: View {
         /// Each with where it sits in the record (docs/plans/record-reshape.md).
         static let sections: [(name: String, field: String)] = [
             ("publishing", "site.publishing"), ("site_passkeys", "site.passkeys"),
-            ("storage", "data.read"), ("source", "repo.source"), ("ci", "ci"),
+            ("data-read", "data.read"), ("source", "repo.source"), ("ci", "ci"),
             ("observability", "observability"),
         ]
 

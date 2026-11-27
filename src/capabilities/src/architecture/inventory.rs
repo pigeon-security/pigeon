@@ -56,8 +56,8 @@ fn scope(name: &str, foundation: bool) -> Scope {
         return SharedFoundation;
     }
     match name {
-        "ci" | "data-ingest" | "ingest" | "observability" | "site_passkeys" | "sites"
-        | "source" | "storage" => InstanceFeature,
+        "ci" | "data" | "data-email" | "data-ingest" | "observability" | "site_passkeys"
+        | "sites" | "source" => InstanceFeature,
         "ai-agents" | "apple" | "changelog" | "cloud" | "cost" | "github" | "land" | "mirror"
         | "models" => MainPlatformFeature,
         "approvals" | "dispatch" | "expiry" | "instances" | "ledger" | "linked" | "oauth"

@@ -394,11 +394,11 @@ fn console_app_bearer_parity() {
     let bind = |tool: &str, args: Value| {
         pigeon_capabilities::instances::tools::bind_global("blog", Some(&record), tool, &args)
     };
-    assert!(INSTANCE_OPS.contains(&"storage_list_objects"));
-    assert!(bind("storage_list_objects", json!({ "instance": "blog" })).is_ok());
+    assert!(INSTANCE_OPS.contains(&"data_read_list_objects"));
+    assert!(bind("data_read_list_objects", json!({ "instance": "blog" })).is_ok());
     assert!(
         bind(
-            "storage_list_objects",
+            "data_read_list_objects",
             json!({ "instance": "blog", "bucket": "other" })
         )
         .is_err()
@@ -2029,7 +2029,7 @@ fn console_ops_allow_the_reads_the_console_needs_and_nothing_else() {
         "site_releases",
         "app_site_hosts",
         "app_site_visitors",
-        "storage_list_objects",
+        "data_read_list_objects",
         "source_read_file",
         "ci_jobs",
         "observability_worker_metrics",
@@ -2065,7 +2065,7 @@ fn console_ops_allow_the_reads_the_console_needs_and_nothing_else() {
     // The instance areas' reads take the instance, and are bound to its record when they do.
     for (op, args) in [
         (
-            "storage_list_objects",
+            "data_read_list_objects",
             json!({ "instance": "blog", "prefix": "img/", "delimiter": "/", "max_keys": 100, "token": "t" }),
         ),
         (
@@ -2106,14 +2106,14 @@ fn console_ops_allow_the_reads_the_console_needs_and_nothing_else() {
     };
     assert_eq!(
         bind(
-            "storage_list_objects",
+            "data_read_list_objects",
             json!({ "instance": "blog", "prefix": "img/" })
         ),
         Ok(json!({ "instance": "blog", "prefix": "img/" }))
     );
     assert!(
         bind(
-            "storage_list_objects",
+            "data_read_list_objects",
             json!({ "instance": "blog", "bucket": "other" })
         )
         .is_err()
@@ -2141,7 +2141,7 @@ fn console_ops_allow_the_reads_the_console_needs_and_nothing_else() {
         ("ai_agents_models", json!({ "set": { "executor": "x" } })),
         ("ai_agents_config", json!({ "max_live_runs": 1 })),
         (
-            "storage_get_object",
+            "data_read_get_object",
             json!({ "account": "a", "bucket": "b", "key": "k", "presign": true }),
         ),
         ("cost_daily", json!({ "range": "7d", "extra": 1 })),
@@ -4307,17 +4307,17 @@ mod email {
         // Roles: the reads are viewer's with exactly their arguments; the writes operator's.
         let i = json!({ "instance": "pigeon.dev" });
         assert_eq!(
-            tool_need("data-email", "email_status", &i),
+            tool_need("data-email", "data_email_status", &i),
             Some(Role::Viewer)
         );
         assert_eq!(
-            tool_need("data-email", "email_mailboxes", &i),
+            tool_need("data-email", "data_email_mailboxes", &i),
             Some(Role::Viewer)
         );
         assert_eq!(
             tool_need(
                 "data-email",
-                "email_list",
+                "data_email_list",
                 &json!({ "instance": "pigeon.dev", "mailbox": "apple", "cursor": "x" })
             ),
             Some(Role::Viewer)
@@ -4325,7 +4325,7 @@ mod email {
         assert_eq!(
             tool_need(
                 "data-email",
-                "email_get",
+                "data_email_get",
                 &json!({ "instance": "pigeon.dev", "id": "a" })
             ),
             Some(Role::Viewer)
@@ -4333,7 +4333,7 @@ mod email {
         assert_eq!(
             tool_need(
                 "data-email",
-                "email_list",
+                "data_email_list",
                 &json!({ "instance": "pigeon.dev", "account": "x" })
             ),
             Some(Role::Operator),
@@ -4342,7 +4342,7 @@ mod email {
         assert_eq!(
             tool_need(
                 "data-email",
-                "email_address_set",
+                "data_email_address_set",
                 &json!({ "instance": "pigeon.dev", "local": "x" })
             ),
             Some(Role::Operator)
@@ -4350,7 +4350,7 @@ mod email {
         assert_eq!(
             tool_need(
                 "data-email",
-                "email_forward_set",
+                "data_email_forward_set",
                 &json!({ "instance": "pigeon.dev", "scope": "all" })
             ),
             Some(Role::Operator)
@@ -4359,12 +4359,12 @@ mod email {
         assert_eq!(
             tool_need(
                 "storage",
-                "storage_get_object",
+                "data_read_get_object",
                 &json!({ "instance": "pigeon.dev", "key": "blobs/x", "source": "data" })
             ),
             Some(Role::Viewer)
         );
-        use pigeon_capabilities::storage::{Source, source_of};
+        use pigeon_capabilities::data_read::{Source, source_of};
         assert_eq!(source_of(&r, &json!({})), Ok(Source::Data));
         assert_eq!(source_of(&r, &json!({ "source": "s3" })), Ok(Source::S3));
         assert!(source_of(&r, &json!({ "source": "r2" })).is_err());
@@ -4374,7 +4374,7 @@ mod email {
             bind_global(
                 "pigeon.dev",
                 Some(&r),
-                "email_list",
+                "data_email_list",
                 &json!({ "mailbox": "apple" })
             )
             .is_ok()
@@ -4383,12 +4383,12 @@ mod email {
             bind_global(
                 "pigeon.dev",
                 Some(&r),
-                "email_list",
+                "data_email_list",
                 &json!({ "account": "x" })
             )
             .is_err()
         );
-        assert!(bind_global("pigeon.dev", Some(&off), "email_list", &json!({})).is_err());
+        assert!(bind_global("pigeon.dev", Some(&off), "data_email_list", &json!({})).is_err());
     }
 
     /// The Email tab's fixtures are what the read ops answer for the stand-in's mail, so fixture
@@ -4446,9 +4446,9 @@ mod email {
         if std::env::var_os("PIGEON_WRITE_FIXTURES").is_some() {
             let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/console/web/fixtures");
             for (name, v) in [
-                ("email_mailboxes.home.json", &mailboxes),
-                ("email_list.home.json", &list),
-                ("email_get.home.json", &get),
+                ("data_email_mailboxes.home.json", &mailboxes),
+                ("data_email_list.home.json", &list),
+                ("data_email_get.home.json", &get),
             ] {
                 std::fs::write(
                     dir.join(name),
@@ -4459,23 +4459,25 @@ mod email {
         }
         for (name, want, recorded) in [
             (
-                "email_mailboxes.home.json",
+                "data_email_mailboxes.home.json",
                 &mailboxes,
                 include_str!(
-                    "../../src/capabilities/src/console/web/fixtures/email_mailboxes.home.json"
+                    "../../src/capabilities/src/console/web/fixtures/data_email_mailboxes.home.json"
                 ),
             ),
             (
-                "email_list.home.json",
+                "data_email_list.home.json",
                 &list,
                 include_str!(
-                    "../../src/capabilities/src/console/web/fixtures/email_list.home.json"
+                    "../../src/capabilities/src/console/web/fixtures/data_email_list.home.json"
                 ),
             ),
             (
-                "email_get.home.json",
+                "data_email_get.home.json",
                 &get,
-                include_str!("../../src/capabilities/src/console/web/fixtures/email_get.home.json"),
+                include_str!(
+                    "../../src/capabilities/src/console/web/fixtures/data_email_get.home.json"
+                ),
             ),
         ] {
             let recorded: Value = serde_json::from_str(recorded).unwrap();

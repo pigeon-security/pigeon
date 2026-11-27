@@ -94,9 +94,9 @@ pub const CAPABILITIES: &[Contributor] = &[
         register: crate::site_passkeys::instance_views,
     },
     Contributor {
-        name: "storage",
-        component: "storage",
-        register: crate::storage::instance_tools,
+        name: "data-read",
+        component: crate::data_store::NAME,
+        register: crate::data_read::instance_tools,
     },
     Contributor {
         name: "source",

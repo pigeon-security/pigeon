@@ -217,7 +217,7 @@ pub fn dependents(instance: &Instance, ledger: &Ledger, others: &[Instance]) -> 
                 ));
             }
         }
-        if let Some(crate::storage::scope::Profile::Enabled { bucket, .. }) =
+        if let Some(crate::data_read::scope::Profile::Enabled { bucket, .. }) =
             crate::data_store::read(o)
             && buckets.contains(&bucket.as_str())
         {

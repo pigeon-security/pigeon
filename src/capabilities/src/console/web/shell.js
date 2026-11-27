@@ -31,9 +31,9 @@
 
   // ---- Contract (P15): every op the shell and its views read, and every write they make.
   const READS = Object.freeze(["console_manifest", "instances_list", "app_inbox", "app_linked_details", "app_jobs_audit_plan", "app_federation_people",
-    "storage_list_objects", "source_resolve_revision", "source_read_file", "ci_jobs", "ci_status",
+    "data_read_list_objects", "source_resolve_revision", "source_read_file", "ci_jobs", "ci_status",
     "observability_worker_metrics", "app_ingest_runs", "ingest_report", "digitalocean_status", "digitalocean_verify",
-    "email_mailboxes", "email_list", "email_get", "storage_get_object",
+    "data_email_mailboxes", "data_email_list", "data_email_get", "data_read_get_object",
     "digitalocean_spaces_status", "digitalocean_spaces_verify", "digitalocean_droplet_status",
     "digitalocean_droplet_jobs", "digitalocean_droplet_job",
     "ai_agents_status", "ai_agents_compare", "cost_daily", "land_list",
@@ -965,7 +965,7 @@
     frame.srcdoc = `<!doctype html><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${MAIL_POLICY}">${String(html ?? "")}`;
     return frame;
   }
-  // Hands the person a file read through /app/op (`storage_get_object`'s answer): never opened
+  // Hands the person a file read through /app/op (`data_read_get_object`'s answer): never opened
   // in the console, only saved.
   function saveFile(name, type, encoding, body) {
     const bytes = encoding === "base64" ? Uint8Array.from(atob(body || ""), (c) => c.charCodeAt(0)) : new TextEncoder().encode(body || "");

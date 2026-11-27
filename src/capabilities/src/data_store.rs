@@ -38,7 +38,7 @@ pub fn settings(record: &Instance) -> Option<&CapabilitySettings> {
 
 /// The approved external storage location the data store's read tools also read
 /// (`data.read`), when the record enables the store and names one.
-pub fn read(record: &Instance) -> Option<&crate::storage::scope::Profile> {
+pub fn read(record: &Instance) -> Option<&crate::data_read::scope::Profile> {
     settings(record).and_then(|s| s.read.as_ref())
 }
 

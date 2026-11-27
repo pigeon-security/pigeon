@@ -99,7 +99,7 @@ struct CapabilitySpec: Identifiable {
         case "publishing": return r["sites"].items.isEmpty ? "a site in the record" : nil
         case "site_passkeys": return CapabilityCatalog.isOn(r, CapabilityCatalog.publishing) ? nil : "publishing"
         case "source": return r["repo"]["kind"].isNull ? "a repository in the record" : nil
-        case "storage": return r["data"].isNull ? "data" : nil
+        case "data-read": return r["data"].isNull ? "data" : nil
         case "ci":
             return r["account"]["kind"].string == "home" && r["repo"]["kind"].string == "artifacts"
                 ? nil : "a home-account Artifacts repository"
@@ -120,7 +120,7 @@ struct CapabilitySpec: Identifiable {
                 CapabilityField(key: "site", label: "Site", options: sites, hint: "Only a site on platform subdomains can be gated."),
                 CapabilityField(key: "allow", label: "Who may sign in", list: true, hint: "Comma-separated user ids, or site for every visitor you invite."),
             ]
-        case "storage":
+        case "data-read":
             return [
                 CapabilityField(key: "store", label: "Storage account", mono: true, hint: "A declared account, such as scaleway:archive."),
                 CapabilityField(key: "bucket", label: "Bucket", mono: true),
@@ -244,7 +244,7 @@ enum CapabilityCatalog {
         publishing,
         sitePasskeys,
         CapabilitySpec(
-            cap: "storage", field: "data.read", component: "storage", adds: ["Storage › Buckets"],
+            cap: "data-read", field: "data.read", component: "data", adds: ["Storage › Buckets"],
             what: "Read the objects of one approved bucket, beside the data store"),
         CapabilitySpec(
             cap: "source", field: "repo.source", component: "source", adds: ["Source › Repository"],

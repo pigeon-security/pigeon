@@ -119,7 +119,7 @@
       current: (r) => { const s = passkeySites(r)[0]; return s ? { site: s.name, allow: s.allow } : { site: r.site?.publishing?.site, allow: ["site"] }; },
       apply: (r, v) => setAt(r, "site.passkeys", { [v.site]: { allow: v.allow } }),
       remove: (r) => delAt(r, "site.passkeys") },
-    { cap: "storage", field: "data.read", component: "storage", adds: ["Storage › Buckets"],
+    { cap: "data-read", field: "data.read", component: "data", adds: ["Storage › Buckets"],
       what: "Read the objects of one approved bucket, beside the data store",
       needs: (r) => (r.data ? null : "data"),
       fields: () => [

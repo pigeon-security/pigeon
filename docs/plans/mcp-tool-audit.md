@@ -155,11 +155,11 @@ Evidence is the line that declares the tool. "none met" means none of (a), (b), 
 | `setup_proxy_host` | keep | (c) not met | `settings.rs:197` | none |
 | `workers_setup` | keep | (c) not met | `src/capabilities/src/split.rs:832` | none |
 | `manifest_refresh` | keep | none met | `split.rs:838` | none |
-| `storage_accounts` | keep | none met | `src/capabilities/src/storage.rs:413` | none |
-| `storage_list_buckets` | keep | none met | `storage.rs:417` | none |
-| `storage_list_objects` | keep | none met | `storage.rs:423` | none |
-| `storage_head_object` | keep | none met | `storage.rs:434` | none |
-| `storage_get_object` | keep | none met | `storage.rs:440` | none |
+| `data_read_accounts` | keep | none met | `src/capabilities/src/storage.rs:413` | none |
+| `data_read_list_buckets` | keep | none met | `storage.rs:417` | none |
+| `data_read_list_objects` | keep | none met | `storage.rs:423` | none |
+| `data_read_head_object` | keep | none met | `storage.rs:434` | none |
+| `data_read_get_object` | keep | none met | `storage.rs:440` | none |
 | `users_whoami` | keep | none met | `src/capabilities/src/users.rs:1487` | none |
 | `users_list` | keep | none met | `users.rs:1491` | none |
 | `users_people` | keep | none met | `users.rs:1495` | none |

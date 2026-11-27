@@ -2704,7 +2704,7 @@ fn arch_home_capabilities() -> Vec<Box<dyn pigeon_capabilities::Capability>> {
             tool: "source_mirror",
         }),
         Box::new(apple::Apple),
-        Box::new(storage::Storage {
+        Box::new(data_read::DataRead {
             accounts: Vec::new(),
         }),
         Box::new(users::Users { host: host.into() }),

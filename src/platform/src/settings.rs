@@ -8,6 +8,7 @@ use pigeon_capabilities::architecture::{Architecture, Wrangler};
 use pigeon_capabilities::changelog::Changelog;
 use pigeon_capabilities::ci;
 use pigeon_capabilities::console::Console;
+use pigeon_capabilities::data_read::{self, DataRead};
 use pigeon_capabilities::dispatch::Dispatch;
 use pigeon_capabilities::github::Github;
 use pigeon_capabilities::ingest;
@@ -27,7 +28,6 @@ use pigeon_capabilities::site::{self, Site};
 use pigeon_capabilities::site_passkeys::SitePasskeys;
 use pigeon_capabilities::source::Source;
 use pigeon_capabilities::split::Split;
-use pigeon_capabilities::storage::{self, Storage};
 use pigeon_capabilities::users::Users;
 use pigeon_capabilities::versioning::Versioning;
 
@@ -200,9 +200,9 @@ pub fn backup() -> Backup {
     }
 }
 
-/// The object storage accounts. Empty on purpose: storage stays off until the person declares
-/// an account here (see docs/plans/storage-providers.md).
-pub fn storage_accounts() -> Vec<storage::Account> {
+/// The object storage accounts the data read tools reach. Empty on purpose: they stay off until
+/// the person declares an account here (see docs/plans/storage-providers.md).
+pub fn data_read_accounts() -> Vec<data_read::Account> {
     Vec::new()
 }
 
@@ -260,9 +260,11 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
         // App Store Connect (docs/plans/ios.md): slots, a read-only status, and the console's
         // passkey-bound writes that adopt the bundle id and make pigeon's signing identity.
         Box::new(Apple),
-        // Read-only object storage; with no accounts declared its tools only explain setup.
-        Box::new(Storage {
-            accounts: storage_accounts(),
+        // The data capability's read tools (data_read_*, which replaced storage): the instance's
+        // data store and declared object storage accounts, read-only; with no accounts declared
+        // the account tools only explain setup.
+        Box::new(DataRead {
+            accounts: data_read_accounts(),
         }),
         Box::new(Users { host: HOST.into() }),
         Box::new(Passkeys {
@@ -322,7 +324,7 @@ pub fn capabilities() -> Vec<Box<dyn Capability>> {
         // the person binds its keys; every run needs a passkey approval.
         Box::new(ingest::Ingest {
             targets: ingest_instances(),
-            accounts: storage_accounts(),
+            accounts: data_read_accounts(),
             passkeys: Passkeys {
                 host: HOST.into(),
                 site_name: "pigeon".into(),
