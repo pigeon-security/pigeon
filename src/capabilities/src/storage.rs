@@ -44,7 +44,7 @@ const INSTANCE_VIEWS: &[View] = &[View {
 }];
 
 /// Storage declares the subset of its tools, and its console view, on enabled instance profiles:
-/// an S3 location (`storage`), the instance's data store (`[capabilities.data]`), or both.
+/// an S3 location (`data.read`), the instance's data store (`data`), or both.
 pub fn instance_tools(instance: &Instance) -> serde_json::Result<Enabled> {
     Ok(Enabled::when(
         s3_enabled(instance) || crate::data_store::enabled(instance),
@@ -54,10 +54,7 @@ pub fn instance_tools(instance: &Instance) -> serde_json::Result<Enabled> {
 }
 
 fn s3_enabled(instance: &Instance) -> bool {
-    instance
-        .storage
-        .as_ref()
-        .is_some_and(|profile| profile.enabled())
+    crate::data_store::read(instance).is_some_and(|profile| profile.enabled())
 }
 
 /// Where a scoped call reads: the approved S3 location, or the instance's data store
@@ -411,9 +408,7 @@ impl Storage {
         if source_of(&record, args).map_err(bad)? == Source::Data {
             return data_source(cx, &record, tool, args).await;
         }
-        let binding = record
-            .storage
-            .as_ref()
+        let binding = crate::data_store::read(&record)
             .ok_or_else(|| bad("object storage is disabled for this instance".into()))?
             .scope()
             .map_err(bad)?;

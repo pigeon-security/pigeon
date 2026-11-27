@@ -1339,7 +1339,7 @@ fn linking_a_cloudflare_account() {
             .iter()
             .map(|c| c.capability)
             .collect::<Vec<_>>(),
-        ["secrets", "data", "email", "email", "email"]
+        ["secrets", "data", "data-email", "data-email", "data-email"]
     );
     assert!(scopes_to_add(&ids).is_empty());
 

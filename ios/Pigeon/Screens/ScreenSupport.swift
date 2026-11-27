@@ -172,11 +172,11 @@ enum RecordDiff {
             }
             return out
         }
-        // A capability's own entry counts `{}` as a value: `capabilities.data = {}` turns it on
-        // with every setting at its default, as record::diff counts it.
-        let entry = path.hasPrefix("capabilities.")
+        // A capability's own entry counts `{}` as a value: `data = {}` turns it on with every
+        // setting at its default, as record::diff counts it.
+        let entry = entryPaths.contains(path) || (path.hasPrefix("capabilities.")
             && path.count > "capabilities.".count
-            && !path.dropFirst("capabilities.".count).contains(".")
+            && !path.dropFirst("capabilities.".count).contains("."))
         let none = { (v: JSON) -> Bool in entry && v == .object([:]) ? false : isNone(v) }
         let x: JSON = none(from) ? .null : from
         let y: JSON = none(to) ? .null : to
@@ -192,6 +192,38 @@ enum RecordDiff {
             if !c.to.isNull { out.append(.add("\(c.path): \(c.to.compactText)")) }
         }
         return out
+    }
+
+    /// Where the catalogue capabilities with a record field sit (docs/plans/record-reshape.md),
+    /// as `capabilities_versions` `catalogue[].field` gives them.
+    static let entryPaths: Set<String> = [
+        "data", "data.email", "data.ingest", "cloud.gateway", "cloud.digitalocean",
+        "instance.mcp-federation", "jobs",
+    ]
+
+    /// The namespaces of the record's layout that are no setting of their own: one left empty
+    /// is removed, as the platform never writes one.
+    static let namespaces: Set<String> = ["site", "network", "cloud", "instance", "capabilities"]
+
+    /// The value at dotted `path` of `object`, such as `site.publishing`; `.null` when absent.
+    static func at(_ object: JSON, _ path: String) -> JSON {
+        path.split(separator: ".").reduce(object) { $0[String($1)] }
+    }
+
+    /// `object` with dotted `path` set to `value` (removed when `value` is nil), making the
+    /// objects on the way; a namespace left empty is removed, and so is a `repo` left with
+    /// nothing (it reads as null).
+    static func setting(_ object: JSON, path: String, _ value: JSON?) -> JSON {
+        let keys = path.split(separator: ".").map(String.init)
+        guard let first = keys.first else { return object }
+        if keys.count == 1 { return setting(object, first, value) }
+        let rest = keys.dropFirst().joined(separator: ".")
+        let child = setting(object[first].object == nil ? .object([:]) : object[first], path: rest, value)
+        if child.object?.isEmpty == true {
+            if namespaces.contains(first) { return setting(object, first, nil) }
+            if first == "repo" { return setting(object, first, .null) }
+        }
+        return setting(object, first, child)
     }
 
     /// `object` with `key` set to `value` (removed when `value` is nil).

@@ -217,22 +217,14 @@ pub fn dependents(instance: &Instance, ledger: &Ledger, others: &[Instance]) -> 
                 ));
             }
         }
-        if let Some(crate::ingest::Profile::Enabled {
-            bucket,
-            destination_bucket,
-            ..
-        }) = &o.ingest
-        {
-            for b in [bucket, destination_bucket] {
-                if buckets.contains(&b.as_str()) {
-                    out.push(format!("instance {}'s ingest uses bucket {b}", o.id));
-                }
-            }
-        }
-        if let Some(crate::storage::scope::Profile::Enabled { bucket, .. }) = &o.storage
+        if let Some(crate::storage::scope::Profile::Enabled { bucket, .. }) =
+            crate::data_store::read(o)
             && buckets.contains(&bucket.as_str())
         {
-            out.push(format!("instance {}'s storage reads bucket {bucket}", o.id));
+            out.push(format!(
+                "instance {}'s data.read reads bucket {bucket}",
+                o.id
+            ));
         }
     }
     out

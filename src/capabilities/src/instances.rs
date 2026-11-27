@@ -10,6 +10,7 @@ pub mod data_apply;
 pub mod data_plan;
 pub mod home;
 pub mod home_site;
+pub mod layout;
 pub mod manifest;
 pub mod plan;
 pub(crate) mod publishing;

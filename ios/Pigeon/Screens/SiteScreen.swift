@@ -56,15 +56,22 @@ struct SiteSitesView: View {
         .task { await load() }
     }
 
-    /// The site publishing names, when publishing is enabled.
+    /// The site publishing names, when publishing is enabled (`site.publishing`).
     static func live(_ r: JSON) -> String? {
-        r["publishing"]["state"].string == "enabled" ? r["publishing"]["site"].string : nil
+        let p = r["site"]["publishing"]
+        return p["state"].string == "enabled" ? p["site"].string : nil
     }
 
-    /// The record's sites, the one publishing names first.
+    /// The record's sites, the one publishing names first, each gated one with its
+    /// `site.passkeys` entry shown as `auth` and `allow` (docs/plans/record-reshape.md).
     static func sites(_ r: JSON) -> [JSON] {
         let live = Self.live(r)
-        let all = r["sites"].items
+        let all = r["sites"].items.map { s -> JSON in
+            let gate = r["site"]["passkeys"][s["name"].string ?? ""]
+            guard !gate.isNull else { return s }
+            let allow = gate["allow"]
+            return RecordDiff.setting(RecordDiff.setting(s, "auth", "passkey"), "allow", allow.isNull ? [] : allow)
+        }
         return all.filter { $0["name"].string == live } + all.filter { $0["name"].string != live }
     }
 

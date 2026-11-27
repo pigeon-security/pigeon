@@ -95,7 +95,7 @@ pub fn target(record: &Value, platform_zone: &str) -> std::result::Result<Target
     Ok(Target {
         repo,
         account_id: account_id.into(),
-        protected: site["auth"] == "passkey",
+        protected: site_publish::protected(record, site),
         bucket: Bucket {
             name: bucket.to_string(),
             jurisdiction: site["jurisdiction"].as_str().map(str::to_string),

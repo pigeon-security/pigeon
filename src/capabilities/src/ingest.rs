@@ -11,33 +11,8 @@
 
 pub mod hosts;
 pub mod net;
-mod profile;
 
 pub const NAME: &str = "data-ingest";
-const SCOPED_TOOLS: &[crate::instances::tools::Registration] = &[
-    crate::instances::tools::Registration {
-        name: "ingest_plan",
-        description: Some("Plan ingestion using this instance's approved source and destination."),
-        arguments: &[
-            "dry_run",
-            "keep_archives",
-            "fingerprints",
-            "size_bytes",
-            "commit",
-        ],
-    },
-    crate::instances::tools::Registration {
-        name: "ingest_start",
-        description: Some("Start an approved ingestion plan for this instance."),
-        arguments: &["plan"],
-    },
-    crate::instances::tools::Registration {
-        name: "ingest_report",
-        description: Some("Read an ingestion report owned by this instance."),
-        arguments: &["run"],
-    },
-];
-
 const INGEST_VIEWS: &[crate::instances::tools::View] = &[crate::instances::tools::View {
     area: "ingest",
     id: "runs",
@@ -52,7 +27,11 @@ const DATA_TOOLS: &[crate::instances::tools::Registration] = &[
         description: Some("Check the approved DigitalOcean Spaces source and data destination."),
         arguments: &["prefix", "size_bytes"],
     },
-    SCOPED_TOOLS[2],
+    crate::instances::tools::Registration {
+        name: "ingest_report",
+        description: Some("Read an ingestion report owned by this instance."),
+        arguments: &["run"],
+    },
     crate::instances::tools::Registration {
         name: "ingest_status",
         description: Some("Read ingest progress and clean up a finished legacy run."),
@@ -69,16 +48,6 @@ fn data_enabled(record: &instances::record::Instance) -> bool {
     record.capabilities.contains_key(NAME) && crate::data_store::enabled(record)
 }
 
-pub fn instance_tools(
-    instance: &instances::record::Instance,
-) -> serde_json::Result<crate::instances::tools::Enabled> {
-    Ok(crate::instances::tools::Enabled::when(
-        !data_enabled(instance) && instance.ingest.as_ref().is_some_and(Profile::enabled),
-        SCOPED_TOOLS,
-        INGEST_VIEWS,
-    ))
-}
-
 pub fn data_instance_tools(
     instance: &instances::record::Instance,
 ) -> serde_json::Result<crate::instances::tools::Enabled> {
@@ -89,7 +58,13 @@ pub fn data_instance_tools(
     ))
 }
 
-pub use profile::{Bindings, Profile};
+/// The source and destination a legacy run (a declared [`Target`], not `data-ingest`) copies.
+pub struct Bindings<'a> {
+    pub source: &'a str,
+    pub bucket: &'a str,
+    pub prefix: &'a str,
+    pub destination_bucket: &'a str,
+}
 
 use pigeon_core::mcp::Tool;
 use pigeon_core::r2::{self, Bucket};
@@ -483,33 +458,17 @@ impl Ingest {
         record: &'a instances::record::Instance,
         args: &'a Value,
     ) -> std::result::Result<Bindings<'a>, String> {
-        match &record.ingest {
-            Some(profile) => profile.bind(args),
-            None => {
-                let target = self.target(&record.id).map_err(|error| error.to_string())?;
-                Ok(Bindings {
-                    source: arg(args, "source").map_err(|error| error.to_string())?,
-                    bucket: arg(args, "bucket").map_err(|error| error.to_string())?,
-                    prefix: args["prefix"].as_str().unwrap_or(""),
-                    destination_bucket: &target.bucket,
-                })
-            }
-        }
+        let target = self.target(&record.id).map_err(|error| error.to_string())?;
+        Ok(Bindings {
+            source: arg(args, "source").map_err(|error| error.to_string())?,
+            bucket: arg(args, "bucket").map_err(|error| error.to_string())?,
+            prefix: args["prefix"].as_str().unwrap_or(""),
+            destination_bucket: &target.bucket,
+        })
     }
 
     fn destination<'a>(&'a self, record: &'a instances::record::Instance) -> Result<&'a str> {
-        match &record.ingest {
-            Some(profile) => {
-                profile.validate().map_err(bad)?;
-                match profile {
-                    Profile::Enabled {
-                        destination_bucket, ..
-                    } => Ok(destination_bucket),
-                    Profile::Disabled => Err(bad("ingest is disabled for this instance")),
-                }
-            }
-            None => Ok(&self.target(&record.id)?.bucket),
-        }
+        Ok(&self.target(&record.id)?.bucket)
     }
 
     async fn checked_link(
@@ -1249,10 +1208,7 @@ impl Capability for Ingest {
 
     fn versions(&self) -> Vec<pigeon_core::versions::Component> {
         use pigeon_core::versions::{Component, Kind};
-        vec![
-            Component::began(NAME, Kind::Capability),
-            Component::began("ingest", Kind::Capability),
-        ]
+        vec![Component::began(NAME, Kind::Capability)]
     }
 
     fn tools(&self) -> Vec<Tool> {
@@ -1268,8 +1224,8 @@ impl Capability for Ingest {
                  Anything missing comes back as `missing`.",
                 json!({
                     "instance": instance,
-                    "source": { "type": "string", "description": "A storage account id (required for legacy instances; a profile fixes the source)." },
-                    "bucket": { "type": "string", "description": "The source bucket (required for legacy instances; a profile fixes the bucket)." },
+                    "source": { "type": "string", "description": "A storage account id (a declared legacy target only)." },
+                    "bucket": { "type": "string", "description": "The source bucket (a declared legacy target only)." },
                     "prefix": { "type": "string" },
                     "dry_run": { "type": "boolean", "description": "Default true: decide and record, copy nothing." },
                     "keep_archives": { "type": "boolean", "description": "Default true." },

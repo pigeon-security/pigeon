@@ -207,11 +207,45 @@ fn instances_are_data_a_person_approves() {
         .insert("data".into(), serde_json::from_value(json!({})).unwrap());
     let changes = diff(Some(&noisy), &data_on);
     assert_eq!(changes.len(), 1, "{changes:?}");
-    assert_eq!(changes[0].path, "capabilities.data");
+    assert_eq!(changes[0].path, "data");
     assert_eq!(
         (changes[0].from.clone(), changes[0].to.clone()),
         (json!(null), json!({}))
     );
+    // An entry that was `{}` and gains settings shows only what it gains, never a misleading
+    // `{} → null` beside them: here mail turned on (`data.email = {}`), then given an address.
+    let mut mail_on = data_on.clone();
+    mail_on.capabilities.insert(
+        "data-email".into(),
+        serde_json::from_value(json!({})).unwrap(),
+    );
+    let changes = diff(Some(&data_on), &mail_on);
+    assert_eq!(
+        changes,
+        [record::Change {
+            path: "data.email".into(),
+            from: json!(null),
+            to: json!({})
+        }]
+    );
+    let mut addressed = mail_on.clone();
+    addressed.capabilities.insert(
+        "data-email".into(),
+        serde_json::from_value(json!({"addresses": [{"local": "a"}]})).unwrap(),
+    );
+    let changes = diff(Some(&mail_on), &addressed);
+    assert_eq!(
+        changes,
+        [record::Change {
+            path: "data.email.addresses[0].local".into(),
+            from: json!(null),
+            to: json!("a")
+        }]
+    );
+    // And the other way: the children go, the entry stays, and only the children show.
+    let changes = diff(Some(&addressed), &mail_on);
+    assert_eq!(changes.len(), 1, "{changes:?}");
+    assert_eq!(changes[0].path, "data.email.addresses[0].local");
     assert_ne!(record::digest(&noisy), record::digest(&on));
 
     // An agent's proposal is a draft bound to the record and the version it was made from;
@@ -287,13 +321,19 @@ fn core_instances_pins_checked_and_planned() {
     assert_eq!(record::digest(&plain), pigeon_core::oauth::hash(&text));
 
     // `source` and `observability` share one opt-in type whose form record digests cover.
+    // `source` sits beside the repository it reads, at `repo.source`; the old top-level
+    // `source` still reads.
     let mut toggled = serde_json::to_value(&plain).unwrap();
-    toggled["source"] = json!({"state": "enabled"});
+    toggled["repo"] = json!({"source": {"state": "enabled"}});
     toggled["observability"] = json!({"state": "disabled"});
     let parsed: Instance = serde_json::from_value(toggled.clone()).unwrap();
     assert_eq!(parsed.source, Some(record::Toggle::Enabled));
     assert_eq!(parsed.observability, Some(record::Toggle::Disabled));
     assert_eq!(serde_json::to_value(&parsed).unwrap(), toggled);
+    let mut old = serde_json::to_value(&plain).unwrap();
+    old["source"] = json!({"state": "enabled"});
+    old["observability"] = json!({"state": "disabled"});
+    assert_eq!(serde_json::from_value::<Instance>(old).unwrap(), parsed);
 
     // The diff shows the pin by itself.
     let changes = diff(Some(&plain), &pinned);
@@ -524,16 +564,17 @@ fn console_manifest_with_nothing_enabled() {
         manifest_areas(&manifest_of(&record, Some(0))),
         ["inbox", "overview", "capabilities"]
     );
-    record["storage"] = json!({ "state": "enabled", "store": "archive-store", "bucket": "archive", "prefix": "p/" });
+    // The old `storage` and `ingest` fields: a disabled `ingest` reads as absent, and
+    // `storage` needs the data store it is now read through (`data.read`).
     record["ingest"] = json!({ "state": "disabled" });
     assert_eq!(
         manifest_areas(&manifest_of(&record, Some(0))),
-        ["inbox", "overview", "storage", "capabilities"]
+        ["inbox", "overview", "capabilities"]
     );
     record["storage"] = json!({ "state": "disabled" });
-    assert_eq!(
-        manifest_areas(&manifest_of(&record, Some(0))),
-        ["inbox", "overview", "capabilities"]
+    assert!(
+        serde_json::from_value::<pigeon_capabilities::instances::record::Instance>(record.clone())
+            .is_err()
     );
 }
 
@@ -650,7 +691,7 @@ fn console_manifest_by_capability_per_instance_kind() {
         "sites": [{ "name": "docs", "bucket": "example-site", "auth": "passkey",
             "targets": [{ "kind": "domain", "hostname": "docs.example.org" }] }],
         "publishing": { "state": "enabled", "site": "docs" },
-        "storage": { "state": "enabled", "store": "s", "bucket": "b", "prefix": "p/" },
+        "data": { "read": { "state": "enabled", "store": "s", "bucket": "b", "prefix": "p/" } },
         "observability": { "state": "enabled" }
     }));
     assert_eq!(
@@ -699,7 +740,7 @@ const LINKED_SO_FAR: &[&str] = &[
     "mcp-federation",
     "jobs",
     "data",
-    "email",
+    "data-email",
 ];
 
 /// The capability catalogue (docs/plans/capability-scoping.md): each capability's placement,
@@ -838,7 +879,7 @@ fn capability_catalogue_as_decided() {
             &[],
         ),
         (
-            "email",
+            "data-email",
             true,
             Placement::OwnWorker,
             Some("pigeon-data"),
@@ -1087,7 +1128,7 @@ fn architecture_on_a_linked_instance() {
         "id": "docs", "title": "Docs",
         "account": { "kind": "linked", "account_id": "0123456789abcdef0123456789abcdef" },
         "zones": ["example.org"], "worker": "example",
-        "storage": { "state": "enabled", "store": "s", "bucket": "b", "prefix": "p/" }
+        "data": { "read": { "state": "enabled", "store": "s", "bucket": "b", "prefix": "p/" } }
     });
     let of = |v: &Value| {
         let record: Instance = serde_json::from_value(v.clone()).unwrap();
@@ -1184,7 +1225,7 @@ fn secrets_on_a_linked_instance() {
          secrets needs: re-link docs (Instances › docs › Overview, Link) and allow it, to enable \
          secrets."
     );
-    assert_eq!(relink_for(Some(old)), ["secrets", "data", "email"]);
+    assert_eq!(relink_for(Some(old)), ["secrets", "data", "data-email"]);
     assert!(relink_for(Some(full)).is_empty() && relink_for(None).is_empty());
     // Cloudflare's refusal of an older link reads as "re-link", never as a bare 403.
     let refused = explain("docs", "secrets", "Cloudflare API: 403: Unauthorized");
@@ -1291,7 +1332,7 @@ fn own_worker_placement_on_a_linked_instance() {
     // data store and its mail, whose Worker the data plan uploads (docs/plans/linked-data.md).
     assert!(LINKED_WORKERS.is_empty());
     for e in CATALOGUE {
-        let either = matches!(e.name, "data" | "email");
+        let either = matches!(e.name, "data" | "data-email");
         assert_eq!(
             linked_placements(e),
             if either {
@@ -1744,7 +1785,7 @@ fn console_manifest_ids_are_stable_and_data_only() {
         "repo": { "kind": "github", "full_name": "example/all" },
         "sites": [{ "name": "blog", "bucket": "all-site", "auth": "passkey", "targets": [] }],
         "publishing": { "state": "enabled", "site": "blog" },
-        "storage": { "state": "enabled", "store": "s", "bucket": "b", "prefix": "p/" },
+        "data": { "read": { "state": "enabled", "store": "s", "bucket": "b", "prefix": "p/" } },
         "source": { "state": "enabled" },
         "observability": { "state": "enabled" },
         "ingest": { "state": "disabled" }
@@ -2988,9 +3029,10 @@ fn instance_retire_removes_only_what_pigeon_made() {
     assert!(stops(std::slice::from_ref(&reader)));
     reader.sites[0].bucket = "reader-site".into();
     assert!(!stops(std::slice::from_ref(&reader)));
-    reader.ingest = Some(
-        serde_json::from_value(json!({ "state": "enabled", "source": "r2:fixture",
-            "bucket": "src", "destination_bucket": "canary-site" }))
+    reader.capabilities.insert(
+        "data".into(),
+        serde_json::from_value(json!({ "read": { "state": "enabled", "store": "r2:fixture",
+            "bucket": "canary-site" } }))
         .unwrap(),
     );
     assert!(stops(std::slice::from_ref(&reader)));
@@ -5000,9 +5042,10 @@ fn redirects_answered_by_the_instance_worker() {
     let inst: Instance = serde_json::from_value(willow.clone()).unwrap();
     assert_eq!(validate(&inst, &[], &rules), Vec::<String>::new());
     // Defaults stay absent, and a record without redirects keeps its digest.
+    // The list sits at `network.redirects` (docs/plans/record-reshape.md).
     let v = serde_json::to_value(&inst).unwrap();
     assert_eq!(
-        v["redirects"],
+        v["network"]["redirects"],
         json!([{ "host": "willowgraysen.com", "to": "https://noisypigeon.com" }])
     );
     let mut bare = inst.clone();
@@ -5010,7 +5053,7 @@ fn redirects_answered_by_the_instance_worker() {
     assert!(
         serde_json::to_value(&bare)
             .unwrap()
-            .get("redirects")
+            .get("network")
             .is_none()
     );
     let mut without = willow.clone();
@@ -5926,7 +5969,7 @@ fn data_and_email_on_linked_instances() {
         Some((Placement::OwnWorker, Some("willowgraysen-data".into())))
     );
     assert_eq!(
-        placement(&willow, "email"),
+        placement(&willow, "data-email"),
         Some((Placement::OwnWorker, Some("willowgraysen-data".into())))
     );
     let parts = data_parts(&willow, &seen_data, &Ledger::default(), None);
@@ -6088,7 +6131,7 @@ fn data_and_email_on_linked_instances() {
             .any(|p| p.contains("Email needs a domain"))
     );
     let mut alone = sandbox.clone();
-    alone.capabilities.remove("email");
+    alone.capabilities.remove("data-email");
     assert!(problems(&alone).is_empty(), "{:?}", problems(&alone));
     let DataParts {
         store,
@@ -6112,7 +6155,7 @@ fn data_and_email_on_linked_instances() {
                  workers-routes.write workers-r2.write offline_access";
     let why = capability_refusal("noisypigeon", "data", Some(today)).unwrap();
     assert!(why.contains("D1 Write (d1.write)") && why.contains("re-link noisypigeon"));
-    let why = capability_refusal("willowgraysen", "email", Some(today)).unwrap();
+    let why = capability_refusal("willowgraysen", "data-email", Some(today)).unwrap();
     for scope in [
         "email-routing-rule.write",
         "email-routing-address.write",
@@ -6128,7 +6171,7 @@ fn data_and_email_on_linked_instances() {
         None
     );
     assert_eq!(
-        capability_refusal("noisypigeon", "email", Some(&granted)),
+        capability_refusal("noisypigeon", "data-email", Some(&granted)),
         None
     );
 

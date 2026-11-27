@@ -60,7 +60,7 @@
           "id": "runs",
           "title": "Runs",
           "order": 10,
-          "capability": "ingest",
+          "capability": "data-ingest",
           "upgrade": null
         }
       ]

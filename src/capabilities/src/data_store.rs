@@ -1,6 +1,6 @@
 //! The `data` capability: an instance's unified data store, lite tier (docs/plans/email.md,
 //! "Tiers"; docs/plans/data-worker.md). The record enables it with
-//! `[capabilities.data] tier = "lite"`; an instance plan makes its bucket, D1 and data Worker
+//! `data = {tier = "lite"}`; an instance plan makes its bucket, D1 and data Worker
 //! (`instances::data_plan`). Core reaches the data Worker only through signed contract ops at
 //! `/data/call`, with the instance's `DATA_KEY`, after the checks of data-worker.md decision 3.
 //! The home instance uses the same path, so there is one code path.
@@ -34,6 +34,12 @@ pub struct Backup {
 /// The record's `data` settings, when it enables the store.
 pub fn settings(record: &Instance) -> Option<&CapabilitySettings> {
     record.capabilities.get(NAME)
+}
+
+/// The approved external storage location the data store's read tools also read
+/// (`data.read`), when the record enables the store and names one.
+pub fn read(record: &Instance) -> Option<&crate::storage::scope::Profile> {
+    settings(record).and_then(|s| s.read.as_ref())
 }
 
 /// Whether the record enables the data store.
@@ -102,7 +108,7 @@ pub fn placement_problems(record: &Instance) -> Vec<String> {
     if record.account != AccountRef::Home && s.backup.is_some() {
         out.push(
             "The data store's B2 backup is not built for a linked instance yet: leave \
-             [capabilities.data.backup] out."
+             data.backup out."
                 .into(),
         );
     }
@@ -160,6 +166,11 @@ pub fn field_problems(name: &str, s: &CapabilitySettings) -> Vec<String> {
                 "The capability \"{name}\" does not accept a backup."
             ));
         }
+        if s.read.is_some() {
+            out.push(format!(
+                "The capability \"{name}\" does not accept read: it is the data store's (data.read)."
+            ));
+        }
         return out;
     }
     if let Some(t) = &s.tier
@@ -190,8 +201,8 @@ pub fn field_problems(name: &str, s: &CapabilitySettings) -> Vec<String> {
 }
 
 /// The setup steps an instance without a ready store is told.
-pub const SETUP: &str = "To set it up: add `[capabilities.data] tier = \"lite\"` (and \
-`[capabilities.email]` for mail) to the instance's record with `instance_propose`, approve it \
+pub const SETUP: &str = "To set it up: add `\"data\": {\"tier\": \"lite\"}` (and \
+`\"email\": {}` inside it for mail) to the instance's record with `instance_propose`, approve it \
 with your passkey, then `instance_plan` and `instance_apply` (docs/plans/email.md).";
 
 fn bad(why: impl Into<String>) -> Error {

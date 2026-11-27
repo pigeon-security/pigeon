@@ -114,11 +114,6 @@ pub const CAPABILITIES: &[Contributor] = &[
         register: crate::observability::instance::instance_tools,
     },
     Contributor {
-        name: "ingest",
-        component: "ingest",
-        register: crate::ingest::instance_tools,
-    },
-    Contributor {
         name: crate::ingest::NAME,
         component: crate::ingest::NAME,
         register: crate::ingest::data_instance_tools,

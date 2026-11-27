@@ -469,7 +469,7 @@ pub fn data_parts(
     match &settings.backup {
         None => steps.push(Step::Pending {
             what: "B2 backup".into(),
-            why: "the record names no backup bucket ([capabilities.data.backup]); nothing is \
+            why: "the record names no backup bucket (data.backup); nothing is \
                   copied offsite until it does"
                 .into(),
         }),

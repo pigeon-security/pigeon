@@ -72,15 +72,6 @@
       "plumbing": false
     },
     {
-      "name": "ingest",
-      "kind": "capability",
-      "version": "1.0.0",
-      "serves": [],
-      "worker": "pigeon-core",
-      "problems": [],
-      "plumbing": false
-    },
-    {
       "name": "approvals",
       "kind": "capability",
       "version": "1.0.0",
@@ -271,7 +262,8 @@
       "availability": "any",
       "requires": [],
       "linked": false,
-      "always": false
+      "always": false,
+      "field": null
     },
     {
       "name": "observability",
@@ -284,7 +276,8 @@
       "availability": "any",
       "requires": [],
       "linked": false,
-      "always": false
+      "always": false,
+      "field": null
     },
     {
       "name": "secrets",
@@ -297,7 +290,8 @@
       "availability": "any",
       "requires": [],
       "linked": true,
-      "always": false
+      "always": false,
+      "field": null
     },
     {
       "name": "proxy",
@@ -312,7 +306,8 @@
         "secrets"
       ],
       "linked": false,
-      "always": false
+      "always": false,
+      "field": null
     },
     {
       "name": "cloud",
@@ -327,7 +322,8 @@
       "requires": [],
       "linked": true,
       "always": false,
-      "opt_in": true
+      "opt_in": true,
+      "field": "cloud.gateway"
     },
     {
       "name": "digitalocean",
@@ -343,7 +339,8 @@
       ],
       "linked": true,
       "always": false,
-      "opt_in": true
+      "opt_in": true,
+      "field": "cloud.digitalocean"
     },
     {
       "name": "mcp-federation",
@@ -357,7 +354,8 @@
       "requires": [],
       "linked": true,
       "always": false,
-      "opt_in": true
+      "opt_in": true,
+      "field": "instance.mcp-federation"
     },
     {
       "name": "jobs",
@@ -371,7 +369,8 @@
       "requires": [],
       "linked": true,
       "always": false,
-      "opt_in": true
+      "opt_in": true,
+      "field": "jobs"
     },
     {
       "name": "models",
@@ -385,7 +384,8 @@
       "availability": "any",
       "requires": [],
       "linked": false,
-      "always": false
+      "always": false,
+      "field": null
     },
     {
       "name": "multi-instance",
@@ -398,7 +398,8 @@
       "availability": "home_only",
       "requires": [],
       "linked": false,
-      "always": false
+      "always": false,
+      "field": null
     },
     {
       "name": "users",
@@ -411,7 +412,8 @@
       "availability": "home_only",
       "requires": [],
       "linked": false,
-      "always": false
+      "always": false,
+      "field": null
     },
     {
       "name": "architecture",
@@ -424,7 +426,8 @@
       "availability": "any",
       "requires": [],
       "linked": true,
-      "always": false
+      "always": false,
+      "field": null
     },
     {
       "name": "instances",
@@ -437,7 +440,8 @@
       "availability": "any",
       "requires": [],
       "linked": true,
-      "always": true
+      "always": true,
+      "field": null
     },
     {
       "name": "data",
@@ -452,7 +456,8 @@
       "requires": [],
       "linked": true,
       "always": false,
-      "opt_in": true
+      "opt_in": true,
+      "field": "data"
     },
     {
       "name": "data-ingest",
@@ -468,10 +473,11 @@
       ],
       "linked": false,
       "always": false,
-      "opt_in": true
+      "opt_in": true,
+      "field": "data.ingest"
     },
     {
-      "name": "email",
+      "name": "data-email",
       "placements": [
         "inline",
         "own_worker"
@@ -485,7 +491,8 @@
       ],
       "linked": true,
       "always": false,
-      "opt_in": true
+      "opt_in": true,
+      "field": "data.email"
     },
     {
       "name": "redirects",
@@ -498,7 +505,8 @@
       "availability": "any",
       "requires": [],
       "linked": true,
-      "always": false
+      "always": false,
+      "field": null
     }
   ]
 }

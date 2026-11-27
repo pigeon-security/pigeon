@@ -388,7 +388,7 @@ fn console_app_bearer_parity() {
     // And the same instance binding: a bound read cannot widen past its record.
     let record: pigeon_capabilities::instances::record::Instance = serde_json::from_value(json!({
         "id": "blog", "title": "Blog", "account": { "kind": "home" },
-        "storage": { "state": "enabled", "store": "scaleway:archive", "bucket": "blog-assets" },
+        "data": { "read": { "state": "enabled", "store": "scaleway:archive", "bucket": "blog-assets" } },
     }))
     .unwrap();
     let bind = |tool: &str, args: Value| {
@@ -2098,7 +2098,7 @@ fn console_ops_allow_the_reads_the_console_needs_and_nothing_else() {
     // A bound storage read cannot also name a raw account or bucket.
     let record: pigeon_capabilities::instances::record::Instance = serde_json::from_value(json!({
         "id": "blog", "title": "Blog", "account": { "kind": "home" },
-        "storage": { "state": "enabled", "store": "scaleway:archive", "bucket": "blog-assets" },
+        "data": { "read": { "state": "enabled", "store": "scaleway:archive", "bucket": "blog-assets" } },
     }))
     .unwrap();
     let bind = |tool: &str, args: Value| {
@@ -2313,9 +2313,7 @@ fn console_every_view() -> std::collections::BTreeMap<String, Vec<String>> {
         "source": { "state": "enabled" },
         "ci": { "state": "enabled", "jobs": ["test"] },
         "observability": { "state": "enabled" },
-        "ingest": { "state": "enabled", "source": "r2:all", "bucket": "src",
-            "destination_bucket": "all-site" },
-        "capabilities": { "jobs": {}, "data": { "tier": "lite" }, "email": { "addresses": [{ "local": "a" }] } }
+        "capabilities": { "jobs": {}, "data": { "tier": "lite" }, "data-ingest": {}, "email": { "addresses": [{ "local": "a" }] } }
     }))
     .unwrap();
     let platform = hosted_views();
@@ -4243,7 +4241,7 @@ mod email {
         // An address is a record change; a forward change too, and scope only through it.
         let added = with_address(&r, "GitHub", false).unwrap();
         assert!(
-            added.capabilities["email"]
+            added.capabilities["data-email"]
                 .addresses
                 .iter()
                 .any(|a| a.local == "github")
@@ -4251,7 +4249,7 @@ mod email {
         assert!(with_address(&r, "apple", false).is_err());
         assert!(with_address(&r, "catch-all", false).is_err());
         let removed = with_address(&r, "apple", true).unwrap();
-        assert_eq!(removed.capabilities["email"].addresses.len(), 2);
+        assert_eq!(removed.capabilities["data-email"].addresses.len(), 2);
         let fwd = with_forward(&r, Some("apple"), Some("me@example.com"), None).unwrap();
         assert_eq!(
             email::config(&fwd).unwrap().forward_for("apple").as_deref(),
@@ -4274,14 +4272,17 @@ mod email {
 
         // Roles: the reads are viewer's with exactly their arguments; the writes operator's.
         let i = json!({ "instance": "pigeon.dev" });
-        assert_eq!(tool_need("email", "email_status", &i), Some(Role::Viewer));
         assert_eq!(
-            tool_need("email", "email_mailboxes", &i),
+            tool_need("data-email", "email_status", &i),
+            Some(Role::Viewer)
+        );
+        assert_eq!(
+            tool_need("data-email", "email_mailboxes", &i),
             Some(Role::Viewer)
         );
         assert_eq!(
             tool_need(
-                "email",
+                "data-email",
                 "email_list",
                 &json!({ "instance": "pigeon.dev", "mailbox": "apple", "cursor": "x" })
             ),
@@ -4289,7 +4290,7 @@ mod email {
         );
         assert_eq!(
             tool_need(
-                "email",
+                "data-email",
                 "email_get",
                 &json!({ "instance": "pigeon.dev", "id": "a" })
             ),
@@ -4297,7 +4298,7 @@ mod email {
         );
         assert_eq!(
             tool_need(
-                "email",
+                "data-email",
                 "email_list",
                 &json!({ "instance": "pigeon.dev", "account": "x" })
             ),
@@ -4306,7 +4307,7 @@ mod email {
         );
         assert_eq!(
             tool_need(
-                "email",
+                "data-email",
                 "email_address_set",
                 &json!({ "instance": "pigeon.dev", "local": "x" })
             ),
@@ -4314,7 +4315,7 @@ mod email {
         );
         assert_eq!(
             tool_need(
-                "email",
+                "data-email",
                 "email_forward_set",
                 &json!({ "instance": "pigeon.dev", "scope": "all" })
             ),

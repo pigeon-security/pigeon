@@ -1,89 +1,21 @@
 [
   {
-    "id": "home",
-    "title": "Pigeon Platform",
     "account": {
       "kind": "home"
     },
-    "zones": [
-      "platform.example.dev"
-    ],
-    "repo": {
-      "kind": "artifacts",
-      "namespace": "example-org",
-      "repo": "pigeon"
-    },
-    "sites": [
-      {
-        "name": "apex",
-        "bucket": "home-site",
-        "build": "workloads/example.dev/apex",
-        "targets": [
-          {
-            "kind": "subdomain",
-            "label": "preview"
-          }
-        ],
-        "auth": "passkey",
-        "allow": [
-          "site"
-        ]
-      },
-      {
-        "name": "handbook",
-        "bucket": "home-site",
-        "targets": [
-          {
-            "kind": "zone",
-            "hostname": "handbook.platform.example.dev",
-            "route": "handbook.platform.example.dev/*",
-            "enabled": false
-          }
-        ]
-      }
-    ],
-    "worker": "home",
-    "pins": {
-      "sites": "^2"
-    },
-    "publishing": {
-      "state": "enabled",
-      "site": "apex"
-    },
-    "storage": {
-      "state": "enabled",
-      "store": "scaleway:archive",
-      "bucket": "platform-assets",
-      "prefix": "public/"
-    },
-    "source": {
-      "state": "enabled"
-    },
     "ci": {
-      "state": "enabled",
       "jobs": [
         "test",
         "land"
-      ]
-    },
-    "observability": {
+      ],
       "state": "enabled"
     },
-    "ingest": {
-      "state": "enabled",
-      "source": "scaleway:field",
-      "bucket": "platform-raw",
-      "destination_bucket": "home-site"
-    },
-    "capabilities": {
-      "data": {
-        "tier": "lite"
-      },
+    "data": {
       "email": {
         "addresses": [
           {
-            "local": "cloudflare",
-            "forward": "person@example.com"
+            "forward": "person@example.com",
+            "local": "cloudflare"
           },
           {
             "local": "buildkite"
@@ -92,106 +24,179 @@
             "local": "apple"
           }
         ]
+      },
+      "ingest": {},
+      "read": {
+        "bucket": "platform-assets",
+        "prefix": "public/",
+        "state": "enabled",
+        "store": "scaleway:archive"
+      },
+      "tier": "lite"
+    },
+    "id": "home",
+    "observability": {
+      "state": "enabled"
+    },
+    "pins": {
+      "sites": "^2"
+    },
+    "repo": {
+      "kind": "artifacts",
+      "namespace": "example-org",
+      "repo": "pigeon",
+      "source": {
+        "state": "enabled"
       }
     },
-    "version": 12
-  },
-  {
-    "id": "docs",
-    "title": "Docs site",
-    "account": {
-      "kind": "linked",
-      "account_id": "a1b2c3d4e5f60718293a4b5c6d7e77f0"
-    },
-    "zones": [
-      "docs.example.org"
-    ],
-    "repo": {
-      "kind": "github",
-      "full_name": "example-org/docs",
-      "installation": 4242
+    "site": {
+      "passkeys": {
+        "apex": {
+          "allow": [
+            "site"
+          ]
+        }
+      },
+      "publishing": {
+        "site": "apex",
+        "state": "enabled"
+      }
     },
     "sites": [
       {
-        "name": "docs",
-        "bucket": "docs-site",
-        "jurisdiction": "eu",
-        "build": "site",
+        "bucket": "home-site",
+        "build": "workloads/example.dev/apex",
+        "jurisdiction": null,
+        "name": "apex",
         "targets": [
           {
-            "kind": "domain",
-            "hostname": "docs.example.org"
+            "kind": "subdomain",
+            "label": "preview"
           }
         ]
       },
       {
-        "name": "staging",
+        "bucket": "home-site",
+        "build": null,
+        "jurisdiction": null,
+        "name": "handbook",
+        "targets": [
+          {
+            "enabled": false,
+            "hostname": "handbook.platform.example.dev",
+            "kind": "zone",
+            "route": "handbook.platform.example.dev/*"
+          }
+        ]
+      }
+    ],
+    "title": "Pigeon Platform",
+    "version": 12,
+    "worker": "home",
+    "zones": [
+      "platform.example.dev"
+    ]
+  },
+  {
+    "account": {
+      "account_id": "a1b2c3d4e5f60718293a4b5c6d7e77f0",
+      "kind": "linked"
+    },
+    "ci": {
+      "jobs": [
+        "build"
+      ],
+      "state": "enabled"
+    },
+    "data": {
+      "read": {
+        "bucket": "docs-assets",
+        "state": "enabled",
+        "store": "scaleway:archive"
+      }
+    },
+    "id": "docs",
+    "observability": {
+      "state": "enabled"
+    },
+    "pins": {
+      "site_passkeys": "~1.3",
+      "sites": "^2"
+    },
+    "repo": {
+      "full_name": "example-org/docs",
+      "installation": 4242,
+      "kind": "github"
+    },
+    "site": {
+      "passkeys": {
+        "staging": {
+          "allow": [
+            "site"
+          ]
+        }
+      },
+      "publishing": {
+        "site": "docs",
+        "state": "enabled"
+      }
+    },
+    "sites": [
+      {
         "bucket": "docs-site",
+        "build": "site",
+        "jurisdiction": "eu",
+        "name": "docs",
+        "targets": [
+          {
+            "hostname": "docs.example.org",
+            "kind": "domain"
+          }
+        ]
+      },
+      {
+        "bucket": "docs-site",
+        "build": null,
+        "jurisdiction": null,
+        "name": "staging",
         "targets": [
           {
             "kind": "subdomain",
             "label": "docs-staging"
           }
-        ],
-        "auth": "passkey",
-        "allow": [
-          "site"
         ]
       }
     ],
+    "title": "Docs site",
+    "version": 4,
     "worker": "docs-site",
-    "pins": {
-      "sites": "^2",
-      "site_passkeys": "~1.3"
-    },
-    "publishing": {
-      "state": "enabled",
-      "site": "docs"
-    },
-    "storage": {
-      "state": "enabled",
-      "store": "scaleway:archive",
-      "bucket": "docs-assets"
-    },
-    "ci": {
-      "state": "enabled",
-      "jobs": [
-        "build"
-      ]
-    },
-    "observability": {
-      "state": "enabled"
-    },
-    "version": 4
+    "zones": [
+      "docs.example.org"
+    ]
   },
   {
-    "id": "notes",
-    "title": "Field notes",
     "account": {
-      "kind": "linked",
-      "account_id": "a91f00000000000000000000000d3d20"
+      "account_id": "a91f00000000000000000000000d3d20",
+      "kind": "linked"
     },
-    "zones": [
-      "notes.example.net"
-    ],
+    "id": "notes",
+    "jobs": {
+      "audit_bucket": "notes-audit"
+    },
     "repo": {
+      "full_name": "notes/site",
+      "installation": null,
       "kind": "github",
-      "full_name": "notes/site"
+      "source": {
+        "state": "enabled"
+      }
     },
     "sites": [],
-    "storage": {
-      "state": "disabled"
-    },
-    "source": {
-      "state": "enabled"
-    },
-    "ingest": {
-      "state": "enabled",
-      "source": "scaleway:field",
-      "bucket": "notes-raw",
-      "destination_bucket": "notes-site"
-    },
-    "capabilities": { "jobs": { "audit_bucket": "notes-audit" } },
-    "version": 2
+    "title": "Field notes",
+    "version": 2,
+    "worker": null,
+    "zones": [
+      "notes.example.net"
+    ]
   }
 ]

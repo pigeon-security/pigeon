@@ -233,7 +233,7 @@ struct CapabilitiesScreen: View {
         } else {
             status = ("Current", Tone.ok)
         }
-        let settings = record["capabilities"][spec.cap]
+        let settings = RecordDiff.at(record, spec.field)
         let auditMissing = spec.linkedJobs && (settings["audit_bucket"].string ?? "").isEmpty
         if auditMissing { status = ("Audit setup required", Tone.warn) }
         let pill = status

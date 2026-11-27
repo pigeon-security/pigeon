@@ -4,8 +4,9 @@
 //! comes from a capability enabled on the selected instance: [`hosted_enabled`] says which of
 //! the hosted capabilities are, and `console_manifest` shows only their views. An instance
 //! record lists the catalogue capabilities it enables in `capabilities`, checked by
-//! [`problems`]. The capabilities a record enables by its own profile fields (publishing,
-//! storage, source, CI, Metrics, ingest) are `instances::tools::CAPABILITIES`. Pure: no I/O.
+//! [`problems`]; each sits in the record at its entry's `field` (docs/plans/record-reshape.md).
+//! The capabilities a record enables by its own profile fields (publishing, source, CI,
+//! Metrics) are `instances::tools::CAPABILITIES`. Pure: no I/O.
 
 use serde::{Deserialize, Serialize};
 
@@ -76,6 +77,10 @@ pub struct Entry {
     /// Whether even home must list this capability in its approved record.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub opt_in: bool,
+    /// Where its settings sit in an instance record (docs/plans/record-reshape.md), such as
+    /// `data.email`; `None`: at `capabilities.<name>`. `instances::layout` reads and writes the
+    /// record by it, and the console finds a capability's settings by it.
+    pub field: Option<&'static str>,
 }
 
 impl Entry {
@@ -101,6 +106,7 @@ const BASE: Entry = Entry {
     linked: false,
     always: false,
     opt_in: false,
+    field: None,
 };
 
 /// One that runs inline or in its own Worker, and on home runs in `worker`.
@@ -156,12 +162,14 @@ pub const CATALOGUE: &[Entry] = &[
         linked: true,
         opt_in: true,
         name: crate::cloud_scope::NAME,
+        field: Some("cloud.gateway"),
         placements: &[Placement::Inline, Placement::OwnWorker],
         ..BASE
     },
     // DigitalOcean connection management is served inline on core.
     Entry {
         name: crate::digitalocean::NAME,
+        field: Some("cloud.digitalocean"),
         linked: true,
         opt_in: true,
         requires: &[crate::cloud_scope::NAME],
@@ -169,6 +177,7 @@ pub const CATALOGUE: &[Entry] = &[
     },
     Entry {
         name: crate::federation::NAME,
+        field: Some("instance.mcp-federation"),
         linked: true,
         opt_in: true,
         ..BASE
@@ -176,6 +185,7 @@ pub const CATALOGUE: &[Entry] = &[
     // Jobs › Runs reads instance-owned job history in core.
     Entry {
         name: JOBS,
+        field: Some("jobs"),
         linked: true,
         opt_in: true,
         ..BASE
@@ -208,6 +218,7 @@ pub const CATALOGUE: &[Entry] = &[
     // `own_worker` (the default) or `inline` in its own Worker; it needs no zone.
     Entry {
         name: crate::data_store::NAME,
+        field: Some("data"),
         placements: EITHER,
         home: Placement::OwnWorker,
         home_worker: Some("pigeon-data"),
@@ -218,15 +229,18 @@ pub const CATALOGUE: &[Entry] = &[
     // Data ingest is opt-in and writes to the instance's data store.
     Entry {
         name: crate::ingest::NAME,
+        field: Some("data.ingest"),
         requires: &[crate::data_store::NAME],
         opt_in: true,
         ..BASE
     },
+    // `data-email` (record field `data.email`; `email` before docs/plans/record-reshape.md).
     // Email › Mailboxes (docs/plans/email.md): mail received through the zone's catch-all into
     // the data store, so it needs `data` and a zone, and runs in the Worker that runs the store.
     // Opt-in even on home.
     Entry {
         name: crate::email::NAME,
+        field: Some("data.email"),
         placements: EITHER,
         home: Placement::OwnWorker,
         home_worker: Some("pigeon-data"),
@@ -235,8 +249,8 @@ pub const CATALOGUE: &[Entry] = &[
         opt_in: true,
         ..BASE
     },
-    // No views of its own: the record's `redirects`, answered by the instance's own site
-    // Worker (docs/plans/redirects.md). Set by that field, never listed in `capabilities`.
+    // No views of its own: the record's `network.redirects`, answered by the instance's own
+    // site Worker (docs/plans/redirects.md). Set by that field, never listed in `capabilities`.
     Entry {
         name: "redirects",
         linked: true,

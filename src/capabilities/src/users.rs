@@ -188,7 +188,9 @@ pub struct Directory {
 impl DurableObject for Directory {
     fn new(state: State, _env: Env) -> Self {
         let db = Db::open(&state, &MIGRATIONS).expect("the Directory's migrations apply");
-        Self { db }
+        let directory = Self { db };
+        directory.reshape_records();
+        directory
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
@@ -196,7 +198,47 @@ impl DurableObject for Directory {
     }
 }
 
+/// The Directory's settings, as the record reshape's migration reads and keeps them.
+impl crate::instances::layout::Settings for Directory {
+    fn get(&self, key: &str) -> Option<(String, i64)> {
+        #[derive(Deserialize)]
+        struct Row {
+            value: String,
+            expires_at: i64,
+        }
+        let row: Option<Row> = self
+            .db
+            .row(
+                "SELECT value, expires_at FROM settings WHERE key = ? AND expires_at > ?",
+                vec![key.into(), now().into()],
+            )
+            .ok()
+            .flatten();
+        row.map(|r| (r.value, r.expires_at))
+    }
+
+    fn keep(&self, key: &str, value: &str, until: i64) {
+        if let Err(e) = self.setting_keep(key, value, until) {
+            worker::console_error!("record reshape: could not keep {key}: {e}");
+        }
+    }
+}
+
 impl Directory {
+    /// The record reshape's migration (docs/plans/record-reshape.md), on every start: rewrites
+    /// each stored instance record not yet in the new layout, with identical settings, and logs
+    /// each one with its digest before and after. Once every record is rewritten it changes
+    /// nothing.
+    fn reshape_records(&self) {
+        let run = crate::instances::layout::migrate(self, now());
+        for m in &run.done {
+            worker::console_log!("record reshape: {} {} -> {}", m.instance, m.before, m.after);
+        }
+        for (id, why) in &run.failed {
+            worker::console_error!("record reshape: {id} left as it is: {why}");
+        }
+    }
+
     fn user(&self, id: &str) -> Result<Option<User>> {
         self.db
             .row("SELECT * FROM users WHERE id = ?", vec![id.into()])

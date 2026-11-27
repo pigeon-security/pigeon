@@ -928,9 +928,18 @@ fn sites_auth_gates_every_path() {
     );
     notes.sites[0].allow = vec!["usr_fake1".into()];
     assert_eq!(check(&notes), Vec::<String>::new());
+    // The sign-in sits at `site.passkeys.<site>` (docs/plans/record-reshape.md).
     let text = serde_json::to_value(&notes).unwrap();
-    assert_eq!(text["sites"][0]["auth"], "passkey");
-    assert_eq!(text["sites"][0]["allow"], json!(["usr_fake1"]));
+    let name = notes.sites[0].name.clone();
+    assert!(text["sites"][0]["auth"].is_null());
+    assert_eq!(
+        text["site"]["passkeys"][&name],
+        json!({ "allow": ["usr_fake1"] })
+    );
+    assert_eq!(
+        serde_json::from_value::<pigeon_capabilities::instances::record::Instance>(text).unwrap(),
+        notes
+    );
     notes.sites[0].auth = Some("password".into());
     assert!(
         check(&notes)

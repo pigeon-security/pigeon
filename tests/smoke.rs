@@ -2459,7 +2459,7 @@ fn instance_tool_profiles_share_discovery_and_binding() {
     .unwrap();
     let archive: Instance = serde_json::from_value(json!({
         "id": "archive", "title": "Archive", "account": {"kind":"home"},
-        "storage": {"state":"enabled", "store":"archive-store", "bucket":"archive", "prefix":"published/"}
+        "data": {"read": {"state":"enabled", "store":"archive-store", "bucket":"archive", "prefix":"published/"}}
     })).unwrap();
     let catalog = || {
         ["site_deploy", "storage_get_object", "storage_list_objects", "land", "call"]
@@ -2926,7 +2926,7 @@ fn instance_worker_metrics_answer_per_worker_rows_and_totals() {
 #[test]
 fn instances_bind_background_publishing_and_ingest_to_approved_targets() {
     use pigeon_capabilities::github::{allows_queued_publish, instance_for, publishing_binding};
-    use pigeon_capabilities::ingest::{Profile, check_job_binding, hosts};
+    use pigeon_capabilities::ingest::{check_job_binding, hosts};
     use pigeon_capabilities::instances::record::{AccountRef, Instance};
     use pigeon_capabilities::storage::Account;
 
@@ -2935,9 +2935,7 @@ fn instances_bind_background_publishing_and_ingest_to_approved_targets() {
         "account": {"kind":"linked", "account_id":"fictional-account"},
         "repo": {"kind":"github", "full_name":"willow/blog", "installation":12},
         "sites":[{"name":"primary","bucket":"blog-site"}],
-        "publishing":{"state":"enabled","site":"primary"},
-        "ingest":{"state":"enabled","source":"scaleway:archive","bucket":"archive",
-                  "prefix":"approved/","destination_bucket":"blog-data"}
+        "publishing":{"state":"enabled","site":"primary"}
     }))
     .unwrap();
     let queued = json!({
@@ -2964,18 +2962,20 @@ fn instances_bind_background_publishing_and_ingest_to_approved_targets() {
     assert!(publishing_binding(&changed).is_none());
     assert!(!allows_queued_publish(&changed, &queued));
 
-    let profile = record.ingest.as_ref().unwrap();
-    let args = json!({});
-    let binding = profile.bind(&args).unwrap();
-    assert_eq!(binding.destination_bucket, "blog-data");
-    for args in [
-        json!({"source":"scaleway:other"}),
-        json!({"bucket":"private"}),
-        json!({"prefix":""}),
-    ] {
-        assert!(profile.bind(&args).is_err());
-    }
-    assert!(Profile::Disabled.bind(&args).is_err());
+    // The old `ingest` profile is gone (docs/plans/record-reshape.md): a record naming one
+    // enabled is refused, a disabled one reads without it.
+    let mut old = serde_json::to_value(&record).unwrap();
+    old["ingest"] = json!({"state":"enabled","source":"scaleway:archive","bucket":"archive",
+                           "destination_bucket":"blog-data"});
+    assert!(serde_json::from_value::<Instance>(old.clone()).is_err());
+    old["ingest"] = json!({"state":"disabled"});
+    assert_eq!(serde_json::from_value::<Instance>(old).unwrap(), record);
+    let binding = pigeon_capabilities::ingest::Bindings {
+        source: "scaleway:archive",
+        bucket: "archive",
+        prefix: "approved/",
+        destination_bucket: "blog-data",
+    };
     let mut source = Account::scaleway("archive", "fr-par");
     let mut job = hosts::job_spec(&hosts::JobInputs {
         instance: &record.id,
@@ -3502,4 +3502,288 @@ mod icons {
             "area `capabilities` must map to puzzlepiece.extension in AreaSymbol in {AREAS_SWIFT}"
         );
     }
+}
+
+/// The record reshape (docs/plans/record-reshape.md): each live record's shape before it reads
+/// as the same model as its new layout, writes the new layout, and plans the same (so an
+/// instance whose settings did not change still plans "already in place"); the Directory's
+/// migration rewrites each stored record once, logging its digests, and then changes nothing;
+/// and a setting given twice, an unknown namespace field or a passkey entry for no site is
+/// refused.
+#[test]
+fn record_reshape_migrates_with_identical_settings() {
+    use pigeon_capabilities::instances::data_plan::{SeenData, data_parts};
+    use pigeon_capabilities::instances::layout::{self, MIGRATION_KEY, Settings};
+    use pigeon_capabilities::instances::plan::{Ledger, digest};
+    use pigeon_capabilities::instances::record::{self, Instance};
+    use std::cell::RefCell;
+    use std::collections::BTreeMap;
+
+    let person = "fixture-person";
+    let grant = |peer: &str| {
+        json!([{ "all_apps": true, "peer": peer, "person": person,
+                 "tools": ["digitalocean_droplet_jobs"] }])
+    };
+    // The four live records as they were stored before the reshape (fixture ids and values).
+    let before = [
+        json!({
+            "id": "pigeon.dev", "title": "pigeon", "account": { "kind": "home" },
+            "zones": ["pigeon.dev"],
+            "repo": { "kind": "artifacts", "namespace": "pigeon-security", "repo": "pigeon" },
+            "sites": [{ "name": "landing", "bucket": "pigeon-platform-site", "build": "site",
+                "jurisdiction": null, "targets": [{ "kind": "domain", "hostname": "pigeon.dev" }],
+                "template": "landing@1" }],
+            "worker": "pigeon-platform",
+            "publishing": { "state": "enabled", "site": "landing" },
+            "source": { "state": "enabled" },
+            "ci": { "state": "enabled", "jobs": ["test"] },
+            "observability": { "state": "enabled" },
+            "platform": { "host": "platform.pigeon.dev" },
+            "capabilities": {
+                "data": {},
+                "email": { "addresses": [{ "local": "cloudflare" }, { "local": "apple" }],
+                           "forward": { "scope": "all", "to": "person@example.com" } },
+                "mcp-federation": { "federation": grant("noisypigeon") }
+            },
+            "version": 14
+        }),
+        json!({
+            "id": "noisypigeon", "title": "noisypigeon",
+            "account": { "kind": "linked", "account_id": "a".repeat(32) },
+            "zones": ["noisypigeon.com"],
+            "repo": { "kind": "github", "full_name": "noisypigeon/noisypigeon", "installation": 7 },
+            "sites": [{ "name": "blog", "bucket": "noisypigeon-site", "build": ".pigeon/site.toml",
+                "jurisdiction": "eu", "targets": [{ "kind": "preview" },
+                { "kind": "domain", "hostname": "noisypigeon.com" },
+                { "kind": "subdomain", "label": "noisypigeon" }] }],
+            "worker": "noisypigeon",
+            "publishing": { "state": "enabled", "site": "blog" },
+            "source": { "state": "enabled" },
+            "capabilities": {
+                "data": { "placement": "inline" },
+                "email": { "forward": { "scope": "all", "to": "person@example.com" } },
+                "mcp-federation": { "federation": grant("pigeon.dev") }
+            },
+            "version": 10
+        }),
+        json!({
+            "id": "sandbox", "title": "sandbox",
+            "account": { "kind": "linked", "account_id": "b".repeat(32) },
+            "zones": [],
+            "repo": { "kind": "github", "full_name": "noisypigeon/sandbox", "installation": 7 },
+            "sites": [{ "name": "canary", "bucket": "sandbox-site", "build": null,
+                "jurisdiction": null, "auth": "passkey", "allow": ["site"],
+                "targets": [{ "kind": "subdomain", "label": "sandbox" }] }],
+            "worker": "sandbox",
+            "publishing": { "state": "enabled", "site": "canary" },
+            "observability": { "state": "enabled" },
+            "capabilities": { "mcp-federation": { "federation": grant("pigeon.dev") } },
+            "version": 3
+        }),
+        json!({
+            "id": "willowgraysen", "title": "willowgraysen",
+            "account": { "kind": "linked", "account_id": "c".repeat(32) },
+            "zones": ["willowgraysen.com"],
+            "repo": { "kind": "github", "full_name": "noisypigeon/willowgraysen", "installation": 7 },
+            "sites": [{ "name": "private", "bucket": "willowgraysen-site", "build": null,
+                "jurisdiction": null, "auth": "passkey", "allow": ["site"],
+                "targets": [{ "kind": "subdomain", "label": "willowgraysen" }] }],
+            "worker": "willowgraysen",
+            "publishing": { "state": "enabled", "site": "private" },
+            "source": { "state": "enabled" },
+            "observability": { "state": "enabled" },
+            "redirects": [{ "host": "willowgraysen.com", "to": "https://noisypigeon.com" }],
+            "capabilities": {
+                "cloud": { "placement": "inline" },
+                "data": { "placement": "own_worker" },
+                "digitalocean": { "droplet_health": true,
+                    "team_id": "ef50c986-1d6f-45b6-8dcf-d2184a81bd79",
+                    "spaces": { "bucket": "fixture-spaces", "region": "tor1" } },
+                "email": { "forward": { "scope": "all", "to": "person@example.com" } },
+                "jobs": { "audit_bucket": "willowgraysen-jobs-audit" },
+                "mcp-federation": { "federation": grant("pigeon.dev") }
+            },
+            "version": 12
+        }),
+    ];
+    let mut stored = BTreeMap::new();
+    for old in &before {
+        let model: Instance = serde_json::from_value(old.clone()).unwrap();
+        let new = serde_json::to_value(&model).unwrap();
+        // Nothing is left at the old places, and the new layout reads back as the same model.
+        for gone in [
+            "publishing",
+            "source",
+            "redirects",
+            "storage",
+            "ingest",
+            "capabilities",
+        ] {
+            assert!(new.get(gone).is_none(), "{}: {gone} in {new}", model.id);
+        }
+        assert!(new["sites"][0].get("auth").is_none());
+        let back: Instance = serde_json::from_value(new.clone()).unwrap();
+        assert_eq!(back, model, "{}", model.id);
+        assert_eq!(serde_json::to_value(&back).unwrap(), new);
+        // The version stays, and so does everything a plan binds: the same model plans the same
+        // steps, the email configuration the data Worker reads keeps its digest, and the plan
+        // digest (instance, version, account, steps) is unchanged.
+        assert_eq!(model.version, old["version"].as_u64().unwrap());
+        let seen = SeenData::default();
+        let parts = data_parts(&model, &seen, &Ledger::default(), None);
+        assert_eq!(parts, data_parts(&back, &seen, &Ledger::default(), None));
+        assert_eq!(
+            pigeon_capabilities::email::config(&model).map(|c| c.digest()),
+            pigeon_capabilities::email::config(&back).map(|c| c.digest())
+        );
+        if model.id != "sandbox" {
+            assert!(
+                pigeon_capabilities::email::config(&model).is_some(),
+                "{}",
+                model.id
+            );
+        }
+        assert_eq!(
+            digest(&model, "acct", &parts.store),
+            digest(&back, "acct", &parts.store)
+        );
+        stored.insert(model.id.clone(), (old.to_string(), new));
+    }
+    // Where the settings went, on willowgraysen.
+    let willow = &stored["willowgraysen"].1;
+    assert_eq!(
+        willow["site"]["publishing"],
+        json!({ "state": "enabled", "site": "private" })
+    );
+    assert_eq!(
+        willow["site"]["passkeys"],
+        json!({ "private": { "allow": ["site"] } })
+    );
+    assert_eq!(willow["repo"]["source"], json!({ "state": "enabled" }));
+    assert_eq!(willow["repo"]["full_name"], "noisypigeon/willowgraysen");
+    assert_eq!(
+        willow["network"]["redirects"][0]["host"],
+        "willowgraysen.com"
+    );
+    assert_eq!(
+        willow["instance"]["mcp-federation"]["federation"][0]["peer"],
+        "pigeon.dev"
+    );
+    assert_eq!(willow["data"]["placement"], "own_worker");
+    assert_eq!(willow["data"]["email"]["forward"]["scope"], "all");
+    assert_eq!(willow["cloud"]["gateway"], json!({ "placement": "inline" }));
+    assert_eq!(willow["cloud"]["digitalocean"]["droplet_health"], true);
+    assert_eq!(willow["jobs"]["audit_bucket"], "willowgraysen-jobs-audit");
+    assert_eq!(willow["observability"], json!({ "state": "enabled" }));
+    assert_eq!(
+        stored["pigeon.dev"].1["data"]["email"]["addresses"][1]["local"],
+        "apple"
+    );
+    assert_eq!(stored["pigeon.dev"].1["ci"]["jobs"], json!(["test"]));
+
+    // The Directory's migration: each record rewritten once, with its digests, then nothing.
+    struct Fake(RefCell<BTreeMap<String, (String, i64)>>);
+    impl Settings for Fake {
+        fn get(&self, key: &str) -> Option<(String, i64)> {
+            self.0.borrow().get(key).cloned()
+        }
+        fn keep(&self, key: &str, value: &str, until: i64) {
+            self.0
+                .borrow_mut()
+                .insert(key.into(), (value.into(), until));
+        }
+    }
+    let ids: Vec<&String> = stored.keys().collect();
+    let fake = Fake(RefCell::new(BTreeMap::new()));
+    fake.keep("instances:index", &serde_json::to_string(&ids).unwrap(), 9);
+    for (id, (old, _)) in &stored {
+        fake.keep(&format!("instance:{id}"), old, 99);
+    }
+    let run = layout::migrate(&fake, 1_000);
+    assert!(run.failed.is_empty(), "{:?}", run.failed);
+    assert_eq!(run.done.len(), 4);
+    for m in &run.done {
+        let (old, new) = &stored[&m.instance];
+        let (text, until) = fake.get(&format!("instance:{}", m.instance)).unwrap();
+        assert_eq!(until, 99, "the expiry stays");
+        assert_eq!(&serde_json::from_str::<Value>(&text).unwrap(), new);
+        assert_eq!(m.before, pigeon_core::oauth::hash(old));
+        assert_eq!(m.after, pigeon_core::oauth::hash(&text));
+        let model: Instance = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            m.after,
+            record::digest(&model),
+            "the stored text is the record's digest"
+        );
+    }
+    let log: Value = serde_json::from_str(&fake.get(MIGRATION_KEY).unwrap().0).unwrap();
+    assert_eq!(log.as_array().unwrap().len(), 4);
+    let again = layout::migrate(&fake, 2_000);
+    assert!(again.done.is_empty() && again.failed.is_empty());
+    // A rename's tombstone is no record and stays; a record it cannot read is reported and
+    // left as it is.
+    let tomb = json!({ "renamed_to": "pigeon.dev" }).to_string();
+    fake.keep("instance:sandbox", &tomb, 99);
+    assert!(layout::migrate(&fake, 3_000).done.is_empty());
+    assert_eq!(fake.get("instance:sandbox").unwrap().0, tomb);
+    fake.keep("instance:sandbox", "{\"id\": 1}", 99);
+    let bad = layout::migrate(&fake, 4_000);
+    assert_eq!(bad.failed.len(), 1);
+    assert_eq!(fake.get("instance:sandbox").unwrap().0, "{\"id\": 1}");
+
+    // Refused: a setting given in both layouts, an unknown field of a namespace, a passkey entry
+    // for no site, the old storage without the data store it is read through.
+    let new = stored["willowgraysen"].1.clone();
+    let refused = |patch: &dyn Fn(&mut Value), why: &str| {
+        let mut v = new.clone();
+        patch(&mut v);
+        let e = serde_json::from_value::<Instance>(v)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains(why), "{e}");
+    };
+    refused(
+        &|v| v["publishing"] = json!({ "state": "disabled" }),
+        "site.publishing",
+    );
+    refused(
+        &|v| v["capabilities"] = json!({ "email": {} }),
+        "data.email",
+    );
+    refused(
+        &|v| v["capabilities"] = json!({ "data-email": {} }),
+        "data.email",
+    );
+    refused(
+        &|v| v["cloud"]["other"] = json!({}),
+        "unknown field cloud.other",
+    );
+    refused(
+        &|v| v["site"]["passkeys"]["nope"] = json!({ "allow": [] }),
+        "names no site",
+    );
+    refused(
+        &|v| v["source"] = json!({ "state": "enabled" }),
+        "repo.source",
+    );
+    refused(
+        &|v| {
+            v.as_object_mut().unwrap().remove("data");
+            v["storage"] = json!({ "state": "disabled" });
+        },
+        "data.read",
+    );
+    // An empty namespace reads as absent.
+    let mut empty = new.clone();
+    empty["network"] = json!({});
+    let model: Instance = serde_json::from_value(empty).unwrap();
+    assert!(model.redirects.is_empty());
+    // The old `storage`, beside the data store, moves to `data.read`.
+    let mut old = before[1].clone();
+    old["storage"] = json!({ "state": "enabled", "store": "scaleway:archive", "bucket": "b" });
+    let model: Instance = serde_json::from_value(old).unwrap();
+    assert_eq!(
+        serde_json::to_value(&model).unwrap()["data"]["read"]["bucket"],
+        "b"
+    );
 }

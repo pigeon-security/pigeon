@@ -6,7 +6,7 @@
 //! The tools read through the data Worker's signed ops (`data_store::call`); the two writes
 //! only propose a record change, which the person approves with their passkey, and the next
 //! instance plan carries it to the Worker's configuration. Off by default: a record without
-//! `[capabilities.email]` has no mail, no tools' answers and no Email tab.
+//! `data.email` has no mail, no tools' answers and no Email tab.
 
 use pigeon_core::mcp::Tool;
 use pigeon_ingest::datastore::{self, CATCH_ALL, DataCall, EmailConfig, ForwardScope, ListQuery};
@@ -18,8 +18,9 @@ use crate::instances::record::{CapabilitySettings, Instance};
 use crate::instances::tools::{Enabled, Registration, View};
 use crate::{Call, Capability, Context, arg, unknown};
 
-/// The capability's name in the catalogue and a record's `capabilities`.
-pub const NAME: &str = "email";
+/// The capability's name in the catalogue (docs/plans/record-reshape.md: `email` before). Its
+/// settings sit at the record's `data.email`.
+pub const NAME: &str = "data-email";
 
 /// The listed addresses the person named first (docs/plans/email.md, "The person's decisions").
 pub const FIRST_ADDRESSES: &[&str] = &["cloudflare", "buildkite", "apple"];

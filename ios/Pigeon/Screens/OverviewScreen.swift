@@ -226,7 +226,7 @@ struct RecordEditSheet: View {
 
     /// A repository as the web writes it: `github:owner/name` or `artifacts:namespace/repo`.
     static func repoText(_ repo: JSON) -> String {
-        if RecordDiff.isNone(repo) { return "" }
+        if repo["kind"].isNull { return "" }
         switch repo["kind"].string {
         case "github": return "github:\(repo["full_name"].string ?? "")"
         case "artifacts": return "artifacts:\(repo["namespace"].string ?? "")/\(repo["repo"].string ?? "")"
@@ -262,7 +262,11 @@ struct RecordEditSheet: View {
         var o = record.object ?? [:]
         o["title"] = .string(title.trimmingCharacters(in: .whitespacesAndNewlines))
         o["zones"] = .array(ConsoleFormat.list(zones).map { JSON.string($0) })
-        o["repo"] = try Self.repoFrom(repo, was: record["repo"])
+        // `repo.source` sits beside the repository and changes in Capabilities, not here.
+        var edited = try Self.repoFrom(repo, was: record["repo"])
+        let source = record["repo"]["source"]
+        if !source.isNull { edited = RecordDiff.setting(edited, "source", source) }
+        o["repo"] = edited
         let w = worker.trimmingCharacters(in: .whitespacesAndNewlines)
         o["worker"] = w.isEmpty ? JSON.null : JSON.string(w)
         o["worker_override"] = .bool(override)

@@ -15,6 +15,41 @@
   const when = (ms) => (ms ? new Date(ms).toISOString().replace("T", " ").slice(0, 16) + " UTC" : "—");
   const show = (v) => (v === undefined || v === null ? "none" : JSON.stringify(v));
   const clone = (v) => JSON.parse(JSON.stringify(v));
+  // The record's layout (docs/plans/record-reshape.md): each setting at a dotted path, such as
+  // `site.publishing` or `data.email`. `setAt` makes the objects on the way; `delAt` removes
+  // the value and every namespace it leaves empty (`site`, `network`, `cloud`, `instance`,
+  // `repo` when only its `source` was left), as the platform never writes an empty one.
+  const getAt = (r, path) => path.split(".").reduce((o, k) => (o == null ? undefined : o[k]), r);
+  function setAt(r, path, value) {
+    const keys = path.split(".");
+    const last = keys.pop();
+    let o = r;
+    for (const k of keys) {
+      if (!o[k] || typeof o[k] !== "object" || Array.isArray(o[k])) o[k] = {};
+      o = o[k];
+    }
+    o[last] = value;
+  }
+  const NAMESPACES = new Set(["site", "network", "cloud", "instance", "capabilities"]);
+  function delAt(r, path) {
+    const keys = path.split(".");
+    const chain = [r];
+    for (const k of keys.slice(0, -1)) {
+      const o = chain[chain.length - 1]?.[k];
+      if (!o || typeof o !== "object") return;
+      chain.push(o);
+    }
+    delete chain[chain.length - 1][keys[keys.length - 1]];
+    for (let i = keys.length - 2; i >= 0; i--) {
+      const parent = chain[i];
+      const k = keys[i];
+      const o = parent[k];
+      if (!o || Object.keys(o).length) break;
+      if (NAMESPACES.has(k) && i === 0) delete parent[k];
+      else if (i > 0) delete parent[k];
+    }
+    if (r.repo && typeof r.repo === "object" && !Object.keys(r.repo).length) r.repo = null;
+  }
   const go = (ctx, to, text) => el("a", { href: shell.href(to), text, on: { click: (e) => {
     if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
     e.preventDefault();
@@ -33,9 +68,9 @@
       return keys.flatMap((k) => changes(from[k], to[k], path ? `${path}.${k}` : k));
     }
     // Absent, null, false and empty are the same to the record (serde's defaults), except a
-    // capability's own entry: `capabilities.data = {}` turns it on with every setting at its
-    // default, as record::diff counts it.
-    const entry = /^capabilities\.[^.]+$/.test(path);
+    // capability's own entry: `data = {}` turns it on with every setting at its default, as
+    // record::diff counts it.
+    const entry = /^capabilities\.[^.]+$/.test(path) || ENTRY_PATHS.has(path);
     const none = (v) => v == null || v === false || (Array.isArray(v) && !v.length) || (plain(v) && !Object.keys(v).length && !entry);
     const a = none(from) ? null : from;
     const b = none(to) ? null : to;
@@ -61,57 +96,50 @@
 
   // ---- Instance capabilities: the record field each one is enabled by, and what it adds.
   const list = (s) => String(s || "").split(",").map((x) => x.trim()).filter(Boolean);
-  const passkeySites = (r) => (r.sites || []).filter((s) => s.auth === "passkey");
-  const on = (r, c) => (c.on ? c.on(r) : c.cap === "site_passkeys" ? passkeySites(r).length > 0 && on(r, CAPS[0]) : r[c.field]?.state === "enabled");
+  // The catalogue capabilities' own entries (`data`, `data.email`, …), filled from the catalogue.
+  const ENTRY_PATHS = new Set();
+  // Where catalogue capability `name` sits: its entry's `field`, or `capabilities.<name>`.
+  let FIELDS = {};
+  const fieldOf = (name) => FIELDS[name] || `capabilities.${name}`;
+  // The sites gated by passkeys: each one `site.passkeys` names, with its `allow`.
+  const passkeySites = (r) => Object.entries(r.site?.passkeys || {}).map(([name, p]) => ({ name, allow: p?.allow || [] }));
+  const on = (r, c) => (c.on ? c.on(r) : c.cap === "site_passkeys" ? passkeySites(r).length > 0 && on(r, CAPS[0]) : getAt(r, c.field)?.state === "enabled");
   const CAPS = [
-    { cap: "publishing", field: "publishing", component: "sites", adds: ["Site › Sites", "Site › Deployments"],
+    { cap: "publishing", field: "site.publishing", component: "sites", adds: ["Site › Sites", "Site › Deployments"],
       what: "Publish one of the instance’s sites from its repository",
       needs: (r) => ((r.sites || []).length ? null : "a site in the record"),
       fields: (r) => [{ key: "site", label: "Site", options: (r.sites || []).map((s) => s.name), hint: "The site that Publish and Roll back act on." }] },
-    { cap: "site_passkeys", field: "sites[].auth", component: "site_passkeys", adds: ["Site › Visitors"],
+    { cap: "site_passkeys", field: "site.passkeys", component: "site_passkeys", adds: ["Site › Visitors"],
       what: "Gate a site’s platform subdomains behind visitor passkeys",
       needs: (r) => (on(r, CAPS[0]) ? null : "publishing"),
       fields: (r) => [
         { key: "site", label: "Site", options: (r.sites || []).map((s) => s.name), hint: "Only a site on platform subdomains can be gated." },
         { key: "allow", label: "Who may sign in", list: true, hint: "Comma-separated user ids, or site for every visitor you invite." },
       ],
-      current: (r) => { const s = passkeySites(r)[0]; return s ? { site: s.name, allow: s.allow || [] } : { site: r.publishing?.site, allow: ["site"] }; },
-      apply: (r, v) => {
-        for (const s of r.sites || []) {
-          delete s.auth;
-          delete s.allow;
-          if (s.name === v.site) Object.assign(s, { auth: "passkey", allow: v.allow });
-        }
-      },
-      remove: (r) => { for (const s of r.sites || []) { delete s.auth; delete s.allow; } } },
-    { cap: "storage", field: "storage", component: "storage", adds: ["Storage › Buckets"],
-      what: "Read the objects of one approved bucket",
+      current: (r) => { const s = passkeySites(r)[0]; return s ? { site: s.name, allow: s.allow } : { site: r.site?.publishing?.site, allow: ["site"] }; },
+      apply: (r, v) => setAt(r, "site.passkeys", { [v.site]: { allow: v.allow } }),
+      remove: (r) => delAt(r, "site.passkeys") },
+    { cap: "storage", field: "data.read", component: "storage", adds: ["Storage › Buckets"],
+      what: "Read the objects of one approved bucket, beside the data store",
+      needs: (r) => (r.data ? null : "data"),
       fields: () => [
         { key: "store", label: "Storage account", mono: true, hint: "A declared account, such as scaleway:archive." },
         { key: "bucket", label: "Bucket", mono: true },
         { key: "prefix", label: "Prefix", mono: true, optional: true, hint: "Ends with /. Empty for the whole bucket." },
       ] },
-    { cap: "source", field: "source", component: "source", adds: ["Source › Repository"],
-      what: "Read the record’s repository", needs: (r) => (r.repo ? null : "a repository in the record"), fields: () => [] },
+    { cap: "source", field: "repo.source", component: "source", adds: ["Source › Repository"],
+      what: "Read the record’s repository", needs: (r) => (r.repo?.kind ? null : "a repository in the record"), fields: () => [] },
     { cap: "ci", field: "ci", component: "ci", adds: ["CI › Jobs"],
       what: "See CI jobs of the record’s repository",
       needs: (r) => (r.account?.kind === "home" && r.repo?.kind === "artifacts" ? null : "a home-account Artifacts repository"),
       fields: () => [{ key: "jobs", label: "Job names", list: true, mono: true, hint: "Comma-separated, 1 to 64." }] },
     { cap: "observability", field: "observability", component: "observability", adds: ["Metrics › Workers"],
       what: "Read metrics of the instance’s Worker", needs: (r) => (r.worker ? null : "a Worker in the record"), fields: () => [] },
-    { cap: "ingest", field: "ingest", component: "ingest", adds: ["Ingest › Runs"],
-      what: "Ingest from a declared source into a destination bucket",
-      fields: () => [
-        { key: "source", label: "Source account", mono: true, hint: "A declared storage account, such as scaleway:field." },
-        { key: "bucket", label: "Source bucket", mono: true },
-        { key: "prefix", label: "Prefix", mono: true, optional: true },
-        { key: "destination_bucket", label: "Destination bucket", mono: true },
-      ] },
     // A list on the record: Configure adds the redirect for a host, or replaces the one it has.
-    { cap: "redirects", field: "redirects", component: "instances", adds: [],
+    { cap: "redirects", field: "network.redirects", component: "instances", adds: [],
       what: "Answer a hostname in the instance’s zones with a redirect to another URL",
       effect: "Its plan attaches the host to the instance’s Worker, which answers it with the redirect.",
-      on: (r) => (r.redirects || []).length > 0,
+      on: (r) => (r.network?.redirects || []).length > 0,
       needs: (r) => (!(r.zones || []).length ? "a zone in the record" : r.worker ? null : "a Worker in the record"),
       fields: (r) => [
         { key: "host", label: "Host", mono: true, hint: `A hostname in ${(r.zones || []).join(", ") || "the instance’s zones"}. An existing host’s redirect is replaced.` },
@@ -120,7 +148,7 @@
         { key: "keep_path", label: "Keep path", options: ["yes", "no"], hint: "Append the request’s path and query to the URL." },
       ],
       current: (r) => {
-        const x = (r.redirects || [])[0];
+        const x = (r.network?.redirects || [])[0];
         return x ? { host: x.host, to: x.to, status: String(x.status ?? 301), keep_path: x.keep_path === false ? "no" : "yes" }
           : { host: (r.zones || [])[0] || "", to: "", status: "301", keep_path: "yes" };
       },
@@ -128,13 +156,14 @@
         const entry = { host: v.host.toLowerCase(), to: v.to };
         if (v.status !== "301") entry.status = Number(v.status);
         if (v.keep_path === "no") entry.keep_path = false;
-        r.redirects = [...(r.redirects || []).filter((x) => x.host !== entry.host), entry];
+        setAt(r, "network.redirects", [...(r.network?.redirects || []).filter((x) => x.host !== entry.host), entry]);
       },
-      remove: (r) => { delete r.redirects; } },
+      remove: (r) => delAt(r, "network.redirects") },
   ];
-  // Catalogue capabilities enabled by name in `capabilities`: linked entries on linked
-  // instances and opt-in entries on home. Placement is stored in the capability settings.
-  // Disabling removes the entry and its dependents.
+  // Catalogue capabilities, each at its entry's `field` (`data.email`, `cloud.gateway`, …; else
+  // `capabilities.<name>`): linked entries on linked instances and opt-in entries on home.
+  // Placement is stored in the capability settings. Disabling removes the entry and its
+  // dependents.
   const CATALOGUE_ADDS = {
     architecture: { adds: ["Platform › Architecture"], what: "Show this instance’s own setup: its Worker, bucket, hostnames and tools" },
     "data-ingest": {
@@ -155,28 +184,39 @@
       what: "Keep this instance’s data store (an R2 bucket, a D1 database and the Worker that runs it)",
       effect: "The next instance plan creates them; Separate Worker runs it as {instance}-data, Inline inside the instance’s own Worker.",
     },
-    email: {
+    "data-email": {
       adds: ["Email › Mailboxes"], what: "Receive every address of the instance’s zone into its data store",
       effect: "The next instance plan shows each DNS record Email Routing adds or removes before your passkey.",
     },
     secrets: { adds: ["Access › Secrets"], what: "List the secrets in this instance’s own Cloudflare account (its Secrets Store)" },
   };
   function catalogueCaps(versions, home) {
+    FIELDS = Object.fromEntries((versions?.catalogue || []).filter((e) => e.field).map((e) => [e.name, e.field]));
+    for (const f of Object.values(FIELDS)) ENTRY_PATHS.add(f);
+    // A capability's own settings, without the capabilities that sit inside it (`data.email`
+    // inside `data`).
+    const children = (name) => Object.values(FIELDS).filter((f) => f.startsWith(`${fieldOf(name)}.`)).map((f) => f.slice(fieldOf(name).length + 1));
+    const own = (r, name) => {
+      const s = { ...getAt(r, fieldOf(name)) };
+      for (const k of children(name)) delete s[k];
+      if (name === "data") delete s.read;
+      return s;
+    };
     return (versions?.catalogue || []).filter((e) => (home ? e.opt_in : e.linked) && !e.always && e.name !== "redirects").map((e) => {
       const digitalOcean = e.name === "digitalocean";
       const jobs = e.name === "jobs" && !home;
       // Email runs where the data store runs (docs/plans/linked-data.md): only `data` chooses.
-      const configurable = !home && e.name !== "email" && (e.placements || []).includes("own_worker");
+      const configurable = !home && e.name !== "data-email" && (e.placements || []).includes("own_worker");
       const choices = versions.linked_placement_choices?.[e.name] || ["inline"];
       // The data store's own Worker is its default on a linked instance; every other entry's is inline.
       const placementDefault = e.name === "data" ? "own_worker" : "inline";
       return {
-        cap: e.name, field: `capabilities.${e.name}`, component: e.name,
+        cap: e.name, field: fieldOf(e.name), component: e.name,
         adds: CATALOGUE_ADDS[e.name]?.adds || [], what: CATALOGUE_ADDS[e.name]?.what || "", effect: CATALOGUE_ADDS[e.name]?.effect,
-        on: (r) => Boolean(r.capabilities && r.capabilities[e.name]),
-        needs: (r) => { if (jobs && !r.account?.account_id) return "a linked Cloudflare account"; const lack = (e.requires || []).filter((q) => !(r.capabilities || {})[q]); return lack.length ? lack.join(", ") : null; },
+        on: (r) => Boolean(getAt(r, fieldOf(e.name))),
+        needs: (r) => { if (jobs && !r.account?.account_id) return "a linked Cloudflare account"; const lack = (e.requires || []).filter((q) => !getAt(r, fieldOf(q))); return lack.length ? lack.join(", ") : null; },
         current: (r) => {
-          const settings = r.capabilities?.[e.name];
+          const settings = own(r, e.name);
           return { placement: placementDefault, ...settings, ...(digitalOcean ? {
             spaces_region: settings?.spaces?.region, spaces_bucket: settings?.spaces?.bucket,
             spaces_prefix: settings?.spaces?.prefix,
@@ -206,7 +246,8 @@
           }] : []),
         ],
         apply: (r, v) => {
-          const settings = { ...r.capabilities?.[e.name] };
+          // The whole entry, its children (`data.email` inside `data`) kept as they are.
+          const settings = { ...getAt(r, fieldOf(e.name)) };
           if (jobs) settings.audit_bucket = v.audit_bucket;
           if (configurable) settings.placement = v.placement;
           if (digitalOcean) {
@@ -217,30 +258,28 @@
               settings.spaces = { region: v.spaces_region, bucket: v.spaces_bucket, ...(v.spaces_prefix ? { prefix: v.spaces_prefix } : {}) };
             } else delete settings.spaces;
           }
-          r.capabilities = { ...(r.capabilities || {}), [e.name]: settings };
+          setAt(r, fieldOf(e.name), settings);
         },
         remove: (r) => {
-          const caps = { ...(r.capabilities || {}) };
-          delete caps[e.name];
-          for (const other of versions.catalogue) if ((other.requires || []).includes(e.name)) delete caps[other.name];
-          if (Object.keys(caps).length) r.capabilities = caps; else delete r.capabilities;
+          for (const other of versions.catalogue) if ((other.requires || []).includes(e.name)) delAt(r, fieldOf(other.name));
+          delAt(r, fieldOf(e.name));
         },
       };
     });
   }
-  const profileOf = (r, c) => (c.current ? c.current(r) : r[c.field] || {});
+  const profileOf = (r, c) => (c.current ? c.current(r) : getAt(r, c.field) || {});
   // The record with capability `c` set to `values`, or without it (and what needs it).
   function withCap(r, c, values) {
     const next = clone(r);
     if (c.apply) c.apply(next, values);
-    else next[c.field] = { state: "enabled", ...Object.fromEntries(Object.entries(values).filter(([, v]) => v !== "" && !(Array.isArray(v) && !v.length))) };
+    else setAt(next, c.field, { state: "enabled", ...Object.fromEntries(Object.entries(values).filter(([, v]) => v !== "" && !(Array.isArray(v) && !v.length))) });
     return next;
   }
   function withoutCap(r, c) {
     const next = clone(r);
     for (const d of [c, ...dependents(r, c)]) {
       if (d.remove) d.remove(next);
-      else delete next[d.field];
+      else delAt(next, d.field);
     }
     return next;
   }
@@ -248,9 +287,9 @@
 
   function digitalOceanConnection(ctx, record, spaces = false) {
     const args = { instance: record.id };
-    const teamId = record.capabilities.digitalocean.team_id;
+    const teamId = record.cloud.digitalocean.team_id;
     const target = [["Instance", code(record.id)], ["Expected team", code(teamId)]];
-    const source = record.capabilities.digitalocean.spaces;
+    const source = record.cloud.digitalocean.spaces;
     if (spaces) target.push(["Source", code(`${source.region} / ${source.bucket} / ${source.prefix || ""}`)]);
     const credential = spaces ? "Spaces key" : "token";
     const status = el("p", { class: "muted", role: "status", text: "Checking connection…" });
@@ -307,7 +346,7 @@
   }
 
   function digitalOceanDroplet(ctx, record) {
-    const team = record.capabilities.digitalocean.team_id;
+    const team = record.cloud.digitalocean.team_id;
     const id = { instance: record.id, team_id: team, version: record.version };
     const target = [["Instance", code(record.id)], ["Expected team", code(team)]];
     const details = el("div", { role: "status" });
@@ -456,17 +495,17 @@
           status = view ? pill(`Upgrade to see ${view.title}`, "warn")
             : pin?.state === "held" ? pill("Held by its pin", "bad")
               : step ? pill(major(step.to) > major(step.from) ? "Major upgrade" : "Update available", "info") : pill("Current", "ok");
-          if (c.cap === "jobs" && !record.capabilities.jobs.audit_bucket) status = pill("Audit setup required", "warn");
+          if (c.cap === "jobs" && !record.jobs.audit_bucket) status = pill("Audit setup required", "warn");
           acts = [
-            c.cap === "jobs" && !record.capabilities.jobs.audit_bucket
+            c.cap === "jobs" && !record.jobs.audit_bucket
               ? button("Set up audit storage", () => configureJobs(c, true), sm) : null,
             step ? button("Upgrade", () => upgrade(c, step), { ...sm, variant: view ? "primary" : undefined }) : null,
             c.fields(record).length || c.cap === "mcp-federation"
               ? button(c.cap === "mcp-federation" ? "Manage trust" : "Configure", () => configure(c, true), { ...sm, variant: "ghost" }) : null,
             c.cap === "digitalocean" ? button("Connection", () => digitalOceanConnection(ctx, record), sm) : null,
-            c.cap === "digitalocean" && record.capabilities.digitalocean.droplet_health
+            c.cap === "digitalocean" && record.cloud.digitalocean.droplet_health
               ? button("Runner check", () => digitalOceanDroplet(ctx, record), sm) : null,
-            c.cap === "digitalocean" && record.capabilities.digitalocean.spaces
+            c.cap === "digitalocean" && record.cloud.digitalocean.spaces
               ? button("Spaces", () => digitalOceanConnection(ctx, record, true), sm) : null,
             button("Disable", () => disable(c), { ...sm, variant: "danger" }),
           ];
@@ -543,7 +582,7 @@
     function configureFederation(editing) {
       const record = state.record;
       const name = "mcp-federation";
-      const grants = record.capabilities?.[name]?.federation || [];
+      const grants = getAt(record, fieldOf(name))?.federation || [];
       const tools = [
         ["digitalocean_droplet_jobs", "List runner checks"],
         ["digitalocean_droplet_job", "Read a runner check"],
@@ -564,8 +603,9 @@
       const title = editing ? "Manage MCP Federation trust" : "Enable MCP Federation";
       function review(nextGrants, removing) {
         const next = clone(record);
-        next.capabilities = { ...next.capabilities, [name]: { ...next.capabilities?.[name], federation: nextGrants } };
-        if (!nextGrants.length) delete next.capabilities[name].federation;
+        const settings = { ...getAt(next, fieldOf(name)), federation: nextGrants };
+        if (!nextGrants.length) delete settings.federation;
+        setAt(next, fieldOf(name), settings);
         d.close();
         putRecord(ctx, {
           record, next, title: removing ? "Revoke MCP Federation trust" : title,
@@ -631,7 +671,7 @@
       const now = profileOf(r, c);
       const fields = c.fields(r);
       const controls = fields.map((f) => {
-        const value = now[f.key] ?? (f.key === "site" ? r.publishing?.site : "");
+        const value = now[f.key] ?? (f.key === "site" ? r.site?.publishing?.site : "");
         const control = f.options
           ? el("select", { class: "input", name: f.key }, f.options.map((o) => el("option", { value: o, text: f.labels?.[o] || o, selected: o === value, disabled: f.disabled?.(o) || false })))
           : input({ name: f.key, mono: f.mono, autocomplete: "off", spellcheck: "false", value: Array.isArray(value) ? value.join(", ") : String(value ?? "") });
@@ -698,10 +738,15 @@
   }
 
   // ---- Overview (C2): facts, the link, and the record's other fields as a form or JSON.
-  const CAP_FIELDS = new Set(["publishing", "storage", "source", "ci", "observability", "ingest", "redirects", "pins", "capabilities"]);
+  // The record's capability fields (docs/plans/record-reshape.md), and `repo.source` beside the
+  // repository: changed in Capabilities, never here.
+  const CAP_FIELDS = new Set(["site", "ci", "observability", "network", "instance", "data", "cloud", "jobs", "pins", "capabilities"]);
   const FIXED = new Set(["id", "account", "version"]);
-  const editable = (r) => Object.fromEntries(Object.entries(r).filter(([k]) => !CAP_FIELDS.has(k) && !FIXED.has(k)));
-  const repoText = (repo) => (!repo ? "" : repo.kind === "github" ? `github:${repo.full_name}` : repo.kind === "artifacts" ? `artifacts:${repo.namespace}/${repo.repo}` : JSON.stringify(repo));
+  const bareRepo = (repo) => { if (!repo || typeof repo !== "object") return repo ?? null; const { source, ...rest } = repo; return Object.keys(rest).length ? rest : null; };
+  const editable = (r) => Object.fromEntries(Object.entries(r).filter(([k]) => !CAP_FIELDS.has(k) && !FIXED.has(k)).map(([k, v]) => [k, k === "repo" ? bareRepo(v) : v]));
+  // `repo` as edited, with the record's `repo.source` put back beside it.
+  const withSource = (repo, was) => (was?.source ? { ...(repo || {}), source: was.source } : repo);
+  const repoText = (repo) => (!repo?.kind ? "" : repo.kind === "github" ? `github:${repo.full_name}` : repo.kind === "artifacts" ? `artifacts:${repo.namespace}/${repo.repo}` : JSON.stringify(repo));
   function repoFrom(text, was) {
     const t = text.trim();
     if (!t) return null;
@@ -738,13 +783,13 @@
         let edited;
         try { edited = JSON.parse(json.value); } catch (err) { throw new Error(`The JSON doesn’t parse: ${err.message}`); }
         if (!plain(edited)) throw new Error("The JSON is an object of the record’s fields.");
-        const bad = Object.keys(edited).find((k) => CAP_FIELDS.has(k) || FIXED.has(k));
-        if (bad) throw new Error(`${bad} is not edited here: ${CAP_FIELDS.has(bad) ? "change it in Capabilities" : "it can’t change"}.`);
+        const bad = Object.keys(edited).find((k) => CAP_FIELDS.has(k) || FIXED.has(k)) || (edited.repo?.source && "repo.source");
+        if (bad) throw new Error(`${bad} is not edited here: ${FIXED.has(bad) ? "it can’t change" : "change it in Capabilities"}.`);
         const out = clone(r);
         for (const k of Object.keys(editable(r))) delete out[k];
-        return { ...out, ...edited };
+        return { ...out, ...edited, repo: withSource(edited.repo, r.repo) };
       }
-      return { ...clone(r), title: title.value.trim(), zones: list(zones.value), repo: repoFrom(repo.value, r.repo),
+      return { ...clone(r), title: title.value.trim(), zones: list(zones.value), repo: withSource(repoFrom(repo.value, r.repo), r.repo),
         worker: worker.value.trim() || null, worker_override: override.checked };
     }
     function update() {
@@ -861,7 +906,7 @@
           ["Account", inst.home ? "Home account" : "Linked account"],
           ["Host", code(inst.host || "—")],
           ["Zones", (r.zones || []).length ? (r.zones || []).map((z) => code(z)).flatMap((z, i) => (i ? [", ", z] : [z])) : "none"],
-          ["Repository", r.repo ? code(repoText(r.repo)) : "none"],
+          ["Repository", r.repo?.kind ? code(repoText(r.repo)) : "none"],
           ["Worker", r.worker ? code(r.worker) : "none (no sites yet)"],
           ["Record", `v${r.version ?? 0}`],
           ["Capabilities", [enabled.length ? enabled.flatMap((c, i) => (i ? [", ", code(c.cap)] : [code(c.cap)])) : "none", " · ", go(ctx, caps, enabled.length ? "Manage" : "Enable one")]],

@@ -61,14 +61,14 @@
   // by prefix a page at a time. storage_list_objects with `instance` answers keys relative to the
   // approved prefix and refuses a raw account or bucket; storage_list_buckets and
   // storage_head_object take those, so this view does not use them.
-  // With the instance's data store (`[capabilities.data]`, docs/plans/email.md) the view can
+  // With the instance's data store (the record's `data`, docs/plans/email.md) the view can
   // also browse its bucket's `blobs/` and `derived/` through the data Worker (`source: "data"`),
-  // beside the approved S3 location, which reads as before.
+  // beside the approved S3 location (`data.read`), which reads as before.
   function storage(ctx) {
     const id = ctx.instance.id;
-    const s = ctx.record?.storage || {};
+    const s = ctx.record?.data?.read || {};
     const hasS3 = s.state === "enabled" || Boolean(s.bucket);
-    const hasData = Boolean(ctx.record?.capabilities?.data);
+    const hasData = Boolean(ctx.record?.data);
     let source = hasS3 ? "s3" : "data";
     const dataName = ctx.record?.account?.kind === "home" ? "pigeon-data" : `${String(id).replace(/[/.]/g, "-")}-data`;
     const locationOf = () => (source === "data" ? dataName : [s.bucket, s.prefix].filter(Boolean).join("/").replace(/\/+$/, ""));

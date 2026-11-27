@@ -170,7 +170,7 @@ struct DigitalOceanConnectionSheet: View {
     @State private var outcome: String?
     @State private var failure: String?
 
-    private var settings: JSON { record["capabilities"]["digitalocean"] }
+    private var settings: JSON { record["cloud"]["digitalocean"] }
     private var credential: String { spaces ? "Spaces key" : "token" }
     private var args: JSON { ["instance": .string(record["id"].text ?? "")] }
 
@@ -287,7 +287,7 @@ struct DigitalOceanDropletSheet: View {
     private var facts: [Fact] {
         [
             Fact("Instance", record["id"].text ?? "—", mono: true),
-            Fact("Expected team", record["capabilities"]["digitalocean"]["team_id"].text ?? "—", mono: true),
+            Fact("Expected team", record["cloud"]["digitalocean"]["team_id"].text ?? "—", mono: true),
         ]
     }
 
@@ -470,7 +470,9 @@ struct FederationTrustSheet: View {
         ("digitalocean_droplet_status", "Read runner status"),
     ]
 
-    private var grants: [JSON] { record["capabilities"][Self.name]["federation"].items }
+    /// Where MCP Federation sits in the record (docs/plans/record-reshape.md).
+    private static let field = "instance.mcp-federation"
+    private var grants: [JSON] { RecordDiff.at(record, Self.field)["federation"].items }
     private var title: String { editing ? "Manage MCP Federation trust" : "Enable MCP Federation" }
 
     var body: some View {
@@ -617,14 +619,13 @@ struct FederationTrustSheet: View {
     }
 
     private func review(_ nextGrants: [JSON], removing: Bool) {
-        var settings = record["capabilities"][Self.name].object ?? [:]
+        var settings = RecordDiff.at(record, Self.field).object ?? [:]
         if nextGrants.isEmpty {
             settings.removeValue(forKey: "federation")
         } else {
             settings["federation"] = .array(nextGrants)
         }
-        let caps = RecordDiff.setting(record["capabilities"], Self.name, .object(settings))
-        let next = RecordDiff.setting(record, "capabilities", caps)
+        let next = RecordDiff.setting(record, path: Self.field, .object(settings))
         let effect: String
         if removing {
             effect = "Blocks this federation grant on the next call."

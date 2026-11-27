@@ -22,7 +22,8 @@ struct StorageScreen: View {
     @State private var moreError: String?
 
     private var id: String { context.instance.id }
-    private var storage: JSON { record["storage"] }
+    /// The approved location, at the record's `data.read` (docs/plans/record-reshape.md).
+    private var storage: JSON { record["data"]["read"] }
 
     var body: some View {
         List {

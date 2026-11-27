@@ -22,7 +22,12 @@ struct InstancesScreen: View {
         let capabilities: [String]
 
         /// The capability sections a record may enable, as the web lists them.
-        static let sections = ["publishing", "site_passkeys", "storage", "source", "ci", "observability", "ingest"]
+        /// Each with where it sits in the record (docs/plans/record-reshape.md).
+        static let sections: [(name: String, field: String)] = [
+            ("publishing", "site.publishing"), ("site_passkeys", "site.passkeys"),
+            ("storage", "data.read"), ("source", "repo.source"), ("ci", "ci"),
+            ("observability", "observability"),
+        ]
 
         init?(_ j: JSON) {
             guard let id = j["id"].string else { return nil }
@@ -32,10 +37,10 @@ struct InstancesScreen: View {
             host = j["zones"][0].string
             worker = j["worker"].string
             version = j["version"].int
-            capabilities = Row.sections.filter { key in
-                let v = j[key]
+            capabilities = Row.sections.filter { s in
+                let v = RecordDiff.at(j, s.field)
                 return !v.isNull && v != .bool(false)
-            }
+            }.map(\.name)
         }
     }
 

@@ -12,8 +12,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// A named unit of what the platform runs.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-#[serde(deny_unknown_fields)]
+///
+/// This is the in-memory model, keyed by catalogue id. The record's layout, as it is stored,
+/// listed, diffed and digested, is `super::layout`'s (docs/plans/record-reshape.md): `Instance`
+/// serializes to it and reads both it and the layout before it.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Instance {
     /// The instance id, such as "noisypigeon" or "pigeon-security/platform". Only the home
     /// instance's may hold a dot, and only as one of its zones: `pigeon.dev`, which R1's
@@ -24,64 +27,60 @@ pub struct Instance {
     /// The Cloudflare account the instance lives in.
     pub account: AccountRef,
     /// The DNS zones this instance may serve hostnames in.
-    #[serde(default)]
     pub zones: Vec<String>,
     /// The source repository, if there is one.
-    #[serde(default)]
     pub repo: Option<RepoRef>,
     /// The sites that belong to this instance.
-    #[serde(default)]
     pub sites: Vec<SiteRecord>,
     /// The one Worker in the instance's account that serves all its sites, on its zone, its
     /// pigeon.dev subdomain or both: by default [`worker_for`], such as `noisypigeon`.
-    #[serde(default)]
     pub worker: Option<String>,
     /// Whether `worker` may differ from the name [`worker_for`] gives. The person sees this in
     /// the diff they approve.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub worker_override: bool,
     /// Version pins: a component name to the requirement the instance holds it to, such as
     /// `{"blog": "^1"}`. Set only by the person approving the record. Absent when empty.
-    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub pins: std::collections::BTreeMap<String, String>,
-    /// The site that `site_deploy` and `site_rollback` publish. Absent: nothing is publishable.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The site that `site_deploy` and `site_rollback` publish (`site.publishing`). Absent:
+    /// nothing is publishable.
     pub publishing: Option<pigeon_core::site_publish::Profile>,
-    /// Optional read-only access to a declared object storage account.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub storage: Option<crate::storage::scope::Profile>,
-    /// Opt in to read-only tools for this record's approved repository.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Opt in to read-only tools for this record's approved repository (`repo.source`).
     pub source: Option<Toggle>,
-    /// Optional read-only CI visibility for this instance.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Optional read-only CI visibility for this instance (`ci`).
     pub ci: Option<crate::ci::Profile>,
-    /// Optional read-only metrics for the approved Worker.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Optional read-only metrics for the approved Worker (`observability`).
     pub observability: Option<Toggle>,
-    /// Optional approved ingestion source and destination.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ingest: Option<crate::ingest::Profile>,
     /// Hostnames in the instance's zones that answer with an HTTP redirect to another URL, served
-    /// by the instance's own Worker (docs/plans/redirects.md). Absent when empty, so the digests
-    /// of records without it do not change.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// by the instance's own Worker (docs/plans/redirects.md; `network.redirects`).
     pub redirects: Vec<Redirect>,
     /// Where the platform itself (console, MCP, OAuth) is served: only the home instance names
-    /// it, and it is platform-owned, so plans never touch it. Absent when unset, so the digests
-    /// of records without it do not change.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// it, and it is platform-owned, so plans never touch it.
     pub platform: Option<PlatformRef>,
     /// The catalogue capabilities (`catalogue::CATALOGUE`) the instance enables beyond its
-    /// profile fields, by name, each with its settings (docs/plans/capability-scoping.md, M2).
-    /// Absent when empty, so the digests of records without it do not change. Checked by
+    /// profile fields, by catalogue id, each with its settings (docs/plans/capability-scoping.md,
+    /// M2). Each sits in the record at its catalogue entry's `field` (`data.email` for
+    /// `data-email`), or at `capabilities.<id>` for an entry without one. Checked by
     /// `catalogue::problems`: no home-only capability off home, none on a linked instance until
     /// M4 turns each on.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub capabilities: BTreeMap<String, CapabilitySettings>,
     /// The record version, which is not part of a diff.
-    #[serde(default)]
     pub version: u64,
+}
+
+impl Serialize for Instance {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let flat = super::layout::Model::serialize(self, serde_json::value::Serializer)
+            .map_err(serde::ser::Error::custom)?;
+        super::layout::shape(flat).serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for Instance {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let value = Value::deserialize(d)?;
+        let flat = super::layout::unshape(value).map_err(serde::de::Error::custom)?;
+        super::layout::Model::deserialize(flat).map_err(serde::de::Error::custom)
+    }
 }
 
 /// An opt-in profile with no settings of its own, serialized as `{"state": "enabled"}` or
@@ -168,13 +167,17 @@ pub struct CapabilitySettings {
     /// `data` only: the Backblaze B2 bucket the store is backed up to (ingest.md decision 10).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backup: Option<crate::data_store::Backup>,
-    /// `email` only: the domain mail is received on; absent, the record's first zone.
+    /// `data` only: the approved external storage location its read tools also read
+    /// (`data.read`; the `storage` profile before docs/plans/record-reshape.md).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read: Option<crate::storage::scope::Profile>,
+    /// `data-email` only: the domain mail is received on; absent, the record's first zone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub domain: Option<String>,
-    /// `email` only: the listed addresses, each its own mailbox.
+    /// `data-email` only: the listed addresses, each its own mailbox.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub addresses: Vec<crate::email::Address>,
-    /// `email` only: the forwarding scope and default destination.
+    /// `data-email` only: the forwarding scope and default destination.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forward: Option<crate::email::Forward>,
 }
@@ -1151,10 +1154,7 @@ pub fn validate(instance: &Instance, others: &[Instance], rules: &Rules) -> Vec<
         }
     }
 
-    if let Some(profile) = instance
-        .storage
-        .as_ref()
-        .filter(|profile| profile.enabled())
+    if let Some(profile) = crate::data_store::read(instance).filter(|profile| profile.enabled())
         && let Err(problem) = profile.scope()
     {
         problems.push(problem);
@@ -1184,22 +1184,6 @@ pub fn validate(instance: &Instance, others: &[Instance], rules: &Rules) -> Vec<
     if let Err(problem) = crate::observability::instance::validate(instance) {
         problems.push(problem);
     }
-    if let Some(profile) = &instance.ingest {
-        if let Err(problem) = profile.validate() {
-            problems.push(problem);
-        }
-        if profile.enabled()
-            && !matches!(
-                instance.account,
-                AccountRef::Linked {
-                    account_id: Some(_)
-                }
-            )
-        {
-            problems.push("Ingest requires an approved linked account.".into());
-        }
-    }
-
     if others.iter().any(|o| o.id == instance.id) {
         problems.push(format!(
             "An instance with id {} already exists.",
@@ -1216,7 +1200,7 @@ pub fn digest(instance: &Instance) -> String {
 
 fn flatten(prefix: &str, value: &Value, out: &mut BTreeMap<String, Value>) {
     match value {
-        // An empty object is a value of its own: `capabilities.data = {}` turns a capability on
+        // An empty object is a value of its own: `data = {}` turns a capability on
         // with every setting at its default, and must show as a change.
         Value::Object(map) if map.is_empty() && !prefix.is_empty() => {
             out.insert(prefix.to_string(), value.clone());
@@ -1252,16 +1236,34 @@ fn leaves(instance: &Instance) -> BTreeMap<String, Value> {
     out
 }
 
+/// Whether `leaves` holds a value under `path`: `path.<key>` or `path[<i>]`.
+fn has_children(leaves: &BTreeMap<String, Value>, path: &str) -> bool {
+    let dot = format!("{path}.");
+    let bracket = format!("{path}[");
+    leaves
+        .range(path.to_string()..)
+        .take_while(|(k, _)| k.starts_with(path))
+        .any(|(k, _)| k.starts_with(&dot) || k.starts_with(&bracket))
+}
+
 /// Lists the leaf values that differ between two records, sorted by path.
+///
+/// An empty object is a leaf of its own (an entry with every setting at its default), so an
+/// entry that was `{}` and gains settings would read as `{} → null` beside its new children:
+/// that line is left out, and only the added children show. Likewise an entry whose children
+/// all go while it stays shows only the removed children.
 pub fn diff(old: Option<&Instance>, new: &Instance) -> Vec<Change> {
     let old_leaves = old.map(leaves).unwrap_or_default();
     let new_leaves = leaves(new);
     let keys: BTreeSet<&String> = old_leaves.keys().chain(new_leaves.keys()).collect();
+    let empty = |v: &Value| v.as_object().is_some_and(|m| m.is_empty());
     let mut changes = Vec::new();
     for key in keys {
         let from = old_leaves.get(key).cloned().unwrap_or(Value::Null);
         let to = new_leaves.get(key).cloned().unwrap_or(Value::Null);
-        if from != to {
+        let filled = empty(&from) && to.is_null() && has_children(&new_leaves, key);
+        let emptied = from.is_null() && empty(&to) && has_children(&old_leaves, key);
+        if from != to && !filled && !emptied {
             changes.push(Change {
                 path: key.clone(),
                 from,

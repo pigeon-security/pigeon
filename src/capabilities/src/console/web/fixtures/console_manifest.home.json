@@ -119,7 +119,7 @@
           "id": "runs",
           "title": "Runs",
           "order": 10,
-          "capability": "ingest",
+          "capability": "data-ingest",
           "upgrade": null
         }
       ]
@@ -134,7 +134,7 @@
           "id": "mailboxes",
           "title": "Mailboxes",
           "order": 10,
-          "capability": "email",
+          "capability": "data-email",
           "upgrade": null
         }
       ]

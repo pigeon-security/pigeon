@@ -25,7 +25,10 @@
     const list = await ctx.op("instances_list");
     return (Array.isArray(list) ? list : []).find((r) => r.id === ctx.instance.id) || null;
   }
-  const publishing = (r) => (r?.publishing?.state === "enabled" ? r.publishing.site : null);
+  // The record's layout (docs/plans/record-reshape.md): publishing at `site.publishing`, each
+  // passkey-gated site under `site.passkeys` by name.
+  const publishing = (r) => (r?.site?.publishing?.state === "enabled" ? r.site.publishing.site : null);
+  const passkeysOf = (r, name) => r?.site?.passkeys?.[name] || null;
 
   // ---- Site › Sites: the record's sites, the one publishing names first.
   function targetText(t) {
@@ -48,14 +51,14 @@
           { label: "Targets", cell: (s) => (s.targets?.length ? s.targets.map((t) => el("div", { class: "mono" }, targetText(t),
             t.kind === "zone" ? [" ", pill(t.enabled ? "Route on" : "Route off", t.enabled ? "ok" : "warn")] : null))
             : el("span", { class: "muted", text: "None" })) },
-          { label: "Visitors", cell: (s) => (s.auth === "passkey"
-            ? [pill("Passkey", "info"), el("span", { class: "sub", text: (s.allow || []).includes("site") ? "Invited visitors" : `${(s.allow || []).length} allowed` })]
+          { label: "Visitors", cell: (s) => (s.passkeys
+            ? [pill("Passkey", "info"), el("span", { class: "sub", text: (s.passkeys.allow || []).includes("site") ? "Invited visitors" : `${(s.passkeys.allow || []).length} allowed` })]
             : pill("Public", "plain")) },
         ],
         load: async () => {
           const r = await recordOf(ctx);
           const live = publishing(r);
-          return (r?.sites || []).map((s) => ({ ...s, published: s.name === live }))
+          return (r?.sites || []).map((s) => ({ ...s, published: s.name === live, passkeys: passkeysOf(r, s.name) }))
             .sort((a, b) => Number(b.published) - Number(a.published));
         },
       }));

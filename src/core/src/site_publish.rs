@@ -22,14 +22,34 @@ pub enum Profile {
     Disabled,
 }
 
+/// A record's `publishing` profile: at `site.publishing` (docs/plans/record-reshape.md), or at
+/// `publishing` in a record of the layout before it.
+pub fn profile(record: &Value) -> &Value {
+    match &record["site"]["publishing"] {
+        Value::Null => &record["publishing"],
+        p => p,
+    }
+}
+
+/// Whether `site` (one of `record`'s `sites`) signs its visitors in with passkeys: an entry
+/// for it under the record's `site.passkeys`, or `auth = "passkey"` on the site in a record of
+/// the layout before it.
+pub fn protected(record: &Value, site: &Value) -> bool {
+    site["name"]
+        .as_str()
+        .is_some_and(|name| record["site"]["passkeys"][name].is_object())
+        || site["auth"] == "passkey"
+}
+
 /// Resolve the site an approved `publishing` profile names. A record without a profile, or
 /// with a disabled one, publishes nothing.
 pub fn site(record: &Value) -> Result<&Value, String> {
     let sites = record["sites"].as_array().ok_or("instance has no sites")?;
-    if record["publishing"].is_null() {
+    let publishing = profile(record);
+    if publishing.is_null() {
         return Err("instance has no publishing profile".into());
     }
-    match serde_json::from_value::<Profile>(record["publishing"].clone())
+    match serde_json::from_value::<Profile>(publishing.clone())
         .map_err(|_| "invalid publishing profile".to_string())?
     {
         Profile::Disabled => Err("site publishing is disabled for this instance".into()),
