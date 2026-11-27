@@ -217,8 +217,8 @@ opt-in still needs to be wired into the reshaped Data plan, so the route remains
 on provisioned instances until that work ships.
 It stores the exact RFC 822 bytes and independently addressable attachments, and records
 the server, account, folder, UIDVALIDITY and UID on each message's sighting. Historical
-imports never forward mail. Use `email_list` with `source: "imap"` to page
-through committed historical sightings. `email_get` follows each attachment's
+imports never forward mail. Use `data_email_list` with `source: "imap"` to page
+through committed historical sightings. `data_email_get` follows each attachment's
 lineage, including when two different messages share its bytes.
 
 Run the client on a trusted local machine with Python 3.10 or later. Use app passwords
