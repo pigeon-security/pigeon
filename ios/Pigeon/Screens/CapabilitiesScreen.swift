@@ -150,8 +150,54 @@ struct CapabilitiesScreen: View {
                 availableRow(spec, record)
             }
         }
+        // The catalogue's built-in capabilities, not offered above, each with its `default`
+        // (docs/plans/platform-capabilities.md): on home on and read-only, `always` ones never
+        // listed in a record; on a linked instance the home-only ones, named.
+        let shown = Set(all.flatMap { [$0.cap, $0.component] })
+        let builtIn = data.versions["catalogue"].items.filter {
+            !shown.contains($0["name"].string ?? "")
+        }
+        let placed = data.versions["instances"].items
+            .first { $0["id"].string == instance.id }?["placements"] ?? .null
         if instance.home {
-            let ours = Set(all.map(\.component))
+            let always = builtIn.filter {
+                $0["default"].string == "always" && !placed[$0["name"].string ?? ""].isNull
+            }
+            let byDefault = builtIn.filter {
+                $0["default"].string == "on" && !placed[$0["name"].string ?? ""].isNull
+            }
+            if !always.isEmpty {
+                Section {
+                    ForEach(always, id: \.self) { e in builtInRow(e, data, status: "Always on") }
+                } header: {
+                    Text("Always on · the platform’s own (\(always.count))")
+                } footer: {
+                    Text("Never listed in the record. Changes land through code.")
+                }
+            }
+            if !byDefault.isEmpty {
+                Section {
+                    ForEach(byDefault, id: \.self) { e in builtInRow(e, data, status: "On by default") }
+                } header: {
+                    Text("On by default (\(byDefault.count))")
+                } footer: {
+                    Text("On here without a record entry. Changes land through code.")
+                }
+            }
+        } else {
+            let homeOnly = builtIn.filter { $0["availability"].string == "home_only" }
+            if !homeOnly.isEmpty {
+                Section {
+                    ForEach(homeOnly, id: \.self) { e in builtInRow(e, data, status: "Home only") }
+                } header: {
+                    Text("Home only (\(homeOnly.count))")
+                } footer: {
+                    Text("Only the home instance has these.")
+                }
+            }
+        }
+        if instance.home {
+            let ours = shown.union(builtIn.compactMap { $0["name"].string })
             let deployed = data.versions["components"].items.filter {
                 $0["kind"].string == "capability" && !ours.contains($0["name"].string ?? "")
             }
@@ -184,6 +230,20 @@ struct CapabilitiesScreen: View {
                     Text("Platform plumbing: deployed with the platform, nothing to use directly.")
                 }
             }
+        }
+    }
+
+    /// A built-in catalogue capability: what it does, its record field when it has one, and its
+    /// served version.
+    private func builtInRow(_ e: JSON, _ data: CapabilitiesData, status: String) -> some View {
+        let name = e["name"].string ?? "—"
+        let version = data.versions["components"].items
+            .first { $0["name"].string == name }?["version"].text
+        let about = e["about"].string ?? ""
+        let field = e["field"].string.map { " · \($0)" } ?? ""
+        return ListRow(title: name, subtitle: "\(status)\(field)\(about.isEmpty ? "" : " · \(about)")",
+                       monoTitle: true) {
+            Text(version ?? "—").idStyle().foregroundStyle(Theme.muted)
         }
     }
 

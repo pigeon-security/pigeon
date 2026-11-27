@@ -903,11 +903,18 @@ fn capability_catalogue_as_decided() {
     for e in CATALOGUE {
         assert_eq!(
             e.linked,
-            e.always || LINKED_SO_FAR.contains(&e.name),
+            e.name == "instances" || LINKED_SO_FAR.contains(&e.name),
             "{}",
             e.name
         );
-        assert_eq!(e.always, e.name == "instances", "{}", e.name);
+        // Always on: `instances` everywhere, and every home-only capability on home.
+        assert_eq!(
+            e.always,
+            e.name == "instances" || e.availability == Availability::HomeOnly,
+            "{}",
+            e.name
+        );
+        assert!(!e.about.is_empty(), "{} says what it does", e.name);
     }
     for e in CATALOGUE {
         assert_eq!(
@@ -971,6 +978,180 @@ fn capability_catalogue_as_decided() {
     }
 }
 
+/// The platform-level capabilities are first-class catalogue entries
+/// (docs/plans/platform-capabilities.md): each with its availability, how it comes to be on,
+/// where it runs and a few words on what it does. The home-only ones are always on on home and
+/// never listed, so the home record does not change: pigeon.dev's stored record reads, validates
+/// and writes back byte for byte as it was, and every one of them is on there, read-only, while
+/// none is on a linked instance.
+#[test]
+fn platform_capabilities_catalogued() {
+    use pigeon_capabilities::catalogue::{
+        Availability, Enablement, Scope, find, hosted_enabled, placements, problems,
+    };
+    use pigeon_capabilities::instances::record::Instance;
+
+    for (name, availability, enablement, scope) in [
+        (
+            "site",
+            Availability::HomeOnly,
+            Enablement::Always,
+            Scope::Platform,
+        ),
+        (
+            "mirror",
+            Availability::HomeOnly,
+            Enablement::Always,
+            Scope::Platform,
+        ),
+        (
+            "apple",
+            Availability::HomeOnly,
+            Enablement::Always,
+            Scope::Platform,
+        ),
+        (
+            "users",
+            Availability::HomeOnly,
+            Enablement::Always,
+            Scope::Platform,
+        ),
+        (
+            "secrets",
+            Availability::Any,
+            Enablement::On,
+            Scope::Instance,
+        ),
+        ("proxy", Availability::Any, Enablement::On, Scope::Instance),
+        (
+            "approvals",
+            Availability::HomeOnly,
+            Enablement::Always,
+            Scope::Platform,
+        ),
+        (
+            "policy",
+            Availability::HomeOnly,
+            Enablement::Always,
+            Scope::Platform,
+        ),
+        (
+            "land",
+            Availability::HomeOnly,
+            Enablement::Always,
+            Scope::Platform,
+        ),
+        (
+            "github",
+            Availability::HomeOnly,
+            Enablement::Always,
+            Scope::Platform,
+        ),
+        (
+            "architecture",
+            Availability::Any,
+            Enablement::On,
+            Scope::Instance,
+        ),
+        (
+            "linked",
+            Availability::HomeOnly,
+            Enablement::Always,
+            Scope::Platform,
+        ),
+        (
+            "multi-instance",
+            Availability::HomeOnly,
+            Enablement::Always,
+            Scope::Platform,
+        ),
+        (
+            "changelog",
+            Availability::HomeOnly,
+            Enablement::Always,
+            Scope::Platform,
+        ),
+        ("models", Availability::Any, Enablement::On, Scope::Instance),
+        (
+            "ai-agents",
+            Availability::Any,
+            Enablement::On,
+            Scope::Instance,
+        ),
+    ] {
+        let e = find(name).unwrap_or_else(|| panic!("{name} is catalogued"));
+        assert_eq!(e.availability, availability, "{name}");
+        assert_eq!(e.enablement(), enablement, "{name}");
+        assert_eq!(e.scope, scope, "{name}");
+        assert!(!e.opt_in, "{name} is never opt-in: no capability turns off");
+        assert_eq!(e.field, None, "{name} has no setting in the record yet");
+    }
+
+    // pigeon.dev's stored record, as `instances_list` answered it before this change.
+    let stored = json!({
+        "account": { "kind": "home" },
+        "ci": { "jobs": ["test"], "state": "enabled" },
+        "data": { "email": { "addresses": [{ "local": "cloudflare" }],
+                             "forward": { "scope": "all", "to": "someone@example.com" } } },
+        "id": "pigeon.dev",
+        "observability": { "state": "enabled" },
+        "platform": { "host": "platform.pigeon.dev" },
+        "repo": { "kind": "artifacts", "namespace": "pigeon-security", "repo": "pigeon",
+                  "source": { "state": "enabled" } },
+        "site": { "publishing": { "site": "landing", "state": "enabled" } },
+        "sites": [{ "bucket": "pigeon-platform-site", "build": "site", "jurisdiction": null,
+                    "name": "landing", "targets": [{ "hostname": "pigeon.dev", "kind": "domain" }],
+                    "template": "landing@1" }],
+        "title": "pigeon", "version": 14, "worker": "pigeon-platform", "zones": ["pigeon.dev"]
+    });
+    let home: Instance = serde_json::from_value(stored.clone()).unwrap();
+    assert_eq!(
+        serde_json::to_value(&home).unwrap(),
+        stored,
+        "nothing to migrate"
+    );
+    assert_eq!(problems(&home), Vec::<String>::new());
+    let linked: Instance = serde_json::from_value(json!({
+        "id": "docs", "title": "Docs", "account": { "kind": "linked" }, "worker": "docs"
+    }))
+    .unwrap();
+    let on_home = placements(&home);
+    let on_linked = placements(&linked);
+    for e in pigeon_capabilities::catalogue::CATALOGUE {
+        if e.opt_in {
+            continue;
+        }
+        assert!(hosted_enabled(&home, e.name), "{} on home", e.name);
+        assert_eq!(on_home[e.name]["read_only"], true, "{}", e.name);
+        if e.availability == Availability::HomeOnly {
+            assert!(!hosted_enabled(&linked, e.name), "{} off home", e.name);
+            assert!(on_linked.get(e.name).is_none(), "{}", e.name);
+            assert_eq!(on_home[e.name]["placement"], "inline", "{}", e.name);
+        }
+    }
+
+    // `capabilities_versions` says how each comes to be on.
+    let v = pigeon_capabilities::versioning::versions_view(&[], &[], &[home], false);
+    let row = |name: &str| {
+        v["catalogue"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == name)
+            .cloned()
+            .unwrap()
+    };
+    assert_eq!(row("land")["default"], "always");
+    assert_eq!(row("land")["availability"], "home_only");
+    assert_eq!(row("secrets")["default"], "on");
+    assert_eq!(row("data")["default"], "opt_in");
+    assert_eq!(row("instances")["default"], "always");
+    assert_eq!(
+        v["instances"][0]["placements"]["approvals"]["read_only"],
+        true
+    );
+}
+
 /// Capability scoping, M2: a record lists the catalogue capabilities it enables beyond its
 /// profile fields. Validation refuses an unknown one, `instances` (every instance has it), a
 /// home-only one (`multi-instance`, `users`) off home, any on a linked instance until M4, and
@@ -1008,13 +1189,20 @@ fn capability_scoping_enforces_home_only() {
     bad["capabilities"] = json!({ "users": { "worker": "pigeon-users" } });
     assert!(serde_json::from_value::<Instance>(bad).is_err());
 
-    // Home may list the home-only ones, and the others with what they require.
-    let home = with(
-        &home_json,
-        json!({ "multi-instance": {}, "users": {}, "secrets": {}, "proxy": {} }),
-    );
+    // Home may list the ones on by default, with what they require; the home-only ones are
+    // always on there and never listed (docs/plans/platform-capabilities.md).
+    let home = with(&home_json, json!({ "secrets": {}, "proxy": {} }));
     assert_eq!(problems(&home), Vec::<String>::new());
     let home_problems = |caps: Value| problems(&with(&home_json, caps));
+    for name in ["multi-instance", "users", "land", "approvals", "policy"] {
+        assert_eq!(
+            home_problems(json!({ name: {} })),
+            [format!(
+                "The capability \"{name}\" is always on on the home instance and home-only; \
+                 leave it out of capabilities."
+            )]
+        );
+    }
     assert_eq!(
         home_problems(json!({ "proxy": {} })),
         ["The capability \"proxy\" needs \"secrets\" enabled beside it."]
@@ -1030,11 +1218,12 @@ fn capability_scoping_enforces_home_only() {
 
     // A linked record may not enable a home-only one, nor any other yet.
     let linked = |caps: Value| problems(&with(&linked_json, caps));
-    for name in ["multi-instance", "users"] {
+    for name in ["multi-instance", "users", "linked", "apple"] {
         assert_eq!(
             linked(json!({ name: {} })),
             [format!(
-                "The capability \"{name}\" is home-only: only the home instance may enable it."
+                "The capability \"{name}\" is always on on the home instance and home-only; \
+                 leave it out of capabilities."
             )]
         );
     }
@@ -1490,15 +1679,15 @@ fn capability_placement_in_the_record() {
     bad["capabilities"] = json!({ "models": { "placement": "elsewhere" } });
     assert!(serde_json::from_value::<Instance>(bad).is_err());
     // Absent, it is absent: `{}` reads back as `{}`, and the digest is the one without it.
-    let bare = with(&home_json, json!({ "users": {} }));
+    let bare = with(&home_json, json!({ "secrets": {} }));
     assert_eq!(
         serde_json::to_value(&bare).unwrap()["capabilities"],
-        json!({ "users": {} })
+        json!({ "secrets": {} })
     );
-    let placed = with(&home_json, json!({ "users": { "placement": "inline" } }));
+    let placed = with(&home_json, json!({ "secrets": { "placement": "inline" } }));
     assert_ne!(record::digest(&placed), record::digest(&bare));
     assert_eq!(
-        serde_json::to_value(&placed).unwrap()["capabilities"]["users"],
+        serde_json::to_value(&placed).unwrap()["capabilities"]["secrets"],
         json!({ "placement": "inline" })
     );
 
@@ -1509,7 +1698,7 @@ fn capability_placement_in_the_record() {
             "ai-agents": { "placement": "own_worker" },
             "models": { "placement": "own_worker" },
             "secrets": { "placement": "inline" },
-            "users": { "placement": "inline" }
+            "proxy": { "placement": "inline" }
         }),
     );
     assert_eq!(problems(&home_ok), Vec::<String>::new());

@@ -178,6 +178,10 @@ the policy.
 
 ## Platform-level capabilities in the new layout (for the follow-up)
 
+Done in [platform-capabilities.md](platform-capabilities.md): each is a catalogue entry; the
+home-only ones are `always` on home and never listed, so none has a field yet. The places below
+are reserved for when one gains a setting.
+
 These capabilities are about the platform as a whole, or are served for every instance, and the
 record does not list them today (the catalogue's `platform()` entries, or none). Where each
 would naturally sit, by the same rule as above (a namespace for what it is about):

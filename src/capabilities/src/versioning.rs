@@ -95,8 +95,23 @@ pub fn versions_view(
         "components": rows,
         "undeclared": undeclared,
         "instances": instances,
-        "catalogue": to_value(crate::catalogue::CATALOGUE),
+        "catalogue": catalogue_view(),
     })
+}
+
+/// The catalogue as `capabilities_versions` answers it: each entry, with `default`, how it
+/// comes to be on (`always`, `on` or `opt_in`; docs/plans/platform-capabilities.md).
+pub fn catalogue_view() -> Value {
+    Value::Array(
+        crate::catalogue::CATALOGUE
+            .iter()
+            .map(|e| {
+                let mut row = to_value(e);
+                row["default"] = to_value(e.enablement());
+                row
+            })
+            .collect(),
+    )
 }
 
 /// The answer of `capabilities_upgrade_plan`: for each of `instances`, the steps that move its
@@ -154,7 +169,8 @@ impl Capability for Versioning {
                               whether it is internal plumbing, the \
                               capabilities that declare none, and each instance's pins checked \
                               against them, and the capability catalogue: each capability's \
-                              placement, scope and availability. `changelog` adds each \
+                              placement, scope, availability and default (always, on or \
+                              opt_in). `changelog` adds each \
                               component's changelog; `instance` limits the pins to one instance.",
                 input_schema: json!({
                     "type": "object",

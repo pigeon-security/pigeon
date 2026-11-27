@@ -71,8 +71,10 @@ pub struct Entry {
     /// Whether a linked instance's record may enable it yet. M4 turns it on one capability at a
     /// time, each with what the instance's Worker needs to serve it and the scopes it needs.
     pub linked: bool,
-    /// Whether every instance has it, so a record never lists it: `instances`, whose record,
-    /// plan and apply every instance needs.
+    /// Whether every instance it is available to has it, so a record never lists it:
+    /// `instances`, whose record, plan and apply every instance needs, and the platform's own
+    /// home-only capabilities (`users`, `land`, `approvals`, `policy`, …), always on on home
+    /// (docs/plans/platform-capabilities.md).
     pub always: bool,
     /// Whether even home must list this capability in its approved record.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -81,12 +83,37 @@ pub struct Entry {
     /// `data.email`; `None`: at `capabilities.<name>`. `instances::layout` reads and writes the
     /// record by it, and the console finds a capability's settings by it.
     pub field: Option<&'static str>,
+    /// What it does, in a few words, for the console's Capabilities view.
+    pub about: &'static str,
+}
+
+/// How a capability comes to be on, as `capabilities_versions` answers it (`default`).
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Enablement {
+    /// On wherever it is available, never listed in a record (`always`).
+    Always,
+    /// On home without being listed; a linked instance's record lists it, where `linked`.
+    On,
+    /// Listed in the record even on home (`opt_in`).
+    OptIn,
 }
 
 impl Entry {
     /// Whether an instance may choose where it runs.
     pub fn offers_choice(&self) -> bool {
         self.placements.len() > 1
+    }
+
+    /// How it comes to be on: always, on by default, or opt-in.
+    pub fn enablement(&self) -> Enablement {
+        if self.always {
+            Enablement::Always
+        } else if self.opt_in {
+            Enablement::OptIn
+        } else {
+            Enablement::On
+        }
     }
 }
 
@@ -107,25 +134,31 @@ const BASE: Entry = Entry {
     always: false,
     opt_in: false,
     field: None,
+    about: "",
 };
 
 /// One that runs inline or in its own Worker, and on home runs in `worker`.
-const fn own(name: &'static str, worker: &'static str) -> Entry {
+const fn own(name: &'static str, worker: &'static str, about: &'static str) -> Entry {
     Entry {
         name,
         placements: EITHER,
         home: Placement::OwnWorker,
         home_worker: Some(worker),
+        about,
         ..BASE
     }
 }
 
-/// One about the platform as a whole, which only home may have.
-const fn platform(name: &'static str) -> Entry {
+/// One about the platform as a whole, which only home has, and always: served inline by the
+/// platform Worker, never listed in a record, shown read-only
+/// (docs/plans/platform-capabilities.md).
+const fn platform(name: &'static str, about: &'static str) -> Entry {
     Entry {
         name,
         scope: Scope::Platform,
         availability: Availability::HomeOnly,
+        always: true,
+        about,
         ..BASE
     }
 }
@@ -133,13 +166,18 @@ const fn platform(name: &'static str) -> Entry {
 /// Every catalogued capability. A hosted capability missing here is treated as home-only.
 pub const CATALOGUE: &[Entry] = &[
     // Sessions › Live and Compare.
-    own("ai-agents", "pigeon-ai-agents"),
+    own(
+        "ai-agents",
+        "pigeon-ai-agents",
+        "Run and follow coding-agent sessions",
+    ),
     // Metrics › Workers, and on home Cost › 7 days, Today and 30 days: both shown only when the
     // record's own `observability` is enabled. Not `linked`: a linked instance's Cost would be its
     // own account's spend, and Cloudflare offers no Billing OAuth scope to read it (M4 step 3,
     // deferred; docs/plans/capability-scoping.md says what would build it).
     Entry {
         name: "observability",
+        about: "Read Worker metrics, errors and cost",
         ..BASE
     },
     // Access › Secrets. On a linked instance (M4, step 2) its own account's Secrets Store,
@@ -147,6 +185,7 @@ pub const CATALOGUE: &[Entry] = &[
     Entry {
         name: "secrets",
         linked: true,
+        about: "List and request secrets in the instance's Secrets Store",
         ..BASE
     },
     // Access › Tokens: issuing, listing and revoking proxy credentials, which core serves. The
@@ -155,6 +194,7 @@ pub const CATALOGUE: &[Entry] = &[
     Entry {
         name: "proxy",
         requires: &["secrets"],
+        about: "Issue and revoke the git and Cloudflare proxy credentials",
         ..BASE
     },
     // Cloud Gateway setup status runs inline on core.
@@ -164,6 +204,7 @@ pub const CATALOGUE: &[Entry] = &[
         name: crate::cloud_scope::NAME,
         field: Some("cloud.gateway"),
         placements: &[Placement::Inline, Placement::OwnWorker],
+        about: "Reach cloud providers through the Cloud Gateway",
         ..BASE
     },
     // DigitalOcean connection management is served inline on core.
@@ -173,6 +214,7 @@ pub const CATALOGUE: &[Entry] = &[
         linked: true,
         opt_in: true,
         requires: &[crate::cloud_scope::NAME],
+        about: "Connect a DigitalOcean team: Droplets and Spaces",
         ..BASE
     },
     Entry {
@@ -180,6 +222,7 @@ pub const CATALOGUE: &[Entry] = &[
         field: Some("instance.mcp-federation"),
         linked: true,
         opt_in: true,
+        about: "Share approved read tools with peer instances",
         ..BASE
     },
     // Jobs › Runs reads instance-owned job history in core.
@@ -188,21 +231,48 @@ pub const CATALOGUE: &[Entry] = &[
         field: Some("jobs"),
         linked: true,
         opt_in: true,
+        about: "Read the history of jobs run for the instance",
         ..BASE
     },
     // Platform › Models.
-    own("models", "pigeon-model-gateway"),
+    own(
+        "models",
+        "pigeon-model-gateway",
+        "Call models through the model gateway",
+    ),
     // Instances › All instances, Platform › Endpoints, and creating and linking instances.
-    platform(MULTI_INSTANCE),
+    platform(MULTI_INSTANCE, "List, create, link and retire instances"),
     // Access › People and Apps. Identity stays platform-level; per-instance membership is a
     // later phase.
-    platform("users"),
+    platform("users", "People, their passkeys and apps"),
+    // The platform's other home-only capabilities (docs/plans/platform-capabilities.md). Each is
+    // always on on home and never listed in a record: none has a setting, and a record entry
+    // would let a record turn off a gate the platform's safety rests on (`approvals`, `policy`,
+    // `land`).
+    // Pigeon's public site at the apex (`site_publish`). An instance's own sites are its
+    // record's `site.publishing`, served by `pigeon-sites`.
+    platform("site", "Publish pigeon's public site"),
+    // `source_mirror`: the source repository in Artifacts, mirrored to GitHub.
+    platform("mirror", "Mirror the source repository to GitHub"),
+    platform("github", "The platform's GitHub App and its installations"),
+    // Landings move the source repository's `main` and deploy what they change.
+    platform("land", "Land branches on main and deploy them"),
+    platform("changelog", "The changelog of main"),
+    // `.pigeon/policy.toml`, read on every call; only the person changes it.
+    platform("policy", "Check a request against the policy"),
+    // What waits for the person's passkey, on every instance.
+    platform("approvals", "What waits for the person's passkey"),
+    // App Store Connect, iOS releases and APNs for the platform's own app.
+    platform("apple", "The iOS app: App Store, releases and push"),
+    // Linking instances to their own Cloudflare accounts, and checking each link.
+    platform("linked", "Link instances to their own Cloudflare accounts"),
     // Platform › Architecture: the selected instance's own setup; on home the platform's. On a
     // linked instance (M4, step 1) it reads only the record and what the platform serves for
     // it, so it needs no linked-account scope.
     Entry {
         name: "architecture",
         linked: true,
+        about: "Draw and check the instance's setup",
         ..BASE
     },
     // No views of its own: every instance's record, `console_manifest`, plan, apply and retire.
@@ -210,6 +280,7 @@ pub const CATALOGUE: &[Entry] = &[
         name: "instances",
         linked: true,
         always: true,
+        about: "The instance's record, plan and apply",
         ..BASE
     },
     // The instance's unified data store, lite tier (docs/plans/email.md): bucket, D1 and data
@@ -224,6 +295,7 @@ pub const CATALOGUE: &[Entry] = &[
         home_worker: Some("pigeon-data"),
         linked: true,
         opt_in: true,
+        about: "The instance's data store, and reading external storage",
         ..BASE
     },
     // Data ingest is opt-in and writes to the instance's data store.
@@ -232,6 +304,7 @@ pub const CATALOGUE: &[Entry] = &[
         field: Some("data.ingest"),
         requires: &[crate::data_store::NAME],
         opt_in: true,
+        about: "Import external storage into the data store",
         ..BASE
     },
     // `data-email` (record field `data.email`; `email` before docs/plans/record-reshape.md).
@@ -247,6 +320,7 @@ pub const CATALOGUE: &[Entry] = &[
         requires: &[crate::data_store::NAME],
         linked: true,
         opt_in: true,
+        about: "Receive the zone's mail into the data store",
         ..BASE
     },
     // No views of its own: the record's `network.redirects`, answered by the instance's own
@@ -254,6 +328,7 @@ pub const CATALOGUE: &[Entry] = &[
     Entry {
         name: "redirects",
         linked: true,
+        about: "Redirect hosts to other addresses",
         ..BASE
     },
 ];
@@ -441,6 +516,13 @@ pub fn problems(record: &Instance) -> Vec<String> {
             ));
             continue;
         };
+        if e.always && e.availability == Availability::HomeOnly {
+            out.push(format!(
+                "The capability \"{name}\" is always on on the home instance and home-only; \
+                 leave it out of capabilities."
+            ));
+            continue;
+        }
         if e.always {
             out.push(format!(
                 "The capability \"{name}\" is on every instance; leave it out of capabilities."

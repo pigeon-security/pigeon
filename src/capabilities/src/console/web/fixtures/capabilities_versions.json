@@ -200,6 +200,60 @@
           "worker": null,
           "read_only": true,
           "choices": []
+        },
+        "site": {
+          "placement": "inline",
+          "worker": null,
+          "read_only": true,
+          "choices": []
+        },
+        "mirror": {
+          "placement": "inline",
+          "worker": null,
+          "read_only": true,
+          "choices": []
+        },
+        "github": {
+          "placement": "inline",
+          "worker": null,
+          "read_only": true,
+          "choices": []
+        },
+        "land": {
+          "placement": "inline",
+          "worker": null,
+          "read_only": true,
+          "choices": []
+        },
+        "changelog": {
+          "placement": "inline",
+          "worker": null,
+          "read_only": true,
+          "choices": []
+        },
+        "policy": {
+          "placement": "inline",
+          "worker": null,
+          "read_only": true,
+          "choices": []
+        },
+        "approvals": {
+          "placement": "inline",
+          "worker": null,
+          "read_only": true,
+          "choices": []
+        },
+        "apple": {
+          "placement": "inline",
+          "worker": null,
+          "read_only": true,
+          "choices": []
+        },
+        "linked": {
+          "placement": "inline",
+          "worker": null,
+          "read_only": true,
+          "choices": []
         }
       }
     },
@@ -251,262 +305,440 @@
   ],
   "catalogue": [
     {
+      "about": "Run and follow coding-agent sessions",
+      "always": false,
+      "availability": "any",
+      "default": "on",
+      "field": null,
+      "home": "own_worker",
+      "home_worker": "pigeon-ai-agents",
+      "linked": false,
       "name": "ai-agents",
       "placements": [
         "inline",
         "own_worker"
       ],
-      "home": "own_worker",
-      "home_worker": "pigeon-ai-agents",
-      "scope": "instance",
-      "availability": "any",
       "requires": [],
-      "linked": false,
-      "always": false,
-      "field": null
+      "scope": "instance"
     },
     {
+      "about": "Read Worker metrics, errors and cost",
+      "always": false,
+      "availability": "any",
+      "default": "on",
+      "field": null,
+      "home": "inline",
+      "home_worker": null,
+      "linked": false,
       "name": "observability",
       "placements": [
         "inline"
       ],
-      "home": "inline",
-      "home_worker": null,
-      "scope": "instance",
-      "availability": "any",
       "requires": [],
-      "linked": false,
-      "always": false,
-      "field": null
+      "scope": "instance"
     },
     {
+      "about": "List and request secrets in the instance's Secrets Store",
+      "always": false,
+      "availability": "any",
+      "default": "on",
+      "field": null,
+      "home": "inline",
+      "home_worker": null,
+      "linked": true,
       "name": "secrets",
       "placements": [
         "inline"
       ],
-      "home": "inline",
-      "home_worker": null,
-      "scope": "instance",
-      "availability": "any",
       "requires": [],
-      "linked": true,
-      "always": false,
-      "field": null
+      "scope": "instance"
     },
     {
+      "about": "Issue and revoke the git and Cloudflare proxy credentials",
+      "always": false,
+      "availability": "any",
+      "default": "on",
+      "field": null,
+      "home": "inline",
+      "home_worker": null,
+      "linked": false,
       "name": "proxy",
       "placements": [
         "inline"
       ],
-      "home": "inline",
-      "home_worker": null,
-      "scope": "instance",
-      "availability": "any",
       "requires": [
         "secrets"
       ],
-      "linked": false,
-      "always": false,
-      "field": null
+      "scope": "instance"
     },
     {
+      "about": "Reach cloud providers through the Cloud Gateway",
+      "always": false,
+      "availability": "any",
+      "default": "opt_in",
+      "field": "cloud.gateway",
+      "home": "inline",
+      "home_worker": null,
+      "linked": true,
       "name": "cloud",
+      "opt_in": true,
       "placements": [
         "inline",
         "own_worker"
       ],
-      "home": "inline",
-      "home_worker": null,
-      "scope": "instance",
-      "availability": "any",
       "requires": [],
-      "linked": true,
-      "always": false,
-      "opt_in": true,
-      "field": "cloud.gateway"
+      "scope": "instance"
     },
     {
+      "about": "Connect a DigitalOcean team: Droplets and Spaces",
+      "always": false,
+      "availability": "any",
+      "default": "opt_in",
+      "field": "cloud.digitalocean",
+      "home": "inline",
+      "home_worker": null,
+      "linked": true,
       "name": "digitalocean",
+      "opt_in": true,
       "placements": [
         "inline"
       ],
-      "home": "inline",
-      "home_worker": null,
-      "scope": "instance",
-      "availability": "any",
       "requires": [
         "cloud"
       ],
-      "linked": true,
-      "always": false,
-      "opt_in": true,
-      "field": "cloud.digitalocean"
+      "scope": "instance"
     },
     {
+      "about": "Share approved read tools with peer instances",
+      "always": false,
+      "availability": "any",
+      "default": "opt_in",
+      "field": "instance.mcp-federation",
+      "home": "inline",
+      "home_worker": null,
+      "linked": true,
       "name": "mcp-federation",
+      "opt_in": true,
       "placements": [
         "inline"
       ],
-      "home": "inline",
-      "home_worker": null,
-      "scope": "instance",
-      "availability": "any",
       "requires": [],
-      "linked": true,
-      "always": false,
-      "opt_in": true,
-      "field": "instance.mcp-federation"
+      "scope": "instance"
     },
     {
+      "about": "Read the history of jobs run for the instance",
+      "always": false,
+      "availability": "any",
+      "default": "opt_in",
+      "field": "jobs",
+      "home": "inline",
+      "home_worker": null,
+      "linked": true,
       "name": "jobs",
+      "opt_in": true,
       "placements": [
         "inline"
       ],
-      "home": "inline",
-      "home_worker": null,
-      "scope": "instance",
-      "availability": "any",
       "requires": [],
-      "linked": true,
-      "always": false,
-      "opt_in": true,
-      "field": "jobs"
+      "scope": "instance"
     },
     {
+      "about": "Call models through the model gateway",
+      "always": false,
+      "availability": "any",
+      "default": "on",
+      "field": null,
+      "home": "own_worker",
+      "home_worker": "pigeon-model-gateway",
+      "linked": false,
       "name": "models",
       "placements": [
         "inline",
         "own_worker"
       ],
-      "home": "own_worker",
-      "home_worker": "pigeon-model-gateway",
-      "scope": "instance",
-      "availability": "any",
       "requires": [],
-      "linked": false,
-      "always": false,
-      "field": null
+      "scope": "instance"
     },
     {
+      "about": "List, create, link and retire instances",
+      "always": true,
+      "availability": "home_only",
+      "default": "always",
+      "field": null,
+      "home": "inline",
+      "home_worker": null,
+      "linked": false,
       "name": "multi-instance",
       "placements": [
         "inline"
       ],
-      "home": "inline",
-      "home_worker": null,
-      "scope": "platform",
-      "availability": "home_only",
       "requires": [],
-      "linked": false,
-      "always": false,
-      "field": null
+      "scope": "platform"
     },
     {
+      "about": "People, their passkeys and apps",
+      "always": true,
+      "availability": "home_only",
+      "default": "always",
+      "field": null,
+      "home": "inline",
+      "home_worker": null,
+      "linked": false,
       "name": "users",
       "placements": [
         "inline"
       ],
-      "home": "inline",
-      "home_worker": null,
-      "scope": "platform",
-      "availability": "home_only",
       "requires": [],
-      "linked": false,
-      "always": false,
-      "field": null
+      "scope": "platform"
     },
     {
+      "about": "Publish pigeon's public site",
+      "always": true,
+      "availability": "home_only",
+      "default": "always",
+      "field": null,
+      "home": "inline",
+      "home_worker": null,
+      "linked": false,
+      "name": "site",
+      "placements": [
+        "inline"
+      ],
+      "requires": [],
+      "scope": "platform"
+    },
+    {
+      "about": "Mirror the source repository to GitHub",
+      "always": true,
+      "availability": "home_only",
+      "default": "always",
+      "field": null,
+      "home": "inline",
+      "home_worker": null,
+      "linked": false,
+      "name": "mirror",
+      "placements": [
+        "inline"
+      ],
+      "requires": [],
+      "scope": "platform"
+    },
+    {
+      "about": "The platform's GitHub App and its installations",
+      "always": true,
+      "availability": "home_only",
+      "default": "always",
+      "field": null,
+      "home": "inline",
+      "home_worker": null,
+      "linked": false,
+      "name": "github",
+      "placements": [
+        "inline"
+      ],
+      "requires": [],
+      "scope": "platform"
+    },
+    {
+      "about": "Land branches on main and deploy them",
+      "always": true,
+      "availability": "home_only",
+      "default": "always",
+      "field": null,
+      "home": "inline",
+      "home_worker": null,
+      "linked": false,
+      "name": "land",
+      "placements": [
+        "inline"
+      ],
+      "requires": [],
+      "scope": "platform"
+    },
+    {
+      "about": "The changelog of main",
+      "always": true,
+      "availability": "home_only",
+      "default": "always",
+      "field": null,
+      "home": "inline",
+      "home_worker": null,
+      "linked": false,
+      "name": "changelog",
+      "placements": [
+        "inline"
+      ],
+      "requires": [],
+      "scope": "platform"
+    },
+    {
+      "about": "Check a request against the policy",
+      "always": true,
+      "availability": "home_only",
+      "default": "always",
+      "field": null,
+      "home": "inline",
+      "home_worker": null,
+      "linked": false,
+      "name": "policy",
+      "placements": [
+        "inline"
+      ],
+      "requires": [],
+      "scope": "platform"
+    },
+    {
+      "about": "What waits for the person's passkey",
+      "always": true,
+      "availability": "home_only",
+      "default": "always",
+      "field": null,
+      "home": "inline",
+      "home_worker": null,
+      "linked": false,
+      "name": "approvals",
+      "placements": [
+        "inline"
+      ],
+      "requires": [],
+      "scope": "platform"
+    },
+    {
+      "about": "The iOS app: App Store, releases and push",
+      "always": true,
+      "availability": "home_only",
+      "default": "always",
+      "field": null,
+      "home": "inline",
+      "home_worker": null,
+      "linked": false,
+      "name": "apple",
+      "placements": [
+        "inline"
+      ],
+      "requires": [],
+      "scope": "platform"
+    },
+    {
+      "about": "Link instances to their own Cloudflare accounts",
+      "always": true,
+      "availability": "home_only",
+      "default": "always",
+      "field": null,
+      "home": "inline",
+      "home_worker": null,
+      "linked": false,
+      "name": "linked",
+      "placements": [
+        "inline"
+      ],
+      "requires": [],
+      "scope": "platform"
+    },
+    {
+      "about": "Draw and check the instance's setup",
+      "always": false,
+      "availability": "any",
+      "default": "on",
+      "field": null,
+      "home": "inline",
+      "home_worker": null,
+      "linked": true,
       "name": "architecture",
       "placements": [
         "inline"
       ],
-      "home": "inline",
-      "home_worker": null,
-      "scope": "instance",
-      "availability": "any",
       "requires": [],
-      "linked": true,
-      "always": false,
-      "field": null
+      "scope": "instance"
     },
     {
+      "about": "The instance's record, plan and apply",
+      "always": true,
+      "availability": "any",
+      "default": "always",
+      "field": null,
+      "home": "inline",
+      "home_worker": null,
+      "linked": true,
       "name": "instances",
       "placements": [
         "inline"
       ],
-      "home": "inline",
-      "home_worker": null,
-      "scope": "instance",
-      "availability": "any",
       "requires": [],
-      "linked": true,
-      "always": true,
-      "field": null
+      "scope": "instance"
     },
     {
+      "about": "The instance's data store, and reading external storage",
+      "always": false,
+      "availability": "any",
+      "default": "opt_in",
+      "field": "data",
+      "home": "own_worker",
+      "home_worker": "pigeon-data",
+      "linked": true,
       "name": "data",
+      "opt_in": true,
       "placements": [
         "inline",
         "own_worker"
       ],
-      "home": "own_worker",
-      "home_worker": "pigeon-data",
-      "scope": "instance",
-      "availability": "any",
       "requires": [],
-      "linked": true,
-      "always": false,
-      "opt_in": true,
-      "field": "data"
+      "scope": "instance"
     },
     {
+      "about": "Import external storage into the data store",
+      "always": false,
+      "availability": "any",
+      "default": "opt_in",
+      "field": "data.ingest",
+      "home": "inline",
+      "home_worker": null,
+      "linked": false,
       "name": "data-ingest",
+      "opt_in": true,
       "placements": [
         "inline"
       ],
-      "home": "inline",
-      "home_worker": null,
-      "scope": "instance",
-      "availability": "any",
       "requires": [
         "data"
       ],
-      "linked": false,
-      "always": false,
-      "opt_in": true,
-      "field": "data.ingest"
+      "scope": "instance"
     },
     {
+      "about": "Receive the zone's mail into the data store",
+      "always": false,
+      "availability": "any",
+      "default": "opt_in",
+      "field": "data.email",
+      "home": "own_worker",
+      "home_worker": "pigeon-data",
+      "linked": true,
       "name": "data-email",
+      "opt_in": true,
       "placements": [
         "inline",
         "own_worker"
       ],
-      "home": "own_worker",
-      "home_worker": "pigeon-data",
-      "scope": "instance",
-      "availability": "any",
       "requires": [
         "data"
       ],
-      "linked": true,
-      "always": false,
-      "opt_in": true,
-      "field": "data.email"
+      "scope": "instance"
     },
     {
+      "about": "Redirect hosts to other addresses",
+      "always": false,
+      "availability": "any",
+      "default": "on",
+      "field": null,
+      "home": "inline",
+      "home_worker": null,
+      "linked": true,
       "name": "redirects",
       "placements": [
         "inline"
       ],
-      "home": "inline",
-      "home_worker": null,
-      "scope": "instance",
-      "availability": "any",
       "requires": [],
-      "linked": true,
-      "always": false,
-      "field": null
+      "scope": "instance"
     }
   ]
 }

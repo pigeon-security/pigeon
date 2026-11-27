@@ -524,8 +524,39 @@
       const yes = all.filter((r) => r.enabled);
       const no = all.filter((r) => !r.enabled);
       const out = [{ group: `Enabled on ${inst.title} (${yes.length})` }, ...yes, { group: `Available (${no.length})` }, ...no];
+      // The catalogue's built-in capabilities (docs/plans/platform-capabilities.md): those not
+      // offered above, each with its `default`. On home they are on and read-only: `always` ones
+      // (home-only platform capabilities and `instances`) are never listed in a record, `on`
+      // ones need no listing there. On a linked instance the home-only ones are named, so where
+      // each capability may run is plain.
+      const shown = new Set(offered.flatMap((c) => [c.cap, c.component]));
+      const builtIn = (versions?.catalogue || []).filter((e) => !shown.has(e.name));
+      const builtInRow = (e, status, note) => ({
+        cap: e.name, what: e.about || "", adds: [], field: e.field || (e.default === "always" ? "— (never listed)" : null),
+        latest: comps.get(e.name)?.version || null, runs: runs(e.name),
+        pinText: comps.get(e.name) ? code(comps.get(e.name).version) : el("span", { class: "muted", text: "—" }),
+        status, acts: el("span", { class: "muted", text: note }),
+      });
       if (inst.home) {
-        const ours = new Set(offered.map((c) => c.component));
+        const always = builtIn.filter((e) => e.default === "always" && placed[e.name]);
+        const byDefault = builtIn.filter((e) => e.default === "on" && placed[e.name]);
+        if (always.length) {
+          out.push({ group: `Always on · the platform’s own (${always.length})` },
+            ...always.map((e) => builtInRow(e, pill("Always on", "ok"), e.availability === "home_only" ? "Home only · changes land through code" : "Every instance · changes land through code")));
+        }
+        if (byDefault.length) {
+          out.push({ group: `On by default (${byDefault.length})` },
+            ...byDefault.map((e) => builtInRow(e, pill("On by default", "ok"), "Changes land through code")));
+        }
+      } else {
+        const homeOnly = builtIn.filter((e) => e.availability === "home_only");
+        if (homeOnly.length) {
+          out.push({ group: `Home only (${homeOnly.length})` },
+            ...homeOnly.map((e) => ({ ...builtInRow(e, pill("Home only", "plain"), "Only the home instance has it"), runs: null, pinText: el("span", { class: "muted", text: "—" }) })));
+        }
+      }
+      if (inst.home) {
+        const ours = new Set([...shown, ...builtIn.map((e) => e.name)]);
         const deployed = (versions?.components || []).filter((c) => c.kind === "capability" && !ours.has(c.name));
         const platformRow = (c) => ({
           cap: c.name, what: c.worker ? `Served by ${c.worker}` : "", adds: [], field: null, latest: c.version, runs: runs(c.name),
