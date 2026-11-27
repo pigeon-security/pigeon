@@ -205,12 +205,53 @@ mod backup;
 async fn queue(batch: MessageBatch<Value>, env: Env, _ctx: Context) -> Result<()> {
     if batch.queue().ends_with("-backup") {
         for message in batch.messages()? {
-            let Some(event) = protocol::parse_event(message.body()) else {
-                // A delete, or not an event: nothing to copy.
-                message.ack();
-                continue;
+            use pigeon_ingest::backup_inventory::Message;
+            let body = message.body();
+            let (key, etag) = if body.get("pigeon_backup").is_some() {
+                let Ok(item) = serde_json::from_value::<Message>(body.clone()) else {
+                    message.ack();
+                    continue;
+                };
+                if !env
+                    .var("BACKUP_GENERATION")
+                    .is_ok_and(|v| v.to_string() == item.generation())
+                {
+                    message.ack();
+                    continue;
+                }
+                match item {
+                    Message::Inventory { generation, cursor } => {
+                        match backup::scan(&env, &generation, cursor).await {
+                            Ok(()) => message.ack(),
+                            Err(err) => {
+                                console_log!("listing a backup inventory page failed: {err}");
+                                if message.attempts() > pigeon_ingest::datastore::BACKUP_MAX_RETRIES
+                                {
+                                    let result = Err(err);
+                                    let _ = backup::audit(
+                                        &env,
+                                        &message.id(),
+                                        message.timestamp().as_millis(),
+                                        &result,
+                                    )
+                                    .await;
+                                }
+                                message.retry();
+                            }
+                        }
+                        continue;
+                    }
+                    Message::Copy { key, etag, .. } => (key, Some(etag)),
+                }
+            } else {
+                let Some(event) = protocol::parse_event(body) else {
+                    // A delete, or not an event: nothing to copy.
+                    message.ack();
+                    continue;
+                };
+                (event.key, None)
             };
-            let result = backup::copy(&env, &event.key).await;
+            let result = backup::copy(&env, &key, etag.as_deref()).await;
             let final_attempt = message.attempts() > pigeon_ingest::datastore::BACKUP_MAX_RETRIES;
             if (result.is_ok() || final_attempt)
                 && backup::audit(

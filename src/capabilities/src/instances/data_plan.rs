@@ -48,6 +48,8 @@ pub struct SeenData {
     pub config_digest: Option<String>,
     /// The account's queue names.
     pub queues: Vec<String>,
+    /// Scripts consuming the backup queue, with unrelated consumers represented as a conflict.
+    pub backup_consumers: Vec<String>,
     /// Whether the bucket already sends its events to the backup queue.
     pub notification: bool,
     /// Whether the backup's B2 key is set (`data_store::b2_slot`).
@@ -417,12 +419,29 @@ pub fn data_parts(
         }
     });
     let backup = settings.backup.as_ref().map(|b| b.bucket.clone());
-    let backup_config = settings.backup.as_ref().map(|b| {
-        pigeon_core::oauth::hash(
-            &json!({ "destination": b, "audit": crate::data_store::backup_audit_bucket(instance) })
-                .to_string(),
-        )
-    });
+    let backup_config = backup_generation(instance);
+    if backup.is_some() {
+        for q in [datastore::backup_dlq(&name), datastore::backup_queue(&name)] {
+            steps.push(
+                match (seen.queues.contains(&q), ledger.queues.contains(&q)) {
+                    (false, _) => Step::CreateQueue {
+                        name: q,
+                        consumer: None,
+                        dead_letter: None,
+                    },
+                    (true, true) => Step::Ok {
+                        what: "queue".into(),
+                        name: q,
+                    },
+                    (true, false) => Step::Conflict {
+                        what: "queue".into(),
+                        name: q,
+                        why: "a queue with this name exists, and pigeon did not create it".into(),
+                    },
+                },
+            );
+        }
+    }
     match &seen.artifact {
         None => steps.push(Step::Blocked {
             why: format!(
@@ -483,28 +502,22 @@ pub fn data_parts(
         Some(b) => {
             let queue = datastore::backup_queue(&name);
             let dlq = datastore::backup_dlq(&name);
-            for (q, consumer, dead) in [
-                (&dlq, None, None),
-                (&queue, Some(worker.clone()), Some(dlq.clone())),
-            ] {
-                let there = seen.queues.contains(q);
-                steps.push(match (there, ledger.queues.contains(q)) {
-                    (false, _) => Step::CreateQueue {
-                        name: q.clone(),
-                        consumer,
-                        dead_letter: dead,
-                    },
-                    (true, true) => Step::Ok {
-                        what: "queue".into(),
-                        name: q.clone(),
-                    },
-                    (true, false) => Step::Conflict {
-                        what: "queue".into(),
-                        name: q.clone(),
-                        why: "a queue with this name exists, and pigeon did not create it".into(),
-                    },
-                });
-            }
+            steps.push(match seen.backup_consumers.as_slice() {
+                [] => Step::ConfigureBackupConsumer {
+                    queue: queue.clone(),
+                    worker: worker.clone(),
+                    dead_letter: dlq,
+                },
+                [consumer] if consumer == &worker => Step::Ok {
+                    what: "backup consumer".into(),
+                    name: worker.clone(),
+                },
+                _ => Step::Conflict {
+                    what: "backup queue".into(),
+                    name: queue.clone(),
+                    why: "a different consumer already reads the backup queue".into(),
+                },
+            });
             steps.push(if seen.notification {
                 Step::Ok {
                     what: "bucket notification".into(),
@@ -513,9 +526,15 @@ pub fn data_parts(
             } else {
                 Step::AddBucketNotification {
                     bucket: name.clone(),
-                    queue,
+                    queue: queue.clone(),
                 }
             });
+            if let Some(generation) = backup_config
+                && seen.backup_key
+                && ledger.backup_inventory.as_deref() != Some(&generation)
+            {
+                steps.push(Step::QueueBackupInventory { queue, generation });
+            }
             if !seen.backup_key {
                 let slot = crate::data_store::b2_slot(instance);
                 let expected = format!(
@@ -653,6 +672,29 @@ pub fn worker_metadata(main: &str, b: &WorkerBindings<'_>) -> serde_json::Value 
         "compatibility_date": super::plan::COMPATIBILITY_DATE,
         "bindings": bindings,
     })
+}
+
+pub fn backup_generation(instance: &Instance) -> Option<String> {
+    Some(pigeon_core::oauth::hash(
+        &json!({
+            "layout": "inventory-v1",
+            "destination": crate::data_store::backup(instance)?,
+            "audit": crate::data_store::backup_audit_bucket(instance)
+        })
+        .to_string(),
+    ))
+}
+
+/// Bind an approved backup's producer queue and its inventory generation.
+pub fn bind_backup_inventory(metadata: &mut serde_json::Value, instance: &Instance) {
+    if let Some(generation) = backup_generation(instance)
+        && let Some(bindings) = metadata["bindings"].as_array_mut()
+    {
+        let queue = datastore::backup_queue(&crate::data_store::store_name(instance));
+        bindings.push(json!({ "type": "queue", "name": "BACKUP_QUEUE", "queue_name": queue }));
+        bindings
+            .push(json!({ "type": "plain_text", "name": "BACKUP_GENERATION", "text": generation }));
+    }
 }
 
 /// Bind only the Jobs bucket approved with this instance, which the planner verifies is private.

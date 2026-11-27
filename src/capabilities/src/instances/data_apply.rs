@@ -243,6 +243,27 @@ pub async fn observe(
     Ok(seen)
 }
 
+fn queue_id<'a>(queues: &'a Value, name: &str) -> Option<&'a str> {
+    queues
+        .as_array()?
+        .iter()
+        .find(|q| q["queue_name"].as_str() == Some(name))
+        .and_then(|q| q["queue_id"].as_str())
+}
+
+async fn backup_queue_id(token: &str, account: &str, name: &str) -> Result<String> {
+    let queues = call(
+        token,
+        Method::Get,
+        &format!("/accounts/{account}/queues"),
+        None,
+    )
+    .await?;
+    queue_id(&queues, name)
+        .map(str::to_string)
+        .ok_or_else(|| bad(format!("queue {name} is not there")))
+}
+
 /// The backup's queues, the bucket's notification and the B2 key's presence.
 async fn observe_backup(
     token: &str,
@@ -259,8 +280,23 @@ async fn observe_backup(
         .flatten()
         .filter_map(|q| q["queue_name"].as_str().map(str::to_string))
         .collect();
+    let backup = datastore::backup_queue(name);
+    if let Some(id) = queue_id(&queues, &backup) {
+        let consumers = call(
+            token,
+            Method::Get,
+            &format!("/accounts/{a}/queues/{id}/consumers"),
+            None,
+        )
+        .await?;
+        seen.backup_consumers = consumers
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|c| c["script_name"].as_str().unwrap_or_default().to_string())
+            .collect();
+    }
     if seen.bucket_exists {
-        let backup = datastore::backup_queue(name);
         let config = get(
             token,
             &format!("/accounts/{a}/event_notifications/r2/{name}/configuration"),
@@ -500,16 +536,42 @@ pub async fn run(
                 }
                 format!("created queue {q}")
             }
+            Step::ConfigureBackupConsumer {
+                queue,
+                worker,
+                dead_letter,
+            } => {
+                let id = backup_queue_id(t, acc, queue).await?;
+                call(
+                    t, Method::Post,
+                    &format!("/accounts/{acc}/queues/{id}/consumers"),
+                    Some(&json!({
+                        "type": "worker", "script_name": worker,
+                        "dead_letter_queue": dead_letter,
+                        "settings": { "batch_size": 1, "max_retries": datastore::BACKUP_MAX_RETRIES }
+                    })),
+                ).await?;
+                format!("configured backup consumer on {queue}")
+            }
+            Step::QueueBackupInventory { queue, generation } => {
+                let id = backup_queue_id(t, acc, queue).await?;
+                let body =
+                    serde_json::to_string(&pigeon_ingest::backup_inventory::Message::Inventory {
+                        generation: generation.clone(),
+                        cursor: None,
+                    })
+                    .map_err(|_| bad("could not encode the backup inventory checkpoint"))?;
+                call(
+                    t,
+                    Method::Post,
+                    &format!("/accounts/{acc}/queues/{id}/messages"),
+                    Some(&json!({ "body": body, "content_type": "json" })),
+                )
+                .await?;
+                format!("queued the initial Data backup inventory on {queue}")
+            }
             Step::AddBucketNotification { bucket, queue } => {
-                let queues = call(t, Method::Get, &format!("/accounts/{acc}/queues"), None).await?;
-                let id = queues
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .find(|q| q["queue_name"].as_str() == Some(queue.as_str()))
-                    .and_then(|q| q["queue_id"].as_str())
-                    .ok_or_else(|| bad(format!("queue {queue} is not there")))?
-                    .to_string();
+                let id = backup_queue_id(t, acc, queue).await?;
                 call(
                     t,
                     Method::Put,
@@ -772,6 +834,7 @@ pub async fn upload_inline(i: &Inline<'_>) -> Result<()> {
         },
     );
     data_plan::bind_jobs_audit(&mut data, i.instance);
+    data_plan::bind_backup_inventory(&mut data, i.instance);
     let mut bindings = site["bindings"].as_array().cloned().unwrap_or_default();
     bindings.extend(data["bindings"].as_array().cloned().unwrap_or_default());
     let metadata = json!({
@@ -839,6 +902,7 @@ async fn upload(
     };
     let mut metadata = data_plan::worker_metadata(&built.main, &bindings);
     data_plan::bind_jobs_audit(&mut metadata, instance);
+    data_plan::bind_backup_inventory(&mut metadata, instance);
     let boundary = pigeon_core::workers::boundary_from(&pigeon_core::webauthn::random()?);
     let body = data_plan::multipart(&boundary, &metadata, &parts);
     let ctype = pigeon_core::workers::content_type(&boundary);

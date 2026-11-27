@@ -9,6 +9,7 @@
 pub mod archive;
 pub mod audit;
 pub mod backblaze;
+pub mod backup_inventory;
 pub mod container_job;
 pub mod datastore;
 pub mod decide;

@@ -56,6 +56,9 @@ pub struct Ledger {
     /// Queues pigeon created for the data store's backup.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub queues: Vec<String>,
+    /// The already queued inventory generation for Data backup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup_inventory: Option<String>,
     /// Zones pigeon turned Email Routing on for, and whose catch-all it set.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub email_zones: Vec<String>,
@@ -123,7 +126,10 @@ pub struct SeenDomain {
 #[serde(tag = "step", rename_all = "snake_case")]
 pub enum Step {
     /// Already as it should be.
-    Ok { what: String, name: String },
+    Ok {
+        what: String,
+        name: String,
+    },
     /// Create the R2 bucket.
     CreateBucket {
         name: String,
@@ -155,7 +161,9 @@ pub enum Step {
         data: Option<InlineData>,
     },
     /// Turn on the Worker's workers.dev address, the preview.
-    EnableWorkersDev { name: String },
+    EnableWorkersDev {
+        name: String,
+    },
     /// Serve a hostname from the Worker as a Workers Custom Domain; Cloudflare makes its DNS
     /// record and certificate.
     AttachDomain {
@@ -189,9 +197,13 @@ pub enum Step {
     },
     /// Create the linked account's Secrets Store, for the `secrets` capability its record
     /// enables (capability scoping, M4).
-    CreateSecretsStore { name: String },
+    CreateSecretsStore {
+        name: String,
+    },
     /// Something only the person can do first.
-    Blocked { why: String },
+    Blocked {
+        why: String,
+    },
     /// There, but not the plan's to change: a platform-owned Worker that the home instance
     /// names. Left alone, and the plan goes on.
     Keep {
@@ -201,7 +213,9 @@ pub enum Step {
     },
     // ---- The data store and email (docs/plans/email.md, "Plan steps"; `data_plan`). ----
     /// Create the data store's D1 database.
-    CreateDatabase { name: String },
+    CreateDatabase {
+        name: String,
+    },
     /// Apply the data store's migrations not yet applied, by id, in order.
     Migrate {
         database: String,
@@ -221,7 +235,10 @@ pub enum Step {
         replaces: bool,
     },
     /// Write the email handler's configuration row (its digest) into the store's D1.
-    WriteEmailConfig { database: String, digest: String },
+    WriteEmailConfig {
+        database: String,
+        digest: String,
+    },
     /// Create a queue, consumed by the data Worker when `consumer` names it.
     CreateQueue {
         name: String,
@@ -231,9 +248,24 @@ pub enum Step {
         dead_letter: Option<String>,
     },
     /// Send the bucket's object-create events to a queue.
-    AddBucketNotification { bucket: String, queue: String },
+    ConfigureBackupConsumer {
+        queue: String,
+        worker: String,
+        dead_letter: String,
+    },
+    QueueBackupInventory {
+        queue: String,
+        generation: String,
+    },
+    AddBucketNotification {
+        bucket: String,
+        queue: String,
+    },
     /// Waits on the person; shown, and the plan goes on without it.
-    Pending { what: String, why: String },
+    Pending {
+        what: String,
+        why: String,
+    },
     /// Delete one stale record of an old mail provider, exactly as shown.
     RemoveStaleDns {
         zone_id: String,
@@ -258,7 +290,9 @@ pub enum Step {
         worker: String,
     },
     /// Add a forward destination address to the account; Cloudflare emails it a link.
-    AddDestination { email: String },
+    AddDestination {
+        email: String,
+    },
 }
 
 /// The data store an instance Worker runs inline (docs/plans/linked-data.md): the data
@@ -318,6 +352,8 @@ impl Step {
                 | Step::UploadDataWorker { .. }
                 | Step::WriteEmailConfig { .. }
                 | Step::CreateQueue { .. }
+                | Step::ConfigureBackupConsumer { .. }
+                | Step::QueueBackupInventory { .. }
                 | Step::AddBucketNotification { .. }
                 | Step::RemoveStaleDns { .. }
                 | Step::EnableEmailRouting { .. }
@@ -1156,6 +1192,9 @@ pub fn record(ledger: &mut Ledger, step: &Step) {
         Step::CreateQueue { name, .. } if !ledger.queues.contains(name) => {
             ledger.queues.push(name.clone());
         }
+        Step::QueueBackupInventory { generation, .. } => {
+            ledger.backup_inventory = Some(generation.clone());
+        }
         Step::EnableEmailRouting { zone, .. } | Step::SetCatchAll { zone, .. }
             if !ledger.email_zones.contains(zone) =>
         {
@@ -1319,6 +1358,12 @@ pub fn describe(steps: &[Step]) -> Vec<Value> {
                     .as_deref()
                     .map(|d| format!(", failures to {d}"))
                     .unwrap_or_default()
+            )),
+            Step::ConfigureBackupConsumer { queue, worker, dead_letter } => json!(format!(
+                "have {worker} consume backup queue {queue}, with failures sent to {dead_letter}"
+            )),
+            Step::QueueBackupInventory { queue, .. } => json!(format!(
+                "scan existing Data objects in bounded pages and enqueue their B2 backups on {queue}"
             )),
             Step::AddBucketNotification { bucket, queue } => json!(format!(
                 "send bucket {bucket}'s new objects to queue {queue}, for the B2 backup (deletes                  are not mirrored)"

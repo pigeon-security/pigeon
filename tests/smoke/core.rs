@@ -3451,3 +3451,37 @@ fn data_backup_refuses_public_bucket_and_delete_capability() {
         .push(serde_json::json!("deleteFiles"));
     assert!(!backup_key_scope(&unsafe_key, "pigeon-backup"));
 }
+
+#[test]
+fn data_backup_inventory_checkpoints_one_bounded_page() {
+    use pigeon_ingest::backup_inventory::{Message, PAGE_SIZE, next};
+    let entries = vec![("blobs/object".into(), "first-etag".into()); PAGE_SIZE as usize];
+    let page = next(
+        "stream",
+        Some("checkpoint"),
+        entries,
+        Some("following".into()),
+    )
+    .unwrap();
+    assert_eq!(page.len(), PAGE_SIZE as usize + 1);
+    assert!(matches!(&page[0], Message::Copy { generation, key, etag }
+        if generation == "stream" && key == "blobs/object" && etag == "first-etag"));
+    assert!(
+        matches!(page.last(), Some(Message::Inventory { cursor: Some(cursor), .. })
+        if cursor == "following")
+    );
+    assert!(
+        next(
+            "stream",
+            Some("following"),
+            vec![],
+            Some("following".into())
+        )
+        .is_none()
+    );
+    assert!(
+        next("stream", Some("following"), vec![], None)
+            .unwrap()
+            .is_empty()
+    );
+}

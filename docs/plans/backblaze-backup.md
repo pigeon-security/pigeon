@@ -24,8 +24,8 @@ metadata, choose versions appropriate to the ingest run being restored. Keep the
 with the recovered blobs so provenance and catalog rows can be replayed. Retain any older same-key
 backups until a protected backup and a test restore have been verified.
 
-This transport consumes R2 notifications. An inventory-driven backfill and multipart resume
-across Workers queue invocations are separate steps. Use a test copy to verify large objects and
+This transport consumes R2 notifications and can queue existing objects through the instance
+plan. Multipart resume across Workers queue invocations is a separate step. Use a test copy to verify large objects and
 retention permissions before relying on it for bulk transfers.
 
 ## Linked instance setup and audit
@@ -43,3 +43,11 @@ duplicates and failures that exhaust retries. It binds only the approved private
 the same linked account. The audit contains no provider credentials or object names. A backup
 object deleted from Data before it could be read is logged as missing. Existing home backups
 have no linked Jobs binding.
+
+## Existing objects
+
+The instance plan includes one inventory kickoff for the approved backup configuration. The Data
+Worker lists at most 48 existing keys at a time. Each successful page queues its copies and an
+opaque continuation cursor. Replays are safe because the destination name identifies the exact
+bytes. A queued copy includes the listed ETag and skips a replaced object so the normal R2
+notification handles the new version.

@@ -384,7 +384,7 @@ impl Source<'_> {
 }
 
 /// Returns None for an object already removed from Data. There is no delete on the B2 side.
-pub async fn copy(env: &Env, key: &str) -> Result<Option<Copy>> {
+pub async fn copy(env: &Env, key: &str, etag: Option<&str>) -> Result<Option<Copy>> {
     if key.is_empty() || key.len() > 1024 {
         return Err(fail(
             "the Data object key cannot be preserved in backup metadata",
@@ -397,6 +397,11 @@ pub async fn copy(env: &Env, key: &str) -> Result<Option<Copy>> {
     let Some(object) = bucket.get(key).execute().await? else {
         return Ok(None);
     };
+    if etag.is_some_and(|etag| object.etag() != etag) {
+        // The normal R2 notification carries any replacement. Avoid copying older inventory
+        // work against a different object version.
+        return Ok(None);
+    }
     let source = Source {
         bucket,
         key,
@@ -501,5 +506,36 @@ pub async fn audit(
         })
         .execute()
         .await?;
+    Ok(())
+}
+
+/// Fan out one inventory page and its continuation only after R2 lists it successfully.
+pub async fn scan(env: &Env, generation: &str, cursor: Option<String>) -> Result<()> {
+    use pigeon_ingest::backup_inventory;
+    let bucket = env.bucket("DATA")?;
+    let mut list = bucket.list().limit(backup_inventory::PAGE_SIZE);
+    if let Some(cursor) = &cursor {
+        list = list.cursor(cursor);
+    }
+    let listed = list.execute().await?;
+    let next = if listed.truncated() {
+        Some(
+            listed
+                .cursor()
+                .ok_or_else(|| fail("R2 omitted the backup inventory continuation"))?,
+        )
+    } else {
+        None
+    };
+    let entries = listed
+        .objects()
+        .into_iter()
+        .map(|o| (o.key(), o.etag()))
+        .collect();
+    let messages = backup_inventory::next(generation, cursor.as_deref(), entries, next)
+        .ok_or_else(|| fail("R2 returned an invalid backup inventory page"))?;
+    if !messages.is_empty() {
+        env.queue("BACKUP_QUEUE")?.send_batch(messages).await?;
+    }
     Ok(())
 }

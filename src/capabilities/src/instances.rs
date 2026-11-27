@@ -1508,6 +1508,8 @@ fn data_step(step: &plan::Step) -> bool {
             | S::UploadDataWorker { .. }
             | S::WriteEmailConfig { .. }
             | S::CreateQueue { .. }
+            | S::ConfigureBackupConsumer { .. }
+            | S::QueueBackupInventory { .. }
             | S::AddBucketNotification { .. }
             | S::RemoveStaleDns { .. }
             | S::EnableEmailRouting { .. }

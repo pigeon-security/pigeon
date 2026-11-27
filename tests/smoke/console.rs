@@ -4128,13 +4128,34 @@ mod email {
             queues,
             [
                 ("pigeon-data-backup-dlq", None),
-                ("pigeon-data-backup", Some("pigeon-data"))
+                ("pigeon-data-backup", None)
             ]
         );
         assert!(steps.iter().any(|s| matches!(s, Step::AddBucketNotification { queue, .. } if queue == "pigeon-data-backup")));
+        assert!(
+            !steps
+                .iter()
+                .any(|s| matches!(s, Step::QueueBackupInventory { .. }))
+        );
         assert!(steps.iter().any(
             |s| matches!(s, Step::Pending { why, .. } if why.contains("DATA_B2_PIGEON_DATA"))
         ));
+        let ready = SeenData {
+            backup_key: true,
+            ..fresh.clone()
+        };
+        let steps = data_steps(&backed, &ready, &Ledger::default(), Some(&owned));
+        let existing = steps
+            .iter()
+            .find(|s| matches!(s, Step::QueueBackupInventory { .. }))
+            .expect("inventory is queued when the key exists");
+        let mut ledger = Ledger::default();
+        record(&mut ledger, existing);
+        assert!(
+            !data_steps(&backed, &ready, &ledger, Some(&owned))
+                .iter()
+                .any(|s| matches!(s, Step::QueueBackupInventory { .. }))
+        );
 
         // The upload's metadata and body: the bindings the Worker reads, every module.
         use pigeon_capabilities::data_store::Backup;
