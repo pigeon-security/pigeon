@@ -168,6 +168,7 @@ bindings = [
   { name = "MODEL_JOBS", class_name = "ModelJobs", script_name = "pigeon-model-gateway" },
   { name = "LANDER", class_name = "Lander" },
   { name = "TOKEN_LEDGER", class_name = "TokenLedger" },
+  { name = "APPROVER", class_name = "Approver" },
 ]
 
 [[migrations]]
@@ -196,6 +197,12 @@ new_sqlite_classes = ["Lander"]
 [[migrations]]
 tag = "v6"
 new_sqlite_classes = ["TokenLedger"]
+
+# The Approver: one object, whose alarm runs what an approval stands for once the person
+# approves it (docs/plans/approvals-auto-run.md).
+[[migrations]]
+tag = "v7"
+new_sqlite_classes = ["Approver"]
 
 # CI job containers: one per job attempt, held by a CiRunner object, which picks the image and
 # the instance size on each start. The base image carries git, curl, coreutils, sh, a Rust

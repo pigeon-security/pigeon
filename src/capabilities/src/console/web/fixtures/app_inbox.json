@@ -45,6 +45,7 @@
     {
       "id": "apv_c7f530",
       "instance": "notes",
+      "after": "apv_a1f2e3",
       "caller": "Claude Code",
       "acting_for": "Rowan Hale",
       "created_ms": 1795592800000,
@@ -88,6 +89,38 @@
       "needs_approval": "changes src/core/src/policy.rs, which needs a person's approval",
       "created_at": 1795598800000,
       "awaiting_since": 1795598920000
+    }
+  ],
+  "recent": [
+    {
+      "id": "apv_a1f2e3",
+      "kind": "instance_draft",
+      "subject": "notes",
+      "instance": "notes",
+      "status": "done",
+      "tool": "instance_plan",
+      "summary": "`instance_plan` ran and asks for the next approval: a plan of 3 step(s).",
+      "error": null,
+      "next": "apv_c7f530",
+      "next_waits": true,
+      "started_ms": 1795592790000,
+      "finished_ms": 1795592800000,
+      "decided_ms": 1795592780000
+    },
+    {
+      "id": "apv_77e0b9",
+      "kind": "tool_call",
+      "subject": "email_forward_set",
+      "instance": "docs",
+      "status": "failed",
+      "tool": "email_forward_set",
+      "summary": null,
+      "error": "the person's policy refuses `email_forward_set`: not in policy (no rule)",
+      "next": null,
+      "next_waits": false,
+      "started_ms": 1795590000000,
+      "finished_ms": 1795590001000,
+      "decided_ms": 1795589990000
     }
   ]
 }

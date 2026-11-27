@@ -30,6 +30,11 @@ struct InboxItem: Identifiable {
             if let a = actingFor.string, !a.isEmpty { return "\(caller.string ?? "—") for \(a)" }
             return caller.string ?? "—"
         }
+        /// A request a run asked for says which approval's run it follows.
+        func follows(_ item: JSON) -> [DiffLine] {
+            guard let after = item["after"].string else { return [] }
+            return [.note("asked by the run of approval \(after)")]
+        }
         var out: [InboxItem] = []
         for c in data["calls"].items {
             let tool = c["tool"].string ?? "tool"
@@ -41,7 +46,7 @@ struct InboxItem: Identifiable {
                 detail.append(Fact("Token permissions", perms.compactMap(\.string).joined(separator: ", ")))
             }
             if let ttl = c["grants"]["ttl_secs"].text { detail.append(Fact("Token lifetime", "\(ttl) s")) }
-            var lines: [DiffLine] = []
+            var lines: [DiffLine] = follows(c)
             if let args = c["args"].object {
                 for key in args.keys.sorted() { lines.append(.note("\(key): \(args[key]?.compactText ?? "null")")) }
             }
@@ -51,13 +56,15 @@ struct InboxItem: Identifiable {
                 monoSubject: true, plain: tool, by: by(c["caller"], c["acting_for"]),
                 since: ConsoleFormat.ms(c["created_ms"]), expires: ConsoleFormat.ms(c["expires_ms"]),
                 action: "approval-approve", deny: true, lines: lines,
-                effect: "Approving lets this exact call run once, if its caller calls again within 10 minutes.",
+                effect: tool == "source_token"
+                    ? "Approving lets this exact call run once, if its caller calls again within 10 minutes."
+                    : "Approving runs this exact call once, now, as its caller.",
                 detail: detail))
         }
         for d in data["drafts"].items {
             let inst = d["instance"].string ?? home
             let from = d["summary"]["version_from"].int ?? 0
-            var lines: [DiffLine] = [.note("record version \(from) → \(from + 1)")]
+            var lines: [DiffLine] = follows(d) + [.note("record version \(from) → \(from + 1)")]
             for c in d["summary"]["changes"].items {
                 let path = c["path"].text ?? ""
                 if !c["from"].isNull { lines.append(.remove("\(path): \(c["from"].compactText)")) }
@@ -69,7 +76,7 @@ struct InboxItem: Identifiable {
                 by: by(d["caller"], d["acting_for"]), since: ConsoleFormat.ms(d["created_ms"]),
                 expires: ConsoleFormat.ms(d["expires_ms"]), action: "approval-approve", deny: true,
                 lines: lines,
-                effect: "Approving applies exactly these changes now, unless the instance changed since this was proposed.",
+                effect: "Approving applies exactly these changes now, unless the instance changed since this was proposed. Then the instance is planned: a plan with something to do comes back here for your approval.",
                 detail: []))
         }
         for p in data["plans"].items {
@@ -83,8 +90,8 @@ struct InboxItem: Identifiable {
                 subject: inst, monoSubject: false, plain: "plan for \(inst)",
                 by: by(p["caller"], p["acting_for"]), since: ConsoleFormat.ms(p["created_ms"]),
                 expires: ConsoleFormat.ms(p["expires_ms"]), action: "approval-approve", deny: true,
-                lines: steps.map { .add($0) },
-                effect: "Approving lets exactly these steps run once. If the account no longer gives the same plan, nothing runs. Nothing is deleted.",
+                lines: follows(p) + steps.map { .add($0) },
+                effect: "Approving runs exactly these steps once, now. If the account no longer gives the same plan, nothing runs. Nothing is deleted.",
                 detail: detail))
         }
         for o in data["other"].items {
@@ -97,7 +104,8 @@ struct InboxItem: Identifiable {
                 id: o["id"].text ?? "", kind: kind, instance: o["instance"].string ?? home, verb: "",
                 subject: title, monoSubject: false, plain: title, by: by(o["caller"], o["acting_for"]),
                 since: ConsoleFormat.ms(o["created_ms"]), expires: ConsoleFormat.ms(o["expires_ms"]),
-                action: "approval-approve", deny: true, lines: steps.map { .add($0) }, effect: nil,
+                action: "approval-approve", deny: true, lines: follows(o) + steps.map { .add($0) },
+                effect: "Approving runs exactly this once, now, as the caller that asked, if it still holds.",
                 detail: detail))
         }
         for l in data["landings"].items {

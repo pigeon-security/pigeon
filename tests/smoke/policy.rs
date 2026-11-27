@@ -1709,3 +1709,345 @@ fn agent_git_session_credential() {
     assert!(get("h_claude_one_x", 30).is_none());
     assert!(get("h_claude_two_x", 30).is_none());
 }
+
+/// What an approval stands for runs once the person approves it, once, as its caller, for
+/// exactly what was approved (docs/plans/approvals-auto-run.md); the old "call again" flow
+/// answers the recorded result; a chain record change → plan → apply continues by itself.
+#[test]
+fn approvals_auto_run() {
+    use pigeon_capabilities::approvals::{self, FollowUp};
+    use pigeon_capabilities::approver::acting_refusal;
+    use pigeon_capabilities::users::{Caller, User};
+    use pigeon_core::approval::{self, Kind, Refusal, RunStatus, State};
+    use pigeon_core::policy::{Answer, Approval, Decision};
+
+    let t0 = 5_000_000;
+    let args = json!({ "instance": "docs", "local": "hello", "to": "me@example.com" });
+    let digest = approval::call_digest("email_forward_set", &args, "svc");
+    let call = |payload: Value| {
+        approval::new(
+            "ap1".into(),
+            Kind::ToolCall,
+            "email_forward_set".into(),
+            digest.clone(),
+            json!({ "tool": "email_forward_set", "args": args, "caller": "Claude", "acting_for": "Willow" }),
+            payload,
+            "svc".into(),
+            Some("willow".into()),
+            t0,
+        )
+    };
+    let kept = json!({ "args": args, "scope": "docs" });
+
+    // A gated call runs on approval with the arguments approved, through the endpoint it came
+    // through, carrying its own id for the gate to take.
+    let r = call(kept.clone());
+    assert_eq!(
+        approvals::follow_up(&r).unwrap(),
+        Some(FollowUp {
+            tool: "email_forward_set".into(),
+            args: json!({ "instance": "docs", "local": "hello", "to": "me@example.com", "approval": "ap1" }),
+            scope: Some("docs".into()),
+        })
+    );
+    // Arguments that are not the ones signed for never run; nor a secret's tool, a console
+    // write's own approval, or a record from before arguments were kept.
+    let mut forged =
+        call(json!({ "args": { "instance": "docs", "local": "hello", "to": "evil@example.com" } }));
+    assert!(
+        approvals::follow_up(&forged)
+            .unwrap_err()
+            .contains("not the ones approved")
+    );
+    forged.digest = approval::call_digest("email_forward_set", &forged.payload["args"], "svc");
+    assert_ne!(forged.digest, digest, "another argument is another call");
+    let mut secret = call(kept.clone());
+    secret.subject = "source_token".into();
+    assert_eq!(approvals::follow_up(&secret).unwrap(), None);
+    let mut own = call(kept.clone());
+    own.summary["via"] = json!("console");
+    assert_eq!(approvals::follow_up(&own).unwrap(), None);
+    assert_eq!(approvals::follow_up(&call(Value::Null)).unwrap(), None);
+
+    // Pending, denied and expired approvals are never claimed, so never run.
+    let mut pending = call(kept.clone());
+    assert_eq!(
+        approval::claim(&mut pending, "email_forward_set", t0 + 1),
+        Err(Refusal::NotApproved("ap1".into()))
+    );
+    let mut denied = call(kept.clone());
+    approval::decide(&mut denied, false, &digest, "willow", t0 + 1).unwrap();
+    assert_eq!(
+        approval::claim(&mut denied, "email_forward_set", t0 + 2),
+        Err(Refusal::Denied("ap1".into()))
+    );
+    let mut late = call(kept.clone());
+    approval::decide(&mut late, true, &digest, "willow", t0 + 1).unwrap();
+    assert_eq!(
+        approval::claim(
+            &mut late,
+            "email_forward_set",
+            t0 + 2 + approval::USE_TTL_MS
+        ),
+        Err(Refusal::Expired("ap1".into()))
+    );
+    assert_eq!(late.state, State::Expired);
+    assert!(late.outcome.is_none());
+
+    // Approved: claimed once; a second claim (a retried alarm, a second runner) is refused.
+    let mut r = call(kept.clone());
+    approval::decide(&mut r, true, &digest, "willow", t0 + 1).unwrap();
+    assert!(approval::runnable(&r, t0 + 2).is_ok());
+    approval::claim(&mut r, "email_forward_set", t0 + 2).unwrap();
+    assert_eq!(r.outcome.as_ref().unwrap().status, RunStatus::Running);
+    assert_eq!(
+        approval::claim(&mut r, "email_forward_set", t0 + 3),
+        Err(Refusal::Claimed("ap1".into()))
+    );
+    // While it runs, the caller calling again is told so, and nothing runs; another caller,
+    // or another tool naming the id, goes on to the tool's own refusal.
+    let running = approvals::recall_answer(&r, "email_forward_set", "svc").unwrap();
+    assert!(running.unwrap_err().contains("running now"));
+    assert!(approvals::recall_answer(&r, "email_forward_set", "svc2").is_none());
+    assert!(approvals::recall_answer(&r, "users_remove", "svc").is_none());
+    // The run's own call takes the approval once, for exactly the digest approved.
+    let other = approval::call_digest("email_forward_set", &json!({ "to": "x" }), "svc");
+    assert_eq!(
+        approval::take(&mut r, &other, "svc", t0 + 4),
+        Err(Refusal::OtherCall("ap1".into()))
+    );
+    approval::take(&mut r, &digest, "svc", t0 + 4).unwrap();
+    assert_eq!(
+        approval::take(&mut r, &digest, "svc", t0 + 5),
+        Err(Refusal::Used("ap1".into()))
+    );
+    // It ran and asked for a record change: done, with the next approval; the arguments are
+    // cleared, the answer kept (redacted) for a caller that asks again.
+    let answer =
+        json!({ "approval": "ap2", "changes": [{ "path": "email.forward" }], "api_token": "t" });
+    assert_eq!(approvals::next_of(&answer).as_deref(), Some("ap2"));
+    let summary = approvals::summarize("email_forward_set", &answer);
+    assert!(summary.contains("next approval"), "{summary}");
+    assert!(approval::finish(
+        &mut r,
+        Ok(&answer),
+        Some(summary),
+        Some("ap2".into()),
+        t0 + 6
+    ));
+    assert!(
+        !approval::finish(&mut r, Err("again"), None, None, t0 + 7),
+        "an outcome ends once"
+    );
+    let o = r.outcome.clone().unwrap();
+    assert_eq!(
+        (o.status, o.next.as_deref()),
+        (RunStatus::Done, Some("ap2"))
+    );
+    assert_eq!(o.result["api_token"], json!(approval::REDACTED));
+    assert!(r.payload.get("args").is_none());
+    let again = approvals::recall_answer(&r, "email_forward_set", "svc")
+        .unwrap()
+        .unwrap();
+    assert_eq!(again["approval"], json!("ap2"));
+    let view = approvals::recent_item(&r, &[]).unwrap();
+    assert_eq!(
+        (view["status"].clone(), view["next_waits"].clone()),
+        (json!("done"), json!(false))
+    );
+    assert!(
+        view.get("result").is_none(),
+        "the tab shows the summary, not the answer"
+    );
+
+    // The chain: the record change, once applied, has its instance planned...
+    let mut draft = approval::new(
+        "ap2".into(),
+        Kind::InstanceDraft,
+        "docs".into(),
+        "d2".into(),
+        json!({ "instance": "docs" }),
+        json!({ "record": {}, "base_version": 3 }),
+        "svc".into(),
+        Some("willow".into()),
+        t0,
+    );
+    assert_eq!(
+        approval::runnable(&draft, t0),
+        Err(Refusal::NotApproved("ap2".into()))
+    );
+    approval::decide(&mut draft, true, "d2", "willow", t0 + 1).unwrap();
+    draft.state = State::Used; // as the Directory's apply leaves it
+    assert_eq!(
+        approvals::follow_up(&draft)
+            .unwrap()
+            .map(|f| (f.tool, f.args)),
+        Some(("instance_plan".to_string(), json!({ "instance": "docs" })))
+    );
+    approval::claim(&mut draft, "instance_plan", t0 + 2).unwrap();
+    // ...an apply that did not hold (the record moved on) plans nothing.
+    let mut stale = draft.clone();
+    stale.outcome = None;
+    stale.note = Some("the record changed since this draft".into());
+    assert!(approval::runnable(&stale, t0 + 2).is_err());
+    // A plan with something to do asks for the plan's approval, which applies it by its tool.
+    let planned = json!({ "instance": "docs", "plan": ["Create bucket", "Add route"], "applies": true, "approval": "ap3" });
+    assert_eq!(approvals::next_of(&planned).as_deref(), Some("ap3"));
+    let mut plan = approval::new(
+        "ap3".into(),
+        Kind::LinkedPlan,
+        "docs".into(),
+        "p3".into(),
+        json!({ "instance": "docs" }),
+        json!({ "steps": [] }),
+        "svc".into(),
+        Some("willow".into()),
+        t0,
+    );
+    assert_eq!(
+        approvals::follow_up(&plan)
+            .unwrap()
+            .map(|f| (f.tool, f.args)),
+        Some(("instance_apply".to_string(), json!({ "plan": "ap3" })))
+    );
+    plan.payload = json!({ "retire": true });
+    assert_eq!(
+        approvals::follow_up(&plan).unwrap().unwrap().tool,
+        "instance_retire_apply"
+    );
+    plan.payload = json!({ "rename": true });
+    assert_eq!(
+        approvals::follow_up(&plan).unwrap().unwrap().tool,
+        "instance_rename_home"
+    );
+    for (kind, tool) in [
+        ("apps_cleanup", "apps_cleanup_apply"),
+        ("portal_oauth_redirects", "portal_oauth_redirects_apply"),
+        ("observability_monitors", "observability_monitors_apply"),
+        ("ingest_run", "ingest_start"),
+        ("cloud_change", "cloud_apply"),
+    ] {
+        let mut other = plan.clone();
+        other.kind = Kind::named(kind);
+        assert_eq!(
+            approvals::follow_up(&other).unwrap().unwrap().tool,
+            tool,
+            "{kind}"
+        );
+        assert!(approvals::PLAN_TOOLS.contains(&tool), "{tool}");
+    }
+    let mut unknown = plan.clone();
+    unknown.kind = Kind::named("someday");
+    assert_eq!(approvals::follow_up(&unknown).unwrap(), None);
+    // The previous run's item says its next approval still waits, for the tab's Approve.
+    let ran_draft = {
+        let mut d = draft.clone();
+        approval::finish(&mut d, Ok(&planned), None, Some("ap3".into()), t0 + 3);
+        d
+    };
+    let mut waiting = plan.clone();
+    waiting.payload = json!({ "steps": [] });
+    assert_eq!(
+        approvals::recent_item(&ran_draft, &[waiting]).unwrap()["next_waits"],
+        json!(true)
+    );
+
+    // A plan with nothing to do, or something in the way, ends the chain, saying so.
+    for note in [
+        "Everything is already in place.",
+        "Something is in the way; nothing was asked or changed.",
+    ] {
+        let ended = json!({ "instance": "docs", "plan": [], "applies": false, "note": note });
+        assert_eq!(approvals::next_of(&ended), None);
+        assert_eq!(approvals::summarize("instance_plan", &ended), note);
+    }
+
+    // An apply whose plan no longer matches its digest is refused by its take, and recorded as
+    // failed; the caller calling again is told why, and nothing runs.
+    approval::decide(&mut plan, true, "p3", "willow", t0 + 4).unwrap();
+    approval::claim(&mut plan, "instance_apply", t0 + 5).unwrap();
+    assert_eq!(
+        approval::take(&mut plan, "p3-changed", "svc", t0 + 6),
+        Err(Refusal::OtherCall("ap3".into()))
+    );
+    let why = "the account no longer gives the approved plan; nothing was changed";
+    approval::finish(&mut plan, Err(why), None, None, t0 + 7);
+    let told = approvals::recall_answer(&plan, "instance_apply", "svc")
+        .unwrap()
+        .unwrap_err();
+    assert!(told.contains("failed") && told.contains(why), "{told}");
+    // A failed retire is the one run calling again resumes.
+    let mut retire = plan.clone();
+    retire.outcome.as_mut().unwrap().tool = "instance_retire_apply".into();
+    assert!(approvals::recall_answer(&retire, "instance_retire_apply", "svc").is_none());
+    // A run that died is taken to have, after a while, and never runs again.
+    let mut died = draft.clone();
+    assert!(!approval::run_stale(&died, t0 + 3));
+    assert!(approval::run_stale(&died, t0 + 2 + approval::RUN_STALE_MS));
+    assert!(approval::finish(
+        &mut died,
+        Err("interrupted"),
+        None,
+        None,
+        t0 + 9
+    ));
+    assert_eq!(
+        approval::claim(&mut died, "instance_plan", t0 + 10),
+        Err(Refusal::Claimed("ap2".into()))
+    );
+
+    // The policy is asked again at run time: a tool it now refuses outright does not run; one
+    // it gates on the passkey runs, the approval being that passkey.
+    let gated = Answer {
+        decision: Decision::Deny,
+        rule: Some("risky-tools-need-passkey".into()),
+        reason: "r".into(),
+        needs: Some(Approval::Passkey),
+    };
+    let refused = Answer {
+        decision: Decision::Deny,
+        rule: None,
+        reason: "not in policy".into(),
+        needs: None,
+    };
+    let allowed = Answer {
+        decision: Decision::Allow,
+        rule: Some("tools-run".into()),
+        reason: "r".into(),
+        needs: None,
+    };
+    assert!(approvals::runs_under(&gated, "email_forward_set").is_ok());
+    assert!(approvals::runs_under(&allowed, "instance_apply").is_ok());
+    assert!(
+        approvals::runs_under(&refused, "email_forward_set")
+            .unwrap_err()
+            .contains("now refuses")
+    );
+    assert!(approvals::recheck("Claude", "email_forward_set").is_ok());
+    assert!(approvals::recheck("Claude", "instance_apply").is_ok());
+
+    // As the original caller only: still acting for the person who approved.
+    let user = |id: &str, kind: &str| User {
+        id: id.into(),
+        kind: kind.into(),
+        name: id.into(),
+        created_at: 0,
+    };
+    let as_svc = |acting: Option<&str>| Caller {
+        user: user("svc", "service"),
+        acting_for: acting.map(|a| user(a, "standard")),
+        run: None,
+    };
+    let r = call(kept);
+    assert_eq!(acting_refusal(&r, &as_svc(Some("willow"))), None);
+    assert!(acting_refusal(&r, &as_svc(Some("mallory"))).is_some());
+    assert!(acting_refusal(&r, &as_svc(None)).is_some());
+    let mut anyone = r.clone();
+    anyone.approver_id = None;
+    assert_eq!(acting_refusal(&anyone, &as_svc(None)), None);
+    assert!(acting_refusal(&anyone, &as_svc(Some("willow"))).is_some());
+
+    // An answer too long to keep is kept as a note.
+    let long = json!({ "lines": vec!["x".repeat(100); 200] });
+    assert_eq!(approval::kept_result(&long)["truncated"], json!(true));
+}

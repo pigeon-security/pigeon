@@ -240,7 +240,7 @@ async fn plan_tool(
         "expires_ms": created.expires_ms,
         "next": format!(
             "Nothing has changed. The person approves it on the Approvals tab with their passkey; \
-             then call cloud_apply with plan `{}`.",
+             then the platform runs cloud_apply with plan `{}` once, as you.",
             created.id
         ),
     }))

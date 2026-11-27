@@ -222,8 +222,9 @@ pub async fn gate(cx: &Context<'_>, tool: &str, args: &Value) -> Result<Gate> {
                 Error::RustError(format!("`{tool}` needs a known caller to be approved"))
             })?;
             let digest = approval::call_digest(tool, &rest, &caller.user.id);
+            let scope = cx.instance.map(|s| s.instance().to_string());
             match id {
-                None => ask(cx.env, caller, tool, &rest, digest, a).await,
+                None => ask(cx.env, caller, tool, &rest, scope, digest, a).await,
                 Some(id) => use_approved(cx.env, caller, tool, rest, digest, &id, a).await,
             }
         }
@@ -231,11 +232,13 @@ pub async fn gate(cx: &Context<'_>, tool: &str, args: &Value) -> Result<Gate> {
 }
 
 /// Asks for the person's approval of this call, answering why it does not run yet.
+#[allow(clippy::too_many_arguments)]
 async fn ask(
     env: &Env,
     caller: &Caller,
     tool: &str,
     args: &Value,
+    scope: Option<String>,
     digest: String,
     a: Answer,
 ) -> Result<Gate> {
@@ -260,7 +263,13 @@ async fn ask(
             "subject": tool,
             "digest": digest,
             "summary": summary,
-            "payload": Value::Null,
+            // What runs once the person approves: these arguments, through this instance
+            // endpoint when the call came through one. The digest covers the arguments.
+            "payload": if ANSWERS_SECRET.contains(&tool) {
+                Value::Null
+            } else {
+                json!({ "args": args, "scope": scope })
+            },
             "caller_id": caller.user.id,
             "approver_id": caller.acting_for.as_ref().map(|p| p.id.clone()),
         }),
@@ -299,10 +308,20 @@ async fn ask(
             }
         }
     }
+    if ANSWERS_SECRET.contains(&tool) {
+        return Err(Error::RustError(format!(
+            "`{tool}` needs the person's passkey for this call: approval `{id}` waits on the \
+             console's Approvals tab until {until}. Once approved, call `{tool}` again with the \
+             same arguments and \"{ARG}\": \"{id}\"; `approvals_status` says where it stands.",
+            id = r.id,
+            until = clock(r.expires_ms),
+        )));
+    }
     Err(Error::RustError(format!(
         "`{tool}` needs the person's passkey for this call: approval `{id}` waits on the \
-         console's Approvals tab until {until}. Once approved, call `{tool}` again with the \
-         same arguments and \"{ARG}\": \"{id}\"; `approvals_status` says where it stands.",
+         console's Approvals tab until {until}. Once the person approves it, the platform runs \
+         this exact call once, as you; do not call it again. `approvals_status {{\"id\": \
+         \"{id}\"}}` answers its result, and any approval it asks for next.",
         id = r.id,
         until = clock(r.expires_ms),
     )))
@@ -376,8 +395,10 @@ pub fn annotate(tools: &mut [Tool]) {
                     "type": "string",
                     "description": "Each call of this tool needs the person's passkey. The first \
                                     call answers an approval id and runs nothing; once the person \
-                                    approves it on the console, call again with the same \
-                                    arguments and this id. It runs once."
+                                    approves it on the console, the platform runs that exact \
+                                    call once, as you (approvals_status answers its result). \
+                                    Calling again with this id answers the recorded result and \
+                                    never runs it twice."
                 }),
             );
         } else {
@@ -432,6 +453,20 @@ pub async fn decide(env: &Env, id: &str, approve: bool, person: &User) -> Result
         return Err(Error::RustError(why.to_string()));
     }
     let r: Record = serde_json::from_value(decided["record"].clone())?;
+    // What it stands for runs now, as its caller, in the Approver's alarm; the console's
+    // request does not wait for it (docs/plans/approvals-auto-run.md).
+    let runs = approve && matches!(follow_up(&r), Ok(Some(_)));
+    let queued = if runs && approval::runnable(&r, js_now()).is_ok() {
+        match crate::approver::enqueue(env, &r.id).await {
+            Ok(()) => true,
+            Err(e) => {
+                worker::console_error!("approval {} not handed to the runner: {e}", r.id);
+                false
+            }
+        }
+    } else {
+        false
+    };
     if r.kind == ApprovalKind::ToolCall {
         let (decision, verb) = if approve {
             (Decision::Allow, "approved")
@@ -452,7 +487,12 @@ pub async fn decide(env: &Env, id: &str, approve: bool, person: &User) -> Result
         .await?;
     }
     if r.kind == ApprovalKind::InstanceDraft {
-        return Ok(json!({ "message": match r.state {
+        return Ok(json!({ "queued": queued, "message": match r.state {
+            State::Used if queued => format!(
+                "Applied: instance `{}` has the approved record. Its plan is being made now; \
+                 if there is something to do, it waits here for your approval.",
+                r.subject
+            ),
             State::Used => format!("Applied: instance `{}` has the approved record.", r.subject),
             State::Expired => format!(
                 "Not applied: {}. Ask for a new proposal.",
@@ -460,6 +500,12 @@ pub async fn decide(env: &Env, id: &str, approve: bool, person: &User) -> Result
             ),
             _ => format!("Denied: instance `{}` is unchanged.", r.subject),
         } }));
+    }
+    if queued {
+        return Ok(json!({ "queued": true, "message": format!(
+            "Approved: {} runs now, once, as the caller that asked. Its result shows here.",
+            follow_up(&r).ok().flatten().map_or_else(|| r.subject.clone(), |f| format!("`{}`", f.tool))
+        ) }));
     }
     if r.kind.name() == "observability_monitors" {
         return Ok(json!({ "message": if approve {
@@ -513,6 +559,7 @@ impl Approvals {
         };
         let open = open_for(cx.env, person).await?;
         let mut out = listing(&open);
+        out["recent"] = Value::Array(recent_for(cx.env, person, &open).await?);
         out["landings"] = Value::Array(with_plain(crate::land::awaiting(cx.env).await?));
         Ok(out)
     }
@@ -534,10 +581,19 @@ impl Approvals {
         } else {
             r.state
         };
-        Ok(json!({
-            "id": r.id, "tool": r.subject, "state": state.name(),
+        let mut out = json!({
+            "id": r.id, "tool": r.subject, "kind": r.kind.name(), "state": state.name(),
             "expires_ms": r.expires_ms, "decided_by_person": r.decided_by.is_some(),
-        }))
+            "runs_on_approval": matches!(follow_up(&r), Ok(Some(_))),
+        });
+        if let Some(o) = &r.outcome {
+            out["outcome"] = outcome_view(o);
+            out["next"] = json!(o.next);
+        }
+        if let Some(after) = &r.after {
+            out["after"] = json!(after);
+        }
+        Ok(out)
     }
 }
 
@@ -562,13 +618,17 @@ impl Capability for Approvals {
             Tool {
                 name: "approvals_list",
                 description: "What waits for the person's passkey: tool calls, instance drafts, \
-                          linked plans and landings. For a person, or an app acting for one.",
+                          linked plans and landings; and `recent`, what ran on approval in the \
+                          last day, with its result and the next approval it asked for. For a \
+                          person, or an app acting for one.",
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
             Tool {
                 name: "approvals_status",
-                description: "Where one of your tool calls' passkey approvals stands: pending, \
-                          approved (call the tool again with it), denied, expired or used.",
+                description: "Where one of your approvals stands: pending, approved, denied, \
+                          expired or used; and, once the person approved it, what the platform \
+                          ran: `outcome` (running, done with its result, or failed with why) \
+                          and `next`, the approval that run asked for, if any.",
                 input_schema: json!({
                     "type": "object",
                     "properties": { "id": { "type": "string" } },
@@ -606,6 +666,7 @@ pub fn listing(open: &[Record]) -> Value {
                 "created_ms": r.created_ms, "expires_ms": r.expires_ms,
                 "digest": short(r),
                 "plain": plain_call(&r.subject, &r.summary["args"], &r.summary["acting_for"]),
+                "after": r.after,
             })
         })
         .collect();
@@ -613,7 +674,7 @@ pub fn listing(open: &[Record]) -> Value {
         json!({
             "id": r.id, "instance": r.subject, "summary": r.summary,
             "created_ms": r.created_ms, "expires_ms": r.expires_ms,
-            "digest": short(r), "plain": plain,
+            "digest": short(r), "plain": plain, "after": r.after,
         })
     };
     let drafts: Vec<Value> = pending(ApprovalKind::InstanceDraft)
@@ -653,6 +714,7 @@ pub fn listing(open: &[Record]) -> Value {
                 "id": r.id, "kind": r.kind.name(), "title": r.subject, "summary": r.summary,
                 "created_ms": r.created_ms, "expires_ms": r.expires_ms,
                 "digest": short(r),
+                "after": r.after,
                 "plain": if r.subject.is_empty() {
                     format!("Approve {}", r.kind.name())
                 } else {
@@ -731,4 +793,252 @@ pub fn with_plain(landings: Vec<Value>) -> Vec<Value> {
             l
         })
         .collect()
+}
+
+// ---- What runs on approval (docs/plans/approvals-auto-run.md) ----
+
+/// Gated tools whose answer is a live secret: their approval does not run on its own, since
+/// the secret would wait at rest for its caller. The caller calls again with the id, as before.
+pub const ANSWERS_SECRET: &[&str] = &["source_token", "session_credential", "oauth_issue_token"];
+
+/// The tools a plan's approval runs, each taking the approval's id as `plan`.
+pub const PLAN_TOOLS: &[&str] = &[
+    "instance_apply",
+    "instance_retire_apply",
+    crate::instances::rename::TOOL,
+    "apps_cleanup_apply",
+    "portal_oauth_redirects_apply",
+    "observability_monitors_apply",
+    "ingest_start",
+    "cloud_apply",
+];
+
+/// The operation an approval stands for: a tool call, made as the approval's caller.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FollowUp {
+    pub tool: String,
+    pub args: Value,
+    /// The instance endpoint the call came through, when it came through one.
+    pub scope: Option<String>,
+}
+
+/// What runs once `r` is approved, if anything does. Pure. A tool call runs with the arguments
+/// kept with it, only when they are exactly the ones whose digest the person signed for; a call
+/// whose answer is a secret, a console write's own approval, and a record from before the
+/// arguments were kept do not run on their own. A draft, once applied, has its instance
+/// planned; a plan is applied by its tool; a kind not known here runs nothing.
+pub fn follow_up(r: &Record) -> std::result::Result<Option<FollowUp>, String> {
+    let plan = |tool: &str| {
+        Ok(Some(FollowUp {
+            tool: tool.to_string(),
+            args: json!({ "plan": r.id }),
+            scope: None,
+        }))
+    };
+    match &r.kind {
+        ApprovalKind::ToolCall => {
+            if r.summary["via"] == "console" || ANSWERS_SECRET.contains(&r.subject.as_str()) {
+                return Ok(None);
+            }
+            let Some(args) = r.payload.get("args").filter(|a| a.is_object()) else {
+                return Ok(None);
+            };
+            if approval::call_digest(&r.subject, args, &r.caller_id) != r.digest {
+                return Err(format!(
+                    "the arguments kept with approval {} are not the ones approved; nothing ran",
+                    r.id
+                ));
+            }
+            let mut run = args.clone();
+            run[ARG] = json!(r.id);
+            Ok(Some(FollowUp {
+                tool: r.subject.clone(),
+                args: run,
+                scope: r.payload["scope"].as_str().map(str::to_string),
+            }))
+        }
+        ApprovalKind::InstanceDraft => Ok(Some(FollowUp {
+            tool: "instance_plan".into(),
+            args: json!({ "instance": r.subject }),
+            scope: None,
+        })),
+        ApprovalKind::LinkedPlan => {
+            if r.payload["retire"] == true {
+                plan("instance_retire_apply")
+            } else if r.payload["rename"] == true {
+                plan(crate::instances::rename::TOOL)
+            } else {
+                plan("instance_apply")
+            }
+        }
+        ApprovalKind::Other(kind) => match kind.as_str() {
+            crate::delegates::KIND => plan("apps_cleanup_apply"),
+            crate::portal_oauth::KIND => plan("portal_oauth_redirects_apply"),
+            "observability_monitors" => plan("observability_monitors_apply"),
+            crate::ingest::KIND => plan("ingest_start"),
+            "cloud_change" => plan("cloud_apply"),
+            _ => Ok(None),
+        },
+    }
+}
+
+/// Whether the policy's answer `a` about a call of `tool` lets an approved run of it go on:
+/// allowed, or gated on the passkey (the approval is that passkey). Refused outright, it does
+/// not run, whatever was approved. Pure.
+pub fn runs_under(a: &Answer, tool: &str) -> std::result::Result<(), String> {
+    match (a.decision, a.needs) {
+        (Decision::Allow, _) | (Decision::Deny, Some(Approval::Passkey)) => Ok(()),
+        _ => Err(format!(
+            "the person's policy now refuses `{tool}`: {} ({}); nothing ran",
+            a.reason,
+            a.rule.as_deref().unwrap_or("no rule")
+        )),
+    }
+}
+
+/// The policy asked again, at run time, about `actor` calling `tool`: the Approver's check
+/// before an approved call runs (`dispatch`'s gate asks it once more).
+pub fn recheck(actor: &str, tool: &str) -> std::result::Result<(), String> {
+    if !asked() {
+        return Ok(());
+    }
+    runs_under(&answer(actor, tool).1, tool)
+}
+
+/// The approval id a call of `tool` with `args` names, when the tool is one an approval runs.
+fn recall_id<'a>(tool: &str, args: &'a Value) -> Option<&'a str> {
+    if PLAN_TOOLS.contains(&tool) {
+        args["plan"].as_str()
+    } else if args.get(ARG).is_some() && gated(tool) {
+        args[ARG].as_str()
+    } else {
+        None
+    }
+}
+
+/// What a caller calling `tool` again with approval `r`, which the platform has claimed, is
+/// answered: the recorded answer, or why there is none, so nothing runs twice. Pure. None lets
+/// the call go on: not claimed, another caller's, another tool's, or a failed retire, which
+/// calling again resumes.
+pub fn recall_answer(
+    r: &Record,
+    tool: &str,
+    caller_id: &str,
+) -> Option<std::result::Result<Value, String>> {
+    let o = r.outcome.as_ref()?;
+    if o.tool != tool {
+        return None;
+    }
+    if o.status == approval::RunStatus::Failed && tool == "instance_retire_apply" {
+        return None;
+    }
+    approval::recall(r, caller_id)
+}
+
+/// For [`crate::dispatch`]: when `tool` is called with the id of an approval the platform
+/// already ran (or runs), its recorded answer, so the old "call again" flow still works and
+/// never runs anything twice. None for every other call.
+pub async fn recalled(
+    cx: &Context<'_>,
+    tool: &str,
+    args: &Value,
+) -> Result<Option<std::result::Result<Value, String>>> {
+    let (Some(id), Some(caller)) = (recall_id(tool, args), cx.caller) else {
+        return Ok(None);
+    };
+    let got = directory(cx.env, "approval.get", json!({ "id": id })).await?;
+    let Ok(Some(r)) = serde_json::from_value::<Option<Record>>(got) else {
+        return Ok(None);
+    };
+    Ok(recall_answer(&r, tool, &caller.user.id))
+}
+
+/// One line saying what a run of `tool` that answered `answer` came to. Pure.
+pub fn summarize(tool: &str, answer: &Value) -> String {
+    if next_of(answer).is_some() {
+        let steps = answer["plan"].as_array().map_or(0, Vec::len);
+        let changes = answer["changes"].as_array().map_or(0, Vec::len);
+        return match (steps, changes) {
+            (0, 0) => format!("`{tool}` ran and asks for the next approval."),
+            (0, n) => format!("`{tool}` ran and asks for the next approval: {n} change(s)."),
+            (n, _) => {
+                format!("`{tool}` ran and asks for the next approval: a plan of {n} step(s).")
+            }
+        };
+    }
+    let said = ["note", "message", "summary"]
+        .iter()
+        .find_map(|k| answer[*k].as_str())
+        .map(str::to_string);
+    match said {
+        Some(s) => s,
+        None if answer["problems"].is_array() => format!(
+            "`{tool}` asked nothing: {}",
+            answer["problems"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join("; ")
+        ),
+        None => format!("`{tool}` ran."),
+    }
+}
+
+/// The approval a run's answer asks for next, if it names one. Pure.
+pub fn next_of(answer: &Value) -> Option<String> {
+    answer["approval"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// An outcome as `approvals_status` and the Approvals tab show it.
+pub fn outcome_view(o: &approval::Outcome) -> Value {
+    json!({
+        "status": o.status.name(), "tool": o.tool, "summary": o.summary, "error": o.error,
+        "next": o.next, "started_ms": o.started_ms, "finished_ms": o.finished_ms,
+        "result": o.result,
+    })
+}
+
+/// What ran on approval in the last day that `person` may see, as the Approvals tab lists it:
+/// newest first, each with whether its next approval still waits (in `open`).
+pub async fn recent_for(env: &Env, person: &User, open: &[Record]) -> Result<Vec<Value>> {
+    let got = directory(env, "approval.recent", json!({})).await?;
+    let ran: Vec<Record> = serde_json::from_value(got["ran"].clone()).unwrap_or_default();
+    let access = crate::membership::access(env, &person.id).await?;
+    Ok(ran
+        .iter()
+        .filter(|r| r.approver_id.as_deref().is_none_or(|p| p == person.id))
+        .filter(|r| {
+            let instance = crate::instances::manifest::approval_instance(r);
+            access
+                .check(instance, crate::membership::Role::Operator)
+                .is_ok()
+        })
+        .filter_map(|r| recent_item(r, open))
+        .collect())
+}
+
+/// One item of `recent`: the outcome without the answer, which stays with its caller's own
+/// `approvals_status`; and whether the next approval still waits (in `open`). Pure.
+pub fn recent_item(r: &Record, open: &[Record]) -> Option<Value> {
+    let o = r.outcome.as_ref()?;
+    let waiting = o
+        .next
+        .as_deref()
+        .is_some_and(|n| open.iter().any(|p| p.id == n && p.state == State::Pending));
+    let mut view = outcome_view(o);
+    view["id"] = json!(r.id);
+    view["kind"] = json!(r.kind.name());
+    view["subject"] = json!(r.subject);
+    view["instance"] = json!(crate::instances::manifest::approval_instance(r));
+    view["next_waits"] = json!(waiting);
+    view["decided_ms"] = json!(r.decided_ms);
+    if let Some(m) = view.as_object_mut() {
+        m.remove("result");
+    }
+    Some(view)
 }

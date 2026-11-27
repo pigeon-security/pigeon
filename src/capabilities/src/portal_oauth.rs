@@ -325,8 +325,9 @@ pub async fn redirects(cx: &Context<'_>, host: &str, args: &Value) -> Result<Val
         "approval": made["record"]["id"],
         "waits_until_ms": made["record"]["expires_ms"],
         "note": "Nothing changes until the person approves this plan on the console's \
-                 Approvals tab; then portal_oauth_redirects_apply {plan: <this approval>} \
-                 makes the change once.",
+                 Approvals tab; then the platform makes the change once, as you \
+                 (portal_oauth_redirects_apply). approvals_status {id: <this approval>} says how \
+                 it went.",
     }))
 }
 

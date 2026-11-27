@@ -1893,8 +1893,8 @@ async fn monitors_plan(this: &Observability, cx: &Context<'_>, args: &Value) -> 
         "approval": made["record"]["id"],
         "waits_until_ms": made["record"]["expires_ms"],
         "note": "Nothing is created or changed until the person approves this plan on the \
-                 console's Approvals tab; then observability_monitors_apply {plan: <this \
-                 approval>} creates and updates the policies once. Updates keep every existing \
+                 console's Approvals tab; then the platform creates and updates the policies \
+                 once, as you (observability_monitors_apply). Updates keep every existing \
                  delivery. Delivery by email is set on every policy only when `email` is \
                  given; otherwise the person adds it in the dashboard.",
     }))

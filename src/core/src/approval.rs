@@ -131,6 +131,85 @@ pub struct Record {
     /// since this draft".
     #[serde(default)]
     pub note: Option<String>,
+    /// What the platform did with it once approved (docs/plans/approvals-auto-run.md): None
+    /// until a runner claims it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<Outcome>,
+    /// The approval whose run asked for this one, when one did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+}
+
+/// Where the run of an approved operation stands.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum RunStatus {
+    Running,
+    Done,
+    Failed,
+}
+
+impl RunStatus {
+    /// Its name as stored.
+    pub fn name(self) -> &'static str {
+        match self {
+            RunStatus::Running => "running",
+            RunStatus::Done => "done",
+            RunStatus::Failed => "failed",
+        }
+    }
+}
+
+/// The run of an approved operation, by the platform, as the approval's caller.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Outcome {
+    pub status: RunStatus,
+    /// The tool that ran (or runs).
+    pub tool: String,
+    pub started_ms: i64,
+    #[serde(default)]
+    pub finished_ms: Option<i64>,
+    /// One line for the person: what came of it.
+    #[serde(default)]
+    pub summary: Option<String>,
+    /// The tool's answer, redacted and bounded, for a caller that asks again.
+    #[serde(default)]
+    pub result: Value,
+    /// Why it failed.
+    #[serde(default)]
+    pub error: Option<String>,
+    /// The approval the run asked for next, if it asked for one.
+    #[serde(default)]
+    pub next: Option<String>,
+}
+
+/// The most of a run's answer an outcome keeps, as canonical JSON.
+pub const RESULT_MAX: usize = 8 * 1024;
+/// The longest summary or error an outcome keeps, in characters.
+pub const LINE_MAX: usize = 500;
+/// How long a run may be `running` before it is taken to have died.
+pub const RUN_STALE_MS: i64 = 20 * 60 * 1000;
+
+/// `s` cut to [`LINE_MAX`] characters.
+pub fn line(s: &str) -> String {
+    let mut out: String = s.chars().take(LINE_MAX).collect();
+    if s.chars().count() > LINE_MAX {
+        out.push('…');
+    }
+    out
+}
+
+/// A run's answer as an outcome keeps it: redacted, and when too long, only a note saying so.
+pub fn kept_result(v: &Value) -> Value {
+    let shown = redact(v);
+    if canonical(&shown).len() > RESULT_MAX {
+        serde_json::json!({
+            "truncated": true,
+            "note": "the answer was too long to keep; read the state again",
+        })
+    } else {
+        shown
+    }
 }
 
 /// `v` with object keys sorted at every depth.
@@ -230,6 +309,8 @@ pub fn new(
         decided_ms: None,
         used_ms: None,
         note: None,
+        outcome: None,
+        after: None,
     }
 }
 
@@ -260,6 +341,8 @@ pub enum Refusal {
     OtherCall(String),
     NotYours(String),
     OtherCaller(String),
+    /// The platform has already taken it to run.
+    Claimed(String),
 }
 
 impl std::fmt::Display for Refusal {
@@ -275,6 +358,7 @@ impl std::fmt::Display for Refusal {
             Refusal::OtherCall(id) => write!(f, "approval {id} is for another call"),
             Refusal::NotYours(id) => write!(f, "approval {id} is not for this person"),
             Refusal::OtherCaller(id) => write!(f, "approval {id} is for another caller"),
+            Refusal::Claimed(id) => write!(f, "approval {id} already ran, or runs, on approval"),
         }
     }
 }
@@ -362,4 +446,118 @@ pub fn stale_draft(r: &mut Record, current_version: u64, draft_version: u64) -> 
     r.state = State::Expired;
     r.note = Some("the record changed since this draft".to_string());
     true
+}
+
+/// Whether `r` is ready for the platform to run what it stands for, at `now_ms`: approved and
+/// not past its time, or a draft the Directory has applied; and not claimed before.
+pub fn runnable(r: &Record, now_ms: i64) -> Result<(), Refusal> {
+    if r.outcome.is_some() {
+        return Err(Refusal::Claimed(r.id.clone()));
+    }
+    if r.kind.applies_on_approve() {
+        // A draft is applied when approved; what follows it runs only after an apply that held.
+        return match r.state {
+            State::Used if r.note.is_none() => Ok(()),
+            State::Pending => Err(Refusal::NotApproved(r.id.clone())),
+            State::Denied => Err(Refusal::Denied(r.id.clone())),
+            _ => Err(Refusal::Expired(r.id.clone())),
+        };
+    }
+    match r.state {
+        State::Approved if !is_stale(r, now_ms) => Ok(()),
+        State::Approved | State::Expired => Err(Refusal::Expired(r.id.clone())),
+        State::Pending => Err(Refusal::NotApproved(r.id.clone())),
+        State::Denied => Err(Refusal::Denied(r.id.clone())),
+        State::Used => Err(Refusal::Used(r.id.clone())),
+    }
+}
+
+/// A runner claims `r` to run `tool`, once: it must be [`runnable`]. Marks it running.
+pub fn claim(r: &mut Record, tool: &str, now_ms: i64) -> Result<(), Refusal> {
+    let ready = runnable(r, now_ms);
+    if ready.is_err() {
+        // A refusal may still expire a stale record.
+        expire(r, now_ms);
+    }
+    ready?;
+    r.outcome = Some(Outcome {
+        status: RunStatus::Running,
+        tool: tool.to_string(),
+        started_ms: now_ms,
+        finished_ms: None,
+        summary: None,
+        result: Value::Null,
+        error: None,
+        next: None,
+    });
+    Ok(())
+}
+
+/// Records how the claimed run of `r` ended: `Ok(answer)` or `Err(why)`, with the approval it
+/// asked for next. Only a running outcome ends, and once; a tool call's arguments are cleared
+/// from its payload. Answers whether it changed `r`.
+pub fn finish(
+    r: &mut Record,
+    ended: Result<&Value, &str>,
+    summary: Option<String>,
+    next: Option<String>,
+    now_ms: i64,
+) -> bool {
+    let Some(o) = r
+        .outcome
+        .as_mut()
+        .filter(|o| o.status == RunStatus::Running)
+    else {
+        return false;
+    };
+    o.finished_ms = Some(now_ms);
+    o.summary = summary.map(|s| line(&s));
+    match ended {
+        Ok(answer) => {
+            o.status = RunStatus::Done;
+            o.result = kept_result(answer);
+            o.next = next;
+        }
+        Err(why) => {
+            o.status = RunStatus::Failed;
+            o.error = Some(line(why));
+        }
+    }
+    if r.kind == Kind::ToolCall
+        && let Some(p) = r.payload.as_object_mut()
+    {
+        p.remove("args");
+    }
+    true
+}
+
+/// Whether a run of `r` has been running for [`RUN_STALE_MS`] or more at `now_ms`.
+pub fn run_stale(r: &Record, now_ms: i64) -> bool {
+    r.outcome.as_ref().is_some_and(|o| {
+        o.status == RunStatus::Running && now_ms.saturating_sub(o.started_ms) >= RUN_STALE_MS
+    })
+}
+
+/// What a caller calling again with approval `r`, which the platform has claimed, is answered:
+/// the run's answer, or why there is none. None when it has not been claimed, or is another
+/// caller's (who is refused as before, by the tool).
+pub fn recall(r: &Record, caller_id: &str) -> Option<Result<Value, String>> {
+    if r.caller_id != caller_id {
+        return None;
+    }
+    let o = r.outcome.as_ref()?;
+    Some(match o.status {
+        RunStatus::Done => Ok(o.result.clone()),
+        RunStatus::Running => Err(format!(
+            "approval {} was approved and `{}` is running now, once; `approvals_status` says \
+             when it is done. Do not call it again.",
+            r.id, o.tool
+        )),
+        RunStatus::Failed => Err(format!(
+            "approval {} was approved and `{}` ran then, and failed: {}",
+            r.id,
+            o.tool,
+            o.error.as_deref().unwrap_or("no reason recorded")
+        )),
+    })
 }

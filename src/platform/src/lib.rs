@@ -61,6 +61,43 @@ impl worker::DurableObject for Lander {
     }
 }
 
+/// The Approver: runs what an approval stands for once the person approves it, from its alarm,
+/// as the caller that asked (docs/plans/approvals-auto-run.md).
+#[worker::durable_object]
+pub struct Approver {
+    inner: pigeon_capabilities::approver::Approver,
+    env: Env,
+}
+
+impl worker::DurableObject for Approver {
+    fn new(state: worker::State, env: Env) -> Self {
+        let hosting = pigeon_capabilities::land::Hosting {
+            worker: settings::WORKER,
+            capabilities: settings::capabilities,
+            sources: SOURCES,
+            bindings: settings::BINDINGS,
+        };
+        let inner = pigeon_capabilities::approver::Approver::new(
+            state,
+            env.clone(),
+            hosting,
+            settings::PARENT_TOKEN,
+        )
+        .expect("the Approver's migrations apply");
+        Self { inner, env }
+    }
+
+    async fn fetch(&self, req: Request) -> Result<Response> {
+        self.inner.fetch(req).await
+    }
+
+    async fn alarm(&self) -> Result<Response> {
+        let answer = self.inner.alarm().await;
+        pigeon_capabilities::ledger::flush_calls(&self.env, false).await;
+        answer
+    }
+}
+
 /// The token ledger: one shared Cloudflare token per caller and permission set
 /// (docs/plans/token-minting.md). Core leases, releases and sweeps through it.
 #[worker::durable_object]

@@ -2762,7 +2762,10 @@ impl AiAgentRuns {
         let caller: Value = serde_json::from_str(&row.caller).unwrap_or(Value::Null);
         let status = dispatch(&self.env, &caller, "approvals_status", &json!({ "id": id })).await?;
         let state = status["state"].as_str().unwrap_or("pending");
-        if state == "pending" {
+        // Once approved, the platform runs the call itself (docs/plans/approvals-auto-run.md):
+        // wait while it runs, then take its outcome as the call's answer.
+        let ran = status["outcome"]["status"].as_str();
+        if state == "pending" || ran == Some("running") {
             return Ok(false);
         }
         let calls = self.calls()?;
@@ -2771,7 +2774,19 @@ impl AiAgentRuns {
             self.state.storage().set_alarm(0).await?;
             return Ok(true);
         };
-        let outcome = if state == "approved" {
+        let outcome = if ran == Some("done") {
+            (status["outcome"]["result"].to_string(), false)
+        } else if ran == Some("failed") {
+            (
+                format!(
+                    "the person approved {id}; the call ran then and failed: {}",
+                    status["outcome"]["error"]
+                        .as_str()
+                        .unwrap_or("no reason recorded")
+                ),
+                true,
+            )
+        } else if state == "approved" {
             let mut input: Value = serde_json::from_str(&c.input).unwrap_or(json!({}));
             input["approval"] = json!(id);
             match dispatch(&self.env, &caller, &c.name, &input).await {

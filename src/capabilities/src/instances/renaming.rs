@@ -155,7 +155,8 @@ impl Instances {
                 "waits_until_ms": made["record"]["expires_ms"],
                 "note": format!(
                     "Nothing changes until the person approves this plan on the console's \
-                     Approvals tab; then {} {{plan: <this approval>}} runs it once.",
+                     Approvals tab; then the platform runs it once, as you ({} with this \
+                     plan). approvals_status says how it went.",
                     rename::TOOL
                 ),
             }),

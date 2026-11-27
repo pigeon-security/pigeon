@@ -405,7 +405,11 @@ impl Instances {
             "approval": made["record"]["id"],
             "waits_until_ms": made["record"]["expires_ms"],
             "changes": changes,
-            "note": "Nothing changes until the person approves this on the console's Approvals tab.",
+            "note": "Nothing changes until the person approves this on the console's Approvals \
+                     tab. Once approved, the record is saved and the platform plans the \
+                     instance as you: a plan with something to do waits there for the person's \
+                     approval too, and is then applied. approvals_status {id: <this approval>} \
+                     follows each step.",
         }))
     }
 }
@@ -1180,7 +1184,9 @@ impl Instances {
             "approval": made["record"]["id"],
             "waits_until_ms": made["record"]["expires_ms"],
             "note": "Nothing changes until the person approves this plan on the console's \
-                     Approvals tab; then instance_apply {plan: <this approval>} applies it once.",
+                     Approvals tab; then the platform applies it once, as you (instance_apply), \
+                     if the account still gives the same plan. approvals_status {id: <this \
+                     approval>} says how it went.",
         })))
     }
 

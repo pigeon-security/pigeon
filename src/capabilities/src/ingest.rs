@@ -820,7 +820,7 @@ impl Ingest {
             "sample": sample,
             "approval": made["record"]["id"],
             "waits_until_ms": made["record"]["expires_ms"],
-            "note": "Nothing starts until the person approves this plan on the console's Approvals tab; then ingest_start {plan: <this approval>} starts it once.",
+            "note": "Nothing starts until the person approves this plan on the console's Approvals tab; then the platform starts it once, as you (ingest_start). approvals_status {id: <this approval>} says how it went.",
         }))
     }
 

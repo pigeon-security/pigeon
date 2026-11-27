@@ -30,12 +30,16 @@
   // instance when it names one (landings only on home); a landing has no deny.
   function inboxItems(data, home) {
     const by = (caller, actingFor) => (actingFor ? `${caller} for ${actingFor}` : caller || "—");
+    // A request a run asked for says which approval's run it follows.
+    const follows = (i) => (i.after ? [{ op: "note", text: `asked by the run of approval ${i.after}` }] : []);
     const items = [
       ...(data.calls || []).map((c) => ({
         id: c.id, kind: "Tool call", instance: c.args?.instance || c.instance || c.summary?.instance || home, title: [el("span", { text: "Run " }), code(c.tool)],
         plain: c.tool, by: by(c.caller, c.acting_for), since: c.created_ms, expires: c.expires_ms, action: "approval-approve", deny: true,
-        diff: [{ op: "note", text: `call digest ${c.digest || "—"}` }],
-        effect: "Approving lets this exact call run once, if its caller calls again within 10 minutes.",
+        diff: [...follows(c), { op: "note", text: `call digest ${c.digest || "—"}` }],
+        effect: c.tool === "source_token"
+          ? "Approving lets this exact call run once, if its caller calls again within 10 minutes."
+          : "Approving runs this exact call once, now, as its caller. The result shows under Ran on approval.",
         detail: () => el("div", { class: "cols" }, facts([
           c.run && ["Run", code(c.run)],
           ["Asked", when(c.created_ms)],
@@ -44,14 +48,14 @@
       })),
       ...(data.drafts || []).map((d) => {
         const changes = d.summary?.changes || [];
-        const diff = [{ op: "note", text: `record version ${d.summary?.version_from ?? 0} → ${(d.summary?.version_from ?? 0) + 1}` },
+        const diff = [...follows(d), { op: "note", text: `record version ${d.summary?.version_from ?? 0} → ${(d.summary?.version_from ?? 0) + 1}` },
           ...changes.flatMap((c) => [c.from != null && { op: "del", text: `${c.path}: ${show(c.from)}` },
             c.to != null && { op: "add", text: `${c.path}: ${show(c.to)}` }].filter(Boolean))];
         return {
           id: d.id, kind: "Instance change", instance: d.instance, title: [el("span", { text: "Change " }), el("strong", { text: d.instance })],
           plain: `change to ${d.instance}`, by: by(d.caller, d.acting_for), since: d.created_ms, expires: d.expires_ms,
           action: "approval-approve", deny: true, diff,
-          effect: "Approving applies exactly these changes now, unless the instance changed since this was proposed.",
+          effect: "Approving applies exactly these changes now, unless the instance changed since this was proposed. Then the instance is planned: a plan with something to do comes back here for your approval.",
           detail: () => diffBlock(diff),
         };
       }),
@@ -60,8 +64,8 @@
         return {
           id: p.id, kind: "Linked plan", instance: p.instance, title: [el("span", { text: "Plan for " }), el("strong", { text: p.instance })],
           plain: `plan for ${p.instance}`, by: by(p.caller, p.acting_for), since: p.created_ms, expires: p.expires_ms,
-          action: "approval-approve", deny: true, diff: steps.map((s) => ({ op: "add", text: s })),
-          effect: "Approving lets exactly these steps run once. If the account no longer gives the same plan, nothing runs. Nothing is deleted.",
+          action: "approval-approve", deny: true, diff: [...follows(p), ...steps.map((s) => ({ op: "add", text: s }))],
+          effect: "Approving runs exactly these steps once, now. If the account no longer gives the same plan, nothing runs. Nothing is deleted.",
           detail: () => el("div", { class: "section" }, facts([["Account", code(p.summary?.account_id)], ["Plan digest", code(p.digest)]]),
             el("ol", { class: "steps" }, steps.map((s) => el("li", { text: s })))),
         };
@@ -71,7 +75,8 @@
         return {
           id: o.id, kind: o.kind || "Request", instance: o.instance || home, title: o.title || o.kind, plain: o.title || o.kind,
           by: by(o.caller, o.acting_for), since: o.created_ms, expires: o.expires_ms, action: "approval-approve", deny: true,
-          diff: steps.map((s) => ({ op: "add", text: s })),
+          diff: [...follows(o), ...steps.map((s) => ({ op: "add", text: s }))],
+          effect: "Approving runs exactly this once, now, as the caller that asked, if it still holds.",
           detail: () => el("div", { class: "section" }, facts([["Digest", code(o.digest)]]),
             el("ol", { class: "steps" }, steps.map((s) => el("li", { text: s })))),
         };
@@ -99,7 +104,11 @@
       effect: approve ? item.effect : "The caller is told it was denied. Nothing runs.",
       action: approve ? item.action : "approval-deny", id: item.id, danger: !approve,
       confirmLabel: approve ? "Approve with passkey" : "Deny with passkey",
-      onDone: () => setTimeout(ctx.refresh, 0),
+      // An approved request runs on its own: read again once it has had time to.
+      onDone: () => {
+        setTimeout(ctx.refresh, 0);
+        if (approve) setTimeout(() => { if (!ctx.signal?.aborted) ctx.refresh(); }, 4000);
+      },
     });
     const columns = [
       { label: "Kind", cell: (i) => tag(i.kind) },
@@ -116,6 +125,40 @@
         i.deny ? button("Deny", () => decide(i, false), { size: "sm" }) : null,
       ] },
     ].filter(Boolean);
+    // One read for both tables: what waits, and what ran on approval in the last day.
+    let read = null;
+    const load = () => (read ||= ctx.op("app_inbox", all ? {} : { instance: ctx.instance.id }));
+    const STATUS = { running: ["Running", "info"], done: ["Done", "ok"], failed: ["Failed", "bad"] };
+    const ran = dataTable({
+      label: "Ran on approval", noun: "runs", signal: ctx.signal,
+      empty: "Nothing has run on approval in the last day.",
+      columns: [
+        { label: "Result", cell: (r) => pill(...(STATUS[r.status] || [r.status, "plain"])) },
+        { label: "What ran", cell: (r) => [code(r.tool), el("span", { class: "sub mono", text: r.subject })] },
+        all && { label: "Instance", cls: "mono", cell: (r) => r.instance || "—" },
+        { label: "Outcome", cell: (r) => r.error || r.summary || (r.status === "running" ? "Running now." : "—") },
+        { label: "When", cls: "num", cell: (r) => ago(r.finished_ms || r.started_ms) },
+        { label: "Next", cls: "acts", cell: (r) => {
+          if (!r.next) return "—";
+          const next = r.nextItem;
+          return next
+            ? button("Approve next", () => decide(next, true), { variant: "primary", size: "sm" })
+            : el("span", { class: "muted mono", text: r.next });
+        } },
+      ].filter(Boolean),
+      expand: (r) => el("div", { class: "section" },
+        facts([["Approval", code(r.id)], ["Kind", r.kind], ["Started", when(r.started_ms)], ["Finished", when(r.finished_ms)],
+          r.next && ["Next approval", code(r.next)]]),
+        r.error ? el("p", { class: "muted", text: r.error }) : null),
+      load: async () => {
+        const data = await load();
+        const waiting = inboxItems(data, ctx.instance.id);
+        const rows = (data.recent || []).map((r) => ({ ...r, nextItem: r.next_waits ? waiting.find((i) => i.id === r.next) : null }));
+        // A run still going is read again until it ends.
+        if (rows.some((r) => r.status === "running")) setTimeout(() => { if (!ctx.signal?.aborted) ctx.refresh(); }, 5000);
+        return rows;
+      },
+    });
     return el("div", { class: "view" },
       el("p", { class: "muted", text: all ? "Every request that waits for your passkey." : `Requests for ${ctx.instance.title}.` }),
       dataTable({
@@ -124,10 +167,13 @@
         expand: (i) => el("div", { class: "section" }, i.detail(), el("p", { class: "muted mono", text: i.id })),
         load: async () => {
           // Home shows every request (M6); another instance asks for its own only.
-          const data = await ctx.op("app_inbox", all ? {} : { instance: ctx.instance.id });
+          const data = await load();
           return inboxItems(data, ctx.instance.id);
         },
-      }));
+      }),
+      el("h3", { text: "Ran on approval" }),
+      el("p", { class: "muted", text: "Once you approve, the platform runs the request itself, as the caller that asked. When a run asks for the next approval, approve it here." }),
+      ran);
   }
 
   // ---- Instances › All instances: every instance, home first, as group rows.

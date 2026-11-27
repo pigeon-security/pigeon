@@ -1,6 +1,8 @@
 # Passkey approval for risky tool calls
 
-Status: **done** (22 November). Phase 1 landed `5VE9A34eRm8GmG_j` (main `51e246b`); phase 2, the person's rules, landed `X0XXqMKxz7EJP_pr` (main `7debe9f`) with their passkey; phase 3 is this docs landing.
+Status: **done** (22 November). Since 27 November an approved call runs on approval, with no
+second call (`approvals-auto-run.md`); section 3's "call again" still works and answers the
+recorded result, and is still the flow for `source_token`. Phase 1 landed `5VE9A34eRm8GmG_j` (main `51e246b`); phase 2, the person's rules, landed `X0XXqMKxz7EJP_pr` (main `7debe9f`) with their passkey; phase 3 is this docs landing.
 
 The person asked: "Can you seed a session to require a pass key approval to use those tools?" The
 tools are the ones listed as candidates to switch off at the MCP portal:
@@ -318,3 +320,14 @@ Executors (AI Gateway, `models_submit`) build fixed pieces, each with its files 
 admin"). The admin role decides who may call `users_remove`, `passkeys_remove` (for another
 person's passkey), `oauth_revoke`, `users_invite` and `users_admin` at all; this rule still asks
 the person's passkey for each call of the gated ones.
+
+## Later: approved calls run themselves (27 November)
+
+`approvals-auto-run.md` replaces step 4 of section 3 for every gated tool but `source_token`:
+once the person approves, the platform runs the exact call itself, as its caller, through the
+`Approver` object's alarm. The reasons in section 3 for calling again still hold for a tool
+that answers a secret, so `source_token` (and any tool in `approvals::ANSWERS_SECRET`) keeps
+that flow. For the others the call's arguments are now kept in the approval's `payload` (so the
+platform can run them), checked against the signed digest before the run and again by `take`,
+and cleared once it has run. The run is the original caller's, with its role and the policy asked
+again at run time; its outcome is kept on the approval and answered to a caller that calls again.

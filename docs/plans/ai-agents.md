@@ -58,8 +58,9 @@ Hard lines, unchanged:
   to its person (approved with a passkey at `/auth/link`).
 - `dispatch` runs `approvals::gate` on every call (`call_tool`, the tool as target).
 - Passkey-gated tools answer with a pending approval id. The person approves that exact call on
-  the console's Approvals tab, and the caller calls again with `"approval": id`.
-  `approvals_status` lets it wait.
+  the console's Approvals tab, and the platform then runs the call itself, once, as the caller
+  (`approvals-auto-run.md`); calling again with `"approval": id` answers the recorded result.
+  `approvals_status` lets it wait and answers the outcome.
 - `land` accepts a standard user or a service user acting for one (`land.rs:137`).
 - The signed caller (`X-Pigeon-Caller`, HMAC with `CALLER_KEY`, 60 s) is how capability Workers
   call core's `dispatch` as a caller.
@@ -390,8 +391,10 @@ in the policy (no new rule) or in a file.
     `assumed` in `ai_agents_inbox` and in the AI Agents section.
 - **Approvals.**
   - When a tool answers "needs the person's passkey: approval {id}", the run moves to `waiting`,
-    puts the approval in `ai_agents_inbox`, polls `approvals_status` and calls again with
-    `"approval": id` once approved. This is today's flow, unchanged.
+    puts the approval in `ai_agents_inbox` and polls `approvals_status`. Once approved, the
+    platform runs the call itself (`approvals-auto-run.md`): the run waits while its outcome is
+    `running` and takes the outcome's answer, or its failure, as the call's. For an approval
+    that does not run on its own (`source_token`), it calls again with `"approval": id`.
   - The card already shows the caller, now with the run.
   - A guarded-path landing waits on the Lander's passkey as any landing does.
 - **Progress.**

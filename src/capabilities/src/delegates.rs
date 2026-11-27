@@ -716,8 +716,8 @@ pub async fn cleanup_plan(cx: &crate::Context<'_>, args: &Value) -> worker::Resu
         "approval": made["record"]["id"],
         "waits_until_ms": made["record"]["expires_ms"],
         "note": "Nothing changes until the person approves this plan with their passkey on the \
-                 console's Approvals tab; then apps_cleanup_apply {plan: <this approval>} makes \
-                 it once.",
+                 console's Approvals tab; then the platform makes it once, as you \
+                 (apps_cleanup_apply). approvals_status {id: <this approval>} says how it went.",
     }))
 }
 

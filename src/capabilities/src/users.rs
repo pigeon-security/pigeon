@@ -1979,6 +1979,73 @@ impl Directory {
                 }
                 json!({ "expired": expired })
             }
+            // A runner claims an approved record to run `tool` on it, once
+            // (docs/plans/approvals-auto-run.md); a refusal answers why, with the record.
+            "approval.claim" => {
+                let id = s("id");
+                let mut r = self
+                    .approval_get(id)?
+                    .ok_or_else(|| bad(&approval::Refusal::NotFound(id.into()).to_string()))?;
+                let done = approval::claim(&mut r, s("tool"), t);
+                self.approval_put(&r)?;
+                match done {
+                    Ok(()) => json!({ "record": r }),
+                    Err(why) => json!({ "record": r, "refused": why.to_string() }),
+                }
+            }
+            // How a claimed run ended: `answer`, or `error`; `next` is the approval it asked
+            // for, marked as following this one when it is the same caller's and pending.
+            "approval.outcome" => {
+                let id = s("id");
+                let mut r = self
+                    .approval_get(id)?
+                    .ok_or_else(|| bad(&approval::Refusal::NotFound(id.into()).to_string()))?;
+                let next = match a["next"].as_str() {
+                    Some(n) => match self.approval_get(n)? {
+                        Some(mut child)
+                            if child.caller_id == r.caller_id
+                                && child.state == approval::State::Pending
+                                && child.id != r.id =>
+                        {
+                            child.after = Some(r.id.clone());
+                            self.approval_put(&child)?;
+                            Some(child.id)
+                        }
+                        _ => None,
+                    },
+                    None => None,
+                };
+                let ended = match a["error"].as_str() {
+                    Some(why) => Err(why),
+                    None => Ok(&a["answer"]),
+                };
+                let summary = a["summary"].as_str().map(str::to_string);
+                let changed = approval::finish(&mut r, ended, summary, next, t);
+                if changed {
+                    self.approval_put(&r)?;
+                }
+                json!({ "record": r, "changed": changed })
+            }
+            // The records the platform ran in the last day, newest first.
+            "approval.recent" => {
+                let ran: Vec<approval::Record> = self.approvals_where(
+                    "SELECT record FROM approvals WHERE state IN ('approved', 'used', 'expired') ORDER BY expires_ms DESC",
+                    vec![],
+                )?;
+                let mut ran: Vec<approval::Record> = ran
+                    .into_iter()
+                    .filter(|r| {
+                        r.outcome.as_ref().is_some_and(|o| {
+                            t.saturating_sub(o.finished_ms.unwrap_or(o.started_ms)) < DAY_MS
+                        })
+                    })
+                    .collect();
+                ran.sort_by_key(|r| {
+                    std::cmp::Reverse(r.outcome.as_ref().map_or(0, |o| o.started_ms))
+                });
+                ran.truncate(50);
+                json!({ "ran": ran })
+            }
             "approval.decide" | "approval.take" => {
                 let id = s("id");
                 let mut r = self

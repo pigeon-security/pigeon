@@ -260,8 +260,9 @@ impl Instances {
             "approval": made["record"]["id"],
             "waits_until_ms": made["record"]["expires_ms"],
             "note": "Nothing is removed until the person approves this plan on the console's \
-                     Approvals tab; then instance_retire_apply {plan: <this approval>} runs it \
-                     once, and resumes it if it stops part way.",
+                     Approvals tab; then the platform runs it once, as you \
+                     (instance_retire_apply). If it stops part way, instance_retire_apply \
+                     {plan: <this approval>} resumes it.",
         }))
     }
 

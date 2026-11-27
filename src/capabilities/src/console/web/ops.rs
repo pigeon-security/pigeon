@@ -159,7 +159,7 @@ pub fn inbox_for(mut listing: Value, instance: &str, home: bool) -> Value {
         .into_iter()
         .any(|i| i.as_str() == Some(instance))
     };
-    for list in ["calls", "drafts", "plans", "other"] {
+    for list in ["calls", "drafts", "plans", "other", "recent"] {
         if let Some(items) = listing[list].as_array_mut() {
             items.retain(of);
         }

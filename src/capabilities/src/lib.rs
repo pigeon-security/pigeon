@@ -5,6 +5,7 @@
 
 pub mod apple;
 pub mod approvals;
+pub mod approver;
 pub mod architecture;
 pub mod catalogue;
 pub mod changelog;
@@ -331,7 +332,28 @@ pub fn owner<'a>(
 /// only with the person's passkey approval of that exact call, used once. A call from outside
 /// (MCP, `call`, the console's reads, a capability Worker's dispatch for a run) comes through
 /// [`dispatch_checked`], which asks the caller's role on the instance first.
+///
+/// A call naming an approval the platform already ran on approval (or runs) is answered its
+/// recorded result ([`approvals::recalled`]), and nothing runs again.
 pub async fn dispatch(cx: &Context<'_>, name: &str, args: &Value) -> Result<Value> {
+    if let Some(answer) = approvals::recalled(cx, name, args).await? {
+        return answer.map_err(Error::RustError);
+    }
+    run_tool(cx, name, args).await
+}
+
+/// For the Approver ([`approver`]): runs the call an approval it has claimed stands for, as
+/// [`dispatch_checked`] would (the caller's role, then the policy and the approval's own
+/// check), but not answered from the approval's outcome, which is this run's.
+pub(crate) async fn dispatch_claimed(cx: &Context<'_>, name: &str, args: &Value) -> Result<Value> {
+    if let Some(owner) = owner(cx.hosted.capabilities, name) {
+        membership::check_tool(cx, owner.name(), name, args).await?;
+    }
+    run_tool(cx, name, args).await
+}
+
+/// [`dispatch`]'s work: the instance binding, the owner, the policy's gate, the call.
+async fn run_tool(cx: &Context<'_>, name: &str, args: &Value) -> Result<Value> {
     // An `instance` argument naming a renamed id (R1's compat window) names the new one.
     let current = instances::current_args(cx.env, args).await?;
     let args = current.as_ref().unwrap_or(args);
