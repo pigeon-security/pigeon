@@ -185,6 +185,10 @@ enum CapabilityCatalog {
             ["Platform › Architecture"],
             "Show this instance’s own setup: its Worker, bucket, hostnames and tools", nil
         ),
+        "data-ingest-email": (
+            [], "Enable read-only IMAP backfill",
+            "The next Data plan authorizes signed historical imports with a dedicated key."
+        ),
         "mcp-federation": ([], "Share approved Jobs reads through the platform MCP connection", nil),
         "jobs": (
             ["Jobs › Runs"], "Inspect this instance’s job history",
@@ -235,7 +239,7 @@ enum CapabilityCatalog {
                     requires: requires, requiresFields: requires.map(fieldOf), children: children,
                     home: home,
                     // Email runs where the data store runs: only `data` chooses.
-                    configurable: !home && name != "data-email" && placements.contains("own_worker"),
+                    configurable: !home && !["data-email", "data-ingest-email"].contains(name) && placements.contains("own_worker"),
                     choices: choices, dependents: dependents))
         }
     }
