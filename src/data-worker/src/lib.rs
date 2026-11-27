@@ -257,3 +257,5 @@ async fn queue(batch: MessageBatch<Value>, env: Env, _ctx: Context) -> Result<()
     }
     Ok(())
 }
+
+// Rebuilt on 2026-11-27: its first artifact build waited on the proxy redeploy after incident 24.

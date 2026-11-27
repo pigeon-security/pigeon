@@ -1357,3 +1357,6 @@ async fn send(
         return Ok((status, content_type, bytes));
     }
 }
+
+// Redeployed on 2026-11-27 after incident 24: Cloudflare rate-limited this Worker's deploy of the
+// data-worker artifact allowlist (10429 on the pre-upload secrets read), not a fault in this code.
