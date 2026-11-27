@@ -1607,6 +1607,137 @@ fn digitalocean_spaces_verifies_team_key_grant_and_bounded_listing() {
 }
 
 #[test]
+fn digitalocean_ingest_recovers_resources_and_waits_for_volume_detach() {
+    use pigeon_cloud::digitalocean_ingest::{
+        Created, Removal, Target, create_droplet, create_volume, find_droplet, find_volume,
+        remove_droplet, remove_volume,
+    };
+
+    let run = "0123456789abcdef0123456789abcdef";
+    let target = Target::new(run, "tor1").unwrap();
+    let id = "01234567-89ab-cdef-0123-456789abcdef";
+    let name = target.name().to_owned();
+    let volume_reads = Cell::new(0);
+    let droplet_reads = Cell::new(0);
+    let net = Net {
+        log: RefCell::new(Vec::new()),
+        handler: Box::new(move |req| {
+            let (_, path, query) = split(&req.url);
+            assert_eq!(req.header("Authorization"), Some("Bearer test-key"));
+            let description = format!("Pigeon ingest scratch for {name}");
+            let volume = json!({
+                "id": id, "name": name, "description": description, "region": {"slug":"tor1"}
+            });
+            let droplet = json!({
+                "id": 42, "name": name, "region": {"slug":"tor1"}, "tags": ["pigeon-ingest"]
+            });
+            match (req.method.as_str(), path.as_str()) {
+                ("POST", "/v2/volumes") => {
+                    let body: Value = serde_json::from_str(&req.body).unwrap();
+                    assert_eq!(body["name"], name);
+                    assert_eq!(body["size_gigabytes"], 256);
+                    assert_eq!(body["filesystem_type"], "ext4");
+                    text_res(503, "")
+                }
+                ("GET", "/v2/volumes") => {
+                    assert_eq!(query, format!("name={name}&region=tor1&per_page=2"));
+                    json_res(200, json!({"volumes":[volume]}))
+                }
+                ("POST", "/v2/droplets") => {
+                    let body: Value = serde_json::from_str(&req.body).unwrap();
+                    assert_eq!(body["volumes"], json!([id]));
+                    assert_eq!(body["region"], "tor1");
+                    assert_eq!(body["user_data"], "bootstrap");
+                    text_res(503, "")
+                }
+                ("GET", "/v2/droplets") => json_res(200, json!({"droplets":[droplet]})),
+                ("GET", "/v2/droplets/42") => {
+                    let n = droplet_reads.replace(droplet_reads.get() + 1);
+                    if n == 0 {
+                        json_res(200, json!({"droplet":droplet}))
+                    } else {
+                        text_res(404, "")
+                    }
+                }
+                ("DELETE", "/v2/droplets/42") => text_res(204, ""),
+                ("GET", path) if path == format!("/v2/volumes/{id}") => {
+                    let mut volume = volume;
+                    let n = volume_reads.replace(volume_reads.get() + 1);
+                    if n == 2 {
+                        return text_res(404, "");
+                    }
+                    volume["droplet_ids"] = if n == 0 { json!([42]) } else { json!([]) };
+                    json_res(200, json!({"volume":volume}))
+                }
+                ("DELETE", path) if path == format!("/v2/volumes/{id}") => text_res(204, ""),
+                _ => panic!("unexpected request"),
+            }
+        }),
+    };
+    let token = "test-key";
+    assert_eq!(
+        block(create_volume(&net, token, &target, 256)),
+        Created::Unknown
+    );
+    assert_eq!(
+        block(find_volume(&net, token, &target)).unwrap().as_deref(),
+        Some(id)
+    );
+    assert_eq!(
+        block(create_droplet(&net, token, &target, id, "bootstrap")),
+        Created::Unknown
+    );
+    assert_eq!(block(find_droplet(&net, token, &target)).unwrap(), Some(42));
+    assert_eq!(
+        block(remove_droplet(&net, token, &target, 42)).unwrap(),
+        Removal::Requested
+    );
+    assert_eq!(
+        block(remove_volume(&net, token, &target, id)).unwrap(),
+        Removal::Attached
+    );
+    assert_eq!(
+        block(remove_droplet(&net, token, &target, 42)).unwrap(),
+        Removal::Absent
+    );
+    assert_eq!(
+        block(remove_volume(&net, token, &target, id)).unwrap(),
+        Removal::Requested
+    );
+    assert_eq!(
+        block(remove_volume(&net, token, &target, id)).unwrap(),
+        Removal::Absent
+    );
+    assert_eq!(
+        net.log
+            .borrow()
+            .iter()
+            .filter(|req| req.method == "POST")
+            .count(),
+        2
+    );
+    assert_eq!(
+        net.log
+            .borrow()
+            .iter()
+            .filter(|req| req.method == "DELETE")
+            .count(),
+        2
+    );
+    assert!(!transport::allowed_request(
+        "POST",
+        &format!("https://api.digitalocean.com/v2/volumes/{id}/actions")
+    ));
+    assert!(!transport::allowed_request(
+        "GET",
+        &format!(
+            "https://api.digitalocean.com/v2/volumes?name={}&region=elsewhere&per_page=2",
+            target.name()
+        )
+    ));
+}
+
+#[test]
 fn digitalocean_droplet_reconciles_ambiguous_create_and_confirms_owned_delete() {
     use pigeon_cloud::digitalocean_droplet::{Created, Removal, cleanup, create, reconcile};
     let name = "pigeon-health-11111111111111111111111111111111";

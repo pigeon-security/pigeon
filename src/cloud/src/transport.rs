@@ -134,7 +134,9 @@ pub fn allowed_request(method: &str, url: &str) -> bool {
     if digitalocean_read_url(url) {
         return method == "GET";
     }
-    crate::digitalocean_droplet::allowed(method, url) || allowed(url)
+    crate::digitalocean_droplet::allowed(method, url)
+        || crate::digitalocean_ingest::allowed(method, url)
+        || allowed(url)
 }
 
 /// The host of `url` as an error message may name it: no scheme, no user name, no path.
