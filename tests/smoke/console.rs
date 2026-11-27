@@ -3783,7 +3783,11 @@ mod email {
                 .into_iter()
                 .map(|migration| migration.id)
                 .collect::<Vec<_>>(),
-            ["0002_operations", "0003_mail_import_lineage"]
+            [
+                "0002_operations",
+                "0003_mail_import_lineage",
+                "0004_backup_progress"
+            ]
         );
     }
 

@@ -3485,3 +3485,73 @@ fn data_backup_inventory_checkpoints_one_bounded_page() {
             .is_empty()
     );
 }
+
+#[test]
+fn data_backup_resumes_exact_sha256_and_owns_each_checkpoint() {
+    use pigeon_ingest::backup_digest::BackupDigest;
+    use pigeon_ingest::backup_inventory::{CLAIM_PROGRESS, INSERT_PROGRESS, SAVE_PROGRESS};
+    use pigeon_ingest::datastore;
+
+    for len in [0, 1, 55, 56, 63, 64, 65, 127, 128, 129, 4096, 65531] {
+        let bytes = (0..len)
+            .map(|i| ((i * 13 + 7) % 256) as u8)
+            .collect::<Vec<_>>();
+        let checkpoint = len / 128 * 64;
+        let mut state = BackupDigest::default();
+        state.update(&bytes[..checkpoint]).unwrap();
+        assert_eq!(state.bytes(), checkpoint as u64);
+        let encoded = serde_json::to_string(&state).unwrap();
+        let restored: BackupDigest = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(
+            restored.finish(&bytes[checkpoint..]).unwrap(),
+            datastore::sha256_hex(&bytes),
+        );
+    }
+    assert!(BackupDigest::default().update(b"unaligned").is_none());
+
+    let db = rusqlite::Connection::open_in_memory().unwrap();
+    let migration = datastore::MIGRATIONS
+        .iter()
+        .find(|m| m.id == "0004_backup_progress")
+        .unwrap();
+    db.execute_batch(migration.sql).unwrap();
+    assert_eq!(db.execute(INSERT_PROGRESS, ["copy", "initial"]).unwrap(), 1);
+    assert_eq!(
+        db.execute(INSERT_PROGRESS, ["copy", "duplicate"]).unwrap(),
+        0
+    );
+    let claim = |owner, expires, now| {
+        db.execute(
+            CLAIM_PROGRESS,
+            rusqlite::params![owner, expires, "copy", now],
+        )
+        .unwrap()
+    };
+    let save = |owner, checkpoint, release| {
+        db.execute(
+            SAVE_PROGRESS,
+            rusqlite::params![checkpoint, "copy", owner, release],
+        )
+        .unwrap()
+    };
+    assert_eq!(claim("delivery-one", 100, 1), 1);
+    assert_eq!(claim("competing", 150, 2), 0);
+    assert_eq!(claim("delivery-one", 100, 3), 1);
+    assert_eq!(save("delivery-one", "one part", 1), 1);
+    assert_eq!(claim("delivery-two", 150, 4), 1);
+    assert_eq!(save("delivery-one", "stale", 1), 0);
+    assert_eq!(claim("after-expiry", 300, 151), 1);
+    assert_eq!(save("after-expiry", "succeeded", 0), 1);
+    assert_eq!(claim("before-audit", 301, 152), 0);
+    assert_eq!(save("after-expiry", "audited", 1), 1);
+    assert_eq!(claim("after-audit", 302, 153), 1);
+    assert_eq!(
+        db.query_row(
+            "SELECT body FROM backup_progress WHERE id = 'copy'",
+            [],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        "audited"
+    );
+}

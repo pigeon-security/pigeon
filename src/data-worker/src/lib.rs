@@ -206,6 +206,8 @@ async fn queue(batch: MessageBatch<Value>, env: Env, _ctx: Context) -> Result<()
     if batch.queue().ends_with("-backup") {
         for message in batch.messages()? {
             use pigeon_ingest::backup_inventory::Message;
+            let final_attempt = message.attempts() > pigeon_ingest::datastore::BACKUP_MAX_RETRIES;
+            let started_ms = message.timestamp().as_millis();
             let body = message.body();
             let (key, etag) = if body.get("pigeon_backup").is_some() {
                 let Ok(item) = serde_json::from_value::<Message>(body.clone()) else {
@@ -242,6 +244,18 @@ async fn queue(batch: MessageBatch<Value>, env: Env, _ctx: Context) -> Result<()
                         continue;
                     }
                     Message::Copy { key, etag, .. } => (key, Some(etag)),
+                    Message::Multipart { generation, id } => {
+                        match backup::resume(&env, &generation, &id, &message.id(), final_attempt)
+                            .await
+                        {
+                            Ok(()) => message.ack(),
+                            Err(err) => {
+                                console_log!("backup checkpoint failed: {err}");
+                                message.retry();
+                            }
+                        }
+                        continue;
+                    }
                 }
             } else {
                 let Some(event) = protocol::parse_event(body) else {
@@ -251,8 +265,14 @@ async fn queue(batch: MessageBatch<Value>, env: Env, _ctx: Context) -> Result<()
                 };
                 (event.key, None)
             };
-            let result = backup::copy(&env, &key, etag.as_deref()).await;
-            let final_attempt = message.attempts() > pigeon_ingest::datastore::BACKUP_MAX_RETRIES;
+            let result = backup::copy(&env, &key, etag.as_deref(), started_ms).await;
+            if result
+                .as_ref()
+                .is_ok_and(|result| result.as_ref().is_some_and(|copy| copy.scheduled))
+            {
+                message.ack();
+                continue;
+            }
             if (result.is_ok() || final_attempt)
                 && backup::audit(
                     &env,

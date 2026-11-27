@@ -246,6 +246,10 @@ CREATE INDEX IF NOT EXISTS deliveries_outcome ON email_deliveries (outcome, at)"
         sql: "CREATE INDEX IF NOT EXISTS mail_attachment_locator ON sightings(locator) \
               WHERE source = 'email_attachment'",
     },
+    Migration {
+        id: "0004_backup_progress",
+        sql: "CREATE TABLE IF NOT EXISTS backup_progress (id TEXT PRIMARY KEY, body TEXT NOT NULL, lease_owner TEXT, lease_until INTEGER NOT NULL DEFAULT 0)",
+    },
 ];
 
 /// The statements of one migration, then the row that records it.

@@ -9,6 +9,9 @@ use worker::{
     Response, Result,
 };
 
+mod multipart;
+pub use multipart::resume;
+
 const PART_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_PARTS: u64 = 10_000;
 
@@ -23,6 +26,7 @@ struct Backup {
 pub struct Copy {
     pub size: u64,
     pub stored: bool,
+    pub scheduled: bool,
 }
 
 fn fail(reason: impl Into<String>) -> worker::Error {
@@ -219,16 +223,15 @@ impl Target {
         Ok(true)
     }
 
+    async fn verified(env: &Env) -> Result<Self> {
+        let target = Self::open(env).await?;
+        target.require_restricted_key().await?;
+        target.require_private().await?;
+        target.require_governance().await?;
+        Ok(target)
+    }
+
     async fn write(&self, source: &Source<'_>, key: &str, sha: &str) -> Result<()> {
-        let metadata = [
-            ("x-amz-meta-sha256".into(), sha.to_string()),
-            (
-                "x-amz-meta-pigeon-r2-key".into(),
-                webauthn::b64url(source.key.as_bytes()),
-            ),
-            ("x-amz-acl".into(), "private".into()),
-            ("x-amz-server-side-encryption".into(), "AES256".into()),
-        ];
         if source.size <= PART_BYTES {
             let bytes = source.read(0, source.size).await?;
             if datastore::sha256_hex(&bytes) != sha {
@@ -236,88 +239,76 @@ impl Target {
             }
             return require_ok(
                 &self
-                    .request(Method::Put, key, &[], &metadata, Some(&bytes))
+                    .request(
+                        Method::Put,
+                        key,
+                        &[],
+                        &metadata(source.key, sha),
+                        Some(&bytes),
+                    )
                     .await?,
             );
         }
+        let id = self.begin_multipart(source.key, key, sha).await?;
+        let copied = self.write_parts(source, key, sha, &id).await;
+        if copied.is_err() {
+            let _ = self.abort_multipart(key, &id).await;
+        }
+        copied
+    }
 
+    async fn begin_multipart(&self, source: &str, key: &str, sha: &str) -> Result<String> {
         let mut res = self
             .request(
                 Method::Post,
                 key,
                 &[("uploads".into(), String::new())],
-                &metadata,
+                &metadata(source, sha),
                 None,
             )
             .await?;
         require_ok(&res)?;
         let xml = res.text().await?;
-        let upload_id =
-            object_id(&xml).ok_or_else(|| fail("B2 did not return a multipart upload ID"))?;
-        let copied = self.write_parts(source, key, sha, upload_id).await;
-        if copied.is_err() {
-            // Release only this unfinished multipart upload. The backup key is never deleted.
-            let _ = self
-                .request(
-                    Method::Delete,
-                    key,
-                    &[("uploadId".into(), upload_id.into())],
-                    &[],
-                    None,
-                )
-                .await;
-        }
-        copied
+        object_id(&xml)
+            .map(str::to_string)
+            .ok_or_else(|| fail("B2 did not return a multipart upload ID"))
     }
 
-    async fn write_parts(
-        &self,
-        source: &Source<'_>,
-        key: &str,
-        sha: &str,
-        upload_id: &str,
-    ) -> Result<()> {
+    async fn put_part(&self, key: &str, id: &str, number: usize, bytes: &[u8]) -> Result<String> {
+        let query = [
+            ("partNumber".into(), number.to_string()),
+            ("uploadId".into(), id.into()),
+        ];
+        let res = self
+            .request(Method::Put, key, &query, &[], Some(bytes))
+            .await?;
+        require_ok(&res)?;
+        res.headers()
+            .get("etag")?
+            .map(|v| v.trim_matches('"').to_string())
+            .filter(|etag| valid_part_etag(etag))
+            .ok_or_else(|| fail("B2 did not return a multipart ETag"))
+    }
+
+    async fn complete_multipart(&self, key: &str, id: &str, parts: &[String]) -> Result<()> {
         let mut manifest = String::from(
             "<CompleteMultipartUpload xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">",
         );
-        let mut digest = Sha256::new();
-        for (i, start) in (0..source.size).step_by(PART_BYTES as usize).enumerate() {
-            let number = (i + 1).to_string();
-            let bytes = source
-                .read(start, (source.size - start).min(PART_BYTES))
-                .await?;
-            digest.update(&bytes);
-            let query = [
-                ("partNumber".into(), number.clone()),
-                ("uploadId".into(), upload_id.into()),
-            ];
-            let res = self
-                .request(Method::Put, key, &query, &[], Some(&bytes))
-                .await?;
-            require_ok(&res)?;
-            let etag = res
-                .headers()
-                .get("etag")?
-                .filter(|v| {
-                    v.len() == 34
-                        && v.starts_with('"')
-                        && v.ends_with('"')
-                        && v[1..33].bytes().all(|c| c.is_ascii_hexdigit())
-                })
-                .ok_or_else(|| fail("B2 did not return a multipart ETag"))?;
+        for (i, etag) in parts.iter().enumerate() {
+            if !valid_part_etag(etag) {
+                return Err(fail("invalid saved backup multipart ETag"));
+            }
+            let number = i + 1;
             manifest.push_str(&format!(
                 "<Part><ETag>{etag}</ETag><PartNumber>{number}</PartNumber></Part>"
             ));
-        }
-        if format!("{:x}", digest.finalize()) != sha {
-            return Err(fail("the Data object changed while copying"));
         }
         manifest.push_str("</CompleteMultipartUpload>");
         let mut res = self
             .request(
                 Method::Post,
                 key,
-                &[("uploadId".into(), upload_id.into())],
+                &[("uploadId".into(), id.into())],
                 &[("content-type".into(), "application/xml".into())],
                 Some(manifest.as_bytes()),
             )
@@ -328,6 +319,56 @@ impl Target {
         }
         Ok(())
     }
+
+    async fn abort_multipart(&self, key: &str, id: &str) -> Result<()> {
+        // This only cancels an incomplete upload. A completed backup key is never deleted.
+        let res = self
+            .request(
+                Method::Delete,
+                key,
+                &[("uploadId".into(), id.into())],
+                &[],
+                None,
+            )
+            .await?;
+        if res.status_code() == 404 {
+            Ok(())
+        } else {
+            require_ok(&res)
+        }
+    }
+
+    async fn write_parts(&self, source: &Source<'_>, key: &str, sha: &str, id: &str) -> Result<()> {
+        let mut parts = Vec::new();
+        let mut digest = Sha256::new();
+        for (i, start) in (0..source.size).step_by(PART_BYTES as usize).enumerate() {
+            let bytes = source
+                .read(start, (source.size - start).min(PART_BYTES))
+                .await?;
+            digest.update(&bytes);
+            parts.push(self.put_part(key, id, i + 1, &bytes).await?);
+        }
+        if format!("{:x}", digest.finalize()) != sha {
+            return Err(fail("the Data object changed while copying"));
+        }
+        self.complete_multipart(key, id, &parts).await
+    }
+}
+
+fn metadata(source: &str, sha: &str) -> [(String, String); 4] {
+    [
+        ("x-amz-meta-sha256".into(), sha.to_string()),
+        (
+            "x-amz-meta-pigeon-r2-key".into(),
+            webauthn::b64url(source.as_bytes()),
+        ),
+        ("x-amz-acl".into(), "private".into()),
+        ("x-amz-server-side-encryption".into(), "AES256".into()),
+    ]
+}
+
+fn valid_part_etag(etag: &str) -> bool {
+    etag.len() == 32 && etag.bytes().all(|c| c.is_ascii_hexdigit())
 }
 
 fn require_ok(response: &Response) -> Result<()> {
@@ -384,7 +425,12 @@ impl Source<'_> {
 }
 
 /// Returns None for an object already removed from Data. There is no delete on the B2 side.
-pub async fn copy(env: &Env, key: &str, etag: Option<&str>) -> Result<Option<Copy>> {
+pub async fn copy(
+    env: &Env,
+    key: &str,
+    etag: Option<&str>,
+    started_ms: u64,
+) -> Result<Option<Copy>> {
     if key.is_empty() || key.len() > 1024 {
         return Err(fail(
             "the Data object key cannot be preserved in backup metadata",
@@ -394,7 +440,7 @@ pub async fn copy(env: &Env, key: &str, etag: Option<&str>) -> Result<Option<Cop
         env.bucket("JOBS_AUDIT")?;
     }
     let bucket = env.bucket("DATA")?;
-    let Some(object) = bucket.get(key).execute().await? else {
+    let Some(object) = bucket.head(key).await? else {
         return Ok(None);
     };
     if etag.is_some_and(|etag| object.etag() != etag) {
@@ -412,10 +458,28 @@ pub async fn copy(env: &Env, key: &str, etag: Option<&str>) -> Result<Option<Cop
         return Err(fail("the Data object exceeds the backup multipart limit"));
     }
 
-    let target = Target::open(env).await?;
-    target.require_restricted_key().await?;
-    target.require_private().await?;
-    target.require_governance().await?;
+    if source.size > PART_BYTES
+        && let Ok(generation) = env.var("BACKUP_GENERATION")
+    {
+        multipart::enqueue(env, generation.to_string(), &source, started_ms).await?;
+        return Ok(Some(Copy {
+            size: source.size,
+            stored: false,
+            scheduled: true,
+        }));
+    }
+
+    let object = source
+        .bucket
+        .get(source.key)
+        .only_if(Conditional {
+            etag_matches: Some(source.etag.clone()),
+            ..Default::default()
+        })
+        .execute()
+        .await?
+        .ok_or_else(|| fail("the Data object disappeared before hashing"))?;
+    let target = Target::verified(env).await?;
     let mut digest = Sha256::new();
     let mut read = 0;
     let mut body = object
@@ -440,6 +504,7 @@ pub async fn copy(env: &Env, key: &str, etag: Option<&str>) -> Result<Option<Cop
         return Ok(Some(Copy {
             size: source.size,
             stored: false,
+            scheduled: false,
         }));
     }
     target.write(&source, &destination, &sha).await?;
@@ -449,6 +514,7 @@ pub async fn copy(env: &Env, key: &str, etag: Option<&str>) -> Result<Option<Cop
     Ok(Some(Copy {
         size: source.size,
         stored: true,
+        scheduled: false,
     }))
 }
 
@@ -457,6 +523,25 @@ pub async fn audit(
     env: &Env,
     event: &str,
     started_ms: u64,
+    result: &Result<Option<Copy>>,
+) -> Result<()> {
+    audit_at(
+        env,
+        event,
+        started_ms,
+        (worker::js_sys::Date::now() as u64).max(started_ms),
+        None,
+        result,
+    )
+    .await
+}
+
+async fn audit_at(
+    env: &Env,
+    event: &str,
+    started_ms: u64,
+    finished_ms: u64,
+    cleanup: Option<pigeon_ingest::audit::Cleanup>,
     result: &Result<Option<Copy>>,
 ) -> Result<()> {
     use pigeon_ingest::audit::{PipelineCounts, PipelineKind, PipelineOutcome, PipelineTerminal};
@@ -489,9 +574,9 @@ pub async fn audit(
     let terminal = PipelineTerminal {
         run_id: datastore::sha256_hex(event.as_bytes()),
         started_ms,
-        finished_ms: (worker::js_sys::Date::now() as u64).max(started_ms),
+        finished_ms: finished_ms.max(started_ms),
         outcome,
-        cleanup: None,
+        cleanup,
         counts,
         estimated_usd_micros: None,
     };

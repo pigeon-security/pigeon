@@ -25,8 +25,8 @@ with the recovered blobs so provenance and catalog rows can be replayed. Retain 
 backups until a protected backup and a test restore have been verified.
 
 This transport consumes R2 notifications and can queue existing objects through the instance
-plan. Multipart resume across Workers queue invocations is a separate step. Use a test copy to verify large objects and
-retention permissions before relying on it for bulk transfers.
+plan. Use a test copy to verify large objects and retention permissions before relying on it for
+bulk transfers.
 
 ## Linked instance setup and audit
 
@@ -51,3 +51,17 @@ Worker lists at most 48 existing keys at a time. Each successful page queues its
 opaque continuation cursor. Replays are safe because the destination name identifies the exact
 bytes. A queued copy includes the listed ETag and skips a replaced object so the normal R2
 notification handles the new version.
+
+## Large objects
+
+Data plans that bind the backup producer break a large object into separate Queue deliveries.
+D1 records the source ETag, serialized SHA-256 state, multipart upload ID, and confirmed part
+ETags. Each delivery hashes or uploads at most one 16 MiB range. A lost response retries the
+same part. The Worker compares the final uploaded digest before publishing the completed B2
+object and writes the terminal Jobs receipt after checking its active lock. Completed object keys
+are never deleted. Exhausted retries cancel only the known unfinished upload and report whether
+cleanup was confirmed. In Backblaze, set a lifecycle rule to cancel stale unfinished multipart
+uploads, which also covers an interrupted initiation whose upload ID never reached the Worker.
+
+For an already provisioned Data Worker, review and apply the instance plan again to install the
+new build and D1 migration before testing the resumed path.
