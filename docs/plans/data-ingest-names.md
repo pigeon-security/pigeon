@@ -83,6 +83,14 @@ release needs the person's go-ahead.
 
 | Phase | What | Branch | State |
 |---|---|---|---|
-| 1 | Plan (this doc) | `claude/data-ingest-names` | with phase 2 |
-| 2 | Ingest on `data_read`, alias removed, `data_ingest_*` renames, 2.0.0, console, iOS, tests, docs | `claude/data-ingest-names` | built |
-| 3 | Verify live (`data_ingest_status`), `ios-check` at the landed commit | — | to do |
+| 1 | Plan (this doc) | `claude/data-ingest-names` | landed with phase 2 |
+| 2 | Ingest on `data_read`, alias removed, `data_ingest_*` renames, 2.0.0, console, iOS, tests, docs | `claude/data-ingest-names` | landed (`9zclms7_4QCUOuwY`, `c384945`) |
+| 3 | Verify live (`data_ingest_status`), `ios-check` at the landed commit | — | done |
+
+## Log
+
+- 2026-11-27: landed as `c384945` (landing `9zclms7_4QCUOuwY`; core and data-worker deployed).
+  Live: `data_ingest_status` answers for willowgraysen, pigeon.dev, noisypigeon and sandbox
+  (no runs, as before); `ingest_status` answers "unknown tool"; `capabilities_versions` shows
+  `data-ingest` 2.0.0. `ios-check` at `c384945` succeeded (Buildkite build 84). The released
+  iOS app (build 49) needs a new build for its Ingest report view.
