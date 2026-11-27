@@ -555,12 +555,10 @@ pub async fn run(
             }
             Step::QueueBackupInventory { queue, generation } => {
                 let id = backup_queue_id(t, acc, queue).await?;
-                let body =
-                    serde_json::to_string(&pigeon_ingest::backup_inventory::Message::Inventory {
-                        generation: generation.clone(),
-                        cursor: None,
-                    })
-                    .map_err(|_| bad("could not encode the backup inventory checkpoint"))?;
+                let body = pigeon_ingest::backup_inventory::Message::Inventory {
+                    generation: generation.clone(),
+                    cursor: None,
+                };
                 call(
                     t,
                     Method::Post,
