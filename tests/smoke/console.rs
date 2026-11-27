@@ -3354,14 +3354,35 @@ mod email {
         )));
         assert!(!s6.looped && s6.forward.is_some());
 
-        // What became of each is recorded; a failed forward too, with a reason and no content.
+        // What became of each is recorded; a failed forward too, with Cloudflare's reason cut
+        // short, never the destination or the content.
+        let dest = s.forward.clone().unwrap();
+        let refused = mail::forward_error(
+            &format!(
+                "Error: destination address {dest} is not\n verified; also cc Other@Example.com"
+            ),
+            &dest,
+        );
+        assert_eq!(
+            refused,
+            "Email Routing refused the forward: destination address [address] is not verified; \
+             also cc [address]"
+        );
+        assert!(!refused.contains(&dest) && !refused.contains("Hello"));
+        assert_eq!(
+            mail::forward_error("", &dest),
+            "Email Routing refused the forward"
+        );
+        let long = mail::forward_error(&"é".repeat(400), &dest);
+        assert_eq!(long.chars().count(), mail::FORWARD_ERROR_MAX + 1);
+        assert!(long.ends_with('…'));
         store.exec(vec![
             mail::delivery_row(
                 &s,
                 "cloudflare@pigeon.dev",
                 "2026-11-26T09:00:07Z",
                 "forward_failed",
-                Some("Email Routing refused the forward"),
+                Some(&refused),
             ),
             mail::delivery_row(
                 &s5,
@@ -3374,7 +3395,12 @@ mod email {
         let q = datastore::status_queries();
         let outcomes = store.rows(&q[1]);
         assert_eq!(outcomes[0]["outcome"], "forward_failed");
+        assert_eq!(
+            outcomes[0]["last_error"], refused,
+            "the email status tool's deliveries say why a forward failed"
+        );
         assert_eq!(outcomes[1]["outcome"], "loop");
+        assert!(outcomes[1]["last_error"].is_null());
         let line = mail::log_line(&s.item_id, s.size, &s.mailbox, "forwarded");
         assert!(!line.contains("billing") && !line.contains("Hello") && !line.contains("first"));
 

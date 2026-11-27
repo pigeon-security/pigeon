@@ -169,13 +169,16 @@ pub async fn email(message: ForwardableEmailMessage, env: &Env) -> Result<()> {
                 headers.set(datastore::LOOP_HEADER, &s.instance)?;
                 match message.forward_with_headers(to, &headers.0).await {
                     Ok(_) => ("forwarded", None),
-                    // The reason, never the destination or the content.
-                    Err(_) => ("forward_failed", Some("Email Routing refused the forward")),
+                    // Cloudflare's reason, never the destination or the content.
+                    Err(e) => (
+                        "forward_failed",
+                        Some(mail::forward_error(&String::from(e.message()), to)),
+                    ),
                 }
             } else {
                 ("stored", None)
             };
-            let row = mail::delivery_row(&s, &envelope_to, &received_at, outcome, error);
+            let row = mail::delivery_row(&s, &envelope_to, &received_at, outcome, error.as_deref());
             if runtime.run(vec![row]).await.is_err() {
                 console_log!("email {} delivery not recorded", s.item_id);
             }

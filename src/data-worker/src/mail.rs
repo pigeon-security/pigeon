@@ -240,6 +240,42 @@ pub fn sighting_row(id: &str, to: &str, at: &str, mailbox: &str, auth: Option<&A
     }
 }
 
+/// The longest reason [`forward_error`] keeps, in characters.
+pub const FORWARD_ERROR_MAX: usize = 160;
+
+/// The reason recorded for a forward Email Routing refused: Cloudflare's own error `message`
+/// (such as "destination address not verified"), on one line and cut to
+/// [`FORWARD_ERROR_MAX`] characters, with the destination `to` and any other word holding an
+/// address replaced by `[address]`. It never holds the message's content: the error is
+/// Cloudflare's, raised before anything is sent.
+pub fn forward_error(message: &str, to: &str) -> String {
+    const PREFIX: &str = "Email Routing refused the forward";
+    let to = to.trim().to_ascii_lowercase();
+    let words: Vec<String> = message
+        .split(|c: char| c.is_whitespace() || c.is_control())
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            let lower = w.to_ascii_lowercase();
+            if w.contains('@') || (!to.is_empty() && lower.contains(&to)) {
+                "[address]".to_string()
+            } else {
+                w.to_string()
+            }
+        })
+        .collect();
+    let reason = words.join(" ");
+    let reason = reason.trim_start_matches("Error:").trim();
+    let full = if reason.is_empty() {
+        PREFIX.to_string()
+    } else {
+        format!("{PREFIX}: {reason}")
+    };
+    match full.char_indices().nth(FORWARD_ERROR_MAX) {
+        Some((cut, _)) => format!("{}…", &full[..cut]),
+        None => full,
+    }
+}
+
 /// The `email_deliveries` row of what happened to a stored message: `outcome` is `stored`
 /// (nothing to forward), `forwarded`, `forward_failed` or `loop`.
 pub fn delivery_row(

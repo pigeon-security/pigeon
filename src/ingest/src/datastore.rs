@@ -497,7 +497,8 @@ fn parse_cursor(c: &str) -> Option<(&str, &str)> {
     (!at.is_empty() && is_sha256(id)).then_some((at, id))
 }
 
-/// `status`'s queries, in order: messages and mailboxes; the newest sighting; forward failures.
+/// `status`'s queries, in order: messages, items and the newest sighting; each delivery outcome
+/// with its count, newest time and newest recorded reason.
 pub fn status_queries() -> Vec<Statement> {
     vec![
         Statement {
@@ -507,8 +508,12 @@ pub fn status_queries() -> Vec<Statement> {
             params: vec![json!(SOURCE_EMAIL_ROUTING)],
         },
         Statement {
-            sql: "SELECT outcome, COUNT(*) AS n, MAX(at) AS last FROM email_deliveries \
-                  GROUP BY outcome ORDER BY outcome"
+            // `last_error`: the newest reason recorded for the outcome (a failed forward's
+            // redacted reason from Cloudflare), or null.
+            sql: "SELECT d.outcome, COUNT(*) AS n, MAX(d.at) AS last, \
+                  (SELECT e.error FROM email_deliveries e WHERE e.outcome = d.outcome \
+                  AND e.error IS NOT NULL ORDER BY e.at DESC LIMIT 1) AS last_error \
+                  FROM email_deliveries d GROUP BY d.outcome ORDER BY d.outcome"
                 .into(),
             params: Vec::new(),
         },
