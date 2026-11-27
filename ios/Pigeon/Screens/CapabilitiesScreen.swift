@@ -18,7 +18,9 @@ struct CapabilityEdit: Identifiable {
 
 /// Capabilities (M2): the one place capabilities change. Enable, Configure, Upgrade and Disable
 /// each make one diff of the instance record, approved with the passkey through `instance-put`;
-/// Upgrade moves a pin as `capabilities_upgrade_plan` suggests.
+/// Upgrade moves a pin as `capabilities_upgrade_plan` suggests. Beside the record's own
+/// capabilities are the catalogue's, enabled by name in `capabilities`; DigitalOcean, Jobs and
+/// MCP Federation open their own sheets (`CapabilitySheets.swift`).
 struct CapabilitiesScreen: View {
     let context: AreaContext
     @Environment(ConsoleAPI.self) private var api
@@ -27,6 +29,7 @@ struct CapabilitiesScreen: View {
     @State private var state: Loadable<CapabilitiesData> = .loading
     @State private var request: WriteRequest?
     @State private var editing: CapabilityEdit?
+    @State private var sheet: CapabilitySheet?
     /// Whether the internal plumbing (`plumbing` in `capabilities_versions`) is shown.
     @State private var showInternal = false
 
@@ -76,6 +79,27 @@ struct CapabilitiesScreen: View {
                 Task { await reloadAll() }
             }
         }
+        .sheet(item: $sheet) { s in
+            switch s {
+            case .connection(let record, let spaces):
+                DigitalOceanConnectionSheet(record: record, spaces: spaces)
+            case .droplet(let record):
+                DigitalOceanDropletSheet(record: record)
+            case .jobs(let spec, let record, let editing):
+                JobsAuditSheet(spec: spec, record: record, instanceTitle: instance.title, editing: editing) {
+                    Task { await reloadAll() }
+                }
+            case .federation(let record, let editing):
+                FederationTrustSheet(record: record, editing: editing) {
+                    Task { await reloadAll() }
+                }
+            }
+        }
+    }
+
+    /// The capabilities this instance is offered: the record's own, then the catalogue's.
+    private func offered(_ data: CapabilitiesData) -> [CapabilitySpec] {
+        CapabilityCatalog.all + CapabilityCatalog.catalogue(data.versions, home: instance.home)
     }
 
     // MARK: Loading
@@ -110,8 +134,9 @@ struct CapabilitiesScreen: View {
 
     @ViewBuilder
     private func sections(_ record: JSON, _ data: CapabilitiesData) -> some View {
-        let enabled = CapabilityCatalog.all.filter { CapabilityCatalog.isOn(record, $0) }
-        let available = CapabilityCatalog.all.filter { !CapabilityCatalog.isOn(record, $0) }
+        let all = offered(data)
+        let enabled = all.filter { CapabilityCatalog.isOn(record, $0) }
+        let available = all.filter { !CapabilityCatalog.isOn(record, $0) }
         Section("Enabled on \(instance.title) (\(enabled.count))") {
             if enabled.isEmpty {
                 MutedNoteRow("None yet. Enable one below.")
@@ -126,7 +151,7 @@ struct CapabilitiesScreen: View {
             }
         }
         if instance.home {
-            let ours = Set(CapabilityCatalog.all.map(\.component))
+            let ours = Set(all.map(\.component))
             let deployed = data.versions["components"].items.filter {
                 $0["kind"].string == "capability" && !ours.contains($0["name"].string ?? "")
             }
@@ -197,7 +222,7 @@ struct CapabilitiesScreen: View {
         let pinRow = pin(data, record, spec.component)
         let stepRow = step(data, record, spec.component)
         let view = gated[spec.cap]
-        let status: (String, Tone)
+        var status: (String, Tone)
         if let view {
             status = ("Upgrade to see \(view.title)", Tone.warn)
         } else if pinRow["state"].string == "held" {
@@ -208,27 +233,50 @@ struct CapabilitiesScreen: View {
         } else {
             status = ("Current", Tone.ok)
         }
+        let settings = record["capabilities"][spec.cap]
+        let auditMissing = spec.linkedJobs && (settings["audit_bucket"].string ?? "").isEmpty
+        if auditMissing { status = ("Audit setup required", Tone.warn) }
+        let pill = status
         let pinText = pinRow.isNull
             ? "unpinned → \(latest ?? "newest")"
             : "\(pinRow["requirement"].text ?? "—") → \(pinRow["selected"].text ?? "none")"
         let latestText = latest.map { " · latest " + $0 } ?? ""
         return VStack(alignment: .leading, spacing: 6) {
             ListRow(title: spec.cap, subtitle: spec.what, monoTitle: true) {
-                StatusPill(status.0, tone: status.1)
+                StatusPill(pill.0, tone: pill.1)
             }
             Text("pin " + pinText + latestText)
                 .idStyle()
                 .foregroundStyle(Theme.muted)
-            HStack(spacing: 8) {
+            // Up to seven capsules, so they wrap onto a second line on an iPhone.
+            FlowLayout(spacing: 8) {
+                if auditMissing {
+                    Button("Set up audit storage") {
+                        sheet = .jobs(spec, record, editing: true)
+                    }
+                    .buttonStyle(RowButtonStyle(.primary))
+                }
                 if !stepRow.isNull {
                     Button("Upgrade") { upgrade(spec, record, stepRow) }
                         .buttonStyle(RowButtonStyle(view != nil ? .primary : .quiet))
                 }
-                if !spec.fields(record).isEmpty {
-                    Button("Configure") {
-                        editing = CapabilityEdit(spec: spec, record: record, editing: true)
+                if !spec.fields(record).isEmpty || spec.cap == "mcp-federation" {
+                    Button(spec.cap == "mcp-federation" ? "Manage trust" : "Configure") {
+                        configure(spec, record)
                     }
                     .buttonStyle(RowButtonStyle(.quiet))
+                }
+                if spec.cap == "digitalocean" {
+                    Button("Connection") { sheet = .connection(record, spaces: false) }
+                        .buttonStyle(RowButtonStyle(.quiet))
+                    if settings["droplet_health"].bool == true {
+                        Button("Runner check") { sheet = .droplet(record) }
+                            .buttonStyle(RowButtonStyle(.quiet))
+                    }
+                    if !settings["spaces"].isNull {
+                        Button("Spaces") { sheet = .connection(record, spaces: true) }
+                            .buttonStyle(RowButtonStyle(.quiet))
+                    }
                 }
                 Button("Disable") { disable(spec, record) }
                     .buttonStyle(RowButtonStyle(.danger))
@@ -261,31 +309,41 @@ struct CapabilitiesScreen: View {
         _ record: JSON, next: JSON, title: String, facts: [Fact], effect: String,
         destructive: Bool = false, confirmLabel: String
     ) {
-        let list = RecordDiff.changes(record, next)
-        guard !list.isEmpty else {
+        guard
+            let made = CapabilityWrite.put(
+                record, next: next, title: title, facts: facts, effect: effect,
+                destructive: destructive, confirmLabel: confirmLabel,
+                onDone: { Task { await reloadAll() } })
+        else {
             toasts.show("Nothing changes.", tone: .info)
             return
         }
-        request = WriteRequest(
-            title: title,
-            subtitle: effect,
-            facts: [Fact("Instance", record["id"].text ?? instance.id, mono: true)] + facts,
-            lines: RecordDiff.lines(record, list),
-            action: "instance-put",
-            target: .string(record["id"].text ?? instance.id),
-            change: RecordDiff.putChange(next),
-            destructive: destructive,
-            confirmLabel: confirmLabel,
-            onDone: { _ in Task { await reloadAll() } })
+        request = made
+    }
+
+    /// Configure (or Manage trust): Jobs and MCP Federation open their own sheets.
+    private func configure(_ spec: CapabilitySpec, _ record: JSON) {
+        if spec.linkedJobs {
+            sheet = .jobs(spec, record, editing: true)
+        } else if spec.cap == "mcp-federation" {
+            sheet = .federation(record, editing: true)
+        } else {
+            editing = CapabilityEdit(spec: spec, record: record, editing: true)
+        }
     }
 
     private func enable(_ spec: CapabilitySpec, _ record: JSON) {
-        if spec.fields(record).isEmpty {
+        if spec.linkedJobs {
+            sheet = .jobs(spec, record, editing: false)
+        } else if spec.cap == "mcp-federation" {
+            sheet = .federation(record, editing: false)
+        } else if spec.fields(record).isEmpty {
             put(
                 record, next: CapabilityCatalog.with(record, spec, values: [:]),
                 title: "Enable \(spec.cap) on \(instance.title)",
                 facts: [Fact("Capability", spec.cap, mono: true)],
-                effect: "Adds \(spec.adds.joined(separator: ", ")) to this instance’s console, and \(spec.cap)’s tools to its MCP endpoint.",
+                effect: spec.effect
+                    ?? "Adds \(spec.adds.joined(separator: ", ")) to this instance’s console, and \(spec.cap)’s tools to its MCP endpoint.",
                 confirmLabel: "Enable with passkey")
         } else {
             editing = CapabilityEdit(spec: spec, record: record, editing: false)
@@ -353,9 +411,9 @@ struct CapabilityEditSheet: View {
         let done = onDone
         return WriteRequest(
             title: "\(verb) \(edit.spec.cap) on \(instanceTitle)",
-            subtitle: edit.editing
+            subtitle: edit.spec.effect ?? (edit.editing
                 ? "Changes how \(edit.spec.cap) is scoped. The console sections stay the same."
-                : "Adds \(edit.spec.adds.joined(separator: ", ")) to this instance’s console, and \(edit.spec.cap)’s tools to its MCP endpoint.",
+                : "Adds \(edit.spec.adds.joined(separator: ", ")) to this instance’s console, and \(edit.spec.cap)’s tools to its MCP endpoint."),
             facts: [
                 Fact("Instance", record["id"].text ?? "—", mono: true),
                 Fact("Capability", edit.spec.cap, mono: true),
@@ -398,10 +456,10 @@ struct CapabilityEditSheet: View {
             if let options = f.options {
                 Picker(f.label, selection: binding(f.key)) {
                     if !options.contains(text[f.key] ?? "") {
-                        Text("Choose a site").tag(text[f.key] ?? "")
+                        Text(f.key == "site" ? "Choose a site" : "Choose").tag(text[f.key] ?? "")
                     }
                     ForEach(options, id: \.self) { o in
-                        Text(o).tag(o)
+                        Text(f.labels?[o] ?? o).tag(o)
                     }
                 }
                 .pickerStyle(.menu)
@@ -422,6 +480,9 @@ struct CapabilityEditSheet: View {
         let values = CapabilityCatalog.values(text, fields: fields)
         if let missing = CapabilityCatalog.missing(values, fields: fields) {
             throw InputError("Fill in \(missing.label.lowercased()).")
+        }
+        if let invalid = CapabilityCatalog.invalid(values, fields: fields) {
+            throw InputError("Enter a valid \(invalid.label).")
         }
         let next = CapabilityCatalog.with(record, edit.spec, values: values)
         if RecordDiff.changes(record, next).isEmpty { throw InputError("Nothing changes.") }

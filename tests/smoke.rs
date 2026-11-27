@@ -3418,3 +3418,88 @@ mod federation;
 /// Private instance-owned structured diagnostic exports.
 #[path = "smoke/jobs_audit.rs"]
 mod jobs_audit;
+
+/// The area icon contract between the web console and the iOS app: every area the console
+/// offers (`console::sections::AREAS`) has a glyph in the shell's `ICONS` (`shell.js`) and an
+/// SF Symbol in `AreaSymbol` (`Areas.swift`), and the web glyph is drawn to read as that
+/// symbol. A new area adds both in the same change.
+mod icons {
+    use pigeon_capabilities::console::sections::AREAS;
+
+    const SHELL: &str = "src/capabilities/src/console/web/shell.js";
+    const AREAS_SWIFT: &str = "ios/Pigeon/Navigation/Areas.swift";
+
+    /// The text of `source` from `start` up to the first `end` after it.
+    fn block<'a>(source: &'a str, start: &str, end: &str, file: &str) -> &'a str {
+        let from = source
+            .find(start)
+            .unwrap_or_else(|| panic!("{file}: no `{start}`"));
+        let rest = &source[from..];
+        let to = rest
+            .find(end)
+            .unwrap_or_else(|| panic!("{file}: no `{end}` after `{start}`"));
+        &rest[..to]
+    }
+
+    /// The keys of the shell's `ICONS` object: its `name: "…"` lines.
+    fn icon_keys(shell: &str) -> Vec<&str> {
+        block(shell, "const ICONS = {", "\n  };", SHELL)
+            .lines()
+            .filter_map(|l| {
+                let (key, value) = l.trim().split_once(':')?;
+                value.trim_start().starts_with('"').then_some(key.trim())
+            })
+            .collect()
+    }
+
+    /// `AreaSymbol`'s cases: each id with the symbol it returns.
+    fn symbol_cases(swift: &str) -> Vec<(&str, &str)> {
+        block(swift, "enum AreaSymbol", "default:", AREAS_SWIFT)
+            .lines()
+            .filter_map(|l| {
+                let rest = l.trim().strip_prefix("case \"")?;
+                let (id, rest) = rest.split_once('"')?;
+                let symbol = rest.split_once("return \"")?.1.split_once('"')?.0;
+                Some((id, symbol))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn area_icons_match_ios_symbols() {
+        let shell = include_str!("../src/capabilities/src/console/web/shell.js");
+        let swift = include_str!("../ios/Pigeon/Navigation/Areas.swift");
+        let icons = icon_keys(shell);
+        let symbols = symbol_cases(swift);
+
+        // The parsers read what is there.
+        assert!(
+            icons.contains(&"chev") && icons.contains(&"inbox"),
+            "{SHELL}: ICONS not parsed"
+        );
+        assert!(
+            symbols.contains(&("inbox", "tray")),
+            "{AREAS_SWIFT}: AreaSymbol not parsed"
+        );
+
+        for area in AREAS {
+            let id = area.id;
+            assert!(
+                icons.contains(&id),
+                "area `{id}` has no glyph in ICONS in {SHELL}: add one drawn as its iOS symbol"
+            );
+            assert!(
+                symbols.iter().any(|(s, _)| *s == id),
+                "area `{id}` has no `case \"{id}\":` in AreaSymbol in {AREAS_SWIFT}"
+            );
+        }
+
+        // Capabilities is the puzzle piece on both sides.
+        let capabilities = symbols.iter().find(|(id, _)| *id == "capabilities");
+        assert_eq!(
+            capabilities.map(|(_, s)| *s),
+            Some("puzzlepiece.extension"),
+            "area `capabilities` must map to puzzlepiece.extension in AreaSymbol in {AREAS_SWIFT}"
+        );
+    }
+}

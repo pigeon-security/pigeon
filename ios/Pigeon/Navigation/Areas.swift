@@ -31,6 +31,8 @@ enum AreaRegistry {
         case "ci": CIScreen(context: context)
         case "metrics": MetricsScreen(context: context)
         case "ingest": IngestScreen(context: context)
+        case "jobs": JobsScreen(context: context)
+        case "email": EmailScreen(context: context)
         case "sessions": SessionsScreen(context: context)
         case "cost": CostScreen(context: context)
         case "access": AccessScreen(context: context)
@@ -54,7 +56,9 @@ enum AreaSymbol {
         case "source": return "arrow.triangle.branch"
         case "ci": return "checkmark.circle"
         case "metrics": return "chart.xyaxis.line"
+        case "jobs": return "list.bullet.clipboard"
         case "ingest": return "square.and.arrow.down"
+        case "email": return "envelope"
         case "capabilities": return "puzzlepiece.extension"
         case "sessions": return "waveform.path.ecg"
         case "cost": return "chart.bar"

@@ -1,6 +1,7 @@
 import Foundation
 
-/// One setting of an instance capability, as the web's `CAPS[].fields` lists it.
+/// One setting of an instance capability, as the web's `CAPS[].fields` and `catalogueCaps`
+/// list it.
 struct CapabilityField: Hashable {
     let key: String
     let label: String
@@ -11,6 +12,50 @@ struct CapabilityField: Hashable {
     var mono = false
     var isOptional = false
     var hint: String? = nil
+    /// What each option is shown as, when not its value.
+    var labels: [String: String]? = nil
+
+    /// Whether the form's `values` give this field a value it accepts, as the web's `validate`
+    /// checks DigitalOcean's settings. Every other field accepts what it is given.
+    func accepts(_ values: [String: JSON]) -> Bool {
+        let of = { (k: String) -> String in values[k]?.string ?? "" }
+        let v = of(key)
+        switch key {
+        case "team_id":
+            return Self.matches(v, "^[A-Za-z0-9_-]{1,128}$")
+        case "spaces_region":
+            return v.isEmpty ? of("spaces_bucket").isEmpty : Self.matches(v, "^[a-z]{2,8}[0-9]{1,2}$")
+        case "spaces_bucket":
+            return v.isEmpty
+                ? of("spaces_region").isEmpty && of("spaces_prefix").isEmpty
+                : Self.matches(v, "^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$")
+        case "spaces_prefix":
+            return v.utf8.count <= 1024
+                && !v.unicodeScalars.contains { $0.value <= 0x1f || (0x7f...0x9f).contains($0.value) }
+        default:
+            return true
+        }
+    }
+
+    private static func matches(_ text: String, _ pattern: String) -> Bool {
+        text.range(of: pattern, options: .regularExpression) != nil
+    }
+}
+
+/// A catalogue capability: enabled by name in the record's `capabilities`, as
+/// `capabilities_versions` `catalogue` lists it (the web's `catalogueCaps`).
+struct CatalogueEntry {
+    /// The capabilities it needs enabled beside it.
+    let requires: [String]
+    /// Whether the record is the home instance's.
+    let home: Bool
+    /// Whether the instance chooses where it runs: a linked instance, for an entry that offers
+    /// a Worker of its own.
+    let configurable: Bool
+    /// The placements a linked instance may choose (`linked_placement_choices`).
+    let choices: [String]
+    /// The catalogue capabilities that need this one, removed with it.
+    let dependents: [String]
 }
 
 /// An instance capability: the record field that enables it and what it adds to the console,
@@ -22,11 +67,26 @@ struct CapabilitySpec: Identifiable {
     let component: String
     let adds: [String]
     let what: String
+    /// What enabling it does, when that says more than what it adds.
+    var effect: String? = nil
+    /// Set for a catalogue capability.
+    var catalogue: CatalogueEntry? = nil
 
     var id: String { cap }
 
+    /// Whether this is Jobs on a linked instance, whose audit bucket is set up through
+    /// `app_jobs_audit_plan`. The record accepts an audit bucket only there.
+    var linkedJobs: Bool { cap == "jobs" && catalogue?.home == false }
+
     /// What the record must have first, or nil when it can be enabled.
     func needs(_ r: JSON) -> String? {
+        if let entry = catalogue {
+            if linkedJobs && (r["account"]["account_id"].string ?? "").isEmpty {
+                return "a linked Cloudflare account"
+            }
+            let lack = entry.requires.filter { r["capabilities"][$0].isNull }
+            return lack.isEmpty ? nil : lack.joined(separator: ", ")
+        }
         switch cap {
         case "publishing": return r["sites"].items.isEmpty ? "a site in the record" : nil
         case "site_passkeys": return CapabilityCatalog.isOn(r, CapabilityCatalog.publishing) ? nil : "publishing"
@@ -41,6 +101,7 @@ struct CapabilitySpec: Identifiable {
 
     /// The settings the capability takes.
     func fields(_ r: JSON) -> [CapabilityField] {
+        if let entry = catalogue { return catalogueFields(entry) }
         let sites = r["sites"].items.compactMap { $0["name"].string }
         switch cap {
         case "publishing":
@@ -69,6 +130,40 @@ struct CapabilitySpec: Identifiable {
             return []
         }
     }
+
+    private func catalogueFields(_ entry: CatalogueEntry) -> [CapabilityField] {
+        var out: [CapabilityField] = []
+        if cap == "digitalocean" {
+            out += [
+                CapabilityField(
+                    key: "team_id", label: "DigitalOcean team ID", mono: true,
+                    hint: "Verification checks that the token belongs to this team."),
+                CapabilityField(
+                    key: "spaces_region", label: "Spaces region", mono: true, isOptional: true,
+                    hint: "For example, nyc3. Leave region and bucket blank to keep Spaces off."),
+                CapabilityField(key: "spaces_bucket", label: "Spaces bucket", mono: true, isOptional: true),
+                CapabilityField(
+                    key: "spaces_prefix", label: "Spaces prefix", mono: true, isOptional: true,
+                    hint: "Leave blank to check the bucket root."),
+                CapabilityField(
+                    key: "droplet_health", label: "Droplet runner checks", options: ["no", "yes"],
+                    hint: "Each runner check needs a separate passkey approval before compute starts.",
+                    labels: ["no": "Off", "yes": "On"]),
+            ]
+        }
+        if entry.configurable {
+            // Only the placements there is a linked-account build for; the web lists the
+            // others disabled.
+            let own = entry.choices.contains("own_worker")
+            out.append(
+                CapabilityField(
+                    key: "placement", label: "Worker placement",
+                    options: ["inline", "own_worker"].filter { entry.choices.contains($0) },
+                    hint: own ? nil : "Separate Worker requires a linked-account build for this capability.",
+                    labels: ["inline": "Inline", "own_worker": "Separate Worker"]))
+        }
+        return out
+    }
 }
 
 /// The instance capabilities and the record edits that enable, configure and disable them.
@@ -81,6 +176,56 @@ enum CapabilityCatalog {
         cap: "site_passkeys", field: "sites[].auth", component: "site_passkeys",
         adds: ["Site › Visitors"],
         what: "Gate a site’s platform subdomains behind visitor passkeys")
+
+    /// What each catalogue capability adds and does, as the web's `CATALOGUE_ADDS`.
+    private static let catalogueAdds: [String: (adds: [String], what: String, effect: String?)] = [
+        "architecture": (
+            ["Platform › Architecture"],
+            "Show this instance’s own setup: its Worker, bucket, hostnames and tools", nil
+        ),
+        "mcp-federation": ([], "Share approved Jobs reads through the platform MCP connection", nil),
+        "jobs": (
+            ["Jobs › Runs"], "Inspect this instance’s job history",
+            "Shows instance-owned job history and exports terminal audit records to one private R2 bucket."
+        ),
+        "cloud": (
+            [], "Enable Cloud Gateway status for this instance",
+            "Adds cloud_status to the instance’s MCP endpoint."
+        ),
+        "digitalocean": (
+            [], "Connect the instance to one DigitalOcean team",
+            "Approves the expected team for this instance. Set and verify the token separately with a passkey."
+        ),
+        "secrets": (
+            ["Access › Secrets"],
+            "List the secrets in this instance’s own Cloudflare account (its Secrets Store)", nil
+        ),
+    ]
+
+    /// The catalogue capabilities this instance may enable by name: the opt-in entries on home,
+    /// the linked entries on a linked instance; never one every instance has, nor `redirects`.
+    static func catalogue(_ versions: JSON, home: Bool) -> [CapabilitySpec] {
+        let entries = versions["catalogue"].items
+        return entries.compactMap { e -> CapabilitySpec? in
+            guard let name = e["name"].string else { return nil }
+            let offered = home ? e["opt_in"].bool == true : e["linked"].bool == true
+            guard offered, e["always"].bool != true, name != "redirects" else { return nil }
+            let placements = e["placements"].items.compactMap { $0.string }
+            let choices = versions["linked_placement_choices"][name].array?.compactMap { $0.string }
+                ?? ["inline"]
+            let dependents = entries
+                .filter { $0["requires"].items.contains(.string(name)) }
+                .compactMap { $0["name"].string }
+            let about = catalogueAdds[name]
+            return CapabilitySpec(
+                cap: name, field: "capabilities.\(name)", component: name,
+                adds: about?.adds ?? [], what: about?.what ?? "", effect: about?.effect,
+                catalogue: CatalogueEntry(
+                    requires: e["requires"].items.compactMap { $0.string }, home: home,
+                    configurable: !home && placements.contains("own_worker"),
+                    choices: choices, dependents: dependents))
+        }
+    }
 
     static let all: [CapabilitySpec] = [
         publishing,
@@ -109,6 +254,7 @@ enum CapabilityCatalog {
 
     /// Whether `c` is enabled on record `r`.
     static func isOn(_ r: JSON, _ c: CapabilitySpec) -> Bool {
+        if c.catalogue != nil { return !r["capabilities"][c.cap].isNull }
         if c.cap == "site_passkeys" { return !passkeySites(r).isEmpty && isOn(r, publishing) }
         return r[c.field]["state"].string == "enabled"
     }
@@ -127,6 +273,17 @@ enum CapabilityCatalog {
             } else {
                 now = ["site": r["publishing"]["site"], "allow": ["site"]]
             }
+        } else if c.catalogue != nil {
+            let settings = r["capabilities"][c.cap]
+            var o: [String: JSON] = ["placement": "inline"]
+            for (k, v) in settings.object ?? [:] { o[k] = v }
+            if c.cap == "digitalocean" {
+                o["spaces_region"] = settings["spaces"]["region"]
+                o["spaces_bucket"] = settings["spaces"]["bucket"]
+                o["spaces_prefix"] = settings["spaces"]["prefix"]
+                o["droplet_health"] = .string(settings["droplet_health"].bool == true ? "yes" : "no")
+            }
+            now = .object(o)
         } else {
             now = r[c.field]
         }
@@ -163,8 +320,37 @@ enum CapabilityCatalog {
         }
     }
 
+    /// The first field whose value it does not accept, if any.
+    static func invalid(_ values: [String: JSON], fields: [CapabilityField]) -> CapabilityField? {
+        fields.first { !$0.accepts(values) }
+    }
+
     /// Record `r` with `c` set to `values`.
     static func with(_ r: JSON, _ c: CapabilitySpec, values: [String: JSON]) -> JSON {
+        if let entry = c.catalogue {
+            var settings = r["capabilities"][c.cap].object ?? [:]
+            if c.linkedJobs { settings["audit_bucket"] = values["audit_bucket"] }
+            if entry.configurable { settings["placement"] = values["placement"] }
+            if c.cap == "digitalocean" {
+                let text = { (k: String) -> String in values[k]?.string ?? "" }
+                settings["team_id"] = values["team_id"]
+                if text("droplet_health") == "yes" {
+                    settings["droplet_health"] = .bool(true)
+                } else {
+                    settings.removeValue(forKey: "droplet_health")
+                }
+                let region = text("spaces_region"), bucket = text("spaces_bucket"), prefix = text("spaces_prefix")
+                if !region.isEmpty || !bucket.isEmpty || !prefix.isEmpty {
+                    var spaces: [String: JSON] = ["region": .string(region), "bucket": .string(bucket)]
+                    if !prefix.isEmpty { spaces["prefix"] = .string(prefix) }
+                    settings["spaces"] = .object(spaces)
+                } else {
+                    settings.removeValue(forKey: "spaces")
+                }
+            }
+            let caps = RecordDiff.setting(r["capabilities"], c.cap, .object(settings))
+            return RecordDiff.setting(r, "capabilities", caps)
+        }
         if c.cap == "site_passkeys" {
             let site = values["site"]?.string
             let sites = r["sites"].items.map { s -> JSON in
@@ -188,6 +374,11 @@ enum CapabilityCatalog {
 
     /// Record `r` without `c` and what needs it.
     static func without(_ r: JSON, _ c: CapabilitySpec) -> JSON {
+        if let entry = c.catalogue {
+            var caps = r["capabilities"].object ?? [:]
+            for name in [c.cap] + entry.dependents { caps.removeValue(forKey: name) }
+            return RecordDiff.setting(r, "capabilities", caps.isEmpty ? nil : .object(caps))
+        }
         var next = r
         for d in [c] + dependents(r, c) {
             if d.cap == "site_passkeys" {

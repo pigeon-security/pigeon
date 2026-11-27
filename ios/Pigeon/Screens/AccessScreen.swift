@@ -1,14 +1,17 @@
 import SwiftUI
 
-/// Access (platform-wide, home only): Secrets, Tokens, People and Apps, as the web console's
+/// Access (platform-wide, home only): Secrets, Tokens and People, as the web console's
 /// `access.js`. Every write goes through the confirm sheet; a token or invite link comes back in
 /// the show-once content.
 ///
 /// - Secrets: `secrets_list`, `credentials_expiry`; `secret-set` (the value is typed in the
 ///   confirm sheet and never kept).
 /// - Tokens: `app_proxy_tokens`; `token-issue`, `token-revoke`.
-/// - People: `app_people`; `invite`, `passkey-remove`.
-/// - Apps: `app_people`; `app-disconnect`.
+/// - People: `app_people`, each person with their passkeys and the apps acting for them, rolled
+///   up one per real app (`app_groups`), and the apps acting for no one under them for an admin;
+///   `invite`, `passkey-remove`, `app-disconnect` (one client at a time). The console's
+///   `app-group-disconnect` and `user-remove` are its own: the server refuses them by bearer, so
+///   the app neither disconnects a whole app of several clients at once nor removes a person.
 struct AccessScreen: View {
     let context: AreaContext
 
@@ -16,7 +19,6 @@ struct AccessScreen: View {
         switch context.viewID.wrappedValue {
         case "tokens": AccessTokens(context: context)
         case "people": AccessPeople(context: context)
-        case "apps": AccessApps(context: context)
         default: AccessSecrets(context: context)
         }
     }
@@ -393,7 +395,9 @@ private struct IssueTokenSheet: View {
 
 // MARK: - People
 
-/// What `app_people` answers: the people, their passkeys, and the apps acting for them.
+/// What `app_people` answers: the people, their passkeys, and the apps acting for them, rolled
+/// up one per real app and person (`app_groups`, src/capabilities/src/delegates.rs), with each
+/// app's clients and service users as its members.
 struct PeopleListing {
     struct Passkey: Identifiable, Hashable {
         let id: String
@@ -402,42 +406,100 @@ struct PeopleListing {
         let lastUsedAt: Double?
     }
 
+    /// One role an app's clients take, such as the AI Gateway's planner and executor.
+    struct Role: Identifiable, Hashable {
+        let id: String
+        let label: String
+    }
+
+    /// One client or service user of an app.
+    struct Member: Identifiable, Hashable {
+        let id: String
+        let name: String
+        let kind: String
+        let role: String?
+        let redirectHost: String?
+        let tokens: Int
+        let lastUsedAt: Double?
+    }
+
+    /// One real app acting for one person, or for no one.
+    struct App: Identifiable, Hashable {
+        let app: String
+        let label: String
+        let person: String?
+        let kinds: [String]
+        let roles: [Role]
+        let clients: Int
+        let tokens: Int
+        let lastUsedAt: Double?
+        let members: [Member]
+        var id: String { "\(app)|\(person ?? "")" }
+
+        init?(_ j: JSON) {
+            guard let app = j["app"].string else { return nil }
+            self.app = app
+            label = j["label"].string ?? app
+            person = j["person"].string
+            kinds = j["kinds"].items.compactMap { $0.string }
+            roles = j["roles"].items.compactMap { (r: JSON) -> Role? in
+                guard let id = r["id"].string else { return nil }
+                return Role(id: id, label: r["label"].string ?? id)
+            }
+            let members = j["members"].items.compactMap { (m: JSON) -> Member? in
+                guard let id = m["id"].string else { return nil }
+                return Member(
+                    id: id, name: m["name"].string ?? id, kind: m["kind"].string ?? "oauth",
+                    role: m["role"].string, redirectHost: m["redirect_host"].string,
+                    tokens: m["tokens"].int ?? 0, lastUsedAt: m["last_used_at"].double)
+            }
+            self.members = members
+            clients = j["clients"].int ?? members.count
+            tokens = j["tokens"].int ?? 0
+            lastUsedAt = j["last_used_at"].double
+        }
+
+        var kindText: String { kinds.map(PeopleListing.kindText).joined(separator: ", ") }
+
+        /// The label of the role `id`, as the app names it.
+        func roleLabel(_ id: String?) -> String? {
+            guard let id else { return nil }
+            return roles.first { $0.id == id }?.label ?? id
+        }
+    }
+
     struct Person: Identifiable, Hashable {
         let id: String
         let name: String
         let initials: String
         let isMe: Bool
+        let isAdmin: Bool
         let passkeys: [Passkey]
-        let apps: Int
+        let apps: [App]
 
         var lastSignIn: Double? { passkeys.compactMap { $0.lastUsedAt }.max() }
     }
 
-    struct App: Identifiable, Hashable {
-        let id: String
-        let name: String
-        let kind: String
-        let personName: String?
-        let tokens: Int
-        let linkedAt: Double?
+    /// Whether the one asking is an admin, from the read; the server checks every write again.
+    let meAdmin: Bool
+    let people: [Person]
+    /// The apps acting for no one: an admin's to see and disconnect, under the people.
+    let unassigned: [App]
 
-        var kindText: String {
-            switch kind {
-            case "app": return "OAuth app"
-            case "service": return "Service user"
-            default: return kind
-            }
+    static func kindText(_ kind: String) -> String {
+        switch kind {
+        case "oauth": return "OAuth app"
+        case "service": return "Service user"
+        case "leftover": return "No client"
+        default: return kind
         }
     }
 
-    let people: [Person]
-    let apps: [App]
-
     init(_ data: JSON) {
         let me = data["me"].string
-        let rawApps = data["apps"].items
-        var names: [String: String] = [:]
-        let people = data["people"].items.compactMap { (p: JSON) -> Person? in
+        meAdmin = data["me_admin"].bool ?? false
+        let groups = data["app_groups"].items.compactMap { App($0) }
+        people = data["people"].items.compactMap { (p: JSON) -> Person? in
             guard let id = p["id"].string else { return nil }
             let name = p["name"].string ?? id
             let keys = p["passkeys"].items.compactMap { (k: JSON) -> Passkey? in
@@ -448,27 +510,17 @@ struct PeopleListing {
             }
             return Person(
                 id: id, name: name, initials: p["initials"].string ?? initialsOf(name),
-                isMe: id == me, passkeys: keys,
-                apps: rawApps.filter { $0["person"].string == id }.count)
+                isMe: id == me, isAdmin: p["admin"].bool ?? false, passkeys: keys,
+                apps: groups.filter { $0.person == id })
         }
         .sorted { a, b in a.isMe && !b.isMe }
-        self.people = people
-        for p in people { names[p.id] = p.name }
-        apps = rawApps.compactMap { (a: JSON) -> App? in
-            guard let id = a["id"].string else { return nil }
-            let person = a["person"].string
-            return App(
-                id: id, name: a["name"].string ?? id, kind: a["kind"].string ?? "app",
-                personName: person.map { names[$0] ?? $0 }, tokens: a["tokens"].int ?? 0,
-                linkedAt: a["linked_at"].double)
-        }
+        unassigned = groups.filter { $0.person == nil }
     }
 }
 
 struct AccessPeople: View {
     let context: AreaContext
     @Environment(ConsoleAPI.self) private var api
-    @Environment(\.openArea) private var openArea
     @State private var state: Loadable<PeopleListing> = .loading
     @State private var inviting = false
     @State private var request: WriteRequest?
@@ -477,14 +529,16 @@ struct AccessPeople: View {
         List {
             PlatformViewPicker(context: context)
             Section {
-                Text("Who can sign in to the platform and approve with a passkey. Expand a person for their passkeys.")
+                Text("Who can sign in to the platform and approve with a passkey, and the apps acting for them. Expand a person for their passkeys and apps.")
                     .font(Theme.Fonts.meta).foregroundStyle(Theme.muted)
-                Button {
-                    inviting = true
-                } label: {
-                    Label("Invite person…", systemImage: "person.badge.plus")
+                if state.value?.meAdmin == true {
+                    Button {
+                        inviting = true
+                    } label: {
+                        Label("Invite person…", systemImage: "person.badge.plus")
+                    }
+                    .font(Theme.Fonts.body)
                 }
-                .font(Theme.Fonts.body)
             }
             LoadableSection(
                 state: state, emptyTitle: "No people yet", isEmpty: { $0.people.isEmpty },
@@ -496,10 +550,29 @@ struct AccessPeople: View {
                             if person.passkeys.isEmpty {
                                 Text("No passkeys registered.").font(Theme.Fonts.meta).foregroundStyle(Theme.muted)
                             }
-                            ForEach(person.passkeys) { key in passkeyRow(key, of: person) }
+                            ForEach(person.passkeys) { key in
+                                passkeyRow(key, of: person, meAdmin: listing.meAdmin)
+                            }
+                            if person.apps.isEmpty {
+                                Text("No apps act for them.").font(Theme.Fonts.meta).foregroundStyle(Theme.muted)
+                            }
+                            ForEach(person.apps) { app in
+                                appRow(app, for: person.name, meAdmin: listing.meAdmin)
+                            }
                         } label: {
                             personRow(person)
                         }
+                    }
+                }
+                if listing.meAdmin && !listing.unassigned.isEmpty {
+                    Section {
+                        ForEach(listing.unassigned) { app in
+                            appRow(app, for: nil, meAdmin: true)
+                        }
+                    } header: {
+                        Text("Apps acting for no one")
+                    } footer: {
+                        Text("Only admins see this section.")
                     }
                 }
             }
@@ -525,6 +598,7 @@ struct AccessPeople: View {
                 HStack(spacing: 6) {
                     Text(p.name).font(Theme.Fonts.body).foregroundStyle(Theme.ink).lineLimit(1)
                     if p.isMe { StatusPill("You", tone: .accent) }
+                    if p.isAdmin { StatusPill("Admin", tone: .neutral) }
                 }
                 Text(personDetail(p)).font(Theme.Fonts.meta).foregroundStyle(Theme.muted).lineLimit(1)
             }
@@ -534,22 +608,72 @@ struct AccessPeople: View {
     private func personDetail(_ p: PeopleListing.Person) -> String {
         var parts = [PlatformFormat.count(p.passkeys.count, "passkey", "passkeys")]
         parts.append("last sign-in \(p.lastSignIn.map { PlatformFormat.day($0) } ?? "never")")
-        if p.apps > 0 { parts.append(PlatformFormat.count(p.apps, "app", "apps")) }
+        if !p.apps.isEmpty { parts.append(PlatformFormat.count(p.apps.count, "app", "apps")) }
         return parts.joined(separator: " · ")
     }
 
-    private func passkeyRow(_ key: PeopleListing.Passkey, of person: PeopleListing.Person) -> some View {
+    private func passkeyRow(
+        _ key: PeopleListing.Passkey, of person: PeopleListing.Person, meAdmin: Bool
+    ) -> some View {
         ListRow(
             title: key.name,
             subtitle: "Added \(PlatformFormat.day(key.createdAt)) · last used \(key.lastUsedAt.map { PlatformFormat.day($0) } ?? "never")"
         ) {
-            if person.passkeys.count > 1 {
+            if person.passkeys.count <= 1 {
+                Text("Only passkey").font(Theme.Fonts.meta).foregroundStyle(Theme.muted)
+            } else if person.isMe || meAdmin {
                 Button("Remove") { request = removeRequest(key, of: person) }
                     .buttonStyle(RowButtonStyle(.danger))
-            } else {
-                Text("Only passkey").font(Theme.Fonts.meta).foregroundStyle(Theme.muted)
             }
         }
+    }
+
+    /// One app acting for a person (or for no one). An app with one client disconnects it with
+    /// `app-disconnect`; one with several expands to its clients, each disconnected on its own.
+    /// `app-group-disconnect`, which disconnects every client at once, is the console's only: the
+    /// server refuses it by bearer.
+    @ViewBuilder
+    private func appRow(_ a: PeopleListing.App, for personName: String?, meAdmin: Bool) -> some View {
+        if a.members.count > 1 {
+            DisclosureGroup {
+                ForEach(a.members) { m in
+                    ListRow(title: m.name, subtitle: clientDetail(m, of: a)) {
+                        if meAdmin {
+                            Button("Disconnect") { request = disconnectRequest(m, of: a, for: personName) }
+                                .buttonStyle(RowButtonStyle(.danger))
+                        }
+                    }
+                }
+            } label: {
+                ListRow(title: a.label, subtitle: appDetail(a))
+            }
+        } else {
+            ListRow(title: a.label, subtitle: appDetail(a)) {
+                if meAdmin, let m = a.members.first {
+                    Button("Disconnect") { request = disconnectRequest(m, of: a, for: personName) }
+                        .buttonStyle(RowButtonStyle(.danger))
+                }
+            }
+        }
+    }
+
+    private func appDetail(_ a: PeopleListing.App) -> String {
+        var parts = [String]()
+        if !a.kinds.isEmpty { parts.append(a.kindText) }
+        parts.append(PlatformFormat.count(a.clients, "client", "clients"))
+        parts.append(PlatformFormat.count(a.tokens, "token", "tokens"))
+        parts.append("last active \(a.lastUsedAt.map { PlatformFormat.day($0) } ?? "never")")
+        if !a.roles.isEmpty { parts.append(a.roles.map { $0.label.lowercased() }.joined(separator: ", ")) }
+        return parts.joined(separator: " · ")
+    }
+
+    private func clientDetail(_ m: PeopleListing.Member, of a: PeopleListing.App) -> String {
+        var parts = [PeopleListing.kindText(m.kind)]
+        if let role = a.roleLabel(m.role) { parts.append(role.lowercased()) }
+        if let host = m.redirectHost { parts.append(host) }
+        parts.append(PlatformFormat.count(m.tokens, "token", "tokens"))
+        parts.append("last active \(m.lastUsedAt.map { PlatformFormat.day($0) } ?? "never")")
+        return parts.joined(separator: " · ")
     }
 
     private func removeRequest(_ key: PeopleListing.Passkey, of person: PeopleListing.Person) -> WriteRequest {
@@ -564,6 +688,27 @@ struct AccessPeople: View {
             target: .string(key.id),
             destructive: true,
             confirmLabel: "Remove with passkey",
+            onDone: { _ in Task { await load() } })
+    }
+
+    /// Disconnects one client of `a`: the whole app when it is its only one.
+    private func disconnectRequest(
+        _ m: PeopleListing.Member, of a: PeopleListing.App, for personName: String?
+    ) -> WriteRequest {
+        let only = a.members.count <= 1
+        return WriteRequest(
+            title: only ? "Disconnect app" : "Disconnect client",
+            subtitle: only
+                ? "Revokes its tokens and its link, so it acts for no one. Signing in again with a passkey reconnects it. Proxy tokens a person issued stay."
+                : "Revokes its tokens and its link, so it acts for no one. The app's other clients stay connected.",
+            facts: [
+                Fact("App", a.label), Fact("Client", m.name), Fact("Id", m.id, mono: true),
+                Fact("Acting for", personName ?? "No one"), Fact("Live tokens", String(m.tokens)),
+            ],
+            action: "app-disconnect",
+            target: .string(m.id),
+            destructive: true,
+            confirmLabel: "Disconnect with passkey",
             onDone: { _ in Task { await load() } })
     }
 
@@ -620,102 +765,5 @@ private struct InviteSheet: View {
             target: .string(text),
             confirmLabel: "Create invite with passkey",
             onDone: { _ in onDone() })
-    }
-}
-
-// MARK: - Apps
-
-struct AccessApps: View {
-    let context: AreaContext
-    @Environment(ConsoleAPI.self) private var api
-    @State private var state: Loadable<PeopleListing> = .loading
-    @State private var request: WriteRequest?
-
-    var body: some View {
-        List {
-            PlatformViewPicker(context: context)
-            Section {
-                Text("OAuth apps (MCP clients) and service users (agents) that act for a person. Disconnecting revokes their tokens.")
-                    .font(Theme.Fonts.meta).foregroundStyle(Theme.muted)
-            }
-            LoadableSection(
-                state: state, emptyTitle: "No apps yet",
-                emptyMessage: "Add pigeon as a connector in Claude, then allow it with your passkey.",
-                isEmpty: { $0.apps.isEmpty }, retry: { await load() }
-            ) { listing in
-                let none = listing.apps.filter { $0.personName == nil }
-                    .sorted { $0.name < $1.name }
-                let some = listing.apps.filter { $0.personName != nil }
-                    .sorted { ($0.personName ?? "", $0.name) < ($1.personName ?? "", $1.name) }
-                if !none.isEmpty {
-                    Section("Acting for no one") {
-                        ForEach(none) { appRow($0, inline: true) }
-                    }
-                }
-                if !some.isEmpty {
-                    Section {
-                        ForEach(some) { appRow($0, inline: false) }
-                    } header: {
-                        Text("Acting for a person")
-                    } footer: {
-                        Text("Swipe an app to disconnect it.")
-                    }
-                }
-            }
-        }
-        .listStyle(.insetGrouped)
-        .refreshable { await load() }
-        .task { await load() }
-        .confirmSheet($request)
-    }
-
-    private func appRow(_ a: PeopleListing.App, inline: Bool) -> some View {
-        ListRow(title: a.name, subtitle: appDetail(a)) {
-            if inline {
-                Button("Disconnect") { request = disconnectRequest(a) }
-                    .buttonStyle(RowButtonStyle(.danger))
-            } else if a.personName == nil {
-                StatusPill("No one", tone: .warn)
-            }
-        }
-        .swipeActions(edge: .trailing) {
-            Button("Disconnect", role: .destructive) { request = disconnectRequest(a) }
-        }
-        .contextMenu {
-            Button("Disconnect", role: .destructive) { request = disconnectRequest(a) }
-        }
-    }
-
-    private func appDetail(_ a: PeopleListing.App) -> String {
-        var parts = [a.kindText]
-        if let who = a.personName { parts.append("for \(who)") }
-        parts.append(a.tokens == 0 ? "no tokens" : PlatformFormat.count(a.tokens, "token", "tokens"))
-        if let linked = a.linkedAt { parts.append("linked \(PlatformFormat.day(linked))") }
-        return parts.joined(separator: " · ")
-    }
-
-    private func disconnectRequest(_ a: PeopleListing.App) -> WriteRequest {
-        WriteRequest(
-            title: "Disconnect app",
-            subtitle: "Revokes its tokens and its link, so it acts for no one. It must be allowed again with a passkey to reconnect. Proxy tokens a person issued stay.",
-            facts: [
-                Fact("App", a.name), Fact("Id", a.id, mono: true), Fact("Kind", a.kindText),
-                Fact("Acting for", a.personName ?? "No one"), Fact("Live tokens", String(a.tokens)),
-            ],
-            action: "app-disconnect",
-            target: .string(a.id),
-            destructive: true,
-            confirmLabel: "Disconnect with passkey",
-            onDone: { _ in Task { await load() } })
-    }
-
-    private func load() async {
-        do {
-            state = .loaded(PeopleListing(try await api.op("app_people")))
-        } catch is CancellationError {
-        } catch ConsoleError.signedOut {
-        } catch {
-            if state.value == nil { state = .failed(error.localizedDescription) }
-        }
     }
 }

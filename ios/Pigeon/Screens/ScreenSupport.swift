@@ -172,8 +172,14 @@ enum RecordDiff {
             }
             return out
         }
-        let x: JSON = isNone(from) ? .null : from
-        let y: JSON = isNone(to) ? .null : to
+        // A capability's own entry counts `{}` as a value: `capabilities.data = {}` turns it on
+        // with every setting at its default, as record::diff counts it.
+        let entry = path.hasPrefix("capabilities.")
+            && path.count > "capabilities.".count
+            && !path.dropFirst("capabilities.".count).contains(".")
+        let none = { (v: JSON) -> Bool in entry && v == .object([:]) ? false : isNone(v) }
+        let x: JSON = none(from) ? .null : from
+        let y: JSON = none(to) ? .null : to
         return x == y ? [] : [RecordChange(path: path, from: x, to: y)]
     }
 
