@@ -137,6 +137,10 @@
   // Disabling removes the entry and its dependents.
   const CATALOGUE_ADDS = {
     architecture: { adds: ["Platform › Architecture"], what: "Show this instance’s own setup: its Worker, bucket, hostnames and tools" },
+    "data-ingest": {
+      adds: ["Ingest › Runs"], what: "Check the approved import source and data store",
+      effect: "Preview the Spaces source and estimated cost. Launch support is pending.",
+    },
     "mcp-federation": { what: "Share approved Jobs reads through the platform MCP connection" },
     jobs: {
       adds: ["Jobs › Runs"], what: "Inspect this instance’s job history",

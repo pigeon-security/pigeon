@@ -1,9 +1,9 @@
-//! The `ingest` capability (decision 13 of docs/plans/ingest.md): plan, start, watch, report on
+//! The `data-ingest` capability (decision 13 of docs/plans/ingest.md): plan, start, watch, report on
 //! and stop a run that copies only what R2 does not already hold.
 //!
 //! It is latent. Nothing starts without a person's passkey approval of an exact plan, and no
-//! plan applies until the keys it needs are bound as secrets. Keys are read only inside
-//! `ingest_start`, passed to the host and never logged or answered.
+//! plan applies until the credentials it needs are configured. Planning uses source credentials
+//! to sample the collection. Credentials are never logged or included in a response.
 //!
 //! The commit a run is built from is the one this Worker was built from (`PIGEON_COMMIT` at
 //! build time). A local build has none, so `ingest_plan` takes an optional full `commit`, which
@@ -12,6 +12,8 @@
 pub mod hosts;
 pub mod net;
 mod profile;
+
+pub const NAME: &str = "data-ingest";
 const SCOPED_TOOLS: &[crate::instances::tools::Registration] = &[
     crate::instances::tools::Registration {
         name: "ingest_plan",
@@ -36,20 +38,54 @@ const SCOPED_TOOLS: &[crate::instances::tools::Registration] = &[
     },
 ];
 
+const INGEST_VIEWS: &[crate::instances::tools::View] = &[crate::instances::tools::View {
+    area: "ingest",
+    id: "runs",
+    title: "Runs",
+    order: 10,
+    since: None,
+}];
+
+const DATA_TOOLS: &[crate::instances::tools::Registration] = &[
+    crate::instances::tools::Registration {
+        name: "ingest_plan",
+        description: Some("Check the approved DigitalOcean Spaces source and data destination."),
+        arguments: &["prefix", "size_bytes"],
+    },
+    SCOPED_TOOLS[2],
+    crate::instances::tools::Registration {
+        name: "ingest_status",
+        description: Some("Read ingest progress and clean up a finished legacy run."),
+        arguments: &["run"],
+    },
+    crate::instances::tools::Registration {
+        name: "ingest_stop",
+        description: Some("Stop a run owned by this instance."),
+        arguments: &["run"],
+    },
+];
+
+fn data_enabled(record: &instances::record::Instance) -> bool {
+    record.capabilities.contains_key(NAME) && crate::data_store::enabled(record)
+}
+
 pub fn instance_tools(
-    instance: &crate::instances::record::Instance,
+    instance: &instances::record::Instance,
 ) -> serde_json::Result<crate::instances::tools::Enabled> {
-    const VIEWS: &[crate::instances::tools::View] = &[crate::instances::tools::View {
-        area: "ingest",
-        id: "runs",
-        title: "Runs",
-        order: 10,
-        since: None,
-    }];
     Ok(crate::instances::tools::Enabled::when(
-        instance.ingest.as_ref().is_some_and(Profile::enabled),
+        !data_enabled(instance) && instance.ingest.as_ref().is_some_and(Profile::enabled),
         SCOPED_TOOLS,
-        VIEWS,
+        INGEST_VIEWS,
+    ))
+}
+
+pub fn data_instance_tools(
+    instance: &instances::record::Instance,
+) -> serde_json::Result<crate::instances::tools::Enabled> {
+    Ok(crate::instances::tools::Enabled::when(
+        data_enabled(instance),
+        DATA_TOOLS,
+        INGEST_VIEWS,
     ))
 }
 
@@ -345,6 +381,89 @@ pub fn cap_report(report: &mut Value) {
     }
 }
 
+/// The caller can narrow the approved S3 prefix. It cannot choose a provider, endpoint, bucket
+/// or destination when running with the data-ingest capability.
+pub fn spaces_prefix<'a>(
+    approved: &'a str,
+    args: &'a Value,
+) -> std::result::Result<&'a str, String> {
+    let Some(value) = args.get("prefix") else {
+        return Ok(approved);
+    };
+    match value.as_str() {
+        Some(prefix) if crate::digitalocean::spaces::allows_prefix(approved, prefix) => Ok(prefix),
+        _ => Err("The ingest prefix must be within the approved Spaces prefix.".into()),
+    }
+}
+
+async fn data_ingest_preflight(
+    record: &instances::record::Instance,
+    env: &Env,
+    args: &Value,
+) -> Result<Value> {
+    if !data_enabled(record) {
+        return Ok(unready(
+            vec!["Enable data on this instance before using data-ingest.".into()],
+            Value::Null,
+            Value::Null,
+        ));
+    }
+    if !args.as_object().is_some_and(|fields| {
+        fields
+            .keys()
+            .all(|key| matches!(key.as_str(), "instance" | "prefix" | "size_bytes"))
+    }) {
+        return Err(bad(
+            "Data ingest preflight takes only a prefix and source size.",
+        ));
+    }
+    let Some(binding) = crate::digitalocean::spaces::binding(record) else {
+        return Ok(unready(
+            vec!["Configure an approved DigitalOcean Spaces connection on this instance.".into()],
+            Value::Null,
+            Value::Null,
+        ));
+    };
+    let prefix = spaces_prefix(&binding.prefix, args).map_err(bad)?;
+    let mut missing =
+        vec!["Data ingest launch requires bounded Jobs cleanup and terminal audit support.".into()];
+    let destination = crate::data_store::store_name(record);
+    if record.account != AccountRef::Home {
+        missing.push("Data provisioning for linked instances is not available yet.".into());
+    }
+    let (sample, est) = match crate::digitalocean::spaces::ingest_sample(record, env, prefix).await
+    {
+        Ok(listing) => {
+            let objects = listing.objects.len() as u64;
+            let bytes = listing.objects.iter().map(|o| o.size).sum::<u64>();
+            let whole_bytes = args["size_bytes"].as_u64().unwrap_or(bytes);
+            let whole_objects = if whole_bytes == bytes {
+                objects
+            } else {
+                ((u128::from(whole_bytes) * u128::from(objects)) / u128::from(bytes.max(1)))
+                    .min(u128::from(u64::MAX)) as u64
+            };
+            (
+                json!({ "objects": objects, "bytes": bytes, "first_page_only": listing.next.is_some() }),
+                to_value(estimate::estimate(
+                    Host::DigitalOcean,
+                    whole_bytes,
+                    whole_objects,
+                    UNIQUE_SHARE,
+                )),
+            )
+        }
+        Err(_) => {
+            missing.push("Could not list the approved Spaces prefix with the saved read-only key. Check DigitalOcean Spaces in Capabilities.".into());
+            (Value::Null, Value::Null)
+        }
+    };
+    let mut out = unready(missing, est, sample);
+    out["source"] = json!({ "provider": "digitalocean", "region": binding.region, "bucket": binding.bucket, "prefix": prefix });
+    out["destination"] = json!({ "capability": crate::data_store::NAME, "bucket": destination });
+    Ok(out)
+}
+
 impl Ingest {
     fn target(&self, instance: &str) -> Result<&Target> {
         self.targets
@@ -455,6 +574,9 @@ impl Ingest {
                 Value::Null,
             ));
         };
+        if record.capabilities.contains_key(NAME) {
+            return data_ingest_preflight(&record, env, args).await;
+        }
         let bindings = match self.bindings(&record, args) {
             Ok(bindings) => bindings,
             Err(error) => return Ok(unready(vec![error], Value::Null, Value::Null)),
@@ -984,13 +1106,24 @@ impl Ingest {
         let record = instances::one(cx.env, &run.instance)
             .await?
             .ok_or_else(|| bad("unknown ingest instance"))?;
-        let bucket = self.destination(&record)?.to_string();
         let account = self.checked_link(cx.env, &record).await?;
-        if run.destination.as_ref().is_some_and(|bound| {
-            bound.bucket != bucket || bound.endpoint != hosts::r2_endpoint(&account.id)
-        }) {
-            return Err(bad("the run belongs to a different ingest destination"));
-        }
+        let bucket = match (&run.destination, data_enabled(&record)) {
+            (Some(bound), true)
+                if bucket_ok(&bound.bucket)
+                    && bound.endpoint == hosts::r2_endpoint(&account.id) =>
+            {
+                bound.bucket.clone()
+            }
+            _ => {
+                let bucket = self.destination(&record)?.to_string();
+                if run.destination.as_ref().is_some_and(|bound| {
+                    bound.bucket != bucket || bound.endpoint != hosts::r2_endpoint(&account.id)
+                }) {
+                    return Err(bad("the run belongs to a different ingest destination"));
+                }
+                bucket
+            }
+        };
         Ok((
             account,
             Bucket {
@@ -1111,14 +1244,15 @@ fn host_label(h: Host) -> &'static str {
 
 impl Capability for Ingest {
     fn name(&self) -> &'static str {
-        "ingest"
+        NAME
     }
 
     fn versions(&self) -> Vec<pigeon_core::versions::Component> {
-        vec![pigeon_core::versions::Component::began(
-            "ingest",
-            pigeon_core::versions::Kind::Capability,
-        )]
+        use pigeon_core::versions::{Component, Kind};
+        vec![
+            Component::began(NAME, Kind::Capability),
+            Component::began("ingest", Kind::Capability),
+        ]
     }
 
     fn tools(&self) -> Vec<Tool> {

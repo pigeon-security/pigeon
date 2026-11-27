@@ -119,6 +119,11 @@ pub const CAPABILITIES: &[Contributor] = &[
         register: crate::ingest::instance_tools,
     },
     Contributor {
+        name: crate::ingest::NAME,
+        component: crate::ingest::NAME,
+        register: crate::ingest::data_instance_tools,
+    },
+    Contributor {
         name: crate::email::NAME,
         component: crate::email::NAME,
         register: crate::email::instance_tools,

@@ -4,7 +4,7 @@ use pigeon_cloud::digitalocean_spaces::Binding;
 use pigeon_core::{crypto, s3};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use worker::{Env, Result};
+use worker::{Env, Method, Result};
 
 use crate::console::write::Write;
 use crate::instances::record::Instance;
@@ -85,8 +85,7 @@ pub(super) async fn status(record: &Instance, env: &Env) -> Result<Value> {
     }))
 }
 
-pub(super) async fn verify(record: &Instance, env: &Env) -> Result<Value> {
-    let binding = required(record)?;
+async fn open_keys(record: &Instance, env: &Env, binding: &Binding) -> Result<s3::Keys> {
     let saved = saved(env, &record.id)
         .await?
         .filter(|s| current(s, record, binding))
@@ -99,8 +98,49 @@ pub(super) async fn verify(record: &Instance, env: &Env) -> Result<Value> {
         .map_err(|_| bad("the saved Spaces key could not be opened"))?;
     let pair =
         std::str::from_utf8(&plaintext).map_err(|_| bad("the saved Spaces key is invalid"))?;
-    check(env, record, pair).await?;
+    s3::parse_keys(pair)
+}
+
+pub(super) async fn verify(record: &Instance, env: &Env) -> Result<Value> {
+    let binding = required(record)?;
+    let keys = open_keys(record, env, binding).await?;
+    let pat = open_pat(record, env).await?;
+    crate::cloud_scope::verify_digitalocean_spaces(record, &pat, &keys).await?;
     Ok(json!({"instance": record.id, "verified": true}))
+}
+
+pub(crate) fn allows_prefix(approved: &str, prefix: &str) -> bool {
+    prefix.starts_with(approved) && prefix.len() <= 1024 && !prefix.chars().any(char::is_control)
+}
+
+/// List one page within the approved binding for a data-ingest preflight.
+pub(crate) async fn ingest_sample(
+    record: &Instance,
+    env: &Env,
+    prefix: &str,
+) -> Result<s3::Listing> {
+    let binding = required(record)?;
+    if !allows_prefix(&binding.prefix, prefix) {
+        return Err(bad(
+            "the requested prefix is outside the approved Spaces binding",
+        ));
+    }
+    let keys = open_keys(record, env, binding).await?;
+    let endpoint = s3::Endpoint {
+        base: format!("https://{}.digitaloceanspaces.com", binding.region),
+        region: binding.region.clone(),
+    };
+    let query = s3::list_objects_query(Some(prefix).filter(|p| !p.is_empty()), None, 1000, None);
+    let mut response = s3::send(
+        Method::Get,
+        &endpoint,
+        &s3::object_path(&binding.bucket, ""),
+        &query,
+        &[],
+        &keys,
+    )
+    .await?;
+    s3::parse_list_objects(&response.text().await?)
 }
 
 async fn check(env: &Env, record: &Instance, pair: &str) -> Result<()> {

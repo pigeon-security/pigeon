@@ -215,6 +215,13 @@ pub const CATALOGUE: &[Entry] = &[
         opt_in: true,
         ..BASE
     },
+    // Data ingest is opt-in and writes to the instance's data store.
+    Entry {
+        name: crate::ingest::NAME,
+        requires: &[crate::data_store::NAME],
+        opt_in: true,
+        ..BASE
+    },
     // Email › Mailboxes (docs/plans/email.md): mail received through the zone's catch-all into
     // the data store, so it needs `data` and runs in the data Worker. Opt-in even on home.
     Entry {

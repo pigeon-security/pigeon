@@ -1005,3 +1005,27 @@ that binding before dispatch and publishing. A stale or legacy unbound queue
 entry requires a new push. The cron evaluates `site_deploy` policy as the linked
 person and defers denied or approval-gated publishes to the manual path. It
 changes queue state only while the claimed entry is still current.
+
+## Data-ingest rollout
+
+`data-ingest` is an opt-in capability that requires `data` on the same instance. The data
+capability owns the destination bucket and catalog. The ingest capability owns source
+enumeration, approval, execution and checkpointing. Ingest uses the approved DigitalOcean
+Spaces binding for its first source. A planning request can narrow that prefix and the
+service uses the saved read-only key to sample the source. The estimate covers the sample
+unless the caller supplies the full source size.
+
+1. Register `data-ingest` and serve the existing `ingest_plan` tool as a read-only preflight
+   on instances that opt in. Keep the existing tool names, profiles and run history.
+2. Provision the data store in linked accounts using the instance's own approved
+   Cloudflare connection. Bind plans to the exact approved source and data destination.
+3. Integrate ingest execution with Jobs. Require a deadline, automatic cleanup with
+   deletion confirmation, and a private terminal audit. Use the existing passkey approval
+   before provisioning compute. Resolve credentials from the owning capabilities after
+   checking the approved plan and avoid storing them in diagnostic output.
+4. Run the Spaces canary on willowgraysen with a dedicated prefix. Reconcile exact hashes,
+   duplicate sightings, distinct variants, archive containers and member lineage against
+   the source and terminal audit. Verify cleanup before expanding the rollout.
+
+The initial preflight produces no launch approval. Linked data provisioning and the Jobs
+lifecycle integration are required before that path can run.

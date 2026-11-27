@@ -2338,6 +2338,63 @@ fn console_every_view() -> std::collections::BTreeMap<String, Vec<String>> {
         .collect()
 }
 
+#[test]
+fn data_ingest_scope_requires_data_and_uses_the_approved_spaces_prefix() {
+    use pigeon_capabilities::{catalogue, ingest, instances::tools::Scope};
+
+    let mut record: pigeon_capabilities::instances::record::Instance =
+        serde_json::from_value(json!({
+            "id": "pigeon.dev",
+            "title": "pigeon",
+            "account": { "kind": "home" },
+            "capabilities": { "data-ingest": {} }
+        }))
+        .unwrap();
+    assert!(
+        catalogue::problems(&record)
+            .iter()
+            .any(|problem| problem.contains("needs \"data\""))
+    );
+    assert!(
+        Scope::new(&record)
+            .unwrap()
+            .bind("ingest_plan", &json!({}))
+            .is_err()
+    );
+
+    record
+        .capabilities
+        .insert("data".into(), Default::default());
+    assert!(catalogue::problems(&record).is_empty());
+    let scope = Scope::new(&record).unwrap();
+    assert!(scope.capabilities().contains(&ingest::NAME));
+    let args = json!({ "prefix": "approved/canary/" });
+    assert!(scope.bind("ingest_plan", &args).is_ok());
+    assert!(
+        scope
+            .bind("ingest_plan", &json!({"bucket": "other"}))
+            .is_err()
+    );
+    assert!(
+        scope
+            .bind("ingest_start", &json!({"plan": "approval"}))
+            .is_err()
+    );
+    for tool in ["ingest_status", "ingest_report", "ingest_stop"] {
+        assert!(scope.bind(tool, &json!({"run": "legacy"})).is_ok());
+    }
+    assert_eq!(
+        ingest::spaces_prefix("approved/", &json!({})).unwrap(),
+        "approved/"
+    );
+    assert_eq!(
+        ingest::spaces_prefix("approved/", &args).unwrap(),
+        "approved/canary/"
+    );
+    assert!(ingest::spaces_prefix("approved/", &json!({"prefix": "approved-other/"})).is_err());
+    assert!(ingest::spaces_prefix("approved/", &json!({"prefix": "approved/\n"})).is_err());
+}
+
 /// The double-quoted string literals in `src`, each with the text that follows it.
 fn js_literals(src: &str) -> Vec<(String, &str)> {
     let mut out = Vec::new();
