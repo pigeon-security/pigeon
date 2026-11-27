@@ -902,8 +902,10 @@ impl Instances {
             .bearer
             .as_deref()
             .ok_or_else(|| bad("the instance's account is not a linked one"))?;
-        let secrets_store = if backup.is_some() {
+        if backup.is_some() || crate::data_store::mail_import_audit_bucket(instance).is_some() {
             crate::data_store::verify_data_jobs_audit(account, instance).await?;
+        }
+        let secrets_store = if backup.is_some() {
             crate::secrets::linked_store(account)
                 .await?
                 .ok_or_else(|| bad("Set up the linked instance's Secrets Store for Data backup."))?

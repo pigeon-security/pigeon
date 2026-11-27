@@ -199,6 +199,7 @@ pub fn data_worker_digest(
     name: &str,
     backup: Option<&str>,
     mail_import: bool,
+    mail_import_audit: Option<&str>,
 ) -> String {
     let mut spec = json!({
         "artifact": artifact,
@@ -209,6 +210,9 @@ pub fn data_worker_digest(
     });
     if mail_import {
         spec["mail_import"] = json!(true);
+    }
+    if let Some(bucket) = mail_import_audit {
+        spec["mail_import_audit"] = json!(bucket);
     }
     pigeon_core::oauth::hash(&spec.to_string())
 }
@@ -449,6 +453,8 @@ pub fn data_parts(
         }
     }
     let mail_import = crate::data_store::mail_import_enabled(instance);
+    let mail_import_audit =
+        crate::data_store::mail_import_audit_bucket(instance).map(str::to_string);
     match &seen.artifact {
         None => steps.push(Step::Blocked {
             why: format!(
@@ -464,10 +470,17 @@ pub fn data_parts(
                 backup: backup.clone(),
                 backup_config: backup_config.clone(),
                 mail_import,
+                mail_import_audit: mail_import_audit.clone(),
             });
         }
         Some(artifact) => {
-            let module = data_worker_digest(artifact, &name, backup_config.as_deref(), mail_import);
+            let module = data_worker_digest(
+                artifact,
+                &name,
+                backup_config.as_deref(),
+                mail_import,
+                mail_import_audit.as_deref(),
+            );
             let uploaded = ledger
                 .workers
                 .iter()
@@ -480,6 +493,7 @@ pub fn data_parts(
                 database: name.clone(),
                 backup: backup.clone(),
                 mail_import,
+                mail_import_audit: mail_import_audit.clone(),
                 module: module.clone(),
                 replaces,
             };

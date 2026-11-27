@@ -489,9 +489,13 @@ pub async fn run(
                 artifact,
                 backup,
                 mail_import,
+                mail_import_audit,
                 ..
             } => {
-                if *mail_import != crate::data_store::mail_import_enabled(instance) {
+                if *mail_import != crate::data_store::mail_import_enabled(instance)
+                    || mail_import_audit.as_deref()
+                        != crate::data_store::mail_import_audit_bucket(instance)
+                {
                     return Err(bad(
                         "the approved historical mail import setting changed: plan again",
                     ));
@@ -791,7 +795,10 @@ pub struct Inline<'a> {
 /// the Worker's workers.dev URL in the Directory; the plan's `EnableWorkersDev` turns that
 /// address on.
 pub async fn upload_inline(i: &Inline<'_>) -> Result<()> {
-    if i.data.mail_import != crate::data_store::mail_import_enabled(i.instance) {
+    if i.data.mail_import != crate::data_store::mail_import_enabled(i.instance)
+        || i.data.mail_import_audit.as_deref()
+            != crate::data_store::mail_import_audit_bucket(i.instance)
+    {
         return Err(bad(
             "the approved historical mail import setting changed: plan again",
         ));
@@ -821,8 +828,12 @@ pub async fn upload_inline(i: &Inline<'_>) -> Result<()> {
     let site = pigeon_core::workers::metadata(super::plan::COMPATIBILITY_DATE, i.bindings);
     let slot = crate::data_store::b2_slot(i.instance);
     let backup = crate::data_store::backup(i.instance);
+    let audit_bucket = if backup.is_some() || i.data.mail_import_audit.is_some() {
+        Some(crate::data_store::verify_data_jobs_audit(i.account, i.instance).await?)
+    } else {
+        None
+    };
     let secrets_store = if backup.is_some() {
-        crate::data_store::verify_data_jobs_audit(i.account, i.instance).await?;
         Some(
             crate::secrets::linked_store(i.account)
                 .await?
@@ -846,6 +857,9 @@ pub async fn upload_inline(i: &Inline<'_>) -> Result<()> {
     );
     data_plan::bind_backup_audit(&mut data, i.instance);
     data_plan::bind_backup_inventory(&mut data, i.instance);
+    if let Some(bucket) = audit_bucket {
+        data_plan::bind_jobs_audit(&mut data, bucket);
+    }
     let mut bindings = site["bindings"].as_array().cloned().unwrap_or_default();
     bindings.extend(data["bindings"].as_array().cloned().unwrap_or_default());
     let metadata = json!({
@@ -897,7 +911,9 @@ async fn upload(
     database_id: &str,
     backup: bool,
 ) -> Result<()> {
-    if backup && instance.account != crate::instances::record::AccountRef::Home {
+    let audit_bucket = if (backup && instance.account != crate::instances::record::AccountRef::Home)
+        || crate::data_store::mail_import_audit_bucket(instance).is_some()
+    {
         let account = Account {
             id: a.account_id.to_string(),
             parent: String::new(),
@@ -905,8 +921,10 @@ async fn upload(
             bearer: Some(a.token.to_string()),
             token_ledger: None,
         };
-        crate::data_store::verify_data_jobs_audit(&account, instance).await?;
-    }
+        Some(crate::data_store::verify_data_jobs_audit(&account, instance).await?)
+    } else {
+        None
+    };
     let parts = modules(a.parent, built).await?;
     let key = new_key()?;
     let slot = crate::data_store::b2_slot(instance);
@@ -925,6 +943,9 @@ async fn upload(
     let mut metadata = data_plan::worker_metadata(&built.main, &bindings);
     data_plan::bind_backup_audit(&mut metadata, instance);
     data_plan::bind_backup_inventory(&mut metadata, instance);
+    if let Some(bucket) = audit_bucket {
+        data_plan::bind_jobs_audit(&mut metadata, bucket);
+    }
     let boundary = pigeon_core::workers::boundary_from(&pigeon_core::webauthn::random()?);
     let body = data_plan::multipart(&boundary, &metadata, &parts);
     let ctype = pigeon_core::workers::content_type(&boundary);

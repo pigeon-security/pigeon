@@ -79,6 +79,14 @@ pub fn backup_audit_bucket(record: &Instance) -> Option<&str> {
     data_jobs_audit_bucket(record)
 }
 
+/// Mail audits use the same approved Jobs destination as other linked Data work.
+pub fn mail_import_audit_bucket(record: &Instance) -> Option<&str> {
+    if record.account == AccountRef::Home || !mail_import_enabled(record) {
+        return None;
+    }
+    crate::jobs_audit::configured_bucket(record)
+}
+
 /// Where the store is backed up: a Backblaze B2 bucket of its own (ingest.md decision 10), by
 /// its S3 endpoint and region. The key is a Secrets Store secret the person sets
 /// ([`b2_slot`]), never in the record.

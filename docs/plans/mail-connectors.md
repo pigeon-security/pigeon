@@ -237,8 +237,10 @@ The client prompts for the mailbox and import secrets. It checks all selectable 
 by default, or only those given with repeatable `--mailbox` arguments. Repeat the command
 until a batch imports zero messages. Keep the private SQLite checkpoint file across runs.
 Batch size, inter-message delay and retry limit are configurable. The client records a
-redacted terminal receipt locally before submitting it to Jobs. A Data Worker without
-the approved Jobs audit binding retains the receipt in its private Data outbox.
+redacted terminal receipt locally before submitting it to Jobs. On a linked instance
+with Jobs audit storage configured, the Data plan verifies the approved bucket is
+private and binds it by name. A Data Worker without that binding retains the receipt
+in its private Data outbox.
 After the binding is available, use `--replay-audit <run-id>` to publish the same
 receipt without rereading IMAP. Messages over 25 MiB stop the batch
 without advancing the cursor so a future larger-message path can pick them up.

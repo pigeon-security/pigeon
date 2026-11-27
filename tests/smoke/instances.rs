@@ -6268,6 +6268,7 @@ fn data_and_email_on_linked_instances() {
         backup: None,
         backup_config: None,
         mail_import: false,
+        mail_import_audit: None,
     };
     assert_eq!(parts.inline.as_ref(), Some(&inline));
     let mut with_mail = noisy.clone();
@@ -6284,6 +6285,22 @@ fn data_and_email_on_linked_instances() {
         .inline
         .expect("the approved Data Worker");
     assert!(approved_mail.mail_import);
+    assert!(approved_mail.mail_import_audit.is_none());
+    with_mail.capabilities.insert(
+        "jobs".into(),
+        serde_json::from_value(json!({ "audit_bucket": "noisypigeon-jobs-audit" })).unwrap(),
+    );
+    let audited_mail = data_parts(&with_mail, &seen_data, &Ledger::default(), None)
+        .inline
+        .expect("the approved Data Worker with Jobs");
+    assert_eq!(
+        audited_mail.mail_import_audit.as_deref(),
+        Some("noisypigeon-jobs-audit")
+    );
+    assert_ne!(
+        with_inline("site", Some(&audited_mail)),
+        with_inline("site", Some(&approved_mail))
+    );
     assert_ne!(
         with_inline("site", Some(&approved_mail)),
         with_inline("site", Some(&inline))
