@@ -259,3 +259,4 @@ async fn queue(batch: MessageBatch<Value>, env: Env, _ctx: Context) -> Result<()
 }
 
 // Rebuilt on 2026-11-27: its first artifact build waited on the proxy redeploy after incident 24.
+// Built again on 2026-11-27: the proxy now serves the artifact lane through an R2 binding.
