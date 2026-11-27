@@ -1,13 +1,14 @@
 # The deploy proxy's revoked token, and what a forward's outcome records
 
-Status: in progress (2026-11-27).
+Status: landed 2026-11-27 (landing x5Ulu8-N2Bh1u2r8, deployed 08:38 UTC: core, proxy, data-worker
+artifact). Phase 3 reaches an instance on its next approved instance plan and apply.
 
 | Phase | What | State |
 | --- | --- | --- |
-| 1 | Deploy proxy (`/cf/`) renews a scoped token Cloudflare refuses | landing |
+| 1 | Deploy proxy (`/cf/`) renews a scoped token Cloudflare refuses | landed |
 | 2 | Inline data store: a successful forward's delivery row | investigated: rows are written; no change |
-| 3 | A failed forward records Cloudflare's reason (redacted) and the email status tool shows it | landing |
-| 4 | Verify CI lost runners and `pigeon-proxy` 401s after the git-proxy fix | after landing |
+| 3 | A failed forward records Cloudflare's reason (redacted) and the email status tool shows it | landed; instances need plan + apply |
+| 4 | Verify CI lost runners and `pigeon-proxy` 401s after the git-proxy fix | done (small sample) |
 
 ## 1. The deploy proxy keeps a revoked token
 
@@ -76,6 +77,14 @@ the inline composition, uploads it on apply). Phase 3 needs a plan and apply on 
 with a data store: pigeon.dev (`pigeon-data`), noisypigeon (inline) and willowgraysen. Until
 then they keep recording the fixed reason; nothing else changes.
 
-## 4. Verification
+## 4. Verification (read-only, 2026-11-27 08:40 UTC)
 
-See the landing report.
+- CI: the git-proxy fix (Mse6QiuwmJMe5c8T) deployed `pigeon-proxy` at 07:45. Of the Containers
+  jobs dispatched since (7 by 08:40: deploy-sites, this landing's test, deploy-proxy, deploy
+  core, data-worker-build, and two other landings' tests), **0** lost an attempt (every one
+  started on attempt 1), against 34% of attempts lost over the 15 hours before. Few jobs ran
+  in the window, so this is encouraging rather than conclusive.
+- `pigeon-proxy`: in the hour 07:27 to 08:27 it logged 6 `git proxy: …namespaces… 401` and 1
+  mint 401; in the hour 07:40 to 08:40, **none**, so all of them fell before 07:40, before the
+  fix deployed. Only 2 `pigeon-proxy fetch 401` remain (the proxy refusing a caller, not
+  Cloudflare refusing the proxy).
