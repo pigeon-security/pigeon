@@ -712,9 +712,13 @@ impl GitProxy {
             Service::UploadPack => Access::Read,
             Service::ReceivePack => Access::Write,
         };
-        let account = host.account(Purpose::Git).await?;
-        let (repo, token) =
-            artifacts::session(&account, &self.namespace, &self.repo, access, TOKEN_TTL).await?;
+        // A kept scoped token Cloudflare refuses is renewed once (crate::with_renewal).
+        let (namespace, name) = (self.namespace.as_str(), self.repo.as_str());
+        let (account, (repo, token)) =
+            crate::with_host_account(host, Purpose::Git, |a| async move {
+                artifacts::session(&a, namespace, name, access, TOKEN_TTL).await
+            })
+            .await?;
         let remote = Remote {
             url: repo.remote.trim_end_matches('/').to_string(),
             authorization: format!("Bearer {}", token.value),

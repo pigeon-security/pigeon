@@ -34,6 +34,8 @@ pub const NAME: &str = "containers";
 pub const BINDING: &str = "CI_RUNNER";
 /// How often a runner object looks at its container.
 const WATCH_MS: i64 = 60_000;
+/// How soon after its container ends a runner object looks at it.
+const ENDED_WATCH_MS: i64 = 1_000;
 /// How long past the job's own timeout its container is kept, for the fetch, the report and
 /// the deadline's allowance.
 const KEEP_MARGIN_MIN: i64 = 15;
@@ -222,19 +224,42 @@ impl Connector for Containers {
 /// runner that reported its result made the job final first.
 fn lost(status: &Value) -> Option<Report> {
     if status["running"].as_bool() == Some(false) && status["started"].as_bool() == Some(true) {
-        let why = match status["exit"].as_i64() {
-            Some(code) => format!("the container exited with code {code} before reporting"),
-            None => "the container stopped before reporting".to_string(),
-        };
+        let why = lost_why(status["exit"].as_i64(), status["why"].as_str());
         Some(Report::Infra { why })
     } else {
         None
     }
 }
 
-const MIGRATIONS: [&str; 2] = [
+/// Why a container that stopped before its runner reported was lost: its exit code, with what
+/// the runner (ci/runner/entrypoint.sh) means by it, or Cloudflare's reason when it ended
+/// without one (it never started, or it was stopped). Neither is known when the object asked
+/// too late: Cloudflare refuses `monitor()` once a container is no longer running.
+pub fn lost_why(exit: Option<i64>, why: Option<&str>) -> String {
+    match (exit, why.map(str::trim).filter(|w| !w.is_empty())) {
+        (Some(code), _) => {
+            let meant = match code {
+                2 => " (the runner's environment was incomplete)",
+                3 => " (the runner could not fetch the commit through the git proxy)",
+                _ => "",
+            };
+            format!("the container exited with code {code} before reporting{meant}")
+        }
+        (None, Some(why)) => {
+            let why: String = why.chars().take(WHY_MAX).collect();
+            format!("the container stopped before reporting: {why}")
+        }
+        (None, None) => "the container stopped before reporting".to_string(),
+    }
+}
+
+/// The most of Cloudflare's reason a lost runner's detail carries, in characters.
+const WHY_MAX: usize = 200;
+
+const MIGRATIONS: [&str; 3] = [
     "CREATE TABLE run (id INTEGER PRIMARY KEY CHECK (id = 1), job TEXT NOT NULL, started_at INTEGER NOT NULL, exit INTEGER, ended INTEGER NOT NULL)",
     "ALTER TABLE run ADD COLUMN keep_ms INTEGER",
+    "ALTER TABLE run ADD COLUMN why TEXT",
 ];
 
 /// One job attempt's container; the hosting Worker's `CiRunner` class wraps it. It keeps the
@@ -249,6 +274,8 @@ pub struct Runner {
 struct Kept {
     job: String,
     exit: Option<i64>,
+    /// How the container ended when it had no exit code, as Cloudflare said.
+    why: Option<String>,
     ended: i64,
     /// Rows from before it was kept read as the ceiling.
     keep_ms: Option<i64>,
@@ -286,7 +313,7 @@ impl Runner {
 
     fn kept(&self) -> Result<Option<Kept>> {
         self.db
-            .row("SELECT job, exit, ended, keep_ms FROM run", vec![])
+            .row("SELECT job, exit, why, ended, keep_ms FROM run", vec![])
     }
 
     /// Answers the connector's operations.
@@ -330,6 +357,7 @@ impl Runner {
                     "INSERT INTO run (id, job, started_at, ended, keep_ms) VALUES (1, ?, ?, 0, ?)",
                     vec![s("job").into(), now().into(), keep.into()],
                 )?;
+                self.watch(s("job"));
                 containers::keep_for(&self.state, keep).await?;
                 self.state.storage().set_alarm(WATCH_MS).await?;
                 Ok(json!({ "started": true }))
@@ -339,7 +367,8 @@ impl Runner {
                 Ok(json!({
                     "started": kept.is_some(),
                     "running": containers::running(&self.state),
-                    "exit": kept.and_then(|k| k.exit),
+                    "exit": kept.as_ref().and_then(|k| k.exit),
+                    "why": kept.and_then(|k| k.why),
                 }))
             }
             "stop" => {
@@ -349,6 +378,47 @@ impl Runner {
             }
             other => Err(bad(&format!("no operation `{other}`"))),
         }
+    }
+
+    /// Asks Cloudflare, right after the start, how the container will end, and records it when
+    /// it does: its exit code, or why it ended without one. Asked any later, once the container
+    /// has stopped, `monitor()` is refused and how it ended is lost, which left every lost
+    /// runner's detail as a bare "stopped before reporting" (docs/plans/ci-container-starts.md).
+    fn watch(&self, job: &str) {
+        let ended = match containers::watch(&self.state) {
+            Ok(ended) => ended,
+            Err(e) => {
+                console_error!("ci: runner for {job}: watching its container: {e}");
+                return;
+            }
+        };
+        let storage = self.state.storage();
+        let sql = storage.sql();
+        let job = job.to_string();
+        worker::wasm_bindgen_futures::spawn_local(async move {
+            let (exit, why) = match ended.await {
+                Exit::Code(c) => (Some(c), None),
+                Exit::Failed(why) => (None, Some(why)),
+            };
+            if let Some(why) = &why {
+                console_error!("ci: runner for {job}: its container ended: {why}");
+            }
+            let args: Vec<worker::SqlStorageValue> = vec![
+                exit.map_or(worker::SqlStorageValue::Null, Into::into),
+                durable::opt(why.as_deref()),
+            ];
+            if let Err(e) = sql.exec(
+                "UPDATE run SET exit = ?, why = ? WHERE exit IS NULL AND why IS NULL",
+                args,
+            ) {
+                console_error!("ci: runner for {job}: recording how its container ended: {e}");
+            }
+            // The watch tells the scheduler now rather than at its next round, so a runner lost
+            // at the start is retried at once; one that reported is ignored there.
+            if let Err(e) = storage.set_alarm(ENDED_WATCH_MS).await {
+                console_error!("ci: runner for {job}: watching sooner: {e}");
+            }
+        });
     }
 
     /// Watches the container; once it has stopped, tells the scheduler, which ignores it when
@@ -367,21 +437,30 @@ impl Runner {
             self.state.storage().set_alarm(WATCH_MS).await?;
             return Response::ok("running");
         }
-        // After a restart the instance may no longer have the container: then no exit code.
-        let exit = match containers::monitor(&self.state).await {
-            Ok(Exit::Code(c)) => Some(c),
-            _ => None,
+        // How it ended, as recorded when it did (Runner::watch); else asked now, which after a
+        // restart, or once the container has stopped, answers nothing.
+        let (exit, why) = if kept.exit.is_some() || kept.why.is_some() {
+            (kept.exit, kept.why.clone())
+        } else {
+            match containers::monitor(&self.state).await {
+                Ok(Exit::Code(c)) => (Some(c), None),
+                Ok(Exit::Failed(why)) => (None, Some(why)),
+                Err(_) => (None, None),
+            }
         };
         self.db.exec(
-            "UPDATE run SET ended = 1, exit = ?",
-            vec![exit.map_or(worker::SqlStorageValue::Null, Into::into)],
+            "UPDATE run SET ended = 1, exit = ?, why = ?",
+            vec![
+                exit.map_or(worker::SqlStorageValue::Null, Into::into),
+                durable::opt(why.as_deref()),
+            ],
         )?;
         let handle = self
             .state
             .id()
             .name()
             .unwrap_or_else(|| format!("{}-?", kept.job));
-        let report = lost(&json!({ "started": true, "running": false, "exit": exit }));
+        let report = lost(&json!({ "started": true, "running": false, "exit": exit, "why": why }));
         if let Some(report) = report {
             let seen = Seen {
                 handle,

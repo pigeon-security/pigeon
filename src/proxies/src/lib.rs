@@ -77,9 +77,72 @@ pub trait Host {
     /// the purpose, used as it is.
     fn account<'a>(&'a self, purpose: Purpose) -> Pending<'a, Account>;
 
+    /// Forgets the scoped `token` [`Host::account`] handed out for `purpose`, because Cloudflare
+    /// refused it; the next [`Host::account`] asks for another. A host that keeps none does
+    /// nothing.
+    fn forget(&self, _purpose: Purpose, _token: &str) {}
+
     /// The R2 bucket the Worker serving the proxies binds as `binding`: an artifact lane's
     /// bucket (`cf_proxy::ARTIFACT_BINDINGS`), whose objects `/cf/` reads and writes through the
     /// binding, with no Cloudflare token and none of the REST API's rate limit. An error when
     /// the Worker does not bind it.
     fn bucket(&self, binding: &str) -> worker::Result<worker::Bucket>;
+}
+
+/// Whether `e` is Cloudflare's API refusing the token it was called with (status 401), as
+/// `pigeon_core::cloudflare::call` words it.
+pub fn unauthorized(e: &worker::Error) -> bool {
+    e.to_string().contains(": 401:")
+}
+
+/// Runs `work` with the account `account` answers, and answers that account with the result.
+/// When `work` fails with a 401 on an account holding a scoped token (`bearer`), the token was
+/// revoked or never became valid: `forget` drops it, and `work` runs once more on the account
+/// `account` answers next. Never more than twice; any other error is returned as it is.
+///
+/// Without it, one isolate of the proxy Worker that kept a token core revoked early (core's
+/// token ledger revokes the leases it held when it restarts) refuses every git fetch until the
+/// token would have expired, up to fifteen minutes, and every CI job dispatched meanwhile loses
+/// its runner before it reports (docs/plans/ci-container-starts.md).
+pub async fn with_renewal<T, A, AF, F, W, WF>(
+    mut account: A,
+    mut forget: F,
+    mut work: W,
+) -> worker::Result<(Account, T)>
+where
+    A: FnMut() -> AF,
+    AF: Future<Output = worker::Result<Account>>,
+    F: FnMut(&str),
+    W: FnMut(Account) -> WF,
+    WF: Future<Output = worker::Result<T>>,
+{
+    let first = account().await?;
+    match work(first.clone()).await {
+        Ok(v) => Ok((first, v)),
+        Err(e) if unauthorized(&e) && first.bearer.is_some() => {
+            forget(first.bearer.as_deref().unwrap_or_default());
+            let second = account().await?;
+            let v = work(second.clone()).await?;
+            Ok((second, v))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// [`with_renewal`] with `host`'s account for `purpose`.
+pub async fn with_host_account<T, W, WF>(
+    host: &dyn Host,
+    purpose: Purpose,
+    work: W,
+) -> worker::Result<(Account, T)>
+where
+    W: FnMut(Account) -> WF,
+    WF: Future<Output = worker::Result<T>>,
+{
+    with_renewal(
+        || host.account(purpose),
+        |token| host.forget(purpose, token),
+        work,
+    )
+    .await
 }

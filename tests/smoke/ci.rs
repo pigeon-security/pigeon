@@ -1511,3 +1511,45 @@ answer 405 '{}'
     assert_eq!(current(), second);
     std::fs::remove_dir_all(fixture).unwrap();
 }
+
+/// A lost runner says how its container ended: the exit code, with what the runner means by
+/// it, or Cloudflare's reason, kept since the start (docs/plans/ci-container-starts.md); the bare
+/// words only when neither is known.
+#[test]
+fn ci_lost_runner_says_how_its_container_ended() {
+    use pigeon_ci::containers::lost_why;
+    assert_eq!(
+        lost_why(Some(3), None),
+        "the container exited with code 3 before reporting \
+         (the runner could not fetch the commit through the git proxy)"
+    );
+    assert_eq!(
+        lost_why(Some(2), Some("ignored")),
+        "the container exited with code 2 before reporting \
+         (the runner's environment was incomplete)"
+    );
+    assert_eq!(
+        lost_why(Some(137), None),
+        "the container exited with code 137 before reporting"
+    );
+    assert_eq!(
+        lost_why(None, Some("no capacity")),
+        "the container stopped before reporting: no capacity"
+    );
+    assert_eq!(
+        lost_why(None, Some("  ")),
+        "the container stopped before reporting"
+    );
+    assert_eq!(
+        lost_why(None, None),
+        "the container stopped before reporting"
+    );
+    assert!(
+        lost_why(None, Some(&"x".repeat(1_000))).len() < 300,
+        "cut short"
+    );
+    // Still an infrastructure loss: retried once, on containers.
+    let why = lost_why(Some(3), None);
+    let (on, _) = pigeon_ci::scheduler::retry_on("containers", None, &why);
+    assert_eq!(on.as_deref(), Some("containers"));
+}

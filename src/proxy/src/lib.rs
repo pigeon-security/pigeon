@@ -201,6 +201,10 @@ impl Host for Core<'_> {
         })
     }
 
+    fn forget(&self, purpose: Purpose, token: &str) {
+        CREDENTIALS.with(|c| c.borrow_mut().forget(purpose, token));
+    }
+
     fn bucket(&self, binding: &str) -> Result<worker::Bucket> {
         self.env.bucket(binding)
     }

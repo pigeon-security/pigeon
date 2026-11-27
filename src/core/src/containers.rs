@@ -165,16 +165,31 @@ pub fn running(state: &State) -> bool {
         .unwrap_or(false)
 }
 
-/// Waits for it to end. An error when this instance has no container, as after a restart.
+/// Waits for it to end. An error when this instance has no container, as after a restart, or
+/// when it is no longer running: Cloudflare refuses `monitor()` then, so how it ended is lost.
+/// To know how a container ended, ask with [`watch`] while it runs.
 pub async fn monitor(state: &State) -> worker::Result<Exit> {
+    Ok(watch(state)?.await)
+}
+
+/// How it will end, asked now: `monitor()` is called before this returns, and the returned
+/// future settles when the container ends, including a container that fails to start. Call it
+/// right after [`start`]; while it is pending, Cloudflare does not evict the object (for up to
+/// fifteen minutes). An error when there is no container to watch.
+pub fn watch(state: &State) -> worker::Result<impl std::future::Future<Output = Exit> + 'static> {
     let container = container(state).ok_or_else(|| fail("this object has no container"))?;
     let promise = method(&container, "monitor")?
         .call0(&container)
         .map_err(|e| fail(format!("container monitor failed: {}", message(&e))))?
         .dyn_into::<Promise>()
         .map_err(|_| fail("container monitor did not return a promise"))?;
-    match JsFuture::from(promise).await {
-        Ok(_) => Ok(Exit::Code(0)),
+    Ok(async move { exit_of(JsFuture::from(promise).await) })
+}
+
+/// How a settled `monitor()` says the container ended.
+fn exit_of(settled: Result<JsValue, JsValue>) -> Exit {
+    match settled {
+        Ok(_) => Exit::Code(0),
         Err(e) => {
             let code = if e.is_object() {
                 Reflect::get(&e, &"exitCode".into())
@@ -183,10 +198,10 @@ pub async fn monitor(state: &State) -> worker::Result<Exit> {
             } else {
                 None
             };
-            Ok(match code {
+            match code {
                 Some(code) => Exit::Code(code as i64),
                 None => Exit::Failed(message(&e)),
-            })
+            }
         }
     }
 }

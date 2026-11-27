@@ -2021,3 +2021,125 @@ fn deploy_proxy_artifact_lane_reaches_its_build_only() {
             .any(|e| e.permissions.contains(&"Workers R2 Storage Write"))
     );
 }
+
+/// A scoped credential Cloudflare refuses (core's token ledger revoked it when it restarted,
+/// while a proxy isolate still kept it) is forgotten and renewed once, so the proxy Worker
+/// does not refuse every git fetch until it would have expired; CI runners lost their start to
+/// it (docs/plans/ci-container-starts.md).
+#[test]
+fn proxy_worker_renews_a_refused_scoped_credential() {
+    use super::core::token_block_on;
+    use pigeon_contract::Credential;
+    use pigeon_core::Account;
+    use pigeon_proxies::cache::Credentials;
+    use pigeon_proxies::{Purpose, unauthorized, with_renewal};
+    use std::cell::{Cell, RefCell};
+
+    // The cache forgets the refused one only while it is still the kept one.
+    let minted = |token: &str| Credential {
+        token: token.into(),
+        account_id: "acct".into(),
+        expires_at: 900_000,
+        token_id: None,
+    };
+    let mut creds = Credentials::new();
+    creds.put(Purpose::Git, minted("old"));
+    creds.put(Purpose::Deploy, minted("deploy"));
+    creds.forget(Purpose::Git, "other");
+    assert_eq!(creds.get(Purpose::Git, 0).unwrap().token, "old");
+    creds.forget(Purpose::Git, "old");
+    assert!(creds.get(Purpose::Git, 0).is_none());
+    assert_eq!(
+        creds.get(Purpose::Deploy, 0).unwrap().token,
+        "deploy",
+        "per purpose"
+    );
+
+    let refused = || {
+        worker::Error::RustError(
+            "/accounts/a/artifacts/namespaces?per_page=50: 401: [{\"code\":10000}]".into(),
+        )
+    };
+    assert!(unauthorized(&refused()));
+    assert!(!unauthorized(&worker::Error::RustError(
+        "/accounts/a/artifacts/namespaces: 429: slow down".into()
+    )));
+    let account_with = |bearer: Option<&str>| Account {
+        id: "acct".into(),
+        parent: if bearer.is_some() {
+            String::new()
+        } else {
+            "p".into()
+        },
+        secrets_store: String::new(),
+        bearer: bearer.map(str::to_string),
+        token_ledger: None,
+    };
+
+    // Core hands out "old" (revoked) until it is forgotten, then "new".
+    let kept = RefCell::new(Some("old".to_string()));
+    let asked = Cell::new(0);
+    let account = || {
+        asked.set(asked.get() + 1);
+        let bearer = kept.borrow().clone().unwrap_or_else(|| "new".to_string());
+        std::future::ready(Ok(account_with(Some(&bearer))))
+    };
+    let forget = |token: &str| {
+        if kept.borrow().as_deref() == Some(token) {
+            *kept.borrow_mut() = None;
+        }
+    };
+    let ran = Cell::new(0);
+    let work = |a: Account| {
+        ran.set(ran.get() + 1);
+        std::future::ready(match a.bearer.as_deref() {
+            Some("new") => Ok("fetched"),
+            _ => Err(refused()),
+        })
+    };
+    let (used, v) = token_block_on(with_renewal(account, forget, work)).unwrap();
+    assert_eq!(v, "fetched");
+    assert_eq!(
+        used.bearer.as_deref(),
+        Some("new"),
+        "the renewed account is answered"
+    );
+    assert_eq!((asked.get(), ran.get()), (2, 2));
+    assert!(kept.borrow().is_none(), "the refused token is forgotten");
+
+    // A working token is used once; any other error is not retried; a second 401 is returned.
+    let one = || std::future::ready(Ok(account_with(Some("t"))));
+    let ran = Cell::new(0);
+    let ok = |_: Account| {
+        ran.set(ran.get() + 1);
+        std::future::ready(Ok(1))
+    };
+    assert!(token_block_on(with_renewal(one, |_: &str| {}, ok)).is_ok());
+    assert_eq!(ran.get(), 1);
+    let ran = Cell::new(0);
+    let other = |_: Account| {
+        ran.set(ran.get() + 1);
+        std::future::ready(Err::<(), _>(worker::Error::RustError("boom".into())))
+    };
+    let not_refused = |_: &str| panic!("not refused");
+    assert!(token_block_on(with_renewal(one, not_refused, other)).is_err());
+    assert_eq!(ran.get(), 1);
+    let ran = Cell::new(0);
+    let always = |_: Account| {
+        ran.set(ran.get() + 1);
+        std::future::ready(Err::<(), _>(refused()))
+    };
+    assert!(token_block_on(with_renewal(one, |_: &str| {}, always)).is_err());
+    assert_eq!(ran.get(), 2, "never more than twice");
+
+    // An account holding the parent token (core's) mints per request: nothing to renew.
+    let parent = || std::future::ready(Ok(account_with(None)));
+    let ran = Cell::new(0);
+    let always = |_: Account| {
+        ran.set(ran.get() + 1);
+        std::future::ready(Err::<(), _>(refused()))
+    };
+    let no_bearer = |_: &str| panic!("no bearer to forget");
+    assert!(token_block_on(with_renewal(parent, no_bearer, always)).is_err());
+    assert_eq!(ran.get(), 1);
+}

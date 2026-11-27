@@ -107,4 +107,14 @@ impl Credentials {
     pub fn put(&mut self, purpose: Purpose, credential: Credential) {
         self.kept.insert(purpose, credential);
     }
+
+    /// Forgets the credential for `purpose` when it is still `token`: Cloudflare refused it
+    /// (core revoked it before it expired, as its token ledger does with the leases it held
+    /// when it restarted), so the next request asks core for another. One another request
+    /// already replaced is left alone.
+    pub fn forget(&mut self, purpose: Purpose, token: &str) {
+        if self.kept.get(&purpose).is_some_and(|c| c.token == token) {
+            self.kept.remove(&purpose);
+        }
+    }
 }
