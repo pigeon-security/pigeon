@@ -332,6 +332,12 @@ impl Step {
     pub fn stops(&self) -> bool {
         matches!(self, Step::Conflict { .. } | Step::Blocked { .. })
     }
+
+    /// Whether it is a capability left alone until the instance is re-linked with a scope it
+    /// needs (`linked::capability_refusal`).
+    pub fn awaits_relink(&self) -> bool {
+        matches!(self, Step::Keep { what, .. } if what == "capability")
+    }
 }
 
 /// The digest of what is uploaded as the Worker: its module, compatibility date and binding.

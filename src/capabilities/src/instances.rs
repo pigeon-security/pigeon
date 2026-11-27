@@ -1147,9 +1147,14 @@ impl Instances {
             ));
         }
         if !steps.iter().any(plan::Step::changes) {
+            // A capability left alone for want of a re-link is not "in place".
+            let note = if steps.iter().any(plan::Step::awaits_relink) {
+                "Nothing can change yet: a capability waits on a re-link (see the plan)."
+            } else {
+                "Everything is already in place."
+            };
             return Ok(with_redirects(
-                json!({ "instance": id, "plan": lines, "applies": false,
-                "note": "Everything is already in place." }),
+                json!({ "instance": id, "plan": lines, "applies": false, "note": note }),
             ));
         }
         let kind = pigeon_core::approval::Kind::LinkedPlan;

@@ -1260,6 +1260,8 @@ fn secrets_on_a_linked_instance() {
         }]
     );
     assert!(!steps[0].stops() && !steps[0].changes());
+    // A capability waiting on a re-link is not "already in place".
+    assert!(steps[0].awaits_relink());
 
     // The store's id from Cloudflare's list.
     use pigeon_capabilities::secrets::store_of;
