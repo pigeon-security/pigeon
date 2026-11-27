@@ -49,3 +49,13 @@ secret_name = "CALLER_KEY_PROXY"
 [[services]]
 binding = "PLATFORM"
 service = "pigeon-platform"
+
+# The data Worker's build (the `data-worker` artifact lane, ci/workers.toml): `/cf/` answers that
+# lane's deploy job's object reads and writes (cf_proxy::artifact_call, held to
+# data-worker/{digest}/{module} and data-worker/current.json) through this binding
+# (cf_proxy::ARTIFACT_BINDINGS) rather than the R2 REST API, whose account-wide rate limit the
+# build's calls ran into. The bucket exists (the lane's own job made it), since a
+# binding to a missing bucket fails the deploy.
+[[r2_buckets]]
+binding = "DATA_ARTIFACTS"
+bucket_name = "pigeon-data-artifacts"

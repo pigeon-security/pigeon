@@ -37,9 +37,6 @@ pub enum Purpose {
     /// The calls `wrangler deploy` makes through `/cf/`, and the lookup of a Worker's container
     /// namespaces.
     Deploy,
-    /// An artifact lane's calls through `/cf/` (`cf_proxy::artifact_call`): reading and writing
-    /// its build's objects in its bucket.
-    DataArtifacts,
 }
 
 impl Purpose {
@@ -49,7 +46,6 @@ impl Purpose {
         match self {
             Purpose::Git => "artifacts",
             Purpose::Deploy => "cf_deploy",
-            Purpose::DataArtifacts => "data_artifacts",
         }
     }
 }
@@ -80,4 +76,10 @@ pub trait Host {
     /// request mints its own token, or one whose `bearer` is a scoped token core minted for
     /// the purpose, used as it is.
     fn account<'a>(&'a self, purpose: Purpose) -> Pending<'a, Account>;
+
+    /// The R2 bucket the Worker serving the proxies binds as `binding`: an artifact lane's
+    /// bucket (`cf_proxy::ARTIFACT_BINDINGS`), whose objects `/cf/` reads and writes through the
+    /// binding, with no Cloudflare token and none of the REST API's rate limit. An error when
+    /// the Worker does not bind it.
+    fn bucket(&self, binding: &str) -> worker::Result<worker::Bucket>;
 }

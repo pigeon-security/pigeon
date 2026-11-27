@@ -254,7 +254,9 @@ viewers and up:
    SHA-256 of the lines `{module} {sha256 of its bytes}`, in order. The plan shows the digest; the
    apply refuses modules that do not match it. Its calls go through the deploy proxy with the
    lane's deploy grant, which reaches only that bucket's build objects
-   (`cf_proxy::artifact_call`), with the proxy Worker's `data_artifacts` token.
+   (`cf_proxy::artifact_call`), answered through the bucket's R2 binding `DATA_ARTIFACTS`
+   (on the proxy Worker, and on core for its backup proxy) with no Cloudflare token, since the
+   R2 REST API's account-wide rate limit refused the build's reads.
 3. **Policy**: add `email_forward_set` to `risky-tools-need-passkey` (the diff is in the
    landing report).
 4. **Backblaze**: create bucket `pigeon-backup-pigeon-data` (SSE-B2 on) and an application key

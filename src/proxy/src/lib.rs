@@ -9,7 +9,8 @@
 //! per purpose (`credential`, kept until a minute before it expires), who holds a proxy
 //! credential (`verify`, kept a minute, keyed by the credential's hash), a CI job token's grant
 //! (`grant`) and the caller a landing's deploy job stands for (`deploy_grant`), these two asked
-//! on every request. Built for `wasm32-unknown-unknown` only.
+//! on every request. An artifact lane's build objects it reads and writes through its own R2
+//! binding (`DATA_ARTIFACTS`), with no token at all. Built for `wasm32-unknown-unknown` only.
 //!
 //! It deploys on its own: a landing that changes only this crate deploys only this Worker.
 
@@ -198,6 +199,10 @@ impl Host for Core<'_> {
                 token_ledger: None,
             })
         })
+    }
+
+    fn bucket(&self, binding: &str) -> Result<worker::Bucket> {
+        self.env.bucket(binding)
     }
 }
 

@@ -19,8 +19,11 @@
 //! [`artifact_call`]'s calls: reading the bucket's record (and creating that bucket, by name
 //! alone, when it is missing), and reading and writing the build's
 //! objects in that bucket, `{prefix}/{digest}/{module}` and `{prefix}/current.json` (whose body
-//! must be a build's manifest), each with a token holding only R2 read or write. It reaches no
-//! Worker, and no other grant or credential reaches those objects.
+//! must be a build's manifest). It reaches no Worker, and no other grant or credential reaches
+//! those objects. Those calls are not passed on to the REST API: they are answered through the
+//! lane's R2 binding ([`ARTIFACT_BINDINGS`]), in the REST API's status codes and shapes, with no
+//! Cloudflare token, since the REST API's R2 calls share one account-wide rate limit
+//! (1,200 per five minutes) that a build's reads and writes ran into.
 //!
 //! Served by core, each call's token is minted from the parent token with only that call's
 //! permissions. Served by the proxy Worker, which never holds the parent token, each call uses
@@ -33,7 +36,9 @@ use pigeon_core::tokens::{self, Policy, Scoped};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use worker::js_sys::Uint8Array;
-use worker::{Fetch, Headers, Method, Request, RequestInit, Response, Result, console_error};
+use worker::{
+    Fetch, Headers, HttpMetadata, Method, Request, RequestInit, Response, Result, console_error,
+};
 
 use pigeon_core::lanes::ArtifactLane;
 
@@ -120,11 +125,6 @@ pub const CONTAINERS_WRITE: &[&str] = &["Workers Containers Write"];
 pub const QUEUES: &[&str] = &["Queues Read"];
 /// Uploading the Worker, which binds Secrets Store secrets.
 pub const UPLOAD: &[&str] = &["Workers Scripts Write", "Secrets Store Write"];
-
-/// Reading an artifact lane's bucket record and its build's objects.
-pub const R2_OBJECTS_READ: &[&str] = &["Workers R2 Storage Read"];
-/// Writing an artifact lane's build objects.
-pub const R2_OBJECTS_WRITE: &[&str] = &["Workers R2 Storage Write"];
 
 /// The calls `wrangler deploy` makes (wrangler 4.166.0, recorded against a stand-in API and
 /// read in its source).
@@ -459,16 +459,57 @@ pub enum ArtifactCall {
     WriteCurrent,
 }
 
-impl ArtifactCall {
-    /// The account permissions the token minted for it holds.
-    pub fn permissions(self) -> &'static [&'static str] {
-        match self {
-            ArtifactCall::Bucket | ArtifactCall::Read => R2_OBJECTS_READ,
-            ArtifactCall::CreateBucket | ArtifactCall::WriteModule | ArtifactCall::WriteCurrent => {
-                R2_OBJECTS_WRITE
-            }
-        }
-    }
+/// The R2 binding each artifact lane's bucket is reached through, by bucket name: both Workers
+/// that serve `/cf/` (the proxy Worker, and core as its backup) bind it in their wrangler.toml.
+pub const ARTIFACT_BINDINGS: [(&str, &str); 1] = [("pigeon-data-artifacts", "DATA_ARTIFACTS")];
+
+/// The binding `lane`'s bucket is reached through ([`ARTIFACT_BINDINGS`]), if it has one.
+pub fn artifact_binding(lane: &ArtifactLane) -> Option<&'static str> {
+    ARTIFACT_BINDINGS
+        .iter()
+        .find(|(bucket, _)| *bucket == lane.bucket)
+        .map(|(_, binding)| *binding)
+}
+
+/// The object key a [`Read`](ArtifactCall::Read), [`WriteModule`](ArtifactCall::WriteModule) or
+/// [`WriteCurrent`](ArtifactCall::WriteCurrent) call names: its path after `.../objects/`, such as
+/// `data-worker/current.json`. Only for a path [`artifact_call`] took.
+pub fn artifact_key<'p>(path: &'p str, account: &str, lane: &ArtifactLane) -> Option<&'p str> {
+    let objects = format!(
+        "{PREFIX}/accounts/{account}/r2/buckets/{}/objects/",
+        lane.bucket
+    );
+    path.strip_prefix(objects.as_str())
+        .filter(|k| !k.is_empty())
+}
+
+/// Cloudflare's answer to reading an object that is not there: 404, with the REST API's error
+/// (10007, "The specified key does not exist."), as the build script reads it.
+pub fn object_missing() -> (u16, Value) {
+    (
+        404,
+        json!({
+            "success": false,
+            "errors": [{ "code": 10007, "message": "The specified key does not exist." }],
+            "messages": [],
+            "result": null,
+        }),
+    )
+}
+
+/// The answer to `call` once done through the binding, for every call but a read that found
+/// its object (whose answer is the object's bytes): 200 in the REST API's envelope. The bucket's
+/// record names the bucket; creating it is answered as done, since the bucket is bound, and
+/// a Worker binding a missing bucket does not deploy; a write answers an empty result.
+pub fn artifact_done(call: ArtifactCall, lane: &ArtifactLane) -> (u16, Value) {
+    let result = match call {
+        ArtifactCall::Bucket | ArtifactCall::CreateBucket => json!({ "name": lane.bucket }),
+        ArtifactCall::Read | ArtifactCall::WriteModule | ArtifactCall::WriteCurrent => json!({}),
+    };
+    (
+        200,
+        json!({ "success": true, "errors": [], "messages": [], "result": result }),
+    )
 }
 
 /// The manifest's key in an artifact lane's folder.
@@ -1209,8 +1250,9 @@ impl CfProxy {
     }
 }
 
-/// One call of an artifact lane's deploy job ([`artifact_call`]), passed on with a token holding
-/// only R2 read or write, minted for the call and revoked once the answer is back.
+/// One call of an artifact lane's deploy job ([`artifact_call`]), answered through the lane's R2
+/// binding ([`artifact_binding`]) in the REST API's status codes and shapes, with no Cloudflare
+/// token.
 async fn artifact(
     host: &dyn Host,
     mut req: Request,
@@ -1249,36 +1291,59 @@ async fn artifact(
     if let Err(why) = checked {
         return refuse(403, &why);
     }
-    let content_type = req.headers().get("Content-Type")?;
-    let upstream_url = format!("{API}{}", &url.path()[PREFIX.len()..]);
-    let account = host.account(Purpose::DataArtifacts).await?;
-    let token = Scoped::open_for(
-        &account,
-        "cf-proxy-artifacts",
-        vec![Policy::new(tokens::Scope::Account, call.permissions())],
-        TOKEN_TTL,
-    )
-    .await?;
-    let sent = send(
-        token.value(),
-        method,
-        &upstream_url,
-        content_type.as_deref(),
-        &body,
-    )
-    .await;
-    let (status, answered_type, bytes) = token.finish(sent).await?;
-    let headers = Headers::new();
-    headers.set(
-        "Content-Type",
-        answered_type.as_deref().unwrap_or("application/json"),
-    )?;
-    Ok((
-        Response::from_bytes(bytes)?
-            .with_status(status)
-            .with_headers(headers),
-        None,
-    ))
+    let binding = artifact_binding(lane).ok_or_else(|| {
+        worker::Error::RustError(format!("no R2 binding for bucket {}", lane.bucket))
+    })?;
+    let bucket = host.bucket(binding)?;
+    let json_answer = |(status, body): (u16, Value)| -> Result<(Response, Option<String>)> {
+        Ok((Response::from_json(&body)?.with_status(status), None))
+    };
+    let key = || {
+        artifact_key(url.path(), &account_id, lane)
+            .map(str::to_string)
+            .ok_or_else(|| worker::Error::RustError("an object call names no key".into()))
+    };
+    match call {
+        // Whether the binding reaches the bucket: a read of the manifest's metadata.
+        ArtifactCall::Bucket => {
+            bucket.head(format!("{}/{MANIFEST}", lane.prefix)).await?;
+            json_answer(artifact_done(call, lane))
+        }
+        ArtifactCall::CreateBucket => json_answer(artifact_done(call, lane)),
+        ArtifactCall::Read => match bucket.get(key()?).execute().await? {
+            None => json_answer(object_missing()),
+            Some(object) => {
+                let content_type = object
+                    .http_metadata()
+                    .content_type
+                    .unwrap_or_else(|| "application/octet-stream".into());
+                let bytes = match object.body() {
+                    Some(b) => b.bytes().await?,
+                    None => Vec::new(),
+                };
+                let headers = Headers::new();
+                headers.set("Content-Type", &content_type)?;
+                Ok((
+                    Response::from_bytes(bytes)?
+                        .with_status(200)
+                        .with_headers(headers),
+                    None,
+                ))
+            }
+        },
+        ArtifactCall::WriteModule | ArtifactCall::WriteCurrent => {
+            let content_type = req.headers().get("Content-Type")?;
+            bucket
+                .put(key()?, body)
+                .http_metadata(HttpMetadata {
+                    content_type,
+                    ..HttpMetadata::default()
+                })
+                .execute()
+                .await?;
+            json_answer(artifact_done(call, lane))
+        }
+    }
 }
 
 /// The time in milliseconds since the epoch.

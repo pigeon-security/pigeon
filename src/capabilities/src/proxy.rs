@@ -230,8 +230,9 @@ pub async fn job_grant(env: &Env, presented: &str, repo: &str) -> Result<Option<
 }
 
 /// Core as the proxies' [`Host`]: credentials from its Directory, job grants from its CI
-/// scheduler, deploy grants from its Lander, and its own account, holding the parent token,
-/// for every purpose.
+/// scheduler, deploy grants from its Lander, its own account, holding the parent token, for
+/// every purpose, and its own R2 bindings (an artifact lane's bucket, bound as the proxy Worker
+/// binds it).
 pub struct Local<'a> {
     /// The request's context.
     pub cx: &'a Context<'a>,
@@ -261,6 +262,10 @@ impl Host for Local<'_> {
     fn account<'a>(&'a self, _purpose: Purpose) -> Pending<'a, Account> {
         let account = self.cx.account.clone();
         Box::pin(async move { Ok(account) })
+    }
+
+    fn bucket(&self, binding: &str) -> Result<worker::Bucket> {
+        self.cx.env.bucket(binding)
     }
 }
 

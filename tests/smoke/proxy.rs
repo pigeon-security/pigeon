@@ -1797,10 +1797,10 @@ fn deploy_proxy_replays_rate_limited_lookup() {
 
 #[test]
 fn deploy_proxy_artifact_lane_reaches_its_build_only() {
-    use pigeon_capabilities::split::{purpose_permissions, worker_may};
+    use pigeon_capabilities::split::purpose_permissions;
     use pigeon_proxies::cf_proxy::{
-        ALLOWED, ArtifactCall, PREFIX, Scope, allowed, artifact_call, create_bucket_ok, is_module,
-        manifest_ok,
+        ALLOWED, ArtifactCall, PREFIX, Scope, allowed, artifact_binding, artifact_call,
+        artifact_done, artifact_key, create_bucket_ok, is_module, manifest_ok, object_missing,
     };
     let lane = pigeon_core::lanes::ARTIFACT_LANES[0];
     assert_eq!(
@@ -1929,35 +1929,95 @@ fn deploy_proxy_artifact_lane_reaches_its_build_only() {
     ] {
         assert!(manifest_ok(bad.as_bytes()).is_err(), "{bad}");
     }
-    // The lane's token: R2 read and write on the account, held to the bucket by the proxy, and
-    // asked of core by the proxy Worker alone. The Worker deploys' token gains nothing.
-    let mut perms: Vec<&str> = [ArtifactCall::Bucket, ArtifactCall::WriteModule]
-        .iter()
-        .flat_map(|c| c.permissions().iter().copied())
-        .collect();
-    perms.sort_unstable();
+    // The transport: the lane's bucket through an R2 binding both Workers serving `/cf/` bind,
+    // not the R2 REST API (whose account-wide rate limit the build's reads ran into), and no
+    // token minted for it.
+    assert_eq!(artifact_binding(&lane), Some("DATA_ARTIFACTS"));
+    for l in pigeon_core::lanes::ARTIFACT_LANES {
+        let binding = artifact_binding(&l).unwrap_or_else(|| panic!("{} has a binding", l.name));
+        for (worker, toml) in [
+            (
+                "pigeon-proxy",
+                include_str!("../../src/proxy/wrangler.toml"),
+            ),
+            (
+                "pigeon-platform",
+                include_str!("../../src/platform/wrangler.toml"),
+            ),
+        ] {
+            let parsed: toml::Value = toml::from_str(toml).unwrap();
+            let bound = parsed["r2_buckets"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{worker} binds R2"))
+                .iter()
+                .any(|b| {
+                    b["binding"].as_str() == Some(binding)
+                        && b["bucket_name"].as_str() == Some(l.bucket)
+                });
+            assert!(bound, "{worker} binds {binding} to {}", l.bucket);
+        }
+    }
+    let other = pigeon_core::lanes::ArtifactLane {
+        name: "other",
+        bucket: "pigeon-other",
+        prefix: "other",
+    };
+    assert_eq!(artifact_binding(&other), None);
+    // The key an object call names: the path after `.../objects/`, nothing for the bucket itself.
+    for rest in ["current.json".to_string(), format!("{d}/index.js")] {
+        let p = format!("{base}/objects/{}/{rest}", lane.prefix);
+        let want = format!("{}/{rest}", lane.prefix);
+        assert_eq!(artifact_key(&p, a, &lane), Some(want.as_str()));
+        assert_eq!(artifact_key(&p, "0000", &lane), None);
+    }
+    assert_eq!(artifact_key(&base, a, &lane), None);
+    assert_eq!(artifact_key(&format!("{base}/objects/"), a, &lane), None);
+    // The answers, as ci/deploy/data-worker-build.sh reads them: a missing object is
+    // Cloudflare's 404 (its 10007), so the script uploads it; the bucket's record, creating
+    // it and each write are 200 in the REST API's envelope.
+    let (status, body) = object_missing();
+    assert_eq!(status, 404);
+    assert_eq!(body["success"], false);
+    assert_eq!(body["errors"][0]["code"], 10007);
+    assert!(body["errors"][0]["message"].is_string());
+    for c in [
+        ArtifactCall::Bucket,
+        ArtifactCall::CreateBucket,
+        ArtifactCall::WriteModule,
+        ArtifactCall::WriteCurrent,
+    ] {
+        let (status, body) = artifact_done(c, &lane);
+        assert_eq!(status, 200, "{c:?}");
+        assert_eq!(body["success"], true, "{c:?}");
+        assert!(body["result"].is_object(), "{c:?}");
+    }
     assert_eq!(
-        purpose_permissions("data_artifacts").unwrap(),
-        perms.as_slice()
+        artifact_done(ArtifactCall::Bucket, &lane).1["result"]["name"],
+        lane.bucket
     );
     assert_eq!(
-        pigeon_proxies::Purpose::DataArtifacts.scoped(),
-        "data_artifacts"
+        artifact_done(ArtifactCall::WriteCurrent, &lane).1["result"],
+        json!({})
     );
+    // The lane's calls mint no token and never reach the REST API: the handler names neither.
+    let source = include_str!("../../src/proxies/src/cf_proxy.rs");
+    let handler = source
+        .split("async fn artifact(")
+        .nth(1)
+        .and_then(|rest| rest.split("\n}\n").next())
+        .expect("cf_proxy has the artifact handler");
+    for never in ["Scoped::", "open_for", "send(", "API", "host.account("] {
+        assert!(
+            !handler.contains(never),
+            "the artifact handler names {never}"
+        );
+    }
+    assert!(handler.contains("host.bucket(binding)"));
+    // No token purpose is left for it: core mints none, and no Worker may ask for one.
+    assert_eq!(purpose_permissions("data_artifacts"), None);
     assert!(
         !ALLOWED
             .iter()
             .any(|e| e.permissions.contains(&"Workers R2 Storage Write"))
     );
-    let ask =
-        |scopes: &[&str]| serde_json::to_vec(&json!({"kind": "scoped", "scopes": scopes})).unwrap();
-    assert!(worker_may("proxy", "credential", &ask(&["data_artifacts"])).is_ok());
-    assert!(worker_may("proxy", "credential", &ask(&["cf_deploy"])).is_ok());
-    for w in ["ci-gateway", "model-gateway", "cloud-gateway"] {
-        assert!(
-            worker_may(w, "credential", &ask(&["data_artifacts"])).is_err(),
-            "{w}"
-        );
-        assert!(worker_may(w, "credential", &ask(&["secrets_store", "data_artifacts"])).is_err());
-    }
 }

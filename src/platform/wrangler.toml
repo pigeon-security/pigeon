@@ -234,6 +234,15 @@ bucket_name = "pigeon-changelog"
 binding = "HOME_SITE"
 bucket_name = "pigeon-platform-site"
 
+# The data Worker's build (the `data-worker` artifact lane), for the deploy proxy core keeps as
+# the proxy Worker's backup (proxy::Backup): `/cf/` answers that lane's deploy job's object reads
+# and writes through this binding, as the proxy Worker does through its own
+# (cf_proxy::ARTIFACT_BINDINGS), never the R2 REST API. The bucket exists (the lane's own job
+# made it), since a binding to a missing bucket fails the deploy.
+[[r2_buckets]]
+binding = "DATA_ARTIFACTS"
+bucket_name = "pigeon-data-artifacts"
+
 # App Store Connect (src/capabilities/src/apple.rs, docs/plans/ios.md phase 1b): the team id,
 # the API key's issuer id, key id and .p8, set by the person on the secrets page; bound once all
 # four existed, since a binding to a missing secret fails the deploy.
