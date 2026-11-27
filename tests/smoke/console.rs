@@ -3192,6 +3192,40 @@ mod email {
         }
     }
 
+    #[test]
+    fn historical_mail_import_keeps_sources_and_recovers_an_uncommitted_message() {
+        let store = Store::new(None);
+        let raw = message("archive", "mail@example.com");
+        let source = |mailbox: &str| pigeon_email::Source::Imap {
+            server: "imap.gmail.com".into(),
+            account: "mail@example.com".into(),
+            mailbox: mailbox.into(),
+            uid_validity: 27,
+            uid: 44,
+        };
+        let at = "2026-11-26T09:00:01Z";
+        store.fail_db.set(true);
+        assert!(ready(mail::import(&store, &raw, source("INBOX"), at)).is_err());
+        assert_eq!(store.count("SELECT COUNT(*) FROM items"), 0);
+        store.fail_db.set(false);
+        let (id, duplicate) = ready(mail::import(&store, &raw, source("INBOX"), at)).unwrap();
+        assert!(duplicate);
+        assert_eq!(store.blobs.borrow()[&pigeon_ingest::blob_key(&id)], raw);
+        ready(mail::import(&store, &raw, source("Archive"), at)).unwrap();
+        ready(mail::import(&store, &raw, source("INBOX"), at)).unwrap();
+        assert_eq!(store.count("SELECT COUNT(*) FROM emails"), 1);
+        assert_eq!(store.count("SELECT COUNT(*) FROM items"), 2);
+        assert_eq!(
+            store.count("SELECT COUNT(*) FROM sightings WHERE source = 'imap'"),
+            2
+        );
+        assert_eq!(
+            store.count("SELECT COUNT(*) FROM sightings WHERE source = 'email_attachment'"),
+            1
+        );
+        assert_eq!(store.count("SELECT COUNT(*) FROM email_deliveries"), 0);
+    }
+
     /// The handler on a stand-in: a listed address lands in its mailbox and anything else in
     /// catch-all; the bytes are stored once, by their SHA-256 hashed as they stream, with the
     /// record rows of ingest.md decision 3; a duplicate adds only a sighting; the trusted sender

@@ -44,6 +44,10 @@ pub fn signing_message(method: &str, path: &str, at_ms: i64, body: &[u8]) -> Str
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
+    signing_digest(method, path, at_ms, &digest)
+}
+
+fn signing_digest(method: &str, path: &str, at_ms: i64, digest: &str) -> String {
     format!("{method}\n{path}\n{at_ms}\n{digest}")
 }
 
@@ -69,7 +73,29 @@ pub fn verify(
     key: &[u8],
     now_ms: i64,
 ) -> Result<(), Error> {
+    use sha2::{Digest, Sha256};
+    let digest = format!("{:x}", Sha256::digest(body));
+    verify_digest(header, method, path, &digest, key, now_ms)
+}
+
+/// Verifies a signed, claimed SHA-256 before reading a potentially large body. The caller must
+/// still compare the streamed body's hash with this digest before acting on it.
+pub fn verify_digest(
+    header: &str,
+    method: &str,
+    path: &str,
+    digest: &str,
+    key: &[u8],
+    now_ms: i64,
+) -> Result<(), Error> {
     let bad = |why: &str| Error::Config(format!("signature: {why}"));
+    if digest.len() != 64
+        || !digest
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(bad("invalid body digest"));
+    }
     let (mut at, mut mac_hex) = (None, None);
     for part in header.split(',') {
         match part.trim().split_once('=') {
@@ -85,7 +111,7 @@ pub fn verify(
     if at.abs_diff(now_ms) > MAX_SKEW_MS.unsigned_abs() {
         return Err(bad("stale"));
     }
-    let message = signing_message(method, path, at, body);
+    let message = signing_digest(method, path, at, digest);
     let mut mac = Hmac::<sha2::Sha256>::new_from_slice(key).map_err(|_| bad("bad key"))?;
     mac.update(message.as_bytes());
     mac.verify_slice(&tag).map_err(|_| bad("does not match"))

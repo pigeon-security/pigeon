@@ -307,6 +307,160 @@ pub fn log_line(id: &str, size: u64, mailbox: &str, outcome: &str) -> String {
     format!("email {id} size={size} mailbox={mailbox} outcome={outcome}")
 }
 
+/// Stores original bytes, repairs any interrupted extraction, and returns rows to commit with
+/// the source sighting in one transaction.
+async fn store_message<B: Bindings>(
+    b: &B,
+    raw: &[u8],
+    content: &ContentRef,
+    source: Source,
+    at: &str,
+) -> Result<(bool, Option<Auth>, Vec<Statement>), &'static str> {
+    let id = content.sha256.as_str();
+    let key = content.key();
+    let duplicate = match b.has(&key).await {
+        Ok(d) => d,
+        Err(_) => return Err(NOT_STORED),
+    };
+    let historical = matches!(source, Source::Imap { .. });
+    let parsed = pigeon_email::parse(raw, source);
+    let auth = parsed.as_ref().ok().and_then(|p| auth_of(&p.message));
+    let mut rows = Vec::new();
+    if !duplicate && b.put(&key, raw, id).await.is_err() {
+        return Err(NOT_STORED);
+    }
+    match &parsed {
+        Ok(p) => {
+            for (content, bytes) in &p.blobs {
+                let k = content.key();
+                let held = b.has(&k).await.map_err(|_| NOT_STORED)?;
+                if !held && b.put(&k, bytes, &content.sha256).await.is_err() {
+                    return Err(NOT_STORED);
+                }
+            }
+            let text_ref = match &p.message.text {
+                Some(t) => {
+                    let k = text_key(id);
+                    let sha = datastore::sha256_hex(t.as_bytes());
+                    if !b.has(&k).await.map_err(|_| NOT_STORED)?
+                        && b.put(&k, t.as_bytes(), &sha).await.is_err()
+                    {
+                        return Err(NOT_STORED);
+                    }
+                    Some(k)
+                }
+                None => None,
+            };
+            rows.push(item_row(
+                Item {
+                    id,
+                    size: content.size,
+                    media_type: "message/rfc822",
+                    filename: None,
+                    parent: None,
+                    status: "stored",
+                    error: None,
+                },
+                at,
+            ));
+            rows.push(email_row(id, &p.message, text_ref.as_deref()));
+            for (index, a) in p.message.attachments.iter().enumerate() {
+                rows.push(item_row(
+                    Item {
+                        id: &a.content.sha256,
+                        size: a.content.size,
+                        media_type: &a.content_type,
+                        filename: a.filename.as_deref(),
+                        parent: Some(id),
+                        status: "stored",
+                        error: None,
+                    },
+                    at,
+                ));
+                if historical {
+                    rows.push(Statement {
+                        sql: "INSERT OR IGNORE INTO sightings (item_id, source, account, locator, seen_at, extra) \
+                              VALUES (?, 'email_attachment', NULL, ?, ?, ?)".into(),
+                        params: vec![
+                            json!(a.content.sha256),
+                            json!(format!("{id}:{index}")),
+                            json!(at),
+                            json!(json!({ "parent": id, "index": index, "filename": a.filename }).to_string()),
+                        ],
+                    });
+                }
+            }
+        }
+        // A parser bug never bounces mail: the bytes are kept and can be parsed again.
+        Err(e) => rows.push(item_row(
+            Item {
+                id,
+                size: content.size,
+                media_type: "message/rfc822",
+                filename: None,
+                parent: None,
+                status: "failed",
+                error: Some(e.to_string()),
+            },
+            at,
+        )),
+    }
+    Ok((duplicate, auth, rows))
+}
+
+/// Commits one historical message and all its attachments without invoking delivery or forwarding.
+pub async fn import<B: Bindings>(
+    b: &B,
+    raw: &[u8],
+    source: Source,
+    at: &str,
+) -> Result<(String, bool), &'static str> {
+    let Source::Imap {
+        server,
+        account,
+        mailbox,
+        uid_validity,
+        uid,
+    } = &source
+    else {
+        return Err("unsupported historical source");
+    };
+    if raw.is_empty() || raw.len() as u64 > datastore::MAX_MESSAGE {
+        return Err(TOO_LARGE);
+    }
+    let fields = [server.as_str(), account.as_str(), mailbox.as_str()];
+    if fields
+        .iter()
+        .any(|s| s.is_empty() || s.len() > 1024 || s.chars().any(char::is_control))
+        || *uid_validity == 0
+        || *uid == 0
+    {
+        return Err("invalid IMAP source");
+    }
+    let mut hasher = Hasher::default();
+    hasher.update(raw);
+    let content = hasher.finish();
+    let locator = json!([server, account, mailbox, uid_validity, uid]).to_string();
+    let account = account.clone();
+    let extra = serde_json::to_string(&source).map_err(|_| NOT_STORED)?;
+    let (duplicate, _, mut rows) = store_message(b, raw, &content, source, at).await?;
+    rows.push(Statement {
+        sql: "INSERT OR IGNORE INTO sightings (item_id, source, account, locator, seen_at, extra) \
+              VALUES (?, ?, ?, ?, ?, ?)"
+            .into(),
+        params: vec![
+            json!(content.sha256),
+            json!("imap"),
+            json!(account),
+            json!(locator),
+            json!(at),
+            json!(extra),
+        ],
+    });
+    b.run(rows).await.map_err(|_| NOT_STORED)?;
+    Ok((content.sha256, duplicate))
+}
+
 /// Receives one message: configuration, mailbox, bytes, rows, forward decision. Anything that
 /// keeps it from being stored rejects it; the forward itself is the caller's.
 pub async fn receive<B: Bindings>(b: &B, m: &Incoming<'_>) -> Verdict {
@@ -321,85 +475,14 @@ pub async fn receive<B: Bindings>(b: &B, m: &Incoming<'_>) -> Verdict {
     let mailbox = config.mailbox_for(m.envelope_to);
     let id = m.content.sha256.clone();
     let at = m.received_at.as_str();
-    let key = m.content.key();
-    let duplicate = match b.has(&key).await {
-        Ok(d) => d,
-        Err(_) => return Verdict::Reject(NOT_STORED.into()),
-    };
     let source = Source::EmailRouting {
         envelope_from: m.envelope_from.to_string(),
         envelope_to: m.envelope_to.to_string(),
     };
-    let parsed = pigeon_email::parse(m.raw, source);
-    let auth = parsed.as_ref().ok().and_then(|p| auth_of(&p.message));
-    let mut rows = Vec::new();
-    if !duplicate {
-        if b.put(&key, m.raw, &id).await.is_err() {
-            return Verdict::Reject(NOT_STORED.into());
-        }
-        match &parsed {
-            Ok(p) => {
-                for (content, bytes) in &p.blobs {
-                    let k = content.key();
-                    let held = b.has(&k).await.unwrap_or(false);
-                    if !held && b.put(&k, bytes, &content.sha256).await.is_err() {
-                        return Verdict::Reject(NOT_STORED.into());
-                    }
-                }
-                let text_ref = match &p.message.text {
-                    Some(t) => {
-                        let k = text_key(&id);
-                        let sha = datastore::sha256_hex(t.as_bytes());
-                        if b.put(&k, t.as_bytes(), &sha).await.is_err() {
-                            return Verdict::Reject(NOT_STORED.into());
-                        }
-                        Some(k)
-                    }
-                    None => None,
-                };
-                rows.push(item_row(
-                    Item {
-                        id: &id,
-                        size: m.content.size,
-                        media_type: "message/rfc822",
-                        filename: None,
-                        parent: None,
-                        status: "stored",
-                        error: None,
-                    },
-                    at,
-                ));
-                rows.push(email_row(&id, &p.message, text_ref.as_deref()));
-                for a in &p.message.attachments {
-                    rows.push(item_row(
-                        Item {
-                            id: &a.content.sha256,
-                            size: a.content.size,
-                            media_type: &a.content_type,
-                            filename: a.filename.as_deref(),
-                            parent: Some(&id),
-                            status: "stored",
-                            error: None,
-                        },
-                        at,
-                    ));
-                }
-            }
-            // A parser bug never bounces mail: the bytes are kept and can be parsed again.
-            Err(e) => rows.push(item_row(
-                Item {
-                    id: &id,
-                    size: m.content.size,
-                    media_type: "message/rfc822",
-                    filename: None,
-                    parent: None,
-                    status: "failed",
-                    error: Some(e.to_string()),
-                },
-                at,
-            )),
-        }
-    }
+    let (duplicate, auth, mut rows) = match store_message(b, m.raw, &m.content, source, at).await {
+        Ok(stored) => stored,
+        Err(reason) => return Verdict::Reject(reason.into()),
+    };
     rows.push(sighting_row(
         &id,
         m.envelope_to,

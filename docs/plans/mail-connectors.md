@@ -208,6 +208,42 @@ with the person's passkey:
 | 5 | Fastmail | person sets the token | agent, person |
 | 6 | Counts and gaps in `data_status`; optional Gmail push; optional Proton through Tunnel and Workers VPC | | agent |
 
+## IMAP backfill and forwarding
+
+The Data Worker transport accepts one raw message per signed request. It requires the
+instance plan to bind `MAIL_IMPORT_INSTANCE` to the approved instance and an instance
+administrator to set the dedicated `MAIL_IMPORT_KEY` secret. The record and console
+opt-in still needs to be wired into the reshaped Data plan, so the route remains inactive
+on provisioned instances until that work ships.
+It stores the exact RFC 822 bytes and independently addressable attachments, and records
+the server, account, folder, UIDVALIDITY and UID on each message's sighting. Historical
+imports never forward mail.
+
+Run the client on a trusted local machine with Python 3.10 or later. Use app passwords
+from Gmail, iCloud, and Fastmail, subject to their account and provider policies. For
+Proton Mail, run the client on the same machine as a signed-in Proton Mail Bridge, then
+use its generated IMAP login and explicitly trust the Bridge certificate with
+`--bridge-certificate`. The Bridge connection uses STARTTLS on loopback.
+
+```sh
+python3 src/data-worker/tools/mail-import.py gmail https://data-worker.example.net person@gmail.com
+```
+
+The client prompts for the mailbox and import secrets. It checks all selectable folders
+by default, or only those given with repeatable `--mailbox` arguments. Repeat the command
+until a batch imports zero messages. Keep the private SQLite checkpoint file across runs.
+Batch size, inter-message delay and retry limit are configurable. The client records a
+redacted local terminal receipt for each attempt. Messages over 25 MiB stop the batch
+without advancing the cursor so a future larger-message path can pick them up.
+
+To transition from historical backfill to forwarding, first configure a listed capture
+address such as `inbox@willowgraysen.com` in the instance's Email capability. Choose an
+independent, verified forwarding destination there, then verify the inbound route with a
+test message. Set that address as the source provider's automatic forwarding target and
+complete the source provider's confirmation. Repeat the IMAP command after forwarding
+starts to cover messages received during cutover. The store keeps distinct byte streams
+when a provider rewrites headers; exact identical bytes share a payload.
+
 ## Follow-ups for the person
 
 1. **Gmail**: in Google Cloud Console, create a project; enable the Gmail API; set up the OAuth
