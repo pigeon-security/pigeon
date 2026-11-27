@@ -1236,6 +1236,11 @@ fn data_worker_build_uploads_its_build_then_current_json() {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
     };
     executable(&bin.join("cargo"), "#!/bin/sh\nexit 0\n");
+    // Waits between retries are recorded, never slept.
+    executable(
+        &bin.join("sleep"),
+        "#!/bin/sh\necho \"$1\" >> \"$FAKE_SLEEP\"\n",
+    );
     // worker-build 0.9's layout: wasm-bindgen's index.js importing index_bg.wasm, and a shim.
     executable(
         &bin.join("worker-build"),
@@ -1282,6 +1287,10 @@ case $method:$rest in
     *) [ -d "$FAKE_STORE" ] && answer 200 '{"success":true,"result":{}}'
        answer 404 '{"success":false,"errors":[{"code":10006,"message":"no such bucket"}]}' ;;
 esac
+if [ -n "${FAKE_429_ONCE:-}" ] && [ ! -f "$FAKE_429_ONCE" ]; then
+    : > "$FAKE_429_ONCE"
+    answer 429 '{"success":false,"errors":[{"code":10429,"message":"Rate limited"}]}'
+fi
 case $method in
     GET)
         if [ -f "$FAKE_STORE/$key" ]; then cp "$FAKE_STORE/$key" "$out"; printf 200; exit 0; fi
@@ -1298,8 +1307,10 @@ answer 405 '{}'
 "#,
     );
     let log = fixture.join("log");
+    let sleeps = fixture.join("sleeps");
     let run = |js: &str, wasm: &str, env: &[(&str, &str)]| -> (i32, Vec<String>, String) {
         std::fs::write(&log, "").unwrap();
+        std::fs::write(&sleeps, "").unwrap();
         let mut path = vec![bin.clone()];
         path.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
         let mut cmd = Command::new("sh");
@@ -1315,6 +1326,7 @@ answer 405 '{}'
             .env("FAKE_JS", js)
             .env("FAKE_WASM", wasm)
             .env("FAKE_LOG", &log)
+            .env("FAKE_SLEEP", &sleeps)
             .env("FAKE_STORE", &store);
         for (k, v) in env {
             cmd.env(k, v);
@@ -1431,6 +1443,42 @@ answer 405 '{}'
     );
     assert_eq!(code, 3, "{text}");
     assert!(!puts(&calls).contains(&"data-worker/current.json".to_string()));
+    assert_eq!(current(), first);
+    // A 500 is retried: five attempts in all, with four doubling waits from 30-45s.
+    let wasm_key = data_plan::module_key(
+        &data_plan::artifact_digest(&[
+            ("index.js", b"export default {};"),
+            ("index_bg.wasm", b"wasm-2"),
+        ]),
+        "index_bg.wasm",
+    );
+    assert_eq!(
+        puts(&calls).iter().filter(|k| **k == wasm_key).count(),
+        5,
+        "{calls:?}"
+    );
+    let waits: Vec<u32> = std::fs::read_to_string(&sleeps)
+        .unwrap()
+        .lines()
+        .map(|l| l.trim().parse().unwrap())
+        .collect();
+    assert_eq!(waits.len(), 4, "{waits:?}");
+    for (i, w) in waits.iter().enumerate() {
+        let base = 30u32 << i;
+        assert!((base..=base + base / 2).contains(w), "wait {i} was {w}");
+    }
+
+    // A rate limit (429) on the first call is waited out, and the build still goes up.
+    let once = fixture.join("rate-limited-once");
+    let _ = std::fs::remove_file(&once);
+    let (code, calls, text) = run(
+        "export default {};",
+        "wasm-1",
+        &[("FAKE_429_ONCE", once.to_str().unwrap())],
+    );
+    assert_eq!(code, 0, "{text}");
+    assert!(text.contains("answered 429"), "{text}");
+    allowed(&calls);
     assert_eq!(current(), first);
 
     // A new build: its modules (index.js is the same bytes, but under a new digest), then

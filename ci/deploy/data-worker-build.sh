@@ -66,7 +66,28 @@ work=$(mktemp -d)
 
 # One call through the deploy proxy with this job's token: `call METHOD URL OUT [FILE TYPE]`
 # writes the answer's body to OUT and prints its HTTP status (curl's 000 when unreachable).
+# Cloudflare rate limits (429), its 5xx and an unreachable proxy are retried with the same call,
+# up to five attempts in all, with jittered, doubling waits (about 30-45s, 60-90s, 120-180s,
+# 240-360s), as deploy.sh does for Workers; every call here is a read or an idempotent put.
 call() {
+    attempt=1
+    base=30
+    while :; do
+        code=$(call_once "$@")
+        case "$code" in
+        429 | 5?? | 000) ;;
+        *) echo "$code"; return ;;
+        esac
+        if [ "$attempt" -ge 5 ]; then echo "$code"; return; fi
+        sample=$(od -An -N1 -tu1 /dev/urandom) || sample=0
+        delay=$(( base + (base / 2) * sample / 255 ))
+        echo "Cloudflare answered $code for $1 ${2##*/objects/}; attempt $((attempt + 1)) in ${delay}s" >&2
+        sleep "$delay"
+        attempt=$(( attempt + 1 ))
+        base=$(( base * 2 ))
+    done
+}
+call_once() {
     if [ $# -gt 3 ]; then
         curl -sS --max-time 300 -X "$1" -o "$3" -w '%{http_code}' \
             -H "Authorization: Bearer $PIGEON_JOB_TOKEN" -H "Content-Type: $5" \
