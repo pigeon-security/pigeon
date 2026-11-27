@@ -80,6 +80,11 @@ pub const CAPABILITY_SCOPES: &[CapabilityScope] = &[
         permission: "Queues Write",
         scope: "queues.write",
     },
+    CapabilityScope {
+        capability: crate::instances::data_ingest_runtime::SCOPE,
+        permission: "Workers Containers Write",
+        scope: "containers.write",
+    },
     // Email Routing on the instance's zone: the catch-all rule, the forward destinations and
     // turning routing on. Its DNS review needs only the base DNS Write.
     CapabilityScope {

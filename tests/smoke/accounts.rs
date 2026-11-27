@@ -1285,12 +1285,13 @@ fn linking_a_cloudflare_account() {
         { "id": "secrets-store.write", "name": "Secrets Store Write" },
         { "id": "d1.write", "name": "D1 Write" },
         { "id": "queues.write", "name": "Queues Write" },
+        { "id": "containers.write", "name": "Workers Containers Write" },
         { "id": "email-routing-rule.write", "name": "Email Routing Rules Write" },
         { "id": "email-routing-address.write", "name": "Email Routing Addresses Write" },
         { "id": "zone-settings.write", "name": "Zone Settings Write" },
         { "id": "zone.write", "name": "Zone Write" }
     ]);
-    // The base scopes, then `secrets`', `data`'s and `email`'s (docs/plans/linked-data.md).
+    // The base scopes and the feature-specific optional scopes.
     assert_eq!(
         requested_permissions(),
         [
@@ -1299,6 +1300,7 @@ fn linking_a_cloudflare_account() {
                 "Secrets Store Write",
                 "D1 Write",
                 "Queues Write",
+                "Workers Containers Write",
                 "Email Routing Rules Write",
                 "Email Routing Addresses Write",
                 "Zone Settings Write"
@@ -1330,6 +1332,7 @@ fn linking_a_cloudflare_account() {
             "secrets-store.write",
             "d1.write",
             "queues.write",
+            "containers.write",
             "email-routing-rule.write",
             "email-routing-address.write",
             "zone-settings.write"
@@ -1346,6 +1349,7 @@ fn linking_a_cloudflare_account() {
             "secrets",
             "data",
             "data backup",
+            "data-ingest-backblaze-runtime",
             "data-email",
             "data-email",
             "data-email"
@@ -1643,6 +1647,7 @@ fn backblaze_ingest_stays_inside_the_approved_source() {
         region: "us-west-004".into(),
         bucket: "ArchiveBucket".into(),
         prefix: "export/".into(),
+        runtime: None,
     };
     assert_eq!(
         source.bind(Some("export/2024/")).unwrap(),
@@ -1733,4 +1738,110 @@ fn backblaze_ingest_uses_the_current_scoped_tools_and_record_layout() {
             .is_err()
     );
     assert!(scope.bind("ingest_plan", &json!({})).is_err());
+}
+
+#[test]
+fn data_ingest_provisioning_binds_only_the_reviewed_image_and_class() {
+    use pigeon_capabilities::instances::data_ingest_runtime::{application_name, bind};
+    use pigeon_ingest::container_job::Runtime;
+
+    let pinned = Runtime {
+        image: format!(
+            "registry.cloudflare.com/{}/pigeon-ingest-runner@sha256:{}",
+            "a".repeat(32),
+            "f".repeat(64)
+        ),
+        revision: "b".repeat(40),
+    };
+    let mut metadata = json!({
+        "main_module": "data-worker.js",
+        "bindings": [{"type": "r2_bucket", "name": "DATA", "bucket_name": "test-data"}],
+    });
+    bind(
+        &mut metadata,
+        "test-data",
+        "https://platform.pigeon.dev",
+        &pinned,
+        None,
+    );
+    assert_eq!(
+        metadata["containers"],
+        json!([{
+            "name": "test-data-ingest", "class_name": "IngestJob", "images": {"ingest": pinned.image},
+        }])
+    );
+    assert_eq!(metadata["bindings"][0]["name"], "DATA");
+    assert_eq!(
+        metadata["bindings"][1],
+        json!({
+            "type": "durable_object_namespace", "name": "INGEST_JOB", "class_name": "IngestJob",
+        })
+    );
+    assert_eq!(metadata["bindings"][2]["text"], pinned.revision);
+    assert_eq!(
+        metadata["bindings"][3]["text"],
+        "https://platform.pigeon.dev"
+    );
+    assert!(metadata["migrations"].is_null());
+    assert!(application_name(&"a".repeat(63)).len() <= 63);
+    assert_ne!(
+        application_name(&"a".repeat(63)),
+        application_name(&format!("{}b", "a".repeat(62)))
+    );
+}
+
+#[test]
+fn linked_data_ingest_plan_retries_attachment_without_losing_worker_ownership() {
+    use pigeon_capabilities::instances::data_plan::{SeenData, data_steps};
+    use pigeon_capabilities::instances::plan::{Ledger, Step, record};
+    use pigeon_capabilities::instances::record::Instance;
+
+    let account = "a".repeat(32);
+    let image = format!(
+        "registry.cloudflare.com/{account}/pigeon-ingest-runner@sha256:{}",
+        "f".repeat(64)
+    );
+    let instance: Instance = serde_json::from_value(json!({
+        "id": "example",
+        "title": "Example",
+        "account": {"kind": "linked", "account_id": account},
+        "data": {"ingest": {"backblaze": {
+            "name": "archive", "region": "us-west-004", "bucket": "archive-example",
+            "runtime": {"image": image, "revision": "b".repeat(40)},
+        }}},
+    }))
+    .unwrap();
+    let mut seen = SeenData {
+        artifact: Some("worker-build".into()),
+        ..Default::default()
+    };
+    let mut ledger = Ledger::default();
+    let steps = data_steps(&instance, &seen, &ledger, None);
+    let upload = steps
+        .iter()
+        .find(|step| {
+            matches!(step, Step::UploadDataWorker {
+        ingest_runtime: Some(runtime), replaces: false, ..
+    } if runtime.image == image)
+        })
+        .unwrap();
+    record(&mut ledger, upload);
+    seen.worker_exists = true;
+    let upload_needed = |seen: &SeenData| {
+        data_steps(&instance, seen, &ledger, None)
+            .iter()
+            .any(|step| {
+                matches!(
+                    step,
+                    Step::UploadDataWorker {
+                        ingest_runtime: Some(_),
+                        replaces: true,
+                        ..
+                    }
+                )
+            })
+    };
+    assert!(upload_needed(&seen));
+    seen.ingest_container = true;
+    assert!(!upload_needed(&seen));
 }

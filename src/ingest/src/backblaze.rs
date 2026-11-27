@@ -14,6 +14,9 @@ pub struct Source {
     pub bucket: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub prefix: String,
+    /// A reviewed digest in the instance account's Cloudflare Containers registry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<crate::container_job::Runtime>,
 }
 
 impl Source {

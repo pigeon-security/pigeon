@@ -12,6 +12,20 @@ pub const MAX_RUNTIME_MS: i64 = 24 * 3_600_000;
 /// Less than the standard-4 container's disk so the binary, filesystem and runtime have room.
 pub const SPOOL_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 
+/// Reviewed runner image and the Git revision used to build that image.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Runtime {
+    pub image: String,
+    pub revision: String,
+}
+
+impl Runtime {
+    pub fn valid_for(&self, account: &str) -> bool {
+        valid_image(&self.image, account) && valid_revision(&self.revision)
+    }
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 pub struct Start {
     #[serde(flatten)]

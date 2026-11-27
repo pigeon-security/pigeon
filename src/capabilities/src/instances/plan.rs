@@ -235,6 +235,8 @@ pub enum Step {
         mail_import: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         mail_import_audit: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ingest_runtime: Option<pigeon_ingest::container_job::Runtime>,
         module: String,
         replaces: bool,
     },
@@ -1342,12 +1344,13 @@ pub fn describe(steps: &[Step]) -> Vec<Value> {
                 bucket,
                 database,
                 backup,
+                ingest_runtime,
                 mail_import,
                 mail_import_audit,
                 replaces,
                 ..
             } => json!(format!(
-                "{} data Worker {name} from build {artifact}, reading bucket {bucket} as DATA and                  D1 {database} as DB{}{}{}, with a new DATA_KEY that core keeps sealed; then turn on                  its workers.dev address for signed Data requests",
+                "{} data Worker {name} from build {artifact}, reading bucket {bucket} as DATA and                  D1 {database} as DB{}{}{}{}, with a new DATA_KEY that core keeps sealed; then turn on                  its workers.dev address for signed Data requests",
                 if *replaces { "update" } else { "upload" },
                 backup
                     .as_deref()
@@ -1356,7 +1359,11 @@ pub fn describe(steps: &[Step]) -> Vec<Value> {
                 if *mail_import { ", authorizing the historical mail importer" } else { "" },
                 mail_import_audit.as_ref()
                     .map(|bucket| format!(", writing its audits to {bucket}"))
-                    .unwrap_or_default()
+                    .unwrap_or_default(),
+                ingest_runtime
+                    .as_ref()
+                    .map(|runtime| format!(", attaching the ingest container pinned to {}", runtime.image))
+                    .unwrap_or_default(),
             )),
             Step::WriteEmailConfig { database, digest } => json!(format!(
                 "write the email handler's configuration (mailboxes and forwarding from the                  record, digest {}) into D1 {database}",

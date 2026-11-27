@@ -7,6 +7,7 @@
 //! can only be listed.
 
 pub mod data_apply;
+pub mod data_ingest_runtime;
 pub mod data_plan;
 pub mod home;
 pub mod home_site;
@@ -876,6 +877,9 @@ impl Instances {
         let backup = crate::data_store::backup(instance);
         if backup.is_some() {
             wanted.extend([crate::data_store::BACKUP_SCOPES, "secrets"]);
+        }
+        if data_ingest_runtime::configured(instance).is_some() {
+            wanted.push(data_ingest_runtime::SCOPE);
         }
         if crate::email::enabled(instance) {
             wanted.push(crate::email::NAME);

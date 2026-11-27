@@ -221,6 +221,13 @@ async fn ready(
             "The Data Worker needs a named ingest container image and the Jobs callback configured.",
         ));
     };
+    if let Some(expected) = crate::instances::data_ingest_runtime::configured(record)
+        && (expected.image != image || expected.revision != revision)
+    {
+        return Err(bad(
+            "The Data Worker does not run the approved Backblaze container. Apply its instance plan first.",
+        ));
+    }
     Ok(Ready {
         execution: Execution {
             account: account.id.clone(),

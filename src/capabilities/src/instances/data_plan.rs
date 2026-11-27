@@ -42,6 +42,8 @@ pub struct SeenData {
     /// The migrations recorded in its `migrations` table.
     pub applied: Vec<String>,
     pub worker_exists: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ingest_container: bool,
     /// The digest of the newest data Worker build pigeon holds, if any.
     pub artifact: Option<String>,
     /// The digest of the email configuration row, if there is one.
@@ -455,6 +457,10 @@ pub fn data_parts(
     let mail_import = crate::data_store::mail_import_enabled(instance);
     let mail_import_audit =
         crate::data_store::mail_import_audit_bucket(instance).map(str::to_string);
+    let ingest_runtime = super::data_ingest_runtime::configured(instance);
+    if ingest_runtime.is_some() && inline {
+        return blocked("Backblaze ingest containers require a standalone Data Worker.".into());
+    }
     match &seen.artifact {
         None => steps.push(Step::Blocked {
             why: format!(
@@ -481,6 +487,15 @@ pub fn data_parts(
                 mail_import,
                 mail_import_audit.as_deref(),
             );
+            let module = match ingest_runtime {
+                Some(runtime) => pigeon_core::oauth::hash(
+                    &json!({
+                        "data_worker": module, "ingest_runtime": runtime,
+                    })
+                    .to_string(),
+                ),
+                None => module,
+            };
             let uploaded = ledger
                 .workers
                 .iter()
@@ -494,15 +509,20 @@ pub fn data_parts(
                 backup: backup.clone(),
                 mail_import,
                 mail_import_audit: mail_import_audit.clone(),
+                ingest_runtime: ingest_runtime.cloned(),
                 module: module.clone(),
                 replaces,
             };
             steps.push(match (seen.worker_exists, uploaded) {
                 (false, _) => upload(false),
-                (true, Some(d)) if d == module => Step::Ok {
-                    what: "data Worker".into(),
-                    name: name.clone(),
-                },
+                (true, Some(d))
+                    if d == module && (ingest_runtime.is_none() || seen.ingest_container) =>
+                {
+                    Step::Ok {
+                        what: "data Worker".into(),
+                        name: name.clone(),
+                    }
+                }
                 (true, Some(_)) => upload(true),
                 (true, None) => Step::Conflict {
                     what: "worker".into(),

@@ -1048,14 +1048,20 @@ name = "historical"
 region = "us-west-004"
 bucket = "example-incoming"
 prefix = "export/"
+
+[data.ingest.backblaze.runtime]
+image = "registry.cloudflare.com/<linked-account-id>/pigeon-ingest-runner@sha256:<image-digest>"
+revision = "<full-Git-revision>"
 ```
 
 Provision the instance's private Data bucket and its separate private Jobs audit bucket first. Use
 a dedicated R2 token with object read and write on the Data bucket for `INGEST_R2_<INSTANCE>`.
 The Cloudflare Container needs the Data Worker's `IngestJob` binding and the matching
 `pigeon-ingest-runner` image pinned to a digest in that instance account's registry.
-`src/data-worker/wrangler.example.toml` shows the runtime bindings. Standard Data instance
-provisioning does not yet attach that container application; review and provision it separately.
+Publish the image with the exact revision as `PIGEON_COMMIT`. Re-link the account with the
+optional Workers Containers Write scope. The instance plan then shows the pinned image and
+prepares it, uploads Data's Worker, and attaches the dedicated SQLite Durable Object container.
+`src/data-worker/wrangler.example.toml` documents the equivalent manual runtime bindings.
 
 On the instance MCP, use `data_ingest_plan` with `source: "backblaze"`. A supplied prefix narrows the
 approved one. Provide the source size if the sample contains more than one page. The default

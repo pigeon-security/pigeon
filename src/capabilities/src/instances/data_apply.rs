@@ -23,6 +23,7 @@ use pigeon_ingest::index::Statement;
 use serde_json::{Value, json};
 use worker::{Env, Error, Method, Result};
 
+use super::data_ingest_runtime;
 use super::data_plan::{self, Artifact, DnsRecord, SeenData, SeenDestination};
 use super::home::Minter;
 use super::plan::{self, Ledger, Step};
@@ -37,7 +38,7 @@ const TOKEN_PURPOSE: &str = "data-home";
 /// How long it lives, in seconds, if revoking it fails.
 const TTL_SECS: u64 = 900;
 
-fn bad(why: impl Into<String>) -> Error {
+pub(super) fn bad(why: impl Into<String>) -> Error {
     Error::RustError(why.into())
 }
 
@@ -110,7 +111,7 @@ fn missing(e: &Error) -> bool {
 }
 
 /// `Ok(Some(v))`, `Ok(None)` when not there, or the error.
-async fn get(token: &str, path: &str) -> Result<Option<Value>> {
+pub(super) async fn get(token: &str, path: &str) -> Result<Option<Value>> {
     match call(token, Method::Get, path, None).await {
         Ok(v) => Ok(Some(v)),
         Err(e) if missing(&e) => Ok(None),
@@ -229,6 +230,9 @@ pub async fn observe(
     )
     .await?
     .is_some();
+    if seen.worker_exists && data_ingest_runtime::configured(instance).is_some() {
+        seen.ingest_container = data_ingest_runtime::installed(token, a, &name).await?;
+    }
     // Only consult optional Queues and Secrets Store scopes on a linked account with backup.
     let backup_read = instance.account == crate::instances::record::AccountRef::Home
         || crate::data_store::settings(instance).is_some_and(|s| s.backup.is_some());
@@ -490,6 +494,7 @@ pub async fn run(
                 backup,
                 mail_import,
                 mail_import_audit,
+                ingest_runtime,
                 ..
             } => {
                 if *mail_import != crate::data_store::mail_import_enabled(instance)
@@ -505,7 +510,27 @@ pub async fn run(
                     .filter(|b| &b.digest == artifact)
                     .ok_or_else(|| bad("the approved build is no longer the newest: plan again"))?;
                 let db = database_id(t, acc, name, &mut database).await?;
-                upload(a, instance, name, built, &db, backup.is_some()).await?;
+                if ingest_runtime.as_ref() != data_ingest_runtime::configured(instance) {
+                    return Err(bad(
+                        "the approved Backblaze container changed, so the Data Worker needs a new plan",
+                    ));
+                }
+                upload(
+                    a,
+                    instance,
+                    name,
+                    built,
+                    &db,
+                    backup.is_some(),
+                    ingest_runtime.as_ref(),
+                )
+                .await?;
+                // Keep Worker ownership even if Cloudflare's container application is not yet
+                // visible. Observe will request the same pinned attachment on the next plan.
+                plan::record(ledger, step);
+                if ingest_runtime.is_some() {
+                    data_ingest_runtime::attach(t, acc, name).await?;
+                }
                 format!("uploaded data Worker {name} (build {artifact})")
             }
             Step::WriteEmailConfig { digest, .. } => {
@@ -910,6 +935,7 @@ async fn upload(
     built: &Artifact,
     database_id: &str,
     backup: bool,
+    ingest_runtime: Option<&pigeon_ingest::container_job::Runtime>,
 ) -> Result<()> {
     let audit_bucket = if (backup && instance.account != crate::instances::record::AccountRef::Home)
         || crate::data_store::mail_import_audit_bucket(instance).is_some()
@@ -946,10 +972,15 @@ async fn upload(
     if let Some(bucket) = audit_bucket {
         data_plan::bind_jobs_audit(&mut metadata, bucket);
     }
+    let (t, acc) = (a.token, a.account_id);
+    if let Some(runtime) = ingest_runtime {
+        let origin = format!("https://{}", a.env.var("PLATFORM_HOST")?);
+        let migration = data_ingest_runtime::prepare(t, acc, name, runtime).await?;
+        data_ingest_runtime::bind(&mut metadata, name, &origin, runtime, migration);
+    }
     let boundary = pigeon_core::workers::boundary_from(&pigeon_core::webauthn::random()?);
     let body = data_plan::multipart(&boundary, &metadata, &parts);
     let ctype = pigeon_core::workers::content_type(&boundary);
-    let (t, acc) = (a.token, a.account_id);
     call_raw(
         t,
         Method::Put,
