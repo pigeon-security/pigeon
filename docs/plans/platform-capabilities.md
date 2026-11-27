@@ -1,6 +1,6 @@
 # Platform capabilities in the catalogue
 
-Status: **in progress** (branch `claude/platform-caps`). The phase table below is kept current.
+Status: **landed** (`claude/platform-caps`, landing `JzEsLrSUba2lHjnz`).
 
 ## Goal
 
@@ -94,7 +94,7 @@ profile, not the `site` capability, which is pigeon's public apex alone.
 
 | Phase | What | Branch | State |
 |---|---|---|---|
-| 1 | Plan (this doc), catalogue entries, `default` and `about`, refusal of a listed `always` entry, console and iOS groups, fixture, smoke `platform_capabilities_catalogued` | `claude/platform-caps` | landing |
+| 1 | Plan (this doc), catalogue entries, `default` and `about`, refusal of a listed `always` entry, console and iOS groups, fixture, smoke `platform_capabilities_catalogued` | `claude/platform-caps` | landed (`JzEsLrSUba2lHjnz`), verified live |
 
 Nothing here needs the person's passkey: no policy, settings or `ci/` change, and no record
 change.
