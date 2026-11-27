@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use worker::{Env, Error, Result};
 
+use crate::catalogue::Placement;
 use crate::instances::record::{AccountRef, CapabilitySettings, Instance};
 use crate::users::directory;
 
@@ -38,6 +39,74 @@ pub fn settings(record: &Instance) -> Option<&CapabilitySettings> {
 /// Whether the record enables the data store.
 pub fn enabled(record: &Instance) -> bool {
     settings(record).is_some()
+}
+
+/// Whether capability `name` is planned by the data plan (`instances::data_plan`), never by
+/// the capability Workers' (M5) steps: `data` and `email`, which runs in the data store's Worker.
+pub fn planned_apart(name: &str) -> bool {
+    name == NAME || name == crate::email::NAME
+}
+
+/// Where the data store runs for `record` (docs/plans/linked-data.md): on home in its own
+/// Worker, `pigeon-data`, always; on a linked instance what its record says, `own_worker`
+/// unless set.
+pub fn placement(record: &Instance) -> Placement {
+    if record.account == AccountRef::Home {
+        return Placement::OwnWorker;
+    }
+    settings(record)
+        .and_then(|s| s.placement)
+        .unwrap_or(Placement::OwnWorker)
+}
+
+/// Whether the store runs inline, in the instance's own Worker (a linked instance only).
+pub fn inline(record: &Instance) -> bool {
+    placement(record) == Placement::Inline
+}
+
+/// The Worker that runs the store, receives the zone's mail and answers `/data/call`: the
+/// store's own (`{instance}-data`, `pigeon-data` on home), or inline the instance's Worker
+/// (`None` when the record names none).
+pub fn worker(record: &Instance) -> Option<String> {
+    match placement(record) {
+        Placement::OwnWorker => Some(store_name(record)),
+        Placement::Inline => record.worker.clone(),
+    }
+}
+
+/// What is wrong with where `record` places the store and its mail: inline without an instance
+/// Worker; `email` placed anywhere but where `data` runs; a backup on a linked instance, which
+/// is not built yet.
+pub fn placement_problems(record: &Instance) -> Vec<String> {
+    let mut out = Vec::new();
+    let Some(s) = settings(record) else {
+        return out;
+    };
+    if inline(record) && record.worker.is_none() {
+        out.push(
+            "The data store runs inline in the instance's own Worker, and the record names \
+             none: choose own_worker, or give the instance a worker."
+                .into(),
+        );
+    }
+    if let Some(e) = crate::email::settings(record)
+        && let Some(p) = e.placement
+        && p != placement(record)
+    {
+        out.push(format!(
+            "Email runs where the data store runs ({}): leave its placement out, or make it \
+             the same.",
+            placement(record).as_str()
+        ));
+    }
+    if record.account != AccountRef::Home && s.backup.is_some() {
+        out.push(
+            "The data store's B2 backup is not built for a linked instance yet: leave \
+             [capabilities.data.backup] out."
+                .into(),
+        );
+    }
+    out
 }
 
 /// The tier the record names, `lite` unless set.
@@ -130,20 +199,14 @@ fn bad(why: impl Into<String>) -> Error {
 }
 
 /// The data Worker's URL and key for `record`, after data-worker.md decision 3's checks in
-/// order: the record enables the store; the account is reachable (home always; a linked
-/// account is not built for the lite tier); the Worker has been deployed (its key and URL are
-/// in the Directory).
+/// order: the record enables the store; the Worker has been deployed (its key and URL are in
+/// the Directory). Either placement (docs/plans/linked-data.md) keeps the same two settings:
+/// the URL is the workers.dev address of whichever Worker runs the store.
 pub async fn reach(env: &Env, record: &Instance) -> Result<(String, String)> {
     let id = &record.id;
     if !enabled(record) {
         return Err(bad(format!(
             "the data store is not set up for {id}. {SETUP}"
-        )));
-    }
-    if record.account != AccountRef::Home {
-        return Err(bad(format!(
-            "the data store of linked instance {id} is not built yet: the lite tier is the home \
-             instance's"
         )));
     }
     let setting = |k: String| async move {

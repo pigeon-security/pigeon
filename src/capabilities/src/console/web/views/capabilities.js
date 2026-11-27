@@ -151,14 +151,25 @@
       what: "Connect the instance to one DigitalOcean team",
       effect: "Approves the expected team for this instance. Set and verify the token separately with a passkey.",
     },
+    data: {
+      what: "Keep this instance’s data store (an R2 bucket, a D1 database and the Worker that runs it)",
+      effect: "The next instance plan creates them; Separate Worker runs it as {instance}-data, Inline inside the instance’s own Worker.",
+    },
+    email: {
+      adds: ["Email › Mailboxes"], what: "Receive every address of the instance’s zone into its data store",
+      effect: "The next instance plan shows each DNS record Email Routing adds or removes before your passkey.",
+    },
     secrets: { adds: ["Access › Secrets"], what: "List the secrets in this instance’s own Cloudflare account (its Secrets Store)" },
   };
   function catalogueCaps(versions, home) {
     return (versions?.catalogue || []).filter((e) => (home ? e.opt_in : e.linked) && !e.always && e.name !== "redirects").map((e) => {
       const digitalOcean = e.name === "digitalocean";
       const jobs = e.name === "jobs" && !home;
-      const configurable = !home && (e.placements || []).includes("own_worker");
+      // Email runs where the data store runs (docs/plans/linked-data.md): only `data` chooses.
+      const configurable = !home && e.name !== "email" && (e.placements || []).includes("own_worker");
       const choices = versions.linked_placement_choices?.[e.name] || ["inline"];
+      // The data store's own Worker is its default on a linked instance; every other entry's is inline.
+      const placementDefault = e.name === "data" ? "own_worker" : "inline";
       return {
         cap: e.name, field: `capabilities.${e.name}`, component: e.name,
         adds: CATALOGUE_ADDS[e.name]?.adds || [], what: CATALOGUE_ADDS[e.name]?.what || "", effect: CATALOGUE_ADDS[e.name]?.effect,
@@ -166,7 +177,7 @@
         needs: (r) => { if (jobs && !r.account?.account_id) return "a linked Cloudflare account"; const lack = (e.requires || []).filter((q) => !(r.capabilities || {})[q]); return lack.length ? lack.join(", ") : null; },
         current: (r) => {
           const settings = r.capabilities?.[e.name];
-          return { placement: "inline", ...settings, ...(digitalOcean ? {
+          return { placement: placementDefault, ...settings, ...(digitalOcean ? {
             spaces_region: settings?.spaces?.region, spaces_bucket: settings?.spaces?.bucket,
             spaces_prefix: settings?.spaces?.prefix,
             droplet_health: settings?.droplet_health ? "yes" : "no",

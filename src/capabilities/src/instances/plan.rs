@@ -148,6 +148,11 @@ pub enum Step {
         /// redirects; absent otherwise, so plans without them read as before.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         redirects: Option<String>,
+        /// The data store this Worker runs inline (docs/plans/linked-data.md): the data
+        /// Worker's build and the store's names, uploaded beside the site module. Absent
+        /// otherwise, so plans without an inline store read as before.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        data: Option<InlineData>,
     },
     /// Turn on the Worker's workers.dev address, the preview.
     EnableWorkersDev { name: String },
@@ -238,8 +243,14 @@ pub enum Step {
         content: String,
         why: String,
     },
-    /// Turn Email Routing on for a zone: Cloudflare adds its MX, SPF and DKIM records.
-    EnableEmailRouting { zone: String, zone_id: String },
+    /// Turn Email Routing on for a zone: Cloudflare adds its MX, SPF and DKIM records, each
+    /// listed in `adds` as Cloudflare names them (absent when it named none).
+    EnableEmailRouting {
+        zone: String,
+        zone_id: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        adds: Vec<String>,
+    },
     /// Point the zone's catch-all rule at the data Worker.
     SetCatchAll {
         zone: String,
@@ -248,6 +259,44 @@ pub enum Step {
     },
     /// Add a forward destination address to the account; Cloudflare emails it a link.
     AddDestination { email: String },
+}
+
+/// The data store an instance Worker runs inline (docs/plans/linked-data.md): the data
+/// Worker's build (`artifact`, its digest), its bucket, D1 database and backup bucket.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct InlineData {
+    pub artifact: String,
+    pub bucket: String,
+    pub database: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup: Option<String>,
+}
+
+/// The module that composes the instance Worker with an inline data store: the site module and
+/// the data Worker's build behind one `fetch`, `email` and `queue`.
+pub const DATA_INLINE_MODULE: &str = include_str!("data_inline.js");
+
+/// The composing module for a data build whose main module is `main` (such as `index.js`).
+pub fn data_inline_module(main: &str) -> String {
+    DATA_INLINE_MODULE.replace("\"./index.js\"", &format!("\"./{main}\""))
+}
+
+/// The digest of what is uploaded as the instance Worker once an inline data store is added:
+/// `module` as it is when there is none, so every other instance keeps its digest.
+pub fn with_inline(module: &str, data: Option<&InlineData>) -> String {
+    match data {
+        None => module.to_string(),
+        Some(d) => pigeon_core::oauth::hash(
+            &json!({
+                "module": module,
+                "data_module": DATA_INLINE_MODULE,
+                "data": d,
+                "bindings": ["DATA", "DB", "INSTANCE", "DATA_KEY"],
+                "compatibility_date": COMPATIBILITY_DATE,
+            })
+            .to_string(),
+        ),
+    }
 }
 
 fn is_public(protected: &bool) -> bool {
@@ -474,8 +523,21 @@ pub fn plan(
     ledger: &Ledger,
     owned: Option<&PlatformOwned>,
 ) -> Vec<Step> {
+    plan_with(instance, seen, ledger, owned, None)
+}
+
+/// [`plan`], with the data store the instance Worker runs inline (`data_plan::inline`): its
+/// upload carries the store, and its workers.dev address is turned on, which core reaches the
+/// store at. Never for home, whose Worker is the platform's.
+pub fn plan_with(
+    instance: &Instance,
+    seen: &Observed,
+    ledger: &Ledger,
+    owned: Option<&PlatformOwned>,
+    data: Option<&InlineData>,
+) -> Vec<Step> {
     if instance.account != AccountRef::Home {
-        return wanted(instance, seen, ledger, None);
+        return wanted(instance, seen, ledger, None, data);
     }
     let Some(owned) = owned else {
         return vec![Step::Blocked {
@@ -483,7 +545,7 @@ pub fn plan(
                 .into(),
         }];
     };
-    wanted(instance, seen, ledger, Some(owned))
+    wanted(instance, seen, ledger, Some(owned), None)
         .into_iter()
         .map(|s| guard(s, owned))
         .collect()
@@ -496,6 +558,7 @@ fn wanted(
     seen: &Observed,
     ledger: &Ledger,
     owned: Option<&PlatformOwned>,
+    data: Option<&InlineData>,
 ) -> Vec<Step> {
     let Some(worker) = instance.worker.as_deref() else {
         return Vec::new();
@@ -503,7 +566,7 @@ fn wanted(
     let redirects = super::redirects::config(instance);
     let Some(site) = instance.sites.first() else {
         return match redirects {
-            Some(map) => redirect_only(instance, worker, map, seen, ledger, owned),
+            Some(map) => redirect_only(instance, worker, map, seen, ledger, owned, data),
             None => Vec::new(),
         };
     };
@@ -575,6 +638,7 @@ fn wanted(
     };
     let module = with_redirects(Some(&module), redirects.as_deref());
     let module = with_services(&module, &services(instance));
+    let module = with_inline(&module, data);
     let uploaded = ledger
         .workers
         .iter()
@@ -589,6 +653,7 @@ fn wanted(
             replaces: false,
             origin: origin.clone(),
             redirects: redirects.clone(),
+            data: data.cloned(),
         },
         (true, Some(d)) if d == module => Step::Ok {
             what: "worker".into(),
@@ -602,6 +667,7 @@ fn wanted(
             replaces: true,
             origin,
             redirects: redirects.clone(),
+            data: data.cloned(),
         },
         (true, None) => Step::Conflict {
             what: "worker".into(),
@@ -614,21 +680,8 @@ fn wanted(
         .targets
         .iter()
         .any(|t| matches!(t, super::record::Target::Preview));
-    if previews || protected {
-        steps.push(match (&seen.account_subdomain, seen.workers_dev) {
-            (None, _) => Step::Blocked {
-                why: "the account has no workers.dev subdomain yet: the person picks one in the \
-                      dashboard (Workers & Pages, then the subdomain), once"
-                    .into(),
-            },
-            (Some(_), Some(true)) => Step::Ok {
-                what: "workers.dev".into(),
-                name: worker.into(),
-            },
-            (Some(_), _) => Step::EnableWorkersDev {
-                name: worker.into(),
-            },
-        });
+    if previews || protected || data.is_some() {
+        steps.push(workers_dev(seen, worker));
     }
     for target in &site.targets {
         let super::record::Target::Domain { hostname } = target else {
@@ -777,6 +830,7 @@ fn redirect_only(
     seen: &Observed,
     ledger: &Ledger,
     owned: Option<&PlatformOwned>,
+    data: Option<&InlineData>,
 ) -> Vec<Step> {
     if owned.is_some() {
         return vec![Step::Blocked {
@@ -785,6 +839,7 @@ fn redirect_only(
     }
     let module = with_redirects(None, Some(&map));
     let module = with_services(&module, &services(instance));
+    let module = with_inline(&module, data);
     let uploaded = ledger
         .workers
         .iter()
@@ -798,6 +853,7 @@ fn redirect_only(
         replaces,
         origin: None,
         redirects: Some(map.clone()),
+        data: data.cloned(),
     };
     let mut steps = vec![match (seen.worker_exists, uploaded) {
         (false, _) => upload(false),
@@ -812,8 +868,30 @@ fn redirect_only(
             why: "a Worker with this name exists, and pigeon did not upload it".into(),
         },
     }];
+    if data.is_some() {
+        steps.push(workers_dev(seen, worker));
+    }
     steps.extend(redirect_domains(instance, worker, seen, owned));
     steps
+}
+
+/// The workers.dev step of `worker`: on, to be turned on, or blocked on the account's
+/// subdomain.
+fn workers_dev(seen: &Observed, worker: &str) -> Step {
+    match (&seen.account_subdomain, seen.workers_dev) {
+        (None, _) => Step::Blocked {
+            why: "the account has no workers.dev subdomain yet: the person picks one in the \
+                  dashboard (Workers & Pages, then the subdomain), once"
+                .into(),
+        },
+        (Some(_), Some(true)) => Step::Ok {
+            what: "workers.dev".into(),
+            name: worker.into(),
+        },
+        (Some(_), _) => Step::EnableWorkersDev {
+            name: worker.into(),
+        },
+    }
 }
 
 /// What the plan says about redirects beside its steps: that removing one detaches nothing.
@@ -905,6 +983,7 @@ pub fn services_with(instance: &Instance, builds: &[LinkedWorker]) -> Vec<(Strin
         .capabilities
         .iter()
         .filter(|(_, s)| s.placement == Some(crate::catalogue::Placement::OwnWorker))
+        .filter(|(name, _)| !crate::data_store::planned_apart(name))
         .filter_map(|(name, _)| {
             let w = builds.iter().find(|w| w.capability == name)?;
             Some((
@@ -945,7 +1024,9 @@ pub fn capability_workers_with(
     }
     let mut steps = Vec::new();
     for (cap, settings) in &instance.capabilities {
-        if settings.placement != Some(crate::catalogue::Placement::OwnWorker) {
+        if settings.placement != Some(crate::catalogue::Placement::OwnWorker)
+            || crate::data_store::planned_apart(cap)
+        {
             continue;
         }
         let name = crate::catalogue::own_worker_name(&instance.id, cap);
@@ -1001,6 +1082,7 @@ pub fn own_workers(instance: &Instance) -> Vec<String> {
         .capabilities
         .iter()
         .filter(|(_, s)| s.placement == Some(crate::catalogue::Placement::OwnWorker))
+        .filter(|(name, _)| !crate::data_store::planned_apart(name))
         .map(|(name, _)| crate::catalogue::own_worker_name(&instance.id, name))
         .collect()
 }
@@ -1099,8 +1181,22 @@ pub fn describe(steps: &[Step]) -> Vec<Value> {
                 replaces,
                 origin,
                 redirects,
+                data,
                 ..
             } => {
+                let inline = data
+                    .as_ref()
+                    .map(|d| {
+                        format!(
+                            "; it also runs the data store inline: build {}, reading bucket {} \
+                             as DATA and D1 {} as DB, with a new DATA_KEY that core keeps \
+                             sealed; its workers.dev address answers only calls signed with \
+                             that key at /data/call, and its email and queue handlers are the \
+                             data Worker's",
+                            d.artifact, d.bucket, d.database
+                        )
+                    })
+                    .unwrap_or_default();
                 let verb = if *replaces { "update" } else { "upload" };
                 let hosts = redirects
                     .as_deref()
@@ -1114,7 +1210,7 @@ pub fn describe(steps: &[Step]) -> Vec<Value> {
                 match bucket {
                     Some(bucket) => json!(format!(
                         "{verb} {}Worker {name}, reading bucket {bucket} as {SITE_BINDING}; it \
-                         serves the live deploy, or \"nothing deployed yet\" until the first{first}",
+                         serves the live deploy, or \"nothing deployed yet\" until the first{first}{inline}",
                         if origin.is_some() {
                             "authenticated origin "
                         } else {
@@ -1123,7 +1219,7 @@ pub fn describe(steps: &[Step]) -> Vec<Value> {
                     )),
                     None => json!(format!(
                         "{verb} Worker {name}, with no site: it answers only its redirects ({}) \
-                         and 404 for anything else",
+                         and 404 for anything else{inline}",
                         hosts.as_deref().unwrap_or("none")
                     )),
                 }
@@ -1229,6 +1325,10 @@ pub fn describe(steps: &[Step]) -> Vec<Value> {
             } => json!(format!(
                 "stale, to replace: delete {kind} {name} \"{}\" ({why})",
                 content.trim().trim_matches('"')
+            )),
+            Step::EnableEmailRouting { zone, adds, .. } if !adds.is_empty() => json!(format!(
+                "turn on Email Routing for {zone}: Cloudflare then writes these DNS records: {}",
+                adds.join("; ")
             )),
             Step::EnableEmailRouting { zone, .. } => json!(format!(
                 "turn on Email Routing for {zone}: Cloudflare adds its MX records                  (route1-3.mx.cloudflare.net), its SPF and its DKIM"

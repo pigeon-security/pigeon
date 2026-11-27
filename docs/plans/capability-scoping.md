@@ -166,6 +166,10 @@ Built (mechanism only):
   `workers::Binding::Service`, new in core). Its digest changes only when it has one to bind
   (`with_services`), so every current plan is as before.
 - Nothing is planned for home: its Workers are the platform's.
+- `data` and `email` are the exception (2026-11-27, [linked-data.md](linked-data.md)): they
+  offer `inline` or `own_worker` on a linked instance, and the data plan, not this mechanism,
+  uploads their Worker (`{instance}-data`, or the instance Worker composed with the data
+  build); `data_store::planned_apart` keeps them out of `capability_workers` and `services`.
 
 Why no capability uses it yet: `models` and `ai-agents` need builds made for a linked account
 (M4 steps 5 and 6, in the log). `proxy` offers only `inline` in the catalogue: core serves

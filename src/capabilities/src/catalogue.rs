@@ -87,8 +87,6 @@ impl Entry {
 
 const INLINE: &[Placement] = &[Placement::Inline];
 const EITHER: &[Placement] = &[Placement::Inline, Placement::OwnWorker];
-/// Only in a Worker of its own: the instance's data Worker.
-const OWN: &[Placement] = &[Placement::OwnWorker];
 
 /// An instance-scoped capability any instance may have, run inline, needing nothing beside it,
 /// not yet on linked instances: what each entry differs from.
@@ -206,12 +204,14 @@ pub const CATALOGUE: &[Entry] = &[
     },
     // The instance's unified data store, lite tier (docs/plans/email.md): bucket, D1 and data
     // Worker `{instance}-data`, `pigeon-data` on home, made by an instance plan, never by a
-    // landing. Opt-in even on home; not on linked instances yet.
+    // landing. Opt-in even on home. A linked instance chooses (docs/plans/linked-data.md):
+    // `own_worker` (the default) or `inline` in its own Worker; it needs no zone.
     Entry {
         name: crate::data_store::NAME,
-        placements: OWN,
+        placements: EITHER,
         home: Placement::OwnWorker,
         home_worker: Some("pigeon-data"),
+        linked: true,
         opt_in: true,
         ..BASE
     },
@@ -223,13 +223,15 @@ pub const CATALOGUE: &[Entry] = &[
         ..BASE
     },
     // Email › Mailboxes (docs/plans/email.md): mail received through the zone's catch-all into
-    // the data store, so it needs `data` and runs in the data Worker. Opt-in even on home.
+    // the data store, so it needs `data` and a zone, and runs in the Worker that runs the store.
+    // Opt-in even on home.
     Entry {
         name: crate::email::NAME,
-        placements: OWN,
+        placements: EITHER,
         home: Placement::OwnWorker,
         home_worker: Some("pigeon-data"),
         requires: &[crate::data_store::NAME],
+        linked: true,
         opt_in: true,
         ..BASE
     },
@@ -294,12 +296,14 @@ pub fn hosted_enabled(record: &Instance, name: &str) -> bool {
 
 /// The placements a linked instance's record may give a capability: `own_worker` beside
 /// `inline` only where the entry offers it and there is a build of its Worker for a linked
-/// account (`instances::plan::LINKED_WORKERS`, M5). There is none yet, so `inline` alone for
-/// every entry (docs/plans/capability-scoping.md, M5).
+/// account (`instances::plan::LINKED_WORKERS`, M5). There is none yet but the data Worker's,
+/// which the data plan uploads (docs/plans/linked-data.md), so `data` and `email` may choose
+/// and every other entry is `inline` alone (docs/plans/capability-scoping.md, M5).
 pub fn linked_placements(entry: &Entry) -> &'static [Placement] {
-    let built = crate::instances::plan::LINKED_WORKERS
-        .iter()
-        .any(|w| w.capability == entry.name);
+    let built = crate::data_store::planned_apart(entry.name)
+        || crate::instances::plan::LINKED_WORKERS
+            .iter()
+            .any(|w| w.capability == entry.name);
     if built && entry.placements.contains(&Placement::OwnWorker) {
         EITHER
     } else {
@@ -316,6 +320,12 @@ pub fn placement(record: &Instance, name: &str) -> Option<(Placement, Option<Str
     let e = find(name)?;
     if is_home(record) {
         return Some((e.home, e.home_worker.map(str::to_string)));
+    }
+    if crate::data_store::planned_apart(name) {
+        return Some((
+            crate::data_store::placement(record),
+            crate::data_store::worker(record),
+        ));
     }
     let p = record
         .capabilities
@@ -477,6 +487,9 @@ pub fn problems(record: &Instance) -> Vec<String> {
             name,
             &record.capabilities[name],
         ));
+        if name == crate::data_store::NAME {
+            out.extend(crate::data_store::placement_problems(record));
+        }
         out.extend(crate::email::field_problems(
             record,
             name,

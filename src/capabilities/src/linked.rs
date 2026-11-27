@@ -62,11 +62,37 @@ pub struct CapabilityScope {
 /// the consent screen; a link made before one was added, or that declined it, lacks it, and the
 /// capability then refuses with "re-link to enable" ([`capability_refusal`]) rather than fail
 /// inside Cloudflare.
-pub const CAPABILITY_SCOPES: &[CapabilityScope] = &[CapabilityScope {
-    capability: "secrets",
-    permission: "Secrets Store Write",
-    scope: "secrets-store.write",
-}];
+pub const CAPABILITY_SCOPES: &[CapabilityScope] = &[
+    CapabilityScope {
+        capability: "secrets",
+        permission: "Secrets Store Write",
+        scope: "secrets-store.write",
+    },
+    // The data store's D1 database (docs/plans/linked-data.md, decision 9); its bucket and
+    // Worker need only the base scopes.
+    CapabilityScope {
+        capability: crate::data_store::NAME,
+        permission: "D1 Write",
+        scope: "d1.write",
+    },
+    // Email Routing on the instance's zone: the catch-all rule, the forward destinations and
+    // turning routing on. Its DNS review needs only the base DNS Write.
+    CapabilityScope {
+        capability: crate::email::NAME,
+        permission: "Email Routing Rules Write",
+        scope: "email-routing-rule.write",
+    },
+    CapabilityScope {
+        capability: crate::email::NAME,
+        permission: "Email Routing Addresses Write",
+        scope: "email-routing-address.write",
+    },
+    CapabilityScope {
+        capability: crate::email::NAME,
+        permission: "Zone Settings Write",
+        scope: "zone-settings.write",
+    },
+];
 
 /// Every permission the client asks for: [`PERMISSIONS`], then each capability's
 /// ([`CAPABILITY_SCOPES`]).

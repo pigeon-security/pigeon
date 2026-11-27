@@ -698,6 +698,8 @@ const LINKED_SO_FAR: &[&str] = &[
     "digitalocean",
     "mcp-federation",
     "jobs",
+    "data",
+    "email",
 ];
 
 /// The capability catalogue (docs/plans/capability-scoping.md): each capability's placement,
@@ -824,10 +826,11 @@ fn capability_catalogue_as_decided() {
             Availability::Any,
             &[],
         ),
-        // The unified data store and email (docs/plans/email.md): in the data Worker alone.
+        // The unified data store and email (docs/plans/email.md): in the data Worker on home;
+        // a linked instance chooses inline or its own Worker (docs/plans/linked-data.md).
         (
             "data",
-            false,
+            true,
             Placement::OwnWorker,
             Some("pigeon-data"),
             Scope::Instance,
@@ -836,7 +839,7 @@ fn capability_catalogue_as_decided() {
         ),
         (
             "email",
-            false,
+            true,
             Placement::OwnWorker,
             Some("pigeon-data"),
             Scope::Instance,
@@ -1165,7 +1168,8 @@ fn secrets_on_a_linked_instance() {
     assert!(js.contains("ctx.op(\"secrets_list\", { instance: ctx.instance.id })"));
 
     // The scope: granted, not granted, or not reported.
-    let full = "account-settings.read zone.read secrets-store.write offline_access";
+    let full = "account-settings.read zone.read secrets-store.write d1.write \
+                email-routing-rule.write email-routing-address.write zone-settings.write offline_access";
     let old = "account-settings.read zone.read dns.write offline_access";
     assert_eq!(grants(Some(full), "secrets-store.write"), Some(true));
     assert_eq!(grants(Some(old), "secrets-store.write"), Some(false));
@@ -1180,7 +1184,7 @@ fn secrets_on_a_linked_instance() {
          secrets needs: re-link docs (Instances › docs › Overview, Link) and allow it, to enable \
          secrets."
     );
-    assert_eq!(relink_for(Some(old)), ["secrets"]);
+    assert_eq!(relink_for(Some(old)), ["secrets", "data", "email"]);
     assert!(relink_for(Some(full)).is_empty() && relink_for(None).is_empty());
     // Cloudflare's refusal of an older link reads as "re-link", never as a bare 403.
     let refused = explain("docs", "secrets", "Cloudflare API: 403: Unauthorized");
@@ -1281,10 +1285,21 @@ fn own_worker_placement_on_a_linked_instance() {
     };
     use pigeon_capabilities::instances::record::Instance;
 
-    // Nothing has a linked build, so nothing may be placed in its own Worker off home.
+    // Nothing has a linked build, so nothing may be placed in its own Worker off home, but the
+    // data store and its mail, whose Worker the data plan uploads (docs/plans/linked-data.md).
     assert!(LINKED_WORKERS.is_empty());
     for e in CATALOGUE {
-        assert_eq!(linked_placements(e), [Placement::Inline], "{}", e.name);
+        let either = matches!(e.name, "data" | "email");
+        assert_eq!(
+            linked_placements(e),
+            if either {
+                &[Placement::Inline, Placement::OwnWorker][..]
+            } else {
+                &[Placement::Inline][..]
+            },
+            "{}",
+            e.name
+        );
     }
 
     // A record as validation would refuse today, to drive the mechanism.
@@ -2784,6 +2799,7 @@ fn instance_retire_removes_only_what_pigeon_made() {
             replaces: false,
             origin: None,
             redirects: None,
+            data: None,
         },
         ApplyStep::AttachDomain {
             hostname: "canary.example".into(),
@@ -3622,6 +3638,7 @@ fn home_instance_plans_and_applies_with_a_minted_token() {
             replaces: true,
             origin: None,
             redirects: None,
+            data: None,
         },
         Step::EnableWorkersDev {
             name: "landing".into(),
@@ -5799,5 +5816,377 @@ fn digitalocean_droplet_plan_is_opted_in_and_passkey_bound() {
         cancel
             .change(&json!({"run":"../../random"}), Step::Finish)
             .is_err()
+    );
+}
+
+/// The data store and email on linked instances (docs/plans/linked-data.md): pigeon.dev's plan
+/// is as before; willowgraysen runs the store in its own Worker, `willowgraysen-data`, beside
+/// its redirect; noisypigeon runs it inline in its site Worker, whose upload then carries the
+/// data build and turns on workers.dev; the link's scopes are checked first; the Email Routing
+/// records are listed in the plan.
+#[test]
+fn data_and_email_on_linked_instances() {
+    use pigeon_capabilities::catalogue::{Placement, placement, problems};
+    use pigeon_capabilities::instances::data_plan::{
+        DataParts, DnsRecord, SeenData, data_parts, data_refusal, data_steps, routing_adds,
+    };
+    use pigeon_capabilities::instances::plan::{
+        DATA_INLINE_MODULE, InlineData, Ledger, Observed, PlatformOwned, Step, data_inline_module,
+        describe, plan, plan_with, record as ledger_record, with_inline,
+    };
+    use pigeon_capabilities::instances::record::Instance;
+    use pigeon_capabilities::linked::capability_refusal;
+
+    let artifact = "a".repeat(64);
+    let seen_data = SeenData {
+        artifact: Some(artifact.clone()),
+        zone_id: Some("zone1".into()),
+        ..Default::default()
+    };
+    let kinds = |steps: &[Step]| -> Vec<String> {
+        steps
+            .iter()
+            .map(|s| {
+                serde_json::to_value(s).unwrap()["step"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect()
+    };
+
+    // Home, own Worker: the same steps as before, in the same order, none inline.
+    let home: Instance = serde_json::from_value(json!({
+        "id": "pigeon.dev", "title": "pigeon", "account": { "kind": "home" },
+        "zones": ["pigeon.dev"], "worker": "pigeon-platform",
+        "capabilities": { "data": {}, "email": { "addresses": [{ "local": "cloudflare" }] } }
+    }))
+    .unwrap();
+    assert!(problems(&home).is_empty(), "{:?}", problems(&home));
+    let owned = PlatformOwned {
+        workers: vec!["pigeon-platform".into(), "pigeon-sites".into()],
+        hosts: vec!["platform.pigeon.dev".into()],
+        apex: "pigeon.dev".into(),
+    };
+    let parts = data_parts(&home, &seen_data, &Ledger::default(), Some(&owned));
+    assert_eq!(parts.inline, None);
+    let steps = data_steps(&home, &seen_data, &Ledger::default(), Some(&owned));
+    assert_eq!(
+        kinds(&steps),
+        [
+            "create_bucket",
+            "create_database",
+            "migrate",
+            "upload_data_worker",
+            "pending",
+            "write_email_config",
+            "enable_email_routing",
+            "set_catch_all"
+        ]
+    );
+    assert!(
+        steps
+            .iter()
+            .any(|s| matches!(s, Step::UploadDataWorker { name, .. } if name == "pigeon-data"))
+    );
+    assert!(
+        steps
+            .iter()
+            .any(|s| matches!(s, Step::SetCatchAll { worker, .. } if worker == "pigeon-data"))
+    );
+    // Its EnableEmailRouting serialises as before when Cloudflare named no records.
+    let routing = steps
+        .iter()
+        .find(|s| matches!(s, Step::EnableEmailRouting { .. }))
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(routing).unwrap(),
+        json!({ "step": "enable_email_routing", "zone": "pigeon.dev", "zone_id": "zone1" })
+    );
+    assert_eq!(
+        placement(&home, "data"),
+        Some((Placement::OwnWorker, Some("pigeon-data".into())))
+    );
+    assert_eq!(data_refusal(&home, &steps, Some(&owned)), None);
+
+    // willowgraysen: its own Worker, beside its redirect, which is untouched.
+    let willow: Instance = serde_json::from_value(json!({
+        "id": "willowgraysen", "title": "willowgraysen",
+        "account": { "kind": "linked", "account_id": "3fc9b528b7f9675254a15660a9ac78ed" },
+        "zones": ["willowgraysen.com"], "worker": "willowgraysen",
+        "redirects": [{ "host": "willowgraysen.com", "to": "https://noisypigeon.com" }],
+        "capabilities": { "data": { "placement": "own_worker" }, "email": {} }
+    }))
+    .unwrap();
+    assert!(problems(&willow).is_empty(), "{:?}", problems(&willow));
+    assert_eq!(
+        placement(&willow, "data"),
+        Some((Placement::OwnWorker, Some("willowgraysen-data".into())))
+    );
+    assert_eq!(
+        placement(&willow, "email"),
+        Some((Placement::OwnWorker, Some("willowgraysen-data".into())))
+    );
+    let parts = data_parts(&willow, &seen_data, &Ledger::default(), None);
+    assert_eq!(parts.inline, None);
+    assert!(parts.store.iter().any(
+        |s| matches!(s, Step::UploadDataWorker { name, bucket, database, .. }
+            if name == "willowgraysen-data" && bucket == name && database == name)
+    ));
+    assert!(
+        parts
+            .rest
+            .iter()
+            .any(|s| matches!(s, Step::SetCatchAll { worker, zone, .. }
+            if worker == "willowgraysen-data" && zone == "willowgraysen.com"))
+    );
+    assert_eq!(
+        data_refusal(
+            &willow,
+            &[parts.store.clone(), parts.rest.clone()].concat(),
+            None
+        ),
+        None
+    );
+    // No placement means its own Worker on a linked instance.
+    let mut unset = willow.clone();
+    unset.capabilities.get_mut("data").unwrap().placement = None;
+    assert_eq!(
+        data_parts(&unset, &seen_data, &Ledger::default(), None),
+        parts
+    );
+    // The site Worker's plan is the redirect's as before: no data rides on it.
+    let observed = Observed {
+        account_id: "3fc9b528b7f9675254a15660a9ac78ed".into(),
+        bucket_exists: false,
+        worker_exists: false,
+        workers_dev: None,
+        account_subdomain: Some("willow".into()),
+        domains: vec![],
+        subdomains: vec![],
+    };
+    assert_eq!(
+        plan_with(&willow, &observed, &Ledger::default(), None, None),
+        plan(&willow, &observed, &Ledger::default(), None)
+    );
+
+    // noisypigeon: inline in its site Worker.
+    let noisy: Instance = serde_json::from_value(json!({
+        "id": "noisypigeon", "title": "noisypigeon",
+        "account": { "kind": "linked", "account_id": "45017763d00a05ee9ff3aaaa15f05145" },
+        "zones": ["noisypigeon.com"], "worker": "noisypigeon",
+        "sites": [{ "name": "blog", "bucket": "noisypigeon-site", "jurisdiction": "eu",
+            "targets": [{ "kind": "domain", "hostname": "noisypigeon.com" }] }],
+        "capabilities": { "data": { "placement": "inline" }, "email": {} }
+    }))
+    .unwrap();
+    assert!(problems(&noisy).is_empty(), "{:?}", problems(&noisy));
+    assert_eq!(
+        placement(&noisy, "data"),
+        Some((Placement::Inline, Some("noisypigeon".into())))
+    );
+    let parts = data_parts(&noisy, &seen_data, &Ledger::default(), None);
+    let inline = InlineData {
+        artifact: artifact.clone(),
+        bucket: "noisypigeon-data".into(),
+        database: "noisypigeon-data".into(),
+        backup: None,
+    };
+    assert_eq!(parts.inline.as_ref(), Some(&inline));
+    assert_eq!(
+        kinds(&parts.store),
+        ["create_bucket", "create_database", "migrate"]
+    );
+    assert!(
+        parts
+            .rest
+            .iter()
+            .any(|s| matches!(s, Step::SetCatchAll { worker, .. } if worker == "noisypigeon"))
+    );
+    let observed = Observed {
+        account_id: "45017763d00a05ee9ff3aaaa15f05145".into(),
+        account_subdomain: Some("noisy".into()),
+        ..observed.clone()
+    };
+    let plain = plan(&noisy, &observed, &Ledger::default(), None);
+    let steps = plan_with(&noisy, &observed, &Ledger::default(), None, Some(&inline));
+    let module_of = |steps: &[Step]| {
+        steps.iter().find_map(|s| match s {
+            Step::UploadWorker { module, data, .. } => Some((module.clone(), data.clone())),
+            _ => None,
+        })
+    };
+    let (plain_module, plain_data) = module_of(&plain).unwrap();
+    let (module, data) = module_of(&steps).unwrap();
+    assert_eq!(plain_data, None);
+    assert_eq!(data.as_ref(), Some(&inline));
+    assert_eq!(module, with_inline(&plain_module, Some(&inline)));
+    assert_ne!(module, plain_module);
+    assert_eq!(with_inline(&plain_module, None), plain_module);
+    // Core reaches the store at the Worker's workers.dev address, turned on by the plan.
+    assert!(
+        !plain
+            .iter()
+            .any(|s| matches!(s, Step::EnableWorkersDev { .. }))
+    );
+    assert!(
+        steps
+            .iter()
+            .any(|s| matches!(s, Step::EnableWorkersDev { name } if name == "noisypigeon"))
+    );
+    let lines = describe(&steps);
+    assert!(lines.iter().any(|l| {
+        l.as_str()
+            .is_some_and(|l| l.contains("runs the data store inline") && l.contains(&artifact))
+    }));
+    // Once uploaded, it reads back unchanged; a new data build uploads it again.
+    let mut l = Ledger::default();
+    for s in &steps {
+        ledger_record(&mut l, s);
+    }
+    let there = Observed {
+        worker_exists: true,
+        workers_dev: Some(true),
+        ..observed.clone()
+    };
+    assert!(
+        plan_with(&noisy, &there, &l, None, Some(&inline))
+            .iter()
+            .any(|s| matches!(s, Step::Ok { what, name } if what == "worker" && name == "noisypigeon"))
+    );
+    let newer = InlineData {
+        artifact: "b".repeat(64),
+        ..inline.clone()
+    };
+    assert!(
+        plan_with(&noisy, &there, &l, None, Some(&newer))
+            .iter()
+            .any(|s| matches!(s, Step::UploadWorker { replaces: true, .. }))
+    );
+
+    // The composing module: only a POST to /data/call on workers.dev reaches the data Worker.
+    assert!(DATA_INLINE_MODULE.contains("import site from \"./site.js\""));
+    assert!(DATA_INLINE_MODULE.contains("url.pathname === CALL_PATH"));
+    assert!(DATA_INLINE_MODULE.contains("url.hostname.endsWith(\".workers.dev\")"));
+    assert!(DATA_INLINE_MODULE.contains("const CALL_PATH = \"/data/call\""));
+    assert!(data_inline_module("main.js").contains("import data from \"./main.js\""));
+    assert_eq!(data_inline_module("index.js"), DATA_INLINE_MODULE);
+
+    // No zone: no mail; the store alone is allowed, and plans no mail.
+    let sandbox: Instance = serde_json::from_value(json!({
+        "id": "sandbox", "title": "sandbox",
+        "account": { "kind": "linked", "account_id": "7d67b07b54ab07904d28f1b1d0554251" },
+        "zones": [], "worker": "sandbox",
+        "capabilities": { "data": {}, "email": {} }
+    }))
+    .unwrap();
+    assert!(
+        problems(&sandbox)
+            .iter()
+            .any(|p| p.contains("Email needs a domain"))
+    );
+    let mut alone = sandbox.clone();
+    alone.capabilities.remove("email");
+    assert!(problems(&alone).is_empty(), "{:?}", problems(&alone));
+    let DataParts {
+        store,
+        rest,
+        inline: none,
+    } = data_parts(&alone, &seen_data, &Ledger::default(), None);
+    assert!(none.is_none());
+    assert!(
+        store
+            .iter()
+            .any(|s| matches!(s, Step::UploadDataWorker { name, .. } if name == "sandbox-data"))
+    );
+    assert!(!rest.iter().any(|s| matches!(
+        s,
+        Step::EnableEmailRouting { .. } | Step::SetCatchAll { .. } | Step::WriteEmailConfig { .. }
+    )));
+
+    // The link's scopes: today's links grant only the base ones, and are refused with the
+    // scopes named.
+    let today = "account-settings.read zone.read dns.write workers-scripts.write \
+                 workers-routes.write workers-r2.write offline_access";
+    let why = capability_refusal("noisypigeon", "data", Some(today)).unwrap();
+    assert!(why.contains("D1 Write (d1.write)") && why.contains("re-link noisypigeon"));
+    let why = capability_refusal("willowgraysen", "email", Some(today)).unwrap();
+    for scope in [
+        "email-routing-rule.write",
+        "email-routing-address.write",
+        "zone-settings.write",
+    ] {
+        assert!(why.contains(scope), "{why}");
+    }
+    let granted = format!(
+        "{today} d1.write email-routing-rule.write email-routing-address.write zone-settings.write"
+    );
+    assert_eq!(
+        capability_refusal("noisypigeon", "data", Some(&granted)),
+        None
+    );
+    assert_eq!(
+        capability_refusal("noisypigeon", "email", Some(&granted)),
+        None
+    );
+
+    // Every record Email Routing writes is shown: added, already there, or beside a kept one.
+    let rec = |name: &str, kind: &str, content: &str| DnsRecord {
+        id: String::new(),
+        name: name.into(),
+        kind: kind.into(),
+        content: content.into(),
+    };
+    let wanted = [
+        rec(
+            "noisypigeon.com",
+            "MX",
+            "route1.mx.cloudflare.net (priority 13)",
+        ),
+        rec(
+            "noisypigeon.com",
+            "TXT",
+            "v=spf1 include:_spf.mx.cloudflare.net ~all",
+        ),
+        rec(
+            "cf2024-1._domainkey.noisypigeon.com",
+            "TXT",
+            "v=DKIM1; p=abc",
+        ),
+    ];
+    let have = [
+        rec(
+            "cf2024-1._domainkey.noisypigeon.com",
+            "TXT",
+            "\"v=DKIM1; p=abc\"",
+        ),
+        rec("noisypigeon.com", "TXT", "google-site-verification=x"),
+    ];
+    assert_eq!(
+        routing_adds(&wanted, &have),
+        [
+            "add MX noisypigeon.com \"route1.mx.cloudflare.net (priority 13)\"",
+            "add TXT noisypigeon.com \"v=spf1 include:_spf.mx.cloudflare.net ~all\", beside \
+             \"google-site-verification=x\" (kept)",
+            "TXT cf2024-1._domainkey.noisypigeon.com \"v=DKIM1; p=abc\": already there",
+        ]
+    );
+    let with_dns = SeenData {
+        routing_dns: wanted.to_vec(),
+        dns: have.to_vec(),
+        ..seen_data.clone()
+    };
+    let steps = data_steps(&noisy, &with_dns, &Ledger::default(), None);
+    let routing = steps
+        .iter()
+        .find(|s| matches!(s, Step::EnableEmailRouting { .. }))
+        .unwrap();
+    let line = describe(std::slice::from_ref(routing))[0]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        line.contains("add MX noisypigeon.com") && line.contains("already there"),
+        "{line}"
     );
 }

@@ -832,12 +832,78 @@ impl Instances {
         let owned = self.owned(cx, &instance);
         let kept = ledger(env, id).await?;
         let caps = observe_capabilities(env, &account, &instance).await?;
-        // A capability's own Worker first (M5), so the instance Worker can bind it.
+        let data = self.linked_data(cx, &account, &instance, &kept).await?;
+        // A capability's own Worker first (M5), so the instance Worker can bind it; the data
+        // store's bucket, D1 and own Worker before the instance Worker, which may run it inline,
+        // and its mail after (docs/plans/linked-data.md, decision 7).
         let mut steps = plan::capability_workers(&instance, &caps, &kept);
-        steps.extend(plan::plan(&instance, &seen, &kept, owned.as_ref()));
+        steps.extend(data.store);
+        steps.extend(plan::plan_with(
+            &instance,
+            &seen,
+            &kept,
+            owned.as_ref(),
+            data.inline.as_ref(),
+        ));
+        steps.extend(data.rest);
         steps.extend(plan::capability_steps(&instance, &caps));
         let digest = plan::digest(&instance, &account.id, &steps);
         Ok((instance, account, steps, digest))
+    }
+
+    /// A linked instance's data store and email steps (docs/plans/linked-data.md), read with
+    /// its link's token. A link that lacks a scope `data` or `email` needs leaves both alone
+    /// with why (re-link to enable), and the site's steps still apply.
+    async fn linked_data(
+        &self,
+        cx: &Context<'_>,
+        account: &pigeon_core::Account,
+        instance: &Instance,
+        kept: &plan::Ledger,
+    ) -> Result<data_plan::DataParts> {
+        if !crate::data_store::enabled(instance) {
+            return Ok(data_plan::DataParts::default());
+        }
+        let granted = crate::linked::link(cx.env, &instance.id)
+            .await?
+            .and_then(|l| l.scope);
+        let mut wanted = vec![crate::data_store::NAME];
+        if crate::email::enabled(instance) {
+            wanted.push(crate::email::NAME);
+        }
+        let refused: Vec<plan::Step> = wanted
+            .iter()
+            .filter_map(|c| {
+                crate::linked::capability_refusal(&instance.id, c, granted.as_deref()).map(|why| {
+                    plan::Step::Keep {
+                        what: "capability".into(),
+                        name: c.to_string(),
+                        why,
+                    }
+                })
+            })
+            .collect();
+        if !refused.is_empty() {
+            return Ok(data_plan::DataParts {
+                store: refused,
+                ..Default::default()
+            });
+        }
+        let token = account
+            .bearer
+            .as_deref()
+            .ok_or_else(|| bad("the instance's account is not a linked one"))?;
+        let built = data_apply::artifact(cx.account).await?;
+        let seen = data_apply::observe(token, &account.id, "", instance, built.as_ref())
+            .await
+            .map_err(|e| {
+                bad(&crate::linked::explain(
+                    &instance.id,
+                    "data",
+                    &e.to_string(),
+                ))
+            })?;
+        Ok(data_plan::data_parts(instance, &seen, kept, None))
     }
 
     /// What is platform-owned for `instance`: `None` for a linked one.
@@ -879,7 +945,7 @@ impl Instances {
 
     /// The data store's and email's steps for `instance` (`data_plan::data_steps`), read with
     /// a `data_home` token (`data_apply`), and the newest data Worker build. None when the record
-    /// does not enable the store; a linked instance's are not built yet.
+    /// does not enable the store; a linked instance's are `linked_data`'s.
     async fn data_planned(
         &self,
         cx: &Context<'_>,
@@ -891,7 +957,9 @@ impl Instances {
         if instance.account != record::AccountRef::Home {
             return Ok((
                 vec![plan::Step::Blocked {
-                    why: "the data store of a linked instance is not built yet".into(),
+                    why: "a linked instance's data store is planned with its link \
+                          (`linked_data`), not with the home token"
+                        .into(),
                 }],
                 None,
             ));
@@ -1163,6 +1231,11 @@ impl Instances {
                 .await;
         }
         let (instance, account, steps, digest) = self.planned(cx, &id).await?;
+        if let Some(why) = data_plan::data_refusal(&instance, &steps, None) {
+            return Err(bad(&format!(
+                "the plan does not run: {why}. Nothing was changed."
+            )));
+        }
         take(cx, approval_id, &digest, &caller.user.id).await?;
         self.run(cx, &id, &instance, &account, &steps).await
     }
@@ -1180,7 +1253,36 @@ impl Instances {
         use pigeon_core::{r2, workers};
         let mut l = ledger(cx.env, id).await?;
         let mut done = Vec::new();
+        // The data store's build, when a step uploads it (docs/plans/linked-data.md).
+        let built = if steps
+            .iter()
+            .any(|s| matches!(s, plan::Step::UploadDataWorker { .. }))
+        {
+            data_apply::artifact(cx.account).await?
+        } else {
+            None
+        };
         for step in steps.iter().filter(|s| s.changes()) {
+            if data_step(step) {
+                // A linked instance's data and mail steps, with its link's token.
+                let token = account
+                    .bearer
+                    .as_deref()
+                    .ok_or_else(|| bad("the instance's account is not a linked one"))?;
+                let apply = data_apply::Apply {
+                    env: cx.env,
+                    parent: cx.account,
+                    token,
+                    account_id: &account.id,
+                    secrets_store: "",
+                    built: built.as_ref(),
+                };
+                let lines =
+                    data_apply::run(&apply, instance, std::slice::from_ref(step), &mut l).await;
+                keep_ledger(cx.env, id, &l).await?;
+                done.extend(lines?);
+                continue;
+            }
             let outcome = match step {
                 plan::Step::CreateBucket {
                     name, jurisdiction, ..
@@ -1204,6 +1306,7 @@ impl Instances {
                     jurisdiction,
                     origin,
                     redirects,
+                    data,
                     ..
                 } => {
                     let mut bindings = Vec::new();
@@ -1253,9 +1356,34 @@ impl Instances {
                         }
                         None => module,
                     };
-                    workers::upload(account, name, plan::COMPATIBILITY_DATE, &bindings, &module)
-                        .await?;
-                    format!("uploaded Worker {name}")
+                    match data {
+                        // The store inline: the site module beside the data Worker's build.
+                        Some(data) => {
+                            data_apply::upload_inline(&data_apply::Inline {
+                                env: cx.env,
+                                parent: cx.account,
+                                account,
+                                instance,
+                                worker: name,
+                                site: &module,
+                                bindings: &bindings,
+                                data,
+                            })
+                            .await?;
+                            format!("uploaded Worker {name}, with the data store inline")
+                        }
+                        None => {
+                            workers::upload(
+                                account,
+                                name,
+                                plan::COMPATIBILITY_DATE,
+                                &bindings,
+                                &module,
+                            )
+                            .await?;
+                            format!("uploaded Worker {name}")
+                        }
+                    }
                 }
                 plan::Step::EnableWorkersDev { name } => {
                     let url = workers::enable_workers_dev(account, name).await?;
@@ -1321,6 +1449,25 @@ impl Instances {
         }
         Ok(json!({ "instance": id, "done": done }))
     }
+}
+
+/// Whether `step` is one of the data store's or email's (`data_apply::run` applies it). Its
+/// bucket is created as any bucket is.
+fn data_step(step: &plan::Step) -> bool {
+    use plan::Step as S;
+    matches!(
+        step,
+        S::CreateDatabase { .. }
+            | S::Migrate { .. }
+            | S::UploadDataWorker { .. }
+            | S::WriteEmailConfig { .. }
+            | S::CreateQueue { .. }
+            | S::AddBucketNotification { .. }
+            | S::RemoveStaleDns { .. }
+            | S::EnableEmailRouting { .. }
+            | S::SetCatchAll { .. }
+            | S::AddDestination { .. }
+    )
 }
 
 /// Takes plan approval `approval_id` for `caller`, once, if it was approved for `digest`.

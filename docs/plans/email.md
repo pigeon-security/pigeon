@@ -152,8 +152,8 @@ once, recording what pigeon made in the instance's ledger.
 | `AddBucketNotification` | the whole bucket's object-create events → the backup queue | it is there |
 | `Pending` | something only the person can do; shown, does not stop the plan: the B2 key not set, a destination not verified | — |
 | `RemoveStaleDns` | one stale old-provider record, by id, exactly as shown | — |
-| `EnableEmailRouting` | Email Routing on the zone (Cloudflare adds its MX, SPF and DKIM) | enabled |
-| `SetCatchAll` | the zone's catch-all rule → action worker `{instance}-data` | it says so |
+| `EnableEmailRouting` | Email Routing on the zone (Cloudflare adds its MX, SPF and DKIM; each record it names, from `GET /zones/{id}/email/routing/dns`, is listed in the step as added, already there, or added beside a kept record) | enabled |
+| `SetCatchAll` | the zone's catch-all rule → action worker: the Worker that runs the store (`{instance}-data`, `pigeon-data` on home, or the instance's own Worker when the store is inline) | it says so |
 | `AddDestination` | a forward destination address; Cloudflare emails it a link | it exists (then `Pending` until verified) |
 
 **The DNS dry run reads the zone first** (`GET /zones/{id}/dns_records`):
@@ -170,7 +170,9 @@ once, recording what pigeon made in the instance's ledger.
 - **Never deletes anything not shown in the plan**: apply deletes exactly the record ids the
   approved plan names, and the digest check refuses the apply if the zone gave a different plan.
 
-**Credentials.** A linked instance's plan uses its link. The home instance's existing token
+**Credentials.** A linked instance's plan uses its link, which needs D1 Write for `data` and
+Email Routing Rules Write, Email Routing Addresses Write and Zone Settings Write for `email`
+beyond the base scopes ([linked-data.md](linked-data.md), decision 9). The home instance's existing token
 (`instance_home`) holds R2 write and Zone Read, never Workers-scripts write. The data steps on
 home therefore use a second core-only purpose, `data_home` (`split::purpose_permissions`),
 minted for one plan or apply and revoked after: on the account Workers R2 Storage Write, D1
@@ -237,7 +239,8 @@ viewers and up:
 | 6 | Forwarding: destinations, scope, loop guard | built, off |
 | 7 | B2 backup steps and consumer | built, off |
 | 8 | Turn on for pigeon.dev (the person) | waits for the person |
-| later | noisypigeon and willowgraysen (linked; `linked: true` in the catalogue); the full tier | not started |
+| 9 | Linked instances: `data` and `email` on any instance with a zone (data alone needs none), placed `inline` in the instance's Worker or `own_worker` as `{instance}-data`, planned with the link ([linked-data.md](linked-data.md)) | built, off |
+| later | the full tier; B2 backup on linked instances | not started |
 
 ## Follow-ups for the person
 
@@ -286,6 +289,8 @@ viewers and up:
 - 2026-11-26: replaced by the person's design (catch-all on pigeon.dev, listed mailboxes, the
   lite data store, forwarding, B2 backup). Built off by default on `claude/email-capability`;
   no Cloudflare API was called while building.
+- 2026-11-27: linked instances built off ([linked-data.md](linked-data.md)): placement
+  `inline` or `own_worker`, the link's scopes, the Email Routing records listed in the plan.
 - 2026-11-27: follow-up 2 built: the `data-worker` artifact lane and its `data-worker-build`
   job upload the data Worker's build; the deploy proxy lets that lane's grant write only
   `pigeon-data-artifacts`' build objects.

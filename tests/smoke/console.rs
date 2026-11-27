@@ -4147,15 +4147,63 @@ mod email {
             let got = problems(&pigeon_record(extra.clone()));
             assert!(got.iter().any(|p| p.contains(why)), "{extra}: {got:?}");
         }
-        // Not on a linked instance yet.
-        let linked = pigeon_record(
-            json!({ "id": "noisypigeon", "account": { "kind": "linked", "account_id": null },
-            "zones": ["noisypigeon.com"] }),
-        );
+        // On a linked instance with a zone (docs/plans/linked-data.md): either placement, the
+        // store named for the instance, mail on its zone.
+        let linked = |extra: Value| {
+            let mut base = json!({ "id": "noisypigeon", "worker": "noisypigeon",
+                "account": { "kind": "linked", "account_id": null }, "zones": ["noisypigeon.com"] });
+            if let (Some(b), Some(more)) = (base.as_object_mut(), extra.as_object()) {
+                for (k, x) in more {
+                    b.insert(k.clone(), x.clone());
+                }
+            }
+            pigeon_record(base)
+        };
+        for placement in ["inline", "own_worker"] {
+            let r = linked(json!({ "capabilities": {
+                "data": { "placement": placement }, "email": {} } }));
+            assert!(problems(&r).is_empty(), "{placement}: {:?}", problems(&r));
+            assert_eq!(email::config(&r).unwrap().domain, "noisypigeon.com");
+            assert_eq!(
+                pigeon_capabilities::data_store::store_name(&r),
+                "noisypigeon-data"
+            );
+        }
+        for (extra, why) in [
+            // No zone: no mail. Data alone needs none.
+            (
+                json!({ "zones": [], "capabilities": { "data": {}, "email": {} } }),
+                "Email needs a domain",
+            ),
+            // Inline runs in the instance's Worker, which the record must name.
+            (
+                json!({ "worker": null, "capabilities": { "data": { "placement": "inline" } } }),
+                "choose own_worker",
+            ),
+            // Email runs where the store runs.
+            (
+                json!({ "capabilities": { "data": { "placement": "inline" },
+                    "email": { "placement": "own_worker" } } }),
+                "Email runs where the data store runs",
+            ),
+            // No B2 backup on a linked instance yet.
+            (
+                json!({ "capabilities": { "data": { "backup": { "bucket": "b2-bucket",
+                    "endpoint": "https://s3.eu-central-003.backblazeb2.com", "region": "eu-central-003" } } } }),
+                "not built for a linked instance yet",
+            ),
+        ] {
+            let got = problems(&linked(extra.clone()));
+            assert!(got.iter().any(|p| p.contains(why)), "{extra}: {got:?}");
+        }
+        let alone = linked(json!({ "zones": [], "capabilities": { "data": {} } }));
+        assert!(problems(&alone).is_empty(), "{:?}", problems(&alone));
+        // Home's placement stays read-only: its own Worker, pigeon-data.
+        let moved = pigeon_record(json!({ "capabilities": { "data": { "placement": "inline" } } }));
         assert!(
-            problems(&linked)
-                .iter()
-                .any(|p| p.contains("cannot be enabled on a linked instance yet"))
+            problems(&moved).iter().any(|p| p.contains("read-only")),
+            "{:?}",
+            problems(&moved)
         );
         // Off by default: a record without them has neither, and every view and tool is hidden.
         let off = pigeon_record(json!({ "capabilities": {} }));

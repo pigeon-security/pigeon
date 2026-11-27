@@ -1283,11 +1283,26 @@ fn linking_a_cloudflare_account() {
         { "id": "workers-routes.write", "name": "Workers Routes Write" },
         { "id": "r2.write", "name": "Workers R2 Storage Write" },
         { "id": "secrets-store.write", "name": "Secrets Store Write" },
+        { "id": "d1.write", "name": "D1 Write" },
+        { "id": "email-routing-rule.write", "name": "Email Routing Rules Write" },
+        { "id": "email-routing-address.write", "name": "Email Routing Addresses Write" },
+        { "id": "zone-settings.write", "name": "Zone Settings Write" },
         { "id": "zone.write", "name": "Zone Write" }
     ]);
+    // The base scopes, then `secrets`', `data`'s and `email`'s (docs/plans/linked-data.md).
     assert_eq!(
         requested_permissions(),
-        [&PERMISSIONS[..], &["Secrets Store Write"]].concat()
+        [
+            &PERMISSIONS[..],
+            &[
+                "Secrets Store Write",
+                "D1 Write",
+                "Email Routing Rules Write",
+                "Email Routing Addresses Write",
+                "Zone Settings Write"
+            ]
+        ]
+        .concat()
     );
     let (ids, missing) = scope_ids(&listed);
     assert_eq!(ids.len(), requested_permissions().len());
@@ -1307,7 +1322,16 @@ fn linking_a_cloudflare_account() {
         let (ids, _) = scope_ids(&listed);
         assert!(ids.contains(&c.scope.to_string()), "{}", c.scope);
     }
-    assert_eq!(optional_scopes(&ids), ["secrets-store.write"]);
+    assert_eq!(
+        optional_scopes(&ids),
+        [
+            "secrets-store.write",
+            "d1.write",
+            "email-routing-rule.write",
+            "email-routing-address.write",
+            "zone-settings.write"
+        ]
+    );
     // A client registered before the scope was added asks for it on the next linked_setup.
     let before: Vec<String> = ids[..PERMISSIONS.len()].to_vec();
     assert_eq!(
@@ -1315,7 +1339,7 @@ fn linking_a_cloudflare_account() {
             .iter()
             .map(|c| c.capability)
             .collect::<Vec<_>>(),
-        ["secrets"]
+        ["secrets", "data", "email", "email", "email"]
     );
     assert!(scopes_to_add(&ids).is_empty());
 

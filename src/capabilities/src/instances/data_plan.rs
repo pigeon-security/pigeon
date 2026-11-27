@@ -10,7 +10,7 @@ use pigeon_ingest::datastore::{self, EmailConfig};
 use serde::Serialize;
 use serde_json::json;
 
-use super::plan::{Ledger, PlatformOwned, Step};
+use super::plan::{InlineData, Ledger, PlatformOwned, Step};
 use super::record::Instance;
 
 /// One DNS record of the zone, as the account answers it.
@@ -57,6 +57,10 @@ pub struct SeenData {
     /// The zone's records that matter to mail: MX, TXT and `_domainkey` CNAMEs.
     pub dns: Vec<DnsRecord>,
     pub routing_enabled: bool,
+    /// The records Cloudflare says Email Routing adds to the zone when it is turned on (its MX,
+    /// SPF and DKIM), read only while it is off; `content` of an MX carries its priority.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub routing_dns: Vec<DnsRecord>,
     /// The Worker the catch-all rule sends to, when it is enabled with a Worker action.
     pub catch_all: Option<String>,
     /// Whether the catch-all is enabled with some other action (forward, drop).
@@ -148,6 +152,44 @@ pub fn dns_review(zone: &str, records: &[DnsRecord]) -> DnsReview {
     out
 }
 
+/// What turning Email Routing on does to the zone, one line per record Cloudflare names
+/// (`wanted`): added, or already there; beside any record of the same type and name the zone
+/// has (`have`), which stays. Empty when Cloudflare named none.
+pub fn routing_adds(wanted: &[DnsRecord], have: &[DnsRecord]) -> Vec<String> {
+    let same = |a: &str, b: &str| {
+        a.trim().trim_matches('"').trim_end_matches('.')
+            == b.trim().trim_matches('"').trim_end_matches('.')
+    };
+    wanted
+        .iter()
+        .map(|w| {
+            let kind = w.kind.to_ascii_uppercase();
+            let beside: Vec<&DnsRecord> = have
+                .iter()
+                .filter(|h| {
+                    h.kind.eq_ignore_ascii_case(&kind) && h.name.eq_ignore_ascii_case(&w.name)
+                })
+                .collect();
+            let content = w.content.trim().trim_matches('"');
+            if beside.iter().any(|h| same(&h.content, &w.content)) {
+                format!("{kind} {} \"{content}\": already there", w.name)
+            } else if beside.is_empty() {
+                format!("add {kind} {} \"{content}\"", w.name)
+            } else {
+                let kept: Vec<String> = beside
+                    .iter()
+                    .map(|h| format!("\"{}\"", h.content.trim().trim_matches('"')))
+                    .collect();
+                format!(
+                    "add {kind} {} \"{content}\", beside {} (kept)",
+                    w.name,
+                    kept.join(", ")
+                )
+            }
+        })
+        .collect()
+}
+
 /// The digest of what is uploaded as the data Worker: its build and every binding but the
 /// secret's value.
 pub fn data_worker_digest(artifact: &str, name: &str, backup: Option<&str>) -> String {
@@ -219,6 +261,7 @@ fn mail_steps(
         Step::EnableEmailRouting {
             zone: zone.clone(),
             zone_id: zone_id.clone(),
+            adds: routing_adds(&seen.routing_dns, &seen.dns),
         }
     });
     steps.push(match (&seen.catch_all, seen.catch_all_other) {
@@ -275,24 +318,55 @@ pub fn data_steps(
     ledger: &Ledger,
     owned: Option<&PlatformOwned>,
 ) -> Vec<Step> {
+    let mut parts = data_parts(instance, seen, ledger, owned);
+    parts.store.append(&mut parts.rest);
+    parts.store
+}
+
+/// The data plan in the order a linked instance's plan places it (docs/plans/linked-data.md,
+/// decision 7): `store` (bucket, D1, migrations and, in a Worker of its own, its upload) before
+/// the instance Worker's steps, `rest` (backup, email configuration, mail) after them, and the
+/// store `inline` in the instance Worker when the record places it there and there is a build.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DataParts {
+    pub store: Vec<Step>,
+    pub rest: Vec<Step>,
+    pub inline: Option<InlineData>,
+}
+
+/// [`data_steps`] in its [`DataParts`].
+pub fn data_parts(
+    instance: &Instance,
+    seen: &SeenData,
+    ledger: &Ledger,
+    owned: Option<&PlatformOwned>,
+) -> DataParts {
+    let mut parts = DataParts::default();
     let Some(settings) = crate::data_store::settings(instance) else {
-        return Vec::new();
+        return parts;
     };
     let name = crate::data_store::store_name(instance);
+    let blocked = |why: String| DataParts {
+        store: vec![Step::Blocked { why }],
+        ..Default::default()
+    };
     if let Some(t) = settings
         .tier
         .as_deref()
         .filter(|t| *t != datastore::TIER_LITE)
     {
-        return vec![Step::Blocked {
-            why: format!("the data store's tier {t} is not built yet"),
-        }];
+        return blocked(format!("the data store's tier {t} is not built yet"));
     }
     if owned.is_some_and(|o| o.worker(&name)) {
-        return vec![Step::Blocked {
-            why: format!("{name} is {}", super::plan::PLATFORM_OWNED),
-        }];
+        return blocked(format!("{name} is {}", super::plan::PLATFORM_OWNED));
     }
+    let inline = crate::data_store::inline(instance);
+    let Some(worker) = crate::data_store::worker(instance) else {
+        return blocked(
+            "the data store runs inline in the instance's own Worker, and the record names none"
+                .into(),
+        );
+    };
     let mut steps = Vec::new();
     let bucket_ours = ledger.buckets.contains(&name);
     steps.push(match (seen.bucket_exists, bucket_ours) {
@@ -350,6 +424,14 @@ pub fn data_steps(
                  {ARTIFACTS} (docs/plans/email.md, follow-up 2)"
             ),
         }),
+        Some(artifact) if inline => {
+            parts.inline = Some(InlineData {
+                artifact: artifact.clone(),
+                bucket: name.clone(),
+                database: name.clone(),
+                backup: backup.clone(),
+            });
+        }
         Some(artifact) => {
             let module = data_worker_digest(artifact, &name, backup.as_deref());
             let uploaded = ledger
@@ -381,6 +463,8 @@ pub fn data_steps(
             });
         }
     }
+    parts.store = steps;
+    let mut steps = Vec::new();
     // The B2 backup (ingest.md decision 10).
     match &settings.backup {
         None => steps.push(Step::Pending {
@@ -394,7 +478,7 @@ pub fn data_steps(
             let dlq = datastore::backup_dlq(&name);
             for (q, consumer, dead) in [
                 (&dlq, None, None),
-                (&queue, Some(name.clone()), Some(dlq.clone())),
+                (&queue, Some(worker.clone()), Some(dlq.clone())),
             ] {
                 let there = seen.queues.contains(q);
                 steps.push(match (there, ledger.queues.contains(q)) {
@@ -449,9 +533,10 @@ pub fn data_steps(
                 name: name.clone(),
             });
         }
-        mail_steps(&config, &name, seen, ledger, &mut steps);
+        mail_steps(&config, &worker, seen, ledger, &mut steps);
     }
-    steps
+    parts.rest = steps;
+    parts
 }
 
 /// Where the data Worker's builds are kept, in the platform's own account: one folder per

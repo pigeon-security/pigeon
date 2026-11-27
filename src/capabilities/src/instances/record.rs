@@ -139,8 +139,10 @@ pub const REDIRECT_STATUSES: [u16; 4] = [301, 302, 307, 308];
 pub struct CapabilitySettings {
     /// Where the capability runs for this instance: `inline` or `own_worker`, one of the
     /// catalogue's offered placements. On home it is read-only and must say what is deployed
-    /// (`catalogue::Entry::home`); on a linked instance only `inline` is accepted for now.
-    /// Absent: the catalogue's default for the instance (`catalogue::placement`).
+    /// (`catalogue::Entry::home`); on a linked instance what `catalogue::linked_placements`
+    /// offers (`inline` alone, but `data` may also be `own_worker`, and `email` runs where
+    /// `data` does: docs/plans/linked-data.md). Absent: the catalogue's default for the
+    /// instance (`catalogue::placement`; `own_worker` for `data`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement: Option<crate::catalogue::Placement>,
     /// The expected team identifier for the DigitalOcean connection.
