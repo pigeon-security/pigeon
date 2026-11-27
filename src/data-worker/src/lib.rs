@@ -10,30 +10,24 @@
 //! `INGEST_JOB` (the Durable Object, ingest only). It consumes `{instance}-ingest-manifests` and
 //! `{instance}-data-backup`.
 
+mod ingest_job;
 pub mod mail;
 mod mail_import;
 pub mod store;
 
+pub use ingest_job::IngestJob;
 pub use pigeon_ingest;
 
-use pigeon_core::containers::{self, Start};
+use pigeon_ingest::container_job::{self, Start};
 use pigeon_ingest::index;
 use pigeon_ingest::manifest::ManifestLine;
-use pigeon_ingest::protocol::{self, StartRequest, StopRequest};
+use pigeon_ingest::protocol::{self, StopRequest};
 use serde_json::{Value, json};
 use worker::wasm_bindgen::JsValue;
 use worker::{
-    Context, D1PreparedStatement, DurableObject, Env, ForwardableEmailMessage, MessageBatch,
-    MessageExt, Method, Request, RequestInit, Response, Result, State, console_log, event,
-    wasm_bindgen,
+    Context, D1PreparedStatement, Env, ForwardableEmailMessage, MessageBatch, MessageExt, Method,
+    Request, RequestInit, Response, Result, console_log, event,
 };
-
-/// The image's key in the object's `ctx.container.images`.
-const IMAGE: &str = "ingest";
-/// The container's size, decision 13.6.
-const INSTANCE: &str = "standard-4";
-/// The runner's program in the image.
-const RUNNER: &str = "/usr/local/bin/pigeon-ingest-runner";
 
 fn now_ms() -> i64 {
     worker::Date::now().as_millis() as i64
@@ -102,12 +96,26 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
                 Ok(b) => b,
                 Err(denied) => return Ok(denied),
             };
-            let Ok(start) = serde_json::from_slice::<StartRequest>(&body) else {
+            let Ok(start) = serde_json::from_slice::<Start>(&body) else {
                 return json_answer(400, json!({ "error": "not a start request" }));
             };
-            to_job(&env, &start.job.run, "/start", body).await
+            let job = &start.request.job;
+            if !container_job::valid_run(&job.run) {
+                return json_answer(400, json!({ "error": "invalid run id" }));
+            }
+            if start.image_revision.is_some() && job.instance != env.var("INSTANCE")?.to_string() {
+                return json_answer(403, json!({ "error": "run belongs to another instance" }));
+            }
+            to_job(&env, &job.run, "/start", body).await
         }
-        (Method::Post, protocol::STOP_PATH) => {
+        (Method::Post, container_job::READY_PATH) => {
+            let body = match signed_body(&mut req, &env).await? {
+                Ok(b) => b,
+                Err(denied) => return Ok(denied),
+            };
+            to_job(&env, "readiness", "/ready", body).await
+        }
+        (Method::Post, path @ (protocol::STOP_PATH | container_job::STATUS_PATH)) => {
             let body = match signed_body(&mut req, &env).await? {
                 Ok(b) => b,
                 Err(denied) => return Ok(denied),
@@ -115,55 +123,17 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
             let Ok(stop) = serde_json::from_slice::<StopRequest>(&body) else {
                 return json_answer(400, json!({ "error": "not a stop request" }));
             };
-            to_job(&env, &stop.run, "/stop", body).await
+            if !container_job::valid_run(&stop.run) {
+                return json_answer(400, json!({ "error": "invalid run id" }));
+            }
+            let op = if path == protocol::STOP_PATH {
+                "/stop"
+            } else {
+                "/status"
+            };
+            to_job(&env, &stop.run, op, body).await
         }
         _ => json_answer(404, json!({ "error": "not found" })),
-    }
-}
-
-/// One ingest run: the object named by the run, holding its container. It keeps no keys in
-/// storage: they live only in the container's environment.
-#[worker::durable_object]
-pub struct IngestJob {
-    state: State,
-}
-
-impl DurableObject for IngestJob {
-    fn new(state: State, _env: Env) -> Self {
-        Self { state }
-    }
-
-    async fn fetch(&self, mut req: Request) -> Result<Response> {
-        match req.path().as_str() {
-            "/start" => {
-                let Ok(start) = req.json::<StartRequest>().await else {
-                    return json_answer(400, json!({ "error": "not a start request" }));
-                };
-                if containers::running(&self.state) {
-                    return json_answer(202, json!({ "state": "running" }));
-                }
-                let env = protocol::start_env(&start).map_err(|e| fail(e.to_string()))?;
-                let pairs: Vec<(&str, &str)> =
-                    env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-                containers::start(
-                    &self.state,
-                    &Start {
-                        image: IMAGE,
-                        instance: INSTANCE,
-                        env: &pairs,
-                        entrypoint: &[RUNNER],
-                        internet: true,
-                    },
-                )?;
-                containers::keep_for(&self.state, containers::MAX_KEEP_MS).await?;
-                json_answer(202, json!({ "state": "starting" }))
-            }
-            "/stop" => {
-                containers::destroy(&self.state, "stopped by pigeon").await?;
-                json_answer(200, json!({ "state": "stopped" }))
-            }
-            _ => json_answer(404, json!({ "error": "not found" })),
-        }
     }
 }
 

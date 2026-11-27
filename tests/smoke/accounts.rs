@@ -1622,3 +1622,52 @@ fn site_visitor_invites_and_enrolments_need_the_site_allowlist() {
     assert!(allowed(&config(&["owner"]), host, "owner", "standard"));
     assert!(!allowed(&config(&["site"]), host, "owner", "standard"));
 }
+
+#[test]
+fn backblaze_ingest_stays_inside_the_approved_source() {
+    use pigeon_ingest::backblaze::Source;
+    use pigeon_ingest::manifest::SourceSpec;
+
+    let mut source = Source {
+        name: "archive".into(),
+        region: "us-west-004".into(),
+        bucket: "ArchiveBucket".into(),
+        prefix: "export/".into(),
+    };
+    assert_eq!(
+        source.bind(Some("export/2024/")).unwrap(),
+        SourceSpec::S3 {
+            account: "backblaze:archive".into(),
+            endpoint: "https://s3.us-west-004.backblazeb2.com".into(),
+            region: "us-west-004".into(),
+            bucket: "ArchiveBucket".into(),
+            prefix: "export/2024/".into(),
+        }
+    );
+    assert!(source.bind(None).is_ok());
+    assert!(source.bind(Some("")).is_err());
+    assert!(source.bind(Some("export-other/")).is_err());
+    assert!(source.bind(Some("export/\n")).is_err());
+    assert!(
+        source
+            .bind(Some(&format!("export/{}", "a".repeat(1024))))
+            .is_err()
+    );
+    source.region = "us-west-004.backblazeb2.com@bad".into();
+    assert!(source.bind(None).is_err());
+}
+
+#[test]
+fn cloudflare_ingest_runtime_bounds_deadlines_and_run_keys() {
+    use pigeon_ingest::container_job::*;
+
+    assert!(valid_run("20261127-backblaze-archive-c2dfab"));
+    assert!(!valid_run("../../terminal"));
+    assert!(!valid_run(&"a".repeat(97)));
+    assert!(valid_revision(&"a".repeat(40)));
+    assert!(!valid_revision(&"g".repeat(40)));
+    assert!(valid_deadline(1_000, 1_000 + MAX_RUNTIME_MS));
+    assert!(!valid_deadline(1_000, 1_000));
+    assert!(!valid_deadline(1_000, 1_001 + MAX_RUNTIME_MS));
+    assert!(!valid_deadline(i64::MIN, i64::MAX));
+}

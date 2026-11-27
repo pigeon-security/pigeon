@@ -8,6 +8,8 @@
 
 pub mod archive;
 pub mod audit;
+pub mod backblaze;
+pub mod container_job;
 pub mod datastore;
 pub mod decide;
 pub mod engine;

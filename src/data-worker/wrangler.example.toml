@@ -34,14 +34,22 @@ new_sqlite_classes = ["IngestJob"]
 
 [[containers]]
 class_name = "IngestJob"
-image = "../ingest-runner/Dockerfile"
-instance_type = "standard-4"
 scheduling_policy = "durable_object"
+
+# Build src/ingest-runner/Dockerfile from the repository root with
+# --build-arg PIGEON_COMMIT=<commit>; push to this instance account's registry.
+[containers.images.ingest]
+image = "registry.cloudflare.com/{account-id}/pigeon-ingest-runner@sha256:{image-digest}"
+
+[containers.observability]
+enabled = false
 
 # ---- The lite data store (docs/plans/email.md). An instance plan uploads the Worker with these
 # bindings itself (instances::data_plan::worker_metadata); they are listed here for reading only.
 # [vars]
 # INSTANCE = "{instance}"
+# INGEST_IMAGE_REVISION = "{40-character-runner-build-commit}"
+# PIGEON_PLATFORM_ORIGIN = "https://platform.pigeon.dev"
 # BACKUP = '{"endpoint":"https://s3.<region>.backblazeb2.com","region":"<region>","bucket":"pigeon-backup-{store}"}'
 #
 # [[secrets_store_secrets]]
