@@ -1214,6 +1214,11 @@ pub fn digest(instance: &Instance) -> String {
 
 fn flatten(prefix: &str, value: &Value, out: &mut BTreeMap<String, Value>) {
     match value {
+        // An empty object is a value of its own: `capabilities.data = {}` turns a capability on
+        // with every setting at its default, and must show as a change.
+        Value::Object(map) if map.is_empty() && !prefix.is_empty() => {
+            out.insert(prefix.to_string(), value.clone());
+        }
         Value::Object(map) => {
             for (key, child) in map {
                 let path = if prefix.is_empty() {

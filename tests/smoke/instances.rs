@@ -199,6 +199,19 @@ fn instances_are_data_a_person_approves() {
         diff(None, &noisy).len() > 10,
         "a new record lists every value"
     );
+    // A capability turned on with no settings (`{"data": {}}`, every setting at its default)
+    // is a change, not "nothing changes".
+    let mut data_on = noisy.clone();
+    data_on
+        .capabilities
+        .insert("data".into(), serde_json::from_value(json!({})).unwrap());
+    let changes = diff(Some(&noisy), &data_on);
+    assert_eq!(changes.len(), 1, "{changes:?}");
+    assert_eq!(changes[0].path, "capabilities.data");
+    assert_eq!(
+        (changes[0].from.clone(), changes[0].to.clone()),
+        (json!(null), json!({}))
+    );
     assert_ne!(record::digest(&noisy), record::digest(&on));
 
     // An agent's proposal is a draft bound to the record and the version it was made from;
