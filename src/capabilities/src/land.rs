@@ -591,7 +591,7 @@ impl Capability for Land {
 // ---- the Lander ----
 
 /// The Lander's schema, one statement per migration, applied in order and never edited.
-const MIGRATIONS: [&str; 20] = [
+const MIGRATIONS: [&str; 25] = [
     "CREATE TABLE landings (id TEXT PRIMARY KEY, branch TEXT NOT NULL, commit_sha TEXT NOT NULL, main_at TEXT NOT NULL, caller TEXT NOT NULL, by_name TEXT NOT NULL, state TEXT NOT NULL, approval_reason TEXT, approved_by TEXT, awaiting_since INTEGER, test_job TEXT, deploy_job TEXT, tries INTEGER NOT NULL DEFAULT 0, detail TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, finished_at INTEGER, note_pushed INTEGER NOT NULL DEFAULT 0, note_tries INTEGER NOT NULL DEFAULT 0)",
     "CREATE TABLE events (landing TEXT NOT NULL, at INTEGER NOT NULL, state TEXT NOT NULL, detail TEXT)",
     "CREATE TABLE notes (commit_sha TEXT PRIMARY KEY, text TEXT NOT NULL)",
@@ -631,6 +631,16 @@ const MIGRATIONS: [&str; 20] = [
     // AI agent runs that watch a landing, and the events still to tell them (`watch`).
     "CREATE TABLE watchers (landing TEXT, run TEXT, caller TEXT, PRIMARY KEY (landing, run))",
     "CREATE TABLE run_events (id INTEGER PRIMARY KEY AUTOINCREMENT, run TEXT, caller TEXT, text TEXT, tries INTEGER NOT NULL DEFAULT 0, at INTEGER)",
+    // A deploy Cloudflare rate limited: how many times it was deployed again for that, and the
+    // time before which its next job is not submitted (docs/plans/lander-fixes.md, fix 1).
+    "ALTER TABLE deploys ADD COLUMN rate_retries INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE deploys ADD COLUMN not_before INTEGER",
+    // The digest of a landing's change to the guarded paths, and the one its approval was given
+    // for: an approval holds across the Lander's rebase only while they are equal (fix 2).
+    "ALTER TABLE landings ADD COLUMN gate_digest TEXT",
+    "ALTER TABLE landings ADD COLUMN approved_digest TEXT",
+    // How many times its `test` job was submitted again after its runner was lost (fix 2).
+    "ALTER TABLE landings ADD COLUMN test_retries INTEGER NOT NULL DEFAULT 0",
 ];
 
 /// What the Lander needs from the hosting Worker, beside the settings: the capabilities it
@@ -681,6 +691,12 @@ struct Row {
     deploy_worker: Option<String>,
     #[serde(default = "waits_for_core")]
     ordered: i64,
+    #[serde(default)]
+    gate_digest: Option<String>,
+    #[serde(default)]
+    approved_digest: Option<String>,
+    #[serde(default)]
+    test_retries: i64,
 }
 
 /// A landing row read without the `ordered` column waits for core, as every landing once did.
@@ -708,6 +724,8 @@ impl Row {
             "workers": self.workers.as_deref().and_then(|w| serde_json::from_str::<Value>(w).ok()),
             "deploys_left": self.deploys.as_deref().and_then(|w| serde_json::from_str::<Value>(w).ok()),
             "deploying": self.deploy_worker,
+            "gate_digest": self.gate_digest, "approved_digest": self.approved_digest,
+            "test_retries": self.test_retries,
         })
     }
 
@@ -776,6 +794,10 @@ struct DeployRow {
     incident: Option<i64>,
     #[serde(default)]
     script: Option<String>,
+    #[serde(default)]
+    rate_retries: i64,
+    #[serde(default)]
+    not_before: Option<i64>,
 }
 
 impl DeployRow {
@@ -1025,7 +1047,7 @@ impl Lander {
                 // The latest incidents still open, that could not isolate their cause, or that
                 // may have left a Worker on a failing build: for the person.
                 let open: Vec<IncidentRow> = self.db.rows(
-                    "SELECT * FROM incidents WHERE state IN ('open', 'unisolated', 'stuck', 'environment') ORDER BY id DESC LIMIT 10",
+                    "SELECT * FROM incidents WHERE state IN ('open', 'unisolated', 'stuck', 'environment', 'rate_limited') ORDER BY id DESC LIMIT 10",
                     vec![],
                 )?;
                 // An incident of a Worker the map no longer has needs no action.
@@ -1096,8 +1118,10 @@ impl Lander {
                         row.id, row.state
                     )));
                 }
+                // The approval is for the change to the guarded paths as checked: its digest, in
+                // the same write. Only the Lander's rebase of that same change keeps it.
                 self.db.exec(
-                    "UPDATE landings SET approved_by = ? WHERE id = ?",
+                    "UPDATE landings SET approved_by = ?, approved_digest = gate_digest WHERE id = ?",
                     vec![s("person").into(), row.id.as_str().into()],
                 )?;
                 let why = format!("approved by {}", s("person"));
@@ -1457,7 +1481,7 @@ impl Lander {
     /// Worker covers ([`lanes::incident_covered`]); the state becomes [`lanes::COVERED`].
     fn close_covered(&self) -> Result<()> {
         let open: Vec<IncidentRow> = self.db.rows(
-            "SELECT * FROM incidents WHERE state IN ('unisolated', 'stuck', 'environment') ORDER BY id",
+            "SELECT * FROM incidents WHERE state IN ('unisolated', 'stuck', 'environment', 'rate_limited') ORDER BY id",
             vec![],
         )?;
         for inc in open {
@@ -1528,12 +1552,18 @@ impl Lander {
             }) {
                 let why = env.detail.clone().unwrap_or_default();
                 let t = now();
+                // A rate limit that outlasted its redeploys is recorded as such.
+                let (to, what) = if lanes::is_rate_limit_detail(&why) {
+                    (lanes::RATE_LIMITED, "stayed rate limited by Cloudflare")
+                } else {
+                    (lanes::ENVIRONMENT, "then failed for the environment")
+                };
                 self.db.exec(
                     "UPDATE incidents SET state = ?, summary = ?, redeploys = ?, updated_at = ?, finished_at = ? WHERE id = ? AND state = 'open'",
                     vec![
-                        lanes::ENVIRONMENT.into(),
+                        to.into(),
                         format!(
-                            "{}'s deploy failed; a redeploy then failed for the environment, so no bisect; the Worker may still be on a failing build: {why}",
+                            "{}'s deploy failed; a redeploy {what}, so no bisect; the Worker may still be on a failing build: {why}",
                             inc.worker
                         )
                         .into(),
@@ -1718,7 +1748,7 @@ impl Lander {
                     } else {
                         seen
                     },
-                    format!("deployed: {}", m.workers.join(", ")),
+                    self.deployed_text(m)?,
                 ),
                 Seen::JobEnded { passed: false } => (
                     seen,
@@ -1748,6 +1778,34 @@ impl Lander {
             self.apply(row, &seen, Some(&detail))?;
         }
         Ok(())
+    }
+
+    /// `deployed: <Workers>` for a landing every Worker of which deployed it, naming those whose
+    /// deploy was skipped because the Worker was removed at its commit.
+    fn deployed_text(&self, m: &lanes::Merged) -> Result<String> {
+        let mut deployed = Vec::new();
+        let mut skipped = Vec::new();
+        for w in &m.workers {
+            let found: Vec<DeployRow> = self.db.rows(
+                "SELECT * FROM deploys WHERE worker = ? AND state = 'succeeded' AND covers >= ? ORDER BY id",
+                vec![w.as_str().into(), m.merged_at.into()],
+            )?;
+            let skip = found.iter().find_map(|d| {
+                d.detail
+                    .as_deref()
+                    .filter(|x| lanes::is_skipped_detail(x))
+                    .map(str::to_string)
+            });
+            match skip {
+                Some(why) if found.len() == 1 => skipped.push(format!("{w} ({why})")),
+                _ => deployed.push(w.as_str()),
+            }
+        }
+        let mut text = format!("deployed: {}", deployed.join(", "));
+        if !skipped.is_empty() {
+            text.push_str(&format!("; {}", skipped.join("; ")));
+        }
+        Ok(text)
     }
 
     /// Starts what each idle lane deploys next ([`lanes::starts`]): a running deploy whose job
@@ -1926,6 +1984,72 @@ impl Lander {
         )
     }
 
+    /// Whether `dir` is in `commit`'s tree. A read that fails counts as present, so the Worker is
+    /// deployed as before.
+    async fn dir_present_at(&self, commit: &str, dir: &str) -> bool {
+        let s = &self.settings;
+        let read = async {
+            let account = pigeon_core::account_from_env(&self.env, &s.parent).await?;
+            let session =
+                merge::Session::open(&account, &s.namespace, &s.repo, Access::Read).await?;
+            let ids = git::path_ids(&session.remote, commit, &[dir]).await;
+            session.close().await;
+            ids
+        };
+        match read.await {
+            Ok(ids) => ids.first().is_some_and(Option::is_some),
+            Err(e) => {
+                console_error!("land: reading {dir} at {commit}: {e}");
+                true
+            }
+        }
+    }
+
+    /// Records lane deploy `d`, which stayed rate limited after every redeploy and ended in error
+    /// with `detail`, as an incident in state [`lanes::RATE_LIMITED`]: infrastructure, so no
+    /// rollback, no bisect and nobody guilty. It holds no lane and fails no landing by itself (the
+    /// deploy is not marked as the incident's); the Worker's next green lane deploy covers it.
+    fn record_rate_limited(&self, d: &DeployRow, detail: &str) -> Result<()> {
+        let included = self.included_of(d)?;
+        let good: Option<DeployRow> = self.db.row(
+            "SELECT * FROM deploys WHERE worker = ? AND state = 'succeeded' AND id < ? ORDER BY id DESC LIMIT 1",
+            vec![d.worker.as_str().into(), d.id.into()],
+        )?;
+        let last_good = good.map(|g| lanes::Good {
+            commit: g.commit_sha,
+            covers: g.covers,
+        });
+        let summary = format!(
+            "{}'s deploy of {} stayed rate limited by Cloudflare after {} redeploys: infrastructure, not the change; no rollback, no bisect, no landing to blame; land again, or the Worker's next deploy covers it ({detail})",
+            d.worker,
+            d.commit_sha,
+            lanes::RATE_LIMIT_REDEPLOYS
+        );
+        let t = now();
+        self.db.exec(
+            "INSERT INTO incidents (worker, failed_deploy, landing, last_good, included, state, summary, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            vec![
+                d.worker.as_str().into(),
+                d.id.into(),
+                d.landing.as_str().into(),
+                opt(last_good
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()?
+                    .as_deref()),
+                serde_json::to_string(&included)?.into(),
+                lanes::RATE_LIMITED.into(),
+                summary.as_str().into(),
+                t.into(),
+                t.into(),
+            ],
+        )?;
+        for l in &included {
+            self.notify(&l.id, &watch::incident_text(&l.id, &d.worker, &summary))?;
+        }
+        Ok(())
+    }
+
     /// The text of `ci/workers.toml` at `commit` through git: its text, no file, or why it could
     /// not be read.
     async fn map_text_at(&self, commit: &str) -> std::result::Result<Option<String>, String> {
@@ -1952,12 +2076,39 @@ impl Lander {
     async fn deploy_step(&self, d: DeployRow) -> Result<()> {
         let s = &self.settings;
         let Some(job) = &d.job else {
+            // A rate-limited deploy waits out its backoff before its next job.
+            if d.not_before.is_some_and(|t| now() < t) {
+                return Ok(());
+            }
             let landing = self
                 .row(&d.landing)?
                 .ok_or_else(|| bad(&format!("no landing {} to deploy", d.landing)))?;
             // The entry comes from the map at the deploy's commit; the compiled map is the
             // fallback, and the detail says which one answered.
             let text = self.map_text_at(&d.commit_sha).await;
+            // A lane's Worker removed at its commit, entry and source, is skipped: nothing to
+            // deploy, and nothing for its landings to wait for (docs/plans/lander-fixes.md, fix 3).
+            if d.purpose() == lanes::Purpose::Lane
+                && let Ok(Some(t)) = &text
+                && let Ok(at_commit) = pigeon_core::lanes::parse(t)
+                && at_commit.worker(&d.worker).is_none()
+            {
+                let dir = s.map.worker(&d.worker).map(|w| w.dir.clone());
+                let present = match &dir {
+                    Some(dir) => Some(self.dir_present_at(&d.commit_sha, dir).await),
+                    None => None,
+                };
+                if let Some(why) =
+                    lanes::removed_at(Some(&at_commit), &d.worker, dir.as_deref(), present)
+                {
+                    self.end_deploy(
+                        &d,
+                        lanes::DeployState::Succeeded,
+                        &lanes::skipped_detail(&why),
+                    )?;
+                    return Ok(());
+                }
+            }
             let (worker, _, which) = lanes::resolve_entry(text, &d.worker, &s.map)
                 .ok_or_else(|| bad(&format!("the map has no Worker `{}` to deploy", d.worker)))?;
             let mut submit = json!({
@@ -2048,7 +2199,15 @@ impl Lander {
                 .as_deref()
                 .is_some_and(|x| x.contains(lanes::ENV_RETRY));
             let in_incident = d.incident.is_some() || d.purpose() != lanes::Purpose::Lane;
-            match lanes::environment_step(retried, in_incident, &why) {
+            // A rate limit is deployed again after a backoff, a few times, lane or incident
+            // alike (docs/plans/lander-fixes.md, fix 1).
+            let limited = end.state == "failed" && lanes::rate_limited(&end.tail).is_some();
+            let step = if limited {
+                lanes::rate_limit_step(d.rate_retries, &why)
+            } else {
+                lanes::environment_step(retried, in_incident, &why)
+            };
+            match step {
                 lanes::EnvStep::Redeploy => self.db.exec(
                     "UPDATE deploys SET job = NULL, tries = 0, detail = ?, updated_at = ? WHERE id = ? AND state = 'running'",
                     vec![
@@ -2063,8 +2222,28 @@ impl Lander {
                         d.id.into(),
                     ],
                 )?,
+                lanes::EnvStep::RedeployAfter(wait) => self.db.exec(
+                    "UPDATE deploys SET job = NULL, tries = 0, rate_retries = rate_retries + 1, not_before = ?, detail = ?, updated_at = ? WHERE id = ? AND state = 'running'",
+                    vec![
+                        (now() + wait).into(),
+                        format!(
+                            "{}: {why}; not this landing's fault; deploying again at {} in {} minutes (rate limit redeploy {} of {})",
+                            script,
+                            d.commit_sha,
+                            wait / 60_000,
+                            d.rate_retries + 1,
+                            lanes::RATE_LIMIT_REDEPLOYS
+                        )
+                        .into(),
+                        now().into(),
+                        d.id.into(),
+                    ],
+                )?,
                 lanes::EnvStep::Error(detail) => {
-                    self.end_deploy(&d, lanes::DeployState::Error, &detail)?
+                    self.end_deploy(&d, lanes::DeployState::Error, &detail)?;
+                    if limited && !in_incident {
+                        self.record_rate_limited(&d, &detail)?;
+                    }
                 }
             }
             return Ok(());
@@ -2325,15 +2504,8 @@ impl Lander {
         Ok(())
     }
 
-    /// A CI job's state, as its scheduler holds it: `Some(passed)` once it has ended.
-    async fn job_ended(&self, job: &str) -> Result<Option<(bool, String)>> {
-        Ok(self
-            .job_ended_code(job)
-            .await?
-            .map(|e| (e.passed, e.detail)))
-    }
-
-    /// [`Self::job_ended`], with the job's exit code too (kept in memory, then written into the
+    /// A CI job's state, as its scheduler holds it, once it has ended: whether it passed, how,
+    /// its state and output tail, and its exit code (kept in memory, then written into a
     /// deploy's detail as `(exit code N)`). The exit code is returned only when the job's state
     /// is exactly `failed`; for `timed_out`, `cancelled` and `error` it is `None`.
     async fn job_ended_code(&self, job: &str) -> Result<Option<JobEnd>> {
@@ -2477,7 +2649,23 @@ impl Lander {
             .copied()
             .filter(|p| !(seen.lock_members_only && *p == pigeon_core::lanes::LOCK))
             .collect();
-        let affected = seen.map.classify(&for_lanes);
+        let mut affected = seen.map.classify(&for_lanes);
+        // A Worker the commit removes, entry and source, is not deployed.
+        for (name, _) in &seen.removed_workers {
+            affected.workers.remove(name);
+        }
+        let skipped = if seen.removed_workers.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "; skipped {}: removed at this commit",
+                seen.removed_workers
+                    .iter()
+                    .map(|(n, _)| n.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
         let docs_only = affected.docs_only;
         let workers = serde_json::to_string(&affected.workers)?;
         let order_bits = (i64::from(affected.ordered) * lanes::ORDER_CORE_FIRST)
@@ -2515,7 +2703,7 @@ impl Lander {
         // From here to the move nothing awaits; `apply` re-reads the row, so a cancel during the
         // awaits above wins.
         self.db.exec(
-            "UPDATE landings SET commit_sha = ?, main_at = ?, base = ?, docs_only = ?, workers = ?, ordered = ?, approval_reason = ?, updated_at = ? WHERE id = ? AND state = 'checking'",
+            "UPDATE landings SET commit_sha = ?, main_at = ?, base = ?, docs_only = ?, workers = ?, ordered = ?, approval_reason = ?, gate_digest = ?, updated_at = ? WHERE id = ? AND state = 'checking'",
             vec![
                 tip.as_str().into(),
                 seen.main.as_str().into(),
@@ -2524,6 +2712,7 @@ impl Lander {
                 workers.into(),
                 order_bits.into(),
                 opt(reason.as_deref()),
+                opt(seen.gate_digest.as_deref()),
                 now().into(),
                 row.id.as_str().into(),
             ],
@@ -2532,7 +2721,7 @@ impl Lander {
             &row,
             &Seen::Checked,
             Some(&format!(
-                "checked: {tip} is {on}{what}{}",
+                "checked: {tip} is {on}{what}{skipped}{}",
                 delegated.unwrap_or_default()
             )),
         )?;
@@ -2608,7 +2797,26 @@ impl Lander {
         } else {
             format!(", merging {} line by line", r.merged.join(", "))
         };
-        if r.retest {
+        // An approval holds across this rebase only for the same change to the guarded paths
+        // (docs/plans/lander-fixes.md, fix 2); otherwise it is void, and the rebased commit is
+        // tested again and waits for the person.
+        let approved = row.approved_by.is_some();
+        let holds = state::approval_holds(
+            approved,
+            row.approved_digest.as_deref(),
+            r.gate_digest.as_deref(),
+        );
+        let void = approved && !holds;
+        let merged = if holds {
+            format!("{merged}; the approval holds: its gated changes are unchanged")
+        } else if void {
+            format!(
+                "{merged}; the approval is void: its gated changes differ after the rebase, so it waits for the person again"
+            )
+        } else {
+            merged
+        };
+        if r.retest || void {
             let name = merge::test_ref(&row.id);
             let old = merge::tip(session, &name).await?;
             if !merge::push(session, &name, old.as_deref(), &r.commit, &r.objects).await? {
@@ -2618,18 +2826,30 @@ impl Lander {
                 )));
             }
             self.db.exec(
-                "UPDATE landings SET commit_sha = ?, base = ?, test_job = NULL WHERE id = ? AND state = 'merging'",
+                "UPDATE landings SET commit_sha = ?, base = ?, gate_digest = ?, test_job = NULL, test_retries = 0 WHERE id = ? AND state = 'merging'",
                 vec![
                     r.commit.as_str().into(),
                     seen.main.as_str().into(),
+                    opt(r.gate_digest.as_deref()),
                     row.id.as_str().into(),
                 ],
             )?;
+            if void {
+                self.db.exec(
+                    "UPDATE landings SET approved_by = NULL, approved_digest = NULL WHERE id = ? AND state = 'merging'",
+                    vec![row.id.as_str().into()],
+                )?;
+            }
+            let why = if r.retest {
+                "main moved in what its tests cover"
+            } else {
+                "its approval is void"
+            };
             self.apply(
                 row,
                 &Seen::Retest,
                 Some(&format!(
-                    "main moved in what its tests cover; rebased onto {} as {}{merged}, testing it again",
+                    "{why}; rebased onto {} as {}{merged}, testing it again",
                     seen.main, r.commit
                 )),
             )?;
@@ -2637,10 +2857,11 @@ impl Lander {
         }
         if merge::push(session, &s.main, Some(&seen.main), &r.commit, &r.objects).await? {
             self.db.exec(
-                "UPDATE landings SET commit_sha = ?, base = ? WHERE id = ? AND state = 'merging'",
+                "UPDATE landings SET commit_sha = ?, base = ?, gate_digest = ? WHERE id = ? AND state = 'merging'",
                 vec![
                     r.commit.as_str().into(),
                     seen.main.as_str().into(),
+                    opt(r.gate_digest.as_deref()),
                     row.id.as_str().into(),
                 ],
             )?;
@@ -2703,7 +2924,21 @@ impl Lander {
                     )?;
                     return Ok(());
                 };
-                if let Some((passed, detail)) = self.job_ended(job).await? {
+                if let Some(end) = self.job_ended_code(job).await? {
+                    let (passed, detail) = (end.passed, end.detail);
+                    // Its runner was lost: the same commit is tested once more, in this same
+                    // landing, so an approval it holds stays (docs/plans/lander-fixes.md, fix 2).
+                    if !passed && state::test_rerun(&end.state, row.test_retries) {
+                        self.db.exec(
+                            "UPDATE landings SET test_job = NULL, test_retries = test_retries + 1, detail = ?, updated_at = ? WHERE id = ? AND state = 'testing'",
+                            vec![
+                                format!("{detail}; the runner was lost, so {} is tested once more", row.commit_sha).into(),
+                                now().into(),
+                                row.id.as_str().into(),
+                            ],
+                        )?;
+                        return Ok(());
+                    }
                     // The setting as it is now: turned on while the tests ran, it still holds
                     // this landing.
                     if passed && row.approval_reason.is_none() && self.approval_on()? {

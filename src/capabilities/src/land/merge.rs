@@ -132,6 +132,12 @@ pub struct Seen {
     /// The commit changed `Cargo.lock` only in the workspace's own crates' entries
     /// ([`lanes::lock_members_only`]), so the lockfile picks no lane by itself.
     pub lock_members_only: bool,
+    /// The Workers of main's map that the commit removes ([`super::lanes::removed_at`]), each
+    /// with why: they are not deployed.
+    pub removed_workers: Vec<(String, String)>,
+    /// The digest of the commit's change to the guarded paths against its base
+    /// ([`gated_patch`], [`super::state::gated_digest`]); `None` when it could not be read.
+    pub gate_digest: Option<String>,
 }
 
 impl Seen {
@@ -215,17 +221,42 @@ pub async fn see(
     let changed = rebase::changes(&objects, &base, commit).map_err(bad)?;
     let main_moved = rebase::changes(&objects, &base, &main).map_err(bad)?;
     let main_map = map_at(&objects, &main);
-    // The branch's own map counts only for the Workers it adds.
+    // The branch's own map counts only for the Workers it adds, and for those it removes along
+    // with their source.
+    let mut removed_workers = Vec::new();
     let (map, added_workers) = if changed.contains_key(MAP_PATH) {
         let text = git::read_file(remote, commit, MAP_PATH)
             .await?
             .and_then(|b| String::from_utf8(b).ok());
         match text.map(|t| lanes::parse(&t)) {
-            Some(Ok(branch)) => super::lanes::with_added_workers(&main_map, &branch),
+            Some(Ok(branch)) => {
+                for w in &main_map.workers {
+                    // A tree that cannot be read counts as present: deployed as before.
+                    let present = pack::path_id(&objects, commit, &w.dir)
+                        .map(|id| id.is_some())
+                        .unwrap_or(true);
+                    if let Some(why) = super::lanes::removed_at(
+                        Some(&branch),
+                        &w.name,
+                        Some(&w.dir),
+                        Some(present),
+                    ) {
+                        removed_workers.push((w.name.clone(), why));
+                    }
+                }
+                super::lanes::with_added_workers(&main_map, &branch)
+            }
             _ => (main_map, Vec::new()),
         }
     } else {
         (main_map, Vec::new())
+    };
+    let gate_digest = match gated_patch(&objects, &base, &changed) {
+        Ok(patch) => Some(super::state::gated_digest(&patch)),
+        Err(e) => {
+            console_error!("land: the gated patch of {commit} on {base}: {e}");
+            None
+        }
     };
     let lock_members_only = if changed.contains_key(lanes::LOCK) {
         let text = |b: Option<Vec<u8>>| b.and_then(|b| String::from_utf8(b).ok());
@@ -244,7 +275,72 @@ pub async fn see(
         map,
         added_workers,
         lock_members_only,
+        removed_workers,
+        gate_digest,
     }))
+}
+
+/// What `path` names in `commit`'s tree, from `objects`: its `(mode, id)`, `None` when nothing
+/// is there. Trees on the way must be in `objects` (a missing one is an error); blobs need not.
+pub fn entry_at(
+    objects: &Objects,
+    commit: &str,
+    path: &str,
+) -> std::result::Result<Option<(String, String)>, String> {
+    let parts: Vec<&str> = path.split('/').collect();
+    if path.is_empty()
+        || parts
+            .iter()
+            .any(|p| p.is_empty() || *p == "." || *p == "..")
+    {
+        return Err("not a path".to_string());
+    }
+    let Some((1, commit_data)) = objects.by_id.get(commit) else {
+        return Err(format!("commit {commit} is not in the pack"));
+    };
+    let mut id = pack::commit_tree(commit_data)?;
+    let last = parts.len() - 1;
+    for (i, part) in parts.iter().enumerate() {
+        let Some((2, tree_data)) = objects.by_id.get(&id) else {
+            return Err("a tree is not in the pack".to_string());
+        };
+        let Some(entry) = pack::tree_entries(tree_data)?
+            .into_iter()
+            .find(|e| e.name == *part)
+        else {
+            return Ok(None);
+        };
+        if i == last {
+            return Ok(Some((entry.mode, entry.id)));
+        }
+        if entry.mode != "40000" {
+            return Ok(None);
+        }
+        id = entry.id;
+    }
+    Ok(None)
+}
+
+/// A change's part under the guarded paths ([`super::state::is_guarded`]): for each guarded
+/// file in `changes` (what is laid onto `before`, as [`rebase::changes`] or the rebase gives
+/// it), what `before` holds there and what the change puts there. Its digest
+/// ([`super::state::gated_digest`]) is what an approval is bound to.
+pub fn gated_patch(
+    objects: &Objects,
+    before: &str,
+    changes: &BTreeMap<String, Change>,
+) -> std::result::Result<Vec<super::state::GatedChange>, String> {
+    let mut out = Vec::new();
+    for (path, after) in changes {
+        if !super::state::is_guarded(path) {
+            continue;
+        }
+        let was = entry_at(objects, before, path)?;
+        if was != *after {
+            out.push((path.clone(), was, after.clone()));
+        }
+    }
+    Ok(out)
 }
 
 /// The map main holds, or [`FALLBACK`] when it holds none or one that does not parse.
@@ -292,6 +388,9 @@ pub struct Rebased {
     pub merged: Vec<String>,
     /// Whether main already holds every change: nothing to commit, `commit` is main.
     pub already: bool,
+    /// The digest of its change to the guarded paths against main ([`gated_patch`]); `None`
+    /// when it could not be read.
+    pub gate_digest: Option<String>,
 }
 
 /// `seen`'s commit rebased onto main, or `Ok(Err(why))` when main and it changed the same path
@@ -359,6 +458,16 @@ pub async fn rebase_onto_main(
         Some((1, body)) => pack::commit_tree(body).map_err(bad)?,
         _ => return Err(bad(format!("main's commit {} was not fetched", seen.main))),
     };
+    let gate_digest = match gated_patch(&seen.objects, &seen.main, &changes) {
+        Ok(patch) => Some(super::state::gated_digest(&patch)),
+        Err(e) => {
+            console_error!(
+                "land: the gated patch of {commit} rebased onto {}: {e}",
+                seen.main
+            );
+            None
+        }
+    };
     if tree == main_tree {
         return Ok(Ok(Rebased {
             commit: seen.main.clone(),
@@ -366,6 +475,7 @@ pub async fn rebase_onto_main(
             retest: false,
             merged,
             already: true,
+            gate_digest,
         }));
     }
     let original = match seen.objects.by_id.get(commit) {
@@ -388,6 +498,7 @@ pub async fn rebase_onto_main(
         retest,
         merged,
         already: false,
+        gate_digest,
     }))
 }
 

@@ -361,6 +361,56 @@ pub fn approval_reason(setting: bool, passkey: &[String]) -> Option<String> {
     }
 }
 
+/// Whether `path`, a file path, is under a guarded path ([`GUARDED`]): a guarded file itself, or
+/// anything under a guarded directory.
+pub fn is_guarded(path: &str) -> bool {
+    !guarded_in(&[path]).is_empty()
+}
+
+/// One file of a landing's change to the guarded paths: its path, and its `(mode, blob id)`
+/// before (on the commit it is laid onto) and after (at the landing's commit); `None` where no
+/// file is.
+pub type GatedChange = (String, Option<(String, String)>, Option<(String, String)>);
+
+/// The digest an approval is bound to: SHA-256, hex, over `patch` (every guarded file the landing
+/// changes, before and after), sorted by path, entries where before equals after dropped. Equal
+/// digests mean the same change to the guarded paths, modes included.
+pub fn gated_digest(patch: &[GatedChange]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut rows: Vec<&GatedChange> = patch.iter().filter(|(_, a, b)| a != b).collect();
+    rows.sort_by(|x, y| x.0.cmp(&y.0));
+    let side = |c: &Option<(String, String)>| match c {
+        Some((mode, id)) => format!("{mode} {id}"),
+        None => "-".to_string(),
+    };
+    let mut h = Sha256::new();
+    for (path, before, after) in rows {
+        h.update(format!("{path}\0{}\0{}\n", side(before), side(after)).as_bytes());
+    }
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Whether an approval holds across the Lander's own rebase: one was given (`approved`), the
+/// digest it was given for was recorded (`approved_digest`; none for an approval from before
+/// digests), and the rebased commit's gated digest (`rebased`, `None` when it could not be
+/// computed) is that one. Anything else voids it: an approval never moves to other content.
+pub fn approval_holds(
+    approved: bool,
+    approved_digest: Option<&str>,
+    rebased: Option<&str>,
+) -> bool {
+    approved && matches!((approved_digest, rebased), (Some(a), Some(r)) if a == r)
+}
+
+/// How many times a `test` job whose runner was lost is submitted again for the same commit.
+pub const TEST_RETRIES: i64 = 1;
+
+/// Whether a `test` job that ended in `job_state` is run once more at the same commit rather
+/// than failing the landing: its runner was lost (`error`), and `retries` are left.
+pub fn test_rerun(job_state: &str, retries: i64) -> bool {
+    job_state == "error" && retries < TEST_RETRIES
+}
+
 /// How long a landing waits for approval.
 pub const APPROVAL_MS: i64 = 24 * 3_600_000;
 /// How often a live landing is looked at.

@@ -3190,3 +3190,340 @@ fn land_takes_codex_branches() {
         assert_eq!(a.decision, Decision::Allow, "{kind:?}");
     }
 }
+
+/// A Cloudflare rate limit is the environment, never the change: classified from the deploy's
+/// last attempt only, deployed again after a doubling backoff a bounded number of times, then an
+/// error that blames no landing and an incident recorded `rate_limited`.
+#[test]
+fn core_land_rate_limits_blame_no_landing() {
+    use pigeon_capabilities::land::lanes::{
+        self, EnvStep, RATE_LIMIT_REDEPLOYS, environment_fault, rate_limit_backoff_ms,
+        rate_limit_step, rate_limited,
+    };
+    // What wrangler and the deploy script print for a rate limit.
+    let wrangler = "\n== wrangler deploy through https://proxy (attempt 5)\n\u{2718} [ERROR] A request to the Cloudflare API (/accounts/a/workers/services/pigeon-proxy) failed.\n  Please wait and consider throttling your request speed [code: 10429]\nthe deploy failed; see above\n";
+    assert_eq!(
+        rate_limited(wrangler).as_deref(),
+        Some("Cloudflare rate limit (code 10429)")
+    );
+    for tail in [
+        "R2 REST API answered HTTP 429",
+        "status: 429 Too Many Requests",
+        "status code 429",
+        "429 Too Many Requests",
+        "the global API limit: rate limited",
+    ] {
+        assert!(rate_limited(tail).is_some(), "{tail}");
+    }
+    // Not a rate limit: other statuses and numbers that only start with 429.
+    for tail in [
+        "HTTP 4290 bytes",
+        "status 404",
+        "error[E0308]: mismatched types",
+        "",
+    ] {
+        assert_eq!(rate_limited(tail), None, "{tail}");
+    }
+    // Only the last attempt counts: limited once, then a code failure, is the code's fault.
+    let then_code = format!(
+        "{wrangler}\n== wrangler deploy through https://proxy (attempt 2)\nUploaded pigeon-proxy\n\u{2718} [ERROR] Uncaught ReferenceError: x is not defined [code: 10021]\n"
+    );
+    assert_eq!(rate_limited(&then_code), None);
+    assert_eq!(environment_fault("failed", Some(1), &then_code), None);
+    // A failed job naming a rate limit is the environment; its reason says so.
+    let why = environment_fault("failed", Some(1), wrangler).unwrap();
+    assert!(why.starts_with(lanes::RATE_LIMIT), "{why}");
+    // Not for a job that timed out.
+    assert_eq!(environment_fault("timed_out", None, wrangler), None);
+
+    // Backoff: 2, 4, 8, 16 minutes, then no more than 16.
+    assert_eq!(
+        (0..5).map(rate_limit_backoff_ms).collect::<Vec<_>>(),
+        [120_000, 240_000, 480_000, 960_000, 960_000]
+    );
+    // Deployed again after the backoff until the redeploys are used up, then an error.
+    assert_eq!(RATE_LIMIT_REDEPLOYS, 4);
+    for r in 0..RATE_LIMIT_REDEPLOYS {
+        assert_eq!(
+            rate_limit_step(r, &why),
+            EnvStep::RedeployAfter(rate_limit_backoff_ms(r))
+        );
+    }
+    let EnvStep::Error(detail) = rate_limit_step(RATE_LIMIT_REDEPLOYS, &why) else {
+        panic!("redeploys used up must end in error");
+    };
+    // The error is an environment failure (the landing ends `error`, "not this landing's
+    // fault"), and a rate limit in particular (its incident is `rate_limited`).
+    assert!(lanes::is_environment_detail(&detail));
+    assert!(lanes::is_rate_limit_detail(&detail), "{detail}");
+    assert!(detail.contains("not this landing's fault"));
+    assert!(!lanes::is_rate_limit_detail(&lanes::environment_detail(
+        "Cloudflare error code 10007"
+    )));
+    // A rate-limited incident never blames: a later green deploy closes it like an unisolated one.
+    assert!(lanes::incident_covered(lanes::RATE_LIMITED, 5, 3, 9, 4));
+    assert!(!lanes::incident_covered(lanes::RATE_LIMITED, 5, 3, 4, 4));
+    // The lane deploy that ran out of redeploys ends `error`.
+    let lane_failed = [lanes::Deploy {
+        worker: "proxy".into(),
+        covers: 10,
+        state: lanes::DeployState::Error,
+        incident: false,
+    }];
+    let merged = lanes::Merged {
+        id: "L".into(),
+        merged_at: 10,
+        commit: "c".into(),
+        workers: vec!["proxy".into()],
+        ordered: false,
+        proxy_first: false,
+    };
+    // Its landing ends `error`, never `deploy_failed`.
+    assert_eq!(
+        lanes::outcome(&merged, &lane_failed),
+        Some(pigeon_capabilities::land::state::Seen::Failed)
+    );
+}
+
+/// An approval is bound to the digest of the landing's change to the guarded paths. The
+/// Lander's own rebase keeps it only when that change is the same afterwards; a text merge into
+/// a guarded file, a mode change, or an approval with no recorded digest voids it.
+#[test]
+fn land_approval_holds_across_a_rebase_only_for_the_same_gated_change() {
+    use pigeon_capabilities::land::merge::{entry_at, gated_patch};
+    use pigeon_capabilities::land::state::{
+        TEST_RETRIES, approval_holds, gated_digest, is_guarded, test_rerun,
+    };
+    use pigeon_core::{merge3, pack, rebase};
+
+    fn change(dir: &Path, files: &[(&str, Option<&str>)], message: &str) -> String {
+        for (path, body) in files {
+            let at = dir.join(path);
+            match body {
+                Some(b) => {
+                    std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+                    std::fs::write(&at, b).unwrap();
+                }
+                None => std::fs::remove_file(&at).unwrap(),
+            }
+        }
+        git(dir, &["add", "-A"], None);
+        git(dir, &["commit", "-q", "-m", message], None);
+        String::from_utf8(git(dir, &["rev-parse", "HEAD"], None))
+            .unwrap()
+            .trim()
+            .to_string()
+    }
+    let objects_of = |dir: &Path, tips: &[&str]| {
+        let packed = git(
+            dir,
+            &["pack-objects", "--stdout", "--revs", "-q"],
+            Some(&(tips.join("\n") + "\n")),
+        );
+        pack::objects(&packed).unwrap()
+    };
+    let map = "[docs]\nline 1\nline 2\nline 3\nline 4\nline 5\nline 6\n";
+
+    assert!(is_guarded(".pigeon/policy.toml"));
+    assert!(is_guarded("ci/workers.toml"));
+    assert!(is_guarded("ci/deploy/deploy.sh"));
+    assert!(!is_guarded("src/core/src/lib.rs"));
+    assert!(!is_guarded("cinema/x"));
+
+    let dir = repo("approval-digest");
+    let base = change(
+        &dir,
+        &[
+            (".pigeon/policy.toml", Some("rule = 1\n")),
+            ("ci/workers.toml", Some(map)),
+            ("src/a.rs", Some("a\n")),
+            ("docs/x.md", Some("x\n")),
+        ],
+        "base",
+    );
+    git(&dir, &["checkout", "-q", "-b", "claude/policy"], None);
+    let tip = change(
+        &dir,
+        &[
+            (".pigeon/policy.toml", Some("rule = 2\n")),
+            ("ci/workers.toml", Some(&map.replace("line 2", "branch"))),
+            ("src/a.rs", Some("a on the branch\n")),
+        ],
+        "the branch",
+    );
+    // Main moves in a path the landing does not change, then in a guarded one it does.
+    git(&dir, &["checkout", "-q", "main"], None);
+    let main1 = change(
+        &dir,
+        &[
+            ("docs/x.md", Some("x on main\n")),
+            ("src/b.rs", Some("b\n")),
+        ],
+        "main moved elsewhere",
+    );
+    let main2 = change(
+        &dir,
+        &[("ci/workers.toml", Some(&map.replace("line 5", "main")))],
+        "main moved the map",
+    );
+
+    let objects = objects_of(&dir, &[&tip, &main1, &main2]);
+    let changed = rebase::changes(&objects, &base, &tip).unwrap();
+    // As checked: the digest the person's approval is bound to.
+    let patch = gated_patch(&objects, &base, &changed).unwrap();
+    assert_eq!(
+        patch.iter().map(|p| p.0.as_str()).collect::<Vec<_>>(),
+        [".pigeon/policy.toml", "ci/workers.toml"],
+        "only guarded files, never src/"
+    );
+    let approved = gated_digest(&patch);
+    assert_eq!(approved.len(), 64);
+    assert_ne!(approved, gated_digest(&[]));
+
+    // Rebased onto main1 (main moved in docs and src/b.rs only): the same gated change, so the
+    // approval holds.
+    let onto1 = gated_digest(&gated_patch(&objects, &main1, &changed).unwrap());
+    assert_eq!(onto1, approved);
+    assert!(approval_holds(true, Some(&approved), Some(&onto1)));
+
+    // Rebased onto main2, which changed the map too: the Lander merges the map line by line, so
+    // the change to a guarded file differs and the approval is void.
+    let ours = map.replace("line 2", "branch");
+    let theirs = map.replace("line 5", "main");
+    let joined = merge3::merge(map, &ours, &theirs).unwrap();
+    let mut onto_main2 = changed.clone();
+    onto_main2.insert(
+        "ci/workers.toml".into(),
+        Some((
+            "100644".into(),
+            pigeon_core::gitobj::Object::blob(joined.as_bytes()).id(),
+        )),
+    );
+    let onto2 = gated_digest(&gated_patch(&objects, &main2, &onto_main2).unwrap());
+    assert_ne!(onto2, approved);
+    assert!(!approval_holds(true, Some(&approved), Some(&onto2)));
+
+    // The same content with another mode (a script made executable) is another change.
+    let mut moded = changed.clone();
+    let (_, id) = moded[".pigeon/policy.toml"].clone().unwrap();
+    moded.insert(".pigeon/policy.toml".into(), Some(("100755".into(), id)));
+    let m = gated_digest(&gated_patch(&objects, &main1, &moded).unwrap());
+    assert_ne!(m, approved);
+    // Deleting a guarded file is a change too, and differs from changing it.
+    let mut deleted = changed.clone();
+    deleted.insert(".pigeon/policy.toml".into(), None);
+    assert_ne!(
+        gated_digest(&gated_patch(&objects, &main1, &deleted).unwrap()),
+        approved
+    );
+    // The order of the patch does not matter; an entry whose before equals its after is no
+    // change.
+    let mut reversed = patch.clone();
+    reversed.reverse();
+    assert_eq!(gated_digest(&reversed), approved);
+    let mut padded = patch.clone();
+    let same = Some(("100644".to_string(), "0".repeat(40)));
+    padded.push(("ci/x".into(), same.clone(), same));
+    assert_eq!(gated_digest(&padded), approved);
+
+    // Fails closed: no approval, no recorded digest (an approval from before digests), or a
+    // rebased digest that could not be read never hold.
+    assert!(!approval_holds(false, Some(&approved), Some(&approved)));
+    assert!(!approval_holds(true, None, Some(&approved)));
+    assert!(!approval_holds(true, Some(&approved), None));
+
+    // entry_at reads modes and ids, and nothing where nothing is.
+    let (mode, _) = entry_at(&objects, &tip, ".pigeon/policy.toml")
+        .unwrap()
+        .unwrap();
+    assert_eq!(mode, "100644");
+    assert_eq!(entry_at(&objects, &tip, "nope/x").unwrap(), None);
+    assert_eq!(entry_at(&objects, &tip, "src/a.rs/x").unwrap(), None);
+    assert!(entry_at(&objects, &tip, "../x").is_err());
+
+    // A test whose runner was lost is run once more at the same commit; a failed test is not.
+    assert_eq!(TEST_RETRIES, 1);
+    assert!(test_rerun("error", 0));
+    assert!(!test_rerun("error", TEST_RETRIES));
+    assert!(!test_rerun("failed", 0));
+    assert!(!test_rerun("timed_out", 0));
+    assert!(!test_rerun("cancelled", 0));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A Worker whose entry and source a commit removes is skipped there, never deployed; one whose
+/// source is gone but whose entry stays is still deployed, so its failure is the change's.
+#[test]
+fn land_skips_workers_removed_at_the_commit() {
+    use pigeon_capabilities::land::lanes::{is_skipped_detail, removed_at, skipped_detail};
+    use pigeon_core::lanes;
+    let main = lanes::parse(include_str!("../../ci/workers.toml")).unwrap();
+    let extra = "\n[[worker]]\nname = \"dotest-a\"\nscript = \"pigeon-dotest-a\"\ndir = \"src/dotest-a\"\npaths = [\"src/dotest-a/*\"]\ntest_job = \"test\"\ndeploy_job = \"deploy-dotest-a\"\n";
+    let with = lanes::parse(&format!("{}{extra}", include_str!("../../ci/workers.toml"))).unwrap();
+    assert!(with.worker("dotest-a").is_some());
+    // A shared change classified with the old map deploys the throwaway Worker too.
+    assert!(with.classify(&["Cargo.toml"]).workers.contains("dotest-a"));
+
+    // Removed: no entry at the commit and no directory.
+    let why = removed_at(Some(&main), "dotest-a", Some("src/dotest-a"), Some(false)).unwrap();
+    assert!(
+        why.contains("dotest-a") && why.contains("src/dotest-a/"),
+        "{why}"
+    );
+    // Removed: no map the Lander knows names it.
+    assert!(removed_at(Some(&main), "dotest-a", None, None).is_some());
+    // Not removed: its entry stays (its failure is the change's), or its source is still there,
+    // or the commit's map could not be read.
+    assert_eq!(
+        removed_at(Some(&with), "dotest-a", Some("src/dotest-a"), Some(false)),
+        None
+    );
+    assert_eq!(
+        removed_at(Some(&main), "dotest-a", Some("src/dotest-a"), Some(true)),
+        None
+    );
+    assert_eq!(
+        removed_at(None, "dotest-a", Some("src/dotest-a"), Some(false)),
+        None
+    );
+    // Every Worker in the map is not removed.
+    for w in &main.workers {
+        assert_eq!(
+            removed_at(Some(&main), &w.name, Some(&w.dir), Some(false)),
+            None
+        );
+    }
+    // A skipped deploy says so, and is told apart from any other detail.
+    let detail = skipped_detail(&why);
+    assert!(is_skipped_detail(&detail));
+    assert!(!is_skipped_detail("proxy: CI job j: succeeded"));
+
+    // A skipped deploy ends `succeeded`: it covers the landings it carries, so they land.
+    use pigeon_capabilities::land::lanes::{Deploy, DeployState, Merged, outcome};
+    let landing = Merged {
+        id: "L".into(),
+        merged_at: 10,
+        commit: "c".into(),
+        workers: vec!["core".into(), "dotest-a".into()],
+        ordered: false,
+        proxy_first: false,
+    };
+    let deploys = [
+        Deploy {
+            worker: "core".into(),
+            covers: 10,
+            state: DeployState::Succeeded,
+            incident: false,
+        },
+        Deploy {
+            worker: "dotest-a".into(),
+            covers: 10,
+            state: DeployState::Succeeded,
+            incident: false,
+        },
+    ];
+    assert_eq!(
+        outcome(&landing, &deploys),
+        Some(pigeon_capabilities::land::state::Seen::JobEnded { passed: true })
+    );
+}

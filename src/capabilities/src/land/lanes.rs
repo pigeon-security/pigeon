@@ -796,6 +796,9 @@ pub fn environment_fault(state: &str, _exit_code: Option<i64>, tail: &str) -> Op
         "failed" => {}
         _ => return None,
     }
+    if let Some(why) = rate_limited(tail) {
+        return Some(why);
+    }
     let low = tail.to_ascii_lowercase();
     if low.contains("code: 10007") {
         return Some("Cloudflare error code 10007".to_string());
@@ -822,13 +825,94 @@ pub fn environment_fault(state: &str, _exit_code: Option<i64>, tail: &str) -> Op
     None
 }
 
+/// The words every rate-limit reason starts with ([`rate_limited`]); a deploy's detail that
+/// names them after `environment: ` records a rate limit ([`is_rate_limit_detail`]).
+pub const RATE_LIMIT: &str = "Cloudflare rate limit";
+
+/// The state of an incident recorded because a deploy stayed rate limited after every redeploy
+/// ([`RATE_LIMIT_REDEPLOYS`]): infrastructure, no rollback, no bisect, no landing to blame.
+pub const RATE_LIMITED: &str = "rate_limited";
+
+/// How many times a rate-limited deploy is deployed again before it ends in error.
+pub const RATE_LIMIT_REDEPLOYS: i64 = 4;
+
+/// The wait before the redeploy after the `retries`-th rate limit (0 for the first): 2, 4, 8,
+/// then 16 minutes.
+pub fn rate_limit_backoff_ms(retries: i64) -> i64 {
+    120_000 << retries.clamp(0, 3)
+}
+
+/// Whether a deploy job's output `tail` says Cloudflare rate limited it, and how, short. Only the
+/// job's last deploy attempt counts: the text after the last `== wrangler deploy` header that
+/// `ci/deploy/deploy.sh` prints, or the whole tail when it has none. So a deploy rate limited
+/// once and then failing for its code is still the code's fault. A rate limit is Cloudflare's
+/// `code: 10429`, a 429 status (`HTTP 429`, `status 429`, `status code: 429`, ...), `Too Many
+/// Requests`, or `rate limited`.
+pub fn rate_limited(tail: &str) -> Option<String> {
+    let last = tail
+        .rfind("== wrangler deploy")
+        .map_or(tail, |at| &tail[at..]);
+    let low = last.to_ascii_lowercase();
+    if low.contains("code: 10429") || low.contains("code 10429") {
+        return Some(format!("{RATE_LIMIT} (code 10429)"));
+    }
+    for key in [
+        "http ",
+        "status ",
+        "status: ",
+        "status code ",
+        "status code: ",
+    ] {
+        let mut from = 0;
+        while let Some(i) = low[from..].find(key) {
+            let at = from + i + key.len();
+            let b = low.as_bytes();
+            if low[at..].starts_with("429") && !b.get(at + 3).is_some_and(u8::is_ascii_digit) {
+                return Some(format!("{RATE_LIMIT} (HTTP 429)"));
+            }
+            from = at;
+        }
+    }
+    if low.contains("too many requests") {
+        return Some(format!("{RATE_LIMIT} (Too Many Requests)"));
+    }
+    if low.contains("rate limited") || low.contains("rate-limited") {
+        return Some(format!("{RATE_LIMIT} (rate limited)"));
+    }
+    None
+}
+
+/// Whether a deploy's detail records a rate limit: an environment failure whose reason is
+/// [`rate_limited`]'s.
+pub fn is_rate_limit_detail(detail: &str) -> bool {
+    detail
+        .strip_prefix("environment: ")
+        .is_some_and(|d| d.starts_with(RATE_LIMIT))
+}
+
 /// What to do with a deploy that failed for the environment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EnvStep {
     /// Deploy once more at the same commit with the same landings.
     Redeploy,
+    /// Deploy once more at the same commit with the same landings, no sooner than this many
+    /// milliseconds from now: a rate limit.
+    RedeployAfter(i64),
     /// End the deploy `error` with this detail; no landing is blamed.
     Error(String),
+}
+
+/// The step for a deploy Cloudflare rate limited (`why`, from [`rate_limited`]), deployed again
+/// `retries` times so far: deployed again after [`rate_limit_backoff_ms`], lane or incident
+/// alike, until [`RATE_LIMIT_REDEPLOYS`] are used up; then an error that blames no landing.
+pub fn rate_limit_step(retries: i64, why: &str) -> EnvStep {
+    if retries >= RATE_LIMIT_REDEPLOYS {
+        EnvStep::Error(environment_detail(&format!(
+            "{why}, still after {retries} redeploys"
+        )))
+    } else {
+        EnvStep::RedeployAfter(rate_limit_backoff_ms(retries))
+    }
 }
 
 /// The step for an environment failure: a lane deploy not yet deployed again
@@ -853,7 +937,7 @@ pub fn incident_covered(
     green_deploy: i64,
     green_covers: i64,
 ) -> bool {
-    matches!(state, "unisolated" | "stuck" | ENVIRONMENT)
+    matches!(state, "unisolated" | "stuck" | ENVIRONMENT | RATE_LIMITED)
         && green_deploy > failed_deploy
         && green_covers >= failed_covers
 }
@@ -964,4 +1048,39 @@ pub fn core_incident_from(
             1,
         ),
     }
+}
+
+/// The detail a lane deploy ends with when its Worker was removed at the deploy's commit
+/// ([`removed_at`]): it starts with `skipped: `.
+pub fn skipped_detail(why: &str) -> String {
+    format!("skipped: {why}; nothing deployed")
+}
+
+/// Whether a deploy's detail records a skipped deploy ([`skipped_detail`]).
+pub fn is_skipped_detail(detail: &str) -> bool {
+    detail.starts_with("skipped: ")
+}
+
+/// Whether Worker `name` was removed at a commit, and why, short. `commit_map` is the map
+/// (`ci/workers.toml`) at that commit, `None` when it could not be read or did not parse;
+/// `dir_present` whether the Worker's directory (as the entry the Lander knows names it) is in
+/// the commit's tree, `None` when no entry the Lander knows names one. Removed only when the
+/// commit's map parses and has no entry `name`, and its directory is gone (or unknown): a Worker
+/// whose source is gone but whose entry stays is still deployed, and its failure is the change's.
+pub fn removed_at(
+    commit_map: Option<&pigeon_core::lanes::Map>,
+    name: &str,
+    dir: Option<&str>,
+    dir_present: Option<bool>,
+) -> Option<String> {
+    let map = commit_map?;
+    if map.worker(name).is_some() || dir_present == Some(true) {
+        return None;
+    }
+    Some(match dir {
+        Some(d) => {
+            format!("`{name}` was removed at this commit (no entry in ci/workers.toml, no {d}/)")
+        }
+        None => format!("`{name}` was removed at this commit (no entry in ci/workers.toml)"),
+    })
 }
