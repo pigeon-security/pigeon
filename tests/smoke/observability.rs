@@ -15,7 +15,8 @@ fn core_observability_on_every_worker() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let map = lanes::parse(include_str!("../../ci/workers.toml")).unwrap();
     assert!(!map.workers.is_empty());
-    for w in &map.workers {
+    // An artifact lane (the data Worker's build) deploys no Worker, so has no wrangler.toml.
+    for w in map.platform_workers() {
         let path = root.join(&w.dir).join("wrangler.toml");
         let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path:?}: {e}"));
         let t: toml::Table = toml::from_str(&text).unwrap_or_else(|e| panic!("{path:?}: {e}"));

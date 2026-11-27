@@ -243,14 +243,18 @@ viewers and up:
 
 1. **Accept the `data_home` credential purpose** (Workers Scripts Write for the data Worker
    alone, on home) or say how the home data Worker should be uploaded instead.
-2. **The data Worker's build artifact**: nothing builds the `.wasm` today (data-worker.md
-   decision 1). Until a CI job does (a `ci/` change, the delegate's approval), build it by hand
-   (`worker-build --release` in `src/data-worker`), put each module of `build/` in the
-   platform account's bucket `pigeon-data-artifacts` at `data-worker/{digest}/{module}`, and
-   write `data-worker/current.json` as `{"digest", "main", "modules": [{"name",
-   "content_type"}]}`. The digest is `data_plan::artifact_digest`: the SHA-256 of the lines
-   `{module} {sha256 of its bytes}`, in order. The plan shows the digest; the apply refuses
-   modules that do not match it.
+2. **The data Worker's build artifact**: built by CI. The `data-worker` lane in
+   `ci/workers.toml` (an artifact lane, `pigeon_core::lanes::ARTIFACT_LANES`; it deploys no
+   Worker) runs the job `data-worker-build` (`ci/deploy/data-worker-build.sh`) after every
+   landing that changes `src/data-worker`, `src/ingest`, `src/email` or a shared path. It builds
+   with `worker-build --release`, puts each module (`index.js`, `index_bg.wasm`) in the platform
+   account's bucket `pigeon-data-artifacts` at `data-worker/{digest}/{module}` (creating the
+   bucket on its first run), then writes `data-worker/current.json` as `{"digest", "main",
+   "modules": [{"name", "content_type"}]}` last. The digest is `data_plan::artifact_digest`: the
+   SHA-256 of the lines `{module} {sha256 of its bytes}`, in order. The plan shows the digest; the
+   apply refuses modules that do not match it. Its calls go through the deploy proxy with the
+   lane's deploy grant, which reaches only that bucket's build objects
+   (`cf_proxy::artifact_call`), with the proxy Worker's `data_artifacts` token.
 3. **Policy**: add `email_forward_set` to `risky-tools-need-passkey` (the diff is in the
    landing report).
 4. **Backblaze**: create bucket `pigeon-backup-pigeon-data` (SSE-B2 on) and an application key
@@ -280,3 +284,6 @@ viewers and up:
 - 2026-11-26: replaced by the person's design (catch-all on pigeon.dev, listed mailboxes, the
   lite data store, forwarding, B2 backup). Built off by default on `claude/email-capability`;
   no Cloudflare API was called while building.
+- 2026-11-27: follow-up 2 built: the `data-worker` artifact lane and its `data-worker-build`
+  job upload the data Worker's build; the deploy proxy lets that lane's grant write only
+  `pigeon-data-artifacts`' build objects.

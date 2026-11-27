@@ -1406,6 +1406,8 @@ fn proxy_worker_caches_and_core_ops() {
             "pigeon-ai-agents"
         ]
     );
+    // The data Worker's lane is an artifact lane: no Worker to deploy, its bucket's build only.
+    assert_eq!(cf.artifacts, pigeon_core::lanes::ARTIFACT_LANES);
     let broken = pigeon_proxies::cf_proxy::CfProxy::platform("h", "s", "not toml [", "nope", "r");
     assert!(broken.others.is_empty() && broken.queues.is_empty());
 
@@ -1790,5 +1792,172 @@ fn deploy_proxy_replays_rate_limited_lookup() {
         )
     }) {
         assert!(!forgets(e, 200, ct, &moving), "{} {}", e.method, e.path);
+    }
+}
+
+#[test]
+fn deploy_proxy_artifact_lane_reaches_its_build_only() {
+    use pigeon_capabilities::split::{purpose_permissions, worker_may};
+    use pigeon_proxies::cf_proxy::{
+        ALLOWED, ArtifactCall, PREFIX, Scope, allowed, artifact_call, create_bucket_ok, is_module,
+        manifest_ok,
+    };
+    let lane = pigeon_core::lanes::ARTIFACT_LANES[0];
+    assert_eq!(
+        (lane.name, lane.bucket),
+        (
+            "data-worker",
+            pigeon_capabilities::instances::data_plan::ARTIFACT_BUCKET
+        )
+    );
+    assert_eq!(
+        format!("{}/{}/", lane.bucket, lane.prefix),
+        pigeon_capabilities::instances::data_plan::ARTIFACTS
+    );
+    // The map's entry for it is that lane, and deploys no Worker.
+    let map = pigeon_core::lanes::parse(include_str!("../../ci/workers.toml")).unwrap();
+    let entry = map.worker(lane.name).unwrap();
+    assert_eq!(entry.artifact(), Some(&lane));
+    assert!(!map.scripts().contains(&lane.bucket));
+    assert!(!map.scripts().contains(&"pigeon-data"));
+    assert_eq!(map.platform_workers().count() + 1, map.workers.len());
+
+    let a = "4f94676cb2cbe46fd985b089ca97ea27";
+    let d = "0123456789abcdef".repeat(4);
+    let base = format!("{PREFIX}/accounts/{a}/r2/buckets/{}", lane.bucket);
+    let call = |m: &str, p: &str| artifact_call(m, p, None, a, &lane);
+    assert_eq!(call("GET", &base), Ok(ArtifactCall::Bucket));
+    let buckets = format!("{PREFIX}/accounts/{a}/r2/buckets");
+    assert_eq!(call("POST", &buckets), Ok(ArtifactCall::CreateBucket));
+    assert!(artifact_call("POST", &buckets, None, "0000", &lane).is_err());
+    assert!(call("GET", &buckets).is_err());
+    // Only the lane's own bucket, by name alone.
+    assert_eq!(
+        create_bucket_ok(br#"{"name":"pigeon-data-artifacts"}"#, &lane),
+        Ok(())
+    );
+    for bad in [
+        r#"{"name":"pigeon-changelog"}"#,
+        r#"{"name":"pigeon-data-artifacts","locationHint":"weur"}"#,
+        r#"{}"#,
+        "nope",
+    ] {
+        assert!(create_bucket_ok(bad.as_bytes(), &lane).is_err(), "{bad}");
+    }
+    for (m, rest, want) in [
+        ("GET", "current.json".to_string(), ArtifactCall::Read),
+        (
+            "PUT",
+            "current.json".to_string(),
+            ArtifactCall::WriteCurrent,
+        ),
+        ("GET", format!("{d}/index.js"), ArtifactCall::Read),
+        (
+            "PUT",
+            format!("{d}/index_bg.wasm"),
+            ArtifactCall::WriteModule,
+        ),
+    ] {
+        let p = format!("{base}/objects/{}/{rest}", lane.prefix);
+        assert_eq!(call(m, &p), Ok(want), "{m} {p}");
+        assert!(artifact_call(m, &p, Some("x=1"), a, &lane).is_err());
+        assert!(artifact_call(m, &p, None, "0000", &lane).is_err());
+        assert!(call("DELETE", &p).is_err());
+        // The Worker deploys' allowlist never reaches the build's objects.
+        let scope = Scope {
+            account: a,
+            script: "pigeon-platform",
+            queues: &[],
+            namespaces: &[],
+        };
+        assert!(allowed(m, &p, None, &scope).is_err(), "{m} {p}");
+    }
+    // Nothing else: another bucket or folder, the bucket itself by another method, a bad digest
+    // or module, deeper keys, a listing, Workers.
+    for (m, p) in [
+        (
+            "GET",
+            format!("{PREFIX}/accounts/{a}/r2/buckets/pigeon-changelog"),
+        ),
+        (
+            "PUT",
+            format!(
+                "{PREFIX}/accounts/{a}/r2/buckets/pigeon-changelog/objects/data-worker/current.json"
+            ),
+        ),
+        ("PUT", format!("{base}/objects/other/current.json")),
+        ("PUT", format!("{base}/objects/data-worker/other.json")),
+        (
+            "PUT",
+            format!("{base}/objects/data-worker/{}/index.js", &d[..63]),
+        ),
+        (
+            "PUT",
+            format!("{base}/objects/data-worker/{}/index.js", d.to_uppercase()),
+        ),
+        ("PUT", format!("{base}/objects/data-worker/{d}/.hidden")),
+        ("PUT", format!("{base}/objects/data-worker/{d}/a/b.js")),
+        ("PUT", format!("{base}/objects/data-worker/{d}/a%2Fb.js")),
+        ("PUT", format!("{base}/objects/current.json")),
+        ("GET", format!("{base}/objects")),
+        ("PUT", base.clone()),
+        ("DELETE", base.clone()),
+        ("POST", format!("{base}/objects/data-worker/current.json")),
+        (
+            "PUT",
+            format!("{PREFIX}/accounts/{a}/workers/scripts/pigeon-data"),
+        ),
+        ("GET", format!("{PREFIX}/accounts/{a}/workers/subdomain")),
+    ] {
+        assert!(call(m, &p).is_err(), "{m} {p}");
+    }
+    assert!(is_module("index_bg.wasm") && !is_module("") && !is_module("-x") && !is_module("a/b"));
+    // current.json must be a build's manifest.
+    let good = format!(
+        r#"{{"digest":"{d}","main":"index.js","modules":[{{"name":"index.js","content_type":"application/javascript+module"}},{{"name":"index_bg.wasm","content_type":"application/wasm"}}]}}"#
+    );
+    assert_eq!(manifest_ok(good.as_bytes()), Ok(()));
+    for bad in [
+        "not json".to_string(),
+        good.replace(&d, "abc"),
+        good.replace(r#""main":"index.js""#, r#""main":"other.js""#),
+        good.replace("application/wasm", "text/html"),
+        good.replace("index_bg.wasm", "index.js"),
+        good.replace(r#""main""#, r#""extra":1,"main""#),
+        good.replace(r#""name":"index.js","#, r#""name":"index.js","x":1,"#),
+        format!(r#"{{"digest":"{d}","main":"index.js","modules":[]}}"#),
+    ] {
+        assert!(manifest_ok(bad.as_bytes()).is_err(), "{bad}");
+    }
+    // The lane's token: R2 read and write on the account, held to the bucket by the proxy, and
+    // asked of core by the proxy Worker alone. The Worker deploys' token gains nothing.
+    let mut perms: Vec<&str> = [ArtifactCall::Bucket, ArtifactCall::WriteModule]
+        .iter()
+        .flat_map(|c| c.permissions().iter().copied())
+        .collect();
+    perms.sort_unstable();
+    assert_eq!(
+        purpose_permissions("data_artifacts").unwrap(),
+        perms.as_slice()
+    );
+    assert_eq!(
+        pigeon_proxies::Purpose::DataArtifacts.scoped(),
+        "data_artifacts"
+    );
+    assert!(
+        !ALLOWED
+            .iter()
+            .any(|e| e.permissions.contains(&"Workers R2 Storage Write"))
+    );
+    let ask =
+        |scopes: &[&str]| serde_json::to_vec(&json!({"kind": "scoped", "scopes": scopes})).unwrap();
+    assert!(worker_may("proxy", "credential", &ask(&["data_artifacts"])).is_ok());
+    assert!(worker_may("proxy", "credential", &ask(&["cf_deploy"])).is_ok());
+    for w in ["ci-gateway", "model-gateway", "cloud-gateway"] {
+        assert!(
+            worker_may(w, "credential", &ask(&["data_artifacts"])).is_err(),
+            "{w}"
+        );
+        assert!(worker_may(w, "credential", &ask(&["secrets_store", "data_artifacts"])).is_err());
     }
 }

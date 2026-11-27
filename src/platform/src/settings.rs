@@ -177,7 +177,7 @@ pub fn backup() -> Backup {
             others: map()
                 .workers
                 .into_iter()
-                .filter(|w| w.script != WORKER)
+                .filter(|w| w.is_worker() && w.script != WORKER)
                 .map(|w| cf_proxy::Other {
                     script: w.script,
                     queues: w.queues,
@@ -189,6 +189,13 @@ pub fn backup() -> Backup {
             queues: wrangler().producers,
             containers: wrangler().containers.into_iter().map(|c| c.class).collect(),
             land_repo: format!("{NAMESPACE}/{REPO}"),
+            // The artifact lanes, whose deploy grants reach only their builds' objects.
+            artifacts: map()
+                .workers
+                .iter()
+                .filter_map(|w| w.artifact())
+                .copied()
+                .collect(),
         },
     }
 }

@@ -1132,7 +1132,8 @@ fn land_rebases_disjoint_branches_and_lanes() {
             "model-gateway",
             "ci-gateway",
             "proxy",
-            "ai-agents"
+            "ai-agents",
+            "data-worker"
         ]
     );
     // CI's code deploys the two Workers built with it, core and the gateway, and no other; the
@@ -3047,10 +3048,15 @@ fn land_scope_map_matches_the_cargo_graph() {
             needed.insert(format!("{c}/src/lib.rs"));
             needed.extend(outside_includes(c));
         }
-        // Its own config, assets and deploy script.
+        // Its own config, assets and deploy script; an artifact lane deploys no Worker, so has
+        // no config of its own.
         let wrangler = format!("{}/wrangler.toml", w.dir);
-        let config: toml::Value = read(&root.join(&wrangler)).parse().unwrap();
-        needed.insert(wrangler);
+        let config: toml::Value = if w.is_worker() {
+            needed.insert(wrangler.clone());
+            read(&root.join(&wrangler)).parse().unwrap()
+        } else {
+            toml::Value::Table(Default::default())
+        };
         if let Some(dir) = config
             .get("assets")
             .and_then(|a| a.get("directory"))
@@ -3125,17 +3131,16 @@ fn land_scope_pins_representative_paths() {
     // The map counts src/ai-agents as core's (core's build script embeds every crate's sources
     // for the architecture page), so it deploys core and the Worker.
     assert_eq!(scope("src/ai-agents/x.rs"), ["core", "ai-agents"]);
-    // pigeon-capabilities links pigeon-ingest, so core builds with it.
-    assert_eq!(scope("src/ingest/x.rs"), ["core"]);
-    // Named as deploying nothing: not platform Workers.
-    for path in [
-        "src/data-worker/x.rs",
-        "src/ingest-runner/x.rs",
-        "src/email/x.rs",
-    ] {
-        let a = map.classify(&[path]);
-        assert!(!a.shared && a.workers.is_empty(), "{path}");
+    // pigeon-capabilities links pigeon-ingest, so core builds with it; so does the data Worker,
+    // whose artifact lane builds and uploads it.
+    assert_eq!(scope("src/ingest/x.rs"), ["core", "data-worker"]);
+    // The data Worker and the email library it links: its artifact lane alone, no Worker.
+    for path in ["src/data-worker/src/lib.rs", "src/email/x.rs"] {
+        assert_eq!(scope(path), ["data-worker"], "{path}");
     }
+    // Named as deploying nothing: not a platform Worker.
+    let runner = map.classify(&["src/ingest-runner/x.rs"]);
+    assert!(!runner.shared && runner.workers.is_empty());
     // Docs deploy nothing and need no tests.
     let docs = map.classify(&["docs/plans/landing-speed.md"]);
     assert!(docs.docs_only && !docs.shared && docs.workers.is_empty());

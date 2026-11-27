@@ -1766,7 +1766,11 @@ async fn monitors_planned(
         ));
     }
     let explicit = validate_filters(&available, filters).map_err(Error::RustError)?;
-    let scripts: Vec<String> = this.map.workers.iter().map(|w| w.script.clone()).collect();
+    let scripts: Vec<String> = this
+        .map
+        .platform_workers()
+        .map(|w| w.script.clone())
+        .collect();
     // Every policy pigeon wants, existing or not, is what existing ones are compared against.
     let billing = validate_billing(&available, billing).map_err(Error::RustError)?;
     let mut wanted = plan_monitors_with(&available, &json!([]), &scripts, &explicit).policies;
@@ -2350,7 +2354,11 @@ async fn errors(this: &Observability, cx: &Context<'_>, args: &Value) -> Result<
             BTreeMap::new()
         }
     };
-    let known: Vec<String> = this.map.workers.iter().map(|w| w.script.clone()).collect();
+    let known: Vec<String> = this
+        .map
+        .platform_workers()
+        .map(|w| w.script.clone())
+        .collect();
     let mut out = errors_answer(&scripts, &messages, &known, &ask);
     out["unavailable"] = json!(unavailable);
     Ok(out)
@@ -2482,7 +2490,7 @@ async fn summary(this: &Observability, cx: &Context<'_>, hours: u64) -> Result<V
     };
     let mut workers = Vec::new();
     let (mut requests, mut cpu_ms) = (0.0, 0.0);
-    for w in &this.map.workers {
+    for w in this.map.platform_workers() {
         let s = metrics.get(&w.script).cloned().unwrap_or_default();
         requests += s.requests;
         cpu_ms += s.cpu_ms_estimate();

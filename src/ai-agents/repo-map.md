@@ -45,6 +45,8 @@ workspace crate the Worker crate pulls in, directly or not.
   - links: `src/contract`, `src/core`, `src/proxies`
 - `ai-agents`: script `pigeon-ai-agents`, crate `src/ai-agents-worker`, config `src/ai-agents-worker/wrangler.toml`
   - links: `src/ai-agents`, `src/contract`, `src/core`, `src/models`
+- `data-worker`: script `pigeon-data-artifacts`, crate `src/data-worker`
+  - links: `src/core`, `src/email`, `src/ingest`
 
 ## Where things live
 
@@ -59,10 +61,10 @@ workspace crate the Worker crate pulls in, directly or not.
   Modules:
   `accounts`, `ai_agents`, `apple`, `ci`, `cloud`, `console`, `core`, `federation`, `instances`, `jobs_audit`, `land`, `models`, `observability`, `policy`, `proxy`, `sites`
 - CI: `.pigeon/ci.toml` defines the jobs, `ci/runner` holds their scripts. Jobs:
-  `smoke`, `smoke-fail`, `test`, `allowlist`, `deploy`, `sleep`, `deploy-sites`, `deploy-model-gateway`, `deploy-cloud-gateway`, `deploy-ci-gateway`, `deploy-proxy`, `deploy-ai-agents`, `ios-check`, `ios-release`
+  `smoke`, `smoke-fail`, `test`, `allowlist`, `deploy`, `sleep`, `deploy-sites`, `deploy-model-gateway`, `deploy-cloud-gateway`, `deploy-ci-gateway`, `deploy-proxy`, `deploy-ai-agents`, `ios-check`, `ios-release`, `data-worker-build`
   Run the gate with `sh ci/runner/test.sh`.
 - Deploy: `ci/deploy/deploy.sh` and one `ci/deploy/deploy-<worker>.sh` per capability
   Worker. Scripts in `ci/deploy`:
-  `allowlist.sh`, `deploy-ai-agents.sh`, `deploy-ci-gateway.sh`, `deploy-cloud-gateway.sh`, `deploy-model-gateway.sh`, `deploy-proxy.sh`, `deploy-sites.sh`, `deploy.sh`, `node.sh`, `standin.mjs`
+  `allowlist.sh`, `data-worker-build.sh`, `deploy-ai-agents.sh`, `deploy-ci-gateway.sh`, `deploy-cloud-gateway.sh`, `deploy-model-gateway.sh`, `deploy-proxy.sh`, `deploy-sites.sh`, `deploy.sh`, `node.sh`, `standin.mjs`
 - Worker ownership of paths (lanes): `ci/workers.toml`.
 - This map: `ci/repo-map.sh` writes `src/ai-agents/repo-map.md`.

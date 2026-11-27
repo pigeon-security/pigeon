@@ -318,10 +318,22 @@ pub fn worker_may(worker: &str, op: &str, body: &[u8]) -> std::result::Result<()
     let Some(allowed) = allowed.iter().find(|a| a.op == op) else {
         return Err(format!("Worker `{worker}` may not ask core `{op}`"));
     };
+    let asked: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+    if op == "credential" && worker != "proxy" {
+        let scopes = asked["scopes"].as_array().into_iter().flatten();
+        if let Some(p) = scopes
+            .filter_map(Value::as_str)
+            .find(|p| PROXY_ONLY_PURPOSES.contains(p))
+        {
+            return Err(format!(
+                "Worker `{worker}` may not ask core for credential purpose `{p}`: the proxy \
+                 Worker's alone"
+            ));
+        }
+    }
     let Some(which) = allowed.only else {
         return Ok(());
     };
-    let asked: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
     let field = if op == "dispatch" { "tool" } else { "kind" };
     let named = asked[field].as_str().unwrap_or_default();
     if which.contains(&named) {
@@ -943,6 +955,12 @@ pub fn purpose_permissions(purpose: &str) -> Option<&'static [&'static str]> {
             "Workers Containers Write",
             "Workers R2 Storage Read",
         ],
+        // The proxy Worker's `/cf/` for an artifact lane's deploy job
+        // (`pigeon_proxies::cf_proxy::artifact_call`): reading and writing the data Worker's
+        // build in the platform account's bucket `pigeon-data-artifacts`. The token is the
+        // account's; the proxy holds each call to that bucket's build objects. Only the proxy
+        // Worker may ask for it ([`PROXY_ONLY_PURPOSES`]).
+        "data_artifacts" => &["Workers R2 Storage Read", "Workers R2 Storage Write"],
         // The home instance's plans and applies (`instances::home`): R2 write for its landing
         // bucket (on the account, as creating a bucket needs), and the platform zone's custom
         // domains (on that zone alone). Never Workers-scripts write: the platform's Workers are
@@ -977,12 +995,19 @@ pub const CORE_ONLY_PURPOSES: [&str; 2] = [
     crate::instances::data_apply::PURPOSE,
 ];
 
+/// Purposes in [`purpose_permissions`] that only the proxy Worker (`proxy` in [`WORKER_KEYS`],
+/// verified with its own key) may ask `credential` for: [`worker_may`] refuses any other.
+pub const PROXY_ONLY_PURPOSES: [&str; 1] = ["data_artifacts"];
+
 /// A token minted from the parent token for `purposes`, living [`SCOPED_TTL_SECS`]: the
 /// capability Worker uses it as an `Account`'s bearer, and it expires on its own.
 async fn scoped(cx: &Context<'_>, purposes: &[String]) -> Result<Value> {
     if purposes.is_empty() {
         return Err(bad("a scoped credential names its purposes"));
     }
+    let caller = cx
+        .caller
+        .ok_or_else(|| bad("a scoped credential is for a signed caller"))?;
     let mut permissions: Vec<&str> = Vec::new();
     for p in purposes {
         if CORE_ONLY_PURPOSES.contains(&p.as_str()) {
@@ -998,9 +1023,6 @@ async fn scoped(cx: &Context<'_>, purposes: &[String]) -> Result<Value> {
             }
         }
     }
-    let caller = cx
-        .caller
-        .ok_or_else(|| bad("a scoped credential is for a signed caller"))?;
     let lease = crate::ledger::lease(
         cx.env,
         &ledger_caller(caller),

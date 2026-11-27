@@ -56,13 +56,9 @@ paths = [
     # The iOS app (docs/plans/ios.md): built only by macOS CI and the person's Mac; the Rust gate
     # checks its generated tokens file. No Worker deploys it.
     "ios/*",
-    # The email library (docs/plans/email.md): used by no Worker yet. Move it into its Worker's
-    # paths when one depends on it.
-    "src/email/*",
     "src/cloud-gateway/*",
-    # The data Worker and the ingest runner (docs/plans/ingest.md): not platform Workers, never
-    # deployed by a landing. The ingest library they use is linked by core, so it is core's.
-    "src/data-worker/*",
+    # The ingest runner (docs/plans/ingest.md): not a platform Worker, never deployed by a
+    # landing. The data Worker and the email library are the `data-worker` lane's, below.
     "src/ingest-runner/*",
     # The pigeon.dev landing's content (docs/plans/platform-self-hosting.md): rendered only by
     # the smoke suite until the home instance publishes it.
@@ -175,3 +171,24 @@ test_job = "test"
 deploy_job = "deploy-ai-agents"
 after = ["portal_sync"]
 containers = ["Sandbox"]
+
+# The data Worker's build (docs/plans/email.md, follow-up 2): an artifact lane
+# (pigeon_core::lanes::ARTIFACT_LANES), not a platform Worker. Its deploy job builds
+# src/data-worker with worker-build and uploads the modules to the platform account's bucket
+# pigeon-data-artifacts at data-worker/{digest}/, then data-worker/current.json, which instance
+# plans read; it never deploys pigeon-data or any Worker. Its `script` is that bucket, the one
+# its deploy grant may write. The crates it links: pigeon-ingest (core's too) and pigeon-email;
+# pigeon-core, the workspace's Cargo files and the toolchain are shared, so they run it too.
+[[worker]]
+name = "data-worker"
+script = "pigeon-data-artifacts"
+dir = "src/data-worker"
+paths = [
+    "src/data-worker/*",
+    "src/ingest/*",
+    "src/email/*",
+    "ci/deploy/data-worker-build.sh",
+]
+test_job = "test"
+deploy_job = "data-worker-build"
+after = []

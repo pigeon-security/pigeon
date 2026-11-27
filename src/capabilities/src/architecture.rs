@@ -1294,6 +1294,7 @@ fn entries(sorted: &[&Source], hosted: &Hosted) -> Vec<Entry> {
         .map(|map| {
             map.workers
                 .into_iter()
+                .filter(|w| w.is_worker())
                 .map(|w| Entry {
                     script: w.script.clone(),
                     dir: format!("{}/", w.dir.trim_end_matches('/')),

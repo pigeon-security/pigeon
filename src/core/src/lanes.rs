@@ -71,6 +71,45 @@ pub struct Worker {
     pub containers: Vec<String>,
 }
 
+/// A lane that deploys no Worker: its deploy job builds a crate and uploads the build to a
+/// bucket of the platform's own account, from which an instance plan reads it. Its map entry's
+/// `script` is that bucket, so its deploy grant names the bucket, not a Worker; the deploy proxy
+/// lets such a grant read and write only the build's objects under `prefix/` in that bucket, and
+/// no Worker of its name exists or is deployed. A shared path deploys it like any lane. The list
+/// is fixed here, not in the map: a map field would not parse in an older core.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArtifactLane {
+    /// Its name in the map.
+    pub name: &'static str,
+    /// The bucket its build goes to: its map entry's `script`.
+    pub bucket: &'static str,
+    /// The folder in the bucket its build goes to.
+    pub prefix: &'static str,
+}
+
+/// The artifact lanes: the data Worker's build (docs/plans/email.md, follow-up 2), which an
+/// instance plan uploads to an instance's account (`instances::data_plan::ARTIFACTS`).
+pub const ARTIFACT_LANES: [ArtifactLane; 1] = [ArtifactLane {
+    name: "data-worker",
+    bucket: "pigeon-data-artifacts",
+    prefix: "data-worker",
+}];
+
+impl Worker {
+    /// The artifact lane this entry is ([`ARTIFACT_LANES`]: its name and script both match), if
+    /// it is one: it deploys no Worker.
+    pub fn artifact(&self) -> Option<&'static ArtifactLane> {
+        ARTIFACT_LANES
+            .iter()
+            .find(|a| a.name == self.name && a.bucket == self.script)
+    }
+
+    /// Whether this entry deploys a Worker: every entry but an artifact lane.
+    pub fn is_worker(&self) -> bool {
+        self.artifact().is_none()
+    }
+}
+
 /// A step that runs once a Worker has deployed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -306,9 +345,15 @@ impl Map {
         order
     }
 
-    /// Returns every Worker's script name, in file order.
+    /// Returns the entries that deploy a Worker, in file order: every one but the artifact
+    /// lanes ([`ARTIFACT_LANES`]).
+    pub fn platform_workers(&self) -> impl Iterator<Item = &Worker> {
+        self.workers.iter().filter(|w| w.is_worker())
+    }
+
+    /// Returns every Worker's script name, in file order; an artifact lane's bucket is none.
     pub fn scripts(&self) -> Vec<&str> {
-        self.workers.iter().map(|w| w.script.as_str()).collect()
+        self.platform_workers().map(|w| w.script.as_str()).collect()
     }
 }
 

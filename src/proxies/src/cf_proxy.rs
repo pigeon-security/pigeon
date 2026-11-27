@@ -14,6 +14,14 @@
 //! 200 for the live deploying landing's job token, 403 otherwise, so a deploy job not started by
 //! a landing stops before its build.
 //!
+//! The deploy job of an artifact lane (`pigeon_core::lanes::ARTIFACT_LANES`, such as the data
+//! Worker's build) holds a deploy grant naming its bucket, not a Worker. Such a grant reaches only
+//! [`artifact_call`]'s calls: reading the bucket's record (and creating that bucket, by name
+//! alone, when it is missing), and reading and writing the build's
+//! objects in that bucket, `{prefix}/{digest}/{module}` and `{prefix}/current.json` (whose body
+//! must be a build's manifest), each with a token holding only R2 read or write. It reaches no
+//! Worker, and no other grant or credential reaches those objects.
+//!
 //! Served by core, each call's token is minted from the parent token with only that call's
 //! permissions. Served by the proxy Worker, which never holds the parent token, each call uses
 //! the scoped `cf_deploy` token core minted for it ([`Purpose::Deploy`]): the union of the
@@ -26,6 +34,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use worker::js_sys::Uint8Array;
 use worker::{Fetch, Headers, Method, Request, RequestInit, Response, Result, console_error};
+
+use pigeon_core::lanes::ArtifactLane;
 
 use crate::lookup;
 use crate::proxy::{self, Audit, Outcome, ProxyCaller, bearer};
@@ -110,6 +120,11 @@ pub const CONTAINERS_WRITE: &[&str] = &["Workers Containers Write"];
 pub const QUEUES: &[&str] = &["Queues Read"];
 /// Uploading the Worker, which binds Secrets Store secrets.
 pub const UPLOAD: &[&str] = &["Workers Scripts Write", "Secrets Store Write"];
+
+/// Reading an artifact lane's bucket record and its build's objects.
+pub const R2_OBJECTS_READ: &[&str] = &["Workers R2 Storage Read"];
+/// Writing an artifact lane's build objects.
+pub const R2_OBJECTS_WRITE: &[&str] = &["Workers R2 Storage Write"];
 
 /// The calls `wrangler deploy` makes (wrangler 4.166.0, recorded against a stand-in API and
 /// read in its source).
@@ -426,6 +441,157 @@ pub fn allowed(
     Ok(entry)
 }
 
+/// A call the deploy job of an artifact lane may make, on its own bucket in this account only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactCall {
+    /// `GET /accounts/{account}/r2/buckets/{bucket}`: whether the bucket is there.
+    Bucket,
+    /// `POST /accounts/{account}/r2/buckets` with `{"name": bucket}` and nothing else: makes the
+    /// bucket on the lane's first run ([`create_bucket_ok`]).
+    CreateBucket,
+    /// `GET .../objects/{prefix}/{digest}/{module}` or `.../objects/{prefix}/current.json`: what
+    /// is already there.
+    Read,
+    /// `PUT .../objects/{prefix}/{digest}/{module}`: a module of a build.
+    WriteModule,
+    /// `PUT .../objects/{prefix}/current.json`: the manifest naming the newest build, written
+    /// after its modules ([`manifest_ok`]).
+    WriteCurrent,
+}
+
+impl ArtifactCall {
+    /// The account permissions the token minted for it holds.
+    pub fn permissions(self) -> &'static [&'static str] {
+        match self {
+            ArtifactCall::Bucket | ArtifactCall::Read => R2_OBJECTS_READ,
+            ArtifactCall::CreateBucket | ArtifactCall::WriteModule | ArtifactCall::WriteCurrent => {
+                R2_OBJECTS_WRITE
+            }
+        }
+    }
+}
+
+/// The manifest's key in an artifact lane's folder.
+pub const MANIFEST: &str = "current.json";
+
+/// Whether `s` is a build's digest: 64 lowercase hex.
+fn is_digest(s: &str) -> bool {
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// Whether `s` is a module's name in a build, such as `index.js` or `index_bg.wasm`: 1 to 128
+/// of `[A-Za-z0-9._-]`, starting with a letter or digit.
+pub fn is_module(s: &str) -> bool {
+    (1..=128).contains(&s.len())
+        && s.as_bytes()[0].is_ascii_alphanumeric()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+/// The artifact call `method path?query` is for `lane` in `account`, or why it isn't one. `path`
+/// is the raw request path, [`PREFIX`] included. No query is allowed.
+pub fn artifact_call(
+    method: &str,
+    path: &str,
+    query: Option<&str>,
+    account: &str,
+    lane: &ArtifactLane,
+) -> std::result::Result<ArtifactCall, String> {
+    let refused = || format!("pigeon's proxy does not allow {method} {path} for this build");
+    if query.is_some_and(|q| !q.is_empty()) {
+        return Err("pigeon's proxy does not allow this query".into());
+    }
+    let rest = path.strip_prefix(PREFIX).ok_or_else(refused)?;
+    let segments: Vec<&str> = rest
+        .strip_prefix('/')
+        .ok_or_else(refused)?
+        .split('/')
+        .collect();
+    if !account.is_empty() && method == "POST" && segments == ["accounts", account, "r2", "buckets"]
+    {
+        return Ok(ArtifactCall::CreateBucket);
+    }
+    let bucket = ["accounts", account, "r2", "buckets", lane.bucket];
+    if account.is_empty() || segments.len() < bucket.len() || segments[..5] != bucket {
+        return Err(refused());
+    }
+    let call = match (method, &segments[5..]) {
+        ("GET", []) => ArtifactCall::Bucket,
+        ("GET", ["objects", p, MANIFEST]) if *p == lane.prefix => ArtifactCall::Read,
+        ("PUT", ["objects", p, MANIFEST]) if *p == lane.prefix => ArtifactCall::WriteCurrent,
+        ("GET", ["objects", p, d, m]) if *p == lane.prefix && is_digest(d) && is_module(m) => {
+            ArtifactCall::Read
+        }
+        ("PUT", ["objects", p, d, m]) if *p == lane.prefix && is_digest(d) && is_module(m) => {
+            ArtifactCall::WriteModule
+        }
+        _ => return Err(refused()),
+    };
+    Ok(call)
+}
+
+/// Whether `body` creates `lane`'s bucket and no other: `{"name": bucket}`, nothing else (no
+/// location hint, jurisdiction or storage class).
+pub fn create_bucket_ok(body: &[u8], lane: &ArtifactLane) -> std::result::Result<(), String> {
+    let obj = json_object(body)?;
+    if obj.len() == 1 && obj.get("name").and_then(Value::as_str) == Some(lane.bucket) {
+        Ok(())
+    } else {
+        body_refused("only the lane's own bucket, by name alone")
+    }
+}
+
+/// Whether `body` is a build's manifest, as `instances::data_plan::Artifact` reads it:
+/// `{"digest", "main", "modules": [{"name", "content_type"}]}` with nothing else, a digest of 64
+/// lowercase hex, one or more modules of distinct names, each a JavaScript module or WASM, and
+/// `main` one of them.
+pub fn manifest_ok(body: &[u8]) -> std::result::Result<(), String> {
+    let obj = json_object(body)?;
+    if obj.len() != 3 {
+        return body_refused("a manifest holds digest, main and modules only");
+    }
+    if !obj
+        .get("digest")
+        .and_then(Value::as_str)
+        .is_some_and(is_digest)
+    {
+        return body_refused("the manifest's digest is not 64 lowercase hex");
+    }
+    let Some(Value::Array(modules)) = obj.get("modules") else {
+        return body_refused("the manifest's modules are not a list");
+    };
+    let mut names: Vec<&str> = Vec::new();
+    for m in modules {
+        let Value::Object(m) = m else {
+            return body_refused("a module is not an object");
+        };
+        let name = m.get("name").and_then(Value::as_str);
+        let kind = m.get("content_type").and_then(Value::as_str);
+        let ok = m.len() == 2
+            && name.is_some_and(is_module)
+            && matches!(
+                kind,
+                Some("application/javascript+module" | "application/wasm")
+            );
+        if !ok {
+            return body_refused("a module is not a name and a JavaScript or WASM content type");
+        }
+        if let Some(n) = name {
+            if names.contains(&n) {
+                return body_refused("a module is listed twice");
+            }
+            names.push(n);
+        }
+    }
+    let main = obj.get("main").and_then(Value::as_str);
+    if names.is_empty() || !main.is_some_and(|m| names.contains(&m)) {
+        return body_refused("the manifest's main is not one of its modules");
+    }
+    Ok(())
+}
+
 /// The calls in `recorded` the proxy would refuse within `scope`, each with why. A recorded call
 /// is one line, `METHOD /path?query`, the path after the API's `/client/v4`, and optionally
 /// ` body=<base64>` holding its JSON body, which is then checked against the call's body rule:
@@ -667,6 +833,9 @@ pub struct CfProxy {
     /// The repository landings deploy from, as `namespace/name`: a deploy job's token is taken
     /// only when its grant is for this repository.
     pub land_repo: String,
+    /// The artifact lanes in the map (`pigeon_core::lanes::ARTIFACT_LANES`): a deploy grant
+    /// naming one's bucket reaches only [`artifact_call`]'s calls on it.
+    pub artifacts: Vec<ArtifactLane>,
 }
 
 /// Another platform Worker the proxy deploys, and its deploy's scope.
@@ -721,11 +890,17 @@ impl CfProxy {
     /// fallback map does.
     pub fn platform(host: &str, script: &str, wrangler: &str, map: &str, land_repo: &str) -> Self {
         let (queues, containers) = deploy_scope(wrangler);
-        let others = pigeon_core::lanes::parse(map)
+        let workers = pigeon_core::lanes::parse(map)
             .map(|m| m.workers)
-            .unwrap_or_default()
+            .unwrap_or_default();
+        let artifacts = workers
+            .iter()
+            .filter_map(|w| w.artifact())
+            .copied()
+            .collect();
+        let others = workers
             .into_iter()
-            .filter(|w| w.script != script)
+            .filter(|w| w.is_worker() && w.script != script)
             .map(|w| Other {
                 script: w.script,
                 queues: w.queues,
@@ -739,7 +914,14 @@ impl CfProxy {
             queues,
             containers,
             land_repo: land_repo.into(),
+            artifacts,
         }
+    }
+
+    /// The artifact lane whose bucket a deploy grant's `script` names, if any.
+    fn artifact_lane(&self, script: Option<&str>) -> Option<ArtifactLane> {
+        let script = script?;
+        self.artifacts.iter().find(|a| a.bucket == script).copied()
     }
 }
 
@@ -896,6 +1078,10 @@ impl CfProxy {
                 Err(e) => return refuse(403, &e.to_string()),
             },
         };
+        // An artifact lane's deploy reaches its build's objects and nothing else.
+        if let Some(lane) = self.artifact_lane(caller.as_ref().and_then(|c| c.script.as_deref())) {
+            return artifact(host, req, &url, &lane).await;
+        }
         let method = req.method();
         // The Worker the call is for: the one its path names, or this one. A landing's deploy
         // job deploys only the Worker its grant names; a proxy credential, any platform Worker.
@@ -1021,6 +1207,78 @@ impl CfProxy {
             None,
         ))
     }
+}
+
+/// One call of an artifact lane's deploy job ([`artifact_call`]), passed on with a token holding
+/// only R2 read or write, minted for the call and revoked once the answer is back.
+async fn artifact(
+    host: &dyn Host,
+    mut req: Request,
+    url: &worker::Url,
+    lane: &ArtifactLane,
+) -> Result<(Response, Option<String>)> {
+    let refuse = |status: u16, why: &str| -> Result<(Response, Option<String>)> {
+        Ok((api_error(status, why)?, Some(why.to_string())))
+    };
+    let method = req.method();
+    let account_id = host.account_id();
+    let call = match artifact_call(method.as_ref(), url.path(), url.query(), &account_id, lane) {
+        Ok(c) => c,
+        Err(why) => return refuse(403, &why),
+    };
+    let too_large = req
+        .headers()
+        .get("Content-Length")?
+        .and_then(|n| n.parse::<usize>().ok())
+        .is_some_and(|n| n > BODY_MAX);
+    if too_large {
+        return refuse(413, "the request body is too large for pigeon's proxy");
+    }
+    let body = match method {
+        Method::Get => Vec::new(),
+        _ => req.bytes().await?,
+    };
+    if body.len() > BODY_MAX {
+        return refuse(413, "the request body is too large for pigeon's proxy");
+    }
+    let checked = match call {
+        ArtifactCall::WriteCurrent => manifest_ok(&body),
+        ArtifactCall::CreateBucket => create_bucket_ok(&body, lane),
+        _ => Ok(()),
+    };
+    if let Err(why) = checked {
+        return refuse(403, &why);
+    }
+    let content_type = req.headers().get("Content-Type")?;
+    let upstream_url = format!("{API}{}", &url.path()[PREFIX.len()..]);
+    let account = host.account(Purpose::DataArtifacts).await?;
+    let token = Scoped::open_for(
+        &account,
+        "cf-proxy-artifacts",
+        vec![Policy::new(tokens::Scope::Account, call.permissions())],
+        TOKEN_TTL,
+    )
+    .await?;
+    let sent = send(
+        token.value(),
+        method,
+        &upstream_url,
+        content_type.as_deref(),
+        &body,
+    )
+    .await;
+    let (status, answered_type, bytes) = token.finish(sent).await?;
+    let headers = Headers::new();
+    headers.set(
+        "Content-Type",
+        answered_type.as_deref().unwrap_or("application/json"),
+    )?;
+    Ok((
+        Response::from_bytes(bytes)?
+            .with_status(status)
+            .with_headers(headers),
+        None,
+    ))
 }
 
 /// The time in milliseconds since the epoch.

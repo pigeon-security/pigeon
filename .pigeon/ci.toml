@@ -134,3 +134,20 @@ token = true
 [jobs.ios-release.needs]
 os = "macos"
 arch = "arm64"
+
+# The data Worker's build (docs/plans/email.md, follow-up 2): the deploy job of the `data-worker`
+# artifact lane in ci/workers.toml, which the Lander runs after a landing that changed
+# src/data-worker, the crates it links or a shared path. It builds src/data-worker with
+# worker-build and uploads the modules to pigeon-data-artifacts/data-worker/{digest}/ through the
+# deploy proxy with this job's own token, then data-worker/current.json last; a build already
+# there is not uploaded again. It deploys no Worker. Like every deploy job it runs only as a
+# landing's deploy: submitted by hand, the proxy refuses its token.
+[jobs.data-worker-build]
+run = "ci/deploy/data-worker-build.sh"
+timeout_min = 45
+token = true
+
+[jobs.data-worker-build.needs]
+cpu = 4
+memory_gb = 12
+disk_gb = 20

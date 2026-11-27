@@ -1194,3 +1194,272 @@ exit "$FAKE_SECOND_EXIT"
     }
     std::fs::remove_dir_all(fixture).unwrap();
 }
+
+/// The data Worker's lane (`data-worker-build`, ci/deploy/data-worker-build.sh) with a fake
+/// proxy and bucket: each module at `data-worker/{digest}/{module}` with the digest instance plans
+/// check, `current.json` written after the modules, nothing uploaded again for a build already
+/// there, and each call one the proxy lets the lane's grant make.
+#[test]
+fn data_worker_build_uploads_its_build_then_current_json() {
+    use pigeon_capabilities::instances::data_plan::{self, Artifact};
+    use pigeon_proxies::cf_proxy::{artifact_call, manifest_ok};
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let fixture = repo("data-worker-build");
+    let bin = fixture.join("bin");
+    let store = fixture.join("store");
+    for dir in [
+        fixture.join("ci/deploy"),
+        fixture.join("ci/runner"),
+        fixture.join("src/platform"),
+        fixture.join("src/data-worker"),
+        bin.clone(),
+    ] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    let script = fixture.join("ci/deploy/data-worker-build.sh");
+    std::fs::copy(root.join("ci/deploy/data-worker-build.sh"), &script).unwrap();
+    std::fs::copy(
+        root.join("ci/runner/warm.sh"),
+        fixture.join("ci/runner/warm.sh"),
+    )
+    .unwrap();
+    let account = "fixture-account";
+    std::fs::write(
+        fixture.join("src/platform/wrangler.toml"),
+        format!("name = \"pigeon-platform\"\naccount_id = \"{account}\"\n"),
+    )
+    .unwrap();
+    let executable = |path: &Path, text: &str| {
+        std::fs::write(path, text).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    executable(&bin.join("cargo"), "#!/bin/sh\nexit 0\n");
+    // worker-build 0.9's layout: wasm-bindgen's index.js importing index_bg.wasm, and a shim.
+    executable(
+        &bin.join("worker-build"),
+        r#"#!/bin/sh
+set -eu
+echo built >> "$FAKE_LOG"
+mkdir -p build/worker
+printf '%s' "$FAKE_JS" > build/index.js
+printf '%s' "$FAKE_WASM" > build/index_bg.wasm
+printf '%s' "export * from '../index.js';" > build/worker/shim.mjs
+printf '{}' > build/package.json
+"#,
+    );
+    // The proxy and the bucket: objects are files under $FAKE_STORE; each call is logged as
+    // `METHOD path`, after the API prefix.
+    executable(
+        &bin.join("curl"),
+        r#"#!/bin/sh
+method=GET out=/dev/null data= url=
+while [ $# -gt 0 ]; do
+    case $1 in
+        -X) method=$2; shift ;;
+        -o) out=$2; shift ;;
+        -w | -H | --max-time) shift ;;
+        --data-binary) data=${2#@}; shift ;;
+        -*) ;;
+        *) url=$1 ;;
+    esac
+    shift
+done
+path=/${url#https://*/}
+answer() { printf '%s' "$2" > "$out"; printf '%s' "$1"; exit 0; }
+case $path in
+    /cf/grant) echo "GET /cf/grant" >> "$FAKE_LOG"; answer "${FAKE_GRANT:-200}" '{"success":false,"errors":[{"code":10000,"message":"refused"}]}' ;;
+esac
+rest=${path#/cf/client/v4}
+echo "$method $rest" >> "$FAKE_LOG"
+case $method:$rest in
+    POST:*/r2/buckets)
+        [ -z "${FAKE_NO_CREATE:-}" ] || answer 403 '{"success":false,"errors":[{"code":10000,"message":"refused"}]}'
+        grep -q '^{"name":"pigeon-data-artifacts"}$' "$data" || answer 400 '{}'
+        mkdir -p "$FAKE_STORE"; answer 200 '{"success":true,"result":{}}' ;;
+    *:*/objects/*) key=${rest#*/objects/} ;;
+    *) [ -d "$FAKE_STORE" ] && answer 200 '{"success":true,"result":{}}'
+       answer 404 '{"success":false,"errors":[{"code":10006,"message":"no such bucket"}]}' ;;
+esac
+case $method in
+    GET)
+        if [ -f "$FAKE_STORE/$key" ]; then cp "$FAKE_STORE/$key" "$out"; printf 200; exit 0; fi
+        answer 404 '{"success":false,"errors":[{"code":10007,"message":"not found"}]}' ;;
+    PUT)
+        case $key in
+            *"${FAKE_FAIL:-none}") answer 500 '{"success":false,"errors":[{"code":10001,"message":"failed"}]}' ;;
+        esac
+        mkdir -p "$(dirname "$FAKE_STORE/$key")"
+        cp "$data" "$FAKE_STORE/$key"
+        answer 200 '{"success":true,"result":{}}' ;;
+esac
+answer 405 '{}'
+"#,
+    );
+    let log = fixture.join("log");
+    let run = |js: &str, wasm: &str, env: &[(&str, &str)]| -> (i32, Vec<String>, String) {
+        std::fs::write(&log, "").unwrap();
+        let mut path = vec![bin.clone()];
+        path.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
+        let mut cmd = Command::new("sh");
+        cmd.arg(&script)
+            .current_dir(&fixture)
+            .env("PATH", std::env::join_paths(path).unwrap())
+            .env("PIGEON_WARM_DIR", fixture.join("no-warm-cache"))
+            .env("PIGEON_JOB_TOKEN", "fake-job-token")
+            .env(
+                "PIGEON_GIT_URL",
+                "https://proxy.example.invalid/git/fixture",
+            )
+            .env("FAKE_JS", js)
+            .env("FAKE_WASM", wasm)
+            .env("FAKE_LOG", &log)
+            .env("FAKE_STORE", &store);
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        let out = cmd.output().unwrap();
+        let text = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let calls = std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(String::from)
+            .collect();
+        (out.status.code().unwrap_or(-1), calls, text)
+    };
+    let lane = pigeon_core::lanes::ARTIFACT_LANES[0];
+    let bucket = format!("/accounts/{account}/r2/buckets/{}", lane.bucket);
+    let current = || -> Artifact {
+        let text = std::fs::read(store.join("data-worker/current.json")).unwrap();
+        manifest_ok(&text).unwrap();
+        serde_json::from_slice(&text).unwrap()
+    };
+    let puts = |calls: &[String]| -> Vec<String> {
+        calls
+            .iter()
+            .filter_map(|c| c.strip_prefix("PUT "))
+            .map(|p| {
+                p.strip_prefix(&format!("{bucket}/objects/"))
+                    .unwrap()
+                    .to_string()
+            })
+            .collect()
+    };
+    // Every call but the pre-flight is one the proxy lets the lane's grant make.
+    let allowed = |calls: &[String]| {
+        for c in calls
+            .iter()
+            .filter(|c| *c != "built" && *c != "GET /cf/grant")
+        {
+            let (method, path) = c.split_once(' ').unwrap();
+            let full = format!("{}{path}", pigeon_proxies::cf_proxy::PREFIX);
+            assert!(
+                artifact_call(method, &full, None, account, &lane).is_ok(),
+                "{c}"
+            );
+        }
+    };
+
+    // No bucket, and the proxy refuses to create it: stopped before anything is built (3).
+    let (code, calls, text) = run("x", "y", &[("FAKE_NO_CREATE", "1")]);
+    assert_eq!(code, 3, "{text}");
+    assert!(text.contains("create it once"), "{text}");
+    assert!(!calls.iter().any(|c| c == "built"));
+
+    // A first build: the bucket made, both modules under its digest, then current.json.
+    let (code, calls, text) = run("export default {};", "wasm-1", &[]);
+    assert_eq!(code, 0, "{text}");
+    allowed(&calls);
+    assert_eq!(calls[1], format!("GET {bucket}"));
+    assert_eq!(calls[2], format!("POST /accounts/{account}/r2/buckets"));
+    let first = current();
+    let digest = data_plan::artifact_digest(&[
+        ("index.js", b"export default {};"),
+        ("index_bg.wasm", b"wasm-1"),
+    ]);
+    assert_eq!(first.digest, digest);
+    assert_eq!(first.main, "index.js");
+    let names: Vec<(&str, &str)> = first
+        .modules
+        .iter()
+        .map(|m| (m.name.as_str(), m.content_type.as_str()))
+        .collect();
+    assert_eq!(
+        names,
+        [
+            ("index.js", "application/javascript+module"),
+            ("index_bg.wasm", "application/wasm")
+        ]
+    );
+    assert_eq!(
+        puts(&calls),
+        [
+            data_plan::module_key(&digest, "index.js"),
+            data_plan::module_key(&digest, "index_bg.wasm"),
+            "data-worker/current.json".to_string(),
+        ],
+        "the modules first, current.json last"
+    );
+    assert_eq!(
+        std::fs::read(store.join(data_plan::module_key(&digest, "index_bg.wasm"))).unwrap(),
+        b"wasm-1"
+    );
+    assert!(
+        !store
+            .join(format!("data-worker/{digest}/shim.mjs"))
+            .exists()
+    );
+
+    // The same build again: nothing is created or uploaded.
+    let (code, calls, text) = run("export default {};", "wasm-1", &[]);
+    assert_eq!(code, 0, "{text}");
+    assert!(!calls.iter().any(|c| c.starts_with("POST ")), "{calls:?}");
+    assert!(puts(&calls).is_empty(), "{calls:?}");
+    assert!(text.contains("already"), "{text}");
+
+    // A module that fails to upload: stopped before current.json (3), which still names the
+    // first build.
+    let (code, calls, text) = run(
+        "export default {};",
+        "wasm-2",
+        &[("FAKE_FAIL", "index_bg.wasm")],
+    );
+    assert_eq!(code, 3, "{text}");
+    assert!(!puts(&calls).contains(&"data-worker/current.json".to_string()));
+    assert_eq!(current(), first);
+
+    // A new build: its modules (index.js is the same bytes, but under a new digest), then
+    // current.json names it.
+    let (code, calls, text) = run("export default {};", "wasm-2", &[]);
+    assert_eq!(code, 0, "{text}");
+    allowed(&calls);
+    let second = current();
+    assert_ne!(second.digest, first.digest);
+    assert_eq!(puts(&calls).last().unwrap(), "data-worker/current.json");
+    assert!(
+        store
+            .join(data_plan::module_key(&first.digest, "index_bg.wasm"))
+            .exists()
+    );
+
+    // A manifest that fails to write after the modules: 1, the old one stays.
+    let (code, _, text) = run(
+        "export default {};",
+        "wasm-3",
+        &[("FAKE_FAIL", "current.json")],
+    );
+    assert_eq!(code, 1, "{text}");
+    assert_eq!(current(), second);
+
+    // Not a landing's deploy: stopped before anything is built or written (3).
+    let (code, calls, text) = run("x", "y", &[("FAKE_GRANT", "403")]);
+    assert_eq!(code, 3, "{text}");
+    assert_eq!(calls, ["GET /cf/grant"]);
+    assert_eq!(current(), second);
+    std::fs::remove_dir_all(fixture).unwrap();
+}

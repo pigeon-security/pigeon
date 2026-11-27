@@ -523,7 +523,7 @@ fn core_architecture_draws_every_worker_in_the_map() {
     let map_text = std::fs::read_to_string(root.join("ci/workers.toml")).unwrap();
     let map = pigeon_core::lanes::parse(&map_text).expect("the map parses");
     let mut files: Vec<(String, String)> = vec![("ci/workers.toml".into(), map_text.clone())];
-    for w in &map.workers {
+    for w in map.platform_workers() {
         let toml = std::fs::read_to_string(root.join(&w.dir).join("wrangler.toml"))
             .unwrap_or_else(|_| panic!("{} has a wrangler.toml", w.dir));
         files.push((format!("{}/wrangler.toml", w.dir), toml));
@@ -613,11 +613,13 @@ fn core_architecture_draws_every_worker_in_the_map() {
     let drawing = &built(&hosted).page;
     let model = serde_json::to_value(&described).unwrap();
 
-    // One Worker per entry of the map, in its order, each in the drawing.
+    // One Worker per entry of the map, in its order, each in the drawing; an artifact lane (the
+    // data Worker's build) is no Worker and is not drawn.
     let all = model["workers"].as_array().unwrap();
     let drawn: Vec<&str> = all.iter().map(|w| w["name"].as_str().unwrap()).collect();
-    let scripts: Vec<&str> = map.workers.iter().map(|w| w.script.as_str()).collect();
+    let scripts = map.scripts();
     assert_eq!(drawn, scripts, "every Worker in ci/workers.toml, once");
+    assert!(!drawn.contains(&"pigeon-data-artifacts"));
     assert!(
         drawn.contains(&"pigeon-proxy"),
         "the proxy Worker has no binding from core"
@@ -853,7 +855,7 @@ fn core_architecture_draws_every_worker_in_the_map() {
         built(&hosted).public_drawing
     );
     let mut secret: Vec<String> = vec!["fake-token".into(), "secret-detail".into()];
-    for w in &map.workers {
+    for w in map.platform_workers() {
         let toml = std::fs::read_to_string(root.join(&w.dir).join("wrangler.toml")).unwrap();
         secret.extend(Wrangler::read(&toml).vars.values().cloned());
         for line in toml.lines() {
@@ -2732,6 +2734,7 @@ fn arch_home_capabilities() -> Vec<Box<dyn pigeon_capabilities::Capability>> {
                     queues: Vec::new(),
                     containers: Vec::new(),
                     land_repo: "pigeon/pigeon".into(),
+                    artifacts: Vec::new(),
                 },
             }),
         }),

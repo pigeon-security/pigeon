@@ -37,6 +37,9 @@ pub enum Purpose {
     /// The calls `wrangler deploy` makes through `/cf/`, and the lookup of a Worker's container
     /// namespaces.
     Deploy,
+    /// An artifact lane's calls through `/cf/` (`cf_proxy::artifact_call`): reading and writing
+    /// its build's objects in its bucket.
+    DataArtifacts,
 }
 
 impl Purpose {
@@ -46,6 +49,7 @@ impl Purpose {
         match self {
             Purpose::Git => "artifacts",
             Purpose::Deploy => "cf_deploy",
+            Purpose::DataArtifacts => "data_artifacts",
         }
     }
 }
