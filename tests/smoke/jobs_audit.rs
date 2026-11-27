@@ -164,3 +164,41 @@ fn jobs_audit_profile_requires_console_setup_before_draft_apply() {
     disabled.capabilities.clear();
     assert!(!jobs_audit_change(Some(&next), &disabled));
 }
+
+#[test]
+fn pipeline_terminal_audit_is_stable_and_scoped() {
+    use pigeon_ingest::audit::{
+        Cleanup, PipelineCounts, PipelineKind, PipelineOutcome, PipelineTerminal, terminal_object,
+    };
+
+    let mut terminal = PipelineTerminal {
+        run_id: "run-123".into(),
+        started_ms: 100,
+        finished_ms: 200,
+        outcome: PipelineOutcome::Succeeded,
+        cleanup: Some(Cleanup::Confirmed),
+        counts: PipelineCounts {
+            stored: 2,
+            ..PipelineCounts::default()
+        },
+        estimated_usd_micros: Some(5),
+    };
+    let object = terminal_object("owner/demo", PipelineKind::ScalewayIngest, &terminal).unwrap();
+    assert!(
+        object
+            .key
+            .starts_with("audit/v1/instances/owner%2Fdemo/jobs/scaleway-ingest/run-123/terminal/")
+    );
+    assert_eq!(
+        object.key,
+        terminal_object("owner/demo", PipelineKind::ScalewayIngest, &terminal)
+            .unwrap()
+            .key
+    );
+    let body: Value = serde_json::from_slice(&object.json).unwrap();
+    assert_eq!(body["job"]["cleanup"], "confirmed");
+    assert_eq!(body["job"]["counts"]["stored"], 2);
+    assert!(terminal_object("../demo", PipelineKind::ScalewayIngest, &terminal).is_none());
+    terminal.run_id = "run/123".into();
+    assert!(terminal_object("owner/demo", PipelineKind::ScalewayIngest, &terminal).is_none());
+}

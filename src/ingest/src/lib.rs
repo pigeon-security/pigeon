@@ -7,6 +7,7 @@
 //! for WASM and natively. The design is decision 13 of docs/plans/ingest.md.
 
 pub mod archive;
+pub mod audit;
 pub mod datastore;
 pub mod decide;
 pub mod engine;

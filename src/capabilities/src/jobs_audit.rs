@@ -343,12 +343,51 @@ pub fn diagnostic_object(instance: &str, job: &Value) -> Option<Object> {
 /// Attempt a copy to the approved linked-instance bucket. Failures remain pending for retry;
 /// callers persist the health outcome independently. Never routes through a home credential.
 pub async fn export(env: &Env, host: &str, instance: &str, public_job: &Value) -> ExportStatus {
+    export_object(
+        env,
+        host,
+        instance,
+        None,
+        diagnostic_object(instance, public_job),
+    )
+    .await
+}
+
+/// Store a pipeline audit only in the account and bucket captured by its approved plan.
+pub async fn export_pipeline(
+    env: &Env,
+    host: &str,
+    instance: &str,
+    approved_target: (&str, &str),
+    kind: pigeon_ingest::audit::PipelineKind,
+    terminal: &pigeon_ingest::audit::PipelineTerminal,
+) -> ExportStatus {
+    let object =
+        pigeon_ingest::audit::terminal_object(instance, kind, terminal).map(|object| Object {
+            key: object.key,
+            json: object.json,
+        });
+    export_object(env, host, instance, Some(approved_target), object).await
+}
+
+async fn export_object(
+    env: &Env,
+    host: &str,
+    instance: &str,
+    expected: Option<(&str, &str)>,
+    object: Option<Object>,
+) -> ExportStatus {
     let approved = match current_target(env, instance).await {
         Ok(Some(target)) => target,
         Ok(None) => return ExportStatus::NotConfigured,
         Err(_) => return ExportStatus::Retrying,
     };
-    let Some(object) = diagnostic_object(instance, public_job) else {
+    if expected
+        .is_some_and(|(account, bucket)| account != approved.account || bucket != approved.bucket)
+    {
+        return ExportStatus::Retrying;
+    }
+    let Some(object) = object else {
         return ExportStatus::Retrying;
     };
     let result = async {
