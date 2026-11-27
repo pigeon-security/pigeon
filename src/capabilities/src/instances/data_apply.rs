@@ -229,8 +229,7 @@ pub async fn observe(
     )
     .await?
     .is_some();
-    // A linked instance has no backup yet (`data_store::placement_problems`), so its link is
-    // never asked for the queues or the Secrets Store, which it may not grant.
+    // Only consult optional Queues and Secrets Store scopes on a linked account with backup.
     let backup_read = instance.account == crate::instances::record::AccountRef::Home
         || crate::data_store::settings(instance).is_some_and(|s| s.backup.is_some());
     if backup_read {
@@ -494,7 +493,7 @@ pub async fn run(
                         Some(&json!({
                             "type": "worker", "script_name": script,
                             "dead_letter_queue": dead_letter,
-                            "settings": { "batch_size": 10, "max_retries": 5 },
+                            "settings": { "batch_size": 10, "max_retries": datastore::BACKUP_MAX_RETRIES },
                         })),
                     )
                     .await?;
@@ -749,16 +748,30 @@ pub async fn upload_inline(i: &Inline<'_>) -> Result<()> {
     let db = database_id(token, acc, &i.data.database, &mut database).await?;
     let key = new_key()?;
     let site = pigeon_core::workers::metadata(super::plan::COMPATIBILITY_DATE, i.bindings);
-    let data = data_plan::worker_metadata(
+    let slot = crate::data_store::b2_slot(i.instance);
+    let backup = crate::data_store::backup(i.instance);
+    let secrets_store = if backup.is_some() {
+        Some(
+            crate::secrets::linked_store(i.account)
+                .await?
+                .ok_or_else(|| bad("The linked instance's Secrets Store disappeared."))?,
+        )
+    } else {
+        None
+    };
+    let mut data = data_plan::worker_metadata(
         INLINE_MAIN,
         &data_plan::WorkerBindings {
             instance: &i.instance.id,
             bucket: &i.data.bucket,
             database_id: &db,
             data_key: &key,
-            backup: None,
+            backup: backup
+                .zip(secrets_store.as_deref())
+                .map(|(b, store)| (b, store, slot.as_str())),
         },
     );
+    data_plan::bind_jobs_audit(&mut data, i.instance);
     let mut bindings = site["bindings"].as_array().cloned().unwrap_or_default();
     bindings.extend(data["bindings"].as_array().cloned().unwrap_or_default());
     let metadata = json!({
@@ -824,7 +837,8 @@ async fn upload(
             .filter(|_| backup)
             .map(|b| (b, a.secrets_store, slot.as_str())),
     };
-    let metadata = data_plan::worker_metadata(&built.main, &bindings);
+    let mut metadata = data_plan::worker_metadata(&built.main, &bindings);
+    data_plan::bind_jobs_audit(&mut metadata, instance);
     let boundary = pigeon_core::workers::boundary_from(&pigeon_core::webauthn::random()?);
     let body = data_plan::multipart(&boundary, &metadata, &parts);
     let ctype = pigeon_core::workers::content_type(&boundary);

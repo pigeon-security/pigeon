@@ -61,6 +61,56 @@ fn backup_xml_field<'a>(xml: &'a str, tag: &str) -> Option<&'a str> {
     Some(xml.split_once(&open)?.1.split_once(&close)?.0.trim())
 }
 
+/// A bucket ACL must identify its owner as the only grantee with full control.
+pub fn backup_is_private(xml: &str) -> bool {
+    let owner = backup_xml_field(xml, "Owner").and_then(|owner| backup_xml_field(owner, "ID"));
+    let Some(list) = backup_xml_field(xml, "AccessControlList") else {
+        return false;
+    };
+    let Some(grant) = backup_xml_field(list, "Grant") else {
+        return false;
+    };
+    list.matches("<Grant>").count() == 1
+        && owner.is_some_and(|id| !id.is_empty() && backup_xml_field(grant, "ID") == Some(id))
+        && backup_xml_field(grant, "Permission") == Some("FULL_CONTROL")
+}
+
+/// Restrict the backup writer to one bucket, read/write of files and read-only inspection.
+pub fn backup_key_scope(allowed: &Value, bucket: &str) -> bool {
+    let Some(buckets) = allowed["buckets"].as_array() else {
+        return false;
+    };
+    let [bound] = buckets.as_slice() else {
+        return false;
+    };
+    const REQUIRED: &[&str] = &[
+        "listBuckets",
+        "listFiles",
+        "readBuckets",
+        "readFiles",
+        "writeFiles",
+        "readBucketRetentions",
+        "readFileRetentions",
+    ];
+    let Some(caps) = allowed["capabilities"].as_array() else {
+        return false;
+    };
+    bound["name"].as_str() == Some(bucket)
+        && (allowed["namePrefix"].is_null()
+            || allowed["namePrefix"]
+                .as_str()
+                .is_some_and(|p| "backup/v1/".starts_with(p)))
+        && REQUIRED
+            .iter()
+            .all(|cap| caps.iter().any(|c| c.as_str() == Some(cap)))
+        && caps.iter().all(|c| {
+            c.as_str().is_some_and(|cap| {
+                REQUIRED.contains(&cap)
+                    || matches!(cap, "listAllBucketNames" | "readBucketEncryption")
+            })
+        })
+}
+
 /// B2 S3 GetObjectLockConfiguration must say the bucket has enabled nonzero default Governance.
 pub fn backup_governance(xml: &str) -> bool {
     backup_xml_field(xml, "ObjectLockEnabled") == Some("Enabled")
@@ -85,6 +135,9 @@ pub fn backup_retention(xml: &str) -> Option<&str> {
         None
     }
 }
+
+/// Number of retries before the backup queue sends a failed message to its dead-letter queue.
+pub const BACKUP_MAX_RETRIES: u32 = 5;
 
 /// The backup queue of a store: `{store}-backup`.
 pub fn backup_queue(store: &str) -> String {

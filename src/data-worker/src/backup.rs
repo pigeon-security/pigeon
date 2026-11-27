@@ -46,6 +46,7 @@ impl Target {
                 .region
                 .bytes()
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+            || !(3..=63).contains(&config.bucket.len())
             || !config
                 .bucket
                 .bytes()
@@ -120,6 +121,50 @@ impl Target {
             .await
     }
 
+    async fn require_restricted_key(&self) -> Result<()> {
+        let credentials = format!(
+            "{}:{}",
+            self.keys.access_key_id, self.keys.secret_access_key
+        );
+        let headers = Headers::new();
+        headers.set(
+            "authorization",
+            &format!("Basic {}", pigeon_core::git::base64(credentials.as_bytes())),
+        )?;
+        let mut init = RequestInit::new();
+        init.with_method(Method::Get)
+            .with_headers(headers)
+            .with_redirect(RequestRedirect::Error);
+        let mut res = Fetch::Request(Request::new_with_init(
+            "https://api.backblazeb2.com/b2api/v4/b2_authorize_account",
+            &init,
+        )?)
+        .send()
+        .await?;
+        require_ok(&res)?;
+        let result: serde_json::Value = res.json().await?;
+        let access = &result["apiInfo"]["storageApi"];
+        if access["s3ApiUrl"].as_str() != Some(self.endpoint.base.as_str())
+            || !datastore::backup_key_scope(&access["allowed"], &self.bucket)
+        {
+            return Err(fail(
+                "the B2 backup credential must have only the approved bucket and backup permissions",
+            ));
+        }
+        Ok(())
+    }
+
+    async fn require_private(&self) -> Result<()> {
+        let mut res = self
+            .request(Method::Get, "", &[("acl".into(), String::new())], &[], None)
+            .await?;
+        require_ok(&res)?;
+        if !datastore::backup_is_private(&res.text().await?) {
+            return Err(fail("the B2 backup bucket is not private"));
+        }
+        Ok(())
+    }
+
     async fn require_governance(&self) -> Result<()> {
         let mut res = self
             .request(
@@ -181,6 +226,7 @@ impl Target {
                 "x-amz-meta-pigeon-r2-key".into(),
                 webauthn::b64url(source.key.as_bytes()),
             ),
+            ("x-amz-acl".into(), "private".into()),
             ("x-amz-server-side-encryption".into(), "AES256".into()),
         ];
         if source.size <= PART_BYTES {
@@ -344,6 +390,9 @@ pub async fn copy(env: &Env, key: &str) -> Result<Option<Copy>> {
             "the Data object key cannot be preserved in backup metadata",
         ));
     }
+    if env.var("BACKUP_AUDIT_REQUIRED").is_ok() {
+        env.bucket("JOBS_AUDIT")?;
+    }
     let bucket = env.bucket("DATA")?;
     let Some(object) = bucket.get(key).execute().await? else {
         return Ok(None);
@@ -358,6 +407,10 @@ pub async fn copy(env: &Env, key: &str) -> Result<Option<Copy>> {
         return Err(fail("the Data object exceeds the backup multipart limit"));
     }
 
+    let target = Target::open(env).await?;
+    target.require_restricted_key().await?;
+    target.require_private().await?;
+    target.require_governance().await?;
     let mut digest = Sha256::new();
     let mut read = 0;
     let mut body = object
@@ -377,8 +430,6 @@ pub async fn copy(env: &Env, key: &str) -> Result<Option<Copy>> {
         return Err(fail("the Data blob does not match the checksum in its key"));
     }
 
-    let target = Target::open(env).await?;
-    target.require_governance().await?;
     let destination = datastore::backup_object_key(source.key, &sha);
     if target.exists(&destination, &sha, source.size).await? {
         return Ok(Some(Copy {
@@ -394,4 +445,61 @@ pub async fn copy(env: &Env, key: &str) -> Result<Option<Copy>> {
         size: source.size,
         stored: true,
     }))
+}
+
+/// Export one redacted terminal receipt for an R2 create event, without exposing object keys.
+pub async fn audit(
+    env: &Env,
+    event: &str,
+    started_ms: u64,
+    result: &Result<Option<Copy>>,
+) -> Result<()> {
+    use pigeon_ingest::audit::{PipelineCounts, PipelineKind, PipelineOutcome, PipelineTerminal};
+
+    let Ok(bucket) = env.bucket("JOBS_AUDIT") else {
+        // Existing home backups do not support instance Jobs.
+        return Ok(());
+    };
+    let instance = env.var("INSTANCE")?.to_string();
+    let mut counts = PipelineCounts {
+        examined: 1,
+        ..Default::default()
+    };
+    let outcome = match result {
+        Ok(Some(copy)) => {
+            counts.bytes_read = copy.size;
+            if copy.stored {
+                counts.stored = 1;
+                counts.bytes_written = copy.size;
+            } else {
+                counts.duplicates = 1;
+            }
+            PipelineOutcome::Succeeded
+        }
+        _ => {
+            counts.failed = 1;
+            PipelineOutcome::Failed
+        }
+    };
+    let terminal = PipelineTerminal {
+        run_id: datastore::sha256_hex(event.as_bytes()),
+        started_ms,
+        finished_ms: (worker::js_sys::Date::now() as u64).max(started_ms),
+        outcome,
+        cleanup: None,
+        counts,
+        estimated_usd_micros: None,
+    };
+    let record =
+        pigeon_ingest::audit::terminal_object(&instance, PipelineKind::BackblazeBackup, &terminal)
+            .ok_or_else(|| fail("the backup audit receipt is invalid"))?;
+    bucket
+        .put(&record.key, record.json)
+        .http_metadata(worker::HttpMetadata {
+            content_type: Some("application/json".into()),
+            ..Default::default()
+        })
+        .execute()
+        .await?;
+    Ok(())
 }

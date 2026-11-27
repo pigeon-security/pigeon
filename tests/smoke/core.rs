@@ -3425,3 +3425,29 @@ fn data_backup_versions_and_governance() {
         None
     );
 }
+
+#[test]
+fn data_backup_refuses_public_bucket_and_delete_capability() {
+    use pigeon_ingest::datastore::{backup_is_private, backup_key_scope};
+
+    let private = "<AccessControlPolicy><Owner><ID>account</ID></Owner><AccessControlList><Grant><Grantee><ID>account</ID></Grantee><Permission>FULL_CONTROL</Permission></Grant></AccessControlList></AccessControlPolicy>";
+    assert!(backup_is_private(private));
+    assert!(!backup_is_private(&private.replace(
+        "</AccessControlList>",
+        "<Grant><Permission>READ</Permission></Grant></AccessControlList>"
+    )));
+    let scoped = serde_json::json!({
+        "buckets": [{"id": "bucket_id", "name": "pigeon-backup"}],
+        "capabilities": ["listBuckets", "listFiles", "readBuckets", "readFiles", "writeFiles",
+                         "readBucketRetentions", "readFileRetentions"],
+        "namePrefix": "backup/v1/"
+    });
+    assert!(backup_key_scope(&scoped, "pigeon-backup"));
+    assert!(!backup_key_scope(&scoped, "source-bucket"));
+    let mut unsafe_key = scoped;
+    unsafe_key["capabilities"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!("deleteFiles"));
+    assert!(!backup_key_scope(&unsafe_key, "pigeon-backup"));
+}

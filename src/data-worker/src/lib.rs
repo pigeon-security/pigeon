@@ -7,6 +7,7 @@
 //!
 //! Bindings: `DATA_KEY` (secret), `DB` (D1 `{instance}-data`), `DATA` (the instance bucket),
 //! `INSTANCE` (text, the instance id), `BACKUP` (text, the B2 bucket), `B2_KEYS` (Secrets Store),
+//! `JOBS_AUDIT` (the approved private Jobs bucket for a linked backup),
 //! `INGEST_JOB` (the Durable Object, ingest only). It consumes `{instance}-ingest-manifests` and
 //! `{instance}-data-backup`.
 
@@ -204,16 +205,33 @@ mod backup;
 async fn queue(batch: MessageBatch<Value>, env: Env, _ctx: Context) -> Result<()> {
     if batch.queue().ends_with("-backup") {
         for message in batch.messages()? {
-            match protocol::parse_event(message.body()) {
-                Some(e) => match backup::copy(&env, &e.key).await {
-                    Ok(_) => message.ack(),
-                    Err(err) => {
-                        console_log!("backup of an object failed: {err}");
-                        message.retry();
-                    }
-                },
+            let Some(event) = protocol::parse_event(message.body()) else {
                 // A delete, or not an event: nothing to copy.
-                None => message.ack(),
+                message.ack();
+                continue;
+            };
+            let result = backup::copy(&env, &event.key).await;
+            let final_attempt = message.attempts() > pigeon_ingest::datastore::BACKUP_MAX_RETRIES;
+            if (result.is_ok() || final_attempt)
+                && backup::audit(
+                    &env,
+                    &message.id(),
+                    message.timestamp().as_millis(),
+                    &result,
+                )
+                .await
+                .is_err()
+            {
+                console_log!("could not store a backup terminal Jobs receipt");
+                message.retry();
+                continue;
+            }
+            match result {
+                Ok(_) => message.ack(),
+                Err(err) => {
+                    console_log!("backup of an object failed: {err}");
+                    message.retry();
+                }
             }
         }
         return Ok(());

@@ -1399,7 +1399,7 @@ fn secrets_on_a_linked_instance() {
     assert!(js.contains("ctx.op(\"secrets_list\", { instance: ctx.instance.id })"));
 
     // The scope: granted, not granted, or not reported.
-    let full = "account-settings.read zone.read secrets-store.write d1.write \
+    let full = "account-settings.read zone.read secrets-store.write d1.write queues.write \
                 email-routing-rule.write email-routing-address.write zone-settings.write offline_access";
     let old = "account-settings.read zone.read dns.write offline_access";
     assert_eq!(grants(Some(full), "secrets-store.write"), Some(true));
@@ -1415,7 +1415,10 @@ fn secrets_on_a_linked_instance() {
          secrets needs: re-link docs (Instances › docs › Overview, Link) and allow it, to enable \
          secrets."
     );
-    assert_eq!(relink_for(Some(old)), ["secrets", "data", "data-email"]);
+    assert_eq!(
+        relink_for(Some(old)),
+        ["secrets", "data", "data backup", "data-email"]
+    );
     assert!(relink_for(Some(full)).is_empty() && relink_for(None).is_empty());
     // Cloudflare's refusal of an older link reads as "re-link", never as a bare 403.
     let refused = explain("docs", "secrets", "Cloudflare API: 403: Unauthorized");
@@ -6251,6 +6254,7 @@ fn data_and_email_on_linked_instances() {
         bucket: "noisypigeon-data".into(),
         database: "noisypigeon-data".into(),
         backup: None,
+        backup_config: None,
     };
     assert_eq!(parts.inline.as_ref(), Some(&inline));
     assert_eq!(

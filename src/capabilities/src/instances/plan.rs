@@ -270,6 +270,8 @@ pub struct InlineData {
     pub database: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backup: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup_config: Option<String>,
 }
 
 /// The module that composes the instance Worker with an inline data store: the site module and

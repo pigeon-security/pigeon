@@ -4293,16 +4293,30 @@ mod email {
                     "email": { "placement": "own_worker" } } }),
                 "Email runs where the data store runs",
             ),
-            // No B2 backup on a linked instance yet.
+            // Linked backups require a dedicated Jobs audit destination.
             (
                 json!({ "capabilities": { "data": { "backup": { "bucket": "b2-bucket",
                     "endpoint": "https://s3.eu-central-003.backblazeb2.com", "region": "eu-central-003" } } } }),
-                "not built for a linked instance yet",
+                "separate approved Jobs audit bucket",
             ),
         ] {
             let got = problems(&linked(extra.clone()));
             assert!(got.iter().any(|p| p.contains(why)), "{extra}: {got:?}");
         }
+        let backed = linked(json!({ "capabilities": {
+            "data": { "backup": { "bucket": "b2-bucket",
+                "endpoint": "https://s3.eu-central-003.backblazeb2.com",
+                "region": "eu-central-003" } },
+            "jobs": { "audit_bucket": "linked-jobs-audit" }
+        } }));
+        let mut metadata = json!({ "bindings": [] });
+        pigeon_capabilities::instances::data_plan::bind_jobs_audit(&mut metadata, &backed);
+        assert_eq!(
+            metadata["bindings"][0],
+            json!({
+                "type": "r2_bucket", "name": "JOBS_AUDIT", "bucket_name": "linked-jobs-audit"
+            })
+        );
         let alone = linked(json!({ "zones": [], "capabilities": { "data": {} } }));
         assert!(problems(&alone).is_empty(), "{:?}", problems(&alone));
         // Home's placement stays read-only: its own Worker, pigeon-data.

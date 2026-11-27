@@ -1284,6 +1284,7 @@ fn linking_a_cloudflare_account() {
         { "id": "r2.write", "name": "Workers R2 Storage Write" },
         { "id": "secrets-store.write", "name": "Secrets Store Write" },
         { "id": "d1.write", "name": "D1 Write" },
+        { "id": "queues.write", "name": "Queues Write" },
         { "id": "email-routing-rule.write", "name": "Email Routing Rules Write" },
         { "id": "email-routing-address.write", "name": "Email Routing Addresses Write" },
         { "id": "zone-settings.write", "name": "Zone Settings Write" },
@@ -1297,6 +1298,7 @@ fn linking_a_cloudflare_account() {
             &[
                 "Secrets Store Write",
                 "D1 Write",
+                "Queues Write",
                 "Email Routing Rules Write",
                 "Email Routing Addresses Write",
                 "Zone Settings Write"
@@ -1327,6 +1329,7 @@ fn linking_a_cloudflare_account() {
         [
             "secrets-store.write",
             "d1.write",
+            "queues.write",
             "email-routing-rule.write",
             "email-routing-address.write",
             "zone-settings.write"
@@ -1339,7 +1342,14 @@ fn linking_a_cloudflare_account() {
             .iter()
             .map(|c| c.capability)
             .collect::<Vec<_>>(),
-        ["secrets", "data", "data-email", "data-email", "data-email"]
+        [
+            "secrets",
+            "data",
+            "data backup",
+            "data-email",
+            "data-email",
+            "data-email"
+        ]
     );
     assert!(scopes_to_add(&ids).is_empty());
 

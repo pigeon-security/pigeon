@@ -4,8 +4,9 @@ The Data Worker copies R2 object-create events to a dedicated, private bucket in
 Backblaze account. The credential is separate from the source-read credential and scoped to the
 backup bucket. Configure Backblaze's default Object Lock retention in Governance mode before
 provisioning the Data backup. The owner chooses the retention period. Use a custom application key
-with read and write file access and read access to bucket and file retention. Omit file deletion,
-retention changes, and governance bypass. The Worker verifies the destination's default retention
+with `listBuckets`, `listFiles`, `readBuckets`, `readFiles`, `writeFiles`,
+`readBucketRetentions` and `readFileRetentions`. The Worker verifies the exact bucket restriction
+and rejects keys with file deletion, retention changes, governance bypass or unrelated access. The Worker verifies the destination's default retention
 and each copied object's active lock. R2 deletions never trigger a B2 deletion. The Worker can
 cancel its own unfinished multipart upload.
 
@@ -26,3 +27,19 @@ backups until a protected backup and a test restore have been verified.
 This transport consumes R2 notifications. An inventory-driven backfill and multipart resume
 across Workers queue invocations are separate steps. Use a test copy to verify large objects and
 retention permissions before relying on it for bulk transfers.
+
+## Linked instance setup and audit
+
+A linked backup uses the same Data plan for an inline Worker or a Worker of its own. Enable the
+instance's private Jobs audit bucket and its linked Secrets Store first. Re-link with Queues
+Write and Secrets Store Write for backup, in addition to the permissions Data already needs.
+Store the dedicated B2 credential at `DATA_B2_<UPPERCASE_STORE_NAME>`, replacing hyphens with
+underscores. Name the approved backup endpoint and bucket in the Data record. The plan verifies
+the Jobs bucket's privacy and refuses a linked backup until the credential exists. Review and
+apply the instance plan with your passkey.
+
+The Data Worker writes a terminal Jobs record per create event, including copied bytes,
+duplicates and failures that exhaust retries. It binds only the approved private Jobs bucket in
+the same linked account. The audit contains no provider credentials or object names. A backup
+object deleted from Data before it could be read is logged as missing. Existing home backups
+have no linked Jobs binding.

@@ -17,6 +17,21 @@ use crate::users::directory;
 /// The capability's name in the catalogue and a record's `capabilities`.
 pub const NAME: &str = "data";
 
+/// Optional linked OAuth grants used only when the Data backup is configured.
+pub const BACKUP_SCOPES: &str = "data backup";
+
+pub fn backup(record: &Instance) -> Option<&Backup> {
+    settings(record)?.backup.as_ref()
+}
+
+/// The separate, approved instance Jobs bucket to bind into a linked Data Worker.
+pub fn backup_audit_bucket(record: &Instance) -> Option<&str> {
+    if record.account == AccountRef::Home || backup(record).is_none() {
+        return None;
+    }
+    crate::jobs_audit::configured_bucket(record).filter(|bucket| *bucket != store_name(record))
+}
+
 /// Where the store is backed up: a Backblaze B2 bucket of its own (ingest.md decision 10), by
 /// its S3 endpoint and region. The key is a Secrets Store secret the person sets
 /// ([`b2_slot`]), never in the record.
@@ -81,8 +96,7 @@ pub fn worker(record: &Instance) -> Option<String> {
 }
 
 /// What is wrong with where `record` places the store and its mail: inline without an instance
-/// Worker; `email` placed anywhere but where `data` runs; a backup on a linked instance, which
-/// is not built yet.
+/// Worker; `email` placed anywhere but where `data` runs; linked backups without Jobs audit.
 pub fn placement_problems(record: &Instance) -> Vec<String> {
     let mut out = Vec::new();
     let Some(s) = settings(record) else {
@@ -105,12 +119,11 @@ pub fn placement_problems(record: &Instance) -> Vec<String> {
             placement(record).as_str()
         ));
     }
-    if record.account != AccountRef::Home && s.backup.is_some() {
-        out.push(
-            "The data store's B2 backup is not built for a linked instance yet: leave \
-             data.backup out."
-                .into(),
-        );
+    if record.account != AccountRef::Home
+        && s.backup.is_some()
+        && backup_audit_bucket(record).is_none()
+    {
+        out.push("A linked Data backup requires a separate approved Jobs audit bucket.".into());
     }
     out
 }

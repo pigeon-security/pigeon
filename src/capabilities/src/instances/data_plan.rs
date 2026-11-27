@@ -417,6 +417,12 @@ pub fn data_parts(
         }
     });
     let backup = settings.backup.as_ref().map(|b| b.bucket.clone());
+    let backup_config = settings.backup.as_ref().map(|b| {
+        pigeon_core::oauth::hash(
+            &json!({ "destination": b, "audit": crate::data_store::backup_audit_bucket(instance) })
+                .to_string(),
+        )
+    });
     match &seen.artifact {
         None => steps.push(Step::Blocked {
             why: format!(
@@ -430,10 +436,11 @@ pub fn data_parts(
                 bucket: name.clone(),
                 database: name.clone(),
                 backup: backup.clone(),
+                backup_config: backup_config.clone(),
             });
         }
         Some(artifact) => {
-            let module = data_worker_digest(artifact, &name, backup.as_deref());
+            let module = data_worker_digest(artifact, &name, backup_config.as_deref());
             let uploaded = ledger
                 .workers
                 .iter()
@@ -510,13 +517,20 @@ pub fn data_parts(
                 }
             });
             if !seen.backup_key {
-                steps.push(Step::Pending {
-                    what: format!("B2 key for {}", b.bucket),
-                    why: format!(
-                        "set {} on Access (`KEY_ID:APPLICATION_KEY`, a key for that bucket \
-                         alone); copies fail and wait in the queue until it is",
-                        crate::data_store::b2_slot(instance)
-                    ),
+                let slot = crate::data_store::b2_slot(instance);
+                let expected = format!(
+                    "`KEY_ID:APPLICATION_KEY`, scoped to backup bucket {}",
+                    b.bucket
+                );
+                steps.push(if instance.account == super::record::AccountRef::Home {
+                    Step::Pending {
+                        what: format!("B2 key for {}", b.bucket),
+                        why: format!("set {slot} on Access ({expected})"),
+                    }
+                } else {
+                    Step::Blocked {
+                        why: format!("set {slot} in the linked account's Cloudflare Secrets Store ({expected})"),
+                    }
                 });
             }
         }
@@ -639,6 +653,17 @@ pub fn worker_metadata(main: &str, b: &WorkerBindings<'_>) -> serde_json::Value 
         "compatibility_date": super::plan::COMPATIBILITY_DATE,
         "bindings": bindings,
     })
+}
+
+/// Bind only the Jobs bucket approved with this instance, which the planner verifies is private.
+pub fn bind_jobs_audit(metadata: &mut serde_json::Value, instance: &Instance) {
+    if let Some(bucket) = crate::data_store::backup_audit_bucket(instance)
+        && let Some(bindings) = metadata["bindings"].as_array_mut()
+    {
+        bindings.push(json!({ "type": "r2_bucket", "name": "JOBS_AUDIT", "bucket_name": bucket }));
+        bindings
+            .push(json!({ "type": "plain_text", "name": "BACKUP_AUDIT_REQUIRED", "text": "1" }));
+    }
 }
 
 /// The multipart body of an upload with several modules (a JS shim and its WASM).
