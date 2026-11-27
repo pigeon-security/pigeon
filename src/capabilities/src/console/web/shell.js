@@ -30,7 +30,7 @@
   if (!root) return;
 
   // ---- Contract (P15): every op the shell and its views read, and every write they make.
-  const READS = Object.freeze(["console_manifest", "instances_list", "app_inbox", "app_linked_details", "app_jobs_audit_plan",
+  const READS = Object.freeze(["console_manifest", "instances_list", "app_inbox", "app_linked_details", "app_jobs_audit_plan", "app_federation_people",
     "storage_list_objects", "source_resolve_revision", "source_read_file", "ci_jobs", "ci_status",
     "observability_worker_metrics", "app_ingest_runs", "ingest_report", "digitalocean_status", "digitalocean_verify",
     "email_mailboxes", "email_list", "email_get", "storage_get_object",

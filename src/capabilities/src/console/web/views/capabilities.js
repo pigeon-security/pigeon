@@ -531,9 +531,17 @@
         ["digitalocean_droplet_job", "Read a runner check"],
         ["digitalocean_droplet_status", "Read runner status"],
       ];
-      const peer = input({ name: "peer", mono: true, spellcheck: "false" });
-      const person = input({ name: "person", mono: true, spellcheck: "false" });
+      const option = (value, text) => el("option", { value, text });
+      const peer = el("select", { class: "input", name: "peer" }, option("", "Loading instances…"));
+      const person = el("select", { class: "input", name: "person" }, option("", "Loading people…"));
       const app = input({ name: "app", mono: true, spellcheck: "false" });
+      const appField = field({ label: "OAuth app service user ID",
+        hint: "Expand the person’s connected app under Access → People to see its service user ID.", control: app });
+      const appScope = el("select", { class: "input", name: "app_scope",
+        on: { change: () => { appField.hidden = appScope.value === "all"; } } }, [
+        option("specific", "Specific OAuth app"),
+        option("all", "All current and future OAuth apps"),
+      ]);
       const choices = tools.map(([value, label]) => ({ value, label, control: el("input", { type: "checkbox", checked: true }) }));
       const title = editing ? "Manage MCP Federation trust" : "Enable MCP Federation";
       function review(nextGrants, removing) {
@@ -546,14 +554,17 @@
           target: [["Capability", code(name)]], danger: removing,
           confirmLabel: removing ? "Revoke with passkey" : "Approve with passkey",
           effect: removing ? "Blocks this federation grant on the next call."
-            : "The peer instance owner must also approve this person, app and tool access.",
+            : nextGrants.at(-1)?.all_apps
+              ? "This grant covers all current and future OAuth apps connected to this person. The peer instance must also approve access."
+              : "The peer instance owner must also approve this person, app and tool access.",
         });
       }
       const add = () => {
-        const grant = { peer: peer.value.trim(), person: person.value.trim(), app: app.value.trim(),
+        const scope = appScope.value === "all" ? { all_apps: true } : { app: app.value.trim() };
+        const grant = { peer: peer.value, person: person.value, ...scope,
           tools: choices.filter(({ control }) => control.checked).map(({ value }) => value) };
-        if (!grant.peer || !grant.person || !grant.app || !grant.tools.length || grant.peer === record.id)
-          return d.say("Enter a different peer instance, the person ID, the OAuth app service user ID, and select at least one tool.", true);
+        if (!grant.peer || !grant.person || !(grant.all_apps || grant.app) || !grant.tools.length)
+          return d.say("Select a peer, a person, an app scope, and at least one tool. Enter the app ID for a specific app.", true);
         if (grants.some((g) => g.peer === grant.peer && g.person === grant.person && g.app === grant.app))
           return d.say("Revoke the existing grant for this peer, person and app before replacing it.", true);
         if (grants.length >= 16) return d.say("This instance already has 16 grants.", true);
@@ -563,15 +574,34 @@
         title,
         body: [
           ...grants.map((g, index) => el("div", { class: "section" },
-            facts([["Peer instance", code(g.peer)], ["Person ID", code(g.person)], ["OAuth app service user ID", code(g.app)],
+            facts([["Peer instance", code(g.peer)], ["Person ID", code(g.person)], ["OAuth app scope", g.all_apps ? "All current and future OAuth apps" : code(g.app)],
               ["Read tools", g.tools.map((tool) => tools.find(([value]) => value === tool)?.[1] || tool).join(", ")]]),
             button("Revoke grant", () => review(grants.filter((_, i) => i !== index), true), { variant: "danger" }))),
-          field({ label: "Peer instance ID", control: peer }),
-          field({ label: "Person ID", hint: "On the home instance, open Access → People and expand the person.", control: person }),
-          field({ label: "OAuth app service user ID", hint: "Expand the person’s connected app to see its service user ID.", control: app }),
+          field({ label: "Peer instance", control: peer }),
+          field({ label: "Person", control: person }),
+          field({ label: "OAuth app access", control: appScope }),
+          appField,
           ...choices.map(({ control, label }) => el("label", {}, [control, " ", label])),
         ],
         actions: [button("Cancel", () => d.close()), button("Review grant", add, { variant: "primary" })],
+      });
+      const home = record.account?.kind === "home";
+      ctx.op("instances_list").then((instances) => {
+        const peers = instances.filter((instance) => instance.id !== record.id
+          && (home ? instance.account?.kind === "linked" : instance.account?.kind === "home"));
+        peer.replaceChildren(option("", peers.length ? "Select a peer instance" : "No eligible peer instances"),
+          ...peers.map((instance) => option(instance.id, instance.title && instance.title !== instance.id
+            ? `${instance.title} (${instance.id})` : instance.id)));
+      }).catch((error) => {
+        peer.replaceChildren(option("", "Could not load instances"));
+        d.say(error.message, true);
+      });
+      ctx.op("app_federation_people", { instance: record.id }).then((people) => {
+        person.replaceChildren(option("", people.length ? "Select a person" : "No instance members"),
+          ...people.map((member) => option(member.id, member.name || member.id)));
+      }).catch((error) => {
+        person.replaceChildren(option("", "Could not load people"));
+        d.say(error.message, true);
       });
     }
 

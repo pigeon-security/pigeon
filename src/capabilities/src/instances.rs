@@ -445,6 +445,15 @@ async fn federation_owner(
                 "select the current ID of the home instance or a linked peer",
             ));
         }
+        if grant.all_apps {
+            let selected: Option<Caller> = serde_json::from_value(
+                directory(cx.env, "caller.of", json!({"user_id": grant.person})).await?,
+            )?;
+            if !selected.is_some_and(|caller| caller.user.kind == "standard") {
+                return Err(bad("select a current person for MCP Federation"));
+            }
+            continue;
+        }
         let linked: Option<Caller> = serde_json::from_value(
             directory(cx.env, "caller.of", json!({"user_id": grant.app})).await?,
         )?;

@@ -32,7 +32,7 @@ fn platform_federation_requires_current_bilateral_trust_for_one_person_app_and_t
     let mut linked = record("willowgraysen", false, "pigeon.dev", &[JOBS, STATUS]);
     let access = access();
     let allowed = |home: &Instance, linked: &Instance, person, app, tool| {
-        permitted(home, linked, &access, person, app, tool)
+        permitted(home, linked, &access, person, app, true, tool)
     };
 
     assert!(allowed(&home, &linked, "willow", "chatgpt", JOBS));
@@ -64,7 +64,7 @@ fn platform_federation_uses_exact_membership_even_for_an_admin_and_blocks_draft_
     access.admin = true;
     access.roles.remove("willowgraysen");
     assert!(!permitted(
-        &home, &linked, &access, "willow", "chatgpt", JOBS
+        &home, &linked, &access, "willow", "chatgpt", true, JOBS
     ));
 
     let mut disabled = linked.clone();
@@ -79,4 +79,37 @@ fn platform_federation_uses_exact_membership_even_for_an_admin_and_blocks_draft_
             .iter()
             .any(|problem| problem.contains("MCP Federation"))
     );
+}
+
+#[test]
+fn platform_federation_all_apps_expands_only_with_current_bilateral_oauth_trust() {
+    let mut home = record("pigeon.dev", true, "willowgraysen", &[JOBS]);
+    let mut linked = record("willowgraysen", false, "pigeon.dev", &[JOBS]);
+    let widen = |record: &mut Instance| {
+        let grant = &mut record.capabilities.get_mut(NAME).unwrap().federation[0];
+        grant.app.clear();
+        grant.all_apps = true;
+    };
+    let access = access();
+    let can_read = |home: &Instance, linked: &Instance, app, registered| {
+        permitted(home, linked, &access, "willow", app, registered, JOBS)
+    };
+
+    widen(&mut home);
+    assert!(can_read(&home, &linked, "chatgpt", true));
+    assert!(!can_read(&home, &linked, "new-app", true));
+    widen(&mut linked);
+    assert!(can_read(&home, &linked, "new-app", true));
+    assert!(!can_read(&home, &linked, "manual-service", false));
+    assert!(!permitted(
+        &home,
+        &linked,
+        &access,
+        "other-person",
+        "new-app",
+        true,
+        JOBS
+    ));
+    linked.capabilities.remove(NAME);
+    assert!(!can_read(&home, &linked, "new-app", true));
 }

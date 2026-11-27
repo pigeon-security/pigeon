@@ -8,7 +8,7 @@ use worker::{Env, Error, Result};
 use crate::digitalocean::health;
 use crate::instances::{self, record::Instance, tools::Scope};
 use crate::membership::{self, Access, Role};
-use crate::users::{Caller, User};
+use crate::users::{Caller, User, directory};
 use crate::{Context, Hosted, catalogue};
 
 pub const NAME: &str = "mcp-federation";
@@ -20,7 +20,10 @@ pub const READS: &[&str] = &[health::STATUS, health::JOBS, health::JOB];
 pub struct Grant {
     pub peer: String,
     pub person: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub app: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub all_apps: bool,
     pub tools: Vec<String>,
 }
 
@@ -38,8 +41,11 @@ fn valid(record: &Instance, grant: &Grant) -> bool {
             b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'/' | b'.')
         })
         && opaque(&grant.person)
-        && opaque(&grant.app)
-        && grant.person != grant.app
+        && (if grant.all_apps {
+            grant.app.is_empty()
+        } else {
+            opaque(&grant.app) && grant.person != grant.app
+        })
         && !grant.tools.is_empty()
         && grant.tools.len() <= READS.len()
         && grant
@@ -74,6 +80,16 @@ pub(crate) fn grants(record: &Instance) -> &[Grant] {
         .map_or(&[], |settings| &settings.federation)
 }
 
+impl Grant {
+    fn covers_app(&self, app: &str, registered: bool) -> bool {
+        if self.all_apps {
+            registered
+        } else {
+            self.app == app
+        }
+    }
+}
+
 fn exact_member(access: &Access, id: &str) -> bool {
     let id = membership::key(id);
     access.instances.iter().any(|i| i == id)
@@ -90,13 +106,14 @@ pub fn permitted(
     access: &Access,
     person: &str,
     app: &str,
+    registered: bool,
     tool: &str,
 ) -> bool {
     let allows = |record: &Instance, peer: &str| {
         grants(record).iter().any(|grant| {
             grant.peer == peer
                 && grant.person == person
-                && grant.app == app
+                && grant.covers_app(app, registered)
                 && grant.tools.iter().any(|name| name == tool)
         })
     };
@@ -149,11 +166,22 @@ impl Available {
         let Some(source) = source else {
             return Ok(empty);
         };
+        if !grants(&source).iter().any(|g| g.person == person.id) {
+            return Ok(empty);
+        }
+        let registered = directory(
+            env,
+            "oauth.service_registered",
+            json!({"service_user_id": caller.user.id}),
+        )
+        .await?
+            == true;
         for peer in grants(&source)
             .iter()
-            .filter(|g| g.person == person.id && g.app == caller.user.id)
+            .filter(|g| g.person == person.id && g.covers_app(&caller.user.id, registered))
             .map(|g| &g.peer)
             .filter(|peer| exact_member(&access, peer))
+            .collect::<std::collections::BTreeSet<_>>()
         {
             let Some(destination) = instances::one(env, peer).await? else {
                 continue;
@@ -172,6 +200,7 @@ impl Available {
                         &access,
                         &person.id,
                         &caller.user.id,
+                        registered,
                         tool,
                     ) && scope.bind(tool, &json!({})).is_ok()
                 })

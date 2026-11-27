@@ -1648,6 +1648,13 @@ impl Directory {
                 )?;
                 row.unwrap_or(Value::Null)
             }
+            "oauth.service_registered" => {
+                let row: Option<Value> = self.db.row(
+                    "SELECT 1 AS registered FROM oauth_clients WHERE service_user_id = ? LIMIT 1",
+                    vec![s("service_user_id").into()],
+                )?;
+                json!(row.is_some())
+            }
             "oauth.clients" => {
                 let rows: Vec<Value> = self.db.rows(
                     "SELECT c.id, c.name, c.redirect_uris, c.service_user_id, c.created_at, l.standard_user_id FROM oauth_clients c LEFT JOIN links l ON l.service_user_id = c.service_user_id ORDER BY c.created_at",

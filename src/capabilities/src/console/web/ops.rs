@@ -29,6 +29,7 @@ pub const READS: &[(&str, &[&str])] = &[
     ("console_manifest", &["instance"]),
     ("app_linked_details", &["instance"]),
     ("app_jobs_audit_plan", &["instance"]),
+    ("app_federation_people", &["instance"]),
     (crate::digitalocean::STATUS, &["instance"]),
     (crate::digitalocean::VERIFY, &["instance"]),
     (crate::digitalocean::spaces::STATUS, &["instance"]),
@@ -443,6 +444,17 @@ pub(super) async fn serve(
         }
         match name {
             "app_linked_details" => linked_details(&person_cx, args).await,
+            "app_federation_people" => {
+                let id = args["instance"]
+                    .as_str()
+                    .ok_or_else(|| bad("expected an instance ID"))?;
+                membership::access(cx.env, &caller.user.id)
+                    .await?
+                    .may_manage(id)
+                    .map_err(|why| bad(&why))?;
+                let roster = directory(cx.env, "members.list", json!({"instance": id})).await?;
+                Ok(roster["members"].clone())
+            }
             "app_jobs_audit_plan" => {
                 let id = args["instance"]
                     .as_str()
