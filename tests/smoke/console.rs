@@ -4174,6 +4174,7 @@ mod email {
                 bucket: "pigeon-data",
                 database_id: "db1",
                 data_key: "k",
+                mail_import: true,
                 backup: Some((&b, "store1", "DATA_B2_PIGEON_DATA")),
             },
         );
@@ -4185,8 +4186,19 @@ mod email {
             .collect();
         assert_eq!(
             names,
-            ["DATA", "DB", "INSTANCE", "DATA_KEY", "BACKUP", "B2_KEYS"]
+            [
+                "DATA",
+                "DB",
+                "INSTANCE",
+                "DATA_KEY",
+                "MAIL_IMPORT_INSTANCE",
+                "MAIL_IMPORT_KEY",
+                "BACKUP",
+                "B2_KEYS"
+            ]
         );
+        assert_eq!(meta["bindings"][4]["text"], "pigeon.dev");
+        assert_eq!(meta["bindings"][5]["type"], "inherit");
         let parts = vec![
             (
                 "shim.mjs".to_string(),

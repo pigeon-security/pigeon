@@ -16,6 +16,12 @@ use crate::users::directory;
 
 /// The capability's name in the catalogue and a record's `capabilities`.
 pub const NAME: &str = "data";
+/// Historical, signed IMAP backfill runs in the instance's Data Worker.
+pub const MAIL_IMPORT: &str = "data-ingest-email";
+
+pub fn mail_import_enabled(record: &Instance) -> bool {
+    enabled(record) && record.capabilities.contains_key(MAIL_IMPORT)
+}
 
 /// Optional linked OAuth grants used only when the Data backup is configured.
 pub const BACKUP_SCOPES: &str = "data backup";
@@ -104,9 +110,9 @@ pub fn enabled(record: &Instance) -> bool {
 }
 
 /// Whether capability `name` is planned by the data plan (`instances::data_plan`), never by
-/// the capability Workers' (M5) steps: `data` and `email`, which runs in the data store's Worker.
+/// the capability Workers' (M5) steps: Data, Data Email and historical IMAP backfill.
 pub fn planned_apart(name: &str) -> bool {
-    name == NAME || name == crate::email::NAME
+    matches!(name, NAME | MAIL_IMPORT) || name == crate::email::NAME
 }
 
 /// Where the data store runs for `record` (docs/plans/linked-data.md): on home in its own
@@ -159,6 +165,15 @@ pub fn placement_problems(record: &Instance) -> Vec<String> {
              the same.",
             placement(record).as_str()
         ));
+    }
+    if let Some(import) = record.capabilities.get(MAIL_IMPORT)
+        && let Some(p) = import.placement
+        && p != placement(record)
+    {
+        out.push(
+            "Historical mail import runs where Data runs. Leave its placement unset or match Data."
+                .into(),
+        );
     }
     if record.account != AccountRef::Home
         && s.backup.is_some()

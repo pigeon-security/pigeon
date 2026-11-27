@@ -308,6 +308,19 @@ pub const CATALOGUE: &[Entry] = &[
         about: "Import external storage into the data store",
         ..BASE
     },
+    // Historical IMAP import is a write-only route on the approved instance's Data Worker.
+    Entry {
+        name: crate::data_store::MAIL_IMPORT,
+        field: Some("data.email_import"),
+        placements: EITHER,
+        home: Placement::OwnWorker,
+        home_worker: Some("pigeon-data"),
+        requires: &[crate::data_store::NAME],
+        linked: true,
+        opt_in: true,
+        about: "Import historical mail from a read-only IMAP client",
+        ..BASE
+    },
     // `data-email` (record field `data.email`; `email` before docs/plans/record-reshape.md).
     // Email › Mailboxes (docs/plans/email.md): mail received through the zone's catch-all into
     // the data store, so it needs `data` and a zone, and runs in the Worker that runs the store.

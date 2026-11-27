@@ -170,6 +170,10 @@
       adds: ["Ingest › Runs"], what: "Import approved source data into the instance's data store",
       effect: "Review the Spaces scope and estimated cost, then approve the ingest run with a passkey.",
     },
+    "data-ingest-email": {
+      what: "Enable read-only IMAP backfill",
+      effect: "The next Data plan authorizes signed historical imports with a dedicated key.",
+    },
     "mcp-federation": { what: "Share approved Jobs reads through the platform MCP connection" },
     jobs: {
       adds: ["Jobs › Runs"], what: "Inspect this instance’s job history",
@@ -206,7 +210,7 @@
       const digitalOcean = e.name === "digitalocean";
       const jobs = e.name === "jobs" && !home;
       // Email runs where the data store runs (docs/plans/linked-data.md): only `data` chooses.
-      const configurable = !home && e.name !== "data-email" && (e.placements || []).includes("own_worker");
+      const configurable = !home && !["data-email", "data-ingest-email"].includes(e.name) && (e.placements || []).includes("own_worker");
       const choices = versions.linked_placement_choices?.[e.name] || ["inline"];
       // The data store's own Worker is its default on a linked instance; every other entry's is inline.
       const placementDefault = e.name === "data" ? "own_worker" : "inline";

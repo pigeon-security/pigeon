@@ -231,6 +231,8 @@ pub enum Step {
         database: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         backup: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        mail_import: bool,
         module: String,
         replaces: bool,
     },
@@ -306,6 +308,8 @@ pub struct InlineData {
     pub backup: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backup_config: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mail_import: bool,
 }
 
 /// The module that composes the instance Worker with an inline data store: the site module and
@@ -1239,8 +1243,9 @@ pub fn describe(steps: &[Step]) -> Vec<Value> {
                              as DATA and D1 {} as DB, with a new DATA_KEY that core keeps \
                              sealed; its workers.dev address answers only calls signed with \
                              that key at /data/call, and its email and queue handlers are the \
-                             data Worker's",
-                            d.artifact, d.bucket, d.database
+                             data Worker's{}",
+                            d.artifact, d.bucket, d.database,
+                            if d.mail_import { ", with the signed historical mail importer enabled" } else { "" }
                         )
                     })
                     .unwrap_or_default();
@@ -1330,15 +1335,17 @@ pub fn describe(steps: &[Step]) -> Vec<Value> {
                 bucket,
                 database,
                 backup,
+                mail_import,
                 replaces,
                 ..
             } => json!(format!(
-                "{} data Worker {name} from build {artifact}, reading bucket {bucket} as DATA and                  D1 {database} as DB{}, with a new DATA_KEY that core keeps sealed; then turn on                  its workers.dev address, which answers only calls signed with that key",
+                "{} data Worker {name} from build {artifact}, reading bucket {bucket} as DATA and                  D1 {database} as DB{}{}, with a new DATA_KEY that core keeps sealed; then turn on                  its workers.dev address for signed Data requests",
                 if *replaces { "update" } else { "upload" },
                 backup
                     .as_deref()
                     .map(|b| format!(", copying new objects to B2 bucket {b}"))
-                    .unwrap_or_default()
+                    .unwrap_or_default(),
+                if *mail_import { ", authorizing the historical mail importer" } else { "" }
             )),
             Step::WriteEmailConfig { database, digest } => json!(format!(
                 "write the email handler's configuration (mailboxes and forwarding from the                  record, digest {}) into D1 {database}",

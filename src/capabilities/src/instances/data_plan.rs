@@ -194,17 +194,23 @@ pub fn routing_adds(wanted: &[DnsRecord], have: &[DnsRecord]) -> Vec<String> {
 
 /// The digest of what is uploaded as the data Worker: its build and every binding but the
 /// secret's value.
-pub fn data_worker_digest(artifact: &str, name: &str, backup: Option<&str>) -> String {
-    pigeon_core::oauth::hash(
-        &json!({
-            "artifact": artifact,
-            "name": name,
-            "bindings": ["DATA", "DB", "INSTANCE", "DATA_KEY", "BACKUP", "B2_KEYS"],
-            "backup": backup,
-            "compatibility_date": super::plan::COMPATIBILITY_DATE,
-        })
-        .to_string(),
-    )
+pub fn data_worker_digest(
+    artifact: &str,
+    name: &str,
+    backup: Option<&str>,
+    mail_import: bool,
+) -> String {
+    let mut spec = json!({
+        "artifact": artifact,
+        "name": name,
+        "bindings": ["DATA", "DB", "INSTANCE", "DATA_KEY", "BACKUP", "B2_KEYS"],
+        "backup": backup,
+        "compatibility_date": super::plan::COMPATIBILITY_DATE,
+    });
+    if mail_import {
+        spec["mail_import"] = json!(true);
+    }
+    pigeon_core::oauth::hash(&spec.to_string())
 }
 
 /// What to do about the email domain's mail records and routing.
@@ -442,6 +448,7 @@ pub fn data_parts(
             );
         }
     }
+    let mail_import = crate::data_store::mail_import_enabled(instance);
     match &seen.artifact {
         None => steps.push(Step::Blocked {
             why: format!(
@@ -456,10 +463,11 @@ pub fn data_parts(
                 database: name.clone(),
                 backup: backup.clone(),
                 backup_config: backup_config.clone(),
+                mail_import,
             });
         }
         Some(artifact) => {
-            let module = data_worker_digest(artifact, &name, backup_config.as_deref());
+            let module = data_worker_digest(artifact, &name, backup_config.as_deref(), mail_import);
             let uploaded = ledger
                 .workers
                 .iter()
@@ -471,6 +479,7 @@ pub fn data_parts(
                 bucket: name.clone(),
                 database: name.clone(),
                 backup: backup.clone(),
+                mail_import,
                 module: module.clone(),
                 replaces,
             };
@@ -645,6 +654,7 @@ pub struct WorkerBindings<'a> {
     pub bucket: &'a str,
     pub database_id: &'a str,
     pub data_key: &'a str,
+    pub mail_import: bool,
     /// The backup bucket, its endpoint and region, with the Secrets Store holding its key.
     pub backup: Option<(&'a crate::data_store::Backup, &'a str, &'a str)>,
 }
@@ -657,6 +667,14 @@ pub fn worker_metadata(main: &str, b: &WorkerBindings<'_>) -> serde_json::Value 
         json!({ "type": "plain_text", "name": "INSTANCE", "text": b.instance }),
         json!({ "type": "secret_text", "name": "DATA_KEY", "text": b.data_key }),
     ];
+    if b.mail_import {
+        bindings.push(json!({
+            "type": "plain_text", "name": "MAIL_IMPORT_INSTANCE", "text": b.instance,
+        }));
+        // Cloudflare drops an unresolved inherit binding on a first upload. If an operator set
+        // this secret on the Worker, later plans keep just this named binding.
+        bindings.push(json!({ "type": "inherit", "name": "MAIL_IMPORT_KEY" }));
+    }
     if let Some((backup, store_id, secret)) = b.backup {
         bindings.push(json!({
             "type": "plain_text", "name": "BACKUP",

@@ -742,6 +742,7 @@ const LINKED_SO_FAR: &[&str] = &[
     "data",
     "data-ingest",
     "data-email",
+    "data-ingest-email",
 ];
 
 /// The capability catalogue (docs/plans/capability-scoping.md): each capability's placement,
@@ -1525,7 +1526,7 @@ fn own_worker_placement_on_a_linked_instance() {
     // data store and its mail, whose Worker the data plan uploads (docs/plans/linked-data.md).
     assert!(LINKED_WORKERS.is_empty());
     for e in CATALOGUE {
-        let either = matches!(e.name, "data" | "data-email");
+        let either = matches!(e.name, "data" | "data-email" | "data-ingest-email");
         assert_eq!(
             linked_placements(e),
             if either {
@@ -6266,8 +6267,28 @@ fn data_and_email_on_linked_instances() {
         database: "noisypigeon-data".into(),
         backup: None,
         backup_config: None,
+        mail_import: false,
     };
     assert_eq!(parts.inline.as_ref(), Some(&inline));
+    let mut with_mail = noisy.clone();
+    with_mail
+        .capabilities
+        .insert("data-ingest-email".into(), Default::default());
+    assert!(
+        problems(&with_mail).is_empty(),
+        "{:?}",
+        problems(&with_mail)
+    );
+    assert!(serde_json::to_value(&with_mail).unwrap()["data"]["email_import"].is_object());
+    let approved_mail = data_parts(&with_mail, &seen_data, &Ledger::default(), None)
+        .inline
+        .expect("the approved Data Worker");
+    assert!(approved_mail.mail_import);
+    assert_ne!(
+        with_inline("site", Some(&approved_mail)),
+        with_inline("site", Some(&inline))
+    );
+
     assert_eq!(
         kinds(&parts.store),
         ["create_bucket", "create_database", "migrate"]
@@ -6342,6 +6363,11 @@ fn data_and_email_on_linked_instances() {
     // The composing module: only a POST to /data/call on workers.dev reaches the data Worker.
     assert!(DATA_INLINE_MODULE.contains("import site from \"./site.js\""));
     assert!(DATA_INLINE_MODULE.contains("url.pathname === CALL_PATH"));
+    assert!(
+        DATA_INLINE_MODULE
+            .contains("env.MAIL_IMPORT_INSTANCE && MAIL_IMPORT_PATHS.has(url.pathname)")
+    );
+    assert!(DATA_INLINE_MODULE.contains("/data/mail-import/terminal"));
     assert!(DATA_INLINE_MODULE.contains("url.hostname.endsWith(\".workers.dev\")"));
     assert!(DATA_INLINE_MODULE.contains("const CALL_PATH = \"/data/call\""));
     assert!(data_inline_module("main.js").contains("import data from \"./main.js\""));

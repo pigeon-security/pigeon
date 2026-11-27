@@ -488,8 +488,14 @@ pub async fn run(
                 name,
                 artifact,
                 backup,
+                mail_import,
                 ..
             } => {
+                if *mail_import != crate::data_store::mail_import_enabled(instance) {
+                    return Err(bad(
+                        "the approved historical mail import setting changed: plan again",
+                    ));
+                }
                 let built = a
                     .built
                     .filter(|b| &b.digest == artifact)
@@ -785,6 +791,11 @@ pub struct Inline<'a> {
 /// the Worker's workers.dev URL in the Directory; the plan's `EnableWorkersDev` turns that
 /// address on.
 pub async fn upload_inline(i: &Inline<'_>) -> Result<()> {
+    if i.data.mail_import != crate::data_store::mail_import_enabled(i.instance) {
+        return Err(bad(
+            "the approved historical mail import setting changed: plan again",
+        ));
+    }
     let token = i
         .account
         .bearer
@@ -830,6 +841,7 @@ pub async fn upload_inline(i: &Inline<'_>) -> Result<()> {
             backup: backup
                 .zip(secrets_store.as_deref())
                 .map(|(b, store)| (b, store, slot.as_str())),
+            mail_import: i.data.mail_import,
         },
     );
     data_plan::bind_backup_audit(&mut data, i.instance);
@@ -904,6 +916,7 @@ async fn upload(
         bucket: name,
         database_id,
         data_key: &key,
+        mail_import: crate::data_store::mail_import_enabled(instance),
         backup: settings
             .and_then(|s| s.backup.as_ref())
             .filter(|_| backup)

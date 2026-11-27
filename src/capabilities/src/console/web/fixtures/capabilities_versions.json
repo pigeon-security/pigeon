@@ -705,6 +705,26 @@
       "scope": "instance"
     },
     {
+      "about": "Import historical mail from a read-only IMAP client",
+      "always": false,
+      "availability": "any",
+      "default": "opt_in",
+      "field": "data.email_import",
+      "home": "own_worker",
+      "home_worker": "pigeon-data",
+      "linked": true,
+      "name": "data-ingest-email",
+      "opt_in": true,
+      "placements": [
+        "inline",
+        "own_worker"
+      ],
+      "requires": [
+        "data"
+      ],
+      "scope": "instance"
+    },
+    {
       "about": "Receive the zone's mail into the data store",
       "always": false,
       "availability": "any",

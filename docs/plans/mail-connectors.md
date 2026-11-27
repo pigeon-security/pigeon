@@ -210,12 +210,14 @@ with the person's passkey:
 
 ## IMAP backfill and forwarding
 
-The Data Worker transport accepts one raw message per signed request. It requires the
-instance plan to bind `MAIL_IMPORT_INSTANCE` to the approved instance and an instance
-administrator to set the dedicated `MAIL_IMPORT_KEY` secret. The record and console
-opt-in still needs to be wired into the reshaped Data plan, so the route remains inactive
-on provisioned instances until that work ships.
-It stores the exact RFC 822 bytes and independently addressable attachments, and records
+Enable **Data Ingest Email** in the instance's Capabilities view, recorded under
+`data.email_import`. It requires Data and runs in the same Worker. Approve the
+reviewed record and Data plan with your passkey. The plan binds `MAIL_IMPORT_INSTANCE`
+to this instance. In that Worker's Cloudflare secrets, set `MAIL_IMPORT_KEY` to a
+random key of at least 32 characters and provide the same key to the client.
+Later managed uploads inherit this named binding while the capability is enabled.
+The secret authorizes the mail import and terminal receipt routes only. The Data Worker accepts one raw
+message per signed request and stores the exact RFC 822 bytes and independently addressable attachments, and records
 the server, account, folder, UIDVALIDITY and UID on each message's sighting. Historical
 imports never forward mail. Use `data_email_list` with `source: "imap"` to page
 through committed historical sightings. `data_email_get` follows each attachment's
