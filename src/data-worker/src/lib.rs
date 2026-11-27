@@ -95,6 +95,7 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
             store::call(&env, &body).await
         }
         (Method::Post, mail_import::PATH) => mail_import::receive(&mut req, &env).await,
+        (Method::Post, mail_import::TERMINAL_PATH) => mail_import::terminal(&mut req, &env).await,
         (Method::Get, "/ingest/health") => json_answer(200, json!({ "ok": true })),
         (Method::Post, protocol::START_PATH) => {
             let body = match signed_body(&mut req, &env).await? {

@@ -2,7 +2,6 @@
 """Read-only IMAP backfill into an opted-in instance Data Worker."""
 
 import argparse
-import datetime
 import getpass
 import hashlib
 import hmac
@@ -22,6 +21,7 @@ import uuid
 from pathlib import Path
 
 PATH = "/data/mail-import"
+TERMINAL_PATH = f"{PATH}/terminal"
 MAX_BYTES = 25 * 1024 * 1024
 UID_WINDOW = 1024
 PROVIDERS = {
@@ -166,17 +166,13 @@ def message_bytes(client, uid):
     return raw
 
 
-def upload(opener, endpoint, key, source, raw):
-    metadata = json.dumps(source, ensure_ascii=True, separators=(",", ":")).encode()
-    if len(metadata) > 8192:
-        raise ImportErrorSafe("IMAP message metadata exceeds the import limit")
-    body = struct.pack(">I", len(metadata)) + metadata + raw
-    timestamp = time.time_ns() // 1_000_000
+def post(opener, endpoint, key, path, body):
+    timestamp = epoch_ms()
     digest = hashlib.sha256(body).hexdigest()
-    message = f"POST\n{PATH}\n{timestamp}\n{digest}".encode()
+    message = f"POST\n{path}\n{timestamp}\n{digest}".encode()
     signature = hmac.digest(key, message, "sha256").hex()
     request = urllib.request.Request(
-        endpoint,
+        urllib.parse.urljoin(endpoint, path),
         body,
         {
             "Content-Type": "application/octet-stream",
@@ -190,18 +186,39 @@ def upload(opener, endpoint, key, source, raw):
             result = json.loads(response.read(4096))
     except urllib.error.HTTPError as error:
         if error.code in (408, 425, 429) or error.code >= 500:
-            raise Retryable("Data Worker temporarily rejected the import") from None
-        raise ImportErrorSafe(f"Data Worker rejected import (HTTP {error.code})") from None
+            raise Retryable("Data Worker temporarily rejected the request") from None
+        raise ImportErrorSafe(f"Data Worker rejected the request (HTTP {error.code})") from None
     except (urllib.error.URLError, TimeoutError):
-        raise Retryable("Data Worker import connection interrupted") from None
+        raise Retryable("Data Worker connection interrupted") from None
     except ValueError:
-        raise Retryable("Data Worker returned an invalid import receipt") from None
-    if not isinstance(result, dict) or (
+        raise Retryable("Data Worker returned an invalid receipt") from None
+    if not isinstance(result, dict):
+        raise Retryable("Data Worker returned an invalid receipt")
+    return result
+
+
+def upload(opener, endpoint, key, source, raw):
+    metadata = json.dumps(source, ensure_ascii=True, separators=(",", ":")).encode()
+    if len(metadata) > 8192:
+        raise ImportErrorSafe("IMAP message metadata exceeds the import limit")
+    body = struct.pack(">I", len(metadata)) + metadata + raw
+    result = post(opener, endpoint, key, PATH, body)
+    if (
         result.get("id") != hashlib.sha256(raw).hexdigest()
         or not isinstance(result.get("duplicate"), bool)
     ):
         raise Retryable("Data Worker returned an invalid import receipt")
     return result["duplicate"]
+
+
+def export_audit(opener, endpoint, key, terminal):
+    result = post(
+        opener, endpoint, key, TERMINAL_PATH,
+        json.dumps(terminal, separators=(",", ":")).encode(),
+    )
+    if result.get("run_id") != terminal["run_id"] or result.get("audit") not in ("stored", "pending"):
+        raise Retryable("Data Worker returned an invalid audit receipt")
+    return result["audit"]
 
 
 def sync_mailbox(client, mailbox, args, state, opener, key, endpoint, counts):
@@ -244,28 +261,51 @@ def sync_mailbox(client, mailbox, args, state, opener, key, endpoint, counts):
                 "uid_validity": validity,
                 "uid": uid,
             }
+            counts["message_pending"] = True
             raw = message_bytes(client, uid)
             duplicate = upload(opener, endpoint, key, source, raw)
             checkpoint(uid)
+            counts["message_pending"] = False
             counts["messages"] += 1
             counts["duplicates"] += int(duplicate)
             counts["bytes"] += len(raw)
+            if not duplicate:
+                counts["bytes_stored"] += len(raw)
             time.sleep(args.interval)
         checkpoint(upper)
         cursor = upper
 
 
-def now():
-    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+def epoch_ms():
+    return time.time_ns() // 1_000_000
 
 
-def run(args, counts):
-    endpoint = target(args.destination)
-    password = os.environ.get("PIGEON_IMAP_PASSWORD") or getpass.getpass("IMAP password: ")
+def report(path, receipt):
+    with path.open("a", encoding="utf-8") as audit:
+        audit.write(json.dumps(receipt) + "\n")
+        audit.flush()
+        os.fsync(audit.fileno())
+
+
+def previous_audit(path, run_id, endpoint):
+    with path.open(encoding="utf-8") as journal:
+        for line in journal:
+            json_record = json.loads(line)
+            candidate = json_record.get("terminal")
+            if candidate and candidate.get("run_id") == run_id and json_record.get("endpoint") == endpoint:
+                return candidate
+    raise ImportErrorSafe("run was not found in the local audit journal")
+
+
+def signing_key():
     key = (os.environ.get("PIGEON_MAIL_IMPORT_KEY") or getpass.getpass("Mail import key: ")).encode()
     if len(key.strip()) < 32:
         raise ImportErrorSafe("mail import key must contain at least 32 bytes")
-    opener = urllib.request.build_opener(NoRedirect())
+    return key
+
+
+def run(args, counts, endpoint, opener, key):
+    password = os.environ.get("PIGEON_IMAP_PASSWORD") or getpass.getpass("IMAP password: ")
     with sqlite3.connect(args.state) as state:
         # One importer owns its checkpoints for the duration of the batch.
         state.execute("PRAGMA locking_mode=EXCLUSIVE")
@@ -311,38 +351,71 @@ def main():
     parser.add_argument("--attempts", type=int, default=4)
     parser.add_argument("--state", type=Path, default=Path("mail-import.sqlite3"))
     parser.add_argument("--audit", type=Path, default=Path("mail-import-audit.jsonl"))
+    parser.add_argument("--replay-audit", help="resend a terminal receipt by run ID without IMAP")
     args = parser.parse_args()
-    if args.provider == "proton-bridge" and args.bridge_certificate is None:
+    if args.provider == "proton-bridge" and args.bridge_certificate is None and not args.replay_audit:
         parser.error("Proton Bridge requires --bridge-certificate")
     if not (1 <= args.batch <= 10000 and 0.1 <= args.interval <= 10 and 1 <= args.attempts <= 8):
         parser.error("batch, interval or attempt limit out of range")
     if not 1 <= args.bridge_port <= 65535:
         parser.error("Bridge port out of range")
     os.umask(0o077)
-    run_id = uuid.uuid4().hex
-    receipt = {
-        "kind": "email_ingest",
-        "run_id": run_id,
-        "provider": args.provider,
-        "started_at": now(),
-        "counts": {"messages": 0, "duplicates": 0, "bytes": 0},
-    }
+    opener = urllib.request.build_opener(NoRedirect())
+    if args.replay_audit:
+        try:
+            endpoint = target(args.destination)
+            terminal = previous_audit(args.audit, args.replay_audit, endpoint)
+            state = export_audit(opener, endpoint, signing_key(), terminal)
+            print(json.dumps({"run_id": args.replay_audit, "audit": state}))
+            return 0 if state == "stored" else 1
+        except (ImportErrorSafe, OSError, ValueError):
+            print(json.dumps({"run_id": args.replay_audit, "audit": "replay_failed"}))
+            return 1
+    started_ms = epoch_ms()
+    counts = {"messages": 0, "duplicates": 0, "bytes": 0, "bytes_stored": 0, "message_pending": False}
+    endpoint = None
+    key = None
+    reason = None
+    outcome = "succeeded"
     try:
-        run(args, receipt["counts"])
-        receipt["outcome"] = "complete_batch"
+        endpoint = target(args.destination)
+        key = signing_key()
+        run(args, counts, endpoint, opener, key)
     except ImportErrorSafe as error:
-        receipt.update(outcome="failed", reason=str(error))
+        outcome, reason = "failed", str(error)
     except KeyboardInterrupt:
-        receipt.update(outcome="stopped", reason="operator interrupted import")
+        outcome, reason = "cancelled", "operator interrupted import"
     except (OSError, sqlite3.Error, ValueError):
-        receipt.update(outcome="failed", reason="could not access connection or local state")
-    receipt["finished_at"] = now()
-    with args.audit.open("a", encoding="utf-8") as audit:
-        audit.write(json.dumps(receipt) + "\n")
-        audit.flush()
-        os.fsync(audit.fileno())
+        outcome, reason = "failed", "could not access connection or local state"
+    failed = int(outcome == "failed" and counts["message_pending"])
+    terminal = {
+        "run_id": uuid.uuid4().hex,
+        "started_ms": started_ms,
+        "finished_ms": epoch_ms(),
+        "outcome": outcome,
+        "cleanup": None,
+        "estimated_usd_micros": None,
+        "counts": {
+            "examined": counts["messages"] + failed,
+            "stored": counts["messages"] - counts["duplicates"],
+            "duplicates": counts["duplicates"],
+            "failed": failed,
+            "bytes_read": counts["bytes"],
+            "bytes_written": counts["bytes_stored"],
+        },
+    }
+    receipt = {"kind": "email_ingest", "provider": args.provider, "endpoint": endpoint, "terminal": terminal}
+    if reason:
+        receipt["reason"] = reason
+    report(args.audit, receipt)
+    receipt["audit"] = "local_only"
+    if endpoint and key:
+        try:
+            receipt["audit"] = export_audit(opener, endpoint, key, terminal)
+        except ImportErrorSafe:
+            pass
     print(json.dumps(receipt))
-    return 0 if receipt["outcome"] == "complete_batch" else 1
+    return 0 if outcome == "succeeded" and receipt["audit"] == "stored" else 1
 
 
 if __name__ == "__main__":
