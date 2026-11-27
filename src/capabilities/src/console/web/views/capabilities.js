@@ -32,8 +32,11 @@
       const keys = [...new Set([...Object.keys(from), ...Object.keys(to)])].filter((k) => path || k !== "version").sort();
       return keys.flatMap((k) => changes(from[k], to[k], path ? `${path}.${k}` : k));
     }
-    // Absent, null, false and empty are the same to the record (serde's defaults).
-    const none = (v) => v == null || v === false || (Array.isArray(v) && !v.length) || (plain(v) && !Object.keys(v).length);
+    // Absent, null, false and empty are the same to the record (serde's defaults), except a
+    // capability's own entry: `capabilities.data = {}` turns it on with every setting at its
+    // default, as record::diff counts it.
+    const entry = /^capabilities\.[^.]+$/.test(path);
+    const none = (v) => v == null || v === false || (Array.isArray(v) && !v.length) || (plain(v) && !Object.keys(v).length && !entry);
     const a = none(from) ? null : from;
     const b = none(to) ? null : to;
     return JSON.stringify(a) === JSON.stringify(b) ? [] : [{ path, from: a, to: b }];
