@@ -82,7 +82,7 @@ pub fn estimate(host: Host, bytes: u64, objects: u64, unique_share: f64) -> Esti
             hours_high * 0.16 + 1.1,
             0.0,
             vec![
-                "Host: a POP2-4C-16G Instance at about 0.15 euro an hour (taken as $0.16) plus a 100 GB volume (about $1.10)."
+                "Host: a POP2-4C-16G Instance at about 0.15 euro an hour (taken as $0.16) plus a 40 GB boot volume and 200 GB scratch volume."
                     .to_string(),
                 "Object Storage reads in region are free and Instances have no egress fee."
                     .to_string(),

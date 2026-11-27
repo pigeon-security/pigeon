@@ -141,6 +141,9 @@ pub struct RunRecord {
     pub region: String,
     /// The VM's id at its provider, once there is one.
     pub vm: Option<String>,
+    /// Extra Scaleway resources created with the server. Older runs have no snapshot.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scaleway_volumes: Vec<String>,
     /// Whether the VM was deleted (or the Container stopped).
     pub vm_deleted: bool,
     /// The bound R2 destination for new runs. Legacy rows have no snapshot.
@@ -738,7 +741,7 @@ impl Ingest {
                 hosts::DO_SIZE, a.region
             ),
             Host::Scaleway => format!(
-                "Create a {} Instance in {} that builds the runner at commit {commit}, runs it once and powers off.",
+                "Create a {} Instance in {} with dedicated 200 GB scratch storage, build the container at commit {commit}, run it once and power off.",
                 hosts::SCW_TYPE,
                 hosts::zone(&a.region)
             ),
@@ -914,6 +917,7 @@ impl Ingest {
             bucket: source_bucket.clone(),
             region: region.clone(),
             vm: None,
+            scaleway_volumes: Vec::new(),
             vm_deleted: false,
             destination: Some(job.dest.clone()),
             data_worker: data.as_ref().map(|(url, _)| url.clone()),
@@ -946,19 +950,39 @@ impl Ingest {
                 let (project, secret) =
                     hosts::scaleway_parts(host_key.as_deref().unwrap_or_default()).map_err(bad)?;
                 let zone = hosts::zone(region);
-                let id =
+                let resources =
                     net::scw_create(&secret, &zone, &hosts::scaleway_server_body(&job, &project))
                         .await?;
-                rec.vm = Some(id.clone());
+                rec.vm = Some(resources.server.clone());
+                rec.scaleway_volumes = resources.volumes;
                 save_run(env, &rec).await?;
-                net::scw_user_data(
-                    &secret,
-                    &zone,
-                    &id,
-                    &hosts::cloud_init(&job, &source_keys, &dest_keys),
-                )
-                .await?;
-                net::scw_action(&secret, &zone, &id, &hosts::scaleway_poweron()).await?;
+                let setup = async {
+                    let scratch = resources.scratch_volume.as_deref().ok_or_else(|| {
+                        bad("Scaleway did not confirm the approved scratch volume")
+                    })?;
+                    net::scw_user_data(
+                        &secret,
+                        &zone,
+                        &resources.server,
+                        &hosts::scaleway_cloud_init(&job, scratch, &source_keys, &dest_keys),
+                    )
+                    .await?;
+                    net::scw_action(
+                        &secret,
+                        &zone,
+                        &resources.server,
+                        &hosts::scaleway_poweron(),
+                    )
+                    .await
+                }
+                .await;
+                if let Err(error) = setup {
+                    self.remove_vm(env, &mut rec).await?;
+                    return Err(bad(format!(
+                        "{error}. Follow ingest_status for cleanup of {}.",
+                        rec.run
+                    )));
+                }
             }
             Host::Cloudflare => {
                 let (url, key) = data.unwrap_or_default();
@@ -1042,13 +1066,31 @@ impl Ingest {
                         net::do_delete(&key, id).await?;
                     } else {
                         let (_, secret) = hosts::scaleway_parts(&key).map_err(bad)?;
-                        net::scw_action(
-                            &secret,
-                            &hosts::zone(&rec.region),
-                            id,
-                            &hosts::scaleway_terminate(),
-                        )
-                        .await?;
+                        let zone = hosts::zone(&rec.region);
+                        match net::scw_state(&secret, &zone, id).await?.as_deref() {
+                            None => {}
+                            Some("stopped") => {
+                                net::scw_delete_server(&secret, &zone, id).await?;
+                                return Ok(());
+                            }
+                            Some("running") => {
+                                net::scw_action(&secret, &zone, id, &hosts::scaleway_terminate())
+                                    .await?;
+                                return Ok(());
+                            }
+                            Some(_) => return Ok(()),
+                        }
+                        let mut remaining = Vec::new();
+                        for volume in &rec.scaleway_volumes {
+                            if !net::scw_remove_volume(&secret, &zone, volume).await? {
+                                remaining.push(volume.clone());
+                            }
+                        }
+                        if !remaining.is_empty() {
+                            rec.scaleway_volumes = remaining;
+                            return save_run(env, rec).await;
+                        }
+                        rec.scaleway_volumes.clear();
                     }
                 }
             }
@@ -1115,7 +1157,12 @@ impl Ingest {
         let mut note = String::new();
         if ended && !rec.vm_deleted && rec.host != "cloudflare" && rec.vm.is_some() {
             self.remove_vm(env, &mut rec).await?;
-            note = "The run ended, so its VM was deleted.".into();
+            note = if rec.vm_deleted {
+                "The run ended, so its VM was deleted."
+            } else {
+                "The run ended. Scaleway resource cleanup is in progress."
+            }
+            .into();
         }
         Ok(json!({
             "run": rec, "status": status, "vm_state": vm, "note": note,
@@ -1149,6 +1196,9 @@ impl Ingest {
             return Ok(json!({ "run": run, "note": "Already stopped." }));
         }
         self.remove_vm(cx.env, &mut rec).await?;
+        if !rec.vm_deleted {
+            return Ok(json!({ "run": run, "note": "Scaleway resource cleanup is in progress." }));
+        }
         Ok(
             json!({ "run": run, "note": "Stopped: the VM is deleted (or the Container told to stop). The files already copied stay in R2." }),
         )
@@ -1301,7 +1351,7 @@ impl Capability for Ingest {
                 ),
                 _ => format!(
                     "`PROJECT_ID:SECRET_KEY` of a Scaleway IAM application that starts and deletes \
-                     ingest Instances for `{}`: InstancesFullAccess on that one project only.",
+                     ingest Instances for `{}`: InstancesFullAccess and BlockStorageFullAccess on that one project only.",
                     a.id()
                 ),
             };

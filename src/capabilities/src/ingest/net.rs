@@ -159,8 +159,26 @@ pub async fn scw_check(secret: &str, zone: &str) -> Result<()> {
     }
 }
 
-/// Creates the server and answers its id.
-pub async fn scw_create(secret: &str, zone: &str, body: &Value) -> Result<String> {
+/// Provider resources created in the one server request.
+pub struct ScalewayCreated {
+    pub server: String,
+    pub volumes: Vec<String>,
+    pub scratch_volume: Option<String>,
+}
+
+fn scw_uuid(s: &str) -> bool {
+    s.len() == 36
+        && s.bytes().enumerate().all(|(i, c)| {
+            if matches!(i, 8 | 13 | 18 | 23) {
+                c == b'-'
+            } else {
+                c.is_ascii_hexdigit()
+            }
+        })
+}
+
+/// Creates the server and answers the ids of its owned resources.
+pub async fn scw_create(secret: &str, zone: &str, body: &Value) -> Result<ScalewayCreated> {
     let url = format!("{SCW_API}{}", hosts::scaleway_servers_path(zone));
     let (s, t) = http(
         Method::Post,
@@ -172,16 +190,36 @@ pub async fn scw_create(secret: &str, zone: &str, body: &Value) -> Result<String
     if !(200..300).contains(&s) {
         return Err(failed("creating the server", s, &t));
     }
-    parse(&t)["server"]["id"]
+    let result = parse(&t);
+    let server = &result["server"];
+    let id = server["id"]
         .as_str()
+        .filter(|id| scw_uuid(id))
+        .ok_or_else(|| bad("Scaleway answered no valid server id"))?;
+    let volumes: Vec<String> = ["0", "1"]
+        .into_iter()
+        .filter_map(|slot| server["volumes"][slot]["id"].as_str())
+        .filter(|id| scw_uuid(id))
         .map(str::to_string)
-        .ok_or_else(|| bad("Scaleway answered no server id"))
+        .collect();
+    let scratch = &server["volumes"]["1"];
+    let scratch_attached = volumes.len() == 2
+        && volumes[0] != volumes[1]
+        && scratch["size"] == hosts::SCW_VOLUME_BYTES
+        && scratch["volume_type"] == "sbs_volume"
+        && scratch["boot"] == false;
+    let scratch_volume = scratch_attached.then(|| volumes[1].clone());
+    Ok(ScalewayCreated {
+        server: id.to_string(),
+        volumes,
+        scratch_volume,
+    })
 }
 
 /// Sets the server's cloud-init user data.
 pub async fn scw_user_data(secret: &str, zone: &str, id: &str, user_data: &str) -> Result<()> {
     let url = format!("{SCW_API}{}", hosts::scaleway_user_data_path(zone, id));
-    let (s, t) = http(
+    let (s, _) = http(
         Method::Patch,
         &url,
         &scw_auth(secret),
@@ -191,7 +229,7 @@ pub async fn scw_user_data(secret: &str, zone: &str, id: &str, user_data: &str) 
     if (200..300).contains(&s) {
         Ok(())
     } else {
-        Err(failed("setting the server's user data", s, &t))
+        Err(bad(format!("setting the server's user data failed ({s})")))
     }
 }
 
@@ -225,6 +263,43 @@ pub async fn scw_state(secret: &str, zone: &str, id: &str) -> Result<Option<Stri
                 .to_string(),
         )),
         _ => Err(failed("reading the server", s, &t)),
+    }
+}
+
+/// Requests deletion of a stopped server without restarting it.
+pub async fn scw_delete_server(secret: &str, zone: &str, id: &str) -> Result<()> {
+    let url = format!("{SCW_API}{}/{id}", hosts::scaleway_servers_path(zone));
+    let (status, _) = http(Method::Delete, &url, &scw_auth(secret), None).await?;
+    match status {
+        200..=299 | 404 => Ok(()),
+        _ => Err(bad(format!(
+            "deleting the Scaleway server failed ({status})"
+        ))),
+    }
+}
+
+/// Deletes a detached project-owned block volume. Success means absence was observed.
+pub async fn scw_remove_volume(secret: &str, zone: &str, id: &str) -> Result<bool> {
+    if !scw_uuid(id) {
+        return Err(bad("the saved Scaleway volume id is invalid"));
+    }
+    let url = format!("{SCW_API}/block/v1/zones/{zone}/volumes/{id}");
+    let (status, _) = http(Method::Delete, &url, &scw_auth(secret), None).await?;
+    if status == 404 {
+        return Ok(true);
+    }
+    if !(200..300).contains(&status) {
+        return Err(bad(format!(
+            "deleting the Scaleway block volume failed ({status})"
+        )));
+    }
+    let (status, _) = http(Method::Get, &url, &scw_auth(secret), None).await?;
+    match status {
+        404 => Ok(true),
+        200 => Ok(false),
+        _ => Err(bad(format!(
+            "checking the Scaleway block volume failed ({status})"
+        ))),
     }
 }
 

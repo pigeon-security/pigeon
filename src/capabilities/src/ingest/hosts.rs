@@ -21,8 +21,12 @@ pub const DO_IMAGE: &str = "ubuntu-24-04-x64";
 pub const SCW_TYPE: &str = "POP2-4C-16G";
 /// The Scaleway image.
 pub const SCW_IMAGE: &str = "ubuntu_noble";
-/// The Scaleway root volume, in bytes (100 GB), used as the spool.
-pub const SCW_VOLUME_BYTES: u64 = 100_000_000_000;
+/// The Scaleway boot volume, used by Ubuntu and the container image build.
+const SCW_BOOT_BYTES: u64 = 40_000_000_000;
+/// The separate block device mounted as the ingest spool.
+pub const SCW_VOLUME_BYTES: u64 = 200_000_000_000;
+/// Leave headroom for the filesystem and temporary writes.
+const SCW_SPOOL_BYTES: u64 = 160_000_000_000;
 /// The placeholder that stands for a key in a plan.
 pub const REDACTED: &str = "<redacted>";
 /// The longest VM name pigeon asks for.
@@ -189,8 +193,34 @@ pub fn droplet_body(job: &JobSpec, region: &str, user_data: &str) -> Value {
     })
 }
 
-/// The Scaleway `POST .../servers` body, with a 100 GB volume for the spool.
+/// The Scaleway bootstrap mounts the extra device before installing or running the container.
+pub fn scaleway_cloud_init(
+    job: &JobSpec,
+    scratch_volume: &str,
+    source_keys: &str,
+    dest_keys: &str,
+) -> String {
+    let bootstrap = cloud_init(job, source_keys, dest_keys);
+    let mounts = include_str!("scaleway-spool.sh");
+    bootstrap
+        .replacen(
+            "#!/bin/bash\n",
+            &format!(
+                "#!/bin/bash\nset -euo pipefail\ntrap 'rm -f /root/ingest.env; poweroff' EXIT\n{mounts}\nmount_spool '{scratch_volume}' {SCW_VOLUME_BYTES}\n"
+            ),
+            1,
+        )
+        .replace("chmod 777 /spool\n", "mountpoint -q /spool\n")
+        .replace(
+            "SPOOL_DIR=/spool\n",
+            &format!("SPOOL_DIR=/spool\nSPOOL_BYTES={SCW_SPOOL_BYTES}\n"),
+        )
+}
+
+/// The Scaleway `POST .../servers` body, with separate boot and scratch volumes.
 pub fn scaleway_server_body(job: &JobSpec, project: &str) -> Value {
+    let name = vm_name(&job.run);
+    let volume_name = &name[..name.len().min(NAME_MAX - 8)];
     json!({
         "name": vm_name(&job.run),
         "commercial_type": SCW_TYPE,
@@ -198,7 +228,20 @@ pub fn scaleway_server_body(job: &JobSpec, project: &str) -> Value {
         "project": project,
         "tags": [TAG],
         "dynamic_ip_required": true,
-        "volumes": { "0": { "size": SCW_VOLUME_BYTES, "volume_type": "sbs_volume" } },
+        "volumes": {
+            "0": {
+                "name": format!("{volume_name}-boot"),
+                "boot": true,
+                "size": SCW_BOOT_BYTES,
+                "volume_type": "sbs_volume",
+            },
+            "1": {
+                "name": format!("{volume_name}-scratch"),
+                "boot": false,
+                "size": SCW_VOLUME_BYTES,
+                "volume_type": "sbs_volume",
+            },
+        },
     })
 }
 
@@ -226,7 +269,7 @@ pub fn scaleway_poweron() -> Value {
     json!({ "action": "poweron" })
 }
 
-/// The body that terminates a Scaleway server and frees its volume.
+/// The action that terminates a running Scaleway server. Block volumes are deleted separately.
 pub fn scaleway_terminate() -> Value {
     json!({ "action": "terminate" })
 }
@@ -262,7 +305,7 @@ pub fn host_request(host: Host, job: &JobSpec, region: &str) -> Value {
                 "create": { "method": "POST", "path": scaleway_servers_path(&z),
                     "body": scaleway_server_body(job, REDACTED) },
                 "user_data": { "method": "PATCH", "path": scaleway_user_data_path(&z, "<server>"),
-                    "body": user_data },
+                    "body": scaleway_cloud_init(job, "<approved-scratch-volume-id>", REDACTED, REDACTED) },
                 "poweron": { "method": "POST", "path": scaleway_action_path(&z, "<server>"),
                     "body": scaleway_poweron() },
             })

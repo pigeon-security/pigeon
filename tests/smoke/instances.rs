@@ -2487,7 +2487,22 @@ fn core_ingest_plans_hosts_and_estimates() {
     assert_eq!(server["image"], "ubuntu_noble");
     assert_eq!(server["project"], "proj-1");
     assert_eq!(server["tags"], json!(["pigeon-ingest"]));
-    assert_eq!(server["volumes"]["0"]["size"], 100_000_000_000u64);
+    assert_eq!(server["volumes"]["0"]["boot"], true);
+    assert_eq!(server["volumes"]["1"]["boot"], false);
+    assert_eq!(server["volumes"]["1"]["size"], 200_000_000_000u64);
+    let volume = "0474092e-2f42-4b73-885c-f7061da83469";
+    let script = hosts::scaleway_cloud_init(&scw_job, volume, src, dst);
+    assert!(script.contains(&format!("mount_spool '{volume}' 200000000000")));
+    assert!(script.contains("/dev/disk/by-id/scsi-0SCW_sbs_volume-"));
+    assert!(script.contains("SPOOL_BYTES=160000000000"));
+    assert!(script.contains("mountpoint -q /spool"));
+    assert!(!script.contains("chmod 777 /spool"));
+    assert!(
+        hosts::host_request(Host::Scaleway, &scw_job, "fr-par")["user_data"]["body"]
+            .as_str()
+            .unwrap()
+            .contains("mount_spool '<approved-scratch-volume-id>' 200000000000")
+    );
     assert_eq!(hosts::scaleway_poweron(), json!({ "action": "poweron" }));
     assert_eq!(
         hosts::scaleway_terminate(),
