@@ -194,6 +194,8 @@ async fn apply(env: &Env, key: &str) -> Result<()> {
     Ok(())
 }
 
+mod backup;
+
 /// The queue consumer: each message is an R2 event notification. On the backup queue
 /// (`…-backup`) each new object is copied to B2, deletes never mirrored; otherwise a manifest
 /// part is applied to the index and any other key is acknowledged and ignored. A D1, R2 or B2
@@ -203,8 +205,8 @@ async fn queue(batch: MessageBatch<Value>, env: Env, _ctx: Context) -> Result<()
     if batch.queue().ends_with("-backup") {
         for message in batch.messages()? {
             match protocol::parse_event(message.body()) {
-                Some(e) => match store::back_up(&env, &e.key).await {
-                    Ok(()) => message.ack(),
+                Some(e) => match backup::copy(&env, &e.key).await {
+                    Ok(_) => message.ack(),
                     Err(err) => {
                         console_log!("backup of an object failed: {err}");
                         message.retry();

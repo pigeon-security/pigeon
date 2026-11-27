@@ -48,6 +48,44 @@ pub fn store_name(instance: &str, home: bool) -> String {
     format!("{}-data", instance.replace(['/', '.'], "-"))
 }
 
+/// The immutable B2 name for an R2 key and exact byte version. B2 permits new versions of a
+/// locked key, so names include both hashes. A retry can only write the same bytes at this name.
+pub fn backup_object_key(source: &str, sha: &str) -> String {
+    let key_hash = sha256_hex(source.as_bytes());
+    format!("backup/v1/{key_hash}/{sha}")
+}
+
+fn backup_xml_field<'a>(xml: &'a str, tag: &str) -> Option<&'a str> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    Some(xml.split_once(&open)?.1.split_once(&close)?.0.trim())
+}
+
+/// B2 S3 GetObjectLockConfiguration must say the bucket has enabled nonzero default Governance.
+pub fn backup_governance(xml: &str) -> bool {
+    backup_xml_field(xml, "ObjectLockEnabled") == Some("Enabled")
+        && backup_xml_field(xml, "DefaultRetention").is_some_and(|default| {
+            backup_xml_field(default, "Mode") == Some("GOVERNANCE")
+                && ["Days", "Years"].into_iter().any(|unit| {
+                    backup_xml_field(default, unit)
+                        .and_then(|n| n.parse::<u32>().ok())
+                        .is_some_and(|period| period > 0)
+                })
+        })
+}
+
+/// The expiration reported by GetObjectRetention, after checking its retention mode.
+pub fn backup_retention(xml: &str) -> Option<&str> {
+    if matches!(
+        backup_xml_field(xml, "Mode"),
+        Some("GOVERNANCE" | "COMPLIANCE")
+    ) {
+        backup_xml_field(xml, "RetainUntilDate")
+    } else {
+        None
+    }
+}
+
 /// The backup queue of a store: `{store}-backup`.
 pub fn backup_queue(store: &str) -> String {
     format!("{store}-backup")

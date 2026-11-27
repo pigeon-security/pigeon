@@ -3388,3 +3388,40 @@ fn core_artifacts_repo_lookup_is_kept_and_forgotten() {
     // Other repositories keep their own entries.
     assert!(cache.get(&key, now).is_some());
 }
+
+#[test]
+fn data_backup_versions_and_governance() {
+    use pigeon_ingest::datastore::{
+        backup_governance, backup_object_key, backup_retention, sha256_hex,
+    };
+
+    let sha = sha256_hex(b"portable manifest");
+    let changed = sha256_hex(b"portable manifest\n");
+    let key = "runs/東京/checkpoint.json";
+    let version = backup_object_key(key, &sha);
+    assert_eq!(version, backup_object_key(key, &sha));
+    assert_ne!(version, backup_object_key(key, &changed));
+    assert_ne!(
+        version,
+        backup_object_key("elsewhere/checkpoint.json", &sha)
+    );
+    assert!(version.starts_with("backup/v1/"));
+    assert!(version.ends_with(&sha));
+    assert!(!version.contains(key));
+
+    let config = "<ObjectLockConfiguration><ObjectLockEnabled>Enabled</ObjectLockEnabled><Rule><DefaultRetention><Mode>GOVERNANCE</Mode><Days>30</Days></DefaultRetention></Rule></ObjectLockConfiguration>";
+    assert!(backup_governance(config));
+    assert!(!backup_governance(&config.replace("30", "0")));
+    assert!(!backup_governance(
+        &config.replace("GOVERNANCE", "COMPLIANCE")
+    ));
+    assert!(!backup_governance(
+        "<ObjectLockEnabled>Enabled</ObjectLockEnabled>"
+    ));
+    let retention = "<Retention><Mode>GOVERNANCE</Mode><RetainUntilDate>2027-01-01T00:00:00Z</RetainUntilDate></Retention>";
+    assert_eq!(backup_retention(retention), Some("2027-01-01T00:00:00Z"));
+    assert_eq!(
+        backup_retention(&retention.replace("GOVERNANCE", "OFF")),
+        None
+    );
+}
