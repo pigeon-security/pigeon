@@ -903,17 +903,7 @@ impl Instances {
             .as_deref()
             .ok_or_else(|| bad("the instance's account is not a linked one"))?;
         let secrets_store = if backup.is_some() {
-            let bucket = crate::data_store::backup_audit_bucket(instance)
-                .ok_or_else(|| bad("Configure the instance's separate Jobs audit bucket first."))?;
-            pigeon_core::r2::require_private_bucket(
-                account,
-                &pigeon_core::r2::Bucket {
-                    name: bucket.to_string(),
-                    jurisdiction: None,
-                },
-            )
-            .await
-            .map_err(|_| bad("Could not verify the approved Jobs audit bucket is private."))?;
+            crate::data_store::verify_data_jobs_audit(account, instance).await?;
             crate::secrets::linked_store(account)
                 .await?
                 .ok_or_else(|| bad("Set up the linked instance's Secrets Store for Data backup."))?

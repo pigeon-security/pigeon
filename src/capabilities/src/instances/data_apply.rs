@@ -813,6 +813,7 @@ pub async fn upload_inline(i: &Inline<'_>) -> Result<()> {
     let slot = crate::data_store::b2_slot(i.instance);
     let backup = crate::data_store::backup(i.instance);
     let secrets_store = if backup.is_some() {
+        crate::data_store::verify_data_jobs_audit(i.account, i.instance).await?;
         Some(
             crate::secrets::linked_store(i.account)
                 .await?
@@ -833,7 +834,7 @@ pub async fn upload_inline(i: &Inline<'_>) -> Result<()> {
                 .map(|(b, store)| (b, store, slot.as_str())),
         },
     );
-    data_plan::bind_jobs_audit(&mut data, i.instance);
+    data_plan::bind_backup_audit(&mut data, i.instance);
     data_plan::bind_backup_inventory(&mut data, i.instance);
     let mut bindings = site["bindings"].as_array().cloned().unwrap_or_default();
     bindings.extend(data["bindings"].as_array().cloned().unwrap_or_default());
@@ -886,6 +887,16 @@ async fn upload(
     database_id: &str,
     backup: bool,
 ) -> Result<()> {
+    if backup && instance.account != crate::instances::record::AccountRef::Home {
+        let account = Account {
+            id: a.account_id.to_string(),
+            parent: String::new(),
+            secrets_store: a.secrets_store.to_string(),
+            bearer: Some(a.token.to_string()),
+            token_ledger: None,
+        };
+        crate::data_store::verify_data_jobs_audit(&account, instance).await?;
+    }
     let parts = modules(a.parent, built).await?;
     let key = new_key()?;
     let slot = crate::data_store::b2_slot(instance);
@@ -901,7 +912,7 @@ async fn upload(
             .map(|b| (b, a.secrets_store, slot.as_str())),
     };
     let mut metadata = data_plan::worker_metadata(&built.main, &bindings);
-    data_plan::bind_jobs_audit(&mut metadata, instance);
+    data_plan::bind_backup_audit(&mut metadata, instance);
     data_plan::bind_backup_inventory(&mut metadata, instance);
     let boundary = pigeon_core::workers::boundary_from(&pigeon_core::webauthn::random()?);
     let body = data_plan::multipart(&boundary, &metadata, &parts);

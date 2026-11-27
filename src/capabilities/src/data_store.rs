@@ -24,12 +24,53 @@ pub fn backup(record: &Instance) -> Option<&Backup> {
     settings(record)?.backup.as_ref()
 }
 
-/// The separate, approved instance Jobs bucket to bind into a linked Data Worker.
+/// The approved Jobs audit bucket, distinct from this Data store and its site buckets.
+pub fn data_jobs_audit_bucket(record: &Instance) -> Option<&str> {
+    let bucket = crate::jobs_audit::configured_bucket(record)?;
+    (crate::jobs_audit::bucket_ok(bucket)
+        && bucket != store_name(record)
+        && !record.sites.iter().any(|site| site.bucket == bucket))
+    .then_some(bucket)
+}
+
+/// Verify that a Data Worker may bind its approved same-account Jobs bucket. The caller supplies
+/// the account that will run the Worker, using the instance's existing plan permissions.
+pub async fn verify_data_jobs_audit<'a>(
+    account: &pigeon_core::Account,
+    record: &'a Instance,
+) -> Result<&'a str> {
+    let bucket = data_jobs_audit_bucket(record).ok_or_else(|| {
+        Error::RustError("Configure a separate approved Jobs audit bucket first.".into())
+    })?;
+    if let AccountRef::Linked { account_id } = &record.account
+        && account_id.as_deref() != Some(account.id.as_str())
+    {
+        return Err(Error::RustError(
+            "The linked Jobs audit account does not match the instance.".into(),
+        ));
+    }
+    let target = pigeon_core::r2::Bucket {
+        name: bucket.to_string(),
+        jurisdiction: None,
+    };
+    if !pigeon_core::r2::bucket_exists(account, &target).await?
+        || pigeon_core::r2::require_private_bucket(account, &target)
+            .await
+            .is_err()
+    {
+        return Err(Error::RustError(
+            "Could not verify the approved Jobs audit bucket is private.".into(),
+        ));
+    }
+    Ok(bucket)
+}
+
+/// The Jobs audit bucket used by a linked backup. Existing home backups keep their behavior.
 pub fn backup_audit_bucket(record: &Instance) -> Option<&str> {
     if record.account == AccountRef::Home || backup(record).is_none() {
         return None;
     }
-    crate::jobs_audit::configured_bucket(record).filter(|bucket| *bucket != store_name(record))
+    data_jobs_audit_bucket(record)
 }
 
 /// Where the store is backed up: a Backblaze B2 bucket of its own (ingest.md decision 10), by

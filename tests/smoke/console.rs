@@ -4331,7 +4331,7 @@ mod email {
             "jobs": { "audit_bucket": "linked-jobs-audit" }
         } }));
         let mut metadata = json!({ "bindings": [] });
-        pigeon_capabilities::instances::data_plan::bind_jobs_audit(&mut metadata, &backed);
+        pigeon_capabilities::instances::data_plan::bind_backup_audit(&mut metadata, &backed);
         assert_eq!(
             metadata["bindings"][0],
             json!({

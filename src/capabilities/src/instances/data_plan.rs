@@ -697,14 +697,25 @@ pub fn bind_backup_inventory(metadata: &mut serde_json::Value, instance: &Instan
     }
 }
 
-/// Bind only the Jobs bucket approved with this instance, which the planner verifies is private.
-pub fn bind_jobs_audit(metadata: &mut serde_json::Value, instance: &Instance) {
-    if let Some(bucket) = crate::data_store::backup_audit_bucket(instance)
-        && let Some(bindings) = metadata["bindings"].as_array_mut()
+/// Bind the Jobs bucket the Data planner verified is private and approved for this instance.
+pub fn bind_jobs_audit(metadata: &mut serde_json::Value, bucket: &str) {
+    if let Some(bindings) = metadata["bindings"].as_array_mut()
+        && !bindings
+            .iter()
+            .any(|binding| binding["name"] == "JOBS_AUDIT")
     {
         bindings.push(json!({ "type": "r2_bucket", "name": "JOBS_AUDIT", "bucket_name": bucket }));
-        bindings
-            .push(json!({ "type": "plain_text", "name": "BACKUP_AUDIT_REQUIRED", "text": "1" }));
+    }
+}
+
+pub fn bind_backup_audit(metadata: &mut serde_json::Value, instance: &Instance) {
+    if let Some(bucket) = crate::data_store::backup_audit_bucket(instance) {
+        bind_jobs_audit(metadata, bucket);
+        if let Some(bindings) = metadata["bindings"].as_array_mut() {
+            bindings.push(
+                json!({ "type": "plain_text", "name": "BACKUP_AUDIT_REQUIRED", "text": "1" }),
+            );
+        }
     }
 }
 
