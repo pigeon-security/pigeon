@@ -36,6 +36,11 @@ pub fn run_job(
     let job_json = env("INGEST_JOB").ok_or("INGEST_JOB is not set")?;
     let job: JobSpec =
         serde_json::from_str(&job_json).map_err(|e| format!("INGEST_JOB is not a job: {e}"))?;
+    if env("INGEST_REQUIRE_REVISION").as_deref() == Some("1")
+        && option_env!("PIGEON_COMMIT") != Some(job.commit.as_str())
+    {
+        return Err("the runner binary does not match the approved ingest revision".into());
+    }
     let source: Box<dyn Source> = match &job.source {
         SourceSpec::S3 {
             endpoint,

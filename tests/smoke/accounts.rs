@@ -1681,3 +1681,56 @@ fn cloudflare_ingest_runtime_bounds_deadlines_and_run_keys() {
     assert!(!valid_deadline(1_000, 1_001 + MAX_RUNTIME_MS));
     assert!(!valid_deadline(i64::MIN, i64::MAX));
 }
+
+#[test]
+fn cloudflare_ingest_image_is_content_addressed_in_the_target_account() {
+    use pigeon_ingest::container_job::valid_image;
+
+    let account = "a".repeat(32);
+    let digest = "f".repeat(64);
+    let image = format!("registry.cloudflare.com/{account}/pigeon-ingest-runner@sha256:{digest}");
+    assert!(valid_image(&image, &account));
+    assert!(!valid_image(&image, &"b".repeat(32)));
+    assert!(!valid_image(&image, "not-an-account"));
+    assert!(!valid_image(&format!("{image}:latest"), &account));
+    assert!(!valid_image(&image.replace("@sha256:", ":"), &account));
+}
+
+#[test]
+fn backblaze_ingest_uses_the_current_scoped_tools_and_record_layout() {
+    use pigeon_capabilities::instances::{record::Instance, tools::Scope};
+
+    let instance: Instance = serde_json::from_value(json!({
+        "id": "archive",
+        "title": "Archive",
+        "account": {"kind": "linked", "account_id": "a".repeat(32)},
+        "data": {"ingest": {"backblaze": {
+            "name": "historical", "region": "us-west-004", "bucket": "history-bucket",
+            "prefix": "export/",
+        }}},
+    }))
+    .unwrap();
+    let scope = Scope::new(&instance).unwrap();
+    assert!(
+        scope
+            .bind(
+                "data_ingest_plan",
+                &json!({"source": "backblaze", "prefix": "export/24/"})
+            )
+            .is_ok()
+    );
+    assert!(
+        scope
+            .bind("data_ingest_start", &json!({"plan": "approved-plan"}))
+            .is_ok()
+    );
+    assert!(
+        scope
+            .bind(
+                "data_ingest_plan",
+                &json!({"source": "backblaze", "bucket": "other-bucket"})
+            )
+            .is_err()
+    );
+    assert!(scope.bind("ingest_plan", &json!({})).is_err());
+}

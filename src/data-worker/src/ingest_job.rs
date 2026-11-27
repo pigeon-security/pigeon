@@ -8,6 +8,7 @@ use pigeon_ingest::manifest::{self, Counters, RunState, Status};
 use pigeon_ingest::protocol::{self, StopRequest};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use worker::js_sys::Reflect;
 use worker::wasm_bindgen::JsValue;
 use worker::{
     DurableObject, Env, Fetch, Headers, Method, Request, RequestInit, Response, Result, State, Url,
@@ -52,9 +53,9 @@ impl DurableObject for IngestJob {
             "/ready" => json_answer(
                 200,
                 json!({
-                    "container": containers::present(&self.state),
+                    "image": self.image(),
                     "image_revision": self.image_revision(),
-                    "jobs_callback": self.callback_origin().is_some(),
+                    "jobs_origin": self.callback_origin(),
                 }),
             ),
             "/start" => {
@@ -92,6 +93,12 @@ impl DurableObject for IngestJob {
 }
 
 impl IngestJob {
+    fn image(&self) -> Option<String> {
+        let container = Reflect::get(self.state.as_raw(), &"container".into()).ok()?;
+        let images = Reflect::get(&container, &"images".into()).ok()?;
+        Reflect::get(&images, &IMAGE.into()).ok()?.as_string()
+    }
+
     fn image_revision(&self) -> Option<String> {
         self.env
             .var("INGEST_IMAGE_REVISION")
@@ -155,7 +162,12 @@ impl IngestJob {
             );
         }
         if start.report_to_jobs
-            && (start.image_revision.is_none() || self.callback_origin().is_none())
+            && (start.image_revision.is_none()
+                || self.callback_origin().is_none()
+                || start
+                    .image
+                    .as_ref()
+                    .is_none_or(|expected| self.image().as_ref() != Some(expected)))
         {
             return json_answer(
                 409,
@@ -171,6 +183,9 @@ impl IngestJob {
         let mut env =
             protocol::start_env(&start.request).map_err(|_| fail("invalid ingest job"))?;
         env.push(("SPOOL_BYTES".into(), SPOOL_BYTES.to_string()));
+        if start.report_to_jobs {
+            env.push(("INGEST_REQUIRE_REVISION".into(), "1".into()));
+        }
         let pairs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
         let run = Run {
             id: start.request.job.run,

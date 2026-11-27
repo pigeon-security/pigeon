@@ -21,6 +21,8 @@ pub struct Start {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_revision: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline_ms: Option<i64>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub report_to_jobs: bool,
@@ -67,4 +69,18 @@ pub fn valid_revision(revision: &str) -> bool {
 
 pub fn valid_deadline(started_ms: i64, deadline_ms: i64) -> bool {
     deadline_ms > started_ms && deadline_ms.saturating_sub(started_ms) <= MAX_RUNTIME_MS
+}
+
+/// The runner image must be content-addressed in the approved account's registry.
+pub fn valid_image(image: &str, account: &str) -> bool {
+    if account.len() != 32 || !account.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return false;
+    }
+    let prefix = format!("registry.cloudflare.com/{account}/pigeon-ingest-runner@sha256:");
+    image.strip_prefix(&prefix).is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
+    })
 }

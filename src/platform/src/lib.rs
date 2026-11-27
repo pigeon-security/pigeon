@@ -195,6 +195,9 @@ async fn route(req: Request, env: Env, ctx: &WorkerContext) -> Result<Response> 
         }
         return Response::error("method not allowed", 405);
     }
+    if host == settings::HOST && path == pigeon_capabilities::ingest::backblaze::TERMINAL_PATH {
+        return pigeon_capabilities::ingest::backblaze::callback(&env, settings::HOST, req).await;
+    }
     if host == settings::HOST && path == pigeon_capabilities::digitalocean::health::CALLBACK_PATH {
         if req.method() != Method::Post {
             return Response::error("method not allowed", 405);

@@ -579,6 +579,20 @@ pub fn problems(record: &Instance) -> Vec<String> {
         {
             out.push(problem);
         }
+        if let Some(source) = &record.capabilities[name].backblaze {
+            if name != crate::ingest::NAME {
+                out.push(format!(
+                    "The capability \"{name}\" does not accept a Backblaze source."
+                ));
+            } else if let Err(why) = source.validate() {
+                out.push(why.into());
+            } else if crate::data_store::settings(record)
+                .and_then(|data| data.backup.as_ref())
+                .is_some_and(|backup| backup.bucket.eq_ignore_ascii_case(&source.bucket))
+            {
+                out.push("Backblaze ingest and backup must use separate buckets.".into());
+            }
+        }
         let grants = &record.capabilities[name].federation;
         if !crate::federation::valid_grants(record, name, grants) {
             out.push(

@@ -911,7 +911,12 @@ pub fn follow_up(r: &Record) -> std::result::Result<Option<FollowUp>, String> {
             crate::delegates::KIND => plan("apps_cleanup_apply"),
             crate::portal_oauth::KIND => plan("portal_oauth_redirects_apply"),
             "observability_monitors" => plan("observability_monitors_apply"),
-            crate::ingest::KIND if r.payload["adapter"] == "digitalocean" => {
+            crate::ingest::KIND
+                if matches!(
+                    r.payload["adapter"].as_str(),
+                    Some("digitalocean" | "backblaze")
+                ) =>
+            {
                 let instance = r.payload["job"]["instance"]
                     .as_str()
                     .ok_or("the managed ingest plan does not name an instance")?;

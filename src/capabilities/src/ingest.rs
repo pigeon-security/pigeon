@@ -9,6 +9,7 @@
 //! build time). A local build has none, so `data_ingest_plan` takes an optional full `commit`, which
 //! also overrides the built-in one.
 
+pub mod backblaze;
 pub mod digitalocean;
 pub mod hosts;
 pub mod net;
@@ -494,6 +495,9 @@ impl Ingest {
             ));
         };
         let managed = if record.capabilities.contains_key(NAME) {
+            if args["source"] == "backblaze" {
+                return backblaze::plan(self, cx, &record, args).await;
+            }
             if args["source"] != "scaleway" {
                 return digitalocean::plan(cx, self.host_name(), &record, args).await;
             }
@@ -862,6 +866,9 @@ impl Ingest {
         }
         if digitalocean::is_plan(&got["payload"]) {
             return digitalocean::start(cx, self.host_name(), approval_id, &got, args).await;
+        }
+        if backblaze::managed(&got["payload"]) {
+            return backblaze::start(self, cx, args, approval_id, &got).await;
         }
         let job: JobSpec = serde_json::from_value(got["payload"]["job"].clone())
             .map_err(|_| bad("the approval holds no readable job"))?;
@@ -1316,9 +1323,13 @@ impl Ingest {
             }
             .into();
         }
-        Ok(json!({
-            "run": rec, "status": status, "vm_state": vm, "note": note,
-        }))
+        let mut output = json!({ "run": rec, "status": status, "vm_state": vm, "note": note });
+        if rec.host == "cloudflare"
+            && let Some(managed) = backblaze::status(env, instance, run).await?
+        {
+            output["jobs"] = managed;
+        }
+        Ok(output)
     }
 
     /// `data_ingest_report`: the run's report with long lists capped.
@@ -1352,6 +1363,11 @@ impl Ingest {
             return Ok(result);
         }
         let mut rec = run_of(cx.env, instance, run).await?;
+        if rec.host == "cloudflare"
+            && let Some(result) = backblaze::stop(cx.env, instance, run).await?
+        {
+            return Ok(result);
+        }
         if rec.vm_deleted {
             return Ok(json!({ "run": run, "note": "Already stopped." }));
         }
@@ -1532,6 +1548,14 @@ impl Capability for Ingest {
                 },
             ]);
         }
+        slots.extend(self.targets.iter().map(|target| Slot {
+            name: backblaze::source_slot(&target.instance),
+            purpose: format!(
+                "The bucket- and prefix-scoped read-only Backblaze B2 key for {}'s approved ingest source, as `KEY_ID:APPLICATION_KEY`.",
+                target.instance
+            ),
+            scopes: &[secrets_store::WORKERS],
+        }));
         for a in &self.accounts {
             let Some(name) = hosts::host_slot(a) else {
                 continue;
@@ -1615,6 +1639,18 @@ impl Capability for Ingest {
                 return Ok(json!(
                     "The key can list Scaleway Instances in the approved region."
                 ));
+            }
+            if let Some(target) = self
+                .targets
+                .iter()
+                .find(|target| backblaze::source_slot(&target.instance) == name)
+            {
+                let record = instances::one(cx.env, &target.instance)
+                    .await?
+                    .ok_or_else(|| {
+                        bad("the approved Backblaze ingest instance no longer exists")
+                    })?;
+                return backblaze::check_key(&record, value).await;
             }
             let account = self
                 .accounts

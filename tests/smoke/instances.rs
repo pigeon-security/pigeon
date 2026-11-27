@@ -2606,6 +2606,7 @@ fn core_ingest_plans_hosts_and_estimates() {
             "INGEST_R2_WILLOWGRAYSEN",
             "INGEST_SCALEWAY_SOURCE_WILLOWGRAYSEN",
             "INGEST_SCALEWAY_COMPUTE_WILLOWGRAYSEN",
+            "INGEST_B2_WILLOWGRAYSEN",
             "INGEST_HOST_DIGITALOCEAN_LEGACY",
             "INGEST_HOST_SCALEWAY_ARCHIVE"
         ]
