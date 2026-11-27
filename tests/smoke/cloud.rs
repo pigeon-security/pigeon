@@ -1666,7 +1666,8 @@ fn digitalocean_ingest_recovers_resources_and_waits_for_volume_detach() {
                     if n == 2 {
                         return text_res(404, "");
                     }
-                    volume["droplet_ids"] = if n == 0 { json!([42]) } else { json!([]) };
+                    // The provider documents a nullable attachment list.
+                    volume["droplet_ids"] = if n == 0 { json!([42]) } else { Value::Null };
                     json_res(200, json!({"volume":volume}))
                 }
                 ("DELETE", path) if path == format!("/v2/volumes/{id}") => text_res(204, ""),

@@ -342,7 +342,10 @@ pub async fn remove_volume(
                     "Could not verify DigitalOcean ingest Volume ownership.",
                 ));
             }
-            if !row["droplet_ids"].as_array().is_some_and(Vec::is_empty) {
+            if !row
+                .get("droplet_ids")
+                .is_some_and(|ids| ids.is_null() || ids.as_array().is_some_and(Vec::is_empty))
+            {
                 return Ok(Removal::Attached);
             }
             delete(transport, token, url).await
