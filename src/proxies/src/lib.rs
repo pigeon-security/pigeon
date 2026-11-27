@@ -105,9 +105,9 @@ pub fn unauthorized(e: &worker::Error) -> bool {
 /// token would have expired, up to fifteen minutes, and every CI job dispatched meanwhile loses
 /// its runner before it reports (docs/plans/ci-container-starts.md).
 pub async fn with_renewal<T, A, AF, F, W, WF>(
-    mut account: A,
-    mut forget: F,
-    mut work: W,
+    account: A,
+    forget: F,
+    work: W,
 ) -> worker::Result<(Account, T)>
 where
     A: FnMut() -> AF,
@@ -116,16 +116,43 @@ where
     W: FnMut(Account) -> WF,
     WF: Future<Output = worker::Result<T>>,
 {
+    with_renewal_if(
+        account,
+        forget,
+        work,
+        |r: &worker::Result<T>| matches!(r, Err(e) if unauthorized(e)),
+    )
+    .await
+}
+
+/// [`with_renewal`], with `refused` saying which results mean Cloudflare refused the token: for
+/// work that answers Cloudflare's 401 as a value (the deploy proxy passes the API's answer on
+/// to wrangler) rather than as an error. The second attempt's result is answered as it is,
+/// refused or not.
+pub async fn with_renewal_if<T, A, AF, F, W, WF, R>(
+    mut account: A,
+    mut forget: F,
+    mut work: W,
+    refused: R,
+) -> worker::Result<(Account, T)>
+where
+    A: FnMut() -> AF,
+    AF: Future<Output = worker::Result<Account>>,
+    F: FnMut(&str),
+    W: FnMut(Account) -> WF,
+    WF: Future<Output = worker::Result<T>>,
+    R: Fn(&worker::Result<T>) -> bool,
+{
     let first = account().await?;
-    match work(first.clone()).await {
-        Ok(v) => Ok((first, v)),
-        Err(e) if unauthorized(&e) && first.bearer.is_some() => {
-            forget(first.bearer.as_deref().unwrap_or_default());
+    let result = work(first.clone()).await;
+    match first.bearer.as_deref() {
+        Some(token) if refused(&result) => {
+            forget(token);
             let second = account().await?;
             let v = work(second.clone()).await?;
             Ok((second, v))
         }
-        Err(e) => Err(e),
+        _ => result.map(|v| (first, v)),
     }
 }
 
@@ -143,6 +170,27 @@ where
         || host.account(purpose),
         |token| host.forget(purpose, token),
         work,
+    )
+    .await
+}
+
+/// [`with_renewal_if`] with `host`'s account for `purpose`.
+pub async fn with_host_account_if<T, W, WF, R>(
+    host: &dyn Host,
+    purpose: Purpose,
+    work: W,
+    refused: R,
+) -> worker::Result<(Account, T)>
+where
+    W: FnMut(Account) -> WF,
+    WF: Future<Output = worker::Result<T>>,
+    R: Fn(&worker::Result<T>) -> bool,
+{
+    with_renewal_if(
+        || host.account(purpose),
+        |token| host.forget(purpose, token),
+        work,
+        refused,
     )
     .await
 }

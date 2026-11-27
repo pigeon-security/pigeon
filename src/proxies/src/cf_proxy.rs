@@ -1157,8 +1157,13 @@ impl CfProxy {
         // Container application calls name the Worker's container namespaces, so they are
         // looked up first; no other call needs them.
         let namespaces = if !classes.is_empty() && url.path().contains("/containers/applications") {
-            let account = host.account(Purpose::Deploy).await?;
-            container_namespaces(&account, scope_script, &classes).await?
+            // A kept scoped token Cloudflare refuses is renewed once (crate::with_renewal).
+            let classes = classes.as_slice();
+            crate::with_host_account(host, Purpose::Deploy, |a| async move {
+                container_namespaces(&a, scope_script, classes).await
+            })
+            .await?
+            .1
         } else {
             Vec::new()
         };
@@ -1199,23 +1204,36 @@ impl CfProxy {
             upstream_url.push('?');
             upstream_url.push_str(q);
         }
-        let account = host.account(Purpose::Deploy).await?;
-        let token = Scoped::open_for(
-            &account,
-            "cf-proxy",
-            vec![Policy::new(tokens::Scope::Account, entry.permissions)],
-            TOKEN_TTL,
+        // A kept scoped token Cloudflare refuses (core's token ledger revoked it when it
+        // restarted) is forgotten and the call made once more with a fresh one, instead of
+        // answering wrangler 401 until the kept one would have expired
+        // (docs/plans/proxy-renewal-and-mail-outcomes.md).
+        let (upstream, sent_type, sent_body) = (
+            upstream_url.as_str(),
+            content_type.as_deref(),
+            body.as_slice(),
+        );
+        let permissions = entry.permissions;
+        let (_, (status, answered_type, bytes)) = crate::with_host_account_if(
+            host,
+            Purpose::Deploy,
+            |account| {
+                let method = method.clone();
+                async move {
+                    let token = Scoped::open_for(
+                        &account,
+                        "cf-proxy",
+                        vec![Policy::new(tokens::Scope::Account, permissions)],
+                        TOKEN_TTL,
+                    )
+                    .await?;
+                    let sent = send(token.value(), method, upstream, sent_type, sent_body).await;
+                    token.finish(sent).await
+                }
+            },
+            refused_answer,
         )
         .await?;
-        let sent = send(
-            token.value(),
-            method,
-            &upstream_url,
-            content_type.as_deref(),
-            &body,
-        )
-        .await;
-        let (status, answered_type, bytes) = token.finish(sent).await?;
         if lookup::is_lookup(entry) {
             let store = lookup::EdgeStore::new(&self.host, &account_id, target);
             if let Some(kept) = remember(
@@ -1383,6 +1401,15 @@ async fn remember(
         }
         lookup::Lookup::Replay(r) => Some(r),
         lookup::Lookup::Pass => None,
+    }
+}
+
+/// Whether `sent` is Cloudflare refusing the token the deploy proxy called it with: a 401
+/// answer (which [`send`] passes on to wrangler as it is) or a 401 error.
+pub fn refused_answer(sent: &Result<(u16, Option<String>, Vec<u8>)>) -> bool {
+    match sent {
+        Ok((status, _, _)) => *status == 401,
+        Err(e) => crate::unauthorized(e),
     }
 }
 

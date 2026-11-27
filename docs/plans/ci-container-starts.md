@@ -84,8 +84,8 @@ script itself (unchanged image digest across successes and losses).
 
 ## Not done, and what to watch
 
-- The deploy proxy (`/cf/`, `Purpose::Deploy`) keeps its credential the same way and has the
-  same exposure after a ledger restart; it should take `with_host_account` too.
+- The deploy proxy (`/cf/`, `Purpose::Deploy`) kept its credential the same way and had the
+  same exposure after a ledger restart; it now renews too (docs/plans/proxy-renewal-and-mail-outcomes.md).
 - The ledger could keep handing out a lease's value across a restart (it cannot: values are in
   memory by design), or revoke orphans only once they expire. Renewing on 401 makes either
   unnecessary for the proxy.

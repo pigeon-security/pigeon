@@ -2143,3 +2143,82 @@ fn proxy_worker_renews_a_refused_scoped_credential() {
     assert!(token_block_on(with_renewal(parent, no_bearer, always)).is_err());
     assert_eq!(ran.get(), 1);
 }
+
+/// The deploy proxy (`/cf/`) keeps its scoped `cf_deploy` credential the same way as the git
+/// proxy, and passes Cloudflare's 401 on to wrangler as an answer rather than an error: such an
+/// answer on a kept token is renewed once too, and a second 401 is passed on as it is
+/// (docs/plans/proxy-renewal-and-mail-outcomes.md).
+#[test]
+fn deploy_proxy_renews_a_refused_scoped_credential() {
+    use super::core::token_block_on;
+    use pigeon_core::Account;
+    use pigeon_proxies::cf_proxy::refused_answer;
+    use pigeon_proxies::with_renewal_if;
+    use std::cell::{Cell, RefCell};
+
+    type Sent = (u16, Option<String>, Vec<u8>);
+    let answer = |status: u16| -> worker::Result<Sent> { Ok((status, None, Vec::new())) };
+    assert!(refused_answer(&answer(401)));
+    assert!(!refused_answer(&answer(200)));
+    assert!(!refused_answer(&answer(403)));
+    assert!(refused_answer(&Err(worker::Error::RustError(
+        "/accounts/a/workers/durable_objects/namespaces?per_page=1000: 401: [{\"code\":10000}]"
+            .into()
+    ))));
+    assert!(!refused_answer(&Err(worker::Error::RustError(
+        "boom".into()
+    ))));
+
+    let account_with = |bearer: &str| Account {
+        id: "acct".into(),
+        parent: String::new(),
+        secrets_store: String::new(),
+        bearer: Some(bearer.to_string()),
+        token_ledger: None,
+    };
+    // Core hands out "old" (revoked by its ledger's restart) until it is forgotten, then "new".
+    let kept = RefCell::new(Some("old".to_string()));
+    let account = || {
+        let bearer = kept.borrow().clone().unwrap_or_else(|| "new".to_string());
+        std::future::ready(Ok(account_with(&bearer)))
+    };
+    let forget = |token: &str| {
+        if kept.borrow().as_deref() == Some(token) {
+            *kept.borrow_mut() = None;
+        }
+    };
+    let ran = Cell::new(0);
+    let deploy = |a: Account| {
+        ran.set(ran.get() + 1);
+        std::future::ready(answer(match a.bearer.as_deref() {
+            Some("new") => 200,
+            _ => 401,
+        }))
+    };
+    let (used, (status, _, _)) =
+        token_block_on(with_renewal_if(account, forget, deploy, refused_answer)).unwrap();
+    assert_eq!(status, 200, "wrangler gets the renewed call's answer");
+    assert_eq!(used.bearer.as_deref(), Some("new"));
+    assert_eq!(ran.get(), 2);
+    assert!(kept.borrow().is_none(), "the refused token is forgotten");
+
+    // A second 401 is wrangler's answer, not an error; other answers are not retried.
+    let one = || std::future::ready(Ok(account_with("t")));
+    let ran = Cell::new(0);
+    let always = |_: Account| {
+        ran.set(ran.get() + 1);
+        std::future::ready(answer(401))
+    };
+    let (_, (status, _, _)) =
+        token_block_on(with_renewal_if(one, |_: &str| {}, always, refused_answer)).unwrap();
+    assert_eq!((status, ran.get()), (401, 2), "never more than twice");
+    let ran = Cell::new(0);
+    let forbidden = |_: Account| {
+        ran.set(ran.get() + 1);
+        std::future::ready(answer(403))
+    };
+    let not_refused = |_: &str| panic!("not refused");
+    let (_, (status, _, _)) =
+        token_block_on(with_renewal_if(one, not_refused, forbidden, refused_answer)).unwrap();
+    assert_eq!((status, ran.get()), (403, 1));
+}
