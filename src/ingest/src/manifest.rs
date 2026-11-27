@@ -272,6 +272,10 @@ pub fn run_id(day: &str, account: &str, bucket: &str, nonce: u32) -> String {
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
-    s.truncate(96);
+    if s.len() > 96 {
+        // Retain the nonce, since long source names can otherwise collide on the same day.
+        s.truncate(89);
+        s.push_str(&format!("-{:06x}", nonce & 0xff_ffff));
+    }
     s
 }

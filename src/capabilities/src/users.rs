@@ -1398,6 +1398,39 @@ impl Directory {
                 )?;
                 Value::Null
             }
+            "scaleway.ingest.replace" => {
+                let key = crate::ingest::run_key(s("run"));
+                let previous = self.setting_value(&key, t)?;
+                if previous.as_deref() != Some(s("previous")) {
+                    return Ok(json!(false));
+                }
+                let next: crate::ingest::RunRecord = serde_json::from_str(s("value"))?;
+                if next.run != s("run") || next.host != "scaleway" || next.scaleway.is_none() {
+                    return Err(bad("the updated Scaleway ingest record does not match"));
+                }
+                self.db.exec(
+                    "UPDATE settings SET value = ? WHERE key = ? AND expires_at > ?",
+                    vec![s("value").into(), key.as_str().into(), t.into()],
+                )?;
+                json!(true)
+            }
+            "scaleway.ingest.pending" => {
+                #[derive(Deserialize)]
+                struct Row {
+                    value: String,
+                }
+                let rows: Vec<Row> = self.db.rows(
+                    "SELECT value FROM settings
+                     WHERE key >= 'ingest:run:' AND key < 'ingest:run;'
+                     AND expires_at > ? AND json_valid(value)
+                     AND json_extract(value, '$.host') = 'scaleway'
+                     AND json_extract(value, '$.scaleway.next_ms') BETWEEN 1 AND ?
+                     AND json_extract(value, '$.scaleway.lease_until_ms') <= ?
+                     ORDER BY json_extract(value, '$.scaleway.next_ms'), key LIMIT 2",
+                    vec![t.into(), t.into(), t.into()],
+                )?;
+                json!(rows.into_iter().map(|row| row.value).collect::<Vec<_>>())
+            }
             "instance.record_save" => {
                 use crate::instances::{self, rename::Stored};
                 let key = instances::key(s("instance"));

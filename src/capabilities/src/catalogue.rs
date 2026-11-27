@@ -302,8 +302,8 @@ pub const CATALOGUE: &[Entry] = &[
     Entry {
         name: crate::ingest::NAME,
         field: Some("data.ingest"),
-        requires: &[crate::data_store::NAME],
         linked: true,
+        requires: &[crate::data_store::NAME],
         opt_in: true,
         about: "Import external storage into the data store",
         ..BASE
@@ -573,6 +573,11 @@ pub fn problems(record: &Instance) -> Vec<String> {
             out.push(format!(
                 "The capability \"{name}\" does not accept Droplet health checks."
             ));
+        }
+        if let Some(problem) =
+            crate::ingest::scaleway_source::field_problems(name, &record.capabilities[name])
+        {
+            out.push(problem);
         }
         let grants = &record.capabilities[name].federation;
         if !crate::federation::valid_grants(record, name, grants) {

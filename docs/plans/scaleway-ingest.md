@@ -1,0 +1,41 @@
+# Scaleway Data Ingest
+
+An approved source describes one project, Object Storage region, bucket and
+prefix. Data Ingest samples that prefix with a read-only Object Storage key
+and targets the private R2 bucket provisioned by Data for the same instance.
+
+```toml
+[data.ingest.scaleway]
+project = "0474092e-2f42-4b73-885c-f7061da83469"
+region = "fr-par"
+bucket = "archive-import"
+prefix = "canary/"
+```
+
+For willowgraysen, the provisioner expects these Worker secret bindings:
+
+- `INGEST_SCALEWAY_SOURCE_WILLOWGRAYSEN` holds an
+  Object Storage access key and secret separated by a colon. Limit the IAM
+  grant to reading and listing the approved source.
+- `INGEST_SCALEWAY_COMPUTE_WILLOWGRAYSEN` holds the
+  approved Scaleway project ID and compute secret separated by a colon. Limit
+  the application to Instances and Block Storage in that project.
+- `INGEST_R2_WILLOWGRAYSEN` holds the Object
+  Read & Write R2 key scoped to the instance's Data bucket.
+
+Approve the record, complete the Data instance plan, set up the dedicated
+private Jobs bucket, then bind the credentials. Run `data_ingest_plan` with
+`source = "scaleway"` and optionally a narrower `prefix`. Review the plan's
+sample and cost estimate before authorizing compute.
+
+The runner is a pinned Docker container on a temporary Scaleway Instance in
+the source region. Scaleway attaches a distinct SBS block volume. The
+bootstrap mounts only the blank device whose guest ID matches the attachment
+UUID in the provider response. The VM has a 40 GB boot volume and 200 GB
+scratch volume, with at most 160 GB allocated to ingest scratch. An incorrect
+device or volume size stops bootstrap. [Scaleway device identification](https://www.scaleway.com/en/docs/instances/reference-content/identify-devices/)
+
+The runner uses the existing hash, archive and checkpoint formats. Jobs
+reconciles an ambiguous create by an exact run tag in the approved project,
+releases guest standby compute before deletion, requires confirmed absence of the server and block volumes, and writes a
+redacted terminal record to the Jobs bucket approved at launch.

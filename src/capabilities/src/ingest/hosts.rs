@@ -230,26 +230,39 @@ pub fn scaleway_cloud_init(
     )
 }
 
+/// A stable provider tag for reconciliation after an interrupted create request.
+pub fn scaleway_run_tag(run: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = pigeon_core::sign::hex(&Sha256::digest(run.as_bytes()));
+    format!("pigeon-ingest-{}", &digest[..24])
+}
+
+/// Names are tied to the run tag so a later cleanup can recover an omitted block ID.
+pub fn scaleway_volume_names(run: &str) -> [String; 2] {
+    let tag = scaleway_run_tag(run);
+    [format!("{tag}-boot"), format!("{tag}-scratch")]
+}
+
 /// The Scaleway `POST .../servers` body, with separate boot and scratch volumes.
 pub fn scaleway_server_body(job: &JobSpec, project: &str) -> Value {
     let name = vm_name(&job.run);
-    let volume_name = &name[..name.len().min(NAME_MAX - 8)];
+    let [boot, scratch] = scaleway_volume_names(&job.run);
     json!({
-        "name": vm_name(&job.run),
+        "name": name,
         "commercial_type": SCW_TYPE,
         "image": SCW_IMAGE,
         "project": project,
-        "tags": [TAG],
+        "tags": [TAG, scaleway_run_tag(&job.run)],
         "dynamic_ip_required": true,
         "volumes": {
             "0": {
-                "name": format!("{volume_name}-boot"),
+                "name": boot,
                 "boot": true,
                 "size": SCW_BOOT_BYTES,
                 "volume_type": "sbs_volume",
             },
             "1": {
-                "name": format!("{volume_name}-scratch"),
+                "name": scratch,
                 "boot": false,
                 "size": SCW_VOLUME_BYTES,
                 "volume_type": "sbs_volume",
@@ -280,6 +293,11 @@ pub fn scaleway_action_path(zone: &str, server: &str) -> String {
 /// The body that powers a Scaleway server on.
 pub fn scaleway_poweron() -> Value {
     json!({ "action": "poweron" })
+}
+
+/// Release the compute allocation of a running or in-place stopped Instance.
+pub fn scaleway_poweroff() -> Value {
+    json!({ "action": "poweroff" })
 }
 
 /// The action that terminates a running Scaleway server. Block volumes are deleted separately.

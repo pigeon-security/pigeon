@@ -147,6 +147,9 @@ pub struct CapabilitySettings {
     /// The expected team identifier for the DigitalOcean connection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub team_id: Option<String>,
+    /// Data Ingest's approved Scaleway project and read-only source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scaleway: Option<crate::ingest::scaleway_source::Source>,
     /// The optional read-only DigitalOcean Spaces source binding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spaces: Option<pigeon_cloud::digitalocean_spaces::Binding>,

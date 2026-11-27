@@ -166,7 +166,7 @@ pub struct ScalewayCreated {
     pub scratch_volume: Option<String>,
 }
 
-fn scw_uuid(s: &str) -> bool {
+pub(super) fn scw_uuid(s: &str) -> bool {
     s.len() == 36
         && s.bytes().enumerate().all(|(i, c)| {
             if matches!(i, 8 | 13 | 18 | 23) {
@@ -190,8 +190,10 @@ pub async fn scw_create(secret: &str, zone: &str, body: &Value) -> Result<Scalew
     if !(200..300).contains(&s) {
         return Err(failed("creating the server", s, &t));
     }
-    let result = parse(&t);
-    let server = &result["server"];
+    scw_resources(&parse(&t)["server"])
+}
+
+fn scw_resources(server: &Value) -> Result<ScalewayCreated> {
     let id = server["id"]
         .as_str()
         .filter(|id| scw_uuid(id))
@@ -214,6 +216,70 @@ pub async fn scw_create(secret: &str, zone: &str, body: &Value) -> Result<Scalew
         volumes,
         scratch_volume,
     })
+}
+
+/// Recover the exact run-owned Instance after an ambiguous create response.
+pub async fn scw_find_created(
+    secret: &str,
+    zone: &str,
+    project: &str,
+    run: &str,
+) -> Result<Option<ScalewayCreated>> {
+    if !scw_uuid(project) {
+        return Err(bad("the approved Scaleway project id is invalid"));
+    }
+    let tag = hosts::scaleway_run_tag(run);
+    let name = hosts::vm_name(run);
+    let path = hosts::scaleway_servers_path(zone);
+    let mut found: Option<ScalewayCreated> = None;
+    // Do not rely on the provider's default state filter. In particular, an
+    // interrupted create can leave a stopped VM before the first power-on.
+    for state in [
+        "stopped",
+        "stopped%20in%20place",
+        "running",
+        "starting",
+        "stopping",
+        "locked",
+    ] {
+        let url = format!(
+            "{SCW_API}{path}?project={project}&tags={tag}&name={name}&state={state}&per_page=2"
+        );
+        let (status, body) = http(Method::Get, &url, &scw_auth(secret), None).await?;
+        if status != 200 {
+            return Err(bad(format!(
+                "listing the Scaleway job resources failed ({status})"
+            )));
+        }
+        let response = parse(&body);
+        if response["total_count"]
+            .as_u64()
+            .is_some_and(|count| count > 2)
+        {
+            return Err(bad("the Scaleway recovery lookup is ambiguous"));
+        }
+        let candidates = response["servers"]
+            .as_array()
+            .ok_or_else(|| bad("Scaleway returned no server list"))?;
+        for server in candidates.iter().filter(|server| {
+            server["project"] == project
+                && server["zone"] == zone
+                && server["name"] == name
+                && server["tags"]
+                    .as_array()
+                    .is_some_and(|tags| tags.iter().any(|value| value == &tag))
+        }) {
+            let candidate = scw_resources(server)?;
+            if found
+                .as_ref()
+                .is_some_and(|known| known.server != candidate.server)
+            {
+                return Err(bad("more than one Scaleway server matches this run"));
+            }
+            found = Some(candidate);
+        }
+    }
+    Ok(found)
 }
 
 /// Sets the server's cloud-init user data.
@@ -276,6 +342,53 @@ pub async fn scw_delete_server(secret: &str, zone: &str, id: &str) -> Result<()>
             "deleting the Scaleway server failed ({status})"
         ))),
     }
+}
+
+/// Look up exactly the named volume from the approved project and zone.
+pub async fn scw_find_volume(
+    secret: &str,
+    zone: &str,
+    project: &str,
+    name: &str,
+) -> Result<Option<String>> {
+    if !scw_uuid(project) || !name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-') {
+        return Err(bad("invalid Scaleway volume recovery scope"));
+    }
+    let url = format!(
+        "{SCW_API}/block/v1/zones/{zone}/volumes?project_id={project}&name={name}&page_size=2"
+    );
+    let (status, body) = http(Method::Get, &url, &scw_auth(secret), None).await?;
+    if status != 200 {
+        return Err(bad(format!(
+            "listing the Scaleway job volumes failed ({status})"
+        )));
+    }
+    let result = parse(&body);
+    let volumes = result["volumes"]
+        .as_array()
+        .ok_or_else(|| bad("Scaleway returned no volume list"))?;
+    if result["total_count"]
+        .as_u64()
+        .is_some_and(|count| count > 2)
+    {
+        return Err(bad("the Scaleway volume lookup is ambiguous"));
+    }
+    let mut matches = volumes.iter().filter(|volume| {
+        volume["name"] == name && volume["project_id"] == project && volume["zone"] == zone
+    });
+    let Some(volume) = matches.next() else {
+        return Ok(None);
+    };
+    if matches.next().is_some() {
+        return Err(bad(
+            "more than one Scaleway volume matched a run-owned name",
+        ));
+    }
+    let id = volume["id"]
+        .as_str()
+        .filter(|id| scw_uuid(id))
+        .ok_or_else(|| bad("Scaleway returned no valid volume id"))?;
+    Ok(Some(id.to_string()))
 }
 
 /// Deletes a detached project-owned block volume. Success means absence was observed.

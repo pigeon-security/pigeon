@@ -12,6 +12,8 @@
 pub mod digitalocean;
 pub mod hosts;
 pub mod net;
+pub mod scaleway;
+pub mod scaleway_source;
 
 pub const NAME: &str = "data-ingest";
 const INGEST_VIEWS: &[crate::instances::tools::View] = &[crate::instances::tools::View {
@@ -162,6 +164,9 @@ pub struct RunRecord {
     /// Extra Scaleway resources created with the server. Older runs have no snapshot.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scaleway_volumes: Vec<String>,
+    /// Cleanup and audit state for managed Scaleway runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scaleway: Option<scaleway::Lifecycle>,
     /// Whether the VM was deleted (or the Container stopped).
     pub vm_deleted: bool,
     /// The bound R2 destination for new runs. Legacy rows have no snapshot.
@@ -216,7 +221,7 @@ fn bad(why: impl Into<String>) -> Error {
     Error::RustError(why.into())
 }
 
-fn run_key(run: &str) -> String {
+pub(crate) fn run_key(run: &str) -> String {
     format!("ingest:run:{run}")
 }
 
@@ -488,12 +493,64 @@ impl Ingest {
                 Value::Null,
             ));
         };
-        if record.capabilities.contains_key(NAME) {
-            return digitalocean::plan(cx, self.host_name(), &record, args).await;
-        }
-        let bindings = match self.bindings(&record, args) {
-            Ok(bindings) => bindings,
-            Err(error) => return Ok(unready(vec![error], Value::Null, Value::Null)),
+        let managed = if record.capabilities.contains_key(NAME) {
+            if args["source"] != "scaleway" {
+                return digitalocean::plan(cx, self.host_name(), &record, args).await;
+            }
+            if !data_enabled(&record) {
+                return Ok(unready(
+                    vec!["Enable Data on this instance first.".into()],
+                    Value::Null,
+                    Value::Null,
+                ));
+            }
+            if [
+                "scratch_gib",
+                "max_minutes",
+                "archive_inflated_gib",
+                "archive_member_gib",
+            ]
+            .iter()
+            .any(|key| args.get(key).is_some())
+            {
+                return Ok(unready(
+                    vec!["Scaleway uses a fixed scratch size, runtime limit and archive limits. Omit the DigitalOcean-specific overrides.".into()],
+                    Value::Null,
+                    Value::Null,
+                ));
+            }
+            let Some(config) = scaleway_source::binding(&record) else {
+                return Ok(unready(
+                    vec!["Approve this instance's Scaleway source binding first.".into()],
+                    Value::Null,
+                    Value::Null,
+                ));
+            };
+            if let Err(error) = config.validate() {
+                return Ok(unready(vec![error], Value::Null, Value::Null));
+            }
+            Some(config)
+        } else {
+            None
+        };
+        let managed_account = managed.map(|config| config.account(instance));
+        let managed_id = managed_account.as_ref().map(Account::id);
+        let store_bucket = crate::data_store::store_name(&record);
+        let bindings = if let (Some(config), Some(source)) = (managed, managed_id.as_deref()) {
+            match config.prefix(args) {
+                Ok(prefix) => Bindings {
+                    source,
+                    bucket: &config.bucket,
+                    prefix,
+                    destination_bucket: &store_bucket,
+                },
+                Err(error) => return Ok(unready(vec![error], Value::Null, Value::Null)),
+            }
+        } else {
+            match self.bindings(&record, args) {
+                Ok(bindings) => bindings,
+                Err(error) => return Ok(unready(vec![error], Value::Null, Value::Null)),
+            }
         };
         let linked = match self.checked_link(env, &record).await {
             Ok(linked) => linked,
@@ -514,7 +571,10 @@ impl Ingest {
         let mut missing = Vec::new();
 
         // The source account and its keys.
-        let account = match data_read::find(&self.accounts, source) {
+        let account = match managed_account
+            .as_ref()
+            .map_or_else(|| data_read::find(&self.accounts, source), Ok)
+        {
             Ok(a) if bucket_ok(bucket) && data_read::bucket_allowed(a, bucket) => Some(a),
             Ok(a) => {
                 missing.push(format!(
@@ -532,15 +592,19 @@ impl Ingest {
         };
         let mut source_keys = None;
         if let Some(a) = account {
-            match secret_value(env, &a.binding()).await {
+            let source_slot =
+                managed.map_or_else(|| a.binding(), |_| scaleway_source::source_slot(instance));
+            match secret_value(env, &source_slot).await {
                 Some(v) => source_keys = s3::parse_keys(&v).ok(),
                 None => missing.push(format!(
                     "Secret `{}` is not bound. Create a read-only key on {}'s console, set it on the app's Access page (Credentials), then ask an agent to bind it in src/platform/wrangler.toml.",
-                    a.binding(),
+                    source_slot,
                     a.provider.slug()
                 )),
             }
-            if let Some(slot) = hosts::host_slot(a)
+            if let Some(slot) = managed
+                .map(|_| scaleway_source::compute_slot(instance))
+                .or_else(|| hosts::host_slot(a))
                 && secret_value(env, &slot).await.is_none()
             {
                 missing.push(format!(
@@ -650,7 +714,10 @@ impl Ingest {
             None
         };
         let host_key = if host == Host::Scaleway {
-            if let Some(slot) = hosts::host_slot(a) {
+            if let Some(slot) = managed
+                .map(|_| scaleway_source::compute_slot(instance))
+                .or_else(|| hosts::host_slot(a))
+            {
                 secret_value(env, &slot).await
             } else {
                 None
@@ -658,10 +725,37 @@ impl Ingest {
         } else {
             None
         };
-        let execution = match execution_binding(host, data_worker.as_deref(), host_key.as_deref()) {
-            Ok(execution) => execution,
-            Err(error) => return Ok(unready(vec![error.to_string()], est, sample)),
-        };
+        let mut execution =
+            match execution_binding(host, data_worker.as_deref(), host_key.as_deref()) {
+                Ok(execution) => execution,
+                Err(error) => return Ok(unready(vec![error.to_string()], est, sample)),
+            };
+        if let Some(config) = managed {
+            if execution["project"] != config.project {
+                return Ok(unready(
+                    vec!["The Scaleway compute credential belongs to a different project.".into()],
+                    est,
+                    sample,
+                ));
+            }
+            execution["scaleway_source"] = to_value(config);
+        }
+        if host == Host::Scaleway {
+            match scaleway::audit_bucket(env, self.host_name(), &record).await {
+                Ok(bucket) if bucket != destination_bucket => {
+                    execution["jobs_audit_bucket"] = json!(bucket);
+                    execution["max_runtime_ms"] = json!(scaleway::MAX_RUN);
+                }
+                Ok(_) => {
+                    return Ok(unready(
+                        vec!["Scaleway ingest needs a Jobs bucket separate from Data.".into()],
+                        est,
+                        sample,
+                    ));
+                }
+                Err(error) => return Ok(unready(vec![error.to_string()], est, sample)),
+            }
+        }
         let request = hosts::host_request(host, &job, &a.region);
         let bucket_here = r2::bucket_exists(
             &linked,
@@ -671,6 +765,23 @@ impl Ingest {
             },
         )
         .await?;
+        if managed.is_some() && !bucket_here {
+            return Ok(unready(
+                vec!["Apply the approved Data instance plan to provision the destination bucket first.".into()],
+                est,
+                sample,
+            ));
+        }
+        if managed.is_some() {
+            r2::require_private_bucket(
+                &linked,
+                &Bucket {
+                    name: destination_bucket.into(),
+                    jurisdiction: None,
+                },
+            )
+            .await?;
+        }
         let mut lines = Vec::new();
         lines.push(if bucket_here {
             format!(
@@ -777,30 +888,55 @@ impl Ingest {
             .await?
             .ok_or_else(|| bad("the approved ingest instance no longer exists"))?;
         let source_args = json!({ "source": source_id, "bucket": source_bucket, "prefix": prefix });
-        let bindings = self.bindings(&record, &source_args).map_err(bad)?;
-        let account = data_read::find(&self.accounts, source_id)?;
+        let managed = if got["payload"]["execution"].get("scaleway_source").is_some() {
+            if !data_enabled(&record) {
+                return Err(bad("Data Ingest or Data has been disabled; plan again"));
+            }
+            Some(
+                scaleway_source::binding(&record)
+                    .ok_or_else(|| bad("the approved Scaleway source was removed; plan again"))?,
+            )
+        } else {
+            None
+        };
+        let managed_account = managed.map(|config| config.account(&record.id));
+        let store_bucket = crate::data_store::store_name(&record);
+        let destination_bucket = if let Some(config) = managed {
+            config.prefix(&source_args).map_err(bad)?;
+            store_bucket.as_str()
+        } else {
+            self.bindings(&record, &source_args)
+                .map_err(bad)?
+                .destination_bucket
+        };
+        let account = managed_account
+            .as_ref()
+            .map_or_else(|| data_read::find(&self.accounts, source_id), Ok)?;
         let account_id =
             linked_id(&record).ok_or_else(|| bad("the approved instance has no linked account"))?;
-        check_job_binding(&job, &account_id, bindings.destination_bucket, account).map_err(bad)?;
+        check_job_binding(&job, &account_id, destination_bucket, account).map_err(bad)?;
         let linked = self.checked_link(env, &record).await?;
         let host = hosts::host_for(account.provider);
         // Read every key before the approval is spent, so a missing one costs nothing.
         let unbound = |name: &str| bad(format!("secret `{name}` is not bound"));
-        let source_keys = secret_value(env, &account.binding())
+        let source_slot = managed.map_or_else(
+            || account.binding(),
+            |_| scaleway_source::source_slot(&record.id),
+        );
+        let source_keys = secret_value(env, &source_slot)
             .await
-            .ok_or_else(|| unbound(&account.binding()))?;
+            .ok_or_else(|| unbound(&source_slot))?;
         s3::parse_keys(&source_keys)?;
         let r2_slot = hosts::r2_slot(&job.instance);
         let dest_keys = secret_value(env, &r2_slot)
             .await
             .ok_or_else(|| unbound(&r2_slot))?;
         s3::parse_keys(&dest_keys)?;
-        let host_key = match hosts::host_slot(account) {
-            Some(slot) => Some(
-                secret_value(env, &slot)
-                    .await
-                    .ok_or_else(|| unbound(&slot))?,
-            ),
+        let compute_slot = managed
+            .map(|_| scaleway_source::compute_slot(&record.id))
+            .or_else(|| hosts::host_slot(account));
+        let host_key = match compute_slot.as_deref() {
+            Some(slot) => Some(secret_value(env, slot).await.ok_or_else(|| unbound(slot))?),
             None => None,
         };
         let data = if host == Host::Cloudflare {
@@ -821,11 +957,40 @@ impl Ingest {
         // Rebuild what was approved; the digest must still match.
         let request = hosts::host_request(host, &job, region);
         let kind = pigeon_core::approval::Kind::Other(KIND.into());
-        let execution = execution_binding(
+        let mut execution = execution_binding(
             host,
             data.as_ref().map(|(url, _)| url.as_str()),
             host_key.as_deref(),
         )?;
+        if let Some(config) = managed {
+            if execution["project"] != config.project {
+                return Err(bad(
+                    "the Scaleway compute credential belongs to a different project",
+                ));
+            }
+            execution["scaleway_source"] = to_value(config);
+            r2::require_private_bucket(
+                &linked,
+                &Bucket {
+                    name: destination_bucket.into(),
+                    jurisdiction: None,
+                },
+            )
+            .await?;
+        }
+        let scaleway_audit_bucket = if host == Host::Scaleway {
+            let bucket = scaleway::audit_bucket(env, self.host_name(), &record).await?;
+            if bucket == destination_bucket {
+                return Err(bad(
+                    "Scaleway ingest needs a Jobs bucket separate from Data",
+                ));
+            }
+            execution["jobs_audit_bucket"] = json!(bucket);
+            execution["max_runtime_ms"] = json!(scaleway::MAX_RUN);
+            Some(bucket)
+        } else {
+            None
+        };
         let mut payload = hosts::approval_payload(&job, &request);
         // Earlier DigitalOcean plans already named their fixed API destination. Other
         // providers need a new plan if they did not record their configurable target.
@@ -852,10 +1017,14 @@ impl Ingest {
         }
         Self::check_current(env, &record).await?;
         let dest = Bucket {
-            name: bindings.destination_bucket.to_string(),
+            name: destination_bucket.to_string(),
             jurisdiction: None,
         };
-        let ensured = r2::ensure_bucket(&linked, &dest).await?;
+        let bucket_created = if managed.is_some() {
+            false
+        } else {
+            r2::ensure_bucket(&linked, &dest).await?.created
+        };
         r2::put(
             &linked,
             &dest,
@@ -873,6 +1042,7 @@ impl Ingest {
             region: region.clone(),
             vm: None,
             scaleway_volumes: Vec::new(),
+            scaleway: None,
             vm_deleted: false,
             destination: Some(job.dest.clone()),
             data_worker: data.as_ref().map(|(url, _)| url.clone()),
@@ -905,6 +1075,17 @@ impl Ingest {
                 let (project, secret) =
                     hosts::scaleway_parts(host_key.as_deref().unwrap_or_default()).map_err(bad)?;
                 let zone = hosts::zone(region);
+                let compute_slot =
+                    compute_slot.ok_or_else(|| bad("the Scaleway compute slot is missing"))?;
+                rec.scaleway = Some(scaleway::Lifecycle::new(
+                    linked.id.clone(),
+                    project.clone(),
+                    compute_slot,
+                    scaleway_audit_bucket
+                        .ok_or_else(|| bad("the approved audit bucket is missing"))?,
+                    rec.started_ms,
+                ));
+                save_run(env, &rec).await?;
                 let resources =
                     net::scw_create(&secret, &zone, &hosts::scaleway_server_body(&job, &project))
                         .await?;
@@ -932,12 +1113,14 @@ impl Ingest {
                 }
                 .await;
                 if let Err(error) = setup {
-                    self.remove_vm(env, &mut rec).await?;
+                    scaleway::mark_start_failed(&mut rec);
+                    save_run(env, &rec).await?;
                     return Err(bad(format!(
                         "{error}. Follow data_ingest_status for cleanup of {}.",
                         rec.run
                     )));
                 }
+                scaleway::mark_started(&mut rec);
             }
             Host::Cloudflare => {
                 let (url, key) = data.unwrap_or_default();
@@ -955,7 +1138,7 @@ impl Ingest {
             "run": job.run,
             "host": rec.host,
             "vm": rec.vm,
-            "bucket_created": ensured.created,
+            "bucket_created": bucket_created,
             "job": manifest::job_key(&job.run),
             "note": "Started. Follow it with data_ingest_status; read data_ingest_report when it is done.",
         }))
@@ -979,6 +1162,10 @@ impl Ingest {
         let (Some(id), false) = (rec.vm.as_deref(), rec.vm_deleted) else {
             return Ok(None);
         };
+        if let Some(state) = rec.scaleway.as_ref() {
+            let secret = scaleway::provider_credentials(env, state).await?;
+            return net::scw_state(&secret, &hosts::zone(&rec.region), id).await;
+        }
         let key = self.host_key(env, rec).await?.unwrap_or_default();
         match rec.host.as_str() {
             "digitalocean" => net::do_state(&key, id).await,
@@ -1115,7 +1302,12 @@ impl Ingest {
         };
         let ended = matches!(state.as_str(), "done" | "failed" | "stopped");
         let mut note = String::new();
-        if ended && !rec.vm_deleted && rec.host != "cloudflare" && rec.vm.is_some() {
+        if ended
+            && !rec.vm_deleted
+            && rec.host != "cloudflare"
+            && rec.vm.is_some()
+            && rec.scaleway.is_none()
+        {
             self.remove_vm(env, &mut rec).await?;
             note = if rec.vm_deleted {
                 "The run ended, so its VM was deleted."
@@ -1162,6 +1354,14 @@ impl Ingest {
         let mut rec = run_of(cx.env, instance, run).await?;
         if rec.vm_deleted {
             return Ok(json!({ "run": run, "note": "Already stopped." }));
+        }
+        if rec.scaleway.is_some() {
+            if !scaleway::request_stop(cx.env, run).await? {
+                return Err(bad("Scaleway cleanup state changed while stopping; retry"));
+            }
+            return Ok(
+                json!({"run":run, "note":"Scaleway cleanup requested. Follow data_ingest_status for confirmation."}),
+            );
         }
         self.remove_vm(cx.env, &mut rec).await?;
         if !rec.vm_deleted {
@@ -1318,6 +1518,20 @@ impl Capability for Ingest {
                 scopes: &[secrets_store::WORKERS],
             })
             .collect();
+        for target in &self.targets {
+            slots.extend([
+                Slot {
+                    name: scaleway_source::source_slot(&target.instance),
+                    purpose: format!("Read-only Object Storage key for the approved Scaleway source on {}, as ACCESS_KEY_ID:SECRET.", target.instance),
+                    scopes: &[secrets_store::WORKERS],
+                },
+                Slot {
+                    name: scaleway_source::compute_slot(&target.instance),
+                    purpose: format!("Scaleway compute credentials on {}, as PROJECT_ID:SECRET, scoped to Instances and Block Storage in the approved project.", target.instance),
+                    scopes: &[secrets_store::WORKERS],
+                },
+            ]);
+        }
         for a in &self.accounts {
             let Some(name) = hosts::host_slot(a) else {
                 continue;
@@ -1352,6 +1566,55 @@ impl Capability for Ingest {
                 .find(|t| hosts::r2_slot(&t.instance) == name)
             {
                 return self.check_r2(cx, t, value).await;
+            }
+            for target in &self.targets {
+                let source = name == scaleway_source::source_slot(&target.instance);
+                if !source && name != scaleway_source::compute_slot(&target.instance) {
+                    continue;
+                }
+                let record = instances::one(cx.env, &target.instance)
+                    .await?
+                    .ok_or_else(|| {
+                        bad("approve the instance before setting its Scaleway credentials")
+                    })?;
+                let config = scaleway_source::binding(&record)
+                    .ok_or_else(|| bad("approve the Scaleway source binding first"))?;
+                config.validate().map_err(bad)?;
+                if source {
+                    let keys = s3::parse_keys(value)?;
+                    let account = config.account(&target.instance);
+                    let endpoint = Endpoint {
+                        base: account.endpoint,
+                        region: account.region,
+                    };
+                    let prefix = config.prefix.as_str();
+                    let query = s3::list_objects_query(
+                        Some(prefix).filter(|p| !p.is_empty()),
+                        None,
+                        1,
+                        None,
+                    );
+                    s3::send(
+                        Method::Get,
+                        &endpoint,
+                        &s3::object_path(&config.bucket, ""),
+                        &query,
+                        &[],
+                        &keys,
+                    )
+                    .await?;
+                    return Ok(json!("The key can list the approved Scaleway prefix."));
+                }
+                let (project, secret) = hosts::scaleway_parts(value).map_err(bad)?;
+                if project != config.project {
+                    return Err(bad(
+                        "the credential's project differs from the approved project",
+                    ));
+                }
+                net::scw_check(&secret, &hosts::zone(&config.region)).await?;
+                return Ok(json!(
+                    "The key can list Scaleway Instances in the approved region."
+                ));
             }
             let account = self
                 .accounts

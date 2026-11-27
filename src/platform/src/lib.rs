@@ -249,6 +249,12 @@ async fn scheduled(_event: worker::ScheduledEvent, env: Env, _ctx: worker::Sched
         Ok(_) => {}
         Err(e) => console_error!("github deploys failed: {e}"),
     }
+    if pigeon_capabilities::ingest::scaleway::reap(&env, settings::HOST)
+        .await
+        .is_err()
+    {
+        console_error!("Scaleway ingest maintenance failed");
+    }
     if pigeon_capabilities::digitalocean::health::reap(&env, settings::HOST)
         .await
         .is_err()

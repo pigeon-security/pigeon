@@ -2604,6 +2604,8 @@ fn core_ingest_plans_hosts_and_estimates() {
         slots,
         [
             "INGEST_R2_WILLOWGRAYSEN",
+            "INGEST_SCALEWAY_SOURCE_WILLOWGRAYSEN",
+            "INGEST_SCALEWAY_COMPUTE_WILLOWGRAYSEN",
             "INGEST_HOST_DIGITALOCEAN_LEGACY",
             "INGEST_HOST_SCALEWAY_ARCHIVE"
         ]
@@ -2679,7 +2681,14 @@ fn core_ingest_plans_hosts_and_estimates() {
     assert_eq!(server["commercial_type"], "POP2-4C-16G");
     assert_eq!(server["image"], "ubuntu_noble");
     assert_eq!(server["project"], "proj-1");
-    assert_eq!(server["tags"], json!(["pigeon-ingest"]));
+    assert_eq!(
+        server["tags"],
+        json!(["pigeon-ingest", hosts::scaleway_run_tag(&scw_job.run)])
+    );
+    assert_ne!(
+        hosts::scaleway_run_tag(&scw_job.run),
+        hosts::scaleway_run_tag(&job.run)
+    );
     assert_eq!(server["volumes"]["0"]["boot"], true);
     assert_eq!(server["volumes"]["1"]["boot"], false);
     assert_eq!(server["volumes"]["1"]["size"], 200_000_000_000u64);
@@ -2707,6 +2716,7 @@ fn core_ingest_plans_hosts_and_estimates() {
             .contains("mount_spool '<approved-scratch-volume-id>' 200000000000")
     );
     assert_eq!(hosts::scaleway_poweron(), json!({ "action": "poweron" }));
+    assert_eq!(hosts::scaleway_poweroff(), json!({ "action": "poweroff" }));
     assert_eq!(
         hosts::scaleway_terminate(),
         json!({ "action": "terminate" })
@@ -6453,4 +6463,28 @@ fn data_and_email_on_linked_instances() {
         line.contains("add MX noisypigeon.com") && line.contains("already there"),
         "{line}"
     );
+}
+
+#[test]
+fn scaleway_ingest_source_binds_instance_and_prefix() {
+    use pigeon_capabilities::ingest::scaleway_source::{Source, compute_slot, source_slot};
+    let source = Source {
+        project: "0474092e-2f42-4b73-885c-f7061da83469".into(),
+        region: "fr-par".into(),
+        bucket: "approved-source".into(),
+        prefix: "transfer/".into(),
+    };
+
+    assert_eq!(source.prefix(&json!({})).unwrap(), "transfer/");
+    assert_eq!(
+        source
+            .prefix(&json!({"prefix":"transfer/canary/"}))
+            .unwrap(),
+        "transfer/canary/"
+    );
+    assert!(source.prefix(&json!({"prefix":"transfer-other/"})).is_err());
+    assert!(source.prefix(&json!({"bucket":"somewhere-else"})).is_err());
+    assert!(source.prefix(&json!({"prefix":"transfer/\n"})).is_err());
+    assert_ne!(compute_slot("willowgraysen"), source_slot("willowgraysen"));
+    assert_ne!(source_slot("one/two"), source_slot("one-two"));
 }

@@ -593,6 +593,7 @@ fn run_record(job: &Run) -> RunRecord {
         region,
         vm: job.droplet.map(|id| id.to_string()),
         scaleway_volumes: Vec::new(),
+        scaleway: None,
         vm_deleted: job.droplet_deleted_ms.is_some() || job.stage == Stage::Done,
         destination: Some(p.dest.clone()),
         data_worker: None,
