@@ -228,6 +228,10 @@ pub async fn answer(env: &Env, call: &DataCall) -> Result<Value> {
             let found = rows(env, &datastore::list_query(q)).await?;
             Ok(datastore::list_answer(&found, q.limit))
         }
+        DataCall::ListImported(q) => {
+            let found = rows(env, &datastore::imported_list_query(q)).await?;
+            Ok(datastore::list_answer(&found, q.limit))
+        }
         DataCall::Get { id } => {
             let qs = datastore::get_queries(id);
             let item = rows(env, &qs[0]).await?;

@@ -3224,6 +3224,40 @@ mod email {
             1
         );
         assert_eq!(store.count("SELECT COUNT(*) FROM email_deliveries"), 0);
+        let follow_up = message("follow-up", "mail@example.com");
+        let second = pigeon_email::Source::Imap {
+            server: "imap.gmail.com".into(),
+            account: "mail@example.com".into(),
+            mailbox: "Archive".into(),
+            uid_validity: 27,
+            uid: 45,
+        };
+        let (second_id, _) = ready(mail::import(&store, &follow_up, second, at)).unwrap();
+        let query = datastore::ListQuery {
+            limit: Some(1),
+            ..Default::default()
+        };
+        assert!(store.rows(&datastore::list_query(&query)).is_empty());
+        let imported = datastore::list_answer(
+            &store.rows(&datastore::imported_list_query(&query)),
+            query.limit,
+        );
+        assert_eq!(imported["messages"][0]["id"], second_id);
+        assert_eq!(imported["messages"][0]["source"], "imap");
+        assert_eq!(imported["messages"][0]["attachments"], 1);
+        let next = datastore::ListQuery {
+            cursor: imported["next"].as_str().map(str::to_string),
+            ..query
+        };
+        assert!(
+            datastore::call_problem(&datastore::DataCall::ListImported(next.clone())).is_none()
+        );
+        let older = store.rows(&datastore::imported_list_query(&next));
+        assert_eq!(older[0]["item_id"], id);
+        let detail = datastore::get_queries(&second_id);
+        let files = store.rows(&detail[3]);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0]["filename"], "invoice.pdf");
     }
 
     /// The handler on a stand-in: a listed address lands in its mailbox and anything else in

@@ -24,6 +24,8 @@ pub const CATCH_ALL: &str = "catch-all";
 pub const LOOP_HEADER: &str = "X-Pigeon-Data";
 /// The `sightings.source` of a message received by Email Routing.
 pub const SOURCE_EMAIL_ROUTING: &str = "email_routing";
+/// The provenance type of each uploaded historical IMAP message.
+pub const SOURCE_IMAP: &str = "imap";
 /// The largest message Email Routing delivers, in bytes (25 MiB).
 pub const MAX_MESSAGE: u64 = 25 * 1024 * 1024;
 /// The prefixes of the bucket the read ops may list or read.
@@ -147,6 +149,11 @@ CREATE TABLE IF NOT EXISTS email_deliveries (
   PRIMARY KEY (item_id, locator, at)
 );
 CREATE INDEX IF NOT EXISTS deliveries_outcome ON email_deliveries (outcome, at)",
+    },
+    Migration {
+        id: "0003_mail_import_lineage",
+        sql: "CREATE INDEX IF NOT EXISTS mail_attachment_locator ON sightings(locator) \
+              WHERE source = 'email_attachment'",
     },
 ];
 
@@ -424,6 +431,8 @@ pub enum DataCall {
     Mailboxes,
     /// A page of messages.
     List(ListQuery),
+    /// Imported messages, latest committed sighting first.
+    ListImported(ListQuery),
     /// One message: its row, sightings, attachments, and its text and HTML.
     Get { id: String },
     /// A page of object keys under a readable prefix.
@@ -451,7 +460,9 @@ pub struct CallRequest {
 pub fn call_problem(call: &DataCall) -> Option<String> {
     match call {
         DataCall::Get { id } if !is_sha256(id) => Some("an email id is 64 hex digits".into()),
-        DataCall::List(q) if q.limit.is_some_and(|l| l == 0 || l > LIST_MAX) => {
+        DataCall::List(q) | DataCall::ListImported(q)
+            if q.limit.is_some_and(|l| l == 0 || l > LIST_MAX) =>
+        {
             Some(format!("limit is 1 to {LIST_MAX}"))
         }
         DataCall::List(q)
@@ -460,6 +471,13 @@ pub fn call_problem(call: &DataCall) -> Option<String> {
                 .is_some_and(|c| parse_cursor(c).is_none()) =>
         {
             Some("the cursor is not one this store gave".into())
+        }
+        DataCall::ListImported(q)
+            if q.cursor
+                .as_deref()
+                .is_some_and(|c| parse_import_cursor(c).is_none()) =>
+        {
+            Some("the cursor is not one this mail import gave".into())
         }
         DataCall::Objects { prefix, .. } if !prefix.is_empty() && !readable(prefix) => Some(
             format!("only {} may be listed", READABLE_PREFIXES.join(" and ")),
@@ -495,6 +513,13 @@ pub fn cursor_of(seen_at: &str, item_id: &str) -> String {
 fn parse_cursor(c: &str) -> Option<(&str, &str)> {
     let (at, id) = c.split_once('|')?;
     (!at.is_empty() && is_sha256(id)).then_some((at, id))
+}
+
+fn parse_import_cursor(c: &str) -> Option<u64> {
+    let sequence = c.strip_prefix("imap:")?.parse().ok()?;
+    (1..=9_007_199_254_740_991)
+        .contains(&sequence)
+        .then_some(sequence)
 }
 
 /// `status`'s queries, in order: messages, items and the newest sighting; each delivery outcome
@@ -534,13 +559,24 @@ pub fn mailboxes_query() -> Statement {
 /// `list`'s query, newest first, one more row than the page so the answer knows there is a
 /// next. `query` was checked by [`call_problem`].
 pub fn list_query(query: &ListQuery) -> Statement {
+    list_query_by_source(query, SOURCE_EMAIL_ROUTING)
+}
+
+pub fn imported_list_query(query: &ListQuery) -> Statement {
+    list_query_by_source(query, SOURCE_IMAP)
+}
+
+fn list_query_by_source(query: &ListQuery, source: &str) -> Statement {
     let mut sql = String::from(
-        "SELECT s.item_id, s.locator, s.seen_at, s.extra, e.subject, e.date, e.\"from\", \
-         i.size, (SELECT COUNT(*) FROM items a WHERE a.parent_id = s.item_id) AS attachments \
+        "SELECT s.item_id, s.locator, s.seen_at, s.extra, s.source, s.account, s.rowid AS seq, \
+         e.subject, e.date, e.\"from\", i.size, CASE s.source WHEN 'imap' THEN \
+         (SELECT COUNT(*) FROM sightings a WHERE a.source = 'email_attachment' \
+          AND a.locator >= s.item_id || ':' AND a.locator < s.item_id || ';') ELSE \
+         (SELECT COUNT(*) FROM items a WHERE a.parent_id = s.item_id) END AS attachments \
          FROM sightings s JOIN items i ON i.item_id = s.item_id \
          LEFT JOIN emails e ON e.item_id = s.item_id WHERE s.source = ?",
     );
-    let mut params = vec![json!(SOURCE_EMAIL_ROUTING)];
+    let mut params = vec![json!(source)];
     if let Some(m) = &query.mailbox {
         sql.push_str(" AND json_extract(s.extra, '$.mailbox') = ?");
         params.push(json!(m));
@@ -558,14 +594,20 @@ pub fn list_query(query: &ListQuery) -> Statement {
         params.push(json!(from));
         params.push(json!(from));
     }
-    if let Some((at, id)) = query.cursor.as_deref().and_then(parse_cursor) {
-        sql.push_str(" AND (s.seen_at < ? OR (s.seen_at = ? AND s.item_id < ?))");
-        params.push(json!(at));
-        params.push(json!(at));
-        params.push(json!(id));
+    if source == SOURCE_IMAP {
+        if let Some(seq) = query.cursor.as_deref().and_then(parse_import_cursor) {
+            sql.push_str(" AND s.rowid < ?");
+            params.push(json!(seq));
+        }
+        sql.push_str(" ORDER BY s.rowid DESC LIMIT ?");
+    } else {
+        if let Some((at, id)) = query.cursor.as_deref().and_then(parse_cursor) {
+            sql.push_str(" AND (s.seen_at < ? OR (s.seen_at = ? AND s.item_id < ?))");
+            params.extend([json!(at), json!(at), json!(id)]);
+        }
+        sql.push_str(" ORDER BY s.seen_at DESC, s.item_id DESC LIMIT ?");
     }
     let limit = query.limit.unwrap_or(LIST_DEFAULT).clamp(1, LIST_MAX);
-    sql.push_str(" ORDER BY s.seen_at DESC, s.item_id DESC LIMIT ?");
     params.push(json!(limit + 1));
     Statement { sql, params }
 }
@@ -581,7 +623,7 @@ pub fn list_answer(rows: &[Value], limit: Option<u32>) -> Value {
             let extra = json_text(&r["extra"]);
             let from = json_text(&r["from"]);
             let first = from.get(0);
-            json!({
+            let mut message = json!({
                 "id": r["item_id"],
                 "mailbox": extra["mailbox"],
                 "to": r["locator"],
@@ -592,13 +634,22 @@ pub fn list_answer(rows: &[Value], limit: Option<u32>) -> Value {
                 "size": r["size"],
                 "attachments": r["attachments"].as_u64().unwrap_or(0),
                 "sender_check": sender_check(extra.get("auth")),
-            })
+            });
+            if r["source"] == SOURCE_IMAP {
+                message["source"] = json!(SOURCE_IMAP);
+                message["account"] = r["account"].clone();
+                message["to"] = Value::Null;
+            }
+            message
         })
         .collect();
     let next = (rows.len() > limit)
         .then(|| page.last())
         .flatten()
         .map(|r| {
+            if r["source"] == SOURCE_IMAP {
+                return format!("imap:{}", r["seq"].as_u64().unwrap_or(0));
+            }
             cursor_of(
                 r["seen_at"].as_str().unwrap_or(""),
                 r["item_id"].as_str().unwrap_or(""),
@@ -617,10 +668,18 @@ pub fn get_queries(id: &str) -> Vec<Statement> {
         one("SELECT * FROM items WHERE item_id = ?"),
         one("SELECT * FROM emails WHERE item_id = ?"),
         one("SELECT * FROM sightings WHERE item_id = ? ORDER BY seen_at"),
-        one(
-            "SELECT item_id, size, media_type, filename, kind FROM items WHERE parent_id = ? \
-             ORDER BY filename",
-        ),
+        Statement {
+            sql: "SELECT a.item_id, i.size, i.media_type, i.kind, \
+                  json_extract(a.extra, '$.filename') AS filename FROM sightings a \
+                  JOIN items i ON i.item_id = a.item_id WHERE a.source = 'email_attachment' \
+                  AND a.locator >= ?1 AND a.locator < ?2 UNION ALL \
+                  SELECT i.item_id, i.size, i.media_type, i.kind, i.filename FROM items i \
+                  WHERE i.parent_id = ?3 AND NOT EXISTS (SELECT 1 FROM sightings a \
+                    WHERE a.item_id = i.item_id AND a.source = 'email_attachment' \
+                    AND a.locator >= ?1 AND a.locator < ?2) ORDER BY filename"
+                .into(),
+            params: vec![json!(format!("{id}:")), json!(format!("{id};")), json!(id)],
+        },
     ]
 }
 
@@ -651,11 +710,16 @@ pub fn get_answer(
         .iter()
         .map(|s| {
             let extra = json_text(&s["extra"]);
-            json!({
+            let mut sighting = json!({
                 "source": s["source"], "to": s["locator"], "seen_at": s["seen_at"],
                 "mailbox": extra["mailbox"], "auth": extra["auth"],
                 "sender_check": sender_check(extra.get("auth")),
-            })
+            });
+            if s["source"] == SOURCE_IMAP {
+                sighting["to"] = Value::Null;
+                sighting["provenance"] = extra;
+            }
+            sighting
         })
         .collect();
     let files: Vec<Value> = attachments

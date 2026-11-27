@@ -267,7 +267,7 @@ const TOOLS: &[Registration] = &[
     Registration {
         name: "data_email_list",
         description: Some("A page of this instance's mail, newest first."),
-        arguments: &["mailbox", "since", "from", "cursor", "limit"],
+        arguments: &["mailbox", "since", "from", "cursor", "limit", "source"],
     },
     Registration {
         name: "data_email_get",
@@ -408,7 +408,13 @@ impl Email {
             cursor: text("cursor"),
             limit,
         };
-        let mut out = crate::data_store::call(cx.env, &record, DataCall::List(q)).await?;
+        let call = match &args["source"] {
+            Value::Null => DataCall::List(q),
+            value if value.as_str() == Some("routed") => DataCall::List(q),
+            value if value.as_str() == Some("imap") => DataCall::ListImported(q),
+            _ => return Err(bad("`source` is `routed` or `imap`")),
+        };
+        let mut out = crate::data_store::call(cx.env, &record, call).await?;
         out["instance"] = json!(record.id);
         Ok(out)
     }
@@ -550,7 +556,8 @@ impl Capability for Email {
                  check and attachment count. Never bodies.",
                 json!({
                     "instance": instance,
-                    "mailbox": { "type": "string", "description": "A listed address's local part, or `catch-all`." },
+                    "mailbox": { "type": "string", "description": "A listed address, catch-all or IMAP folder name." },
+                    "source": { "type": "string", "enum": ["routed", "imap"], "description": "Email Routing by default. Use imap to read historical imports." },
                     "since": { "type": "string", "description": "RFC 3339: messages received at or after it." },
                     "from": { "type": "string", "description": "A sender address or domain." },
                     "cursor": { "type": "string", "description": "`next` from the page before." },
