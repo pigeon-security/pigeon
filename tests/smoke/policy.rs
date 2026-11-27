@@ -1506,8 +1506,8 @@ fn agent_git_branch_push() {
             .contains("8 MiB")
     );
 
-    // The policy's say: Claude's pushes and rewrites under claude/ are allowed; codex/ is not
-    // in the policy until the person adds it, and then is.
+    // The policy's say: Claude's pushes and rewrites under claude/ are allowed, and Codex's
+    // under codex/ (the person added it to the live policy); main never.
     let vars = vars();
     let live = pigeon_core::policy_file::current().unwrap();
     let decide = |p: &pigeon_core::policy::Policy, m: Move, b: &str| {
@@ -1521,23 +1521,13 @@ fn agent_git_branch_push() {
         decide(live, Move::Rewrite, "refs/heads/claude/x"),
         Decision::Allow
     );
-    let not_yet = push::ask(
-        live,
-        &vars,
-        "Codex for Willow",
-        Move::Create,
-        "refs/heads/codex/x",
-    );
-    assert!(push::refusal(&not_yet).is_some());
-    let with = policy_with_codex();
-    for m in [Move::Create, Move::Forward, Move::Rewrite] {
-        assert_eq!(decide(&with, m, "refs/heads/codex/x"), Decision::Allow);
+    for p in [live, &policy_with_codex()] {
+        for m in [Move::Create, Move::Forward, Move::Rewrite] {
+            let codex = push::ask(p, &vars, "Codex for Willow", m, "refs/heads/codex/x");
+            assert_eq!(codex.decision, Decision::Allow);
+        }
+        assert_eq!(decide(p, Move::Forward, MAIN), Decision::Deny, "main never");
     }
-    assert_eq!(
-        decide(&with, Move::Forward, MAIN),
-        Decision::Deny,
-        "main never"
-    );
 
     // The audit line names the app, the person (by id), the branch and the tip; nothing else.
     let who = agent_of(&agent_caller("cx", "service"), Some(&codex)).unwrap();

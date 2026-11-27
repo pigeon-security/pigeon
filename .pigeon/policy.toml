@@ -24,7 +24,7 @@ reason = "agents message, start, steer and archive sessions and hand branches to
 [[rule]]
 id = "land-and-deploy"
 actions = ["land", "deploy"]
-targets = ["@session/*"]
+targets = ["@session/*", "codex/*"]
 decision = "allow"
 reason = "a session branch lands through the gate, and the deploy after it is automatic"
 
@@ -37,7 +37,7 @@ reason = "a deploy follows a session branch's landing, nothing else"
 [[rule]]
 id = "session-branches"
 actions = ["push_branch", "rewrite_branch", "delete_branch"]
-targets = ["@session/*"]
+targets = ["@session/*", "codex/*"]
 decision = "allow"
 reason = "session branches are the agents' own: push, rewrite or delete them"
 
