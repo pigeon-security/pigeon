@@ -200,21 +200,34 @@ pub fn scaleway_cloud_init(
     source_keys: &str,
     dest_keys: &str,
 ) -> String {
-    let bootstrap = cloud_init(job, source_keys, dest_keys);
+    let one_line = |s: &str| s.replace(['\n', '\r'], "");
+    let job_json = serde_json::to_string(job).unwrap_or_default();
     let mounts = include_str!("scaleway-spool.sh");
-    bootstrap
-        .replacen(
-            "#!/bin/bash\n",
-            &format!(
-                "#!/bin/bash\nset -euo pipefail\ntrap 'rm -f /root/ingest.env; poweroff' EXIT\n{mounts}\nmount_spool '{scratch_volume}' {SCW_VOLUME_BYTES}\n"
-            ),
-            1,
-        )
-        .replace("chmod 777 /spool\n", "mountpoint -q /spool\n")
-        .replace(
-            "SPOOL_DIR=/spool\n",
-            &format!("SPOOL_DIR=/spool\nSPOOL_BYTES={SCW_SPOOL_BYTES}\n"),
-        )
+    let commit = &job.commit;
+    format!(
+        "#!/bin/bash\n\
+         set -euo pipefail\n\
+         umask 077\n\
+         {mounts}\n\
+         trap close_spool EXIT\n\
+         export DEBIAN_FRONTEND=noninteractive\n\
+         apt-get update -y\n\
+         apt-get install -y docker.io cryptsetup-bin\n\
+         mount_spool '{scratch_volume}' {SCW_VOLUME_BYTES}\n\
+         mountpoint -q /spool\n\
+         systemctl start docker\n\
+         cat > /root/ingest.env <<'PIGEON_ENV_END'\n\
+         INGEST_JOB={job_json}\n\
+         SOURCE_KEYS={source}\n\
+         DEST_KEYS={dest}\n\
+         SPOOL_DIR=/spool\n\
+         SPOOL_BYTES={SCW_SPOOL_BYTES}\n\
+         PIGEON_ENV_END\n\
+         docker build -f src/ingest-runner/Dockerfile --build-arg PIGEON_COMMIT={commit} -t pigeon-ingest-runner {REPO_URL}#{commit}\n\
+         docker run --rm --env-file /root/ingest.env -v /spool:/spool pigeon-ingest-runner\n",
+        source = one_line(source_keys),
+        dest = one_line(dest_keys),
+    )
 }
 
 /// The Scaleway `POST .../servers` body, with separate boot and scratch volumes.

@@ -2496,6 +2496,16 @@ fn core_ingest_plans_hosts_and_estimates() {
     assert!(script.contains("/dev/disk/by-id/scsi-0SCW_sbs_volume-"));
     assert!(script.contains("SPOOL_BYTES=160000000000"));
     assert!(script.contains("mountpoint -q /spool"));
+    assert!(script.contains("--keyfile-size 64 --key-file /dev/urandom"));
+    assert!(script.contains("mkfs.ext4 -q -m 0 /dev/mapper/pigeon-ingest-spool"));
+    assert!(!script.contains("mkfs.ext4 -q -m 0 \"$disk\""));
+    assert!(script.contains("cryptsetup close pigeon-ingest-spool"));
+    assert!(
+        script
+            .find("apt-get install -y docker.io cryptsetup-bin")
+            .unwrap()
+            < script.find(&format!("mount_spool '{volume}'")).unwrap()
+    );
     assert!(!script.contains("chmod 777 /spool"));
     assert!(
         hosts::host_request(Host::Scaleway, &scw_job, "fr-par")["user_data"]["body"]

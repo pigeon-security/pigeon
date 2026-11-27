@@ -29,9 +29,30 @@ mount_spool() {
     signatures="$(wipefs --noheadings --output TYPE "$disk")" || return 1
     [[ -z "$signatures" ]] || return 1
 
-    mkfs.ext4 -q -m 0 "$disk"
+    # Read one key directly from the kernel RNG. dm-crypt retains it only for
+    # this mapping. No key file, volume header, or command output can restore it.
+    cryptsetup open --type plain --cipher aes-xts-plain64 \
+        --key-size 512 --keyfile-size 64 --key-file /dev/urandom \
+        "$disk" pigeon-ingest-spool
+    mkfs.ext4 -q -m 0 /dev/mapper/pigeon-ingest-spool
     install -d -m 0700 /spool
-    mount -o nodev,nosuid,noexec "$disk" /spool
+    mount -o nodev,nosuid,noexec /dev/mapper/pigeon-ingest-spool /spool
     chown 10001:10001 /spool
     chmod 0700 /spool
+}
+
+close_spool() {
+    local outcome="$?"
+    trap - EXIT
+    if [[ -f /root/ingest.env ]]; then
+        shred -u /root/ingest.env || rm -f /root/ingest.env
+    fi
+    if mountpoint -q /spool; then
+        umount /spool || true
+    fi
+    if [[ -b /dev/mapper/pigeon-ingest-spool ]]; then
+        cryptsetup close pigeon-ingest-spool || true
+    fi
+    poweroff || true
+    exit "$outcome"
 }
