@@ -378,7 +378,7 @@ const GATED: [&str; 8] = [
     "instance_member_set",
     "passkeys_remove",
     "oauth_revoke",
-    "email_forward_set",
+    "data_email_forward_set",
 ];
 
 #[test]
@@ -1723,14 +1723,14 @@ fn approvals_auto_run() {
 
     let t0 = 5_000_000;
     let args = json!({ "instance": "docs", "local": "hello", "to": "me@example.com" });
-    let digest = approval::call_digest("email_forward_set", &args, "svc");
+    let digest = approval::call_digest("data_email_forward_set", &args, "svc");
     let call = |payload: Value| {
         approval::new(
             "ap1".into(),
             Kind::ToolCall,
-            "email_forward_set".into(),
+            "data_email_forward_set".into(),
             digest.clone(),
-            json!({ "tool": "email_forward_set", "args": args, "caller": "Claude", "acting_for": "Willow" }),
+            json!({ "tool": "data_email_forward_set", "args": args, "caller": "Claude", "acting_for": "Willow" }),
             payload,
             "svc".into(),
             Some("willow".into()),
@@ -1745,7 +1745,7 @@ fn approvals_auto_run() {
     assert_eq!(
         approvals::follow_up(&r).unwrap(),
         Some(FollowUp {
-            tool: "email_forward_set".into(),
+            tool: "data_email_forward_set".into(),
             args: json!({ "instance": "docs", "local": "hello", "to": "me@example.com", "approval": "ap1" }),
             scope: Some("docs".into()),
         })
@@ -1759,7 +1759,7 @@ fn approvals_auto_run() {
             .unwrap_err()
             .contains("not the ones approved")
     );
-    forged.digest = approval::call_digest("email_forward_set", &forged.payload["args"], "svc");
+    forged.digest = approval::call_digest("data_email_forward_set", &forged.payload["args"], "svc");
     assert_ne!(forged.digest, digest, "another argument is another call");
     let mut secret = call(kept.clone());
     secret.subject = "source_token".into();
@@ -1772,13 +1772,13 @@ fn approvals_auto_run() {
     // Pending, denied and expired approvals are never claimed, so never run.
     let mut pending = call(kept.clone());
     assert_eq!(
-        approval::claim(&mut pending, "email_forward_set", t0 + 1),
+        approval::claim(&mut pending, "data_email_forward_set", t0 + 1),
         Err(Refusal::NotApproved("ap1".into()))
     );
     let mut denied = call(kept.clone());
     approval::decide(&mut denied, false, &digest, "willow", t0 + 1).unwrap();
     assert_eq!(
-        approval::claim(&mut denied, "email_forward_set", t0 + 2),
+        approval::claim(&mut denied, "data_email_forward_set", t0 + 2),
         Err(Refusal::Denied("ap1".into()))
     );
     let mut late = call(kept.clone());
@@ -1786,7 +1786,7 @@ fn approvals_auto_run() {
     assert_eq!(
         approval::claim(
             &mut late,
-            "email_forward_set",
+            "data_email_forward_set",
             t0 + 2 + approval::USE_TTL_MS
         ),
         Err(Refusal::Expired("ap1".into()))
@@ -1798,20 +1798,20 @@ fn approvals_auto_run() {
     let mut r = call(kept.clone());
     approval::decide(&mut r, true, &digest, "willow", t0 + 1).unwrap();
     assert!(approval::runnable(&r, t0 + 2).is_ok());
-    approval::claim(&mut r, "email_forward_set", t0 + 2).unwrap();
+    approval::claim(&mut r, "data_email_forward_set", t0 + 2).unwrap();
     assert_eq!(r.outcome.as_ref().unwrap().status, RunStatus::Running);
     assert_eq!(
-        approval::claim(&mut r, "email_forward_set", t0 + 3),
+        approval::claim(&mut r, "data_email_forward_set", t0 + 3),
         Err(Refusal::Claimed("ap1".into()))
     );
     // While it runs, the caller calling again is told so, and nothing runs; another caller,
     // or another tool naming the id, goes on to the tool's own refusal.
-    let running = approvals::recall_answer(&r, "email_forward_set", "svc").unwrap();
+    let running = approvals::recall_answer(&r, "data_email_forward_set", "svc").unwrap();
     assert!(running.unwrap_err().contains("running now"));
-    assert!(approvals::recall_answer(&r, "email_forward_set", "svc2").is_none());
+    assert!(approvals::recall_answer(&r, "data_email_forward_set", "svc2").is_none());
     assert!(approvals::recall_answer(&r, "users_remove", "svc").is_none());
     // The run's own call takes the approval once, for exactly the digest approved.
-    let other = approval::call_digest("email_forward_set", &json!({ "to": "x" }), "svc");
+    let other = approval::call_digest("data_email_forward_set", &json!({ "to": "x" }), "svc");
     assert_eq!(
         approval::take(&mut r, &other, "svc", t0 + 4),
         Err(Refusal::OtherCall("ap1".into()))
@@ -1826,7 +1826,7 @@ fn approvals_auto_run() {
     let answer =
         json!({ "approval": "ap2", "changes": [{ "path": "email.forward" }], "api_token": "t" });
     assert_eq!(approvals::next_of(&answer).as_deref(), Some("ap2"));
-    let summary = approvals::summarize("email_forward_set", &answer);
+    let summary = approvals::summarize("data_email_forward_set", &answer);
     assert!(summary.contains("next approval"), "{summary}");
     assert!(approval::finish(
         &mut r,
@@ -1846,7 +1846,7 @@ fn approvals_auto_run() {
     );
     assert_eq!(o.result["api_token"], json!(approval::REDACTED));
     assert!(r.payload.get("args").is_none());
-    let again = approvals::recall_answer(&r, "email_forward_set", "svc")
+    let again = approvals::recall_answer(&r, "data_email_forward_set", "svc")
         .unwrap()
         .unwrap();
     assert_eq!(again["approval"], json!("ap2"));
@@ -2016,14 +2016,14 @@ fn approvals_auto_run() {
         reason: "r".into(),
         needs: None,
     };
-    assert!(approvals::runs_under(&gated, "email_forward_set").is_ok());
+    assert!(approvals::runs_under(&gated, "data_email_forward_set").is_ok());
     assert!(approvals::runs_under(&allowed, "instance_apply").is_ok());
     assert!(
-        approvals::runs_under(&refused, "email_forward_set")
+        approvals::runs_under(&refused, "data_email_forward_set")
             .unwrap_err()
             .contains("now refuses")
     );
-    assert!(approvals::recheck("Claude", "email_forward_set").is_ok());
+    assert!(approvals::recheck("Claude", "data_email_forward_set").is_ok());
     assert!(approvals::recheck("Claude", "instance_apply").is_ok());
 
     // As the original caller only: still acting for the person who approved.
