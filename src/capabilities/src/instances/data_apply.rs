@@ -10,7 +10,9 @@
 use std::future::Future;
 
 use pigeon_core::Account;
-use pigeon_core::cloudflare::{call, call_raw};
+// Every call here uses a `data_home` token minted moments before, which some services (D1 among
+// them) refuse with 401 until it reaches them: `call_fresh` retries those.
+use pigeon_core::cloudflare::{call_fresh as call, call_raw};
 use pigeon_core::tokens::{Policy, Scope};
 use pigeon_ingest::datastore;
 use pigeon_ingest::index::Statement;
