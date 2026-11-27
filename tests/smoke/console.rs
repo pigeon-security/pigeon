@@ -3772,7 +3772,10 @@ mod email {
         assert!(datastore::migration_refusal(&["blobs".into(), "sightings".into()]).is_some());
         assert!(datastore::migration_refusal(&["items".into()]).is_none());
         assert_eq!(
-            datastore::pending_migrations(&["0001_record".into()]),
+            datastore::pending_migrations(&["0001_record".into()])
+                .into_iter()
+                .map(|migration| migration.id)
+                .collect::<Vec<_>>(),
             ["0002_operations", "0003_mail_import_lineage"]
         );
     }
