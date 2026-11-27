@@ -3309,7 +3309,7 @@ mod email {
             1
         );
         let sighting = &store.rows(&Statement {
-            sql: "SELECT * FROM sightings".into(),
+            sql: "SELECT * FROM sightings WHERE source = 'email_routing'".into(),
             params: vec![],
         })[0];
         assert_eq!(sighting["source"], "email_routing");
@@ -3364,7 +3364,12 @@ mod email {
         // Three items: both messages and the PDF they both carry, stored once.
         assert_eq!(store.count("SELECT COUNT(*) FROM items"), 3);
         assert_eq!(store.count("SELECT COUNT(*) FROM emails"), 2);
-        assert_eq!(store.count("SELECT COUNT(*) FROM sightings"), 3);
+        assert_eq!(
+            store.count("SELECT COUNT(*) FROM sightings WHERE source = 'email_routing'"),
+            3
+        );
+        let detail = datastore::get_queries(&s2.item_id);
+        assert_eq!(store.rows(&detail[3])[0]["filename"], "invoice.pdf");
 
         // Forwarding scope `all` with a default destination forwards catch-all too.
         let all = EmailConfig {

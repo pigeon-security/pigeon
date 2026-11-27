@@ -569,10 +569,10 @@ pub fn imported_list_query(query: &ListQuery) -> Statement {
 fn list_query_by_source(query: &ListQuery, source: &str) -> Statement {
     let mut sql = String::from(
         "SELECT s.item_id, s.locator, s.seen_at, s.extra, s.source, s.account, s.rowid AS seq, \
-         e.subject, e.date, e.\"from\", i.size, CASE s.source WHEN 'imap' THEN \
+         e.subject, e.date, e.\"from\", i.size, COALESCE(NULLIF( \
          (SELECT COUNT(*) FROM sightings a WHERE a.source = 'email_attachment' \
-          AND a.locator >= s.item_id || ':' AND a.locator < s.item_id || ';') ELSE \
-         (SELECT COUNT(*) FROM items a WHERE a.parent_id = s.item_id) END AS attachments \
+          AND a.locator >= s.item_id || ':' AND a.locator < s.item_id || ';'), 0), \
+         (SELECT COUNT(*) FROM items a WHERE a.parent_id = s.item_id)) AS attachments \
          FROM sightings s JOIN items i ON i.item_id = s.item_id \
          LEFT JOIN emails e ON e.item_id = s.item_id WHERE s.source = ?",
     );

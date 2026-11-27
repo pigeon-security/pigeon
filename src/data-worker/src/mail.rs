@@ -322,7 +322,6 @@ async fn store_message<B: Bindings>(
         Ok(d) => d,
         Err(_) => return Err(NOT_STORED),
     };
-    let historical = matches!(source, Source::Imap { .. });
     let parsed = pigeon_email::parse(raw, source);
     let auth = parsed.as_ref().ok().and_then(|p| auth_of(&p.message));
     let mut rows = Vec::new();
@@ -377,18 +376,16 @@ async fn store_message<B: Bindings>(
                     },
                     at,
                 ));
-                if historical {
-                    rows.push(Statement {
-                        sql: "INSERT OR IGNORE INTO sightings (item_id, source, account, locator, seen_at, extra) \
-                              VALUES (?, 'email_attachment', NULL, ?, ?, ?)".into(),
-                        params: vec![
-                            json!(a.content.sha256),
-                            json!(format!("{id}:{index}")),
-                            json!(at),
-                            json!(json!({ "parent": id, "index": index, "filename": a.filename }).to_string()),
-                        ],
-                    });
-                }
+                rows.push(Statement {
+                    sql: "INSERT OR IGNORE INTO sightings (item_id, source, account, locator, seen_at, extra) \
+                          VALUES (?, 'email_attachment', NULL, ?, ?, ?)".into(),
+                    params: vec![
+                        json!(a.content.sha256),
+                        json!(format!("{id}:{index}")),
+                        json!(at),
+                        json!(json!({ "parent": id, "index": index, "filename": a.filename }).to_string()),
+                    ],
+                });
             }
         }
         // A parser bug never bounces mail: the bytes are kept and can be parsed again.
