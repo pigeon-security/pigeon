@@ -299,6 +299,7 @@
       configured: "Credential saved",
       scope_changed: "Scope changed. Replace the credential.",
       legacy_spaces_key: "Using the existing Spaces credential",
+      owning_account: "Owning-account key slot",
       missing: "Credential required",
     };
     const args = { instance: record.id };
@@ -320,7 +321,7 @@
       try {
         const result = await read();
         content.replaceChildren(...result.connections.map((connection) => {
-          const { name, binding, state } = connection;
+          const { name, binding, state, slot } = connection;
           const verify = button("Verify", async () => {
             verify.disabled = true;
             try {
@@ -332,13 +333,18 @@
               verify.disabled = false;
             }
           });
-          verify.disabled = state !== "configured" && state !== "legacy_spaces_key";
+          const owned = state === "owning_account";
+          verify.disabled = !owned && state !== "configured" && state !== "legacy_spaces_key";
           return el("div", { class: "section" },
             el("h3", { text: name }), facts(scopeFacts(binding)),
             el("p", { class: "muted", text: states[state] || "Credential status unavailable" }),
+            slot ? facts([["Secrets Store slot", code(slot)]]) : null,
             el("div", { class: "actions" }, [
               button("Edit source", () => editScope(connection)), verify,
-              button(state === "configured" ? "Rotate key" : "Set key", () => editKey(connection, result.version)),
+              !owned ? button(state === "configured" ? "Rotate key" : "Set key", () => editKey(connection, result.version)) : null,
+              !owned && record.account?.kind === "linked" && record.account.account_id && record.data?.placement !== "inline"
+                ? button("Use owning account", () => stageOwner(connection))
+                : null,
             ]));
         }));
         if (!result.connections.length) {
@@ -409,7 +415,8 @@
                 const saved = await read();
                 const updated = saved.connections.find((item) => item.name === alias);
                 if (!updated) throw new Error("The saved connection could not be loaded.");
-                editKey(updated, saved.version);
+                if (updated.state === "owning_account") ingestBucketConnections(ctx, record);
+                else editKey(updated, saved.version);
               } catch (err) {
                 ingestBucketConnections(ctx, record, err.message || String(err));
               }
@@ -433,6 +440,32 @@
         ],
         actions: [button("Back", () => ingestBucketConnections(ctx, record)), review],
       });
+    }
+
+    async function stageOwner({ name, binding }) {
+      try {
+        const current = await recordOf(ctx);
+        const ingest = current?.data?.ingest;
+        if (!ingest || changes(binding, ingest.connections?.[name]).length
+          || ingest.source_generations?.[name]) {
+          throw new Error("The connection changed. Reopen Bucket connections and try again.");
+        }
+        const bytes = crypto.getRandomValues(new Uint8Array(32));
+        const nextGeneration = btoa(String.fromCharCode(...bytes)).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+        const next = clone(current);
+        next.data.ingest.source_generations = { ...ingest.source_generations, [name]: nextGeneration };
+        putRecord(ctx, {
+          record: current,
+          next,
+          title: `Stage an owning-account key for ${name}`,
+          target: [["Connection", code(name)], ...scopeFacts(binding)],
+          confirmLabel: "Approve key slot with passkey",
+          effect: "Save the new key in your Cloudflare Secrets Store and apply the Data plan. Provider runs require owning-account source support.",
+          onDone: () => ingestBucketConnections(ctx, record),
+        });
+      } catch (err) {
+        d.say(err.message || String(err), true);
+      }
     }
 
     function editKey({ name, binding, state, generation }, version) {

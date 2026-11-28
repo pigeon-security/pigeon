@@ -2,6 +2,8 @@
 
 use pigeon_cloud::{digitalocean_spaces, transport::FetchTransport};
 use pigeon_core::{crypto, oauth, s3};
+use pigeon_ingest::source_credentials::{self, Bound, Verify};
+pub use pigeon_ingest::source_credentials::{Reference as Pin, valid_generation};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use worker::{Env, Method, Result};
@@ -43,14 +45,6 @@ impl Binding {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct Pin {
-    pub name: String,
-    pub scope: String,
-    pub generation: String,
-}
-
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Saved {
@@ -67,13 +61,6 @@ pub fn valid_name(name: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
-pub fn valid_generation(generation: &str) -> bool {
-    generation.len() == 43
-        && generation
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
-}
-
 pub fn binding<'a>(record: &'a Instance, name: &str) -> Result<&'a Binding> {
     let found = record
         .capabilities
@@ -88,41 +75,53 @@ pub fn binding<'a>(record: &'a Instance, name: &str) -> Result<&'a Binding> {
 }
 
 pub fn field_problems(record: &Instance, capability: &str) -> Vec<String> {
-    let connections = &record.capabilities[capability].connections;
-    if connections.is_empty() {
+    let settings = &record.capabilities[capability];
+    let connections = &settings.connections;
+    let generations = &settings.source_generations;
+    if connections.is_empty() && generations.is_empty() {
         return Vec::new();
     }
-    if capability != super::NAME || connections.len() > 32 {
+    if capability != super::NAME || connections.len() > 32 || generations.len() > 32 {
         return vec!["Data Ingest supports up to 32 named bucket connections.".into()];
     }
-    connections
-        .iter()
-        .filter_map(|(name, binding)| {
-            if !valid_name(name) {
-                return Some(format!("Invalid bucket connection name {name}."));
+    let mut problems = Vec::new();
+    if !generations.is_empty() && owning_account(record).is_none() {
+        problems.push(
+            "Owning-account source keys require a linked account with a standalone Data Worker."
+                .into(),
+        );
+    }
+    for (name, generation) in generations {
+        if !valid_generation(generation) || !connections.contains_key(name) {
+            problems.push(format!(
+                "Invalid owning-account source generation for {name}."
+            ));
+        }
+    }
+    problems.extend(connections.iter().filter_map(|(name, binding)| {
+        if !valid_name(name) {
+            return Some(format!("Invalid bucket connection name {name}."));
+        }
+        if let Err(error) = binding.validate() {
+            return Some(format!("{name}: {error}"));
+        }
+        match binding {
+            Binding::DigitalOcean(_) if crate::digitalocean::team(record).is_none() => {
+                Some(format!("{name} requires an approved DigitalOcean team."))
             }
-            if let Err(error) = binding.validate() {
-                return Some(format!("{name}: {error}"));
+            Binding::Backblaze(source)
+                if crate::data_store::settings(record)
+                    .and_then(|data| data.backup.as_ref())
+                    .is_some_and(|backup| backup.bucket.eq_ignore_ascii_case(&source.bucket)) =>
+            {
+                Some(format!(
+                    "{name} must use a bucket separate from the Data backup."
+                ))
             }
-            match binding {
-                Binding::DigitalOcean(_) if crate::digitalocean::team(record).is_none() => {
-                    Some(format!("{name} requires an approved DigitalOcean team."))
-                }
-                Binding::Backblaze(source)
-                    if crate::data_store::settings(record)
-                        .and_then(|data| data.backup.as_ref())
-                        .is_some_and(|backup| {
-                            backup.bucket.eq_ignore_ascii_case(&source.bucket)
-                        }) =>
-                {
-                    Some(format!(
-                        "{name} must use a bucket separate from the Data backup."
-                    ))
-                }
-                _ => None,
-            }
-        })
-        .collect()
+            _ => None,
+        }
+    }));
+    problems
 }
 
 pub(crate) fn key(instance: &str, name: &str) -> String {
@@ -149,6 +148,147 @@ pub(crate) fn scope(record: &Instance, name: &str) -> Result<String> {
     ))?))
 }
 
+fn owning_account(record: &Instance) -> Option<&str> {
+    let instances::record::AccountRef::Linked {
+        account_id: Some(account),
+    } = &record.account
+    else {
+        return None;
+    };
+    (crate::data_store::placement(record) == crate::catalogue::Placement::OwnWorker)
+        .then_some(account.as_str())
+}
+
+pub fn uses_owned_credentials(record: &Instance) -> bool {
+    record
+        .capabilities
+        .get(super::NAME)
+        .is_some_and(|settings| !settings.source_generations.is_empty())
+}
+
+fn owned_binding(record: &Instance, name: &str) -> Result<Option<Bound>> {
+    let Some(generation) = record
+        .capabilities
+        .get(super::NAME)
+        .and_then(|settings| settings.source_generations.get(name))
+    else {
+        return Ok(None);
+    };
+    let account = owning_account(record)
+        .filter(|_| valid_generation(generation))
+        .ok_or_else(|| super::bad("The owning-account source reference is invalid."))?;
+    let binding = binding(record, name)?;
+    let (owner, region, bucket, prefix) = match binding {
+        Binding::DigitalOcean(source) => (
+            Some(
+                crate::digitalocean::team(record)
+                    .ok_or_else(|| super::bad("Approve a DigitalOcean team first."))?,
+            ),
+            &source.region,
+            &source.bucket,
+            &source.prefix,
+        ),
+        Binding::Backblaze(source) => (None, &source.region, &source.bucket, &source.prefix),
+        Binding::Scaleway(source) => (
+            Some(source.project.as_str()),
+            &source.region,
+            &source.bucket,
+            &source.prefix,
+        ),
+    };
+    let reference = Pin {
+        name: name.into(),
+        scope: oauth::hash(&serde_json::to_string(&(
+            "owned-ingest-source-v1",
+            &record.id,
+            account,
+            name,
+            binding.provider(),
+            owner,
+            region,
+            bucket,
+            prefix,
+        ))?),
+        generation: generation.clone(),
+    };
+    let slot = source_credentials::slot(&record.id, account, &reference);
+    Ok(Some(Bound {
+        reference,
+        slot,
+        provider: binding.provider().into(),
+        owner: owner.map(str::to_owned),
+        region: region.clone(),
+        bucket: bucket.clone(),
+        prefix: prefix.clone(),
+    }))
+}
+
+pub fn owned_reference(record: &Instance, name: &str) -> Result<Option<Pin>> {
+    Ok(owned_binding(record, name)?.map(|source| source.reference))
+}
+
+pub fn owned_bindings(record: &Instance) -> Result<Vec<Bound>> {
+    let Some(settings) = record.capabilities.get(super::NAME) else {
+        return Ok(Vec::new());
+    };
+    settings
+        .source_generations
+        .keys()
+        .filter_map(|name| owned_binding(record, name).transpose())
+        .collect()
+}
+
+pub(crate) fn owned_bindings_for_account(
+    record: &Instance,
+    account_id: &str,
+) -> Result<Vec<Bound>> {
+    let sources = owned_bindings(record)?;
+    if !sources.is_empty() && owning_account(record) != Some(account_id) {
+        return Err(super::bad(
+            "The approved source credentials belong to a different Cloudflare account.",
+        ));
+    }
+    Ok(sources)
+}
+
+async fn owned_read(
+    env: &Env,
+    record: &Instance,
+    reference: &Pin,
+    prefix: Option<&str>,
+) -> Result<String> {
+    if owned_reference(record, &reference.name)?.as_ref() != Some(reference) {
+        return Err(super::bad(
+            "The owning-account source scope or generation changed.",
+        ));
+    }
+    let (url, key) = crate::data_store::reach(env, record).await?;
+    let body = serde_json::to_value(Verify {
+        instance: record.id.clone(),
+        reference: reference.clone(),
+        prefix: prefix.map(str::to_owned),
+    })?;
+    super::net::data_post(
+        &url,
+        source_credentials::READY_PATH,
+        &key,
+        super::now_ms(),
+        &body,
+    )
+    .await
+}
+
+pub async fn owned_sample(
+    env: &Env,
+    record: &Instance,
+    reference: &Pin,
+    prefix: &str,
+) -> Result<s3::Listing> {
+    let text = owned_read(env, record, reference, Some(prefix)).await?;
+    serde_json::from_str(&text)
+        .map_err(|_| super::bad("The owning Data Worker returned an invalid source listing."))
+}
+
 pub(crate) fn generation(saved: &Saved) -> String {
     oauth::hash(&saved.sealed)
 }
@@ -166,6 +306,11 @@ async fn saved(env: &Env, instance: &str, name: &str) -> Result<Option<Saved>> {
 /// A named Spaces scope may use the existing sealed key only if the previously approved
 /// DigitalOcean binding matches it exactly. The approval still pins the old ciphertext generation.
 pub async fn open(env: &Env, record: &Instance, name: &str) -> Result<(Pin, s3::Keys)> {
+    if owned_reference(record, name)?.is_some() {
+        return Err(super::bad(
+            "This source is owned by its linked Data Worker. Its provider launch requires owning-account source support.",
+        ));
+    }
     let binding = binding(record, name)?;
     let scope = scope(record, name)?;
     let (generation, keys) = match saved(env, &record.id, name).await? {
@@ -310,6 +455,13 @@ pub(super) async fn listings(env: &Env, record: &Instance) -> Result<Value> {
     };
     let mut result = Vec::new();
     for (name, binding) in &config.connections {
+        if let Some(source) = owned_binding(record, name)? {
+            result.push(json!({
+                "name": name, "binding": binding, "state": "owning_account",
+                "generation": source.reference.generation, "slot": source.slot,
+            }));
+            continue;
+        }
         let current_scope = scope(record, name)?;
         let stored = saved(env, &record.id, name).await?;
         let state = match &stored {
@@ -328,6 +480,10 @@ pub(super) async fn listings(env: &Env, record: &Instance) -> Result<Value> {
 }
 
 pub(super) async fn verify(env: &Env, record: &Instance, name: &str) -> Result<Value> {
+    if let Some(reference) = owned_reference(record, name)? {
+        let text = owned_read(env, record, &reference, None).await?;
+        return Ok(serde_json::from_str(&text)?);
+    }
     let (pin, keys) = open(env, record, name).await?;
     probe(env, record, binding(record, name)?, &keys).await?;
     Ok(
@@ -342,6 +498,11 @@ async fn checked_target(env: &Env, target: &Value) -> Result<(Instance, String, 
         .await?
         .filter(|record| target["version"].as_u64() == Some(record.version))
         .ok_or_else(|| super::bad("The approved instance changed. Review the connection again."))?;
+    if owned_reference(&record, name)?.is_some() {
+        return Err(super::bad(
+            "Set this source key in the owning Cloudflare account's Secrets Store.",
+        ));
+    }
     let scope = scope(&record, name)?;
     let previous = saved(env, instance, name).await?.as_ref().map(generation);
     if previous.as_deref() != target["generation"].as_str() {

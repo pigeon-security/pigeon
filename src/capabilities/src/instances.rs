@@ -877,7 +877,10 @@ impl Instances {
         let mut wanted = vec![crate::data_store::NAME];
         let backup = crate::data_store::backup(instance);
         if backup.is_some() {
-            wanted.extend([crate::data_store::BACKUP_SCOPES, "secrets"]);
+            wanted.push(crate::data_store::BACKUP_SCOPES);
+        }
+        if backup.is_some() || crate::ingest::connections::uses_owned_credentials(instance) {
+            wanted.push("secrets");
         }
         if data_publisher::fingerprint(instance).is_some() && backup.is_none() {
             wanted.push("secrets");

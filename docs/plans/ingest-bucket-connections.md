@@ -40,3 +40,24 @@ grant for that run. Dry runs can write their progress and reports. A live canary
 requires a fully listed source prefix with objects no larger than 16 MiB. ZIP
 members above that limit are reported as failed until the managed multipart
 publisher is available.
+
+
+### Owning-account source key staging
+
+For a linked instance with a standalone Data Worker, **Use owning account** stages a
+new slot for an existing named source. The instance record stores the generation in
+`data.ingest.source_generations`. It carries no key bytes. After approving the change,
+copy the slot shown beside the connection and create that secret directly in the
+owning Cloudflare account's Secrets Store. Use a provider read-only key scoped to the
+approved source and store it as `ACCESS_KEY_ID:SECRET_ACCESS_KEY`.
+
+Review and apply the Data plan. It binds only the named slots in that account and
+fails closed when a staged slot is missing. **Verify** uses the linked Data Worker for
+a bounded list. The listing proves read access and does not establish provider-side
+write denial. The home console only handles the reference in this mode.
+
+This step stages the registry, bindings, and owning-account read path. A source
+marked owning-account cannot launch through a legacy runner or save its key through
+the home console. Leave an existing active connection in legacy mode until its
+owning-account launch adapter is available. No existing home key or provider
+credential is deleted by staging a linked slot.

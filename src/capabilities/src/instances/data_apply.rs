@@ -239,6 +239,24 @@ pub async fn observe(
     if backup_read {
         observe_backup(token, a, secrets_store, instance, &name, &mut seen).await?;
     }
+    let sources = crate::ingest::connections::owned_bindings_for_account(instance, a)?;
+    if !sources.is_empty() {
+        let listed = get(
+            token,
+            &format!("/accounts/{a}/secrets_store/stores/{secrets_store}/secrets?search=INGEST_SRC_&per_page=100"),
+        ).await?.unwrap_or(Value::Null);
+        seen.source_slots = sources
+            .into_iter()
+            .filter_map(|source| {
+                listed
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|secret| secret["name"].as_str() == Some(source.slot.as_str()))
+                    .then_some(source.slot)
+            })
+            .collect();
+    }
     let Some(domain) = crate::email::domain(instance).filter(|_| crate::email::enabled(instance))
     else {
         return Ok(seen);
@@ -985,6 +1003,9 @@ async fn upload(
     if let Some(publisher) = publisher {
         super::data_publisher::bind(&mut metadata, publisher)?;
     }
+    let owned_sources =
+        crate::ingest::connections::owned_bindings_for_account(instance, a.account_id)?;
+    data_plan::bind_owned_ingest_sources(&mut metadata, &owned_sources, a.secrets_store);
     data_plan::bind_backup_audit(&mut metadata, instance);
     data_plan::bind_backup_inventory(&mut metadata, instance);
     if let Some(bucket) = audit_bucket {

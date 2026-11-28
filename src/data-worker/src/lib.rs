@@ -17,6 +17,7 @@ pub mod mail;
 mod mail_import;
 mod managed_dest;
 mod scaleway_compute;
+mod source_credentials;
 pub mod store;
 
 pub use ingest_job::IngestJob;
@@ -97,6 +98,9 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
         (Method::Get, "/ingest/health") => json_answer(200, json!({ "ok": true })),
         (Method::Post, pigeon_ingest::scaleway::BROKER_PATH) => {
             scaleway_compute::fetch(&mut req, &env).await
+        }
+        (Method::Post, pigeon_ingest::source_credentials::READY_PATH) => {
+            source_credentials::verify(&mut req, &env).await
         }
         (Method::Post, pigeon_ingest::managed_destination::PATH) => {
             managed_dest::fetch(&mut req, &env).await

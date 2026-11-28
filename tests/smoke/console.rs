@@ -4651,3 +4651,60 @@ mod email {
         );
     }
 }
+
+#[test]
+fn owned_source_credential_binding_contains_only_generation_and_scope_metadata() {
+    use pigeon_capabilities::{
+        ingest::connections,
+        instances::{data_plan, record::Instance},
+    };
+
+    let record: Instance = serde_json::from_value(json!({
+        "id": "linked", "title": "Linked",
+        "account": { "kind": "linked", "account_id": "a".repeat(32) },
+        "data": { "ingest": {
+            "connections": {
+                "origin": { "provider": "backblaze", "name": "origin",
+                    "region": "us-west-004", "bucket": "history-source", "prefix": "2025/" }
+            },
+            "source_generations": { "origin": "B".repeat(43) }
+        } }
+    }))
+    .unwrap();
+    let bindings = connections::owned_bindings(&record).unwrap();
+    assert_eq!(bindings.len(), 1);
+    let reference = connections::owned_reference(&record, "origin")
+        .unwrap()
+        .unwrap();
+    assert_eq!(bindings[0].reference, reference);
+    assert_eq!(bindings[0].prefix, "2025/");
+    assert_eq!(
+        bindings[0].endpoint().as_deref(),
+        Some("https://s3.us-west-004.backblazeb2.com")
+    );
+    assert!(
+        connections::owned_reference(&record, "unknown")
+            .unwrap()
+            .is_none()
+    );
+
+    let mut metadata = json!({"bindings":[]});
+    data_plan::bind_owned_ingest_sources(&mut metadata, &bindings, "owning-store");
+    assert_eq!(
+        metadata["bindings"][1],
+        json!({
+            "type": "secrets_store_secret", "name": bindings[0].slot,
+            "store_id": "owning-store", "secret_name": bindings[0].slot,
+        })
+    );
+    let configured: Vec<pigeon_ingest::source_credentials::Bound> =
+        serde_json::from_str(metadata["bindings"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(configured, bindings);
+
+    let mut changed = serde_json::to_value(&record).unwrap();
+    changed["data"]["ingest"]["source_generations"]["origin"] = json!("C".repeat(43));
+    let changed: Instance = serde_json::from_value(changed).unwrap();
+    let next = connections::owned_bindings(&changed).unwrap();
+    assert_eq!(next[0].reference.scope, bindings[0].reference.scope);
+    assert_ne!(next[0].slot, bindings[0].slot);
+}

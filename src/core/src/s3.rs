@@ -2,7 +2,7 @@
 //! Backblaze B2). Path-style addressing only. Request signing (AWS Signature Version 4) and the
 //! XML readers are pure, so they can be checked against recorded inputs. Provider calls are separated from the pure parsing and signing helpers. A secret key never appears in an error or in `Debug` output.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use worker::{
     Error, Fetch, Headers, Method, Request, RequestInit, RequestRedirect, Response, Result,
@@ -439,7 +439,7 @@ pub fn parse_list_buckets(xml: &str) -> Result<Vec<Bucket>> {
 }
 
 /// An object as ListObjectsV2 answers it.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Object {
     pub key: String,
     pub size: u64,
@@ -448,7 +448,7 @@ pub struct Object {
 }
 
 /// One page of ListObjectsV2.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Listing {
     pub objects: Vec<Object>,
     /// The CommonPrefixes.

@@ -58,6 +58,8 @@ pub struct SeenData {
     pub backup_key: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publisher: Option<super::data_publisher::Publisher>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_slots: Vec<String>,
     /// The email domain's zone id, when it is in the account.
     pub zone_id: Option<String>,
     /// The zone's records that matter to mail: MX, TXT and `_domainkey` CNAMEs.
@@ -492,6 +494,32 @@ pub fn data_parts(
             });
         }
         Some(artifact) => {
+            let owned_sources = match crate::ingest::connections::owned_bindings(instance) {
+                Ok(sources) => sources,
+                Err(error) => {
+                    steps.push(Step::Blocked {
+                        why: error.to_string(),
+                    });
+                    parts.store = steps;
+                    return parts;
+                }
+            };
+            let missing: Vec<_> = owned_sources
+                .iter()
+                .filter(|source| !seen.source_slots.contains(&source.slot))
+                .collect();
+            if !missing.is_empty() {
+                for source in missing {
+                    steps.push(Step::Blocked {
+                        why: format!(
+                            "Set {} for {} in the owning account's Cloudflare Secrets Store.",
+                            source.slot, source.reference.name
+                        ),
+                    });
+                }
+                parts.store = steps;
+                return parts;
+            }
             let module = data_worker_digest(
                 artifact,
                 &name,
@@ -505,6 +533,16 @@ pub fn data_parts(
                 )
             } else {
                 module
+            };
+            let module = if owned_sources.is_empty() {
+                module
+            } else {
+                pigeon_core::oauth::hash(
+                    &json!({
+                        "data_worker": module, "owned_ingest_sources": owned_sources,
+                    })
+                    .to_string(),
+                )
             };
             let module = match ingest_runtime {
                 Some(runtime) => pigeon_core::oauth::hash(
@@ -744,6 +782,30 @@ pub fn worker_metadata(main: &str, b: &WorkerBindings<'_>) -> serde_json::Value 
         "compatibility_date": super::plan::COMPATIBILITY_DATE,
         "bindings": bindings,
     })
+}
+
+/// The upload binds exact secret names from the owning account's store. It carries no secret values.
+pub fn bind_owned_ingest_sources(
+    metadata: &mut serde_json::Value,
+    sources: &[pigeon_ingest::source_credentials::Bound],
+    store: &str,
+) {
+    if sources.is_empty() {
+        return;
+    }
+    let Some(bindings) = metadata["bindings"].as_array_mut() else {
+        return;
+    };
+    bindings.push(json!({
+        "type": "plain_text", "name": pigeon_ingest::source_credentials::SOURCES_BINDING,
+        "text": json!(sources).to_string(),
+    }));
+    for source in sources {
+        bindings.push(json!({
+            "type": "secrets_store_secret", "name": source.slot,
+            "store_id": store, "secret_name": source.slot,
+        }));
+    }
 }
 
 pub fn backup_generation(instance: &Instance) -> Option<String> {
