@@ -1,6 +1,6 @@
 //! Passkey registration of immutable compute generations in an instance's Secrets Store.
 use pigeon_core::secrets_store::Writer;
-use pigeon_ingest::scaleway::ComputePin;
+use pigeon_ingest::scaleway::{self, ComputePin};
 use serde_json::{Value, json};
 use worker::{Env, Result};
 
@@ -306,9 +306,13 @@ pub(super) async fn ready(
     project: &str,
     region: &str,
 ) -> Result<(ComputePin, String)> {
-    let pin = active(env, &record.id, project)
-        .await?
-        .ok_or_else(|| bad("Set a linked Scaleway compute key and apply the Data Worker plan."))?;
+    let missing = || bad("Register a linked Scaleway compute key and apply the Data Worker plan.");
+    let registry = registry(env, &record.id).await?.ok_or_else(missing)?;
+    let pin = registry.active(project).cloned().ok_or_else(missing)?;
+    let host = env.var("PLATFORM_HOST")?.to_string();
+    let account =
+        crate::linked::account_for_bound(env, &host, &record.id, &registry.account).await?;
+    verify_registry(&account, &record.id, &registry).await?;
     let (origin, reply) = command(
         env,
         record,
