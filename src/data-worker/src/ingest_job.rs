@@ -22,6 +22,8 @@ const INSTANCE: &str = "standard-4";
 const RUNNER: &str = "/usr/local/bin/pigeon-ingest-runner";
 const POLL_MS: i64 = 30_000;
 const START_GRACE_MS: i64 = 120_000;
+/// How fresh a `running` status keeps a runner that does not look running from being failed.
+const STATUS_GRACE_MS: i64 = 120_000;
 const KEY: &str = "run";
 
 #[derive(Deserialize, Serialize)]
@@ -306,6 +308,17 @@ impl IngestJob {
             Some(RunState::Stopped) => Some(Outcome::Cancelled),
             _ => None,
         };
+        // A runner whose status still says it runs and was written moments ago may only look
+        // stopped (or be writing its last records): look again on the next polls before calling
+        // the run failed (docs/plans/ingest-bytes.md).
+        if reported.is_none()
+            && run.requested_stop.is_none()
+            && status
+                .as_ref()
+                .is_some_and(|status| status.updated_ms > now - STATUS_GRACE_MS)
+        {
+            return Ok(());
+        }
         let outcome = run.requested_stop.or(reported);
         if reported.is_none() && now < run.started_ms + START_GRACE_MS {
             return Ok(());

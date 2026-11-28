@@ -91,6 +91,8 @@ struct MemDest {
     blind: bool,
     /// Blob writes left in the run's grant, when limited.
     budget: Mutex<Option<u64>>,
+    /// Control writes (parts, checkpoints, status, report) that fail next, as a hiccup.
+    flaky_control: Mutex<u32>,
 }
 
 impl MemDest {
@@ -190,6 +192,13 @@ impl Dest for MemDest {
         out
     }
     fn put_object(&self, key: &str, body: &[u8], _: &str) -> Result<(), Error> {
+        {
+            let mut left = self.flaky_control.lock().unwrap();
+            if *left > 0 {
+                *left -= 1;
+                return Err(Error::Dest("the Data Worker is busy".into()));
+            }
+        }
         self.objs
             .lock()
             .unwrap()
@@ -1834,4 +1843,89 @@ fn ingest_shard_status_and_terminal_combine() {
     assert_eq!((t.started_ms, t.finished_ms), (5, 70));
     assert_eq!(t.counters.listed, 10);
     assert!(combined_terminal("r", &[]).is_none());
+}
+
+/// A clock that counts the pauses it is asked for, instead of sleeping.
+#[derive(Default)]
+struct Pausing(AtomicU64);
+impl Clock for Pausing {
+    fn now_ms(&self) -> i64 {
+        1000
+    }
+    fn pause(&self, ms: u64) {
+        self.0.fetch_add(ms, Ordering::SeqCst);
+    }
+}
+
+/// A Data Worker hiccup on control writes (here the first eight: status, part, checkpoint and
+/// status again) no longer ends the run: control writes wait and try again for about a minute.
+/// A failure longer than that still ends it, with a `failed` status once the writes recover.
+#[test]
+fn ingest_control_writes_ride_out_a_hiccup() {
+    for threads in [1, 16] {
+        let (source, dest) = planted(800);
+        *dest.flaky_control.lock().unwrap() = 8;
+        let clock = Pausing::default();
+        let report = run(&Run {
+            job: &job("hiccup", false, threads),
+            source: &source,
+            dest: &dest,
+            spool: &MemSpool,
+            clock: &clock,
+            stop: &AtomicBool::new(false),
+        })
+        .expect("the run outlives the hiccup");
+        assert_eq!(report.state, pigeon_ingest::manifest::RunState::Done);
+        assert_eq!(report.counters.listed, 807);
+        assert!(
+            clock.0.load(Ordering::SeqCst) >= 500,
+            "it waited before trying again"
+        );
+        assert!(
+            dest.get(&pigeon_ingest::manifest::report_key("hiccup"))
+                .is_some()
+        );
+
+        // Longer than every pause: the run fails rather than run on unrecorded.
+        let (source, dest) = planted(50);
+        *dest.flaky_control.lock().unwrap() = 1_000;
+        let failed = run(&Run {
+            job: &job("down", false, threads),
+            source: &source,
+            dest: &dest,
+            spool: &MemSpool,
+            clock: &Pausing::default(),
+            stop: &AtomicBool::new(false),
+        });
+        assert!(failed.is_err());
+    }
+}
+
+/// A stop records the finished watermark at once (a checkpoint and a `stopped` status), so a
+/// host that kills the container soon after SIGTERM still leaves a run to continue.
+#[test]
+fn ingest_stop_records_a_checkpoint_at_once() {
+    use pigeon_ingest::manifest::{RunState, Status, status_key};
+    let (source, dest) = planted(1_200);
+    let flag = Arc::new(AtomicBool::new(false));
+    let stopping = StopAt {
+        inner: &source,
+        key: "o/00700".into(),
+        flag: Arc::clone(&flag),
+    };
+    let report = go_until(&job("stop-now", false, 32), &stopping, &dest, &flag);
+    assert_eq!(report.state, RunState::Stopped);
+    let status: Status =
+        serde_json::from_slice(&dest.get(&status_key("stop-now")).unwrap()).unwrap();
+    assert_eq!(status.state, RunState::Stopped);
+    let cp: Checkpoint =
+        serde_json::from_slice(&dest.get(&checkpoint_key("stop-now")).unwrap()).unwrap();
+    assert_eq!(cp.counters, report.counters);
+    // The early checkpoint closed a part: more parts than lines alone would make, all in order.
+    let lines = dest.lines("stop-now");
+    assert_eq!(
+        lines.len() as u64,
+        report.counters.files + report.counters.members
+    );
+    assert!(dest.part_keys("stop-now").len() >= 2);
 }

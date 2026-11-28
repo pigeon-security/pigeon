@@ -111,6 +111,9 @@ pub trait Clock: Sync {
             .unwrap_or(0)
             .saturating_mul(1000)
     }
+    /// Waits `ms` milliseconds before a control write is tried again. No wait by default, so
+    /// tests run at once; the runner sleeps.
+    fn pause(&self, _ms: u64) {}
 }
 
 /// A reader that hashes what passes and fails at its end when the bytes do not have the
@@ -284,6 +287,30 @@ impl Seek for MemFile {
 impl Drop for MemFile {
     fn drop(&mut self) {
         self.held.fetch_sub(self.reserved, Ordering::SeqCst);
+    }
+}
+
+/// Waits between tries of a control write (manifest part, checkpoint, status, report): about a
+/// minute in all, so a Data Worker or D1 hiccup does not end a run that has hours of work in it
+/// (docs/plans/ingest-bytes.md, the willowgraysen run that ended at its 50,000th line).
+const CONTROL_PAUSES_MS: [u64; 8] = [500, 1_000, 2_000, 4_000, 8_000, 15_000, 15_000, 15_000];
+
+/// Runs a control write `f`, and when it fails again after each of [`CONTROL_PAUSES_MS`]. A spent
+/// grant or an existing object answers at once.
+fn retry_control<T>(
+    clock: &dyn Clock,
+    mut f: impl FnMut() -> Result<T, Error>,
+) -> Result<T, Error> {
+    let mut pauses = CONTROL_PAUSES_MS.iter();
+    loop {
+        match f() {
+            Ok(v) => return Ok(v),
+            Err(e @ (Error::Exists | Error::Exhausted)) => return Err(e),
+            Err(e) => match pauses.next() {
+                Some(ms) => clock.pause(*ms),
+                None => return Err(e),
+            },
+        }
     }
 }
 
@@ -1519,6 +1546,12 @@ impl<'r, 'a> Engine<'r, 'a> {
             if !stopping && r.stop.load(Ordering::SeqCst) {
                 stopping = true;
                 queue.clear();
+                // Record the finished watermark at once: a host that stops the container soon
+                // after SIGTERM leaves a checkpoint and a `stopped` status to continue from, not
+                // the last part boundary and a `running` status (docs/plans/ingest-bytes.md).
+                // The objects still in flight finish and are recorded after it, as before.
+                self.checkpoint()?;
+                self.status(RunState::Stopped);
             }
             while listing && !stopping && queue.len() < window {
                 let idle = queue.is_empty() && reading.is_empty() && pending.is_empty();
@@ -1705,7 +1738,7 @@ impl<'r, 'a> Engine<'r, 'a> {
             }
             let key = part_key(&r.job.run, self.seq);
             let size = body.len() as u64;
-            retry(|| {
+            retry_control(r.clock, || {
                 self.sh.timed(r, Stage::Control, size, || {
                     r.dest
                         .put_object(&key, body.as_bytes(), "application/x-ndjson")
@@ -1723,7 +1756,7 @@ impl<'r, 'a> Engine<'r, 'a> {
         let body = serde_json::to_vec(&cp).map_err(|e| Error::Io(e.to_string()))?;
         let key = checkpoint_key(&r.job.run);
         let size = body.len() as u64;
-        retry(|| {
+        retry_control(r.clock, || {
             self.sh.timed(r, Stage::Control, size, || {
                 r.dest.put_object(&key, &body, "application/json")
             })
@@ -1761,7 +1794,7 @@ impl<'r, 'a> Engine<'r, 'a> {
         if let Ok(body) = serde_json::to_vec(&st) {
             let key = status_key(&r.job.run);
             let size = body.len() as u64;
-            if let Err(e) = retry(|| {
+            if let Err(e) = retry_control(r.clock, || {
                 self.sh.timed(r, Stage::Control, size, || {
                     r.dest.put_object(&key, &body, "application/json")
                 })
@@ -1868,7 +1901,9 @@ impl<'r, 'a> Engine<'r, 'a> {
         let report = self.report(state);
         let body = serde_json::to_vec(&report).map_err(|e| Error::Io(e.to_string()))?;
         let key = report_key(&r.job.run);
-        retry(|| r.dest.put_object(&key, &body, "application/json"))?;
+        retry_control(r.clock, || {
+            r.dest.put_object(&key, &body, "application/json")
+        })?;
         self.status(state);
         Ok(report)
     }
@@ -1883,7 +1918,9 @@ impl<'r, 'a> Engine<'r, 'a> {
 /// flag counts, lists and duplicate groups cover only this session, while its counters carry
 /// on from the checkpoint. A dry run remembers would-be uploads, so a repeat is a duplicate.
 pub fn run(run: &Run<'_>) -> Result<Report, Error> {
-    let cp = match retry(|| run.dest.get_object(&checkpoint_key(&run.job.run)))? {
+    let cp = match retry_control(run.clock, || {
+        run.dest.get_object(&checkpoint_key(&run.job.run))
+    })? {
         Some(bytes) => serde_json::from_slice::<Checkpoint>(&bytes)
             .map_err(|e| Error::Io(format!("checkpoint.json is not readable: {e}")))?,
         // A continuation starts its own manifest at part 0 from the checkpoint it was given.

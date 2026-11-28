@@ -184,8 +184,42 @@ the same prefix, under one approval.
 
 | Phase | What | State |
 | --- | --- | --- |
-| a | Stage timings in status and report; keep-alive, sign-ahead, lookups off the coordinator, memory staging to 16 MiB, 64 threads, concurrent D1 charge, byte-rate estimate | landing |
-| b | Shards: partition, shard jobs, per-shard grants within the cap, combined status/report, one audit, per-shard continuation | landing |
+| a | Stage timings in status and report; keep-alive, sign-ahead, lookups off the coordinator, memory staging to 16 MiB, 64 threads, concurrent D1 charge, byte-rate estimate | landed (oacmQp6fLoE90nD3) |
+| b | Shards: partition, shard jobs, per-shard grants within the cap, combined status/report, one audit, per-shard continuation | landed (lWdso0TGSo21kKCm) |
+| c | The willowgraysen run's sudden end: control writes back off for about a minute, a stop checkpoints at once, the Data Worker waits two minutes on a fresh `running` status before failing a run | landing |
+
+## The run that ended at its 50,000th line (slice c)
+
+The live run above ended at 06:21:51 UTC with Jobs outcome `failed` after 49,826 files and
+101.3 GB, no failed files, no `report.json`, and a last `status.json` at 06:21:35 that still
+said `running` with no error. Its deadline was 07:31.
+
+- **What the record shows.** The engine writes a manifest part and a checkpoint every 5,000
+  lines and a status right after; at ~17 files a second line 50,000 fell at about 06:21:45, and
+  no status followed it. So the runner most likely ended at that checkpoint. When a run ends in
+  error the engine writes a `failed` status with its error; that write did not land either. Both
+  are control writes to the Data Worker (`put-object`: a D1 budget charge, an R2 write and, for
+  a manifest part, a D1 index batch of the part's 5,000 lines in the same request), and the
+  engine tried each **four times with no pause**: a Data Worker or D1 hiccup of a second or two
+  ended a run with an hour of work left and left its status saying `running`. The runner's
+  stderr line (`ingest runner: …`, in the container's logs in the Cloudflare dashboard) would
+  confirm the error; this session cannot read the instance account's logs.
+- **Other causes, checked and unlikely.** Memory: the old runner keeps at most 128 objects in
+  flight, files up to 1 MiB in memory and up to 32 upload buffers of at most 16 MiB (under
+  1.5 GiB of 12 GiB). Disk: spool files are deleted when uploaded; at most 128 × 16 MiB are on
+  the 20 GB disk at once, under the 16 GiB spool budget. The grant: 8 times the declared bytes
+  and 64 writes per object. A host stop (SIGTERM with a short grace) fits the symptoms too: the
+  runner then finished everything in flight before writing anything.
+- **Fixes.** Control writes (parts, checkpoints, status, report, the first checkpoint read) wait
+  and try again for about a minute (0.5 s doubling to 15 s); a stop writes a checkpoint and a
+  `stopped` status at once, then finishes what is in flight; the Data Worker's Durable Object no
+  longer fails a run whose container does not look running while its `running` status is under
+  two minutes old (it looks again on the next polls).
+- **Continuing it.** `continue` from its checkpoint is safe on the old runner: the checkpoint
+  is the one written at line 45,000, so about 4,800 objects are read again and found in R2
+  (`duplicate`, `in_r2`); nothing is lost or stored twice. It would run at the old ~17 files a
+  second and could end the same way at a later checkpoint; on the new image it is faster and rides
+  out a hiccup.
 
 ## Rollout
 

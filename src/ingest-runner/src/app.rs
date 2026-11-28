@@ -28,6 +28,10 @@ impl Clock for SystemClock {
         let start = START.get_or_init(std::time::Instant::now);
         u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX)
     }
+
+    fn pause(&self, ms: u64) {
+        std::thread::sleep(Duration::from_millis(ms));
+    }
 }
 
 /// The default budget for files staged in memory: 3 GiB of a `standard-4`'s 12 GiB.
