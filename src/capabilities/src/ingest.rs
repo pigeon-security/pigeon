@@ -20,7 +20,7 @@ pub mod net;
 pub mod scaleway;
 pub mod scaleway_compute;
 pub mod scaleway_source;
-mod throughput;
+pub mod throughput;
 
 pub const NAME: &str = "data-ingest";
 const INGEST_VIEWS: &[crate::instances::tools::View] = &[crate::instances::tools::View {
@@ -52,6 +52,7 @@ const DATA_TOOLS: &[crate::instances::tools::Registration] = &[
             "size_bytes",
             "objects",
             "continue",
+            "only",
             "max_live_bytes",
             "shards",
             "dry_run",
@@ -502,6 +503,12 @@ impl Ingest {
 
     /// `data_ingest_plan`: checks, a sample, an estimate and, when nothing is missing, an approval.
     async fn plan(&self, cx: &Context<'_>, args: &Value) -> Result<Value> {
+        if throughput::only_arg(args)?
+            && args["connection"].is_null()
+            && args["source"] != "backblaze"
+        {
+            return Err(bad("only \"too_large\" is for Backblaze connections."));
+        }
         let caller = cx
             .caller
             .ok_or_else(|| bad("planning needs a known caller"))?;
@@ -541,6 +548,11 @@ impl Ingest {
                         "The approved connection fixes the provider and bucket.",
                     ));
                 }
+                if throughput::only_arg(args)?
+                    && !matches!(binding, connections::Binding::Backblaze(_))
+                {
+                    return Err(bad("only \"too_large\" is for Backblaze connections."));
+                }
                 match binding {
                     connections::Binding::Scaleway(config) => Some(config),
                     connections::Binding::DigitalOcean(_) => {
@@ -557,6 +569,9 @@ impl Ingest {
         let managed = if record.capabilities.contains_key(NAME) {
             if named_scaleway.is_none() && args["source"] == "backblaze" {
                 return backblaze::plan(self, cx, &record, args).await;
+            }
+            if throughput::only_arg(args)? {
+                return Err(bad("only \"too_large\" is for Backblaze connections."));
             }
             if named_scaleway.is_none() && args["source"] != "scaleway" {
                 return digitalocean::plan(cx, self.host_name(), &record, args).await;
@@ -1797,6 +1812,7 @@ impl Capability for Ingest {
                     "max_live_bytes": { "type": "integer", "description": "A live run's cap on declared source bytes (default 10 GB, at most 100 TB). Raising it is the person's call: it is shown in the approval." },
                     "shards": { "type": "integer", "description": "Backblaze on a named connection only: split the run into 1 to 8 containers on disjoint keys (by the hash of each key), under one approval; each shard gets an equal share of the write grant. Continue a stopped shard by its own run id ({run}-s{i})." },
                     "continue": { "type": "string", "description": "The id of a stopped run (by its deadline, a stop or a spent grant) to continue from its checkpoint, with the same source, prefix and dry-run setting. Needs a new approval; the continuation gets a new run id." },
+                    "only": { "type": "string", "enum": ["too_large"], "description": "With continue naming an ended live run: a new run that takes only the objects that run skipped as too large (over 16 MiB), once large-file uploads pass data_ingest_multipart_check. Backblaze connections only." },
                     "commit": { "type": "string", "description": "A full commit id to build the runner from; default this Worker's own." },
                     "scratch_gib": { "type": "integer", "description": "Size of the dedicated DigitalOcean scratch volume (default 32 GiB)." },
                     "max_minutes": { "type": "integer", "description": "DigitalOcean only: override the computed deadline (1.5 times the slow estimate plus 10 minutes), 10 to 1440 minutes." },

@@ -78,6 +78,12 @@ pub struct JobSpec {
     /// (docs/plans/ingest-bytes.md). None for an unsharded run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shard: Option<Shard>,
+    /// Only objects larger than this many bytes are taken; the rest are passed over unlisted
+    /// (docs/plans/multipart-enable.md, "Picking up skipped files"). A job with it carries a
+    /// [`fenced`] `resume`, so a runner that predates this field resumes after every key and
+    /// does nothing, rather than copy the whole prefix.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub only_over: Option<u64>,
 }
 
 /// One shard of a sharded run: the keys whose [`crate::shard::shard_of`] is `index` of `count`.
@@ -88,6 +94,26 @@ pub struct Shard {
     pub count: u32,
     /// The approved run this shard belongs to.
     pub parent: String,
+}
+
+/// The `after_key` above every real key (byte order): a runner resuming after it lists nothing.
+pub const FENCE: &str = "\u{10FFFF}\u{10FFFF}\u{10FFFF}\u{10FFFF}";
+
+/// The resume of an [`JobSpec::only_over`] run picking up `run`'s skipped objects: fenced, so
+/// only a runner that reads `only_over` (and so starts from the beginning) does any work.
+pub fn fenced(run: &str) -> Resume {
+    Resume {
+        run: run.to_string(),
+        checkpoint: Checkpoint {
+            after_key: Some(FENCE.into()),
+            ..Checkpoint::default()
+        },
+    }
+}
+
+/// Whether `resume` is a [`fenced`] one.
+pub fn is_fenced(resume: &Resume) -> bool {
+    resume.checkpoint.after_key.as_deref() == Some(FENCE)
 }
 
 /// Where a continuation starts: another run's checkpoint (docs/plans/ingest-throughput.md).

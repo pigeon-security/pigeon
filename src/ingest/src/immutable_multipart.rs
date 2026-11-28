@@ -113,10 +113,15 @@ pub fn canary_part(nonce: &[u8], number: u32) -> Option<Vec<u8>> {
     let offset = u64::from(number.checked_sub(1)?) * PART_BYTES;
     let remaining = CANARY_BYTES.checked_sub(offset).filter(|r| *r > 0)?;
     let len = remaining.min(PART_BYTES) as usize;
-    let start = offset as usize;
-    let mut bytes: Vec<u8> = (0..len)
-        .map(|i| ((start + i).wrapping_mul(31) % 251) as u8)
-        .collect();
+    // A fixed pattern of period 251, laid down a cycle at a time.
+    let cycle: Vec<u8> = (0..251usize).map(|i| (i * 31 % 251) as u8).collect();
+    let mut bytes = Vec::with_capacity(len + 251);
+    let first = offset as usize % 251;
+    bytes.extend_from_slice(&cycle[first..]);
+    while bytes.len() < len {
+        bytes.extend_from_slice(&cycle);
+    }
+    bytes.truncate(len);
     if number == 1 {
         let n = nonce.len().min(len);
         bytes[..n].copy_from_slice(&nonce[..n]);

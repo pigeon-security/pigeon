@@ -252,6 +252,7 @@ fn job(run_id: &str, dry: bool, threads: u32) -> JobSpec {
         resume: None,
         skip_over: None,
         shard: None,
+        only_over: None,
     }
 }
 
@@ -841,6 +842,83 @@ fn ingest_skips_and_lists_objects_too_large_for_the_run() {
         reports.push((report, dest.lines("big")));
     }
     assert_eq!(reports[0], reports[1]);
+}
+
+/// docs/plans/multipart-enable.md, slice c: a run that skipped objects as too large is picked
+/// up by one that takes exactly those (`only_over` behind a fenced resume), on both engines;
+/// a runner that ignores `only_over` resumes after every key and does nothing.
+#[test]
+fn ingest_picks_up_exactly_the_too_large_objects() {
+    use pigeon_capabilities::ingest::throughput::too_large_of;
+    use pigeon_ingest::manifest::{FENCE, fenced, is_fenced};
+    use serde_json::{Value, json};
+    let mut objs = BTreeMap::new();
+    for i in 0..40u32 {
+        let size = if i % 9 == 0 { 300 + i as usize } else { 20 };
+        objs.insert(format!("k/{i:03}"), vec![b'a' + (i % 26) as u8; size]);
+    }
+    let source = MemSource {
+        objs,
+        page: 8,
+        jitter_us: 50,
+    };
+    for threads in [1, 64] {
+        let dest = MemDest::default();
+        let mut first = job("skipping", false, threads);
+        first.skip_over = Some(100);
+        let skipped = go(&first, &source, &dest);
+        let mut wanted: Vec<String> = skipped
+            .too_large
+            .iter()
+            .map(|l| l.origin.key.clone())
+            .collect();
+        wanted.sort();
+        assert_eq!(wanted.len(), 5);
+
+        // The pick-up: from the start, only objects over the skipped size.
+        let mut pick = job("pickup", false, threads);
+        pick.only_over = Some(100);
+        pick.resume = Some(fenced("skipping"));
+        assert!(is_fenced(pick.resume.as_ref().unwrap()));
+        let picked = go(&pick, &source, &dest);
+        assert_eq!(picked.counters.listed, 5);
+        assert!(picked.too_large.is_empty());
+        let mut got: Vec<String> = dest
+            .lines("pickup")
+            .iter()
+            .map(|l| l.origin.key.clone())
+            .collect();
+        got.sort();
+        got.dedup();
+        assert_eq!(got, wanted);
+
+        // An older runner reads the same job without `only_over`: it lists nothing.
+        let mut old = pick.clone();
+        old.run = "old-runner".into();
+        old.only_over = None;
+        let none = go(&old, &source, &MemDest::default());
+        assert_eq!(none.counters.listed, 0);
+        assert!(source.objs.keys().all(|k| k.as_str() < FENCE));
+    }
+
+    // What the plan reads from the prior run: its threshold and count, live runs only.
+    let mut prior = job("prior", false, 1);
+    prior.skip_over = Some(16 << 20);
+    let report = json!({
+        "flags": [["too_large", 262], ["duplicate", 3]],
+        "too_large": [{"origin": {"listed_size": 20_000_000}}, {"origin": {"listed_size": 30_000_000}}],
+    });
+    let found = too_large_of(&prior, &report, "t").unwrap();
+    assert_eq!((found.over, found.count, found.listed), (16 << 20, 262, 2));
+    assert_eq!(found.listed_bytes, 50_000_000);
+    assert!(too_large_of(&prior, &report, "other").is_err());
+    assert!(too_large_of(&prior, &Value::Null, "t").is_err());
+    assert!(too_large_of(&prior, &json!({"flags": [], "too_large": []}), "t").is_err());
+    let mut dry = prior.clone();
+    dry.dry_run = true;
+    assert!(too_large_of(&dry, &report, "t").is_err());
+    prior.skip_over = None;
+    assert!(too_large_of(&prior, &report, "t").is_err());
 }
 
 /// A spent write grant stops the run before the object that found it, so a continuation with a

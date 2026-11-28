@@ -220,6 +220,106 @@ pub(crate) async fn continuation(
     Ok((job, resume))
 }
 
+/// What `only: "too_large"` picks up from an ended live run `prior`
+/// (docs/plans/multipart-enable.md, "Picking up skipped files").
+pub struct TooLarge {
+    pub job: JobSpec,
+    /// The size over which `prior` skipped objects: the new run takes only those.
+    pub over: u64,
+    /// How many it skipped (the report's flag count), and the bytes of those it listed.
+    pub count: u64,
+    pub listed: u64,
+    pub listed_bytes: u64,
+}
+
+/// The `only` argument: `Some(true)` for `"too_large"`, `None` when absent.
+pub(crate) fn only_arg(args: &Value) -> Result<bool> {
+    match args.get("only") {
+        None | Some(Value::Null) => Ok(false),
+        Some(Value::String(s)) if s == "too_large" => Ok(true),
+        Some(_) => Err(bad(
+            "only takes \"too_large\", with continue naming the run",
+        )),
+    }
+}
+
+/// The too-large objects of run `prior`, from its job and report: the run must belong to
+/// `instance`, have ended, and have been live with a size limit.
+pub fn too_large_of(prior: &JobSpec, report: &Value, instance: &str) -> Result<TooLarge> {
+    if prior.instance != instance {
+        return Err(bad(format!(
+            "run `{}` belongs to another instance",
+            prior.run
+        )));
+    }
+    if report.is_null() {
+        return Err(bad(format!(
+            "run `{}` has not finished: pick up its skipped files once it has a report",
+            prior.run
+        )));
+    }
+    let over = match (prior.dry_run, prior.skip_over) {
+        (false, Some(over)) => over,
+        _ => {
+            return Err(bad(format!(
+                "run `{}` skipped nothing for size: only too_large needs a live run that did",
+                prior.run
+            )));
+        }
+    };
+    let count = report["flags"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|f| f[0] == "too_large")
+        .and_then(|f| f[1].as_u64())
+        .unwrap_or(0);
+    let lines = report["too_large"].as_array().cloned().unwrap_or_default();
+    let listed_bytes = lines
+        .iter()
+        .map(|l| l["origin"]["listed_size"].as_u64().unwrap_or(0))
+        .fold(0u64, u64::saturating_add);
+    let listed = lines.len() as u64;
+    if count.max(listed) == 0 {
+        return Err(bad(format!(
+            "run `{}` skipped no objects as too large",
+            prior.run
+        )));
+    }
+    Ok(TooLarge {
+        job: prior.clone(),
+        over,
+        count: count.max(listed),
+        listed,
+        listed_bytes,
+    })
+}
+
+/// Reads run `prior`'s job and report from the instance's Data bucket for [`too_large_of`].
+pub(crate) async fn too_large(
+    account: &pigeon_core::Account,
+    bucket: &str,
+    instance: &str,
+    prior: &str,
+) -> Result<TooLarge> {
+    let bucket = Bucket {
+        name: bucket.to_string(),
+        jurisdiction: None,
+    };
+    let job: JobSpec = match r2::get(account, &bucket, &manifest::job_key(prior)).await? {
+        Some(bytes) => serde_json::from_slice(&bytes)?,
+        None => return Err(bad(format!("run `{prior}` has no job.json"))),
+    };
+    if job.run != prior {
+        return Err(bad(format!("run `{prior}` has another run's job")));
+    }
+    let report: Value = match r2::get(account, &bucket, &manifest::report_key(prior)).await? {
+        Some(bytes) => serde_json::from_slice(&bytes)?,
+        None => Value::Null,
+    };
+    too_large_of(&job, &report, instance)
+}
+
 /// The `max_live_bytes` argument: the live cap for this run (default 10 GB), shown in the
 /// approval the person signs.
 pub(crate) fn live_cap(args: &Value) -> Result<u64> {

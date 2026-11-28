@@ -549,6 +549,8 @@ pub(super) async fn plan(
         resume: continued.as_ref().map(|(_, resume)| resume.clone()),
         skip_over: live.as_ref().and_then(|allowed| allowed.skip_over),
         shard: None,
+        // A continuation of a run that took only large objects takes only those too.
+        only_over: continued.as_ref().and_then(|(prior, _)| prior.only_over),
     };
     if continued
         .as_ref()

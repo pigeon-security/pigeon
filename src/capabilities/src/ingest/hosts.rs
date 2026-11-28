@@ -114,6 +114,7 @@ pub fn job_spec(i: &JobInputs<'_>) -> JobSpec {
         resume: None,
         skip_over: None,
         shard: None,
+        only_over: None,
     }
 }
 

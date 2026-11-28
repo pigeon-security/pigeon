@@ -385,6 +385,11 @@ struct Engine<'r, 'a> {
     last_error: Option<String>,
 }
 
+/// Whether this run passes over an object of `size` bytes unlisted (`job.only_over`).
+fn passed_over(r: &Run<'_>, size: u64) -> bool {
+    r.job.only_over.is_some_and(|min| size <= min)
+}
+
 /// Whether an object of `size` bytes is more than this run writes (`job.skip_over`).
 fn too_large(r: &Run<'_>, size: u64) -> bool {
     r.job.skip_over.is_some_and(|max| size > max)
@@ -1573,6 +1578,7 @@ impl<'r, 'a> Engine<'r, 'a> {
                         queue.extend(page.objects.into_iter().filter(|o| {
                             after.as_deref().is_none_or(|a| o.key.as_str() > a)
                                 && crate::shard::takes(r.job, &o.key)
+                                && !passed_over(r, o.size)
                         }));
                     }
                     // Objects listed before the failure are still finished, as serially.
@@ -1831,6 +1837,7 @@ impl<'r, 'a> Engine<'r, 'a> {
                 }
                 if after.as_deref().is_some_and(|a| obj.key.as_str() <= a)
                     || !crate::shard::takes(r.job, &obj.key)
+                    || passed_over(r, obj.size)
                 {
                     continue;
                 }
@@ -1924,10 +1931,12 @@ pub fn run(run: &Run<'_>) -> Result<Report, Error> {
         Some(bytes) => serde_json::from_slice::<Checkpoint>(&bytes)
             .map_err(|e| Error::Io(format!("checkpoint.json is not readable: {e}")))?,
         // A continuation starts its own manifest at part 0 from the checkpoint it was given.
+        // A fenced resume (an `only_over` run) starts from the beginning.
         None => run
             .job
             .resume
             .as_ref()
+            .filter(|r| !(run.job.only_over.is_some() && crate::manifest::is_fenced(r)))
             .map_or_else(Checkpoint::default, |r| Checkpoint {
                 seq: 0,
                 ..r.checkpoint.clone()

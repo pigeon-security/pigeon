@@ -373,6 +373,7 @@ pub(crate) async fn plan(
                     | "size_bytes"
                     | "objects"
                     | "continue"
+                    | "only"
                     | "max_live_bytes"
                     | "dry_run"
                     | "fingerprints"
@@ -381,7 +382,7 @@ pub(crate) async fn plan(
         })
     }) {
         return Err(bad(
-            "The Backblaze plan takes the approved source, prefix, size, object count, continue, dry-run, fingerprint and shards options.",
+            "The Backblaze plan takes the approved source, prefix, size, object count, continue, only, dry-run, fingerprint and shards options.",
         ));
     }
     let shards = shards_arg(args)?;
@@ -392,6 +393,8 @@ pub(crate) async fn plan(
     let objects_arg = throughput::objects_arg(args)?;
     let linked = cap.checked_link(env, record).await?;
     let store = data_store::store_name(record);
+    let only_large = throughput::only_arg(args)?;
+    let mut picked = None;
     let continued = match args.get("continue").filter(|v| !v.is_null()) {
         Some(prior) => {
             let prior = prior
@@ -399,19 +402,48 @@ pub(crate) async fn plan(
                 .filter(|run| container_job::valid_run(run))
                 .ok_or_else(|| bad("continue must be a Backblaze run id"))?;
             if let Some(parts) = shard_runs(env, &record.id, prior).await? {
-                return Err(bad(format!(
-                    "run `{prior}` was split into {} shards; continue each one that did not finish ({})",
-                    parts.len(),
-                    parts.join(", ")
-                )));
+                return Err(bad(if only_large {
+                    format!(
+                        "run `{prior}` was split into {} shards; name one shard ({}): the \
+                         pick-up takes every too-large object of the whole prefix",
+                        parts.len(),
+                        parts.join(", ")
+                    )
+                } else {
+                    format!(
+                        "run `{prior}` was split into {} shards; continue each one that did not finish ({})",
+                        parts.len(),
+                        parts.join(", ")
+                    )
+                }));
             }
-            let continued = throughput::continuation(&linked, &store, &record.id, prior).await?;
-            if continued.0.shard.is_some() && shards > 1 {
-                return Err(bad(
-                    "a continued shard keeps its own keys; it cannot be split again",
-                ));
+            if only_large {
+                // A new run from the beginning taking only what `prior` skipped as too large,
+                // behind a fenced resume (docs/plans/multipart-enable.md). It covers the whole
+                // prefix, so it is never a shard and is not split.
+                if shards > 1 {
+                    return Err(bad("a too-large pick-up is one run; it is not split"));
+                }
+                let found = throughput::too_large(&linked, &store, &record.id, prior).await?;
+                let mut job = found.job.clone();
+                job.shard = None;
+                picked = Some(found);
+                Some((job, pigeon_ingest::manifest::fenced(prior)))
+            } else {
+                let continued =
+                    throughput::continuation(&linked, &store, &record.id, prior).await?;
+                if continued.0.shard.is_some() && shards > 1 {
+                    return Err(bad(
+                        "a continued shard keeps its own keys; it cannot be split again",
+                    ));
+                }
+                Some(continued)
             }
-            Some(continued)
+        }
+        None if only_large => {
+            return Err(bad(
+                "only \"too_large\" picks up a run's skipped files: pass continue: <that run>",
+            ));
         }
         None => None,
     };
@@ -474,8 +506,21 @@ pub(crate) async fn plan(
     if expected.is_some_and(|total| total < bytes) {
         return Err(bad("size_bytes is below the sampled source size"));
     }
-    let (total, objects, extrapolated) =
-        estimate::totals(count, bytes, listing.next.is_some(), expected, objects_arg);
+    let (total, objects, extrapolated) = match &picked {
+        // Only the skipped objects are read: their count from the report, their bytes from
+        // size_bytes or the listed ones scaled to the count.
+        Some(p) => (
+            expected.unwrap_or_else(|| {
+                p.listed_bytes
+                    .saturating_mul(p.count)
+                    .checked_div(p.listed)
+                    .unwrap_or(p.listed_bytes)
+            }),
+            p.count,
+            p.listed < p.count,
+        ),
+        None => estimate::totals(count, bytes, listing.next.is_some(), expected, objects_arg),
+    };
     let measured = throughput::measured(env, &linked, &store, &record.id, "cloudflare").await;
     let mut estimate =
         throughput::plan_estimate(Host::Cloudflare, total, objects, extrapolated, measured);
@@ -502,7 +547,24 @@ pub(crate) async fn plan(
                 ));
             }
         };
-        match throughput::live(args, dry_run, &listing, target.multipart)? {
+        let guarded = match &picked {
+            Some(_) if !target.multipart => Err(
+                "Large-file uploads are not ready on this Data Worker: bind the multipart \
+                 publisher and pass data_ingest_multipart_check first."
+                    .to_string(),
+            ),
+            Some(p) => pigeon_ingest::managed_destination::live_guard(
+                dry_run,
+                false,
+                Some(total),
+                total,
+                p.over.saturating_add(1),
+                true,
+                throughput::live_cap(args)?,
+            ),
+            None => throughput::live(args, dry_run, &listing, target.multipart)?,
+        };
+        match guarded {
             Ok(allowed) => live = Some(allowed),
             Err(why) => return Ok(unready(vec![why], to_value(&estimate), sampled)),
         }
@@ -578,8 +640,18 @@ pub(crate) async fn plan(
             resolved.execution.audit_bucket
         ),
     ];
-    if let Some((_, resume)) = &continued {
-        lines.insert(0, throughput::continue_line(resume));
+    match (&picked, &continued) {
+        (Some(p), _) => lines.insert(
+            0,
+            format!(
+                "Pick up the {} objects over {} bytes that run {} skipped (too_large): list the \
+                 prefix from the start and pass over every smaller object unread. A runner \
+                 image that predates this lists nothing and stops (its resume is fenced).",
+                p.count, p.over, p.job.run
+            ),
+        ),
+        (None, Some((_, resume))) => lines.insert(0, throughput::continue_line(resume)),
+        (None, None) => {}
     }
     lines.push(throughput::time_line(&estimate));
     if let Some(allowed) = &live {
@@ -609,6 +681,11 @@ pub(crate) async fn plan(
         threads: throughput::CLOUDFLARE_THREADS,
         commit: resolved.revision,
         max_minutes: Some(max_minutes),
+        // Only what the prior run skipped, or (continuing such a run) only that again.
+        only_over: picked
+            .as_ref()
+            .map(|p| p.over)
+            .or_else(|| continued.as_ref().and_then(|(prior, _)| prior.only_over)),
         resume: continued.map(|(_, resume)| resume),
         skip_over: live.and_then(|allowed| allowed.skip_over),
         shard: kept_shard,
