@@ -18,6 +18,7 @@ use crate::{
 pub const LIST: &str = "data_ingest_connections";
 pub const VERIFY: &str = "data_ingest_connection_verify";
 pub const SET_KEY: &str = "data-ingest-connection-key-set";
+pub(crate) const RESEAL: &str = "data-ingest.bucket.reseal";
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "provider", rename_all = "lowercase")]
@@ -128,8 +129,65 @@ pub(crate) fn key(instance: &str, name: &str) -> String {
     format!("data-ingest-bucket:{instance}:{name}")
 }
 
-pub(crate) fn scope(record: &Instance, name: &str) -> Result<String> {
+/// What a saved key may reach: provider, owner (DigitalOcean team or Scaleway project), region,
+/// bucket and prefix. The Backblaze runner `runtime` and provenance `name` are not access scope.
+struct Access<'a> {
+    provider: &'static str,
+    owner: Option<&'a str>,
+    region: &'a String,
+    bucket: &'a String,
+    prefix: &'a String,
+}
+
+fn access<'a>(record: &'a Instance, name: &str) -> Result<Access<'a>> {
     let binding = binding(record, name)?;
+    let (owner, region, bucket, prefix) = match binding {
+        Binding::DigitalOcean(source) => (
+            Some(
+                crate::digitalocean::team(record)
+                    .ok_or_else(|| super::bad("Approve a DigitalOcean team first."))?,
+            ),
+            &source.region,
+            &source.bucket,
+            &source.prefix,
+        ),
+        Binding::Backblaze(source) => (None, &source.region, &source.bucket, &source.prefix),
+        Binding::Scaleway(source) => (
+            Some(source.project.as_str()),
+            &source.region,
+            &source.bucket,
+            &source.prefix,
+        ),
+    };
+    Ok(Access {
+        provider: binding.provider(),
+        owner,
+        region,
+        bucket,
+        prefix,
+    })
+}
+
+/// The access-scope fingerprint a saved key is sealed to (its AES-GCM associated data). It covers
+/// the instance, its account, the connection name and the access fields only, so re-pinning the
+/// runner image keeps the key. See `docs/plans/ingest-key-scope.md`.
+pub fn scope(record: &Instance, name: &str) -> Result<String> {
+    let access = access(record, name)?;
+    Ok(oauth::hash(&serde_json::to_string(&(
+        "data-ingest-bucket-v2",
+        &record.id,
+        &record.account,
+        name,
+        access.provider,
+        access.owner,
+        access.region,
+        access.bucket,
+        access.prefix,
+    ))?))
+}
+
+/// The retired fingerprint over the whole binding, runtime included.
+fn scope_v1(record: &Instance, name: &str, binding: &Binding) -> Result<String> {
     let team = if matches!(binding, Binding::DigitalOcean(_)) {
         Some(
             crate::digitalocean::team(record)
@@ -146,6 +204,46 @@ pub(crate) fn scope(record: &Instance, name: &str) -> Result<String> {
         binding,
         team,
     ))?))
+}
+
+/// The v1 fingerprints that name this connection's current access scope: its binding as it is
+/// and, for Backblaze, the same binding without a runner pin. A key sealed under some other
+/// runtime cannot be recognised and must be set again.
+fn legacy_scopes(record: &Instance, name: &str) -> Result<Vec<String>> {
+    let binding = binding(record, name)?;
+    let mut scopes = vec![scope_v1(record, name, binding)?];
+    if let Binding::Backblaze(source) = binding
+        && source.runtime.is_some()
+    {
+        let mut bare = source.clone();
+        bare.runtime = None;
+        scopes.push(scope_v1(record, name, &Binding::Backblaze(bare))?);
+    }
+    Ok(scopes)
+}
+
+/// How a saved key's sealed scope relates to the connection's current access scope.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Sealed {
+    /// Sealed to the current access scope.
+    Current,
+    /// Sealed under v1 to this same access scope: open it with its old scope, then re-seal.
+    Legacy,
+    /// Sealed to some other scope: the key must be set again.
+    Changed,
+}
+
+pub fn sealed(record: &Instance, name: &str, saved_scope: &str) -> Result<Sealed> {
+    Ok(if scope(record, name)? == saved_scope {
+        Sealed::Current
+    } else if legacy_scopes(record, name)?
+        .iter()
+        .any(|legacy| legacy == saved_scope)
+    {
+        Sealed::Legacy
+    } else {
+        Sealed::Changed
+    })
 }
 
 fn owning_account(record: &Instance) -> Option<&str> {
@@ -177,25 +275,13 @@ fn owned_binding(record: &Instance, name: &str) -> Result<Option<Bound>> {
     let account = owning_account(record)
         .filter(|_| valid_generation(generation))
         .ok_or_else(|| super::bad("The owning-account source reference is invalid."))?;
-    let binding = binding(record, name)?;
-    let (owner, region, bucket, prefix) = match binding {
-        Binding::DigitalOcean(source) => (
-            Some(
-                crate::digitalocean::team(record)
-                    .ok_or_else(|| super::bad("Approve a DigitalOcean team first."))?,
-            ),
-            &source.region,
-            &source.bucket,
-            &source.prefix,
-        ),
-        Binding::Backblaze(source) => (None, &source.region, &source.bucket, &source.prefix),
-        Binding::Scaleway(source) => (
-            Some(source.project.as_str()),
-            &source.region,
-            &source.bucket,
-            &source.prefix,
-        ),
-    };
+    let Access {
+        provider,
+        owner,
+        region,
+        bucket,
+        prefix,
+    } = access(record, name)?;
     let reference = Pin {
         name: name.into(),
         scope: oauth::hash(&serde_json::to_string(&(
@@ -203,7 +289,7 @@ fn owned_binding(record: &Instance, name: &str) -> Result<Option<Bound>> {
             &record.id,
             account,
             name,
-            binding.provider(),
+            provider,
             owner,
             region,
             bucket,
@@ -215,7 +301,7 @@ fn owned_binding(record: &Instance, name: &str) -> Result<Option<Bound>> {
     Ok(Some(Bound {
         reference,
         slot,
-        provider: binding.provider().into(),
+        provider: provider.into(),
         owner: owner.map(str::to_owned),
         region: region.clone(),
         bucket: bucket.clone(),
@@ -367,8 +453,50 @@ async fn saved(env: &Env, instance: &str, name: &str) -> Result<Option<Saved>> {
         .transpose()
 }
 
-/// A named Spaces scope may use the existing sealed key only if the previously approved
-/// DigitalOcean binding matches it exactly. The approval still pins the old ciphertext generation.
+async fn unseal(sealing: &[u8], saved: &Saved) -> Result<String> {
+    let plaintext = crypto::open(sealing, &saved.sealed, saved.scope.as_bytes())
+        .await
+        .map_err(|_| super::bad("The saved bucket credential could not be opened."))?;
+    String::from_utf8(plaintext).map_err(|_| super::bad("The saved bucket credential is invalid."))
+}
+
+/// Re-seal a key saved under the v1 whole-binding scope to the access scope it was already bound
+/// to. The plaintext is unchanged; the Directory swaps it in only if the instance version and the
+/// ciphertext generation are still the ones opened here and the old scope is still a v1 scope of
+/// the same access scope. Returns the new saved key.
+async fn reseal(
+    env: &Env,
+    record: &Instance,
+    name: &str,
+    sealing: &[u8],
+    legacy: &Saved,
+    pair: &str,
+) -> Result<Saved> {
+    let scope = scope(record, name)?;
+    let sealed = crypto::seal(sealing, pair.as_bytes(), scope.as_bytes()).await?;
+    let next = Saved { scope, sealed };
+    let updated = directory(
+        env,
+        RESEAL,
+        json!({
+            "target": {"instance": record.id, "name": name, "version": record.version,
+                "generation": generation(legacy)},
+            "value": serde_json::to_string(&next)?,
+        }),
+    )
+    .await?;
+    if updated != true {
+        return Err(super::bad(
+            "The saved bucket credential changed while it was re-sealed. Try again.",
+        ));
+    }
+    Ok(next)
+}
+
+/// The saved key of a named connection, opened under its access scope. A key sealed under the
+/// v1 scope of this same access scope is re-sealed on first use, which changes its generation, so
+/// plans pinned to the old generation must be made again. A named Spaces scope without a saved key
+/// may use the legacy instance-wide Spaces key only if the approved binding matches it exactly.
 pub async fn open(env: &Env, record: &Instance, name: &str) -> Result<(Pin, s3::Keys)> {
     if owned_reference(record, name)?.is_some() {
         return Err(super::bad(
@@ -378,20 +506,25 @@ pub async fn open(env: &Env, record: &Instance, name: &str) -> Result<(Pin, s3::
     let binding = binding(record, name)?;
     let scope = scope(record, name)?;
     let (generation, keys) = match saved(env, &record.id, name).await? {
-        Some(saved) if saved.scope == scope => {
-            let sealing = crate::linked::sealing_key(env).await?;
-            let plaintext = crypto::open(&sealing, &saved.sealed, scope.as_bytes())
-                .await
-                .map_err(|_| super::bad("The saved bucket credential could not be opened."))?;
-            let pair = std::str::from_utf8(&plaintext)
-                .map_err(|_| super::bad("The saved bucket credential is invalid."))?;
-            (generation(&saved), s3::parse_keys(pair)?)
-        }
-        Some(_) => {
-            return Err(super::bad(
-                "Replace the saved credential for the newly approved bucket scope.",
-            ));
-        }
+        Some(saved) => match sealed(record, name, &saved.scope)? {
+            Sealed::Current => {
+                let sealing = crate::linked::sealing_key(env).await?;
+                let pair = unseal(&sealing, &saved).await?;
+                (generation(&saved), s3::parse_keys(&pair)?)
+            }
+            Sealed::Legacy => {
+                let sealing = crate::linked::sealing_key(env).await?;
+                let pair = unseal(&sealing, &saved).await?;
+                let keys = s3::parse_keys(&pair)?;
+                let next = reseal(env, record, name, &sealing, &saved, &pair).await?;
+                (generation(&next), keys)
+            }
+            Sealed::Changed => {
+                return Err(super::bad(
+                    "Replace the saved credential for the newly approved bucket scope.",
+                ));
+            }
+        },
         None => {
             let Binding::DigitalOcean(binding) = binding else {
                 return Err(super::bad(
@@ -415,9 +548,16 @@ pub async fn open(env: &Env, record: &Instance, name: &str) -> Result<(Pin, s3::
     ))
 }
 
+/// The key a plan or approval pinned, only while its scope and generation are unchanged. A pin
+/// taken before the key was re-sealed to its access scope is refused: the plan is made again.
 pub async fn open_pinned(env: &Env, record: &Instance, pin: &Pin) -> Result<s3::Keys> {
     let (current, keys) = open(env, record, &pin.name).await?;
     if &current != pin {
+        if legacy_scopes(record, &pin.name)?.contains(&pin.scope) {
+            return Err(super::bad(
+                "The saved bucket credential was re-sealed to its access scope after this plan. Make a new ingest plan.",
+            ));
+        }
         return Err(super::bad(
             "The bucket scope or credential changed. Make a new ingest plan.",
         ));
@@ -526,11 +666,14 @@ pub(super) async fn listings(env: &Env, record: &Instance) -> Result<Value> {
             }));
             continue;
         }
-        let current_scope = scope(record, name)?;
         let stored = saved(env, &record.id, name).await?;
         let state = match &stored {
-            Some(saved) if saved.scope == current_scope => "configured",
-            Some(_) => "scope_changed",
+            Some(saved) => match sealed(record, name, &saved.scope)? {
+                Sealed::Current => "configured",
+                // Opens as is; re-sealed to its access scope on first use.
+                Sealed::Legacy => "configured",
+                Sealed::Changed => "scope_changed",
+            },
             None if matches!(binding, Binding::DigitalOcean(b) if crate::digitalocean::spaces::legacy_generation(record, env, b).await?.is_some()) => {
                 "legacy_spaces_key"
             }
@@ -538,6 +681,7 @@ pub(super) async fn listings(env: &Env, record: &Instance) -> Result<Value> {
         };
         result.push(json!({
             "name": name, "binding": binding, "state": state, "generation": stored.as_ref().map(generation),
+            "reseal_pending": stored.as_ref().is_some_and(|saved| sealed(record, name, &saved.scope).ok() == Some(Sealed::Legacy)),
         }));
     }
     Ok(json!({"instance": record.id, "version": record.version, "connections": result}))

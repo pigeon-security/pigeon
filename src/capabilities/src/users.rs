@@ -1720,7 +1720,7 @@ impl Directory {
                 }
                 json!(matches)
             }
-            "data-ingest.bucket.put" => {
+            "data-ingest.bucket.put" | crate::ingest::connections::RESEAL => {
                 use crate::ingest::connections as buckets;
                 let target = &a["target"];
                 let instance = target["instance"].as_str().unwrap_or_default();
@@ -1746,6 +1746,15 @@ impl Directory {
                     .transpose()?;
                 if previous.as_ref().map(buckets::generation).as_deref()
                     != target["generation"].as_str()
+                {
+                    return Ok(json!(false));
+                }
+                // A re-seal only moves a v1 key of this same access scope to its v2 scope.
+                if op == buckets::RESEAL
+                    && !previous.is_some_and(|saved| {
+                        buckets::sealed(&record, name, &saved.scope).ok()
+                            == Some(buckets::Sealed::Legacy)
+                    })
                 {
                     return Ok(json!(false));
                 }

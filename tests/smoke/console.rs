@@ -2386,6 +2386,145 @@ fn data_ingest_named_buckets_keep_scopes_and_credentials_separate() {
 }
 
 #[test]
+fn data_ingest_bucket_key_scope_covers_access_only_and_migrates_v1_keys() {
+    use pigeon_capabilities::{
+        ingest::connections::{self, Sealed},
+        instances::record::Instance,
+    };
+
+    let runtime = |digest: char, revision: char| {
+        json!({
+            "image": format!(
+                "registry.cloudflare.com/{}/pigeon-ingest-runner@sha256:{}",
+                "a".repeat(32),
+                digest.to_string().repeat(64)
+            ),
+            "revision": revision.to_string().repeat(40),
+        })
+    };
+    let base = json!({
+        "id": "test", "title": "Test", "version": 4,
+        "account": { "kind": "linked", "account_id": "a".repeat(32) },
+        "data": { "ingest": { "connections": {
+            "b2": {"provider":"backblaze","name":"b2","region":"us-west-004",
+                "bucket":"source-bucket","prefix":"txt/","runtime": runtime('b', '4')},
+            "scw": {"provider":"scaleway","project":"12345678-1234-1234-1234-123456789abc",
+                "region":"fr-par","bucket":"source-bucket","prefix":"txt/"}
+        }}}
+    });
+    let with = |edit: &dyn Fn(&mut Value)| -> Instance {
+        let mut value = base.clone();
+        edit(&mut value);
+        serde_json::from_value(value).unwrap()
+    };
+    // The retired v1 fingerprint: the whole binding, runtime included.
+    let v1 = |record: &Instance, name: &str| {
+        hash(
+            &serde_json::to_string(&(
+                "data-ingest-bucket-v1",
+                &record.id,
+                &record.account,
+                name,
+                connections::binding(record, name).unwrap(),
+                None::<&str>,
+            ))
+            .unwrap(),
+        )
+    };
+    let b2 = |edit: &'static str, value: Value| {
+        with(&move |record: &mut Value| {
+            record["data"]["ingest"]["connections"]["b2"][edit] = value.clone()
+        })
+    };
+    let record = with(&|_| {});
+    let scope = connections::scope(&record, "b2").unwrap();
+    assert_ne!(scope, connections::scope(&record, "scw").unwrap());
+
+    // Re-pinning or removing the runner image, or renaming the provenance label, keeps the key.
+    let repinned = b2("runtime", runtime('f', '9'));
+    let unpinned = with(&|r| {
+        r["data"]["ingest"]["connections"]["b2"]
+            .as_object_mut()
+            .unwrap()
+            .remove("runtime");
+    });
+    for same in [&repinned, &unpinned, &b2("name", json!("renamed"))] {
+        assert_eq!(connections::scope(same, "b2").unwrap(), scope);
+        assert_eq!(
+            connections::sealed(same, "b2", &scope).unwrap(),
+            Sealed::Current
+        );
+    }
+
+    // Anything that changes what the key may reach invalidates it.
+    let moved = [
+        b2("bucket", json!("other-bucket")),
+        b2("prefix", json!("txt/private/")),
+        b2("prefix", json!("")),
+        b2("region", json!("eu-central-003")),
+        with(&|r| r["account"]["account_id"] = json!("c".repeat(32))),
+        with(&|r| r["id"] = json!("other")),
+        with(&|r| {
+            let scaleway = r["data"]["ingest"]["connections"]["scw"].clone();
+            r["data"]["ingest"]["connections"]["b2"] = scaleway;
+        }),
+    ];
+    for other in &moved {
+        assert_ne!(connections::scope(other, "b2").unwrap(), scope);
+        assert_eq!(
+            connections::sealed(other, "b2", &scope).unwrap(),
+            Sealed::Changed
+        );
+        // A v1 key sealed for a different access scope is never migrated.
+        assert_eq!(
+            connections::sealed(&record, "b2", &v1(other, "b2")).unwrap(),
+            Sealed::Changed
+        );
+    }
+    let other_project = with(&|r| {
+        r["data"]["ingest"]["connections"]["scw"]["project"] =
+            json!("87654321-1234-1234-1234-123456789abc")
+    });
+    assert_ne!(
+        connections::scope(&other_project, "scw").unwrap(),
+        connections::scope(&record, "scw").unwrap()
+    );
+
+    // A v1 key saved under the current runtime (or before any runtime pin) migrates.
+    assert_eq!(
+        connections::sealed(&record, "b2", &v1(&record, "b2")).unwrap(),
+        Sealed::Legacy
+    );
+    assert_eq!(
+        connections::sealed(&record, "b2", &v1(&unpinned, "b2")).unwrap(),
+        Sealed::Legacy
+    );
+    assert_eq!(
+        connections::sealed(&unpinned, "b2", &v1(&unpinned, "b2")).unwrap(),
+        Sealed::Legacy
+    );
+    assert_eq!(
+        connections::sealed(&record, "scw", &v1(&record, "scw")).unwrap(),
+        Sealed::Legacy
+    );
+    // A v1 key saved under some other runtime cannot be recognised, nor a v1 key of another
+    // connection name.
+    assert_eq!(
+        connections::sealed(&record, "b2", &v1(&repinned, "b2")).unwrap(),
+        Sealed::Changed
+    );
+    assert_eq!(
+        connections::sealed(&record, "scw", &v1(&record, "b2")).unwrap(),
+        Sealed::Changed
+    );
+    // Once migrated, the v2 scope survives the re-pin that would have broken a v1 key.
+    assert_eq!(
+        connections::sealed(&repinned, "b2", &scope).unwrap(),
+        Sealed::Current
+    );
+}
+
+#[test]
 fn data_ingest_scope_requires_data_and_uses_the_approved_spaces_prefix() {
     use pigeon_capabilities::{catalogue, ingest, instances::tools::Scope};
 

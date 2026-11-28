@@ -17,7 +17,9 @@ Directory and never appears in the instance record, tool result or ingest approv
 
 A connection pin identifies the approved account and bucket scope plus the exact
 credential generation. Changing the scope or rotating the key invalidates a previous
-pin. A named Spaces connection can reuse the old sealed Spaces key when both approved
+pin. The scope is the access scope only (provider, team or project, region, bucket,
+prefix): re-pinning a Backblaze runner image keeps the key. See
+[ingest-key-scope.md](ingest-key-scope.md). A named Spaces connection can reuse the old sealed Spaces key when both approved
 bindings match exactly. Setting a dedicated key for the named connection takes over
 from that fallback.
 
