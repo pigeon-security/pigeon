@@ -13,6 +13,7 @@ pub mod backblaze;
 pub mod connections;
 pub mod digitalocean;
 pub mod hosts;
+mod managed_destination;
 pub mod net;
 pub mod scaleway;
 pub mod scaleway_source;
@@ -506,18 +507,45 @@ impl Ingest {
                 Value::Null,
             ));
         };
-        if let Some(value) = args.get("connection") {
-            let name = value
-                .as_str()
-                .filter(|name| connections::valid_name(name))
-                .ok_or_else(|| bad("Name an approved bucket connection."))?;
-            return connections::preflight(env, &record, name, args).await;
-        }
+        let connection = args
+            .get("connection")
+            .map(|value| {
+                value
+                    .as_str()
+                    .filter(|name| connections::valid_name(name))
+                    .ok_or_else(|| bad("Name an approved bucket connection."))
+            })
+            .transpose()?;
+        let named_scaleway = match connection {
+            Some(name) if record.capabilities.contains_key(NAME) => {
+                let binding = connections::binding(&record, name)?;
+                if args.get("bucket").is_some()
+                    || args
+                        .get("source")
+                        .is_some_and(|source| source.as_str() != Some(binding.provider()))
+                {
+                    return Err(bad(
+                        "The approved connection fixes the provider and bucket.",
+                    ));
+                }
+                match binding {
+                    connections::Binding::Scaleway(config) => Some(config),
+                    connections::Binding::DigitalOcean(_) => {
+                        return digitalocean::plan(cx, self.host_name(), &record, args).await;
+                    }
+                    connections::Binding::Backblaze(_) => {
+                        return backblaze::plan(self, cx, &record, args).await;
+                    }
+                }
+            }
+            Some(_) => return Err(bad("enable Data Ingest before using a named connection")),
+            None => None,
+        };
         let managed = if record.capabilities.contains_key(NAME) {
-            if args["source"] == "backblaze" {
+            if named_scaleway.is_none() && args["source"] == "backblaze" {
                 return backblaze::plan(self, cx, &record, args).await;
             }
-            if args["source"] != "scaleway" {
+            if named_scaleway.is_none() && args["source"] != "scaleway" {
                 return digitalocean::plan(cx, self.host_name(), &record, args).await;
             }
             if !data_enabled(&record) {
@@ -542,7 +570,7 @@ impl Ingest {
                     Value::Null,
                 ));
             }
-            let Some(config) = scaleway_source::binding(&record) else {
+            let Some(config) = named_scaleway.or_else(|| scaleway_source::binding(&record)) else {
                 return Ok(unready(
                     vec!["Approve this instance's Scaleway source binding first.".into()],
                     Value::Null,
@@ -591,6 +619,9 @@ impl Ingest {
             flag("keep_archives", true),
             flag("fingerprints", false),
         );
+        if connection.is_some() && !keep_archives {
+            return Err(bad("A named Scaleway run must retain archive containers."));
+        }
         let mut missing = Vec::new();
 
         // The source account and its keys.
@@ -614,16 +645,27 @@ impl Ingest {
             }
         };
         let mut source_keys = None;
+        let mut source_pin = None;
         if let Some(a) = account {
-            let source_slot =
-                managed.map_or_else(|| a.binding(), |_| scaleway_source::source_slot(instance));
-            match secret_value(env, &source_slot).await {
+            if let Some(name) = connection {
+                match connections::open(env, &record, name).await {
+                    Ok((pin, keys)) => {
+                        source_pin = Some(pin);
+                        source_keys = Some(keys);
+                    }
+                    Err(error) => missing.push(error.to_string()),
+                }
+            } else {
+                let source_slot =
+                    managed.map_or_else(|| a.binding(), |_| scaleway_source::source_slot(instance));
+                match secret_value(env, &source_slot).await {
                 Some(v) => source_keys = s3::parse_keys(&v).ok(),
                 None => missing.push(format!(
                     "Secret `{}` is not bound. Create a read-only key on {}'s console, set it on the app's Access page (Credentials), then ask an agent to bind it in src/platform/wrangler.toml.",
                     source_slot,
                     a.provider.slug()
                 )),
+            }
             }
             if let Some(slot) = managed
                 .map(|_| scaleway_source::compute_slot(instance))
@@ -645,7 +687,7 @@ impl Ingest {
                 ));
             }
         }
-        if secret_value(env, &hosts::r2_slot(instance)).await.is_none() {
+        if connection.is_none() && secret_value(env, &hosts::r2_slot(instance)).await.is_none() {
             missing.push(format!(
                 "Secret `{}` is not bound. In {}'s Cloudflare dashboard make an R2 API token for bucket `{}` only, Object Read & Write, set it on the app's Access page (Credentials), then ask an agent to bind it.",
                 hosts::r2_slot(instance),
@@ -684,16 +726,36 @@ impl Ingest {
                 Ok(mut res) => {
                     let listing = s3::parse_list_objects(&res.text().await?)?;
                     let count = listing.objects.len() as u64;
-                    let bytes: u64 = listing.objects.iter().map(|o| o.size).sum();
+                    let bytes = listing.objects.iter().try_fold(0_u64, |sum, object| {
+                        sum.checked_add(object.size)
+                            .ok_or_else(|| bad("source byte count overflow"))
+                    })?;
+                    let largest = listing
+                        .objects
+                        .iter()
+                        .map(|object| object.size)
+                        .max()
+                        .unwrap_or(0);
                     let more = listing.next.is_some();
                     let (total_bytes, total_objects) = match args["size_bytes"].as_u64() {
-                        Some(t) if count > 0 => (t, t * count / bytes.max(1)),
+                        Some(t) if connection.is_none() && count > 0 => {
+                            (t, t.saturating_mul(count) / bytes.max(1))
+                        }
+                        _ if connection.is_some() => (bytes, count),
                         Some(t) => (t, 0),
                         None => (bytes, count),
                     };
+                    if connection.is_some()
+                        && !dry_run
+                        && (more || largest > pigeon_ingest::managed_destination::MAX_BLOB)
+                    {
+                        missing.push("Use a dedicated prefix with at most one page of source objects, each at most 16 MiB, for a managed Scaleway run.".into());
+                    }
                     sample = json!({
                         "objects": count, "bytes": bytes, "first_page_only": more,
-                        "note": if more && args["size_bytes"].is_null() {
+                        "note": if more && connection.is_some() {
+                            "Only the first page was listed, so the estimate and budget use that page."
+                        } else if more && args["size_bytes"].is_null() {
                             "Only the first page was listed, so the estimate covers that page. Pass `size_bytes` (the whole size) for a whole-run estimate."
                         } else { "" },
                     });
@@ -779,7 +841,19 @@ impl Ingest {
                 Err(error) => return Ok(unready(vec![error.to_string()], est, sample)),
             }
         }
-        let request = hosts::host_request(host, &job, &a.region);
+        let request = if let Some(pin) = source_pin {
+            let destination = match managed_destination::ready(env, &record).await {
+                Ok(binding) => binding,
+                Err(error) => return Ok(unready(vec![error.to_string()], est, sample)),
+            };
+            let estimate: estimate::Estimate = serde_json::from_value(est.clone())?;
+            execution["connection"] = to_value(&pin);
+            execution["managed_destination"] =
+                to_value(destination.review(estimate.bytes, estimate.objects, dry_run));
+            hosts::scaleway_managed_host_request(&job, &a.region)
+        } else {
+            hosts::host_request(host, &job, &a.region)
+        };
         let bucket_here = r2::bucket_exists(
             &linked,
             &Bucket {
@@ -838,6 +912,12 @@ impl Ingest {
         } else {
             "Real run: files R2 does not hold are copied into the bucket.".to_string()
         });
+        if let Some(review) = execution.get("managed_destination") {
+            lines.push(format!(
+                "Use a Data Worker run grant limited to {} write bytes, {} write attempts and 16 MiB per atomic payload.",
+                review["max_bytes"], review["max_objects"]
+            ));
+        }
         let mut payload = hosts::approval_payload(&job, &request);
         payload["execution"] = execution.clone();
         let kind = pigeon_core::approval::Kind::Other(KIND.into());
@@ -914,14 +994,41 @@ impl Ingest {
             .await?
             .ok_or_else(|| bad("the approved ingest instance no longer exists"))?;
         let source_args = json!({ "source": source_id, "bucket": source_bucket, "prefix": prefix });
-        let managed = if got["payload"]["execution"].get("scaleway_source").is_some() {
+        let approved_execution = &got["payload"]["execution"];
+        let named_destination = match (
+            approved_execution.get("connection"),
+            approved_execution.get("managed_destination"),
+        ) {
+            (Some(pin), Some(review)) if approved_execution.get("scaleway_source").is_some() => {
+                let pin: connections::Pin = serde_json::from_value(pin.clone())?;
+                let review: managed_destination::Reviewed = serde_json::from_value(review.clone())?;
+                Some((pin, review))
+            }
+            (None, None) => None,
+            _ => {
+                return Err(bad(
+                    "the Scaleway approval has incomplete managed bindings; plan again",
+                ));
+            }
+        };
+        let managed = if approved_execution.get("scaleway_source").is_some() {
             if !data_enabled(&record) {
                 return Err(bad("Data Ingest or Data has been disabled; plan again"));
             }
-            Some(
+            let config = if let Some((pin, _)) = named_destination.as_ref() {
+                let connections::Binding::Scaleway(config) =
+                    connections::binding(&record, &pin.name)?
+                else {
+                    return Err(bad(
+                        "the approved connection is no longer a Scaleway source; plan again",
+                    ));
+                };
+                config
+            } else {
                 scaleway_source::binding(&record)
-                    .ok_or_else(|| bad("the approved Scaleway source was removed; plan again"))?,
-            )
+                    .ok_or_else(|| bad("the approved Scaleway source was removed; plan again"))?
+            };
+            Some(config)
         } else {
             None
         };
@@ -949,15 +1056,26 @@ impl Ingest {
             || account.binding(),
             |_| scaleway_source::source_slot(&record.id),
         );
-        let source_keys = secret_value(env, &source_slot)
-            .await
-            .ok_or_else(|| unbound(&source_slot))?;
-        s3::parse_keys(&source_keys)?;
-        let r2_slot = hosts::r2_slot(&job.instance);
-        let dest_keys = secret_value(env, &r2_slot)
-            .await
-            .ok_or_else(|| unbound(&r2_slot))?;
-        s3::parse_keys(&dest_keys)?;
+        let source_keys = if let Some((pin, _)) = named_destination.as_ref() {
+            let keys = connections::open_pinned(env, &record, pin).await?;
+            format!("{}:{}", keys.access_key_id, keys.secret_access_key)
+        } else {
+            let keys = secret_value(env, &source_slot)
+                .await
+                .ok_or_else(|| unbound(&source_slot))?;
+            s3::parse_keys(&keys)?;
+            keys
+        };
+        let dest_keys = if named_destination.is_none() {
+            let r2_slot = hosts::r2_slot(&job.instance);
+            let keys = secret_value(env, &r2_slot)
+                .await
+                .ok_or_else(|| unbound(&r2_slot))?;
+            s3::parse_keys(&keys)?;
+            keys
+        } else {
+            String::new()
+        };
         let compute_slot = managed
             .map(|_| scaleway_source::compute_slot(&record.id))
             .or_else(|| hosts::host_slot(account));
@@ -981,7 +1099,23 @@ impl Ingest {
             None
         };
         // Rebuild what was approved; the digest must still match.
-        let request = hosts::host_request(host, &job, region);
+        let started_ms = now_ms();
+        let destination = if let Some((_, review)) = named_destination.as_ref() {
+            let binding = managed_destination::ready(env, &record).await?;
+            Some(serde_json::to_string(&binding.issue(
+                &job,
+                started_ms,
+                started_ms + scaleway::MAX_RUN,
+                review,
+            )?)?)
+        } else {
+            None
+        };
+        let request = if destination.is_some() {
+            hosts::scaleway_managed_host_request(&job, region)
+        } else {
+            hosts::host_request(host, &job, region)
+        };
         let kind = pigeon_core::approval::Kind::Other(KIND.into());
         let mut execution = execution_binding(
             host,
@@ -1017,6 +1151,10 @@ impl Ingest {
         } else {
             None
         };
+        if let Some((pin, review)) = named_destination {
+            execution["connection"] = to_value(&pin);
+            execution["managed_destination"] = to_value(&review);
+        }
         let mut payload = hosts::approval_payload(&job, &request);
         // Earlier DigitalOcean plans already named their fixed API destination. Other
         // providers need a new plan if they did not record their configurable target.
@@ -1075,7 +1213,7 @@ impl Ingest {
             approval: approval_id.to_string(),
             commit: job.commit.clone(),
             dry_run: job.dry_run,
-            started_ms: now_ms(),
+            started_ms,
         };
         let mut runs = runs_of(env, &job.instance).await?;
         runs.push(job.run.clone());
@@ -1122,13 +1260,13 @@ impl Ingest {
                     let scratch = resources.scratch_volume.as_deref().ok_or_else(|| {
                         bad("Scaleway did not confirm the approved scratch volume")
                     })?;
-                    net::scw_user_data(
-                        &secret,
-                        &zone,
-                        &resources.server,
-                        &hosts::scaleway_cloud_init(&job, scratch, &source_keys, &dest_keys),
-                    )
-                    .await?;
+                    let bootstrap = match destination.as_deref() {
+                        Some(grant) => {
+                            hosts::scaleway_managed_cloud_init(&job, scratch, &source_keys, grant)
+                        }
+                        None => hosts::scaleway_cloud_init(&job, scratch, &source_keys, &dest_keys),
+                    };
+                    net::scw_user_data(&secret, &zone, &resources.server, &bootstrap).await?;
                     net::scw_action(
                         &secret,
                         &zone,

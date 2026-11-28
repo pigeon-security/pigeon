@@ -39,3 +39,19 @@ The runner uses the existing hash, archive and checkpoint formats. Jobs
 reconciles an ambiguous create by an exact run tag in the approved project,
 releases guest standby compute before deletion, requires confirmed absence of the server and block volumes, and writes a
 redacted terminal record to the Jobs bucket approved at launch.
+
+### Named source and managed destination
+
+Use `data_ingest_plan` with the instance and an approved Scaleway `connection`
+for the source. The approval records the sealed read-only key's generation, the
+source scope, and the Data Worker destination and budget. Credential rotation
+requires a fresh plan. The boot environment receives a grant for this run that
+expires after its deadline. This path uses the existing separate compute
+credential and Jobs audit bucket.
+
+For the first real canary, use a dedicated prefix that fits in one list page and
+contains only objects up to 16 MiB. Keep extracted members within that size too.
+Use exact duplicates, a one-byte variant, and a nested ZIP, then compare source
+references, stored payloads and archive lineage. Confirm the terminal audit and
+deletion of the Instance, its boot disk and the attached scratch volume before
+retiring any direct-source or home credential bindings.

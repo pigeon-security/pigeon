@@ -41,7 +41,14 @@ with open(sys.argv[1], encoding="utf-8") as source:
     credentials = json.load(source)
 with open(sys.argv[2], "w", encoding="utf-8") as target:
     target.write("INGEST_JOB=" + json.dumps(credentials["job"], separators=(",", ":")) + "\n")
-    for variable in ("SOURCE_KEYS", "DEST_KEYS"):
+    if "INGEST_DESTINATION" in credentials:
+        if "DEST_KEYS" in credentials:
+            raise ValueError("conflicting ingest destination")
+        target.write("INGEST_DESTINATION=" + json.dumps(credentials["INGEST_DESTINATION"], separators=(",", ":")) + "\n")
+        variables = ("SOURCE_KEYS",)
+    else:
+        variables = ("SOURCE_KEYS", "DEST_KEYS")
+    for variable in variables:
         key = credentials[variable]
         if not key or "\r" in key or "\n" in key:
             raise ValueError("invalid ingest credential")

@@ -2708,6 +2708,20 @@ fn core_ingest_plans_hosts_and_estimates() {
     assert!(script.contains("/dev/disk/by-id/scsi-0SCW_sbs_volume-"));
     assert!(script.contains("SPOOL_BYTES=160000000000"));
     assert!(script.contains("mountpoint -q /spool"));
+    let managed = hosts::scaleway_managed_cloud_init(
+        &scw_job,
+        volume,
+        src,
+        r#"{"origin":"https://data.example","grant":"test-grant"}"#,
+    );
+    assert!(managed.contains("INGEST_DESTINATION="));
+    assert!(managed.contains("test-grant"));
+    assert!(!managed.contains("DEST_KEYS="));
+    let managed_plan = hosts::scaleway_managed_host_request(&scw_job, "fr-par");
+    let redacted = managed_plan["user_data"]["body"].as_str().unwrap();
+    assert!(redacted.contains("INGEST_DESTINATION=<redacted>"));
+    assert!(!redacted.contains("test-grant"));
+    assert!(!redacted.contains("DEST_KEYS="));
     assert!(script.contains("--keyfile-size 64 --key-file /dev/urandom"));
     assert!(script.contains("mkfs.ext4 -q -m 0 /dev/mapper/pigeon-ingest-spool"));
     assert!(!script.contains("mkfs.ext4 -q -m 0 \"$disk\""));

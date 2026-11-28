@@ -606,12 +606,11 @@ pub fn problems(record: &Instance) -> Vec<String> {
             {
                 out.push("Backblaze ingest and backup must use separate buckets.".into());
             }
-            if let Some(runtime) = &source.runtime
-                && let Some(why) =
-                    crate::instances::data_ingest_runtime::field_problems(record, runtime)
-            {
-                out.push(why.into());
-            }
+        }
+        if name == crate::ingest::NAME
+            && let Some(why) = crate::instances::data_ingest_runtime::record_problem(record)
+        {
+            out.push(why.into());
         }
         let grants = &record.capabilities[name].federation;
         if !crate::federation::valid_grants(record, name, grants) {

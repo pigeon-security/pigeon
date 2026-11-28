@@ -300,50 +300,6 @@ async fn probe(env: &Env, record: &Instance, binding: &Binding, keys: &s3::Keys)
     Ok(())
 }
 
-pub(super) async fn preflight(
-    env: &Env,
-    record: &Instance,
-    name: &str,
-    args: &Value,
-) -> Result<Value> {
-    let binding = binding(record, name)?;
-    if args
-        .get("source")
-        .is_some_and(|source| source.as_str() != Some(binding.provider()))
-        || args.get("bucket").is_some()
-    {
-        return Err(super::bad(
-            "The approved connection fixes the provider and bucket.",
-        ));
-    }
-    let approved_prefix = match binding {
-        Binding::DigitalOcean(source) => &source.prefix,
-        Binding::Scaleway(source) => &source.prefix,
-        Binding::Backblaze(source) => &source.prefix,
-    };
-    let prefix = super::spaces_prefix(approved_prefix, args).map_err(super::bad)?;
-    let mut missing = vec![
-        "Named bucket runs require the managed Data writer grant before an approval can be issued."
-            .into(),
-    ];
-    let pin = match open(env, record, name).await {
-        Ok((pin, keys)) => {
-            if probe(env, record, binding, &keys).await.is_err() {
-                missing.push("The provider could not verify the saved bucket credential.".into());
-            }
-            Some(pin)
-        }
-        Err(error) => {
-            missing.push(error.to_string());
-            None
-        }
-    };
-    let mut out = super::unready(missing, Value::Null, Value::Null);
-    out["source"] = json!({"connection": name, "provider": binding.provider(), "prefix": prefix, "binding": binding});
-    out["source_pin"] = json!(pin);
-    Ok(out)
-}
-
 pub(super) async fn listings(env: &Env, record: &Instance) -> Result<Value> {
     let Some(config) = record
         .capabilities

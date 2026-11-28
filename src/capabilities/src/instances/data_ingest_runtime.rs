@@ -17,8 +17,45 @@ const CLASS: &str = "IngestJob";
 const BINDING: &str = "INGEST_JOB";
 const MIGRATION: &str = "data-ingest-container-v1";
 
+fn configured_runtimes(record: &Instance) -> impl Iterator<Item = &Runtime> {
+    use crate::ingest::{NAME, connections::Binding};
+
+    record
+        .capabilities
+        .get(NAME)
+        .into_iter()
+        .flat_map(|settings| {
+            settings
+                .backblaze
+                .iter()
+                .chain(
+                    settings
+                        .connections
+                        .values()
+                        .filter_map(|binding| match binding {
+                            Binding::Backblaze(source) => Some(source),
+                            _ => None,
+                        }),
+                )
+                .filter_map(|source| source.runtime.as_ref())
+        })
+}
+
 pub fn configured(record: &Instance) -> Option<&Runtime> {
-    crate::ingest::backblaze::source(record)?.runtime.as_ref()
+    let mut configured = configured_runtimes(record);
+    let first = configured.next()?;
+    configured.all(|runtime| runtime == first).then_some(first)
+}
+
+pub fn record_problem(record: &Instance) -> Option<&'static str> {
+    let mut configured = configured_runtimes(record);
+    let first = configured.next()?;
+    if configured.any(|runtime| runtime != first) {
+        return Some(
+            "The instance's Backblaze connections must share one Data Worker runner image.",
+        );
+    }
+    field_problems(record, first)
 }
 
 pub fn field_problems(record: &Instance, runtime: &Runtime) -> Option<&'static str> {

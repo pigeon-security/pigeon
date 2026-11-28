@@ -1,6 +1,8 @@
 //! Passkey approval, bootstrap, and scheduled cleanup for a Spaces data ingest.
 
-use pigeon_cloud::{digitalocean_ingest as provider, transport::FetchTransport};
+use pigeon_cloud::{
+    digitalocean_ingest as provider, digitalocean_spaces::Binding, transport::FetchTransport,
+};
 use pigeon_core::{
     approval::{Kind, payload_digest},
     oauth, r2, s3,
@@ -19,6 +21,7 @@ use sha2::{Digest, Sha256};
 use worker::{Env, Method, Request, Response, Result};
 
 use super::{KEPT_MS, KIND, RunRecord, UNIQUE_SHARE, bad, hosts, secret_value, setting, unready};
+use super::{connections, managed_destination};
 use crate::{
     Context, data_store,
     digitalocean::{health, spaces, team},
@@ -48,6 +51,10 @@ struct Planned {
     spool_bytes: u64,
     max_minutes: u16,
     bootstrap: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    connection: Option<connections::Pin>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    destination: Option<managed_destination::Reviewed>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
@@ -141,29 +148,68 @@ fn range(args: &Value, field: &str, default: u16, minimum: u16, maximum: u16) ->
     }
 }
 
-fn bound(
+fn source_binding<'a>(record: &'a Instance, pin: Option<&connections::Pin>) -> Result<&'a Binding> {
+    if let Some(pin) = pin {
+        let connections::Binding::DigitalOcean(binding) = connections::binding(record, &pin.name)?
+        else {
+            return Err(bad("the approved connection is not DigitalOcean Spaces"));
+        };
+        return Ok(binding);
+    }
+    spaces::binding(record).ok_or_else(|| bad("The Spaces binding changed."))
+}
+
+async fn source_keys(
+    env: &Env,
     record: &Instance,
-    job: &JobSpec,
-    account: &str,
-    approved_team: &str,
-    audit_bucket: &str,
-) -> bool {
-    let Some(binding) = spaces::binding(record) else {
+    pin: Option<&connections::Pin>,
+) -> Result<s3::Keys> {
+    if let Some(pin) = pin {
+        return connections::open_pinned(env, record, pin).await;
+    }
+    spaces::open_keys(record, env, source_binding(record, None)?).await
+}
+
+fn bound(record: &Instance, plan: &Planned) -> bool {
+    let Ok(binding) = source_binding(record, plan.connection.as_ref()) else {
         return false;
     };
+    let job = &plan.job;
+    let stable_source = plan.connection.as_ref().map_or_else(
+        || "digitalocean:instance".to_string(),
+        |pin| format!("digitalocean:{}", pin.name),
+    );
     super::data_enabled(record)
-        && super::linked_id(record).as_deref() == Some(account)
-        && team(record) == Some(approved_team)
-        && jobs_audit::configured_bucket(record) == Some(audit_bucket)
+        && super::linked_id(record).as_deref() == Some(plan.account.as_str())
+        && team(record) == Some(plan.team.as_str())
+        && jobs_audit::configured_bucket(record) == Some(plan.audit_bucket.as_str())
         && job.instance == record.id
         && job.dest.bucket == data_store::store_name(record)
-        && job.dest.endpoint == hosts::r2_endpoint(account)
+        && job.dest.endpoint == hosts::r2_endpoint(&plan.account)
         && matches!(&job.source, SourceSpec::S3 { account, endpoint, region, bucket, prefix }
-            if account == "digitalocean:instance"
+            if account == &stable_source
                 && endpoint == &format!("https://{}.digitaloceanspaces.com", binding.region)
                 && region == &binding.region
                 && bucket == &binding.bucket
                 && spaces::allows_prefix(&binding.prefix, prefix))
+}
+
+async fn list_spaces(binding: &Binding, prefix: &str, keys: &s3::Keys) -> Result<s3::Listing> {
+    let endpoint = s3::Endpoint {
+        base: format!("https://{}.digitaloceanspaces.com", binding.region),
+        region: binding.region.clone(),
+    };
+    let query = s3::list_objects_query(Some(prefix).filter(|p| !p.is_empty()), None, 1000, None);
+    let mut response = s3::send(
+        Method::Get,
+        &endpoint,
+        &s3::object_path(&binding.bucket, ""),
+        &query,
+        &[],
+        keys,
+    )
+    .await?;
+    s3::parse_list_objects(&response.text().await?)
 }
 
 fn volume_bytes(gib: u16) -> u64 {
@@ -183,7 +229,17 @@ pub(super) async fn plan(
     record: &Instance,
     args: &Value,
 ) -> Result<Value> {
-    let Some(binding) = spaces::binding(record) else {
+    let name = args["connection"].as_str();
+    let binding = if let Some(name) = name {
+        let connections::Binding::DigitalOcean(binding) = connections::binding(record, name)?
+        else {
+            return Err(bad("the approved connection is not DigitalOcean Spaces"));
+        };
+        Some(binding)
+    } else {
+        spaces::binding(record)
+    };
+    let Some(binding) = binding else {
         return Ok(unready(
             vec!["Configure the approved DigitalOcean Spaces connection first.".into()],
             Value::Null,
@@ -231,11 +287,27 @@ pub(super) async fn plan(
     };
     let run_id = hex(&Sha256::digest(webauthn::random()?.as_bytes()))[..32].to_owned();
     let requested_since = u64::from(max_minutes) * MINUTE_MS;
-    let sample = spaces::ingest_sample(record, cx.env, prefix).await;
+    let dry_run = args["dry_run"].as_bool().unwrap_or(true);
+    let (sample, connection) = if let Some(name) = name {
+        let (pin, keys) = connections::open(cx.env, record, name).await?;
+        (list_spaces(binding, prefix, &keys).await, Some(pin))
+    } else {
+        (spaces::ingest_sample(record, cx.env, prefix).await, None)
+    };
     let mut missing = Vec::new();
     let (est, sample) = match sample {
         Ok(listing) => {
             let (bytes, objects, sample) = sample_size(&listing, args);
+            if connection.is_some()
+                && !dry_run
+                && (listing.next.is_some()
+                    || listing
+                        .objects
+                        .iter()
+                        .any(|row| row.size > pigeon_ingest::managed_destination::MAX_BLOB))
+            {
+                missing.push("The managed destination requires a fully listed canary with objects at most 16 MiB until atomic multipart is available.".into());
+            }
             if sample["objects"] == 0 {
                 missing.push("The chosen Spaces prefix contains no objects.".into());
             }
@@ -285,9 +357,24 @@ pub(super) async fn plan(
     if bucket.name == audit_bucket {
         missing.push("The data and Jobs audit buckets must be distinct.".into());
     }
-    if check_destination(cx.env, record, &account).await.is_err() {
-        missing.push("Configure the bucket-scoped R2 credential for the Data runner.".into());
-    }
+    let destination = if connection.is_some() {
+        match managed_destination::ready(cx.env, record).await {
+            Ok(target) => {
+                let bytes = est["bytes"].as_u64().unwrap_or_default();
+                let objects = est["objects"].as_u64().unwrap_or_default();
+                Some(target.review(bytes, objects, dry_run))
+            }
+            Err(error) => {
+                missing.push(error.to_string());
+                None
+            }
+        }
+    } else {
+        if check_destination(cx.env, record, &account).await.is_err() {
+            missing.push("Configure the bucket-scoped R2 credential for the Data runner.".into());
+        }
+        None
+    };
     match health::for_ingest(cx.env, record).await {
         Ok(credential) => {
             let pat = health::open(cx.env, &record.id, &credential).await?;
@@ -318,12 +405,14 @@ pub(super) async fn plan(
         return Ok(unready(missing, est, sample));
     }
 
-    let dry_run = args["dry_run"].as_bool().unwrap_or(true);
     let job = JobSpec {
         run: run_id,
         instance: record.id.clone(),
         source: SourceSpec::S3 {
-            account: "digitalocean:instance".into(),
+            account: name.map_or_else(
+                || "digitalocean:instance".into(),
+                |name| format!("digitalocean:{name}"),
+            ),
             endpoint: format!("https://{}.digitaloceanspaces.com", binding.region),
             region: binding.region.clone(),
             bucket: binding.bucket.clone(),
@@ -351,8 +440,10 @@ pub(super) async fn plan(
         spool_bytes: volume_bytes(volume_gib),
         max_minutes,
         bootstrap: bootstrap_policy(),
+        connection,
+        destination,
     };
-    let summary = json!({
+    let mut summary = json!({
         "instance": record.id,
         "plan":[
             format!("Read Spaces {} in {} under prefix {}.",binding.bucket,binding.region,prefix),
@@ -364,6 +455,15 @@ pub(super) async fn plan(
         ],
         "estimate":est,
     });
+    if let Some(reviewed) = &approval.destination {
+        let grant = format!(
+            "Use a Data Worker run grant limited to {} write bytes, {} write attempts and 16 MiB per atomic payload.",
+            reviewed.max_bytes, reviewed.max_objects
+        );
+        if let Some(plan) = summary["plan"].as_array_mut() {
+            plan.push(json!(grant));
+        }
+    }
     let caller = cx
         .caller
         .ok_or_else(|| bad("Planning requires a known caller."))?;
@@ -432,7 +532,7 @@ pub(super) fn is_plan(raw: &Value) -> bool {
 async fn current_binding(env: &Env, p: &Planned) -> Result<Option<Instance>> {
     Ok(instances::one(env, &p.job.instance)
         .await?
-        .filter(|record| bound(record, &p.job, &p.account, &p.team, &p.audit_bucket)))
+        .filter(|record| bound(record, p)))
 }
 
 async fn current(env: &Env, p: &Planned) -> Result<Instance> {
@@ -477,9 +577,16 @@ pub(super) async fn start(
     }
     let link = crate::linked::account_for_bound(env, host, &record.id, &p.account).await?;
     let credential = health::for_ingest(env, &record).await?;
-    let binding = spaces::binding(&record).ok_or_else(|| bad("The Spaces binding changed."))?;
-    spaces::open_keys(&record, env, binding).await?;
-    check_destination(env, &record, &p.account).await?;
+    source_keys(env, &record, p.connection.as_ref()).await?;
+    match (&p.connection, &p.destination) {
+        (Some(_), Some(reviewed)) => {
+            if managed_destination::ready(env, &record).await?.origin != reviewed.origin {
+                return Err(bad("The approved Data Worker changed. Plan again."));
+            }
+        }
+        (None, None) => check_destination(env, &record, &p.account).await?,
+        _ => return Err(bad("The approved managed destination is incomplete.")),
+    }
     let bucket = data_bucket(&record);
     r2::require_private_bucket(&link, &bucket).await?;
     r2::require_private_bucket(&link, &named_bucket(&p.audit_bucket)).await?;
@@ -759,7 +866,7 @@ pub async fn bootstrap(env: &Env, host: &str, mut request: Request) -> Result<Re
         return Response::error("Retry provisioned runner", 409);
     }
     let record = current(env, &job.plan).await?;
-    let binding = spaces::binding(&record).ok_or_else(|| bad("The Spaces binding changed."))?;
+    let binding = source_binding(&record, job.plan.connection.as_ref())?;
     let Some(id) = job.droplet else {
         return Response::error("Retry provisioned runner", 409);
     };
@@ -783,15 +890,29 @@ pub async fn bootstrap(env: &Env, host: &str, mut request: Request) -> Result<Re
     }
     let link = crate::linked::account_for_bound(env, host, &record.id, &job.plan.account).await?;
     r2::require_private_bucket(&link, &data_bucket(&record)).await?;
-    let source = spaces::open_keys(&record, env, binding).await?;
-    let destination = destination_keys(env, &record).await?;
+    let source = source_keys(env, &record, job.plan.connection.as_ref()).await?;
+    let mut credentials = json!({"job": job.plan.job, "SOURCE_KEYS": keys_string(source)});
+    match (&job.plan.connection, &job.plan.destination) {
+        (Some(_), Some(reviewed)) => {
+            let target = managed_destination::ready(env, &record).await?;
+            let grant = target.issue(
+                &job.plan.job,
+                now() as i64,
+                job.deadline_ms as i64,
+                reviewed,
+            )?;
+            credentials["INGEST_DESTINATION"] = json!(grant);
+        }
+        (None, None) => {
+            credentials["DEST_KEYS"] = json!(keys_string(destination_keys(env, &record).await?));
+        }
+        _ => return Err(bad("The approved managed destination is incomplete.")),
+    }
     job.boot_hash = None;
     if replace(env, &prior, &job).await?.is_none() {
         return Response::error("Retry provisioned runner", 409);
     }
-    let mut response = Response::from_json(&json!({
-        "job":job.plan.job,"SOURCE_KEYS":keys_string(source),"DEST_KEYS":keys_string(destination),
-    }))?;
+    let mut response = Response::from_json(&credentials)?;
     response.headers_mut().set("Cache-Control", "no-store")?;
     Ok(response)
 }

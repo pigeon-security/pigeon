@@ -200,6 +200,32 @@ pub fn scaleway_cloud_init(
     source_keys: &str,
     dest_keys: &str,
 ) -> String {
+    scaleway_bootstrap(job, scratch_volume, source_keys, "DEST_KEYS", dest_keys)
+}
+
+/// Bootstrap a scoped Scaleway runner with only its signed Data Worker grant.
+pub fn scaleway_managed_cloud_init(
+    job: &JobSpec,
+    scratch_volume: &str,
+    source_keys: &str,
+    destination_json: &str,
+) -> String {
+    scaleway_bootstrap(
+        job,
+        scratch_volume,
+        source_keys,
+        "INGEST_DESTINATION",
+        destination_json,
+    )
+}
+
+fn scaleway_bootstrap(
+    job: &JobSpec,
+    scratch_volume: &str,
+    source_keys: &str,
+    destination_variable: &str,
+    destination: &str,
+) -> String {
     let one_line = |s: &str| s.replace(['\n', '\r'], "");
     let job_json = serde_json::to_string(job).unwrap_or_default();
     let mounts = include_str!("scaleway-spool.sh");
@@ -219,14 +245,14 @@ pub fn scaleway_cloud_init(
          cat > /root/ingest.env <<'PIGEON_ENV_END'\n\
          INGEST_JOB={job_json}\n\
          SOURCE_KEYS={source}\n\
-         DEST_KEYS={dest}\n\
+         {destination_variable}={dest}\n\
          SPOOL_DIR=/spool\n\
          SPOOL_BYTES={SCW_SPOOL_BYTES}\n\
          PIGEON_ENV_END\n\
          docker build -f src/ingest-runner/Dockerfile --build-arg PIGEON_COMMIT={commit} -t pigeon-ingest-runner {REPO_URL}#{commit}\n\
          docker run --rm --env-file /root/ingest.env -v /spool:/spool pigeon-ingest-runner\n",
         source = one_line(source_keys),
-        dest = one_line(dest_keys),
+        dest = one_line(destination),
     )
 }
 
@@ -329,22 +355,37 @@ pub fn host_request(host: Host, job: &JobSpec, region: &str) -> Value {
             "host": "digitalocean", "method": "POST", "url": "https://api.digitalocean.com/v2/droplets",
             "body": droplet_body(job, region, &user_data),
         }),
-        Host::Scaleway => {
-            let z = zone(region);
-            json!({
-                "host": "scaleway", "zone": z,
-                "create": { "method": "POST", "path": scaleway_servers_path(&z),
-                    "body": scaleway_server_body(job, REDACTED) },
-                "user_data": { "method": "PATCH", "path": scaleway_user_data_path(&z, "<server>"),
-                    "body": scaleway_cloud_init(job, "<approved-scratch-volume-id>", REDACTED, REDACTED) },
-                "poweron": { "method": "POST", "path": scaleway_action_path(&z, "<server>"),
-                    "body": scaleway_poweron() },
-            })
-        }
+        Host::Scaleway => scaleway_host_request(
+            job,
+            region,
+            scaleway_cloud_init(job, "<approved-scratch-volume-id>", REDACTED, REDACTED),
+        ),
         Host::Cloudflare => json!({
             "host": "cloudflare", "method": "POST", "path": pigeon_ingest::protocol::START_PATH,
             "body": { "job": job, "source_keys": REDACTED, "dest_keys": REDACTED },
         }),
         Host::Local => json!({ "host": "local" }),
     }
+}
+
+/// The redacted request shows the managed transport without exposing its grant.
+pub fn scaleway_managed_host_request(job: &JobSpec, region: &str) -> Value {
+    scaleway_host_request(
+        job,
+        region,
+        scaleway_managed_cloud_init(job, "<approved-scratch-volume-id>", REDACTED, REDACTED),
+    )
+}
+
+fn scaleway_host_request(job: &JobSpec, region: &str, user_data: String) -> Value {
+    let zone = zone(region);
+    json!({
+        "host": "scaleway", "zone": zone,
+        "create": { "method": "POST", "path": scaleway_servers_path(&zone),
+            "body": scaleway_server_body(job, REDACTED) },
+        "user_data": { "method": "PATCH", "path": scaleway_user_data_path(&zone, "<server>"),
+            "body": user_data },
+        "poweron": { "method": "POST", "path": scaleway_action_path(&zone, "<server>"),
+            "body": scaleway_poweron() },
+    })
 }

@@ -1845,3 +1845,41 @@ fn linked_data_ingest_plan_retries_attachment_without_losing_worker_ownership() 
     seen.ingest_container = true;
     assert!(!upload_needed(&seen));
 }
+
+#[test]
+fn named_backblaze_connections_share_one_reviewed_worker_runtime() {
+    use pigeon_capabilities::instances::{
+        data_ingest_runtime::{configured, record_problem},
+        record::Instance,
+    };
+
+    let account = "a".repeat(32);
+    let image = format!(
+        "registry.cloudflare.com/{account}/pigeon-ingest-runner@sha256:{}",
+        "f".repeat(64)
+    );
+    let mut record = json!({
+        "id": "example",
+        "title": "Example",
+        "account": {"kind": "linked", "account_id": account},
+        "data": {"placement": "own_worker", "ingest": {
+            "connections": {
+                "history": {
+                    "provider": "backblaze", "name": "archive", "region": "us-west-004", "bucket": "archive-example",
+                    "runtime": {"image": image, "revision": "b".repeat(40)}
+                },
+                "daily": {"provider": "backblaze", "name": "daily", "region": "us-west-004", "bucket": "daily-example"}
+            }
+        }},
+    });
+    let instance: Instance = serde_json::from_value(record.clone()).unwrap();
+    assert_eq!(configured(&instance).unwrap().image, image);
+    assert!(record_problem(&instance).is_none());
+
+    record["data"]["ingest"]["connections"]["daily"]["runtime"] = json!({
+        "image": image, "revision": "c".repeat(40),
+    });
+    let instance: Instance = serde_json::from_value(record).unwrap();
+    assert!(configured(&instance).is_none());
+    assert!(record_problem(&instance).unwrap().contains("share one"));
+}

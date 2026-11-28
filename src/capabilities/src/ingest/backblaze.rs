@@ -23,6 +23,7 @@ use crate::jobs_audit::{self, ExportStatus};
 use crate::{Context, to_value, users::directory};
 
 use super::{Ingest, KEPT_MS, KIND, PENDING_MS, RunRecord, UNIQUE_SHARE, bad, data_enabled};
+use super::{connections, managed_destination};
 use super::{
     execution_binding, hosts, index_key, keep, net, now_ms, runs_of, save_run, secret_value,
     setting, today, unready,
@@ -55,6 +56,11 @@ fn connection(record: &Instance) -> Result<&Source> {
     let binding = source(record)
         .ok_or_else(|| bad("Configure this instance's approved read-only Backblaze source."))?;
     binding.validate().map_err(bad)?;
+    separate_backup(record, binding)?;
+    Ok(binding)
+}
+
+fn separate_backup(record: &Instance, binding: &Source) -> Result<()> {
     if data_store::settings(record)
         .and_then(|settings| settings.backup.as_ref())
         .is_some_and(|backup| backup.bucket.eq_ignore_ascii_case(&binding.bucket))
@@ -63,7 +69,7 @@ fn connection(record: &Instance) -> Result<&Source> {
             "Backblaze ingest and backup must use separate buckets.",
         ));
     }
-    Ok(binding)
+    Ok(())
 }
 
 async fn source_keys(record: &Instance, env: &Env) -> Result<String> {
@@ -127,6 +133,10 @@ struct Execution {
     worker: String,
     image: String,
     max_minutes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    connection: Option<connections::Pin>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    destination: Option<managed_destination::Reviewed>,
 }
 
 struct Ready {
@@ -136,6 +146,7 @@ struct Ready {
     source: SourceSpec,
     source_keys: String,
     dest_keys: String,
+    managed: Option<managed_destination::Binding>,
     worker_key: String,
     revision: String,
 }
@@ -146,6 +157,8 @@ async fn ready(
     env: &Env,
     source: SourceSpec,
     max_minutes: u64,
+    source_keys: String,
+    scoped: Option<(connections::Pin, managed_destination::Reviewed)>,
 ) -> Result<Ready> {
     if data_store::inline(record) {
         return Err(bad(
@@ -177,30 +190,40 @@ async fn ready(
             ))
         })?;
     }
-    let source_keys = source_keys(record, env).await?;
-    let dest_slot = hosts::r2_slot(&record.id);
-    let dest_keys = secret_value(env, &dest_slot).await.ok_or_else(|| {
-        bad(format!(
-            "Bind an object key scoped to {} as {dest_slot}.",
-            bucket.name
-        ))
-    })?;
-    let keys =
-        s3::parse_keys(&dest_keys).map_err(|_| bad("the saved R2 destination key is invalid"))?;
-    let data_endpoint = Endpoint {
-        base: hosts::r2_endpoint(&account.id),
-        region: "auto".into(),
+    let (managed, dest_keys, connection, destination) = if let Some((pin, reviewed)) = scoped {
+        let target = managed_destination::ready(env, record).await?;
+        if target.origin != reviewed.origin {
+            return Err(bad(
+                "the approved Backblaze destination changed; plan again",
+            ));
+        }
+        (Some(target), String::new(), Some(pin), Some(reviewed))
+    } else {
+        let dest_slot = hosts::r2_slot(&record.id);
+        let dest_keys = secret_value(env, &dest_slot).await.ok_or_else(|| {
+            bad(format!(
+                "Bind an object key scoped to {} as {dest_slot}.",
+                bucket.name
+            ))
+        })?;
+        let keys = s3::parse_keys(&dest_keys)
+            .map_err(|_| bad("the saved R2 destination key is invalid"))?;
+        let data_endpoint = Endpoint {
+            base: hosts::r2_endpoint(&account.id),
+            region: "auto".into(),
+        };
+        s3::send(
+            Method::Head,
+            &data_endpoint,
+            &s3::object_path(&bucket.name, ""),
+            &[],
+            &[],
+            &keys,
+        )
+        .await
+        .map_err(|_| bad("The bound R2 key cannot read the approved Data bucket."))?;
+        (None, dest_keys, None, None)
     };
-    s3::send(
-        Method::Head,
-        &data_endpoint,
-        &s3::object_path(&bucket.name, ""),
-        &[],
-        &[],
-        &keys,
-    )
-    .await
-    .map_err(|_| bad("The bound R2 key cannot read the approved Data bucket."))?;
     let (worker, worker_key) = data_store::reach(env, record).await?;
     execution_binding(Host::Cloudflare, Some(&worker), None)?;
     let reply = net::data_post(&worker, container_job::READY_PATH, &worker_key, now_ms(), &json!({}))
@@ -221,8 +244,9 @@ async fn ready(
             "The Data Worker needs a named ingest container image and the Jobs callback configured.",
         ));
     };
-    if let Some(expected) = crate::instances::data_ingest_runtime::configured(record)
-        && (expected.image != image || expected.revision != revision)
+    let runtime = crate::instances::data_ingest_runtime::configured(record);
+    if (connection.is_some() && runtime.is_none())
+        || runtime.is_some_and(|expected| expected.image != image || expected.revision != revision)
     {
         return Err(bad(
             "The Data Worker does not run the approved Backblaze container. Apply its instance plan first.",
@@ -235,12 +259,15 @@ async fn ready(
             worker,
             image: image.to_string(),
             max_minutes,
+            connection,
+            destination,
         },
         account,
         bucket,
         source,
         source_keys,
         dest_keys,
+        managed,
         worker_key,
         revision: revision.to_string(),
     })
@@ -279,7 +306,13 @@ pub(crate) async fn plan(
         fields.keys().all(|key| {
             matches!(
                 key.as_str(),
-                "instance" | "source" | "prefix" | "size_bytes" | "dry_run" | "fingerprints"
+                "instance"
+                    | "source"
+                    | "connection"
+                    | "prefix"
+                    | "size_bytes"
+                    | "dry_run"
+                    | "fingerprints"
             )
         })
     }) {
@@ -291,8 +324,25 @@ pub(crate) async fn plan(
         .get("prefix")
         .map(|value| value.as_str().ok_or_else(|| bad("prefix must be text")))
         .transpose()?;
-    let approved = connection(record)?.bind(prefix).map_err(bad)?;
-    let creds = source_keys(record, env).await?;
+    let (approved, pin, creds) = if let Some(name) = args["connection"].as_str() {
+        let connections::Binding::Backblaze(binding) = connections::binding(record, name)? else {
+            return Err(bad("the approved connection is not Backblaze"));
+        };
+        let approved = binding.bind(prefix).map_err(bad)?;
+        separate_backup(record, binding)?;
+        let (pin, keys) = connections::open(env, record, name).await?;
+        (
+            approved,
+            Some(pin),
+            format!("{}:{}", keys.access_key_id, keys.secret_access_key),
+        )
+    } else {
+        (
+            connection(record)?.bind(prefix).map_err(bad)?,
+            None,
+            source_keys(record, env).await?,
+        )
+    };
     let listing = sample(&approved, &creds).await?;
     let count = listing.objects.len() as u64;
     let bytes = listing
@@ -324,7 +374,32 @@ pub(crate) async fn plan(
         .min(u128::from(u64::MAX)) as u64;
     let estimate = estimate::estimate(Host::Cloudflare, total, objects, UNIQUE_SHARE);
     let max_minutes = (estimate.hours_high.mul_add(90.0, 5.0).ceil() as u64).clamp(5, 24 * 60);
-    let resolved = match ready(cap, record, env, approved, max_minutes).await {
+    let dry_run = args["dry_run"].as_bool().unwrap_or(true);
+    let scoped = if let Some(pin) = pin {
+        if !dry_run
+            && (listing.next.is_some()
+                || listing
+                    .objects
+                    .iter()
+                    .any(|object| object.size > pigeon_ingest::managed_destination::MAX_BLOB))
+        {
+            return Ok(unready(vec!["The managed destination requires a fully listed canary with objects at most 16 MiB until atomic multipart is available.".into()], to_value(&estimate), sampled));
+        }
+        let target = match managed_destination::ready(env, record).await {
+            Ok(target) => target,
+            Err(error) => {
+                return Ok(unready(
+                    vec![error.to_string()],
+                    to_value(&estimate),
+                    sampled,
+                ));
+            }
+        };
+        Some((pin, target.review(total, objects, dry_run)))
+    } else {
+        None
+    };
+    let resolved = match ready(cap, record, env, approved, max_minutes, creds, scoped).await {
         Ok(resolved) => resolved,
         Err(error) => {
             return Ok(unready(
@@ -344,8 +419,7 @@ pub(crate) async fn plan(
         today(),
         &pigeon_core::sign::hex(nonce.as_bytes())[..32]
     );
-    let dry_run = args["dry_run"].as_bool().unwrap_or(true);
-    let lines = vec![
+    let mut lines = vec![
         format!("Read Backblaze bucket {bucket}, prefix {prefix:?}, with its saved read-only key."),
         format!(
             "Run one Cloudflare standard-4 container for at most {max_minutes} minutes, at runner revision {}.",
@@ -365,6 +439,9 @@ pub(crate) async fn plan(
             resolved.execution.audit_bucket
         ),
     ];
+    if let Some(reviewed) = &resolved.execution.destination {
+        lines.push(format!("Use a Data Worker run grant limited to {} write bytes, {} write attempts and 16 MiB per atomic payload.", reviewed.max_bytes, reviewed.max_objects));
+    }
     let job = JobSpec {
         run: id,
         instance: record.id.clone(),
@@ -460,8 +537,39 @@ pub(crate) async fn start(
     else {
         return Err(bad("the approved Backblaze run has no source bucket"));
     };
-    let source = connection(&record)?.bind(Some(prefix)).map_err(bad)?;
-    let resolved = ready(cap, &record, env, source, prior.max_minutes).await?;
+    let (source, source_keys, scoped) = match (&prior.connection, &prior.destination) {
+        (Some(pin), Some(reviewed)) => {
+            let connections::Binding::Backblaze(binding) =
+                connections::binding(&record, &pin.name)?
+            else {
+                return Err(bad("the approved Backblaze connection changed"));
+            };
+            separate_backup(&record, binding)?;
+            let source = binding.bind(Some(prefix)).map_err(bad)?;
+            let keys = connections::open_pinned(env, &record, pin).await?;
+            (
+                source,
+                format!("{}:{}", keys.access_key_id, keys.secret_access_key),
+                Some((pin.clone(), reviewed.clone())),
+            )
+        }
+        (None, None) => (
+            connection(&record)?.bind(Some(prefix)).map_err(bad)?,
+            source_keys(&record, env).await?,
+            None,
+        ),
+        _ => return Err(bad("the approved Backblaze destination is incomplete")),
+    };
+    let resolved = ready(
+        cap,
+        &record,
+        env,
+        source,
+        prior.max_minutes,
+        source_keys,
+        scoped,
+    )
+    .await?;
     if resolved.execution != prior
         || resolved.revision != job.commit
         || resolved.source != job.source
@@ -543,8 +651,15 @@ pub(crate) async fn start(
         &serde_json::to_string(&managed)?,
     )
     .await?;
+    let managed_destination = match (&resolved.managed, &prior.destination) {
+        (Some(target), Some(reviewed)) => {
+            Some(target.issue(&job, started_ms, deadline_ms, reviewed)?)
+        }
+        (None, None) => None,
+        _ => return Err(bad("the approved Backblaze destination is incomplete")),
+    };
     let body = serde_json::to_value(container_job::Start {
-        managed_destination: None,
+        managed_destination,
         request: StartRequest {
             job: job.clone(),
             source_keys: resolved.source_keys,

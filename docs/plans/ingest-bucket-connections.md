@@ -18,7 +18,22 @@ pin. A named Spaces connection can reuse the old sealed Spaces key when both app
 bindings match exactly. Setting a dedicated key for the named connection takes over
 from that fallback.
 
-Use `data_ingest_plan` with `instance`, `connection` and optionally a narrower `prefix`
-to check the named source. This preview can verify the scope and present its pin.
-Issuing a run approval for a named connection requires managed Data writer grants.
-The existing provider selectors still use their established configuration.
+Use `data_ingest_connection_verify` with `instance` and `connection` to verify the
+approved read-only source without creating an ingest approval. Use `data_ingest_plan`
+with `instance`, `connection` and optionally a narrower `prefix` to review a run.
+Named runs require a managed Data writer grant. The existing provider selectors
+still use their established configuration.
+
+To enable the managed destination, review and apply the standalone Data Worker's
+instance plan. It installs the destination route and its D1 run-budget table. A
+Backblaze Cloudflare run also needs one reviewed runner image pin for the instance.
+Put it under a named Backblaze connection's `runtime`, or reuse the same existing
+Backblaze runtime pin. Build the image from a revision that includes the managed
+destination client.
+
+The approval names the exact connection generation, destination Worker and
+maximum number of write attempts and bytes. The runner receives a short-lived
+grant for that run. Dry runs can write their progress and reports. A live canary
+requires a fully listed source prefix with objects no larger than 16 MiB. ZIP
+members above that limit are reported as failed until the managed multipart
+publisher is available.
