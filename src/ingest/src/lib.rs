@@ -16,6 +16,7 @@ pub mod datastore;
 pub mod decide;
 pub mod engine;
 pub mod estimate;
+pub mod immutable_multipart;
 pub mod index;
 pub mod managed_destination;
 pub mod manifest;

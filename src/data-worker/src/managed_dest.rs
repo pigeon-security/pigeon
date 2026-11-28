@@ -44,7 +44,11 @@ pub async fn ready(req: &mut Request, env: &Env) -> Result<Response> {
         .await?;
     json_answer(
         200,
-        json!({"version": 1, "instance": env.var("INSTANCE")?.to_string()}),
+        json!({
+            "version": 1,
+            "instance": env.var("INSTANCE")?.to_string(),
+            "multipart_configured": crate::immutable_multipart::configured(env).await,
+        }),
     )
 }
 
@@ -116,6 +120,16 @@ pub async fn fetch(req: &mut Request, env: &Env) -> Result<Response> {
     let bucket = env.bucket("DATA")?;
     let op = req.headers().get(wire::OPERATION)?.unwrap_or_default();
     match op.as_str() {
+        "multipart-start" | "multipart-part" | "multipart-complete" | "multipart-abort" => {
+            let sha = req.headers().get(wire::SHA256)?.unwrap_or_default();
+            if grant.dry_run || !wire::payload_key(&grant.run, &key, &sha) {
+                return error(403, "multipart write outside grant");
+            }
+            crate::immutable_multipart::fetch(req, env, &grant.run, &key, &op, |size| {
+                charge(env, &grant, size)
+            })
+            .await
+        }
         "head" if wire::payload_read_key(&grant.run, &key) => {
             let Some(object) = bucket.head(&key).await? else {
                 return error(404, "payload absent");

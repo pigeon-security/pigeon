@@ -1070,3 +1070,32 @@ and retains archive originals. The approval binds the source, destination, audit
 digest and maximum runtime. The Data Worker starts each approved run at most once, polls its
 container until exit and sends a signed terminal report for Jobs. The report excludes credentials
 and source object names.
+
+### Managed destination multipart publication
+
+Managed runners stage canonical blobs above the single-write limit in 16 MiB
+parts. The Data Worker reserves the admitted bytes and one write at initiation.
+D1 pins each part's digest before it goes to R2 and records the provider receipt
+and running SHA-256 state. A retry uses the same run and blob key and may replay
+the same part. The Worker verifies the complete SHA-256 before publication.
+The ceiling is 10,000 parts. Larger objects and large quarantine objects fail
+closed.
+
+The Data Worker alone signs R2 `CompleteMultipartUpload` with
+`If-None-Match: *`, using an R2 temporary credential scoped to exactly that
+object and the completion action. The Worker confirms an ambiguously completed upload only
+when the canonical object has the matching server-generated write ID, SHA-256,
+and size. The runner receives neither an upload ID nor an S3 credential.
+The provider's [conditional operation semantics](https://developers.cloudflare.com/r2/api/s3/conditional-operations/)
+define the create-only guarantee at completion.
+
+Multipart requires an approved, private Data bucket and a bucket-scoped R2 S3
+credential available only to its Data Worker. The Worker expects a Secrets
+Store binding named `INGEST_R2_PUBLISH` and trusted deployment metadata
+`INGEST_R2_ACCOUNT` and `INGEST_R2_BUCKET` matching the `DATA` binding. The
+credential value contains `account`, `bucket`, and `keys` in the established
+S3 credential format. The linked-account provisioner does not currently mint
+or bind this credential. Multipart returns 503 before staging when the binding
+is unavailable. Rollout also requires checking the bucket's incomplete
+multipart expiration rule and validating ambiguous completion against R2 with
+a disposable approved canary.

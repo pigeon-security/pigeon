@@ -254,6 +254,10 @@ CREATE INDEX IF NOT EXISTS deliveries_outcome ON email_deliveries (outcome, at)"
         id: "0005_ingest_grants",
         sql: "CREATE TABLE IF NOT EXISTS ingest_grants (run TEXT PRIMARY KEY, expires INTEGER NOT NULL, bytes INTEGER NOT NULL, writes INTEGER NOT NULL)",
     },
+    Migration {
+        id: "0006_immutable_multipart",
+        sql: "CREATE TABLE IF NOT EXISTS ingest_multipart (id TEXT PRIMARY KEY, body TEXT NOT NULL)",
+    },
 ];
 
 /// The statements of one migration, then the row that records it.

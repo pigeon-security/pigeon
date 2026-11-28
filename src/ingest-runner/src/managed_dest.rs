@@ -47,6 +47,98 @@ impl ManagedDest {
         }
     }
 
+    fn stage_request(
+        &self,
+        op: &str,
+        key: &str,
+        sha: &str,
+        field: Option<(&str, &str)>,
+        bytes: &[u8],
+    ) -> Result<String, Error> {
+        for attempt in 0..3 {
+            let mut request = self.request(op, key).set(wire::SHA256, sha);
+            if let Some((name, value)) = field {
+                request = request.set(name, value);
+            }
+            match request.send_bytes(bytes) {
+                Ok(response) if response.status() == 200 => {
+                    let malformed = || Error::Dest("invalid managed multipart receipt".into());
+                    let receipt: serde_json::Value =
+                        serde_json::from_slice(&Self::read(response, 1024)?)
+                            .map_err(|_| malformed())?;
+                    return receipt["state"]
+                        .as_str()
+                        .map(str::to_owned)
+                        .ok_or_else(malformed);
+                }
+                Err(ureq::Error::Status(409 | 503, _)) | Err(ureq::Error::Transport(_))
+                    if attempt < 2 =>
+                {
+                    std::thread::sleep(Duration::from_millis(250 << attempt));
+                }
+                Err(ureq::Error::Status(status, _)) => {
+                    return Err(Error::Dest(format!(
+                        "managed multipart refused HTTP {status}"
+                    )));
+                }
+                _ => return Err(Error::Dest("managed multipart request failed".into())),
+            }
+        }
+        Err(Error::Dest("managed multipart request failed".into()))
+    }
+
+    fn put_multipart(
+        &self,
+        key: &str,
+        body: &mut dyn Read,
+        size: u64,
+        sha: &str,
+    ) -> Result<(), Error> {
+        use pigeon_ingest::immutable_multipart::{MAX_BYTES, PART_BYTES};
+
+        if size > MAX_BYTES || key != pigeon_ingest::blob_key(sha) {
+            return Err(Error::Dest(
+                "payload is outside managed multipart limits".into(),
+            ));
+        }
+        let status = self.stage_request(
+            "multipart-start",
+            key,
+            sha,
+            Some(("x-ingest-size", &size.to_string())),
+            &[],
+        )?;
+        if status == "published" {
+            self.stage_request("multipart-complete", key, sha, None, &[])?;
+            return Ok(());
+        }
+        let mut bytes = vec![0; PART_BYTES as usize];
+        for part_number in 1..=size.div_ceil(PART_BYTES) {
+            let length = (size - (part_number - 1) * PART_BYTES).min(PART_BYTES) as usize;
+            let part = &mut bytes[..length];
+            body.read_exact(part)
+                .map_err(|_| Error::Dest("could not read a managed multipart payload".into()))?;
+            self.stage_request(
+                "multipart-part",
+                key,
+                sha,
+                Some(("x-ingest-part", &part_number.to_string())),
+                part,
+            )?;
+        }
+        if body
+            .read(&mut [0])
+            .map_err(|_| Error::Dest("could not verify managed payload length".into()))?
+            != 0
+        {
+            return Err(Error::Dest(
+                "managed payload exceeds its expected length".into(),
+            ));
+        }
+        self.stage_request("multipart-complete", key, sha, None, &[])?;
+        Ok(())
+    }
+
     fn read(reply: ureq::Response, limit: u64) -> Result<Vec<u8>, Error> {
         let mut body = Vec::new();
         reply
@@ -79,9 +171,7 @@ impl Dest for ManagedDest {
         metrics: &Metrics,
     ) -> Result<(), Error> {
         if size > wire::MAX_BLOB {
-            return Err(Error::Dest(
-                "object exceeds the managed atomic write limit".into(),
-            ));
+            return self.put_multipart(key, body, size, &metrics.sha256);
         }
         let mut bytes = Vec::new();
         body.take(size + 1)

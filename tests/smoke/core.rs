@@ -3555,3 +3555,56 @@ fn data_backup_resumes_exact_sha256_and_owns_each_checkpoint() {
         "audited"
     );
 }
+
+#[test]
+fn immutable_multipart_requires_verified_bytes_and_reconciles_only_its_write() {
+    use pigeon_ingest::datastore::sha256_hex;
+    use pigeon_ingest::immutable_multipart::{
+        CREATE_ONLY, Checkpoint, PART_BYTES, PartAction, Reconciliation, Write, reconcile,
+    };
+
+    let first = vec![42; PART_BYTES as usize];
+    let last = [33, 44];
+    let mut all = first.clone();
+    all.extend(last);
+    let digest = sha256_hex(&all);
+    let id = "b".repeat(64);
+    let key = pigeon_ingest::blob_key(&digest);
+    let size = all.len() as u64;
+    let mut checkpoint = Checkpoint::new(Write::new(&key, size, id.clone()).unwrap());
+    let etag = "a".repeat(32);
+    assert!(checkpoint.completion_xml().is_none());
+    assert_eq!(checkpoint.pin(2, &last), None);
+    assert_eq!(checkpoint.pin(1, &first), Some(PartAction::Upload));
+
+    let raw = serde_json::to_string(&checkpoint).unwrap();
+    let mut checkpoint: Checkpoint = serde_json::from_str(&raw).unwrap();
+    let mut changed = first.clone();
+    changed[0] = 1;
+    assert_eq!(checkpoint.pin(1, &changed), None);
+    assert_eq!(checkpoint.confirm(1, &first, "<illegal>"), None);
+    assert_eq!(checkpoint.confirm(1, &first, &etag), Some(()));
+    assert_eq!(checkpoint.pin(1, &first), Some(PartAction::Replay));
+    assert_eq!(checkpoint.pin(2, &[33, 45]), None);
+    assert!(checkpoint.completion_xml().is_none());
+    assert_eq!(checkpoint.confirm(2, &last, &etag), Some(()));
+    assert!(
+        checkpoint
+            .completion_xml()
+            .unwrap()
+            .contains("<PartNumber>2</PartNumber>")
+    );
+    assert_eq!(CREATE_ONLY, ("if-none-match", "*"));
+    assert_eq!(
+        reconcile(&checkpoint.write, Some((size, Some(&digest), Some(&id)))),
+        Reconciliation::Ours
+    );
+    assert_eq!(
+        reconcile(&checkpoint.write, Some((size, Some(&digest), Some(&etag)))),
+        Reconciliation::AlreadyPresent
+    );
+    assert_eq!(
+        reconcile(&checkpoint.write, None),
+        Reconciliation::Unresolved
+    );
+}

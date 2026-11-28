@@ -11,6 +11,7 @@
 //! `INGEST_JOB` (the Durable Object, ingest only). It consumes `{instance}-ingest-manifests` and
 //! `{instance}-data-backup`.
 
+mod immutable_multipart;
 mod ingest_job;
 pub mod mail;
 mod mail_import;

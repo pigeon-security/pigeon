@@ -3833,7 +3833,8 @@ mod email {
                 "0002_operations",
                 "0003_mail_import_lineage",
                 "0004_backup_progress",
-                "0005_ingest_grants"
+                "0005_ingest_grants",
+                "0006_immutable_multipart"
             ]
         );
     }
