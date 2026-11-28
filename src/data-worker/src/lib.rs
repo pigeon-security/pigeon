@@ -97,10 +97,7 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
             managed_dest::fetch(&mut req, &env).await
         }
         (Method::Post, pigeon_ingest::managed_destination::READY_PATH) => {
-            if let Err(denied) = signed_body(&mut req, &env).await? {
-                return Ok(denied);
-            }
-            managed_dest::ready(&env).await
+            managed_dest::ready(&mut req, &env).await
         }
         (Method::Post, protocol::START_PATH) => {
             let body = match signed_body(&mut req, &env).await? {

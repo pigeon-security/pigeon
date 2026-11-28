@@ -14,7 +14,8 @@ pub const OBJECT: &str = "x-pigeon-ingest-object";
 pub const SHA256: &str = "x-pigeon-ingest-sha256";
 pub const BLAKE3: &str = "x-pigeon-ingest-blake3";
 pub const MAX_BLOB: u64 = 16 * 1024 * 1024;
-pub const MAX_CONTROL: u64 = 8 * 1024 * 1024;
+/// A manifest is flushed at 8 MiB and can contain one final record past that threshold.
+pub const MAX_CONTROL: u64 = 10 * 1024 * 1024;
 pub const MAX_GRANT_MS: i64 = 25 * 3_600_000;
 pub const CHARGE_SQL: &str =
     "INSERT INTO ingest_grants(run,expires,bytes,writes) VALUES (?1,?2,?3,1)
@@ -23,7 +24,7 @@ pub const CHARGE_SQL: &str =
 
 type HmacSha256 = Hmac<Sha256>;
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Destination {
     pub origin: String,

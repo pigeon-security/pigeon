@@ -14,7 +14,29 @@ fn error(status: u16, message: &str) -> Result<Response> {
     json_answer(status, json!({"error": message}))
 }
 
-pub async fn ready(env: &Env) -> Result<Response> {
+pub async fn ready(req: &mut Request, env: &Env) -> Result<Response> {
+    let key = env.secret("DATA_KEY")?.to_string();
+    let signature = req
+        .headers()
+        .get(pigeon_ingest::protocol::SIGNATURE_HEADER)?;
+    let Some(signature) = signature else {
+        return error(401, "unauthorized");
+    };
+    let Some(body) = bounded_body(req, 1024).await? else {
+        return error(413, "readiness body too large");
+    };
+    if pigeon_ingest::protocol::verify(
+        &signature,
+        "POST",
+        wire::READY_PATH,
+        &body,
+        key.as_bytes(),
+        now_ms(),
+    )
+    .is_err()
+    {
+        return error(401, "unauthorized");
+    }
     env.bucket("DATA")?;
     env.d1("DB")?
         .prepare("SELECT run FROM ingest_grants LIMIT 0")
