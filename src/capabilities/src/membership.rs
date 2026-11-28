@@ -211,7 +211,9 @@ pub fn write_need(action: &Action, target: &Value) -> Need {
     }
     let instance = match action.target {
         Target::Instance => target.as_str(),
-        Target::Site | Target::DigitalOceanTeam => target["instance"].as_str(),
+        Target::Site | Target::DigitalOceanTeam | Target::IngestConnection => {
+            target["instance"].as_str()
+        }
         _ => None,
     };
     Need::On(instance.map(str::to_string), Role::Operator)
@@ -240,7 +242,9 @@ pub fn tool_need(capability: &str, tool: &str, args: &Value) -> Option<Role> {
     Some(
         if matches!(
             tool,
-            crate::digitalocean::VERIFY | crate::digitalocean::spaces::VERIFY
+            crate::digitalocean::VERIFY
+                | crate::digitalocean::spaces::VERIFY
+                | crate::ingest::connections::VERIFY
         ) {
             Role::Operator
         } else if crate::console::ops::allowed(tool, args) {

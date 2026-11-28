@@ -181,7 +181,7 @@ async fn status(record: &Instance, env: &Env) -> Result<Value> {
     connection_status(record, saved.as_ref().map(|value| value.team_id.as_str()))
 }
 
-async fn open_pat(record: &Instance, env: &Env) -> Result<String> {
+pub(crate) async fn open_pat(record: &Instance, env: &Env) -> Result<String> {
     let expected = expected(record)?;
     let saved = credential(env, &record.id)
         .await?

@@ -144,6 +144,9 @@ pub struct CapabilitySettings {
     /// instance (`catalogue::placement`; `own_worker` for `data`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement: Option<crate::catalogue::Placement>,
+    /// Source aliases and their approved scopes. Credentials are sealed separately.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub connections: BTreeMap<String, crate::ingest::connections::Binding>,
     /// Data Ingest's approved read-only B2 source. The credential is never in the record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backblaze: Option<pigeon_ingest::backblaze::Source>,

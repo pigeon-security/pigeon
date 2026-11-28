@@ -10,6 +10,7 @@
 //! also overrides the built-in one.
 
 pub mod backblaze;
+pub mod connections;
 pub mod digitalocean;
 pub mod hosts;
 pub mod net;
@@ -27,10 +28,21 @@ const INGEST_VIEWS: &[crate::instances::tools::View] = &[crate::instances::tools
 
 const DATA_TOOLS: &[crate::instances::tools::Registration] = &[
     crate::instances::tools::Registration {
+        name: connections::LIST,
+        description: None,
+        arguments: &[],
+    },
+    crate::instances::tools::Registration {
+        name: connections::VERIFY,
+        description: None,
+        arguments: &["connection"],
+    },
+    crate::instances::tools::Registration {
         name: "data_ingest_plan",
         description: Some("Plan an ingest using the approved source and private Data destination."),
         arguments: &[
             "source",
+            "connection",
             "prefix",
             "size_bytes",
             "dry_run",
@@ -494,6 +506,13 @@ impl Ingest {
                 Value::Null,
             ));
         };
+        if let Some(value) = args.get("connection") {
+            let name = value
+                .as_str()
+                .filter(|name| connections::valid_name(name))
+                .ok_or_else(|| bad("Name an approved bucket connection."))?;
+            return connections::preflight(env, &record, name, args).await;
+        }
         let managed = if record.capabilities.contains_key(NAME) {
             if args["source"] == "backblaze" {
                 return backblaze::plan(self, cx, &record, args).await;
@@ -1458,6 +1477,18 @@ impl Capability for Ingest {
         let run = json!({ "type": "string", "description": "A run id from data_ingest_plan or data_ingest_status." });
         vec![
             tool(
+                connections::LIST,
+                "List this instance's approved bucket connections and credential state.",
+                json!({"instance": instance}),
+                &["instance"],
+            ),
+            tool(
+                connections::VERIFY,
+                "Verify read access to a named bucket connection without writing to it.",
+                json!({"instance": instance, "connection": {"type": "string"}}),
+                &["instance", "connection"],
+            ),
+            tool(
                 "data_ingest_plan",
                 "Plan a run that copies a source bucket into an instance's R2 bucket, leaving behind \
                  only files R2 already holds with certainty. Reads only: checks what is set up, \
@@ -1466,6 +1497,7 @@ impl Capability for Ingest {
                 json!({
                     "instance": instance,
                     "source": { "type": "string", "description": "Provider adapter for Data ingest, or a registered account for a legacy run." },
+                    "connection": { "type": "string", "description": "Name of an approved bucket connection." },
                     "bucket": { "type": "string", "description": "The source bucket (a declared legacy target only)." },
                     "prefix": { "type": "string" },
                     "dry_run": { "type": "boolean", "description": "Default true: decide and record, copy nothing." },
@@ -1510,6 +1542,17 @@ impl Capability for Ingest {
     fn call<'a>(&'a self, cx: &'a Context<'a>, tool: &'a str, args: &'a Value) -> Call<'a> {
         Box::pin(async move {
             match tool {
+                connections::LIST | connections::VERIFY => {
+                    let instance = arg(args, "instance")?;
+                    let record = instances::one(cx.env, instance)
+                        .await?
+                        .ok_or_else(|| bad("There is no approved instance."))?;
+                    if tool == connections::LIST {
+                        connections::listings(cx.env, &record).await
+                    } else {
+                        connections::verify(cx.env, &record, arg(args, "connection")?).await
+                    }
+                }
                 "data_ingest_plan" => self.plan(cx, args).await,
                 "data_ingest_start" => self.start(cx, args).await,
                 "data_ingest_status" => self.status(cx, args).await,
@@ -1518,6 +1561,22 @@ impl Capability for Ingest {
                 other => Err(unknown(other)),
             }
         })
+    }
+
+    fn write_check<'a>(
+        &'a self,
+        cx: &'a Context<'a>,
+        w: &'a crate::console::write::Write<'a>,
+    ) -> Call<'a> {
+        Box::pin(async move { connections::check_write(cx, w).await })
+    }
+
+    fn write_make<'a>(
+        &'a self,
+        cx: &'a Context<'a>,
+        w: &'a crate::console::write::Write<'a>,
+    ) -> Call<'a> {
+        Box::pin(async move { connections::save(cx, w).await })
     }
 
     fn secrets(&self) -> Vec<Slot> {

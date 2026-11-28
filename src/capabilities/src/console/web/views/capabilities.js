@@ -289,6 +289,57 @@
   }
   const dependents = (r, c) => (c.cap === "publishing" && on(r, CAPS[1]) ? [CAPS[1]] : []);
 
+  function ingestBucketConnections(ctx, record) {
+    const content = el("div", { class: "stack" });
+    const d = dialog({ title: "Bucket connections", body: [content] });
+    const states = {
+      configured: "Credential saved",
+      scope_changed: "Scope changed. Replace the credential.",
+      legacy_spaces_key: "Using the existing Spaces credential",
+      missing: "Credential required",
+    };
+    ctx.op("data_ingest_connections", { instance: record.id }).then((result) => {
+      if (!result.connections.length) {
+        content.append(el("p", { text: "Add named connections under data.ingest.connections in the instance record." }));
+        return;
+      }
+      for (const connection of result.connections) {
+        const { name, binding, state, generation } = connection;
+        const target = [
+          ["Instance", code(record.id)],
+          ["Connection", code(name)],
+          ["Source", code([binding.provider, binding.region, binding.bucket, binding.prefix].filter(Boolean).join(" / "))],
+        ];
+        const verify = button("Verify", async () => {
+          try {
+            await ctx.op("data_ingest_connection_verify", { instance: record.id, connection: name });
+            d.say(`Verified read access for ${name}.`);
+          } catch (err) {
+            d.say(err.message || String(err), true);
+          }
+        });
+        verify.disabled = state !== "configured" && state !== "legacy_spaces_key";
+        const set = button(state === "configured" ? "Rotate key" : "Set key", () => {
+          const value = input({ type: "password", mono: true, autocomplete: "off", spellcheck: "false" });
+          confirm({
+            title: `Set key for ${name}`, target,
+            form: field({ label: "Access key ID and secret", control: value,
+              hint: "Enter ACCESS_KEY_ID:SECRET_ACCESS_KEY for a read-only key limited to the bucket." }),
+            action: "data-ingest-connection-key-set", id: { instance: record.id, name, version: result.version, generation },
+            confirmLabel: "Verify and save with passkey",
+            prepare: async () => {
+              const secret = value.value.trim();
+              if (!secret) throw new Error("Enter the bucket credential.");
+              return { change: { value: secret }, begin: { digest: await sha256(secret) } };
+            },
+            onDone: () => setTimeout(ctx.refresh, 0),
+          });
+        });
+        content.append(facts(target), el("p", { class: "muted", text: states[state] || "Credential status unavailable" }), el("div", { class: "actions" }, [verify, set]));
+      }
+    }).catch((err) => d.say(err.message || String(err), true));
+  }
+
   function digitalOceanConnection(ctx, record, spaces = false) {
     const args = { instance: record.id };
     const teamId = record.cloud.digitalocean.team_id;
@@ -506,6 +557,7 @@
             step ? button("Upgrade", () => upgrade(c, step), { ...sm, variant: view ? "primary" : undefined }) : null,
             c.fields(record).length || c.cap === "mcp-federation"
               ? button(c.cap === "mcp-federation" ? "Manage trust" : "Configure", () => configure(c, true), { ...sm, variant: "ghost" }) : null,
+            c.cap === "data-ingest" ? button("Bucket connections", () => ingestBucketConnections(ctx, record), sm) : null,
             c.cap === "digitalocean" ? button("Connection", () => digitalOceanConnection(ctx, record), sm) : null,
             c.cap === "digitalocean" && record.cloud.digitalocean.droplet_health
               ? button("Runner check", () => digitalOceanDroplet(ctx, record), sm) : null,

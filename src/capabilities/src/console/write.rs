@@ -58,6 +58,8 @@ pub enum Target {
     Instance,
     /// The approved DigitalOcean configuration: `{instance, team_id, version}`.
     DigitalOceanTeam,
+    /// A named Data Ingest connection and its current generation.
+    IngestConnection,
     /// A person's name, as an invite takes it.
     Name,
     /// `on` or `off`.
@@ -185,6 +187,14 @@ pub const ACTIONS: &[Action] = &[
         Target::Secret,
         Change::Secret,
     )),
+    act(
+        crate::ingest::connections::SET_KEY,
+        "Set a bucket connection credential",
+        Cap(crate::ingest::NAME),
+        false,
+        Target::IngestConnection,
+        Change::Secret,
+    ),
     act(
         crate::digitalocean::SET_TOKEN,
         "Set a DigitalOcean token",
@@ -568,6 +578,33 @@ impl Action {
                     .ok_or("the target needs the approved record version")?;
                 json!({"instance": instance, "team_id": team, "version": version})
             }
+            Target::IngestConnection => {
+                let object = raw
+                    .as_object()
+                    .ok_or("expected a bucket connection target")?;
+                only(object, &["instance", "name", "version", "generation"], true)?;
+                let instance = raw["instance"]
+                    .as_str()
+                    .filter(|id| instance_like(id))
+                    .ok_or("expected an instance ID")?;
+                let name = raw["name"]
+                    .as_str()
+                    .filter(|name| crate::ingest::connections::valid_name(name))
+                    .ok_or("expected a bucket connection name")?;
+                let version = raw["version"]
+                    .as_u64()
+                    .ok_or("expected the approved record version")?;
+                let generation = match &raw["generation"] {
+                    Value::Null => None,
+                    value => Some(
+                        value
+                            .as_str()
+                            .filter(|id| crate::ingest::connections::valid_generation(id))
+                            .ok_or("invalid credential generation")?,
+                    ),
+                };
+                json!({"instance": instance, "name": name, "version": version, "generation": generation})
+            }
             Target::Name => json!(crate::users::invite_name(text())?),
             Target::Switch => match text() {
                 t @ ("on" | "off") => json!(t),
@@ -820,6 +857,12 @@ impl Action {
     pub fn summary(&self, target: &Value, bound: &Value) -> Summary {
         let target_text = match target {
             Value::String(s) => s.clone(),
+            v if self.target == Target::IngestConnection => format!(
+                "{} / {} (record version {})",
+                v["instance"].as_str().unwrap_or(""),
+                v["name"].as_str().unwrap_or(""),
+                v["version"],
+            ),
             v if self.target == Target::DigitalOceanTeam => format!(
                 "{} / DigitalOcean team {} (record version {})",
                 v["instance"].as_str().unwrap_or(""),

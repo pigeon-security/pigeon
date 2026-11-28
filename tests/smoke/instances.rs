@@ -2594,11 +2594,13 @@ fn core_ingest_plans_hosts_and_estimates() {
         },
     };
 
-    // The five tools, and the slots.
+    // The bucket connection and ingest run tools, and the slots.
     let tools: Vec<&str> = cap.tools().iter().map(|t| t.name).collect();
     assert_eq!(
         tools,
         [
+            "data_ingest_connections",
+            "data_ingest_connection_verify",
             "data_ingest_plan",
             "data_ingest_start",
             "data_ingest_status",

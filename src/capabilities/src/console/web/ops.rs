@@ -79,6 +79,8 @@ pub const READS: &[(&str, &[&str])] = &[
     ("observability_errors", &["hours", "limit", "worker"]),
     ("observability_worker_metrics", &["instance", "hours"]),
     ("data_ingest_report", &["instance", "run"]),
+    ("data_ingest_connections", &["instance"]),
+    ("data_ingest_connection_verify", &["instance", "connection"]),
     // Ingest › Runs lists an instance's runs here: `data_ingest_status` would also delete the VM of
     // a run that has ended, so the console never calls it.
     ("app_ingest_runs", &["instance"]),
@@ -136,6 +138,8 @@ pub const INSTANCE_OPS: &[&str] = &[
     "ci_status",
     "observability_worker_metrics",
     "data_ingest_report",
+    "data_ingest_connections",
+    "data_ingest_connection_verify",
 ];
 
 /// The arguments read `name` may take, when it is one.

@@ -1591,6 +1591,38 @@ impl Directory {
                 }
                 json!(matches)
             }
+            "data-ingest.bucket.put" => {
+                use crate::ingest::connections as buckets;
+                let target = &a["target"];
+                let instance = target["instance"].as_str().unwrap_or_default();
+                let name = target["name"].as_str().unwrap_or_default();
+                let Some(record) = self
+                    .setting_value(&crate::instances::key(instance), t)?
+                    .and_then(|raw| {
+                        serde_json::from_str::<crate::instances::record::Instance>(&raw).ok()
+                    })
+                    .filter(|record| target["version"].as_u64() == Some(record.version))
+                else {
+                    return Ok(json!(false));
+                };
+                let value = s("value");
+                let next: buckets::Saved = serde_json::from_str(value)?;
+                if buckets::scope(&record, name).ok().as_deref() != Some(&next.scope) {
+                    return Ok(json!(false));
+                }
+                let key = buckets::key(instance, name);
+                let previous = self
+                    .setting_value(&key, t)?
+                    .map(|raw| serde_json::from_str::<buckets::Saved>(&raw))
+                    .transpose()?;
+                if previous.as_ref().map(buckets::generation).as_deref()
+                    != target["generation"].as_str()
+                {
+                    return Ok(json!(false));
+                }
+                self.setting_keep(&key, value, t + crate::digitalocean::TOKEN_KEPT_MS)?;
+                json!(true)
+            }
             "data-ingest.droplet.pending" | "data-ingest.droplet.list" => {
                 #[derive(Deserialize)]
                 struct Row {

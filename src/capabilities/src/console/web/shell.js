@@ -34,6 +34,7 @@
     "data_read_list_objects", "source_resolve_revision", "source_read_file", "ci_jobs", "ci_status",
     "observability_worker_metrics", "app_ingest_runs", "data_ingest_report", "digitalocean_status", "digitalocean_verify",
     "data_email_mailboxes", "data_email_list", "data_email_get", "data_read_get_object",
+    "data_ingest_connections", "data_ingest_connection_verify",
     "digitalocean_spaces_status", "digitalocean_spaces_verify", "digitalocean_droplet_status",
     "digitalocean_droplet_jobs", "digitalocean_droplet_job",
     "ai_agents_status", "ai_agents_compare", "cost_daily", "land_list",
@@ -45,7 +46,7 @@
     "instance-put", "linked-unlink", "site-deploy", "site-rollback", "visitor-invite", "visitor-revoke",
     // Access and Platform.
     "secret-set", "apple-adopt", "apple-identity", "token-issue", "token-revoke", "invite", "passkey-remove", "person-admin", "member-set", "user-remove",
-    "app-disconnect", "app-group-disconnect", "model-defaults", "agents-config", "digitalocean-token-set", "digitalocean-spaces-key-set", "digitalocean-droplet-token-set", "digitalocean-droplet-start", "digitalocean-droplet-cancel"]);
+    "app-disconnect", "app-group-disconnect", "model-defaults", "agents-config", "digitalocean-token-set", "digitalocean-spaces-key-set", "data-ingest-connection-key-set", "digitalocean-droplet-token-set", "digitalocean-droplet-start", "digitalocean-droplet-cancel"]);
 
   // ---- Fixture mode (P14) and routing base.
   const query = new URLSearchParams(location.search);

@@ -17,7 +17,7 @@ fn bad(why: impl Into<String>) -> Error {
 }
 
 /// One HTTPS call. `body` is a content type and text. Answers the status and the body text.
-async fn http(
+pub(super) async fn http(
     method: Method,
     url: &str,
     headers: &[(&str, String)],

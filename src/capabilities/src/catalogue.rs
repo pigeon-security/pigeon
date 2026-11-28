@@ -587,6 +587,7 @@ pub fn problems(record: &Instance) -> Vec<String> {
                 "The capability \"{name}\" does not accept Droplet health checks."
             ));
         }
+        out.extend(crate::ingest::connections::field_problems(record, name));
         if let Some(problem) =
             crate::ingest::scaleway_source::field_problems(name, &record.capabilities[name])
         {

@@ -85,20 +85,51 @@ pub(super) async fn status(record: &Instance, env: &Env) -> Result<Value> {
     }))
 }
 
-pub(crate) async fn open_keys(record: &Instance, env: &Env, binding: &Binding) -> Result<s3::Keys> {
-    let saved = saved(env, &record.id)
+pub(crate) async fn legacy_generation(
+    record: &Instance,
+    env: &Env,
+    binding: &Binding,
+) -> Result<Option<String>> {
+    if self::binding(record) != Some(binding) {
+        return Ok(None);
+    }
+    Ok(saved(env, &record.id)
         .await?
-        .filter(|s| current(s, record, binding))
-        .ok_or_else(|| {
-            bad("set a read-only Spaces key for the approved bucket before verifying")
-        })?;
+        .filter(|saved| current(saved, record, binding))
+        .map(|saved| pigeon_core::oauth::hash(&saved.sealed)))
+}
+
+pub(crate) async fn legacy_credential(
+    record: &Instance,
+    env: &Env,
+    binding: &Binding,
+) -> Result<Option<(String, s3::Keys)>> {
+    if self::binding(record) != Some(binding) {
+        return Ok(None);
+    }
+    let Some(saved) = saved(env, &record.id)
+        .await?
+        .filter(|saved| current(saved, record, binding))
+    else {
+        return Ok(None);
+    };
     let key = crate::linked::sealing_key(env).await?;
     let plaintext = crypto::open(&key, &saved.sealed, &context(record, binding)?)
         .await
         .map_err(|_| bad("the saved Spaces key could not be opened"))?;
     let pair =
         std::str::from_utf8(&plaintext).map_err(|_| bad("the saved Spaces key is invalid"))?;
-    s3::parse_keys(pair)
+    Ok(Some((
+        pigeon_core::oauth::hash(&saved.sealed),
+        s3::parse_keys(pair)?,
+    )))
+}
+
+pub(crate) async fn open_keys(record: &Instance, env: &Env, binding: &Binding) -> Result<s3::Keys> {
+    legacy_credential(record, env, binding)
+        .await?
+        .map(|(_, keys)| keys)
+        .ok_or_else(|| bad("set a read-only Spaces key for the approved bucket before verifying"))
 }
 
 pub(super) async fn verify(record: &Instance, env: &Env) -> Result<Value> {

@@ -33,6 +33,7 @@ fn console_write_actions_each_have_a_handler_and_policy() {
     const OWNERS: &[&str] = &[
         "secrets",
         "digitalocean",
+        "data-ingest",
         "proxy",
         "linked",
         "instances",
@@ -2337,6 +2338,51 @@ fn console_every_view() -> std::collections::BTreeMap<String, Vec<String>> {
             )
         })
         .collect()
+}
+
+#[test]
+fn data_ingest_named_buckets_keep_scopes_and_credentials_separate() {
+    use pigeon_capabilities::{console::write, ingest::connections, instances::record::Instance};
+
+    let mut record: Instance = serde_json::from_value(json!({
+        "id": "test", "title": "Test", "version": 4,
+        "account": { "kind": "linked" },
+        "data": { "ingest": { "connections": {
+            "b2-backfill": {"provider":"backblaze","name":"b2-backfill","region":"us-west-004","bucket":"source-bucket"},
+            "scw-backfill": {"provider":"scaleway","project":"12345678-1234-1234-1234-123456789abc","region":"fr-par","bucket":"source-bucket"},
+            "spaces-backfill": {"provider":"digitalocean","region":"tor1","bucket":"source-bucket","prefix":"canary/"}
+        }}}
+    })).unwrap();
+    for name in ["b2-backfill", "scw-backfill", "spaces-backfill"] {
+        assert!(connections::binding(&record, name).is_ok());
+    }
+    assert!(connections::binding(&record, "other").is_err());
+    assert_eq!(
+        serde_json::to_value(&record).unwrap()["data"]["ingest"]["connections"]["spaces-backfill"]
+            ["provider"],
+        "digitalocean"
+    );
+    record.capabilities.remove("data");
+    assert!(connections::binding(&record, "b2-backfill").is_err());
+
+    let action = write::ACTIONS
+        .iter()
+        .find(|action| action.id == connections::SET_KEY)
+        .unwrap();
+    let target = json!({"instance":"test","name":"b2-backfill","version":4,"generation":null});
+    assert_eq!(action.target(&target).unwrap(), target);
+    assert!(
+        action
+            .target(&json!({"instance":"test","name":"../unsafe","version":4}))
+            .is_err()
+    );
+    assert!(
+        action
+            .target(
+                &json!({"instance":"test","name":"b2-backfill","version":4,"generation":"wrong"})
+            )
+            .is_err()
+    );
 }
 
 #[test]
