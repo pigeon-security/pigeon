@@ -88,7 +88,7 @@ async fn check(env: &Env, pin: ComputePin, region: &str) -> Result<Response> {
     }
     json_answer(
         200,
-        json!({"project": pin.project, "generation": pin.generation}),
+        json!({"project": pin.project, "generation": pin.generation, "launch_protocol": 1}),
     )
 }
 

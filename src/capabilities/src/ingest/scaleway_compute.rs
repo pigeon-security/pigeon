@@ -323,6 +323,11 @@ pub(super) async fn ready(
         },
     )
     .await?;
+    if reply["launch_protocol"] != 1 {
+        return Err(bad(
+            "Apply the Data Worker plan with Scaleway launch and cleanup support.",
+        ));
+    }
     if reply["project"] != pin.project || reply["generation"] != pin.generation {
         return Err(bad(
             "the Scaleway compute broker did not confirm the approved generation",
