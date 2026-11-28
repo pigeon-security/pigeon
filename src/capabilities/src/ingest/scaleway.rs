@@ -199,38 +199,15 @@ async fn runner_outcome(
 
 /// Request removal of the server and confirm its volumes are all gone.
 async fn cleanup(run: &mut RunRecord, secret: &str, project: &str) -> Result<()> {
-    let zone = hosts::zone(&run.region);
-    if let Some(id) = run.vm.as_deref() {
-        match net::scw_state(secret, &zone, id).await?.as_deref() {
-            None => {}
-            Some("stopped") => {
-                net::scw_delete_server(secret, &zone, id).await?;
-                return Ok(());
-            }
-            Some("running" | "stopped in place") => {
-                net::scw_action(secret, &zone, id, &hosts::scaleway_poweroff()).await?;
-                return Ok(());
-            }
-            Some(_) => return Ok(()),
-        }
-    }
-    // A create response can omit its asynchronous block IDs. Before declaring
-    // cleanup complete, also query both deterministic names within the project.
-    for name in hosts::scaleway_volume_names(&run.run) {
-        if let Some(volume) = net::scw_find_volume(secret, &zone, project, &name).await?
-            && !run.scaleway_volumes.contains(&volume)
-        {
-            run.scaleway_volumes.push(volume);
-        }
-    }
-    let mut remaining = Vec::new();
-    for volume in &run.scaleway_volumes {
-        if !net::scw_remove_volume(secret, &zone, volume).await? {
-            remaining.push(volume.clone());
-        }
-    }
-    run.scaleway_volumes = remaining;
-    run.vm_deleted = run.scaleway_volumes.is_empty();
+    run.vm_deleted = pigeon_cloud::scaleway_ingest::cleanup(
+        secret,
+        &hosts::zone(&run.region),
+        project,
+        &run.run,
+        run.vm.as_deref(),
+        &mut run.scaleway_volumes,
+    )
+    .await?;
     Ok(())
 }
 

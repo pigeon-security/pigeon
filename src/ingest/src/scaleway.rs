@@ -245,4 +245,31 @@ pub fn valid_region(region: &str) -> bool {
 #[serde(rename_all = "snake_case", tag = "operation", deny_unknown_fields)]
 pub enum ComputeCommand {
     Check { pin: ComputePin, region: String },
+    Status { run: String },
+    Cleanup { run: String },
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BrokerRun {
+    pub run: String,
+    pub pin: ComputePin,
+    pub region: String,
+    pub deadline_ms: i64,
+    pub server: Option<String>,
+    pub volumes: Vec<String>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BrokerStatus {
+    pub run: String,
+    pub server: Option<String>,
+    pub state: Option<String>,
+    pub volumes: Vec<String>,
+    pub gone: bool,
+}
+
+pub fn broker_run_key(run: &str) -> String {
+    format!("internal/scaleway/{run}.json")
 }

@@ -329,3 +329,44 @@ pub async fn scw_remove_volume(secret: &str, zone: &str, id: &str) -> Result<boo
         ))),
     }
 }
+/// Request removal of the server and confirm its volumes are all gone.
+pub async fn cleanup(
+    secret: &str,
+    zone: &str,
+    project: &str,
+    run: &str,
+    server: Option<&str>,
+    volumes: &mut Vec<String>,
+) -> Result<bool> {
+    if let Some(id) = server {
+        match scw_state(secret, zone, id).await?.as_deref() {
+            None => {}
+            Some("stopped") => {
+                scw_delete_server(secret, zone, id).await?;
+                return Ok(false);
+            }
+            Some("running" | "stopped in place") => {
+                scw_action(secret, zone, id, &hosts::scaleway_poweroff()).await?;
+                return Ok(false);
+            }
+            Some(_) => return Ok(false),
+        }
+    }
+    // A create response can omit its asynchronous block IDs. Before declaring
+    // cleanup complete, also query both deterministic names within the project.
+    for name in hosts::scaleway_volume_names(run) {
+        if let Some(volume) = scw_find_volume(secret, zone, project, &name).await?
+            && !volumes.contains(&volume)
+        {
+            volumes.push(volume);
+        }
+    }
+    let mut remaining = Vec::new();
+    for volume in volumes.iter() {
+        if !scw_remove_volume(secret, zone, volume).await? {
+            remaining.push(volume.clone());
+        }
+    }
+    *volumes = remaining;
+    Ok(volumes.is_empty())
+}
