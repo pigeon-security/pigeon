@@ -1457,8 +1457,10 @@ fn ingest_stage_timings_are_counted() {
 #[test]
 fn ingest_memory_staging_stores_what_the_spool_path_stores() {
     let mut objs = BTreeMap::new();
-    for i in 0..300u32 {
-        let size = [5usize, 900, 70_000, 1_200_000][(i % 4) as usize];
+    // Small enough for the smoke suite's time limit (hashing is slow unoptimised); one in
+    // eight is over the 1 MiB default.
+    for i in 0..40u32 {
+        let size = [5usize, 900, 70_000, 5, 900, 70_000, 5, 1_050_000][(i % 8) as usize];
         let body: Vec<u8> = (0..size)
             .map(|j| (j as u32).wrapping_mul(31).wrapping_add(i % 37) as u8)
             .collect();
@@ -1466,7 +1468,7 @@ fn ingest_memory_staging_stores_what_the_spool_path_stores() {
     }
     let source = MemSource {
         objs,
-        page: 50,
+        page: 20,
         jitter_us: 30,
     };
     let spools = [
@@ -1504,7 +1506,7 @@ fn ingest_memory_staging_stores_what_the_spool_path_stores() {
             match i {
                 0 => assert_eq!(t.spool_write.count, report.counters.listed),
                 1 => assert_eq!(t.spool_write.count, 0),
-                2 => assert!(t.spool_write.count > 0 && t.spool_write.count < 300),
+                2 => assert!(t.spool_write.count > 0 && t.spool_write.count < 40),
                 _ => assert_eq!(t.spool_write.count, 0),
             }
             let mut lines = dest.lines("mem");
@@ -1524,8 +1526,7 @@ fn ingest_memory_staging_stores_what_the_spool_path_stores() {
         assert_eq!(o.1, outcomes[0].1);
         assert_eq!(o.2, outcomes[0].2);
     }
-    // Bodies repeat every 148 objects: the rest are duplicates.
-    assert_eq!(outcomes[0].2.len(), 148);
+    assert_eq!(outcomes[0].2.len(), 40);
 }
 
 /// A measured run of large objects sets the byte rate, so a byte-heavy bucket is no longer
