@@ -120,7 +120,19 @@ async fn sample(source: &SourceSpec, pair: &str) -> Result<s3::Listing> {
 }
 
 pub(crate) async fn check_key(record: &Instance, pair: &str) -> Result<Value> {
-    let approved = connection(record)?.bind(None).map_err(bad)?;
+    let binding = connection(record)?;
+    let approved = binding.bind(None).map_err(bad)?;
+    let SourceSpec::S3 {
+        endpoint,
+        bucket,
+        prefix,
+        ..
+    } = &approved
+    else {
+        return Err(bad("Backblaze requires an S3 source"));
+    };
+    let keys = s3::parse_keys(pair)?;
+    s3::verify_backblaze_read_key(endpoint, bucket, prefix, &keys).await?;
     let listing = sample(&approved, pair).await?;
     Ok(json!({ "instance": record.id, "verified": true, "sample_count": listing.objects.len() }))
 }

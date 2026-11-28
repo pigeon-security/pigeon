@@ -1,11 +1,12 @@
 //! A small S3 client for S3-compatible object storage (Scaleway, DigitalOcean Spaces,
 //! Backblaze B2). Path-style addressing only. Request signing (AWS Signature Version 4) and the
-//! XML readers are pure, so they can be checked against recorded inputs. Only [`send`] touches
-//! the network. A secret key never appears in an error or in `Debug` output.
+//! XML readers are pure, so they can be checked against recorded inputs. Provider calls are separated from the pure parsing and signing helpers. A secret key never appears in an error or in `Debug` output.
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use worker::{Error, Fetch, Headers, Method, Request, RequestInit, Response, Result};
+use worker::{
+    Error, Fetch, Headers, Method, Request, RequestInit, RequestRedirect, Response, Result,
+};
 
 use crate::sign::{hex, hmac_sha256};
 
@@ -53,6 +54,99 @@ pub fn parse_keys(value: &str) -> Result<Keys> {
         access_key_id: id.into(),
         secret_access_key: secret.into(),
     })
+}
+
+/// Checks the B2 Native API's v4 authorization metadata for an exact read-only source scope.
+pub fn backblaze_read_scope(
+    access: &serde_json::Value,
+    endpoint: &str,
+    bucket: &str,
+    prefix: &str,
+) -> bool {
+    if access["s3ApiUrl"].as_str() != Some(endpoint) {
+        return false;
+    }
+    let allowed = &access["allowed"];
+    let Some(buckets) = allowed["buckets"].as_array() else {
+        return false;
+    };
+    let [only_bucket] = buckets.as_slice() else {
+        return false;
+    };
+    if only_bucket["name"].as_str() != Some(bucket) {
+        return false;
+    }
+    let prefix_matches = match allowed.get("namePrefix") {
+        Some(value) if value.is_null() => prefix.is_empty(),
+        Some(value) => value.as_str() == Some(prefix),
+        None => false,
+    };
+    let Some(capabilities) = allowed["capabilities"].as_array() else {
+        return false;
+    };
+    prefix_matches
+        && ["listFiles", "readFiles"].iter().all(|capability| {
+            capabilities
+                .iter()
+                .any(|value| value.as_str() == Some(capability))
+        })
+        && capabilities.iter().all(|value| {
+            matches!(
+                value.as_str(),
+                Some(
+                    "listFiles"
+                        | "readFiles"
+                        | "listBuckets"
+                        | "readBuckets"
+                        | "readBucketEncryption"
+                        | "readBucketRetentions"
+                        | "readFileLegalHolds"
+                        | "readFileRetentions"
+                )
+            )
+        })
+}
+
+/// Verifies an application key against Backblaze's fixed native authorization service. Never
+/// returns the session token or the provider response. A successful S3 list alone proves
+/// access but cannot prove that the key cannot write to the source.
+pub async fn verify_backblaze_read_key(
+    endpoint: &str,
+    bucket: &str,
+    prefix: &str,
+    keys: &Keys,
+) -> Result<()> {
+    let unavailable =
+        || Error::RustError("Backblaze could not verify the source application key.".into());
+    let credentials = format!("{}:{}", keys.access_key_id, keys.secret_access_key);
+    let headers = Headers::new();
+    headers.set(
+        "authorization",
+        &format!("Basic {}", crate::git::base64(credentials.as_bytes())),
+    )?;
+    let mut init = RequestInit::new();
+    init.with_method(Method::Get)
+        .with_headers(headers)
+        .with_redirect(RequestRedirect::Error);
+    let request = Request::new_with_init(
+        "https://api.backblazeb2.com/b2api/v4/b2_authorize_account",
+        &init,
+    )?;
+    let mut response = Fetch::Request(request)
+        .send()
+        .await
+        .map_err(|_| unavailable())?;
+    if response.status_code() != 200 {
+        return Err(unavailable());
+    }
+    let reply: serde_json::Value = response.json().await.map_err(|_| unavailable())?;
+    if !backblaze_read_scope(&reply["apiInfo"]["storageApi"], endpoint, bucket, prefix) {
+        return Err(Error::RustError(
+            "Use a Backblaze read-only application key for exactly the approved bucket and prefix."
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Where a provider's S3 API is.

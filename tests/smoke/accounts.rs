@@ -1883,3 +1883,63 @@ fn named_backblaze_connections_share_one_reviewed_worker_runtime() {
     assert!(configured(&instance).is_none());
     assert!(record_problem(&instance).unwrap().contains("share one"));
 }
+
+#[test]
+fn backblaze_source_authority_is_one_read_only_bucket_and_prefix() {
+    use pigeon_core::s3::backblaze_read_scope;
+
+    let endpoint = "https://s3.us-west-004.backblazeb2.com";
+    let bucket = "source-bucket";
+    let prefix = "approved/";
+    let read = json!({
+        "s3ApiUrl": endpoint,
+        "allowed": {
+            "buckets": [{"id": "bucket-1", "name": bucket}],
+            "capabilities": ["listBuckets", "listFiles", "readFiles", "readBuckets"],
+            "namePrefix": prefix,
+        },
+    });
+    assert!(backblaze_read_scope(&read, endpoint, bucket, prefix));
+    assert!(!backblaze_read_scope(&read, endpoint, "other", prefix));
+    assert!(!backblaze_read_scope(
+        &read,
+        endpoint,
+        bucket,
+        "approved/narrower/"
+    ));
+    assert!(!backblaze_read_scope(
+        &read,
+        "https://s3.us-west-009.backblazeb2.com",
+        bucket,
+        prefix
+    ));
+
+    let mut broader = read.clone();
+    broader["allowed"]["namePrefix"] = Value::Null;
+    assert!(!backblaze_read_scope(&broader, endpoint, bucket, prefix));
+    assert!(backblaze_read_scope(&broader, endpoint, bucket, ""));
+    let mut extra_bucket = read.clone();
+    extra_bucket["allowed"]["buckets"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"name":"other"}));
+    assert!(!backblaze_read_scope(
+        &extra_bucket,
+        endpoint,
+        bucket,
+        prefix
+    ));
+    for extra in [
+        "writeFiles",
+        "deleteFiles",
+        "shareFiles",
+        "listAllBucketNames",
+    ] {
+        let mut wider = read.clone();
+        wider["allowed"]["capabilities"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!(extra));
+        assert!(!backblaze_read_scope(&wider, endpoint, bucket, prefix));
+    }
+}
