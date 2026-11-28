@@ -2432,6 +2432,7 @@ fn ingest_engine_dedupes_resumes_and_opens_zips() {
         commit: "c".into(),
         max_minutes: None,
         resume: None,
+        skip_over: None,
     };
 
     // Verify passes the right bytes and fails on a short, long or changed stream.

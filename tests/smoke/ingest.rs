@@ -89,6 +89,8 @@ struct MemDest {
     fail_first: Mutex<HashMap<String, u32>>,
     /// Answers every HEAD as absent: another writer stores blobs after the check.
     blind: bool,
+    /// Blob writes left in the run's grant, when limited.
+    budget: Mutex<Option<u64>>,
 }
 
 impl MemDest {
@@ -156,6 +158,12 @@ impl Dest for MemDest {
             .map_err(|e| Error::Dest(e.to_string()))?;
         if buf.len() as u64 != size {
             return Err(Error::Dest("wrong length".into()));
+        }
+        if let Some(left) = self.budget.lock().unwrap().as_mut() {
+            if *left == 0 {
+                return Err(Error::Exhausted);
+            }
+            *left -= 1;
         }
         if let Some(left) = self.fail_first.lock().unwrap().get_mut(key)
             && *left > 0
@@ -233,6 +241,7 @@ fn job(run_id: &str, dry: bool, threads: u32) -> JobSpec {
         commit: "c".into(),
         max_minutes: None,
         resume: None,
+        skip_over: None,
     }
 }
 
@@ -755,4 +764,105 @@ fn ingest_head_many_stays_inside_the_grant() {
     assert!(!head_many_keys("run", &batch(vec![checkpoint_key("run")])));
     // The body is a strict shape.
     assert!(serde_json::from_str::<HeadMany>(r#"{"keys":[],"more":1}"#).is_err());
+}
+
+/// The one live guard for every host: dry runs always; live runs across many pages when the
+/// whole size is declared and within the cap; objects over 16 MiB through multipart when the
+/// Data Worker has it, else skipped and listed.
+#[test]
+fn ingest_live_guard_allows_runs_beyond_one_page() {
+    use pigeon_ingest::immutable_multipart::MAX_BYTES;
+    use pigeon_ingest::managed_destination::{LIVE_CAP_BYTES, MAX_BLOB, live_guard};
+    let gb = 1_000_000_000u64;
+    // A dry run is never limited.
+    let dry = live_guard(true, true, None, 0, 100 * MAX_BLOB, false, 1).unwrap();
+    assert_eq!(dry.skip_over, None);
+    // A live run over many pages needs the declared size, and stays within the cap.
+    assert!(live_guard(false, true, None, gb, 10, false, LIVE_CAP_BYTES).is_err());
+    let many = live_guard(false, true, Some(5 * gb), gb, 10, false, LIVE_CAP_BYTES).unwrap();
+    assert_eq!(many.skip_over, Some(MAX_BLOB));
+    assert!(many.notes.iter().any(|n| n.contains("skipped and listed")));
+    let over = live_guard(false, true, Some(11 * gb), gb, 10, true, LIVE_CAP_BYTES);
+    assert!(over.unwrap_err().contains("max_live_bytes"));
+    // The person raises the cap in the approved plan.
+    assert!(live_guard(false, true, Some(11 * gb), gb, 10, true, 20 * gb).is_ok());
+    // With multipart configured, large objects are written.
+    let big = live_guard(false, false, None, gb, 2 * MAX_BLOB, true, LIVE_CAP_BYTES).unwrap();
+    assert_eq!(big.skip_over, Some(MAX_BYTES));
+    // A fully listed page needs nothing declared.
+    assert!(live_guard(false, false, None, gb, 10, false, LIVE_CAP_BYTES).is_ok());
+}
+
+/// Objects larger than the run takes are not read: skipped, flagged `too_large` and listed in
+/// the report, identically on both engines.
+#[test]
+fn ingest_skips_and_lists_objects_too_large_for_the_run() {
+    use pigeon_ingest::archive::Flag;
+    let mut objs = BTreeMap::new();
+    for i in 0..40u32 {
+        let size = if i % 9 == 0 { 300 } else { 20 };
+        objs.insert(format!("k/{i:03}"), vec![b'a' + (i % 26) as u8; size]);
+    }
+    let source = MemSource {
+        objs,
+        page: 8,
+        jitter_us: 50,
+    };
+    let mut reports = Vec::new();
+    for threads in [1, 64] {
+        let dest = MemDest::default();
+        let mut j = job("big", false, threads);
+        j.skip_over = Some(100);
+        let report = go(&j, &source, &dest);
+        assert_eq!(report.counters.skipped, 5);
+        assert_eq!(report.too_large.len(), 5);
+        assert!(
+            report
+                .too_large
+                .iter()
+                .all(|l| l.flags == vec![Flag::TooLarge] && l.sha256.is_empty())
+        );
+        assert_eq!(report.counters.listed, 40);
+        reports.push((report, dest.lines("big")));
+    }
+    assert_eq!(reports[0], reports[1]);
+}
+
+/// A spent write grant stops the run before the object that found it, so a continuation with a
+/// new grant finishes the rest: every object exactly once, none lost.
+#[test]
+fn ingest_spent_grant_stops_cleanly_for_a_continuation() {
+    for threads in [1, 64] {
+        let (source, dest) = planted(400);
+        *dest.budget.lock().unwrap() = Some(100);
+        let first = go(&job("spent", false, threads), &source, &dest);
+        assert_eq!(first.state, pigeon_ingest::manifest::RunState::Stopped);
+        assert!(first.budget_spent);
+        assert_eq!(first.counters.failed, 0, "nothing is failed for the budget");
+        let cp: Checkpoint =
+            serde_json::from_slice(&dest.get(&checkpoint_key("spent")).unwrap()).unwrap();
+        let after = cp.after_key.clone().unwrap();
+        assert_eq!(cp.counters.listed, first.counters.listed);
+        // A continuation with a new grant.
+        *dest.budget.lock().unwrap() = None;
+        let mut next = job("spent-2", false, threads);
+        next.resume = Some(Resume {
+            run: "spent".into(),
+            checkpoint: cp,
+        });
+        let second = go(&next, &source, &dest);
+        assert_eq!(second.counters.listed, 407);
+        let mut keys: Vec<String> = dest
+            .lines("spent")
+            .into_iter()
+            .chain(dest.lines("spent-2"))
+            .filter(|l| l.member.is_none())
+            .map(|l| l.origin.key)
+            .collect();
+        assert!(keys.iter().any(|k| *k > after));
+        let n = keys.len();
+        keys.dedup();
+        assert_eq!(keys.len(), n, "no object twice");
+        assert_eq!(n, 407, "no object lost");
+    }
 }

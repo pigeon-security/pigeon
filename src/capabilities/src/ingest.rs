@@ -51,6 +51,7 @@ const DATA_TOOLS: &[crate::instances::tools::Registration] = &[
             "size_bytes",
             "objects",
             "continue",
+            "max_live_bytes",
             "dry_run",
             "keep_archives",
             "fingerprints",
@@ -712,6 +713,7 @@ impl Ingest {
         // A sample of the source and the estimate, when the source can be read.
         let mut sample = Value::Null;
         let mut est = Value::Null;
+        let mut sampled_listing: Option<s3::Listing> = None;
         if let Some(a) = account {
             let listing = if let Some(pin) = source_pin.as_ref() {
                 Some(connections::owned_sample(env, &record, pin, prefix).await)
@@ -752,12 +754,6 @@ impl Ingest {
                             sum.checked_add(object.size)
                                 .ok_or_else(|| bad("source byte count overflow"))
                         })?;
-                        let largest = listing
-                            .objects
-                            .iter()
-                            .map(|object| object.size)
-                            .max()
-                            .unwrap_or(0);
                         let more = listing.next.is_some();
                         // The declared totals count for every source, a named connection
                         // included.
@@ -768,12 +764,7 @@ impl Ingest {
                             args["size_bytes"].as_u64(),
                             throughput::objects_arg(args)?,
                         );
-                        if connection.is_some()
-                            && !dry_run
-                            && (more || largest > pigeon_ingest::managed_destination::MAX_BLOB)
-                        {
-                            missing.push("Use a dedicated prefix with at most one page of source objects, each at most 16 MiB, for a managed Scaleway run.".into());
-                        }
+                        sampled_listing = Some(listing.clone());
                         sample = json!({
                             "objects": count, "bytes": bytes, "first_page_only": more,
                             "note": if more && args["size_bytes"].is_null() {
@@ -891,12 +882,22 @@ impl Ingest {
                 Err(error) => return Ok(unready(vec![error.to_string()], est, sample)),
             }
         }
+        let mut live_notes = Vec::new();
         let request = if let Some(pin) = source_pin {
             let destination = match managed_destination::ready(env, &record).await {
                 Ok(binding) => binding,
                 Err(error) => return Ok(unready(vec![error.to_string()], est, sample)),
             };
             let estimate: estimate::Estimate = serde_json::from_value(est.clone())?;
+            if let Some(listing) = &sampled_listing {
+                match throughput::live(args, dry_run, listing, destination.multipart)? {
+                    Ok(allowed) => {
+                        job.skip_over = allowed.skip_over;
+                        live_notes = allowed.notes;
+                    }
+                    Err(why) => return Ok(unready(vec![why], est, sample)),
+                }
+            }
             let origin = match connections::owned_origin(env, &record, &pin).await {
                 Ok(origin) => origin,
                 Err(error) => return Ok(unready(vec![error.to_string()], est, sample)),
@@ -941,6 +942,7 @@ impl Ingest {
         if let Ok(planned) = serde_json::from_value::<estimate::Estimate>(est.clone()) {
             lines.push(throughput::time_line(&planned));
         }
+        lines.extend(live_notes.iter().cloned());
         lines.push(if bucket_here {
             format!(
                 "R2 bucket `{}` already exists in `{instance}`'s account.",
@@ -1733,6 +1735,7 @@ impl Capability for Ingest {
                     "fingerprints": { "type": "boolean", "description": "Default false." },
                     "size_bytes": { "type": "integer", "description": "The source's whole size, for the estimate." },
                     "objects": { "type": "integer", "description": "The source's whole object count (from the provider's console), for the run time: small files make a run file-count-bound." },
+                    "max_live_bytes": { "type": "integer", "description": "A live run's cap on declared source bytes (default 10 GB, at most 100 TB). Raising it is the person's call: it is shown in the approval." },
                     "continue": { "type": "string", "description": "The id of a stopped run (by its deadline, a stop or a spent grant) to continue from its checkpoint, with the same source, prefix and dry-run setting. Needs a new approval; the continuation gets a new run id." },
                     "commit": { "type": "string", "description": "A full commit id to build the runner from; default this Worker's own." },
                     "scratch_gib": { "type": "integer", "description": "Size of the dedicated DigitalOcean scratch volume (default 32 GiB)." },

@@ -95,16 +95,27 @@ B2 `ca-east-006`, prefix `txt/`, about 471,000 files of about 640 bytes each) ra
 ### 3. Live runs beyond one page (slice c)
 
 - One guard, `pigeon_ingest::managed_destination::live_guard`, used by all three hosts. A live run
-  may cover many pages; its grant (write bytes and write attempts) is sized from the declared
-  totals with headroom, and the Data Worker enforces it. When it is spent the run stops cleanly
-  and can be continued.
+  may cover many pages when the whole prefix's `size_bytes` is declared (a truncated listing
+  without it is refused, since the grant would cover one page); its grant (write bytes and write
+  attempts) is sized from the declared totals with headroom, and the Data Worker enforces it.
+  When it is spent (HTTP 429, `Error::Exhausted`) the run stops **before** the object that found
+  it, records nothing from there on, writes its checkpoint where possible and ends `stopped`
+  with `budget_spent: true`; a continuation with a new grant finishes the rest.
 - Objects over 16 MiB go through the multipart publisher when the Data Worker's readiness reports
-  `multipart_configured`; otherwise the run **skips them and lists them** in its report (flag
-  `too_large`), rather than refusing the run.
-- **Live cap.** A live run declares at most `ingest_live_cap_bytes` (default 10 GB) unless the
-  person raises it in the instance record's Data Ingest settings.
+  `multipart_configured` (up to its 160 GiB limit); otherwise the run **skips them unread and
+  lists them** in its report (flag `too_large`, report list `too_large`), rather than refusing the
+  run. The job carries the limit as `skip_over`; zip members over it are skipped the same way.
+- **Live cap.** A live run may declare at most 10 GB of source bytes. The plan's `max_live_bytes`
+  (up to 100 TB) raises it for one run; it appears in the plan the person approves with their
+  passkey, so raising it is their call.
 
 ## Rollout
+
+- **Compatibility.** Every new job field (`max_minutes`, `resume`, `skip_over`) is omitted when
+  unset, so older approvals keep their digests. An older runner ignores them: it does not stop
+  itself early, starts a continuation from the beginning of the prefix (safe: blobs already
+  stored are duplicates, just slower) and does not skip large objects (they fail as before). Plan
+  continuations and large live runs only once the host runs this revision.
 
 - The Data Worker's `head-many` operation reaches an instance with its next reviewed instance
   plan/apply (passkey). Until then the runner falls back to one HEAD per blob.
@@ -118,5 +129,5 @@ B2 `ca-east-006`, prefix `txt/`, about 471,000 files of about 640 bytes each) ra
 | Phase | What | State |
 | --- | --- | --- |
 | a | Estimate from file count, `objects`, measured rate, deadline, runner self-stop, continue, Scaleway `size_bytes` fix | landed |
-| b | Parallel engine, `head_many` (+ Data Worker op), create-only uploads, prefetch, memory spool, connection reuse | landing |
-| c | Shared live guard, grant from declared totals, >16 MiB multipart or skip-and-report, live cap | planned |
+| b | Parallel engine, `head_many` (+ Data Worker op), create-only uploads, prefetch, memory spool, connection reuse | landed |
+| c | Shared live guard, grant from declared totals, >16 MiB multipart or skip-and-report, live cap, spent grant stops for a continuation | landing |

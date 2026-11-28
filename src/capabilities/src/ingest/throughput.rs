@@ -215,6 +215,42 @@ pub(crate) async fn continuation(
     Ok((job, resume))
 }
 
+/// The `max_live_bytes` argument: the live cap for this run (default 10 GB), shown in the
+/// approval the person signs.
+pub(crate) fn live_cap(args: &Value) -> Result<u64> {
+    use pigeon_ingest::managed_destination::{LIVE_CAP_BYTES, LIVE_CAP_MAX};
+    match args.get("max_live_bytes") {
+        None | Some(Value::Null) => Ok(LIVE_CAP_BYTES),
+        Some(value) => value
+            .as_u64()
+            .filter(|n| (1..=LIVE_CAP_MAX).contains(n))
+            .ok_or_else(|| bad(format!("max_live_bytes must be from 1 to {LIVE_CAP_MAX}"))),
+    }
+}
+
+/// The shared live guard for a managed run, from a first listing page.
+pub(crate) fn live(
+    args: &Value,
+    dry_run: bool,
+    listing: &pigeon_core::s3::Listing,
+    multipart: bool,
+) -> Result<std::result::Result<pigeon_ingest::managed_destination::Live, String>> {
+    let sampled = listing
+        .objects
+        .iter()
+        .fold(0u64, |sum, o| sum.saturating_add(o.size));
+    let largest = listing.objects.iter().map(|o| o.size).max().unwrap_or(0);
+    Ok(pigeon_ingest::managed_destination::live_guard(
+        dry_run,
+        listing.next.is_some(),
+        args["size_bytes"].as_u64(),
+        sampled,
+        largest,
+        multipart,
+        live_cap(args)?,
+    ))
+}
+
 /// The plan line for the expected time.
 pub(crate) fn time_line(estimate: &Estimate) -> String {
     format!(

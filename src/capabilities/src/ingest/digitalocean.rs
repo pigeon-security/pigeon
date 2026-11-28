@@ -385,19 +385,11 @@ pub(super) async fn plan(
         )
     };
     let mut missing = Vec::new();
+    let mut sampled_listing = None;
     let (est, sample) = match sample {
         Ok(listing) => {
             let (bytes, objects, extrapolated, sample) = sample_size(&listing, args)?;
-            if connection.is_some()
-                && !dry_run
-                && (listing.next.is_some()
-                    || listing
-                        .objects
-                        .iter()
-                        .any(|row| row.size > pigeon_ingest::managed_destination::MAX_BLOB))
-            {
-                missing.push("The managed destination requires a fully listed canary with objects at most 16 MiB until atomic multipart is available.".into());
-            }
+            sampled_listing = Some(listing);
             if sample["objects"] == 0 {
                 missing.push("The chosen Spaces prefix contains no objects.".into());
             }
@@ -460,9 +452,16 @@ pub(super) async fn plan(
     if bucket.name == audit_bucket {
         missing.push("The data and Jobs audit buckets must be distinct.".into());
     }
+    let mut live = None;
     let destination = if connection.is_some() {
         match managed_destination::ready(cx.env, record).await {
             Ok(target) => {
+                if let Some(listing) = &sampled_listing {
+                    match throughput::live(args, dry_run, listing, target.multipart)? {
+                        Ok(allowed) => live = Some(allowed),
+                        Err(why) => missing.push(why),
+                    }
+                }
                 let bytes = est["bytes"].as_u64().unwrap_or_default();
                 let objects = est["objects"].as_u64().unwrap_or_default();
                 Some(target.review(bytes, objects, dry_run))
@@ -548,6 +547,7 @@ pub(super) async fn plan(
         commit,
         max_minutes: Some(u64::from(max_minutes)),
         resume: continued.as_ref().map(|(_, resume)| resume.clone()),
+        skip_over: live.as_ref().and_then(|allowed| allowed.skip_over),
     };
     if continued
         .as_ref()
@@ -598,6 +598,9 @@ pub(super) async fn plan(
         }
         if let Some((_, resume)) = &continued {
             plan.insert(0, json!(throughput::continue_line(resume)));
+        }
+        if let Some(allowed) = &live {
+            plan.extend(allowed.notes.iter().map(|note| json!(note)));
         }
     }
     if let Some(reviewed) = &approval.destination {

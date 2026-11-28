@@ -51,6 +51,9 @@ credential and Jobs audit bucket.
 
 For the first real canary, use a dedicated prefix that fits in one list page and
 contains only objects up to 16 MiB. Keep extracted members within that size too.
+(Since 2026-11-28 a live run may span many pages when `size_bytes` is declared, and
+larger objects are skipped and listed unless multipart is configured:
+[ingest-throughput.md](ingest-throughput.md). A small canary is still the first step.)
 Use exact duplicates, a one-byte variant, and a nested ZIP, then compare source
 references, stored payloads and archive lineage. Confirm the terminal audit and
 deletion of the Instance, its boot disk and the attached scratch volume before

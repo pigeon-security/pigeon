@@ -70,6 +70,10 @@ pub struct JobSpec {
     /// The stopped run this one continues, and its checkpoint, read and approved at plan time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume: Option<Resume>,
+    /// Objects larger than this many bytes are not read: skipped with `too_large` and listed in
+    /// the report (a live run whose destination has no multipart publisher).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_over: Option<u64>,
 }
 
 /// Where a continuation starts: another run's checkpoint (docs/plans/ingest-throughput.md).
@@ -242,6 +246,12 @@ pub struct Report {
     /// The run this one continues, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continues: Option<String>,
+    /// Objects skipped as larger than the run takes, at most 200.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub too_large: Vec<ManifestLine>,
+    /// The run stopped because its write budget was spent; continue it with a new grant.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub budget_spent: bool,
 }
 
 /// `ingest/runs/{run}/`.

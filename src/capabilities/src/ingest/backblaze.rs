@@ -335,6 +335,7 @@ pub(crate) async fn plan(
                     | "size_bytes"
                     | "objects"
                     | "continue"
+                    | "max_live_bytes"
                     | "dry_run"
                     | "fingerprints"
             )
@@ -435,16 +436,8 @@ pub(crate) async fn plan(
         (Some((job, _)), _) => job.dry_run,
         (None, given) => given.unwrap_or(true),
     };
+    let mut live = None;
     let scoped = if let Some((pin, owned)) = pin {
-        if !dry_run
-            && (listing.next.is_some()
-                || listing
-                    .objects
-                    .iter()
-                    .any(|object| object.size > pigeon_ingest::managed_destination::MAX_BLOB))
-        {
-            return Ok(unready(vec!["The managed destination requires a fully listed canary with objects at most 16 MiB until atomic multipart is available.".into()], to_value(&estimate), sampled));
-        }
         let target = match managed_destination::ready(env, record).await {
             Ok(target) => target,
             Err(error) => {
@@ -455,6 +448,10 @@ pub(crate) async fn plan(
                 ));
             }
         };
+        match throughput::live(args, dry_run, &listing, target.multipart)? {
+            Ok(allowed) => live = Some(allowed),
+            Err(why) => return Ok(unready(vec![why], to_value(&estimate), sampled)),
+        }
         Some((pin, target.review(total, objects, dry_run), owned))
     } else {
         None
@@ -511,6 +508,9 @@ pub(crate) async fn plan(
         lines.insert(0, throughput::continue_line(resume));
     }
     lines.push(throughput::time_line(&estimate));
+    if let Some(allowed) = &live {
+        lines.extend(allowed.notes.iter().cloned());
+    }
     if let Some(reviewed) = &resolved.execution.destination {
         lines.push(format!("Use a Data Worker run grant limited to {} write bytes, {} write attempts and 16 MiB per atomic payload.", reviewed.max_bytes, reviewed.max_objects));
     }
@@ -530,6 +530,7 @@ pub(crate) async fn plan(
         commit: resolved.revision,
         max_minutes: Some(max_minutes),
         resume: continued.map(|(_, resume)| resume),
+        skip_over: live.and_then(|allowed| allowed.skip_over),
     };
     Ingest::check_current(env, record).await?;
     let payload = payload(&job, &resolved.execution);

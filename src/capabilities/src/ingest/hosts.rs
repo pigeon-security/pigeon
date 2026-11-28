@@ -112,6 +112,7 @@ pub fn job_spec(i: &JobInputs<'_>) -> JobSpec {
         commit: i.commit.into(),
         max_minutes: None,
         resume: None,
+        skip_over: None,
     }
 }
 

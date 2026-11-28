@@ -53,6 +53,8 @@ pub enum Error {
     /// A create-only blob write found the key already holding the same blob: recorded as a
     /// duplicate, never an error.
     Exists,
+    /// The run's write budget is spent: the run stops before the object, so it can be continued.
+    Exhausted,
 }
 
 impl fmt::Display for Error {
@@ -65,6 +67,7 @@ impl fmt::Display for Error {
             Error::Config(s) => write!(f, "job: {s}"),
             Error::NotBuilt(s) => write!(f, "not built yet: {s}"),
             Error::Exists => write!(f, "destination: the blob already exists"),
+            Error::Exhausted => write!(f, "destination: the run's write budget is spent"),
         }
     }
 }

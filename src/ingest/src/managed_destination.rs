@@ -14,6 +14,70 @@ pub const OBJECT: &str = "x-pigeon-ingest-object";
 pub const SHA256: &str = "x-pigeon-ingest-sha256";
 pub const BLAKE3: &str = "x-pigeon-ingest-blake3";
 pub const MAX_BLOB: u64 = 16 * 1024 * 1024;
+/// The default most source bytes a live run may declare: 10 GB. The person raises it for a run
+/// with the plan's `max_live_bytes`, shown in the approval they sign.
+pub const LIVE_CAP_BYTES: u64 = 10_000_000_000;
+/// The highest `max_live_bytes`: 100 TB.
+pub const LIVE_CAP_MAX: u64 = 100_000_000_000_000;
+
+/// What a live managed run may do, from [`live_guard`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Live {
+    /// Objects above this many bytes are skipped and listed (`job.skip_over`).
+    pub skip_over: Option<u64>,
+    /// Plan lines for the person.
+    pub notes: Vec<String>,
+}
+
+/// The one guard for a managed run on every host (Backblaze, Scaleway, DigitalOcean): a dry run
+/// is always allowed; a live run may cover many listing pages when the whole source is declared
+/// (`size_bytes`, so the grant is sized from it) and stays within `cap` bytes. Objects over
+/// [`MAX_BLOB`] go through the multipart publisher when the Data Worker reports it configured,
+/// else they are skipped and listed in the report rather than refusing the run.
+pub fn live_guard(
+    dry_run: bool,
+    truncated: bool,
+    declared: Option<u64>,
+    sampled_bytes: u64,
+    largest: u64,
+    multipart: bool,
+    cap: u64,
+) -> Result<Live, String> {
+    if dry_run {
+        return Ok(Live {
+            skip_over: None,
+            notes: Vec::new(),
+        });
+    }
+    if truncated && declared.is_none() {
+        return Err("A live run beyond one listing page needs size_bytes (the whole prefix's size, from the provider's console), so its write grant covers it.".into());
+    }
+    let total = declared.unwrap_or(sampled_bytes).max(sampled_bytes);
+    if total > cap {
+        return Err(format!(
+            "This live run declares {total} bytes, over its live cap of {cap} bytes. Choose a smaller prefix, or pass max_live_bytes (at most {LIVE_CAP_MAX}) to raise the cap; the person approves it with the plan."
+        ));
+    }
+    let mut notes = vec![format!(
+        "Live run of {total} declared bytes within a cap of {cap} bytes; a spent write grant stops the run cleanly for a continuation."
+    )];
+    let skip_over = if multipart {
+        notes.push("Objects over 16 MiB go through the Data Worker's multipart publisher.".into());
+        Some(crate::immutable_multipart::MAX_BYTES)
+    } else {
+        notes.push(format!(
+            "Objects over 16 MiB are skipped and listed in the report (too_large) until the Data Worker's multipart publisher is configured{}.",
+            if largest > MAX_BLOB {
+                "; the sample already has some"
+            } else {
+                ""
+            }
+        ));
+        Some(MAX_BLOB)
+    };
+    Ok(Live { skip_over, notes })
+}
+
 /// Most payload keys in one `head-many` request.
 pub const HEAD_MANY: usize = 500;
 /// The largest `head-many` request and reply bodies.

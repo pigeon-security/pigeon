@@ -42,6 +42,8 @@ impl ManagedDest {
         match result {
             Ok(reply) if matches!(reply.status(), 200 | 201) => Ok(Some(reply)),
             Err(ureq::Error::Status(404, _)) => Ok(None),
+            // The run's grant is spent: the engine stops for a continuation.
+            Err(ureq::Error::Status(429, _)) => Err(Error::Exhausted),
             Err(ureq::Error::Status(status, _)) => Err(Error::Dest(format!(
                 "managed destination refused HTTP {status}"
             ))),

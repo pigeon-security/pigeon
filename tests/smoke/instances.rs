@@ -6640,6 +6640,7 @@ fn scaleway_owned_workflow_keeps_runner_grants_out_of_review_and_legacy_keys_out
         commit: "0123456789abcdef0123456789abcdef01234567".into(),
         max_minutes: None,
         resume: None,
+        skip_over: None,
     };
     let scoped = scaleway::owned_bootstrap(
         &job,

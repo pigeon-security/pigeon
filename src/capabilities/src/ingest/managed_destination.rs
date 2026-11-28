@@ -10,6 +10,9 @@ use crate::{data_store, instances::record::Instance};
 
 pub(super) struct Binding {
     pub origin: String,
+    /// The Data Worker's multipart publisher is configured, so objects over 16 MiB can be
+    /// written.
+    pub multipart: bool,
     instance: String,
     key: String,
 }
@@ -77,6 +80,7 @@ pub(super) async fn ready(env: &Env, record: &Instance) -> Result<Binding> {
         ));
     }
     Ok(Binding {
+        multipart: reply["multipart_configured"].as_bool().unwrap_or(false),
         origin,
         instance: record.id.clone(),
         key,

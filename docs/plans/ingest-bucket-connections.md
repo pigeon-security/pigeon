@@ -36,10 +36,14 @@ destination client.
 
 The approval names the exact connection generation, destination Worker and
 maximum number of write attempts and bytes. The runner receives a short-lived
-grant for that run. Dry runs can write their progress and reports. A live canary
-requires a fully listed source prefix with objects no larger than 16 MiB. ZIP
-members above that limit are reported as failed until the managed multipart
-publisher is available.
+grant for that run. Dry runs can write their progress and reports. A live run
+may cover many listing pages when the whole prefix's `size_bytes` is declared,
+within its live cap (10 GB unless the plan's `max_live_bytes`, which the person
+approves, raises it); the grant is sized from the declared totals. Objects over
+16 MiB go through the multipart publisher when the Data Worker reports it
+configured, otherwise they are skipped and listed in the report (`too_large`).
+One guard serves every host: `managed_destination::live_guard`
+([ingest-throughput.md](ingest-throughput.md)).
 
 
 ### Owning-account source key staging

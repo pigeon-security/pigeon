@@ -52,6 +52,9 @@ pub enum Flag {
     NotOpened,
     /// Larger than the spool: hashed while streaming, not opened.
     OverSpool,
+    /// Larger than the destination takes in this run (`job.skip_over`): not read, listed in
+    /// the report.
+    TooLarge,
 }
 
 /// Whether `head` starts like a zip archive (a local file header or an empty archive's end

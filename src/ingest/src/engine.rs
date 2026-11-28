@@ -198,7 +198,7 @@ fn retry<T>(mut f: impl FnMut() -> Result<T, Error>) -> Result<T, Error> {
     loop {
         match f() {
             Ok(v) => return Ok(v),
-            Err(Error::Exists) => return Err(Error::Exists),
+            Err(e @ (Error::Exists | Error::Exhausted)) => return Err(e),
             Err(e) => {
                 tried += 1;
                 if tried > RETRIES {
@@ -249,12 +249,20 @@ struct Engine<'r, 'a> {
     conflicts: Vec<ManifestLine>,
     failures: Vec<ManifestLine>,
     not_opened: Vec<ManifestLine>,
+    too_large: Vec<ManifestLine>,
+    /// The write budget was spent: stop before the object that found it.
+    exhausted: bool,
     dups: HashMap<String, (u64, u64)>,
     started_ms: i64,
     last_status_ms: i64,
     base_read: u64,
     base_listed: u64,
     last_error: Option<String>,
+}
+
+/// Whether an object of `size` bytes is more than this run writes (`job.skip_over`).
+fn too_large(r: &Run<'_>, size: u64) -> bool {
+    r.job.skip_over.is_some_and(|max| size > max)
 }
 
 /// The item for a listed object.
@@ -387,9 +395,17 @@ enum Done {
     },
 }
 
-/// A worker thread: takes tasks until the coordinator hangs up.
-fn worker(r: &Run<'_>, tasks: &Mutex<mpsc::Receiver<Task>>, done: mpsc::Sender<Done>) {
+/// A worker thread: takes tasks until the coordinator hangs up or cancels what is queued.
+fn worker(
+    r: &Run<'_>,
+    tasks: &Mutex<mpsc::Receiver<Task>>,
+    done: mpsc::Sender<Done>,
+    cancel: &AtomicBool,
+) {
     loop {
+        if cancel.load(Ordering::SeqCst) {
+            return;
+        }
         let task = match tasks.lock() {
             Ok(rx) => rx.recv(),
             Err(_) => return,
@@ -442,6 +458,8 @@ struct Pending {
 enum Outcome {
     /// Reading, hashing or the existence check failed.
     Failed(Option<Metrics>, Vec<Flag>, Error),
+    /// Not read or not written, with the flags saying why.
+    Skipped(Vec<Flag>),
     Decided {
         metrics: Metrics,
         verdict: Verdict,
@@ -527,7 +545,12 @@ impl<'r, 'a> Engine<'r, 'a> {
                     self.failures.push(line.clone());
                 }
             }
-            Verdict::Skipped => self.counters.skipped += 1,
+            Verdict::Skipped => {
+                self.counters.skipped += 1;
+                if line.flags.contains(&Flag::TooLarge) && self.too_large.len() < LIST_CAP {
+                    self.too_large.push(line.clone());
+                }
+            }
         }
         for f in &line.flags {
             *self.flags.entry(*f).or_insert(0) += 1;
@@ -683,10 +706,20 @@ impl<'r, 'a> Engine<'r, 'a> {
             _ => None,
         };
         let writes = !dry && matches!(d.verdict, Verdict::Upload | Verdict::Conflict);
+        if writes && too_large(r, metrics.size) {
+            flags.push(Flag::TooLarge);
+            self.skip(item, flags);
+            return;
+        }
         let mut d = d;
         if writes && let Some(key) = &r2_key {
             match put(r, key, &mut file, &metrics, item.reopen) {
                 Ok(()) => {}
+                // A listed object is left for a continuation; a member fails.
+                Err(Error::Exhausted) if item.depth == 0 => {
+                    self.exhausted = true;
+                    return;
+                }
                 // The create-only write found the blob: R2 holds these bytes.
                 Err(Error::Exists) => {
                     if d.verdict == Verdict::Upload {
@@ -867,8 +900,22 @@ impl<'r, 'a> Engine<'r, 'a> {
     /// Handles one listed object.
     fn object(&mut self, obj: &Object) {
         let r = self.r;
+        if too_large(r, obj.size) {
+            self.object_too_large(obj);
+            return;
+        }
         let staged = retry(|| stage(r, &obj.key, obj.size));
         self.object_staged(obj, staged);
+    }
+
+    /// Records a listed object too large for this run, without reading it.
+    fn object_too_large(&mut self, obj: &Object) {
+        let origin = self.origin_of(obj);
+        let item = top_item(&origin, obj);
+        self.counters.listed += 1;
+        self.counters.listed_bytes += obj.size;
+        self.skip(&item, vec![Flag::TooLarge]);
+        self.after_key = Some(obj.key.clone());
     }
 
     /// Records one listed object whose bytes were read (or failed to be read): looks it up,
@@ -876,6 +923,7 @@ impl<'r, 'a> Engine<'r, 'a> {
     fn object_staged(&mut self, obj: &Object, staged: Result<Staged, Error>) {
         let origin = self.origin_of(obj);
         let item = top_item(&origin, obj);
+        let before = self.counters.clone();
         self.counters.listed += 1;
         self.counters.listed_bytes += obj.size;
         match staged {
@@ -884,6 +932,11 @@ impl<'r, 'a> Engine<'r, 'a> {
                 self.finish_file(&item, staged, None);
             }
             Err(e) => self.fail(&item, None, Vec::new(), e),
+        }
+        if self.exhausted {
+            // Not recorded: the continuation starts at this object.
+            self.counters = before;
+            return;
         }
         self.after_key = Some(obj.key.clone());
     }
@@ -952,6 +1005,16 @@ impl<'r, 'a> Engine<'r, 'a> {
             _ => None,
         };
         let writes = !self.dry() && matches!(d.verdict, Verdict::Upload | Verdict::Conflict);
+        if writes && too_large(r, metrics.size) {
+            flags.push(Flag::TooLarge);
+            return Pending {
+                seq,
+                obj,
+                bytes_read,
+                outcome: Outcome::Skipped(flags),
+                upload: Upload::None,
+            };
+        }
         // Not a zip here, so an archive is kept unopened.
         let mut not_opened = false;
         if metrics.kind == Kind::Archive {
@@ -1053,6 +1116,16 @@ impl<'r, 'a> Engine<'r, 'a> {
             .front()
             .is_some_and(|p| !matches!(p.upload, Upload::InFlight))
         {
+            if pending
+                .front()
+                .is_some_and(|p| matches!(p.upload, Upload::Finished(Err(Error::Exhausted))))
+            {
+                // Stop before it: nothing from here on is recorded, so a continuation starts
+                // at this object.
+                self.exhausted = true;
+                pending.clear();
+                return Ok(());
+            }
             let Some(p) = pending.pop_front() else { break };
             let origin = self.origin_of(&p.obj);
             let item = top_item(&origin, &p.obj);
@@ -1061,6 +1134,7 @@ impl<'r, 'a> Engine<'r, 'a> {
             self.counters.bytes_read += p.bytes_read;
             match p.outcome {
                 Outcome::Failed(m, flags, e) => self.fail(&item, m.as_ref(), flags, e),
+                Outcome::Skipped(flags) => self.skip(&item, flags),
                 Outcome::Decided {
                     metrics,
                     verdict,
@@ -1146,7 +1220,9 @@ impl<'r, 'a> Engine<'r, 'a> {
         tasks: &mpsc::Sender<Task>,
     ) -> Result<(), Error> {
         self.prefetch_heads(reading, hints, uploading);
-        while let Some(mut entry) = reading.first_entry() {
+        while !self.exhausted
+            && let Some(mut entry) = reading.first_entry()
+        {
             let seq = *entry.key();
             let (zip, waits) = match entry.get_mut().1.as_mut() {
                 None => break,
@@ -1169,6 +1245,17 @@ impl<'r, 'a> Engine<'r, 'a> {
             }
             let (obj, staged) = entry.remove();
             let Some(staged) = staged else { break };
+            if too_large(self.r, obj.size) {
+                pending.push_back(Pending {
+                    seq,
+                    obj,
+                    bytes_read: 0,
+                    outcome: Outcome::Skipped(vec![Flag::TooLarge]),
+                    upload: Upload::None,
+                });
+                self.drain(pending)?;
+                continue;
+            }
             if zip {
                 self.object_staged(&obj, staged);
                 self.after_object()?;
@@ -1246,6 +1333,11 @@ impl<'r, 'a> Engine<'r, 'a> {
             }
             while !stopping && reading.len() + pending.len() < window {
                 let Some(obj) = queue.pop_front() else { break };
+                if too_large(r, obj.size) {
+                    reading.insert(next_seq, (obj, Some(Err(Error::Io("not read".into())))));
+                    next_seq += 1;
+                    continue;
+                }
                 tasks
                     .send(Task::Stage {
                         seq: next_seq,
@@ -1264,6 +1356,9 @@ impl<'r, 'a> Engine<'r, 'a> {
                 &tasks,
             )?;
             self.drain(&mut pending)?;
+            if self.exhausted {
+                return Ok(true);
+            }
             if reading.is_empty() && pending.is_empty() {
                 if (queue.is_empty() || stopping) && (!listing || stopping) {
                     if let Some(e) = list_error {
@@ -1305,11 +1400,12 @@ impl<'r, 'a> Engine<'r, 'a> {
         let (done_tx, done_rx) = mpsc::channel::<Done>();
         // One page listed ahead of the one being worked on.
         let (page_tx, page_rx) = mpsc::sync_channel::<Result<Page, Error>>(1);
+        let cancel = AtomicBool::new(false);
         std::thread::scope(|scope| {
             for _ in 0..threads {
                 let done = done_tx.clone();
-                let tasks = &task_rx;
-                scope.spawn(move || worker(r, tasks, done));
+                let (tasks, cancel) = (&task_rx, &cancel);
+                scope.spawn(move || worker(r, tasks, done, cancel));
             }
             drop(done_tx);
             scope.spawn(move || {
@@ -1327,7 +1423,10 @@ impl<'r, 'a> Engine<'r, 'a> {
                     }
                 }
             });
-            self.coordinate(threads * WINDOW_PER_THREAD, task_tx, done_rx, page_rx)
+            let ended = self.coordinate(threads * WINDOW_PER_THREAD, task_tx, done_rx, page_rx);
+            // Queued work is not needed once the coordinator has ended.
+            cancel.store(true, Ordering::SeqCst);
+            ended
         })
     }
 
@@ -1410,6 +1509,9 @@ impl<'r, 'a> Engine<'r, 'a> {
                     continue;
                 }
                 self.object(obj);
+                if self.exhausted {
+                    return Ok(true);
+                }
                 self.after_object()?;
             }
             match page.next {
@@ -1453,6 +1555,8 @@ impl<'r, 'a> Engine<'r, 'a> {
             files_per_s: rate(self.counters.listed.saturating_sub(self.base_listed)),
             bytes_per_s: rate(self.counters.bytes_read.saturating_sub(self.base_read)),
             continues: self.r.job.resume.as_ref().map(|r| r.run.clone()),
+            too_large: self.too_large.clone(),
+            budget_spent: self.exhausted,
         }
     }
 
@@ -1515,6 +1619,8 @@ pub fn run(run: &Run<'_>) -> Result<Report, Error> {
         conflicts: Vec::new(),
         failures: Vec::new(),
         not_opened: Vec::new(),
+        too_large: Vec::new(),
+        exhausted: false,
         dups: HashMap::new(),
         started_ms: now,
         last_status_ms: now,

@@ -975,7 +975,8 @@ opened": the report says how many; a VM run can open them later).
   `claude/ai-agent-Pz9swlihkaev`: `pigeon-ingest` (metrics, rules 1–5, zip with limits and flags,
   the engine with resume, the D1 schema and statements, signed starts), the runner, the `ingest_*`
   tools and the data Worker's `IngestJob` and manifest consumer. No secret bound, no host or
-  instance account called. Known gaps: the engine is single-threaded (`threads` unused), the
+  instance account called. Known gaps: the engine is single-threaded (`threads` unused; since
+  2026-11-28 a worker pool, see [ingest-throughput.md](ingest-throughput.md)), the
   status has no ETA and the report no estimate-against-actual; duplicate member names in one zip
   are read as one (the `zip` crate keeps one entry per name); the data Worker and the container
   start were built for WASM and never run; a CI job that builds the image needs `.pigeon/ci.toml`
