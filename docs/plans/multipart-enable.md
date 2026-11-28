@@ -88,26 +88,41 @@ path (D1 checkpoints, R2 binding parts, the signed create-only S3 completion), a
 `ingest/canary/multipart/<sha256>`. It checks the SHA-256 and size, that a second create-only
 completion on the same key is refused (412), reads the object back and hashes it, then deletes
 only that object and its checkpoint row. The result (fingerprint, passed, checks, time) is kept
-at `ingest/canary/multipart/result.json`. Readiness reports `multipart_configured` only when the
+at `ingest/canary/multipart-result.json`. Readiness reports `multipart_configured` only when the
 publisher opens **and** the stored canary passed for the current fingerprint. The backup never
 copies `ingest/canary/` objects.
 
 ### Picking up skipped files
 
-`data_ingest_plan {…, continue: <run>, only: "too_large"}` reads that run's report and plans a
-new run of only the objects it listed as `too_large` (`job.only`, at most 200 keys, the
-report's cap), once readiness says multipart is ready. The runner lists the source as usual and
-processes only those keys; `skip_over` is not set.
+Planned: `data_ingest_plan {…, continue: <run>, only: "too_large"}` reads that run's report
+and plans a new run of only the objects it listed as `too_large` (at most 200 keys, the
+report's cap), once readiness says multipart is ready, with `skip_over` unset.
+
+**Not built yet, on purpose.** The runner that would honour a key list is not always the
+code core is built from: a Backblaze run executes the container image pinned in the record
+(`data.ingest.runtime`), and `JobSpec` accepts unknown fields. An older runner would read
+`job.only` as nothing and copy the **whole prefix live**. The list must fail closed on an
+older runner: a new `SourceSpec` variant (internally tagged, so an older runner refuses the
+job) carrying the keys, plus a new pinned image. That touches `src/ingest` and
+`src/ingest-runner`, which another ingest change is landing in now; it follows once that has
+landed.
+
+Until then, the skipped files are picked up by a fresh live run of the same connection and
+prefix after the canary passes: content-addressed blobs already in Data are not written again,
+so only the previously skipped large objects are written (the small ones are re-listed and
+re-decided, at the run's usual rate).
 
 ## Phases
 
 | Slice | What | State |
 | --- | --- | --- |
-| a | Credential builder, manual verify-and-write, console flow, lifecycle step, stale-slot removal, Data Worker canary, readiness gated on it, `data_ingest_multipart_check` | landing (pUsOJDxbNd039cfH) |
-| b | `multipart_mint`, optional scope, mint step, ledger and audit, revoke on rotation, console opt-in | building |
-| c | `continue` + `only: "too_large"` | planned |
+| a | Credential builder, manual verify-and-write, console flow, lifecycle step, stale-slot removal, Data Worker canary, readiness gated on it, `data_ingest_multipart_check` | landed (pUsOJDxbNd039cfH) |
+| b | `multipart_mint`, optional scope, mint step, ledger and audit, revoke on rotation, console opt-in | landing (seufPX_YNwWMNIdk) |
+| c | `continue` + `only: "too_large"`, failing closed on older runners | deferred (see above) |
 
 ## Log
 
 - 2026-11-28: planned. Scope id confirmed with `linked_scopes`: `account-api-tokens.write`
   ("Account API Tokens Write"). Resource form and S3 derivation from Cloudflare's R2 token docs.
+- 2026-11-28: slices a and b built and landed; c deferred so an older pinned runner image
+  cannot turn a key-list run into a whole-prefix live run.
