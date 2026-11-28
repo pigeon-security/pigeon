@@ -2579,7 +2579,10 @@ fn core_ingest_plans_hosts_and_estimates() {
     use pigeon_capabilities::data_read::{Account, Provider};
     use pigeon_capabilities::ingest::{Ingest, Target, hosts};
     use pigeon_capabilities::passkeys::Passkeys;
-    use pigeon_ingest::estimate::{Host, estimate};
+    use pigeon_ingest::estimate::{Host, Throughput, estimate_run};
+    // Large-file workloads with objects in flight are bound by bytes.
+    let estimate =
+        |h: Host, b: u64, o: u64, u: f64| estimate_run(h, b, o, u, &Throughput::new(h, 32));
     use pigeon_ingest::manifest::SourceSpec;
 
     let do_acct = Account::digitalocean("legacy", "fra1");
@@ -6635,6 +6638,8 @@ fn scaleway_owned_workflow_keeps_runner_grants_out_of_review_and_legacy_keys_out
         limits: Limits::default(),
         threads: 1,
         commit: "0123456789abcdef0123456789abcdef01234567".into(),
+        max_minutes: None,
+        resume: None,
     };
     let scoped = scaleway::owned_bootstrap(
         &job,

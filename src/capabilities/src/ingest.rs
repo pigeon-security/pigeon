@@ -19,6 +19,7 @@ pub mod net;
 pub mod scaleway;
 pub mod scaleway_compute;
 pub mod scaleway_source;
+mod throughput;
 
 pub const NAME: &str = "data-ingest";
 const INGEST_VIEWS: &[crate::instances::tools::View] = &[crate::instances::tools::View {
@@ -48,6 +49,8 @@ const DATA_TOOLS: &[crate::instances::tools::Registration] = &[
             "connection",
             "prefix",
             "size_bytes",
+            "objects",
+            "continue",
             "dry_run",
             "keep_archives",
             "fingerprints",
@@ -615,9 +618,22 @@ impl Ingest {
             prefix,
             destination_bucket,
         } = bindings;
+        let continued = match args.get("continue").filter(|v| !v.is_null()) {
+            Some(prior) => {
+                let prior = prior
+                    .as_str()
+                    .filter(|run| pigeon_ingest::container_job::valid_run(run))
+                    .ok_or_else(|| bad("continue must be a run id"))?;
+                Some(throughput::continuation(&linked, destination_bucket, instance, prior).await?)
+            }
+            None => None,
+        };
         let flag = |name: &str, default: bool| args[name].as_bool().unwrap_or(default);
         let (dry_run, keep_archives, fingerprints) = (
-            flag("dry_run", true),
+            flag(
+                "dry_run",
+                continued.as_ref().is_none_or(|(prior, _)| prior.dry_run),
+            ),
             flag("keep_archives", true),
             flag("fingerprints", false),
         );
@@ -743,14 +759,15 @@ impl Ingest {
                             .max()
                             .unwrap_or(0);
                         let more = listing.next.is_some();
-                        let (total_bytes, total_objects) = match args["size_bytes"].as_u64() {
-                            Some(t) if connection.is_none() && count > 0 => {
-                                (t, t.saturating_mul(count) / bytes.max(1))
-                            }
-                            _ if connection.is_some() => (bytes, count),
-                            Some(t) => (t, 0),
-                            None => (bytes, count),
-                        };
+                        // The declared totals count for every source, a named connection
+                        // included.
+                        let (total_bytes, total_objects, extrapolated) = estimate::totals(
+                            count,
+                            bytes,
+                            more,
+                            args["size_bytes"].as_u64(),
+                            throughput::objects_arg(args)?,
+                        );
                         if connection.is_some()
                             && !dry_run
                             && (more || largest > pigeon_ingest::managed_destination::MAX_BLOB)
@@ -759,17 +776,30 @@ impl Ingest {
                         }
                         sample = json!({
                             "objects": count, "bytes": bytes, "first_page_only": more,
-                            "note": if more && connection.is_some() {
-                                "Only the first page was listed, so the estimate and budget use that page."
-                            } else if more && args["size_bytes"].is_null() {
+                            "note": if more && args["size_bytes"].is_null() {
                                 "Only the first page was listed, so the estimate covers that page. Pass `size_bytes` (the whole size) for a whole-run estimate."
                             } else { "" },
                         });
-                        est = to_value(estimate::estimate(
-                            hosts::host_for(a.provider),
+                        let host = hosts::host_for(a.provider);
+                        let measured = match host {
+                            Host::Scaleway => {
+                                throughput::measured(
+                                    env,
+                                    &linked,
+                                    destination_bucket,
+                                    instance,
+                                    "scaleway",
+                                )
+                                .await
+                            }
+                            _ => None,
+                        };
+                        est = to_value(throughput::plan_estimate(
+                            host,
                             total_bytes,
                             total_objects,
-                            UNIQUE_SHARE,
+                            extrapolated,
+                            measured,
                         ));
                     }
                     Err(e) => missing.push(format!(
@@ -785,7 +815,7 @@ impl Ingest {
         if !missing.is_empty() {
             return Ok(unready(missing, est, sample));
         }
-        let job = hosts::job_spec(&hosts::JobInputs {
+        let mut job = hosts::job_spec(&hosts::JobInputs {
             instance,
             account: a,
             bucket,
@@ -800,6 +830,19 @@ impl Ingest {
             nonce: nonce(),
         });
         let host = hosts::host_for(a.provider);
+        if let Ok(planned) = serde_json::from_value::<estimate::Estimate>(est.clone())
+            && host == Host::Scaleway
+        {
+            job.max_minutes = Some(throughput::deadline(host, &planned, None)?);
+        }
+        if let Some((prior, resume)) = &continued {
+            if prior.source != job.source || prior.dry_run != job.dry_run {
+                return Err(bad(
+                    "a continuation keeps the continued run's source, prefix and dry-run setting; plan a new run instead",
+                ));
+            }
+            job.resume = Some(resume.clone());
+        }
         let data_worker = if host == Host::Cloudflare {
             setting(env, &format!("data_url:{instance}")).await?
         } else {
@@ -892,6 +935,12 @@ impl Ingest {
             .await?;
         }
         let mut lines = Vec::new();
+        if let Some(resume) = &job.resume {
+            lines.push(throughput::continue_line(resume));
+        }
+        if let Ok(planned) = serde_json::from_value::<estimate::Estimate>(est.clone()) {
+            lines.push(throughput::time_line(&planned));
+        }
         lines.push(if bucket_here {
             format!(
                 "R2 bucket `{}` already exists in `{instance}`'s account.",
@@ -1683,9 +1732,11 @@ impl Capability for Ingest {
                     "keep_archives": { "type": "boolean", "description": "Default true." },
                     "fingerprints": { "type": "boolean", "description": "Default false." },
                     "size_bytes": { "type": "integer", "description": "The source's whole size, for the estimate." },
+                    "objects": { "type": "integer", "description": "The source's whole object count (from the provider's console), for the run time: small files make a run file-count-bound." },
+                    "continue": { "type": "string", "description": "The id of a stopped run (by its deadline, a stop or a spent grant) to continue from its checkpoint, with the same source, prefix and dry-run setting. Needs a new approval; the continuation gets a new run id." },
                     "commit": { "type": "string", "description": "A full commit id to build the runner from; default this Worker's own." },
                     "scratch_gib": { "type": "integer", "description": "Size of the dedicated DigitalOcean scratch volume (default 32 GiB)." },
-                    "max_minutes": { "type": "integer", "description": "DigitalOcean job deadline in minutes (default 30)." },
+                    "max_minutes": { "type": "integer", "description": "DigitalOcean only: override the computed deadline (1.5 times the slow estimate plus 10 minutes), 10 to 1440 minutes." },
                     "archive_inflated_gib": { "type": "integer", "description": "Maximum inflated GiB per ZIP tree, bounded by scratch space." },
                     "archive_member_gib": { "type": "integer", "description": "Maximum inflated GiB per ZIP member." },
                 }),

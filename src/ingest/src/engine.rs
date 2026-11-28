@@ -234,6 +234,7 @@ struct Engine<'r, 'a> {
     started_ms: i64,
     last_status_ms: i64,
     base_read: u64,
+    base_listed: u64,
     last_error: Option<String>,
 }
 
@@ -845,6 +846,15 @@ impl<'r, 'a> Engine<'r, 'a> {
             .collect();
         top.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         top.truncate(50);
+        let finished_ms = self.r.clock.now_ms();
+        let elapsed = finished_ms.saturating_sub(self.started_ms);
+        let rate = |n: u64| {
+            if elapsed > 0 {
+                n as f64 * 1000.0 / elapsed as f64
+            } else {
+                0.0
+            }
+        };
         Report {
             run: self.r.job.run.clone(),
             state,
@@ -856,7 +866,10 @@ impl<'r, 'a> Engine<'r, 'a> {
             not_opened: self.not_opened.clone(),
             top_duplicates: top,
             started_ms: self.started_ms,
-            finished_ms: self.r.clock.now_ms(),
+            finished_ms,
+            files_per_s: rate(self.counters.listed.saturating_sub(self.base_listed)),
+            bytes_per_s: rate(self.counters.bytes_read.saturating_sub(self.base_read)),
+            continues: self.r.job.resume.as_ref().map(|r| r.run.clone()),
         }
     }
 
@@ -880,8 +893,8 @@ impl<'r, 'a> Engine<'r, 'a> {
     }
 }
 
-/// Runs the job to its end (or a stop), resuming from `checkpoint.json` if there is one, and
-/// answers the report it wrote.
+/// Runs the job to its end (or a stop), resuming from `checkpoint.json` if there is one (else
+/// from the checkpoint of the run it continues, `job.resume`), and answers the report it wrote.
 ///
 /// Objects are handled one at a time; `job.threads` is future work. After a resume the report's
 /// flag counts, lists and duplicate groups cover only this session, while its counters carry
@@ -890,12 +903,21 @@ pub fn run(run: &Run<'_>) -> Result<Report, Error> {
     let cp = match retry(|| run.dest.get_object(&checkpoint_key(&run.job.run)))? {
         Some(bytes) => serde_json::from_slice::<Checkpoint>(&bytes)
             .map_err(|e| Error::Io(format!("checkpoint.json is not readable: {e}")))?,
-        None => Checkpoint::default(),
+        // A continuation starts its own manifest at part 0 from the checkpoint it was given.
+        None => run
+            .job
+            .resume
+            .as_ref()
+            .map_or_else(Checkpoint::default, |r| Checkpoint {
+                seq: 0,
+                ..r.checkpoint.clone()
+            }),
     };
     let now = run.clock.now_ms();
     let mut e = Engine {
         r: run,
         base_read: cp.counters.bytes_read,
+        base_listed: cp.counters.listed,
         counters: cp.counters,
         seq: cp.seq,
         after_key: cp.after_key,

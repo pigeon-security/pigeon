@@ -15,7 +15,7 @@ use pigeon_core::{
 use pigeon_ingest::{
     archive::Limits,
     audit::{Cleanup, PipelineCounts, PipelineKind, PipelineOutcome, PipelineTerminal},
-    estimate::{Host, estimate},
+    estimate::{self, Host},
     manifest::{self, DestSpec, JobSpec, Report, RunState, SourceSpec},
 };
 use serde::{Deserialize, Serialize};
@@ -23,8 +23,8 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use worker::{Env, Method, Request, Response, Result};
 
-use super::{KEPT_MS, KIND, RunRecord, UNIQUE_SHARE, bad, hosts, secret_value, setting, unready};
-use super::{connections, managed_destination};
+use super::{KEPT_MS, KIND, RunRecord, bad, hosts, secret_value, setting, unready};
+use super::{connections, managed_destination, throughput};
 use crate::{
     Context, data_store,
     digitalocean::{compute, health, spaces, team},
@@ -155,21 +155,22 @@ fn bootstrap_policy() -> String {
     ))
 }
 
-fn sample_size(listing: &s3::Listing, args: &Value) -> (u64, u64, Value) {
+fn sample_size(listing: &s3::Listing, args: &Value) -> Result<(u64, u64, bool, Value)> {
     let count = listing.objects.len() as u64;
     let bytes = listing.objects.iter().map(|row| row.size).sum::<u64>();
-    let total = args["size_bytes"].as_u64().unwrap_or(bytes);
-    let objects = if total == bytes {
-        count
-    } else {
-        ((u128::from(total) * u128::from(count)) / u128::from(bytes.max(1)))
-            .min(u128::from(u64::MAX)) as u64
-    };
-    (
+    let (total, objects, extrapolated) = estimate::totals(
+        count,
+        bytes,
+        listing.next.is_some(),
+        args["size_bytes"].as_u64(),
+        throughput::objects_arg(args)?,
+    );
+    Ok((
         total,
         objects,
+        extrapolated,
         json!({"objects":count,"bytes":bytes,"first_page_only":listing.next.is_some()}),
-    )
+    ))
 }
 
 fn range(args: &Value, field: &str, default: u16, minimum: u16, maximum: u16) -> Result<u16> {
@@ -283,8 +284,47 @@ pub(super) async fn plan(
         ));
     }
     let prefix = super::spaces_prefix(&binding.prefix, args).map_err(bad)?;
+    let link = match super::linked_id(record) {
+        Some(account) => crate::linked::account_for_bound(cx.env, host, &record.id, &account)
+            .await
+            .ok(),
+        None => None,
+    };
+    let store = data_store::store_name(record);
+    let continued = match args.get("continue").filter(|v| !v.is_null()) {
+        Some(prior) => {
+            let prior = prior
+                .as_str()
+                .filter(|run| valid_run_id(run))
+                .ok_or_else(|| bad("continue must be a Spaces run id"))?;
+            let link = link
+                .as_ref()
+                .ok_or_else(|| bad("Link the instance to its approved Cloudflare account."))?;
+            Some(throughput::continuation(link, &store, &record.id, prior).await?)
+        }
+        None => None,
+    };
+    let prefix = match &continued {
+        Some((job, _)) => {
+            let SourceSpec::S3 { prefix: kept, .. } = &job.source else {
+                return Err(bad("the continued run has no Spaces source"));
+            };
+            if args.get("prefix").is_some() && kept != prefix {
+                return Err(bad("a continuation keeps the continued run's prefix"));
+            }
+            kept.as_str()
+        }
+        None => prefix,
+    };
     let volume_gib = range(args, "scratch_gib", 32, 8, 1024)?;
-    let max_minutes = range(args, "max_minutes", 30, 10, 360)?;
+    let max_minutes_arg = match args.get("max_minutes") {
+        None | Some(Value::Null) => None,
+        Some(_) => Some(range(args, "max_minutes", 0, 10, 24 * 60)?),
+    };
+    let measured = match &link {
+        Some(link) => throughput::measured(cx.env, link, &store, &record.id, "digitalocean").await,
+        None => None,
+    };
     // Reserve one half of the scratch budget for the source archive and processing overhead.
     let maximum_inflated = (volume_bytes(volume_gib) / (2 << 30)) as u16;
     let inflated_gib = range(
@@ -307,8 +347,16 @@ pub(super) async fn plan(
         ..Limits::default()
     };
     let run_id = hex(&Sha256::digest(webauthn::random()?.as_bytes()))[..32].to_owned();
-    let requested_since = u64::from(max_minutes) * MINUTE_MS;
-    let dry_run = args["dry_run"].as_bool().unwrap_or(true);
+    let dry_run = match (&continued, args["dry_run"].as_bool()) {
+        (Some((job, _)), given) if given.is_some_and(|given| given != job.dry_run) => {
+            return Err(bad(
+                "a continuation keeps the continued run's dry-run setting",
+            ));
+        }
+        (Some((job, _)), _) => job.dry_run,
+        (None, given) => given.unwrap_or(true),
+    };
+    let mut max_minutes = max_minutes_arg.unwrap_or(30);
     let (sample, connection, source_origin) = if let Some(name) = name {
         if let Some(pin) = connections::owned_reference(record, name)? {
             if !pigeon_ingest::source_credentials::valid_read_path(prefix) {
@@ -339,7 +387,7 @@ pub(super) async fn plan(
     let mut missing = Vec::new();
     let (est, sample) = match sample {
         Ok(listing) => {
-            let (bytes, objects, sample) = sample_size(&listing, args);
+            let (bytes, objects, extrapolated, sample) = sample_size(&listing, args)?;
             if connection.is_some()
                 && !dry_run
                 && (listing.next.is_some()
@@ -353,8 +401,21 @@ pub(super) async fn plan(
             if sample["objects"] == 0 {
                 missing.push("The chosen Spaces prefix contains no objects.".into());
             }
-            let mut est =
-                serde_json::to_value(estimate(Host::DigitalOcean, bytes, objects, UNIQUE_SHARE))?;
+            let planned = throughput::plan_estimate(
+                Host::DigitalOcean,
+                bytes,
+                objects,
+                extrapolated,
+                measured,
+            );
+            max_minutes = u16::try_from(throughput::deadline(
+                Host::DigitalOcean,
+                &planned,
+                max_minutes_arg.map(u64::from),
+            )?)
+            .map_err(|_| bad("max_minutes is out of range"))?;
+            let requested_since = u64::from(max_minutes) * MINUTE_MS;
+            let mut est = serde_json::to_value(&planned)?;
             est["compute_and_volume_at_deadline_usd"] =
                 json!(estimated_cost(requested_since, requested_since, volume_gib));
             if let Some(assumptions) = est["assumptions"].as_array_mut() {
@@ -485,7 +546,17 @@ pub(super) async fn plan(
         limits,
         threads: 8,
         commit,
+        max_minutes: Some(u64::from(max_minutes)),
+        resume: continued.as_ref().map(|(_, resume)| resume.clone()),
     };
+    if continued
+        .as_ref()
+        .is_some_and(|(prior, _)| prior.source != job.source)
+    {
+        return Err(bad(
+            "the continued run's source changed; plan a new run instead",
+        ));
+    }
     let approval = Planned {
         adapter: ADAPTER.into(),
         job,
@@ -520,6 +591,14 @@ pub(super) async fn plan(
             "team": broker.pin.team,
             "generation": broker.pin.generation,
         });
+    }
+    if let Some(plan) = summary["plan"].as_array_mut() {
+        if let Ok(planned) = serde_json::from_value::<estimate::Estimate>(est.clone()) {
+            plan.push(json!(throughput::time_line(&planned)));
+        }
+        if let Some((_, resume)) = &continued {
+            plan.insert(0, json!(throughput::continue_line(resume)));
+        }
     }
     if let Some(reviewed) = &approval.destination {
         let grant = format!(

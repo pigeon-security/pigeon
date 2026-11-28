@@ -63,6 +63,34 @@ pub struct JobSpec {
     pub threads: u32,
     /// The repository commit the runner was built from.
     pub commit: String,
+    /// The approved run time: the runner stops itself, writing its checkpoint, shortly before
+    /// it. None for older jobs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_minutes: Option<u64>,
+    /// The stopped run this one continues, and its checkpoint, read and approved at plan time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume: Option<Resume>,
+}
+
+/// Where a continuation starts: another run's checkpoint (docs/plans/ingest-throughput.md).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Resume {
+    /// The run continued.
+    pub run: String,
+    /// Its checkpoint when the continuation was planned.
+    pub checkpoint: Checkpoint,
+}
+
+impl JobSpec {
+    /// When the runner started at `started_ms` should stop itself: five minutes or a tenth of
+    /// the approved time before its end, whichever is less. None with no approved time.
+    pub fn stop_at_ms(&self, started_ms: i64) -> Option<i64> {
+        let total = i64::try_from(self.max_minutes?)
+            .ok()?
+            .saturating_mul(60_000);
+        let margin = (total / 10).min(5 * 60_000);
+        Some(started_ms.saturating_add(total - margin))
+    }
 }
 
 /// Where a file or member came from.
@@ -206,6 +234,14 @@ pub struct Report {
     pub top_duplicates: Vec<(String, u64, u64)>,
     pub started_ms: i64,
     pub finished_ms: i64,
+    /// Objects listed and bytes read a second in this session, for later estimates.
+    #[serde(default)]
+    pub files_per_s: f64,
+    #[serde(default)]
+    pub bytes_per_s: f64,
+    /// The run this one continues, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continues: Option<String>,
 }
 
 /// `ingest/runs/{run}/`.

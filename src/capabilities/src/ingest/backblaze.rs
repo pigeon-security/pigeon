@@ -22,8 +22,8 @@ use crate::instances::{self, record::Instance};
 use crate::jobs_audit::{self, ExportStatus};
 use crate::{Context, to_value, users::directory};
 
-use super::{Ingest, KEPT_MS, KIND, PENDING_MS, RunRecord, UNIQUE_SHARE, bad, data_enabled};
-use super::{connections, managed_destination};
+use super::{Ingest, KEPT_MS, KIND, PENDING_MS, RunRecord, bad, data_enabled};
+use super::{connections, managed_destination, throughput};
 use super::{
     execution_binding, hosts, index_key, keep, net, now_ms, runs_of, save_run, secret_value,
     setting, today, unready,
@@ -333,19 +333,46 @@ pub(crate) async fn plan(
                     | "connection"
                     | "prefix"
                     | "size_bytes"
+                    | "objects"
+                    | "continue"
                     | "dry_run"
                     | "fingerprints"
             )
         })
     }) {
         return Err(bad(
-            "The Backblaze plan takes the approved source, prefix, size, dry-run and fingerprint options.",
+            "The Backblaze plan takes the approved source, prefix, size, object count, continue, dry-run and fingerprint options.",
         ));
     }
     let prefix = args
         .get("prefix")
         .map(|value| value.as_str().ok_or_else(|| bad("prefix must be text")))
         .transpose()?;
+    let objects_arg = throughput::objects_arg(args)?;
+    let linked = cap.checked_link(env, record).await?;
+    let store = data_store::store_name(record);
+    let continued = match args.get("continue").filter(|v| !v.is_null()) {
+        Some(prior) => {
+            let prior = prior
+                .as_str()
+                .filter(|run| container_job::valid_run(run))
+                .ok_or_else(|| bad("continue must be a Backblaze run id"))?;
+            Some(throughput::continuation(&linked, &store, &record.id, prior).await?)
+        }
+        None => None,
+    };
+    let prefix = match (&continued, prefix) {
+        (Some((job, _)), given) => {
+            let SourceSpec::S3 { prefix: kept, .. } = &job.source else {
+                return Err(bad("the continued run has no Backblaze source"));
+            };
+            if given.is_some_and(|given| given != kept) {
+                return Err(bad("a continuation keeps the continued run's prefix"));
+            }
+            Some(kept.as_str())
+        }
+        (None, given) => given,
+    };
     let (approved, pin, creds, listing) = if let Some(name) = args["connection"].as_str() {
         let connections::Binding::Backblaze(binding) = connections::binding(record, name)? else {
             return Err(bad("the approved connection is not Backblaze"));
@@ -390,16 +417,24 @@ pub(crate) async fn plan(
             Value::Null, sampled,
         ));
     }
-    let total = expected.unwrap_or(bytes);
-    if total < bytes {
+    if expected.is_some_and(|total| total < bytes) {
         return Err(bad("size_bytes is below the sampled source size"));
     }
-    let objects = ((u128::from(total) * u128::from(count)) / u128::from(bytes.max(1)))
-        .max(u128::from(count))
-        .min(u128::from(u64::MAX)) as u64;
-    let estimate = estimate::estimate(Host::Cloudflare, total, objects, UNIQUE_SHARE);
-    let max_minutes = (estimate.hours_high.mul_add(90.0, 5.0).ceil() as u64).clamp(5, 24 * 60);
-    let dry_run = args["dry_run"].as_bool().unwrap_or(true);
+    let (total, objects, extrapolated) =
+        estimate::totals(count, bytes, listing.next.is_some(), expected, objects_arg);
+    let measured = throughput::measured(env, &linked, &store, &record.id, "cloudflare").await;
+    let estimate =
+        throughput::plan_estimate(Host::Cloudflare, total, objects, extrapolated, measured);
+    let max_minutes = throughput::deadline(Host::Cloudflare, &estimate, None)?;
+    let dry_run = match (&continued, args["dry_run"].as_bool()) {
+        (Some((job, _)), given) if given.is_some_and(|given| given != job.dry_run) => {
+            return Err(bad(
+                "a continuation keeps the continued run's dry-run setting",
+            ));
+        }
+        (Some((job, _)), _) => job.dry_run,
+        (None, given) => given.unwrap_or(true),
+    };
     let scoped = if let Some((pin, owned)) = pin {
         if !dry_run
             && (listing.next.is_some()
@@ -435,6 +470,14 @@ pub(crate) async fn plan(
         }
     };
     let source = resolved.source;
+    if continued
+        .as_ref()
+        .is_some_and(|(job, _)| job.source != source)
+    {
+        return Err(bad(
+            "the continued run's source changed; plan a new run instead",
+        ));
+    }
     let SourceSpec::S3 { bucket, prefix, .. } = &source else {
         return Err(bad("Backblaze requires an S3 source"));
     };
@@ -464,6 +507,10 @@ pub(crate) async fn plan(
             resolved.execution.audit_bucket
         ),
     ];
+    if let Some((_, resume)) = &continued {
+        lines.insert(0, throughput::continue_line(resume));
+    }
+    lines.push(throughput::time_line(&estimate));
     if let Some(reviewed) = &resolved.execution.destination {
         lines.push(format!("Use a Data Worker run grant limited to {} write bytes, {} write attempts and 16 MiB per atomic payload.", reviewed.max_bytes, reviewed.max_objects));
     }
@@ -481,6 +528,8 @@ pub(crate) async fn plan(
         limits: Limits::default(),
         threads: 4,
         commit: resolved.revision,
+        max_minutes: Some(max_minutes),
+        resume: continued.map(|(_, resume)| resume),
     };
     Ingest::check_current(env, record).await?;
     let payload = payload(&job, &resolved.execution);

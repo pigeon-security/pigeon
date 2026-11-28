@@ -110,6 +110,8 @@ pub fn job_spec(i: &JobInputs<'_>) -> JobSpec {
         limits: Limits::default(),
         threads: 8,
         commit: i.commit.into(),
+        max_minutes: None,
+        resume: None,
     }
 }
 

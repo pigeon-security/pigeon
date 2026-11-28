@@ -1,7 +1,8 @@
 //! Reads the environment, builds the source, destination and spool, and runs the job.
 
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use pigeon_core::s3::{Keys, parse_keys};
 use pigeon_ingest::engine::{Clock, Dest, Run, Source, run};
@@ -89,13 +90,33 @@ pub fn run_job(
     };
     let dir = env("SPOOL_DIR").unwrap_or_else(|| "/spool".into());
     let spool = DirSpool::new(PathBuf::from(dir), budget).map_err(|e| e.to_string())?;
-    let report = run(&Run {
-        job: &job,
-        source: source.as_ref(),
-        dest: dest.as_ref(),
-        spool: &spool,
-        clock: &SystemClock,
-        stop,
+    // Stop shortly before the approved run time ends, so the run checkpoints and ends `stopped`
+    // (and can be continued) rather than being killed by its host.
+    let stop_at = job.stop_at_ms(SystemClock.now_ms());
+    let finished = AtomicBool::new(false);
+    let report = std::thread::scope(|scope| {
+        if let Some(at) = stop_at {
+            let finished = &finished;
+            scope.spawn(move || {
+                while !finished.load(Ordering::SeqCst) {
+                    if SystemClock.now_ms() >= at {
+                        stop.store(true, Ordering::SeqCst);
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+            });
+        }
+        let report = run(&Run {
+            job: &job,
+            source: source.as_ref(),
+            dest: dest.as_ref(),
+            spool: &spool,
+            clock: &SystemClock,
+            stop,
+        });
+        finished.store(true, Ordering::SeqCst);
+        report
     })
     .map_err(|e| e.to_string())?;
     Ok(report.state)

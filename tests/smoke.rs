@@ -118,6 +118,10 @@ mod core;
 /// suite compiles the one file natively against stand-in bindings (tests/smoke/console.rs, `email`).
 #[path = "../src/data-worker/src/mail.rs"]
 mod data_worker_mail;
+/// Ingest throughput: run time from the file count, the parallel engine and live runs
+/// (docs/plans/ingest-throughput.md).
+#[path = "smoke/ingest.rs"]
+mod ingest;
 /// Instances and versions: pins, plans and upgrades.
 #[path = "smoke/instances.rs"]
 mod instances;

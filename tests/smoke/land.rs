@@ -2430,6 +2430,8 @@ fn ingest_engine_dedupes_resumes_and_opens_zips() {
         limits: Limits::default(),
         threads: 1,
         commit: "c".into(),
+        max_minutes: None,
+        resume: None,
     };
 
     // Verify passes the right bytes and fails on a short, long or changed stream.
