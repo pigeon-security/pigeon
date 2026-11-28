@@ -16,6 +16,7 @@ pub mod hosts;
 mod managed_destination;
 pub mod net;
 pub mod scaleway;
+pub mod scaleway_compute;
 pub mod scaleway_source;
 
 pub const NAME: &str = "data-ingest";
@@ -31,7 +32,7 @@ const DATA_TOOLS: &[crate::instances::tools::Registration] = &[
     crate::instances::tools::Registration {
         name: connections::LIST,
         description: None,
-        arguments: &[],
+        arguments: &["compute_preview"],
     },
     crate::instances::tools::Registration {
         name: connections::VERIFY,
@@ -1617,7 +1618,7 @@ impl Capability for Ingest {
             tool(
                 connections::LIST,
                 "List this instance's approved bucket connections and credential state.",
-                json!({"instance": instance}),
+                json!({"instance": instance, "compute_preview": {"type": "string", "description": "Check the newly entered Scaleway compute slot for this connection."}}),
                 &["instance"],
             ),
             tool(
@@ -1686,7 +1687,21 @@ impl Capability for Ingest {
                         .await?
                         .ok_or_else(|| bad("There is no approved instance."))?;
                     if tool == connections::LIST {
-                        connections::listings(cx.env, &record).await
+                        let mut listed = connections::listings(cx.env, &record).await?;
+                        if let Some(rows) = listed["connections"].as_array_mut() {
+                            for row in rows {
+                                let Some(name) = row["name"].as_str() else {
+                                    continue;
+                                };
+                                if scaleway_compute::project_scope(&record, name).is_ok() {
+                                    let verify = args["compute_preview"].as_str() == Some(name);
+                                    row["compute"] =
+                                        scaleway_compute::preview(cx, &record, name, verify)
+                                            .await?;
+                                }
+                            }
+                        }
+                        Ok(listed)
                     } else {
                         connections::verify(cx.env, &record, arg(args, "connection")?).await
                     }
@@ -1706,7 +1721,12 @@ impl Capability for Ingest {
         cx: &'a Context<'a>,
         w: &'a crate::console::write::Write<'a>,
     ) -> Call<'a> {
-        Box::pin(async move { connections::check_write(cx, w).await })
+        Box::pin(async move {
+            if w.action.id == scaleway_compute::SET {
+                return scaleway_compute::check_write(cx, w).await;
+            }
+            connections::check_write(cx, w).await
+        })
     }
 
     fn write_make<'a>(
@@ -1714,7 +1734,12 @@ impl Capability for Ingest {
         cx: &'a Context<'a>,
         w: &'a crate::console::write::Write<'a>,
     ) -> Call<'a> {
-        Box::pin(async move { connections::save(cx, w).await })
+        Box::pin(async move {
+            if w.action.id == scaleway_compute::SET {
+                return scaleway_compute::save(cx, w).await;
+            }
+            connections::save(cx, w).await
+        })
     }
 
     fn secrets(&self) -> Vec<Slot> {

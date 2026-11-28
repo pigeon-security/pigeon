@@ -239,6 +239,8 @@ pub enum Step {
         ingest_runtime: Option<pigeon_ingest::container_job::Runtime>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         publisher: Option<super::data_publisher::Publisher>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scaleway_compute: Option<crate::ingest::scaleway_compute::Registry>,
         module: String,
         replaces: bool,
     },

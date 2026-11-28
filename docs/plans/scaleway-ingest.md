@@ -55,3 +55,17 @@ Use exact duplicates, a one-byte variant, and a nested ZIP, then compare source
 references, stored payloads and archive lineage. Confirm the terminal audit and
 deletion of the Instance, its boot disk and the attached scratch volume before
 retiring any direct-source or home credential bindings.
+
+### Instance-owned compute credentials
+
+For a linked instance with standalone Data, open **Data Ingest → Bucket connections**
+and choose **Register compute key** for the approved Scaleway connection. In the
+linked Cloudflare account, put `PROJECT_ID:SECRET_KEY` in the displayed Secrets
+Store slot with Workers scope. Use a Scaleway IAM application with project-scoped
+Instances and Block Storage permissions. The passkey approves the slot's metadata
+fingerprint. Pigeon Core does not receive the credential value.
+
+Review and apply the updated Data Worker plan to bind the generation. The instance
+Data Worker reads the key and checks access to the approved project before a
+launch. Rotate by creating a fresh slot. Earlier generations remain bound for
+cleanup, and the source read key remains a separate credential.

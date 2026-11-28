@@ -947,6 +947,12 @@ impl Instances {
                 .await?,
             );
         }
+        seen.scaleway_compute =
+            crate::ingest::scaleway_compute::registry(cx.env, &instance.id).await?;
+        if let Some(registry) = &seen.scaleway_compute {
+            crate::ingest::scaleway_compute::verify_registry(account, &instance.id, registry)
+                .await?;
+        }
         Ok(data_plan::data_parts(instance, &seen, kept, None))
     }
 

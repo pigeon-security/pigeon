@@ -345,6 +345,8 @@
               !owned && record.account?.kind === "linked" && record.account.account_id && record.data?.placement !== "inline"
                 ? button("Use owning account", () => stageOwner(connection))
                 : null,
+              ...(connection.compute ? [button(connection.compute.generation ? "Rotate compute key" : "Register compute key",
+                () => editCompute(connection, result.version))] : []),
             ]));
         }));
         if (!result.connections.length) {
@@ -466,6 +468,37 @@
       } catch (err) {
         d.say(err.message || String(err), true);
       }
+    }
+
+    function editCompute({ name, binding, compute }, version) {
+      const target = [["Instance", code(record.id)], ["Connection", code(name)], ["Project", code(binding.project)],
+        ["Secrets Store slot", code(compute.slot)]];
+      const review = button("Review registration", async () => {
+        review.disabled = true;
+        try {
+          const result = await ctx.op("data_ingest_connections", { ...args, compute_preview: name });
+          const current = result.connections.find(row => row.name === name)?.compute;
+          if (result.version !== version || current?.slot !== compute.slot || !current.fingerprint) {
+            throw new Error("The approved slot changed. Reopen Bucket connections.");
+          }
+          entry.close();
+          confirm({
+            title: "Register Scaleway compute key", target,
+            action: "data-ingest-scaleway-compute-register",
+            id: { instance: record.id, name, version, generation: current.generation, fingerprint: current.fingerprint },
+            confirmLabel: "Register with passkey",
+            onDone: () => setTimeout(() => ingestBucketConnections(ctx, record), 0),
+          });
+        } catch (err) {
+          entry.say(err.message || String(err), true);
+        } finally {
+          review.disabled = false;
+        }
+      }, { variant: "primary" });
+      const entry = dialog({ title: "Scaleway compute key", body: [
+        facts(target),
+        el("p", { text: "In the linked Cloudflare account, create this exact secret in Secrets Store with Workers scope. Its value is PROJECT_ID:SECRET_KEY. Use a new slot for each rotation." }),
+      ], actions: [button("Back", () => ingestBucketConnections(ctx, record)), review] });
     }
 
     function editKey({ name, binding, state, generation }, version) {

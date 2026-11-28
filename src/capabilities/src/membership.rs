@@ -211,9 +211,10 @@ pub fn write_need(action: &Action, target: &Value) -> Need {
     }
     let instance = match action.target {
         Target::Instance => target.as_str(),
-        Target::Site | Target::DigitalOceanTeam | Target::IngestConnection => {
-            target["instance"].as_str()
-        }
+        Target::Site
+        | Target::DigitalOceanTeam
+        | Target::IngestConnection
+        | Target::ScalewayCompute => target["instance"].as_str(),
         _ => None,
     };
     Need::On(instance.map(str::to_string), Role::Operator)

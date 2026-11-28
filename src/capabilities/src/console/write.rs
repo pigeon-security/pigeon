@@ -60,6 +60,7 @@ pub enum Target {
     DigitalOceanTeam,
     /// A named Data Ingest connection and its current generation.
     IngestConnection,
+    ScalewayCompute,
     /// A person's name, as an invite takes it.
     Name,
     /// `on` or `off`.
@@ -187,6 +188,14 @@ pub const ACTIONS: &[Action] = &[
         Target::Secret,
         Change::Secret,
     )),
+    act(
+        crate::ingest::scaleway_compute::SET,
+        "Register a Scaleway compute credential",
+        Cap(crate::ingest::NAME),
+        false,
+        Target::ScalewayCompute,
+        Change::Nothing,
+    ),
     act(
         crate::ingest::connections::SET_KEY,
         "Set a bucket connection credential",
@@ -578,11 +587,20 @@ impl Action {
                     .ok_or("the target needs the approved record version")?;
                 json!({"instance": instance, "team_id": team, "version": version})
             }
-            Target::IngestConnection => {
+            Target::IngestConnection | Target::ScalewayCompute => {
                 let object = raw
                     .as_object()
                     .ok_or("expected a bucket connection target")?;
-                only(object, &["instance", "name", "version", "generation"], true)?;
+                let compute = self.target == Target::ScalewayCompute;
+                if compute {
+                    only(
+                        object,
+                        &["instance", "name", "version", "generation", "fingerprint"],
+                        true,
+                    )?;
+                } else {
+                    only(object, &["instance", "name", "version", "generation"], true)?;
+                }
                 let instance = raw["instance"]
                     .as_str()
                     .filter(|id| instance_like(id))
@@ -599,11 +617,25 @@ impl Action {
                     value => Some(
                         value
                             .as_str()
-                            .filter(|id| crate::ingest::connections::valid_generation(id))
+                            .filter(|id| {
+                                if self.target == Target::ScalewayCompute {
+                                    crate::ingest::scaleway_compute::valid_generation(id)
+                                } else {
+                                    crate::ingest::connections::valid_generation(id)
+                                }
+                            })
                             .ok_or("invalid credential generation")?,
                     ),
                 };
-                json!({"instance": instance, "name": name, "version": version, "generation": generation})
+                let mut target = json!({"instance": instance, "name": name, "version": version, "generation": generation});
+                if compute {
+                    let fingerprint = raw["fingerprint"]
+                        .as_str()
+                        .filter(|value| digest_like(value))
+                        .ok_or("invalid Secrets Store metadata fingerprint")?;
+                    target["fingerprint"] = json!(fingerprint);
+                }
+                target
             }
             Target::Name => json!(crate::users::invite_name(text())?),
             Target::Switch => match text() {
@@ -857,12 +889,18 @@ impl Action {
     pub fn summary(&self, target: &Value, bound: &Value) -> Summary {
         let target_text = match target {
             Value::String(s) => s.clone(),
-            v if self.target == Target::IngestConnection => format!(
-                "{} / {} (record version {})",
-                v["instance"].as_str().unwrap_or(""),
-                v["name"].as_str().unwrap_or(""),
-                v["version"],
-            ),
+            v if matches!(
+                self.target,
+                Target::IngestConnection | Target::ScalewayCompute
+            ) =>
+            {
+                format!(
+                    "{} / {} (record version {})",
+                    v["instance"].as_str().unwrap_or(""),
+                    v["name"].as_str().unwrap_or(""),
+                    v["version"],
+                )
+            }
             v if self.target == Target::DigitalOceanTeam => format!(
                 "{} / DigitalOcean team {} (record version {})",
                 v["instance"].as_str().unwrap_or(""),

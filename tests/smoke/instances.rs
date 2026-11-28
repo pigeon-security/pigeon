@@ -6554,3 +6554,54 @@ fn scaleway_ingest_source_binds_instance_and_prefix() {
     assert_ne!(compute_slot("willowgraysen"), source_slot("willowgraysen"));
     assert_ne!(source_slot("one/two"), source_slot("one-two"));
 }
+
+#[test]
+fn rotation_retains_the_bindings_for_outstanding_runs() {
+    use pigeon_capabilities::ingest::scaleway_compute::{Registered, Registry};
+    use pigeon_ingest::scaleway::ComputePin;
+    use serde_json::json;
+    let project = "bc9df11a-e8f8-44d7-86ad-0d9111122333";
+    let old = ComputePin {
+        project: project.into(),
+        generation: "0123456789abcdef01234567".into(),
+    };
+    let new = ComputePin {
+        project: project.into(),
+        generation: "123456789abcdef012345678".into(),
+    };
+    let registry = Registry {
+        account: "account".into(),
+        store: "store".into(),
+        pins: vec![
+            Registered {
+                pin: old.clone(),
+                fingerprint: "old".into(),
+            },
+            Registered {
+                pin: new.clone(),
+                fingerprint: "new".into(),
+            },
+        ],
+    };
+    assert_eq!(registry.active(project), Some(&new));
+    let mut metadata = json!({"bindings": []});
+    registry.bind(&mut metadata, "instance").unwrap();
+    assert_eq!(
+        metadata["bindings"][0]["secret_name"],
+        old.binding("instance").unwrap()
+    );
+    assert_eq!(
+        metadata["bindings"][1]["secret_name"],
+        new.binding("instance").unwrap()
+    );
+    assert_ne!(old.binding("instance"), old.binding("another-instance"));
+
+    use pigeon_capabilities::console::write::{Step, action};
+    let registration = action("data-ingest-scaleway-compute-register").unwrap();
+    assert!(
+        registration
+            .change(&json!({"value": "must stay with the owner"}), Step::Finish)
+            .is_err()
+    );
+    assert!(registration.change(&json!({}), Step::Finish).is_ok());
+}

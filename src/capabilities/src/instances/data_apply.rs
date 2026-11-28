@@ -514,6 +514,7 @@ pub async fn run(
                 mail_import_audit,
                 ingest_runtime,
                 publisher,
+                scaleway_compute,
                 ..
             } => {
                 if *mail_import != crate::data_store::mail_import_enabled(instance)
@@ -534,6 +535,17 @@ pub async fn run(
                         "the approved Backblaze container changed, so the Data Worker needs a new plan",
                     ));
                 }
+                let current_compute =
+                    crate::ingest::scaleway_compute::registry(a.env, &instance.id).await?;
+                if scaleway_compute != &current_compute
+                    || scaleway_compute
+                        .as_ref()
+                        .is_some_and(|registry| registry.account != a.account_id)
+                {
+                    return Err(bad(
+                        "the approved Scaleway credentials changed; review a new Data Worker plan",
+                    ));
+                }
                 upload(
                     a,
                     instance,
@@ -544,6 +556,7 @@ pub async fn run(
                         backup: backup.is_some(),
                         ingest_runtime: ingest_runtime.as_ref(),
                         publisher: publisher.as_ref(),
+                        scaleway_compute: scaleway_compute.as_ref(),
                     },
                 )
                 .await?;
@@ -952,6 +965,7 @@ struct UploadOptions<'a> {
     backup: bool,
     ingest_runtime: Option<&'a pigeon_ingest::container_job::Runtime>,
     publisher: Option<&'a super::data_publisher::Publisher>,
+    scaleway_compute: Option<&'a crate::ingest::scaleway_compute::Registry>,
 }
 
 /// Uploads the data Worker from `built` (each module checked against its digest), with a new
@@ -968,6 +982,7 @@ async fn upload(
         backup,
         ingest_runtime,
         publisher,
+        scaleway_compute,
     } = options;
     let account = Account {
         id: a.account_id.to_string(),
@@ -1010,6 +1025,10 @@ async fn upload(
     data_plan::bind_backup_inventory(&mut metadata, instance);
     if let Some(bucket) = audit_bucket {
         data_plan::bind_jobs_audit(&mut metadata, bucket);
+    }
+    if let Some(compute) = scaleway_compute {
+        crate::ingest::scaleway_compute::verify_registry(&account, &instance.id, compute).await?;
+        compute.bind(&mut metadata, &instance.id)?;
     }
     let (t, acc) = (a.token, a.account_id);
     if let Some(runtime) = ingest_runtime {

@@ -1398,6 +1398,71 @@ impl Directory {
                 )?;
                 Value::Null
             }
+            "scaleway.compute.activate" => {
+                use crate::ingest::scaleway_compute as compute;
+                let target = &a["target"];
+                let instance = target["instance"].as_str().unwrap_or_default();
+                let name = target["name"].as_str().unwrap_or_default();
+                let registered: compute::Registered =
+                    serde_json::from_value(a["registered"].clone())?;
+                let pin = &registered.pin;
+                let Some(record) = self
+                    .setting_value(&crate::instances::key(instance), t)?
+                    .and_then(|raw| {
+                        serde_json::from_str::<crate::instances::record::Instance>(&raw).ok()
+                    })
+                    .filter(|record| target["version"].as_u64() == Some(record.version))
+                else {
+                    return Ok(json!(false));
+                };
+                if pin.binding(instance).is_none()
+                    || compute::project_scope(&record, name)
+                        .ok()
+                        .map(|(project, _)| project)
+                        != Some(pin.project.as_str())
+                {
+                    return Ok(json!(false));
+                }
+                let account = s("account");
+                let store = s("store");
+                if !matches!(&record.account, crate::instances::record::AccountRef::Linked { account_id: Some(id) } if id == account)
+                    || store.len() != 32
+                    || !store.bytes().all(|b| b.is_ascii_hexdigit())
+                {
+                    return Ok(json!(false));
+                }
+                let key = compute::registry_key(instance);
+                let mut registry = self
+                    .setting_value(&key, t)?
+                    .map(|raw| serde_json::from_str::<compute::Registry>(&raw))
+                    .transpose()?
+                    .unwrap_or_else(|| compute::Registry {
+                        account: account.into(),
+                        store: store.into(),
+                        pins: Vec::new(),
+                    });
+                if registry.account != account
+                    || registry.store != store
+                    || registry.pins.len() >= compute::MAX_GENERATIONS
+                    || registry.pins.iter().any(|entry| &entry.pin == pin)
+                    || *pin
+                        != compute::next_pin(instance, &pin.project, target["generation"].as_str())
+                    || target["fingerprint"].as_str() != Some(&registered.fingerprint)
+                    || registry
+                        .active(&pin.project)
+                        .map(|pin| pin.generation.as_str())
+                        != target["generation"].as_str()
+                {
+                    return Ok(json!(false));
+                }
+                registry.pins.push(registered);
+                self.setting_keep(
+                    &key,
+                    &serde_json::to_string(&registry)?,
+                    t + compute::ACTIVE_TTL_MS,
+                )?;
+                json!(true)
+            }
             "scaleway.ingest.replace" => {
                 let key = crate::ingest::run_key(s("run"));
                 let previous = self.setting_value(&key, t)?;
