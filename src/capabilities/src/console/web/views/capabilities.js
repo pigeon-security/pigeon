@@ -82,7 +82,7 @@
         c.to !== null && { op: "add", text: `${c.path}: ${show(c.to)}` }].filter(Boolean))];
   }
   // One record write: the exact diff, then the passkey, through instance-put.
-  function putRecord(ctx, { record, next, title, target = [], effect, danger = false, confirmLabel, jobsAudit }) {
+  function putRecord(ctx, { record, next, title, target = [], effect, danger = false, confirmLabel, jobsAudit, onDone = ctx.refresh }) {
     const list = changes(record, next);
     if (!list.length) return toast("Nothing changes.", "info");
     confirm({
@@ -90,7 +90,7 @@
       target: [["Instance", code(record.id)], ...target],
       diff: diffLines(record, list), effect,
       action: "instance-put", id: record.id, change: { record: JSON.stringify(next), ...(jobsAudit ? { jobs_audit: jobsAudit } : {}) },
-      onDone: () => setTimeout(ctx.refresh, 0),
+      onDone: () => setTimeout(onDone, 0),
     });
   }
 
@@ -289,55 +289,176 @@
   }
   const dependents = (r, c) => (c.cap === "publishing" && on(r, CAPS[1]) ? [CAPS[1]] : []);
 
-  function ingestBucketConnections(ctx, record) {
-    const content = el("div", { class: "stack" });
-    const d = dialog({ title: "Bucket connections", body: [content] });
+  function ingestBucketConnections(ctx, record, feedback) {
+    const fields = [
+      ["digitalocean", "DigitalOcean Spaces"],
+      ["backblaze", "Backblaze B2"],
+      ["scaleway", "Scaleway Object Storage"],
+    ];
     const states = {
       configured: "Credential saved",
       scope_changed: "Scope changed. Replace the credential.",
       legacy_spaces_key: "Using the existing Spaces credential",
       missing: "Credential required",
     };
-    ctx.op("data_ingest_connections", { instance: record.id }).then((result) => {
-      if (!result.connections.length) {
-        content.append(el("p", { text: "Add named connections under data.ingest.connections in the instance record." }));
-        return;
-      }
-      for (const connection of result.connections) {
-        const { name, binding, state, generation } = connection;
-        const target = [
-          ["Instance", code(record.id)],
-          ["Connection", code(name)],
-          ["Source", code([binding.provider, binding.region, binding.bucket, binding.prefix].filter(Boolean).join(" / "))],
-        ];
-        const verify = button("Verify", async () => {
-          try {
-            await ctx.op("data_ingest_connection_verify", { instance: record.id, connection: name });
-            d.say(`Verified read access for ${name}.`);
-          } catch (err) {
-            d.say(err.message || String(err), true);
-          }
-        });
-        verify.disabled = state !== "configured" && state !== "legacy_spaces_key";
-        const set = button(state === "configured" ? "Rotate key" : "Set key", () => {
-          const value = input({ type: "password", mono: true, autocomplete: "off", spellcheck: "false" });
-          confirm({
-            title: `Set key for ${name}`, target,
-            form: field({ label: "Access key ID and secret", control: value,
-              hint: "Enter ACCESS_KEY_ID:SECRET_ACCESS_KEY for a read-only key limited to the bucket." }),
-            action: "data-ingest-connection-key-set", id: { instance: record.id, name, version: result.version, generation },
-            confirmLabel: "Verify and save with passkey",
-            prepare: async () => {
-              const secret = value.value.trim();
-              if (!secret) throw new Error("Enter the bucket credential.");
-              return { change: { value: secret }, begin: { digest: await sha256(secret) } };
-            },
-            onDone: () => setTimeout(ctx.refresh, 0),
+    const args = { instance: record.id };
+    const read = () => ctx.op("data_ingest_connections", args);
+    const content = el("div", { class: "stack", text: "Loading connections…" });
+    const add = button("Add connection", () => editScope(), { variant: "primary" });
+    add.disabled = true;
+    const d = dialog({ title: "Bucket connections", body: [content], actions: [add] });
+    if (feedback) d.say(feedback, true);
+
+    const scopeFacts = (binding) => [
+      ["Provider", fields.find(([value]) => value === binding.provider)?.[1] || binding.provider],
+      ["Region", code(binding.region)], ["Bucket", code(binding.bucket)],
+      ["Prefix", binding.prefix ? code(binding.prefix) : "Entire bucket"],
+    ];
+
+    async function refresh() {
+      add.disabled = true;
+      try {
+        const result = await read();
+        content.replaceChildren(...result.connections.map((connection) => {
+          const { name, binding, state } = connection;
+          const verify = button("Verify", async () => {
+            verify.disabled = true;
+            try {
+              await ctx.op("data_ingest_connection_verify", { ...args, connection: name });
+              d.say(`Verified read access for ${name}.`);
+            } catch (err) {
+              d.say(err.message || String(err), true);
+            } finally {
+              verify.disabled = false;
+            }
           });
-        });
-        content.append(facts(target), el("p", { class: "muted", text: states[state] || "Credential status unavailable" }), el("div", { class: "actions" }, [verify, set]));
+          verify.disabled = state !== "configured" && state !== "legacy_spaces_key";
+          return el("div", { class: "section" },
+            el("h3", { text: name }), facts(scopeFacts(binding)),
+            el("p", { class: "muted", text: states[state] || "Credential status unavailable" }),
+            el("div", { class: "actions" }, [
+              button("Edit source", () => editScope(connection)), verify,
+              button(state === "configured" ? "Rotate key" : "Set key", () => editKey(connection, result.version)),
+            ]));
+        }));
+        if (!result.connections.length) {
+          content.append(el("p", { text: "There are no bucket connections on this instance." }));
+        }
+        add.disabled = false;
+      } catch (err) {
+        content.replaceChildren();
+        d.say(err.message || String(err), true);
       }
-    }).catch((err) => d.say(err.message || String(err), true));
+    }
+
+    function editScope(connection) {
+      const old = connection?.binding;
+      const name = input({ name: "name", mono: true, value: connection?.name || "", disabled: !!connection });
+      const provider = el("select", { class: "input", name: "provider" },
+        fields.map(([value, text]) => el("option", { value, text, selected: value === old?.provider })));
+      const region = input({ name: "region", mono: true, value: old?.region || "" });
+      const bucket = input({ name: "bucket", mono: true, value: old?.bucket || "" });
+      const prefix = input({ name: "prefix", mono: true, value: old?.prefix || "" });
+      const project = input({ name: "project", mono: true, value: old?.project || "" });
+      const projectField = field({ label: "Scaleway project ID", control: project });
+      const update = () => { projectField.hidden = provider.value !== "scaleway"; };
+      provider.addEventListener("change", update);
+      update();
+      const title = connection ? `Edit ${connection.name}` : "Add bucket connection";
+      const review = button("Review source", async () => {
+        const alias = name.value.trim();
+        const source = provider.value;
+        if (!/^[a-z](?:[a-z0-9-]{0,46}[a-z0-9])?$/.test(alias)) {
+          return form.say("Enter a lowercase connection name of up to 48 characters using letters, numbers and hyphens.", true);
+        }
+        if (!region.value.trim() || !bucket.value.trim() || (source === "scaleway" && !project.value.trim())) {
+          return form.say("Enter the region, bucket and the provider's required fields.", true);
+        }
+        const b2Name = (old?.provider === "backblaze" && old.name) || alias;
+        if (source === "backblaze" && b2Name.length > 32) {
+          return form.say("Use a name of up to 32 characters for a Backblaze connection.", true);
+        }
+        review.disabled = true;
+        try {
+          const current = await recordOf(ctx);
+          if (!current?.data?.ingest) throw new Error("Enable Data Ingest on this instance first.");
+          const connections = current.data.ingest.connections || {};
+          if (connection ? changes(old, connections[alias]).length : Object.hasOwn(connections, alias)) {
+            throw new Error("This connection changed. Reopen Bucket connections and try again.");
+          }
+          const binding = { provider: source, region: region.value.trim(), bucket: bucket.value.trim() };
+          if (prefix.value) binding.prefix = prefix.value;
+          if (source === "scaleway") binding.project = project.value.trim();
+          if (source === "backblaze") {
+            binding.name = b2Name;
+            if (old?.runtime && old.provider === source) binding.runtime = old.runtime;
+          }
+          const next = clone(current);
+          next.data.ingest.connections = { ...connections, [alias]: binding };
+          if (connection && !changes(old, binding).length) {
+            form.say("The source is unchanged. Use Set key or Rotate key to replace its credential.");
+            return;
+          }
+          form.close();
+          putRecord(ctx, {
+            record: current, next, title, target: [["Connection", code(alias)], ...scopeFacts(binding)],
+            confirmLabel: "Approve source with passkey",
+            effect: "The bucket scope is saved first. You can then verify and save its application key.",
+            onDone: async () => {
+              try {
+                const saved = await read();
+                const updated = saved.connections.find((item) => item.name === alias);
+                if (!updated) throw new Error("The saved connection could not be loaded.");
+                editKey(updated, saved.version);
+              } catch (err) {
+                ingestBucketConnections(ctx, record, err.message || String(err));
+              }
+            },
+          });
+        } catch (err) {
+          form.say(err.message || String(err), true);
+        } finally {
+          review.disabled = false;
+        }
+      }, { variant: "primary" });
+      const form = dialog({
+        title,
+        body: [
+          field({ label: "Connection name", control: name }),
+          field({ label: "Provider", control: provider }),
+          field({ label: "Region", control: region }),
+          field({ label: "Bucket", control: bucket }),
+          field({ label: "Prefix", hint: "Optional. Leave blank to include the entire bucket.", control: prefix }),
+          projectField,
+        ],
+        actions: [button("Back", () => ingestBucketConnections(ctx, record)), review],
+      });
+    }
+
+    function editKey({ name, binding, state, generation }, version) {
+      const access = input({ name: "access-key-id", mono: true, autocomplete: "off", spellcheck: "false" });
+      const secret = input({ name: "secret-access-key", type: "password", mono: true, autocomplete: "off", spellcheck: "false" });
+      confirm({
+        title: `${state === "configured" ? "Rotate" : "Set"} application key for ${name}`,
+        target: [["Instance", code(record.id)], ["Connection", code(name)], ...scopeFacts(binding)],
+        form: el("div", { class: "stack" },
+          field({ label: binding.provider === "backblaze" ? "Application key ID" : "Access key ID", control: access }),
+          field({ label: binding.provider === "backblaze" ? "Application key" : "Secret access key",
+            hint: "Use a read-only key limited to this bucket.", control: secret })),
+        action: "data-ingest-connection-key-set", id: { instance: record.id, name, version, generation },
+        confirmLabel: "Verify and save key with passkey",
+        prepare: async () => {
+          const id = access.value.trim();
+          const key = secret.value.trim();
+          if (!id || !key || id.includes(":")) throw new Error("Enter the key ID and secret.");
+          const value = `${id}:${key}`;
+          return { change: { value }, begin: { digest: await sha256(value) } };
+        },
+        onDone: () => setTimeout(() => ingestBucketConnections(ctx, record), 0),
+      });
+    }
+
+    refresh();
   }
 
   function digitalOceanConnection(ctx, record, spaces = false) {

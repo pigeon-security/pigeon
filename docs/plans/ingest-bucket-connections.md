@@ -1,14 +1,17 @@
 # Named Data Ingest bucket connections
 
-A bucket connection is an approved source under `data.ingest.connections` on an instance
-record. Add a lowercase connection name and its provider, region, bucket and optional
-prefix through the instance record editor. Backblaze also takes its source name and
-Scaleway takes its project ID, as in the existing provider profiles. DigitalOcean uses
-the instance's approved team. The Data capability must be enabled.
+Enable Data and Data Ingest on the instance, then open **Capabilities → Data Ingest
+→ Bucket connections → Add connection**. Enter the connection name, provider, region,
+bucket, and optional prefix. Scaleway also needs its project ID. DigitalOcean uses the
+instance's approved team. Choose **Review source** and approve the instance record
+change with a passkey.
 
-Capabilities → Data Ingest → Bucket connections shows the approved scopes. Set or
-rotate each connection's bucket-scoped read-only key with a passkey. Pigeon verifies a
-bounded listing in the approved scope before saving the key. Spaces also verifies the
+The console opens the credential form after saving the source. Enter the key ID and
+secret in the console and choose **Verify and save key with passkey**. The secret is
+masked and excluded from the record approval. To update an existing connection, use
+**Edit source**, **Set key**, or **Rotate key** in the same list.
+
+Pigeon verifies a bounded listing in the approved scope before saving the key. Spaces also verifies the
 key's permissions against the approved DigitalOcean team. The key is encrypted in the
 Directory and never appears in the instance record, tool result or ingest approval.
 
