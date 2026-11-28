@@ -3527,3 +3527,92 @@ fn land_skips_workers_removed_at_the_commit() {
         Some(pigeon_capabilities::land::state::Seen::JobEnded { passed: true })
     );
 }
+
+#[test]
+fn managed_ingest_grants_limit_keys_authentication_and_writes() {
+    use pigeon_ingest::{blob_key, datastore, managed_destination as managed, manifest};
+
+    let now = 1_000_000;
+    let grant = managed::Grant {
+        instance: "account/example".into(),
+        run: "00112233445566778899aabbccddeeff".into(),
+        issued_ms: now,
+        expires_ms: now + 1000,
+        dry_run: true,
+        max_bytes: 10,
+        max_objects: 2,
+    };
+    let secret = b"D1-only test credential";
+    let token = managed::issue(&grant, secret, now).unwrap();
+    assert_eq!(
+        managed::verify(&token, secret, &grant.instance, now),
+        Some(grant.clone())
+    );
+    assert!(managed::verify(&token, secret, "other", now).is_none());
+    assert!(managed::verify(&token, b"wrong", &grant.instance, now).is_none());
+    assert!(managed::verify(&token, secret, &grant.instance, grant.expires_ms).is_none());
+    let replaced = format!("00{}", &token[2..]);
+    assert!(managed::verify(&replaced, secret, &grant.instance, now).is_none());
+
+    let sha = managed::hashes(b"same bytes").0;
+    assert!(managed::payload_key(&grant.run, &blob_key(&sha), &sha));
+    assert!(!managed::payload_key(
+        &grant.run,
+        &blob_key(&sha),
+        &"0".repeat(64)
+    ));
+    assert!(!managed::payload_read_key(
+        &grant.run,
+        &manifest::quarantine_key("other", &sha)
+    ));
+    assert!(managed::control_key(&grant.run, &blob_key(&sha)).is_none());
+    assert!(managed::control_key(&grant.run, &manifest::job_key(&grant.run)).is_none());
+    assert_eq!(
+        managed::control_key(&grant.run, &manifest::checkpoint_key(&grant.run)),
+        Some(false)
+    );
+    assert_eq!(
+        managed::control_key(&grant.run, &manifest::part_key(&grant.run, 14)),
+        Some(true)
+    );
+    assert!(managed::control_key(&grant.run, &manifest::report_key("other")).is_none());
+    assert!(managed::valid_origin("https://data.example.workers.dev"));
+    assert!(!managed::valid_origin(
+        "https://data.example.workers.dev:443"
+    ));
+    assert!(!managed::valid_origin("https://example.test@evil.test"));
+
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    let migration = datastore::MIGRATIONS
+        .iter()
+        .find(|m| m.id == "0005_ingest_grants")
+        .unwrap();
+    conn.execute_batch(migration.sql).unwrap();
+    let charge = |bytes: u64, expires: i64| {
+        conn.query_row(
+            managed::CHARGE_SQL,
+            rusqlite::params![
+                grant.run,
+                expires,
+                bytes,
+                grant.max_bytes,
+                grant.max_objects
+            ],
+            |row| row.get::<_, u64>(0),
+        )
+    };
+    assert_eq!(charge(6, grant.expires_ms).unwrap(), 1);
+    assert!(matches!(
+        charge(5, grant.expires_ms),
+        Err(rusqlite::Error::QueryReturnedNoRows)
+    ));
+    assert!(matches!(
+        charge(4, grant.expires_ms + 1),
+        Err(rusqlite::Error::QueryReturnedNoRows)
+    ));
+    assert_eq!(charge(4, grant.expires_ms).unwrap(), 2);
+    assert!(matches!(
+        charge(0, grant.expires_ms),
+        Err(rusqlite::Error::QueryReturnedNoRows)
+    ));
+}

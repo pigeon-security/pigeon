@@ -27,6 +27,7 @@ pub struct StartRequest {
     /// The source account's read key, `ACCESS_KEY_ID:SECRET`.
     pub source_keys: String,
     /// The instance bucket's R2 key, `ACCESS_KEY_ID:SECRET`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub dest_keys: String,
 }
 

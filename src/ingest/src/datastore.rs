@@ -250,6 +250,10 @@ CREATE INDEX IF NOT EXISTS deliveries_outcome ON email_deliveries (outcome, at)"
         id: "0004_backup_progress",
         sql: "CREATE TABLE IF NOT EXISTS backup_progress (id TEXT PRIMARY KEY, body TEXT NOT NULL, lease_owner TEXT, lease_until INTEGER NOT NULL DEFAULT 0)",
     },
+    Migration {
+        id: "0005_ingest_grants",
+        sql: "CREATE TABLE IF NOT EXISTS ingest_grants (run TEXT PRIMARY KEY, expires INTEGER NOT NULL, bytes INTEGER NOT NULL, writes INTEGER NOT NULL)",
+    },
 ];
 
 /// The statements of one migration, then the row that records it.

@@ -182,6 +182,11 @@ impl IngestJob {
         }
         let mut env =
             protocol::start_env(&start.request).map_err(|_| fail("invalid ingest job"))?;
+        if let Some(dest) = &start.managed_destination {
+            env.retain(|(key, _)| key != "DEST_KEYS");
+            let raw = serde_json::to_string(dest).map_err(|_| fail("invalid destination grant"))?;
+            env.push((pigeon_ingest::managed_destination::ENV.into(), raw));
+        }
         env.push(("SPOOL_BYTES".into(), SPOOL_BYTES.to_string()));
         if start.report_to_jobs {
             env.push(("INGEST_REQUIRE_REVISION".into(), "1".into()));

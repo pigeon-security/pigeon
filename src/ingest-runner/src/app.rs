@@ -4,7 +4,8 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 
 use pigeon_core::s3::{Keys, parse_keys};
-use pigeon_ingest::engine::{Clock, Run, Source, run};
+use pigeon_ingest::engine::{Clock, Dest, Run, Source, run};
+use pigeon_ingest::managed_destination as managed;
 use pigeon_ingest::manifest::{JobSpec, RunState, SourceSpec};
 
 use crate::{DirSpool, LocalSource, R2Dest, S3Source};
@@ -57,11 +58,17 @@ pub fn run_job(
         )),
         SourceSpec::Local { root, .. } => Box::new(LocalSource::new(PathBuf::from(root))),
     };
-    let dest = R2Dest::new(
-        &job.dest.endpoint,
-        &job.dest.bucket,
-        keys(env, "DEST_KEYS")?,
-    );
+    let dest: Box<dyn Dest> = match env(managed::ENV) {
+        Some(raw) => {
+            let dest = serde_json::from_str(&raw).map_err(|_| "invalid managed destination")?;
+            Box::new(crate::managed_dest::ManagedDest::new(dest).map_err(|e| e.to_string())?)
+        }
+        None => Box::new(R2Dest::new(
+            &job.dest.endpoint,
+            &job.dest.bucket,
+            keys(env, "DEST_KEYS")?,
+        )),
+    };
     let budget = match env("SPOOL_BYTES") {
         Some(v) => v
             .trim()
@@ -74,7 +81,7 @@ pub fn run_job(
     let report = run(&Run {
         job: &job,
         source: source.as_ref(),
-        dest: &dest,
+        dest: dest.as_ref(),
         spool: &spool,
         clock: &SystemClock,
         stop,

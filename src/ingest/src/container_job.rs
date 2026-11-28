@@ -30,6 +30,8 @@ impl Runtime {
 pub struct Start {
     #[serde(flatten)]
     pub request: StartRequest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_destination: Option<crate::managed_destination::Destination>,
     /// The exact revision approved by the operator and configured on the Worker deployment.
     /// Absent on historical requests to a manually deployed Data Worker.
     #[serde(default, skip_serializing_if = "Option::is_none")]

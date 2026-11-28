@@ -544,6 +544,7 @@ pub(crate) async fn start(
     )
     .await?;
     let body = serde_json::to_value(container_job::Start {
+        managed_destination: None,
         request: StartRequest {
             job: job.clone(),
             source_keys: resolved.source_keys,
