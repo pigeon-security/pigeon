@@ -548,6 +548,7 @@ pub(super) async fn plan(
         max_minutes: Some(u64::from(max_minutes)),
         resume: continued.as_ref().map(|(_, resume)| resume.clone()),
         skip_over: live.as_ref().and_then(|allowed| allowed.skip_over),
+        shard: None,
     };
     if continued
         .as_ref()

@@ -74,6 +74,20 @@ pub struct JobSpec {
     /// the report (a live run whose destination has no multipart publisher).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skip_over: Option<u64>,
+    /// This run is one shard of a sharded run: it takes only the keys of its shard
+    /// (docs/plans/ingest-bytes.md). None for an unsharded run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shard: Option<Shard>,
+}
+
+/// One shard of a sharded run: the keys whose [`crate::shard::shard_of`] is `index` of `count`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Shard {
+    pub index: u32,
+    pub count: u32,
+    /// The approved run this shard belongs to.
+    pub parent: String,
 }
 
 /// Where a continuation starts: another run's checkpoint (docs/plans/ingest-throughput.md).

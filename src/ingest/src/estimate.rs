@@ -46,6 +46,36 @@ pub struct Estimate {
     /// The run whose measured rate was used, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub measured_run: Option<String>,
+    /// Containers the run is split into (docs/plans/ingest-bytes.md); the hours are each
+    /// shard's, the costs the whole run's.
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    pub shards: u32,
+}
+
+fn one() -> u32 {
+    1
+}
+
+fn is_one(n: &u32) -> bool {
+    *n <= 1
+}
+
+/// Splits `estimate` over `shards` containers working at once: each takes about a shard's
+/// share of the time (the measured rate is one container's), and the host cost stays the
+/// total of their hours. A no-op for one shard.
+pub fn split(estimate: &mut Estimate, shards: u32) {
+    if shards <= 1 {
+        return;
+    }
+    let n = f64::from(shards);
+    estimate.shards = shards;
+    estimate.hours_low /= n;
+    estimate.hours_high /= n;
+    estimate.files_per_s *= n;
+    estimate.assumptions.push(format!(
+        "{shards} shards: {shards} containers in parallel on disjoint keys, each about {:.1} hours; the host cost above is their total. Cloudflare publishes no limit on concurrent containers below the account's vCPU and memory totals.",
+        estimate.hours_high
+    ));
 }
 
 /// A rate measured by an earlier run on the same host.
@@ -336,5 +366,6 @@ pub fn estimate_run(
         bound: bound.to_string(),
         confidence: confidence.to_string(),
         measured_run: throughput.measured.as_ref().map(|m| m.run.clone()),
+        shards: 1,
     }
 }

@@ -1536,11 +1536,11 @@ impl<'r, 'a> Engine<'r, 'a> {
                             first = false;
                             self.status(RunState::Running);
                         }
-                        queue.extend(
-                            page.objects
-                                .into_iter()
-                                .filter(|o| after.as_deref().is_none_or(|a| o.key.as_str() > a)),
-                        );
+                        // A shard takes only its own keys (docs/plans/ingest-bytes.md).
+                        queue.extend(page.objects.into_iter().filter(|o| {
+                            after.as_deref().is_none_or(|a| o.key.as_str() > a)
+                                && crate::shard::takes(r.job, &o.key)
+                        }));
                     }
                     // Objects listed before the failure are still finished, as serially.
                     Ok(Err(e)) => {
@@ -1796,7 +1796,9 @@ impl<'r, 'a> Engine<'r, 'a> {
                 if r.stop.load(Ordering::SeqCst) {
                     return Ok(true);
                 }
-                if after.as_deref().is_some_and(|a| obj.key.as_str() <= a) {
+                if after.as_deref().is_some_and(|a| obj.key.as_str() <= a)
+                    || !crate::shard::takes(r.job, &obj.key)
+                {
                     continue;
                 }
                 self.object(obj);

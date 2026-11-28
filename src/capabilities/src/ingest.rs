@@ -53,6 +53,7 @@ const DATA_TOOLS: &[crate::instances::tools::Registration] = &[
             "objects",
             "continue",
             "max_live_bytes",
+            "shards",
             "dry_run",
             "keep_archives",
             "fingerprints",
@@ -1552,10 +1553,33 @@ impl Ingest {
         }
         let mut rec = run_of(env, instance, run).await?;
         let (account, bucket) = self.linked_for(cx, &rec).await?;
-        let status: Value = match r2::get(&account, &bucket, &manifest::status_key(run)).await? {
+        let mut status: Value = match r2::get(&account, &bucket, &manifest::status_key(run)).await?
+        {
             Some(bytes) => serde_json::from_slice(&bytes)?,
             None => Value::Null,
         };
+        // A sharded run: its shards' statuses, and their sum (docs/plans/ingest-bytes.md).
+        let mut shard_statuses = Vec::new();
+        if rec.host == "cloudflare"
+            && let Some(parts) = backblaze::shard_runs(env, instance, run).await?
+        {
+            let mut read = Vec::new();
+            for part in &parts {
+                let one: Option<manifest::Status> =
+                    r2::get(&account, &bucket, &manifest::status_key(part))
+                        .await?
+                        .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+                shard_statuses.push(json!({ "run": part, "status": one }));
+                read.extend(one);
+            }
+            if !read.is_empty() {
+                let mut all = pigeon_ingest::shard::combined_status(run, &read);
+                if read.len() < parts.len() {
+                    all.state = manifest::RunState::Running;
+                }
+                status = serde_json::to_value(all)?;
+            }
+        }
         let state = status["state"].as_str().unwrap_or("").to_string();
         let vm = if rec.host == "cloudflare" {
             net::cloudflare_note()
@@ -1579,6 +1603,9 @@ impl Ingest {
             .into();
         }
         let mut output = json!({ "run": rec, "status": status, "vm_state": vm, "note": note });
+        if !shard_statuses.is_empty() {
+            output["shards"] = json!(shard_statuses);
+        }
         if rec.host == "cloudflare"
             && let Some(managed) = backblaze::status(env, instance, run).await?
         {
@@ -1598,6 +1625,32 @@ impl Ingest {
         }
         let rec = run_of(cx.env, instance, run).await?;
         let (account, bucket) = self.linked_for(cx, &rec).await?;
+        // A sharded run's report is its shards' reports combined, once every shard has one.
+        if rec.host == "cloudflare"
+            && let Some(parts) = backblaze::shard_runs(cx.env, instance, run).await?
+        {
+            let mut reports = Vec::new();
+            let mut missing = Vec::new();
+            for part in &parts {
+                match r2::get(&account, &bucket, &manifest::report_key(part)).await? {
+                    Some(bytes) => {
+                        reports.push(serde_json::from_slice::<manifest::Report>(&bytes)?)
+                    }
+                    None => missing.push(part.clone()),
+                }
+            }
+            if !missing.is_empty() {
+                return Ok(json!({
+                    "run": run, "report": null, "shards": parts,
+                    "note": format!("There is no combined report yet: shards {} have not finished.", missing.join(", ")),
+                }));
+            }
+            let mut report =
+                serde_json::to_value(pigeon_ingest::shard::combined_report(run, &reports))?;
+            cap_report(&mut report);
+            report["shards"] = json!(parts);
+            return Ok(report);
+        }
         match r2::get(&account, &bucket, &manifest::report_key(run)).await? {
             Some(bytes) => {
                 let mut report: Value = serde_json::from_slice(&bytes)?;
@@ -1742,6 +1795,7 @@ impl Capability for Ingest {
                     "size_bytes": { "type": "integer", "description": "The source's whole size, for the estimate." },
                     "objects": { "type": "integer", "description": "The source's whole object count (from the provider's console), for the run time: small files make a run file-count-bound." },
                     "max_live_bytes": { "type": "integer", "description": "A live run's cap on declared source bytes (default 10 GB, at most 100 TB). Raising it is the person's call: it is shown in the approval." },
+                    "shards": { "type": "integer", "description": "Backblaze on a named connection only: split the run into 1 to 8 containers on disjoint keys (by the hash of each key), under one approval; each shard gets an equal share of the write grant. Continue a stopped shard by its own run id ({run}-s{i})." },
                     "continue": { "type": "string", "description": "The id of a stopped run (by its deadline, a stop or a spent grant) to continue from its checkpoint, with the same source, prefix and dry-run setting. Needs a new approval; the continuation gets a new run id." },
                     "commit": { "type": "string", "description": "A full commit id to build the runner from; default this Worker's own." },
                     "scratch_gib": { "type": "integer", "description": "Size of the dedicated DigitalOcean scratch volume (default 32 GiB)." },

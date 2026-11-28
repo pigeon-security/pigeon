@@ -242,6 +242,7 @@ fn job(run_id: &str, dry: bool, threads: u32) -> JobSpec {
         max_minutes: None,
         resume: None,
         skip_over: None,
+        shard: None,
     }
 }
 
@@ -1478,6 +1479,23 @@ fn ingest_estimate_uses_a_measured_byte_rate() {
     // 211.4 GB at 20 MB/s is about 2.9 hours, over the files' 1.1 hours.
     assert_eq!(s.bound, "bytes");
     assert!(s.hours_high > 2.9 && s.hours_high < 3.0, "{s:?}");
+    // Eight shards: each takes an eighth of the time; the host cost is their total.
+    let mut sharded = e.clone();
+    pigeon_ingest::estimate::split(&mut sharded, 8);
+    assert_eq!(sharded.shards, 8);
+    assert!((sharded.hours_high * 8.0 - e.hours_high).abs() < 1e-9);
+    assert_eq!(sharded.host_usd, e.host_usd);
+    assert_eq!(sharded.total_usd, e.total_usd);
+    assert!(
+        sharded
+            .assumptions
+            .iter()
+            .any(|a| a.starts_with("8 shards"))
+    );
+    let mut single = e.clone();
+    pigeon_ingest::estimate::split(&mut single, 1);
+    assert_eq!(single, e);
+    assert!(serde_json::to_value(&e).unwrap().get("shards").is_none());
 }
 
 /// `get_many` batches are bounded so the request stays under the Data Worker's request limit,
@@ -1517,4 +1535,303 @@ fn ingest_source_signs_downloads_in_bounded_batches() {
     assert!(serde_json::from_slice::<Older>(&batch).is_err());
     let single = serde_json::to_vec(&SourceRead::Get { key: "k/1".into() }).unwrap();
     assert!(serde_json::from_slice::<Older>(&single).is_ok());
+}
+
+/// Every key belongs to exactly one shard, for every shard count, and shards are balanced.
+#[test]
+fn ingest_shard_partition_covers_every_key_once() {
+    use pigeon_ingest::shard::{MAX_SHARDS, jobs, run_id, shard_of, takes, valid};
+    let keys: Vec<String> = (0..20_000)
+        .map(|i| format!("photos/{}/{i:06}.jpg", i % 13))
+        .collect();
+    for count in 1..=MAX_SHARDS {
+        let parent = job("20261128-b2-0123456789abcdef0123456789abcdef", false, 64);
+        let shards = jobs(&parent, count);
+        assert_eq!(shards.len(), count as usize);
+        let mut per = vec![0usize; count as usize];
+        for key in &keys {
+            let takers: Vec<u32> = shards
+                .iter()
+                .filter(|j| takes(j, key))
+                .map(|j| j.shard.as_ref().map_or(0, |s| s.index))
+                .collect();
+            assert_eq!(takers.len(), 1, "{key} in {count} shards");
+            assert_eq!(takers[0], shard_of(key, count));
+            per[takers[0] as usize] += 1;
+        }
+        let even = keys.len() / count as usize;
+        assert!(per.iter().all(|n| n.abs_diff(even) * 10 < even), "{per:?}");
+        if count > 1 {
+            for (i, j) in shards.iter().enumerate() {
+                assert_eq!(j.run, run_id(&parent.run, i as u32));
+                assert!(pigeon_ingest::container_job::valid_run(&j.run));
+                let s = j.shard.as_ref().unwrap();
+                assert_eq!(
+                    (s.index, s.count, s.parent.as_str()),
+                    (i as u32, count, parent.run.as_str())
+                );
+                // The shard is in the job, so it is in the approval digest and job.json.
+                let back: JobSpec =
+                    serde_json::from_str(&serde_json::to_string(j).unwrap()).unwrap();
+                assert_eq!(&back, j);
+            }
+        } else {
+            assert_eq!(shards[0], parent);
+        }
+        assert!(valid(&parent.run, count));
+    }
+    assert!(!valid("r", 0) && !valid("r", MAX_SHARDS + 1));
+    assert!(!valid(&"a".repeat(89), 2));
+    // An unsharded job's JSON has no shard field: older approvals keep their digests.
+    let plain = serde_json::to_value(job("plain", false, 1)).unwrap();
+    assert!(plain.get("shard").is_none());
+}
+
+/// Each shard's grant gets the floor of the approved budget over the shard count: the shares
+/// never add up to more than the approved cap, and lose less than one unit per shard.
+#[test]
+fn ingest_shard_budget_split_never_exceeds_the_approved_cap() {
+    use pigeon_ingest::managed_destination::run_budget;
+    use pigeon_ingest::shard::{MAX_SHARDS, share};
+    let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+    for _ in 0..5_000 {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        let total = x % 1_000_000_000_000_000;
+        for count in 1..=MAX_SHARDS {
+            let each = share(total, count);
+            let sum = each * u64::from(count);
+            assert!(sum <= total, "{total} over {count}");
+            assert!(total - sum < u64::from(count));
+        }
+    }
+    // The approved grant of the willowgraysen bucket, split over 8 shards.
+    let (bytes, objects) = run_budget(211_400_000_000, 145_991, false);
+    for count in [2, 4, 8] {
+        assert!(share(bytes, count) * u64::from(count) <= bytes);
+        assert!(share(objects, count) * u64::from(count) <= objects);
+        // Each shard's share still covers its part of the source with the grant's headroom.
+        assert!(share(bytes, count) >= 211_400_000_000 / u64::from(count));
+    }
+}
+
+/// The stored blobs and every sighting of a sharded run are those of a serial run. What may
+/// differ is which sighting of a blob seen in two shards is the upload, and whether a later
+/// sighting's reason is `seen_in_run` or `in_r2`; each stored blob still has exactly one upload.
+#[test]
+fn ingest_sharded_run_stores_what_a_serial_run_stores() {
+    use pigeon_ingest::manifest::RunState;
+    use pigeon_ingest::shard::{combined_report, jobs};
+    use std::collections::BTreeSet;
+    let (source, serial_dest) = planted(3_000);
+    let (_, sharded_dest) = planted(3_000);
+    // The flaky blob's failures land on whichever shard tries first; leave them out here.
+    serial_dest.fail_first.lock().unwrap().clear();
+    sharded_dest.fail_first.lock().unwrap().clear();
+    let serial = go(&job("whole", false, 1), &source, &serial_dest);
+    let parent = job("sharded", false, 16);
+    let shards = jobs(&parent, 4);
+    let reports: Vec<Report> = std::thread::scope(|s| {
+        let hs: Vec<_> = shards
+            .iter()
+            .map(|j| {
+                let (source, dest) = (&source, &sharded_dest);
+                s.spawn(move || go(j, source, dest))
+            })
+            .collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    assert!(reports.iter().all(|r| r.state == RunState::Done));
+    let all = combined_report("sharded", &reports);
+    assert_eq!(all.state, RunState::Done);
+    assert_eq!(all.counters.listed, serial.counters.listed);
+    assert_eq!(all.counters.files, serial.counters.files);
+    assert_eq!(all.counters.members, serial.counters.members);
+    assert_eq!(all.counters.bytes_read, serial.counters.bytes_read);
+    assert_eq!(all.counters.conflicts, serial.counters.conflicts);
+    assert_eq!(all.counters.failed, 0);
+    assert_eq!(
+        all.counters.uploaded + all.counters.duplicates,
+        serial.counters.uploaded + serial.counters.duplicates
+    );
+    // The same blobs, byte for byte.
+    assert_eq!(
+        stored(&sharded_dest, "blobs/"),
+        stored(&serial_dest, "blobs/")
+    );
+    // The same sightings: every object and member once, with its hash and where its bytes are.
+    type Sighting = (String, Option<String>, String, Option<String>, bool);
+    let sightings = |lines: Vec<ManifestLine>| -> BTreeSet<Sighting> {
+        lines
+            .into_iter()
+            .map(|l| {
+                let conflict = l.verdict == Verdict::Conflict;
+                (
+                    l.origin.key,
+                    l.member.map(|m| m.path),
+                    l.sha256,
+                    // A conflict's quarantine key names its run; compare blob keys only.
+                    l.r2_key.filter(|_| !conflict),
+                    conflict,
+                )
+            })
+            .collect()
+    };
+    let serial_lines = serial_dest.lines("whole");
+    let mut sharded_lines = Vec::new();
+    for j in &shards {
+        sharded_lines.extend(sharded_dest.lines(&j.run));
+    }
+    assert_eq!(sharded_lines.len(), serial_lines.len());
+    assert_eq!(
+        sightings(sharded_lines.clone()),
+        sightings(serial_lines.clone())
+    );
+    // Exactly one upload per blob this run stored, in both.
+    let uploads = |lines: &[ManifestLine]| {
+        let mut n: BTreeMap<String, usize> = BTreeMap::new();
+        for l in lines.iter().filter(|l| l.verdict == Verdict::Upload) {
+            *n.entry(l.sha256.clone()).or_default() += 1;
+        }
+        n
+    };
+    let (a, b) = (uploads(&serial_lines), uploads(&sharded_lines));
+    assert_eq!(a.keys().collect::<Vec<_>>(), b.keys().collect::<Vec<_>>());
+    assert!(b.values().all(|n| *n == 1));
+    // Blobs held before the run are duplicates in both. Serially the second sighting is
+    // `seen_in_run`; in another shard it is `in_r2`: the reason may differ, never the verdict.
+    for key in ["p/known.txt", "p/known-again.txt"] {
+        let of = |lines: &[ManifestLine]| {
+            lines
+                .iter()
+                .find(|l| l.origin.key == key)
+                .map(|l| (l.verdict, l.reason))
+                .unwrap()
+        };
+        let (a, b) = (of(&serial_lines), of(&sharded_lines));
+        assert_eq!((a.0, b.0), (Verdict::Duplicate, Verdict::Duplicate));
+        assert!(matches!(b.1, Reason::InR2 | Reason::SeenInRun));
+    }
+}
+
+/// A stopped shard is continued on its own: the continuation keeps the shard, starts from its
+/// checkpoint, and every key of that shard is decided exactly once across both runs.
+#[test]
+fn ingest_shard_continues_on_its_own() {
+    use pigeon_ingest::manifest::RunState;
+    use pigeon_ingest::shard::{jobs, shard_of};
+    let (source, dest) = planted(1_500);
+    let shards = jobs(&job("parent", false, 32), 3);
+    let mine: Vec<&String> = source.objs.keys().filter(|k| shard_of(k, 3) == 1).collect();
+    let stop_key = mine[mine.len() / 2].clone();
+    let flag = Arc::new(AtomicBool::new(false));
+    let stopping = StopAt {
+        inner: &source,
+        key: stop_key,
+        flag: Arc::clone(&flag),
+    };
+    let first = go_until(&shards[1], &stopping, &dest, &flag);
+    assert_eq!(first.state, RunState::Stopped);
+    assert!(first.counters.listed < mine.len() as u64);
+    let cp: Checkpoint =
+        serde_json::from_slice(&dest.get(&checkpoint_key(&shards[1].run)).unwrap()).unwrap();
+    // The continuation: a new run id, the same shard, the shard's checkpoint.
+    let mut next = shards[1].clone();
+    next.run = "parent-s1-continued".into();
+    next.resume = Some(Resume {
+        run: shards[1].run.clone(),
+        checkpoint: cp,
+    });
+    let cont = go(&next, &source, &dest);
+    assert_eq!(cont.state, RunState::Done);
+    assert_eq!(cont.counters.listed, mine.len() as u64);
+    let mut keys: Vec<String> = dest
+        .lines(&shards[1].run)
+        .into_iter()
+        .chain(dest.lines("parent-s1-continued"))
+        .filter(|l| l.member.is_none())
+        .map(|l| l.origin.key)
+        .collect();
+    let in_order = keys.clone();
+    keys.sort();
+    keys.dedup();
+    assert_eq!(in_order, keys, "each key once, in order");
+    assert_eq!(keys.iter().collect::<Vec<_>>(), mine);
+    // The other shards' keys were not touched.
+    assert!(keys.iter().all(|k| shard_of(k, 3) == 1));
+}
+
+/// The shards' statuses and terminal records combine into the parent's: counters add up, the
+/// state is running while any shard runs, and the worst outcome wins.
+#[test]
+fn ingest_shard_status_and_terminal_combine() {
+    use pigeon_ingest::container_job::{Outcome, Terminal};
+    use pigeon_ingest::manifest::{Counters, RunState, Status};
+    use pigeon_ingest::shard::{combined_state, combined_status, combined_terminal};
+    let counters = |n: u64| Counters {
+        listed: n,
+        bytes_read: n * 10,
+        uploaded: n / 2,
+        ..Counters::default()
+    };
+    let status = |state, n, started, updated| Status {
+        run: "r-s0".into(),
+        state,
+        dry_run: false,
+        counters: counters(n),
+        started_ms: started,
+        updated_ms: updated,
+        read_rate: 5.0,
+        eta_s: None,
+        last_error: None,
+        timings: None,
+    };
+    let all = combined_status(
+        "r",
+        &[
+            status(RunState::Done, 10, 100, 900),
+            status(RunState::Running, 20, 50, 800),
+        ],
+    );
+    assert_eq!(all.run, "r");
+    assert_eq!(all.state, RunState::Running);
+    assert_eq!(
+        all.counters,
+        pigeon_ingest::shard::add_counters(&[&counters(10), &counters(20)])
+    );
+    assert_eq!((all.started_ms, all.updated_ms), (50, 900));
+    assert_eq!(all.read_rate, 10.0);
+    assert_eq!(
+        combined_state(&[RunState::Done, RunState::Stopped]),
+        RunState::Stopped
+    );
+    assert_eq!(
+        combined_state(&[RunState::Stopped, RunState::Failed]),
+        RunState::Failed
+    );
+    assert_eq!(
+        combined_state(&[RunState::Done, RunState::Done]),
+        RunState::Done
+    );
+    let terminal = |outcome, n, s, f| Terminal {
+        run: "r-s1".into(),
+        started_ms: s,
+        finished_ms: f,
+        outcome,
+        counters: counters(n),
+    };
+    let t = combined_terminal(
+        "r",
+        &[
+            terminal(Outcome::Succeeded, 4, 10, 50),
+            terminal(Outcome::TimedOut, 6, 5, 70),
+        ],
+    )
+    .unwrap();
+    assert_eq!(t.run, "r");
+    assert_eq!(t.outcome, Outcome::TimedOut);
+    assert_eq!((t.started_ms, t.finished_ms), (5, 70));
+    assert_eq!(t.counters.listed, 10);
+    assert!(combined_terminal("r", &[]).is_none());
 }

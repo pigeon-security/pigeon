@@ -2439,6 +2439,7 @@ fn ingest_engine_dedupes_resumes_and_opens_zips() {
         max_minutes: None,
         resume: None,
         skip_over: None,
+        shard: None,
     };
 
     // Verify passes the right bytes and fails on a short, long or changed stream.

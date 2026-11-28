@@ -13,6 +13,7 @@ use pigeon_ingest::container_job::{self, Outcome, Terminal, TerminalNotice};
 use pigeon_ingest::estimate::{self, Host};
 use pigeon_ingest::manifest::{DestSpec, JobSpec, SourceSpec, job_key};
 use pigeon_ingest::protocol::{self, StartRequest};
+use pigeon_ingest::shard;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use worker::{Env, Method, Request, Response, Result};
@@ -151,6 +152,42 @@ struct Execution {
     destination: Option<managed_destination::Reviewed>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     owned_source: bool,
+    /// Containers the run is split into (docs/plans/ingest-bytes.md); 1, and omitted, for an
+    /// unsharded run, so older approvals keep their digests.
+    #[serde(default = "one_shard", skip_serializing_if = "unsharded")]
+    shards: u32,
+}
+
+fn one_shard() -> u32 {
+    1
+}
+
+fn unsharded(shards: &u32) -> bool {
+    *shards <= 1
+}
+
+/// The `shards` argument: 1 to 8 containers, 1 by default.
+fn shards_arg(args: &Value) -> Result<u32> {
+    match args.get("shards") {
+        None | Some(Value::Null) => Ok(1),
+        Some(value) => value
+            .as_u64()
+            .and_then(|n| u32::try_from(n).ok())
+            .filter(|n| (1..=shard::MAX_SHARDS).contains(n))
+            .ok_or_else(|| bad(format!("shards must be from 1 to {}", shard::MAX_SHARDS))),
+    }
+}
+
+/// Each shard's share of an approved run grant: the floor, so the shares stay within it.
+fn shard_review(
+    reviewed: &managed_destination::Reviewed,
+    shards: u32,
+) -> managed_destination::Reviewed {
+    managed_destination::Reviewed {
+        origin: reviewed.origin.clone(),
+        max_bytes: shard::share(reviewed.max_bytes, shards),
+        max_objects: shard::share(reviewed.max_objects, shards),
+    }
 }
 
 struct Ready {
@@ -283,6 +320,7 @@ async fn ready(
             connection,
             destination,
             owned_source,
+            shards: 1,
         },
         account,
         bucket,
@@ -338,13 +376,15 @@ pub(crate) async fn plan(
                     | "max_live_bytes"
                     | "dry_run"
                     | "fingerprints"
+                    | "shards"
             )
         })
     }) {
         return Err(bad(
-            "The Backblaze plan takes the approved source, prefix, size, object count, continue, dry-run and fingerprint options.",
+            "The Backblaze plan takes the approved source, prefix, size, object count, continue, dry-run, fingerprint and shards options.",
         ));
     }
+    let shards = shards_arg(args)?;
     let prefix = args
         .get("prefix")
         .map(|value| value.as_str().ok_or_else(|| bad("prefix must be text")))
@@ -358,7 +398,20 @@ pub(crate) async fn plan(
                 .as_str()
                 .filter(|run| container_job::valid_run(run))
                 .ok_or_else(|| bad("continue must be a Backblaze run id"))?;
-            Some(throughput::continuation(&linked, &store, &record.id, prior).await?)
+            if let Some(parts) = shard_runs(env, &record.id, prior).await? {
+                return Err(bad(format!(
+                    "run `{prior}` was split into {} shards; continue each one that did not finish ({})",
+                    parts.len(),
+                    parts.join(", ")
+                )));
+            }
+            let continued = throughput::continuation(&linked, &store, &record.id, prior).await?;
+            if continued.0.shard.is_some() && shards > 1 {
+                return Err(bad(
+                    "a continued shard keeps its own keys; it cannot be split again",
+                ));
+            }
+            Some(continued)
         }
         None => None,
     };
@@ -424,8 +477,9 @@ pub(crate) async fn plan(
     let (total, objects, extrapolated) =
         estimate::totals(count, bytes, listing.next.is_some(), expected, objects_arg);
     let measured = throughput::measured(env, &linked, &store, &record.id, "cloudflare").await;
-    let estimate =
+    let mut estimate =
         throughput::plan_estimate(Host::Cloudflare, total, objects, extrapolated, measured);
+    estimate::split(&mut estimate, shards);
     let max_minutes = throughput::deadline(Host::Cloudflare, &estimate, None)?;
     let dry_run = match (&continued, args["dry_run"].as_bool()) {
         (Some((job, _)), given) if given.is_some_and(|given| given != job.dry_run) => {
@@ -456,8 +510,18 @@ pub(crate) async fn plan(
     } else {
         None
     };
+    if shards > 1 && scoped.is_none() {
+        return Ok(unready(
+            vec!["A sharded run needs a named Backblaze connection, so each shard gets its own share of the run's write grant.".into()],
+            to_value(&estimate),
+            sampled,
+        ));
+    }
     let resolved = match ready(cap, record, env, approved, max_minutes, creds, scoped).await {
-        Ok(resolved) => resolved,
+        Ok(mut resolved) => {
+            resolved.execution.shards = shards;
+            resolved
+        }
         Err(error) => {
             return Ok(unready(
                 vec![error.to_string()],
@@ -484,12 +548,22 @@ pub(crate) async fn plan(
         today(),
         &pigeon_core::sign::hex(nonce.as_bytes())[..32]
     );
-    let mut lines = vec![
-        format!("Read Backblaze bucket {bucket}, prefix {prefix:?}, with its saved read-only key."),
+    let containers = if shards > 1 {
+        format!(
+            "Run {shards} Cloudflare standard-4 containers in parallel, one per shard ({} to {}, keys split by the hash of their name), each for at most {max_minutes} minutes, at runner revision {} (which must be built from a revision with sharded runs, docs/plans/ingest-bytes.md; an older runner copies the whole prefix in every shard).",
+            shard::run_id(&id, 0),
+            shard::run_id(&id, shards - 1),
+            resolved.revision
+        )
+    } else {
         format!(
             "Run one Cloudflare standard-4 container for at most {max_minutes} minutes, at runner revision {}.",
             resolved.revision
-        ),
+        )
+    };
+    let mut lines = vec![
+        format!("Read Backblaze bucket {bucket}, prefix {prefix:?}, with its saved read-only key."),
+        containers,
         format!(
             "{} in the private {} Data bucket; preserve archive containers, exact duplicates and portable manifests.",
             if dry_run {
@@ -513,7 +587,13 @@ pub(crate) async fn plan(
     }
     if let Some(reviewed) = &resolved.execution.destination {
         lines.push(format!("Use a Data Worker run grant limited to {} write bytes, {} write attempts and 16 MiB per atomic payload.", reviewed.max_bytes, reviewed.max_objects));
+        if shards > 1 {
+            let each = shard_review(reviewed, shards);
+            lines.push(format!("Split the grant into {shards} shard grants of {} write bytes and {} write attempts each, never more than the approved total; a shard that spends its share stops for a continuation.", each.max_bytes, each.max_objects));
+        }
     }
+    // A continued shard keeps its shard; a new run is split at start.
+    let kept_shard = continued.as_ref().and_then(|(job, _)| job.shard.clone());
     let job = JobSpec {
         run: id,
         instance: record.id.clone(),
@@ -531,6 +611,7 @@ pub(crate) async fn plan(
         max_minutes: Some(max_minutes),
         resume: continued.map(|(_, resume)| resume),
         skip_over: live.and_then(|allowed| allowed.skip_over),
+        shard: kept_shard,
     };
     Ingest::check_current(env, record).await?;
     let payload = payload(&job, &resolved.execution);
@@ -556,6 +637,24 @@ struct ManagedRun {
     deadline_ms: i64,
     terminal: Option<Terminal>,
     audit_status: ExportStatus,
+    /// The shard runs of a sharded run (docs/plans/ingest-bytes.md).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    shards: Vec<String>,
+    /// The sharded run this shard belongs to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parent: Option<String>,
+}
+
+/// The shard runs of `run`, when it was split.
+pub(crate) async fn shard_runs(
+    env: &Env,
+    instance: &str,
+    run: &str,
+) -> Result<Option<Vec<String>>> {
+    Ok(current_managed(env, instance, run)
+        .await?
+        .map(|(_, state)| state.shards)
+        .filter(|shards| !shards.is_empty()))
 }
 
 fn managed_key(run: &str) -> String {
@@ -650,7 +749,7 @@ pub(crate) async fn start(
         ),
         _ => return Err(bad("the approved Backblaze destination is incomplete")),
     };
-    let resolved = ready(
+    let mut resolved = ready(
         cap,
         &record,
         env,
@@ -660,6 +759,10 @@ pub(crate) async fn start(
         scoped,
     )
     .await?;
+    resolved.execution.shards = prior.shards;
+    if !shard::valid(&job.run, prior.shards) || (prior.shards > 1 && prior.destination.is_none()) {
+        return Err(bad("the approved Backblaze shards are invalid; plan again"));
+    }
     if resolved.execution != prior
         || resolved.revision != job.commit
         || resolved.source != job.source
@@ -702,87 +805,130 @@ pub(crate) async fn start(
     .await?;
     let started_ms = now_ms();
     let deadline_ms = started_ms + (prior.max_minutes as i64 * 60_000);
-    let record = RunRecord {
-        run: job.run.clone(),
-        instance: job.instance.clone(),
-        host: "cloudflare".into(),
-        source: source_account.clone(),
-        bucket: source_bucket.clone(),
-        region: region.clone(),
-        vm: None,
-        scaleway_volumes: Vec::new(),
-        scaleway: None,
-        vm_deleted: false,
-        destination: Some(job.dest.clone()),
-        data_worker: Some(prior.worker.clone()),
-        approval: approval.to_string(),
-        commit: job.commit.clone(),
-        dry_run: job.dry_run,
-        started_ms,
-    };
-    save_run(env, &record).await?;
+    let parts = shard::jobs(&job, prior.shards);
+    let sharded = prior.shards > 1;
     let mut runs = runs_of(env, &job.instance).await?;
-    runs.push(job.run.clone());
+    // The parent's record, then each shard's (its own run, status and report).
+    for part in std::iter::once(&job).chain(parts.iter().filter(|_| sharded)) {
+        if sharded && part.run != job.run {
+            r2::put(
+                &resolved.account,
+                &resolved.bucket,
+                &job_key(&part.run),
+                "application/json",
+                serde_json::to_vec(part)?,
+            )
+            .await?;
+        }
+        let record = RunRecord {
+            run: part.run.clone(),
+            instance: job.instance.clone(),
+            host: "cloudflare".into(),
+            source: source_account.clone(),
+            bucket: source_bucket.clone(),
+            region: region.clone(),
+            vm: None,
+            scaleway_volumes: Vec::new(),
+            scaleway: None,
+            vm_deleted: false,
+            destination: Some(job.dest.clone()),
+            data_worker: Some(prior.worker.clone()),
+            approval: approval.to_string(),
+            commit: job.commit.clone(),
+            dry_run: job.dry_run,
+            started_ms,
+        };
+        save_run(env, &record).await?;
+        runs.push(part.run.clone());
+        let managed = ManagedRun {
+            instance: job.instance.clone(),
+            execution: prior.clone(),
+            started_ms,
+            deadline_ms,
+            terminal: None,
+            audit_status: ExportStatus::Pending,
+            shards: if sharded && part.run == job.run {
+                parts.iter().map(|p| p.run.clone()).collect()
+            } else {
+                Vec::new()
+            },
+            parent: part
+                .shard
+                .as_ref()
+                .map(|s| s.parent.clone())
+                .filter(|_| sharded),
+        };
+        keep(
+            env,
+            &managed_key(&part.run),
+            &serde_json::to_string(&managed)?,
+        )
+        .await?;
+    }
     keep(
         env,
         &index_key(&job.instance),
         &serde_json::to_string(&runs)?,
     )
     .await?;
-    let managed = ManagedRun {
-        instance: job.instance.clone(),
-        execution: prior.clone(),
-        started_ms,
-        deadline_ms,
-        terminal: None,
-        audit_status: ExportStatus::Pending,
-    };
-    keep(
-        env,
-        &managed_key(&job.run),
-        &serde_json::to_string(&managed)?,
-    )
-    .await?;
-    let managed_destination = match (&resolved.managed, &prior.destination) {
-        (Some(target), Some(reviewed)) => {
-            Some(target.issue(&job, started_ms, deadline_ms, reviewed)?)
-        }
-        (None, None) => None,
-        _ => return Err(bad("the approved Backblaze destination is incomplete")),
-    };
     let owned_source = if prior.owned_source {
         prior.connection.clone()
     } else {
         None
     };
-    let body = serde_json::to_value(container_job::Start {
-        managed_destination,
-        owned_source,
-        request: StartRequest {
-            job: job.clone(),
-            source_keys: resolved.source_keys,
-            dest_keys: resolved.dest_keys,
-        },
-        image_revision: Some(job.commit.clone()),
-        image: Some(prior.image.clone()),
-        deadline_ms: Some(deadline_ms),
-        report_to_jobs: true,
-    })?;
-    match net::data_post(
-        &prior.worker,
-        protocol::START_PATH,
-        &resolved.worker_key,
-        now_ms(),
-        &body,
-    )
-    .await
-    {
-        Ok(_) => Ok(json!({ "run": job.run, "host": "cloudflare", "state": "starting" })),
-        Err(_) => Ok(json!({
-            "run": job.run, "host": "cloudflare", "state": "launch_unconfirmed",
-            "note": "The start response was lost or refused. This approval is spent; inspect the run and its Jobs audit before planning another.",
-        })),
+    let mut started = Vec::new();
+    for part in &parts {
+        let managed_destination = match (&resolved.managed, &prior.destination) {
+            (Some(target), Some(reviewed)) => Some(target.issue(
+                part,
+                started_ms,
+                deadline_ms,
+                &shard_review(reviewed, prior.shards),
+            )?),
+            (None, None) => None,
+            _ => return Err(bad("the approved Backblaze destination is incomplete")),
+        };
+        let body = serde_json::to_value(container_job::Start {
+            managed_destination,
+            owned_source: owned_source.clone(),
+            request: StartRequest {
+                job: part.clone(),
+                source_keys: resolved.source_keys.clone(),
+                dest_keys: resolved.dest_keys.clone(),
+            },
+            image_revision: Some(job.commit.clone()),
+            image: Some(prior.image.clone()),
+            deadline_ms: Some(deadline_ms),
+            report_to_jobs: true,
+        })?;
+        let state = match net::data_post(
+            &prior.worker,
+            protocol::START_PATH,
+            &resolved.worker_key,
+            now_ms(),
+            &body,
+        )
+        .await
+        {
+            Ok(_) => "starting",
+            Err(_) => "launch_unconfirmed",
+        };
+        started.push(json!({ "run": part.run, "state": state }));
     }
+    let confirmed = started.iter().all(|s| s["state"] == "starting");
+    let mut answer = json!({
+        "run": job.run, "host": "cloudflare",
+        "state": if confirmed { "starting" } else { "launch_unconfirmed" },
+    });
+    if sharded {
+        answer["shards"] = json!(started);
+    }
+    if !confirmed {
+        answer["note"] = json!(
+            "A start response was lost or refused. This approval is spent; inspect the run and its Jobs audit before planning another."
+        );
+    }
+    Ok(answer)
 }
 
 async fn current_managed(
@@ -805,14 +951,28 @@ async fn replace(env: &Env, run: &str, previous: String, state: &ManagedRun) -> 
 }
 
 pub(crate) async fn status(env: &Env, instance: &str, run: &str) -> Result<Option<Value>> {
-    Ok(current_managed(env, instance, run)
-        .await?
-        .map(|(_, state)| {
-            json!({
-                "started_ms": state.started_ms, "deadline_ms": state.deadline_ms,
-                "terminal": state.terminal, "audit_status": state.audit_status,
-            })
-        }))
+    let Some((_, state)) = current_managed(env, instance, run).await? else {
+        return Ok(None);
+    };
+    let mut out = json!({
+        "started_ms": state.started_ms, "deadline_ms": state.deadline_ms,
+        "terminal": state.terminal, "audit_status": state.audit_status,
+    });
+    if let Some(parent) = &state.parent {
+        out["parent"] = json!(parent);
+    }
+    if !state.shards.is_empty() {
+        let mut shards = Vec::new();
+        for part in &state.shards {
+            let shard = current_managed(env, instance, part).await?.map(|(_, s)| s);
+            shards.push(json!({
+                "run": part,
+                "terminal": shard.as_ref().and_then(|s| s.terminal.clone()),
+            }));
+        }
+        out["shards"] = json!(shards);
+    }
+    Ok(Some(out))
 }
 
 /// Requests cancellation on the recorded Data Worker. A stopped request and confirmed
@@ -824,6 +984,15 @@ pub(crate) async fn stop(env: &Env, instance: &str, run: &str) -> Result<Option<
     if state.terminal.is_some() {
         return Ok(Some(
             json!({ "run": run, "state": "ended", "audit_status": state.audit_status }),
+        ));
+    }
+    if !state.shards.is_empty() {
+        let mut shards = Vec::new();
+        for part in &state.shards {
+            shards.push(Box::pin(stop(env, instance, part)).await?);
+        }
+        return Ok(Some(
+            json!({ "run": run, "state": "cancel_requested", "shards": shards }),
         ));
     }
     let record = instances::one(env, instance)
@@ -945,6 +1114,21 @@ pub async fn callback(env: &Env, host: &str, mut req: Request) -> Result<Respons
         }
         previous = serde_json::to_string(&state)?;
     }
+    // A shard's terminal record goes into its run's one audit, written once every shard ended.
+    if let Some(parent) = state.parent.clone() {
+        return match finish_sharded(env, host, &notice.instance, &parent).await? {
+            Some(status) => {
+                state.audit_status = status;
+                let stored = state.audit_status == ExportStatus::Stored;
+                if !replace(env, &terminal.run, previous, &state).await? || !stored {
+                    return Response::error("retry terminal audit", 503);
+                }
+                Ok(Response::empty()?.with_status(204))
+            }
+            // Other shards still run: the last one to end writes the audit.
+            None => Ok(Response::empty()?.with_status(204)),
+        };
+    }
     state.audit_status = jobs_audit::export_pipeline(
         env,
         host,
@@ -959,4 +1143,54 @@ pub async fn callback(env: &Env, host: &str, mut req: Request) -> Result<Respons
         return Response::error("retry terminal audit", 503);
     }
     Ok(Response::empty()?.with_status(204))
+}
+
+/// Once every shard of `parent` has its terminal record: the parent's one terminal record
+/// (the shards' combined, docs/plans/ingest-bytes.md) and its Jobs audit, written once
+/// (content-addressed, so a repeat writes the same record). None while a shard still runs.
+async fn finish_sharded(
+    env: &Env,
+    host: &str,
+    instance: &str,
+    parent: &str,
+) -> Result<Option<ExportStatus>> {
+    let Some((mut previous, mut state)) = current_managed(env, instance, parent).await? else {
+        return Err(bad("the sharded run's record is missing"));
+    };
+    let mut ended = Vec::new();
+    for part in &state.shards {
+        match current_managed(env, instance, part)
+            .await?
+            .and_then(|(_, s)| s.terminal)
+        {
+            Some(terminal) => ended.push(terminal),
+            None => return Ok(None),
+        }
+    }
+    let Some(terminal) = shard::combined_terminal(parent, &ended) else {
+        return Ok(None);
+    };
+    if state.terminal.is_none() {
+        state.terminal = Some(terminal.clone());
+        if !replace(env, parent, previous, &state).await? {
+            return Ok(Some(ExportStatus::Pending));
+        }
+        previous = serde_json::to_string(&state)?;
+    }
+    let terminal = state.terminal.clone().unwrap_or(terminal);
+    if state.audit_status != ExportStatus::Stored {
+        state.audit_status = jobs_audit::export_pipeline(
+            env,
+            host,
+            instance,
+            (&state.execution.account, &state.execution.audit_bucket),
+            PipelineKind::BackblazeIngest,
+            &pipeline_terminal(&terminal),
+        )
+        .await;
+        if !replace(env, parent, previous, &state).await? {
+            return Ok(Some(ExportStatus::Pending));
+        }
+    }
+    Ok(Some(state.audit_status))
 }

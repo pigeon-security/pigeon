@@ -113,6 +113,7 @@ pub fn job_spec(i: &JobInputs<'_>) -> JobSpec {
         max_minutes: None,
         resume: None,
         skip_over: None,
+        shard: None,
     }
 }
 

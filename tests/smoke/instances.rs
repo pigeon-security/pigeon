@@ -6644,6 +6644,7 @@ fn scaleway_owned_workflow_keeps_runner_grants_out_of_review_and_legacy_keys_out
         max_minutes: None,
         resume: None,
         skip_over: None,
+        shard: None,
     };
     let scoped = scaleway::owned_bootstrap(
         &job,

@@ -23,6 +23,7 @@ pub mod manifest;
 pub mod metrics;
 pub mod protocol;
 pub mod scaleway;
+pub mod shard;
 pub mod source_credentials;
 pub mod timing;
 
