@@ -141,13 +141,17 @@ async fn registration_account(cx: &Context<'_>, record: &Instance) -> Result<pig
     Ok(account)
 }
 
-fn metadata_fingerprint(secret: &pigeon_core::secrets_store::Secret) -> String {
-    pigeon_core::oauth::hash(
-        &json!({
-            "id": secret.id, "modified": secret.modified, "slot": secret.name,
-        })
-        .to_string(),
-    )
+fn metadata_fingerprint(secret: &pigeon_core::secrets_store::Secret) -> Option<String> {
+    let modified = secret
+        .modified
+        .as_deref()
+        .filter(|value| !value.is_empty())?;
+    if secret.id.is_empty() {
+        return None;
+    }
+    Some(pigeon_core::oauth::hash(
+        &json!({"id": secret.id, "modified": modified, "slot": secret.name}).to_string(),
+    ))
 }
 
 pub(crate) async fn verify_registry(
@@ -168,10 +172,10 @@ pub(crate) async fn verify_registry(
             .pin
             .binding(instance)
             .ok_or_else(|| bad("invalid stored Scaleway compute credential"))?;
-        if !listed
-            .iter()
-            .any(|secret| secret.name == slot && metadata_fingerprint(secret) == entry.fingerprint)
-        {
+        if !listed.iter().any(|secret| {
+            secret.name == slot
+                && metadata_fingerprint(secret).as_deref() == Some(entry.fingerprint.as_str())
+        }) {
             return Err(bad(
                 "a registered Scaleway compute slot changed. Keep earlier generations for their run cleanup.",
             ));
@@ -189,7 +193,8 @@ async fn fingerprint(account: &pigeon_core::Account, slot: &str) -> Result<Strin
         .into_iter()
         .find(|secret| secret.name == slot)
         .ok_or_else(|| bad("add the requested credential to the linked Secrets Store first"))?;
-    Ok(metadata_fingerprint(&secret))
+    metadata_fingerprint(&secret)
+        .ok_or_else(|| bad("the linked Secrets Store did not report the credential generation"))
 }
 
 async fn reviewed(
