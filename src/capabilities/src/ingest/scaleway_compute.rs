@@ -273,3 +273,56 @@ pub(super) async fn preview(
         json!({"generation": previous.map(|pin| pin.generation), "slot": slot, "fingerprint": credential_fingerprint}),
     )
 }
+
+pub(super) async fn command(
+    env: &Env,
+    record: &Instance,
+    expected_origin: Option<&str>,
+    command: &scaleway::ComputeCommand,
+) -> Result<(String, Value)> {
+    let (origin, key) = crate::data_store::reach(env, record).await?;
+    if !pigeon_ingest::managed_destination::valid_origin(&origin)
+        || expected_origin.is_some_and(|expected| expected != origin)
+    {
+        return Err(bad("the approved Scaleway Data Worker changed"));
+    }
+    let result = super::net::data_post(
+        &origin,
+        scaleway::BROKER_PATH,
+        &key,
+        super::now_ms(),
+        &serde_json::to_value(command)?,
+    )
+    .await
+    .map_err(|_| {
+        bad("the instance's Scaleway compute broker is unavailable or rejected the operation")
+    })?;
+    Ok((origin, serde_json::from_str(&result)?))
+}
+
+pub(super) async fn ready(
+    env: &Env,
+    record: &Instance,
+    project: &str,
+    region: &str,
+) -> Result<(ComputePin, String)> {
+    let pin = active(env, &record.id, project)
+        .await?
+        .ok_or_else(|| bad("Set a linked Scaleway compute key and apply the Data Worker plan."))?;
+    let (origin, reply) = command(
+        env,
+        record,
+        None,
+        &scaleway::ComputeCommand::Check {
+            pin: pin.clone(),
+            region: region.into(),
+        },
+    )
+    .await?;
+    if reply["project"] != pin.project || reply["generation"] != pin.generation {
+        return Err(bad(
+            "the Scaleway compute broker did not confirm the approved generation",
+        ));
+    }
+    Ok((pin, origin))
+}

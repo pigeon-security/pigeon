@@ -6605,3 +6605,49 @@ fn rotation_retains_the_bindings_for_outstanding_runs() {
     );
     assert!(registration.change(&json!({}), Step::Finish).is_ok());
 }
+
+#[test]
+fn scaleway_owned_workflow_keeps_runner_grants_out_of_review_and_legacy_keys_out_of_guest() {
+    use pigeon_capabilities::ingest::hosts;
+    use pigeon_ingest::{
+        archive::Limits,
+        manifest::{DestSpec, JobSpec, SourceSpec},
+        scaleway,
+    };
+
+    let job = JobSpec {
+        run: "scaleway-canary".into(),
+        instance: "example".into(),
+        source: SourceSpec::S3 {
+            account: "scaleway:canary".into(),
+            endpoint: "https://s3.fr-par.scw.cloud".into(),
+            region: "fr-par".into(),
+            bucket: "canary-source".into(),
+            prefix: "canary/".into(),
+        },
+        dest: DestSpec {
+            endpoint: "https://example.r2.cloudflarestorage.com".into(),
+            bucket: "example-data".into(),
+        },
+        dry_run: true,
+        keep_archives: true,
+        fingerprints: false,
+        limits: Limits::default(),
+        threads: 1,
+        commit: "0123456789abcdef0123456789abcdef01234567".into(),
+    };
+    let scoped = scaleway::owned_bootstrap(
+        &job,
+        "scratch-id",
+        r#"{"grant":"temporary-reader"}"#,
+        r#"{"grant":"temporary-writer"}"#,
+    );
+    assert!(scoped.contains("INGEST_MANAGED_SOURCE="));
+    assert!(scoped.contains("INGEST_DESTINATION="));
+    assert!(!scoped.contains("SOURCE_KEYS="));
+    assert!(!scoped.contains("DEST_KEYS="));
+    let reviewed = hosts::scaleway_broker_host_request(&job, "fr-par").to_string();
+    assert!(reviewed.contains(scaleway::BROKER_PATH));
+    assert!(!reviewed.contains("temporary-reader"));
+    assert!(!reviewed.contains("temporary-writer"));
+}

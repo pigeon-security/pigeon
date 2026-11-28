@@ -69,3 +69,11 @@ Review and apply the updated Data Worker plan to bind the generation. The instan
 Data Worker reads the key and checks access to the approved project before a
 launch. Rotate by creating a fresh slot. Earlier generations remain bound for
 cleanup, and the source read key remains a separate credential.
+
+New linked Scaleway runs require an owning-account source, the bound compute
+generation, and a managed destination grant. Core sends a signed job command
+to the instance Data Worker. The Worker admits the run once, creates the
+Instance and its disks, and gives the guest only short-lived source and
+destination grants. It retains a durable marker for status and cleanup tied
+to the exact owning account and compute generation. Old runs continue to
+reconcile using the credential recorded when they started.

@@ -24,6 +24,8 @@ pub struct Lifecycle {
     account: String,
     project: String,
     compute_slot: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    broker_origin: Option<String>,
     audit_bucket: String,
     next_ms: i64,
     lease_until_ms: i64,
@@ -44,6 +46,7 @@ impl Lifecycle {
             account,
             project,
             compute_slot,
+            broker_origin: None,
             audit_bucket,
             next_ms: time + START_GRACE,
             lease_until_ms: time + START_GRACE,
@@ -51,6 +54,15 @@ impl Lifecycle {
             audit_status: ExportStatus::Pending,
             terminal: None,
         }
+    }
+
+    pub(super) fn use_broker(&mut self, origin: String, deadline_ms: i64) {
+        self.broker_origin = Some(origin);
+        self.deadline_ms = deadline_ms;
+    }
+
+    pub(super) fn uses_broker(&self) -> bool {
+        self.broker_origin.is_some()
     }
 }
 
@@ -211,6 +223,70 @@ async fn cleanup(run: &mut RunRecord, secret: &str, project: &str) -> Result<()>
     Ok(())
 }
 
+pub(super) async fn broker_status(
+    env: &Env,
+    run: &RunRecord,
+    state: &Lifecycle,
+    cleanup: bool,
+) -> Result<pigeon_ingest::scaleway::BrokerStatus> {
+    use pigeon_ingest::scaleway::{BrokerStatus, ComputeCommand};
+    let record = crate::instances::one(env, &run.instance)
+        .await?
+        .filter(|record| {
+            super::linked_id(record).as_deref() == Some(state.account.as_str())
+                && run
+                    .destination
+                    .as_ref()
+                    .is_some_and(|dest| crate::data_store::store_name(record) == dest.bucket)
+        })
+        .ok_or_else(|| bad("the Scaleway owning account no longer matches the run"))?;
+    let command = if cleanup {
+        ComputeCommand::Cleanup {
+            run: run.run.clone(),
+            absent_after_ms: state.deadline_ms,
+        }
+    } else {
+        ComputeCommand::Status {
+            run: run.run.clone(),
+        }
+    };
+    let origin = state
+        .broker_origin
+        .as_deref()
+        .ok_or_else(|| bad("missing Scaleway broker origin"))?;
+    let (_, reply) = super::scaleway_compute::command(env, &record, Some(origin), &command).await?;
+    let status: BrokerStatus = serde_json::from_value(reply)?;
+    if status.run != run.run {
+        return Err(bad("the Scaleway compute response belongs to another run"));
+    }
+    Ok(status)
+}
+
+async fn reconcile_broker(env: &Env, run: &mut RunRecord, state: &mut Lifecycle) -> Result<()> {
+    if state.terminal.is_none() && !run.vm_deleted {
+        let status = broker_status(env, run, state, false).await?;
+        if status.server.is_some() && run.vm.is_none() {
+            run.vm = status.server;
+            run.scaleway_volumes = status.volumes;
+            state.terminal = Some(terminal(run, PipelineOutcome::Failed, None));
+        } else if run.vm.is_some()
+            && matches!(
+                status.state.as_deref(),
+                Some("stopped" | "stopped in place") | None
+            )
+        {
+            state.terminal = Some(terminal(run, PipelineOutcome::Failed, None));
+        }
+    }
+    if state.terminal.is_some() && !run.vm_deleted {
+        let status = broker_status(env, run, state, true).await?;
+        run.vm = status.server.or_else(|| run.vm.take());
+        run.scaleway_volumes = status.volumes;
+        run.vm_deleted = status.gone;
+    }
+    Ok(())
+}
+
 async fn reconcile(
     env: &Env,
     host: &str,
@@ -223,39 +299,43 @@ async fn reconcile(
             state.terminal = Some(terminal(run, PipelineOutcome::TimedOut, None));
         }
     }
-    if run.vm.is_none() {
-        let secret = provider_credentials(env, state).await?;
-        let zone = hosts::zone(&run.region);
-        if let Some(resources) =
-            net::scw_find_created(&secret, &zone, &state.project, &run.run).await?
-        {
-            run.vm = Some(resources.server);
-            run.scaleway_volumes = resources.volumes;
-            state
-                .terminal
-                .get_or_insert_with(|| terminal(run, PipelineOutcome::Failed, None));
-        } else if now_ms() < state.deadline_ms {
-            return Ok(());
+    if state.uses_broker() {
+        reconcile_broker(env, run, state).await?;
+    } else {
+        if run.vm.is_none() {
+            let secret = provider_credentials(env, state).await?;
+            let zone = hosts::zone(&run.region);
+            if let Some(resources) =
+                net::scw_find_created(&secret, &zone, &state.project, &run.run).await?
+            {
+                run.vm = Some(resources.server);
+                run.scaleway_volumes = resources.volumes;
+                state
+                    .terminal
+                    .get_or_insert_with(|| terminal(run, PipelineOutcome::Failed, None));
+            } else if now_ms() < state.deadline_ms {
+                return Ok(());
+            }
         }
-    }
-    if state.terminal.is_none() && !run.vm_deleted {
-        let secret = provider_credentials(env, state).await?;
-        let zone = hosts::zone(&run.region);
-        let id = run
-            .vm
-            .as_deref()
-            .ok_or_else(|| bad("missing Scaleway server"))?;
-        if matches!(
-            net::scw_state(&secret, &zone, id).await?.as_deref(),
-            Some("stopped" | "stopped in place") | None
-        ) {
-            // A successful runner writes its report before its guest powers off.
-            state.terminal = Some(terminal(run, PipelineOutcome::Failed, None));
+        if state.terminal.is_none() && !run.vm_deleted {
+            let secret = provider_credentials(env, state).await?;
+            let zone = hosts::zone(&run.region);
+            let id = run
+                .vm
+                .as_deref()
+                .ok_or_else(|| bad("missing Scaleway server"))?;
+            if matches!(
+                net::scw_state(&secret, &zone, id).await?.as_deref(),
+                Some("stopped" | "stopped in place") | None
+            ) {
+                // A successful runner writes its report before its guest powers off.
+                state.terminal = Some(terminal(run, PipelineOutcome::Failed, None));
+            }
         }
-    }
-    if state.terminal.is_some() && !run.vm_deleted {
-        let secret = provider_credentials(env, state).await?;
-        cleanup(run, &secret, &state.project).await?;
+        if state.terminal.is_some() && !run.vm_deleted {
+            let secret = provider_credentials(env, state).await?;
+            cleanup(run, &secret, &state.project).await?;
+        }
     }
     if run.vm_deleted
         && let Some(terminal) = state.terminal.as_mut()

@@ -198,6 +198,14 @@ pub fn scaleway_managed_host_request(job: &JobSpec, region: &str) -> Value {
     )
 }
 
+pub fn scaleway_broker_host_request(job: &JobSpec, region: &str) -> Value {
+    json!({
+        "host": "scaleway", "method": "POST", "path": pigeon_ingest::scaleway::BROKER_PATH,
+        "body": { "operation": "launch", "job": job, "region": region, "source": REDACTED, "destination": REDACTED },
+        "provider": scaleway_server_body(job, REDACTED),
+    })
+}
+
 fn scaleway_host_request(job: &JobSpec, region: &str, user_data: String) -> Value {
     let zone = zone(region);
     json!({

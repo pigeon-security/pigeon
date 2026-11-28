@@ -645,38 +645,26 @@ impl Ingest {
                 None
             }
         };
+        if account.is_some_and(|a| a.provider == Provider::Scaleway) && connection.is_none() {
+            return Ok(unready(
+                vec!["Choose an approved named Scaleway bucket connection with an owning-account source and compute key.".into()],
+                Value::Null, Value::Null,
+            ));
+        }
         let mut source_keys = None;
         let mut source_pin = None;
         if let Some(a) = account {
             if let Some(name) = connection {
-                match connections::open(env, &record, name).await {
-                    Ok((pin, keys)) => {
-                        source_pin = Some(pin);
-                        source_keys = Some(keys);
-                    }
-                    Err(error) => missing.push(error.to_string()),
+                source_pin = connections::owned_reference(&record, name)?;
+                if source_pin.is_none() {
+                    missing.push("Register this source key in the linked account and apply the Data Worker plan.".into());
                 }
             } else {
-                let source_slot =
-                    managed.map_or_else(|| a.binding(), |_| scaleway_source::source_slot(instance));
+                let source_slot = a.binding();
                 match secret_value(env, &source_slot).await {
-                Some(v) => source_keys = s3::parse_keys(&v).ok(),
-                None => missing.push(format!(
-                    "Secret `{}` is not bound. Create a read-only key on {}'s console, set it on the app's Access page (Credentials), then ask an agent to bind it in src/platform/wrangler.toml.",
-                    source_slot,
-                    a.provider.slug()
-                )),
-            }
-            }
-            if let Some(slot) = managed
-                .map(|_| scaleway_source::compute_slot(instance))
-                .or_else(|| hosts::host_slot(a))
-                && secret_value(env, &slot).await.is_none()
-            {
-                missing.push(format!(
-                    "Secret `{slot}` is not bound. Create the API key for starting a VM on {} (decision 13.9 step 3), set it on the app's Access page (Credentials), then ask an agent to bind it.",
-                    a.provider.slug()
-                ));
+                    Some(v) => source_keys = s3::parse_keys(&v).ok(),
+                    None => missing.push(format!("Secret {source_slot} is not bound.")),
+                }
             }
             if a.provider == Provider::Backblaze
                 && setting(env, &format!("data_key:{instance}"))
@@ -684,7 +672,7 @@ impl Ingest {
                     .is_none()
             {
                 missing.push(format!(
-                    "The data Worker for `{instance}` has no key in the Directory (`data_key:{instance}`). Deploy the data Worker first (decision 13.9 step 6)."
+                    "The data Worker for `{instance}` has no key in the Directory (`data_key:{instance}`). Deploy the data Worker first."
                 ));
             }
         }
@@ -707,69 +695,86 @@ impl Ingest {
         // A sample of the source and the estimate, when the source can be read.
         let mut sample = Value::Null;
         let mut est = Value::Null;
-        if let (Some(a), Some(keys)) = (account, source_keys.as_ref()) {
-            let query =
-                s3::list_objects_query(Some(prefix).filter(|p| !p.is_empty()), None, 1000, None);
-            let endpoint = Endpoint {
-                base: a.endpoint.clone(),
-                region: a.region.clone(),
-            };
-            match s3::send(
-                Method::Get,
-                &endpoint,
-                &s3::object_path(bucket, ""),
-                &query,
-                &[],
-                keys,
-            )
-            .await
-            {
-                Ok(mut res) => {
-                    let listing = s3::parse_list_objects(&res.text().await?)?;
-                    let count = listing.objects.len() as u64;
-                    let bytes = listing.objects.iter().try_fold(0_u64, |sum, object| {
-                        sum.checked_add(object.size)
-                            .ok_or_else(|| bad("source byte count overflow"))
-                    })?;
-                    let largest = listing
-                        .objects
-                        .iter()
-                        .map(|object| object.size)
-                        .max()
-                        .unwrap_or(0);
-                    let more = listing.next.is_some();
-                    let (total_bytes, total_objects) = match args["size_bytes"].as_u64() {
-                        Some(t) if connection.is_none() && count > 0 => {
-                            (t, t.saturating_mul(count) / bytes.max(1))
-                        }
-                        _ if connection.is_some() => (bytes, count),
-                        Some(t) => (t, 0),
-                        None => (bytes, count),
-                    };
-                    if connection.is_some()
-                        && !dry_run
-                        && (more || largest > pigeon_ingest::managed_destination::MAX_BLOB)
-                    {
-                        missing.push("Use a dedicated prefix with at most one page of source objects, each at most 16 MiB, for a managed Scaleway run.".into());
+        if let Some(a) = account {
+            let listing = if let Some(pin) = source_pin.as_ref() {
+                Some(connections::owned_sample(env, &record, pin, prefix).await)
+            } else if let Some(keys) = source_keys.as_ref() {
+                let query = s3::list_objects_query(
+                    Some(prefix).filter(|p| !p.is_empty()),
+                    None,
+                    1000,
+                    None,
+                );
+                let endpoint = Endpoint {
+                    base: a.endpoint.clone(),
+                    region: a.region.clone(),
+                };
+                Some(
+                    async {
+                        let mut response = s3::send(
+                            Method::Get,
+                            &endpoint,
+                            &s3::object_path(bucket, ""),
+                            &query,
+                            &[],
+                            keys,
+                        )
+                        .await?;
+                        s3::parse_list_objects(&response.text().await?)
                     }
-                    sample = json!({
-                        "objects": count, "bytes": bytes, "first_page_only": more,
-                        "note": if more && connection.is_some() {
-                            "Only the first page was listed, so the estimate and budget use that page."
-                        } else if more && args["size_bytes"].is_null() {
-                            "Only the first page was listed, so the estimate covers that page. Pass `size_bytes` (the whole size) for a whole-run estimate."
-                        } else { "" },
-                    });
-                    est = to_value(estimate::estimate(
-                        hosts::host_for(a.provider),
-                        total_bytes,
-                        total_objects,
-                        UNIQUE_SHARE,
-                    ));
+                    .await,
+                )
+            } else {
+                None
+            };
+            if let Some(listing) = listing {
+                match listing {
+                    Ok(listing) => {
+                        let count = listing.objects.len() as u64;
+                        let bytes = listing.objects.iter().try_fold(0_u64, |sum, object| {
+                            sum.checked_add(object.size)
+                                .ok_or_else(|| bad("source byte count overflow"))
+                        })?;
+                        let largest = listing
+                            .objects
+                            .iter()
+                            .map(|object| object.size)
+                            .max()
+                            .unwrap_or(0);
+                        let more = listing.next.is_some();
+                        let (total_bytes, total_objects) = match args["size_bytes"].as_u64() {
+                            Some(t) if connection.is_none() && count > 0 => {
+                                (t, t.saturating_mul(count) / bytes.max(1))
+                            }
+                            _ if connection.is_some() => (bytes, count),
+                            Some(t) => (t, 0),
+                            None => (bytes, count),
+                        };
+                        if connection.is_some()
+                            && !dry_run
+                            && (more || largest > pigeon_ingest::managed_destination::MAX_BLOB)
+                        {
+                            missing.push("Use a dedicated prefix with at most one page of source objects, each at most 16 MiB, for a managed Scaleway run.".into());
+                        }
+                        sample = json!({
+                            "objects": count, "bytes": bytes, "first_page_only": more,
+                            "note": if more && connection.is_some() {
+                                "Only the first page was listed, so the estimate and budget use that page."
+                            } else if more && args["size_bytes"].is_null() {
+                                "Only the first page was listed, so the estimate covers that page. Pass `size_bytes` (the whole size) for a whole-run estimate."
+                            } else { "" },
+                        });
+                        est = to_value(estimate::estimate(
+                            hosts::host_for(a.provider),
+                            total_bytes,
+                            total_objects,
+                            UNIQUE_SHARE,
+                        ));
+                    }
+                    Err(e) => missing.push(format!(
+                        "The source could not be listed with the bound key: {e}"
+                    )),
                 }
-                Err(e) => missing.push(format!(
-                    "The source could not be listed with the bound key: {e}"
-                )),
             }
         }
 
@@ -799,23 +804,23 @@ impl Ingest {
         } else {
             None
         };
-        let host_key = if host == Host::Scaleway {
-            if let Some(slot) = managed
-                .map(|_| scaleway_source::compute_slot(instance))
-                .or_else(|| hosts::host_slot(a))
-            {
-                secret_value(env, &slot).await
-            } else {
-                None
+        let broker = if let Some(config) = managed {
+            match scaleway_compute::ready(env, &record, &config.project, &a.region).await {
+                Ok(broker) => Some(broker),
+                Err(error) => return Ok(unready(vec![error.to_string()], est, sample)),
             }
         } else {
             None
         };
-        let mut execution =
-            match execution_binding(host, data_worker.as_deref(), host_key.as_deref()) {
+        let mut execution = match broker.as_ref() {
+            Some((pin, origin)) => {
+                json!({"project": pin.project, "compute": pin, "compute_origin": origin})
+            }
+            None => match execution_binding(host, data_worker.as_deref(), None) {
                 Ok(execution) => execution,
                 Err(error) => return Ok(unready(vec![error.to_string()], est, sample)),
-            };
+            },
+        };
         if let Some(config) = managed {
             if execution["project"] != config.project {
                 return Ok(unready(
@@ -848,10 +853,15 @@ impl Ingest {
                 Err(error) => return Ok(unready(vec![error.to_string()], est, sample)),
             };
             let estimate: estimate::Estimate = serde_json::from_value(est.clone())?;
+            let origin = match connections::owned_origin(env, &record, &pin).await {
+                Ok(origin) => origin,
+                Err(error) => return Ok(unready(vec![error.to_string()], est, sample)),
+            };
+            execution["source_origin"] = json!(origin);
             execution["connection"] = to_value(&pin);
             execution["managed_destination"] =
                 to_value(destination.review(estimate.bytes, estimate.objects, dry_run));
-            hosts::scaleway_managed_host_request(&job, &a.region)
+            hosts::scaleway_broker_host_request(&job, &a.region)
         } else {
             hosts::host_request(host, &job, &a.region)
         };
@@ -1051,15 +1061,50 @@ impl Ingest {
         check_job_binding(&job, &account_id, destination_bucket, account).map_err(bad)?;
         let linked = self.checked_link(env, &record).await?;
         let host = hosts::host_for(account.provider);
+        let broker = if host == Host::Scaleway {
+            let config =
+                managed.ok_or_else(|| bad("plan with an owning-account Scaleway source"))?;
+            let (pin, review) = named_destination
+                .as_ref()
+                .ok_or_else(|| bad("plan with a named Scaleway source"))?;
+            let (compute, origin) =
+                scaleway_compute::ready(env, &record, &config.project, region).await?;
+            let source_origin = approved_execution["source_origin"]
+                .as_str()
+                .ok_or_else(|| {
+                    bad("the Scaleway plan predates the owning-account runner; plan again")
+                })?;
+            let deadline = now_ms() + scaleway::MAX_RUN;
+            let source =
+                connections::owned_runner(env, &record, pin, source_origin, &job, deadline).await?;
+            let destination = managed_destination::ready(env, &record).await?.issue(
+                &job,
+                now_ms(),
+                deadline,
+                review,
+            )?;
+            Some((
+                origin,
+                pigeon_ingest::scaleway::BrokerLaunch {
+                    pin: compute,
+                    region: region.clone(),
+                    job: job.clone(),
+                    deadline_ms: deadline,
+                    source,
+                    destination,
+                },
+            ))
+        } else {
+            None
+        };
         // Read every key before the approval is spent, so a missing one costs nothing.
         let unbound = |name: &str| bad(format!("secret `{name}` is not bound"));
         let source_slot = managed.map_or_else(
             || account.binding(),
             |_| scaleway_source::source_slot(&record.id),
         );
-        let source_keys = if let Some((pin, _)) = named_destination.as_ref() {
-            let keys = connections::open_pinned(env, &record, pin).await?;
-            format!("{}:{}", keys.access_key_id, keys.secret_access_key)
+        let source_keys = if broker.is_some() {
+            String::new()
         } else {
             let keys = secret_value(env, &source_slot)
                 .await
@@ -1077,9 +1122,11 @@ impl Ingest {
         } else {
             String::new()
         };
-        let compute_slot = managed
-            .map(|_| scaleway_source::compute_slot(&record.id))
-            .or_else(|| hosts::host_slot(account));
+        let compute_slot = if broker.is_some() {
+            None
+        } else {
+            hosts::host_slot(account)
+        };
         let host_key = match compute_slot.as_deref() {
             Some(slot) => Some(secret_value(env, slot).await.ok_or_else(|| unbound(slot))?),
             None => None,
@@ -1101,28 +1148,21 @@ impl Ingest {
         };
         // Rebuild what was approved; the digest must still match.
         let started_ms = now_ms();
-        let destination = if let Some((_, review)) = named_destination.as_ref() {
-            let binding = managed_destination::ready(env, &record).await?;
-            Some(serde_json::to_string(&binding.issue(
-                &job,
-                started_ms,
-                started_ms + scaleway::MAX_RUN,
-                review,
-            )?)?)
-        } else {
-            None
-        };
-        let request = if destination.is_some() {
-            hosts::scaleway_managed_host_request(&job, region)
+        let request = if broker.is_some() {
+            hosts::scaleway_broker_host_request(&job, region)
         } else {
             hosts::host_request(host, &job, region)
         };
         let kind = pigeon_core::approval::Kind::Other(KIND.into());
-        let mut execution = execution_binding(
-            host,
-            data.as_ref().map(|(url, _)| url.as_str()),
-            host_key.as_deref(),
-        )?;
+        let mut execution = if let Some((origin, launch)) = broker.as_ref() {
+            json!({"project": launch.pin.project, "compute": launch.pin, "compute_origin": origin, "source_origin": launch.source.origin})
+        } else {
+            execution_binding(
+                host,
+                data.as_ref().map(|(url, _)| url.as_str()),
+                host_key.as_deref(),
+            )?
+        };
         if let Some(config) = managed {
             if execution["project"] != config.project {
                 return Err(bad(
@@ -1169,6 +1209,14 @@ impl Ingest {
         }
         let digest = pigeon_core::approval::payload_digest(&kind, &job.run, &payload);
         Self::check_current(env, &record).await?;
+        if let Some((_, launch)) = broker.as_ref()
+            && scaleway_compute::active(env, &record.id, &launch.pin.project)
+                .await?
+                .as_ref()
+                != Some(&launch.pin)
+        {
+            return Err(bad("the Scaleway compute credential changed; plan again"));
+        }
         let taken = directory(
             env,
             "approval.take",
@@ -1237,55 +1285,43 @@ impl Ingest {
                 rec.vm = Some(net::do_create(token, &body).await?);
             }
             Host::Scaleway => {
-                let (project, secret) =
-                    hosts::scaleway_parts(host_key.as_deref().unwrap_or_default()).map_err(bad)?;
-                let zone = hosts::zone(region);
-                let compute_slot =
-                    compute_slot.ok_or_else(|| bad("the Scaleway compute slot is missing"))?;
-                rec.scaleway = Some(scaleway::Lifecycle::new(
+                let (origin, launch) =
+                    broker.ok_or_else(|| bad("missing Scaleway broker launch"))?;
+                let mut lifecycle = scaleway::Lifecycle::new(
                     linked.id.clone(),
-                    project.clone(),
-                    compute_slot,
+                    launch.pin.project.clone(),
+                    String::new(),
                     scaleway_audit_bucket
                         .ok_or_else(|| bad("the approved audit bucket is missing"))?,
                     rec.started_ms,
-                ));
+                );
+                lifecycle.use_broker(origin.clone(), launch.deadline_ms);
+                rec.scaleway = Some(lifecycle);
                 save_run(env, &rec).await?;
-                let resources =
-                    net::scw_create(&secret, &zone, &hosts::scaleway_server_body(&job, &project))
-                        .await?;
-                rec.vm = Some(resources.server.clone());
-                rec.scaleway_volumes = resources.volumes;
-                save_run(env, &rec).await?;
-                let setup = async {
-                    let scratch = resources.scratch_volume.as_deref().ok_or_else(|| {
-                        bad("Scaleway did not confirm the approved scratch volume")
-                    })?;
-                    let bootstrap = match destination.as_deref() {
-                        Some(grant) => {
-                            hosts::scaleway_managed_cloud_init(&job, scratch, &source_keys, grant)
-                        }
-                        None => hosts::scaleway_cloud_init(&job, scratch, &source_keys, &dest_keys),
-                    };
-                    net::scw_user_data(&secret, &zone, &resources.server, &bootstrap).await?;
-                    net::scw_action(
-                        &secret,
-                        &zone,
-                        &resources.server,
-                        &hosts::scaleway_poweron(),
-                    )
+                let command = pigeon_ingest::scaleway::ComputeCommand::Launch {
+                    launch: Box::new(launch),
+                };
+                let result = scaleway_compute::command(env, &record, Some(&origin), &command)
                     .await
+                    .and_then(|(_, reply)| {
+                        serde_json::from_value::<pigeon_ingest::scaleway::BrokerStatus>(reply)
+                            .map_err(Into::into)
+                    });
+                match result {
+                    Ok(status) if status.run == rec.run && status.server.is_some() => {
+                        rec.vm = status.server;
+                        rec.scaleway_volumes = status.volumes;
+                        scaleway::mark_started(&mut rec);
+                    }
+                    _ => {
+                        scaleway::mark_start_failed(&mut rec);
+                        save_run(env, &rec).await?;
+                        return Err(bad(format!(
+                            "Scaleway launch could not be confirmed. Follow data_ingest_status for cleanup of {}.",
+                            rec.run
+                        )));
+                    }
                 }
-                .await;
-                if let Err(error) = setup {
-                    scaleway::mark_start_failed(&mut rec);
-                    save_run(env, &rec).await?;
-                    return Err(bad(format!(
-                        "{error}. Follow data_ingest_status for cleanup of {}.",
-                        rec.run
-                    )));
-                }
-                scaleway::mark_started(&mut rec);
             }
             Host::Cloudflare => {
                 let (url, key) = data.unwrap_or_default();
@@ -1328,6 +1364,9 @@ impl Ingest {
             return Ok(None);
         };
         if let Some(state) = rec.scaleway.as_ref() {
+            if state.uses_broker() {
+                return Ok(scaleway::broker_status(env, rec, state, false).await?.state);
+            }
             let secret = scaleway::provider_credentials(env, state).await?;
             return net::scw_state(&secret, &hosts::zone(&rec.region), id).await;
         }

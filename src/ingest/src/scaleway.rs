@@ -48,7 +48,14 @@ pub fn scaleway_cloud_init(
     source_keys: &str,
     dest_keys: &str,
 ) -> String {
-    scaleway_bootstrap(job, scratch_volume, source_keys, "DEST_KEYS", dest_keys)
+    scaleway_bootstrap(
+        job,
+        scratch_volume,
+        "SOURCE_KEYS",
+        source_keys,
+        "DEST_KEYS",
+        dest_keys,
+    )
 }
 
 /// Bootstrap a scoped Scaleway runner with only its signed Data Worker grant.
@@ -61,7 +68,24 @@ pub fn scaleway_managed_cloud_init(
     scaleway_bootstrap(
         job,
         scratch_volume,
+        "SOURCE_KEYS",
         source_keys,
+        "INGEST_DESTINATION",
+        destination_json,
+    )
+}
+
+pub fn owned_bootstrap(
+    job: &JobSpec,
+    scratch_volume: &str,
+    source_json: &str,
+    destination_json: &str,
+) -> String {
+    scaleway_bootstrap(
+        job,
+        scratch_volume,
+        crate::source_credentials::RUN_ENV,
+        source_json,
         "INGEST_DESTINATION",
         destination_json,
     )
@@ -70,6 +94,7 @@ pub fn scaleway_managed_cloud_init(
 fn scaleway_bootstrap(
     job: &JobSpec,
     scratch_volume: &str,
+    source_variable: &str,
     source_keys: &str,
     destination_variable: &str,
     destination: &str,
@@ -92,7 +117,7 @@ fn scaleway_bootstrap(
          systemctl start docker\n\
          cat > /root/ingest.env <<'PIGEON_ENV_END'\n\
          INGEST_JOB={job_json}\n\
-         SOURCE_KEYS={source}\n\
+         {source_variable}={source}\n\
          {destination_variable}={dest}\n\
          SPOOL_DIR=/spool\n\
          SPOOL_BYTES={SCW_SPOOL_BYTES}\n\
@@ -245,8 +270,20 @@ pub fn valid_region(region: &str) -> bool {
 #[serde(rename_all = "snake_case", tag = "operation", deny_unknown_fields)]
 pub enum ComputeCommand {
     Check { pin: ComputePin, region: String },
+    Launch { launch: Box<BrokerLaunch> },
     Status { run: String },
-    Cleanup { run: String },
+    Cleanup { run: String, absent_after_ms: i64 },
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct BrokerLaunch {
+    pub pin: ComputePin,
+    pub region: String,
+    pub job: JobSpec,
+    pub deadline_ms: i64,
+    pub source: crate::source_credentials::RunnerSource,
+    pub destination: crate::managed_destination::Destination,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
