@@ -25,6 +25,7 @@ pub const MAX_SKEW_MS: i64 = 60_000;
 pub struct StartRequest {
     pub job: JobSpec,
     /// The source account's read key, `ACCESS_KEY_ID:SECRET`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub source_keys: String,
     /// The instance bucket's R2 key, `ACCESS_KEY_ID:SECRET`.
     #[serde(default, skip_serializing_if = "String::is_empty")]

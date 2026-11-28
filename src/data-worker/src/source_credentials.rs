@@ -60,6 +60,16 @@ pub(crate) async fn verify(req: &mut Request, env: &Env) -> Result<Response> {
     let Some(base) = bound.endpoint() else {
         return Response::error("the approved source provider is invalid", 409);
     };
+    if bound.provider == "backblaze"
+        && s3::verify_backblaze_read_key(&base, &bound.bucket, &bound.prefix, &keys)
+            .await
+            .is_err()
+    {
+        return Response::error(
+            "Backblaze must confirm a read-only key for the approved bucket and prefix",
+            422,
+        );
+    }
     let endpoint = s3::Endpoint {
         base,
         region: bound.region,

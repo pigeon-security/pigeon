@@ -32,6 +32,9 @@ pub struct Start {
     pub request: StartRequest,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub managed_destination: Option<crate::managed_destination::Destination>,
+    /// A linked account's source binding. The start envelope carries only this reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owned_source: Option<crate::source_credentials::Reference>,
     /// The exact revision approved by the operator and configured on the Worker deployment.
     /// Absent on historical requests to a manually deployed Data Worker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -42,6 +45,28 @@ pub struct Start {
     pub deadline_ms: Option<i64>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub report_to_jobs: bool,
+}
+
+impl Start {
+    /// Only a matching Backblaze source can be opened by this Container.
+    pub fn owns_backblaze_source(&self, bound: &crate::source_credentials::Bound) -> bool {
+        self.owned_source.as_ref() == Some(&bound.reference)
+            && self.request.source_keys.is_empty()
+            && self.request.dest_keys.is_empty()
+            && self.managed_destination.is_some()
+            && self.report_to_jobs
+            && bound.provider == "backblaze"
+            && bound.owner.is_none()
+            && matches!(
+                &self.request.job.source,
+                crate::manifest::SourceSpec::S3 { account, endpoint, bucket, region, prefix }
+                if account.starts_with("backblaze:")
+                    && bound.endpoint().as_ref() == Some(endpoint)
+                    && bound.bucket == *bucket && bound.region == *region
+                    && prefix.starts_with(&bound.prefix)
+                    && prefix.len() <= 1024 && !prefix.chars().any(char::is_control)
+            )
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

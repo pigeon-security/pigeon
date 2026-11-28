@@ -2019,3 +2019,59 @@ fn backblaze_source_authority_is_one_read_only_bucket_and_prefix() {
         assert!(!backblaze_read_scope(&wider, endpoint, bucket, prefix));
     }
 }
+
+#[test]
+fn owned_backblaze_start_carries_only_a_matching_reference() {
+    use pigeon_ingest::{
+        container_job::Start,
+        manifest::SourceSpec,
+        source_credentials::{Bound, Reference},
+    };
+
+    let pin = Reference {
+        name: "history".into(),
+        scope: "approved-scope".into(),
+        generation: "a".repeat(43),
+    };
+    let bound = Bound {
+        reference: pin.clone(),
+        slot: "INGEST_SRC_example".into(),
+        provider: "backblaze".into(),
+        owner: None,
+        region: "us-west-004".into(),
+        bucket: "source-bucket".into(),
+        prefix: "approved/".into(),
+    };
+    let mut start: Start = serde_json::from_value(json!({
+        "job": {
+            "run": "run-b2",
+            "instance": "linked-test",
+            "source": {
+                "kind": "s3", "account": "backblaze:history",
+                "endpoint": "https://s3.us-west-004.backblazeb2.com",
+                "region": "us-west-004", "bucket": "source-bucket", "prefix": "approved/canary/",
+            },
+            "dest": {"endpoint":"https://example.r2.cloudflarestorage.com","bucket":"linked-test-data"},
+            "dry_run": true, "keep_archives": true, "fingerprints": false,
+            "limits": pigeon_ingest::archive::Limits::default(), "threads": 1, "commit": "b".repeat(40)
+        },
+        "owned_source": pin,
+        "managed_destination": {"origin":"https://data.example.workers.dev","grant":"test-grant"},
+        "report_to_jobs": true,
+    }))
+    .unwrap();
+    assert!(start.owns_backblaze_source(&bound));
+    let wire = serde_json::to_value(&start).unwrap();
+    assert!(wire.get("source_keys").is_none());
+    assert!(wire.get("dest_keys").is_none());
+    let mut rotated = bound.clone();
+    rotated.reference.generation = "c".repeat(43);
+    assert!(!start.owns_backblaze_source(&rotated));
+    start.request.source_keys = "disallowed-extra-key".into();
+    assert!(!start.owns_backblaze_source(&bound));
+    start.request.source_keys.clear();
+    if let SourceSpec::S3 { prefix, .. } = &mut start.request.job.source {
+        *prefix = "outside/".into();
+    }
+    assert!(!start.owns_backblaze_source(&bound));
+}

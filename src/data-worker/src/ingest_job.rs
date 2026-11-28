@@ -143,7 +143,7 @@ impl IngestJob {
         )
     }
 
-    async fn start(&self, start: Start) -> Result<Response> {
+    async fn start(&self, mut start: Start) -> Result<Response> {
         if let Some(run) = self.run().await? {
             return self.answer(&run);
         }
@@ -179,6 +179,31 @@ impl IngestJob {
                 409,
                 json!({ "error": "this Data Worker has no ingest container" }),
             );
+        }
+        if let Some(pin) = &start.owned_source {
+            if start.request.job.instance != self.env.var("INSTANCE")?.to_string() {
+                return json_answer(403, json!({"error": "source belongs to another instance"}));
+            }
+            let (bound, keys) = crate::source_credentials::open(&self.env, pin).await?;
+            if !start.owns_backblaze_source(&bound) {
+                return json_answer(
+                    403,
+                    json!({"error": "source does not match the approved Backblaze job"}),
+                );
+            }
+            if let Some(endpoint) = bound.endpoint() {
+                pigeon_core::s3::verify_backblaze_read_key(
+                    &endpoint,
+                    &bound.bucket,
+                    &bound.prefix,
+                    &keys,
+                )
+                .await?;
+            } else {
+                return json_answer(403, json!({"error": "invalid Backblaze source region"}));
+            }
+            start.request.source_keys =
+                format!("{}:{}", keys.access_key_id, keys.secret_access_key);
         }
         let mut env =
             protocol::start_env(&start.request).map_err(|_| fail("invalid ingest job"))?;

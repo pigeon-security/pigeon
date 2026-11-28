@@ -149,6 +149,8 @@ struct Execution {
     connection: Option<connections::Pin>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     destination: Option<managed_destination::Reviewed>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    owned_source: bool,
 }
 
 struct Ready {
@@ -170,7 +172,7 @@ async fn ready(
     source: SourceSpec,
     max_minutes: u64,
     source_keys: String,
-    scoped: Option<(connections::Pin, managed_destination::Reviewed)>,
+    scoped: Option<(connections::Pin, managed_destination::Reviewed, bool)>,
 ) -> Result<Ready> {
     if data_store::inline(record) {
         return Err(bad(
@@ -202,40 +204,47 @@ async fn ready(
             ))
         })?;
     }
-    let (managed, dest_keys, connection, destination) = if let Some((pin, reviewed)) = scoped {
-        let target = managed_destination::ready(env, record).await?;
-        if target.origin != reviewed.origin {
-            return Err(bad(
-                "the approved Backblaze destination changed; plan again",
-            ));
-        }
-        (Some(target), String::new(), Some(pin), Some(reviewed))
-    } else {
-        let dest_slot = hosts::r2_slot(&record.id);
-        let dest_keys = secret_value(env, &dest_slot).await.ok_or_else(|| {
-            bad(format!(
-                "Bind an object key scoped to {} as {dest_slot}.",
-                bucket.name
-            ))
-        })?;
-        let keys = s3::parse_keys(&dest_keys)
-            .map_err(|_| bad("the saved R2 destination key is invalid"))?;
-        let data_endpoint = Endpoint {
-            base: hosts::r2_endpoint(&account.id),
-            region: "auto".into(),
+    let (managed, dest_keys, connection, destination, owned_source) =
+        if let Some((pin, reviewed, owned)) = scoped {
+            let target = managed_destination::ready(env, record).await?;
+            if target.origin != reviewed.origin {
+                return Err(bad(
+                    "the approved Backblaze destination changed; plan again",
+                ));
+            }
+            (
+                Some(target),
+                String::new(),
+                Some(pin),
+                Some(reviewed),
+                owned,
+            )
+        } else {
+            let dest_slot = hosts::r2_slot(&record.id);
+            let dest_keys = secret_value(env, &dest_slot).await.ok_or_else(|| {
+                bad(format!(
+                    "Bind an object key scoped to {} as {dest_slot}.",
+                    bucket.name
+                ))
+            })?;
+            let keys = s3::parse_keys(&dest_keys)
+                .map_err(|_| bad("the saved R2 destination key is invalid"))?;
+            let data_endpoint = Endpoint {
+                base: hosts::r2_endpoint(&account.id),
+                region: "auto".into(),
+            };
+            s3::send(
+                Method::Head,
+                &data_endpoint,
+                &s3::object_path(&bucket.name, ""),
+                &[],
+                &[],
+                &keys,
+            )
+            .await
+            .map_err(|_| bad("The bound R2 key cannot read the approved Data bucket."))?;
+            (None, dest_keys, None, None, false)
         };
-        s3::send(
-            Method::Head,
-            &data_endpoint,
-            &s3::object_path(&bucket.name, ""),
-            &[],
-            &[],
-            &keys,
-        )
-        .await
-        .map_err(|_| bad("The bound R2 key cannot read the approved Data bucket."))?;
-        (None, dest_keys, None, None)
-    };
     let (worker, worker_key) = data_store::reach(env, record).await?;
     execution_binding(Host::Cloudflare, Some(&worker), None)?;
     let reply = net::data_post(&worker, container_job::READY_PATH, &worker_key, now_ms(), &json!({}))
@@ -273,6 +282,7 @@ async fn ready(
             max_minutes,
             connection,
             destination,
+            owned_source,
         },
         account,
         bucket,
@@ -336,26 +346,29 @@ pub(crate) async fn plan(
         .get("prefix")
         .map(|value| value.as_str().ok_or_else(|| bad("prefix must be text")))
         .transpose()?;
-    let (approved, pin, creds) = if let Some(name) = args["connection"].as_str() {
+    let (approved, pin, creds, listing) = if let Some(name) = args["connection"].as_str() {
         let connections::Binding::Backblaze(binding) = connections::binding(record, name)? else {
             return Err(bad("the approved connection is not Backblaze"));
         };
         let approved = binding.bind(prefix).map_err(bad)?;
         separate_backup(record, binding)?;
-        let (pin, keys) = connections::open(env, record, name).await?;
-        (
-            approved,
-            Some(pin),
-            format!("{}:{}", keys.access_key_id, keys.secret_access_key),
-        )
+        if let Some(pin) = connections::owned_reference(record, name)? {
+            let listing =
+                connections::owned_sample(env, record, &pin, prefix.unwrap_or(&binding.prefix))
+                    .await?;
+            (approved, Some((pin, true)), String::new(), listing)
+        } else {
+            let (pin, keys) = connections::open(env, record, name).await?;
+            let pair = format!("{}:{}", keys.access_key_id, keys.secret_access_key);
+            let listing = sample(&approved, &pair).await?;
+            (approved, Some((pin, false)), pair, listing)
+        }
     } else {
-        (
-            connection(record)?.bind(prefix).map_err(bad)?,
-            None,
-            source_keys(record, env).await?,
-        )
+        let approved = connection(record)?.bind(prefix).map_err(bad)?;
+        let pair = source_keys(record, env).await?;
+        let listing = sample(&approved, &pair).await?;
+        (approved, None, pair, listing)
     };
-    let listing = sample(&approved, &creds).await?;
     let count = listing.objects.len() as u64;
     let bytes = listing
         .objects
@@ -387,7 +400,7 @@ pub(crate) async fn plan(
     let estimate = estimate::estimate(Host::Cloudflare, total, objects, UNIQUE_SHARE);
     let max_minutes = (estimate.hours_high.mul_add(90.0, 5.0).ceil() as u64).clamp(5, 24 * 60);
     let dry_run = args["dry_run"].as_bool().unwrap_or(true);
-    let scoped = if let Some(pin) = pin {
+    let scoped = if let Some((pin, owned)) = pin {
         if !dry_run
             && (listing.next.is_some()
                 || listing
@@ -407,7 +420,7 @@ pub(crate) async fn plan(
                 ));
             }
         };
-        Some((pin, target.review(total, objects, dry_run)))
+        Some((pin, target.review(total, objects, dry_run), owned))
     } else {
         None
     };
@@ -558,14 +571,29 @@ pub(crate) async fn start(
             };
             separate_backup(&record, binding)?;
             let source = binding.bind(Some(prefix)).map_err(bad)?;
-            let keys = connections::open_pinned(env, &record, pin).await?;
+            let owner = connections::owned_reference(&record, &pin.name)?;
+            let keys = match (prior.owned_source, owner) {
+                (true, Some(owner)) if owner == *pin => {
+                    connections::owned_sample(env, &record, pin, prefix).await?;
+                    String::new()
+                }
+                (false, None) => {
+                    let keys = connections::open_pinned(env, &record, pin).await?;
+                    format!("{}:{}", keys.access_key_id, keys.secret_access_key)
+                }
+                _ => {
+                    return Err(bad(
+                        "the approved Backblaze credential custody changed; plan again",
+                    ));
+                }
+            };
             (
                 source,
-                format!("{}:{}", keys.access_key_id, keys.secret_access_key),
-                Some((pin.clone(), reviewed.clone())),
+                keys,
+                Some((pin.clone(), reviewed.clone(), prior.owned_source)),
             )
         }
-        (None, None) => (
+        (None, None) if !prior.owned_source => (
             connection(&record)?.bind(Some(prefix)).map_err(bad)?,
             source_keys(&record, env).await?,
             None,
@@ -593,7 +621,9 @@ pub(crate) async fn start(
         ));
     }
     // Confirm the freshly read key still works before spending the approval.
-    sample(&job.source, &resolved.source_keys).await?;
+    if !prior.owned_source {
+        sample(&job.source, &resolved.source_keys).await?;
+    }
     Ingest::check_current(env, &record).await?;
     let kind = pigeon_core::approval::Kind::Other(KIND.into());
     let digest =
@@ -670,8 +700,14 @@ pub(crate) async fn start(
         (None, None) => None,
         _ => return Err(bad("the approved Backblaze destination is incomplete")),
     };
+    let owned_source = if prior.owned_source {
+        prior.connection.clone()
+    } else {
+        None
+    };
     let body = serde_json::to_value(container_job::Start {
         managed_destination,
+        owned_source,
         request: StartRequest {
             job: job.clone(),
             source_keys: resolved.source_keys,

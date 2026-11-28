@@ -53,8 +53,8 @@ approved source and store it as `ACCESS_KEY_ID:SECRET_ACCESS_KEY`.
 
 Review and apply the Data plan. It binds only the named slots in that account and
 fails closed when a staged slot is missing. **Verify** uses the linked Data Worker for
-a bounded list. The listing proves read access and does not establish provider-side
-write denial. The home console only handles the reference in this mode.
+a bounded list to verify read access. The home console only handles the reference
+in this mode.
 
 This step stages the registry, bindings, and owning-account read path. A source
 marked owning-account cannot launch through a legacy runner or save its key through
@@ -69,3 +69,9 @@ bytes directly from the provider. The grant's run, generation, and narrower pref
 are pinned, and changing the bound generation makes existing grants unusable.
 An owning-account Spaces run needs an applied Data Worker plan and a runner built
 with this transport. The Droplet compute credential follows its separate setup.
+
+For Backblaze, the owning Worker checks native authorization metadata for exactly
+one approved bucket, endpoint and prefix with read-only permissions. A new named
+Backblaze plan can launch from a verified owning-account slot. Its approved
+start carries the generation reference. The Data Worker's IngestJob reads the
+key locally for its own container and checks the reviewed source scope again.
