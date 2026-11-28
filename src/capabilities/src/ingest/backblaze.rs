@@ -526,7 +526,7 @@ pub(crate) async fn plan(
         keep_archives: true,
         fingerprints: args["fingerprints"].as_bool().unwrap_or(false),
         limits: Limits::default(),
-        threads: 4,
+        threads: throughput::THREADS,
         commit: resolved.revision,
         max_minutes: Some(max_minutes),
         resume: continued.map(|(_, resume)| resume),

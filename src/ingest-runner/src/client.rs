@@ -51,6 +51,9 @@ impl Client {
             .timeout_connect(Duration::from_secs(30))
             .timeout_read(Duration::from_secs(300))
             .timeout_write(Duration::from_secs(300))
+            // Keep connections for the engine's worker threads (docs/plans/ingest-throughput.md).
+            .max_idle_connections(256)
+            .max_idle_connections_per_host(128)
             .build();
         Self {
             endpoint: Endpoint {

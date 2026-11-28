@@ -2653,7 +2653,7 @@ fn core_ingest_plans_hosts_and_estimates() {
     };
     let job = inputs(&do_acct, true, commit);
     assert!(job.dry_run && job.keep_archives && !job.fingerprints);
-    assert_eq!(job.threads, 8);
+    assert_eq!(job.threads, 32);
     assert_eq!(job.run, "20261123-digitalocean-legacy-photos-abcdef");
     assert_eq!(
         job.dest.endpoint,

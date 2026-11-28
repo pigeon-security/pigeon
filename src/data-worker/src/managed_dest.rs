@@ -142,6 +142,40 @@ pub async fn fetch(req: &mut Request, env: &Env) -> Result<Response> {
             };
             Response::from_json(&head)
         }
+        // Up to 500 payload identities in one request, a hint for the runner's decisions. Each
+        // is an R2 HEAD (concurrently): the D1 `blobs` index is not used, because a dry run's
+        // repeated would-be uploads are indexed as duplicates of blobs R2 does not hold, and a
+        // duplicate must be certain (docs/plans/ingest-throughput.md).
+        "head-many" => {
+            let Some(body) = bounded_body(req, wire::HEAD_MANY_BODY).await? else {
+                return error(413, "existence batch too large");
+            };
+            let Ok(batch) = serde_json::from_slice::<wire::HeadMany>(&body) else {
+                return error(400, "invalid existence batch");
+            };
+            if !wire::head_many_keys(&grant.run, &batch) {
+                return error(403, "existence batch outside grant");
+            }
+            let mut heads = Vec::with_capacity(batch.keys.len());
+            for chunk in batch.keys.chunks(50) {
+                let found =
+                    futures_util::future::join_all(chunk.iter().map(|key| bucket.head(key))).await;
+                for object in found {
+                    heads.push(match object? {
+                        Some(object) => {
+                            let fields = object.custom_metadata()?;
+                            Some(Head {
+                                size: object.size(),
+                                sha256: fields.get("sha256").cloned(),
+                                blake3: fields.get("blake3").cloned(),
+                            })
+                        }
+                        None => None,
+                    });
+                }
+            }
+            Response::from_json(&wire::HeadManyReply { heads })
+        }
         "get" if key == pigeon_ingest::manifest::checkpoint_key(&grant.run) => {
             let Some(object) = bucket.get(&key).execute().await? else {
                 return error(404, "checkpoint absent");

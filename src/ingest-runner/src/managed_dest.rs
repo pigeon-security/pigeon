@@ -24,6 +24,8 @@ impl ManagedDest {
                 .redirects(0)
                 .timeout_connect(Duration::from_secs(20))
                 .timeout(Duration::from_secs(90))
+                .max_idle_connections(256)
+                .max_idle_connections_per_host(128)
                 .build(),
         })
     }
@@ -110,7 +112,7 @@ impl ManagedDest {
         )?;
         if status == "published" {
             self.stage_request("multipart-complete", key, sha, None, &[])?;
-            return Ok(());
+            return Err(Error::Exists);
         }
         let mut bytes = vec![0; PART_BYTES as usize];
         for part_number in 1..=size.div_ceil(PART_BYTES) {
@@ -182,14 +184,40 @@ impl Dest for ManagedDest {
                 "managed payload has an unexpected length".into(),
             ));
         }
-        Self::check(
+        let reply = Self::check(
             self.request("put-blob", key)
                 .set(wire::SHA256, &metrics.sha256)
                 .set(wire::BLAKE3, &metrics.blake3)
                 .send_bytes(&bytes),
         )?
         .ok_or_else(|| Error::Dest("managed payload route is unavailable".into()))?;
+        // The write is create-only: `created: false` is the same blob already stored.
+        let status = reply.status();
+        let receipt: serde_json::Value =
+            serde_json::from_slice(&Self::read(reply, 1024)?).unwrap_or_default();
+        if status == 200 && receipt["created"] == false {
+            return Err(Error::Exists);
+        }
         Ok(())
+    }
+
+    fn head_many(&self, keys: &[String]) -> Result<Vec<Option<Head>>, Error> {
+        if keys.is_empty() || keys.len() > wire::HEAD_MANY {
+            return Err(Error::Dest("invalid managed existence batch".into()));
+        }
+        let body = serde_json::to_vec(&wire::HeadMany {
+            keys: keys.to_vec(),
+        })
+        .map_err(|_| Error::Dest("invalid managed existence batch".into()))?;
+        let reply = Self::check(self.request("head-many", "").send_bytes(&body))?
+            .ok_or_else(|| Error::Dest("managed existence batch is unavailable".into()))?;
+        let answer: wire::HeadManyReply =
+            serde_json::from_slice(&Self::read(reply, wire::HEAD_MANY_REPLY)?)
+                .map_err(|_| Error::Dest("invalid managed existence batch reply".into()))?;
+        if answer.heads.len() != keys.len() {
+            return Err(Error::Dest("invalid managed existence batch reply".into()));
+        }
+        Ok(answer.heads)
     }
 
     fn put_object(&self, key: &str, body: &[u8], _content_type: &str) -> Result<(), Error> {

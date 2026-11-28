@@ -50,6 +50,9 @@ pub enum Error {
     Config(String),
     /// A part of this library that is not built yet.
     NotBuilt(&'static str),
+    /// A create-only blob write found the key already holding the same blob: recorded as a
+    /// duplicate, never an error.
+    Exists,
 }
 
 impl fmt::Display for Error {
@@ -61,6 +64,7 @@ impl fmt::Display for Error {
             Error::Archive(s) => write!(f, "archive: {s}"),
             Error::Config(s) => write!(f, "job: {s}"),
             Error::NotBuilt(s) => write!(f, "not built yet: {s}"),
+            Error::Exists => write!(f, "destination: the blob already exists"),
         }
     }
 }

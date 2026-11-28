@@ -15,8 +15,19 @@ const MEASURE_RUNS: usize = 3;
 /// A run with no report whose status is older than this is taken as ended.
 const STALE_MS: i64 = 15 * 60_000;
 
-/// Objects in flight for the engine a host runs. The serial engine handles one at a time.
-pub(crate) const CONCURRENCY: u32 = 1;
+/// Worker threads of a run: IO-bound small objects on a 4-vCPU host.
+pub(crate) const THREADS: u32 = 32;
+
+/// Objects in flight assumed for `host` before a run there is measured. DigitalOcean and
+/// Scaleway build the runner at the approved commit, so they run the parallel engine. A
+/// Cloudflare Container runs the image pinned by hand, which may be an older serial runner, so
+/// its estimate assumes one until a run measures it.
+pub(crate) fn concurrency(host: Host) -> u32 {
+    match host {
+        Host::Cloudflare => 1,
+        _ => THREADS,
+    }
+}
 
 /// The `objects` argument: the source's whole object count, from the provider's console.
 pub(crate) fn objects_arg(args: &Value) -> Result<Option<u64>> {
@@ -41,7 +52,7 @@ pub(crate) fn plan_estimate(
     let throughput = Throughput {
         measured,
         extrapolated,
-        ..Throughput::new(host, CONCURRENCY)
+        ..Throughput::new(host, concurrency(host))
     };
     estimate::estimate_run(host, bytes, objects, UNIQUE_SHARE, &throughput)
 }

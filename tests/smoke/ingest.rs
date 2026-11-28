@@ -1,18 +1,19 @@
 //! Ingest throughput (docs/plans/ingest-throughput.md): run time from the file count, deadlines
 //! and continuations; the parallel engine's equivalence with the serial one; live runs.
 
-use pigeon_ingest::Error;
 use pigeon_ingest::archive::Limits;
 use pigeon_ingest::decide::Head;
+use pigeon_ingest::decide::{Reason, Verdict};
 use pigeon_ingest::engine::{Clock, Dest, Object, Page, Run, Source, Spool, SpoolFile, run};
 use pigeon_ingest::manifest::{
     Checkpoint, DestSpec, JobSpec, ManifestLine, Report, Resume, SourceSpec, checkpoint_key,
 };
 use pigeon_ingest::metrics::Metrics;
+use pigeon_ingest::{Error, blob_key};
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Cursor, Read};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// A listing in pages of `page` objects; reads may be delayed to shuffle worker finishing order.
 struct MemSource {
@@ -20,6 +21,25 @@ struct MemSource {
     page: usize,
     /// Microseconds of delay for a read, from a key's hash.
     jitter_us: u64,
+}
+
+/// Sets `flag` once `key` is opened: a stop arriving mid-run.
+struct StopAt<'a> {
+    inner: &'a MemSource,
+    key: String,
+    flag: Arc<AtomicBool>,
+}
+
+impl Source for StopAt<'_> {
+    fn list(&self, after: Option<&str>, token: Option<&str>) -> Result<Page, Error> {
+        self.inner.list(after, token)
+    }
+    fn open(&self, key: &str) -> Result<Box<dyn Read + Send>, Error> {
+        if key == self.key {
+            self.flag.store(true, Ordering::SeqCst);
+        }
+        self.inner.open(key)
+    }
 }
 
 impl Source for MemSource {
@@ -64,6 +84,11 @@ struct MemDest {
     objs: Mutex<HashMap<String, Stored>>,
     blob_puts: AtomicU64,
     heads: AtomicU64,
+    head_many: AtomicU64,
+    /// Blob keys whose next writes fail, and how many.
+    fail_first: Mutex<HashMap<String, u32>>,
+    /// Answers every HEAD as absent: another writer stores blobs after the check.
+    blind: bool,
 }
 
 impl MemDest {
@@ -110,6 +135,9 @@ impl MemDest {
 impl Dest for MemDest {
     fn head(&self, key: &str) -> Result<Option<Head>, Error> {
         self.heads.fetch_add(1, Ordering::SeqCst);
+        if self.blind {
+            return Ok(None);
+        }
         Ok(self.objs.lock().unwrap().get(key).map(|(b, s, h)| Head {
             size: b.len() as u64,
             sha256: s.clone(),
@@ -129,9 +157,15 @@ impl Dest for MemDest {
         if buf.len() as u64 != size {
             return Err(Error::Dest("wrong length".into()));
         }
+        if let Some(left) = self.fail_first.lock().unwrap().get_mut(key)
+            && *left > 0
+        {
+            *left -= 1;
+            return Err(Error::Dest("flaky write".into()));
+        }
         let mut objs = self.objs.lock().unwrap();
         if objs.contains_key(key) {
-            return Err(Error::Dest("the blob exists".into()));
+            return Err(Error::Exists);
         }
         self.blob_puts.fetch_add(1, Ordering::SeqCst);
         objs.insert(
@@ -139,6 +173,13 @@ impl Dest for MemDest {
             (buf, Some(m.sha256.clone()), Some(m.blake3.clone())),
         );
         Ok(())
+    }
+    fn head_many(&self, keys: &[String]) -> Result<Vec<Option<Head>>, Error> {
+        self.head_many.fetch_add(1, Ordering::SeqCst);
+        let heads = self.heads.load(Ordering::SeqCst);
+        let out = keys.iter().map(|k| self.head(k)).collect();
+        self.heads.store(heads, Ordering::SeqCst);
+        out
     }
     fn put_object(&self, key: &str, body: &[u8], _: &str) -> Result<(), Error> {
         self.objs
@@ -195,17 +236,292 @@ fn job(run_id: &str, dry: bool, threads: u32) -> JobSpec {
     }
 }
 
-fn go(job: &JobSpec, source: &MemSource, dest: &MemDest) -> Report {
-    let stop = AtomicBool::new(false);
+fn go(job: &JobSpec, source: &dyn Source, dest: &MemDest) -> Report {
+    go_until(job, source, dest, &AtomicBool::new(false))
+}
+
+fn go_until(job: &JobSpec, source: &dyn Source, dest: &MemDest, stop: &AtomicBool) -> Report {
     run(&Run {
         job,
         source,
         dest,
         spool: &MemSpool,
         clock: &Fixed,
-        stop: &stop,
+        stop,
     })
     .unwrap()
+}
+
+fn metrics(b: &[u8]) -> Metrics {
+    let mut h = pigeon_ingest::metrics::Hasher::new(false);
+    h.update(b);
+    h.finish().unwrap()
+}
+
+/// Every object R2 holds, sorted, with its bytes and identity.
+fn stored(dest: &MemDest, prefix: &str) -> Vec<(String, Stored)> {
+    let mut out: Vec<(String, Stored)> = dest
+        .objs
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(k, _)| k.starts_with(prefix))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    out.sort();
+    out
+}
+
+/// A zip holding `files`.
+fn zip_of(files: &[(&str, &[u8])]) -> Vec<u8> {
+    use std::io::Write;
+    use zip::write::SimpleFileOptions;
+    let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    for (name, data) in files {
+        w.start_file(*name, SimpleFileOptions::default()).unwrap();
+        w.write_all(data).unwrap();
+    }
+    w.finish().unwrap().into_inner()
+}
+
+/// A source of `n` small files with planted duplicates: runs of identical neighbours (decided
+/// in the same batch), repeats far apart, blobs R2 already holds, a conflict, a zip holding a
+/// duplicate, an archive left unopened, and a blob whose first upload fails.
+fn planted(n: usize) -> (MemSource, MemDest) {
+    let mut objs = BTreeMap::new();
+    for i in 0..n {
+        let body = match i % 10 {
+            // Neighbours with the same bytes.
+            3 | 4 => format!("pair {}\n", i / 10),
+            // The same bytes every 70 objects, across pages and batches.
+            7 => format!("far {}\n", i % 70),
+            _ => format!("unique {i}\n"),
+        };
+        objs.insert(format!("o/{i:05}"), body.into_bytes());
+    }
+    objs.insert("p/known.txt".into(), b"already in r2\n".to_vec());
+    objs.insert("p/known-again.txt".into(), b"already in r2\n".to_vec());
+    objs.insert("p/conflict.bin".into(), b"conflicting\n".to_vec());
+    objs.insert(
+        "p/z.zip".into(),
+        zip_of(&[("a.txt", b"pair 1\n"), ("b.txt", b"only in the zip\n")]),
+    );
+    objs.insert("p/flaky-1.txt".into(), b"flaky blob\n".to_vec());
+    objs.insert("p/flaky-2.txt".into(), b"flaky blob\n".to_vec());
+    objs.insert("p/flaky-3.txt".into(), b"flaky blob\n".to_vec());
+    let dest = MemDest::default();
+    let known = metrics(b"already in r2\n");
+    dest.objs.lock().unwrap().insert(
+        blob_key(&known.sha256),
+        (
+            b"already in r2\n".to_vec(),
+            Some(known.sha256.clone()),
+            Some(known.blake3.clone()),
+        ),
+    );
+    let conflict = metrics(b"conflicting\n");
+    dest.objs.lock().unwrap().insert(
+        blob_key(&conflict.sha256),
+        (b"something else".to_vec(), Some("0".repeat(64)), None),
+    );
+    // Four failures exhaust the retries of the first upload; the next sighting succeeds.
+    dest.fail_first
+        .lock()
+        .unwrap()
+        .insert(blob_key(&metrics(b"flaky blob\n").sha256), 4);
+    (
+        MemSource {
+            objs,
+            page: 97,
+            jitter_us: 100,
+        },
+        dest,
+    )
+}
+
+/// The serial engine (one thread) and the parallel engine (64 threads, reads finishing in a
+/// shuffled order) make identical decisions: the same counters, manifest lines and parts,
+/// checkpoint, report and stored blobs, for live and dry runs.
+#[test]
+fn ingest_parallel_engine_matches_the_serial_engine() {
+    for dry in [false, true] {
+        // More than one manifest part (5,000 lines each).
+        let (source, serial_dest) = planted(5_600);
+        let (_, parallel_dest) = planted(5_600);
+        let serial = go(&job("run", dry, 1), &source, &serial_dest);
+        let parallel = go(&job("run", dry, 64), &source, &parallel_dest);
+        assert_eq!(serial, parallel, "dry {dry}");
+        assert_eq!(
+            serial_dest.lines("run"),
+            parallel_dest.lines("run"),
+            "dry {dry}"
+        );
+        assert_eq!(serial_dest.part_keys("run").len(), 2);
+        assert_eq!(serial_dest.part_keys("run"), parallel_dest.part_keys("run"));
+        assert_eq!(
+            serial_dest.get(&checkpoint_key("run")),
+            parallel_dest.get(&checkpoint_key("run"))
+        );
+        assert_eq!(
+            stored(&serial_dest, "blobs/"),
+            stored(&parallel_dest, "blobs/")
+        );
+        assert_eq!(
+            stored(&serial_dest, "quarantine/"),
+            stored(&parallel_dest, "quarantine/")
+        );
+        // The batched existence check stood in for most single HEADs.
+        assert_eq!(serial_dest.head_many.load(Ordering::SeqCst), 0);
+        assert!(parallel_dest.head_many.load(Ordering::SeqCst) > 0);
+        assert!(
+            parallel_dest.heads.load(Ordering::SeqCst) * 4
+                < serial_dest.heads.load(Ordering::SeqCst)
+        );
+
+        let c = &serial.counters;
+        assert_eq!(c.listed, 5_607);
+        assert_eq!(c.conflicts, 1);
+        assert_eq!(c.archives_opened, 1);
+        let lines = serial_dest.lines("run");
+        let by_key = |k: &str| {
+            lines
+                .iter()
+                .find(|l| l.origin.key == k && l.member.is_none())
+                .unwrap()
+                .clone()
+        };
+        // Neighbours: the first is canonical, the second a duplicate seen in this run.
+        let first = by_key("o/00003");
+        let second = by_key("o/00004");
+        assert_eq!(first.sha256, second.sha256);
+        assert_eq!(second.verdict, Verdict::Duplicate);
+        assert_eq!(second.reason, Reason::SeenInRun);
+        assert_eq!(
+            by_key("p/known-again.txt").reason,
+            Reason::InR2,
+            "already held blobs are duplicates"
+        );
+        if dry {
+            assert_eq!(first.verdict, Verdict::WouldUpload);
+            assert_eq!(serial_dest.blob_puts.load(Ordering::SeqCst), 0);
+        } else {
+            assert_eq!(first.verdict, Verdict::Upload);
+            // A failed upload is never a duplicate source: the next sighting is canonical.
+            assert_eq!(by_key("p/flaky-1.txt").verdict, Verdict::Failed);
+            assert_eq!(by_key("p/flaky-2.txt").verdict, Verdict::Upload);
+            assert_eq!(by_key("p/flaky-3.txt").verdict, Verdict::Duplicate);
+            // Every source object kept its sighting, pointing at the canonical blob.
+            assert!(lines.iter().all(|l| l.verdict == Verdict::Failed
+                || l.verdict == Verdict::Skipped
+                || l.r2_key.is_some()));
+            assert_eq!(
+                c.uploaded + c.conflicts,
+                serial_dest.blob_puts.load(Ordering::SeqCst)
+            );
+        }
+    }
+}
+
+/// Two writers of the same blob: one stores it, the other is told it exists, and the engine
+/// records that as a duplicate, never an error, on either engine.
+#[test]
+fn ingest_create_only_race_records_a_duplicate() {
+    let dest = Arc::new(MemDest::default());
+    let body = b"raced blob\n".to_vec();
+    let m = metrics(&body);
+    let key = blob_key(&m.sha256);
+    let results: Vec<Result<(), Error>> = std::thread::scope(|s| {
+        let hs: Vec<_> = (0..2)
+            .map(|_| {
+                let (dest, body, m, key) = (&dest, &body, &m, &key);
+                s.spawn(move || {
+                    dest.put_blob(key, &mut Cursor::new(body.clone()), body.len() as u64, m)
+                })
+            })
+            .collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
+    assert_eq!(
+        results.iter().filter(|r| **r == Err(Error::Exists)).count(),
+        1
+    );
+    assert_eq!(dest.blob_puts.load(Ordering::SeqCst), 1);
+
+    // Another writer stores the blob after the existence check (the HEAD says absent): the
+    // create-only upload finds it and the line is a duplicate in R2.
+    for threads in [1, 64] {
+        let mut objs = BTreeMap::new();
+        objs.insert("a.txt".to_string(), body.clone());
+        objs.insert("b.txt".to_string(), b"fresh\n".to_vec());
+        let source = MemSource {
+            objs,
+            page: 10,
+            jitter_us: 0,
+        };
+        let dest = MemDest {
+            blind: true,
+            ..MemDest::default()
+        };
+        dest.objs.lock().unwrap().insert(
+            key.clone(),
+            (body.clone(), Some(m.sha256.clone()), Some(m.blake3.clone())),
+        );
+        let report = go(&job("race", false, threads), &source, &dest);
+        assert_eq!(report.counters.failed, 0);
+        assert_eq!(report.counters.duplicates, 1);
+        assert_eq!(report.counters.uploaded, 1);
+        let lines = dest.lines("race");
+        assert_eq!(lines[0].verdict, Verdict::Duplicate);
+        assert_eq!(lines[0].reason, Reason::InR2);
+        assert_eq!(lines[0].r2_key.as_deref(), Some(key.as_str()));
+    }
+}
+
+/// A parallel run stopped mid-way resumes from its checkpoint: every object is decided exactly
+/// once across both sessions, none skipped, and only first sightings were copied.
+#[test]
+fn ingest_parallel_engine_resumes_without_skips_or_repeats() {
+    let (source, dest) = planted(1_200);
+    let flag = Arc::new(AtomicBool::new(false));
+    let stopping = StopAt {
+        inner: &source,
+        key: "o/00600".into(),
+        flag: Arc::clone(&flag),
+    };
+    let first = go_until(&job("resume", false, 64), &stopping, &dest, &flag);
+    assert_eq!(first.state, pigeon_ingest::manifest::RunState::Stopped);
+    assert!(first.counters.listed >= 601 && first.counters.listed < 1_207);
+    let second = go(&job("resume", false, 64), &source, &dest);
+    assert_eq!(second.counters.listed, 1_207);
+    let lines = dest.lines("resume");
+    let mut keys: Vec<&str> = lines
+        .iter()
+        .filter(|l| l.member.is_none())
+        .map(|l| l.origin.key.as_str())
+        .collect();
+    let in_order = keys.clone();
+    keys.sort_unstable();
+    keys.dedup();
+    assert_eq!(keys.len(), 1_207, "each object once");
+    assert_eq!(in_order, keys, "in listing order");
+    assert_eq!(
+        keys,
+        source.objs.keys().map(String::as_str).collect::<Vec<_>>()
+    );
+    // Each blob was written once: the second session found the first session's blobs in R2.
+    let (_, whole_dest) = planted(1_200);
+    let whole = go(&job("whole", false, 1), &source, &whole_dest);
+    assert_eq!(
+        stored(&dest, "blobs/"),
+        stored(&whole_dest, "blobs/"),
+        "the same blobs as an uninterrupted run"
+    );
+    assert_eq!(
+        dest.blob_puts.load(Ordering::SeqCst),
+        whole_dest.blob_puts.load(Ordering::SeqCst)
+    );
+    assert_eq!(whole.counters.listed, 1_207);
 }
 
 /// Run time is the slower of the byte time and the file time; tiny files are file-count-bound,
@@ -405,4 +721,38 @@ fn ingest_continues_from_another_runs_checkpoint() {
     let again = go(&next, &source, &first);
     assert_eq!(again.counters.listed, 30);
     assert_eq!(first.lines("second").len(), 18);
+}
+
+/// The Data Worker's batched existence check stays inside the run's grant: 1 to 500 distinct
+/// payload keys of this run, nothing else.
+#[test]
+fn ingest_head_many_stays_inside_the_grant() {
+    use pigeon_ingest::managed_destination::{HEAD_MANY, HeadMany, head_many_keys};
+    use pigeon_ingest::manifest::quarantine_key;
+    let sha = |i: usize| format!("{i:064x}");
+    let batch = |keys: Vec<String>| HeadMany { keys };
+    assert!(head_many_keys(
+        "run",
+        &batch(vec![blob_key(&sha(1)), quarantine_key("run", &sha(2))])
+    ));
+    assert!(head_many_keys(
+        "run",
+        &batch((0..HEAD_MANY).map(|i| blob_key(&sha(i))).collect())
+    ));
+    assert!(!head_many_keys(
+        "run",
+        &batch((0..=HEAD_MANY).map(|i| blob_key(&sha(i))).collect())
+    ));
+    assert!(!head_many_keys("run", &batch(Vec::new())));
+    assert!(!head_many_keys(
+        "run",
+        &batch(vec![blob_key(&sha(1)), blob_key(&sha(1))])
+    ));
+    assert!(!head_many_keys(
+        "run",
+        &batch(vec![quarantine_key("other", &sha(2))])
+    ));
+    assert!(!head_many_keys("run", &batch(vec![checkpoint_key("run")])));
+    // The body is a strict shape.
+    assert!(serde_json::from_str::<HeadMany>(r#"{"keys":[],"more":1}"#).is_err());
 }

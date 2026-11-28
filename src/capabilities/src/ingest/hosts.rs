@@ -87,7 +87,7 @@ pub struct JobInputs<'a> {
     pub nonce: u32,
 }
 
-/// The job for a plan: the run id, the source and destination, default limits and 8 threads.
+/// The job for a plan: the run id, the source and destination, default limits and 32 threads.
 pub fn job_spec(i: &JobInputs<'_>) -> JobSpec {
     let a = i.account;
     JobSpec {
@@ -108,7 +108,7 @@ pub fn job_spec(i: &JobInputs<'_>) -> JobSpec {
         keep_archives: i.keep_archives,
         fingerprints: i.fingerprints,
         limits: Limits::default(),
-        threads: 8,
+        threads: 32,
         commit: i.commit.into(),
         max_minutes: None,
         resume: None,

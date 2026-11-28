@@ -4,9 +4,12 @@
 //! checkpoint. Implemented over traits, so the runner gives it HTTPS and a spool directory and
 //! the smoke suite gives it memory.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::io::{Cursor, Read, Seek, SeekFrom, Write};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError, TryRecvError};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -51,10 +54,17 @@ pub trait Source: Sync {
 pub trait Dest: Sync {
     /// The object at `key`: its length and `sha256`/`blake3` metadata, or none.
     fn head(&self, key: &str) -> Result<Option<Head>, Error>;
+    /// [`Dest::head`] for many keys at once, in order: a hint the engine may use in place of one
+    /// HEAD per blob. The default asks one at a time.
+    fn head_many(&self, keys: &[String]) -> Result<Vec<Option<Head>>, Error> {
+        keys.iter().map(|k| self.head(k)).collect()
+    }
     /// Writes `size` bytes from `body` at `key` with `metrics` as metadata
     /// (`x-amz-meta-sha256`, `-blake3`, `-size`, `-mime`); a single PUT also sends
     /// `x-amz-checksum-sha256`, larger ones go multipart. The body may fail its read at the end
     /// when the bytes do not match `metrics` (see [`Verify`]): the write must then not complete.
+    /// The write is create-only: when `key` already holds the same blob it answers
+    /// [`Error::Exists`] and leaves it.
     fn put_blob(
         &self,
         key: &str,
@@ -173,6 +183,14 @@ const LIST_CAP: usize = 200;
 const NEAR_BITS: u32 = 3;
 /// Read buffer size.
 const BUF: usize = 64 * 1024;
+/// Files up to this size are staged in memory rather than in the spool.
+const MEMORY_BYTES: u64 = 1024 * 1024;
+/// Objects in flight (read, waiting in order, or uploading) per worker thread.
+const WINDOW_PER_THREAD: usize = 4;
+/// Most worker threads.
+const MAX_THREADS: usize = 256;
+/// Most blob keys in one batched existence check.
+const HEAD_BATCH: usize = 500;
 
 /// Runs `f` and, when it fails, again up to [`RETRIES`] more times.
 fn retry<T>(mut f: impl FnMut() -> Result<T, Error>) -> Result<T, Error> {
@@ -180,6 +198,7 @@ fn retry<T>(mut f: impl FnMut() -> Result<T, Error>) -> Result<T, Error> {
     loop {
         match f() {
             Ok(v) => return Ok(v),
+            Err(Error::Exists) => return Err(Error::Exists),
             Err(e) => {
                 tried += 1;
                 if tried > RETRIES {
@@ -238,6 +257,20 @@ struct Engine<'r, 'a> {
     last_error: Option<String>,
 }
 
+/// The item for a listed object.
+fn top_item<'x>(origin: &'x Origin, obj: &'x Object) -> Item<'x> {
+    Item {
+        origin,
+        name: obj.key.clone(),
+        member: None,
+        chain: Vec::new(),
+        flags: Vec::new(),
+        depth: 0,
+        declared: obj.size,
+        reopen: Some(&obj.key),
+    }
+}
+
 /// Whether `f` starts like a zip. Leaves `f` rewound.
 fn file_is_zip(f: &mut dyn SpoolFile) -> bool {
     let mut head = [0u8; 4];
@@ -271,65 +304,158 @@ fn hash_file(f: &mut dyn SpoolFile, fingerprint: bool) -> Result<Metrics, Error>
     h.finish()
 }
 
+/// Reads one object once: into memory (small files) or a spool file while hashing when it
+/// fits, else hashing only.
+fn stage(r: &Run<'_>, key: &str, size: u64) -> Result<Staged, Error> {
+    let mut src = r.source.open(key)?;
+    let mut h = Hasher::new(r.job.fingerprints);
+    let mut buf = vec![0u8; BUF];
+    let mut spool_file: Option<Box<dyn SpoolFile>> = if size > r.spool.free_bytes() {
+        None
+    } else if size <= MEMORY_BYTES {
+        Some(Box::new(Cursor::new(Vec::with_capacity(size as usize))))
+    } else {
+        Some(r.spool.create()?)
+    };
+    loop {
+        let n = src
+            .read(&mut buf)
+            .map_err(|e| Error::Source(e.to_string()))?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+        if let Some(f) = spool_file.as_mut() {
+            f.write_all(&buf[..n])?;
+        }
+    }
+    if let Some(f) = spool_file.as_mut() {
+        f.seek(SeekFrom::Start(0))?;
+    }
+    Ok(Staged {
+        metrics: h.finish()?,
+        over_spool: spool_file.is_none(),
+        file: spool_file,
+    })
+}
+
+/// Writes the bytes of a staged file to `key`, from its spool file or a verified re-read.
+fn put(
+    r: &Run<'_>,
+    key: &str,
+    file: &mut Option<Box<dyn SpoolFile>>,
+    metrics: &Metrics,
+    reopen: Option<&str>,
+) -> Result<(), Error> {
+    retry(|| match file.as_mut() {
+        Some(f) => {
+            f.seek(SeekFrom::Start(0))?;
+            r.dest.put_blob(key, f, metrics.size, metrics)
+        }
+        None => {
+            let src_key = reopen.ok_or_else(|| Error::Io("no source to copy from".into()))?;
+            let src = r.source.open(src_key)?;
+            let mut v = Verify::new(src, metrics.clone());
+            r.dest.put_blob(key, &mut v, metrics.size, metrics)
+        }
+    })
+}
+
+/// Work for a worker thread of the parallel engine.
+enum Task {
+    /// Read and hash a listed object.
+    Stage { seq: u64, key: String, size: u64 },
+    /// Upload a decided blob.
+    Put {
+        seq: u64,
+        key: String,
+        file: Option<Box<dyn SpoolFile>>,
+        metrics: Metrics,
+        reopen: Option<String>,
+    },
+}
+
+/// What a worker thread finished.
+enum Done {
+    Staged {
+        seq: u64,
+        result: Result<Staged, Error>,
+    },
+    Put {
+        seq: u64,
+        result: Result<(), Error>,
+    },
+}
+
+/// A worker thread: takes tasks until the coordinator hangs up.
+fn worker(r: &Run<'_>, tasks: &Mutex<mpsc::Receiver<Task>>, done: mpsc::Sender<Done>) {
+    loop {
+        let task = match tasks.lock() {
+            Ok(rx) => rx.recv(),
+            Err(_) => return,
+        };
+        let Ok(task) = task else { return };
+        let out = match task {
+            Task::Stage { seq, key, size } => Done::Staged {
+                seq,
+                result: retry(|| stage(r, &key, size)),
+            },
+            Task::Put {
+                seq,
+                key,
+                mut file,
+                metrics,
+                reopen,
+            } => Done::Put {
+                seq,
+                result: put(r, &key, &mut file, &metrics, reopen.as_deref()),
+            },
+        };
+        if done.send(out).is_err() {
+            return;
+        }
+    }
+}
+
+/// Objects handed to the pool to read, by sequence number, with their result once read.
+type Reading = BTreeMap<u64, (Object, Option<Result<Staged, Error>>)>;
+
+/// Where a decided object's upload stands.
+enum Upload {
+    /// Nothing to write.
+    None,
+    InFlight,
+    Finished(Result<(), Error>),
+}
+
+/// A top-level object decided in listing order, kept until it and everything before it are
+/// finished, so lines are kept in the serial engine's order.
+struct Pending {
+    seq: u64,
+    obj: Object,
+    bytes_read: u64,
+    outcome: Outcome,
+    upload: Upload,
+}
+
+/// What was decided for a pending object.
+enum Outcome {
+    /// Reading, hashing or the existence check failed.
+    Failed(Option<Metrics>, Vec<Flag>, Error),
+    Decided {
+        metrics: Metrics,
+        verdict: Verdict,
+        reason: Reason,
+        flags: Vec<Flag>,
+        r2_key: Option<String>,
+        first_time: bool,
+        not_opened: bool,
+    },
+}
+
 impl<'r, 'a> Engine<'r, 'a> {
     fn dry(&self) -> bool {
         self.r.job.dry_run
-    }
-
-    /// Reads one object once: into a spool file while hashing when it fits, else hashing only.
-    fn stage(&self, key: &str, size: u64) -> Result<Staged, Error> {
-        let r = self.r;
-        let mut src = r.source.open(key)?;
-        let mut h = Hasher::new(r.job.fingerprints);
-        let mut buf = vec![0u8; BUF];
-        let mut spool_file = if size <= r.spool.free_bytes() {
-            Some(r.spool.create()?)
-        } else {
-            None
-        };
-        loop {
-            let n = src
-                .read(&mut buf)
-                .map_err(|e| Error::Source(e.to_string()))?;
-            if n == 0 {
-                break;
-            }
-            h.update(&buf[..n]);
-            if let Some(f) = spool_file.as_mut() {
-                f.write_all(&buf[..n])?;
-            }
-        }
-        if let Some(f) = spool_file.as_mut() {
-            f.seek(SeekFrom::Start(0))?;
-        }
-        Ok(Staged {
-            metrics: h.finish()?,
-            over_spool: spool_file.is_none(),
-            file: spool_file,
-        })
-    }
-
-    /// Writes the bytes of a staged file to `key`, from its spool file or a verified re-read.
-    fn put(
-        &self,
-        key: &str,
-        file: &mut Option<Box<dyn SpoolFile>>,
-        metrics: &Metrics,
-        reopen: Option<&str>,
-    ) -> Result<(), Error> {
-        let r = self.r;
-        retry(|| match file.as_mut() {
-            Some(f) => {
-                f.seek(SeekFrom::Start(0))?;
-                r.dest.put_blob(key, f, metrics.size, metrics)
-            }
-            None => {
-                let src_key = reopen.ok_or_else(|| Error::Io("no source to copy from".into()))?;
-                let src = r.source.open(src_key)?;
-                let mut v = Verify::new(src, metrics.clone());
-                r.dest.put_blob(key, &mut v, metrics.size, metrics)
-            }
-        })
     }
 
     /// Builds a manifest line.
@@ -557,12 +683,22 @@ impl<'r, 'a> Engine<'r, 'a> {
             _ => None,
         };
         let writes = !dry && matches!(d.verdict, Verdict::Upload | Verdict::Conflict);
-        if writes
-            && let Some(key) = &r2_key
-            && let Err(e) = self.put(key, &mut file, &metrics, item.reopen)
-        {
-            self.fail(item, Some(&metrics), flags, e);
-            return;
+        let mut d = d;
+        if writes && let Some(key) = &r2_key {
+            match put(r, key, &mut file, &metrics, item.reopen) {
+                Ok(()) => {}
+                // The create-only write found the blob: R2 holds these bytes.
+                Err(Error::Exists) => {
+                    if d.verdict == Verdict::Upload {
+                        d.verdict = Verdict::Duplicate;
+                        d.reason = Reason::InR2;
+                    }
+                }
+                Err(e) => {
+                    self.fail(item, Some(&metrics), flags, e);
+                    return;
+                }
+            }
         }
         // A conflicting file is not remembered: its blob key does not hold these bytes.
         if d.verdict != Verdict::Conflict {
@@ -710,35 +846,39 @@ impl<'r, 'a> Engine<'r, 'a> {
         }
     }
 
-    /// Handles one listed object.
-    fn object(&mut self, obj: &Object) {
+    /// Where a listed object came from.
+    fn origin_of(&self, obj: &Object) -> Origin {
         let (account, bucket) = match &self.r.job.source {
             SourceSpec::S3 {
                 account, bucket, ..
             } => (account.clone(), bucket.clone()),
             SourceSpec::Local { account, root } => (account.clone(), root.clone()),
         };
-        let origin = Origin {
+        Origin {
             account,
             bucket,
             key: obj.key.clone(),
             etag: obj.etag.clone(),
             listed_size: obj.size,
             modified: obj.modified.clone(),
-        };
-        let item = Item {
-            origin: &origin,
-            name: obj.key.clone(),
-            member: None,
-            chain: Vec::new(),
-            flags: Vec::new(),
-            depth: 0,
-            declared: obj.size,
-            reopen: Some(&obj.key),
-        };
+        }
+    }
+
+    /// Handles one listed object.
+    fn object(&mut self, obj: &Object) {
+        let r = self.r;
+        let staged = retry(|| stage(r, &obj.key, obj.size));
+        self.object_staged(obj, staged);
+    }
+
+    /// Records one listed object whose bytes were read (or failed to be read): looks it up,
+    /// decides, writes and opens it.
+    fn object_staged(&mut self, obj: &Object, staged: Result<Staged, Error>) {
+        let origin = self.origin_of(obj);
+        let item = top_item(&origin, obj);
         self.counters.listed += 1;
         self.counters.listed_bytes += obj.size;
-        match retry(|| self.stage(&obj.key, obj.size)) {
+        match staged {
             Ok(staged) => {
                 self.counters.bytes_read += staged.metrics.size;
                 self.finish_file(&item, staged, None);
@@ -746,6 +886,449 @@ impl<'r, 'a> Engine<'r, 'a> {
             Err(e) => self.fail(&item, None, Vec::new(), e),
         }
         self.after_key = Some(obj.key.clone());
+    }
+
+    /// After each finished top-level object: a checkpoint when the open part is full, else a
+    /// status now and then.
+    fn after_object(&mut self) -> Result<(), Error> {
+        if self.lines.len() >= PART_LINES || self.part_bytes >= PART_BYTES {
+            self.checkpoint()?;
+            self.status(RunState::Running);
+        } else if self.r.clock.now_ms() - self.last_status_ms >= STATUS_EVERY_MS {
+            self.status(RunState::Running);
+        }
+        Ok(())
+    }
+
+    /// Decides a staged top-level object that is not a zip, in listing order: the same rules
+    /// and state as [`Engine::finish_file`], with the upload handed to the pool.
+    fn decide_one(
+        &mut self,
+        seq: u64,
+        obj: Object,
+        staged: Staged,
+        hints: &mut HashMap<String, Option<Head>>,
+        tasks: &mpsc::Sender<Task>,
+        uploading: &mut HashMap<String, u64>,
+    ) -> Pending {
+        let r = self.r;
+        let Staged {
+            metrics,
+            file,
+            over_spool,
+        } = staged;
+        let bytes_read = metrics.size;
+        let sha = metrics.sha256.clone();
+        let first_time = !self.seen.contains(&sha);
+        let mut flags = Vec::new();
+        if over_spool {
+            flags.push(Flag::OverSpool);
+        }
+        let lookup = if first_time {
+            let head = match hints.remove(&sha) {
+                Some(hint) => Ok(hint),
+                None => retry(|| r.dest.head(&blob_key(&sha))),
+            };
+            match head {
+                Ok(None) => Lookup::Absent,
+                Ok(Some(h)) => Lookup::Present(h),
+                Err(e) => {
+                    return Pending {
+                        seq,
+                        obj,
+                        bytes_read,
+                        outcome: Outcome::Failed(Some(metrics), flags, e),
+                        upload: Upload::None,
+                    };
+                }
+            }
+        } else {
+            Lookup::SeenInRun
+        };
+        let d = decide(&metrics, &lookup, self.dry());
+        let r2_key = match d.verdict {
+            Verdict::Upload | Verdict::WouldUpload | Verdict::Duplicate => Some(blob_key(&sha)),
+            Verdict::Conflict => Some(quarantine_key(&r.job.run, &sha)),
+            _ => None,
+        };
+        let writes = !self.dry() && matches!(d.verdict, Verdict::Upload | Verdict::Conflict);
+        // Not a zip here, so an archive is kept unopened.
+        let mut not_opened = false;
+        if metrics.kind == Kind::Archive {
+            if !over_spool {
+                flags.push(Flag::NotOpened);
+            }
+            not_opened = true;
+        }
+        // Remembered now, so a later sighting is a duplicate; forgotten again if the upload
+        // fails (a later sighting of an uploading blob waits for its result).
+        if d.verdict != Verdict::Conflict {
+            self.seen.insert(sha.clone());
+        }
+        let upload = match (&r2_key, writes) {
+            (Some(key), true) => {
+                let task = Task::Put {
+                    seq,
+                    key: key.clone(),
+                    file,
+                    metrics: metrics.clone(),
+                    reopen: Some(obj.key.clone()),
+                };
+                if tasks.send(task).is_ok() {
+                    if d.verdict != Verdict::Conflict {
+                        uploading.insert(sha.clone(), seq);
+                    }
+                    Upload::InFlight
+                } else {
+                    if d.verdict != Verdict::Conflict {
+                        self.seen.remove(&sha);
+                    }
+                    Upload::Finished(Err(Error::Io("the worker pool ended".into())))
+                }
+            }
+            _ => Upload::None,
+        };
+        Pending {
+            seq,
+            obj,
+            bytes_read,
+            outcome: Outcome::Decided {
+                metrics,
+                verdict: d.verdict,
+                reason: d.reason,
+                flags,
+                r2_key,
+                first_time,
+                not_opened,
+            },
+            upload,
+        }
+    }
+
+    /// Records an upload's result on its pending object.
+    fn put_done(
+        &mut self,
+        pending: &mut VecDeque<Pending>,
+        uploading: &mut HashMap<String, u64>,
+        seq: u64,
+        result: Result<(), Error>,
+    ) {
+        let Some(p) = pending.iter_mut().find(|p| p.seq == seq) else {
+            return;
+        };
+        let Outcome::Decided {
+            metrics,
+            verdict,
+            reason,
+            ..
+        } = &mut p.outcome
+        else {
+            return;
+        };
+        let result = match result {
+            // The create-only write found the blob: R2 holds these bytes.
+            Err(Error::Exists) => {
+                if *verdict == Verdict::Upload {
+                    *verdict = Verdict::Duplicate;
+                    *reason = Reason::InR2;
+                }
+                Ok(())
+            }
+            other => other,
+        };
+        if *verdict != Verdict::Conflict {
+            if uploading.get(&metrics.sha256) == Some(&seq) {
+                uploading.remove(&metrics.sha256);
+            }
+            if result.is_err() {
+                self.seen.remove(&metrics.sha256);
+            }
+        }
+        p.upload = Upload::Finished(result);
+    }
+
+    /// Keeps the lines of every finished object at the front of `pending`, in order.
+    fn drain(&mut self, pending: &mut VecDeque<Pending>) -> Result<(), Error> {
+        while pending
+            .front()
+            .is_some_and(|p| !matches!(p.upload, Upload::InFlight))
+        {
+            let Some(p) = pending.pop_front() else { break };
+            let origin = self.origin_of(&p.obj);
+            let item = top_item(&origin, &p.obj);
+            self.counters.listed += 1;
+            self.counters.listed_bytes += p.obj.size;
+            self.counters.bytes_read += p.bytes_read;
+            match p.outcome {
+                Outcome::Failed(m, flags, e) => self.fail(&item, m.as_ref(), flags, e),
+                Outcome::Decided {
+                    metrics,
+                    verdict,
+                    reason,
+                    flags,
+                    r2_key,
+                    first_time,
+                    not_opened,
+                } => match p.upload {
+                    Upload::Finished(Err(e)) => self.fail(&item, Some(&metrics), flags, e),
+                    _ => {
+                        let hints = if first_time {
+                            self.hints_for(&item, &metrics)
+                        } else {
+                            Vec::new()
+                        };
+                        let line = self.make_line(
+                            &item,
+                            Some(&metrics),
+                            verdict,
+                            reason,
+                            flags,
+                            hints,
+                            r2_key,
+                            None,
+                        );
+                        self.push_line(line, not_opened);
+                    }
+                },
+            }
+            self.after_key = Some(p.obj.key.clone());
+            self.after_object()?;
+        }
+        Ok(())
+    }
+
+    /// One batched existence check for the first-seen blobs among the objects read so far, as
+    /// hints. A failed batch leaves no hints: each blob is then looked up on its own.
+    fn prefetch_heads(
+        &self,
+        reading: &Reading,
+        hints: &mut HashMap<String, Option<Head>>,
+        uploading: &HashMap<String, u64>,
+    ) {
+        if hints.len() > 4 * HEAD_BATCH {
+            hints.clear();
+        }
+        let mut want: Vec<String> = Vec::new();
+        let mut asked = HashSet::new();
+        for (_, staged) in reading.values() {
+            let Some(staged) = staged else { break };
+            let Ok(staged) = staged else { continue };
+            let sha = &staged.metrics.sha256;
+            if !self.seen.contains(sha)
+                && !hints.contains_key(sha)
+                && !uploading.contains_key(sha)
+                && asked.insert(sha.clone())
+            {
+                want.push(sha.clone());
+                if want.len() >= HEAD_BATCH {
+                    break;
+                }
+            }
+        }
+        if want.len() < 2 {
+            return;
+        }
+        let keys: Vec<String> = want.iter().map(|sha| blob_key(sha)).collect();
+        if let Ok(heads) = self.r.dest.head_many(&keys)
+            && heads.len() == want.len()
+        {
+            hints.extend(want.into_iter().zip(heads));
+        }
+    }
+
+    /// Decides every object read so far that is next in listing order.
+    fn decide_ready(
+        &mut self,
+        reading: &mut Reading,
+        pending: &mut VecDeque<Pending>,
+        uploading: &mut HashMap<String, u64>,
+        hints: &mut HashMap<String, Option<Head>>,
+        tasks: &mpsc::Sender<Task>,
+    ) -> Result<(), Error> {
+        self.prefetch_heads(reading, hints, uploading);
+        while let Some(mut entry) = reading.first_entry() {
+            let seq = *entry.key();
+            let (zip, waits) = match entry.get_mut().1.as_mut() {
+                None => break,
+                Some(Err(_)) => (false, false),
+                Some(Ok(staged)) => (
+                    staged
+                        .file
+                        .as_mut()
+                        .is_some_and(|f| file_is_zip(f.as_mut())),
+                    uploading.contains_key(&staged.metrics.sha256),
+                ),
+            };
+            // The same blob is uploading: its result decides whether this one is canonical.
+            if waits {
+                break;
+            }
+            // A zip is opened in order, after everything before it is finished.
+            if zip && !pending.is_empty() {
+                break;
+            }
+            let (obj, staged) = entry.remove();
+            let Some(staged) = staged else { break };
+            if zip {
+                self.object_staged(&obj, staged);
+                self.after_object()?;
+                continue;
+            }
+            let p = match staged {
+                Ok(staged) => self.decide_one(seq, obj, staged, hints, tasks, uploading),
+                Err(e) => Pending {
+                    seq,
+                    obj,
+                    bytes_read: 0,
+                    outcome: Outcome::Failed(None, Vec::new(), e),
+                    upload: Upload::None,
+                },
+            };
+            pending.push_back(p);
+            self.drain(pending)?;
+        }
+        Ok(())
+    }
+
+    /// The coordinator of the parallel engine: lists ahead, hands reads and uploads to the
+    /// pool, and decides and records in listing order. Answers whether a stop ended it.
+    fn coordinate(
+        &mut self,
+        window: usize,
+        tasks: mpsc::Sender<Task>,
+        done: mpsc::Receiver<Done>,
+        pages: mpsc::Receiver<Result<Page, Error>>,
+    ) -> Result<bool, Error> {
+        let r = self.r;
+        let after = self.after_key.clone();
+        let mut queue: VecDeque<Object> = VecDeque::new();
+        let mut listing = true;
+        let mut first = true;
+        let mut list_error = None;
+        let mut stopping = false;
+        let mut next_seq = 0u64;
+        let mut reading: Reading = BTreeMap::new();
+        let mut pending: VecDeque<Pending> = VecDeque::new();
+        let mut uploading: HashMap<String, u64> = HashMap::new();
+        let mut hints: HashMap<String, Option<Head>> = HashMap::new();
+        loop {
+            if !stopping && r.stop.load(Ordering::SeqCst) {
+                stopping = true;
+                queue.clear();
+            }
+            while listing && !stopping && queue.len() < window {
+                let idle = queue.is_empty() && reading.is_empty() && pending.is_empty();
+                let got = if idle {
+                    pages.recv().map_err(|_| TryRecvError::Disconnected)
+                } else {
+                    pages.try_recv()
+                };
+                match got {
+                    Ok(Ok(page)) => {
+                        if first {
+                            first = false;
+                            self.status(RunState::Running);
+                        }
+                        queue.extend(
+                            page.objects
+                                .into_iter()
+                                .filter(|o| after.as_deref().is_none_or(|a| o.key.as_str() > a)),
+                        );
+                    }
+                    // Objects listed before the failure are still finished, as serially.
+                    Ok(Err(e)) => {
+                        list_error = Some(e);
+                        listing = false;
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => listing = false,
+                }
+            }
+            while !stopping && reading.len() + pending.len() < window {
+                let Some(obj) = queue.pop_front() else { break };
+                tasks
+                    .send(Task::Stage {
+                        seq: next_seq,
+                        key: obj.key.clone(),
+                        size: obj.size,
+                    })
+                    .map_err(|_| Error::Io("the worker pool ended".into()))?;
+                reading.insert(next_seq, (obj, None));
+                next_seq += 1;
+            }
+            self.decide_ready(
+                &mut reading,
+                &mut pending,
+                &mut uploading,
+                &mut hints,
+                &tasks,
+            )?;
+            self.drain(&mut pending)?;
+            if reading.is_empty() && pending.is_empty() {
+                if (queue.is_empty() || stopping) && (!listing || stopping) {
+                    if let Some(e) = list_error {
+                        return Err(e);
+                    }
+                    return Ok(stopping || r.stop.load(Ordering::SeqCst));
+                }
+                continue;
+            }
+            let mut next = match done.recv_timeout(Duration::from_millis(200)) {
+                Ok(d) => Some(d),
+                Err(RecvTimeoutError::Timeout) => None,
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(Error::Io("the worker pool ended".into()));
+                }
+            };
+            while let Some(d) = next {
+                match d {
+                    Done::Staged { seq, result } => {
+                        if let Some(entry) = reading.get_mut(&seq) {
+                            entry.1 = Some(result);
+                        }
+                    }
+                    Done::Put { seq, result } => {
+                        self.put_done(&mut pending, &mut uploading, seq, result)
+                    }
+                }
+                next = done.try_recv().ok();
+            }
+        }
+    }
+
+    /// [`Engine::drive`] over `threads` worker threads.
+    fn drive_parallel(&mut self, threads: usize) -> Result<bool, Error> {
+        let r = self.r;
+        let after = self.after_key.clone();
+        let (task_tx, task_rx) = mpsc::channel::<Task>();
+        let task_rx = Mutex::new(task_rx);
+        let (done_tx, done_rx) = mpsc::channel::<Done>();
+        // One page listed ahead of the one being worked on.
+        let (page_tx, page_rx) = mpsc::sync_channel::<Result<Page, Error>>(1);
+        std::thread::scope(|scope| {
+            for _ in 0..threads {
+                let done = done_tx.clone();
+                let tasks = &task_rx;
+                scope.spawn(move || worker(r, tasks, done));
+            }
+            drop(done_tx);
+            scope.spawn(move || {
+                let mut token: Option<String> = None;
+                loop {
+                    let page = retry(|| r.source.list(after.as_deref(), token.as_deref()));
+                    let next = page.as_ref().ok().and_then(|p| p.next.clone());
+                    let failed = page.is_err();
+                    if page_tx.send(page).is_err() || failed || r.stop.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    match next {
+                        Some(t) => token = Some(t),
+                        None => return,
+                    }
+                }
+            });
+            self.coordinate(threads * WINDOW_PER_THREAD, task_tx, done_rx, page_rx)
+        })
     }
 
     /// Writes the open part, if any, then the checkpoint that covers it.
@@ -803,8 +1386,13 @@ impl<'r, 'a> Engine<'r, 'a> {
     }
 
     /// Lists and handles every object after the checkpoint. Answers whether a stop ended it.
+    /// With more than one thread the parallel engine makes the same decisions in the same order.
     fn drive(&mut self) -> Result<bool, Error> {
         let r = self.r;
+        let threads = (r.job.threads as usize).min(MAX_THREADS);
+        if threads > 1 {
+            return self.drive_parallel(threads);
+        }
         let after = self.after_key.clone();
         let mut token: Option<String> = None;
         let mut first = true;
@@ -822,12 +1410,7 @@ impl<'r, 'a> Engine<'r, 'a> {
                     continue;
                 }
                 self.object(obj);
-                if self.lines.len() >= PART_LINES || self.part_bytes >= PART_BYTES {
-                    self.checkpoint()?;
-                    self.status(RunState::Running);
-                } else if r.clock.now_ms() - self.last_status_ms >= STATUS_EVERY_MS {
-                    self.status(RunState::Running);
-                }
+                self.after_object()?;
             }
             match page.next {
                 Some(t) => token = Some(t),
@@ -896,7 +1479,9 @@ impl<'r, 'a> Engine<'r, 'a> {
 /// Runs the job to its end (or a stop), resuming from `checkpoint.json` if there is one (else
 /// from the checkpoint of the run it continues, `job.resume`), and answers the report it wrote.
 ///
-/// Objects are handled one at a time; `job.threads` is future work. After a resume the report's
+/// With `job.threads` above one, workers read, hash and upload while one coordinator decides in
+/// listing order (docs/plans/ingest-throughput.md); the decisions, counters, manifest and report
+/// are those of the serial engine. After a resume the report's
 /// flag counts, lists and duplicate groups cover only this session, while its counters carry
 /// on from the checkpoint. A dry run remembers would-be uploads, so a repeat is a duplicate.
 pub fn run(run: &Run<'_>) -> Result<Report, Error> {

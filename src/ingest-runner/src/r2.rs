@@ -1,6 +1,10 @@
 //! The R2 destination: HEAD, single and multipart PUT, and small objects, over R2's S3 API.
+//! Blob writes are create-only (`If-None-Match: *`): an existing blob with the same identity
+//! answers [`Error::Exists`].
 
+use std::collections::HashSet;
 use std::io::Read;
+use std::sync::Mutex;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -27,6 +31,8 @@ pub struct R2Dest {
     client: Client,
     threshold: u64,
     part_size: u64,
+    /// Keys found holding an object with no SHA-256: the next write there is unconditional.
+    unattested: Mutex<HashSet<String>>,
 }
 
 impl R2Dest {
@@ -36,6 +42,7 @@ impl R2Dest {
             client: Client::new(endpoint, "auto", bucket, keys),
             threshold: DEFAULT_THRESHOLD,
             part_size: DEFAULT_PART,
+            unattested: Mutex::new(HashSet::new()),
         }
     }
 
@@ -182,6 +189,25 @@ impl R2Dest {
     }
 }
 
+impl R2Dest {
+    /// A create-only write found `found` at the key: the same blob is [`Error::Exists`].
+    fn existing(&self, found: Head, size: u64, m: &Metrics) -> Result<(), Error> {
+        let same_sha = found
+            .sha256
+            .as_deref()
+            .is_some_and(|s| s.eq_ignore_ascii_case(&m.sha256));
+        let same_blake = found
+            .blake3
+            .as_deref()
+            .is_none_or(|b| b.eq_ignore_ascii_case(&m.blake3));
+        if found.size == size && same_sha && same_blake {
+            Err(Error::Exists)
+        } else {
+            Err(Error::Dest("the existing blob's identity differs".into()))
+        }
+    }
+}
+
 impl Dest for R2Dest {
     fn head(&self, key: &str) -> Result<Option<Head>, Error> {
         let path = object_path(&self.client.bucket, key);
@@ -215,6 +241,12 @@ impl Dest for R2Dest {
         let path = object_path(&self.client.bucket, key);
         let mut headers = Self::meta_headers(size, metrics);
         if size > 0 && size > self.threshold {
+            // Create-only: an existing blob with the same identity is left.
+            if let Some(found) = self.head(key)?
+                && found.sha256.is_some()
+            {
+                return self.existing(found, size, metrics);
+            }
             return self.multipart(&path, body, size, &headers);
         }
         let digest = (0..32)
@@ -233,17 +265,43 @@ impl Dest for R2Dest {
             left: size,
             check_end: true,
         };
-        self.client
-            .call(
-                "PUT",
-                &path,
-                &[],
-                &headers,
-                UNSIGNED_PAYLOAD,
-                Body::Stream(&mut reader, size),
-            )
-            .map(|_| ())
-            .map_err(|f| Self::fail(&format!("cannot write {key}"), f))
+        let mut create_only = headers.clone();
+        // Unconditional only to replace an object with no SHA-256 to compare.
+        let replace = self
+            .unattested
+            .lock()
+            .map(|mut keys| keys.remove(key))
+            .unwrap_or(false);
+        if !replace {
+            create_only.push(("if-none-match".into(), "*".into()));
+        }
+        match self.client.call(
+            "PUT",
+            &path,
+            &[],
+            &create_only,
+            UNSIGNED_PAYLOAD,
+            Body::Stream(&mut reader, size),
+        ) {
+            Ok(_) => Ok(()),
+            Err(f) if f.status == Some(412) => match self.head(key)? {
+                // An object with no SHA-256 to compare (an unattested write by another path)
+                // is replaced, as before create-only writes, once the body can be read again.
+                Some(found) if found.sha256.is_none() => {
+                    if let Ok(mut keys) = self.unattested.lock() {
+                        keys.insert(key.to_string());
+                    }
+                    Err(Error::Dest(format!(
+                        "{key} exists unattested; the retry replaces it"
+                    )))
+                }
+                Some(found) => self.existing(found, size, metrics),
+                None => Err(Error::Dest(format!(
+                    "{key} changed during a create-only write"
+                ))),
+            },
+            Err(f) => Err(Self::fail(&format!("cannot write {key}"), f)),
+        }
     }
 
     fn put_object(&self, key: &str, body: &[u8], content_type: &str) -> Result<(), Error> {

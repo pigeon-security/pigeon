@@ -14,6 +14,35 @@ pub const OBJECT: &str = "x-pigeon-ingest-object";
 pub const SHA256: &str = "x-pigeon-ingest-sha256";
 pub const BLAKE3: &str = "x-pigeon-ingest-blake3";
 pub const MAX_BLOB: u64 = 16 * 1024 * 1024;
+/// Most payload keys in one `head-many` request.
+pub const HEAD_MANY: usize = 500;
+/// The largest `head-many` request and reply bodies.
+pub const HEAD_MANY_BODY: u64 = 64 * 1024;
+pub const HEAD_MANY_REPLY: u64 = 256 * 1024;
+
+/// A `head-many` request: payload keys of the run's grant.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HeadMany {
+    pub keys: Vec<String>,
+}
+
+/// A `head-many` reply: for each key in order, the blob's identity or none. A hint only.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct HeadManyReply {
+    pub heads: Vec<Option<crate::decide::Head>>,
+}
+
+/// Whether a `head-many` request is within a run's grant: 1 to [`HEAD_MANY`] distinct payload
+/// keys.
+pub fn head_many_keys(run: &str, request: &HeadMany) -> bool {
+    let mut seen = std::collections::HashSet::new();
+    (1..=HEAD_MANY).contains(&request.keys.len())
+        && request
+            .keys
+            .iter()
+            .all(|key| payload_read_key(run, key) && seen.insert(key.as_str()))
+}
 /// A manifest is flushed at 8 MiB and can contain one final record past that threshold.
 pub const MAX_CONTROL: u64 = 10 * 1024 * 1024;
 pub const MAX_GRANT_MS: i64 = 25 * 3_600_000;

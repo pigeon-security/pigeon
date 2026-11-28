@@ -68,16 +68,26 @@ B2 `ca-east-006`, prefix `txt/`, about 471,000 files of about 640 bytes each) ra
   everything before it are finished, so the manifest, its part boundaries and the checkpoint (the
   contiguous-finished watermark) are the same as the serial engine's.
 - **Batched existence check.** The coordinator asks for up to 500 first-seen SHA-256s at once
-  (`Dest::head_many`; on the Data Worker the `head-many` operation: the D1 `blobs` index first,
-  R2 HEAD only for misses, within the run's grant). It is a hint: a missing or failed batch falls
-  back to one HEAD per blob, and an older Data Worker without the operation still works.
+  (`Dest::head_many`; on the Data Worker the `head-many` operation, payload keys of the run's
+  grant only, answered by concurrent R2 HEADs inside the Worker: one runner round trip per batch).
+  It is a hint: a missing or failed batch falls back to one HEAD per blob, and an older Data
+  Worker without the operation still works.
+  **Deviation from the approved wording ("D1 index first"):** the D1 `blobs` table is not
+  certain evidence. `index::apply_part` indexes every `duplicate` line as a stored blob, and in a
+  dry run a repeated would-be upload is a `duplicate` (seen in run) of a blob R2 never received,
+  so a D1 hit could leave a file behind that R2 does not hold (decision 13.1 forbids it). R2 HEADs
+  inside the Worker keep the batching benefit. Follow-up: index only blobs a live run stored,
+  then D1 can answer first.
 - **Create-only uploads.** Every blob PUT is create-only (`If-None-Match: *` on R2's S3 API; the
   managed destination already was). An upload refused because the blob already exists with the
   same identity is recorded as a **duplicate** (`in_r2`), never an error. The D1 index stays keyed
   by SHA-256, and every source object still gets its sighting pointing at the canonical blob.
 - **Listing prefetch** (the next page is fetched while this one is worked on), files up to 1 MiB
-  stay in memory instead of the spool, and HTTP connections are kept and reused (up to 64 idle per
+  stay in memory instead of the spool, and HTTP connections are kept and reused (up to 128 idle per
   host).
+- R2's S3 API (the non-managed destination): `If-None-Match: *`; on 412 the HEAD decides: the
+  same identity is `Exists`, an object with no SHA-256 (unattested) is replaced on the retry as
+  before, anything else is an error. Multipart writes HEAD first.
 - Expected: Cloudflare, ~70 ms per small file serial → about 32 in flight; the per-file cost moves
   from round trips to the coordinator's ordering and the batched check, so 100-400 files a second
   is expected for small files (to be measured: the first run reports it, and later plans use it).
@@ -107,6 +117,6 @@ B2 `ca-east-006`, prefix `txt/`, about 471,000 files of about 640 bytes each) ra
 
 | Phase | What | State |
 | --- | --- | --- |
-| a | Estimate from file count, `objects`, measured rate, deadline, runner self-stop, continue, Scaleway `size_bytes` fix | landing |
-| b | Parallel engine, `head_many` (+ Data Worker op), create-only uploads, prefetch, memory spool, connection reuse | planned |
+| a | Estimate from file count, `objects`, measured rate, deadline, runner self-stop, continue, Scaleway `size_bytes` fix | landed |
+| b | Parallel engine, `head_many` (+ Data Worker op), create-only uploads, prefetch, memory spool, connection reuse | landing |
 | c | Shared live guard, grant from declared totals, >16 MiB multipart or skip-and-report, live cap | planned |

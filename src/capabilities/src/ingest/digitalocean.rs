@@ -544,7 +544,7 @@ pub(super) async fn plan(
         keep_archives: true,
         fingerprints: args["fingerprints"].as_bool().unwrap_or(false),
         limits,
-        threads: 8,
+        threads: throughput::THREADS,
         commit,
         max_minutes: Some(u64::from(max_minutes)),
         resume: continued.as_ref().map(|(_, resume)| resume.clone()),
