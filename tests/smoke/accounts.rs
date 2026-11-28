@@ -1960,6 +1960,179 @@ fn data_multipart_publisher_is_opt_in_and_pinned_to_worker_upload() {
     ));
 }
 
+/// docs/plans/multipart-enable.md, slice a: the one credential builder (JSON, fingerprint and
+/// slot), the manual key's scope check, the lifecycle step before the upload, stale slots
+/// removed only after it, and the canary's shape.
+#[test]
+fn multipart_enable_manual_key_lifecycle_and_canary() {
+    use pigeon_capabilities::instances::{
+        data_plan::{SeenData, data_steps},
+        data_publisher::{
+            LIFECYCLE_MAX_AGE, LIFECYCLE_RULE, credential, lifecycle_ok, lifecycle_with_ours,
+            listing_scoped, slot_for, slot_prefix, stale_slots,
+        },
+        plan::{Ledger, Step, describe},
+        record::Instance,
+    };
+    use pigeon_ingest::datastore::sha256_hex;
+    use pigeon_ingest::immutable_multipart::{
+        CANARY_BYTES, CANARY_PREFIX, PART_BYTES, Write, canary_key, canary_part, canary_sha256,
+        is_canary_key,
+    };
+
+    // The credential: exactly the JSON the Data Worker reads, fingerprinted as bytes.
+    let account = "a".repeat(32);
+    let keys = pigeon_core::s3::parse_keys("AKIDEXAMPLE:very-secret-value").unwrap();
+    let (text, fingerprint) = credential(&account, "example-data", &keys);
+    assert_eq!(
+        text,
+        format!(
+            r#"{{"account":"{account}","bucket":"example-data","keys":"AKIDEXAMPLE:very-secret-value"}}"#
+        )
+    );
+    assert_eq!(fingerprint, sha256_hex(text.as_bytes()));
+    let slot = slot_for("example", &fingerprint);
+    let instance_hash = sha256_hex(b"example");
+    assert_eq!(
+        slot,
+        format!(
+            "DATA_R2_PUBLISH_{}_{}",
+            &instance_hash[..16],
+            &fingerprint[..24]
+        )
+    );
+    assert!(slot.starts_with(&slot_prefix("example")));
+    assert!(!slot.starts_with(&slot_prefix("other")));
+
+    // A manual key is refused unless ListBuckets is refused or shows only the Data bucket.
+    let names = |n: &[&str]| n.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    assert!(listing_scoped(403, &[], "example-data"));
+    assert!(listing_scoped(
+        200,
+        &names(&["example-data"]),
+        "example-data"
+    ));
+    assert!(!listing_scoped(
+        200,
+        &names(&["example-data", "other"]),
+        "example-data"
+    ));
+    assert!(!listing_scoped(500, &[], "example-data"));
+
+    // Stale slots: this instance's other publisher slots only.
+    let listed = json!([
+        {"id": "1", "name": slot},
+        {"id": "2", "name": format!("{}{}", slot_prefix("example"), "0".repeat(24))},
+        {"id": "3", "name": format!("{}{}", slot_prefix("other"), "0".repeat(24))},
+        {"id": "4", "name": "UNRELATED"},
+    ]);
+    let stale = stale_slots(&listed, "example", &slot);
+    assert_eq!(stale.len(), 1);
+    assert_eq!(stale[0].0, "2");
+
+    // Lifecycle: R2's default abort rule counts; ours replaces only itself.
+    let default = json!([{ "id": "Default Multipart Abort Rule", "enabled": true,
+        "conditions": {"prefix": ""},
+        "abortMultipartUploadsTransition": {"condition": {"type": "Age", "maxAge": 604800}} }]);
+    assert!(lifecycle_ok(&default));
+    let other = json!([{ "id": "logs", "enabled": true, "conditions": {"prefix": "logs/"},
+        "deleteObjectsTransition": {"condition": {"type": "Age", "maxAge": 86400}} }]);
+    assert!(!lifecycle_ok(&other));
+    let merged = lifecycle_with_ours(&lifecycle_with_ours(&other)["rules"]);
+    let rules = merged["rules"].as_array().unwrap();
+    assert_eq!(rules.len(), 2);
+    assert_eq!(rules[0]["id"], "logs");
+    assert_eq!(rules[1]["id"], LIFECYCLE_RULE);
+    assert_eq!(
+        rules[1]["abortMultipartUploadsTransition"]["condition"]["maxAge"],
+        LIFECYCLE_MAX_AGE
+    );
+    assert!(lifecycle_ok(&merged["rules"]));
+
+    // The plan: the lifecycle step before the upload, stale slots removed after it.
+    let instance: Instance = serde_json::from_value(json!({
+        "id": "example", "title": "Example", "worker": "example-site",
+        "account": {"kind": "linked", "account_id": account},
+        "data": {"multipart_publisher": fingerprint},
+    }))
+    .unwrap();
+    let publisher = serde_json::from_value(json!({
+        "account": account, "bucket": "example-data", "store": "linked-store",
+        "slot": slot, "generation": "g", "fingerprint": fingerprint,
+    }))
+    .unwrap();
+    let mut seen = SeenData {
+        artifact: Some("worker-build".into()),
+        bucket_exists: true,
+        publisher: Some(publisher),
+        stale_publisher_slots: stale.clone(),
+        ..Default::default()
+    };
+    let ledger = Ledger {
+        buckets: vec!["example-data".into()],
+        ..Default::default()
+    };
+    let steps = data_steps(&instance, &seen, &ledger, None);
+    let at = |f: &dyn Fn(&Step) -> bool| steps.iter().position(f).unwrap();
+    let lifecycle =
+        at(&|s| matches!(s, Step::SetMultipartLifecycle { bucket } if bucket == "example-data"));
+    let upload = at(&|s| {
+        matches!(
+            s,
+            Step::UploadDataWorker {
+                publisher: Some(_),
+                ..
+            }
+        )
+    });
+    let remove = at(
+        &|s| matches!(s, Step::RemovePublisherSlot { id, store, .. } if id == "2" && store == "linked-store"),
+    );
+    assert!(lifecycle < upload && upload < remove);
+    assert!(steps.iter().all(|s| !s.stops()));
+    let words =
+        serde_json::to_string(&describe(&steps)).unwrap() + &serde_json::to_string(&steps).unwrap();
+    assert!(!words.contains("very-secret-value"));
+    seen.multipart_lifecycle = true;
+    seen.stale_publisher_slots.clear();
+    let steps = data_steps(&instance, &seen, &ledger, None);
+    assert!(!steps.iter().any(|s| matches!(
+        s,
+        Step::SetMultipartLifecycle { .. } | Step::RemovePublisherSlot { .. }
+    )));
+
+    // The canary: three parts (16, 16 and 8 MiB) under its own prefix, never a blob key.
+    let nonce = sha256_hex(b"nonce");
+    let sizes: Vec<usize> = (1..=4)
+        .map_while(|n| canary_part(nonce.as_bytes(), n).map(|p| p.len()))
+        .collect();
+    assert_eq!(
+        sizes,
+        [
+            PART_BYTES as usize,
+            PART_BYTES as usize,
+            PART_BYTES as usize / 2
+        ]
+    );
+    assert_eq!(sizes.iter().sum::<usize>() as u64, CANARY_BYTES);
+    let whole: Vec<u8> = (1..=3)
+        .flat_map(|n| canary_part(nonce.as_bytes(), n).unwrap())
+        .collect();
+    let sha = canary_sha256(nonce.as_bytes());
+    assert_eq!(sha, sha256_hex(&whole));
+    assert_ne!(sha, canary_sha256(sha256_hex(b"other").as_bytes()));
+    let write = Write::canary(&sha, "c".repeat(64)).unwrap();
+    assert_eq!(write.key(), canary_key(&sha));
+    assert!(write.key().starts_with(CANARY_PREFIX));
+    assert!(is_canary_key(&write.key()));
+    assert!(!is_canary_key(&pigeon_ingest::blob_key(&sha)));
+    assert!(!is_canary_key(&format!(
+        "{CANARY_PREFIX}multipart/../blobs"
+    )));
+    assert!(Write::new(&write.key(), CANARY_BYTES, "c".repeat(64)).is_none());
+    assert!(Write::canary("not-a-digest", "c".repeat(64)).is_none());
+}
+
 #[test]
 fn backblaze_source_authority_is_one_read_only_bucket_and_prefix() {
     use pigeon_core::s3::backblaze_read_scope;

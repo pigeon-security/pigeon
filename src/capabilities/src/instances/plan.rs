@@ -273,6 +273,18 @@ pub enum Step {
         bucket: String,
         queue: String,
     },
+    /// Keep pigeon's lifecycle rule on the Data bucket: abort incomplete multipart uploads
+    /// after 7 days; its other rules are kept (docs/plans/multipart-enable.md).
+    SetMultipartLifecycle {
+        bucket: String,
+    },
+    /// Remove an earlier multipart publisher credential's Secrets Store slot, once the
+    /// current one is bound.
+    RemovePublisherSlot {
+        store: String,
+        id: String,
+        slot: String,
+    },
     /// Waits on the person; shown, and the plan goes on without it.
     Pending {
         what: String,
@@ -371,6 +383,8 @@ impl Step {
                 | Step::ConfigureBackupConsumer { .. }
                 | Step::QueueBackupInventory { .. }
                 | Step::AddBucketNotification { .. }
+                | Step::SetMultipartLifecycle { .. }
+                | Step::RemovePublisherSlot { .. }
                 | Step::RemoveStaleDns { .. }
                 | Step::EnableEmailRouting { .. }
                 | Step::SetCatchAll { .. }
@@ -1402,6 +1416,13 @@ pub fn describe(steps: &[Step]) -> Vec<Value> {
             )),
             Step::AddBucketNotification { bucket, queue } => json!(format!(
                 "send bucket {bucket}'s new objects to queue {queue}, for the B2 backup (deletes                  are not mirrored)"
+            )),
+            Step::SetMultipartLifecycle { bucket } => json!(format!(
+                "keep an R2 lifecycle rule on {bucket}: abort incomplete multipart uploads \
+                 after 7 days (its other rules are kept)"
+            )),
+            Step::RemovePublisherSlot { slot, .. } => json!(format!(
+                "remove the earlier multipart publisher credential {slot} from the Secrets Store"
             )),
             Step::Pending { what, why } => json!(format!("pending: {what}: {why}")),
             Step::RemoveStaleDns {

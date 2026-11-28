@@ -15,28 +15,40 @@ fn error(status: u16, message: &str) -> Result<Response> {
     json_answer(status, json!({"error": message}))
 }
 
-pub async fn ready(req: &mut Request, env: &Env) -> Result<Response> {
+/// Whether `req` is core's request for `path`, signed with the data key: `Some` refusal if not.
+async fn core_signed(req: &mut Request, env: &Env, path: &str) -> Result<Option<Response>> {
     let key = env.secret("DATA_KEY")?.to_string();
     let signature = req
         .headers()
         .get(pigeon_ingest::protocol::SIGNATURE_HEADER)?;
     let Some(signature) = signature else {
-        return error(401, "unauthorized");
+        return error(401, "unauthorized").map(Some);
     };
     let Some(body) = bounded_body(req, 1024).await? else {
-        return error(413, "readiness body too large");
+        return error(413, "request body too large").map(Some);
     };
-    if pigeon_ingest::protocol::verify(
-        &signature,
-        "POST",
-        wire::READY_PATH,
-        &body,
-        key.as_bytes(),
-        now_ms(),
-    )
-    .is_err()
+    if pigeon_ingest::protocol::verify(&signature, "POST", path, &body, key.as_bytes(), now_ms())
+        .is_err()
     {
-        return error(401, "unauthorized");
+        return error(401, "unauthorized").map(Some);
+    }
+    Ok(None)
+}
+
+/// Core's `data_ingest_multipart_check`: run the multipart canary and answer its result.
+pub async fn canary(req: &mut Request, env: &Env) -> Result<Response> {
+    if let Some(refused) = core_signed(req, env, wire::CANARY_PATH).await? {
+        return Ok(refused);
+    }
+    if !crate::immutable_multipart::configured(env).await {
+        return error(503, "the multipart publisher is not configured");
+    }
+    json_answer(200, crate::immutable_multipart::canary(env).await?)
+}
+
+pub async fn ready(req: &mut Request, env: &Env) -> Result<Response> {
+    if let Some(refused) = core_signed(req, env, wire::READY_PATH).await? {
+        return Ok(refused);
     }
     env.bucket("DATA")?;
     env.d1("DB")?
@@ -48,7 +60,10 @@ pub async fn ready(req: &mut Request, env: &Env) -> Result<Response> {
         json!({
             "version": 1,
             "instance": env.var("INSTANCE")?.to_string(),
-            "multipart_configured": crate::immutable_multipart::configured(env).await,
+            // Ready for ingest only once the canary passed for the bound credential.
+            "multipart_configured": crate::immutable_multipart::ready(env).await,
+            "multipart_publisher": crate::immutable_multipart::configured(env).await,
+            "multipart_canary": crate::immutable_multipart::canary_state(env).await,
         }),
     )
 }

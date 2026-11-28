@@ -61,6 +61,13 @@ pub struct SeenData {
     pub backup_key: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publisher: Option<super::data_publisher::Publisher>,
+    /// Whether the Data bucket's lifecycle aborts incomplete multipart uploads within 7 days
+    /// (read only while a publisher applies).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub multipart_lifecycle: bool,
+    /// Earlier publisher slots of this instance, `(id, name)`, which a bound plan removes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stale_publisher_slots: Vec<(String, String)>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub source_slots: Vec<String>,
     /// The email domain's zone id, when it is in the account.
@@ -594,6 +601,18 @@ pub fn data_parts(
                 module: module.clone(),
                 replaces,
             };
+            if publisher.is_some() {
+                steps.push(if seen.multipart_lifecycle {
+                    Step::Ok {
+                        what: "multipart lifecycle rule".into(),
+                        name: name.clone(),
+                    }
+                } else {
+                    Step::SetMultipartLifecycle {
+                        bucket: name.clone(),
+                    }
+                });
+            }
             steps.push(match (seen.worker_exists, uploaded) {
                 (false, _) => upload(false),
                 (true, Some(d))
@@ -611,6 +630,17 @@ pub fn data_parts(
                     why: "a Worker with this name exists, and pigeon did not upload it".into(),
                 },
             });
+            // After the upload binds the current credential: the earlier ones go. A failed
+            // upload stops the apply before these run.
+            if let Some(p) = publisher {
+                for (id, slot) in &seen.stale_publisher_slots {
+                    steps.push(Step::RemovePublisherSlot {
+                        store: p.store.clone(),
+                        id: id.clone(),
+                        slot: slot.clone(),
+                    });
+                }
+            }
         }
     }
     parts.store = steps;

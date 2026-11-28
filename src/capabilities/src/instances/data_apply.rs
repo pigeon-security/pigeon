@@ -662,6 +662,23 @@ pub async fn run(
                 .await?;
                 format!("bucket {bucket} now sends new objects to {queue}")
             }
+            Step::SetMultipartLifecycle { bucket } => {
+                let path = format!("/accounts/{acc}/r2/buckets/{bucket}/lifecycle");
+                let current = call(t, Method::Get, &path, None).await?;
+                let next = super::data_publisher::lifecycle_with_ours(&current["rules"]);
+                call(t, Method::Put, &path, Some(&next)).await?;
+                format!("bucket {bucket} now aborts incomplete multipart uploads after 7 days")
+            }
+            Step::RemovePublisherSlot { store, id, slot } => {
+                call(
+                    t,
+                    Method::Delete,
+                    &format!("/accounts/{acc}/secrets_store/stores/{store}/secrets/{id}"),
+                    None,
+                )
+                .await?;
+                format!("removed the earlier multipart publisher credential {slot}")
+            }
             Step::RemoveStaleDns {
                 zone_id,
                 id,

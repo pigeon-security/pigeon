@@ -530,6 +530,45 @@
     refresh();
   }
 
+  // Large-file uploads (docs/plans/multipart-enable.md, manual path): the key is checked against
+  // the Data bucket and stored in the linked Secrets Store (one passkey); then its fingerprint
+  // is proposed as data.multipart_publisher (a second), and the Data plan binds it.
+  function largeFileUploads(ctx, record) {
+    const access = input({ name: "access-key-id", mono: true, autocomplete: "off", spellcheck: "false" });
+    const secret = input({ name: "secret-access-key", type: "password", mono: true, autocomplete: "off", spellcheck: "false" });
+    confirm({
+      title: `${record.data?.multipart_publisher ? "Rotate" : "Enable"} large-file uploads`,
+      target: [["Instance", code(record.id)], ["Data bucket", code(`${record.id}-data`)]],
+      form: el("div", { class: "stack" },
+        field({ label: "Access Key ID", control: access }),
+        field({ label: "Secret Access Key", hint: "An R2 key with Object Read & Write on the Data bucket only.", control: secret })),
+      effect: "Pigeon writes and deletes one scratch object to check the key reaches only the Data bucket, then stores it in the instance's Cloudflare Secrets Store. Next you approve the record change, then the Data plan that binds it.",
+      action: "data-multipart-key-set", id: record.id,
+      confirmLabel: "Verify and save key with passkey",
+      prepare: async () => {
+        const id = access.value.trim();
+        const key = secret.value.trim();
+        if (!id || !key || id.includes(":")) throw new Error("Enter the Access Key ID and Secret.");
+        const value = `${id}:${key}`;
+        return { change: { value }, begin: { digest: await sha256(value) } };
+      },
+      onDone: (done) => setTimeout(async () => {
+        const fingerprint = done?.data?.fingerprint;
+        if (!fingerprint) return ctx.refresh();
+        const current = await recordOf(ctx);
+        const next = clone(current);
+        next.data = { ...(next.data || {}), multipart_publisher: fingerprint };
+        putRecord(ctx, {
+          record: current, next,
+          title: "Bind the large-file key",
+          target: [["Secrets Store slot", code(done.data.slot)]],
+          effect: "Saving this plans the instance; approving that plan binds the key to the Data Worker. Then run data_ingest_multipart_check.",
+          confirmLabel: "Approve record change with passkey",
+        });
+      }, 0),
+    });
+  }
+
   function digitalOceanConnection(ctx, record, spaces = false) {
     const args = { instance: record.id };
     const teamId = record.cloud.digitalocean.team_id;
@@ -748,6 +787,8 @@
             c.fields(record).length || c.cap === "mcp-federation"
               ? button(c.cap === "mcp-federation" ? "Manage trust" : "Configure", () => configure(c, true), { ...sm, variant: "ghost" }) : null,
             c.cap === "data-ingest" ? button("Bucket connections", () => ingestBucketConnections(ctx, record), sm) : null,
+            c.cap === "data-ingest" && record.account?.kind === "linked"
+              ? button(record.data?.multipart_publisher ? "Rotate large-file key" : "Enable large-file uploads", () => largeFileUploads(ctx, record), sm) : null,
             c.cap === "digitalocean" ? button("Connection", () => digitalOceanConnection(ctx, record), sm) : null,
             c.cap === "digitalocean" && record.cloud.digitalocean.droplet_health
               ? button("Runner check", () => digitalOceanDroplet(ctx, record), sm) : null,

@@ -2605,6 +2605,7 @@ fn core_ingest_plans_hosts_and_estimates() {
             "data_ingest_connections",
             "data_ingest_connection_verify",
             "data_ingest_plan",
+            "data_ingest_multipart_check",
             "data_ingest_start",
             "data_ingest_status",
             "data_ingest_report",

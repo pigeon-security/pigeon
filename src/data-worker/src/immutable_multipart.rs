@@ -10,7 +10,8 @@ use std::future::Future;
 use pigeon_core::{git::base64, s3, sign::hmac_sha256, webauthn};
 use pigeon_ingest::datastore;
 use pigeon_ingest::immutable_multipart::{
-    CREATE_ONLY, Checkpoint, PartAction, Reconciliation, Write, reconcile,
+    CANARY_BYTES, CANARY_RESULT, CREATE_ONLY, Checkpoint, PartAction, Reconciliation, Write,
+    canary_part, canary_sha256, is_canary_key, reconcile,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -220,22 +221,20 @@ async fn head(bucket: &Bucket, write: &Write) -> Result<Reconciliation> {
 }
 
 async fn start<F, R>(
-    request: &Request,
     db: &D1Database,
     bucket: &Bucket,
     slot: &str,
-    key: &str,
+    write: Option<Write>,
     reserve: F,
 ) -> Result<Response>
 where
     F: FnOnce(u64) -> R,
     R: Future<Output = Result<bool>>,
 {
-    let size = request
-        .headers()
-        .get("x-ingest-size")?
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_default();
+    let Some(write) = write else {
+        return reply(400, "invalid multipart blob");
+    };
+    let (size, key) = (write.size, write.key());
     if let Some((_, old)) = load(db, slot).await? {
         if old.write().size != size || old.write().key() != key {
             return reply(409, "different upload already reserved");
@@ -247,10 +246,6 @@ where
             Saved::Closed { .. } => reply(409, "upload closed"),
         };
     }
-    let write_id = datastore::sha256_hex(webauthn::random()?.as_bytes());
-    let Some(write) = Write::new(key, size, write_id) else {
-        return reply(400, "invalid multipart blob");
-    };
     if head(bucket, &write).await? != Reconciliation::Unresolved {
         // This request did not independently verify the existing object's bytes.
         return reply(412, "destination already exists");
@@ -287,7 +282,7 @@ where
         ("write-id".to_string(), write.write_id.clone()),
     ]);
     let upload = bucket
-        .create_multipart_upload(key)
+        .create_multipart_upload(&key)
         .custom_metadata(metadata)
         .execute()
         .await?;
@@ -324,7 +319,7 @@ async fn part(
         .headers()
         .get("content-length")?
         .and_then(|s| s.parse::<u64>().ok());
-    let Some((before, Saved::Open { id, mut checkpoint })) = load(db, slot).await? else {
+    let Some((_, Saved::Open { checkpoint, .. })) = load(db, slot).await? else {
         return reply(404, "no open upload");
     };
     let Some(expected) = checkpoint.part_bytes(number) else {
@@ -344,6 +339,20 @@ async fn part(
         }
         bytes.extend_from_slice(&chunk);
     }
+    put_part(db, bucket, slot, number, bytes).await
+}
+
+/// Pins, uploads and confirms part `number` of the open upload in `slot`.
+async fn put_part(
+    db: &D1Database,
+    bucket: &Bucket,
+    slot: &str,
+    number: u32,
+    bytes: Vec<u8>,
+) -> Result<Response> {
+    let Some((before, Saved::Open { id, mut checkpoint })) = load(db, slot).await? else {
+        return reply(404, "no open upload");
+    };
     match checkpoint.pin(number, &bytes) {
         Some(PartAction::Replay) => return reply(200, "confirmed"),
         Some(PartAction::Upload) => {}
@@ -505,6 +514,252 @@ pub async fn configured(env: &Env) -> bool {
         && Publisher::open(env).await.is_ok()
 }
 
+/// The last canary's state for the bound credential: `passed`, `failed` or `missing` (none yet,
+/// or one run with an earlier credential).
+pub async fn canary_state(env: &Env) -> &'static str {
+    let Ok(fingerprint) = env.var("INGEST_R2_PUBLISH_SHA256") else {
+        return "missing";
+    };
+    let Ok(bucket) = env.bucket("DATA") else {
+        return "missing";
+    };
+    let Ok(Some(object)) = bucket.get(CANARY_RESULT).execute().await else {
+        return "missing";
+    };
+    let Some(Ok(text)) = (match object.body() {
+        Some(body) => Some(body.text().await),
+        None => None,
+    }) else {
+        return "missing";
+    };
+    let result: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+    match (
+        result["fingerprint"].as_str() == Some(fingerprint.to_string().as_str()),
+        result["passed"].as_bool(),
+    ) {
+        (true, Some(true)) => "passed",
+        (true, Some(false)) => "failed",
+        _ => "missing",
+    }
+}
+
+/// Multipart is ready for ingest: configured, and the canary passed for this credential.
+pub async fn ready(env: &Env) -> bool {
+    configured(env).await && canary_state(env).await == "passed"
+}
+
+/// One check of the canary, for its result.
+fn check(checks: &mut Vec<serde_json::Value>, name: &str, ok: bool, detail: &str) -> bool {
+    checks.push(json!({ "check": name, "ok": ok, "detail": detail }));
+    ok
+}
+
+async fn state_of(response: Result<Response>) -> (u16, String) {
+    match response {
+        Ok(mut r) => {
+            let status = r.status_code();
+            let body: serde_json::Value = r.json().await.unwrap_or_default();
+            (
+                status,
+                body["state"].as_str().unwrap_or_default().to_string(),
+            )
+        }
+        Err(e) => (0, e.to_string()),
+    }
+}
+
+/// The Data Worker's multipart canary (docs/plans/multipart-enable.md, "Canary"): a generated
+/// [`CANARY_BYTES`] object through the real path (checkpoints, binding parts, the signed
+/// create-only completion) at its own key under [`CANARY_PREFIX`], read back, then deleted.
+/// Only that one object and its checkpoint row are removed. The result is kept at
+/// [`CANARY_RESULT`] for readiness, and answered.
+pub async fn canary(env: &Env) -> Result<serde_json::Value> {
+    let fingerprint = env
+        .var("INGEST_R2_PUBLISH_SHA256")
+        .map(|v| v.to_string())
+        .unwrap_or_default();
+    let mut checks = Vec::new();
+    let passed = run_canary(env, &mut checks).await;
+    let result = json!({
+        "fingerprint": fingerprint,
+        "passed": passed,
+        "bytes": CANARY_BYTES,
+        "checks": checks,
+        "at_ms": worker::js_sys::Date::now() as u64,
+    });
+    if !fingerprint.is_empty() {
+        env.bucket("DATA")?
+            .put(CANARY_RESULT, result.to_string())
+            .execute()
+            .await?;
+    }
+    Ok(result)
+}
+
+async fn run_canary(env: &Env, checks: &mut Vec<serde_json::Value>) -> bool {
+    let publisher = match Publisher::open(env).await {
+        Ok(p) => p,
+        Err(e) => return check(checks, "publisher", false, &e.to_string()),
+    };
+    check(checks, "publisher", true, "the bound credential opens");
+    let (Ok(db), Ok(bucket)) = (env.d1("DB"), env.bucket("DATA")) else {
+        return check(checks, "bindings", false, "missing DB or DATA");
+    };
+    let Ok(nonce) = webauthn::random() else {
+        return check(checks, "nonce", false, "no randomness");
+    };
+    let nonce = datastore::sha256_hex(nonce.as_bytes());
+    let sha = canary_sha256(nonce.as_bytes());
+    let Ok(write_id) = webauthn::random().map(|r| datastore::sha256_hex(r.as_bytes())) else {
+        return check(checks, "nonce", false, "no randomness");
+    };
+    let Some(write) = Write::canary(&sha, write_id) else {
+        return check(checks, "write", false, "invalid canary");
+    };
+    let key = write.key();
+    let slot = datastore::sha256_hex(format!("canary\0{key}").as_bytes());
+    let ok = canary_upload(
+        &db,
+        &bucket,
+        &publisher,
+        &slot,
+        write,
+        nonce.as_bytes(),
+        checks,
+    )
+    .await
+        && canary_create_only(&bucket, &publisher, &key, checks).await
+        && canary_read_back(&bucket, &key, &sha, checks).await;
+    // Remove only the canary object (never anything else) and its checkpoint row.
+    let removed = is_canary_key(&key) && bucket.delete(&key).await.is_ok();
+    let row = match db
+        .prepare("DELETE FROM ingest_multipart WHERE id = ?1")
+        .bind(&[crate::store::js(&json!(slot))])
+    {
+        Ok(statement) => statement.run().await.is_ok(),
+        Err(_) => false,
+    };
+    let gone = matches!(bucket.head(&key).await, Ok(None));
+    check(
+        checks,
+        "cleanup",
+        removed && row && gone,
+        "canary object and checkpoint removed",
+    ) && ok
+}
+
+async fn canary_upload(
+    db: &D1Database,
+    bucket: &Bucket,
+    publisher: &Publisher,
+    slot: &str,
+    write: Write,
+    nonce: &[u8],
+    checks: &mut Vec<serde_json::Value>,
+) -> bool {
+    let (status, state) =
+        state_of(start(db, bucket, slot, Some(write), |_| async { Ok(true) }).await).await;
+    if !check(
+        checks,
+        "start",
+        status == 200 && state == "open",
+        &format!("{status} {state}"),
+    ) {
+        return false;
+    }
+    let mut number = 1;
+    while let Some(bytes) = canary_part(nonce, number) {
+        let (status, state) = state_of(put_part(db, bucket, slot, number, bytes).await).await;
+        if !check(
+            checks,
+            &format!("part {number}"),
+            status == 200 && state == "confirmed",
+            &format!("{status} {state}"),
+        ) {
+            return false;
+        }
+        number += 1;
+    }
+    let (status, state) = state_of(complete(db, bucket, publisher, slot).await).await;
+    check(
+        checks,
+        "complete",
+        status == 200 && state == "published",
+        &format!("{status} {state}"),
+    )
+}
+
+/// A second create-only completion on the same key must be refused (412) by R2 itself.
+async fn canary_create_only(
+    bucket: &Bucket,
+    publisher: &Publisher,
+    key: &str,
+    checks: &mut Vec<serde_json::Value>,
+) -> bool {
+    let upload = match bucket.create_multipart_upload(key).execute().await {
+        Ok(u) => u,
+        Err(e) => return check(checks, "create-only", false, &e.to_string()),
+    };
+    let id = upload.upload_id().await;
+    let part = match upload.upload_part(1, vec![0_u8; 1]).await {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = upload.abort().await;
+            return check(checks, "create-only", false, &e.to_string());
+        }
+    };
+    let etag = part.etag();
+    let xml = format!(
+        "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>\"{}\"</ETag></Part></CompleteMultipartUpload>",
+        etag.trim_matches('"')
+    );
+    let status = publisher
+        .complete(key, &id, &xml)
+        .await
+        .map(|r| r.status_code())
+        .unwrap_or_default();
+    let _ = upload.abort().await;
+    check(
+        checks,
+        "create-only",
+        status == 412,
+        &format!("a second completion answered {status}"),
+    )
+}
+
+async fn canary_read_back(
+    bucket: &Bucket,
+    key: &str,
+    sha: &str,
+    checks: &mut Vec<serde_json::Value>,
+) -> bool {
+    use futures_util::StreamExt;
+    use sha2::Digest;
+    let Ok(Some(object)) = bucket.get(key).execute().await else {
+        return check(checks, "read back", false, "the canary is missing");
+    };
+    let size = object.size();
+    let Some(Ok(mut stream)) = object.body().map(|b| b.stream()) else {
+        return check(checks, "read back", false, "no body");
+    };
+    let mut digest = sha2::Sha256::new();
+    let mut read = 0_u64;
+    while let Some(chunk) = stream.next().await {
+        let Ok(chunk) = chunk else {
+            return check(checks, "read back", false, "read failed");
+        };
+        read += chunk.len() as u64;
+        digest.update(&chunk);
+    }
+    let got = format!("{:x}", digest.finalize());
+    check(
+        checks,
+        "read back",
+        size == CANARY_BYTES && read == CANARY_BYTES && got == sha,
+        "size and SHA-256 match",
+    )
+}
+
 /// Called only by the managed destination after validating its signed, per-run grant.
 pub async fn fetch<F, R>(
     request: &mut Request,
@@ -542,7 +797,16 @@ where
     let db = env.d1("DB")?;
     let bucket = env.bucket("DATA")?;
     match operation {
-        "multipart-start" => start(request, &db, &bucket, &slot, key, reserve).await,
+        "multipart-start" => {
+            let size = request
+                .headers()
+                .get("x-ingest-size")?
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_default();
+            let write_id = datastore::sha256_hex(webauthn::random()?.as_bytes());
+            let write = Write::new(key, size, write_id);
+            start(&db, &bucket, &slot, write, reserve).await
+        }
         "multipart-part" => part(request, &db, &bucket, &slot).await,
         "multipart-complete" => {
             let publisher = publisher.ok_or_else(|| fail("multipart publisher missing"))?;

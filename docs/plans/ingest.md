@@ -1117,6 +1117,7 @@ fingerprint, a new slot, and a new approved Data plan. Account-link OAuth
 authorizes the binding but cannot mint the R2 S3 parent credential.
 
 Multipart returns 503 before staging when the binding or exact credential
-fingerprint check fails. Rollout still requires checking the bucket's
-incomplete multipart expiration rule and validating ambiguous completion
-against R2 with a disposable approved canary.
+fingerprint check fails. [multipart-enable.md](multipart-enable.md) covers the rest of the
+rollout: the console's checked key flow, the data plan's lifecycle rule (abort incomplete
+uploads after 7 days), and `data_ingest_multipart_check`, the Data Worker's canary, which
+readiness requires before ingest writes objects over 16 MiB.

@@ -9,7 +9,7 @@
 pub mod data_apply;
 pub mod data_ingest_runtime;
 pub mod data_plan;
-pub(crate) mod data_publisher;
+pub mod data_publisher;
 pub mod home;
 pub mod home_site;
 pub mod layout;
@@ -947,6 +947,10 @@ impl Instances {
                 .await?,
             );
         }
+        if let Some(publisher) = seen.publisher.clone() {
+            (seen.multipart_lifecycle, seen.stale_publisher_slots) =
+                data_publisher::observe_upkeep(account, instance, &publisher).await?;
+        }
         seen.scaleway_compute =
             crate::ingest::scaleway_compute::registry(cx.env, &instance.id).await?;
         if let Some(registry) = &seen.scaleway_compute {
@@ -1539,6 +1543,8 @@ fn data_step(step: &plan::Step) -> bool {
             | S::ConfigureBackupConsumer { .. }
             | S::QueueBackupInventory { .. }
             | S::AddBucketNotification { .. }
+            | S::SetMultipartLifecycle { .. }
+            | S::RemovePublisherSlot { .. }
             | S::RemoveStaleDns { .. }
             | S::EnableEmailRouting { .. }
             | S::SetCatchAll { .. }

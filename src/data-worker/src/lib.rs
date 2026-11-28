@@ -115,6 +115,9 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
         (Method::Post, pigeon_ingest::managed_destination::READY_PATH) => {
             managed_dest::ready(&mut req, &env).await
         }
+        (Method::Post, pigeon_ingest::managed_destination::CANARY_PATH) => {
+            managed_dest::canary(&mut req, &env).await
+        }
         (Method::Post, protocol::START_PATH) => {
             let body = match signed_body(&mut req, &env).await? {
                 Ok(b) => b,

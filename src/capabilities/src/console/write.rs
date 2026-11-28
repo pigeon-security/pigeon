@@ -213,6 +213,14 @@ pub const ACTIONS: &[Action] = &[
         Change::Secret,
     ),
     act(
+        crate::ingest::multipart::SET_KEY,
+        "Check and store an R2 key for large-file uploads",
+        Cap(crate::ingest::NAME),
+        false,
+        Target::Instance,
+        Change::Secret,
+    ),
+    act(
         crate::digitalocean::SET_TOKEN,
         "Set a DigitalOcean token",
         Cap(crate::digitalocean::NAME),

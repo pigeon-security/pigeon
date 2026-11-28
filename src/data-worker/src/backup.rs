@@ -436,6 +436,10 @@ pub async fn copy(
             "the Data object key cannot be preserved in backup metadata",
         ));
     }
+    // The multipart canary and its result are disposable checks, never Data.
+    if key.starts_with(pigeon_ingest::immutable_multipart::CANARY_PREFIX) {
+        return Ok(None);
+    }
     if env.var("BACKUP_AUDIT_REQUIRED").is_ok() {
         env.bucket("JOBS_AUDIT")?;
     }

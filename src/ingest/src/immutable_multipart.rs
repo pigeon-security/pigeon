@@ -42,6 +42,10 @@ pub struct Write {
     pub size: u64,
     pub sha256: String,
     pub write_id: String,
+    /// A disposable canary under [`CANARY_PREFIX`] rather than a content-addressed blob
+    /// (docs/plans/multipart-enable.md, "Canary").
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub canary: bool,
 }
 
 impl Write {
@@ -58,12 +62,81 @@ impl Write {
             size,
             sha256: sha256.into(),
             write_id,
+            canary: false,
+        })
+    }
+
+    /// The Data Worker's own canary write: [`CANARY_BYTES`] at [`canary_key`], never a blob.
+    pub fn canary(sha256: &str, write_id: String) -> Option<Self> {
+        if !digest_ok(sha256) || !digest_ok(&write_id) {
+            return None;
+        }
+        Some(Self {
+            size: CANARY_BYTES,
+            sha256: sha256.into(),
+            write_id,
+            canary: true,
         })
     }
 
     pub fn key(&self) -> String {
-        crate::blob_key(&self.sha256)
+        if self.canary {
+            canary_key(&self.sha256)
+        } else {
+            crate::blob_key(&self.sha256)
+        }
     }
+}
+
+/// Where the Data Worker's multipart canary writes, and keeps its last result. Nothing under it
+/// is a blob: the backup skips it, and only the canary deletes there.
+pub const CANARY_PREFIX: &str = "ingest/canary/";
+/// The canary's size: three parts, of 16, 16 and 8 MiB.
+pub const CANARY_BYTES: u64 = 2 * PART_BYTES + PART_BYTES / 2;
+/// The stored result of the last canary.
+pub const CANARY_RESULT: &str = "ingest/canary/multipart-result.json";
+
+pub fn canary_key(sha256: &str) -> String {
+    format!("{CANARY_PREFIX}multipart/{sha256}")
+}
+
+/// Whether `key` is one the canary may write or delete: a digest directly under its prefix.
+pub fn is_canary_key(key: &str) -> bool {
+    key.strip_prefix(CANARY_PREFIX)
+        .and_then(|rest| rest.strip_prefix("multipart/"))
+        .is_some_and(digest_ok)
+}
+
+/// Part `number` (1-based) of the canary seeded by `nonce`: the nonce first, so each canary's
+/// digest (and key) is its own, then a cheap fixed pattern. `None` past the last part.
+pub fn canary_part(nonce: &[u8], number: u32) -> Option<Vec<u8>> {
+    let offset = u64::from(number.checked_sub(1)?) * PART_BYTES;
+    let remaining = CANARY_BYTES.checked_sub(offset).filter(|r| *r > 0)?;
+    let len = remaining.min(PART_BYTES) as usize;
+    let start = offset as usize;
+    let mut bytes: Vec<u8> = (0..len)
+        .map(|i| ((start + i).wrapping_mul(31) % 251) as u8)
+        .collect();
+    if number == 1 {
+        let n = nonce.len().min(len);
+        bytes[..n].copy_from_slice(&nonce[..n]);
+    }
+    Some(bytes)
+}
+
+/// The SHA-256 hex of the whole canary seeded by `nonce`.
+pub fn canary_sha256(nonce: &[u8]) -> String {
+    let mut digest = BackupDigest::default();
+    let mut number = 1;
+    let mut last = Vec::new();
+    while let Some(part) = canary_part(nonce, number) {
+        if !last.is_empty() {
+            let _ = digest.update(&last);
+        }
+        last = part;
+        number += 1;
+    }
+    digest.finish(&last).unwrap_or_default()
 }
 
 fn digest_ok(sha: &str) -> bool {

@@ -9,6 +9,8 @@ use crate::{blob_key, container_job::valid_run, manifest};
 
 pub const PATH: &str = "/ingest/destination";
 pub const READY_PATH: &str = "/ingest/destination/ready";
+/// Core's signed request for the Data Worker's multipart canary (docs/plans/multipart-enable.md).
+pub const CANARY_PATH: &str = "/ingest/destination/multipart-canary";
 pub const ENV: &str = "INGEST_DESTINATION";
 pub const OPERATION: &str = "x-pigeon-ingest-operation";
 pub const OBJECT: &str = "x-pigeon-ingest-object";

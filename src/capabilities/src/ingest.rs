@@ -15,6 +15,7 @@ pub mod digitalocean;
 pub mod digitalocean_compute;
 pub mod hosts;
 mod managed_destination;
+pub mod multipart;
 pub mod net;
 pub mod scaleway;
 pub mod scaleway_compute;
@@ -61,6 +62,11 @@ const DATA_TOOLS: &[crate::instances::tools::Registration] = &[
             "archive_inflated_gib",
             "archive_member_gib",
         ],
+    },
+    crate::instances::tools::Registration {
+        name: multipart::CHECK,
+        description: Some("Check large-file uploads: run the Data Worker's multipart canary once."),
+        arguments: &[],
     },
     crate::instances::tools::Registration {
         name: "data_ingest_start",
@@ -1746,6 +1752,16 @@ impl Capability for Ingest {
                 &["instance"],
             ),
             tool(
+                multipart::CHECK,
+                "Check an instance's large-file uploads (objects over 16 MiB): the Data Worker \
+                 writes a generated 40 MiB object through its real multipart path, checks its \
+                 SHA-256, that a second create-only completion is refused and that it reads \
+                 back, then deletes only that object. Ingest writes large files only after \
+                 this passes for the bound credential.",
+                json!({ "instance": instance }),
+                &["instance"],
+            ),
+            tool(
                 "data_ingest_start",
                 "Start an approved ingest plan, once.",
                 json!({ "plan": { "type": "string", "description": "The approval id from data_ingest_plan." } }),
@@ -1804,6 +1820,7 @@ impl Capability for Ingest {
                         connections::verify(cx.env, &record, arg(args, "connection")?).await
                     }
                 }
+                multipart::CHECK => multipart::check(cx.env, arg(args, "instance")?).await,
                 "data_ingest_plan" => self.plan(cx, args).await,
                 "data_ingest_start" => self.start(cx, args).await,
                 "data_ingest_status" => self.status(cx, args).await,
@@ -1826,6 +1843,9 @@ impl Capability for Ingest {
             if w.action.id == digitalocean_compute::SET {
                 return digitalocean_compute::check_write(cx, w).await;
             }
+            if w.action.id == multipart::SET_KEY {
+                return multipart::check_write(cx, w).await;
+            }
             connections::check_write(cx, w).await
         })
     }
@@ -1841,6 +1861,9 @@ impl Capability for Ingest {
             }
             if w.action.id == digitalocean_compute::SET {
                 return digitalocean_compute::save(cx, w).await;
+            }
+            if w.action.id == multipart::SET_KEY {
+                return multipart::save(cx, self.host_name(), w).await;
             }
             connections::save(cx, w).await
         })
